@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { runInit } from '../src/commands/init.ts';
@@ -139,4 +139,25 @@ test('--force overwrites existing files', (t) => {
   runInit({ target: 'codex', repoRoot: root });
   const forced = runInit({ target: 'codex', repoRoot: root, force: true });
   assert.ok(forced.results.every((r) => r.status === 'overwritten'));
+});
+
+test('hooks are only scaffolded with --with-hooks', (t) => {
+  const plain = tempRepo(t);
+  runInit({ target: 'codex', repoRoot: plain });
+  assert.ok(!exists(plain, '.fadeno/hooks/pre-commit'));
+  assert.ok(!exists(plain, '.github/workflows/fadeno-guard.yml'));
+
+  const hooked = tempRepo(t);
+  runInit({ target: 'codex', repoRoot: hooked, withHooks: true });
+  assert.ok(exists(hooked, '.fadeno/hooks/pre-commit'));
+  assert.ok(exists(hooked, '.fadeno/hooks/README.md'));
+  assert.ok(exists(hooked, '.github/workflows/fadeno-guard.yml'));
+  // pre-commit must be executable
+  assert.ok(statSync(join(hooked, '.fadeno/hooks/pre-commit')).mode & 0o111);
+});
+
+test('--with-hooks on Claude adds a settings example', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: root, withHooks: true });
+  assert.ok(exists(root, '.fadeno/hooks/claude-settings.example.json'));
 });

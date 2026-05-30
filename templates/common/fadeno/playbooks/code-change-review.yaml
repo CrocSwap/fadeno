@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=../schemas/playbook.schema.json
 kind: AgentPlaybook
 schema_version: "0.1"
 name: code-change-review

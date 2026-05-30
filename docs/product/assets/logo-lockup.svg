@@ -1,0 +1,25 @@
+<svg viewBox="0 0 720 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Fadeno">
+  <style>
+    .ink { fill: #1A1A1A; }
+    .wm { font-family: 'JetBrains Mono','Roboto Mono',ui-monospace,SFMono-Regular,Menlo,monospace; font-weight: 700; }
+  </style>
+
+  <!-- icon: thread weaving through workflow nodes -->
+  <g transform="translate(20,40)">
+    <path d="M 14 80 C 28 80, 28 40, 44 40 C 60 40, 60 80, 76 80 C 92 80, 92 40, 106 40"
+          fill="none" stroke="#C9683C" stroke-width="6" stroke-linecap="round" />
+    <circle cx="14"  cy="80" r="7" class="ink" />
+    <circle cx="44"  cy="40" r="7" class="ink" />
+    <circle cx="76"  cy="80" r="7" class="ink" />
+    <circle cx="106" cy="40" r="7" class="ink" />
+  </g>
+
+  <!-- wordmark: thread woven through the type -->
+  <g transform="translate(176,6)">
+    <path d="M 28 120 C 100 120, 110 150, 180 150 C 250 150, 250 104, 320 104 C 390 104, 410 130, 500 116"
+          fill="none" stroke="#C9683C" stroke-width="5" stroke-linecap="round" />
+    <path d="M 500 116 l 16 -5 M 500 116 l 12 9" fill="none" stroke="#C9683C" stroke-width="5" stroke-linecap="round" />
+    <circle cx="24" cy="120" r="6" fill="#C9683C" />
+    <text x="34" y="108" class="wm ink" font-size="96" letter-spacing="2">fadeno</text>
+  </g>
+</svg>

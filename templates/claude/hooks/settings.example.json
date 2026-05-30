@@ -1,0 +1,16 @@
+{
+  "//": "Example Claude Code hook config. Merge the `hooks` block into your repo's .claude/settings.json (do not blindly overwrite it). This makes the no_blocking_issues gate enforced rather than advisory: when the agent stops, the most recent run's review report is checked, and a non-zero exit asks Claude to keep working.",
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "run=$(ls -dt .fadeno/runs/*/ 2>/dev/null | head -1); [ -n \"$run\" ] && npx fadeno gate \"$run\" no_blocking_issues || true"
+          }
+        ]
+      }
+    ]
+  }
+}

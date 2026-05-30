@@ -1,28 +1,36 @@
 # Fadeno
 
-**A portable, repo-native playbook layer for AI coding agents.**
+**The playbook layer for AI coding agents.**
 
-Fadeno lets teams define repeatable agent workflows — plan, implement, review,
-test, revise, summarize — as repo-local **YAML playbooks** plus **agent skills**.
-It works without a heavyweight runtime: in Codex or Claude Code it uses
-instructions, native subagents when available, and file-backed run traces.
+Stop re-typing *"be careful, plan, review, test"* every run. Define your workflow once as a repo-native YAML playbook, and any agent runs it the same disciplined way — leaving an inspectable trace of what it did. No runtime, no service, no lock-in.
 
-Before Fadeno:
+> **Fadeno** /fah-DEH-no/ — Esperanto for *"thread."* The thread that runs through every agent task.
 
-> "Codex, please be careful. Think through the problem, review your code, and run tests."
+```bash
+npx fadeno init --codex     # or --claude
+```
 
-After Fadeno:
+---
 
-> "Use the `code-change-review` playbook."
+## The problem
 
-Fadeno is **harness-neutral**. The same playbooks run on Codex and Claude Code
-today, and are designed to compile into a real orchestration runtime later. Only
-a thin per-target adapter differs.
+Coding agents are powerful but inconsistent. Every nontrivial task, you re-explain the same discipline:
 
-> **Honesty up front:** in instruction-only hosts, approval policies are
-> *advisory* — the model is asked to honor them, with no hard guarantee. For real
-> guarantees, wire gates to your git/CI/pre-commit layer (or Claude Code hooks).
-> See [Enforcement](#enforcement-advisory-vs-enforced).
+> *"Codex, please be careful. Make a plan first, then implement it. Review your own code for edge cases. Run the tests. If something's broken, fix it. Don't install new dependencies or run anything destructive without checking with me."*
+
+You retype some version of that every time. You get different behavior every run. And when the chat closes, there's no record of what the agent actually did.
+
+## The fix
+
+Define the workflow **once**, commit it to your repo, and then just say:
+
+> *"Use the code-change-review playbook."*
+
+Same discipline — plan → implement → review → test → bounded revision — every time. Inspectable. Shareable. Portable across the agents your team actually uses.
+
+Fadeno is **harness-neutral**: the same playbooks run on Codex and Claude Code today, and are designed to compile into a real orchestration runtime later. Only a thin per-target adapter differs.
+
+> **Honest about enforcement, up front:** in instruction-only hosts, approval policies are *advisory* — the model is asked to honor them, with no hard guarantee. For real guarantees, wire gates to your git/CI/pre-commit layer (or Claude Code hooks). See [Enforcement](#enforcement-advisory-vs-enforced). We'd rather you trust the tool because it's honest than because it overclaims.
 
 ---
 
@@ -40,7 +48,9 @@ npx fadeno init --claude
 
 `init` is safe to re-run: existing files are left untouched (and your
 `AGENTS.md`/`CLAUDE.md` content is preserved — Fadeno only appends a marked
-section). Use `--force` to overwrite.
+section). Use `--force` to overwrite. Add `--with-hooks` to also scaffold the
+tier-2 [enforcement](#enforcement-advisory-vs-enforced) layer (a pre-commit
+guard + a CI workflow).
 
 ### What gets created
 
@@ -95,11 +105,20 @@ The runner will:
 5. respect loop bounds, versioning each iteration's artifacts,
 6. report what changed, what was checked, which gates passed, and the run path.
 
-You can also create a run ledger from the CLI:
+You can also drive the ledger from the CLI — useful for scripts, hooks, and so
+the agent doesn't hand-edit JSONL:
 
 ```bash
 fadeno new-run code-change-review "Add CSV export for reports"
+fadeno run <run-id> --step implement            # set current_step + log step_started
+fadeno run <run-id> --status completed           # finalize: status + ended_at + run_completed
+fadeno gate <run-id> no_blocking_issues          # exit 0/1 from the review-report artifact
 ```
+
+`fadeno gate` is the **advisory→enforced bridge**: it computes a gate condition
+from a structured judgment artifact on disk (same check the runner applies), so
+the identical condition can run in CI, a pre-commit/pre-push hook, or a Claude
+Code `Stop` hook. Exits non-zero when the gate fails.
 
 ### What `.fadeno/runs/` contains
 
@@ -164,13 +183,25 @@ The vocabulary is intentionally small and orthogonal:
 ```bash
 fadeno validate                                       # all playbooks
 fadeno validate .fadeno/playbooks/code-change-review.yaml
+fadeno validate .fadeno/runs/<id>/run.yaml            # run ledgers and review reports too
+fadeno validate report.json --schema review-report    # force the document kind
 ```
 
-`validate` checks each playbook against the JSON Schema **and** runs a
-reference-integrity pass: every step id referenced by `on_pass`, `on_fail`,
-`next`, `on_approve`, `on_reject`, `on_exhausted`, `default`, a loop `body`, or a
-`routes` map must resolve to a defined step. It also flags duplicate ids. Exits
-non-zero on any error.
+`validate` runs three passes on a playbook:
+
+1. **Schema** — structure against `playbook.schema.json` (unknown fields, bad
+   `kind`, missing required fields…).
+2. **Reference integrity** *(error)* — every step id referenced by `on_pass`,
+   `on_fail`, `next`, `on_approve`, `on_reject`, `on_exhausted`, `default`, a
+   loop `body`, or a `routes` map must resolve to a defined step; duplicate ids
+   are flagged.
+3. **Semantics** — every `actor` must be a declared role *(error)*; an `input`
+   artifact never produced upstream, or a declared-but-unused role, are
+   *warnings*.
+
+It also validates `run.yaml` and `review-report.json` documents (auto-detected,
+or forced with `--schema playbook|run|review-report`). Exits non-zero on any
+error; warnings are reported but don't fail.
 
 ---
 
@@ -193,9 +224,19 @@ also protects against human mistakes, not just agent ones.
 Fadeno is designed so the same conditions are deterministically checkable: gate
 conditions are computable from a structured judgment artifact
 (`review-report.schema.json`), and approval categories map to concrete, detectable
-actions. `.fadeno/enforcement.md` ships copy-paste **stubs** (a `no_blocking_issues`
-check, a pre-commit dependency guard, a CI deploy guard) you can wire up. v0 does
-not auto-wire enforcement — but every data shape already supports it.
+actions. Two ways to make that real:
+
+- **`fadeno gate <run> no_blocking_issues`** computes the gate from the review
+  report and exits 0/1 — drop it into CI, a git hook, or a Claude Code `Stop`
+  hook.
+- **`fadeno init --with-hooks`** scaffolds runnable enforcement: an executable
+  `.fadeno/hooks/pre-commit` (dependency/secret guard), a
+  `.github/workflows/fadeno-guard.yml` CI guard, and (on Claude) a
+  `settings.example.json` hook config. Activate them per `.fadeno/hooks/README.md`.
+
+`.fadeno/enforcement.md` documents the patterns. Fadeno still doesn't *force*
+enforcement on you — but the data shapes support it and the scaffold is one flag
+away.
 
 ---
 

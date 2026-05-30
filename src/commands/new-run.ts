@@ -82,7 +82,8 @@ export function runNewRun(opts: NewRunOptions): NewRunResult {
     artifacts_dir: 'artifacts',
     current_step: null,
   });
-  writeFileSync(join(runDir, 'run.yaml'), runYaml, 'utf8');
+  const modeline = '# yaml-language-server: $schema=../../schemas/run.schema.json';
+  writeFileSync(join(runDir, 'run.yaml'), `${modeline}\n${runYaml}`, 'utf8');
 
   const startEvent = JSON.stringify({ type: 'run_started', step: null, timestamp: iso });
   writeFileSync(join(runDir, 'events.jsonl'), `${startEvent}\n`, 'utf8');

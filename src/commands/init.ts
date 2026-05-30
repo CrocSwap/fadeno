@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { chmodSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { copyTree, emitBootstrap, emitFile, type EmitResult } from '../lib/fsutil.ts';
 import { findRepoRoot, templatesDir } from '../lib/paths.ts';
@@ -8,6 +8,8 @@ export type Target = 'codex' | 'claude';
 export interface InitOptions {
   target: Target;
   force?: boolean;
+  /** Also scaffold tier-2 enforcement hooks (pre-commit, CI workflow, examples). */
+  withHooks?: boolean;
   /** Working directory used to locate the repo root. Defaults to process.cwd(). */
   cwd?: string;
   /** Explicit repo root (mainly for tests); bypasses git-root detection. */
@@ -89,5 +91,37 @@ export function runInit(opts: InitOptions): InitResult {
   const bootstrapBody = readFileSync(join(tpl, opts.target, bootstrapName), 'utf8');
   emitBootstrap(join(repoRoot, bootstrapName), bootstrapBody, force, results);
 
+  // 5. Optional tier-2 enforcement scaffold.
+  if (opts.withHooks) emitHooks(tpl, repoRoot, opts.target, force, results);
+
   return { target: opts.target, repoRoot, results };
+}
+
+function emitHooks(
+  tpl: string,
+  repoRoot: string,
+  target: Target,
+  force: boolean,
+  results: EmitResult[],
+): void {
+  const hookFile = (srcRel: string, destRel: string, executable = false): void => {
+    const content = readFileSync(join(tpl, srcRel), 'utf8');
+    const dest = join(repoRoot, destRel);
+    const status = emitFile(dest, content, force);
+    if (executable && (status === 'created' || status === 'overwritten')) chmodSync(dest, 0o755);
+    results.push({ path: dest, status });
+  };
+
+  hookFile(join('common', 'hooks', 'pre-commit'), join('.fadeno', 'hooks', 'pre-commit'), true);
+  hookFile(join('common', 'hooks', 'README.md'), join('.fadeno', 'hooks', 'README.md'));
+  hookFile(
+    join('common', 'hooks', 'fadeno-guard.yml'),
+    join('.github', 'workflows', 'fadeno-guard.yml'),
+  );
+  if (target === 'claude') {
+    hookFile(
+      join('claude', 'hooks', 'settings.example.json'),
+      join('.fadeno', 'hooks', 'claude-settings.example.json'),
+    );
+  }
 }

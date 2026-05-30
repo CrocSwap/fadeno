@@ -1,43 +1,63 @@
 #!/usr/bin/env node
 import { relative } from 'node:path';
 import { parseArgs } from 'node:util';
+import { runGate } from './commands/gate.ts';
 import { runInit, type Target } from './commands/init.ts';
-import { runNewRun, NewRunError } from './commands/new-run.ts';
-import { runValidate, ValidateError } from './commands/validate.ts';
+import { runNewRun } from './commands/new-run.ts';
+import { runRun } from './commands/run.ts';
+import { runValidate } from './commands/validate.ts';
 import type { EmitResult } from './lib/fsutil.ts';
+import type { SchemaKind, ValidationIssue } from './lib/playbook-validate.ts';
 import { packageVersion } from './lib/paths.ts';
+import type { ValidateOutcome } from './commands/validate.ts';
 
-const HELP = `fadeno — portable playbook layer for AI coding agents
+const HELP = `fadeno — the playbook layer for AI coding agents
 
 Usage:
-  fadeno init --codex            Scaffold Fadeno for Codex (.agents/skills, AGENTS.md)
-  fadeno init --claude           Scaffold Fadeno for Claude Code (.claude/skills, CLAUDE.md)
-  fadeno validate [file]         Validate playbooks (schema + reference integrity)
-  fadeno new-run <playbook> <task>
-                                 Create a new run-ledger directory under .fadeno/runs
+  fadeno init --codex [--with-hooks]    Scaffold for Codex (.agents/skills, AGENTS.md)
+  fadeno init --claude [--with-hooks]   Scaffold for Claude Code (.claude/skills, CLAUDE.md)
+  fadeno validate [file] [--schema K]   Validate playbooks (schema + references + semantics)
+  fadeno new-run <playbook> <task>      Create a new run-ledger directory
+  fadeno run <run> [flags]              Update a run ledger (run.yaml + events.jsonl)
+  fadeno gate <run> <condition>         Evaluate a gate condition from a judgment artifact
 
 Options:
-  --force                        Overwrite existing files / refresh the bootstrap section
-  -h, --help                     Show this help
-  -v, --version                  Show version
+  --with-hooks            (init) Also scaffold tier-2 enforcement hooks
+  --force                 (init) Overwrite existing files / refresh the bootstrap section
+  --schema <kind>         (validate) Force document kind: playbook | run | review-report
+  --step <id>             (run) Set current_step and log a step_started event
+  --status <status>       (run) Set status: running | completed | failed | aborted
+  --event <type>          (run) Append a custom event
+  --artifact <path>       (run) Attach an artifact path to the event
+  --report <path>         (gate) Review-report path (default: artifacts/review-report.json)
+  -h, --help              Show this help
+  -v, --version           Show version
 
 Examples:
-  fadeno init --codex
+  fadeno init --codex --with-hooks
   fadeno validate
-  fadeno validate .fadeno/playbooks/code-change-review.yaml
+  fadeno validate .fadeno/runs/2026-05-30-1132-csv/run.yaml --schema run
   fadeno new-run code-change-review "Add CSV export for reports"
+  fadeno run 2026-05-30-1132-csv --step review
+  fadeno run 2026-05-30-1132-csv --status completed
+  fadeno gate 2026-05-30-1132-csv no_blocking_issues
 `;
 
 const SIGIL: Record<Target, string> = { codex: '$', claude: '/' };
+const SCHEMA_KINDS: SchemaKind[] = ['playbook', 'run', 'review-report'];
 
-function printInitSummary(target: Target, repoRoot: string, results: EmitResult[]): void {
+function printInitSummary(
+  target: Target,
+  repoRoot: string,
+  results: EmitResult[],
+  withHooks: boolean,
+): void {
   const counts = { created: 0, overwritten: 0, appended: 0, skipped: 0 };
   for (const r of results) counts[r.status] += 1;
 
   console.log(`Fadeno initialized for ${target} in ${repoRoot}\n`);
   for (const r of results) {
-    const rel = relative(repoRoot, r.path) || r.path;
-    console.log(`  ${r.status.padEnd(11)} ${rel}`);
+    console.log(`  ${r.status.padEnd(11)} ${relative(repoRoot, r.path) || r.path}`);
   }
   console.log(
     `\n${counts.created} created, ${counts.appended} appended, ` +
@@ -52,33 +72,43 @@ function printInitSummary(target: Target, repoRoot: string, results: EmitResult[
   console.log('  1. Review .fadeno/playbooks and .fadeno/vocabulary.md');
   console.log('  2. Run `fadeno validate` to check the playbooks');
   console.log(`  3. Ask your agent to use the ${sigil}fadeno-runner skill on a complex task`);
+  if (withHooks) {
+    console.log('  4. Activate enforcement: see .fadeno/hooks/README.md');
+  }
 }
 
-function printValidate(repoRoot: string, outcome: ReturnType<typeof runValidate>): void {
+function printIssue(issue: ValidationIssue): void {
+  const at = issue.path ? `${issue.path}: ` : '';
+  const line = `          ${issue.severity === 'error' ? 'error' : 'warn '} ${at}${issue.message}`;
+  if (issue.severity === 'error') console.error(line);
+  else console.log(line);
+}
+
+function printValidate(outcome: ValidateOutcome): void {
+  let warnings = 0;
   for (const result of outcome.results) {
-    const rel = relative(repoRoot, result.file) || result.file;
+    const rel = relative(outcome.repoRoot, result.file) || result.file;
+    const fileWarnings = result.issues.filter((i) => i.severity === 'warning').length;
+    warnings += fileWarnings;
     if (result.ok) {
-      console.log(`  ok    ${rel}`);
+      const note = fileWarnings > 0 ? ` (${fileWarnings} warning${fileWarnings > 1 ? 's' : ''})` : '';
+      console.log(`  ok    ${rel} [${result.kind}]${note}`);
     } else {
-      console.log(`  FAIL  ${rel}`);
-      for (const issue of result.issues) {
-        const at = issue.path ? `${issue.path}: ` : '';
-        console.error(`          ${at}${issue.message}`);
-      }
+      console.log(`  FAIL  ${rel} [${result.kind}]`);
     }
+    for (const issue of result.issues) printIssue(issue);
   }
+
   const failed = outcome.results.filter((r) => !r.ok).length;
-  if (outcome.ok) {
-    console.log(`\nAll ${outcome.results.length} playbook(s) valid.`);
-  } else {
-    console.error(`\n${failed} of ${outcome.results.length} playbook(s) invalid.`);
-  }
+  const summary =
+    `\n${outcome.results.length - failed} ok, ${failed} invalid` +
+    (warnings > 0 ? `, ${warnings} warning${warnings > 1 ? 's' : ''}` : '');
+  if (outcome.ok) console.log(summary);
+  else console.error(summary);
 }
 
 function requireTarget(values: { codex?: boolean; claude?: boolean }): Target {
-  if (values.codex && values.claude) {
-    throw new Error('Choose only one target: --codex or --claude.');
-  }
+  if (values.codex && values.claude) throw new Error('Choose only one target: --codex or --claude.');
   if (values.codex) return 'codex';
   if (values.claude) return 'claude';
   throw new Error('Specify a target: `fadeno init --codex` or `fadeno init --claude`.');
@@ -94,6 +124,13 @@ function main(argv: string[]): number {
         codex: { type: 'boolean' },
         claude: { type: 'boolean' },
         force: { type: 'boolean' },
+        'with-hooks': { type: 'boolean' },
+        schema: { type: 'string' },
+        step: { type: 'string' },
+        status: { type: 'string' },
+        event: { type: 'string' },
+        artifact: { type: 'string' },
+        report: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
       },
@@ -123,13 +160,23 @@ function main(argv: string[]): number {
   switch (command) {
     case 'init': {
       const target = requireTarget(values);
-      const { repoRoot, results } = runInit({ target, force: values.force });
-      printInitSummary(target, repoRoot, results);
+      const { repoRoot, results } = runInit({
+        target,
+        force: values.force,
+        withHooks: values['with-hooks'],
+      });
+      printInitSummary(target, repoRoot, results, Boolean(values['with-hooks']));
       return 0;
     }
     case 'validate': {
-      const outcome = runValidate({ path: positionals[1] });
-      printValidate(outcome.repoRoot, outcome);
+      if (values.schema && !SCHEMA_KINDS.includes(values.schema as SchemaKind)) {
+        throw new Error(`Invalid --schema "${values.schema}". Use: ${SCHEMA_KINDS.join(', ')}.`);
+      }
+      const outcome = runValidate({
+        path: positionals[1],
+        schema: values.schema as SchemaKind | undefined,
+      });
+      printValidate(outcome);
       return outcome.ok ? 0 : 1;
     }
     case 'new-run': {
@@ -140,9 +187,38 @@ function main(argv: string[]): number {
       const { runId, runDir } = runNewRun({ playbook, task });
       console.log(`Created run ${runId}`);
       console.log(`  ${runDir}`);
-      console.log('\nThe agent (or runner skill) should now execute the playbook,');
-      console.log('appending events to events.jsonl and saving outputs under artifacts/.');
+      console.log('\nAdvance it with `fadeno run` as the playbook executes:');
+      console.log(`  fadeno run ${runId} --step <step-id>`);
+      console.log(`  fadeno run ${runId} --status completed`);
       return 0;
+    }
+    case 'run': {
+      const run = positionals[1];
+      if (!run) throw new Error('Usage: fadeno run <run> [--step|--status|--event|--artifact]');
+      const result = runRun({
+        run,
+        step: values.step,
+        status: values.status,
+        event: values.event,
+        artifact: values.artifact,
+      });
+      const parts: string[] = [];
+      if (result.updatedFields.length) parts.push(`updated ${result.updatedFields.join(', ')}`);
+      if (result.appendedEvents.length) parts.push(`logged ${result.appendedEvents.join(', ')}`);
+      console.log(`${relative(process.cwd(), result.runDir) || result.runDir}: ${parts.join('; ')}`);
+      return 0;
+    }
+    case 'gate': {
+      const [, run, condition] = positionals;
+      if (!run || !condition) throw new Error('Usage: fadeno gate <run> <condition>');
+      const result = runGate({ run, condition, report: values.report });
+      if (result.pass) {
+        console.log(`PASS  ${result.condition} (0 blocking issues)`);
+      } else {
+        console.error(`FAIL  ${result.condition} (${result.blockingCount} blocking issue(s))`);
+        for (const title of result.blockingTitles) console.error(`        - ${title}`);
+      }
+      return result.pass ? 0 : 1;
     }
     default:
       console.error(`Unknown command: ${command}\n`);
@@ -154,10 +230,6 @@ function main(argv: string[]): number {
 try {
   process.exitCode = main(process.argv.slice(2));
 } catch (err) {
-  if (err instanceof ValidateError || err instanceof NewRunError) {
-    console.error(`Error: ${err.message}`);
-  } else {
-    console.error(`Error: ${(err as Error).message}`);
-  }
+  console.error(`Error: ${(err as Error).message}`);
   process.exitCode = 1;
 }

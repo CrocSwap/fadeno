@@ -1,0 +1,13 @@
+<svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Fadeno mark">
+  <style>
+    .node { fill: #1A1A1A; }
+  </style>
+  <!-- thread weaving through workflow nodes -->
+  <path d="M 14 80 C 28 80, 28 40, 44 40 C 60 40, 60 80, 76 80 C 92 80, 92 40, 106 40"
+        fill="none" stroke="#C9683C" stroke-width="6" stroke-linecap="round" />
+  <!-- nodes (steps) the thread passes through -->
+  <circle cx="14"  cy="80" r="7" class="node" />
+  <circle cx="44"  cy="40" r="7" class="node" />
+  <circle cx="76"  cy="80" r="7" class="node" />
+  <circle cx="106" cy="40" r="7" class="node" />
+</svg>

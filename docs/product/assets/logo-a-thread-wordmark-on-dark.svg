@@ -1,0 +1,12 @@
+<svg viewBox="0 0 540 190" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="fadeno">
+  <style>
+    .ink { fill: #F5F1EA; }
+    .wm { font-family: 'JetBrains Mono','Roboto Mono',ui-monospace,SFMono-Regular,Menlo,monospace; font-weight: 700; }
+  </style>
+  <g fill="none" stroke="#C9683C" stroke-width="5" stroke-linecap="round">
+    <path d="M 28 120 C 100 120, 110 150, 180 150 C 250 150, 250 104, 320 104 C 390 104, 410 130, 500 116" />
+    <path d="M 500 116 l 16 -5 M 500 116 l 12 9" />
+  </g>
+  <circle cx="24" cy="120" r="6" fill="#C9683C" />
+  <text x="34" y="108" class="wm ink" font-size="96" letter-spacing="2">fadeno</text>
+</svg>

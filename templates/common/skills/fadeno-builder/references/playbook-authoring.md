@@ -56,8 +56,11 @@ Insert a `human_gate` before any irreversible or outward-facing action
       not an inline "ask the model".
 - [ ] Every loop has `max_iterations`; iteration artifacts are versioned.
 - [ ] Fan-out is depth-1 (no subagent-spawns-subagent).
-- [ ] All step references resolve (`fadeno validate` is green).
+- [ ] All step references resolve, every `actor` is a declared role, and inputs
+      are produced upstream (`fadeno validate` is green, no warnings).
 - [ ] Approval-worthy actions are listed in `require_user_approval_for`.
+- [ ] First line is the editor modeline
+      `# yaml-language-server: $schema=../schemas/playbook.schema.json`.
 - [ ] The playbook is as small as the task allows.
 
 ## Anti-patterns

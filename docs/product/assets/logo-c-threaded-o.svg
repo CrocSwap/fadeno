@@ -1,0 +1,13 @@
+<svg viewBox="0 0 470 150" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="fadeno">
+  <style>
+    .ink { fill: #1A1A1A; }
+    @media (prefers-color-scheme: dark) { .ink { fill: #F5F1EA; } }
+    .wm { font-family: 'JetBrains Mono','Roboto Mono',ui-monospace,SFMono-Regular,Menlo,monospace; font-weight: 700; }
+  </style>
+  <!-- "faden" + the final letter o formed by the thread -->
+  <text x="24" y="100" class="wm ink" font-size="84" letter-spacing="3">faden</text>
+  <!-- thread loop as the 'o' -->
+  <circle cx="316" cy="74" r="26" fill="none" stroke="#C9683C" stroke-width="7" />
+  <!-- short thread tail feeding into the loop -->
+  <path d="M 296 92 q -14 14 -30 8" fill="none" stroke="#C9683C" stroke-width="7" stroke-linecap="round" />
+</svg>
