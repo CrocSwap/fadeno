@@ -1,0 +1,89 @@
+kind: AgentPlaybook
+schema_version: "0.1"
+name: pr-review
+description: >
+  Load a diff, review it from multiple perspectives, merge the findings, decide
+  an outcome, and post the review only behind an explicit human gate.
+when_to_use:
+  - reviewing a pull request or a diff
+  - multiple review perspectives are useful
+  - a structured review report is the deliverable
+roles:
+  coordinator:
+    purpose: Merge perspective reviews and produce the final review summary.
+  correctness_reviewer:
+    purpose: Review logic, correctness, edge cases, and tests.
+  style_reviewer:
+    purpose: Review clarity, naming, conventions, and documentation.
+  security_reviewer:
+    purpose: Review for security issues, secrets, and unsafe operations.
+flow:
+  - id: load_diff
+    kind: tool_call
+    tool: diff_loader
+    output: Diff
+
+  - id: review
+    kind: map
+    over:
+      - correctness_reviewer
+      - style_reviewer
+      - security_reviewer
+    input:
+      - Diff
+    output: ReviewReport[]
+
+  - id: merge
+    kind: reduce
+    actor: coordinator
+    input:
+      - ReviewReport[]
+    output: MergedReview
+
+  - id: decision_gate
+    kind: gate
+    condition: no_blocking_issues   # computed from the ReviewReport[] / MergedReview
+    on_pass: approve
+    on_fail: request_changes
+
+  - id: approve
+    kind: actor_call
+    actor: coordinator
+    input:
+      - MergedReview
+    output: ReviewSummary
+    next: post_gate
+
+  - id: request_changes
+    kind: actor_call
+    actor: coordinator
+    input:
+      - MergedReview
+    output: ReviewSummary
+    next: post_gate
+
+  - id: post_gate
+    kind: human_gate
+    prompt: Post this review to the pull request?
+    on_approve: post
+    on_reject: done
+
+  - id: post
+    kind: tool_call
+    tool: pr_commenter   # external_send — gated above
+    input:
+      - ReviewSummary
+    output: PostResult
+    next: done
+
+  - id: done
+    kind: actor_call
+    actor: coordinator
+    input:
+      - ReviewSummary
+    output: FinalSummary
+
+policies:
+  max_subagents: 4
+  require_user_approval_for:
+    - external_send

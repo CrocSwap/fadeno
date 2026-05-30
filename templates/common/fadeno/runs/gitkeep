@@ -1,0 +1,3 @@
+# Fadeno run ledgers are written here by the runner skill / `fadeno new-run`.
+# Each run is a directory: <timestamp>-<slug>/ with run.yaml, events.jsonl, artifacts/.
+# This is execution-trace output, not source code. It is safe to delete old runs.

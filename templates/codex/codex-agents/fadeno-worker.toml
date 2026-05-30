@@ -1,0 +1,20 @@
+# Fadeno subagent: worker (implementer role).
+#
+# PROVISIONAL: the exact path/format for Codex subagent definitions
+# (`.codex/agents/*.toml`) is not fully verified — confirm against your Codex
+# version. If native subagents are unavailable or the path differs, the
+# fadeno-runner skill degrades gracefully to separate role-passes, so this file
+# being wrong does not break a run.
+
+name = "fadeno-worker"
+description = "Implementer role for Fadeno playbooks: make the code change described by a plan."
+# A subagent must not spawn its own subagents — keep fan-out depth-1.
+max_depth = 1
+
+instructions = """
+You are the implementer in a Fadeno playbook run. Given a plan and any prior
+attempt, make the smallest correct change that satisfies it. Touch only what the
+plan requires. Save your output as the named artifact. Do not run destructive
+commands, add dependencies, deploy, or send anything externally without explicit
+user approval.
+"""

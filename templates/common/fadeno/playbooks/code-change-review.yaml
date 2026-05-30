@@ -1,0 +1,109 @@
+kind: AgentPlaybook
+schema_version: "0.1"
+name: code-change-review
+description: >
+  Plan, implement, review, test, and run a bounded revision loop for nontrivial
+  code changes.
+when_to_use:
+  - nontrivial code change
+  - multiple files may be touched
+  - correctness matters
+  - tests or review are useful
+roles:
+  coordinator:
+    purpose: Plan, route, merge, and decide completion.
+  implementer:
+    purpose: Make the code change.
+  substance_reviewer:
+    purpose: Review correctness, architecture, edge cases, safety, and tests.
+  style_reviewer:
+    purpose: Review clarity, maintainability, conventions, and docs.
+flow:
+  - id: plan
+    kind: actor_call
+    actor: coordinator
+    output: Plan
+
+  - id: implement
+    kind: actor_call
+    actor: implementer
+    input:
+      - Plan
+    output: ImplementationResult
+
+  - id: review
+    kind: map
+    over:
+      - substance_reviewer
+      - style_reviewer
+    input:
+      - ImplementationResult
+    output: ReviewReport[]
+
+  - id: review_gate
+    kind: gate
+    condition: no_blocking_issues   # computed from the ReviewReport[] artifacts
+    on_pass: test
+    on_fail: revise
+
+  - id: revise
+    kind: loop
+    max_iterations: 1
+    body:
+      - implement_revision
+      - review_revision
+    until: no_blocking_issues
+    on_exhausted: summarize_best_attempt
+
+  # --- loop body (re-run each iteration; artifacts versioned, never overwritten) ---
+  - id: implement_revision
+    kind: actor_call
+    actor: implementer
+    input:
+      - ImplementationResult
+      - ReviewReport[]
+    output: ImplementationResult
+
+  - id: review_revision
+    kind: map
+    over:
+      - substance_reviewer
+      - style_reviewer
+    input:
+      - ImplementationResult
+    output: ReviewReport[]
+
+  # --- loop exhaustion target ---
+  - id: summarize_best_attempt
+    kind: actor_call
+    actor: coordinator
+    input:
+      - ImplementationResult
+      - ReviewReport[]
+    output: FinalSummary
+    next: final
+
+  - id: test
+    kind: tool_call
+    tool: test_runner
+    output: TestResult
+    next: final
+
+  - id: final
+    kind: actor_call
+    actor: coordinator
+    input:
+      - ImplementationResult
+      - TestResult
+    output: FinalSummary
+
+policies:
+  max_revision_loops: 1
+  max_subagents: 4
+  # ADVISORY in instruction-only hosts. For real enforcement, wire these to
+  # pre-commit/CI (or Claude Code hooks). See .fadeno/enforcement.md.
+  require_user_approval_for:
+    - destructive_commands
+    - dependency_addition
+    - deploy
+    - external_send

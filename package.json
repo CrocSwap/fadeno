@@ -1,0 +1,43 @@
+{
+  "name": "fadeno",
+  "version": "0.1.0",
+  "description": "Portable, repo-native playbook layer for AI coding agents (Codex, Claude Code).",
+  "keywords": [
+    "ai",
+    "agents",
+    "codex",
+    "claude-code",
+    "playbook",
+    "workflow",
+    "skills"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "fadeno": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "templates",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
+    "dev": "node src/cli.ts",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "validate:self": "node src/cli.ts validate",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^6.0.3"
+  }
+}

@@ -1,0 +1,95 @@
+kind: AgentPlaybook
+schema_version: "0.1"
+name: research-synthesis
+description: >
+  Plan research questions, gather evidence per question, synthesize a draft,
+  fact-check it, and revise until claims are supported.
+when_to_use:
+  - open-ended research question
+  - multiple sources must be gathered and compared
+  - claims must be supported by evidence
+  - a written synthesis is the deliverable
+roles:
+  coordinator:
+    purpose: Frame the question, plan subquestions, and assemble the final report.
+  researcher:
+    purpose: Gather evidence and notes for a single subquestion.
+  synthesizer:
+    purpose: Merge findings into a coherent, well-structured draft.
+  fact_checker:
+    purpose: Check each claim against the gathered evidence and flag unsupported ones.
+flow:
+  - id: plan
+    kind: actor_call
+    actor: coordinator
+    output: ResearchPlan
+
+  - id: gather
+    kind: map
+    over: ResearchPlan.subquestions   # artifact-field reference; one researcher pass per subquestion
+    input:
+      - ResearchPlan
+    output: Findings[]
+
+  - id: synthesize
+    kind: reduce
+    actor: synthesizer
+    input:
+      - Findings[]
+    output: Draft
+
+  - id: fact_check
+    kind: evaluator
+    actor: fact_checker
+    input:
+      - Draft
+      - Findings[]
+    output: FactCheckReport
+
+  - id: fact_gate
+    kind: gate
+    condition: no_unsupported_claims   # computed from FactCheckReport
+    on_pass: finalize
+    on_fail: revise
+
+  - id: revise
+    kind: loop
+    max_iterations: 2
+    body:
+      - revise_draft
+      - recheck
+    until: no_unsupported_claims
+    on_exhausted: finalize
+
+  - id: revise_draft
+    kind: actor_call
+    actor: synthesizer
+    input:
+      - Draft
+      - FactCheckReport
+    output: Draft
+
+  - id: recheck
+    kind: evaluator
+    actor: fact_checker
+    input:
+      - Draft
+      - Findings[]
+    output: FactCheckReport
+
+  - id: finalize
+    kind: actor_call
+    actor: coordinator
+    input:
+      - Draft
+      - FactCheckReport
+    output: FinalReport
+
+limits:
+  max_iterations: 2
+  max_actor_calls: 16
+
+policies:
+  max_subagents: 4
+  require_user_approval_for:
+    - external_send
