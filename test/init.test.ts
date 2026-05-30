@@ -161,3 +161,28 @@ test('--with-hooks on Claude adds a settings example', (t) => {
   runInit({ target: 'claude', repoRoot: root, withHooks: true });
   assert.ok(exists(root, '.fadeno/hooks/claude-settings.example.json'));
 });
+
+test('--data-only seeds .fadeno definitions but no capability layer', (t) => {
+  const root = tempRepo(t);
+  const { results } = runInit({ target: 'claude', repoRoot: root, dataOnly: true });
+
+  // definitions present
+  assert.ok(exists(root, '.fadeno/schemas/playbook.schema.json'));
+  assert.ok(exists(root, '.fadeno/playbooks/code-change-review.yaml'));
+  assert.ok(exists(root, '.fadeno/vocabulary.md'));
+
+  // capability layer skipped (comes from the plugin)
+  assert.ok(!exists(root, '.claude/skills/fadeno-runner/SKILL.md'));
+  assert.ok(!exists(root, '.claude/agents/fadeno-worker.md'));
+  assert.ok(!exists(root, 'CLAUDE.md'));
+
+  // every emitted path is under .fadeno/
+  assert.ok(results.every((r) => r.path.includes('.fadeno')));
+});
+
+test('--data-only still scaffolds hooks when requested', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: root, dataOnly: true, withHooks: true });
+  assert.ok(exists(root, '.fadeno/hooks/pre-commit'));
+  assert.ok(!exists(root, '.claude/skills/fadeno-runner/SKILL.md'));
+});

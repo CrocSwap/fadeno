@@ -82,6 +82,29 @@ The playbooks, schemas, vocabulary, and SKILL.md *bodies* are **identical** on
 both targets. Only the install dir, bootstrap file + invocation sigil, invocation
 policy, and subagent format differ.
 
+### Or install as a Claude Code plugin
+
+`init --claude` copies the skills into one repo. For Claude Code, you can instead
+install Fadeno's **skills + role subagents once, for every project**, as a
+plugin — and let the CLI seed just the per-repo playbooks. (This is the
+capability/definitions split: the plugin carries *how to run playbooks*; the repo
+carries *which playbooks*.)
+
+```bash
+# the Fadeno repo doubles as a plugin marketplace
+/plugin marketplace add <owner>/fadeno      # or a local path for testing
+/plugin install fadeno@fadeno               # provides /fadeno:runner and /fadeno:builder
+
+# then, in any project, seed just the playbooks/schemas (no skill copy):
+npx fadeno init --claude --data-only
+```
+
+To test the plugin locally before publishing: `claude --plugin-dir ./plugin`.
+The `plugin/` directory is generated from the same templates as the CLI
+(`npm run build:plugin`), so the skills never drift. The `fadeno` CLI is still
+needed (the skills call `fadeno validate` / `diagram` / `gate`); install it with
+`npm i -g fadeno` or rely on `npx`.
+
 ---
 
 ## Running a playbook
@@ -140,7 +163,24 @@ runs.
 ## Creating a playbook
 
 Use the **builder** skill (explicit only — it won't fire just because a prompt
-mentions "playbook"): `$fadeno-builder` (Codex) / `/fadeno-builder` (Claude).
+mentions "playbook"): `$fadeno-builder` (Codex) / `/fadeno-builder` or
+`/fadeno:builder` (Claude). The builder runs a short loop:
+
+> **describe the flow** (or pick a starter to adapt) → builder **writes the YAML**
+> → shows it back as a **diagram** + summary → you **approve** → it **hands off to
+> the runner**. On first use it seeds `.fadeno/` for you (`init --data-only`).
+
+You can render any playbook's flow yourself:
+
+```bash
+fadeno diagram code-change-review              # annotated ASCII
+fadeno diagram code-change-review --format mermaid   # graph for GitHub/docs
+```
+
+```
+● plan → implement → ⊞ review → ◇ review_gate   ✓→test  ✗→revise
+↻ revise (max 1, until no_blocking_issues)  body: implement_revision → review_revision
+```
 
 A playbook is a small YAML file validated by `playbook.schema.json`. The key
 design rule:
@@ -256,9 +296,10 @@ integration. Those are non-goals for v0.
 
 ```bash
 npm install
-npm test          # node --test over test/**/*.test.ts (no test framework dep)
-npm run build     # tsc → dist/ (rewrites .ts imports to .js); sets the bin executable
-node src/cli.ts --help   # run from source (Node ≥ 22.6 strips types natively)
+npm test            # node --test over test/**/*.test.ts (no test framework dep)
+npm run build       # tsc → dist/ (rewrites .ts imports to .js); sets the bin executable
+npm run build:plugin   # regenerate ./plugin from the templates (keeps it in sync)
+node src/cli.ts --help # run from source (Node ≥ 22.6 strips types natively)
 ```
 
 The CLI has only two runtime dependencies (`ajv`, `yaml`) and uses Node's

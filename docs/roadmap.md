@@ -5,9 +5,18 @@ chat. v0's scope and non-goals come from `docs/kickoff-memo.md`.
 
 ## Shipped (v0)
 
-- CLI: `init --codex|--claude [--with-hooks] [--force]`, `validate [file] [--schema]`,
-  `new-run`, `run`, `gate`.
+- CLI: `init --codex|--claude [--with-hooks] [--data-only] [--force]`,
+  `validate [file] [--schema]`, `diagram [--format ascii|mermaid]`, `new-run`,
+  `run`, `gate`, `plugin`.
 - Dual-target scaffolding from one template core (Codex + Claude Code), non-destructive.
+- **Claude plugin** packaging: `fadeno plugin` generates a `plugin/` (skills +
+  role subagents) from the same templates; repo root carries a
+  `.claude-plugin/marketplace.json`, so the repo is directly installable
+  (`/plugin install fadeno@fadeno`). `init --data-only` seeds just the per-repo
+  definitions for plugin users (the capability/definitions split).
+- **Builder arc + diagrams:** the builder seeds → offers starters or NL → writes
+  the playbook → renders it (`fadeno diagram`, ASCII or Mermaid) → human-gate
+  approval → hands off to the runner; runner explains role↔subagent management.
 - Schemas: `playbook`, `run`, `review-report`. Starter playbooks: `code-change-review`,
   `research-synthesis`, `pr-review`. Runner + builder skills.
 - Validation: schema + reference-integrity (errors) + **semantics** — `actor` must be a
@@ -35,7 +44,10 @@ chat. v0's scope and non-goals come from `docs/kickoff-memo.md`.
    flow model mixes implicit sequential fall-through with explicit branches/loop bodies;
    it needs a firmer execution-order spec before reachability can avoid false positives.
 2. **Authoring helpers** — `fadeno list` (playbooks + `when_to_use`),
-   `fadeno new-playbook <pattern>` scaffolder.
+   `fadeno new-playbook <pattern>` scaffolder. (`fadeno diagram` already ships.)
+3. **Bundle the CLI with the plugin** — today the plugin's skills call the `fadeno`
+   CLI, which is a separate `npm i -g fadeno` / `npx`. Ship it in the plugin's
+   `bin/` (single-file build) so plugin install is fully self-contained.
 3. **More gate conditions** in `fadeno gate` (e.g. `no_unsupported_claims` from a
    fact-check report) + a fact-check artifact schema, widening deterministic enforcement.
 4. **More harness targets** — Cursor and others (SKILL.md is a cross-harness standard, so

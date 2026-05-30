@@ -1,0 +1,15 @@
+{
+  "name": "fadeno",
+  "description": "Run and author Fadeno playbooks — repeatable plan/implement/review/test workflows with file-backed run traces. Seed a repo with `fadeno init --claude --data-only`.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Fadeno"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "playbook",
+    "workflow",
+    "skills"
+  ]
+}

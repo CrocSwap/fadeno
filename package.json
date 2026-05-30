@@ -27,6 +27,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
+    "build:plugin": "node src/cli.ts plugin ./plugin --force",
     "dev": "node src/cli.ts",
     "test": "node --test \"test/**/*.test.ts\"",
     "validate:self": "node src/cli.ts validate",

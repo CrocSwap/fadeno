@@ -1,0 +1,13 @@
+{
+  "name": "fadeno",
+  "owner": {
+    "name": "Fadeno"
+  },
+  "plugins": [
+    {
+      "name": "fadeno",
+      "source": "./plugin",
+      "description": "Run and author Fadeno playbooks (skills + role subagents). Seed a repo's playbooks with `fadeno init --claude --data-only`."
+    }
+  ]
+}

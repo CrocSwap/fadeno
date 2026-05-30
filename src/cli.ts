@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { relative } from 'node:path';
 import { parseArgs } from 'node:util';
+import { runDiagram } from './commands/diagram.ts';
 import { runGate } from './commands/gate.ts';
 import { runInit, type Target } from './commands/init.ts';
 import { runNewRun } from './commands/new-run.ts';
+import { runPlugin } from './commands/plugin.ts';
 import { runRun } from './commands/run.ts';
 import { runValidate } from './commands/validate.ts';
+import type { DiagramFormat } from './lib/diagram.ts';
 import type { EmitResult } from './lib/fsutil.ts';
 import type { SchemaKind, ValidationIssue } from './lib/playbook-validate.ts';
 import { packageVersion } from './lib/paths.ts';
@@ -14,17 +17,20 @@ import type { ValidateOutcome } from './commands/validate.ts';
 const HELP = `fadeno — the playbook layer for AI coding agents
 
 Usage:
-  fadeno init --codex [--with-hooks]    Scaffold for Codex (.agents/skills, AGENTS.md)
-  fadeno init --claude [--with-hooks]   Scaffold for Claude Code (.claude/skills, CLAUDE.md)
+  fadeno init --codex|--claude [opts]   Scaffold (see --with-hooks, --data-only)
   fadeno validate [file] [--schema K]   Validate playbooks (schema + references + semantics)
+  fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
   fadeno run <run> [flags]              Update a run ledger (run.yaml + events.jsonl)
   fadeno gate <run> <condition>         Evaluate a gate condition from a judgment artifact
+  fadeno plugin [dir]                   Generate a Claude Code plugin (default ./plugin)
 
 Options:
   --with-hooks            (init) Also scaffold tier-2 enforcement hooks
+  --data-only             (init) Seed only .fadeno/ definitions (capability via plugin)
   --force                 (init) Overwrite existing files / refresh the bootstrap section
   --schema <kind>         (validate) Force document kind: playbook | run | review-report
+  --format <fmt>          (diagram) ascii (default) | mermaid
   --step <id>             (run) Set current_step and log a step_started event
   --status <status>       (run) Set status: running | completed | failed | aborted
   --event <type>          (run) Append a custom event
@@ -125,7 +131,9 @@ function main(argv: string[]): number {
         claude: { type: 'boolean' },
         force: { type: 'boolean' },
         'with-hooks': { type: 'boolean' },
+        'data-only': { type: 'boolean' },
         schema: { type: 'string' },
+        format: { type: 'string' },
         step: { type: 'string' },
         status: { type: 'string' },
         event: { type: 'string' },
@@ -164,6 +172,7 @@ function main(argv: string[]): number {
         target,
         force: values.force,
         withHooks: values['with-hooks'],
+        dataOnly: values['data-only'],
       });
       printInitSummary(target, repoRoot, results, Boolean(values['with-hooks']));
       return 0;
@@ -178,6 +187,15 @@ function main(argv: string[]): number {
       });
       printValidate(outcome);
       return outcome.ok ? 0 : 1;
+    }
+    case 'diagram': {
+      const playbook = positionals[1];
+      if (!playbook) throw new Error('Usage: fadeno diagram <playbook> [--format ascii|mermaid]');
+      if (values.format && values.format !== 'ascii' && values.format !== 'mermaid') {
+        throw new Error(`Invalid --format "${values.format}". Use: ascii | mermaid.`);
+      }
+      console.log(runDiagram({ playbook, format: values.format as DiagramFormat | undefined }));
+      return 0;
     }
     case 'new-run': {
       const [, playbook, task] = positionals;
@@ -206,6 +224,15 @@ function main(argv: string[]): number {
       if (result.updatedFields.length) parts.push(`updated ${result.updatedFields.join(', ')}`);
       if (result.appendedEvents.length) parts.push(`logged ${result.appendedEvents.join(', ')}`);
       console.log(`${relative(process.cwd(), result.runDir) || result.runDir}: ${parts.join('; ')}`);
+      return 0;
+    }
+    case 'plugin': {
+      const { outDir, results } = runPlugin({ outDir: positionals[1], force: values.force });
+      const counts = { created: 0, overwritten: 0, appended: 0, skipped: 0 };
+      for (const r of results) counts[r.status] += 1;
+      console.log(`Generated Fadeno plugin in ${outDir}`);
+      console.log(`  ${counts.created} created, ${counts.overwritten} overwritten, ${counts.skipped} skipped.`);
+      console.log('\nTest it: `claude --plugin-dir ' + relative(process.cwd(), outDir) + '`');
       return 0;
     }
     case 'gate': {

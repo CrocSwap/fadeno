@@ -1,6 +1,7 @@
 ---
-name: fadeno-builder
+name: builder
 description: Create or modify Fadeno playbooks from natural-language workflow descriptions, show them back as a diagram, and hand off to the runner. Use ONLY when the user explicitly wants to create, modify, simplify, or review a playbook. Do NOT trigger merely because a task mentions a playbook.
+disable-model-invocation: true
 ---
 
 # Fadeno Builder

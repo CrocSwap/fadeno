@@ -10,6 +10,8 @@ export interface InitOptions {
   force?: boolean;
   /** Also scaffold tier-2 enforcement hooks (pre-commit, CI workflow, examples). */
   withHooks?: boolean;
+  /** Seed only the per-repo `.fadeno/` definitions; skip skills/subagents/bootstrap. */
+  dataOnly?: boolean;
   /** Working directory used to locate the repo root. Defaults to process.cwd(). */
   cwd?: string;
   /** Explicit repo root (mainly for tests); bypasses git-root detection. */
@@ -48,50 +50,56 @@ export function runInit(opts: InitOptions): InitResult {
   const results: EmitResult[] = [];
 
   // 1. Shared `.fadeno/` tree (vocabulary, playbooks, schemas, runs, enforcement).
+  //    This is the per-repo "definitions" layer — always written.
   copyTree(join(tpl, 'common', 'fadeno'), join(repoRoot, '.fadeno'), force, results);
 
-  // 2. Skills — shared bodies, per-target install dir and invocation policy.
-  const skillsBase =
-    opts.target === 'codex'
-      ? join(repoRoot, '.agents', 'skills')
-      : join(repoRoot, '.claude', 'skills');
+  // Steps 2–4 install the "capability" layer (skills, subagents, bootstrap).
+  // --data-only skips them: a plugin user gets capability from the plugin, so
+  // init only needs to seed the definitions above.
+  if (!opts.dataOnly) {
+    // 2. Skills — shared bodies, per-target install dir and invocation policy.
+    const skillsBase =
+      opts.target === 'codex'
+        ? join(repoRoot, '.agents', 'skills')
+        : join(repoRoot, '.claude', 'skills');
 
-  for (const skill of SKILLS) {
-    const skillSrc = join(tpl, 'common', 'skills', skill);
-    const skillDest = join(skillsBase, skill);
+    for (const skill of SKILLS) {
+      const skillSrc = join(tpl, 'common', 'skills', skill);
+      const skillDest = join(skillsBase, skill);
 
-    let skillMd = readFileSync(join(skillSrc, 'SKILL.md'), 'utf8');
-    // Claude expresses "don't fire implicitly" via frontmatter; Codex uses
-    // openai.yaml (below). Only the builder should be invocation-gated.
-    if (opts.target === 'claude' && skill === 'fadeno-builder') {
-      skillMd = addFrontmatterField(skillMd, 'disable-model-invocation: true');
+      let skillMd = readFileSync(join(skillSrc, 'SKILL.md'), 'utf8');
+      // Claude expresses "don't fire implicitly" via frontmatter; Codex uses
+      // openai.yaml (below). Only the builder should be invocation-gated.
+      if (opts.target === 'claude' && skill === 'fadeno-builder') {
+        skillMd = addFrontmatterField(skillMd, 'disable-model-invocation: true');
+      }
+      const skillMdPath = join(skillDest, 'SKILL.md');
+      results.push({ path: skillMdPath, status: emitFile(skillMdPath, skillMd, force) });
+
+      copyTree(join(skillSrc, 'references'), join(skillDest, 'references'), force, results);
+
+      if (opts.target === 'codex') {
+        const policy = readFileSync(join(tpl, 'codex', 'openai', `${skill}.yaml`), 'utf8');
+        const policyPath = join(skillDest, 'agents', 'openai.yaml');
+        results.push({ path: policyPath, status: emitFile(policyPath, policy, force) });
+      }
     }
-    const skillMdPath = join(skillDest, 'SKILL.md');
-    results.push({ path: skillMdPath, status: emitFile(skillMdPath, skillMd, force) });
 
-    copyTree(join(skillSrc, 'references'), join(skillDest, 'references'), force, results);
-
+    // 3. Subagent definitions (provisional path/format — runner degrades when
+    //    native subagents are unavailable).
     if (opts.target === 'codex') {
-      const policy = readFileSync(join(tpl, 'codex', 'openai', `${skill}.yaml`), 'utf8');
-      const policyPath = join(skillDest, 'agents', 'openai.yaml');
-      results.push({ path: policyPath, status: emitFile(policyPath, policy, force) });
+      copyTree(join(tpl, 'codex', 'codex-agents'), join(repoRoot, '.codex', 'agents'), force, results);
+    } else {
+      copyTree(join(tpl, 'claude', 'claude-agents'), join(repoRoot, '.claude', 'agents'), force, results);
     }
+
+    // 4. Bootstrap instruction file (append-or-create, never clobber).
+    const bootstrapName = opts.target === 'codex' ? 'AGENTS.md' : 'CLAUDE.md';
+    const bootstrapBody = readFileSync(join(tpl, opts.target, bootstrapName), 'utf8');
+    emitBootstrap(join(repoRoot, bootstrapName), bootstrapBody, force, results);
   }
 
-  // 3. Subagent definitions (provisional path/format — runner degrades when
-  //    native subagents are unavailable).
-  if (opts.target === 'codex') {
-    copyTree(join(tpl, 'codex', 'codex-agents'), join(repoRoot, '.codex', 'agents'), force, results);
-  } else {
-    copyTree(join(tpl, 'claude', 'claude-agents'), join(repoRoot, '.claude', 'agents'), force, results);
-  }
-
-  // 4. Bootstrap instruction file (append-or-create, never clobber).
-  const bootstrapName = opts.target === 'codex' ? 'AGENTS.md' : 'CLAUDE.md';
-  const bootstrapBody = readFileSync(join(tpl, opts.target, bootstrapName), 'utf8');
-  emitBootstrap(join(repoRoot, bootstrapName), bootstrapBody, force, results);
-
-  // 5. Optional tier-2 enforcement scaffold.
+  // 5. Optional tier-2 enforcement scaffold (per-repo policy — allowed with --data-only).
   if (opts.withHooks) emitHooks(tpl, repoRoot, opts.target, force, results);
 
   return { target: opts.target, repoRoot, results };
