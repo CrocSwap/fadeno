@@ -13,7 +13,11 @@ chat. v0's scope and non-goals come from `docs/kickoff-memo.md`.
   role subagents) from the same templates; repo root carries a
   `.claude-plugin/marketplace.json`, so the repo is directly installable
   (`/plugin install fadeno@fadeno`). `init --data-only` seeds just the per-repo
-  definitions for plugin users (the capability/definitions split).
+  definitions for plugin users (the capability/definitions split). The plugin is
+  **self-contained**: `npm run build:bin` bundles the CLI (deps inlined) into
+  `plugin/bin/fadeno` + adjacent templates, committed so a git-URL install yields
+  a working `fadeno` with no extra step. (A `prepare` script also makes
+  `npm i -g github:…` build a working binary.)
 - **Builder arc + diagrams:** the builder seeds → offers starters or NL → writes
   the playbook → renders it (`fadeno diagram`, ASCII or Mermaid) → human-gate
   approval → hands off to the runner; runner explains role↔subagent management.
@@ -45,9 +49,6 @@ chat. v0's scope and non-goals come from `docs/kickoff-memo.md`.
    it needs a firmer execution-order spec before reachability can avoid false positives.
 2. **Authoring helpers** — `fadeno list` (playbooks + `when_to_use`),
    `fadeno new-playbook <pattern>` scaffolder. (`fadeno diagram` already ships.)
-3. **Bundle the CLI with the plugin** — today the plugin's skills call the `fadeno`
-   CLI, which is a separate `npm i -g fadeno` / `npx`. Ship it in the plugin's
-   `bin/` (single-file build) so plugin install is fully self-contained.
 3. **More gate conditions** in `fadeno gate` (e.g. `no_unsupported_claims` from a
    fact-check report) + a fact-check artifact schema, widening deterministic enforcement.
 4. **More harness targets** — Cursor and others (SKILL.md is a cross-harness standard, so

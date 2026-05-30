@@ -101,9 +101,13 @@ npx fadeno init --claude --data-only
 
 To test the plugin locally before publishing: `claude --plugin-dir ./plugin`.
 The `plugin/` directory is generated from the same templates as the CLI
-(`npm run build:plugin`), so the skills never drift. The `fadeno` CLI is still
-needed (the skills call `fadeno validate` / `diagram` / `gate`); install it with
-`npm i -g fadeno` or rely on `npx`.
+(`npm run build:plugin`), so the skills never drift.
+
+The plugin is **self-contained**: it bundles the `fadeno` CLI as a single
+executable in `plugin/bin/` (auto-added to your PATH while the plugin is
+enabled), so the skills can call `fadeno validate` / `diagram` / `gate` with
+nothing else to install. A git-URL plugin install gives you a working `fadeno`
+out of the box.
 
 ---
 

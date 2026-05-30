@@ -57,6 +57,7 @@ function printInitSummary(
   repoRoot: string,
   results: EmitResult[],
   withHooks: boolean,
+  dataOnly: boolean,
 ): void {
   const counts = { created: 0, overwritten: 0, appended: 0, skipped: 0 };
   for (const r of results) counts[r.status] += 1;
@@ -73,11 +74,14 @@ function printInitSummary(
     console.log('Some files already existed and were left untouched. Re-run with --force to overwrite.');
   }
 
-  const sigil = SIGIL[target];
   console.log('\nNext steps:');
   console.log('  1. Review .fadeno/playbooks and .fadeno/vocabulary.md');
   console.log('  2. Run `fadeno validate` to check the playbooks');
-  console.log(`  3. Ask your agent to use the ${sigil}fadeno-runner skill on a complex task`);
+  if (dataOnly) {
+    console.log('  3. Use the /fadeno:runner skill (from the installed Fadeno plugin)');
+  } else {
+    console.log(`  3. Ask your agent to use the ${SIGIL[target]}fadeno-runner skill on a complex task`);
+  }
   if (withHooks) {
     console.log('  4. Activate enforcement: see .fadeno/hooks/README.md');
   }
@@ -174,7 +178,13 @@ function main(argv: string[]): number {
         withHooks: values['with-hooks'],
         dataOnly: values['data-only'],
       });
-      printInitSummary(target, repoRoot, results, Boolean(values['with-hooks']));
+      printInitSummary(
+        target,
+        repoRoot,
+        results,
+        Boolean(values['with-hooks']),
+        Boolean(values['data-only']),
+      );
       return 0;
     }
     case 'validate': {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { runPlugin } from '../src/commands/plugin.ts';
@@ -47,3 +47,17 @@ test('the committed plugin/ matches a fresh generation (no drift)', (t) => {
   );
   assert.equal(fresh, committed);
 });
+
+test('the committed plugin ships a self-contained CJS binary + templates', () => {
+  const binDir = join(import.meta.dirname, '..', 'plugin', 'bin');
+  const bin = join(binDir, 'fadeno');
+  assert.ok(existsSync(bin), 'plugin/bin/fadeno missing — run `npm run build:bin`');
+  assert.ok(statSync(bin).mode & 0o111, 'plugin/bin/fadeno is not executable');
+  assert.match(readFileSync(bin, 'utf8').split('\n', 1)[0]!, /^#!\/usr\/bin\/env node/);
+  // Pinned to CommonJS so the extensionless bundle runs under a type:module ancestor.
+  const pkg = JSON.parse(readFileSync(join(binDir, 'package.json'), 'utf8'));
+  assert.equal(pkg.type, 'commonjs');
+  // Templates travel with the binary so `fadeno init` works with no node_modules.
+  assert.ok(existsSync(join(binDir, 'templates', 'common', 'fadeno', 'vocabulary.md')));
+});
+

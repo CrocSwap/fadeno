@@ -1,0 +1,170 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://fadeno.dev/schemas/playbook.schema.json",
+  "title": "Fadeno Playbook",
+  "description": "A reusable orchestration recipe for an AI coding agent. Authored in YAML, validated against this schema. The schema is the single source of truth for the vocabulary; references/playbook-format.md explains the semantics.",
+  "type": "object",
+  "required": ["kind", "schema_version", "name", "description", "roles", "flow"],
+  "additionalProperties": false,
+  "properties": {
+    "kind": { "const": "AgentPlaybook" },
+    "schema_version": {
+      "type": ["string", "number"],
+      "description": "Playbook schema version, e.g. \"0.1\"."
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "Kebab-case identifier; should match the file name."
+    },
+    "description": { "type": "string", "minLength": 1 },
+    "when_to_use": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Plain-language cues the host agent uses to decide whether to pick this playbook."
+    },
+    "roles": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "Named actors the flow can call. A role is performed by a subagent when available, otherwise simulated by a separate pass.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["purpose"],
+        "additionalProperties": false,
+        "properties": { "purpose": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "flow": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/step" }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Global bounds on the run. Loops must always be bounded.",
+      "properties": {
+        "max_iterations": { "type": "integer", "minimum": 0 },
+        "max_actor_calls": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "policies": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Run policies. require_user_approval_for is ADVISORY in instruction-only hosts; wire it to CI/pre-commit/hooks for real enforcement.",
+      "properties": {
+        "max_revision_loops": { "type": "integer", "minimum": 0 },
+        "max_subagents": { "type": "integer", "minimum": 0 },
+        "max_actor_calls": { "type": "integer", "minimum": 0 },
+        "require_user_approval_for": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "destructive_commands",
+              "dependency_addition",
+              "deploy",
+              "external_send",
+              "secret_access",
+              "data_deletion"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "artifactRef": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Name of an artifact produced or consumed by a step (e.g. \"Plan\", \"ReviewReport[]\")."
+    },
+    "stepId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_]*$",
+      "description": "Snake/lower identifier of a step within this flow."
+    },
+    "step": {
+      "type": "object",
+      "required": ["id", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/definitions/stepId" },
+        "kind": {
+          "enum": [
+            "actor_call",
+            "tool_call",
+            "evaluator",
+            "gate",
+            "human_gate",
+            "router",
+            "map",
+            "replicate",
+            "join",
+            "reduce",
+            "loop",
+            "artifact_op",
+            "subworkflow"
+          ]
+        },
+        "description": { "type": "string" },
+        "actor": { "type": "string", "description": "Role name (must be declared in roles)." },
+        "actors": { "type": "array", "items": { "type": "string" } },
+        "tool": { "type": "string", "description": "Logical tool/capability name (e.g. test_runner)." },
+        "input": { "type": "array", "items": { "$ref": "#/definitions/artifactRef" } },
+        "output": { "$ref": "#/definitions/artifactRef" },
+        "next": { "$ref": "#/definitions/stepId" },
+        "condition": {
+          "type": "string",
+          "description": "A named, deterministic predicate computed from a judgment artifact (NOT an ad-hoc LLM call)."
+        },
+        "on_pass": { "$ref": "#/definitions/stepId" },
+        "on_fail": { "$ref": "#/definitions/stepId" },
+        "on_approve": { "$ref": "#/definitions/stepId" },
+        "on_reject": { "$ref": "#/definitions/stepId" },
+        "prompt": { "type": "string", "description": "Human-facing question for a human_gate." },
+        "over": {
+          "description": "List to map over: literal role/item names, or an artifact-field reference string.",
+          "oneOf": [
+            { "type": "array", "items": { "type": "string" } },
+            { "type": "string" }
+          ]
+        },
+        "routes": {
+          "type": "object",
+          "description": "Router branches: label -> step id.",
+          "additionalProperties": { "$ref": "#/definitions/stepId" }
+        },
+        "default": { "$ref": "#/definitions/stepId" },
+        "body": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/stepId" },
+          "description": "Step ids re-run each loop iteration."
+        },
+        "max_iterations": { "type": "integer", "minimum": 1 },
+        "until": { "type": "string", "description": "Named condition that ends the loop early." },
+        "on_exhausted": { "$ref": "#/definitions/stepId" },
+        "count": { "type": "integer", "minimum": 1 },
+        "wait_for": { "type": "array", "items": { "type": "string" } },
+        "op": { "type": "string" },
+        "playbook": { "type": "string" }
+      },
+      "allOf": [
+        { "if": { "properties": { "kind": { "const": "actor_call" } } }, "then": { "required": ["actor"] } },
+        { "if": { "properties": { "kind": { "const": "tool_call" } } }, "then": { "required": ["tool"] } },
+        { "if": { "properties": { "kind": { "const": "evaluator" } } }, "then": { "required": ["actor", "output"] } },
+        { "if": { "properties": { "kind": { "const": "gate" } } }, "then": { "required": ["condition", "on_pass", "on_fail"] } },
+        { "if": { "properties": { "kind": { "const": "human_gate" } } }, "then": { "required": ["prompt"] } },
+        { "if": { "properties": { "kind": { "const": "router" } } }, "then": { "required": ["routes"] } },
+        { "if": { "properties": { "kind": { "const": "map" } } }, "then": { "required": ["over"] } },
+        { "if": { "properties": { "kind": { "const": "replicate" } } }, "then": { "required": ["actor"] } },
+        { "if": { "properties": { "kind": { "const": "join" } } }, "then": { "required": ["wait_for"] } },
+        { "if": { "properties": { "kind": { "const": "reduce" } } }, "then": { "required": ["actor", "input"] } },
+        { "if": { "properties": { "kind": { "const": "loop" } } }, "then": { "required": ["body", "max_iterations"] } },
+        { "if": { "properties": { "kind": { "const": "artifact_op" } } }, "then": { "required": ["op"] } },
+        { "if": { "properties": { "kind": { "const": "subworkflow" } } }, "then": { "required": ["playbook"] } }
+      ]
+    }
+  }
+}

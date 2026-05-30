@@ -27,7 +27,9 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
-    "build:plugin": "node src/cli.ts plugin ./plugin --force",
+    "build:bin": "node scripts/build-bin.mjs",
+    "build:plugin": "node src/cli.ts plugin ./plugin --force && npm run build:bin",
+    "prepare": "npm run build",
     "dev": "node src/cli.ts",
     "test": "node --test \"test/**/*.test.ts\"",
     "validate:self": "node src/cli.ts validate",
@@ -39,6 +41,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "esbuild": "^0.28.0",
     "typescript": "^6.0.3"
   }
 }
