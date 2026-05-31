@@ -22,13 +22,26 @@ export interface NewRunResult {
 
 export class NewRunError extends Error {}
 
-/** Turn arbitrary task text into a short, filesystem-safe slug. */
+/**
+ * Turn arbitrary task text into a short, filesystem-safe slug, cut at a word
+ * boundary so it never ends mid-word (e.g. not `…-conver`).
+ */
 export function slugify(text: string, maxLen = 40): string {
-  const base = text
+  const words = text
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  return (base || 'run').slice(0, maxLen).replace(/-+$/, '') || 'run';
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  let slug = '';
+  for (const word of words) {
+    const next = slug ? `${slug}-${word}` : word;
+    if (next.length > maxLen) break;
+    slug = next;
+  }
+  // A single leading word longer than maxLen still has to be hard-cut.
+  if (!slug && words.length) slug = words[0]!.slice(0, maxLen);
+  return slug || 'run';
 }
 
 function resolvePlaybook(playbooksDir: string, name: string): string {
@@ -58,8 +71,11 @@ export function runNewRun(opts: NewRunOptions): NewRunResult {
 
   const now = opts.now ?? new Date();
   const iso = now.toISOString();
-  const datePart = iso.slice(0, 10);
-  const timePart = `${iso.slice(11, 13)}${iso.slice(14, 16)}`;
+  // The run id uses LOCAL date/time so "today's run" is findable under today's
+  // date; started_at below keeps the unambiguous UTC ISO timestamp.
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  const datePart = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const timePart = `${pad(now.getHours())}${pad(now.getMinutes())}`;
   const slug = slugify(opts.task);
 
   const runsDir = join(fadenoDir, 'runs');

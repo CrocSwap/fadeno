@@ -14142,7 +14142,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.1.1";
+  if (true) return "0.1.2";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -14379,8 +14379,15 @@ var import_yaml2 = __toESM(require_dist(), 1);
 var NewRunError = class extends Error {
 };
 function slugify(text, maxLen = 40) {
-  const base = text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  return (base || "run").slice(0, maxLen).replace(/-+$/, "") || "run";
+  const words = text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
+  let slug = "";
+  for (const word of words) {
+    const next = slug ? `${slug}-${word}` : word;
+    if (next.length > maxLen) break;
+    slug = next;
+  }
+  if (!slug && words.length) slug = words[0].slice(0, maxLen);
+  return slug || "run";
 }
 function resolvePlaybook(playbooksDir, name) {
   const stripped = name.replace(/\.(ya?ml)$/i, "");
@@ -14401,8 +14408,9 @@ function runNewRun(opts) {
   const playbook = resolvePlaybook((0, import_node_path6.join)(fadenoDir, "playbooks"), opts.playbook);
   const now = opts.now ?? /* @__PURE__ */ new Date();
   const iso = now.toISOString();
-  const datePart = iso.slice(0, 10);
-  const timePart = `${iso.slice(11, 13)}${iso.slice(14, 16)}`;
+  const pad = (n) => String(n).padStart(2, "0");
+  const datePart = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const timePart = `${pad(now.getHours())}${pad(now.getMinutes())}`;
   const slug = slugify(opts.task);
   const runsDir = (0, import_node_path6.join)(fadenoDir, "runs");
   let runId = `${datePart}-${timePart}-${slug}`;
@@ -14516,12 +14524,13 @@ function runRun(opts) {
     updatedFields.push("current_step");
     appendEvent({ type: "step_started", step: opts.step });
   }
+  const eventStep = opts.step ?? (run.current_step ?? null);
   if (opts.event) {
-    const event = { type: opts.event, step: opts.step ?? null };
+    const event = { type: opts.event, step: eventStep };
     if (opts.artifact) event.artifact = opts.artifact;
     appendEvent(event);
   } else if (opts.artifact) {
-    appendEvent({ type: "artifact_created", step: opts.step ?? null, artifact: opts.artifact });
+    appendEvent({ type: "artifact_created", step: eventStep, artifact: opts.artifact });
   }
   if (opts.status) {
     if (!VALID_STATUSES.has(opts.status)) {

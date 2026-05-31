@@ -13,8 +13,9 @@ reliably than a sprawling graph.
 ## Procedure
 
 1. **Ensure the repo is set up.** If `.fadeno/` is missing, seed the per-repo
-   definitions: run `fadeno init --claude --data-only` (or
-   `npx fadeno init --claude --data-only`). That writes `.fadeno/schemas`,
+   definitions: run `fadeno init --claude --data-only` (if bare `fadeno` isn't on
+   your PATH yet, use `"${CLAUDE_PLUGIN_ROOT}/bin/fadeno" init --claude
+   --data-only`, or `npx fadeno …` for a non-plugin setup). That writes `.fadeno/schemas`,
    `vocabulary.md`, and the starter playbooks — **not** skills/subagents, which
    come from the installed Fadeno skill/plugin.
 2. **Start from a pattern, not a blank page.** Offer the user a choice:

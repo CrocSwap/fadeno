@@ -74,12 +74,17 @@ export function runRun(opts: RunOptions): RunResult {
     appendEvent({ type: 'step_started', step: opts.step });
   }
 
+  // Attribute the event to the step in progress: an explicit --step wins,
+  // otherwise fall back to the run's current_step so artifacts/events aren't
+  // logged with a null step. (Run-level events like run_completed stay null.)
+  const eventStep = opts.step ?? ((run.current_step as string | null | undefined) ?? null);
+
   if (opts.event) {
-    const event: Record<string, unknown> = { type: opts.event, step: opts.step ?? null };
+    const event: Record<string, unknown> = { type: opts.event, step: eventStep };
     if (opts.artifact) event.artifact = opts.artifact;
     appendEvent(event);
   } else if (opts.artifact) {
-    appendEvent({ type: 'artifact_created', step: opts.step ?? null, artifact: opts.artifact });
+    appendEvent({ type: 'artifact_created', step: eventStep, artifact: opts.artifact });
   }
 
   if (opts.status) {

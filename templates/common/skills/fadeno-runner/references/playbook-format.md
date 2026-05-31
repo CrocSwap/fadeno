@@ -72,6 +72,11 @@ A step with no outgoing reference is terminal.
 Judgment lives in an artifact; control flow is a deterministic check on it. Never
 write a gate that "asks the model to decide" inline.
 
+An evaluator does **not** require a following `gate`. When the structured
+judgment *is* the deliverable — e.g. a comments-only review that returns the
+report rather than branching on it — a terminal evaluator is legitimate and
+validates clean. The gate is only for when the judgment must steer control flow.
+
 ## Bounded loops
 
 ```yaml

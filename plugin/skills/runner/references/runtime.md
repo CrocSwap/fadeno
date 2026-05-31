@@ -2,6 +2,21 @@
 
 Operational detail for executing a playbook. Load this when you actually run one.
 
+## Running the `fadeno` CLI
+
+The runner shells out to `fadeno` (`new-run`, `run`, `gate`, `validate`,
+`diagram`). Prefer the bare command — when the plugin is enabled its `bin/` is on
+the Bash `PATH`. If bare `fadeno` is "command not found" (the plugin's PATH entry
+can lag a `/reload-plugins` within a session), call the bundled binary directly:
+
+```
+"${CLAUDE_PLUGIN_ROOT}/bin/fadeno" <args>
+```
+
+For a repo-native (non-plugin) setup, `npx fadeno <args>` works. The CLI is
+optional — you *can* hand-write `run.yaml` / `events.jsonl` — but it keeps the
+ledger schema-valid.
+
 ## The run ledger
 
 For each run, create:
@@ -81,15 +96,14 @@ subagents aren't available, to a separate role-pass.
   subagents (`worker` = implementer, `reviewer` = reviewer, `judge` = evaluator),
   provided by the installed Fadeno skill/plugin (or written to `.claude/agents/`
   by `fadeno init`). A playbook's role names are matched to these by intent.
-- **Addressing them.** From the plugin the subagents are namespaced —
-  dispatch to `fadeno:worker` / `fadeno:reviewer` / `fadeno:judge` (the bare
-  `worker` etc. also resolves when the name is unique in the session). Repo-native
-  installs (`fadeno init`) write them un-namespaced to `.claude/agents/`.
-- **If a subagent type "is not found":** plugin subagents register at **session
-  start**, not on `/reload-plugins`. Right after installing or updating the
-  plugin, fully **restart** Claude Code so `fadeno:worker` etc. appear (check with
-  `/agents`). Until they do, just rely on graceful degradation below — the run
-  still completes, with each role done as a separate pass.
+- **Addressing them.** Dispatch by the bare role agent name — `worker` /
+  `reviewer` / `judge` (the `name:` in each agent file); the namespaced
+  `fadeno:worker` form also resolves from the plugin. Repo-native installs
+  (`fadeno init`) write the same agents un-namespaced to `.claude/agents/`.
+- **If a subagent type "is not found":** run `/reload-plugins` (it picks up
+  newly added or renamed plugin agents); if they still don't show in `/agents`,
+  fully **restart** Claude Code. Until `worker`/`reviewer`/`judge` resolve, rely
+  on graceful degradation below — the run still completes.
 - **Customizing for a repo.** To change how a role behaves in *this* repo, add or
   edit a per-repo subagent override at `.claude/agents/<name>.md` (Claude) /
   `.codex/agents/<name>.toml` (Codex). Repo-local definitions take precedence over
@@ -97,9 +111,13 @@ subagents aren't available, to a separate role-pass.
 - **Delegate one level only.** A subagent may **not** spawn its own subagents.
   `map`/`replicate` fan out one level; loop bodies re-run at the top level, not
   nested inside a subagent. This keeps playbooks safe under Codex `max_depth: 1`.
-- **Graceful degradation.** When native subagents are unavailable, perform the
-  roles yourself in separate passes and save each as a distinct artifact so the
-  role separation is still visible in the run ledger.
+- **Graceful degradation — but say so.** When the role subagents aren't
+  available, perform the roles yourself in separate passes and save each as a
+  distinct artifact so the role separation stays visible in the ledger. Make the
+  fallback **loud, not silent**: tell the user the run is using simulated roles
+  (not dedicated subagents), and record it — `fadeno run <run> --event
+  roles_degraded`. Otherwise the run reads as if it used subagents when it
+  didn't — exactly the kind of dishonest trace this system exists to avoid.
 
 ## Gates, honestly
 

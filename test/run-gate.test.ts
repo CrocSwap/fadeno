@@ -38,6 +38,28 @@ test('run --step updates current_step and logs step_started', (t) => {
   assert.equal(last.step, 'implement');
 });
 
+test('an artifact/event logged without --step inherits the run current_step', (t) => {
+  const { root, runId, runDir } = freshRun(t);
+  runRun({ repoRoot: root, run: runId, step: 'implement' });
+
+  // No --step here: should be attributed to the step in progress, not null.
+  runRun({ repoRoot: root, run: runId, artifact: 'artifacts/impl.md' });
+  const artifactEvent = readEvents(runDir).at(-1)!;
+  assert.equal(artifactEvent.type, 'artifact_created');
+  assert.equal(artifactEvent.step, 'implement');
+  assert.equal(artifactEvent.artifact, 'artifacts/impl.md');
+
+  // A custom event without --step inherits it too.
+  runRun({ repoRoot: root, run: runId, event: 'tests_passed' });
+  assert.equal(readEvents(runDir).at(-1)!.step, 'implement');
+
+  // Run-level completion stays null (not a step event).
+  runRun({ repoRoot: root, run: runId, status: 'completed' });
+  const done = readEvents(runDir).at(-1)!;
+  assert.equal(done.type, 'run_completed');
+  assert.equal(done.step, null);
+});
+
 test('run --status completed finalizes the ledger and keeps it schema-valid', (t) => {
   const { root, runId, runDir } = freshRun(t);
   runRun({ repoRoot: root, run: runId, status: 'completed' });

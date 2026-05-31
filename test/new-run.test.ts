@@ -19,6 +19,13 @@ test('slugify produces filesystem-safe slugs', () => {
   assert.equal(slugify('   '), 'run');
   assert.equal(slugify('a'.repeat(80)).length, 40);
   assert.doesNotMatch(slugify('Trailing punctuation ...'), /-$/);
+  // Truncation lands on a word boundary — never mid-word.
+  const long = slugify('Create a Python module for converting to and from Roman numerals');
+  assert.ok(long.length <= 40);
+  assert.doesNotMatch(long, /-$/);
+  // The break must coincide with a real word from the input, not a fragment.
+  const words = 'create a python module for converting to and from roman numerals'.split(' ');
+  assert.ok(words.includes(long.split('-').at(-1)!), `"${long}" ends mid-word`);
 });
 
 test('new-run writes a complete run ledger', (t) => {
@@ -31,7 +38,12 @@ test('new-run writes a complete run ledger', (t) => {
     now,
   });
 
-  assert.equal(runId, '2026-05-30-1132-add-csv-export');
+  // The id uses local date/time (TZ-robust: derive the expectation the same way).
+  const p = (n: number): string => String(n).padStart(2, '0');
+  const expectedId =
+    `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}` +
+    `-${p(now.getHours())}${p(now.getMinutes())}-add-csv-export`;
+  assert.equal(runId, expectedId);
   assert.ok(exists(root, join('.fadeno', 'runs', runId, 'run.yaml')));
   assert.ok(exists(root, join('.fadeno', 'runs', runId, 'events.jsonl')));
   assert.ok(exists(root, join('.fadeno', 'runs', runId, 'artifacts', '.gitkeep')));
