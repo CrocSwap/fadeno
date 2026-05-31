@@ -9,8 +9,9 @@ chat. v0's scope and non-goals come from `docs/kickoff-memo.md`.
   `validate [file] [--schema]`, `diagram [--format ascii|mermaid]`, `new-run`,
   `run`, `gate`, `plugin`.
 - Dual-target scaffolding from one template core (Codex + Claude Code), non-destructive.
-- **Claude plugin** packaging: `fadeno plugin` generates a `plugin/` (skills +
-  role subagents) from the same templates; repo root carries a
+- **Claude plugin** packaging: `fadeno plugin` generates a `plugin/` (skills,
+  `/fadeno:runner` + `/fadeno:builder` slash commands, and `worker`/`reviewer`/
+  `judge` role subagents) from the same templates; repo root carries a
   `.claude-plugin/marketplace.json`, so the repo is directly installable
   (`/plugin install fadeno@fadeno`). `init --data-only` seeds just the per-repo
   definitions for plugin users (the capability/definitions split). The plugin is
@@ -30,6 +31,9 @@ chat. v0's scope and non-goals come from `docs/kickoff-memo.md`.
 - Run ledger (`run.yaml` / `events.jsonl` / `artifacts/`) with CLI helpers (`run`) and a
   deterministic gate evaluator (`gate no_blocking_issues`) — the advisory→enforced bridge.
 - Tier-2 enforcement scaffold via `--with-hooks` (pre-commit, CI workflow, Claude hook example).
+- **Validated end-to-end in live Claude Code sessions** (through v0.1.2): bundled
+  CLI on PATH, `Skill(fadeno:*)` model-invocation, `/fadeno:*` slash commands in
+  the `/` menu, and `fadeno:*` role-subagent dispatch after `/reload-plugins`.
 
 ## Specified but advisory / not demonstrated (honest gaps in v0)
 
@@ -41,6 +45,7 @@ chat. v0's scope and non-goals come from `docs/kickoff-memo.md`.
 - Skill *sufficiency* (kickoff memo acceptance #8–#9) is model-mediated — needs live-session
   evaluation, not unit tests.
 - Codex subagent path (`.codex/agents/*.toml`) is provisional; runner degrades to role-passes.
+  (The Claude plugin subagents are now verified live; Codex's remain unverified.)
 
 ## Next (deferred, roughly prioritized)
 
@@ -57,6 +62,8 @@ chat. v0's scope and non-goals come from `docs/kickoff-memo.md`.
    real agent session produces good runs (the actual product risk).
 6. **Schema versioning / migration** as `schema_version` moves past `0.1`.
 7. **Richer ledger** — per-step token/cost accounting and a `fadeno runs` summary view.
+8. **Diagram artifact/data-flow edge labels** — `fadeno diagram` annotating the
+   input/output artifacts that flow along each edge, not just the control flow.
 
 ## Explicit non-goals (from the kickoff memo)
 

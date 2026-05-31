@@ -99,6 +99,13 @@ carries *which playbooks*.)
 npx fadeno init --claude --data-only
 ```
 
+> **After installing, run `/reload-plugins`** (or restart Claude Code). The
+> skills, `/fadeno:*` slash commands, and bundled CLI are available immediately,
+> but the role subagents (`worker`, `reviewer`, `judge`) register only at a
+> session boundary. Until they do, a run still completes — it just falls back to
+> simulated role-passes instead of dedicated subagents, and says so in the
+> ledger (a `roles_degraded` event).
+
 To test the plugin locally before publishing: `claude --plugin-dir ./plugin`.
 The `plugin/` directory is generated from the same templates as the CLI
 (`npm run build:plugin`), so the skills never drift.
