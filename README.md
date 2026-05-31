@@ -106,6 +106,12 @@ npx fadeno init --claude --data-only
 > simulated role-passes instead of dedicated subagents, and says so in the
 > ledger (a `roles_degraded` event).
 
+A full run makes many `fadeno` CLI calls, so `init --claude` pre-approves
+`Bash(fadeno:*)` in `.claude/settings.local.json` (local, git-ignored) — the CLI
+then stops prompting on every call. It's a per-user convenience, never committed;
+delete that allow rule to restore prompts. (Plugins can't grant Bash permissions
+to themselves, so this is seeded by `init` rather than the plugin.)
+
 To test the plugin locally before publishing: `claude --plugin-dir ./plugin`.
 The `plugin/` directory is generated from the same templates as the CLI
 (`npm run build:plugin`), so the skills never drift.

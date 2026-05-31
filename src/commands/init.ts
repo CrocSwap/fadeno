@@ -1,5 +1,5 @@
-import { chmodSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { copyTree, emitBootstrap, emitFile, type EmitResult } from '../lib/fsutil.ts';
 import { findRepoRoot, templatesDir } from '../lib/paths.ts';
 
@@ -90,7 +90,76 @@ export function runInit(opts: InitOptions): InitResult {
   // 5. Optional tier-2 enforcement scaffold (per-repo policy — allowed with --data-only).
   if (opts.withHooks) emitHooks(tpl, repoRoot, opts.target, force, results);
 
+  // 6. Pre-approve the fadeno CLI locally so it stops prompting on every call
+  //    (Claude only; written to git-ignored settings — a per-user convenience,
+  //    not a trust decision committed to the shared repo). Plugins can't grant
+  //    Bash permissions to themselves, so `init` is the seam for this.
+  if (opts.target === 'claude') emitClaudePermissions(repoRoot, results);
+
   return { target: opts.target, repoRoot, results };
+}
+
+const FADENO_BASH_RULE = 'Bash(fadeno:*)';
+
+/**
+ * Merge a `Bash(fadeno:*)` allow rule into the repo's *local* Claude settings so
+ * the agent isn't prompted on every `fadeno <verb>` call. Non-destructive:
+ * preserves any existing rules, is idempotent, and leaves a malformed or
+ * unexpectedly-shaped settings file untouched rather than clobbering it.
+ */
+function emitClaudePermissions(repoRoot: string, results: EmitResult[]): void {
+  const settingsPath = join(repoRoot, '.claude', 'settings.local.json');
+  const existed = existsSync(settingsPath);
+
+  let data: Record<string, unknown> = {};
+  if (existed) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(settingsPath, 'utf8'));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        results.push({ path: settingsPath, status: 'skipped' }); // not an object — don't clobber
+        return;
+      }
+      data = parsed as Record<string, unknown>;
+    } catch {
+      results.push({ path: settingsPath, status: 'skipped' }); // malformed JSON — never clobber
+      return;
+    }
+  }
+
+  const perms =
+    data.permissions && typeof data.permissions === 'object' && !Array.isArray(data.permissions)
+      ? (data.permissions as Record<string, unknown>)
+      : {};
+  const allow = Array.isArray(perms.allow) ? [...(perms.allow as unknown[])] : [];
+
+  if (allow.includes(FADENO_BASH_RULE)) {
+    results.push({ path: settingsPath, status: 'skipped' });
+    return;
+  }
+
+  allow.push(FADENO_BASH_RULE);
+  perms.allow = allow;
+  data.permissions = perms;
+
+  mkdirSync(dirname(settingsPath), { recursive: true });
+  writeFileSync(settingsPath, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
+  results.push({ path: settingsPath, status: existed ? 'appended' : 'created' });
+
+  ensureGitignored(repoRoot, '.claude/settings.local.json', results);
+}
+
+/** Append `pattern` to `.gitignore` (creating it if needed) unless already ignored. */
+function ensureGitignored(repoRoot: string, pattern: string, results: EmitResult[]): void {
+  const gitignorePath = join(repoRoot, '.gitignore');
+  const existed = existsSync(gitignorePath);
+  const content = existed ? readFileSync(gitignorePath, 'utf8') : '';
+  const lines = content.split(/\r?\n/).map((line) => line.trim());
+  if (lines.includes(pattern) || lines.includes('.claude') || lines.includes('.claude/')) return;
+
+  const sep = content.length === 0 || content.endsWith('\n') ? '' : '\n';
+  const block = `${sep}# Fadeno: per-user local Claude settings (not committed)\n${pattern}\n`;
+  writeFileSync(gitignorePath, content + block, 'utf8');
+  results.push({ path: gitignorePath, status: existed ? 'appended' : 'created' });
 }
 
 function emitHooks(

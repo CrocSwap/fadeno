@@ -8,6 +8,22 @@ All notable changes to Fadeno are documented here. The format follows
 
 _Nothing yet._
 
+## [0.1.4] — 2026-05-31
+
+Fewer permission prompts.
+
+### Added
+
+- **`fadeno init --claude` pre-approves the CLI.** A full builder→runner flow
+  makes ~a dozen `fadeno` calls, each of which otherwise triggers a Bash
+  permission prompt. `init` now merges a `Bash(fadeno:*)` allow rule into
+  `.claude/settings.local.json` (local, git-ignored) and ensures that file is
+  git-ignored, so the CLI stops prompting on every call. Non-destructive
+  (preserves existing rules, idempotent), announced on stdout, and easy to undo
+  (delete the rule). Applies to the `--data-only` plugin-seed path too, where the
+  prompts bite most. Plugins can't grant themselves Bash permissions, so `init`
+  is the seam for this rather than the plugin.
+
 ## [0.1.3] — 2026-05-31
 
 Prettier deterministic diagrams.

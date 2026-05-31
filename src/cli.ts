@@ -74,6 +74,16 @@ function printInitSummary(
     console.log('Some files already existed and were left untouched. Re-run with --force to overwrite.');
   }
 
+  if (target === 'claude') {
+    const perm = results.find((r) => r.path.endsWith('settings.local.json'));
+    if (perm && (perm.status === 'created' || perm.status === 'appended')) {
+      console.log(
+        '\nPre-approved `Bash(fadeno:*)` in .claude/settings.local.json (local, git-ignored)\n' +
+          'so fadeno CLI calls no longer prompt each run — delete that allow rule to restore prompts.',
+      );
+    }
+  }
+
   console.log('\nNext steps:');
   console.log('  1. Review .fadeno/playbooks and .fadeno/vocabulary.md');
   console.log('  2. Run `fadeno validate` to check the playbooks');

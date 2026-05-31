@@ -14204,7 +14204,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.1.3";
+  if (true) return "0.1.4";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -14410,7 +14410,54 @@ function runInit(opts) {
     emitBootstrap((0, import_node_path5.join)(repoRoot, bootstrapName), bootstrapBody, force, results);
   }
   if (opts.withHooks) emitHooks(tpl, repoRoot, opts.target, force, results);
+  if (opts.target === "claude") emitClaudePermissions(repoRoot, results);
   return { target: opts.target, repoRoot, results };
+}
+var FADENO_BASH_RULE = "Bash(fadeno:*)";
+function emitClaudePermissions(repoRoot, results) {
+  const settingsPath = (0, import_node_path5.join)(repoRoot, ".claude", "settings.local.json");
+  const existed = (0, import_node_fs5.existsSync)(settingsPath);
+  let data = {};
+  if (existed) {
+    try {
+      const parsed = JSON.parse((0, import_node_fs5.readFileSync)(settingsPath, "utf8"));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        results.push({ path: settingsPath, status: "skipped" });
+        return;
+      }
+      data = parsed;
+    } catch {
+      results.push({ path: settingsPath, status: "skipped" });
+      return;
+    }
+  }
+  const perms = data.permissions && typeof data.permissions === "object" && !Array.isArray(data.permissions) ? data.permissions : {};
+  const allow = Array.isArray(perms.allow) ? [...perms.allow] : [];
+  if (allow.includes(FADENO_BASH_RULE)) {
+    results.push({ path: settingsPath, status: "skipped" });
+    return;
+  }
+  allow.push(FADENO_BASH_RULE);
+  perms.allow = allow;
+  data.permissions = perms;
+  (0, import_node_fs5.mkdirSync)((0, import_node_path5.dirname)(settingsPath), { recursive: true });
+  (0, import_node_fs5.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
+`, "utf8");
+  results.push({ path: settingsPath, status: existed ? "appended" : "created" });
+  ensureGitignored(repoRoot, ".claude/settings.local.json", results);
+}
+function ensureGitignored(repoRoot, pattern, results) {
+  const gitignorePath = (0, import_node_path5.join)(repoRoot, ".gitignore");
+  const existed = (0, import_node_fs5.existsSync)(gitignorePath);
+  const content = existed ? (0, import_node_fs5.readFileSync)(gitignorePath, "utf8") : "";
+  const lines = content.split(/\r?\n/).map((line) => line.trim());
+  if (lines.includes(pattern) || lines.includes(".claude") || lines.includes(".claude/")) return;
+  const sep = content.length === 0 || content.endsWith("\n") ? "" : "\n";
+  const block = `${sep}# Fadeno: per-user local Claude settings (not committed)
+${pattern}
+`;
+  (0, import_node_fs5.writeFileSync)(gitignorePath, content + block, "utf8");
+  results.push({ path: gitignorePath, status: existed ? "appended" : "created" });
 }
 function emitHooks(tpl, repoRoot, target, force, results) {
   const hookFile = (srcRel, destRel, executable = false) => {
@@ -14939,6 +14986,14 @@ ${counts.created} created, ${counts.appended} appended, ${counts.overwritten} ov
   );
   if (counts.skipped > 0) {
     console.log("Some files already existed and were left untouched. Re-run with --force to overwrite.");
+  }
+  if (target === "claude") {
+    const perm = results.find((r) => r.path.endsWith("settings.local.json"));
+    if (perm && (perm.status === "created" || perm.status === "appended")) {
+      console.log(
+        "\nPre-approved `Bash(fadeno:*)` in .claude/settings.local.json (local, git-ignored)\nso fadeno CLI calls no longer prompt each run \u2014 delete that allow rule to restore prompts."
+      );
+    }
   }
   console.log("\nNext steps:");
   console.log("  1. Review .fadeno/playbooks and .fadeno/vocabulary.md");

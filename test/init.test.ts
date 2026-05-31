@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { runInit } from '../src/commands/init.ts';
@@ -178,8 +178,68 @@ test('--data-only seeds .fadeno definitions but no capability layer', (t) => {
   assert.ok(!exists(root, '.claude/agents/worker.md'));
   assert.ok(!exists(root, 'CLAUDE.md'));
 
-  // every emitted path is under .fadeno/
-  assert.ok(results.every((r) => r.path.includes('.fadeno')));
+  // every emitted path is either a .fadeno/ definition or the local CLI
+  // allow-list (no skills/subagents/bootstrap — those come from the plugin)
+  assert.ok(
+    results.every(
+      (r) =>
+        r.path.includes('.fadeno') ||
+        r.path.endsWith('settings.local.json') ||
+        r.path.endsWith('.gitignore'),
+    ),
+  );
+});
+
+test('init --claude pre-approves the fadeno CLI in local, git-ignored settings', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: root });
+
+  const settings = JSON.parse(read(root, '.claude/settings.local.json')) as {
+    permissions: { allow: string[] };
+  };
+  assert.deepEqual(settings.permissions.allow, ['Bash(fadeno:*)']);
+  // local-only: git-ignored so the trust decision is never committed to the repo
+  assert.match(read(root, '.gitignore'), /\.claude\/settings\.local\.json/);
+
+  // it ships in the plugin (data-only) flow too — where the prompts bite most
+  const dataRoot = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: dataRoot, dataOnly: true });
+  assert.ok(exists(dataRoot, '.claude/settings.local.json'));
+
+  // Codex uses a different permission model — no settings.local.json there
+  const codexRoot = tempRepo(t);
+  runInit({ target: 'codex', repoRoot: codexRoot });
+  assert.ok(!exists(codexRoot, '.claude/settings.local.json'));
+});
+
+test('init merges the fadeno allow rule into existing Claude settings, idempotently', (t) => {
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.claude'), { recursive: true });
+  writeFileSync(
+    join(root, '.claude', 'settings.local.json'),
+    `${JSON.stringify({ permissions: { allow: ['Bash(ls:*)'] } }, null, 2)}\n`,
+  );
+
+  const first = runInit({ target: 'claude', repoRoot: root });
+  const merged = JSON.parse(read(root, '.claude/settings.local.json')) as {
+    permissions: { allow: string[] };
+  };
+  assert.deepEqual(merged.permissions.allow, ['Bash(ls:*)', 'Bash(fadeno:*)']); // preserves + appends
+  assert.equal(
+    first.results.find((r) => r.path.endsWith('settings.local.json'))?.status,
+    'appended',
+  );
+
+  // re-running leaves the rule once and reports it skipped
+  const second = runInit({ target: 'claude', repoRoot: root });
+  const after = JSON.parse(read(root, '.claude/settings.local.json')) as {
+    permissions: { allow: string[] };
+  };
+  assert.deepEqual(after.permissions.allow, ['Bash(ls:*)', 'Bash(fadeno:*)']);
+  assert.equal(
+    second.results.find((r) => r.path.endsWith('settings.local.json'))?.status,
+    'skipped',
+  );
 });
 
 test('--data-only still scaffolds hooks when requested', (t) => {
