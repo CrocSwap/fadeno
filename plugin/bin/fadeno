@@ -13902,21 +13902,17 @@ var import_node_path2 = require("node:path");
 var import_yaml = __toESM(require_dist(), 1);
 
 // src/lib/diagram.ts
-var GLYPH = {
-  actor_call: "\u25CF",
-  tool_call: "\u2699",
-  evaluator: "\u2299",
-  gate: "\u25C7",
-  human_gate: "\u25A2",
-  router: "\u2928",
-  map: "\u229E",
-  replicate: "\u29C9",
-  join: "\u2295",
-  reduce: "\u229F",
-  loop: "\u21BB",
-  artifact_op: "\u270E",
-  subworkflow: "\u22A1"
+var KIND_LABEL = {
+  actor_call: "actor",
+  tool_call: "tool",
+  evaluator: "eval",
+  human_gate: "ask",
+  artifact_op: "artifact",
+  subworkflow: "subflow"
 };
+function kindLabel(kind) {
+  return KIND_LABEL[kind] ?? kind;
+}
 function str(value) {
   return typeof value === "string" ? value : void 0;
 }
@@ -13983,6 +13979,34 @@ function edges(step) {
   push("\u2192", step.next);
   return out;
 }
+function branchLines(step) {
+  const out = [];
+  const arrow = (mark, value) => {
+    const target = str(value);
+    if (target) out.push(`${mark} \u25B6 ${target}`);
+  };
+  switch (step.kind) {
+    case "gate":
+      arrow("\u2713 pass", step.on_pass);
+      arrow("\u2717 fail", step.on_fail);
+      break;
+    case "human_gate":
+      arrow("\u2713 approve", step.on_approve);
+      arrow("\u2717 reject", step.on_reject);
+      break;
+    case "router":
+      if (step.routes && typeof step.routes === "object" && !Array.isArray(step.routes)) {
+        for (const [label, target] of Object.entries(step.routes)) {
+          arrow(label, target);
+        }
+      }
+      arrow("default", step.default);
+      break;
+    default:
+      break;
+  }
+  return out;
+}
 function bodySteps(step) {
   return Array.isArray(step.body) ? step.body.filter((b) => typeof b === "string") : [];
 }
@@ -14000,51 +14024,89 @@ function header(playbook) {
   }
   return lines;
 }
+var MIN_INNER = 26;
+var MAX_INNER = 60;
+function fit(s, width) {
+  if (s.length === width) return s;
+  if (s.length < width) return s + " ".repeat(width - s.length);
+  if (width <= 1) return s.slice(0, width);
+  return `${s.slice(0, width - 1)}\u2026`;
+}
+function buildCards(flow) {
+  const bodyMembers = /* @__PURE__ */ new Set();
+  for (const s of flow) for (const b of bodySteps(s)) bodyMembers.add(b);
+  const rendered = flow.filter((s) => {
+    const id = str(s.id);
+    return id === void 0 || !bodyMembers.has(id);
+  });
+  return rendered.map((step, i) => {
+    const id = str(step.id) ?? `?${i}`;
+    const kind = str(step.kind) ?? "?";
+    const nextRenderedId = str(rendered[i + 1]?.id);
+    const hasNextCard = nextRenderedId !== void 0;
+    const content = [];
+    const det = detail(step);
+    if (det) content.push(det);
+    const body = bodySteps(step);
+    if (body.length > 0) content.push(`body: ${body.join(" \u25B6 ")}`);
+    const exhausted = str(step.on_exhausted);
+    if (exhausted) content.push(`\u2913 exhausted \u25B6 ${exhausted}`);
+    for (const line of branchLines(step)) content.push(line);
+    const hasOtherOut = branchLines(step).length > 0 || body.length > 0 || exhausted !== void 0;
+    const nextTarget = str(step.next);
+    let fallsThrough = false;
+    if (nextTarget !== void 0) {
+      if (nextTarget === nextRenderedId && !hasOtherOut) {
+        fallsThrough = true;
+      } else {
+        content.push(`\u25B6 ${nextTarget}`);
+      }
+    } else if (!hasOtherOut) {
+      if (hasNextCard) fallsThrough = true;
+      else content.push("\u25A0 end");
+    }
+    return { id, kindLabel: kindLabel(kind), body: content, fallsThrough: fallsThrough && hasNextCard };
+  });
+}
+function renderCard(card, inner) {
+  const out = [];
+  const left = `\u2500 ${card.id} `;
+  const right = ` ${card.kindLabel} \u2500`;
+  const dashes = Math.max(1, inner - left.length - right.length);
+  out.push(`\u250C${left}${"\u2500".repeat(dashes)}${right}\u2510`);
+  const lines = card.body.length > 0 ? card.body : [""];
+  for (const line of lines) out.push(`\u2502${fit(` ${line}`, inner)}\u2502`);
+  const center = Math.floor(inner / 2);
+  out.push(
+    card.fallsThrough ? `\u2514${"\u2500".repeat(center)}\u252C${"\u2500".repeat(inner - center - 1)}\u2518` : `\u2514${"\u2500".repeat(inner)}\u2518`
+  );
+  return out;
+}
+function connector(inner, marker) {
+  return `${" ".repeat(1 + Math.floor(inner / 2))}${marker}`;
+}
 function renderAscii(playbook) {
   const flow = steps(playbook);
   const lines = header(playbook);
   const entry = str(flow[0]?.id);
-  lines.push(`steps run top-to-bottom unless an arrow redirects${entry ? ` \xB7 entry: ${entry}` : ""}`);
+  lines.push(`flow runs top-to-bottom; \u25B6 redirects${entry ? ` \xB7 entry: ${entry}` : ""}`);
   lines.push("");
-  const idWidth = Math.min(
-    Math.max(0, ...flow.map((s) => (str(s.id) ?? "").length)),
-    28
-  );
-  const usedKinds = /* @__PURE__ */ new Set();
-  flow.forEach((step, index) => {
-    const id = str(step.id) ?? `?${index}`;
-    const kind = str(step.kind) ?? "?";
-    usedKinds.add(kind);
-    const glyph = GLYPH[kind] ?? "\xB7";
-    const det = detail(step);
-    const edgeStrs = edges(step).map(
-      ([label, target]) => label === "\u2192" ? `\u2192 ${target}` : `${label}\u2192${target}`
-    );
-    const isLast = index === flow.length - 1;
-    const terminal = edgeStrs.length === 0 && bodySteps(step).length === 0 && isLast;
-    const left = `  ${glyph} ${id.padEnd(idWidth)}  ${kind.padEnd(11)}`;
-    const right = [det, ...edgeStrs, terminal ? "\u25A0 end" : ""].filter(Boolean).join("   ");
-    lines.push(right ? `${left} ${right}` : left.trimEnd());
-    const body = bodySteps(step);
-    if (body.length > 0) {
-      const indent = " ".repeat(left.length - 11);
-      lines.push(`${indent}body: ${body.join(" \u2192 ")}`);
-    }
-    const exhausted = str(step.on_exhausted);
-    if (exhausted) {
-      const indent = " ".repeat(left.length - 11);
-      lines.push(`${indent}exhausted \u2192 ${exhausted}`);
-    }
+  const cards = buildCards(flow);
+  let inner = MIN_INNER;
+  for (const c of cards) {
+    inner = Math.max(inner, `\u2500 ${c.id} `.length + ` ${c.kindLabel} \u2500`.length + 1);
+    for (const line of c.body) inner = Math.max(inner, line.length + 2);
+  }
+  inner = Math.min(inner, MAX_INNER);
+  cards.forEach((card, i) => {
+    for (const line of renderCard(card, inner)) lines.push(line);
+    if (i < cards.length - 1) lines.push(connector(inner, card.fallsThrough ? "\u25BC" : "\u22EE"));
   });
-  lines.push("");
-  lines.push(
-    "legend: " + [...usedKinds].filter((k) => GLYPH[k]).map((k) => `${GLYPH[k]} ${k}`).join("   ")
-  );
   return lines.join("\n");
 }
 function mermaidLabel(step) {
   const id = str(step.id) ?? "?";
-  const kind = str(step.kind) ?? "?";
+  const kind = kindLabel(str(step.kind) ?? "?");
   const det = detail(step);
   const text = det ? `${id}<br/>${kind}: ${det}` : `${id}<br/>${kind}`;
   return text.replace(/"/g, "'");
@@ -14142,7 +14204,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.1.2";
+  if (true) return "0.1.3";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {

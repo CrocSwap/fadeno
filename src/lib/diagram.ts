@@ -1,11 +1,16 @@
 /**
  * Deterministic renderers for a playbook's control flow.
  *
- *  - `ascii`   : a top-to-bottom annotated step list with explicit edges. Robust
- *                and terminal-friendly; relies on document order for the implicit
- *                happy-path (whose exact semantics are intentionally informal).
+ *  - `ascii`   : a top-to-bottom column of boxed "cards", one per step. A `▼`
+ *                connector means control falls through to the next card; a `⋮`
+ *                means the next card is reached only via a labelled `▶` arrow
+ *                (a gate branch, router route, loop exit, or explicit jump).
+ *                No 2-D edge routing, so it stays correct for any playbook.
  *  - `mermaid` : a `flowchart` graph (renders on GitHub/docs). Explicit edges are
  *                solid+labelled; implicit fall-through is dotted.
+ *
+ * Primitive `kind`s are abbreviated for display only (`actor_call` → `actor`,
+ * etc. — see `KIND_LABEL`); the schema/vocabulary keep the full names.
  */
 
 export type DiagramFormat = 'ascii' | 'mermaid';
@@ -40,21 +45,19 @@ interface Playbook {
   flow?: unknown;
 }
 
-const GLYPH: Record<string, string> = {
-  actor_call: '●',
-  tool_call: '⚙',
-  evaluator: '⊙',
-  gate: '◇',
-  human_gate: '▢',
-  router: '⤨',
-  map: '⊞',
-  replicate: '⧉',
-  join: '⊕',
-  reduce: '⊟',
-  loop: '↻',
-  artifact_op: '✎',
-  subworkflow: '⊡',
+/** Display-only short labels for verbose primitive kinds (schema keeps the full names). */
+const KIND_LABEL: Record<string, string> = {
+  actor_call: 'actor',
+  tool_call: 'tool',
+  evaluator: 'eval',
+  human_gate: 'ask',
+  artifact_op: 'artifact',
+  subworkflow: 'subflow',
 };
+
+function kindLabel(kind: string): string {
+  return KIND_LABEL[kind] ?? kind;
+}
 
 function str(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
@@ -97,7 +100,7 @@ function detail(step: Step): string {
   }
 }
 
-/** Explicit single-target edges, as `[label, target]`. */
+/** Explicit single-target edges, as `[label, target]` (used by the mermaid renderer). */
 function edges(step: Step): Array<[string, string]> {
   const out: Array<[string, string]> = [];
   const push = (label: string, value: unknown): void => {
@@ -128,6 +131,36 @@ function edges(step: Step): Array<[string, string]> {
   return out;
 }
 
+/** Labelled `▶` branch lines to show inside an ASCII card (gate / human_gate / router). */
+function branchLines(step: Step): string[] {
+  const out: string[] = [];
+  const arrow = (mark: string, value: unknown): void => {
+    const target = str(value);
+    if (target) out.push(`${mark} ▶ ${target}`);
+  };
+  switch (step.kind) {
+    case 'gate':
+      arrow('✓ pass', step.on_pass);
+      arrow('✗ fail', step.on_fail);
+      break;
+    case 'human_gate':
+      arrow('✓ approve', step.on_approve);
+      arrow('✗ reject', step.on_reject);
+      break;
+    case 'router':
+      if (step.routes && typeof step.routes === 'object' && !Array.isArray(step.routes)) {
+        for (const [label, target] of Object.entries(step.routes as Record<string, unknown>)) {
+          arrow(label, target);
+        }
+      }
+      arrow('default', step.default);
+      break;
+    default:
+      break;
+  }
+  return out;
+}
+
 function bodySteps(step: Step): string[] {
   return Array.isArray(step.body) ? step.body.filter((b): b is string => typeof b === 'string') : [];
 }
@@ -147,62 +180,119 @@ function header(playbook: Playbook): string[] {
   return lines;
 }
 
+interface Card {
+  id: string;
+  kindLabel: string;
+  body: string[];
+  /** Whether a `▼` fall-through connector (and a `┬` in the bottom border) follows. */
+  fallsThrough: boolean;
+}
+
+const MIN_INNER = 26;
+const MAX_INNER = 60;
+
+/** Pad or ellipsis-truncate `s` to exactly `width` characters. */
+function fit(s: string, width: number): string {
+  if (s.length === width) return s;
+  if (s.length < width) return s + ' '.repeat(width - s.length);
+  if (width <= 1) return s.slice(0, width);
+  return `${s.slice(0, width - 1)}…`;
+}
+
+function buildCards(flow: Step[]): Card[] {
+  // Steps that belong to a loop body are shown inside their loop's card (as a
+  // `body:` line), not as standalone cards.
+  const bodyMembers = new Set<string>();
+  for (const s of flow) for (const b of bodySteps(s)) bodyMembers.add(b);
+  const rendered = flow.filter((s) => {
+    const id = str(s.id);
+    return id === undefined || !bodyMembers.has(id);
+  });
+
+  return rendered.map((step, i) => {
+    const id = str(step.id) ?? `?${i}`;
+    const kind = str(step.kind) ?? '?';
+    const nextRenderedId = str(rendered[i + 1]?.id);
+    const hasNextCard = nextRenderedId !== undefined;
+
+    const content: string[] = [];
+    const det = detail(step);
+    if (det) content.push(det);
+
+    const body = bodySteps(step);
+    if (body.length > 0) content.push(`body: ${body.join(' ▶ ')}`);
+    const exhausted = str(step.on_exhausted);
+    if (exhausted) content.push(`⤓ exhausted ▶ ${exhausted}`);
+    for (const line of branchLines(step)) content.push(line);
+
+    const hasOtherOut = branchLines(step).length > 0 || body.length > 0 || exhausted !== undefined;
+    const nextTarget = str(step.next);
+    let fallsThrough = false;
+    if (nextTarget !== undefined) {
+      if (nextTarget === nextRenderedId && !hasOtherOut) {
+        fallsThrough = true; // plain sequential flow to the next card
+      } else {
+        content.push(`▶ ${nextTarget}`); // a jump elsewhere
+      }
+    } else if (!hasOtherOut) {
+      if (hasNextCard) fallsThrough = true; // implicit top-to-bottom fall-through
+      else content.push('■ end'); // terminal
+    }
+
+    return { id, kindLabel: kindLabel(kind), body: content, fallsThrough: fallsThrough && hasNextCard };
+  });
+}
+
+function renderCard(card: Card, inner: number): string[] {
+  const out: string[] = [];
+  const left = `─ ${card.id} `;
+  const right = ` ${card.kindLabel} ─`;
+  const dashes = Math.max(1, inner - left.length - right.length);
+  out.push(`┌${left}${'─'.repeat(dashes)}${right}┐`);
+
+  const lines = card.body.length > 0 ? card.body : [''];
+  for (const line of lines) out.push(`│${fit(` ${line}`, inner)}│`);
+
+  const center = Math.floor(inner / 2);
+  out.push(
+    card.fallsThrough
+      ? `└${'─'.repeat(center)}┬${'─'.repeat(inner - center - 1)}┘`
+      : `└${'─'.repeat(inner)}┘`,
+  );
+  return out;
+}
+
+function connector(inner: number, marker: '▼' | '⋮'): string {
+  return `${' '.repeat(1 + Math.floor(inner / 2))}${marker}`;
+}
+
 function renderAscii(playbook: Playbook): string {
   const flow = steps(playbook);
   const lines = header(playbook);
   const entry = str(flow[0]?.id);
-  lines.push(`steps run top-to-bottom unless an arrow redirects${entry ? ` · entry: ${entry}` : ''}`);
+  lines.push(`flow runs top-to-bottom; ▶ redirects${entry ? ` · entry: ${entry}` : ''}`);
   lines.push('');
 
-  const idWidth = Math.min(
-    Math.max(0, ...flow.map((s) => (str(s.id) ?? '').length)),
-    28,
-  );
-  const usedKinds = new Set<string>();
+  const cards = buildCards(flow);
 
-  flow.forEach((step, index) => {
-    const id = str(step.id) ?? `?${index}`;
-    const kind = str(step.kind) ?? '?';
-    usedKinds.add(kind);
-    const glyph = GLYPH[kind] ?? '·';
-    const det = detail(step);
-    const edgeStrs = edges(step).map(([label, target]) =>
-      label === '→' ? `→ ${target}` : `${label}→${target}`,
-    );
+  let inner = MIN_INNER;
+  for (const c of cards) {
+    inner = Math.max(inner, `─ ${c.id} `.length + ` ${c.kindLabel} ─`.length + 1);
+    for (const line of c.body) inner = Math.max(inner, line.length + 2);
+  }
+  inner = Math.min(inner, MAX_INNER);
 
-    const isLast = index === flow.length - 1;
-    const terminal = edgeStrs.length === 0 && bodySteps(step).length === 0 && isLast;
-
-    const left = `  ${glyph} ${id.padEnd(idWidth)}  ${kind.padEnd(11)}`;
-    const right = [det, ...edgeStrs, terminal ? '■ end' : ''].filter(Boolean).join('   ');
-    lines.push(right ? `${left} ${right}` : left.trimEnd());
-
-    const body = bodySteps(step);
-    if (body.length > 0) {
-      const indent = ' '.repeat(left.length - 11);
-      lines.push(`${indent}body: ${body.join(' → ')}`);
-    }
-    const exhausted = str(step.on_exhausted);
-    if (exhausted) {
-      const indent = ' '.repeat(left.length - 11);
-      lines.push(`${indent}exhausted → ${exhausted}`);
-    }
+  cards.forEach((card, i) => {
+    for (const line of renderCard(card, inner)) lines.push(line);
+    if (i < cards.length - 1) lines.push(connector(inner, card.fallsThrough ? '▼' : '⋮'));
   });
 
-  lines.push('');
-  lines.push(
-    'legend: ' +
-      [...usedKinds]
-        .filter((k) => GLYPH[k])
-        .map((k) => `${GLYPH[k]} ${k}`)
-        .join('   '),
-  );
   return lines.join('\n');
 }
 
 function mermaidLabel(step: Step): string {
   const id = str(step.id) ?? '?';
-  const kind = str(step.kind) ?? '?';
+  const kind = kindLabel(str(step.kind) ?? '?');
   const det = detail(step);
   const text = det ? `${id}<br/>${kind}: ${det}` : `${id}<br/>${kind}`;
   return text.replace(/"/g, "'");

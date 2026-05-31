@@ -191,9 +191,28 @@ fadeno diagram code-change-review --format mermaid   # graph for GitHub/docs
 ```
 
 ```
-● plan → implement → ⊞ review → ◇ review_gate   ✓→test  ✗→revise
-↻ revise (max 1, until no_blocking_issues)  body: implement_revision → review_revision
+┌─ review ───────────────────────────── map ─┐
+│ over [substance_reviewer, style_reviewer]  │
+└──────────────────────┬─────────────────────┘
+                       ▼
+┌─ review_gate ─────────────────────── gate ─┐
+│ no_blocking_issues                         │
+│ ✓ pass ▶ test                              │
+│ ✗ fail ▶ revise                            │
+└────────────────────────────────────────────┘
+                       ⋮
+┌─ revise ──────────────────────────── loop ─┐
+│ max 1 · until no_blocking_issues           │
+│ body: implement_revision ▶ review_revision │
+│ ⤓ exhausted ▶ summarize_best_attempt       │
+└────────────────────────────────────────────┘
 ```
+
+Each step is a card; `▼` is sequential fall-through and `⋮` marks a step reached
+only via a labelled `▶` arrow (a gate branch, loop exit, or jump). Verbose
+primitive kinds are abbreviated in the diagram (`actor_call` → `actor`,
+`tool_call` → `tool`, `evaluator` → `eval`, `human_gate` → `ask`); the schema
+keeps the full names.
 
 A playbook is a small YAML file validated by `playbook.schema.json`. The key
 design rule:

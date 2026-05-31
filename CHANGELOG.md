@@ -8,6 +8,23 @@ All notable changes to Fadeno are documented here. The format follows
 
 _Nothing yet._
 
+## [0.1.3] — 2026-05-31
+
+Prettier deterministic diagrams.
+
+### Changed
+
+- **`fadeno diagram` ASCII output is now a column of boxed cards** — one per
+  step, with `▼` for sequential fall-through and `⋮` for a step reached only via
+  a labelled `▶` arrow (a gate branch, loop exit, or jump). Loop bodies are
+  inlined into the loop card. No 2-D edge routing, so it stays correct for any
+  playbook.
+- **Verbose primitive kinds are abbreviated in diagrams** (display only — the
+  schema/vocabulary keep the full names): `actor_call` → `actor`,
+  `tool_call` → `tool`, `evaluator` → `eval`, `human_gate` → `ask`,
+  `artifact_op` → `artifact`, `subworkflow` → `subflow`. Applied to both the
+  ASCII and Mermaid renderers.
+
 ## [0.1.2] — 2026-05-31
 
 Live-session feedback fixes — ledger fidelity and runner robustness. The full

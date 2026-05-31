@@ -10,16 +10,20 @@ function initRepo(t: Parameters<typeof tempRepo>[0]): string {
   return root;
 }
 
-test('ascii diagram renders entry, gate branches, loop body and terminal', (t) => {
+test('ascii diagram renders cards with abbreviated kinds, gate branches, loop body and terminal', (t) => {
   const root = initRepo(t);
   const out = runDiagram({ repoRoot: root, playbook: 'code-change-review' });
   assert.match(out, /entry: plan/);
-  assert.match(out, /◇ review_gate/);
-  assert.match(out, /✓→test/);
-  assert.match(out, /✗→revise/);
-  assert.match(out, /body: implement_revision → review_revision/);
-  assert.match(out, /exhausted → summarize_best_attempt/);
+  assert.match(out, /┌─ plan .* actor ─┐/); // boxed card; actor_call abbreviated to "actor"
+  assert.match(out, /┌─ review_gate .* gate ─┐/);
+  assert.match(out, /✓ pass ▶ test/);
+  assert.match(out, /✗ fail ▶ revise/);
+  assert.match(out, /body: implement_revision ▶ review_revision/);
+  assert.match(out, /⤓ exhausted ▶ summarize_best_attempt/);
   assert.match(out, /■ end/);
+  assert.match(out, /▼/); // fall-through connector
+  assert.match(out, /⋮/); // branch-driven continuation
+  assert.doesNotMatch(out, /actor_call/); // kinds are abbreviated for display
 });
 
 test('mermaid diagram is a flowchart with shaped nodes and labelled edges', (t) => {
