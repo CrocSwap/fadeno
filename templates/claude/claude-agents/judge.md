@@ -1,5 +1,5 @@
 ---
-name: fadeno-judge
+name: judge
 description: Evaluator role for Fadeno playbooks — scores competing attempts and emits a structured judgment. Use when a Fadeno playbook delegates judging/evaluation to a subagent.
 ---
 

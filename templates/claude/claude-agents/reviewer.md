@@ -1,5 +1,5 @@
 ---
-name: fadeno-reviewer
+name: reviewer
 description: Reviewer role for Fadeno playbooks — reviews a change and emits a structured review report. Use when a Fadeno playbook delegates review work to a subagent.
 ---
 

@@ -5,7 +5,7 @@
 # version. The fadeno-runner skill degrades gracefully to separate role-passes
 # when native subagents are unavailable, so a wrong path does not break a run.
 
-name = "fadeno-judge"
+name = "judge"
 description = "Evaluator role for Fadeno playbooks: score competing attempts and emit a structured judgment."
 max_depth = 1
 

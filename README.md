@@ -72,10 +72,10 @@ guard + a CI workflow).
 AGENTS.md                                CLAUDE.md
 .agents/skills/                          .claude/skills/
   fadeno-runner/  (SKILL.md, refs,         fadeno-runner/  (SKILL.md, refs)
-                  agents/openai.yaml)      fadeno-builder/ (SKILL.md, refs;
-  fadeno-builder/ (SKILL.md, refs,                          disable-model-invocation)
-                  agents/openai.yaml)    .claude/agents/  (fadeno-worker/-reviewer/-judge.md)
-.codex/agents/  (fadeno-worker/-reviewer/-judge.toml)
+                  agents/openai.yaml)      fadeno-builder/ (SKILL.md, refs)
+  fadeno-builder/ (SKILL.md, refs,       .claude/agents/  (worker/reviewer/judge.md)
+                  agents/openai.yaml)
+.codex/agents/  (worker/reviewer/judge.toml)
 ```
 
 The playbooks, schemas, vocabulary, and SKILL.md *bodies* are **identical** on
@@ -118,7 +118,7 @@ Fadeno ships two skills. Point your agent at the **runner**:
 | Host | How |
 |------|-----|
 | Codex | `$fadeno-runner`, or `/skills` to browse, or just describe a complex task (implicit). |
-| Claude Code | `/fadeno-runner`, or describe a complex task (implicit). |
+| Claude Code | `/fadeno:runner` (plugin command), or describe a complex task (implicit). |
 
 The runner will:
 
@@ -166,9 +166,11 @@ runs.
 
 ## Creating a playbook
 
-Use the **builder** skill (explicit only — it won't fire just because a prompt
-mentions "playbook"): `$fadeno-builder` (Codex) / `/fadeno-builder` or
-`/fadeno:builder` (Claude). The builder runs a short loop:
+Use the **builder** skill — it fires when you explicitly want to author or revise
+a playbook (its description is scoped so it won't trigger just because a prompt
+mentions "playbook"). Invoke it with `$fadeno-builder` (Codex) or `/fadeno:builder`
+(Claude plugin command), or simply ask to build or modify a playbook. The builder
+runs a short loop:
 
 > **describe the flow** (or pick a starter to adapt) → builder **writes the YAML**
 > → shows it back as a **diagram** + summary → you **approve** → it **hands off to

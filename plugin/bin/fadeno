@@ -14317,13 +14317,6 @@ ${FADENO_END}
 
 // src/commands/init.ts
 var SKILLS = ["fadeno-runner", "fadeno-builder"];
-function addFrontmatterField(markdown, line) {
-  if (!markdown.startsWith("---")) return markdown;
-  const closeIndex = markdown.indexOf("\n---", 3);
-  if (closeIndex === -1) return markdown;
-  return `${markdown.slice(0, closeIndex)}
-${line}${markdown.slice(closeIndex)}`;
-}
 function runInit(opts) {
   const tpl = templatesDir();
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
@@ -14335,10 +14328,7 @@ function runInit(opts) {
     for (const skill of SKILLS) {
       const skillSrc = (0, import_node_path5.join)(tpl, "common", "skills", skill);
       const skillDest = (0, import_node_path5.join)(skillsBase, skill);
-      let skillMd = (0, import_node_fs5.readFileSync)((0, import_node_path5.join)(skillSrc, "SKILL.md"), "utf8");
-      if (opts.target === "claude" && skill === "fadeno-builder") {
-        skillMd = addFrontmatterField(skillMd, "disable-model-invocation: true");
-      }
+      const skillMd = (0, import_node_fs5.readFileSync)((0, import_node_path5.join)(skillSrc, "SKILL.md"), "utf8");
       const skillMdPath = (0, import_node_path5.join)(skillDest, "SKILL.md");
       results.push({ path: skillMdPath, status: emitFile(skillMdPath, skillMd, force) });
       copyTree((0, import_node_path5.join)(skillSrc, "references"), (0, import_node_path5.join)(skillDest, "references"), force, results);
@@ -14446,8 +14436,8 @@ ${runYaml}`, "utf8");
 var import_node_fs7 = require("node:fs");
 var import_node_path7 = require("node:path");
 var SKILLS2 = [
-  { src: "fadeno-runner", dst: "runner", gated: false },
-  { src: "fadeno-builder", dst: "builder", gated: true }
+  { src: "fadeno-runner", dst: "runner" },
+  { src: "fadeno-builder", dst: "builder" }
 ];
 function runPlugin(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
@@ -14469,10 +14459,9 @@ function runPlugin(opts = {}) {
   ) + "\n";
   const manifestPath = (0, import_node_path7.join)(outDir, ".claude-plugin", "plugin.json");
   results.push({ path: manifestPath, status: emitFile(manifestPath, manifest, force) });
-  for (const { src, dst, gated } of SKILLS2) {
+  for (const { src, dst } of SKILLS2) {
     let md = (0, import_node_fs7.readFileSync)((0, import_node_path7.join)(tpl, "common", "skills", src, "SKILL.md"), "utf8");
     md = md.replace(`name: ${src}`, `name: ${dst}`);
-    if (gated) md = addFrontmatterField(md, "disable-model-invocation: true");
     const skillPath = (0, import_node_path7.join)(outDir, "skills", dst, "SKILL.md");
     results.push({ path: skillPath, status: emitFile(skillPath, md, force) });
     copyTree(
@@ -14482,6 +14471,7 @@ function runPlugin(opts = {}) {
       results
     );
   }
+  copyTree((0, import_node_path7.join)(tpl, "common", "commands"), (0, import_node_path7.join)(outDir, "commands"), force, results);
   copyTree((0, import_node_path7.join)(tpl, "claude", "claude-agents"), (0, import_node_path7.join)(outDir, "agents"), force, results);
   return { outDir, results };
 }

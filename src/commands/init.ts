@@ -27,17 +27,6 @@ export interface InitResult {
 const SKILLS = ['fadeno-runner', 'fadeno-builder'] as const;
 
 /**
- * Insert a line into a SKILL.md YAML frontmatter block, just before the
- * closing `---`. Returns the document unchanged if no frontmatter is found.
- */
-export function addFrontmatterField(markdown: string, line: string): string {
-  if (!markdown.startsWith('---')) return markdown;
-  const closeIndex = markdown.indexOf('\n---', 3);
-  if (closeIndex === -1) return markdown;
-  return `${markdown.slice(0, closeIndex)}\n${line}${markdown.slice(closeIndex)}`;
-}
-
-/**
  * Scaffold a Fadeno setup for the given target into the repository.
  * Shared content (`.fadeno/`, SKILL.md bodies, references) is identical across
  * targets; only the adapter surface (skill dir, bootstrap file + sigil,
@@ -67,12 +56,11 @@ export function runInit(opts: InitOptions): InitResult {
       const skillSrc = join(tpl, 'common', 'skills', skill);
       const skillDest = join(skillsBase, skill);
 
-      let skillMd = readFileSync(join(skillSrc, 'SKILL.md'), 'utf8');
-      // Claude expresses "don't fire implicitly" via frontmatter; Codex uses
-      // openai.yaml (below). Only the builder should be invocation-gated.
-      if (opts.target === 'claude' && skill === 'fadeno-builder') {
-        skillMd = addFrontmatterField(skillMd, 'disable-model-invocation: true');
-      }
+      // Both skills are invocable: the runner fires on a described task, the
+      // builder on explicit "author a playbook" intent (its description is
+      // scoped to that). Codex's narrower invocation policy lives in openai.yaml
+      // (below); Claude relies on the scoped description, not a frontmatter gate.
+      const skillMd = readFileSync(join(skillSrc, 'SKILL.md'), 'utf8');
       const skillMdPath = join(skillDest, 'SKILL.md');
       results.push({ path: skillMdPath, status: emitFile(skillMdPath, skillMd, force) });
 

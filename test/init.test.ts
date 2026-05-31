@@ -31,9 +31,9 @@ test('init --codex creates the Codex target tree', (t) => {
   assert.ok(exists(root, '.agents/skills/fadeno-runner/agents/openai.yaml'));
   assert.ok(exists(root, '.agents/skills/fadeno-builder/SKILL.md'));
   assert.ok(exists(root, '.agents/skills/fadeno-builder/agents/openai.yaml'));
-  assert.ok(exists(root, '.codex/agents/fadeno-worker.toml'));
-  assert.ok(exists(root, '.codex/agents/fadeno-reviewer.toml'));
-  assert.ok(exists(root, '.codex/agents/fadeno-judge.toml'));
+  assert.ok(exists(root, '.codex/agents/worker.toml'));
+  assert.ok(exists(root, '.codex/agents/reviewer.toml'));
+  assert.ok(exists(root, '.codex/agents/judge.toml'));
 
   // No Claude artifacts leak in
   assert.ok(!exists(root, 'CLAUDE.md'));
@@ -53,9 +53,9 @@ test('init --claude creates the Claude target tree', (t) => {
   assert.ok(exists(root, '.claude/skills/fadeno-runner/SKILL.md'));
   assert.ok(exists(root, '.claude/skills/fadeno-runner/references/runtime.md'));
   assert.ok(exists(root, '.claude/skills/fadeno-builder/SKILL.md'));
-  assert.ok(exists(root, '.claude/agents/fadeno-worker.md'));
-  assert.ok(exists(root, '.claude/agents/fadeno-reviewer.md'));
-  assert.ok(exists(root, '.claude/agents/fadeno-judge.md'));
+  assert.ok(exists(root, '.claude/agents/worker.md'));
+  assert.ok(exists(root, '.claude/agents/reviewer.md'));
+  assert.ok(exists(root, '.claude/agents/judge.md'));
 
   // Claude uses frontmatter, not an openai.yaml policy file
   assert.ok(!exists(root, '.claude/skills/fadeno-runner/agents/openai.yaml'));
@@ -63,16 +63,18 @@ test('init --claude creates the Claude target tree', (t) => {
   assert.ok(!exists(root, '.agents/skills/fadeno-runner/SKILL.md'));
 });
 
-test('invocation policy differs per target (builder gated, runner not)', (t) => {
+test('invocation policy: Claude skills stay model-invocable; Codex builder is gated', (t) => {
   const codexRoot = tempRepo(t);
   const claudeRoot = tempRepo(t);
   runInit({ target: 'codex', repoRoot: codexRoot });
   runInit({ target: 'claude', repoRoot: claudeRoot });
 
-  // Claude: builder frontmatter disables implicit invocation; runner does not.
+  // Claude: neither skill carries a frontmatter gate. A builder gated with
+  // disable-model-invocation was uninvocable (plugin skills aren't slash-
+  // invocable) — the builder is now scoped by its description instead.
   const claudeBuilder = read(claudeRoot, '.claude/skills/fadeno-builder/SKILL.md');
   const claudeRunner = read(claudeRoot, '.claude/skills/fadeno-runner/SKILL.md');
-  assert.match(claudeBuilder, /disable-model-invocation:\s*true/);
+  assert.doesNotMatch(claudeBuilder, /disable-model-invocation/);
   assert.doesNotMatch(claudeRunner, /disable-model-invocation/);
 
   // Codex: openai.yaml carries the policy; SKILL.md frontmatter is untouched.
@@ -173,7 +175,7 @@ test('--data-only seeds .fadeno definitions but no capability layer', (t) => {
 
   // capability layer skipped (comes from the plugin)
   assert.ok(!exists(root, '.claude/skills/fadeno-runner/SKILL.md'));
-  assert.ok(!exists(root, '.claude/agents/fadeno-worker.md'));
+  assert.ok(!exists(root, '.claude/agents/worker.md'));
   assert.ok(!exists(root, 'CLAUDE.md'));
 
   // every emitted path is under .fadeno/

@@ -25,12 +25,18 @@ test('plugin generates manifest, namespaced skills, and subagents', (t) => {
   assert.match(runner, /^name: runner$/m);
   assert.doesNotMatch(runner, /disable-model-invocation/);
   assert.match(builder, /^name: builder$/m);
-  assert.match(builder, /^disable-model-invocation: true$/m);
+  // Builder stays model-invocable — a builder gated with disable-model-invocation
+  // was uninvocable (plugin skills aren't reliably slash-invocable).
+  assert.doesNotMatch(builder, /disable-model-invocation/);
 
-  // subagents
-  assert.ok(exists(outDir, 'agents/fadeno-worker.md'));
-  assert.ok(exists(outDir, 'agents/fadeno-reviewer.md'));
-  assert.ok(exists(outDir, 'agents/fadeno-judge.md'));
+  // slash-command entry points → /fadeno:runner, /fadeno:builder
+  assert.ok(exists(outDir, 'commands/runner.md'));
+  assert.ok(exists(outDir, 'commands/builder.md'));
+
+  // subagents — namespaced as fadeno:worker / :reviewer / :judge
+  assert.ok(exists(outDir, 'agents/worker.md'));
+  assert.ok(exists(outDir, 'agents/reviewer.md'));
+  assert.ok(exists(outDir, 'agents/judge.md'));
 
   // the plugin carries no per-repo definitions
   assert.ok(!exists(outDir, 'skills/runner/playbooks'));

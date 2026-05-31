@@ -1,5 +1,5 @@
 ---
-name: fadeno-worker
+name: worker
 description: Implementer role for Fadeno playbooks — makes the code change described by a plan. Use when a Fadeno playbook delegates implementation work to a subagent.
 ---
 

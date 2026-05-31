@@ -6,7 +6,7 @@
 # fadeno-runner skill degrades gracefully to separate role-passes, so this file
 # being wrong does not break a run.
 
-name = "fadeno-worker"
+name = "worker"
 description = "Implementer role for Fadeno playbooks: make the code change described by a plan."
 # A subagent must not spawn its own subagents — keep fan-out depth-1.
 max_depth = 1

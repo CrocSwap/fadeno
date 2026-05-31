@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { copyTree, emitFile, type EmitResult } from '../lib/fsutil.ts';
-import { addFrontmatterField } from './init.ts';
 import { packageVersion, templatesDir } from '../lib/paths.ts';
 
 export interface PluginOptions {
@@ -16,11 +15,14 @@ export interface PluginResult {
   results: EmitResult[];
 }
 
-// Plugin skill dirs are short (invoked as /fadeno:runner, /fadeno:builder) and
+// Plugin skill dirs are short (namespaced as fadeno:runner, fadeno:builder) and
 // are generated from the same shared SKILL.md bodies used by `fadeno init`.
+// Both stay model-invocable; the matching commands/ entries give explicit
+// /fadeno:runner and /fadeno:builder slash handles (plugin skills are not
+// reliably slash-invocable on their own).
 const SKILLS = [
-  { src: 'fadeno-runner', dst: 'runner', gated: false },
-  { src: 'fadeno-builder', dst: 'builder', gated: true },
+  { src: 'fadeno-runner', dst: 'runner' },
+  { src: 'fadeno-builder', dst: 'builder' },
 ] as const;
 
 /**
@@ -53,11 +55,10 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
   const manifestPath = join(outDir, '.claude-plugin', 'plugin.json');
   results.push({ path: manifestPath, status: emitFile(manifestPath, manifest, force) });
 
-  for (const { src, dst, gated } of SKILLS) {
+  for (const { src, dst } of SKILLS) {
     let md = readFileSync(join(tpl, 'common', 'skills', src, 'SKILL.md'), 'utf8');
-    // Use the short, namespaced skill name (/fadeno:runner, /fadeno:builder).
+    // Use the short, namespaced skill name (fadeno:runner, fadeno:builder).
     md = md.replace(`name: ${src}`, `name: ${dst}`);
-    if (gated) md = addFrontmatterField(md, 'disable-model-invocation: true');
     const skillPath = join(outDir, 'skills', dst, 'SKILL.md');
     results.push({ path: skillPath, status: emitFile(skillPath, md, force) });
     copyTree(
@@ -68,8 +69,13 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
     );
   }
 
+  // Slash-command entry points (/fadeno:runner, /fadeno:builder). Plugin skills
+  // are not reliably slash-invocable, so these commands are the explicit handles;
+  // each one drives the matching model-invocable skill.
+  copyTree(join(tpl, 'common', 'commands'), join(outDir, 'commands'), force, results);
+
   // Subagents: reuse the Claude markdown agent definitions (no hooks/mcp/perms,
-  // which plugin agents disallow).
+  // which plugin agents disallow). They namespace as fadeno:worker / :reviewer / :judge.
   copyTree(join(tpl, 'claude', 'claude-agents'), join(outDir, 'agents'), force, results);
 
   return { outDir, results };

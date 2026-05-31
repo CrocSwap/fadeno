@@ -78,10 +78,18 @@ Each **role** declared in a playbook (`coordinator`, `implementer`,
 subagents aren't available, to a separate role-pass.
 
 - **Defaults — nothing to manage to start.** Fadeno ships sensible role
-  subagents (`fadeno-worker` = implementer, `fadeno-reviewer` = reviewer,
-  `fadeno-judge` = evaluator), provided by the installed Fadeno skill/plugin (or
-  written to `.claude/agents/` by `fadeno init`). A playbook's role names are
-  matched to these by intent.
+  subagents (`worker` = implementer, `reviewer` = reviewer, `judge` = evaluator),
+  provided by the installed Fadeno skill/plugin (or written to `.claude/agents/`
+  by `fadeno init`). A playbook's role names are matched to these by intent.
+- **Addressing them.** From the plugin the subagents are namespaced —
+  dispatch to `fadeno:worker` / `fadeno:reviewer` / `fadeno:judge` (the bare
+  `worker` etc. also resolves when the name is unique in the session). Repo-native
+  installs (`fadeno init`) write them un-namespaced to `.claude/agents/`.
+- **If a subagent type "is not found":** plugin subagents register at **session
+  start**, not on `/reload-plugins`. Right after installing or updating the
+  plugin, fully **restart** Claude Code so `fadeno:worker` etc. appear (check with
+  `/agents`). Until they do, just rely on graceful degradation below — the run
+  still completes, with each role done as a separate pass.
 - **Customizing for a repo.** To change how a role behaves in *this* repo, add or
   edit a per-repo subagent override at `.claude/agents/<name>.md` (Claude) /
   `.codex/agents/<name>.toml` (Codex). Repo-local definitions take precedence over
