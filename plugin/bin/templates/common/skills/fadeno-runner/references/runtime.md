@@ -54,6 +54,12 @@ Update `status` to `completed`/`failed`/`aborted` at the end, and keep
 {"type":"run_completed","step":null,"timestamp":"..."}
 ```
 
+**Conventional event types** — the log is open (`fadeno run <run> --event <type>`
+appends any type), but these are the standard ones: `run_started`,
+`step_started`, `artifact_created`, `gate_evaluated`, `roles_degraded`, and a
+terminal `run_completed` / `run_failed` / `run_aborted`. Every line carries at
+least `type`, `step` (a step id, or `null` for run-level events), and `timestamp`.
+
 The ledger is the *degraded runtime* for instruction-only hosts. Keep it honest:
 it is what makes the run inspectable, and the seam a future compiled runtime reads.
 
@@ -66,14 +72,21 @@ it is what makes the run inspectable, and the seam a future compiled runtime rea
 - **evaluator** — Have the actor produce a *structured* judgment artifact, e.g.
   `artifacts/review-report.json` conforming to `review-report.schema.json`. Do
   not let the evaluator make the control-flow decision.
-- **gate** — Compute `condition` from the judgment artifact deterministically.
-  `no_blocking_issues` == there are zero issues with `severity: blocking`. Then
-  route to `on_pass` / `on_fail`. Record a `gate_evaluated` event.
+- **gate** — Compute `condition` from the judgment artifact deterministically. It
+  reads **one** report file — a single report object or a `ReviewReport[]` JSON
+  array (e.g. the aggregated output of a reviewer `map`). `no_blocking_issues` ==
+  zero issues with `severity: blocking` across that file. Then route to
+  `on_pass` / `on_fail` and record a `gate_evaluated` event. (`fadeno gate <run>
+  no_blocking_issues` computes exactly this.)
 - **human_gate** — Stop and ask the user the `prompt`. Route to
   `on_approve` / `on_reject` based on their answer. Never auto-approve.
 - **map** — For each item in `over`, do the work. `over` may be a literal list of
   role names, or an artifact-field reference (e.g. `ResearchPlan.subquestions`).
-  Save one artifact per item; the collective output is the `Name[]` artifact.
+  Save one artifact per item; the collective output is the `Name[]` artifact. When
+  that collective feeds a gate (e.g. a `ReviewReport[]` consumed by
+  `no_blocking_issues`), write the items as a single JSON array in one file —
+  `artifacts/review-report.json` — so the gate reads them in one place; separate
+  per-item files are fine for maps whose output isn't gated.
 - **replicate** — Ask `count` (or `actors`) independent attempts at the same task;
   save each separately.
 - **join** — Wait until every artifact in `wait_for` exists before proceeding.
