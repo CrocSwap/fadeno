@@ -1,9 +1,21 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
 import test from 'node:test';
 import { runPlugin } from '../src/commands/plugin.ts';
-import { exists, tempRepo } from './helpers.ts';
+import { exists, read, tempRepo } from './helpers.ts';
+
+/** Every file under `dir`, as paths relative to it (recursive). */
+function listFilesRel(dir: string, base = dir): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...listFilesRel(full, base));
+    else out.push(relative(base, full));
+  }
+  return out;
+}
 
 test('plugin generates manifest, namespaced skills, and subagents', (t) => {
   const root = tempRepo(t);
@@ -45,13 +57,30 @@ test('plugin generates manifest, namespaced skills, and subagents', (t) => {
 test('the committed plugin/ matches a fresh generation (no drift)', (t) => {
   const root = tempRepo(t);
   const { outDir } = runPlugin({ cwd: root, outDir: join(root, 'plugin') });
-  const fresh = readFileSync(join(outDir, 'skills/builder/SKILL.md'), 'utf8');
-  // Compare against the committed copy in the repo (run `npm run build:plugin` if this fails).
-  const committed = readFileSync(
-    join(import.meta.dirname, '..', 'plugin', 'skills', 'builder', 'SKILL.md'),
-    'utf8',
+  const committedDir = join(import.meta.dirname, '..', 'plugin');
+
+  // `runPlugin` emits the whole plugin surface EXCEPT bin/ (the esbuild bundle +
+  // its bundled templates), which `npm run build:bin` produces — so diff
+  // everything else, in both directions, file by file.
+  const generated = listFilesRel(outDir).sort();
+  const committed = listFilesRel(committedDir)
+    .filter((f) => !f.startsWith(`bin${sep}`))
+    .sort();
+
+  // Same file set: catches an added/removed/renamed template, not just edits.
+  assert.deepEqual(
+    committed,
+    generated,
+    'plugin/ file set differs from a fresh generation — run `npm run build:plugin`',
   );
-  assert.equal(fresh, committed);
+  // Same contents.
+  for (const rel of generated) {
+    assert.equal(
+      read(committedDir, rel),
+      read(outDir, rel),
+      `plugin/${rel} is stale — run \`npm run build:plugin\``,
+    );
+  }
 });
 
 test('the committed plugin ships a self-contained CJS binary + templates', () => {
@@ -63,6 +92,14 @@ test('the committed plugin ships a self-contained CJS binary + templates', () =>
   // Pinned to CommonJS so the extensionless bundle runs under a type:module ancestor.
   const pkg = JSON.parse(readFileSync(join(binDir, 'package.json'), 'utf8'));
   assert.equal(pkg.type, 'commonjs');
+  // The bundle bakes in the version (esbuild --define); executing it must report
+  // the current package.json version — catches a forgotten `npm run build:bin`
+  // after a bump (the marketplace cache is version-keyed, so a stale bin ships).
+  const version = JSON.parse(
+    readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8'),
+  ).version;
+  const reported = execFileSync(bin, ['--version'], { encoding: 'utf8' }).trim();
+  assert.equal(reported, version, 'plugin/bin/fadeno is stale — run `npm run build:bin`');
   // Templates travel with the binary so `fadeno init` works with no node_modules.
   assert.ok(existsSync(join(binDir, 'templates', 'common', 'fadeno', 'vocabulary.md')));
 });
