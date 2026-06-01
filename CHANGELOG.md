@@ -8,6 +8,34 @@ All notable changes to Fadeno are documented here. The format follows
 
 _Nothing yet._
 
+## [0.1.5] — 2026-05-31
+
+Runner-guidance clarifications and a stronger plugin drift guard. No CLI behavior
+changes — but the runner instructions are bundled templates, so plugin users
+receive these via the version bump.
+
+### Changed
+
+- **Gate report-file convention is pinned.** The runner runtime reference now
+  states that a reviewer `map` feeding a gate writes its reports as a single
+  `review-report.json` array (which `fadeno gate` already reads), resolving the
+  ambiguity with the per-item artifacts a `map` otherwise produces.
+- **The plugin no-drift test is hardened.** It now diffs the entire generated
+  plugin tree (file set + contents, both directions) and asserts the bundled
+  `plugin/bin/fadeno` reports the current version, instead of checking a single
+  `SKILL.md` — so a stale `plugin/` after any template edit or a missed rebuild
+  on a version bump is caught.
+
+### Documentation
+
+- **Conventional `events.jsonl` event types** are listed in the runtime
+  reference (`run_started`, `step_started`, `artifact_created`, `gate_evaluated`,
+  `roles_degraded`, and a terminal `run_completed`/`run_failed`/`run_aborted`);
+  the log stays open via `fadeno run --event <type>`.
+- **Contributor docs** added: a root `AGENTS.md` orientation hub plus
+  `docs/architecture.md` (codebase map) and `docs/extending.md` (file-by-file
+  recipes for common changes).
+
 ## [0.1.4] — 2026-05-31
 
 Fewer permission prompts.
