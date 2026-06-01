@@ -344,6 +344,11 @@ The CLI has only two runtime dependencies (`ajv`, `yaml`) and uses Node's
 built-in argument parser and test runner. TypeScript source is written in
 erasable syntax so it runs directly under Node and compiles cleanly to ESM.
 
+**Contributing?** Start with [`AGENTS.md`](AGENTS.md) for the repo map and
+invariants, then [`docs/architecture.md`](docs/architecture.md) (how the code is
+built) and [`docs/extending.md`](docs/extending.md) (file-by-file recipes for
+common changes).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
