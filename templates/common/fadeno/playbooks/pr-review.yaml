@@ -43,7 +43,9 @@ flow:
 
   - id: decision_gate
     kind: gate
-    condition: no_blocking_issues   # computed from the ReviewReport[] / MergedReview
+    input:
+      - ReviewReport[]
+    condition: no_blocking_issues
     on_pass: approve
     on_fail: request_changes
 
@@ -83,6 +85,7 @@ flow:
     input:
       - ReviewSummary
     output: FinalSummary
+    terminal_status: completed
 
 policies:
   max_subagents: 4

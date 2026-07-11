@@ -2,31 +2,43 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://fadeno.dev/schemas/review-report.schema.json",
   "title": "Fadeno Review Report",
-  "description": "The structured judgment artifact an evaluator/reviewer produces. Gate conditions such as no_blocking_issues are computed deterministically from this file (issues filtered to severity == blocking), so a hook, a CI check, or a future runtime can evaluate the gate without re-asking a model.",
-  "type": "object",
-  "required": ["reviewer", "summary", "issues", "verdict"],
-  "additionalProperties": false,
-  "properties": {
-    "reviewer": { "type": "string", "description": "Role/actor that produced this report." },
-    "target": { "type": "string", "description": "What was reviewed (artifact name, file, diff, etc.)." },
-    "summary": { "type": "string" },
-    "issues": {
+  "description": "A structured review judgment. A gate may consume one report or a formally schema-valid array of reports.",
+  "oneOf": [
+    { "$ref": "#/definitions/report" },
+    {
       "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["severity", "title"],
-        "additionalProperties": false,
-        "properties": {
-          "severity": { "enum": ["blocking", "major", "minor", "nit"] },
-          "title": { "type": "string", "minLength": 1 },
-          "detail": { "type": "string" },
-          "location": { "type": "string", "description": "file:line or artifact path." }
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/report" }
+    }
+  ],
+  "definitions": {
+    "report": {
+      "type": "object",
+      "required": ["reviewer", "summary", "issues", "verdict"],
+      "additionalProperties": false,
+      "properties": {
+        "reviewer": { "type": "string", "description": "Role/actor that produced this report." },
+        "target": { "type": "string", "description": "What was reviewed (artifact name, file, diff, etc.)." },
+        "summary": { "type": "string" },
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["severity", "title"],
+            "additionalProperties": false,
+            "properties": {
+              "severity": { "enum": ["blocking", "major", "minor", "nit"] },
+              "title": { "type": "string", "minLength": 1 },
+              "detail": { "type": "string" },
+              "location": { "type": "string", "description": "file:line or artifact path." }
+            }
+          }
+        },
+        "verdict": {
+          "enum": ["approve", "request_changes", "comment"],
+          "description": "Overall recommendation. The gate relies on issues, not this field alone."
         }
       }
-    },
-    "verdict": {
-      "enum": ["approve", "request_changes", "comment"],
-      "description": "Overall recommendation. The gate should rely on the issues list, not this field alone."
     }
   }
 }

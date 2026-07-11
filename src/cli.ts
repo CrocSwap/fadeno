@@ -22,20 +22,21 @@ Usage:
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
   fadeno run <run> [flags]              Update a run ledger (run.yaml + events.jsonl)
-  fadeno gate <run> <condition>         Evaluate a gate condition from a judgment artifact
+  fadeno gate <run> <condition>         Evaluate a gate condition from a structured artifact
   fadeno plugin [dir]                   Generate a Claude Code plugin (default ./plugin)
 
 Options:
   --with-hooks            (init) Also scaffold tier-2 enforcement hooks
   --data-only             (init) Seed only .fadeno/ definitions (capability via plugin)
   --force                 (init) Overwrite existing files / refresh the bootstrap section
-  --schema <kind>         (validate) Force document kind: playbook | run | review-report
+  --schema <kind>         (validate) Force document kind: playbook | run | review-report | test-result
   --format <fmt>          (diagram) ascii (default) | mermaid
   --step <id>             (run) Set current_step and log a step_started event
   --status <status>       (run) Set status: running | completed | failed | aborted
   --event <type>          (run) Append a custom event
   --artifact <path>       (run) Attach an artifact path to the event
-  --report <path>         (gate) Review-report path (default: artifacts/review-report.json)
+  --artifact <path>       (gate) Artifact path relative to run (condition-specific default)
+  --report <path>         (gate) Deprecated alias for --artifact
   -h, --help              Show this help
   -v, --version           Show version
 
@@ -46,11 +47,11 @@ Examples:
   fadeno new-run code-change-review "Add CSV export for reports"
   fadeno run 2026-05-30-1132-csv --step review
   fadeno run 2026-05-30-1132-csv --status completed
-  fadeno gate 2026-05-30-1132-csv no_blocking_issues
+  fadeno gate 2026-05-30-1132-csv no_blocking_issues --artifact artifacts/review-report.json
 `;
 
 const SIGIL: Record<Target, string> = { codex: '$', claude: '/' };
-const SCHEMA_KINDS: SchemaKind[] = ['playbook', 'run', 'review-report'];
+const SCHEMA_KINDS: SchemaKind[] = ['playbook', 'run', 'review-report', 'test-result'];
 
 function printInitSummary(
   target: Target,
@@ -258,12 +259,20 @@ function main(argv: string[]): number {
     case 'gate': {
       const [, run, condition] = positionals;
       if (!run || !condition) throw new Error('Usage: fadeno gate <run> <condition>');
-      const result = runGate({ run, condition, report: values.report });
+      const result = runGate({ run, condition, artifact: values.artifact, report: values.report });
       if (result.pass) {
-        console.log(`PASS  ${result.condition} (0 blocking issues)`);
+        if (result.condition === 'tests_pass') {
+          console.log(`PASS  ${result.condition} (status=${String(result.details.status)}, exit_code=${String(result.details.exitCode)})`);
+        } else {
+          console.log(`PASS  ${result.condition} (0 blocking issues)`);
+        }
       } else {
-        console.error(`FAIL  ${result.condition} (${result.blockingCount} blocking issue(s))`);
-        for (const title of result.blockingTitles) console.error(`        - ${title}`);
+        if (result.condition === 'tests_pass') {
+          console.error(`FAIL  ${result.condition} (status=${String(result.details.status)}, exit_code=${String(result.details.exitCode)})`);
+        } else {
+          console.error(`FAIL  ${result.condition} (${result.blockingCount} blocking issue(s))`);
+          for (const title of result.blockingTitles) console.error(`        - ${title}`);
+        }
       }
       return result.pass ? 0 : 1;
     }

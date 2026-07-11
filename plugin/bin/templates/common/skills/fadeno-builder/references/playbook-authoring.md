@@ -21,9 +21,36 @@ Plan, do, then verify with a tool and a gate.
 flow:
   - { id: plan, kind: actor_call, actor: coordinator, output: Plan }
   - { id: execute, kind: actor_call, actor: worker, input: [Plan], output: Result }
-  - { id: verify, kind: tool_call, tool: test_runner, output: TestResult, next: gate }
-  - { id: gate, kind: gate, condition: tests_pass, on_pass: done, on_fail: execute }
-  - { id: done, kind: actor_call, actor: coordinator, input: [Result, TestResult], output: Summary }
+  - id: verify
+    kind: tool_call
+    tool: test_runner
+    input:
+      - Result
+    output: TestResult
+    next: gate
+  - id: gate
+    kind: gate
+    input:
+      - TestResult
+    condition: tests_pass
+    on_pass: done
+    on_fail: tests_failed
+  - id: done
+    kind: actor_call
+    actor: coordinator
+    input:
+      - Result
+      - TestResult
+    output: Summary
+    terminal_status: completed
+  - id: tests_failed
+    kind: actor_call
+    actor: coordinator
+    input:
+      - Result
+      - TestResult
+    output: Summary
+    terminal_status: failed
 ```
 
 ### worker_reviewer_merge
@@ -32,16 +59,17 @@ review.
 
 ### research_synthesis
 Plan subquestions → `map` researchers → `reduce` synthesize → `evaluator`
-fact-check → gate → bounded revise loop. (See the shipped `research-synthesis`
-playbook.)
+fact-check → final report. (The shipped starter intentionally has no unsupported
+fact-check gate until a deterministic condition is implemented.)
 
 ### debate_judge
 `replicate` N independent attempts → `evaluator` judge scores them → `reduce`
 the winner. Use when the solution space is wide and one attempt is risky.
 
 ### code_change_review
-Plan → implement → `map` reviewers → gate → bounded revise loop → test →
-summarize. (See the shipped `code-change-review` playbook.)
+Plan → implement → `map` reviewers → review gate → bounded revise loop → test
+gate → completed or failed terminal. (See the shipped `code-change-review`
+playbook.)
 
 ### human_approval_gate
 Insert a `human_gate` before any irreversible or outward-facing action
@@ -54,7 +82,8 @@ Insert a `human_gate` before any irreversible or outward-facing action
 - [ ] Roles are explicit and each has a `purpose`.
 - [ ] Every gate is `evaluator → judgment artifact → deterministic condition`,
       not an inline "ask the model".
-- [ ] Every loop has `max_iterations`; iteration artifacts are versioned.
+- [ ] Every loop has `max_iterations`, `until`, `on_success`, and `on_exhausted`;
+      iteration artifacts are versioned.
 - [ ] Fan-out is depth-1 (no subagent-spawns-subagent).
 - [ ] All step references resolve, every `actor` is a declared role, and inputs
       are produced upstream (`fadeno validate` is green, no warnings).
@@ -68,7 +97,7 @@ Insert a `human_gate` before any irreversible or outward-facing action
 - **Gate that asks an LLM.** Replace with an evaluator that writes an artifact,
   then a deterministic condition on that artifact.
 - **Unbounded loop** ("keep trying until good"). Always bound and define
-  `on_exhausted`.
+  `on_success` and `on_exhausted`.
 - **Fan-out explosions.** Mapping over a large runtime list with no cap; add
   `policies.max_subagents` and prefer batching.
 - **Overwriting iteration artifacts.** Version them (`.v1`, `.v2`).

@@ -50,14 +50,18 @@ Update `status` to `completed`/`failed`/`aborted` at the end, and keep
 {"type":"run_started","step":null,"timestamp":"2026-05-30T11:32:00Z"}
 {"type":"step_started","step":"plan","timestamp":"2026-05-30T11:33:00Z"}
 {"type":"artifact_created","step":"plan","artifact":"artifacts/plan.md","timestamp":"2026-05-30T11:35:00Z"}
-{"type":"gate_evaluated","step":"review_gate","result":"pass","timestamp":"..."}
+{"type":"gate_evaluated","step":"review_gate","condition":"no_blocking_issues","artifact":"artifacts/review-report.json","result":"pass","timestamp":"..."}
+{"type":"loop_iteration_started","step":"revise","iteration":1,"timestamp":"..."}
+{"type":"loop_condition_evaluated","step":"revise","condition":"no_blocking_issues","artifact":"artifacts/review-report.json","result":"pass","timestamp":"..."}
+{"type":"loop_succeeded","step":"revise","timestamp":"..."}
 {"type":"run_completed","step":null,"timestamp":"..."}
 ```
 
 **Conventional event types** — the log is open (`fadeno run <run> --event <type>`
 appends any type), but these are the standard ones: `run_started`,
-`step_started`, `artifact_created`, `gate_evaluated`, `roles_degraded`, and a
-terminal `run_completed` / `run_failed` / `run_aborted`. Every line carries at
+`step_started`, `artifact_created`, `gate_evaluated`, `loop_iteration_started`,
+`loop_condition_evaluated`, `loop_succeeded`, `loop_exhausted`, `roles_degraded`,
+and a terminal `run_completed` / `run_failed` / `run_aborted`. Every line carries at
 least `type`, `step` (a step id, or `null` for run-level events), and `timestamp`.
 
 The ledger is the *degraded runtime* for instruction-only hosts. Keep it honest:
@@ -72,12 +76,12 @@ it is what makes the run inspectable, and the seam a future compiled runtime rea
 - **evaluator** — Have the actor produce a *structured* judgment artifact, e.g.
   `artifacts/review-report.json` conforming to `review-report.schema.json`. Do
   not let the evaluator make the control-flow decision.
-- **gate** — Compute `condition` from the judgment artifact deterministically. It
-  reads **one** report file — a single report object or a `ReviewReport[]` JSON
-  array (e.g. the aggregated output of a reviewer `map`). `no_blocking_issues` ==
-  zero issues with `severity: blocking` across that file. Then route to
-  `on_pass` / `on_fail` and record a `gate_evaluated` event. (`fadeno gate <run>
-  no_blocking_issues` computes exactly this.)
+- **gate** — Compute `condition` from exactly one named, schema-valid artifact.
+  `no_blocking_issues` accepts `ReviewReport` or `ReviewReport[]`; `tests_pass`
+  accepts `TestResult` and is true only when `status: passed` and `exit_code: 0`.
+  Use `fadeno gate <run> <condition> --artifact <path>`; `--report` remains a
+  deprecated alias. Route to `on_pass` / `on_fail` and record a `gate_evaluated`
+  event. A malformed artifact is an execution error, not a failed predicate.
 - **human_gate** — Stop and ask the user the `prompt`. Route to
   `on_approve` / `on_reject` based on their answer. Never auto-approve.
 - **map** — For each item in `over`, do the work. `over` may be a literal list of
@@ -91,9 +95,14 @@ it is what makes the run inspectable, and the seam a future compiled runtime rea
   save each separately.
 - **join** — Wait until every artifact in `wait_for` exists before proceeding.
 - **reduce** — Merge the input artifacts into one with the named `actor`.
-- **loop** — Re-run `body` (a list of step ids) until `until` holds or
-  `max_iterations` is reached, then go to `on_exhausted`. Version every iteration
-  artifact; never overwrite.
+- **loop** — Re-run `body` (a list of step ids) in listed order, resolving the
+  latest versions of its `input` artifacts before each iteration. Evaluate
+  `until` against the latest body-produced artifact; route to `on_success` when
+  it passes, otherwise repeat while iterations remain, then route to
+  `on_exhausted`. Record `loop_iteration_started`, `loop_condition_evaluated`,
+  and `loop_succeeded` or `loop_exhausted`. Version every iteration artifact;
+  never overwrite. Milestone 1 loop bodies are linear: body steps cannot branch,
+  contain gates/conditions or `terminal_status`, or contain nested loops.
 - **router** — Pick a branch from `routes` (label → step id), falling back to
   `default`.
 - **subworkflow** — Run another playbook by name and treat its result as one

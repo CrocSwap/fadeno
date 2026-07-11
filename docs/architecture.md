@@ -79,27 +79,34 @@ so tests stay hermetic and deterministic.
 
 ## The validator (`src/lib/playbook-validate.ts`)
 
-`validateFile()` runs up to three passes; severity-aware, so **warnings don't fail
-the build** (only `error`-severity issues do).
+`validateFile()` runs schema, reference, and semantic passes; severity-aware, so
+**warnings don't fail the build** (only `error`-severity issues do).
 
 1. **Schema** — Ajv against the relevant JSON Schema in `.fadeno/schemas/`.
-   `SchemaSet` lazily compiles and caches each of the three schemas
-   (`playbook` / `run` / `review-report`). It registers a dependency-free
+   `SchemaSet` lazily compiles and caches the shipped schemas (`playbook` / `run`
+   / `review-report` / `test-result`). It registers a dependency-free
    `date-time` format (a lenient `Date.parse`) so run timestamps are actually
    checked and Ajv doesn't warn about an unknown format.
 2. **Reference integrity** *(playbook only, errors)* — every step id referenced by
    a control-flow field (`next`, `on_pass`, `on_fail`, `on_approve`, `on_reject`,
-   `on_exhausted`, `default`), a loop `body`, or a `routes` map must resolve to a
-   defined step; duplicate ids are flagged.
-3. **Semantics** *(playbook only)* — every `actor`/`actors` entry must be a
-   declared role *(error)*; an `input` artifact never produced by any step's
-   `output`, or a declared-but-unused role, are *warnings*. `over` items count as
-   role usage (a `map` over roles), which is why they aren't error-checked.
+   `on_success`, `on_exhausted`, `default`), a loop `body`, or a `routes` map must
+   resolve to a defined step; duplicate ids are flagged.
+3. **Normalized control flow and definite artifacts** *(playbook only)* — physical
+   fallthrough is added only for steps without explicit outgoing control flow;
+   loop-body definitions are reachable only through their owning loop. The
+   validator reports unreachable steps, loop recursion/multiple ownership,
+   invalid terminal declarations, unsupported condition bindings, and inputs that
+   are absent from the intersection of incoming artifact paths. Loop body outputs
+   are available on both success and exhaustion.
+4. **Role semantics** *(playbook only)* — every `actor`/`actors` entry must be a
+   declared role *(error)*; declared-but-unused roles are *warnings*. `over` items
+   count as role usage (a `map` over roles), which is why they aren't error-checked.
 
-Passes 2–3 run only when the schema pass is clean (no point analyzing a
-structurally invalid doc). `detectKind()` infers the document type from its shape
-(then its path) when `--schema` isn't given; only playbooks get passes 2–3, while
-`run.yaml` and `review-report.json` get the schema pass alone.
+Semantic analysis runs only when the playbook schema and references are clean.
+`detectKind()` infers the document type from its shape (then its path) when
+`--schema` isn't given; only playbooks get semantic analysis, while `run.yaml`,
+`review-report.json`/`ReviewReport[]`, and `test-result.json` get the schema pass
+alone.
 
 > The schema is the **single source of truth for the vocabulary**; the validator
 > enforces the cross-references and semantics a schema can't express.
@@ -129,9 +136,10 @@ Three commands drive its lifecycle:
   events to the in-progress step (an explicit `--step` wins, else the run's
   `current_step`), and on a terminal status sets `ended_at` and clears
   `current_step`.
-- **`gate <id> <condition>`** (`runGate`) computes a condition from a judgment
-  artifact and **exits 0/1**. v0 supports only `no_blocking_issues` (zero
-  `severity: "blocking"` issues across all reports in the file). This is the
+- **`gate <id> <condition> --artifact <path>`** (`runGate`) validates a named
+  artifact against the condition's schema, evaluates it deterministically, logs a
+  `gate_evaluated` event, and **exits 0/1**. v0 supports `no_blocking_issues` and
+  `tests_pass`; `--report` remains a deprecated alias. This is the
   **advisory→enforced bridge**: the same check the runner applies can run in CI, a
   pre-commit hook, or a Claude Code `Stop` hook. See `enforcement.md`.
 

@@ -19,8 +19,10 @@ test('ascii diagram renders cards with abbreviated kinds, gate branches, loop bo
   assert.match(out, /✓ pass ▶ test/);
   assert.match(out, /✗ fail ▶ revise/);
   assert.match(out, /body: implement_revision ▶ review_revision/);
-  assert.match(out, /⤓ exhausted ▶ summarize_best_attempt/);
-  assert.match(out, /■ end/);
+  assert.match(out, /✓ success ▶ test/);
+  assert.match(out, /⤓ exhausted ▶ unresolved_review/);
+  assert.match(out, /■ completed/);
+  assert.match(out, /■ failed/);
   assert.match(out, /▼/); // fall-through connector
   assert.match(out, /⋮/); // branch-driven continuation
   assert.doesNotMatch(out, /actor_call/); // kinds are abbreviated for display

@@ -8,6 +8,28 @@ All notable changes to Fadeno are documented here. The format follows
 
 _Nothing yet._
 
+## [0.2.0] — 2026-07-10
+
+Formalize code-change workflow semantics: explicit loop exits, artifact-bound
+gates, structured test results, path-aware validation, and honest failed-run
+terminals.
+
+### Added
+
+- `tests_pass` and the `test-result.schema.json` artifact contract.
+- Definite-artifact and normalized control-flow validation, including reachability,
+  loop ownership, terminal statuses, and deterministic condition bindings.
+- Gate and loop lifecycle event conventions in the runner ledger.
+
+### Changed
+
+- `code-change-review` now distinguishes resolved review, exhausted review, passing
+  tests, and failing tests.
+- `fadeno gate` validates named artifacts and accepts `--artifact`; `--report` is
+  retained as a deprecated alias.
+- Claude's example Stop hook preserves non-zero gate failures and handles a missing
+  run explicitly.
+
 ## [0.1.5] — 2026-05-31
 
 Runner-guidance clarifications and a stronger plugin drift guard. No CLI behavior

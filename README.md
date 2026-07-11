@@ -152,7 +152,10 @@ the agent doesn't hand-edit JSONL:
 fadeno new-run code-change-review "Add CSV export for reports"
 fadeno run <run-id> --step implement            # set current_step + log step_started
 fadeno run <run-id> --status completed           # finalize: status + ended_at + run_completed
-fadeno gate <run-id> no_blocking_issues          # exit 0/1 from the review-report artifact
+fadeno gate <run-id> no_blocking_issues \
+  --artifact artifacts/review-report.json       # exit 0/1; --report is deprecated
+fadeno gate <run-id> tests_pass \
+  --artifact artifacts/test-result.json         # status passed + exit_code 0
 ```
 
 `fadeno gate` is the **advisory→enforced bridge**: it computes a gate condition
@@ -210,7 +213,8 @@ fadeno diagram code-change-review --format mermaid   # graph for GitHub/docs
 ┌─ revise ──────────────────────────── loop ─┐
 │ max 1 · until no_blocking_issues           │
 │ body: implement_revision ▶ review_revision │
-│ ⤓ exhausted ▶ summarize_best_attempt       │
+│ ✓ success ▶ test                           │
+│ ⤓ exhausted ▶ unresolved_review            │
 └────────────────────────────────────────────┘
 ```
 
@@ -239,16 +243,29 @@ or a runtime later).
 
 - id: review_gate
   kind: gate
+  input:
+    - ReviewReport[]
   condition: no_blocking_issues     # = zero issues with severity "blocking"
   on_pass: test
   on_fail: revise
 
 - id: revise
   kind: loop
+  input:
+    - ReviewReport[]
   max_iterations: 1                 # loops are always bounded
   body: [implement_revision, review_revision]
   until: no_blocking_issues
-  on_exhausted: summarize_best_attempt
+  on_success: test
+  on_exhausted: unresolved_review
+
+- id: test_gate
+  kind: gate
+  input:
+    - TestResult
+  condition: tests_pass
+  on_pass: final
+  on_fail: tests_failed
 ```
 
 The vocabulary is intentionally small and orthogonal:
@@ -261,8 +278,9 @@ The vocabulary is intentionally small and orthogonal:
 ```bash
 fadeno validate                                       # all playbooks
 fadeno validate .fadeno/playbooks/code-change-review.yaml
-fadeno validate .fadeno/runs/<id>/run.yaml            # run ledgers and review reports too
+fadeno validate .fadeno/runs/<id>/run.yaml            # run ledgers and artifacts too
 fadeno validate report.json --schema review-report    # force the document kind
+fadeno validate test-result.json --schema test-result
 ```
 
 `validate` runs three passes on a playbook:
@@ -300,13 +318,13 @@ enforcement is your git/CI/pre-commit layer, because it is harness-agnostic and
 also protects against human mistakes, not just agent ones.
 
 Fadeno is designed so the same conditions are deterministically checkable: gate
-conditions are computable from a structured judgment artifact
-(`review-report.schema.json`), and approval categories map to concrete, detectable
-actions. Two ways to make that real:
+conditions are computable from schema-valid structured artifacts
+(`review-report.schema.json` and `test-result.schema.json`), and approval
+categories map to concrete, detectable actions. Two ways to make that real:
 
-- **`fadeno gate <run> no_blocking_issues`** computes the gate from the review
-  report and exits 0/1 — drop it into CI, a git hook, or a Claude Code `Stop`
-  hook.
+- **`fadeno gate <run> <condition> --artifact <path>`** computes a condition
+  from its named artifact and exits 0/1 — drop it into CI, a git hook, or a
+  Claude Code `Stop` hook.
 - **`fadeno init --with-hooks`** scaffolds runnable enforcement: an executable
   `.fadeno/hooks/pre-commit` (dependency/secret guard), a
   `.github/workflows/fadeno-guard.yml` CI guard, and (on Claude) a

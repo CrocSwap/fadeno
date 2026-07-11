@@ -4,7 +4,7 @@ schema_version: "0.1"
 name: research-synthesis
 description: >
   Plan research questions, gather evidence per question, synthesize a draft,
-  fact-check it, and revise until claims are supported.
+  fact-check it, and produce a final report.
 when_to_use:
   - open-ended research question
   - multiple sources must be gathered and compared
@@ -48,37 +48,6 @@ flow:
       - Findings[]
     output: FactCheckReport
 
-  - id: fact_gate
-    kind: gate
-    condition: no_unsupported_claims   # computed from FactCheckReport
-    on_pass: finalize
-    on_fail: revise
-
-  - id: revise
-    kind: loop
-    max_iterations: 2
-    body:
-      - revise_draft
-      - recheck
-    until: no_unsupported_claims
-    on_exhausted: finalize
-
-  - id: revise_draft
-    kind: actor_call
-    actor: synthesizer
-    input:
-      - Draft
-      - FactCheckReport
-    output: Draft
-
-  - id: recheck
-    kind: evaluator
-    actor: fact_checker
-    input:
-      - Draft
-      - Findings[]
-    output: FactCheckReport
-
   - id: finalize
     kind: actor_call
     actor: coordinator
@@ -86,6 +55,7 @@ flow:
       - Draft
       - FactCheckReport
     output: FinalReport
+    terminal_status: completed
 
 limits:
   max_iterations: 2

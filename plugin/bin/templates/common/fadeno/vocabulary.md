@@ -14,6 +14,8 @@ truth for the vocabulary; this file explains what each term *means*.
   simulated role-pass when subagents are unavailable.
 - **Artifact** — A durable output of a step (plan, patch, review, test result,
   summary, …), saved under a run's `artifacts/`.
+- **TestResult** — A structured test artifact with `status`, `exit_code`, and
+  `summary`; `tests_pass` never infers success from prose.
 - **Gate** — A checkpoint that decides whether execution proceeds, revises, asks
   the user, or stops.
 - **Evaluator** — An actor that produces a *structured judgment artifact*.
@@ -49,7 +51,7 @@ limits:
 ```
 
 Iterations are versioned (`ReviewReport.v1`, `ReviewReport.v2`, …) and never
-overwritten.
+overwritten. A loop has separate `on_success` and `on_exhausted` exits.
 
 ## Primitives (step `kind`s)
 

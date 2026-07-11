@@ -63,17 +63,19 @@ Then `npm run validate:self` (and add a starter or test that exercises it).
 Gate conditions are the deterministic core — keep them computable from a
 **structured artifact on disk**, never a model call.
 
-1. **`src/commands/gate.ts`** — add the name to `SUPPORTED_CONDITIONS` and compute
-   it inside `runGate` from the report file. Return enough detail for `cli.ts` to
-   print a useful failure (like `blockingTitles`). Exit code follows `pass`.
+1. **`src/commands/gate.ts`** — add a condition-registry entry with accepted
+   logical artifact names, a schema kind, and a pure evaluator. `runGate` validates
+   the concrete `--artifact` file before evaluating it, logs `gate_evaluated`, and
+   returns enough detail for `cli.ts` to print a useful failure. Exit code follows
+   `pass`.
 2. **Artifact schema** — if the condition reads a *new* artifact shape (e.g. a
    fact-check report), add a schema under `templates/common/fadeno/schemas/`, wire
    it into `SCHEMA_FILE`/`SchemaKind` in `playbook-validate.ts` and the
    `--schema` choices in `cli.ts`, and teach `detectKind` to recognize it.
 3. **`templates/common/skills/fadeno-runner/references/runtime.md`** — extend the
    "gate" bullet so the runner computes the same condition the CLI does.
-4. **`templates/common/fadeno/enforcement.md`** — add the equivalent `jq`/CI
-   one-liner so the condition is usable as a real (tier-2) check.
+4. **`templates/common/fadeno/enforcement.md`** — document the equivalent CLI
+   invocation so the condition is usable as a real (tier-2) check.
 5. **`test/run-gate.test.ts`** — cover pass and fail.
 
 The invariant: the runner (now), a hook/CI (tier 2), and a future runtime must all

@@ -20,7 +20,9 @@ a run ledger so the result is reproducible and reviewable.
 4. Create a new run directory: `.fadeno/runs/<timestamp>-<slug>/` (or run
    `fadeno new-run <playbook> "<task>"` if the CLI is available).
 5. Write `run.yaml` (see `references/runtime.md` for the shape).
-6. Append major lifecycle events to `events.jsonl` as you go.
+6. Append major lifecycle events to `events.jsonl` as you go. Gate events must
+   include `condition`, the concrete artifact path, and `result`; loops must
+   record iteration start, condition evaluation, and success or exhaustion.
 7. Execute each step in `flow` using available host capabilities.
 8. If native subagents are available, delegate role-specific work to them — but
    **one level only**; do not assume a subagent can spawn its own subagents.
@@ -28,13 +30,18 @@ a run ledger so the result is reproducible and reviewable.
    passes and save each pass as a distinct artifact.
 10. Save every major output under `artifacts/`.
 11. Apply gates using the **structured judgment artifact**, not vague prose: an
-    evaluator writes a report (see `review-report.schema.json`), then the gate
-    condition is computed from it.
-12. Respect loop limits. Version iteration artifacts (`.v1`, `.v2`); never
-    overwrite a prior iteration.
+    evaluator writes a schema-valid report or test result, then run
+    `fadeno gate <run> <condition> --artifact <path>` and follow the explicit
+    branch. Do not infer `tests_pass` from a prose summary.
+12. Respect loop limits. Execute body steps in listed order, evaluate the loop
+    condition against the latest body-produced artifact, then follow
+    `on_success` or `on_exhausted`. Version iteration artifacts (`.v1`, `.v2`);
+    never overwrite a prior iteration.
 13. Run tests or checks when the playbook requires them.
-14. Return a final answer with: what changed, checks performed, gates
-    passed/failed, and the path to the run directory.
+14. When a step declares `terminal_status`, stop there and set `run.yaml.status`
+    to the same value. A failed review exhaustion or failed test path must not
+    be reported as completed. Return a final answer with: what changed, checks
+    performed, gates passed/failed, terminal status, and the run path.
 
 ## Rules
 

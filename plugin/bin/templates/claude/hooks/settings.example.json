@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "run=$(ls -dt .fadeno/runs/*/ 2>/dev/null | head -1); [ -n \"$run\" ] && npx fadeno gate \"$run\" no_blocking_issues || true"
+            "command": "run=$(ls -dt .fadeno/runs/*/ 2>/dev/null | head -1); if [ -z \"$run\" ]; then exit 0; fi; fadeno gate \"$run\" no_blocking_issues"
           }
         ]
       }

@@ -49,20 +49,17 @@ chat. v0's scope and non-goals come from `docs/kickoff-memo.md`.
 
 ## Next (deferred, roughly prioritized)
 
-1. **Reachability / orphan-step analysis** — deferred from the semantics pass because the
-   flow model mixes implicit sequential fall-through with explicit branches/loop bodies;
-   it needs a firmer execution-order spec before reachability can avoid false positives.
-2. **Authoring helpers** — `fadeno list` (playbooks + `when_to_use`),
+1. **Authoring helpers** — `fadeno list` (playbooks + `when_to_use`),
    `fadeno new-playbook <pattern>` scaffolder. (`fadeno diagram` already ships.)
-3. **More gate conditions** in `fadeno gate` (e.g. `no_unsupported_claims` from a
+2. **More gate conditions** in `fadeno gate` (e.g. `no_unsupported_claims` from a
    fact-check report) + a fact-check artifact schema, widening deterministic enforcement.
-4. **More harness targets** — Cursor and others (SKILL.md is a cross-harness standard, so
+3. **More harness targets** — Cursor and others (SKILL.md is a cross-harness standard, so
    it's mostly adapter work: install dir, bootstrap file, invocation policy, subagent format).
-5. **Eval harness** for the runner/builder skills — a repeatable way to measure whether a
+4. **Eval harness** for the runner/builder skills — a repeatable way to measure whether a
    real agent session produces good runs (the actual product risk).
-6. **Schema versioning / migration** as `schema_version` moves past `0.1`.
-7. **Richer ledger** — per-step token/cost accounting and a `fadeno runs` summary view.
-8. **Diagram artifact/data-flow edge labels** — `fadeno diagram` annotating the
+5. **Schema versioning / migration** as `schema_version` moves past `0.1`.
+6. **Richer ledger** — per-step token/cost accounting and a `fadeno runs` summary view.
+7. **Diagram artifact/data-flow edge labels** — `fadeno diagram` annotating the
    input/output artifacts that flow along each edge, not just the control flow.
 
 ## Explicit non-goals (from the kickoff memo)

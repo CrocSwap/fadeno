@@ -10968,49 +10968,49 @@ var require_fast_uri = __commonJS({
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
-    function resolveComponent(base, relative2, options, skipNormalization) {
+    function resolveComponent(base, relative3, options, skipNormalization) {
       const target = {};
       if (!skipNormalization) {
         base = parse(serialize(base, options), options);
-        relative2 = parse(serialize(relative2, options), options);
+        relative3 = parse(serialize(relative3, options), options);
       }
       options = options || {};
-      if (!options.tolerant && relative2.scheme) {
-        target.scheme = relative2.scheme;
-        target.userinfo = relative2.userinfo;
-        target.host = relative2.host;
-        target.port = relative2.port;
-        target.path = removeDotSegments(relative2.path || "");
-        target.query = relative2.query;
+      if (!options.tolerant && relative3.scheme) {
+        target.scheme = relative3.scheme;
+        target.userinfo = relative3.userinfo;
+        target.host = relative3.host;
+        target.port = relative3.port;
+        target.path = removeDotSegments(relative3.path || "");
+        target.query = relative3.query;
       } else {
-        if (relative2.userinfo !== void 0 || relative2.host !== void 0 || relative2.port !== void 0) {
-          target.userinfo = relative2.userinfo;
-          target.host = relative2.host;
-          target.port = relative2.port;
-          target.path = removeDotSegments(relative2.path || "");
-          target.query = relative2.query;
+        if (relative3.userinfo !== void 0 || relative3.host !== void 0 || relative3.port !== void 0) {
+          target.userinfo = relative3.userinfo;
+          target.host = relative3.host;
+          target.port = relative3.port;
+          target.path = removeDotSegments(relative3.path || "");
+          target.query = relative3.query;
         } else {
-          if (!relative2.path) {
+          if (!relative3.path) {
             target.path = base.path;
-            if (relative2.query !== void 0) {
-              target.query = relative2.query;
+            if (relative3.query !== void 0) {
+              target.query = relative3.query;
             } else {
               target.query = base.query;
             }
           } else {
-            if (relative2.path[0] === "/") {
-              target.path = removeDotSegments(relative2.path);
+            if (relative3.path[0] === "/") {
+              target.path = removeDotSegments(relative3.path);
             } else {
               if ((base.userinfo !== void 0 || base.host !== void 0 || base.port !== void 0) && !base.path) {
-                target.path = "/" + relative2.path;
+                target.path = "/" + relative3.path;
               } else if (!base.path) {
-                target.path = relative2.path;
+                target.path = relative3.path;
               } else {
-                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative2.path;
+                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative3.path;
               }
               target.path = removeDotSegments(target.path);
             }
-            target.query = relative2.query;
+            target.query = relative3.query;
           }
           target.userinfo = base.userinfo;
           target.host = base.host;
@@ -11018,7 +11018,7 @@ var require_fast_uri = __commonJS({
         }
         target.scheme = base.scheme;
       }
-      target.fragment = relative2.fragment;
+      target.fragment = relative3.fragment;
       return target;
     }
     function equal(uriA, uriB, options) {
@@ -13973,6 +13973,10 @@ function edges(step) {
       }
       push("default", step.default);
       break;
+    case "loop":
+      push("success", step.on_success);
+      push("exhausted", step.on_exhausted);
+      break;
     default:
       break;
   }
@@ -14001,6 +14005,10 @@ function branchLines(step) {
         }
       }
       arrow("default", step.default);
+      break;
+    case "loop":
+      arrow("\u2713 success", step.on_success);
+      arrow("\u2913 exhausted", step.on_exhausted);
       break;
     default:
       break;
@@ -14049,10 +14057,9 @@ function buildCards(flow) {
     if (det) content.push(det);
     const body = bodySteps(step);
     if (body.length > 0) content.push(`body: ${body.join(" \u25B6 ")}`);
-    const exhausted = str(step.on_exhausted);
-    if (exhausted) content.push(`\u2913 exhausted \u25B6 ${exhausted}`);
     for (const line of branchLines(step)) content.push(line);
-    const hasOtherOut = branchLines(step).length > 0 || body.length > 0 || exhausted !== void 0;
+    const markedTerminal = str(step.terminal_status);
+    const hasOtherOut = branchLines(step).length > 0 || body.length > 0 || markedTerminal !== void 0;
     const nextTarget = str(step.next);
     let fallsThrough = false;
     if (nextTarget !== void 0) {
@@ -14064,6 +14071,8 @@ function buildCards(flow) {
     } else if (!hasOtherOut) {
       if (hasNextCard) fallsThrough = true;
       else content.push("\u25A0 end");
+    } else if (markedTerminal) {
+      content.push(`\u25A0 ${markedTerminal}`);
     }
     return { id, kindLabel: kindLabel(kind), body: content, fallsThrough: fallsThrough && hasNextCard };
   });
@@ -14108,8 +14117,10 @@ function mermaidLabel(step) {
   const id = str(step.id) ?? "?";
   const kind = kindLabel(str(step.kind) ?? "?");
   const det = detail(step);
+  const terminal = str(step.terminal_status);
   const text = det ? `${id}<br/>${kind}: ${det}` : `${id}<br/>${kind}`;
-  return text.replace(/"/g, "'");
+  const withTerminal = terminal ? `${text}<br/>terminal: ${terminal}` : text;
+  return withTerminal.replace(/"/g, "'");
 }
 function mermaidNode(step) {
   const id = str(step.id) ?? "?";
@@ -14147,9 +14158,7 @@ function renderMermaid(playbook) {
       lines.push(`  ${id} -.->|body| ${body[0]}`);
       for (let i = 0; i < body.length - 1; i += 1) lines.push(`  ${body[i]} -.-> ${body[i + 1]}`);
     }
-    const exhausted = str(step.on_exhausted);
-    if (exhausted) lines.push(`  ${id} -->|exhausted| ${exhausted}`);
-    const hasExplicitOut = explicit.length > 0 || body.length > 0 || Boolean(exhausted);
+    const hasExplicitOut = explicit.length > 0 || body.length > 0 || Boolean(str(step.terminal_status));
     const nextStep = flow[index + 1];
     const nextId = str(nextStep?.id);
     if (!hasExplicitOut && nextId && !bodyMembers.has(id)) {
@@ -14204,7 +14213,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.1.5";
+  if (true) return "0.2.0";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -14248,94 +14257,627 @@ function runDiagram(opts) {
 }
 
 // src/commands/gate.ts
+var import_node_fs4 = require("node:fs");
+var import_node_path4 = require("node:path");
+var import_yaml3 = __toESM(require_dist(), 1);
+
+// src/lib/playbook-validate.ts
 var import_node_fs3 = require("node:fs");
 var import_node_path3 = require("node:path");
-var GateError = class extends Error {
+var import_ajv = __toESM(require_ajv(), 1);
+var import_yaml2 = __toESM(require_dist(), 1);
+var SCHEMA_FILE = {
+  playbook: "playbook.schema.json",
+  run: "run.schema.json",
+  "review-report": "review-report.schema.json",
+  "test-result": "test-result.schema.json"
 };
-var SUPPORTED_CONDITIONS = ["no_blocking_issues"];
-var DEFAULT_REPORT = (0, import_node_path3.join)("artifacts", "review-report.json");
-function resolveRunDir(repoRoot, cwd, run) {
-  const candidates = (0, import_node_path3.isAbsolute)(run) ? [run] : [(0, import_node_path3.join)(repoRoot, ".fadeno", "runs", run), (0, import_node_path3.resolve)(cwd, run)];
-  for (const candidate of candidates) {
-    const dir = candidate.endsWith("run.yaml") ? candidate.slice(0, -"run.yaml".length) : candidate;
-    if ((0, import_node_fs3.existsSync)((0, import_node_path3.join)(dir, "run.yaml"))) return dir;
+var SINGLE_REF_FIELDS = [
+  "next",
+  "on_pass",
+  "on_fail",
+  "on_approve",
+  "on_reject",
+  "on_success",
+  "on_exhausted",
+  "default"
+];
+var OUTGOING_FIELDS = SINGLE_REF_FIELDS;
+var LOOP_BODY_CONTROL_FIELDS = [...OUTGOING_FIELDS, "routes"];
+var CONDITION_ARTIFACTS = {
+  no_blocking_issues: ["ReviewReport"],
+  tests_pass: ["TestResult"]
+};
+var SchemaSet = class {
+  cache = /* @__PURE__ */ new Map();
+  ajv;
+  schemasDir;
+  constructor(schemasDir) {
+    this.schemasDir = schemasDir;
+    this.ajv = new import_ajv.Ajv({ allErrors: true, strict: false });
+    this.ajv.addFormat("date-time", (value) => !Number.isNaN(Date.parse(value)));
   }
-  throw new GateError(`No run found for "${run}" (looked for run.yaml under .fadeno/runs).`);
+  has(kind) {
+    return (0, import_node_fs3.existsSync)((0, import_node_path3.join)(this.schemasDir, SCHEMA_FILE[kind]));
+  }
+  get(kind) {
+    const cached = this.cache.get(kind);
+    if (cached) return cached;
+    const path = (0, import_node_path3.join)(this.schemasDir, SCHEMA_FILE[kind]);
+    if (!(0, import_node_fs3.existsSync)(path)) throw new Error(`Missing schema: ${path}`);
+    const validate = this.ajv.compile(JSON.parse((0, import_node_fs3.readFileSync)(path, "utf8")));
+    this.cache.set(kind, validate);
+    return validate;
+  }
+};
+function formatAjvError(err) {
+  const detail2 = err.message ?? "is invalid";
+  if (err.keyword === "additionalProperties") {
+    const prop = err.params.additionalProperty;
+    return `unknown property "${prop}"`;
+  }
+  if (err.keyword === "enum") {
+    const allowed = err.params.allowedValues;
+    return `${detail2}: ${JSON.stringify(allowed)}`;
+  }
+  return detail2;
 }
-function collectReports(parsed) {
-  const reports = Array.isArray(parsed) ? parsed : [parsed];
-  return reports.map((report) => {
-    const issues = report.issues;
-    if (!Array.isArray(issues)) {
-      throw new GateError("Review report is malformed: expected an `issues` array.");
+function schemaIssues(file, validate, doc) {
+  if (validate(doc)) return [];
+  return (validate.errors ?? []).map((err) => ({
+    file,
+    path: err.instancePath || "/",
+    message: formatAjvError(err),
+    severity: "error"
+  }));
+}
+function schemaErrorMessages(validate) {
+  return (validate.errors ?? []).map(formatAjvError);
+}
+function baseArtifact(name) {
+  return name.replace(/\[\]$/, "");
+}
+function referenceIntegrity(playbook, file) {
+  const issues = [];
+  const flow = playbook.flow;
+  if (!Array.isArray(flow)) return issues;
+  const ids = /* @__PURE__ */ new Set();
+  const seen = /* @__PURE__ */ new Set();
+  for (const step of flow) {
+    if (typeof step?.id !== "string") continue;
+    if (seen.has(step.id)) {
+      issues.push({ file, path: `/flow (id "${step.id}")`, message: "duplicate step id", severity: "error" });
     }
-    return issues;
+    seen.add(step.id);
+    ids.add(step.id);
+  }
+  const err = (path, message) => {
+    issues.push({ file, path, message, severity: "error" });
+  };
+  flow.forEach((rawStep, index) => {
+    const step = rawStep;
+    const base = `/flow/${index}`;
+    const where = typeof step?.id === "string" ? `${base} (id "${step.id}")` : base;
+    for (const field of SINGLE_REF_FIELDS) {
+      const target = step?.[field];
+      if (typeof target === "string" && !ids.has(target)) err(`${where}/${field}`, `references undefined step "${target}"`);
+    }
+    if (Array.isArray(step?.body)) {
+      step.body.forEach((target, bodyIndex) => {
+        if (typeof target === "string" && !ids.has(target)) err(`${where}/body/${bodyIndex}`, `references undefined step "${target}"`);
+      });
+    }
+    if (step?.routes && typeof step.routes === "object" && !Array.isArray(step.routes)) {
+      for (const [label, target] of Object.entries(step.routes)) {
+        if (typeof target === "string" && !ids.has(target)) err(`${where}/routes/${label}`, `references undefined step "${target}"`);
+      }
+    }
   });
+  return issues;
 }
-function runGate(opts) {
-  if (!SUPPORTED_CONDITIONS.includes(opts.condition)) {
-    throw new GateError(
-      `Unsupported condition "${opts.condition}". Supported in v0: ${SUPPORTED_CONDITIONS.join(", ")}.`
-    );
+function stepWhere(step, index) {
+  return `/flow/${index}` + (typeof step.id === "string" ? ` (id "${step.id}")` : "");
+}
+function stringTargets(step) {
+  const targets = [];
+  for (const field of OUTGOING_FIELDS) {
+    if (typeof step[field] === "string") targets.push(step[field]);
   }
-  const condition = opts.condition;
-  const cwd = opts.cwd ?? process.cwd();
-  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const runDir = resolveRunDir(repoRoot, cwd, opts.run);
-  const reportArg = opts.report ?? DEFAULT_REPORT;
-  const reportPath = (0, import_node_path3.isAbsolute)(reportArg) ? reportArg : (0, import_node_path3.join)(runDir, reportArg);
-  if (!(0, import_node_fs3.existsSync)(reportPath)) {
-    throw new GateError(
-      `No review report at ${reportPath}.
-Produce one (conforming to review-report.schema.json) or pass --report <path>.`
-    );
+  if (step.routes && typeof step.routes === "object" && !Array.isArray(step.routes)) {
+    for (const target of Object.values(step.routes)) {
+      if (typeof target === "string") targets.push(target);
+    }
   }
-  let parsed;
-  try {
-    parsed = JSON.parse((0, import_node_fs3.readFileSync)(reportPath, "utf8"));
-  } catch (err) {
-    throw new GateError(`Could not parse review report: ${err.message}`);
+  return targets;
+}
+function hasExplicitOutgoing(step) {
+  if (stringTargets(step).length > 0) return true;
+  return Boolean(step.routes && typeof step.routes === "object" && !Array.isArray(step.routes));
+}
+function cloneSet(values) {
+  return new Set(values);
+}
+function unionInto(target, source) {
+  for (const value of source) target.add(value);
+}
+function sameSet(left, right) {
+  if (left === void 0 || right === void 0) return left === right;
+  if (left.size !== right.size) return false;
+  for (const item of left) if (!right.has(item)) return false;
+  return true;
+}
+function intersection(sets) {
+  if (sets.length === 0) return /* @__PURE__ */ new Set();
+  const result = cloneSet(sets[0]);
+  for (const set of sets.slice(1)) {
+    for (const item of result) if (!set.has(item)) result.delete(item);
   }
-  const blockingTitles = [];
-  for (const issues of collectReports(parsed)) {
-    for (const issue of issues) {
-      if (issue?.severity === "blocking") {
-        blockingTitles.push(typeof issue.title === "string" ? issue.title : "(untitled)");
+  return result;
+}
+function addStepOutput(available, step) {
+  if (typeof step.output === "string") available.add(baseArtifact(step.output));
+}
+function bodyOutputs(loop, byId, visiting = /* @__PURE__ */ new Set()) {
+  const available = /* @__PURE__ */ new Set();
+  const loopId = typeof loop.id === "string" ? loop.id : void 0;
+  if (loopId && visiting.has(loopId)) return available;
+  const nextVisiting = loopId ? new Set(visiting).add(loopId) : visiting;
+  if (!Array.isArray(loop.body)) return available;
+  for (const id of loop.body) {
+    if (typeof id !== "string") continue;
+    const bodyStep = byId.get(id);
+    if (!bodyStep) continue;
+    addStepOutput(available, bodyStep);
+    if (bodyStep.kind === "loop") unionInto(available, bodyOutputs(bodyStep, byId, nextVisiting));
+  }
+  return available;
+}
+function transfer(step, incoming, byId) {
+  const outgoing = cloneSet(incoming);
+  if (step.kind === "loop") unionInto(outgoing, bodyOutputs(step, byId));
+  else addStepOutput(outgoing, step);
+  return outgoing;
+}
+function bodyReachability(id, byId, reachable, visiting = /* @__PURE__ */ new Set()) {
+  if (visiting.has(id)) return;
+  const step = byId.get(id);
+  if (!step) return;
+  reachable.add(id);
+  if (step.kind !== "loop" || !Array.isArray(step.body)) return;
+  const nextVisiting = new Set(visiting).add(id);
+  for (const bodyId of step.body) if (typeof bodyId === "string") bodyReachability(bodyId, byId, reachable, nextVisiting);
+}
+function buildFlowModel(playbook, issues, file) {
+  const flow = Array.isArray(playbook.flow) ? playbook.flow : [];
+  const byId = /* @__PURE__ */ new Map();
+  const indexById = /* @__PURE__ */ new Map();
+  flow.forEach((step, index) => {
+    if (typeof step.id === "string") {
+      byId.set(step.id, step);
+      indexById.set(step.id, index);
+    }
+  });
+  const bodyOwner = /* @__PURE__ */ new Map();
+  flow.forEach((step, index) => {
+    if (step.kind !== "loop" || !Array.isArray(step.body)) return;
+    for (const [bodyIndex, bodyId] of step.body.entries()) {
+      if (typeof bodyId !== "string") continue;
+      const existing = bodyOwner.get(bodyId);
+      if (existing && existing !== step.id) {
+        issues.push({ file, path: `${stepWhere(step, index)}/body/${bodyIndex}`, message: `loop body step "${bodyId}" belongs to multiple loops (already owned by "${existing}")`, severity: "error" });
+      } else if (!existing && typeof step.id === "string") {
+        bodyOwner.set(bodyId, step.id);
+      }
+    }
+  });
+  const contains = (loopId, targetId, seen = /* @__PURE__ */ new Set()) => {
+    if (seen.has(loopId)) return false;
+    const loop = byId.get(loopId);
+    if (!loop || loop.kind !== "loop" || !Array.isArray(loop.body)) return false;
+    const nextSeen = new Set(seen).add(loopId);
+    return loop.body.some((bodyId) => typeof bodyId === "string" && (bodyId === targetId || contains(bodyId, targetId, nextSeen)));
+  };
+  flow.forEach((step, index) => {
+    if (step.kind === "loop" && typeof step.id === "string" && contains(step.id, step.id)) {
+      issues.push({ file, path: `${stepWhere(step, index)}/body`, message: `loop body recursively contains loop "${step.id}"`, severity: "error" });
+    }
+  });
+  const outerIds = flow.filter((step) => typeof step.id === "string" && !bodyOwner.has(step.id)).map((step) => step.id);
+  const outerSet = new Set(outerIds);
+  const nextOuter = (id) => {
+    const position = outerIds.indexOf(id);
+    return position >= 0 ? outerIds[position + 1] : void 0;
+  };
+  const outerEdges = /* @__PURE__ */ new Map();
+  for (const id of outerIds) {
+    const step = byId.get(id);
+    const allTargets = stringTargets(step);
+    for (const target of allTargets) {
+      if (!outerSet.has(target) && bodyOwner.has(target)) {
+        issues.push({ file, path: `${stepWhere(step, indexById.get(id))}`, message: `control-flow edge targets loop-body step "${target}", which is not independently reachable`, severity: "error" });
+      }
+    }
+    const explicitTargets = allTargets.filter((target) => outerSet.has(target));
+    const terminalMarked = typeof step.terminal_status === "string";
+    const targets = explicitTargets.length > 0 || hasExplicitOutgoing(step) ? explicitTargets : terminalMarked ? [] : nextOuter(id) ? [nextOuter(id)] : [];
+    outerEdges.set(id, targets);
+  }
+  const first = flow[0];
+  if (first && typeof first.id === "string" && bodyOwner.has(first.id)) {
+    issues.push({ file, path: "/flow/0", message: `entry step "${first.id}" is a loop-body step and has no outer-flow entry`, severity: "error" });
+  }
+  const reachable = /* @__PURE__ */ new Set();
+  const visitOuter = (id, visiting = /* @__PURE__ */ new Set()) => {
+    if (visiting.has(id) || reachable.has(id)) return;
+    const step = byId.get(id);
+    if (!step) return;
+    reachable.add(id);
+    const nextVisiting = new Set(visiting).add(id);
+    if (step.kind === "loop" && Array.isArray(step.body)) {
+      for (const bodyId of step.body) if (typeof bodyId === "string") bodyReachability(bodyId, byId, reachable);
+    }
+    for (const target of outerEdges.get(id) ?? []) visitOuter(target, nextVisiting);
+  };
+  if (first && typeof first.id === "string" && outerSet.has(first.id)) visitOuter(first.id);
+  for (const id of outerIds) {
+    if (!reachable.has(id)) {
+      const step = byId.get(id);
+      issues.push({ file, path: stepWhere(step, indexById.get(id)), message: `unreachable outer-flow step "${id}"; it is not reached by an explicit edge (possible accidental fallthrough/orphan loop-body definition)`, severity: "error" });
+    }
+  }
+  const predecessorIds = /* @__PURE__ */ new Map();
+  for (const id of outerIds) predecessorIds.set(id, []);
+  for (const [source, targets] of outerEdges) for (const target of targets) predecessorIds.get(target)?.push(source);
+  const incoming = /* @__PURE__ */ new Map();
+  const outgoing = /* @__PURE__ */ new Map();
+  const entryId = first && typeof first.id === "string" ? first.id : void 0;
+  for (let iteration = 0; iteration < 100; iteration += 1) {
+    let changed = false;
+    for (const id of outerIds) {
+      if (!reachable.has(id)) continue;
+      const predecessors = predecessorIds.get(id) ?? [];
+      let nextIncoming;
+      if (id === entryId) nextIncoming = /* @__PURE__ */ new Set();
+      else if (predecessors.length > 0 && predecessors.every((pred) => outgoing.has(pred))) {
+        nextIncoming = intersection(predecessors.map((pred) => outgoing.get(pred)));
+      }
+      if (!nextIncoming) continue;
+      const nextOutgoing = transfer(byId.get(id), nextIncoming, byId);
+      if (!sameSet(incoming.get(id), nextIncoming) || !sameSet(outgoing.get(id), nextOutgoing)) changed = true;
+      incoming.set(id, nextIncoming);
+      outgoing.set(id, nextOutgoing);
+    }
+    if (!changed) break;
+  }
+  return { flow, byId, indexById, bodyOwner, outerIds, outerEdges, incoming, reachable };
+}
+function conditionIssues(step, index, available, producedByBody, file, issues) {
+  if (step.kind !== "gate" && step.kind !== "loop") return;
+  const where = stepWhere(step, index);
+  const field = step.kind === "gate" ? "condition" : "until";
+  const condition = typeof step[field] === "string" ? step[field] : void 0;
+  if (!condition) return;
+  const accepted = CONDITION_ARTIFACTS[condition];
+  if (!accepted) issues.push({ file, path: `${where}/${field}`, message: `unsupported condition "${condition}"`, severity: "error" });
+  const inputs = Array.isArray(step.input) ? step.input.filter((input2) => typeof input2 === "string") : [];
+  if (inputs.length !== 1) {
+    issues.push({ file, path: `${where}/input`, message: `${step.kind} condition must declare exactly one input artifact in Milestone 1`, severity: "error" });
+    return;
+  }
+  const input = inputs[0];
+  const logical = baseArtifact(input);
+  if (accepted && !accepted.includes(logical)) issues.push({ file, path: `${where}/input/0`, message: `condition "${condition}" accepts ${accepted.join(" or ")}, not "${input}"`, severity: "error" });
+  if (!available.has(logical) && !producedByBody.has(logical)) issues.push({ file, path: `${where}/input/0`, message: `condition input artifact "${input}" is not definitely available on this path`, severity: "error" });
+}
+function flowAndArtifactChecks(playbook, file) {
+  const issues = [];
+  const model = buildFlowModel(playbook, issues, file);
+  const { byId, incoming, bodyOwner } = model;
+  for (const [bodyId, ownerId] of bodyOwner) {
+    if (!model.reachable.has(bodyId)) {
+      const bodyStep = byId.get(bodyId);
+      if (bodyStep) {
+        issues.push({
+          file,
+          path: stepWhere(bodyStep, model.indexById.get(bodyId)),
+          message: `loop-body step "${bodyId}" is not reachable through its owning loop "${ownerId}"`,
+          severity: "error"
+        });
       }
     }
   }
+  for (const [id, step] of byId) {
+    const index = model.indexById.get(id);
+    const where = stepWhere(step, index);
+    if (bodyOwner.has(id)) {
+      for (const field of LOOP_BODY_CONTROL_FIELDS) {
+        if (step[field] !== void 0) {
+          issues.push({
+            file,
+            path: `${where}/${field}`,
+            message: `loop-body step "${id}" cannot declare explicit control flow "${field}" in Milestone 1; body steps execute in listed order`,
+            severity: "error"
+          });
+        }
+      }
+      if (step.kind === "gate" || typeof step.condition === "string" || typeof step.until === "string") {
+        issues.push({
+          file,
+          path: `${where}/kind`,
+          message: `loop-body step "${id}" cannot be a gate or declare a condition in Milestone 1; loop bodies are linear`,
+          severity: "error"
+        });
+      }
+      if (step.kind === "loop") {
+        issues.push({
+          file,
+          path: `${where}/kind`,
+          message: `loop-body step "${id}" cannot be a nested loop in Milestone 1`,
+          severity: "error"
+        });
+      }
+      if (step.terminal_status !== void 0) issues.push({ file, path: `${where}/terminal_status`, message: "terminal_status is not allowed on a loop-body step", severity: "error" });
+      continue;
+    }
+    if (step.terminal_status !== void 0 && hasExplicitOutgoing(step)) {
+      issues.push({ file, path: `${where}/terminal_status`, message: "terminal_status is only valid on a terminal step; this step has an outgoing control-flow edge", severity: "error" });
+    } else if (step.terminal_status === void 0 && (model.outerEdges.get(id)?.length ?? 0) === 0) {
+      issues.push({ file, path: where, message: "terminal step is missing terminal_status; executor may default to completed", severity: "warning" });
+    }
+  }
+  for (const id of model.outerIds) {
+    if (!model.reachable.has(id)) continue;
+    const step = byId.get(id);
+    const index = model.indexById.get(id);
+    const available = incoming.get(id);
+    if (!available) continue;
+    const conditionInputIndex = (step.kind === "gate" || step.kind === "loop") && Array.isArray(step.input) && step.input.length === 1 ? 0 : -1;
+    if (Array.isArray(step.input)) {
+      for (const [inputIndex, input] of step.input.entries()) {
+        if (inputIndex === conditionInputIndex || typeof input !== "string") continue;
+        if (!available.has(baseArtifact(input))) issues.push({ file, path: `${stepWhere(step, index)}/input/${inputIndex}`, message: `input artifact "${input}" is not definitely available on every incoming path`, severity: "error" });
+      }
+    }
+    const producedByBody = step.kind === "loop" ? bodyOutputs(step, byId) : /* @__PURE__ */ new Set();
+    conditionIssues(step, index, available, producedByBody, file, issues);
+    if (step.kind === "loop" && Array.isArray(step.body)) {
+      const bodyAvailable = cloneSet(available);
+      for (const bodyId of step.body) {
+        if (typeof bodyId !== "string") continue;
+        const bodyStep = byId.get(bodyId);
+        if (!bodyStep) continue;
+        const bodyIndex = model.indexById.get(bodyId);
+        if (Array.isArray(bodyStep.input)) {
+          for (const [inputIndex, input] of bodyStep.input.entries()) {
+            if (typeof input === "string" && !bodyAvailable.has(baseArtifact(input))) issues.push({ file, path: `${stepWhere(bodyStep, bodyIndex)}/input/${inputIndex}`, message: `loop-body input artifact "${input}" is not definitely available when "${step.id}" runs`, severity: "error" });
+          }
+        }
+        if (bodyStep.kind === "loop") unionInto(bodyAvailable, bodyOutputs(bodyStep, byId));
+        addStepOutput(bodyAvailable, bodyStep);
+      }
+    }
+  }
+  return issues;
+}
+function semanticChecks(playbook, file) {
+  const issues = [];
+  const roles = playbook.roles && typeof playbook.roles === "object" ? new Set(Object.keys(playbook.roles)) : /* @__PURE__ */ new Set();
+  const flow = Array.isArray(playbook.flow) ? playbook.flow : [];
+  const usedRoles = /* @__PURE__ */ new Set();
+  flow.forEach((step, index) => {
+    const where = stepWhere(step, index);
+    const actorRefs = [];
+    if (typeof step.actor === "string") actorRefs.push(["actor", step.actor]);
+    if (Array.isArray(step.actors)) step.actors.forEach((actor, actorIndex) => {
+      if (typeof actor === "string") actorRefs.push([`actors/${actorIndex}`, actor]);
+    });
+    for (const [field, role] of actorRefs) {
+      usedRoles.add(role);
+      if (!roles.has(role)) issues.push({ file, path: `${where}/${field}`, message: `actor "${role}" is not a declared role`, severity: "error" });
+    }
+    if (Array.isArray(step.over)) {
+      for (const item of step.over) if (typeof item === "string") usedRoles.add(item);
+    }
+  });
+  for (const role of roles) if (!usedRoles.has(role)) issues.push({ file, path: `/roles/${role}`, message: `role "${role}" is declared but never used`, severity: "warning" });
+  issues.push(...flowAndArtifactChecks(playbook, file));
+  return issues;
+}
+function isPlaybookShape(doc) {
+  return doc.kind === "AgentPlaybook" || "flow" in doc && "roles" in doc;
+}
+function isRunShape(doc) {
+  return "run_id" in doc || "status" in doc && "started_at" in doc;
+}
+function isReviewReportShape(doc) {
+  return Boolean(doc && typeof doc === "object" && !Array.isArray(doc) && "reviewer" in doc && "issues" in doc && "verdict" in doc);
+}
+function isTestResultShape(doc) {
+  return Boolean(doc && typeof doc === "object" && !Array.isArray(doc) && "tool" in doc && "command" in doc && "status" in doc && "exit_code" in doc && "summary" in doc);
+}
+function detectKind(file, doc) {
+  if (doc && typeof doc === "object" && !Array.isArray(doc) && isPlaybookShape(doc)) return "playbook";
+  if (isReviewReportShape(doc)) return "review-report";
+  if (Array.isArray(doc) && doc.length > 0 && doc.every((item) => isReviewReportShape(item))) return "review-report";
+  if (isTestResultShape(doc)) return "test-result";
+  if (doc && typeof doc === "object" && !Array.isArray(doc) && isRunShape(doc)) return "run";
+  if (file.includes(`${(0, import_node_path3.join)(".fadeno", "playbooks")}`)) return "playbook";
+  if (file.includes(`${(0, import_node_path3.join)(".fadeno", "runs")}`)) return "run";
+  if (file.endsWith("review-report.json")) return "review-report";
+  if (file.endsWith("test-result.json")) return "test-result";
+  return null;
+}
+function validateFile(file, schemas, forcedKind) {
+  const fail = (kind2, message) => ({ file, kind: kind2, ok: false, issues: [{ file, path: "", message, severity: "error" }] });
+  let raw;
+  try {
+    raw = (0, import_node_fs3.readFileSync)(file, "utf8");
+  } catch (err) {
+    return fail(forcedKind ?? "playbook", `cannot read file: ${err.message}`);
+  }
+  let doc;
+  try {
+    doc = (0, import_yaml2.parse)(raw);
+  } catch (err) {
+    return fail(forcedKind ?? "playbook", `invalid YAML/JSON: ${err.message}`);
+  }
+  if (doc === null || typeof doc !== "object") return fail(forcedKind ?? "playbook", "document must be a mapping or a supported artifact array");
+  const record = !Array.isArray(doc) ? doc : void 0;
+  const kind = forcedKind ?? detectKind(file, doc);
+  if (!kind) return fail("playbook", "could not determine document type (playbook | run | review-report | test-result); pass --schema to force it");
+  let validate;
+  try {
+    validate = schemas.get(kind);
+  } catch (err) {
+    return fail(kind, err.message);
+  }
+  const issues = schemaIssues(file, validate, doc);
+  if (kind === "playbook" && record) {
+    issues.push(...referenceIntegrity(record, file));
+    if (issues.length === 0) issues.push(...semanticChecks(record, file));
+  }
+  return { file, kind, ok: issues.every((issue) => issue.severity !== "error"), issues };
+}
+
+// src/commands/gate.ts
+var GateError = class extends Error {
+};
+var SUPPORTED_CONDITIONS = ["no_blocking_issues", "tests_pass"];
+function reviewReports(document) {
+  return Array.isArray(document) ? document : [document];
+}
+var CONDITION_REGISTRY = {
+  no_blocking_issues: {
+    acceptedArtifacts: ["ReviewReport", "ReviewReport[]"],
+    schema: "review-report",
+    evaluate(document) {
+      const blockingTitles = [];
+      for (const report of reviewReports(document)) {
+        for (const issue of report.issues) {
+          if (issue.severity === "blocking") blockingTitles.push(issue.title);
+        }
+      }
+      return {
+        pass: blockingTitles.length === 0,
+        details: { blockingCount: blockingTitles.length, blockingTitles }
+      };
+    }
+  },
+  tests_pass: {
+    acceptedArtifacts: ["TestResult"],
+    schema: "test-result",
+    evaluate(document) {
+      const result = document;
+      const pass = result.status === "passed" && result.exit_code === 0;
+      return {
+        pass,
+        details: { status: result.status, exitCode: result.exit_code }
+      };
+    }
+  }
+};
+var DEFAULT_ARTIFACTS = {
+  no_blocking_issues: (0, import_node_path4.join)("artifacts", "review-report.json"),
+  tests_pass: (0, import_node_path4.join)("artifacts", "test-result.json")
+};
+function resolveRunDir(repoRoot, cwd, run) {
+  const candidates = (0, import_node_path4.isAbsolute)(run) ? [run] : [(0, import_node_path4.join)(repoRoot, ".fadeno", "runs", run), (0, import_node_path4.resolve)(cwd, run)];
+  for (const candidate of candidates) {
+    const dir = candidate.endsWith("run.yaml") ? candidate.slice(0, -"run.yaml".length) : candidate;
+    if ((0, import_node_fs4.existsSync)((0, import_node_path4.join)(dir, "run.yaml"))) return dir;
+  }
+  throw new GateError(`No run found for "${run}" (looked for run.yaml under .fadeno/runs).`);
+}
+function appendGateEvent(runDir, condition, artifact, pass, now) {
+  let step = null;
+  try {
+    const run = (0, import_yaml3.parse)((0, import_node_fs4.readFileSync)((0, import_node_path4.join)(runDir, "run.yaml"), "utf8"));
+    if (typeof run.current_step === "string") step = run.current_step;
+  } catch {
+  }
+  const event = {
+    type: "gate_evaluated",
+    step,
+    condition,
+    artifact,
+    result: pass ? "pass" : "fail",
+    timestamp: now.toISOString()
+  };
+  (0, import_node_fs4.appendFileSync)((0, import_node_path4.join)(runDir, "events.jsonl"), `${JSON.stringify(event)}
+`, "utf8");
+}
+function runGate(opts) {
+  if (!SUPPORTED_CONDITIONS.includes(opts.condition)) {
+    throw new GateError(`Unsupported condition "${opts.condition}". Supported: ${SUPPORTED_CONDITIONS.join(", ")}.`);
+  }
+  if (opts.artifact && opts.report) throw new GateError("Pass only one of --artifact or deprecated --report.");
+  const condition = opts.condition;
+  const definition = CONDITION_REGISTRY[condition];
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const runDir = resolveRunDir(repoRoot, cwd, opts.run);
+  const artifactArg = opts.artifact ?? opts.report ?? DEFAULT_ARTIFACTS[condition];
+  const artifactPath = (0, import_node_path4.isAbsolute)(artifactArg) ? artifactArg : (0, import_node_path4.join)(runDir, artifactArg);
+  if (!(0, import_node_fs4.existsSync)(artifactPath)) {
+    throw new GateError(`No artifact at ${artifactPath}. Produce a schema-valid ${definition.acceptedArtifacts.join(" or ")} artifact or pass --artifact <path>.`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse((0, import_node_fs4.readFileSync)(artifactPath, "utf8"));
+  } catch (err) {
+    throw new GateError(`Could not parse artifact ${artifactPath}: ${err.message}`);
+  }
+  let validate;
+  try {
+    validate = new SchemaSet((0, import_node_path4.join)(repoRoot, ".fadeno", "schemas")).get(definition.schema);
+  } catch (err) {
+    throw new GateError(err.message);
+  }
+  if (!validate(parsed)) {
+    const details = schemaErrorMessages(validate).join("; ");
+    throw new GateError(`Artifact ${artifactPath} is invalid for ${condition}: ${details}`);
+  }
+  const evaluation = definition.evaluate(parsed);
+  const now = opts.now ?? /* @__PURE__ */ new Date();
+  const artifactForEvent = (0, import_node_path4.isAbsolute)(artifactArg) ? (0, import_node_path4.relative)(runDir, artifactArg) : artifactArg;
+  appendGateEvent(runDir, condition, artifactForEvent, evaluation.pass, now);
+  const blockingTitles = Array.isArray(evaluation.details.blockingTitles) ? evaluation.details.blockingTitles.filter((title) => typeof title === "string") : [];
+  const blockingCount = typeof evaluation.details.blockingCount === "number" ? evaluation.details.blockingCount : blockingTitles.length;
   return {
     condition,
-    pass: blockingTitles.length === 0,
-    reportPath,
-    blockingCount: blockingTitles.length,
-    blockingTitles
+    pass: evaluation.pass,
+    result: evaluation.pass ? "pass" : "fail",
+    artifactPath,
+    reportPath: artifactPath,
+    blockingCount,
+    blockingTitles,
+    details: evaluation.details
   };
 }
 
 // src/commands/init.ts
-var import_node_fs5 = require("node:fs");
-var import_node_path5 = require("node:path");
+var import_node_fs6 = require("node:fs");
+var import_node_path6 = require("node:path");
 
 // src/lib/fsutil.ts
-var import_node_fs4 = require("node:fs");
-var import_node_path4 = require("node:path");
+var import_node_fs5 = require("node:fs");
+var import_node_path5 = require("node:path");
 function emitFile(absPath, content, force) {
-  const exists = (0, import_node_fs4.existsSync)(absPath);
+  const exists = (0, import_node_fs5.existsSync)(absPath);
   if (exists && !force) return "skipped";
-  (0, import_node_fs4.mkdirSync)((0, import_node_path4.dirname)(absPath), { recursive: true });
-  (0, import_node_fs4.writeFileSync)(absPath, content, "utf8");
+  (0, import_node_fs5.mkdirSync)((0, import_node_path5.dirname)(absPath), { recursive: true });
+  (0, import_node_fs5.writeFileSync)(absPath, content, "utf8");
   return exists ? "overwritten" : "created";
 }
 function copyTree(srcDir, destDir, force, results) {
-  for (const entry of (0, import_node_fs4.readdirSync)(srcDir, { withFileTypes: true })) {
-    const srcPath = (0, import_node_path4.join)(srcDir, entry.name);
+  for (const entry of (0, import_node_fs5.readdirSync)(srcDir, { withFileTypes: true })) {
+    const srcPath = (0, import_node_path5.join)(srcDir, entry.name);
     const destName = entry.name === "gitkeep" ? ".gitkeep" : entry.name;
-    const destPath = (0, import_node_path4.join)(destDir, destName);
+    const destPath = (0, import_node_path5.join)(destDir, destName);
     if (entry.isDirectory()) {
       copyTree(srcPath, destPath, force, results);
     } else {
-      const content = (0, import_node_fs4.readFileSync)(srcPath, "utf8");
+      const content = (0, import_node_fs5.readFileSync)(srcPath, "utf8");
       results.push({ path: destPath, status: emitFile(destPath, content, force) });
     }
   }
@@ -14352,13 +14894,13 @@ ${section.trim()}
 
 ${FADENO_END}
 `;
-  if (!(0, import_node_fs4.existsSync)(absPath)) {
-    (0, import_node_fs4.mkdirSync)((0, import_node_path4.dirname)(absPath), { recursive: true });
-    (0, import_node_fs4.writeFileSync)(absPath, block, "utf8");
+  if (!(0, import_node_fs5.existsSync)(absPath)) {
+    (0, import_node_fs5.mkdirSync)((0, import_node_path5.dirname)(absPath), { recursive: true });
+    (0, import_node_fs5.writeFileSync)(absPath, block, "utf8");
     results.push({ path: absPath, status: "created" });
     return;
   }
-  const existing = (0, import_node_fs4.readFileSync)(absPath, "utf8");
+  const existing = (0, import_node_fs5.readFileSync)(absPath, "utf8");
   const hasBlock = existing.includes(FADENO_BEGIN);
   if (hasBlock) {
     if (!force) {
@@ -14368,12 +14910,12 @@ ${FADENO_END}
     const blockRe = new RegExp(
       `${escapeRegExp(FADENO_BEGIN)}[\\s\\S]*?${escapeRegExp(FADENO_END)}\\n?`
     );
-    (0, import_node_fs4.writeFileSync)(absPath, existing.replace(blockRe, block), "utf8");
+    (0, import_node_fs5.writeFileSync)(absPath, existing.replace(blockRe, block), "utf8");
     results.push({ path: absPath, status: "overwritten" });
     return;
   }
   const separator = existing.endsWith("\n") ? "\n" : "\n\n";
-  (0, import_node_fs4.writeFileSync)(absPath, existing + separator + block, "utf8");
+  (0, import_node_fs5.writeFileSync)(absPath, existing + separator + block, "utf8");
   results.push({ path: absPath, status: "appended" });
 }
 
@@ -14384,30 +14926,30 @@ function runInit(opts) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const force = opts.force ?? false;
   const results = [];
-  copyTree((0, import_node_path5.join)(tpl, "common", "fadeno"), (0, import_node_path5.join)(repoRoot, ".fadeno"), force, results);
+  copyTree((0, import_node_path6.join)(tpl, "common", "fadeno"), (0, import_node_path6.join)(repoRoot, ".fadeno"), force, results);
   if (!opts.dataOnly) {
-    const skillsBase = opts.target === "codex" ? (0, import_node_path5.join)(repoRoot, ".agents", "skills") : (0, import_node_path5.join)(repoRoot, ".claude", "skills");
+    const skillsBase = opts.target === "codex" ? (0, import_node_path6.join)(repoRoot, ".agents", "skills") : (0, import_node_path6.join)(repoRoot, ".claude", "skills");
     for (const skill of SKILLS) {
-      const skillSrc = (0, import_node_path5.join)(tpl, "common", "skills", skill);
-      const skillDest = (0, import_node_path5.join)(skillsBase, skill);
-      const skillMd = (0, import_node_fs5.readFileSync)((0, import_node_path5.join)(skillSrc, "SKILL.md"), "utf8");
-      const skillMdPath = (0, import_node_path5.join)(skillDest, "SKILL.md");
+      const skillSrc = (0, import_node_path6.join)(tpl, "common", "skills", skill);
+      const skillDest = (0, import_node_path6.join)(skillsBase, skill);
+      const skillMd = (0, import_node_fs6.readFileSync)((0, import_node_path6.join)(skillSrc, "SKILL.md"), "utf8");
+      const skillMdPath = (0, import_node_path6.join)(skillDest, "SKILL.md");
       results.push({ path: skillMdPath, status: emitFile(skillMdPath, skillMd, force) });
-      copyTree((0, import_node_path5.join)(skillSrc, "references"), (0, import_node_path5.join)(skillDest, "references"), force, results);
+      copyTree((0, import_node_path6.join)(skillSrc, "references"), (0, import_node_path6.join)(skillDest, "references"), force, results);
       if (opts.target === "codex") {
-        const policy = (0, import_node_fs5.readFileSync)((0, import_node_path5.join)(tpl, "codex", "openai", `${skill}.yaml`), "utf8");
-        const policyPath = (0, import_node_path5.join)(skillDest, "agents", "openai.yaml");
+        const policy = (0, import_node_fs6.readFileSync)((0, import_node_path6.join)(tpl, "codex", "openai", `${skill}.yaml`), "utf8");
+        const policyPath = (0, import_node_path6.join)(skillDest, "agents", "openai.yaml");
         results.push({ path: policyPath, status: emitFile(policyPath, policy, force) });
       }
     }
     if (opts.target === "codex") {
-      copyTree((0, import_node_path5.join)(tpl, "codex", "codex-agents"), (0, import_node_path5.join)(repoRoot, ".codex", "agents"), force, results);
+      copyTree((0, import_node_path6.join)(tpl, "codex", "codex-agents"), (0, import_node_path6.join)(repoRoot, ".codex", "agents"), force, results);
     } else {
-      copyTree((0, import_node_path5.join)(tpl, "claude", "claude-agents"), (0, import_node_path5.join)(repoRoot, ".claude", "agents"), force, results);
+      copyTree((0, import_node_path6.join)(tpl, "claude", "claude-agents"), (0, import_node_path6.join)(repoRoot, ".claude", "agents"), force, results);
     }
     const bootstrapName = opts.target === "codex" ? "AGENTS.md" : "CLAUDE.md";
-    const bootstrapBody = (0, import_node_fs5.readFileSync)((0, import_node_path5.join)(tpl, opts.target, bootstrapName), "utf8");
-    emitBootstrap((0, import_node_path5.join)(repoRoot, bootstrapName), bootstrapBody, force, results);
+    const bootstrapBody = (0, import_node_fs6.readFileSync)((0, import_node_path6.join)(tpl, opts.target, bootstrapName), "utf8");
+    emitBootstrap((0, import_node_path6.join)(repoRoot, bootstrapName), bootstrapBody, force, results);
   }
   if (opts.withHooks) emitHooks(tpl, repoRoot, opts.target, force, results);
   if (opts.target === "claude") emitClaudePermissions(repoRoot, results);
@@ -14415,12 +14957,12 @@ function runInit(opts) {
 }
 var FADENO_BASH_RULE = "Bash(fadeno:*)";
 function emitClaudePermissions(repoRoot, results) {
-  const settingsPath = (0, import_node_path5.join)(repoRoot, ".claude", "settings.local.json");
-  const existed = (0, import_node_fs5.existsSync)(settingsPath);
+  const settingsPath = (0, import_node_path6.join)(repoRoot, ".claude", "settings.local.json");
+  const existed = (0, import_node_fs6.existsSync)(settingsPath);
   let data = {};
   if (existed) {
     try {
-      const parsed = JSON.parse((0, import_node_fs5.readFileSync)(settingsPath, "utf8"));
+      const parsed = JSON.parse((0, import_node_fs6.readFileSync)(settingsPath, "utf8"));
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         results.push({ path: settingsPath, status: "skipped" });
         return;
@@ -14440,51 +14982,51 @@ function emitClaudePermissions(repoRoot, results) {
   allow.push(FADENO_BASH_RULE);
   perms.allow = allow;
   data.permissions = perms;
-  (0, import_node_fs5.mkdirSync)((0, import_node_path5.dirname)(settingsPath), { recursive: true });
-  (0, import_node_fs5.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
+  (0, import_node_fs6.mkdirSync)((0, import_node_path6.dirname)(settingsPath), { recursive: true });
+  (0, import_node_fs6.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
 `, "utf8");
   results.push({ path: settingsPath, status: existed ? "appended" : "created" });
   ensureGitignored(repoRoot, ".claude/settings.local.json", results);
 }
 function ensureGitignored(repoRoot, pattern, results) {
-  const gitignorePath = (0, import_node_path5.join)(repoRoot, ".gitignore");
-  const existed = (0, import_node_fs5.existsSync)(gitignorePath);
-  const content = existed ? (0, import_node_fs5.readFileSync)(gitignorePath, "utf8") : "";
+  const gitignorePath = (0, import_node_path6.join)(repoRoot, ".gitignore");
+  const existed = (0, import_node_fs6.existsSync)(gitignorePath);
+  const content = existed ? (0, import_node_fs6.readFileSync)(gitignorePath, "utf8") : "";
   const lines = content.split(/\r?\n/).map((line) => line.trim());
   if (lines.includes(pattern) || lines.includes(".claude") || lines.includes(".claude/")) return;
   const sep = content.length === 0 || content.endsWith("\n") ? "" : "\n";
   const block = `${sep}# Fadeno: per-user local Claude settings (not committed)
 ${pattern}
 `;
-  (0, import_node_fs5.writeFileSync)(gitignorePath, content + block, "utf8");
+  (0, import_node_fs6.writeFileSync)(gitignorePath, content + block, "utf8");
   results.push({ path: gitignorePath, status: existed ? "appended" : "created" });
 }
 function emitHooks(tpl, repoRoot, target, force, results) {
   const hookFile = (srcRel, destRel, executable = false) => {
-    const content = (0, import_node_fs5.readFileSync)((0, import_node_path5.join)(tpl, srcRel), "utf8");
-    const dest = (0, import_node_path5.join)(repoRoot, destRel);
+    const content = (0, import_node_fs6.readFileSync)((0, import_node_path6.join)(tpl, srcRel), "utf8");
+    const dest = (0, import_node_path6.join)(repoRoot, destRel);
     const status = emitFile(dest, content, force);
-    if (executable && (status === "created" || status === "overwritten")) (0, import_node_fs5.chmodSync)(dest, 493);
+    if (executable && (status === "created" || status === "overwritten")) (0, import_node_fs6.chmodSync)(dest, 493);
     results.push({ path: dest, status });
   };
-  hookFile((0, import_node_path5.join)("common", "hooks", "pre-commit"), (0, import_node_path5.join)(".fadeno", "hooks", "pre-commit"), true);
-  hookFile((0, import_node_path5.join)("common", "hooks", "README.md"), (0, import_node_path5.join)(".fadeno", "hooks", "README.md"));
+  hookFile((0, import_node_path6.join)("common", "hooks", "pre-commit"), (0, import_node_path6.join)(".fadeno", "hooks", "pre-commit"), true);
+  hookFile((0, import_node_path6.join)("common", "hooks", "README.md"), (0, import_node_path6.join)(".fadeno", "hooks", "README.md"));
   hookFile(
-    (0, import_node_path5.join)("common", "hooks", "fadeno-guard.yml"),
-    (0, import_node_path5.join)(".github", "workflows", "fadeno-guard.yml")
+    (0, import_node_path6.join)("common", "hooks", "fadeno-guard.yml"),
+    (0, import_node_path6.join)(".github", "workflows", "fadeno-guard.yml")
   );
   if (target === "claude") {
     hookFile(
-      (0, import_node_path5.join)("claude", "hooks", "settings.example.json"),
-      (0, import_node_path5.join)(".fadeno", "hooks", "claude-settings.example.json")
+      (0, import_node_path6.join)("claude", "hooks", "settings.example.json"),
+      (0, import_node_path6.join)(".fadeno", "hooks", "claude-settings.example.json")
     );
   }
 }
 
 // src/commands/new-run.ts
-var import_node_fs6 = require("node:fs");
-var import_node_path6 = require("node:path");
-var import_yaml2 = __toESM(require_dist(), 1);
+var import_node_fs7 = require("node:fs");
+var import_node_path7 = require("node:path");
+var import_yaml4 = __toESM(require_dist(), 1);
 var NewRunError = class extends Error {
 };
 function slugify(text, maxLen = 40) {
@@ -14501,35 +15043,35 @@ function slugify(text, maxLen = 40) {
 function resolvePlaybook(playbooksDir, name) {
   const stripped = name.replace(/\.(ya?ml)$/i, "");
   for (const candidate of [`${stripped}.yaml`, `${stripped}.yml`]) {
-    if ((0, import_node_fs6.existsSync)((0, import_node_path6.join)(playbooksDir, candidate))) return stripped;
+    if ((0, import_node_fs7.existsSync)((0, import_node_path7.join)(playbooksDir, candidate))) return stripped;
   }
   throw new NewRunError(`Playbook "${stripped}" not found in ${playbooksDir}.`);
 }
 function runNewRun(opts) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const fadenoDir = (0, import_node_path6.join)(repoRoot, ".fadeno");
-  if (!(0, import_node_fs6.existsSync)(fadenoDir)) {
+  const fadenoDir = (0, import_node_path7.join)(repoRoot, ".fadeno");
+  if (!(0, import_node_fs7.existsSync)(fadenoDir)) {
     throw new NewRunError(
       `No .fadeno directory at ${repoRoot}. Run \`fadeno init\` first.`
     );
   }
-  const playbook = resolvePlaybook((0, import_node_path6.join)(fadenoDir, "playbooks"), opts.playbook);
+  const playbook = resolvePlaybook((0, import_node_path7.join)(fadenoDir, "playbooks"), opts.playbook);
   const now = opts.now ?? /* @__PURE__ */ new Date();
   const iso = now.toISOString();
   const pad = (n) => String(n).padStart(2, "0");
   const datePart = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
   const timePart = `${pad(now.getHours())}${pad(now.getMinutes())}`;
   const slug = slugify(opts.task);
-  const runsDir = (0, import_node_path6.join)(fadenoDir, "runs");
+  const runsDir = (0, import_node_path7.join)(fadenoDir, "runs");
   let runId = `${datePart}-${timePart}-${slug}`;
-  let runDir = (0, import_node_path6.join)(runsDir, runId);
-  for (let n = 2; (0, import_node_fs6.existsSync)(runDir); n += 1) {
+  let runDir = (0, import_node_path7.join)(runsDir, runId);
+  for (let n = 2; (0, import_node_fs7.existsSync)(runDir); n += 1) {
     runId = `${datePart}-${timePart}-${slug}-${n}`;
-    runDir = (0, import_node_path6.join)(runsDir, runId);
+    runDir = (0, import_node_path7.join)(runsDir, runId);
   }
-  (0, import_node_fs6.mkdirSync)((0, import_node_path6.join)(runDir, "artifacts"), { recursive: true });
-  const runYaml = (0, import_yaml2.stringify)({
+  (0, import_node_fs7.mkdirSync)((0, import_node_path7.join)(runDir, "artifacts"), { recursive: true });
+  const runYaml = (0, import_yaml4.stringify)({
     run_id: runId,
     playbook,
     status: "running",
@@ -14540,18 +15082,18 @@ function runNewRun(opts) {
     current_step: null
   });
   const modeline = "# yaml-language-server: $schema=../../schemas/run.schema.json";
-  (0, import_node_fs6.writeFileSync)((0, import_node_path6.join)(runDir, "run.yaml"), `${modeline}
+  (0, import_node_fs7.writeFileSync)((0, import_node_path7.join)(runDir, "run.yaml"), `${modeline}
 ${runYaml}`, "utf8");
   const startEvent = JSON.stringify({ type: "run_started", step: null, timestamp: iso });
-  (0, import_node_fs6.writeFileSync)((0, import_node_path6.join)(runDir, "events.jsonl"), `${startEvent}
+  (0, import_node_fs7.writeFileSync)((0, import_node_path7.join)(runDir, "events.jsonl"), `${startEvent}
 `, "utf8");
-  (0, import_node_fs6.writeFileSync)((0, import_node_path6.join)(runDir, "artifacts", ".gitkeep"), "", "utf8");
+  (0, import_node_fs7.writeFileSync)((0, import_node_path7.join)(runDir, "artifacts", ".gitkeep"), "", "utf8");
   return { runId, runDir, playbook };
 }
 
 // src/commands/plugin.ts
-var import_node_fs7 = require("node:fs");
-var import_node_path7 = require("node:path");
+var import_node_fs8 = require("node:fs");
+var import_node_path8 = require("node:path");
 var SKILLS2 = [
   { src: "fadeno-runner", dst: "runner" },
   { src: "fadeno-builder", dst: "builder" }
@@ -14560,7 +15102,7 @@ function runPlugin(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const tpl = templatesDir();
   const ref = opts.outDir ?? "plugin";
-  const outDir = (0, import_node_path7.isAbsolute)(ref) ? ref : (0, import_node_path7.resolve)(cwd, ref);
+  const outDir = (0, import_node_path8.isAbsolute)(ref) ? ref : (0, import_node_path8.resolve)(cwd, ref);
   const force = opts.force ?? false;
   const results = [];
   const manifest = JSON.stringify(
@@ -14574,39 +15116,39 @@ function runPlugin(opts = {}) {
     null,
     2
   ) + "\n";
-  const manifestPath = (0, import_node_path7.join)(outDir, ".claude-plugin", "plugin.json");
+  const manifestPath = (0, import_node_path8.join)(outDir, ".claude-plugin", "plugin.json");
   results.push({ path: manifestPath, status: emitFile(manifestPath, manifest, force) });
   for (const { src, dst } of SKILLS2) {
-    let md = (0, import_node_fs7.readFileSync)((0, import_node_path7.join)(tpl, "common", "skills", src, "SKILL.md"), "utf8");
+    let md = (0, import_node_fs8.readFileSync)((0, import_node_path8.join)(tpl, "common", "skills", src, "SKILL.md"), "utf8");
     md = md.replace(`name: ${src}`, `name: ${dst}`);
-    const skillPath = (0, import_node_path7.join)(outDir, "skills", dst, "SKILL.md");
+    const skillPath = (0, import_node_path8.join)(outDir, "skills", dst, "SKILL.md");
     results.push({ path: skillPath, status: emitFile(skillPath, md, force) });
     copyTree(
-      (0, import_node_path7.join)(tpl, "common", "skills", src, "references"),
-      (0, import_node_path7.join)(outDir, "skills", dst, "references"),
+      (0, import_node_path8.join)(tpl, "common", "skills", src, "references"),
+      (0, import_node_path8.join)(outDir, "skills", dst, "references"),
       force,
       results
     );
   }
-  copyTree((0, import_node_path7.join)(tpl, "common", "commands"), (0, import_node_path7.join)(outDir, "commands"), force, results);
-  copyTree((0, import_node_path7.join)(tpl, "claude", "claude-agents"), (0, import_node_path7.join)(outDir, "agents"), force, results);
+  copyTree((0, import_node_path8.join)(tpl, "common", "commands"), (0, import_node_path8.join)(outDir, "commands"), force, results);
+  copyTree((0, import_node_path8.join)(tpl, "claude", "claude-agents"), (0, import_node_path8.join)(outDir, "agents"), force, results);
   return { outDir, results };
 }
 
 // src/commands/run.ts
-var import_node_fs8 = require("node:fs");
-var import_node_path8 = require("node:path");
-var import_yaml3 = __toESM(require_dist(), 1);
+var import_node_fs9 = require("node:fs");
+var import_node_path9 = require("node:path");
+var import_yaml5 = __toESM(require_dist(), 1);
 var RunError = class extends Error {
 };
 var TERMINAL_STATUSES = /* @__PURE__ */ new Set(["completed", "failed", "aborted"]);
 var VALID_STATUSES = /* @__PURE__ */ new Set(["running", ...TERMINAL_STATUSES]);
 var RUN_YAML_MODELINE = "# yaml-language-server: $schema=../../schemas/run.schema.json";
 function resolveRunDir2(repoRoot, cwd, run) {
-  const candidates = (0, import_node_path8.isAbsolute)(run) ? [run] : [(0, import_node_path8.join)(repoRoot, ".fadeno", "runs", run), (0, import_node_path8.resolve)(cwd, run)];
+  const candidates = (0, import_node_path9.isAbsolute)(run) ? [run] : [(0, import_node_path9.join)(repoRoot, ".fadeno", "runs", run), (0, import_node_path9.resolve)(cwd, run)];
   for (const candidate of candidates) {
     const dir = candidate.endsWith("run.yaml") ? candidate.slice(0, -"run.yaml".length) : candidate;
-    if ((0, import_node_fs8.existsSync)((0, import_node_path8.join)(dir, "run.yaml"))) return dir;
+    if ((0, import_node_fs9.existsSync)((0, import_node_path9.join)(dir, "run.yaml"))) return dir;
   }
   throw new RunError(`No run found for "${run}" (looked for run.yaml under .fadeno/runs).`);
 }
@@ -14617,14 +15159,14 @@ function runRun(opts) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const runDir = resolveRunDir2(repoRoot, cwd, opts.run);
-  const runYamlPath = (0, import_node_path8.join)(runDir, "run.yaml");
-  const eventsPath = (0, import_node_path8.join)(runDir, "events.jsonl");
-  const run = (0, import_yaml3.parse)((0, import_node_fs8.readFileSync)(runYamlPath, "utf8"));
+  const runYamlPath = (0, import_node_path9.join)(runDir, "run.yaml");
+  const eventsPath = (0, import_node_path9.join)(runDir, "events.jsonl");
+  const run = (0, import_yaml5.parse)((0, import_node_fs9.readFileSync)(runYamlPath, "utf8"));
   const iso = (opts.now ?? /* @__PURE__ */ new Date()).toISOString();
   const appendedEvents = [];
   const updatedFields = [];
   const appendEvent = (event) => {
-    (0, import_node_fs8.appendFileSync)(eventsPath, `${JSON.stringify({ ...event, timestamp: iso })}
+    (0, import_node_fs9.appendFileSync)(eventsPath, `${JSON.stringify({ ...event, timestamp: iso })}
 `, "utf8");
     appendedEvents.push(event.type);
   };
@@ -14656,252 +15198,14 @@ function runRun(opts) {
       appendEvent({ type: `run_${opts.status}`, step: null });
     }
   }
-  (0, import_node_fs8.writeFileSync)(runYamlPath, `${RUN_YAML_MODELINE}
-${(0, import_yaml3.stringify)(run)}`, "utf8");
+  (0, import_node_fs9.writeFileSync)(runYamlPath, `${RUN_YAML_MODELINE}
+${(0, import_yaml5.stringify)(run)}`, "utf8");
   return { runDir, appendedEvents, updatedFields };
 }
 
 // src/commands/validate.ts
 var import_node_fs10 = require("node:fs");
 var import_node_path10 = require("node:path");
-
-// src/lib/playbook-validate.ts
-var import_node_fs9 = require("node:fs");
-var import_node_path9 = require("node:path");
-var import_ajv = __toESM(require_ajv(), 1);
-var import_yaml4 = __toESM(require_dist(), 1);
-var SCHEMA_FILE = {
-  playbook: "playbook.schema.json",
-  run: "run.schema.json",
-  "review-report": "review-report.schema.json"
-};
-var SINGLE_REF_FIELDS = [
-  "next",
-  "on_pass",
-  "on_fail",
-  "on_approve",
-  "on_reject",
-  "on_exhausted",
-  "default"
-];
-var SchemaSet = class {
-  cache = /* @__PURE__ */ new Map();
-  ajv;
-  schemasDir;
-  constructor(schemasDir) {
-    this.schemasDir = schemasDir;
-    this.ajv = new import_ajv.Ajv({ allErrors: true, strict: false });
-    this.ajv.addFormat("date-time", (value) => !Number.isNaN(Date.parse(value)));
-  }
-  has(kind) {
-    return (0, import_node_fs9.existsSync)((0, import_node_path9.join)(this.schemasDir, SCHEMA_FILE[kind]));
-  }
-  get(kind) {
-    const cached = this.cache.get(kind);
-    if (cached) return cached;
-    const path = (0, import_node_path9.join)(this.schemasDir, SCHEMA_FILE[kind]);
-    if (!(0, import_node_fs9.existsSync)(path)) {
-      throw new Error(`Missing schema: ${path}`);
-    }
-    const schema = JSON.parse((0, import_node_fs9.readFileSync)(path, "utf8"));
-    const validate = this.ajv.compile(schema);
-    this.cache.set(kind, validate);
-    return validate;
-  }
-};
-function formatAjvError(err) {
-  const detail2 = err.message ?? "is invalid";
-  if (err.keyword === "additionalProperties") {
-    const prop = err.params.additionalProperty;
-    return `unknown property "${prop}"`;
-  }
-  if (err.keyword === "enum") {
-    const allowed = err.params.allowedValues;
-    return `${detail2}: ${JSON.stringify(allowed)}`;
-  }
-  return detail2;
-}
-function schemaIssues(file, validate, doc) {
-  if (validate(doc)) return [];
-  return (validate.errors ?? []).map((err) => ({
-    file,
-    path: err.instancePath || "/",
-    message: formatAjvError(err),
-    severity: "error"
-  }));
-}
-function referenceIntegrity(playbook, file) {
-  const issues = [];
-  const flow = playbook.flow;
-  if (!Array.isArray(flow)) return issues;
-  const ids = /* @__PURE__ */ new Set();
-  const seen = /* @__PURE__ */ new Set();
-  for (const step of flow) {
-    if (typeof step?.id === "string") {
-      if (seen.has(step.id)) {
-        issues.push({
-          file,
-          path: `/flow (id "${step.id}")`,
-          message: "duplicate step id",
-          severity: "error"
-        });
-      }
-      seen.add(step.id);
-      ids.add(step.id);
-    }
-  }
-  const err = (path, message) => {
-    issues.push({ file, path, message, severity: "error" });
-  };
-  flow.forEach((rawStep, index) => {
-    const step = rawStep;
-    const base = `/flow/${index}`;
-    const where = typeof step?.id === "string" ? `${base} (id "${step.id}")` : base;
-    for (const field of SINGLE_REF_FIELDS) {
-      const target = step?.[field];
-      if (typeof target === "string" && !ids.has(target)) {
-        err(`${where}/${field}`, `references undefined step "${target}"`);
-      }
-    }
-    if (Array.isArray(step?.body)) {
-      step.body.forEach((target, i) => {
-        if (typeof target === "string" && !ids.has(target)) {
-          err(`${where}/body/${i}`, `references undefined step "${target}"`);
-        }
-      });
-    }
-    if (step?.routes && typeof step.routes === "object" && !Array.isArray(step.routes)) {
-      for (const [label, target] of Object.entries(step.routes)) {
-        if (typeof target === "string" && !ids.has(target)) {
-          err(`${where}/routes/${label}`, `references undefined step "${target}"`);
-        }
-      }
-    }
-  });
-  return issues;
-}
-function baseArtifact(name) {
-  return name.replace(/\[\]$/, "");
-}
-function semanticChecks(playbook, file) {
-  const issues = [];
-  const roles = playbook.roles && typeof playbook.roles === "object" ? new Set(Object.keys(playbook.roles)) : /* @__PURE__ */ new Set();
-  const flow = Array.isArray(playbook.flow) ? playbook.flow : [];
-  const produced = /* @__PURE__ */ new Set();
-  for (const step of flow) {
-    if (typeof step?.output === "string") produced.add(baseArtifact(step.output));
-  }
-  const usedRoles = /* @__PURE__ */ new Set();
-  flow.forEach((step, index) => {
-    const where = `/flow/${index}` + (typeof step?.id === "string" ? ` (id "${step.id}")` : "");
-    const actorRefs = [];
-    if (typeof step?.actor === "string") actorRefs.push(["actor", step.actor]);
-    if (Array.isArray(step?.actors)) {
-      step.actors.forEach((a, j) => {
-        if (typeof a === "string") actorRefs.push([`actors/${j}`, a]);
-      });
-    }
-    for (const [field, role] of actorRefs) {
-      usedRoles.add(role);
-      if (!roles.has(role)) {
-        issues.push({
-          file,
-          path: `${where}/${field}`,
-          message: `actor "${role}" is not a declared role`,
-          severity: "error"
-        });
-      }
-    }
-    if (Array.isArray(step?.over)) {
-      for (const item of step.over) if (typeof item === "string") usedRoles.add(item);
-    }
-    if (Array.isArray(step?.input)) {
-      step.input.forEach((inp, j) => {
-        if (typeof inp === "string" && !produced.has(baseArtifact(inp))) {
-          issues.push({
-            file,
-            path: `${where}/input/${j}`,
-            message: `input artifact "${inp}" is not produced by any step's output`,
-            severity: "warning"
-          });
-        }
-      });
-    }
-  });
-  for (const role of roles) {
-    if (!usedRoles.has(role)) {
-      issues.push({
-        file,
-        path: `/roles/${role}`,
-        message: `role "${role}" is declared but never used`,
-        severity: "warning"
-      });
-    }
-  }
-  return issues;
-}
-function isPlaybookShape(doc) {
-  return doc.kind === "AgentPlaybook" || "flow" in doc && "roles" in doc;
-}
-function isRunShape(doc) {
-  return "run_id" in doc || "status" in doc && "started_at" in doc;
-}
-function isReviewReportShape(doc) {
-  return "reviewer" in doc && "issues" in doc && "verdict" in doc;
-}
-function detectKind(file, doc) {
-  if (isPlaybookShape(doc)) return "playbook";
-  if (isReviewReportShape(doc)) return "review-report";
-  if (isRunShape(doc)) return "run";
-  if (file.includes(`${(0, import_node_path9.join)(".fadeno", "playbooks")}`)) return "playbook";
-  if (file.includes(`${(0, import_node_path9.join)(".fadeno", "runs")}`)) return "run";
-  return null;
-}
-function validateFile(file, schemas, forcedKind) {
-  const fail = (kind2, message) => ({
-    file,
-    kind: kind2,
-    ok: false,
-    issues: [{ file, path: "", message, severity: "error" }]
-  });
-  let raw;
-  try {
-    raw = (0, import_node_fs9.readFileSync)(file, "utf8");
-  } catch (err) {
-    return fail(forcedKind ?? "playbook", `cannot read file: ${err.message}`);
-  }
-  let doc;
-  try {
-    doc = (0, import_yaml4.parse)(raw);
-  } catch (err) {
-    return fail(forcedKind ?? "playbook", `invalid YAML/JSON: ${err.message}`);
-  }
-  if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
-    return fail(forcedKind ?? "playbook", "document must be a mapping");
-  }
-  const record = doc;
-  const kind = forcedKind ?? detectKind(file, record);
-  if (!kind) {
-    return fail(
-      "playbook",
-      "could not determine document type (playbook | run | review-report); pass --schema to force it"
-    );
-  }
-  let validate;
-  try {
-    validate = schemas.get(kind);
-  } catch (err) {
-    return fail(kind, err.message);
-  }
-  const issues = schemaIssues(file, validate, doc);
-  if (kind === "playbook" && issues.length === 0) {
-    issues.push(...referenceIntegrity(record, file));
-    issues.push(...semanticChecks(record, file));
-  }
-  return { file, kind, ok: issues.every((i) => i.severity !== "error"), issues };
-}
-
-// src/commands/validate.ts
 var ValidateError = class extends Error {
 };
 function runValidate(opts = {}) {
@@ -14944,20 +15248,21 @@ Usage:
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
   fadeno run <run> [flags]              Update a run ledger (run.yaml + events.jsonl)
-  fadeno gate <run> <condition>         Evaluate a gate condition from a judgment artifact
+  fadeno gate <run> <condition>         Evaluate a gate condition from a structured artifact
   fadeno plugin [dir]                   Generate a Claude Code plugin (default ./plugin)
 
 Options:
   --with-hooks            (init) Also scaffold tier-2 enforcement hooks
   --data-only             (init) Seed only .fadeno/ definitions (capability via plugin)
   --force                 (init) Overwrite existing files / refresh the bootstrap section
-  --schema <kind>         (validate) Force document kind: playbook | run | review-report
+  --schema <kind>         (validate) Force document kind: playbook | run | review-report | test-result
   --format <fmt>          (diagram) ascii (default) | mermaid
   --step <id>             (run) Set current_step and log a step_started event
   --status <status>       (run) Set status: running | completed | failed | aborted
   --event <type>          (run) Append a custom event
   --artifact <path>       (run) Attach an artifact path to the event
-  --report <path>         (gate) Review-report path (default: artifacts/review-report.json)
+  --artifact <path>       (gate) Artifact path relative to run (condition-specific default)
+  --report <path>         (gate) Deprecated alias for --artifact
   -h, --help              Show this help
   -v, --version           Show version
 
@@ -14968,10 +15273,10 @@ Examples:
   fadeno new-run code-change-review "Add CSV export for reports"
   fadeno run 2026-05-30-1132-csv --step review
   fadeno run 2026-05-30-1132-csv --status completed
-  fadeno gate 2026-05-30-1132-csv no_blocking_issues
+  fadeno gate 2026-05-30-1132-csv no_blocking_issues --artifact artifacts/review-report.json
 `;
 var SIGIL = { codex: "$", claude: "/" };
-var SCHEMA_KINDS = ["playbook", "run", "review-report"];
+var SCHEMA_KINDS = ["playbook", "run", "review-report", "test-result"];
 function printInitSummary(target, repoRoot, results, withHooks, dataOnly) {
   const counts = { created: 0, overwritten: 0, appended: 0, skipped: 0 };
   for (const r of results) counts[r.status] += 1;
@@ -15161,12 +15466,20 @@ function main(argv) {
     case "gate": {
       const [, run, condition] = positionals;
       if (!run || !condition) throw new Error("Usage: fadeno gate <run> <condition>");
-      const result = runGate({ run, condition, report: values.report });
+      const result = runGate({ run, condition, artifact: values.artifact, report: values.report });
       if (result.pass) {
-        console.log(`PASS  ${result.condition} (0 blocking issues)`);
+        if (result.condition === "tests_pass") {
+          console.log(`PASS  ${result.condition} (status=${String(result.details.status)}, exit_code=${String(result.details.exitCode)})`);
+        } else {
+          console.log(`PASS  ${result.condition} (0 blocking issues)`);
+        }
       } else {
-        console.error(`FAIL  ${result.condition} (${result.blockingCount} blocking issue(s))`);
-        for (const title of result.blockingTitles) console.error(`        - ${title}`);
+        if (result.condition === "tests_pass") {
+          console.error(`FAIL  ${result.condition} (status=${String(result.details.status)}, exit_code=${String(result.details.exitCode)})`);
+        } else {
+          console.error(`FAIL  ${result.condition} (${result.blockingCount} blocking issue(s))`);
+          for (const title of result.blockingTitles) console.error(`        - ${title}`);
+        }
       }
       return result.pass ? 0 : 1;
     }

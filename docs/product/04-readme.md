@@ -101,7 +101,8 @@ flow:
     kind: loop
     max_iterations: 1               # bounded. no "keep trying until good."
     body: [implement_revision, review_revision]
-    on_exhausted: summarize_best_attempt
+    on_success: test
+    on_exhausted: unresolved_review
   # ...
 ```
 

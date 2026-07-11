@@ -16,23 +16,31 @@ three; only the host adapter changes.
 
 This file ships **documented stubs**, not wired-up enforcement. The point is that
 the data shapes already support enforcement: gate conditions are computable from a
-structured judgment artifact (`schemas/review-report.schema.json`), and approval
-categories map to concrete, detectable actions.
+structured judgment artifacts (`schemas/review-report.schema.json` and
+`schemas/test-result.schema.json`), and approval categories map to concrete,
+detectable actions.
 
 ## Example: gate condition as a deterministic check
 
 A reviewer writes `artifacts/review-report.json` conforming to
 `review-report.schema.json`. The gate `no_blocking_issues` is then *computable*,
-not a re-prompt:
+not a re-prompt. The CLI validates the artifact before evaluating it:
 
 ```bash
 # exit 0 = pass (no blocking issues), exit 1 = fail
-jq -e '[.issues[] | select(.severity == "blocking")] | length == 0' \
-  .fadeno/runs/<run-id>/artifacts/review-report.json > /dev/null
+fadeno gate <run-id> no_blocking_issues \
+  --artifact artifacts/review-report.json
 ```
 
 A Claude Code `Stop`/`PostToolUse` hook, a CI step, or a future runtime can run
-the exact same check.
+the exact same check. The shipped Claude example uses the most recent run as a
+fallback heuristic; when the host exposes an active run ID, pass that explicit
+ID instead.
+
+For tests, the structured artifact is `artifacts/test-result.json` and the
+corresponding command is `fadeno gate <run-id> tests_pass --artifact
+artifacts/test-result.json`. It passes only when `status` is `passed` and
+`exit_code` is `0`.
 
 ## Example: pre-commit guard for an approval category
 

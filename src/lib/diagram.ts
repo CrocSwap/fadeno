@@ -29,12 +29,14 @@ interface Step {
   on_fail?: unknown;
   on_approve?: unknown;
   on_reject?: unknown;
+  on_success?: unknown;
   on_exhausted?: unknown;
   default?: unknown;
   body?: unknown;
   routes?: unknown;
   max_iterations?: unknown;
   until?: unknown;
+  terminal_status?: unknown;
   [key: string]: unknown;
 }
 
@@ -124,6 +126,10 @@ function edges(step: Step): Array<[string, string]> {
       }
       push('default', step.default);
       break;
+    case 'loop':
+      push('success', step.on_success);
+      push('exhausted', step.on_exhausted);
+      break;
     default:
       break;
   }
@@ -154,6 +160,10 @@ function branchLines(step: Step): string[] {
         }
       }
       arrow('default', step.default);
+      break;
+    case 'loop':
+      arrow('✓ success', step.on_success);
+      arrow('⤓ exhausted', step.on_exhausted);
       break;
     default:
       break;
@@ -221,11 +231,10 @@ function buildCards(flow: Step[]): Card[] {
 
     const body = bodySteps(step);
     if (body.length > 0) content.push(`body: ${body.join(' ▶ ')}`);
-    const exhausted = str(step.on_exhausted);
-    if (exhausted) content.push(`⤓ exhausted ▶ ${exhausted}`);
     for (const line of branchLines(step)) content.push(line);
 
-    const hasOtherOut = branchLines(step).length > 0 || body.length > 0 || exhausted !== undefined;
+    const markedTerminal = str(step.terminal_status);
+    const hasOtherOut = branchLines(step).length > 0 || body.length > 0 || markedTerminal !== undefined;
     const nextTarget = str(step.next);
     let fallsThrough = false;
     if (nextTarget !== undefined) {
@@ -237,6 +246,8 @@ function buildCards(flow: Step[]): Card[] {
     } else if (!hasOtherOut) {
       if (hasNextCard) fallsThrough = true; // implicit top-to-bottom fall-through
       else content.push('■ end'); // terminal
+    } else if (markedTerminal) {
+      content.push(`■ ${markedTerminal}`);
     }
 
     return { id, kindLabel: kindLabel(kind), body: content, fallsThrough: fallsThrough && hasNextCard };
@@ -294,8 +305,10 @@ function mermaidLabel(step: Step): string {
   const id = str(step.id) ?? '?';
   const kind = kindLabel(str(step.kind) ?? '?');
   const det = detail(step);
+  const terminal = str(step.terminal_status);
   const text = det ? `${id}<br/>${kind}: ${det}` : `${id}<br/>${kind}`;
-  return text.replace(/"/g, "'");
+  const withTerminal = terminal ? `${text}<br/>terminal: ${terminal}` : text;
+  return withTerminal.replace(/"/g, "'");
 }
 
 function mermaidNode(step: Step): string {
@@ -340,11 +353,8 @@ function renderMermaid(playbook: Playbook): string {
       lines.push(`  ${id} -.->|body| ${body[0]}`);
       for (let i = 0; i < body.length - 1; i += 1) lines.push(`  ${body[i]} -.-> ${body[i + 1]}`);
     }
-    const exhausted = str(step.on_exhausted);
-    if (exhausted) lines.push(`  ${id} -->|exhausted| ${exhausted}`);
-
     // Implicit fall-through: a step with no explicit out-edge, not driven by a loop body.
-    const hasExplicitOut = explicit.length > 0 || body.length > 0 || Boolean(exhausted);
+    const hasExplicitOut = explicit.length > 0 || body.length > 0 || Boolean(str(step.terminal_status));
     const nextStep = flow[index + 1];
     const nextId = str(nextStep?.id);
     if (!hasExplicitOut && nextId && !bodyMembers.has(id)) {

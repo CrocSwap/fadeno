@@ -14,6 +14,7 @@ const SHARED_FILES = [
   '.fadeno/schemas/playbook.schema.json',
   '.fadeno/schemas/run.schema.json',
   '.fadeno/schemas/review-report.schema.json',
+  '.fadeno/schemas/test-result.schema.json',
   '.fadeno/runs/.gitkeep',
 ];
 

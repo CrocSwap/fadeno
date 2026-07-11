@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://fadeno.dev/schemas/test-result.schema.json",
+  "title": "Fadeno Test Result",
+  "description": "The structured result of a test/tool invocation. tests_pass is true only for status passed and exit_code 0.",
+  "type": "object",
+  "required": ["tool", "command", "status", "exit_code", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "tool": { "type": "string", "minLength": 1 },
+    "command": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["passed", "failed", "error"] },
+    "exit_code": { "type": ["integer", "null"] },
+    "summary": { "type": "string" },
+    "details_path": { "type": "string", "minLength": 1 }
+  }
+}

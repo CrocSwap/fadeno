@@ -94,6 +94,10 @@ function writeReport(runDir: string, body: unknown): void {
   writeFileSync(join(runDir, 'artifacts', 'review-report.json'), JSON.stringify(body), 'utf8');
 }
 
+function writeTestResult(runDir: string, body: unknown): void {
+  writeFileSync(join(runDir, 'artifacts', 'test-result.json'), JSON.stringify(body), 'utf8');
+}
+
 test('gate fails on a blocking issue, passes when clean', (t) => {
   const { root, runId, runDir } = freshRun(t);
 
@@ -126,6 +130,46 @@ test('gate aggregates across a ReviewReport[] array', (t) => {
   const result = runGate({ repoRoot: root, run: runId, condition: 'no_blocking_issues' });
   assert.equal(result.pass, false);
   assert.equal(result.blockingCount, 1);
+});
+
+test('gate rejects malformed review arrays before evaluating them', (t) => {
+  const { root, runId, runDir } = freshRun(t);
+  writeReport(runDir, [{ reviewer: 'a', summary: 'missing issues', verdict: 'approve' }]);
+  assert.throws(() => runGate({ repoRoot: root, run: runId, condition: 'no_blocking_issues' }), /invalid.*no_blocking_issues/i);
+});
+
+test('tests_pass requires passed status and zero exit code', (t) => {
+  const { root, runId, runDir } = freshRun(t);
+  const base = { tool: 'test_runner', command: 'npm test', summary: 'tests' };
+  writeTestResult(runDir, { ...base, status: 'passed', exit_code: 0 });
+  assert.equal(runGate({ repoRoot: root, run: runId, condition: 'tests_pass' }).pass, true);
+
+  writeTestResult(runDir, { ...base, status: 'passed', exit_code: 1 });
+  assert.equal(runGate({ repoRoot: root, run: runId, condition: 'tests_pass' }).pass, false);
+  writeTestResult(runDir, { ...base, status: 'failed', exit_code: 0 });
+  assert.equal(runGate({ repoRoot: root, run: runId, condition: 'tests_pass' }).pass, false);
+});
+
+test('tests_pass rejects malformed test results and logs gate events', (t) => {
+  const { root, runId, runDir } = freshRun(t);
+  writeTestResult(runDir, { tool: 'test_runner', command: 'npm test', status: 'passed', exit_code: 0 });
+  assert.throws(() => runGate({ repoRoot: root, run: runId, condition: 'tests_pass' }), /invalid.*tests_pass/i);
+
+  writeTestResult(runDir, { tool: 'test_runner', command: 'npm test', status: 'passed', exit_code: 0, summary: 'ok' });
+  const result = runGate({ repoRoot: root, run: runId, condition: 'tests_pass', now: new Date('2026-07-10T12:00:00Z') });
+  assert.equal(result.artifactPath, join(runDir, 'artifacts', 'test-result.json'));
+  const event = readEvents(runDir).at(-1)!;
+  assert.deepEqual(
+    { type: event.type, condition: event.condition, artifact: event.artifact, result: event.result },
+    { type: 'gate_evaluated', condition: 'tests_pass', artifact: 'artifacts/test-result.json', result: 'pass' },
+  );
+});
+
+test('--report remains a compatibility alias for --artifact', (t) => {
+  const { root, runId, runDir } = freshRun(t);
+  writeReport(runDir, { reviewer: 'r', summary: 's', issues: [], verdict: 'approve' });
+  const result = runGate({ repoRoot: root, run: runId, condition: 'no_blocking_issues', report: 'artifacts/review-report.json' });
+  assert.equal(result.pass, true);
 });
 
 test('gate rejects an unsupported condition and a missing report', (t) => {

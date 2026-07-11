@@ -43,20 +43,25 @@ flow:
 
   - id: review_gate
     kind: gate
-    condition: no_blocking_issues   # computed from the ReviewReport[] artifacts
+    input:
+      - ReviewReport[]
+    condition: no_blocking_issues
     on_pass: test
     on_fail: revise
 
   - id: revise
     kind: loop
-    max_iterations: 1
+    input:
+      - ReviewReport[]
     body:
       - implement_revision
       - review_revision
+    max_iterations: 1
     until: no_blocking_issues
-    on_exhausted: summarize_best_attempt
+    on_success: test
+    on_exhausted: unresolved_review
 
-  # --- loop body (re-run each iteration; artifacts versioned, never overwritten) ---
+  # --- loop body (definitions only; the loop executes them in listed order) ---
   - id: implement_revision
     kind: actor_call
     actor: implementer
@@ -74,29 +79,48 @@ flow:
       - ImplementationResult
     output: ReviewReport[]
 
-  # --- loop exhaustion target ---
-  - id: summarize_best_attempt
-    kind: actor_call
-    actor: coordinator
-    input:
-      - ImplementationResult
-      - ReviewReport[]
-    output: FinalSummary
-    next: final
-
   - id: test
     kind: tool_call
     tool: test_runner
+    input:
+      - ImplementationResult
     output: TestResult
-    next: final
+    next: test_gate
+
+  - id: test_gate
+    kind: gate
+    input:
+      - TestResult
+    condition: tests_pass
+    on_pass: final
+    on_fail: tests_failed
 
   - id: final
     kind: actor_call
     actor: coordinator
     input:
       - ImplementationResult
+      - ReviewReport[]
       - TestResult
     output: FinalSummary
+    terminal_status: completed
+
+  - id: tests_failed
+    kind: actor_call
+    actor: coordinator
+    input:
+      - ImplementationResult
+      - TestResult
+    output: FinalSummary
+    terminal_status: failed
+
+  - id: unresolved_review
+    kind: actor_call
+    actor: coordinator
+    input:
+      - ImplementationResult
+    output: FinalSummary
+    terminal_status: failed
 
 policies:
   max_revision_loops: 1

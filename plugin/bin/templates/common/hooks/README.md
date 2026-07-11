@@ -33,11 +33,13 @@ A reviewer writes `review-report.json` (conforming to
 re-prompt:
 
 ```bash
-fadeno gate <run-id> no_blocking_issues
-# or, dependency-free:
-jq -e '[.issues[] | select(.severity == "blocking")] | length == 0' \
-  .fadeno/runs/<run-id>/artifacts/review-report.json > /dev/null
+fadeno gate <run-id> no_blocking_issues \
+  --artifact artifacts/review-report.json
 ```
 
 Run either from a CI step, a `pre-push` hook, or a Claude Code `Stop` hook
 (see `claude-settings.example.json` if present).
+
+The Claude example selects the most recent run as a fallback heuristic. Prefer
+an explicitly supplied active run ID when the host exposes one, and do not
+swallow a non-zero gate result in the hook.

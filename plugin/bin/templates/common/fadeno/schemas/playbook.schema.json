@@ -122,6 +122,7 @@
         "on_fail": { "$ref": "#/definitions/stepId" },
         "on_approve": { "$ref": "#/definitions/stepId" },
         "on_reject": { "$ref": "#/definitions/stepId" },
+        "on_success": { "$ref": "#/definitions/stepId" },
         "prompt": { "type": "string", "description": "Human-facing question for a human_gate." },
         "over": {
           "description": "List to map over: literal role/item names, or an artifact-field reference string.",
@@ -145,6 +146,10 @@
         "max_iterations": { "type": "integer", "minimum": 1 },
         "until": { "type": "string", "description": "Named condition that ends the loop early." },
         "on_exhausted": { "$ref": "#/definitions/stepId" },
+        "terminal_status": {
+          "enum": ["completed", "failed", "aborted"],
+          "description": "Explicit terminal run status. A terminal step has no outgoing edge."
+        },
         "count": { "type": "integer", "minimum": 1 },
         "wait_for": { "type": "array", "items": { "type": "string" } },
         "op": { "type": "string" },
@@ -154,14 +159,14 @@
         { "if": { "properties": { "kind": { "const": "actor_call" } } }, "then": { "required": ["actor"] } },
         { "if": { "properties": { "kind": { "const": "tool_call" } } }, "then": { "required": ["tool"] } },
         { "if": { "properties": { "kind": { "const": "evaluator" } } }, "then": { "required": ["actor", "output"] } },
-        { "if": { "properties": { "kind": { "const": "gate" } } }, "then": { "required": ["condition", "on_pass", "on_fail"] } },
+        { "if": { "properties": { "kind": { "const": "gate" } } }, "then": { "required": ["input", "condition", "on_pass", "on_fail"] } },
         { "if": { "properties": { "kind": { "const": "human_gate" } } }, "then": { "required": ["prompt"] } },
         { "if": { "properties": { "kind": { "const": "router" } } }, "then": { "required": ["routes"] } },
         { "if": { "properties": { "kind": { "const": "map" } } }, "then": { "required": ["over"] } },
         { "if": { "properties": { "kind": { "const": "replicate" } } }, "then": { "required": ["actor"] } },
         { "if": { "properties": { "kind": { "const": "join" } } }, "then": { "required": ["wait_for"] } },
         { "if": { "properties": { "kind": { "const": "reduce" } } }, "then": { "required": ["actor", "input"] } },
-        { "if": { "properties": { "kind": { "const": "loop" } } }, "then": { "required": ["body", "max_iterations"] } },
+        { "if": { "properties": { "kind": { "const": "loop" } } }, "then": { "required": ["body", "max_iterations", "input", "until", "on_success", "on_exhausted"] } },
         { "if": { "properties": { "kind": { "const": "artifact_op" } } }, "then": { "required": ["op"] } },
         { "if": { "properties": { "kind": { "const": "subworkflow" } } }, "then": { "required": ["playbook"] } }
       ]
