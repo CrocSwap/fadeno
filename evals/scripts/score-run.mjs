@@ -34,6 +34,7 @@ const result = {
   host_version: hostData.host_version ?? metadata.host_version,
   model: hostData.model ?? metadata.model,
   fadeno_commit: metadata.fadeno_commit,
+  fixture_git_commit: metadata.fixture_git_commit ?? null,
   repetition: metadata.repetition,
   started_at: hostData.started_at ?? metadata.started_at,
   ended_at: hostData.ended_at ?? null,

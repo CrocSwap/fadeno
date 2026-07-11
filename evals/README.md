@@ -4,7 +4,7 @@ This directory contains a deliberately small evaluation harness for comparing ag
 
 ## Status
 
-The fixtures, isolated oracles, result format, and manual run procedure are ready for a post-Milestone-1 pilot. Batch 1 is pinned to Milestone 1 commit `a5e3dd3`. The only committed smoke evidence validates fixture and scorer mechanics, not an agent treatment.
+The fixtures, isolated oracles, result format, and corrected manual run procedure are ready for a post-Milestone-1 pilot. Batch 1 is pinned to Milestone 1 commit `a5e3dd3`. An initial three-cell Codex procedure run was classified as setup failure after exposing missing capability installation and Git-root isolation; it is not treatment evidence. The preparation path now installs pinned capability for Fadeno treatments and creates an independent committed Git repository for every workspace. The only committed smoke evidence validates fixture and scorer mechanics, not an agent treatment.
 
 ## Manual run procedure
 
@@ -14,7 +14,7 @@ From the repository root, create an isolated unit:
 node evals/scripts/prepare-run.mjs --fixture clean-first-pass --treatment careful-skill --host codex --model '<model-id>' --repetition 1 --fadeno-commit a5e3dd3
 ```
 
-The command prints a run-root. Start a fresh host session in its `workspace/` directory and give the session the exact `agent-input.md` from the run-root. Do not expose `evals/fixtures/<fixture>/oracle/` to the agent. Preserve the unmodified run-root, including any transcript placed in `raw-artifacts/`.
+The command prints a run-root. Its `workspace/` is an independent Git repository with a committed fixture baseline, so Fadeno root detection and agent diff review cannot escape into the enclosing repository. Fadeno treatments also receive the runner skill and bundled CLI extracted from the pinned Fadeno commit. Start a fresh host session in `workspace/` and give it the exact `agent-input.md` from the run-root. Do not expose `evals/fixtures/<fixture>/oracle/` to the agent. Preserve the unmodified run-root, including any transcript placed in `raw-artifacts/`.
 
 Copy [host-metadata.example.json](host-metadata.example.json) to `raw-artifacts/host-metadata.json` when host telemetry is available. Record unknown values as `null`; do not estimate tokens. Put transcript-derived measurements only in `workflow_observed` and cite their evidence paths. The scorer writes Fadeno-ledger measurements separately in `workflow_claimed`; neither source overrides the other. This file is also the place to classify a predefined host/setup/harness failure.
 

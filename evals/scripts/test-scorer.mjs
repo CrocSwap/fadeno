@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -54,6 +54,12 @@ async function prepare(fixture, name) {
   const runRoot = join(temp, name);
   const prepared = spawnSync('node', [join(evalRoot, 'scripts', 'prepare-run.mjs'), '--fixture', fixture, '--treatment', 'fadeno-degraded', '--host', 'test-host', '--repetition', '1', '--fadeno-commit', commit, '--out', runRoot], { cwd: repoRoot, encoding: 'utf8' });
   if (prepared.status !== 0) throw new Error(prepared.stderr || prepared.stdout);
+  const workspace = join(runRoot, 'workspace');
+  const topLevel = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: workspace, encoding: 'utf8' });
+  assert.equal(topLevel.status, 0);
+  assert.equal(await realpath(topLevel.stdout.trim()), await realpath(workspace));
+  assert.ok((await readFile(join(workspace, '.agents', 'skills', 'fadeno-runner', 'SKILL.md'), 'utf8')).includes('Fadeno Runner'));
+  assert.ok((await readFile(join(workspace, '.fadeno-capability', 'bin', 'package.json'), 'utf8')).includes('commonjs'));
   return runRoot;
 }
 

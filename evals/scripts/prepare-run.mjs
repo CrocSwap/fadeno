@@ -25,15 +25,14 @@ await mkdir(runRoot, { recursive: true });
 const workspace = join(runRoot, 'workspace');
 await cp(join(fixtureDir, 'repo'), workspace, { recursive: true, errorOnExist: true });
 if (args.treatment.startsWith('fadeno-')) {
-  await mkdir(join(workspace, '.fadeno'));
-  const archive = spawnSync('git', ['archive', '--format=tar', `${args['fadeno-commit']}:templates/common/fadeno`], { cwd: repoRoot });
-  if (archive.status !== 0) throw new Error(`Could not archive Fadeno definitions at ${args['fadeno-commit']}: ${archive.stderr}`);
-  const extracted = spawnSync('tar', ['-xf', '-', '-C', join(workspace, '.fadeno')], { input: archive.stdout });
-  if (extracted.status !== 0) throw new Error(`Could not extract pinned Fadeno definitions: ${extracted.stderr}`);
+  await extractGitTree(`${args['fadeno-commit']}:templates/common/fadeno`, join(workspace, '.fadeno'), 'definitions');
+  await extractGitTree(`${args['fadeno-commit']}:templates/common/skills/fadeno-runner`, join(workspace, '.agents', 'skills', 'fadeno-runner'), 'runner skill');
+  await extractGitTree(`${args['fadeno-commit']}:plugin/bin`, join(workspace, '.fadeno-capability', 'bin'), 'CLI capability');
 }
+const fixtureGitCommit = initializeWorkspaceGit(workspace);
 await mkdir(join(runRoot, 'raw-artifacts'));
 const task = await readFile(join(fixtureDir, 'task.md'), 'utf8');
-const pin = args.treatment.startsWith('fadeno-') ? `\n\nPinned Fadeno definitions were seeded from commit ${args['fadeno-commit']}. Confirm the host capability is pinned to the same commit before executing.\n` : '';
+const pin = args.treatment.startsWith('fadeno-') ? `\n\nPinned Fadeno definitions and capability were seeded from commit ${args['fadeno-commit']}. Read and follow .agents/skills/fadeno-runner/SKILL.md and its references. Use ./.fadeno-capability/bin/fadeno for all Fadeno CLI operations.\n` : '';
 const agentInput = `${task.trim()}\n\n---\n\n${args.treatment === 'plain-prompt' ? '' : treatmentText.trim()}${pin}\n`;
 await writeFile(join(runRoot, 'agent-input.md'), agentInput);
 const metadata = {
@@ -45,6 +44,7 @@ const metadata = {
   host_version: args['host-version'] ?? null,
   model: args.model ?? null,
   fadeno_commit: args['fadeno-commit'],
+  fixture_git_commit: fixtureGitCommit,
   repetition: Number(args.repetition),
   started_at: new Date().toISOString(),
   fixture_expected_outcome: expected.expected_task_outcome,
@@ -61,6 +61,26 @@ function parseArgs(tokens) {
     result[tokens[i].slice(2)] = tokens[++i];
   }
   return result;
+}
+
+async function extractGitTree(tree, destination, label) {
+  await mkdir(destination, { recursive: true });
+  const archive = spawnSync('git', ['archive', '--format=tar', tree], { cwd: repoRoot });
+  if (archive.status !== 0) throw new Error(`Could not archive pinned Fadeno ${label} from ${tree}: ${archive.stderr}`);
+  const extracted = spawnSync('tar', ['-xf', '-', '-C', destination], { input: archive.stdout });
+  if (extracted.status !== 0) throw new Error(`Could not extract pinned Fadeno ${label}: ${extracted.stderr}`);
+}
+
+function initializeWorkspaceGit(root) {
+  runGit(root, ['init', '-q']);
+  runGit(root, ['add', '--all']);
+  runGit(root, ['-c', 'user.name=Fadeno Eval', '-c', 'user.email=fadeno-eval@invalid', 'commit', '-qm', 'Fixture baseline']);
+  return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+}
+
+function runGit(root, gitArgs) {
+  const result = spawnSync('git', gitArgs, { cwd: root, encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`git ${gitArgs.join(' ')} failed in ${root}: ${result.stderr || result.stdout}`);
 }
 
 async function hashesFor(root, paths) {
