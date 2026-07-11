@@ -32,6 +32,7 @@
     "prepare": "npm run build",
     "dev": "node src/cli.ts",
     "test": "node --test \"test/**/*.test.ts\"",
+    "eval:summary": "node evals/scripts/summarize-results.mjs --results-dir evals/results --valid-only",
     "validate:self": "node src/cli.ts validate",
     "prepublishOnly": "npm run build"
   },

@@ -4,7 +4,7 @@ This directory contains a deliberately small evaluation harness for comparing ag
 
 ## Status
 
-The fixtures, isolated oracles, result format, and corrected manual run procedure are ready for a post-Milestone-1 pilot. Batch 1 is pinned to Milestone 1 commit `a5e3dd3`. An initial three-cell Codex procedure run was classified as setup failure after exposing missing capability installation and Git-root isolation; it is not treatment evidence. The preparation path now installs pinned capability for Fadeno treatments and creates an independent committed Git repository for every workspace. The only committed smoke evidence validates fixture and scorer mechanics, not an agent treatment.
+The fixtures, isolated oracles, result format, and corrected manual run procedure have completed a two-repetition post-Milestone-1 pilot pinned to commit `a5e3dd3`. See [pilot-report.md](pilot-report.md). Generated run evidence remains ignored; the report records the durable findings and limitations.
 
 ## Manual run procedure
 
@@ -31,6 +31,14 @@ To make a compact, non-aggregated report from scored runs:
 ```sh
 node evals/scripts/summarize-results.mjs /path/to/run-root/result.yaml ...
 ```
+
+To rediscover every locally retained valid result and regenerate the raw-vector summary:
+
+```sh
+npm run --silent eval:summary
+```
+
+The local command intentionally excludes setup, host, and harness failures. Run the underlying script without `--valid-only` when investigating those failures. Silent npm mode keeps stdout as valid JSON, so it can be redirected to a retained local snapshot.
 
 ## Fixture smoke tests
 
