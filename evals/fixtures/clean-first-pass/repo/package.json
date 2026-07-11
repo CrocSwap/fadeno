@@ -1,0 +1,6 @@
+{
+  "name": "eval-clean-first-pass",
+  "private": true,
+  "type": "commonjs",
+  "scripts": { "test": "node --test" }
+}

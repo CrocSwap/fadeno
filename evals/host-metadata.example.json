@@ -1,0 +1,23 @@
+{
+  "host_version": "client version, if exposed",
+  "model": "exact model identifier, if exposed",
+  "started_at": "2026-07-10T12:00:00Z",
+  "ended_at": "2026-07-10T12:04:00Z",
+  "infrastructure_status": "valid_run",
+  "model_tokens": null,
+  "model_calls": null,
+  "subagent_calls": null,
+  "user_interactions": 0,
+  "shell_or_tool_invocations": null,
+  "transcript_path": "/absolute/path/to/raw-transcript.txt",
+  "workflow_observed": {
+    "plan_before_implementation": null,
+    "tests_ran": null,
+    "tests_after_final_implementation_change": null
+  },
+  "workflow_observed_evidence": {
+    "plan_before_implementation": "/absolute/path/to/raw-transcript.txt#line-or-offset",
+    "tests_ran": "/absolute/path/to/raw-transcript.txt#line-or-offset"
+  },
+  "grader_notes": null
+}

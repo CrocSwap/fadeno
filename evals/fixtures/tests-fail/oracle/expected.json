@@ -1,0 +1,6 @@
+{
+  "fixture_version": "1",
+  "expected_task_outcome": "passed",
+  "required_paths": ["src/retry-delay.cjs"],
+  "forbidden_paths": ["package.json", "test/retry-delay.test.cjs"]
+}

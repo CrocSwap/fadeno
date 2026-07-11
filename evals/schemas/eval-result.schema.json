@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Fadeno evaluation result",
+  "type": "object",
+  "required": ["fixture_id", "fixture_version", "treatment", "treatment_version", "host", "fadeno_commit", "repetition", "started_at", "infrastructure_status", "task_outcome", "checks", "workflow_claimed", "workflow_observed", "trace", "cost", "raw_artifacts", "grader_notes"],
+  "properties": {
+    "fixture_id": {"type": "string"}, "fixture_version": {"type": "string"}, "treatment": {"type": "string"}, "treatment_version": {"type": "string"}, "host": {"type": "string"}, "host_version": {"type": ["string", "null"]}, "model": {"type": ["string", "null"]}, "fadeno_commit": {"type": "string", "minLength": 1}, "repetition": {"type": "integer", "minimum": 1}, "started_at": {"type": "string"}, "ended_at": {"type": ["string", "null"]}, "infrastructure_status": {"enum": ["valid_run", "host_failure", "harness_failure", "setup_failure"]}, "task_outcome": {"enum": ["passed", "failed", "unresolved", "unknown"]}, "checks": {"type": "object"}, "workflow_claimed": {"type": "object"}, "workflow_observed": {"type": "object"}, "trace": {"type": "object"}, "cost": {"type": "object"}, "raw_artifacts": {"type": "object"}, "grader_notes": {"type": ["string", "null"]}
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,6 @@
+{
+  "name": "eval-revision-exhausts",
+  "private": true,
+  "type": "commonjs",
+  "scripts": { "test": "node --test" }
+}

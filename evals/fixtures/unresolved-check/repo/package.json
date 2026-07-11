@@ -1,0 +1,6 @@
+{
+  "name": "eval-unresolved-check",
+  "private": true,
+  "type": "commonjs",
+  "scripts": { "test": "node --test" }
+}

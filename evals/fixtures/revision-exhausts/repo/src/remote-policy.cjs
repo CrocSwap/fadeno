@@ -1,0 +1,1 @@
+exports.isRemoteEnabled = endpoint => endpoint !== '';

@@ -1,0 +1,6 @@
+{
+  "fixture_version": "1",
+  "expected_task_outcome": "passed",
+  "required_paths": ["src/parse-port.cjs"],
+  "forbidden_paths": ["package.json", "test/parse-port.test.cjs"]
+}

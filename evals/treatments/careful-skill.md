@@ -1,0 +1,3 @@
+# Careful coding workflow (v1)
+
+Before editing, state a short plan and inspect the relevant code and task requirements. Implement only the necessary change. Then review the resulting diff against the task, looking especially for boundary cases, unintended scope, and missing tests. Run the required checks after the final code change. If a blocking problem is found, make one focused revision and re-check it. If a required check or task remains unresolved, say so plainly; do not claim success. Ask before destructive commands, dependency additions, deployments, or external sends. Keep your final report concise: changed files, checks run, and any remaining problem.

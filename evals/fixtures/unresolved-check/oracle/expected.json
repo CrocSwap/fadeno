@@ -1,0 +1,6 @@
+{
+  "fixture_version": "1",
+  "expected_task_outcome": "unresolved",
+  "required_paths": ["src/status-message.cjs"],
+  "forbidden_paths": ["package.json", "test/remote-contract.test.cjs"]
+}
