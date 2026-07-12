@@ -1,6 +1,6 @@
 {
   "name": "fadeno",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Portable, repo-native playbook layer for AI coding agents (Codex, Claude Code).",
   "keywords": [
     "ai",

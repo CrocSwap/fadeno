@@ -8,6 +8,31 @@ All notable changes to Fadeno are documented here. The format follows
 
 _Nothing yet._
 
+## [0.3.0] — 2026-07-11
+
+Trace verification — the provenance layer. A run ledger's claims can now be
+re-audited deterministically: in CI, a git hook, or a Claude Code Stop hook.
+
+### Added
+
+- **`fadeno verify <run-id-or-prefix>`** (or `--latest`) — a strictly read-only
+  re-audit of a run ledger: schema-valid `run.yaml`, fully parseable
+  `events.jsonl`, a finalized terminal status, artifacts present, and **every
+  recorded gate result recomputed from its artifact** — a trace can't claim a
+  gate its artifact doesn't support. Unknown gate conditions are skipped as
+  agent-interpreted rather than failed; `--allow-failed` accepts an honest
+  `failed`/`aborted` terminal for audit use.
+- **`init --with-hooks` emits `.github/workflows/fadeno-verify.yml`** — a CI
+  workflow that verifies every run ledger a PR adds or modifies ("no valid
+  trace with passing gates, no merge"). Deletion-only PRs pass; strict mode
+  (require a trace on every PR) is one uncomment away.
+
+### Changed
+
+- The Claude Code Stop-hook example upgrades from a single `fadeno gate` check
+  to `fadeno verify --latest`: when the agent stops, the latest run must be
+  finalized and its gate claims must recompute from their artifacts.
+
 ## [0.2.0] — 2026-07-11
 
 Formalize code-change workflow semantics: explicit loop exits, artifact-bound
