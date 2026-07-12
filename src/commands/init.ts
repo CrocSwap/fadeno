@@ -183,6 +183,10 @@ function emitHooks(
     join('common', 'hooks', 'fadeno-guard.yml'),
     join('.github', 'workflows', 'fadeno-guard.yml'),
   );
+  hookFile(
+    join('common', 'hooks', 'fadeno-verify.yml'),
+    join('.github', 'workflows', 'fadeno-verify.yml'),
+  );
   if (target === 'claude') {
     hookFile(
       join('claude', 'hooks', 'settings.example.json'),

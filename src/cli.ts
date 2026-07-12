@@ -10,6 +10,7 @@ import { runRun } from './commands/run.ts';
 import { runRuns } from './commands/runs.ts';
 import { runShow } from './commands/show.ts';
 import { runValidate } from './commands/validate.ts';
+import { runVerify, type VerifyResult } from './commands/verify.ts';
 import type { DiagramFormat } from './lib/diagram.ts';
 import type { EmitResult } from './lib/fsutil.ts';
 import type { SchemaKind, ValidationIssue } from './lib/playbook-validate.ts';
@@ -29,6 +30,7 @@ Usage:
   fadeno gate <run> <condition>         Evaluate a gate condition from a structured artifact
   fadeno runs                           List run ledgers under .fadeno/runs/
   fadeno show <run>                     Show a run summary, timeline, and artifacts
+  fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic gate claims (or --latest)
   fadeno plugin [dir]                   Generate a Claude Code plugin (default ./plugin)
 
 Options:
@@ -43,6 +45,8 @@ Options:
   --artifact <path>       (run) Attach an artifact path to the event
   --artifact <path>       (gate) Artifact path relative to run (condition-specific default)
   --report <path>         (gate) Deprecated alias for --artifact
+  --latest                (verify) Audit the newest run instead of a named one
+  --allow-failed          (verify) Accept an honest failed/aborted terminal
   -h, --help              Show this help
   -v, --version           Show version
 
@@ -56,6 +60,7 @@ Examples:
   fadeno gate 2026-05-30-1132-csv no_blocking_issues --artifact artifacts/review-report.json
   fadeno runs
   fadeno show 2026-07-10-2212
+  fadeno verify --latest
 `;
 
 const SIGIL: Record<Target, string> = { codex: '$', claude: '/' };
@@ -238,6 +243,24 @@ function printShow(repoRoot: string, result: ShowResult): void {
   }
 }
 
+function printVerify(result: VerifyResult): void {
+  const { run, findings, ok } = result;
+  console.log(`run ${run.runId}  [${run.status ?? '?'}]`);
+  console.log('');
+  for (const f of findings) {
+    const token = f.status === 'fail' ? 'FAIL' : f.status;
+    const line = `  ${token.padEnd(4)}  ${f.check.padEnd(20)}  ${f.detail}`;
+    if (f.status === 'fail') console.error(line);
+    else console.log(line);
+  }
+
+  const counts = { ok: 0, skip: 0, fail: 0 };
+  for (const f of findings) counts[f.status] += 1;
+  const summary = `\nverify: ${counts.ok} ok, ${counts.skip} skipped, ${counts.fail} failed`;
+  if (ok) console.log(summary);
+  else console.error(summary);
+}
+
 function requireTarget(values: { codex?: boolean; claude?: boolean }): Target {
   if (values.codex && values.claude) throw new Error('Choose only one target: --codex or --claude.');
   if (values.codex) return 'codex';
@@ -264,6 +287,8 @@ function main(argv: string[]): number {
         event: { type: 'string' },
         artifact: { type: 'string' },
         report: { type: 'string' },
+        latest: { type: 'boolean' },
+        'allow-failed': { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
       },
@@ -397,6 +422,15 @@ function main(argv: string[]): number {
       const result = runShow({ run });
       printShow(findRepoRoot(), result);
       return 0;
+    }
+    case 'verify': {
+      const result = runVerify({
+        run: positionals[1],
+        latest: values.latest,
+        allowFailed: values['allow-failed'],
+      });
+      printVerify(result);
+      return result.ok ? 0 : 1;
     }
     default:
       console.error(`Unknown command: ${command}\n`);

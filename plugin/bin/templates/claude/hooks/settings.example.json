@@ -1,5 +1,5 @@
 {
-  "//": "Example Claude Code hook config. Merge the `hooks` block into your repo's .claude/settings.json (do not blindly overwrite it). This makes the no_blocking_issues gate enforced rather than advisory: when the agent stops, the most recent run's review report is checked, and a non-zero exit asks Claude to keep working.",
+  "//": "Example Claude Code hook config. Merge the `hooks` block into your repo's .claude/settings.json (do not blindly overwrite it). This makes trace verification enforced rather than advisory: when the agent stops, the most recent run must verify — a finalized status plus every deterministic gate result recomputed from its artifact — and a non-zero exit asks Claude to keep working.",
   "hooks": {
     "Stop": [
       {
@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "run=$(ls -dt .fadeno/runs/*/ 2>/dev/null | head -1); if [ -z \"$run\" ]; then exit 0; fi; fadeno gate \"$run\" no_blocking_issues"
+            "command": "run=$(ls -dt .fadeno/runs/*/ 2>/dev/null | head -1); if [ -z \"$run\" ]; then exit 0; fi; fadeno verify --latest"
           }
         ]
       }

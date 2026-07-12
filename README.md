@@ -327,10 +327,15 @@ categories map to concrete, detectable actions. Two ways to make that real:
 - **`fadeno gate <run> <condition> --artifact <path>`** computes a condition
   from its named artifact and exits 0/1 — drop it into CI, a git hook, or a
   Claude Code `Stop` hook.
+- **`fadeno verify <run>`** (or `--latest`) re-audits a whole run ledger read-only,
+  recomputing every deterministic gate result from its artifact so a trace can't
+  claim a gate it can't support — the "no valid trace, no merge" check.
 - **`fadeno init --with-hooks`** scaffolds runnable enforcement: an executable
   `.fadeno/hooks/pre-commit` (dependency/secret guard), a
-  `.github/workflows/fadeno-guard.yml` CI guard, and (on Claude) a
-  `settings.example.json` hook config. Activate them per `.fadeno/hooks/README.md`.
+  `.github/workflows/fadeno-guard.yml` CI guard, a
+  `.github/workflows/fadeno-verify.yml` trace-verification workflow, and (on
+  Claude) a `settings.example.json` hook config. Activate them per
+  `.fadeno/hooks/README.md`.
 
 `.fadeno/enforcement.md` documents the patterns. Fadeno still doesn't *force*
 enforcement on you — but the data shapes support it and the scaffold is one flag

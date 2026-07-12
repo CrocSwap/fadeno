@@ -1,0 +1,33 @@
+# Fadeno trace verification (tier-2, enforced in CI).
+# Any run ledger a PR adds or modifies must verify: schema-valid, parseable,
+# terminal, artifacts present, and every deterministic gate result RECOMPUTED
+# from its artifact — a trace can't claim what its artifacts don't support.
+name: fadeno-verify
+on:
+  pull_request:
+jobs:
+  verify-traces:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Verify run ledgers touched by this PR
+        run: |
+          ids=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- '.fadeno/runs/' \
+            | cut -d/ -f3 | sort -u)
+          if [ -z "$ids" ]; then
+            echo "No run ledgers touched by this PR."
+            # STRICT MODE: uncomment to require a trace on every PR instead.
+            # echo "::error::This PR carries no Fadeno run trace."; exit 1
+            exit 0
+          fi
+          status=0
+          for id in $ids; do
+            [ -d ".fadeno/runs/$id" ] || { echo "run $id was deleted; skipping"; continue; }
+            npx --yes fadeno@latest verify "$id" || status=1
+          done
+          exit $status

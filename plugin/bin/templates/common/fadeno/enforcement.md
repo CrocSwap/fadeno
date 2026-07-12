@@ -42,6 +42,15 @@ corresponding command is `fadeno gate <run-id> tests_pass --artifact
 artifacts/test-result.json`. It passes only when `status` is `passed` and
 `exit_code` is `0`.
 
+To audit a whole trace rather than a single condition, `fadeno verify <run-id>`
+(or `--latest`) recomputes every deterministic claim the ledger makes — schema
+validity, a parseable event log, a terminal status, artifact presence, and each
+recorded gate result re-evaluated from its artifact. It exits non-zero if any
+check fails and never writes to the ledger, so it drops straight into a CI step
+or `Stop` hook. `.github/workflows/fadeno-verify.yml` (from `init --with-hooks`)
+runs it on every run ledger a PR touches — no valid trace with passing gates, no
+merge.
+
 ## Example: pre-commit guard for an approval category
 
 `dependency_addition` maps to changes in dependency manifests. A pre-commit hook

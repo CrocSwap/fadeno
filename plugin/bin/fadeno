@@ -13893,7 +13893,7 @@ var require_ajv = __commonJS({
 });
 
 // src/cli.ts
-var import_node_path12 = require("node:path");
+var import_node_path13 = require("node:path");
 var import_node_util = require("node:util");
 
 // src/commands/diagram.ts
@@ -15015,6 +15015,10 @@ function emitHooks(tpl, repoRoot, target, force, results) {
     (0, import_node_path6.join)("common", "hooks", "fadeno-guard.yml"),
     (0, import_node_path6.join)(".github", "workflows", "fadeno-guard.yml")
   );
+  hookFile(
+    (0, import_node_path6.join)("common", "hooks", "fadeno-verify.yml"),
+    (0, import_node_path6.join)(".github", "workflows", "fadeno-verify.yml")
+  );
   if (target === "claude") {
     hookFile(
       (0, import_node_path6.join)("claude", "hooks", "settings.example.json"),
@@ -15389,6 +15393,176 @@ Run \`fadeno init --codex\` or \`fadeno init --claude\` first.`
   return { repoRoot, results, ok: results.every((r) => r.ok) };
 }
 
+// src/commands/verify.ts
+var import_node_fs12 = require("node:fs");
+var import_node_path12 = require("node:path");
+var import_yaml7 = __toESM(require_dist(), 1);
+var VerifyError = class extends Error {
+};
+function resolveArtifact(runDir, rel) {
+  return (0, import_node_path12.isAbsolute)(rel) ? rel : (0, import_node_path12.join)(runDir, rel);
+}
+function runVerify(opts) {
+  const hasRun = opts.run != null;
+  const wantsLatest = opts.latest === true;
+  if (hasRun === wantsLatest) throw new VerifyError("Pass a run id or --latest.");
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  let run;
+  if (wantsLatest) {
+    const runs = listRuns(repoRoot);
+    if (runs.length === 0) throw new VerifyError("No runs found under .fadeno/runs.");
+    run = runs[0];
+  } else {
+    run = resolveRun(repoRoot, opts.run);
+  }
+  const schemas = new SchemaSet((0, import_node_path12.join)(repoRoot, ".fadeno", "schemas"));
+  const findings = [];
+  findings.push(checkRunSchema(run, schemas));
+  const { events, badLines } = readEvents(run.dir);
+  findings.push(checkEventsParseable(events, badLines));
+  findings.push(checkTerminalStatus(run, opts.allowFailed === true));
+  findings.push(checkArtifactsExist(run, events));
+  const lastResultByCondition = /* @__PURE__ */ new Map();
+  for (const event of events) {
+    if (event.type !== "gate_evaluated") continue;
+    findings.push(checkGateEvent(run, schemas, event, lastResultByCondition));
+  }
+  if (run.status === "completed") {
+    findings.push(checkGateCoherence(lastResultByCondition));
+  }
+  const ok = !findings.some((f) => f.status === "fail");
+  return { run, findings, ok };
+}
+function checkRunSchema(run, schemas) {
+  const check = "run-schema";
+  let doc;
+  try {
+    doc = (0, import_yaml7.parse)((0, import_node_fs12.readFileSync)((0, import_node_path12.join)(run.dir, "run.yaml"), "utf8"));
+  } catch (err) {
+    return { check, status: "fail", detail: `run.yaml did not parse: ${err.message}` };
+  }
+  if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
+    return { check, status: "fail", detail: "run.yaml is not a mapping" };
+  }
+  let validate;
+  try {
+    validate = schemas.get("run");
+  } catch (err) {
+    return { check, status: "fail", detail: err.message };
+  }
+  if (!validate(doc)) {
+    return { check, status: "fail", detail: schemaErrorMessages(validate).join("; ") };
+  }
+  return { check, status: "ok", detail: "run.yaml is schema-valid" };
+}
+function checkEventsParseable(events, badLines) {
+  const check = "events-parseable";
+  if (badLines.length > 0) {
+    return {
+      check,
+      status: "fail",
+      detail: `${badLines.length} unparseable event line(s): ${badLines.join(", ")}`
+    };
+  }
+  if (events.length === 0) {
+    return { check, status: "fail", detail: "no events recorded" };
+  }
+  return { check, status: "ok", detail: `${events.length} events, 0 bad lines` };
+}
+function checkTerminalStatus(run, allowFailed) {
+  const check = "terminal-status";
+  const status = run.status;
+  if (status === "running") {
+    return { check, status: "fail", detail: "incomplete trace: status is running" };
+  }
+  if (status === "failed" || status === "aborted") {
+    if (allowFailed) {
+      return { check, status: "ok", detail: "honest failure accepted (--allow-failed)" };
+    }
+    return { check, status: "fail", detail: `run terminated as ${status}` };
+  }
+  if (status === "completed") {
+    if (run.endedAt) return { check, status: "ok", detail: "completed, ended_at present" };
+    return { check, status: "fail", detail: "completed but ended_at is missing" };
+  }
+  return { check, status: "fail", detail: `unexpected status: ${status ?? "(none)"}` };
+}
+function checkArtifactsExist(run, events) {
+  const check = "artifacts-exist";
+  const paths = [];
+  for (const event of events) {
+    if (event.type !== "artifact_created") continue;
+    if (typeof event.extra.artifact === "string") paths.push(event.extra.artifact);
+  }
+  const missing = paths.filter((p) => !(0, import_node_fs12.existsSync)(resolveArtifact(run.dir, p)));
+  if (missing.length === 0) {
+    return { check, status: "ok", detail: `${paths.length}/${paths.length} present` };
+  }
+  return {
+    check,
+    status: "fail",
+    detail: `missing ${missing.join(", ")} (${paths.length - missing.length}/${paths.length} present)`
+  };
+}
+function checkGateEvent(run, schemas, event, lastResultByCondition) {
+  const condition = typeof event.extra.condition === "string" ? event.extra.condition : "(unknown)";
+  const check = `gate-${condition}`;
+  if (!SUPPORTED_CONDITIONS.includes(condition)) {
+    return {
+      check,
+      status: "skip",
+      detail: "agent-interpreted condition, not deterministically verifiable"
+    };
+  }
+  const supported = condition;
+  const recorded = typeof event.extra.result === "string" ? event.extra.result : "(none)";
+  lastResultByCondition.set(supported, recorded);
+  const artifactRel = typeof event.extra.artifact === "string" ? event.extra.artifact : "";
+  if (!artifactRel) {
+    return { check, status: "fail", detail: "gate event recorded no artifact to recompute from" };
+  }
+  const artifactPath = resolveArtifact(run.dir, artifactRel);
+  if (!(0, import_node_fs12.existsSync)(artifactPath)) {
+    return { check, status: "fail", detail: `artifact ${artifactRel} is missing; cannot recompute` };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse((0, import_node_fs12.readFileSync)(artifactPath, "utf8"));
+  } catch (err) {
+    return { check, status: "fail", detail: `artifact ${artifactRel} is not valid JSON: ${err.message}` };
+  }
+  const definition = CONDITION_REGISTRY[supported];
+  let validate;
+  try {
+    validate = schemas.get(definition.schema);
+  } catch (err) {
+    return { check, status: "fail", detail: err.message };
+  }
+  if (!validate(parsed)) {
+    return {
+      check,
+      status: "fail",
+      detail: `artifact ${artifactRel} is invalid for ${supported}: ${schemaErrorMessages(validate).join("; ")}`
+    };
+  }
+  const recomputed = definition.evaluate(parsed).pass ? "pass" : "fail";
+  const status = recomputed === recorded ? "ok" : "fail";
+  return { check, status, detail: `recorded ${recorded}, recomputed ${recomputed}  (${artifactRel})` };
+}
+function checkGateCoherence(lastResultByCondition) {
+  const check = "gate-coherence";
+  if (lastResultByCondition.size === 0) {
+    return { check, status: "skip", detail: "no deterministic gate events recorded" };
+  }
+  const incoherent = [...lastResultByCondition.entries()].filter(([, result]) => result !== "pass");
+  if (incoherent.length === 0) {
+    return { check, status: "ok", detail: "latest result per condition is pass" };
+  }
+  const detail2 = incoherent.map(([cond, result]) => `${cond}=${result}`).join(", ");
+  return { check, status: "fail", detail: `completed run with non-passing latest gate: ${detail2}` };
+}
+
 // src/cli.ts
 var HELP = `fadeno \u2014 the playbook layer for AI coding agents
 
@@ -15401,6 +15575,7 @@ Usage:
   fadeno gate <run> <condition>         Evaluate a gate condition from a structured artifact
   fadeno runs                           List run ledgers under .fadeno/runs/
   fadeno show <run>                     Show a run summary, timeline, and artifacts
+  fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic gate claims (or --latest)
   fadeno plugin [dir]                   Generate a Claude Code plugin (default ./plugin)
 
 Options:
@@ -15415,6 +15590,8 @@ Options:
   --artifact <path>       (run) Attach an artifact path to the event
   --artifact <path>       (gate) Artifact path relative to run (condition-specific default)
   --report <path>         (gate) Deprecated alias for --artifact
+  --latest                (verify) Audit the newest run instead of a named one
+  --allow-failed          (verify) Accept an honest failed/aborted terminal
   -h, --help              Show this help
   -v, --version           Show version
 
@@ -15428,6 +15605,7 @@ Examples:
   fadeno gate 2026-05-30-1132-csv no_blocking_issues --artifact artifacts/review-report.json
   fadeno runs
   fadeno show 2026-07-10-2212
+  fadeno verify --latest
 `;
 var SIGIL = { codex: "$", claude: "/" };
 var SCHEMA_KINDS = ["playbook", "run", "review-report", "test-result"];
@@ -15437,7 +15615,7 @@ function printInitSummary(target, repoRoot, results, withHooks, dataOnly) {
   console.log(`Fadeno initialized for ${target} in ${repoRoot}
 `);
   for (const r of results) {
-    console.log(`  ${r.status.padEnd(11)} ${(0, import_node_path12.relative)(repoRoot, r.path) || r.path}`);
+    console.log(`  ${r.status.padEnd(11)} ${(0, import_node_path13.relative)(repoRoot, r.path) || r.path}`);
   }
   console.log(
     `
@@ -15475,7 +15653,7 @@ function printIssue(issue) {
 function printValidate(outcome) {
   let warnings = 0;
   for (const result of outcome.results) {
-    const rel = (0, import_node_path12.relative)(outcome.repoRoot, result.file) || result.file;
+    const rel = (0, import_node_path13.relative)(outcome.repoRoot, result.file) || result.file;
     const fileWarnings = result.issues.filter((i) => i.severity === "warning").length;
     warnings += fileWarnings;
     if (result.ok) {
@@ -15559,7 +15737,7 @@ function renderEvent(event) {
 function printShow(repoRoot, result) {
   const { run, events, badLines, artifacts } = result;
   const dash = (value) => value ?? "\u2014";
-  const relDir = (0, import_node_path12.relative)(repoRoot, run.dir) || run.dir;
+  const relDir = (0, import_node_path13.relative)(repoRoot, run.dir) || run.dir;
   console.log(`run ${run.runId}`);
   console.log(`  playbook:  ${dash(run.playbook)}`);
   console.log(`  task:      ${dash(run.task)}`);
@@ -15582,6 +15760,23 @@ artifacts (${artifacts.length})`);
   for (const art of artifacts) {
     console.log(`  ${art.path}  (${art.bytes} bytes)`);
   }
+}
+function printVerify(result) {
+  const { run, findings, ok } = result;
+  console.log(`run ${run.runId}  [${run.status ?? "?"}]`);
+  console.log("");
+  for (const f of findings) {
+    const token = f.status === "fail" ? "FAIL" : f.status;
+    const line = `  ${token.padEnd(4)}  ${f.check.padEnd(20)}  ${f.detail}`;
+    if (f.status === "fail") console.error(line);
+    else console.log(line);
+  }
+  const counts = { ok: 0, skip: 0, fail: 0 };
+  for (const f of findings) counts[f.status] += 1;
+  const summary = `
+verify: ${counts.ok} ok, ${counts.skip} skipped, ${counts.fail} failed`;
+  if (ok) console.log(summary);
+  else console.error(summary);
 }
 function requireTarget(values) {
   if (values.codex && values.claude) throw new Error("Choose only one target: --codex or --claude.");
@@ -15608,6 +15803,8 @@ function main(argv) {
         event: { type: "string" },
         artifact: { type: "string" },
         report: { type: "string" },
+        latest: { type: "boolean" },
+        "allow-failed": { type: "boolean" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "v" }
       }
@@ -15696,7 +15893,7 @@ function main(argv) {
       const parts = [];
       if (result.updatedFields.length) parts.push(`updated ${result.updatedFields.join(", ")}`);
       if (result.appendedEvents.length) parts.push(`logged ${result.appendedEvents.join(", ")}`);
-      console.log(`${(0, import_node_path12.relative)(process.cwd(), result.runDir) || result.runDir}: ${parts.join("; ")}`);
+      console.log(`${(0, import_node_path13.relative)(process.cwd(), result.runDir) || result.runDir}: ${parts.join("; ")}`);
       return 0;
     }
     case "plugin": {
@@ -15705,7 +15902,7 @@ function main(argv) {
       for (const r of results) counts[r.status] += 1;
       console.log(`Generated Fadeno plugin in ${outDir}`);
       console.log(`  ${counts.created} created, ${counts.overwritten} overwritten, ${counts.skipped} skipped.`);
-      console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path12.relative)(process.cwd(), outDir) + "`");
+      console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path13.relative)(process.cwd(), outDir) + "`");
       return 0;
     }
     case "gate": {
@@ -15739,6 +15936,15 @@ function main(argv) {
       const result = runShow({ run });
       printShow(findRepoRoot(), result);
       return 0;
+    }
+    case "verify": {
+      const result = runVerify({
+        run: positionals[1],
+        latest: values.latest,
+        allowFailed: values["allow-failed"]
+      });
+      printVerify(result);
+      return result.ok ? 0 : 1;
     }
     default:
       console.error(`Unknown command: ${command}
