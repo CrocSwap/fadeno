@@ -1,0 +1,245 @@
+# EXPERIMENTAL — not a shipped starter. Encodes a real multi-model/multi-harness
+# workflow (two architects in different harnesses, cross-review, bounded
+# convergence, spec fan-out to fast builders, gated acceptance). Validates clean
+# at fadeno 0.3.0. Exposed two gaps now on the roadmap: replicate needs an
+# `actors` form (encoded here as map-over-roles), and roles need host/model
+# hints (advisory in purpose text). See memory/session notes 2026-07-12.
+kind: AgentPlaybook
+schema_version: "0.1"
+name: dual-architect-review
+description: >
+  Two models in different harnesses independently draft an architecture for the
+  same brief, adversarially cross-review each other, converge within bounded
+  rounds, consolidate into a spec series, fan the specs out to fast builder
+  agents, and gate acceptance on a final adversarial review.
+when_to_use:
+  - complex design-heavy task where a second independent model perspective pays
+  - multi-harness work (Claude Code + Codex) coordinated through the repo
+  - spec-driven delegation to fast builder agents
+
+# Host/model bindings are ADVISORY today (the schema has no host field on roles
+# yet). The human operator is the scheduler: each role's work happens in the
+# named harness session, reading and writing this run's artifacts/.
+roles:
+  coordinator:
+    purpose: >
+      Frame the brief, arbitrate if convergence exhausts, own the ledger.
+      (Fable, Claude Code)
+  architect_fable:
+    purpose: >
+      Draft an independent architecture; cross-review the other architect's
+      draft. (Fable, Claude Code)
+  architect_sol:
+    purpose: >
+      Draft an independent architecture; cross-review the other architect's
+      draft. (GPT-5.6-Sol, Codex)
+  consolidator:
+    purpose: >
+      Merge the converged approaches into one design and a series of
+      builder-ready specs. (Fable, Claude Code)
+  builder:
+    purpose: >
+      Implement one spec each, fast, exactly as written. (Grok 4.5 in Grok
+      Build; sometimes Opus in Claude Code or GPT-5.6-Luna)
+  final_reviewer:
+    purpose: >
+      Adversarially review the assembled build against the specs. (Fable,
+      Claude Code)
+
+flow:
+  - id: frame
+    kind: actor_call
+    actor: coordinator
+    output: Brief
+
+  # Steps 2-3 of the manual workflow: independent attempts at the same task.
+  # Convention: artifacts/approach-fable.md, artifacts/approach-sol.md.
+  # NOTE: semantically this is `replicate` with distinct actors, but the
+  # current schema only supports replicate as one actor x count — so this
+  # encodes as a map over the two architect roles (schema/doc gap on record).
+  - id: draft_approaches
+    kind: map
+    over:
+      - architect_fable
+      - architect_sol
+    input:
+      - Brief
+    output: ApproachDraft[]
+
+  # Step 4: each architect reviews the OTHER's draft. The pairing (who reviews
+  # whose) is runner-interpreted. Reviews are schema-valid review reports
+  # written as ONE array file (artifacts/cross-review.json) so the gate below
+  # is deterministic: a blocking issue = an objection that must be resolved
+  # before consolidation.
+  - id: cross_review
+    kind: map
+    over:
+      - architect_fable
+      - architect_sol
+    input:
+      - ApproachDraft[]
+    output: ReviewReport[]
+
+  - id: convergence_gate
+    kind: gate
+    input:
+      - ReviewReport[]
+    condition: no_blocking_issues
+    on_pass: consolidate
+    on_fail: reconcile
+
+  # Step 5: "maybe repeat for 1 or more rounds" — bounded at 2.
+  - id: reconcile
+    kind: loop
+    input:
+      - ReviewReport[]
+    body:
+      - revise_approaches
+      - re_cross_review
+    max_iterations: 2
+    until: no_blocking_issues
+    on_success: consolidate
+    on_exhausted: arbitrate
+
+  # --- reconcile loop body (versioned artifacts per iteration) ---
+  - id: revise_approaches
+    kind: map
+    over:
+      - architect_fable
+      - architect_sol
+    input:
+      - ApproachDraft[]
+      - ReviewReport[]
+    output: ApproachDraft[]
+
+  - id: re_cross_review
+    kind: map
+    over:
+      - architect_fable
+      - architect_sol
+    input:
+      - ApproachDraft[]
+    output: ReviewReport[]
+
+  # If two rounds don't converge, the human picks a direction rather than the
+  # models arguing forever — or calls the whole thing off.
+  - id: arbitrate
+    kind: human_gate
+    prompt: >
+      The architects did not converge within 2 rounds. Review the surviving
+      blocking objections in the latest cross-review. Approve to consolidate
+      anyway (coordinator resolves the dissent, recording it), or reject to
+      abandon the run.
+    on_approve: consolidate
+    on_reject: abandoned
+
+  # Step 6a: merge into one design (artifacts/consolidated-design.md),
+  # recording any overruled dissent explicitly.
+  - id: consolidate
+    kind: reduce
+    actor: consolidator
+    input:
+      - ApproachDraft[]
+      - ReviewReport[]
+    output: ConsolidatedDesign
+
+  # Step 6b: the hardened-spec series (artifacts/specs/spec-01.md, ...).
+  # Each spec must be self-contained: a weaker builder gets golden outputs,
+  # pre-made decisions, and a self-check list.
+  - id: draft_specs
+    kind: actor_call
+    actor: consolidator
+    input:
+      - ConsolidatedDesign
+    output: SpecSeries
+
+  # Step 7: fan out to fast builders, one spec per builder session.
+  - id: build
+    kind: map
+    actor: builder
+    over: SpecSeries.specs
+    input:
+      - SpecSeries
+    output: BuildResult[]
+
+  # Step 8: Fable reviews the assembled result against the specs —
+  # a structured report (artifacts/final-review.json), not vibes.
+  - id: final_review
+    kind: evaluator
+    actor: final_reviewer
+    input:
+      - BuildResult[]
+      - SpecSeries
+    output: ReviewReport
+
+  - id: acceptance_gate
+    kind: gate
+    input:
+      - ReviewReport
+    condition: no_blocking_issues
+    on_pass: done
+    on_fail: rework
+
+  - id: rework
+    kind: loop
+    input:
+      - ReviewReport
+    body:
+      - rework_builds
+      - re_review_builds
+    max_iterations: 1
+    until: no_blocking_issues
+    on_success: done
+    on_exhausted: unresolved
+
+  # --- rework loop body ---
+  - id: rework_builds
+    kind: map
+    actor: builder
+    over: SpecSeries.specs
+    input:
+      - BuildResult[]
+      - ReviewReport
+    output: BuildResult[]
+
+  - id: re_review_builds
+    kind: evaluator
+    actor: final_reviewer
+    input:
+      - BuildResult[]
+      - SpecSeries
+    output: ReviewReport
+
+  - id: done
+    kind: actor_call
+    actor: coordinator
+    input:
+      - BuildResult[]
+      - ReviewReport
+    output: FinalSummary
+    terminal_status: completed
+
+  - id: abandoned
+    kind: actor_call
+    actor: coordinator
+    input:
+      - ReviewReport[]
+    output: FinalSummary
+    terminal_status: failed
+
+  - id: unresolved
+    kind: actor_call
+    actor: coordinator
+    input:
+      - ReviewReport
+    output: FinalSummary
+    terminal_status: failed
+
+policies:
+  max_revision_loops: 2
+  max_subagents: 6
+  require_user_approval_for:
+    - destructive_commands
+    - dependency_addition
+    - deploy
+    - external_send
