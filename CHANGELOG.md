@@ -8,11 +8,12 @@ All notable changes to Fadeno are documented here. The format follows
 
 _Nothing yet._
 
-## [0.2.0] — 2026-07-10
+## [0.2.0] — 2026-07-11
 
 Formalize code-change workflow semantics: explicit loop exits, artifact-bound
 gates, structured test results, path-aware validation, and honest failed-run
-terminals.
+terminals. Also adds a trace-reading CLI (`fadeno runs` / `fadeno show`) and a
+falsifiable evaluation harness for the runner skill.
 
 ### Added
 
@@ -20,6 +21,12 @@ terminals.
 - Definite-artifact and normalized control-flow validation, including reachability,
   loop ownership, terminal statuses, and deterministic condition bindings.
 - Gate and loop lifecycle event conventions in the runner ledger.
+- `fadeno runs` lists run ledgers newest-first; `fadeno show <run-id-or-prefix>`
+  renders one run as a summary, event timeline, and artifact listing. Malformed
+  `run.yaml` files or `events.jsonl` lines are reported, never fatal.
+- A falsifiable evaluation suite under `evals/` — five fixtures, three treatments,
+  deterministic oracles, isolated workspaces — with a pilot report
+  (`evals/pilot-report.md`). Repo-only; not part of the npm package.
 
 ### Changed
 
