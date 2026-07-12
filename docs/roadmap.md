@@ -7,7 +7,7 @@ chat. v0's scope and non-goals come from `docs/kickoff-memo.md`.
 
 - CLI: `init --codex|--claude [--with-hooks] [--data-only] [--force]`,
   `validate [file] [--schema]`, `diagram [--format ascii|mermaid]`, `new-run`,
-  `run`, `gate`, `plugin`.
+  `run`, `gate`, `runs`, `show`, `plugin`.
 - Dual-target scaffolding from one template core (Codex + Claude Code), non-destructive.
 - **Claude plugin** packaging: `fadeno plugin` generates a `plugin/` (skills,
   `/fadeno:runner` + `/fadeno:builder` slash commands, and `worker`/`reviewer`/
@@ -28,8 +28,9 @@ chat. v0's scope and non-goals come from `docs/kickoff-memo.md`.
   declared role (error); unproduced `input` artifact and unused role (warnings). Also
   validates `run.yaml` / `review-report.json` (auto-detected or `--schema`).
 - `$schema` editor modelines in generated YAML (playbooks + run ledgers).
-- Run ledger (`run.yaml` / `events.jsonl` / `artifacts/`) with CLI helpers (`run`) and a
-  deterministic gate evaluator (`gate no_blocking_issues`) — the advisory→enforced bridge.
+- Run ledger (`run.yaml` / `events.jsonl` / `artifacts/`) with CLI helpers (`run`,
+  `runs` list, `show` timeline) and a deterministic gate evaluator
+  (`gate no_blocking_issues`) — the advisory→enforced bridge.
 - Tier-2 enforcement scaffold via `--with-hooks` (pre-commit, CI workflow, Claude hook example).
 - **Validated end-to-end in live Claude Code sessions** (through v0.1.2): bundled
   CLI on PATH, `Skill(fadeno:*)` model-invocation, `/fadeno:*` slash commands in
@@ -58,7 +59,8 @@ chat. v0's scope and non-goals come from `docs/kickoff-memo.md`.
 4. **Eval harness** for the runner/builder skills — a repeatable way to measure whether a
    real agent session produces good runs (the actual product risk).
 5. **Schema versioning / migration** as `schema_version` moves past `0.1`.
-6. **Richer ledger** — per-step token/cost accounting and a `fadeno runs` summary view.
+6. **Richer ledger** — per-step token/cost accounting (the `fadeno runs` /
+   `fadeno show` summary view already ships).
 7. **Diagram artifact/data-flow edge labels** — `fadeno diagram` annotating the
    input/output artifacts that flow along each edge, not just the control flow.
 

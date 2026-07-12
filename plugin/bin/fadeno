@@ -10968,49 +10968,49 @@ var require_fast_uri = __commonJS({
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
-    function resolveComponent(base, relative3, options, skipNormalization) {
+    function resolveComponent(base, relative4, options, skipNormalization) {
       const target = {};
       if (!skipNormalization) {
         base = parse(serialize(base, options), options);
-        relative3 = parse(serialize(relative3, options), options);
+        relative4 = parse(serialize(relative4, options), options);
       }
       options = options || {};
-      if (!options.tolerant && relative3.scheme) {
-        target.scheme = relative3.scheme;
-        target.userinfo = relative3.userinfo;
-        target.host = relative3.host;
-        target.port = relative3.port;
-        target.path = removeDotSegments(relative3.path || "");
-        target.query = relative3.query;
+      if (!options.tolerant && relative4.scheme) {
+        target.scheme = relative4.scheme;
+        target.userinfo = relative4.userinfo;
+        target.host = relative4.host;
+        target.port = relative4.port;
+        target.path = removeDotSegments(relative4.path || "");
+        target.query = relative4.query;
       } else {
-        if (relative3.userinfo !== void 0 || relative3.host !== void 0 || relative3.port !== void 0) {
-          target.userinfo = relative3.userinfo;
-          target.host = relative3.host;
-          target.port = relative3.port;
-          target.path = removeDotSegments(relative3.path || "");
-          target.query = relative3.query;
+        if (relative4.userinfo !== void 0 || relative4.host !== void 0 || relative4.port !== void 0) {
+          target.userinfo = relative4.userinfo;
+          target.host = relative4.host;
+          target.port = relative4.port;
+          target.path = removeDotSegments(relative4.path || "");
+          target.query = relative4.query;
         } else {
-          if (!relative3.path) {
+          if (!relative4.path) {
             target.path = base.path;
-            if (relative3.query !== void 0) {
-              target.query = relative3.query;
+            if (relative4.query !== void 0) {
+              target.query = relative4.query;
             } else {
               target.query = base.query;
             }
           } else {
-            if (relative3.path[0] === "/") {
-              target.path = removeDotSegments(relative3.path);
+            if (relative4.path[0] === "/") {
+              target.path = removeDotSegments(relative4.path);
             } else {
               if ((base.userinfo !== void 0 || base.host !== void 0 || base.port !== void 0) && !base.path) {
-                target.path = "/" + relative3.path;
+                target.path = "/" + relative4.path;
               } else if (!base.path) {
-                target.path = relative3.path;
+                target.path = relative4.path;
               } else {
-                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative3.path;
+                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative4.path;
               }
               target.path = removeDotSegments(target.path);
             }
-            target.query = relative3.query;
+            target.query = relative4.query;
           }
           target.userinfo = base.userinfo;
           target.host = base.host;
@@ -11018,7 +11018,7 @@ var require_fast_uri = __commonJS({
         }
         target.scheme = base.scheme;
       }
-      target.fragment = relative3.fragment;
+      target.fragment = relative4.fragment;
       return target;
     }
     function equal(uriA, uriB, options) {
@@ -13893,7 +13893,7 @@ var require_ajv = __commonJS({
 });
 
 // src/cli.ts
-var import_node_path11 = require("node:path");
+var import_node_path12 = require("node:path");
 var import_node_util = require("node:util");
 
 // src/commands/diagram.ts
@@ -15203,16 +15203,166 @@ ${(0, import_yaml5.stringify)(run)}`, "utf8");
   return { runDir, appendedEvents, updatedFields };
 }
 
-// src/commands/validate.ts
+// src/lib/run-ledger.ts
 var import_node_fs10 = require("node:fs");
 var import_node_path10 = require("node:path");
+var import_yaml6 = __toESM(require_dist(), 1);
+var RunLedgerError = class extends Error {
+};
+function stringOrNull(value) {
+  return typeof value === "string" ? value : null;
+}
+function summarizeRunDir(runId, dir) {
+  const yamlPath = (0, import_node_path10.join)(dir, "run.yaml");
+  const base = {
+    runId,
+    dir,
+    playbook: null,
+    status: null,
+    task: null,
+    host: null,
+    startedAt: null,
+    endedAt: null,
+    problems: []
+  };
+  let raw;
+  try {
+    raw = (0, import_node_fs10.readFileSync)(yamlPath, "utf8");
+  } catch (err) {
+    base.problems.push(`unreadable run.yaml: ${err.message}`);
+    return base;
+  }
+  let parsed;
+  try {
+    parsed = (0, import_yaml6.parse)(raw);
+  } catch (err) {
+    base.problems.push(`unparseable run.yaml: ${err.message}`);
+    return base;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    base.problems.push("unparseable run.yaml: not an object");
+    return base;
+  }
+  const doc = parsed;
+  base.playbook = stringOrNull(doc.playbook);
+  base.status = stringOrNull(doc.status);
+  base.task = stringOrNull(doc.task);
+  base.host = stringOrNull(doc.host);
+  base.startedAt = stringOrNull(doc.started_at);
+  base.endedAt = stringOrNull(doc.ended_at);
+  return base;
+}
+function listRuns(repoRoot) {
+  const runsDir = (0, import_node_path10.join)(repoRoot, ".fadeno", "runs");
+  if (!(0, import_node_fs10.existsSync)(runsDir)) return [];
+  const entries = (0, import_node_fs10.readdirSync)(runsDir, { withFileTypes: true });
+  const runs = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const dir = (0, import_node_path10.join)(runsDir, entry.name);
+    if (!(0, import_node_fs10.existsSync)((0, import_node_path10.join)(dir, "run.yaml"))) continue;
+    runs.push(summarizeRunDir(entry.name, dir));
+  }
+  runs.sort((a, b) => a.runId < b.runId ? 1 : a.runId > b.runId ? -1 : 0);
+  return runs;
+}
+function readEvents(runDir) {
+  const path = (0, import_node_path10.join)(runDir, "events.jsonl");
+  if (!(0, import_node_fs10.existsSync)(path)) return { events: [], badLines: [] };
+  const text = (0, import_node_fs10.readFileSync)(path, "utf8");
+  const lines = text.split("\n");
+  const events = [];
+  const badLines = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (line.trim() === "") continue;
+    const lineNo = i + 1;
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      badLines.push(lineNo);
+      continue;
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      badLines.push(lineNo);
+      continue;
+    }
+    const obj = parsed;
+    const type = typeof obj.type === "string" ? obj.type : "unknown";
+    const step = stringOrNull(obj.step);
+    const timestamp = stringOrNull(obj.timestamp);
+    const extra = {};
+    for (const [key, value] of Object.entries(obj)) {
+      if (key === "type" || key === "step" || key === "timestamp") continue;
+      extra[key] = value;
+    }
+    events.push({ type, step, timestamp, extra });
+  }
+  return { events, badLines };
+}
+function resolveRun(repoRoot, query) {
+  const runs = listRuns(repoRoot);
+  const exact = runs.find((r) => r.runId === query);
+  if (exact) return exact;
+  const matches = runs.filter((r) => r.runId.startsWith(query));
+  if (matches.length === 1) return matches[0];
+  if (matches.length === 0) {
+    throw new RunLedgerError(`No run matching "${query}" under .fadeno/runs.`);
+  }
+  const listed = matches.slice(0, 5).map((r) => r.runId).join(", ");
+  const more = matches.length > 5 ? `, \u2026(+${matches.length - 5} more)` : "";
+  throw new RunLedgerError(`Multiple runs match "${query}": ${listed}${more}.`);
+}
+function listArtifacts(runDir) {
+  const artifactsDir = (0, import_node_path10.join)(runDir, "artifacts");
+  if (!(0, import_node_fs10.existsSync)(artifactsDir)) return [];
+  const out = [];
+  function walk(dir) {
+    for (const entry of (0, import_node_fs10.readdirSync)(dir, { withFileTypes: true })) {
+      const full = (0, import_node_path10.join)(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (entry.isFile()) {
+        out.push({
+          path: (0, import_node_path10.relative)(runDir, full).split("\\").join("/"),
+          bytes: (0, import_node_fs10.statSync)(full).size
+        });
+      }
+    }
+  }
+  walk(artifactsDir);
+  out.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  return out;
+}
+
+// src/commands/runs.ts
+function runRuns(opts = {}) {
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  return { repoRoot, runs: listRuns(repoRoot) };
+}
+
+// src/commands/show.ts
+function runShow(opts) {
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const run = resolveRun(repoRoot, opts.run);
+  const { events, badLines } = readEvents(run.dir);
+  const artifacts = listArtifacts(run.dir);
+  return { run, events, badLines, artifacts };
+}
+
+// src/commands/validate.ts
+var import_node_fs11 = require("node:fs");
+var import_node_path11 = require("node:path");
 var ValidateError = class extends Error {
 };
 function runValidate(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const schemasDir = (0, import_node_path10.join)(repoRoot, ".fadeno", "schemas");
-  if (!(0, import_node_fs10.existsSync)(schemasDir)) {
+  const schemasDir = (0, import_node_path11.join)(repoRoot, ".fadeno", "schemas");
+  if (!(0, import_node_fs11.existsSync)(schemasDir)) {
     throw new ValidateError(
       `No Fadeno schemas found at ${schemasDir}.
 Run \`fadeno init --codex\` or \`fadeno init --claude\` first.`
@@ -15222,15 +15372,15 @@ Run \`fadeno init --codex\` or \`fadeno init --claude\` first.`
   let files;
   let forcedKind;
   if (opts.path) {
-    files = [(0, import_node_path10.isAbsolute)(opts.path) ? opts.path : (0, import_node_path10.resolve)(cwd, opts.path)];
+    files = [(0, import_node_path11.isAbsolute)(opts.path) ? opts.path : (0, import_node_path11.resolve)(cwd, opts.path)];
     forcedKind = opts.schema;
   } else {
     forcedKind = "playbook";
-    const playbooksDir = (0, import_node_path10.join)(repoRoot, ".fadeno", "playbooks");
-    if (!(0, import_node_fs10.existsSync)(playbooksDir)) {
+    const playbooksDir = (0, import_node_path11.join)(repoRoot, ".fadeno", "playbooks");
+    if (!(0, import_node_fs11.existsSync)(playbooksDir)) {
       throw new ValidateError(`No playbooks directory at ${playbooksDir}.`);
     }
-    files = (0, import_node_fs10.readdirSync)(playbooksDir).filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort().map((f) => (0, import_node_path10.join)(playbooksDir, f));
+    files = (0, import_node_fs11.readdirSync)(playbooksDir).filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort().map((f) => (0, import_node_path11.join)(playbooksDir, f));
     if (files.length === 0) {
       throw new ValidateError(`No playbooks (*.yaml) found in ${playbooksDir}.`);
     }
@@ -15249,6 +15399,8 @@ Usage:
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
   fadeno run <run> [flags]              Update a run ledger (run.yaml + events.jsonl)
   fadeno gate <run> <condition>         Evaluate a gate condition from a structured artifact
+  fadeno runs                           List run ledgers under .fadeno/runs/
+  fadeno show <run>                     Show a run summary, timeline, and artifacts
   fadeno plugin [dir]                   Generate a Claude Code plugin (default ./plugin)
 
 Options:
@@ -15274,6 +15426,8 @@ Examples:
   fadeno run 2026-05-30-1132-csv --step review
   fadeno run 2026-05-30-1132-csv --status completed
   fadeno gate 2026-05-30-1132-csv no_blocking_issues --artifact artifacts/review-report.json
+  fadeno runs
+  fadeno show 2026-07-10-2212
 `;
 var SIGIL = { codex: "$", claude: "/" };
 var SCHEMA_KINDS = ["playbook", "run", "review-report", "test-result"];
@@ -15283,7 +15437,7 @@ function printInitSummary(target, repoRoot, results, withHooks, dataOnly) {
   console.log(`Fadeno initialized for ${target} in ${repoRoot}
 `);
   for (const r of results) {
-    console.log(`  ${r.status.padEnd(11)} ${(0, import_node_path11.relative)(repoRoot, r.path) || r.path}`);
+    console.log(`  ${r.status.padEnd(11)} ${(0, import_node_path12.relative)(repoRoot, r.path) || r.path}`);
   }
   console.log(
     `
@@ -15321,7 +15475,7 @@ function printIssue(issue) {
 function printValidate(outcome) {
   let warnings = 0;
   for (const result of outcome.results) {
-    const rel = (0, import_node_path11.relative)(outcome.repoRoot, result.file) || result.file;
+    const rel = (0, import_node_path12.relative)(outcome.repoRoot, result.file) || result.file;
     const fileWarnings = result.issues.filter((i) => i.severity === "warning").length;
     warnings += fileWarnings;
     if (result.ok) {
@@ -15337,6 +15491,97 @@ function printValidate(outcome) {
 ${outcome.results.length - failed} ok, ${failed} invalid` + (warnings > 0 ? `, ${warnings} warning${warnings > 1 ? "s" : ""}` : "");
   if (outcome.ok) console.log(summary);
   else console.error(summary);
+}
+function truncateWithEllipsis(text, maxLen) {
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, maxLen)}\u2026`;
+}
+function formatRunLine(run) {
+  if (run.problems.length > 0) {
+    const playbook2 = run.playbook ?? "?";
+    const task2 = run.task ? truncateWithEllipsis(run.task, 60) : "?";
+    return `${run.runId}  [malformed]  ${playbook2} \u2014 ${task2} (${run.problems[0]})`;
+  }
+  const status = run.status ?? "?";
+  const playbook = run.playbook ?? "?";
+  const task = run.task ? truncateWithEllipsis(run.task, 60) : "?";
+  return `${run.runId}  [${status}]  ${playbook} \u2014 ${task}`;
+}
+function printRuns(runs) {
+  if (runs.length === 0) {
+    console.log("No runs yet under .fadeno/runs.");
+    return;
+  }
+  for (const run of runs) console.log(formatRunLine(run));
+  const statusCounts = /* @__PURE__ */ new Map();
+  for (const run of runs) {
+    const key = run.status ?? "?";
+    statusCounts.set(key, (statusCounts.get(key) ?? 0) + 1);
+  }
+  const parts = [...statusCounts.entries()].sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0).map(([status, n]) => `${n} ${status}`);
+  console.log(`
+${runs.length} run${runs.length === 1 ? "" : "s"} (${parts.join(", ")})`);
+}
+function utcTime(timestamp) {
+  if (!timestamp) return "--:--:--";
+  const d = new Date(timestamp);
+  if (Number.isNaN(d.getTime())) return "--:--:--";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+}
+function stepSuffix(step) {
+  return step != null ? `  (step: ${step})` : "";
+}
+function renderEvent(event) {
+  const { type, step, extra } = event;
+  switch (type) {
+    case "step_started":
+      return `step_started  ${step ?? "?"}`;
+    case "artifact_created": {
+      const artifact = typeof extra.artifact === "string" ? extra.artifact : "?";
+      return `artifact_created  ${artifact}${stepSuffix(step)}`;
+    }
+    case "gate_evaluated": {
+      const condition = typeof extra.condition === "string" ? extra.condition : "?";
+      const resultRaw = typeof extra.result === "string" ? extra.result : "?";
+      const artifact = typeof extra.artifact === "string" ? extra.artifact : "?";
+      return `gate_evaluated  ${condition} \u2192 ${resultRaw.toUpperCase()}  (${artifact})`;
+    }
+    case "run_started":
+    case "run_completed":
+      return `${type}${stepSuffix(step)}`;
+    default: {
+      const compact = JSON.stringify(extra);
+      return `${type}  ${truncateWithEllipsis(compact, 80)}`;
+    }
+  }
+}
+function printShow(repoRoot, result) {
+  const { run, events, badLines, artifacts } = result;
+  const dash = (value) => value ?? "\u2014";
+  const relDir = (0, import_node_path12.relative)(repoRoot, run.dir) || run.dir;
+  console.log(`run ${run.runId}`);
+  console.log(`  playbook:  ${dash(run.playbook)}`);
+  console.log(`  task:      ${dash(run.task)}`);
+  console.log(`  status:    ${dash(run.status)}`);
+  console.log(`  host:      ${dash(run.host)}`);
+  console.log(`  started:   ${dash(run.startedAt)}`);
+  console.log(`  ended:     ${dash(run.endedAt)}`);
+  console.log(`  dir:       ${relDir}`);
+  const eventLabel = events.length === 1 ? "event" : "events";
+  console.log(`
+timeline (${events.length} ${eventLabel})`);
+  for (const event of events) {
+    console.log(`  ${utcTime(event.timestamp)}  ${renderEvent(event)}`);
+  }
+  for (const lineNo of badLines) {
+    console.log(`  line ${lineNo}: unparseable event (skipped)`);
+  }
+  console.log(`
+artifacts (${artifacts.length})`);
+  for (const art of artifacts) {
+    console.log(`  ${art.path}  (${art.bytes} bytes)`);
+  }
 }
 function requireTarget(values) {
   if (values.codex && values.claude) throw new Error("Choose only one target: --codex or --claude.");
@@ -15451,7 +15696,7 @@ function main(argv) {
       const parts = [];
       if (result.updatedFields.length) parts.push(`updated ${result.updatedFields.join(", ")}`);
       if (result.appendedEvents.length) parts.push(`logged ${result.appendedEvents.join(", ")}`);
-      console.log(`${(0, import_node_path11.relative)(process.cwd(), result.runDir) || result.runDir}: ${parts.join("; ")}`);
+      console.log(`${(0, import_node_path12.relative)(process.cwd(), result.runDir) || result.runDir}: ${parts.join("; ")}`);
       return 0;
     }
     case "plugin": {
@@ -15460,7 +15705,7 @@ function main(argv) {
       for (const r of results) counts[r.status] += 1;
       console.log(`Generated Fadeno plugin in ${outDir}`);
       console.log(`  ${counts.created} created, ${counts.overwritten} overwritten, ${counts.skipped} skipped.`);
-      console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path11.relative)(process.cwd(), outDir) + "`");
+      console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path12.relative)(process.cwd(), outDir) + "`");
       return 0;
     }
     case "gate": {
@@ -15482,6 +15727,18 @@ function main(argv) {
         }
       }
       return result.pass ? 0 : 1;
+    }
+    case "runs": {
+      const { runs } = runRuns();
+      printRuns(runs);
+      return 0;
+    }
+    case "show": {
+      const run = positionals[1];
+      if (!run) throw new Error("Usage: fadeno show <run>");
+      const result = runShow({ run });
+      printShow(findRepoRoot(), result);
+      return 0;
     }
     default:
       console.error(`Unknown command: ${command}

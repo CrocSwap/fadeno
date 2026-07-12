@@ -7,12 +7,16 @@ import { runInit, type Target } from './commands/init.ts';
 import { runNewRun } from './commands/new-run.ts';
 import { runPlugin } from './commands/plugin.ts';
 import { runRun } from './commands/run.ts';
+import { runRuns } from './commands/runs.ts';
+import { runShow } from './commands/show.ts';
 import { runValidate } from './commands/validate.ts';
 import type { DiagramFormat } from './lib/diagram.ts';
 import type { EmitResult } from './lib/fsutil.ts';
 import type { SchemaKind, ValidationIssue } from './lib/playbook-validate.ts';
-import { packageVersion } from './lib/paths.ts';
+import { findRepoRoot, packageVersion } from './lib/paths.ts';
+import type { RunEvent, RunSummary } from './lib/run-ledger.ts';
 import type { ValidateOutcome } from './commands/validate.ts';
+import type { ShowResult } from './commands/show.ts';
 
 const HELP = `fadeno — the playbook layer for AI coding agents
 
@@ -23,6 +27,8 @@ Usage:
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
   fadeno run <run> [flags]              Update a run ledger (run.yaml + events.jsonl)
   fadeno gate <run> <condition>         Evaluate a gate condition from a structured artifact
+  fadeno runs                           List run ledgers under .fadeno/runs/
+  fadeno show <run>                     Show a run summary, timeline, and artifacts
   fadeno plugin [dir]                   Generate a Claude Code plugin (default ./plugin)
 
 Options:
@@ -48,6 +54,8 @@ Examples:
   fadeno run 2026-05-30-1132-csv --step review
   fadeno run 2026-05-30-1132-csv --status completed
   fadeno gate 2026-05-30-1132-csv no_blocking_issues --artifact artifacts/review-report.json
+  fadeno runs
+  fadeno show 2026-07-10-2212
 `;
 
 const SIGIL: Record<Target, string> = { codex: '$', claude: '/' };
@@ -126,6 +134,108 @@ function printValidate(outcome: ValidateOutcome): void {
     (warnings > 0 ? `, ${warnings} warning${warnings > 1 ? 's' : ''}` : '');
   if (outcome.ok) console.log(summary);
   else console.error(summary);
+}
+
+function truncateWithEllipsis(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, maxLen)}…`;
+}
+
+function formatRunLine(run: RunSummary): string {
+  if (run.problems.length > 0) {
+    const playbook = run.playbook ?? '?';
+    const task = run.task ? truncateWithEllipsis(run.task, 60) : '?';
+    return `${run.runId}  [malformed]  ${playbook} — ${task} (${run.problems[0]})`;
+  }
+  const status = run.status ?? '?';
+  const playbook = run.playbook ?? '?';
+  const task = run.task ? truncateWithEllipsis(run.task, 60) : '?';
+  return `${run.runId}  [${status}]  ${playbook} — ${task}`;
+}
+
+function printRuns(runs: RunSummary[]): void {
+  if (runs.length === 0) {
+    console.log('No runs yet under .fadeno/runs.');
+    return;
+  }
+
+  for (const run of runs) console.log(formatRunLine(run));
+
+  const statusCounts = new Map<string, number>();
+  for (const run of runs) {
+    const key = run.status ?? '?';
+    statusCounts.set(key, (statusCounts.get(key) ?? 0) + 1);
+  }
+  const parts = [...statusCounts.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([status, n]) => `${n} ${status}`);
+  console.log(`\n${runs.length} run${runs.length === 1 ? '' : 's'} (${parts.join(', ')})`);
+}
+
+function utcTime(timestamp: string | null): string {
+  if (!timestamp) return '--:--:--';
+  const d = new Date(timestamp);
+  if (Number.isNaN(d.getTime())) return '--:--:--';
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+}
+
+function stepSuffix(step: string | null): string {
+  return step != null ? `  (step: ${step})` : '';
+}
+
+function renderEvent(event: RunEvent): string {
+  const { type, step, extra } = event;
+  switch (type) {
+    case 'step_started':
+      return `step_started  ${step ?? '?'}`;
+    case 'artifact_created': {
+      const artifact = typeof extra.artifact === 'string' ? extra.artifact : '?';
+      return `artifact_created  ${artifact}${stepSuffix(step)}`;
+    }
+    case 'gate_evaluated': {
+      const condition = typeof extra.condition === 'string' ? extra.condition : '?';
+      const resultRaw = typeof extra.result === 'string' ? extra.result : '?';
+      const artifact = typeof extra.artifact === 'string' ? extra.artifact : '?';
+      return `gate_evaluated  ${condition} → ${resultRaw.toUpperCase()}  (${artifact})`;
+    }
+    case 'run_started':
+    case 'run_completed':
+      return `${type}${stepSuffix(step)}`;
+    default: {
+      const compact = JSON.stringify(extra);
+      return `${type}  ${truncateWithEllipsis(compact, 80)}`;
+    }
+  }
+}
+
+function printShow(repoRoot: string, result: ShowResult): void {
+  const { run, events, badLines, artifacts } = result;
+  const dash = (value: string | null): string => value ?? '—';
+  const relDir = relative(repoRoot, run.dir) || run.dir;
+
+  console.log(`run ${run.runId}`);
+  console.log(`  playbook:  ${dash(run.playbook)}`);
+  console.log(`  task:      ${dash(run.task)}`);
+  console.log(`  status:    ${dash(run.status)}`);
+  console.log(`  host:      ${dash(run.host)}`);
+  console.log(`  started:   ${dash(run.startedAt)}`);
+  console.log(`  ended:     ${dash(run.endedAt)}`);
+  console.log(`  dir:       ${relDir}`);
+
+  const eventLabel = events.length === 1 ? 'event' : 'events';
+  console.log(`\ntimeline (${events.length} ${eventLabel})`);
+  for (const event of events) {
+    console.log(`  ${utcTime(event.timestamp)}  ${renderEvent(event)}`);
+  }
+  for (const lineNo of badLines) {
+    console.log(`  line ${lineNo}: unparseable event (skipped)`);
+  }
+
+  console.log(`\nartifacts (${artifacts.length})`);
+  for (const art of artifacts) {
+    console.log(`  ${art.path}  (${art.bytes} bytes)`);
+  }
 }
 
 function requireTarget(values: { codex?: boolean; claude?: boolean }): Target {
@@ -275,6 +385,18 @@ function main(argv: string[]): number {
         }
       }
       return result.pass ? 0 : 1;
+    }
+    case 'runs': {
+      const { runs } = runRuns();
+      printRuns(runs);
+      return 0;
+    }
+    case 'show': {
+      const run = positionals[1];
+      if (!run) throw new Error('Usage: fadeno show <run>');
+      const result = runShow({ run });
+      printShow(findRepoRoot(), result);
+      return 0;
     }
     default:
       console.error(`Unknown command: ${command}\n`);

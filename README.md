@@ -156,6 +156,8 @@ fadeno gate <run-id> no_blocking_issues \
   --artifact artifacts/review-report.json       # exit 0/1; --report is deprecated
 fadeno gate <run-id> tests_pass \
   --artifact artifacts/test-result.json         # status passed + exit_code 0
+fadeno runs                                     # list run ledgers (newest first)
+fadeno show <run-id-or-prefix>                  # summary + timeline + artifacts
 ```
 
 `fadeno gate` is the **advisory→enforced bridge**: it computes a gate condition
