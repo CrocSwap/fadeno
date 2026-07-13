@@ -61,8 +61,15 @@ Update `status` to `completed`/`failed`/`aborted` at the end, and keep
 appends any type), but these are the standard ones: `run_started`,
 `step_started`, `artifact_created`, `gate_evaluated`, `loop_iteration_started`,
 `loop_condition_evaluated`, `loop_succeeded`, `loop_exhausted`, `roles_degraded`,
-and a terminal `run_completed` / `run_failed` / `run_aborted`. Every line carries at
-least `type`, `step` (a step id, or `null` for run-level events), and `timestamp`.
+`prompt_assembled`, and a terminal `run_completed` / `run_failed` / `run_aborted`.
+Every line carries at least `type`, `step` (a step id, or `null` for run-level
+events), and `timestamp`.
+
+An artifact event (`artifact_created` / legacy `artifact_written`) may carry an
+optional **`member`** field naming the map member that produced it (e.g.
+`{"type":"artifact_created","step":"cross_review","artifact":"artifacts/cross-review.architect_fable.json","member":"architect_fable",...}`).
+When present it drives `fadeno prompt`'s per-member attribution directly; without
+it, attribution falls back to the producing step's `output_path` map.
 
 The ledger is the *degraded runtime* for instruction-only hosts. Keep it honest:
 it is what makes the run inspectable, and the seam a future compiled runtime reads.
@@ -140,6 +147,39 @@ subagents aren't available, to a separate role-pass.
   (not dedicated subagents), and record it — `fadeno run <run> --event
   roles_degraded`. Otherwise the run reads as if it used subagents when it
   didn't — exactly the kind of dishonest trace this system exists to avoid.
+
+## Assembling step prompts (`fadeno prompt`)
+
+`fadeno prompt <run> <step> [--actor <role>] [--iteration <n>] [--inline]
+[--no-record] [--format text|json]` deterministically assembles the exact text a
+step's actor should receive — a pure function of the validated playbook, the run
+ledger (events through the invocation's `step_started` cutoff), the referenced
+artifact bytes, and the selection. It **renders**; it never judges, dispatches,
+or advances control flow. The driver dispatches a step by piping it into a
+sub-harness: `fadeno prompt <run> <step> --actor <role> | { codex exec -; claude
+-p }`.
+
+- **Promptable kinds (v1):** `actor_call`, `evaluator`, `reduce`, and a `map`
+  over a literal role list (`--actor` required, and must be an `over` member).
+  Gates, human_gates, loops, artifact-field maps, and `tool_call` / `router` /
+  `join` / `artifact_op` / `subworkflow` / `replicate` are not promptable in v1.
+- **Records by default.** It writes an immutable snapshot under
+  `artifacts/prompts/<step>[--<member>][--v<G>]--n<J>.md` and appends a
+  `prompt_assembled` manifest event (selection, cutoff line, per-input
+  path/bytes/sha256, playbook sha256, prompt sha256, snapshot path). A
+  byte-identical re-run reuses the snapshot (no duplicate event); a divergent one
+  errors rather than overwrite. `--no-record`, a terminal run, or a step not yet
+  dispatched (no `step_started`) makes it a read-only preview. Snapshots under
+  `artifacts/prompts/**` and `prompt_assembled` events are records, **not inputs**
+  to any step.
+- **Output paths.** The producing step's `output_path` wins (a string, or a
+  member→template map; tokens `{actor}`, `{iteration}`). Otherwise defaults:
+  singular typed → `artifacts/review-report.json` / `artifacts/test-result.json`;
+  singular untyped → `artifacts/<kebab-name>.md`; mapped typed →
+  `artifacts/parts/<step>/<member>.json`. Loop-body outputs are
+  **generation-scoped** with `.v<G>`, where **G = N + 1** (pre-loop = generation
+  1): a loop-body `output_path` template must contain `{iteration}`, which expands
+  to the generation, so the first iteration (N = 1) writes `.v2`.
 
 ## Gates, honestly
 

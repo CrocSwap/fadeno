@@ -158,7 +158,15 @@ fadeno gate <run-id> tests_pass \
   --artifact artifacts/test-result.json         # status passed + exit_code 0
 fadeno runs                                     # list run ledgers (newest first)
 fadeno show <run-id-or-prefix>                  # summary + timeline + artifacts
+fadeno prompt <run-id> <step> --actor <role> \
+  --no-record                                   # assemble a step's actor prompt (pipe to codex/claude)
 ```
+
+`fadeno prompt` deterministically assembles the exact prompt a step's actor
+receives — from the validated playbook, the ledger, and the referenced artifact
+bytes — and records it as an immutable snapshot (`artifacts/prompts/…`) plus a
+`prompt_assembled` manifest event, unless `--no-record`. A driver runs a role
+with `fadeno prompt <run> <step> --actor <role> | codex exec -`.
 
 `fadeno gate` is the **advisory→enforced bridge**: it computes a gate condition
 from a structured judgment artifact on disk (same check the runner applies), so

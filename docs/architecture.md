@@ -59,6 +59,7 @@ assert on return values and filesystem effects instead of scraping stdout.
 | `runNewRun` | `runId` + `runDir` | Creates a run ledger. |
 | `runRun` | updated fields + appended events | Mutates `run.yaml`, appends `events.jsonl`. |
 | `runGate` | pass/fail + blocking titles | The advisory→enforced bridge. |
+| `runPrompt` | prompt text + sha + record status + plan | Deterministic step-prompt assembler; records a snapshot + `prompt_assembled` by default. Pure resolution/rendering live in `lib/prompt-resolve.ts` + `lib/prompt.ts`. |
 | `runPlugin` | `EmitResult[]` + `outDir` | Generates `plugin/` from templates. |
 
 All commands accept injectable `cwd` / `repoRoot` (and `now` where time matters)

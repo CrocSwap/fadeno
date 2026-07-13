@@ -71,6 +71,19 @@
           }
         }
       }
+    },
+    "artifact_contracts": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "Optional per-artifact output contracts, keyed by the artifact's base name (e.g. \"ConsolidatedDesign\"). Consumed by `fadeno prompt` when rendering an untyped step's output contract.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "media_type": { "type": "string" },
+          "instructions": { "type": "string" }
+        }
+      }
     }
   },
   "definitions": {
@@ -153,7 +166,27 @@
         "count": { "type": "integer", "minimum": 1 },
         "wait_for": { "type": "array", "items": { "type": "string" } },
         "op": { "type": "string" },
-        "playbook": { "type": "string" }
+        "playbook": { "type": "string" },
+        "output_path": {
+          "description": "Optional explicit output path template for this step's artifact. A string, or a member->template map for a map over a literal role list. Tokens: {actor}, {iteration}. Repo-relative POSIX, no \"..\", no backslash, not absolute. Consumed by `fadeno prompt`.",
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "object", "minProperties": 1, "additionalProperties": { "type": "string", "minLength": 1 } }
+          ]
+        },
+        "input_bindings": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "Optional per-actor input routing for a map over a literal role list: which declared inputs are primary vs context for each member. Consumed by `fadeno prompt` for peer attribution.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "primary": { "type": "array", "items": { "type": "string" } },
+              "context": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        }
       },
       "allOf": [
         { "if": { "properties": { "kind": { "const": "actor_call" } } }, "then": { "required": ["actor"] } },

@@ -6,6 +6,7 @@ import { runGate } from './commands/gate.ts';
 import { runInit, type Target } from './commands/init.ts';
 import { runNewRun } from './commands/new-run.ts';
 import { runPlugin } from './commands/plugin.ts';
+import { runPrompt } from './commands/prompt.ts';
 import { runRun } from './commands/run.ts';
 import { runRuns } from './commands/runs.ts';
 import { runShow } from './commands/show.ts';
@@ -28,6 +29,7 @@ Usage:
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
   fadeno run <run> [flags]              Update a run ledger (run.yaml + events.jsonl)
   fadeno gate <run> <condition>         Evaluate a gate condition from a structured artifact
+  fadeno prompt <run> <step> [flags]    Assemble (and record) a step's actor prompt
   fadeno runs                           List run ledgers under .fadeno/runs/
   fadeno show <run>                     Show a run summary, timeline, and artifacts
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic gate claims (or --latest)
@@ -45,6 +47,10 @@ Options:
   --artifact <path>       (run) Attach an artifact path to the event
   --artifact <path>       (gate) Artifact path relative to run (condition-specific default)
   --report <path>         (gate) Deprecated alias for --artifact
+  --actor <role>          (prompt) Map member / actor to assemble the prompt for
+  --iteration <n>         (prompt) Loop-body iteration to target (default: latest)
+  --inline                (prompt) Embed input file contents in the prompt
+  --no-record             (prompt) Preview only: write no snapshot or event
   --latest                (verify) Audit the newest run instead of a named one
   --allow-failed          (verify) Accept an honest failed/aborted terminal
   -h, --help              Show this help
@@ -58,6 +64,7 @@ Examples:
   fadeno run 2026-05-30-1132-csv --step review
   fadeno run 2026-05-30-1132-csv --status completed
   fadeno gate 2026-05-30-1132-csv no_blocking_issues --artifact artifacts/review-report.json
+  fadeno prompt 2026-05-30-1132-csv cross_review --actor architect_fable --no-record
   fadeno runs
   fadeno show 2026-07-10-2212
   fadeno verify --latest
@@ -287,6 +294,10 @@ function main(argv: string[]): number {
         event: { type: 'string' },
         artifact: { type: 'string' },
         report: { type: 'string' },
+        actor: { type: 'string' },
+        iteration: { type: 'string' },
+        inline: { type: 'boolean' },
+        'no-record': { type: 'boolean' },
         latest: { type: 'boolean' },
         'allow-failed': { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
@@ -410,6 +421,52 @@ function main(argv: string[]): number {
         }
       }
       return result.pass ? 0 : 1;
+    }
+    case 'prompt': {
+      const [, run, step] = positionals;
+      if (!run || !step) {
+        throw new Error('Usage: fadeno prompt <run> <step> [--actor <role>] [--iteration <n>] [--inline] [--no-record] [--format text|json]');
+      }
+      if (values.format && values.format !== 'text' && values.format !== 'json') {
+        throw new Error(`Invalid --format "${values.format}". Use: text | json.`);
+      }
+      let iteration: number | undefined;
+      if (values.iteration != null) {
+        const n = Number(values.iteration);
+        if (!Number.isInteger(n) || n < 1) {
+          throw new Error(`Invalid --iteration "${values.iteration}". Use a positive integer.`);
+        }
+        iteration = n;
+      }
+      const result = runPrompt({
+        run,
+        step,
+        actor: values.actor,
+        iteration,
+        inline: values.inline,
+        record: !values['no-record'],
+      });
+      if (values.format === 'json') {
+        console.log(
+          JSON.stringify(
+            {
+              step,
+              actor: result.plan.actor,
+              iteration: result.plan.iteration,
+              invocation: result.plan.invocation,
+              recorded: result.recorded,
+              prompt_path: result.promptPath,
+              sha256: result.sha256,
+              prompt: result.prompt,
+            },
+            null,
+            2,
+          ),
+        );
+      } else {
+        console.log(result.prompt);
+      }
+      return 0;
     }
     case 'runs': {
       const { runs } = runRuns();

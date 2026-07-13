@@ -65,6 +65,11 @@ flow:
     input:
       - Brief
     output: ApproachDraft[]
+    # Entrenched real filenames, so `fadeno prompt` attributes each draft to its
+    # producing architect (member map key -> member's output path).
+    output_path:
+      architect_fable: artifacts/approach-fable.md
+      architect_sol: artifacts/approach-sol.md
 
   # Step 4: each architect reviews the OTHER's draft. The pairing (who reviews
   # whose) is runner-interpreted. Reviews are schema-valid review reports
@@ -79,6 +84,19 @@ flow:
     input:
       - ApproachDraft[]
     output: ReviewReport[]
+    output_path:
+      architect_fable: artifacts/cross-review.architect_fable.json
+      architect_sol: artifacts/cross-review.architect_sol.json
+    # Block style: `- ApproachDraft[]` — the `[]` marker breaks YAML flow style.
+    input_bindings:
+      architect_fable:
+        primary:
+          - ApproachDraft[]
+        context: []
+      architect_sol:
+        primary:
+          - ApproachDraft[]
+        context: []
 
   - id: convergence_gate
     kind: gate
@@ -111,6 +129,12 @@ flow:
       - ApproachDraft[]
       - ReviewReport[]
     output: ApproachDraft[]
+    # Loop-body outputs are generation-scoped: the {iteration} token expands to
+    # the generation G = N+1 (pre-loop = gen 1), so iteration 1 writes `.v2` —
+    # matching the entrenched real filenames (approach-fable.v2.md, ...).
+    output_path:
+      architect_fable: artifacts/approach-fable.v{iteration}.md
+      architect_sol: artifacts/approach-sol.v{iteration}.md
 
   - id: re_cross_review
     kind: map
@@ -120,6 +144,9 @@ flow:
     input:
       - ApproachDraft[]
     output: ReviewReport[]
+    output_path:
+      architect_fable: artifacts/cross-review.architect_fable.v{iteration}.json
+      architect_sol: artifacts/cross-review.architect_sol.v{iteration}.json
 
   # If two rounds don't converge, the human picks a direction rather than the
   # models arguing forever — or calls the whole thing off.

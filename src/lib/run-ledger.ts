@@ -130,6 +130,19 @@ export function readEvents(runDir: string): { events: RunEvent[]; badLines: numb
   return { events, badLines };
 }
 
+/**
+ * Parse `events.jsonl`, throwing on any malformed line. Unlike `readEvents`
+ * (which collects bad lines for a tolerant `show`), a prompt assembly must refuse
+ * to build on a corrupt ledger so a pipeline never feeds a partial prompt onward.
+ */
+export function readEventsStrict(runDir: string): RunEvent[] {
+  const { events, badLines } = readEvents(runDir);
+  if (badLines.length > 0) {
+    throw new RunLedgerError(`events.jsonl has malformed lines: ${badLines.join(', ')}`);
+  }
+  return events;
+}
+
 /** Resolve a run id or unique prefix under `.fadeno/runs/`. */
 export function resolveRun(repoRoot: string, query: string): RunSummary {
   const runs = listRuns(repoRoot);

@@ -509,6 +509,154 @@ function flowAndArtifactChecks(playbook: Playbook, file: string): ValidationIssu
   return issues;
 }
 
+/** Steps that appear in some loop's `body` (i.e. loop-body steps). */
+function loopBodyIds(flow: Step[]): Set<string> {
+  const ids = new Set<string>();
+  for (const step of flow) {
+    if (step.kind === 'loop' && Array.isArray(step.body)) {
+      for (const id of step.body) if (typeof id === 'string') ids.add(id);
+    }
+  }
+  return ids;
+}
+
+/** Every logical output base name declared anywhere in the flow. */
+function declaredOutputBases(flow: Step[]): Set<string> {
+  const bases = new Set<string>();
+  for (const step of flow) {
+    if (typeof step.output === 'string') bases.add(baseArtifact(step.output));
+  }
+  return bases;
+}
+
+const ITERATION_TOKEN = '{iteration}';
+
+/** Reason an output_path template is path-unsafe, or null when it is safe. */
+function unsafeTemplate(template: string): string | null {
+  if (template.includes('\\')) return 'contains a backslash';
+  if (/^([a-zA-Z]:)?\//.test(template)) return 'is an absolute path';
+  if (template.split('/').some((segment) => segment === '..')) return 'contains a ".." segment';
+  return null;
+}
+
+/** Every literal template string in an `output_path` (string or member map). */
+function templateStrings(spec: string | Record<string, unknown>): string[] {
+  if (typeof spec === 'string') return [spec];
+  return Object.values(spec).filter((value): value is string => typeof value === 'string');
+}
+
+function stringList(value: unknown): string[] | null {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : null;
+}
+
+/**
+ * Static checks for the `output_path`, `input_bindings`, and `artifact_contracts`
+ * fields consumed by `fadeno prompt`. Additive and control-flow-free; every issue
+ * is error-severity because it indicates an unusable output contract.
+ */
+function outputContractChecks(playbook: Playbook, file: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const flow = Array.isArray(playbook.flow) ? (playbook.flow as Step[]) : [];
+  const bodyIds = loopBodyIds(flow);
+
+  flow.forEach((step, index) => {
+    const where = stepWhere(step, index);
+    const overList = stringList(step.over);
+    const outputPath = step.output_path;
+
+    if (outputPath !== undefined && outputPath !== null) {
+      // 1. output_path on a step that produces nothing.
+      if (typeof step.output !== 'string' && step.over === undefined) {
+        issues.push({ file, path: `${where}/output_path`, message: 'output_path on a step that produces nothing (no output or over)', severity: 'error' });
+      }
+      const isMemberMap = typeof outputPath === 'object' && !Array.isArray(outputPath);
+      if (isMemberMap) {
+        const map = outputPath as Record<string, unknown>;
+        // 2. member-map keys must exactly equal the literal `over` role list.
+        if (!overList) {
+          issues.push({ file, path: `${where}/output_path`, message: 'output_path member map requires a literal `over` role list', severity: 'error' });
+        } else {
+          const overSet = new Set(overList);
+          const extras = Object.keys(map).filter((key) => !overSet.has(key));
+          const missing = overList.filter((member) => !(member in map));
+          if (extras.length > 0 || missing.length > 0) {
+            const parts: string[] = [];
+            if (missing.length) parts.push(`missing ${missing.join(', ')}`);
+            if (extras.length) parts.push(`unexpected ${extras.join(', ')}`);
+            issues.push({ file, path: `${where}/output_path`, message: `output_path member map keys must match the \`over\` role list (${parts.join('; ')})`, severity: 'error' });
+          }
+        }
+      } else if (typeof outputPath === 'string' && overList && overList.length > 1 && !outputPath.includes('{actor}')) {
+        // 3. a single string template for a map over roles must vary by {actor}.
+        issues.push({ file, path: `${where}/output_path`, message: 'output_path string template for a map over roles must contain {actor}', severity: 'error' });
+      }
+
+      const isBody = typeof step.id === 'string' && bodyIds.has(step.id);
+      for (const template of templateStrings(outputPath as string | Record<string, unknown>)) {
+        // 4. loop bodies are generation-scoped; non-loop steps are not.
+        if (isBody && !template.includes(ITERATION_TOKEN)) {
+          issues.push({ file, path: `${where}/output_path`, message: `loop-body step output_path template "${template}" must contain {iteration}`, severity: 'error' });
+        } else if (!isBody && template.includes(ITERATION_TOKEN)) {
+          issues.push({ file, path: `${where}/output_path`, message: `non-loop-body step output_path template "${template}" must not contain {iteration}`, severity: 'error' });
+        }
+        // 5. path safety.
+        const unsafe = unsafeTemplate(template);
+        if (unsafe) issues.push({ file, path: `${where}/output_path`, message: `output_path template "${template}" ${unsafe}`, severity: 'error' });
+      }
+
+      // 6. static collision: expand over the literal role list; {actor} -> member.
+      if (overList && overList.length > 0) {
+        const seen = new Map<string, string>();
+        for (const member of overList) {
+          const template = isMemberMap ? (outputPath as Record<string, unknown>)[member] : outputPath;
+          if (typeof template !== 'string') continue;
+          const expanded = template.split('{actor}').join(member);
+          const prior = seen.get(expanded);
+          if (prior !== undefined) {
+            issues.push({ file, path: `${where}/output_path`, message: `output_path collides: members "${prior}" and "${member}" both resolve to "${expanded}"`, severity: 'error' });
+          } else {
+            seen.set(expanded, member);
+          }
+        }
+      }
+    }
+
+    // 8. input_bindings keys must be `over` members; refs must be declared inputs.
+    const inputBindings = step.input_bindings;
+    if (inputBindings && typeof inputBindings === 'object' && !Array.isArray(inputBindings)) {
+      const overSet = new Set(overList ?? []);
+      const inputSet = new Set(stringList(step.input) ?? []);
+      for (const [actor, binding] of Object.entries(inputBindings as Record<string, unknown>)) {
+        if (!overSet.has(actor)) {
+          issues.push({ file, path: `${where}/input_bindings/${actor}`, message: `input_bindings key "${actor}" is not a member of \`over\``, severity: 'error' });
+        }
+        if (binding && typeof binding === 'object' && !Array.isArray(binding)) {
+          for (const role of ['primary', 'context'] as const) {
+            for (const ref of stringList((binding as Record<string, unknown>)[role]) ?? []) {
+              if (!inputSet.has(ref)) {
+                issues.push({ file, path: `${where}/input_bindings/${actor}/${role}`, message: `input_bindings references artifact "${ref}", which is not a declared input of this step`, severity: 'error' });
+              }
+            }
+          }
+        }
+      }
+    }
+  });
+
+  // 7. artifact_contracts keys must each match a declared output base name.
+  const contracts = playbook.artifact_contracts;
+  if (contracts && typeof contracts === 'object' && !Array.isArray(contracts)) {
+    const outputBases = declaredOutputBases(flow);
+    for (const key of Object.keys(contracts as Record<string, unknown>)) {
+      if (!outputBases.has(key)) {
+        issues.push({ file, path: `/artifact_contracts/${key}`, message: `artifact_contracts key "${key}" does not match any declared output artifact`, severity: 'error' });
+      }
+    }
+  }
+
+  return issues;
+}
+
 /**
  * Semantic checks: actor references, role usage, normalized control flow,
  * terminal declarations, condition bindings, reachability, and definite
@@ -534,6 +682,7 @@ export function semanticChecks(playbook: Playbook, file: string): ValidationIssu
 
   for (const role of roles) if (!usedRoles.has(role)) issues.push({ file, path: `/roles/${role}`, message: `role "${role}" is declared but never used`, severity: 'warning' });
   issues.push(...flowAndArtifactChecks(playbook, file));
+  issues.push(...outputContractChecks(playbook, file));
   return issues;
 }
 

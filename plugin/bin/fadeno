@@ -26,9 +26,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// node_modules/yaml/dist/nodes/identity.js
+// ../../../node_modules/yaml/dist/nodes/identity.js
 var require_identity = __commonJS({
-  "node_modules/yaml/dist/nodes/identity.js"(exports2) {
+  "../../../node_modules/yaml/dist/nodes/identity.js"(exports2) {
     "use strict";
     var ALIAS = /* @__PURE__ */ Symbol.for("yaml.alias");
     var DOC = /* @__PURE__ */ Symbol.for("yaml.document");
@@ -83,9 +83,9 @@ var require_identity = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/visit.js
+// ../../../node_modules/yaml/dist/visit.js
 var require_visit = __commonJS({
-  "node_modules/yaml/dist/visit.js"(exports2) {
+  "../../../node_modules/yaml/dist/visit.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var BREAK = /* @__PURE__ */ Symbol("break visit");
@@ -241,9 +241,9 @@ var require_visit = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/doc/directives.js
+// ../../../node_modules/yaml/dist/doc/directives.js
 var require_directives = __commonJS({
-  "node_modules/yaml/dist/doc/directives.js"(exports2) {
+  "../../../node_modules/yaml/dist/doc/directives.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var visit = require_visit();
@@ -412,9 +412,9 @@ var require_directives = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/doc/anchors.js
+// ../../../node_modules/yaml/dist/doc/anchors.js
 var require_anchors = __commonJS({
-  "node_modules/yaml/dist/doc/anchors.js"(exports2) {
+  "../../../node_modules/yaml/dist/doc/anchors.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var visit = require_visit();
@@ -482,9 +482,9 @@ var require_anchors = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/doc/applyReviver.js
+// ../../../node_modules/yaml/dist/doc/applyReviver.js
 var require_applyReviver = __commonJS({
-  "node_modules/yaml/dist/doc/applyReviver.js"(exports2) {
+  "../../../node_modules/yaml/dist/doc/applyReviver.js"(exports2) {
     "use strict";
     function applyReviver(reviver, obj, key, val) {
       if (val && typeof val === "object") {
@@ -532,9 +532,9 @@ var require_applyReviver = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/nodes/toJS.js
+// ../../../node_modules/yaml/dist/nodes/toJS.js
 var require_toJS = __commonJS({
-  "node_modules/yaml/dist/nodes/toJS.js"(exports2) {
+  "../../../node_modules/yaml/dist/nodes/toJS.js"(exports2) {
     "use strict";
     var identity = require_identity();
     function toJS(value, arg, ctx) {
@@ -562,9 +562,9 @@ var require_toJS = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/nodes/Node.js
+// ../../../node_modules/yaml/dist/nodes/Node.js
 var require_Node = __commonJS({
-  "node_modules/yaml/dist/nodes/Node.js"(exports2) {
+  "../../../node_modules/yaml/dist/nodes/Node.js"(exports2) {
     "use strict";
     var applyReviver = require_applyReviver();
     var identity = require_identity();
@@ -603,9 +603,9 @@ var require_Node = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/nodes/Alias.js
+// ../../../node_modules/yaml/dist/nodes/Alias.js
 var require_Alias = __commonJS({
-  "node_modules/yaml/dist/nodes/Alias.js"(exports2) {
+  "../../../node_modules/yaml/dist/nodes/Alias.js"(exports2) {
     "use strict";
     var anchors = require_anchors();
     var visit = require_visit();
@@ -719,9 +719,9 @@ var require_Alias = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/nodes/Scalar.js
+// ../../../node_modules/yaml/dist/nodes/Scalar.js
 var require_Scalar = __commonJS({
-  "node_modules/yaml/dist/nodes/Scalar.js"(exports2) {
+  "../../../node_modules/yaml/dist/nodes/Scalar.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var Node = require_Node();
@@ -749,9 +749,9 @@ var require_Scalar = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/doc/createNode.js
+// ../../../node_modules/yaml/dist/doc/createNode.js
 var require_createNode = __commonJS({
-  "node_modules/yaml/dist/doc/createNode.js"(exports2) {
+  "../../../node_modules/yaml/dist/doc/createNode.js"(exports2) {
     "use strict";
     var Alias = require_Alias();
     var identity = require_identity();
@@ -824,9 +824,9 @@ var require_createNode = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/nodes/Collection.js
+// ../../../node_modules/yaml/dist/nodes/Collection.js
 var require_Collection = __commonJS({
-  "node_modules/yaml/dist/nodes/Collection.js"(exports2) {
+  "../../../node_modules/yaml/dist/nodes/Collection.js"(exports2) {
     "use strict";
     var createNode = require_createNode();
     var identity = require_identity();
@@ -967,9 +967,9 @@ var require_Collection = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/stringify/stringifyComment.js
+// ../../../node_modules/yaml/dist/stringify/stringifyComment.js
 var require_stringifyComment = __commonJS({
-  "node_modules/yaml/dist/stringify/stringifyComment.js"(exports2) {
+  "../../../node_modules/yaml/dist/stringify/stringifyComment.js"(exports2) {
     "use strict";
     var stringifyComment = (str2) => str2.replace(/^(?!$)(?: $)?/gm, "#");
     function indentComment(comment, indent) {
@@ -984,9 +984,9 @@ var require_stringifyComment = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/stringify/foldFlowLines.js
+// ../../../node_modules/yaml/dist/stringify/foldFlowLines.js
 var require_foldFlowLines = __commonJS({
-  "node_modules/yaml/dist/stringify/foldFlowLines.js"(exports2) {
+  "../../../node_modules/yaml/dist/stringify/foldFlowLines.js"(exports2) {
     "use strict";
     var FOLD_FLOW = "flow";
     var FOLD_BLOCK = "block";
@@ -1120,9 +1120,9 @@ ${indent}${text.slice(fold + 1, end2)}`;
   }
 });
 
-// node_modules/yaml/dist/stringify/stringifyString.js
+// ../../../node_modules/yaml/dist/stringify/stringifyString.js
 var require_stringifyString = __commonJS({
-  "node_modules/yaml/dist/stringify/stringifyString.js"(exports2) {
+  "../../../node_modules/yaml/dist/stringify/stringifyString.js"(exports2) {
     "use strict";
     var Scalar = require_Scalar();
     var foldFlowLines = require_foldFlowLines();
@@ -1403,9 +1403,9 @@ ${indent}`);
   }
 });
 
-// node_modules/yaml/dist/stringify/stringify.js
+// ../../../node_modules/yaml/dist/stringify/stringify.js
 var require_stringify = __commonJS({
-  "node_modules/yaml/dist/stringify/stringify.js"(exports2) {
+  "../../../node_modules/yaml/dist/stringify/stringify.js"(exports2) {
     "use strict";
     var anchors = require_anchors();
     var identity = require_identity();
@@ -1527,9 +1527,9 @@ ${ctx.indent}${str2}`;
   }
 });
 
-// node_modules/yaml/dist/stringify/stringifyPair.js
+// ../../../node_modules/yaml/dist/stringify/stringifyPair.js
 var require_stringifyPair = __commonJS({
-  "node_modules/yaml/dist/stringify/stringifyPair.js"(exports2) {
+  "../../../node_modules/yaml/dist/stringify/stringifyPair.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var Scalar = require_Scalar();
@@ -1660,9 +1660,9 @@ ${ctx.indent}`;
   }
 });
 
-// node_modules/yaml/dist/log.js
+// ../../../node_modules/yaml/dist/log.js
 var require_log = __commonJS({
-  "node_modules/yaml/dist/log.js"(exports2) {
+  "../../../node_modules/yaml/dist/log.js"(exports2) {
     "use strict";
     var node_process = require("process");
     function debug(logLevel, ...messages) {
@@ -1682,9 +1682,9 @@ var require_log = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/merge.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/merge.js
 var require_merge = __commonJS({
-  "node_modules/yaml/dist/schema/yaml-1.1/merge.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/yaml-1.1/merge.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var Scalar = require_Scalar();
@@ -1742,9 +1742,9 @@ var require_merge = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/nodes/addPairToJSMap.js
+// ../../../node_modules/yaml/dist/nodes/addPairToJSMap.js
 var require_addPairToJSMap = __commonJS({
-  "node_modules/yaml/dist/nodes/addPairToJSMap.js"(exports2) {
+  "../../../node_modules/yaml/dist/nodes/addPairToJSMap.js"(exports2) {
     "use strict";
     var log = require_log();
     var merge = require_merge();
@@ -1806,9 +1806,9 @@ var require_addPairToJSMap = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/nodes/Pair.js
+// ../../../node_modules/yaml/dist/nodes/Pair.js
 var require_Pair = __commonJS({
-  "node_modules/yaml/dist/nodes/Pair.js"(exports2) {
+  "../../../node_modules/yaml/dist/nodes/Pair.js"(exports2) {
     "use strict";
     var createNode = require_createNode();
     var stringifyPair = require_stringifyPair();
@@ -1846,9 +1846,9 @@ var require_Pair = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/stringify/stringifyCollection.js
+// ../../../node_modules/yaml/dist/stringify/stringifyCollection.js
 var require_stringifyCollection = __commonJS({
-  "node_modules/yaml/dist/stringify/stringifyCollection.js"(exports2) {
+  "../../../node_modules/yaml/dist/stringify/stringifyCollection.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var stringify = require_stringify();
@@ -1997,9 +1997,9 @@ ${indent}${end}`;
   }
 });
 
-// node_modules/yaml/dist/nodes/YAMLMap.js
+// ../../../node_modules/yaml/dist/nodes/YAMLMap.js
 var require_YAMLMap = __commonJS({
-  "node_modules/yaml/dist/nodes/YAMLMap.js"(exports2) {
+  "../../../node_modules/yaml/dist/nodes/YAMLMap.js"(exports2) {
     "use strict";
     var stringifyCollection = require_stringifyCollection();
     var addPairToJSMap = require_addPairToJSMap();
@@ -2141,9 +2141,9 @@ var require_YAMLMap = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/common/map.js
+// ../../../node_modules/yaml/dist/schema/common/map.js
 var require_map = __commonJS({
-  "node_modules/yaml/dist/schema/common/map.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/common/map.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var YAMLMap = require_YAMLMap();
@@ -2163,9 +2163,9 @@ var require_map = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/nodes/YAMLSeq.js
+// ../../../node_modules/yaml/dist/nodes/YAMLSeq.js
 var require_YAMLSeq = __commonJS({
-  "node_modules/yaml/dist/nodes/YAMLSeq.js"(exports2) {
+  "../../../node_modules/yaml/dist/nodes/YAMLSeq.js"(exports2) {
     "use strict";
     var createNode = require_createNode();
     var stringifyCollection = require_stringifyCollection();
@@ -2279,9 +2279,9 @@ var require_YAMLSeq = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/common/seq.js
+// ../../../node_modules/yaml/dist/schema/common/seq.js
 var require_seq = __commonJS({
-  "node_modules/yaml/dist/schema/common/seq.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/common/seq.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var YAMLSeq = require_YAMLSeq();
@@ -2301,9 +2301,9 @@ var require_seq = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/common/string.js
+// ../../../node_modules/yaml/dist/schema/common/string.js
 var require_string = __commonJS({
-  "node_modules/yaml/dist/schema/common/string.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/common/string.js"(exports2) {
     "use strict";
     var stringifyString = require_stringifyString();
     var string = {
@@ -2320,9 +2320,9 @@ var require_string = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/common/null.js
+// ../../../node_modules/yaml/dist/schema/common/null.js
 var require_null = __commonJS({
-  "node_modules/yaml/dist/schema/common/null.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/common/null.js"(exports2) {
     "use strict";
     var Scalar = require_Scalar();
     var nullTag = {
@@ -2338,9 +2338,9 @@ var require_null = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/core/bool.js
+// ../../../node_modules/yaml/dist/schema/core/bool.js
 var require_bool = __commonJS({
-  "node_modules/yaml/dist/schema/core/bool.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/core/bool.js"(exports2) {
     "use strict";
     var Scalar = require_Scalar();
     var boolTag = {
@@ -2362,9 +2362,9 @@ var require_bool = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/stringify/stringifyNumber.js
+// ../../../node_modules/yaml/dist/stringify/stringifyNumber.js
 var require_stringifyNumber = __commonJS({
-  "node_modules/yaml/dist/stringify/stringifyNumber.js"(exports2) {
+  "../../../node_modules/yaml/dist/stringify/stringifyNumber.js"(exports2) {
     "use strict";
     function stringifyNumber({ format, minFractionDigits, tag, value }) {
       if (typeof value === "bigint")
@@ -2389,9 +2389,9 @@ var require_stringifyNumber = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/core/float.js
+// ../../../node_modules/yaml/dist/schema/core/float.js
 var require_float = __commonJS({
-  "node_modules/yaml/dist/schema/core/float.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/core/float.js"(exports2) {
     "use strict";
     var Scalar = require_Scalar();
     var stringifyNumber = require_stringifyNumber();
@@ -2435,9 +2435,9 @@ var require_float = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/core/int.js
+// ../../../node_modules/yaml/dist/schema/core/int.js
 var require_int = __commonJS({
-  "node_modules/yaml/dist/schema/core/int.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/core/int.js"(exports2) {
     "use strict";
     var stringifyNumber = require_stringifyNumber();
     var intIdentify = (value) => typeof value === "bigint" || Number.isInteger(value);
@@ -2480,9 +2480,9 @@ var require_int = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/core/schema.js
+// ../../../node_modules/yaml/dist/schema/core/schema.js
 var require_schema = __commonJS({
-  "node_modules/yaml/dist/schema/core/schema.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/core/schema.js"(exports2) {
     "use strict";
     var map = require_map();
     var _null = require_null();
@@ -2508,9 +2508,9 @@ var require_schema = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/json/schema.js
+// ../../../node_modules/yaml/dist/schema/json/schema.js
 var require_schema2 = __commonJS({
-  "node_modules/yaml/dist/schema/json/schema.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/json/schema.js"(exports2) {
     "use strict";
     var Scalar = require_Scalar();
     var map = require_map();
@@ -2575,9 +2575,9 @@ var require_schema2 = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/binary.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/binary.js
 var require_binary = __commonJS({
-  "node_modules/yaml/dist/schema/yaml-1.1/binary.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/yaml-1.1/binary.js"(exports2) {
     "use strict";
     var node_buffer = require("buffer");
     var Scalar = require_Scalar();
@@ -2641,9 +2641,9 @@ var require_binary = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/pairs.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/pairs.js
 var require_pairs = __commonJS({
-  "node_modules/yaml/dist/schema/yaml-1.1/pairs.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/yaml-1.1/pairs.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var Pair = require_Pair();
@@ -2719,9 +2719,9 @@ ${cn.comment}` : item.comment;
   }
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/omap.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/omap.js
 var require_omap = __commonJS({
-  "node_modules/yaml/dist/schema/yaml-1.1/omap.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/yaml-1.1/omap.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var toJS = require_toJS();
@@ -2797,9 +2797,9 @@ var require_omap = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/bool.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/bool.js
 var require_bool2 = __commonJS({
-  "node_modules/yaml/dist/schema/yaml-1.1/bool.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/yaml-1.1/bool.js"(exports2) {
     "use strict";
     var Scalar = require_Scalar();
     function boolStringify({ value, source }, ctx) {
@@ -2829,9 +2829,9 @@ var require_bool2 = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/float.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/float.js
 var require_float2 = __commonJS({
-  "node_modules/yaml/dist/schema/yaml-1.1/float.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/yaml-1.1/float.js"(exports2) {
     "use strict";
     var Scalar = require_Scalar();
     var stringifyNumber = require_stringifyNumber();
@@ -2878,9 +2878,9 @@ var require_float2 = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/int.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/int.js
 var require_int2 = __commonJS({
-  "node_modules/yaml/dist/schema/yaml-1.1/int.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/yaml-1.1/int.js"(exports2) {
     "use strict";
     var stringifyNumber = require_stringifyNumber();
     var intIdentify = (value) => typeof value === "bigint" || Number.isInteger(value);
@@ -2957,9 +2957,9 @@ var require_int2 = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/set.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/set.js
 var require_set = __commonJS({
-  "node_modules/yaml/dist/schema/yaml-1.1/set.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/yaml-1.1/set.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var Pair = require_Pair();
@@ -3046,9 +3046,9 @@ var require_set = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/timestamp.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/timestamp.js
 var require_timestamp = __commonJS({
-  "node_modules/yaml/dist/schema/yaml-1.1/timestamp.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/yaml-1.1/timestamp.js"(exports2) {
     "use strict";
     var stringifyNumber = require_stringifyNumber();
     function parseSexagesimal(str2, asBigInt) {
@@ -3134,9 +3134,9 @@ var require_timestamp = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/schema.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/schema.js
 var require_schema3 = __commonJS({
-  "node_modules/yaml/dist/schema/yaml-1.1/schema.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/yaml-1.1/schema.js"(exports2) {
     "use strict";
     var map = require_map();
     var _null = require_null();
@@ -3178,9 +3178,9 @@ var require_schema3 = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/tags.js
+// ../../../node_modules/yaml/dist/schema/tags.js
 var require_tags = __commonJS({
-  "node_modules/yaml/dist/schema/tags.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/tags.js"(exports2) {
     "use strict";
     var map = require_map();
     var _null = require_null();
@@ -3272,9 +3272,9 @@ var require_tags = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/schema/Schema.js
+// ../../../node_modules/yaml/dist/schema/Schema.js
 var require_Schema = __commonJS({
-  "node_modules/yaml/dist/schema/Schema.js"(exports2) {
+  "../../../node_modules/yaml/dist/schema/Schema.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var map = require_map();
@@ -3304,9 +3304,9 @@ var require_Schema = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/stringify/stringifyDocument.js
+// ../../../node_modules/yaml/dist/stringify/stringifyDocument.js
 var require_stringifyDocument = __commonJS({
-  "node_modules/yaml/dist/stringify/stringifyDocument.js"(exports2) {
+  "../../../node_modules/yaml/dist/stringify/stringifyDocument.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var stringify = require_stringify();
@@ -3384,9 +3384,9 @@ var require_stringifyDocument = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/doc/Document.js
+// ../../../node_modules/yaml/dist/doc/Document.js
 var require_Document = __commonJS({
-  "node_modules/yaml/dist/doc/Document.js"(exports2) {
+  "../../../node_modules/yaml/dist/doc/Document.js"(exports2) {
     "use strict";
     var Alias = require_Alias();
     var Collection = require_Collection();
@@ -3693,9 +3693,9 @@ var require_Document = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/errors.js
+// ../../../node_modules/yaml/dist/errors.js
 var require_errors = __commonJS({
-  "node_modules/yaml/dist/errors.js"(exports2) {
+  "../../../node_modules/yaml/dist/errors.js"(exports2) {
     "use strict";
     var YAMLError = class extends Error {
       constructor(name, pos, code, message) {
@@ -3758,9 +3758,9 @@ ${pointer}
   }
 });
 
-// node_modules/yaml/dist/compose/resolve-props.js
+// ../../../node_modules/yaml/dist/compose/resolve-props.js
 var require_resolve_props = __commonJS({
-  "node_modules/yaml/dist/compose/resolve-props.js"(exports2) {
+  "../../../node_modules/yaml/dist/compose/resolve-props.js"(exports2) {
     "use strict";
     function resolveProps(tokens, { flow, indicator, next, offset, onError, parentIndent, startOnNewline }) {
       let spaceBefore = false;
@@ -3892,9 +3892,9 @@ var require_resolve_props = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/compose/util-contains-newline.js
+// ../../../node_modules/yaml/dist/compose/util-contains-newline.js
 var require_util_contains_newline = __commonJS({
-  "node_modules/yaml/dist/compose/util-contains-newline.js"(exports2) {
+  "../../../node_modules/yaml/dist/compose/util-contains-newline.js"(exports2) {
     "use strict";
     function containsNewline(key) {
       if (!key)
@@ -3934,9 +3934,9 @@ var require_util_contains_newline = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/compose/util-flow-indent-check.js
+// ../../../node_modules/yaml/dist/compose/util-flow-indent-check.js
 var require_util_flow_indent_check = __commonJS({
-  "node_modules/yaml/dist/compose/util-flow-indent-check.js"(exports2) {
+  "../../../node_modules/yaml/dist/compose/util-flow-indent-check.js"(exports2) {
     "use strict";
     var utilContainsNewline = require_util_contains_newline();
     function flowIndentCheck(indent, fc, onError) {
@@ -3952,9 +3952,9 @@ var require_util_flow_indent_check = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/compose/util-map-includes.js
+// ../../../node_modules/yaml/dist/compose/util-map-includes.js
 var require_util_map_includes = __commonJS({
-  "node_modules/yaml/dist/compose/util-map-includes.js"(exports2) {
+  "../../../node_modules/yaml/dist/compose/util-map-includes.js"(exports2) {
     "use strict";
     var identity = require_identity();
     function mapIncludes(ctx, items, search) {
@@ -3968,9 +3968,9 @@ var require_util_map_includes = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/compose/resolve-block-map.js
+// ../../../node_modules/yaml/dist/compose/resolve-block-map.js
 var require_resolve_block_map = __commonJS({
-  "node_modules/yaml/dist/compose/resolve-block-map.js"(exports2) {
+  "../../../node_modules/yaml/dist/compose/resolve-block-map.js"(exports2) {
     "use strict";
     var Pair = require_Pair();
     var YAMLMap = require_YAMLMap();
@@ -4076,9 +4076,9 @@ var require_resolve_block_map = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/compose/resolve-block-seq.js
+// ../../../node_modules/yaml/dist/compose/resolve-block-seq.js
 var require_resolve_block_seq = __commonJS({
-  "node_modules/yaml/dist/compose/resolve-block-seq.js"(exports2) {
+  "../../../node_modules/yaml/dist/compose/resolve-block-seq.js"(exports2) {
     "use strict";
     var YAMLSeq = require_YAMLSeq();
     var resolveProps = require_resolve_props();
@@ -4127,9 +4127,9 @@ var require_resolve_block_seq = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/compose/resolve-end.js
+// ../../../node_modules/yaml/dist/compose/resolve-end.js
 var require_resolve_end = __commonJS({
-  "node_modules/yaml/dist/compose/resolve-end.js"(exports2) {
+  "../../../node_modules/yaml/dist/compose/resolve-end.js"(exports2) {
     "use strict";
     function resolveEnd(end, offset, reqSpace, onError) {
       let comment = "";
@@ -4170,9 +4170,9 @@ var require_resolve_end = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/compose/resolve-flow-collection.js
+// ../../../node_modules/yaml/dist/compose/resolve-flow-collection.js
 var require_resolve_flow_collection = __commonJS({
-  "node_modules/yaml/dist/compose/resolve-flow-collection.js"(exports2) {
+  "../../../node_modules/yaml/dist/compose/resolve-flow-collection.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var Pair = require_Pair();
@@ -4364,9 +4364,9 @@ var require_resolve_flow_collection = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/compose/compose-collection.js
+// ../../../node_modules/yaml/dist/compose/compose-collection.js
 var require_compose_collection = __commonJS({
-  "node_modules/yaml/dist/compose/compose-collection.js"(exports2) {
+  "../../../node_modules/yaml/dist/compose/compose-collection.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var Scalar = require_Scalar();
@@ -4429,9 +4429,9 @@ var require_compose_collection = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/compose/resolve-block-scalar.js
+// ../../../node_modules/yaml/dist/compose/resolve-block-scalar.js
 var require_resolve_block_scalar = __commonJS({
-  "node_modules/yaml/dist/compose/resolve-block-scalar.js"(exports2) {
+  "../../../node_modules/yaml/dist/compose/resolve-block-scalar.js"(exports2) {
     "use strict";
     var Scalar = require_Scalar();
     function resolveBlockScalar(ctx, scalar, onError) {
@@ -4612,9 +4612,9 @@ var require_resolve_block_scalar = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/compose/resolve-flow-scalar.js
+// ../../../node_modules/yaml/dist/compose/resolve-flow-scalar.js
 var require_resolve_flow_scalar = __commonJS({
-  "node_modules/yaml/dist/compose/resolve-flow-scalar.js"(exports2) {
+  "../../../node_modules/yaml/dist/compose/resolve-flow-scalar.js"(exports2) {
     "use strict";
     var Scalar = require_Scalar();
     var resolveEnd = require_resolve_end();
@@ -4832,9 +4832,9 @@ var require_resolve_flow_scalar = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/compose/compose-scalar.js
+// ../../../node_modules/yaml/dist/compose/compose-scalar.js
 var require_compose_scalar = __commonJS({
-  "node_modules/yaml/dist/compose/compose-scalar.js"(exports2) {
+  "../../../node_modules/yaml/dist/compose/compose-scalar.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var Scalar = require_Scalar();
@@ -4913,9 +4913,9 @@ var require_compose_scalar = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/compose/util-empty-scalar-position.js
+// ../../../node_modules/yaml/dist/compose/util-empty-scalar-position.js
 var require_util_empty_scalar_position = __commonJS({
-  "node_modules/yaml/dist/compose/util-empty-scalar-position.js"(exports2) {
+  "../../../node_modules/yaml/dist/compose/util-empty-scalar-position.js"(exports2) {
     "use strict";
     function emptyScalarPosition(offset, before, pos) {
       if (before) {
@@ -4943,9 +4943,9 @@ var require_util_empty_scalar_position = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/compose/compose-node.js
+// ../../../node_modules/yaml/dist/compose/compose-node.js
 var require_compose_node = __commonJS({
-  "node_modules/yaml/dist/compose/compose-node.js"(exports2) {
+  "../../../node_modules/yaml/dist/compose/compose-node.js"(exports2) {
     "use strict";
     var Alias = require_Alias();
     var identity = require_identity();
@@ -5049,9 +5049,9 @@ var require_compose_node = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/compose/compose-doc.js
+// ../../../node_modules/yaml/dist/compose/compose-doc.js
 var require_compose_doc = __commonJS({
-  "node_modules/yaml/dist/compose/compose-doc.js"(exports2) {
+  "../../../node_modules/yaml/dist/compose/compose-doc.js"(exports2) {
     "use strict";
     var Document = require_Document();
     var composeNode = require_compose_node();
@@ -5092,9 +5092,9 @@ var require_compose_doc = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/compose/composer.js
+// ../../../node_modules/yaml/dist/compose/composer.js
 var require_composer = __commonJS({
-  "node_modules/yaml/dist/compose/composer.js"(exports2) {
+  "../../../node_modules/yaml/dist/compose/composer.js"(exports2) {
     "use strict";
     var node_process = require("process");
     var directives = require_directives();
@@ -5300,9 +5300,9 @@ ${end.comment}` : end.comment;
   }
 });
 
-// node_modules/yaml/dist/parse/cst-scalar.js
+// ../../../node_modules/yaml/dist/parse/cst-scalar.js
 var require_cst_scalar = __commonJS({
-  "node_modules/yaml/dist/parse/cst-scalar.js"(exports2) {
+  "../../../node_modules/yaml/dist/parse/cst-scalar.js"(exports2) {
     "use strict";
     var resolveBlockScalar = require_resolve_block_scalar();
     var resolveFlowScalar = require_resolve_flow_scalar();
@@ -5485,9 +5485,9 @@ var require_cst_scalar = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/parse/cst-stringify.js
+// ../../../node_modules/yaml/dist/parse/cst-stringify.js
 var require_cst_stringify = __commonJS({
-  "node_modules/yaml/dist/parse/cst-stringify.js"(exports2) {
+  "../../../node_modules/yaml/dist/parse/cst-stringify.js"(exports2) {
     "use strict";
     var stringify = (cst) => "type" in cst ? stringifyToken(cst) : stringifyItem(cst);
     function stringifyToken(token) {
@@ -5546,9 +5546,9 @@ var require_cst_stringify = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/parse/cst-visit.js
+// ../../../node_modules/yaml/dist/parse/cst-visit.js
 var require_cst_visit = __commonJS({
-  "node_modules/yaml/dist/parse/cst-visit.js"(exports2) {
+  "../../../node_modules/yaml/dist/parse/cst-visit.js"(exports2) {
     "use strict";
     var BREAK = /* @__PURE__ */ Symbol("break visit");
     var SKIP = /* @__PURE__ */ Symbol("skip children");
@@ -5608,9 +5608,9 @@ var require_cst_visit = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/parse/cst.js
+// ../../../node_modules/yaml/dist/parse/cst.js
 var require_cst = __commonJS({
-  "node_modules/yaml/dist/parse/cst.js"(exports2) {
+  "../../../node_modules/yaml/dist/parse/cst.js"(exports2) {
     "use strict";
     var cstScalar = require_cst_scalar();
     var cstStringify = require_cst_stringify();
@@ -5710,9 +5710,9 @@ var require_cst = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/parse/lexer.js
+// ../../../node_modules/yaml/dist/parse/lexer.js
 var require_lexer = __commonJS({
-  "node_modules/yaml/dist/parse/lexer.js"(exports2) {
+  "../../../node_modules/yaml/dist/parse/lexer.js"(exports2) {
     "use strict";
     var cst = require_cst();
     function isEmpty(ch) {
@@ -6299,9 +6299,9 @@ var require_lexer = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/parse/line-counter.js
+// ../../../node_modules/yaml/dist/parse/line-counter.js
 var require_line_counter = __commonJS({
-  "node_modules/yaml/dist/parse/line-counter.js"(exports2) {
+  "../../../node_modules/yaml/dist/parse/line-counter.js"(exports2) {
     "use strict";
     var LineCounter = class {
       constructor() {
@@ -6330,9 +6330,9 @@ var require_line_counter = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/parse/parser.js
+// ../../../node_modules/yaml/dist/parse/parser.js
 var require_parser = __commonJS({
-  "node_modules/yaml/dist/parse/parser.js"(exports2) {
+  "../../../node_modules/yaml/dist/parse/parser.js"(exports2) {
     "use strict";
     var node_process = require("process");
     var cst = require_cst();
@@ -7204,9 +7204,9 @@ var require_parser = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/public-api.js
+// ../../../node_modules/yaml/dist/public-api.js
 var require_public_api = __commonJS({
-  "node_modules/yaml/dist/public-api.js"(exports2) {
+  "../../../node_modules/yaml/dist/public-api.js"(exports2) {
     "use strict";
     var composer = require_composer();
     var Document = require_Document();
@@ -7301,9 +7301,9 @@ var require_public_api = __commonJS({
   }
 });
 
-// node_modules/yaml/dist/index.js
+// ../../../node_modules/yaml/dist/index.js
 var require_dist = __commonJS({
-  "node_modules/yaml/dist/index.js"(exports2) {
+  "../../../node_modules/yaml/dist/index.js"(exports2) {
     "use strict";
     var composer = require_composer();
     var Document = require_Document();
@@ -7353,9 +7353,9 @@ var require_dist = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/compile/codegen/code.js
+// ../../../node_modules/ajv/dist/compile/codegen/code.js
 var require_code = __commonJS({
-  "node_modules/ajv/dist/compile/codegen/code.js"(exports2) {
+  "../../../node_modules/ajv/dist/compile/codegen/code.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.regexpCode = exports2.getEsmExportName = exports2.getProperty = exports2.safeStringify = exports2.stringify = exports2.strConcat = exports2.addCodeArg = exports2.str = exports2._ = exports2.nil = exports2._Code = exports2.Name = exports2.IDENTIFIER = exports2._CodeOrName = void 0;
@@ -7507,9 +7507,9 @@ var require_code = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/compile/codegen/scope.js
+// ../../../node_modules/ajv/dist/compile/codegen/scope.js
 var require_scope = __commonJS({
-  "node_modules/ajv/dist/compile/codegen/scope.js"(exports2) {
+  "../../../node_modules/ajv/dist/compile/codegen/scope.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.ValueScope = exports2.ValueScopeName = exports2.Scope = exports2.varKinds = exports2.UsedValueState = void 0;
@@ -7652,9 +7652,9 @@ var require_scope = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/compile/codegen/index.js
+// ../../../node_modules/ajv/dist/compile/codegen/index.js
 var require_codegen = __commonJS({
-  "node_modules/ajv/dist/compile/codegen/index.js"(exports2) {
+  "../../../node_modules/ajv/dist/compile/codegen/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.or = exports2.and = exports2.not = exports2.CodeGen = exports2.operators = exports2.varKinds = exports2.ValueScopeName = exports2.ValueScope = exports2.Scope = exports2.Name = exports2.regexpCode = exports2.stringify = exports2.getProperty = exports2.nil = exports2.strConcat = exports2.str = exports2._ = void 0;
@@ -8372,9 +8372,9 @@ var require_codegen = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/compile/util.js
+// ../../../node_modules/ajv/dist/compile/util.js
 var require_util = __commonJS({
-  "node_modules/ajv/dist/compile/util.js"(exports2) {
+  "../../../node_modules/ajv/dist/compile/util.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.checkStrictMode = exports2.getErrorPath = exports2.Type = exports2.useFunc = exports2.setEvaluated = exports2.evaluatedPropsToName = exports2.mergeEvaluated = exports2.eachItem = exports2.unescapeJsonPointer = exports2.escapeJsonPointer = exports2.escapeFragment = exports2.unescapeFragment = exports2.schemaRefOrVal = exports2.schemaHasRulesButRef = exports2.schemaHasRules = exports2.checkUnknownRules = exports2.alwaysValidSchema = exports2.toHash = void 0;
@@ -8539,9 +8539,9 @@ var require_util = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/compile/names.js
+// ../../../node_modules/ajv/dist/compile/names.js
 var require_names = __commonJS({
-  "node_modules/ajv/dist/compile/names.js"(exports2) {
+  "../../../node_modules/ajv/dist/compile/names.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -8578,9 +8578,9 @@ var require_names = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/compile/errors.js
+// ../../../node_modules/ajv/dist/compile/errors.js
 var require_errors2 = __commonJS({
-  "node_modules/ajv/dist/compile/errors.js"(exports2) {
+  "../../../node_modules/ajv/dist/compile/errors.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.extendErrors = exports2.resetErrorsCount = exports2.reportExtraError = exports2.reportError = exports2.keyword$DataError = exports2.keywordError = void 0;
@@ -8700,9 +8700,9 @@ var require_errors2 = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/compile/validate/boolSchema.js
+// ../../../node_modules/ajv/dist/compile/validate/boolSchema.js
 var require_boolSchema = __commonJS({
-  "node_modules/ajv/dist/compile/validate/boolSchema.js"(exports2) {
+  "../../../node_modules/ajv/dist/compile/validate/boolSchema.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.boolOrEmptySchema = exports2.topBoolOrEmptySchema = void 0;
@@ -8751,9 +8751,9 @@ var require_boolSchema = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/compile/rules.js
+// ../../../node_modules/ajv/dist/compile/rules.js
 var require_rules = __commonJS({
-  "node_modules/ajv/dist/compile/rules.js"(exports2) {
+  "../../../node_modules/ajv/dist/compile/rules.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.getRules = exports2.isJSONType = void 0;
@@ -8782,9 +8782,9 @@ var require_rules = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/compile/validate/applicability.js
+// ../../../node_modules/ajv/dist/compile/validate/applicability.js
 var require_applicability = __commonJS({
-  "node_modules/ajv/dist/compile/validate/applicability.js"(exports2) {
+  "../../../node_modules/ajv/dist/compile/validate/applicability.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.shouldUseRule = exports2.shouldUseGroup = exports2.schemaHasRulesForType = void 0;
@@ -8805,9 +8805,9 @@ var require_applicability = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/compile/validate/dataType.js
+// ../../../node_modules/ajv/dist/compile/validate/dataType.js
 var require_dataType = __commonJS({
-  "node_modules/ajv/dist/compile/validate/dataType.js"(exports2) {
+  "../../../node_modules/ajv/dist/compile/validate/dataType.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.reportTypeError = exports2.checkDataTypes = exports2.checkDataType = exports2.coerceAndCheckDataType = exports2.getJSONTypes = exports2.getSchemaTypes = exports2.DataType = void 0;
@@ -8989,9 +8989,9 @@ var require_dataType = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/compile/validate/defaults.js
+// ../../../node_modules/ajv/dist/compile/validate/defaults.js
 var require_defaults = __commonJS({
-  "node_modules/ajv/dist/compile/validate/defaults.js"(exports2) {
+  "../../../node_modules/ajv/dist/compile/validate/defaults.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.assignDefaults = void 0;
@@ -9026,9 +9026,9 @@ var require_defaults = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/code.js
+// ../../../node_modules/ajv/dist/vocabularies/code.js
 var require_code2 = __commonJS({
-  "node_modules/ajv/dist/vocabularies/code.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/code.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.validateUnion = exports2.validateArray = exports2.usePattern = exports2.callValidateCode = exports2.schemaProperties = exports2.allSchemaProperties = exports2.noPropertyInData = exports2.propertyInData = exports2.isOwnProperty = exports2.hasPropFunc = exports2.reportMissingProp = exports2.checkMissingProp = exports2.checkReportMissingProp = void 0;
@@ -9159,9 +9159,9 @@ var require_code2 = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/compile/validate/keyword.js
+// ../../../node_modules/ajv/dist/compile/validate/keyword.js
 var require_keyword = __commonJS({
-  "node_modules/ajv/dist/compile/validate/keyword.js"(exports2) {
+  "../../../node_modules/ajv/dist/compile/validate/keyword.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.validateKeywordUsage = exports2.validSchemaType = exports2.funcKeywordCode = exports2.macroKeywordCode = void 0;
@@ -9277,9 +9277,9 @@ var require_keyword = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/compile/validate/subschema.js
+// ../../../node_modules/ajv/dist/compile/validate/subschema.js
 var require_subschema = __commonJS({
-  "node_modules/ajv/dist/compile/validate/subschema.js"(exports2) {
+  "../../../node_modules/ajv/dist/compile/validate/subschema.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.extendSubschemaMode = exports2.extendSubschemaData = exports2.getSubschema = void 0;
@@ -9360,9 +9360,9 @@ var require_subschema = __commonJS({
   }
 });
 
-// node_modules/fast-deep-equal/index.js
+// ../../../node_modules/fast-deep-equal/index.js
 var require_fast_deep_equal = __commonJS({
-  "node_modules/fast-deep-equal/index.js"(exports2, module2) {
+  "../../../node_modules/fast-deep-equal/index.js"(exports2, module2) {
     "use strict";
     module2.exports = function equal(a, b) {
       if (a === b) return true;
@@ -9395,9 +9395,9 @@ var require_fast_deep_equal = __commonJS({
   }
 });
 
-// node_modules/json-schema-traverse/index.js
+// ../../../node_modules/json-schema-traverse/index.js
 var require_json_schema_traverse = __commonJS({
-  "node_modules/json-schema-traverse/index.js"(exports2, module2) {
+  "../../../node_modules/json-schema-traverse/index.js"(exports2, module2) {
     "use strict";
     var traverse = module2.exports = function(schema, opts, cb) {
       if (typeof opts == "function") {
@@ -9483,9 +9483,9 @@ var require_json_schema_traverse = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/compile/resolve.js
+// ../../../node_modules/ajv/dist/compile/resolve.js
 var require_resolve = __commonJS({
-  "node_modules/ajv/dist/compile/resolve.js"(exports2) {
+  "../../../node_modules/ajv/dist/compile/resolve.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.getSchemaRefs = exports2.resolveUrl = exports2.normalizeId = exports2._getFullPath = exports2.getFullPath = exports2.inlineRef = void 0;
@@ -9639,9 +9639,9 @@ var require_resolve = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/compile/validate/index.js
+// ../../../node_modules/ajv/dist/compile/validate/index.js
 var require_validate = __commonJS({
-  "node_modules/ajv/dist/compile/validate/index.js"(exports2) {
+  "../../../node_modules/ajv/dist/compile/validate/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.getData = exports2.KeywordCxt = exports2.validateFunctionCode = void 0;
@@ -10147,9 +10147,9 @@ var require_validate = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/runtime/validation_error.js
+// ../../../node_modules/ajv/dist/runtime/validation_error.js
 var require_validation_error = __commonJS({
-  "node_modules/ajv/dist/runtime/validation_error.js"(exports2) {
+  "../../../node_modules/ajv/dist/runtime/validation_error.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var ValidationError = class extends Error {
@@ -10163,9 +10163,9 @@ var require_validation_error = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/compile/ref_error.js
+// ../../../node_modules/ajv/dist/compile/ref_error.js
 var require_ref_error = __commonJS({
-  "node_modules/ajv/dist/compile/ref_error.js"(exports2) {
+  "../../../node_modules/ajv/dist/compile/ref_error.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var resolve_1 = require_resolve();
@@ -10180,9 +10180,9 @@ var require_ref_error = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/compile/index.js
+// ../../../node_modules/ajv/dist/compile/index.js
 var require_compile = __commonJS({
-  "node_modules/ajv/dist/compile/index.js"(exports2) {
+  "../../../node_modules/ajv/dist/compile/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.resolveSchema = exports2.getCompilingSchema = exports2.resolveRef = exports2.compileSchema = exports2.SchemaEnv = void 0;
@@ -10404,9 +10404,9 @@ var require_compile = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/refs/data.json
+// ../../../node_modules/ajv/dist/refs/data.json
 var require_data = __commonJS({
-  "node_modules/ajv/dist/refs/data.json"(exports2, module2) {
+  "../../../node_modules/ajv/dist/refs/data.json"(exports2, module2) {
     module2.exports = {
       $id: "https://raw.githubusercontent.com/ajv-validator/ajv/master/lib/refs/data.json#",
       description: "Meta-schema for $data reference (JSON AnySchema extension proposal)",
@@ -10423,9 +10423,9 @@ var require_data = __commonJS({
   }
 });
 
-// node_modules/fast-uri/lib/utils.js
+// ../../../node_modules/fast-uri/lib/utils.js
 var require_utils = __commonJS({
-  "node_modules/fast-uri/lib/utils.js"(exports2, module2) {
+  "../../../node_modules/fast-uri/lib/utils.js"(exports2, module2) {
     "use strict";
     var isUUID = RegExp.prototype.test.bind(/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/iu);
     var isIPv4 = RegExp.prototype.test.bind(/^(?:(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]\d|\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]\d|\d)$/u);
@@ -10736,9 +10736,9 @@ var require_utils = __commonJS({
   }
 });
 
-// node_modules/fast-uri/lib/schemes.js
+// ../../../node_modules/fast-uri/lib/schemes.js
 var require_schemes = __commonJS({
-  "node_modules/fast-uri/lib/schemes.js"(exports2, module2) {
+  "../../../node_modules/fast-uri/lib/schemes.js"(exports2, module2) {
     "use strict";
     var { isUUID } = require_utils();
     var URN_REG = /([\da-z][\d\-a-z]{0,31}):((?:[\w!$'()*+,\-.:;=@]|%[\da-f]{2})+)/iu;
@@ -10946,9 +10946,9 @@ var require_schemes = __commonJS({
   }
 });
 
-// node_modules/fast-uri/index.js
+// ../../../node_modules/fast-uri/index.js
 var require_fast_uri = __commonJS({
-  "node_modules/fast-uri/index.js"(exports2, module2) {
+  "../../../node_modules/fast-uri/index.js"(exports2, module2) {
     "use strict";
     var { normalizeIPv6, removeDotSegments, recomposeAuthority, normalizePercentEncoding, normalizePathEncoding, escapePreservingEscapes, reescapeHostDelimiters, isIPv4, nonSimpleDomain } = require_utils();
     var { SCHEMES, getSchemeHandler } = require_schemes();
@@ -11232,9 +11232,9 @@ var require_fast_uri = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/runtime/uri.js
+// ../../../node_modules/ajv/dist/runtime/uri.js
 var require_uri = __commonJS({
-  "node_modules/ajv/dist/runtime/uri.js"(exports2) {
+  "../../../node_modules/ajv/dist/runtime/uri.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var uri = require_fast_uri();
@@ -11243,9 +11243,9 @@ var require_uri = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/core.js
+// ../../../node_modules/ajv/dist/core.js
 var require_core = __commonJS({
-  "node_modules/ajv/dist/core.js"(exports2) {
+  "../../../node_modules/ajv/dist/core.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.CodeGen = exports2.Name = exports2.nil = exports2.stringify = exports2.str = exports2._ = exports2.KeywordCxt = void 0;
@@ -11854,9 +11854,9 @@ var require_core = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/core/id.js
+// ../../../node_modules/ajv/dist/vocabularies/core/id.js
 var require_id = __commonJS({
-  "node_modules/ajv/dist/vocabularies/core/id.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/core/id.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var def = {
@@ -11869,9 +11869,9 @@ var require_id = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/core/ref.js
+// ../../../node_modules/ajv/dist/vocabularies/core/ref.js
 var require_ref = __commonJS({
-  "node_modules/ajv/dist/vocabularies/core/ref.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/core/ref.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.callRef = exports2.getValidate = void 0;
@@ -11991,9 +11991,9 @@ var require_ref = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/core/index.js
+// ../../../node_modules/ajv/dist/vocabularies/core/index.js
 var require_core2 = __commonJS({
-  "node_modules/ajv/dist/vocabularies/core/index.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/core/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var id_1 = require_id();
@@ -12012,9 +12012,9 @@ var require_core2 = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/validation/limitNumber.js
+// ../../../node_modules/ajv/dist/vocabularies/validation/limitNumber.js
 var require_limitNumber = __commonJS({
-  "node_modules/ajv/dist/vocabularies/validation/limitNumber.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/validation/limitNumber.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -12044,9 +12044,9 @@ var require_limitNumber = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/validation/multipleOf.js
+// ../../../node_modules/ajv/dist/vocabularies/validation/multipleOf.js
 var require_multipleOf = __commonJS({
-  "node_modules/ajv/dist/vocabularies/validation/multipleOf.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/validation/multipleOf.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -12072,9 +12072,9 @@ var require_multipleOf = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/runtime/ucs2length.js
+// ../../../node_modules/ajv/dist/runtime/ucs2length.js
 var require_ucs2length = __commonJS({
-  "node_modules/ajv/dist/runtime/ucs2length.js"(exports2) {
+  "../../../node_modules/ajv/dist/runtime/ucs2length.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     function ucs2length(str2) {
@@ -12098,9 +12098,9 @@ var require_ucs2length = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/validation/limitLength.js
+// ../../../node_modules/ajv/dist/vocabularies/validation/limitLength.js
 var require_limitLength = __commonJS({
-  "node_modules/ajv/dist/vocabularies/validation/limitLength.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/validation/limitLength.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -12130,9 +12130,9 @@ var require_limitLength = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/validation/pattern.js
+// ../../../node_modules/ajv/dist/vocabularies/validation/pattern.js
 var require_pattern = __commonJS({
-  "node_modules/ajv/dist/vocabularies/validation/pattern.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/validation/pattern.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var code_1 = require_code2();
@@ -12167,9 +12167,9 @@ var require_pattern = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/validation/limitProperties.js
+// ../../../node_modules/ajv/dist/vocabularies/validation/limitProperties.js
 var require_limitProperties = __commonJS({
-  "node_modules/ajv/dist/vocabularies/validation/limitProperties.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/validation/limitProperties.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -12196,9 +12196,9 @@ var require_limitProperties = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/validation/required.js
+// ../../../node_modules/ajv/dist/vocabularies/validation/required.js
 var require_required = __commonJS({
-  "node_modules/ajv/dist/vocabularies/validation/required.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/validation/required.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var code_1 = require_code2();
@@ -12278,9 +12278,9 @@ var require_required = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/validation/limitItems.js
+// ../../../node_modules/ajv/dist/vocabularies/validation/limitItems.js
 var require_limitItems = __commonJS({
-  "node_modules/ajv/dist/vocabularies/validation/limitItems.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/validation/limitItems.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -12307,9 +12307,9 @@ var require_limitItems = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/runtime/equal.js
+// ../../../node_modules/ajv/dist/runtime/equal.js
 var require_equal = __commonJS({
-  "node_modules/ajv/dist/runtime/equal.js"(exports2) {
+  "../../../node_modules/ajv/dist/runtime/equal.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var equal = require_fast_deep_equal();
@@ -12318,9 +12318,9 @@ var require_equal = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/validation/uniqueItems.js
+// ../../../node_modules/ajv/dist/vocabularies/validation/uniqueItems.js
 var require_uniqueItems = __commonJS({
-  "node_modules/ajv/dist/vocabularies/validation/uniqueItems.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/validation/uniqueItems.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var dataType_1 = require_dataType();
@@ -12385,9 +12385,9 @@ var require_uniqueItems = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/validation/const.js
+// ../../../node_modules/ajv/dist/vocabularies/validation/const.js
 var require_const = __commonJS({
-  "node_modules/ajv/dist/vocabularies/validation/const.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/validation/const.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -12414,9 +12414,9 @@ var require_const = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/validation/enum.js
+// ../../../node_modules/ajv/dist/vocabularies/validation/enum.js
 var require_enum = __commonJS({
-  "node_modules/ajv/dist/vocabularies/validation/enum.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/validation/enum.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -12463,9 +12463,9 @@ var require_enum = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/validation/index.js
+// ../../../node_modules/ajv/dist/vocabularies/validation/index.js
 var require_validation = __commonJS({
-  "node_modules/ajv/dist/vocabularies/validation/index.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/validation/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var limitNumber_1 = require_limitNumber();
@@ -12501,9 +12501,9 @@ var require_validation = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/applicator/additionalItems.js
+// ../../../node_modules/ajv/dist/vocabularies/applicator/additionalItems.js
 var require_additionalItems = __commonJS({
-  "node_modules/ajv/dist/vocabularies/applicator/additionalItems.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/applicator/additionalItems.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.validateAdditionalItems = void 0;
@@ -12554,9 +12554,9 @@ var require_additionalItems = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/applicator/items.js
+// ../../../node_modules/ajv/dist/vocabularies/applicator/items.js
 var require_items = __commonJS({
-  "node_modules/ajv/dist/vocabularies/applicator/items.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/applicator/items.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.validateTuple = void 0;
@@ -12611,9 +12611,9 @@ var require_items = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/applicator/prefixItems.js
+// ../../../node_modules/ajv/dist/vocabularies/applicator/prefixItems.js
 var require_prefixItems = __commonJS({
-  "node_modules/ajv/dist/vocabularies/applicator/prefixItems.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/applicator/prefixItems.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var items_1 = require_items();
@@ -12628,9 +12628,9 @@ var require_prefixItems = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/applicator/items2020.js
+// ../../../node_modules/ajv/dist/vocabularies/applicator/items2020.js
 var require_items2020 = __commonJS({
-  "node_modules/ajv/dist/vocabularies/applicator/items2020.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/applicator/items2020.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -12663,9 +12663,9 @@ var require_items2020 = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/applicator/contains.js
+// ../../../node_modules/ajv/dist/vocabularies/applicator/contains.js
 var require_contains = __commonJS({
-  "node_modules/ajv/dist/vocabularies/applicator/contains.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/applicator/contains.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -12757,9 +12757,9 @@ var require_contains = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/applicator/dependencies.js
+// ../../../node_modules/ajv/dist/vocabularies/applicator/dependencies.js
 var require_dependencies = __commonJS({
-  "node_modules/ajv/dist/vocabularies/applicator/dependencies.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/applicator/dependencies.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.validateSchemaDeps = exports2.validatePropertyDeps = exports2.error = void 0;
@@ -12851,9 +12851,9 @@ var require_dependencies = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/applicator/propertyNames.js
+// ../../../node_modules/ajv/dist/vocabularies/applicator/propertyNames.js
 var require_propertyNames = __commonJS({
-  "node_modules/ajv/dist/vocabularies/applicator/propertyNames.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/applicator/propertyNames.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -12894,9 +12894,9 @@ var require_propertyNames = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/applicator/additionalProperties.js
+// ../../../node_modules/ajv/dist/vocabularies/applicator/additionalProperties.js
 var require_additionalProperties = __commonJS({
-  "node_modules/ajv/dist/vocabularies/applicator/additionalProperties.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/applicator/additionalProperties.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var code_1 = require_code2();
@@ -13000,9 +13000,9 @@ var require_additionalProperties = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/applicator/properties.js
+// ../../../node_modules/ajv/dist/vocabularies/applicator/properties.js
 var require_properties = __commonJS({
-  "node_modules/ajv/dist/vocabularies/applicator/properties.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/applicator/properties.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var validate_1 = require_validate();
@@ -13058,9 +13058,9 @@ var require_properties = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/applicator/patternProperties.js
+// ../../../node_modules/ajv/dist/vocabularies/applicator/patternProperties.js
 var require_patternProperties = __commonJS({
-  "node_modules/ajv/dist/vocabularies/applicator/patternProperties.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/applicator/patternProperties.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var code_1 = require_code2();
@@ -13132,9 +13132,9 @@ var require_patternProperties = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/applicator/not.js
+// ../../../node_modules/ajv/dist/vocabularies/applicator/not.js
 var require_not = __commonJS({
-  "node_modules/ajv/dist/vocabularies/applicator/not.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/applicator/not.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var util_1 = require_util();
@@ -13163,9 +13163,9 @@ var require_not = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/applicator/anyOf.js
+// ../../../node_modules/ajv/dist/vocabularies/applicator/anyOf.js
 var require_anyOf = __commonJS({
-  "node_modules/ajv/dist/vocabularies/applicator/anyOf.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/applicator/anyOf.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var code_1 = require_code2();
@@ -13180,9 +13180,9 @@ var require_anyOf = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/applicator/oneOf.js
+// ../../../node_modules/ajv/dist/vocabularies/applicator/oneOf.js
 var require_oneOf = __commonJS({
-  "node_modules/ajv/dist/vocabularies/applicator/oneOf.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/applicator/oneOf.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -13238,9 +13238,9 @@ var require_oneOf = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/applicator/allOf.js
+// ../../../node_modules/ajv/dist/vocabularies/applicator/allOf.js
 var require_allOf = __commonJS({
-  "node_modules/ajv/dist/vocabularies/applicator/allOf.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/applicator/allOf.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var util_1 = require_util();
@@ -13265,9 +13265,9 @@ var require_allOf = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/applicator/if.js
+// ../../../node_modules/ajv/dist/vocabularies/applicator/if.js
 var require_if = __commonJS({
-  "node_modules/ajv/dist/vocabularies/applicator/if.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/applicator/if.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -13334,9 +13334,9 @@ var require_if = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/applicator/thenElse.js
+// ../../../node_modules/ajv/dist/vocabularies/applicator/thenElse.js
 var require_thenElse = __commonJS({
-  "node_modules/ajv/dist/vocabularies/applicator/thenElse.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/applicator/thenElse.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var util_1 = require_util();
@@ -13352,9 +13352,9 @@ var require_thenElse = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/applicator/index.js
+// ../../../node_modules/ajv/dist/vocabularies/applicator/index.js
 var require_applicator = __commonJS({
-  "node_modules/ajv/dist/vocabularies/applicator/index.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/applicator/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var additionalItems_1 = require_additionalItems();
@@ -13400,9 +13400,9 @@ var require_applicator = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/format/format.js
+// ../../../node_modules/ajv/dist/vocabularies/format/format.js
 var require_format = __commonJS({
-  "node_modules/ajv/dist/vocabularies/format/format.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/format/format.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -13490,9 +13490,9 @@ var require_format = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/format/index.js
+// ../../../node_modules/ajv/dist/vocabularies/format/index.js
 var require_format2 = __commonJS({
-  "node_modules/ajv/dist/vocabularies/format/index.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/format/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var format_1 = require_format();
@@ -13501,9 +13501,9 @@ var require_format2 = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/metadata.js
+// ../../../node_modules/ajv/dist/vocabularies/metadata.js
 var require_metadata = __commonJS({
-  "node_modules/ajv/dist/vocabularies/metadata.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/metadata.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.contentVocabulary = exports2.metadataVocabulary = void 0;
@@ -13524,9 +13524,9 @@ var require_metadata = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/draft7.js
+// ../../../node_modules/ajv/dist/vocabularies/draft7.js
 var require_draft7 = __commonJS({
-  "node_modules/ajv/dist/vocabularies/draft7.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/draft7.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var core_1 = require_core2();
@@ -13546,9 +13546,9 @@ var require_draft7 = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/discriminator/types.js
+// ../../../node_modules/ajv/dist/vocabularies/discriminator/types.js
 var require_types = __commonJS({
-  "node_modules/ajv/dist/vocabularies/discriminator/types.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/discriminator/types.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.DiscrError = void 0;
@@ -13560,9 +13560,9 @@ var require_types = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/vocabularies/discriminator/index.js
+// ../../../node_modules/ajv/dist/vocabularies/discriminator/index.js
 var require_discriminator = __commonJS({
-  "node_modules/ajv/dist/vocabularies/discriminator/index.js"(exports2) {
+  "../../../node_modules/ajv/dist/vocabularies/discriminator/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -13665,9 +13665,9 @@ var require_discriminator = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/refs/json-schema-draft-07.json
+// ../../../node_modules/ajv/dist/refs/json-schema-draft-07.json
 var require_json_schema_draft_07 = __commonJS({
-  "node_modules/ajv/dist/refs/json-schema-draft-07.json"(exports2, module2) {
+  "../../../node_modules/ajv/dist/refs/json-schema-draft-07.json"(exports2, module2) {
     module2.exports = {
       $schema: "http://json-schema.org/draft-07/schema#",
       $id: "http://json-schema.org/draft-07/schema#",
@@ -13822,9 +13822,9 @@ var require_json_schema_draft_07 = __commonJS({
   }
 });
 
-// node_modules/ajv/dist/ajv.js
+// ../../../node_modules/ajv/dist/ajv.js
 var require_ajv = __commonJS({
-  "node_modules/ajv/dist/ajv.js"(exports2, module2) {
+  "../../../node_modules/ajv/dist/ajv.js"(exports2, module2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.MissingRefError = exports2.ValidationError = exports2.CodeGen = exports2.Name = exports2.nil = exports2.stringify = exports2.str = exports2._ = exports2.KeywordCxt = exports2.Ajv = void 0;
@@ -13893,7 +13893,7 @@ var require_ajv = __commonJS({
 });
 
 // src/cli.ts
-var import_node_path13 = require("node:path");
+var import_node_path14 = require("node:path");
 var import_node_util = require("node:util");
 
 // src/commands/diagram.ts
@@ -14659,6 +14659,123 @@ function flowAndArtifactChecks(playbook, file) {
   }
   return issues;
 }
+function loopBodyIds(flow) {
+  const ids = /* @__PURE__ */ new Set();
+  for (const step of flow) {
+    if (step.kind === "loop" && Array.isArray(step.body)) {
+      for (const id of step.body) if (typeof id === "string") ids.add(id);
+    }
+  }
+  return ids;
+}
+function declaredOutputBases(flow) {
+  const bases = /* @__PURE__ */ new Set();
+  for (const step of flow) {
+    if (typeof step.output === "string") bases.add(baseArtifact(step.output));
+  }
+  return bases;
+}
+var ITERATION_TOKEN = "{iteration}";
+function unsafeTemplate(template) {
+  if (template.includes("\\")) return "contains a backslash";
+  if (/^([a-zA-Z]:)?\//.test(template)) return "is an absolute path";
+  if (template.split("/").some((segment) => segment === "..")) return 'contains a ".." segment';
+  return null;
+}
+function templateStrings(spec) {
+  if (typeof spec === "string") return [spec];
+  return Object.values(spec).filter((value) => typeof value === "string");
+}
+function stringList(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === "string") : null;
+}
+function outputContractChecks(playbook, file) {
+  const issues = [];
+  const flow = Array.isArray(playbook.flow) ? playbook.flow : [];
+  const bodyIds = loopBodyIds(flow);
+  flow.forEach((step, index) => {
+    const where = stepWhere(step, index);
+    const overList = stringList(step.over);
+    const outputPath = step.output_path;
+    if (outputPath !== void 0 && outputPath !== null) {
+      if (typeof step.output !== "string" && step.over === void 0) {
+        issues.push({ file, path: `${where}/output_path`, message: "output_path on a step that produces nothing (no output or over)", severity: "error" });
+      }
+      const isMemberMap = typeof outputPath === "object" && !Array.isArray(outputPath);
+      if (isMemberMap) {
+        const map = outputPath;
+        if (!overList) {
+          issues.push({ file, path: `${where}/output_path`, message: "output_path member map requires a literal `over` role list", severity: "error" });
+        } else {
+          const overSet = new Set(overList);
+          const extras = Object.keys(map).filter((key) => !overSet.has(key));
+          const missing = overList.filter((member) => !(member in map));
+          if (extras.length > 0 || missing.length > 0) {
+            const parts = [];
+            if (missing.length) parts.push(`missing ${missing.join(", ")}`);
+            if (extras.length) parts.push(`unexpected ${extras.join(", ")}`);
+            issues.push({ file, path: `${where}/output_path`, message: `output_path member map keys must match the \`over\` role list (${parts.join("; ")})`, severity: "error" });
+          }
+        }
+      } else if (typeof outputPath === "string" && overList && overList.length > 1 && !outputPath.includes("{actor}")) {
+        issues.push({ file, path: `${where}/output_path`, message: "output_path string template for a map over roles must contain {actor}", severity: "error" });
+      }
+      const isBody = typeof step.id === "string" && bodyIds.has(step.id);
+      for (const template of templateStrings(outputPath)) {
+        if (isBody && !template.includes(ITERATION_TOKEN)) {
+          issues.push({ file, path: `${where}/output_path`, message: `loop-body step output_path template "${template}" must contain {iteration}`, severity: "error" });
+        } else if (!isBody && template.includes(ITERATION_TOKEN)) {
+          issues.push({ file, path: `${where}/output_path`, message: `non-loop-body step output_path template "${template}" must not contain {iteration}`, severity: "error" });
+        }
+        const unsafe = unsafeTemplate(template);
+        if (unsafe) issues.push({ file, path: `${where}/output_path`, message: `output_path template "${template}" ${unsafe}`, severity: "error" });
+      }
+      if (overList && overList.length > 0) {
+        const seen = /* @__PURE__ */ new Map();
+        for (const member of overList) {
+          const template = isMemberMap ? outputPath[member] : outputPath;
+          if (typeof template !== "string") continue;
+          const expanded = template.split("{actor}").join(member);
+          const prior = seen.get(expanded);
+          if (prior !== void 0) {
+            issues.push({ file, path: `${where}/output_path`, message: `output_path collides: members "${prior}" and "${member}" both resolve to "${expanded}"`, severity: "error" });
+          } else {
+            seen.set(expanded, member);
+          }
+        }
+      }
+    }
+    const inputBindings = step.input_bindings;
+    if (inputBindings && typeof inputBindings === "object" && !Array.isArray(inputBindings)) {
+      const overSet = new Set(overList ?? []);
+      const inputSet = new Set(stringList(step.input) ?? []);
+      for (const [actor, binding] of Object.entries(inputBindings)) {
+        if (!overSet.has(actor)) {
+          issues.push({ file, path: `${where}/input_bindings/${actor}`, message: `input_bindings key "${actor}" is not a member of \`over\``, severity: "error" });
+        }
+        if (binding && typeof binding === "object" && !Array.isArray(binding)) {
+          for (const role of ["primary", "context"]) {
+            for (const ref of stringList(binding[role]) ?? []) {
+              if (!inputSet.has(ref)) {
+                issues.push({ file, path: `${where}/input_bindings/${actor}/${role}`, message: `input_bindings references artifact "${ref}", which is not a declared input of this step`, severity: "error" });
+              }
+            }
+          }
+        }
+      }
+    }
+  });
+  const contracts = playbook.artifact_contracts;
+  if (contracts && typeof contracts === "object" && !Array.isArray(contracts)) {
+    const outputBases = declaredOutputBases(flow);
+    for (const key of Object.keys(contracts)) {
+      if (!outputBases.has(key)) {
+        issues.push({ file, path: `/artifact_contracts/${key}`, message: `artifact_contracts key "${key}" does not match any declared output artifact`, severity: "error" });
+      }
+    }
+  }
+  return issues;
+}
 function semanticChecks(playbook, file) {
   const issues = [];
   const roles = playbook.roles && typeof playbook.roles === "object" ? new Set(Object.keys(playbook.roles)) : /* @__PURE__ */ new Set();
@@ -14681,6 +14798,7 @@ function semanticChecks(playbook, file) {
   });
   for (const role of roles) if (!usedRoles.has(role)) issues.push({ file, path: `/roles/${role}`, message: `role "${role}" is declared but never used`, severity: "warning" });
   issues.push(...flowAndArtifactChecks(playbook, file));
+  issues.push(...outputContractChecks(playbook, file));
   return issues;
 }
 function isPlaybookShape(doc) {
@@ -15139,85 +15257,513 @@ function runPlugin(opts = {}) {
   return { outDir, results };
 }
 
-// src/commands/run.ts
-var import_node_fs9 = require("node:fs");
-var import_node_path9 = require("node:path");
-var import_yaml5 = __toESM(require_dist(), 1);
-var RunError = class extends Error {
-};
-var TERMINAL_STATUSES = /* @__PURE__ */ new Set(["completed", "failed", "aborted"]);
-var VALID_STATUSES = /* @__PURE__ */ new Set(["running", ...TERMINAL_STATUSES]);
-var RUN_YAML_MODELINE = "# yaml-language-server: $schema=../../schemas/run.schema.json";
-function resolveRunDir2(repoRoot, cwd, run) {
-  const candidates = (0, import_node_path9.isAbsolute)(run) ? [run] : [(0, import_node_path9.join)(repoRoot, ".fadeno", "runs", run), (0, import_node_path9.resolve)(cwd, run)];
-  for (const candidate of candidates) {
-    const dir = candidate.endsWith("run.yaml") ? candidate.slice(0, -"run.yaml".length) : candidate;
-    if ((0, import_node_fs9.existsSync)((0, import_node_path9.join)(dir, "run.yaml"))) return dir;
-  }
-  throw new RunError(`No run found for "${run}" (looked for run.yaml under .fadeno/runs).`);
-}
-function runRun(opts) {
-  if (!opts.step && !opts.status && !opts.event && !opts.artifact) {
-    throw new RunError("Nothing to do: pass --step, --status, --event, and/or --artifact.");
-  }
-  const cwd = opts.cwd ?? process.cwd();
-  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const runDir = resolveRunDir2(repoRoot, cwd, opts.run);
-  const runYamlPath = (0, import_node_path9.join)(runDir, "run.yaml");
-  const eventsPath = (0, import_node_path9.join)(runDir, "events.jsonl");
-  const run = (0, import_yaml5.parse)((0, import_node_fs9.readFileSync)(runYamlPath, "utf8"));
-  const iso = (opts.now ?? /* @__PURE__ */ new Date()).toISOString();
-  const appendedEvents = [];
-  const updatedFields = [];
-  const appendEvent = (event) => {
-    (0, import_node_fs9.appendFileSync)(eventsPath, `${JSON.stringify({ ...event, timestamp: iso })}
-`, "utf8");
-    appendedEvents.push(event.type);
-  };
-  if (opts.step) {
-    run.current_step = opts.step;
-    updatedFields.push("current_step");
-    appendEvent({ type: "step_started", step: opts.step });
-  }
-  const eventStep = opts.step ?? (run.current_step ?? null);
-  if (opts.event) {
-    const event = { type: opts.event, step: eventStep };
-    if (opts.artifact) event.artifact = opts.artifact;
-    appendEvent(event);
-  } else if (opts.artifact) {
-    appendEvent({ type: "artifact_created", step: eventStep, artifact: opts.artifact });
-  }
-  if (opts.status) {
-    if (!VALID_STATUSES.has(opts.status)) {
-      throw new RunError(
-        `Invalid status "${opts.status}". Use one of: ${[...VALID_STATUSES].join(", ")}.`
-      );
-    }
-    run.status = opts.status;
-    updatedFields.push("status");
-    if (TERMINAL_STATUSES.has(opts.status)) {
-      run.ended_at = iso;
-      updatedFields.push("ended_at");
-      run.current_step = null;
-      appendEvent({ type: `run_${opts.status}`, step: null });
-    }
-  }
-  (0, import_node_fs9.writeFileSync)(runYamlPath, `${RUN_YAML_MODELINE}
-${(0, import_yaml5.stringify)(run)}`, "utf8");
-  return { runDir, appendedEvents, updatedFields };
-}
-
-// src/lib/run-ledger.ts
+// src/commands/prompt.ts
+var import_node_crypto = require("node:crypto");
 var import_node_fs10 = require("node:fs");
 var import_node_path10 = require("node:path");
 var import_yaml6 = __toESM(require_dist(), 1);
+
+// src/lib/prompt.ts
+function canonicalJson(value) {
+  return canonical(value, 0);
+}
+function canonical(value, depth) {
+  const pad = "  ".repeat(depth);
+  const inner = "  ".repeat(depth + 1);
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "[]";
+    const items = value.map((item) => inner + canonical(item, depth + 1));
+    return `[
+${items.join(",\n")}
+${pad}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    if (keys.length === 0) return "{}";
+    const items = keys.map((key) => `${inner}${JSON.stringify(key)}: ${canonical(value[key], depth + 1)}`);
+    return `{
+${items.join(",\n")}
+${pad}}`;
+  }
+  return JSON.stringify(value);
+}
+function fenceFor(content) {
+  let longest = 0;
+  const runs = content.match(/`+/g);
+  if (runs) for (const run of runs) longest = Math.max(longest, run.length);
+  return "`".repeat(Math.max(3, longest + 1));
+}
+function blockquote(text) {
+  return text.replace(/\s+$/, "").split("\n").map((line) => line.trim() === "" ? ">" : `> ${line.trim()}`);
+}
+function renderPolicyValue(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => typeof item === "string" ? item : JSON.stringify(item)).join(", ")}]`;
+  }
+  if (typeof value === "string") return value;
+  return JSON.stringify(value);
+}
+function attribution(file) {
+  if (file.isSelf) return " \u2014 produced by you";
+  if (file.byActor) return ` \u2014 produced by \`${file.byActor}\``;
+  return "";
+}
+function renderInputs(ctx) {
+  const lines = ["## Inputs", ""];
+  if (ctx.inputs.length === 0) {
+    lines.push("No declared inputs; work from the task and constraints below.");
+    return lines;
+  }
+  ctx.inputs.forEach((input, index) => {
+    const producer = input.producedBy == null ? "produced upstream" : input.invocation == null ? `produced by step \`${input.producedBy}\`` : `produced by step \`${input.producedBy}\` (invocation ${input.invocation})`;
+    lines.push(`${index + 1}. ${input.artifact} \u2014 ${producer}`);
+    if (input.files.length === 0) {
+      lines.push("   - (no file recorded at the cutoff)");
+    }
+    for (const file of input.files) {
+      lines.push(`   - \`${file.path}\` \u2014 ${file.bytes} bytes, sha256 ${file.sha256}${attribution(file)}`);
+      if (file.content != null) {
+        const fence = fenceFor(file.content);
+        lines.push(`${fence}`, file.content.replace(/\n$/, ""), `${fence}`);
+      }
+    }
+    if (input.isAssembledAggregate && input.aggregatePath) {
+      lines.push(`   - assembled aggregate (not re-listed): \`${input.aggregatePath}\` \u2014 the gate-evaluated ${input.artifact} array.`);
+    }
+    lines.push("");
+  });
+  lines.pop();
+  return lines;
+}
+function renderConstraints(ctx) {
+  const lines = ["## Execution constraints", ""];
+  if (ctx.output.isMap && ctx.actor) {
+    const others = ctx.otherMembers.length > 0 ? ctx.otherMembers.map((m) => `\`${m}\``).join(", ") : "(none)";
+    lines.push(
+      `- Map step: perform only the \`${ctx.actor}\` member. The other members (${others}) are handled separately \u2014 do not coordinate with them or produce their outputs.`
+    );
+  }
+  if (ctx.policies) {
+    const keys = Object.keys(ctx.policies).sort();
+    if (keys.length > 0) {
+      const rendered = keys.map((key) => `${key} = ${renderPolicyValue(ctx.policies[key])}`).join("; ");
+      lines.push(`- Policies (advisory unless enforced by hooks/CI): ${rendered}.`);
+    }
+  }
+  if (ctx.loopOwner && ctx.iteration != null) {
+    const bound = ctx.maxIterations != null ? ` of at most ${ctx.maxIterations}` : "";
+    lines.push(
+      `- This step is body of loop \`${ctx.loopOwner}\`, iteration ${ctx.iteration}${bound}. Write this generation's artifact; never overwrite an earlier generation.`
+    );
+  }
+  lines.push(
+    "- You may read the repository, but must not modify `run.yaml`, `events.jsonl`, prompt snapshots under `artifacts/prompts/`, or any artifact other than your declared output below."
+  );
+  return lines;
+}
+function renderOutput(ctx) {
+  const out = ctx.output;
+  const lines = ["## Output contract", ""];
+  if (out.isMap) {
+    lines.push(`- Collective output: ${out.collectiveType}. Your output: ${out.memberType}.`);
+  } else {
+    lines.push(`- Output: ${out.collectiveType || out.memberType}.`);
+  }
+  lines.push(`- Write exactly one artifact to \`${out.path}\`.`);
+  lines.push(`- Media type: ${out.mediaType}.`);
+  if (out.schemaKind && ctx.schemaText != null) {
+    lines.push("- Emit JSON only \u2014 no prose, no code fences around it \u2014 conforming to this schema:");
+    lines.push("", "```json", ctx.schemaText, "```", "");
+    lines.push(`- Self-check before finishing: \`fadeno validate ${out.path} --schema ${out.schemaKind}\`.`);
+  } else if (out.instructions != null) {
+    lines.push(`- ${out.instructions}`);
+  } else {
+    lines.push("- Produce one self-contained markdown document.");
+  }
+  if (ctx.downstream) {
+    let note = `- Downstream: gate \`${ctx.downstream.gateStep}\` computes \`${ctx.downstream.condition}\` from ${out.collectiveType || out.memberType}.`;
+    if (out.schemaKind === "review-report") note += " A `blocking`-severity issue fails it.";
+    if (out.isMap) note += " The coordinator first assembles all map members into one array.";
+    lines.push(note);
+  }
+  return lines;
+}
+function renderStepPrompt(ctx) {
+  const lines = [];
+  lines.push("# Fadeno step assignment", "");
+  lines.push("## Task", "", ctx.task, "");
+  lines.push("## Assignment", "");
+  lines.push(`- run: ${ctx.runId}`);
+  lines.push(`- playbook: ${ctx.playbookName} (schema_version ${ctx.schemaVersion})`);
+  lines.push(`- step: ${ctx.step} (${ctx.kind})`);
+  lines.push(`- actor: ${ctx.actor ?? "(unassigned)"}`);
+  if (ctx.output.isMap && ctx.actor) {
+    const others = ctx.otherMembers.length > 0 ? ctx.otherMembers.join(", ") : "(none)";
+    lines.push(`- map member: ${ctx.actor} (other members: ${others})`);
+  }
+  if (ctx.loopOwner && ctx.iteration != null) {
+    const bound = ctx.maxIterations != null ? ` of ${ctx.maxIterations}` : "";
+    lines.push(`- iteration: ${ctx.iteration}${bound}`);
+  }
+  lines.push(`- invocation: ${ctx.invocation}`);
+  if (ctx.purpose) {
+    lines.push("", ...blockquote(ctx.purpose));
+  }
+  lines.push("");
+  lines.push(...renderInputs(ctx), "");
+  lines.push(...renderConstraints(ctx), "");
+  lines.push(...renderOutput(ctx), "");
+  lines.push("## Completion protocol", "");
+  lines.push("- Produce exactly the one declared artifact above; write nothing else.");
+  lines.push("- Do not modify the run ledger (`run.yaml`, `events.jsonl`) or any prompt snapshot.");
+  lines.push("- Keep all commentary inside the artifact; emit no other prose.");
+  lines.push("- If your harness cannot write files, return only the artifact body for the coordinator to save.");
+  return `${lines.join("\n")}
+`;
+}
+
+// src/lib/prompt-resolve.ts
+var PromptResolveError = class extends Error {
+};
+var ARTIFACT_EVENT_TYPES = /* @__PURE__ */ new Set(["artifact_created", "artifact_written"]);
+var NOT_PROMPTABLE = /* @__PURE__ */ new Set(["tool_call", "router", "join", "artifact_op", "subworkflow", "replicate"]);
+function baseArtifact2(name) {
+  return name.replace(/\[\]$/, "");
+}
+function asStringArray(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+}
+function kebab(name) {
+  return name.replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1-$2").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+function escapeRegExp2(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function loopBodyOwners(flow) {
+  const owners = /* @__PURE__ */ new Map();
+  for (const step of flow) {
+    if (step.kind !== "loop" || !Array.isArray(step.body) || typeof step.id !== "string") continue;
+    for (const id of step.body) {
+      if (typeof id === "string" && !owners.has(id)) owners.set(id, step.id);
+    }
+  }
+  return owners;
+}
+function findStep(flow, id) {
+  return flow.find((step) => step.id === id);
+}
+function expandOutputPath(spec, member, iteration) {
+  let template;
+  if (typeof spec === "string") {
+    template = spec;
+  } else {
+    if (member == null || typeof spec[member] !== "string") {
+      throw new PromptResolveError(`output_path map has no entry for member "${member ?? "(none)"}".`);
+    }
+    template = spec[member];
+  }
+  let out = template;
+  if (member != null) out = out.split("{actor}").join(member);
+  if (iteration != null) out = out.split("{iteration}").join(String(iteration + 1));
+  return out;
+}
+function withGeneration(path, iteration) {
+  const generation = iteration + 1;
+  const dot = path.lastIndexOf(".");
+  const slash = path.lastIndexOf("/");
+  if (dot > slash) return `${path.slice(0, dot)}.v${generation}${path.slice(dot)}`;
+  return `${path}.v${generation}`;
+}
+function templateMatches(template, member, path) {
+  const pattern = template.split(/(\{actor\}|\{iteration\})/).map((part) => part === "{actor}" ? escapeRegExp2(member) : part === "{iteration}" ? "\\d+" : escapeRegExp2(part)).join("");
+  return new RegExp(`^${pattern}$`).test(path);
+}
+function attributeToMember(producer, path) {
+  const spec = producer.output_path;
+  if (spec == null) return null;
+  if (typeof spec === "object" && !Array.isArray(spec)) {
+    for (const [member, template] of Object.entries(spec)) {
+      if (typeof template === "string" && templateMatches(template, member, path)) return member;
+    }
+    return null;
+  }
+  if (typeof spec === "string") {
+    for (const member of asStringArray(producer.over)) {
+      if (templateMatches(spec, member, path)) return member;
+    }
+  }
+  return null;
+}
+function schemaKindFor(base) {
+  if (base === "ReviewReport") return "review-report";
+  if (base === "TestResult") return "test-result";
+  return null;
+}
+function resolveInput(inputType, flow, events, cutoff, actor) {
+  const base = baseArtifact2(inputType);
+  const producerIds = new Set(
+    flow.filter((step) => typeof step.output === "string" && baseArtifact2(step.output) === base).map((step) => step.id)
+  );
+  const candidates = [];
+  for (let i = 0; i < cutoff; i += 1) {
+    const event = events[i];
+    if (!ARTIFACT_EVENT_TYPES.has(event.type)) continue;
+    if (event.step == null || !producerIds.has(event.step)) continue;
+    const path = event.extra.artifact;
+    if (typeof path !== "string") continue;
+    const memberField = typeof event.extra.member === "string" ? event.extra.member : null;
+    const producer = findStep(flow, event.step);
+    const member = memberField ?? (producer ? attributeToMember(producer, path) : null);
+    candidates.push({ index: i, path, producer: event.step, member });
+  }
+  const byMember = /* @__PURE__ */ new Map();
+  const unattributed = [];
+  let aggregate = null;
+  for (const candidate of candidates) {
+    if (candidate.member != null) {
+      const prior = byMember.get(candidate.member);
+      if (!prior || candidate.index > prior.index) byMember.set(candidate.member, candidate);
+      continue;
+    }
+    const producer = findStep(flow, candidate.producer);
+    if (producer && producer.output_path != null) {
+      if (!aggregate || candidate.index > aggregate.index) aggregate = candidate;
+    } else {
+      unattributed.push(candidate);
+    }
+  }
+  const memberEntries = [...byMember.entries()];
+  const overOrder = memberEntries.length > 0 ? asStringArray(findStep(flow, memberEntries[0][1].producer)?.over) : [];
+  memberEntries.sort((a, b) => {
+    const ai = overOrder.indexOf(a[0]);
+    const bi = overOrder.indexOf(b[0]);
+    if (ai !== -1 && bi !== -1) return ai - bi;
+    return a[1].index - b[1].index;
+  });
+  const files = [];
+  for (const [member, event] of memberEntries) {
+    files.push({ path: event.path, byActor: member, isSelf: member === actor });
+  }
+  for (const event of unattributed.sort((a, b) => a.index - b.index)) {
+    files.push({ path: event.path, byActor: null, isSelf: false });
+  }
+  const all = [...byMember.values(), ...unattributed, ...aggregate ? [aggregate] : []];
+  let producedBy = null;
+  let invocation = null;
+  if (all.length > 0) {
+    const last = all.reduce((a, b) => a.index >= b.index ? a : b);
+    producedBy = last.producer;
+    let count = 0;
+    for (let i = 0; i < cutoff; i += 1) {
+      if (events[i].type === "step_started" && events[i].step === producedBy) count += 1;
+    }
+    invocation = count > 0 ? count : null;
+  }
+  return {
+    artifact: inputType,
+    producedBy,
+    invocation,
+    files,
+    isAssembledAggregate: aggregate != null,
+    aggregatePath: aggregate ? aggregate.path : null
+  };
+}
+function resolveStepPlan(playbook, events, sel) {
+  const flow = asFlow(playbook.flow);
+  const step = findStep(flow, sel.step);
+  if (!step) {
+    const ids = flow.map((s) => typeof s.id === "string" ? s.id : "?").join(", ");
+    throw new PromptResolveError(`step "${sel.step}" not found. Steps: ${ids}`);
+  }
+  const kind = typeof step.kind === "string" ? step.kind : "unknown";
+  guardKind(step, kind, sel.step);
+  const isMap = kind === "map";
+  let overMembers = [];
+  if (isMap) {
+    if (typeof step.over === "string") {
+      throw new PromptResolveError(`step "${sel.step}" maps over an artifact field ("${step.over}"); artifact-field maps are not promptable in v1.`);
+    }
+    overMembers = asStringArray(step.over);
+    if (overMembers.length === 0) {
+      throw new PromptResolveError(`step "${sel.step}" has no literal \`over\` role list; not promptable in v1.`);
+    }
+  }
+  const { actor, otherMembers } = resolveActor(step, sel, isMap, overMembers);
+  const owners = loopBodyOwners(flow);
+  const loopOwner = typeof step.id === "string" ? owners.get(step.id) ?? null : null;
+  const isBody = loopOwner != null;
+  if (!isBody && sel.iteration != null) {
+    throw new PromptResolveError(`--iteration is only valid on loop-body steps; "${sel.step}" is not one.`);
+  }
+  let iteration = null;
+  let maxIterations = null;
+  let iterationStarts = [];
+  if (isBody) {
+    const loopStep = findStep(flow, loopOwner);
+    maxIterations = loopStep && typeof loopStep.max_iterations === "number" ? loopStep.max_iterations : null;
+    iterationStarts = events.reduce((acc, event, index) => {
+      if (event.type === "loop_iteration_started" && event.step === loopOwner) acc.push(index);
+      return acc;
+    }, []);
+    if (iterationStarts.length === 0) {
+      throw new PromptResolveError(`loop "${loopOwner}" has no recorded loop_iteration_started; cannot resolve an iteration for "${sel.step}".`);
+    }
+    iterationStarts.forEach((index, ordinal) => {
+      const declared = events[index].extra.iteration;
+      if (typeof declared === "number" && declared !== ordinal + 1) {
+        throw new PromptResolveError(`loop_iteration_started #${ordinal + 1} for "${loopOwner}" records iteration ${declared}, which does not match its ordinal ${ordinal + 1}.`);
+      }
+    });
+    const wanted = sel.iteration ?? iterationStarts.length;
+    if (wanted < 1 || wanted > iterationStarts.length) {
+      throw new PromptResolveError(`--iteration ${wanted} is out of range for "${sel.step}"; loop "${loopOwner}" has ${iterationStarts.length} recorded iteration(s).`);
+    }
+    iteration = wanted;
+  }
+  let spanStart = 0;
+  let spanEnd = events.length;
+  if (isBody && iteration != null) {
+    spanStart = iterationStarts[iteration - 1];
+    spanEnd = iteration < iterationStarts.length ? iterationStarts[iteration] : events.length;
+  }
+  const stepStarts = [];
+  for (let i = spanStart; i < spanEnd; i += 1) {
+    if (events[i].type === "step_started" && events[i].step === sel.step) stepStarts.push(i);
+  }
+  let invocation;
+  let cutoffIndex;
+  if (stepStarts.length === 0) {
+    invocation = 1;
+    cutoffIndex = null;
+  } else {
+    invocation = stepStarts.length;
+    cutoffIndex = stepStarts[stepStarts.length - 1];
+  }
+  const inputCutoff = cutoffIndex ?? spanEnd;
+  const inputs = asStringArray(step.input).map((type) => resolveInput(type, flow, events, inputCutoff, actor));
+  const output = planOutput(playbook, step, sel.step, kind, isMap, actor, iteration, isBody);
+  const downstream = resolveDownstream(flow, output.collectiveType);
+  const purpose = resolvePurpose(playbook, actor);
+  return {
+    kind,
+    actor,
+    iteration,
+    maxIterations,
+    invocation,
+    cutoffLine: cutoffIndex == null ? null : cutoffIndex + 1,
+    inputs,
+    output,
+    downstream,
+    otherMembers,
+    loopOwner,
+    purpose
+  };
+}
+function asFlow(flow) {
+  return Array.isArray(flow) ? flow : [];
+}
+function guardKind(step, kind, stepId) {
+  if (kind === "gate") {
+    throw new PromptResolveError(`step "${stepId}" is a gate; evaluate it with \`fadeno gate <run> <condition> --artifact <path>\`, not \`fadeno prompt\`.`);
+  }
+  if (kind === "human_gate") {
+    const question = typeof step.prompt === "string" ? step.prompt.trim().replace(/\s+/g, " ") : "(no prompt declared)";
+    throw new PromptResolveError(`step "${stepId}" is a human_gate; ask the user directly: ${question}`);
+  }
+  if (kind === "loop") {
+    const body = asStringArray(step.body).join(", ");
+    throw new PromptResolveError(`step "${stepId}" is a loop; prompt one of its body steps: ${body}`);
+  }
+  if (NOT_PROMPTABLE.has(kind)) {
+    throw new PromptResolveError(`step "${stepId}" (kind ${kind}) is not promptable in v1.`);
+  }
+}
+function resolveActor(step, sel, isMap, overMembers) {
+  if (isMap) {
+    if (sel.actor == null) {
+      throw new PromptResolveError(`step "${sel.step}" maps over roles; pass --actor ${overMembers.join("|")}.`);
+    }
+    if (!overMembers.includes(sel.actor)) {
+      throw new PromptResolveError(`unknown --actor "${sel.actor}" for step "${sel.step}"; valid members: ${overMembers.join(", ")}.`);
+    }
+    return { actor: sel.actor, otherMembers: overMembers.filter((member) => member !== sel.actor) };
+  }
+  const declared = typeof step.actor === "string" ? step.actor : null;
+  if (sel.actor != null && sel.actor !== declared) {
+    throw new PromptResolveError(`unknown --actor "${sel.actor}" for step "${sel.step}"; valid actor: ${declared ?? "(none)"}.`);
+  }
+  return { actor: declared, otherMembers: [] };
+}
+function planOutput(playbook, step, stepId, kind, isMap, actor, iteration, isBody) {
+  const collectiveType = typeof step.output === "string" ? step.output : "";
+  const base = baseArtifact2(collectiveType);
+  const schemaKind = schemaKindFor(base);
+  const memberType = isMap ? base : collectiveType;
+  let path;
+  const spec = step.output_path;
+  if (spec != null && (typeof spec === "string" || typeof spec === "object" && !Array.isArray(spec))) {
+    path = expandOutputPath(spec, actor, iteration);
+  } else if (isMap) {
+    if (schemaKind) {
+      path = `artifacts/parts/${stepId}/${actor ?? "member"}.json`;
+      if (isBody && iteration != null) path = withGeneration(path, iteration);
+    } else {
+      throw new PromptResolveError(`step "${stepId}" maps an untyped output ("${collectiveType || "unnamed"}") with no output_path; declare output_path so each member's file is unambiguous.`);
+    }
+  } else {
+    if (schemaKind === "review-report") path = "artifacts/review-report.json";
+    else if (schemaKind === "test-result") path = "artifacts/test-result.json";
+    else path = `artifacts/${kebab(base) || kebab(kind)}.md`;
+    if (isBody && iteration != null) path = withGeneration(path, iteration);
+  }
+  const contract = resolveContract(playbook, base);
+  const mediaType = schemaKind ? "application/json" : contract && typeof contract.media_type === "string" ? contract.media_type : "text/markdown";
+  const instructions = contract && typeof contract.instructions === "string" ? contract.instructions : null;
+  return { path, mediaType, schemaKind, instructions, collectiveType, memberType, isMap };
+}
+function resolveContract(playbook, base) {
+  const contracts = playbook.artifact_contracts;
+  if (!contracts || typeof contracts !== "object" || Array.isArray(contracts)) return null;
+  const contract = contracts[base];
+  return contract && typeof contract === "object" && !Array.isArray(contract) ? contract : null;
+}
+function resolveDownstream(flow, collectiveType) {
+  const base = baseArtifact2(collectiveType);
+  if (!base) return null;
+  const consumes = (step) => asStringArray(step.input).some((type) => baseArtifact2(type) === base);
+  for (const step of flow) {
+    if (step.kind === "gate" && typeof step.condition === "string" && consumes(step)) {
+      return { gateStep: step.id, condition: step.condition };
+    }
+  }
+  for (const step of flow) {
+    if (step.kind === "loop" && typeof step.until === "string" && consumes(step)) {
+      return { gateStep: step.id, condition: step.until };
+    }
+  }
+  return null;
+}
+function resolvePurpose(playbook, actor) {
+  if (actor == null) return null;
+  const roles = playbook.roles;
+  if (!roles || typeof roles !== "object" || Array.isArray(roles)) return null;
+  const role = roles[actor];
+  if (!role || typeof role !== "object") return null;
+  const purpose = role.purpose;
+  return typeof purpose === "string" ? purpose : null;
+}
+
+// src/lib/run-ledger.ts
+var import_node_fs9 = require("node:fs");
+var import_node_path9 = require("node:path");
+var import_yaml5 = __toESM(require_dist(), 1);
 var RunLedgerError = class extends Error {
 };
 function stringOrNull(value) {
   return typeof value === "string" ? value : null;
 }
 function summarizeRunDir(runId, dir) {
-  const yamlPath = (0, import_node_path10.join)(dir, "run.yaml");
+  const yamlPath = (0, import_node_path9.join)(dir, "run.yaml");
   const base = {
     runId,
     dir,
@@ -15231,14 +15777,14 @@ function summarizeRunDir(runId, dir) {
   };
   let raw;
   try {
-    raw = (0, import_node_fs10.readFileSync)(yamlPath, "utf8");
+    raw = (0, import_node_fs9.readFileSync)(yamlPath, "utf8");
   } catch (err) {
     base.problems.push(`unreadable run.yaml: ${err.message}`);
     return base;
   }
   let parsed;
   try {
-    parsed = (0, import_yaml6.parse)(raw);
+    parsed = (0, import_yaml5.parse)(raw);
   } catch (err) {
     base.problems.push(`unparseable run.yaml: ${err.message}`);
     return base;
@@ -15257,23 +15803,23 @@ function summarizeRunDir(runId, dir) {
   return base;
 }
 function listRuns(repoRoot) {
-  const runsDir = (0, import_node_path10.join)(repoRoot, ".fadeno", "runs");
-  if (!(0, import_node_fs10.existsSync)(runsDir)) return [];
-  const entries = (0, import_node_fs10.readdirSync)(runsDir, { withFileTypes: true });
+  const runsDir = (0, import_node_path9.join)(repoRoot, ".fadeno", "runs");
+  if (!(0, import_node_fs9.existsSync)(runsDir)) return [];
+  const entries = (0, import_node_fs9.readdirSync)(runsDir, { withFileTypes: true });
   const runs = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const dir = (0, import_node_path10.join)(runsDir, entry.name);
-    if (!(0, import_node_fs10.existsSync)((0, import_node_path10.join)(dir, "run.yaml"))) continue;
+    const dir = (0, import_node_path9.join)(runsDir, entry.name);
+    if (!(0, import_node_fs9.existsSync)((0, import_node_path9.join)(dir, "run.yaml"))) continue;
     runs.push(summarizeRunDir(entry.name, dir));
   }
   runs.sort((a, b) => a.runId < b.runId ? 1 : a.runId > b.runId ? -1 : 0);
   return runs;
 }
 function readEvents(runDir) {
-  const path = (0, import_node_path10.join)(runDir, "events.jsonl");
-  if (!(0, import_node_fs10.existsSync)(path)) return { events: [], badLines: [] };
-  const text = (0, import_node_fs10.readFileSync)(path, "utf8");
+  const path = (0, import_node_path9.join)(runDir, "events.jsonl");
+  if (!(0, import_node_fs9.existsSync)(path)) return { events: [], badLines: [] };
+  const text = (0, import_node_fs9.readFileSync)(path, "utf8");
   const lines = text.split("\n");
   const events = [];
   const badLines = [];
@@ -15305,6 +15851,13 @@ function readEvents(runDir) {
   }
   return { events, badLines };
 }
+function readEventsStrict(runDir) {
+  const { events, badLines } = readEvents(runDir);
+  if (badLines.length > 0) {
+    throw new RunLedgerError(`events.jsonl has malformed lines: ${badLines.join(", ")}`);
+  }
+  return events;
+}
 function resolveRun(repoRoot, query) {
   const runs = listRuns(repoRoot);
   const exact = runs.find((r) => r.runId === query);
@@ -15319,18 +15872,18 @@ function resolveRun(repoRoot, query) {
   throw new RunLedgerError(`Multiple runs match "${query}": ${listed}${more}.`);
 }
 function listArtifacts(runDir) {
-  const artifactsDir = (0, import_node_path10.join)(runDir, "artifacts");
-  if (!(0, import_node_fs10.existsSync)(artifactsDir)) return [];
+  const artifactsDir = (0, import_node_path9.join)(runDir, "artifacts");
+  if (!(0, import_node_fs9.existsSync)(artifactsDir)) return [];
   const out = [];
   function walk(dir) {
-    for (const entry of (0, import_node_fs10.readdirSync)(dir, { withFileTypes: true })) {
-      const full = (0, import_node_path10.join)(dir, entry.name);
+    for (const entry of (0, import_node_fs9.readdirSync)(dir, { withFileTypes: true })) {
+      const full = (0, import_node_path9.join)(dir, entry.name);
       if (entry.isDirectory()) {
         walk(full);
       } else if (entry.isFile()) {
         out.push({
-          path: (0, import_node_path10.relative)(runDir, full).split("\\").join("/"),
-          bytes: (0, import_node_fs10.statSync)(full).size
+          path: (0, import_node_path9.relative)(runDir, full).split("\\").join("/"),
+          bytes: (0, import_node_fs9.statSync)(full).size
         });
       }
     }
@@ -15338,6 +15891,241 @@ function listArtifacts(runDir) {
   walk(artifactsDir);
   out.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
   return out;
+}
+
+// src/commands/prompt.ts
+var PromptError = class extends Error {
+};
+function sha256(data) {
+  return (0, import_node_crypto.createHash)("sha256").update(data).digest("hex");
+}
+function locatePlaybook(repoRoot, name) {
+  const dir = (0, import_node_path10.join)(repoRoot, ".fadeno", "playbooks");
+  for (const candidate of [`${name}.yaml`, `${name}.yml`]) {
+    const path = (0, import_node_path10.join)(dir, candidate);
+    if ((0, import_node_fs10.existsSync)(path)) return path;
+  }
+  throw new PromptError(`Playbook "${name}" not found in ${dir}.`);
+}
+function runPrompt(opts) {
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const run = resolveRun(repoRoot, opts.run);
+  const runDir = run.dir;
+  let events;
+  try {
+    events = readEventsStrict(runDir);
+  } catch (err) {
+    if (err instanceof RunLedgerError) throw new PromptError(err.message);
+    throw err;
+  }
+  if (run.playbook == null) {
+    throw new PromptError(`run "${run.runId}" has no playbook recorded in run.yaml.`);
+  }
+  const playbookPath = locatePlaybook(repoRoot, run.playbook);
+  const playbookBytes = (0, import_node_fs10.readFileSync)(playbookPath);
+  let playbook;
+  try {
+    const parsed = (0, import_yaml6.parse)(playbookBytes.toString("utf8"));
+    if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("playbook is not a mapping");
+    }
+    playbook = parsed;
+  } catch (err) {
+    throw new PromptError(`could not parse playbook ${run.playbook}: ${err.message}`);
+  }
+  const schemas = new SchemaSet((0, import_node_path10.join)(repoRoot, ".fadeno", "schemas"));
+  const validation = validateFile(playbookPath, schemas, "playbook");
+  const errorIssues = validation.issues.filter((issue) => issue.severity === "error");
+  if (errorIssues.length > 0) {
+    const detail2 = errorIssues.map((issue) => `${issue.path || "/"}: ${issue.message}`).join("; ");
+    throw new PromptError(`playbook ${run.playbook} is invalid; fix it before assembling a prompt: ${detail2}`);
+  }
+  const sel = {
+    step: opts.step,
+    actor: opts.actor ?? null,
+    iteration: opts.iteration ?? null
+  };
+  let plan;
+  try {
+    plan = resolveStepPlan(playbook, events, sel);
+  } catch (err) {
+    if (err instanceof PromptResolveError) throw new PromptError(err.message);
+    throw err;
+  }
+  const inputs = plan.inputs.map((input) => {
+    const files = input.files.map((file) => {
+      const abs = (0, import_node_path10.join)(runDir, file.path);
+      if (!(0, import_node_fs10.existsSync)(abs)) {
+        const producer = input.producedBy ?? "an upstream step";
+        throw new PromptError(`input file "${file.path}" for ${input.artifact} (produced by ${producer}) is missing on disk.`);
+      }
+      const bytes = (0, import_node_fs10.readFileSync)(abs);
+      return {
+        path: file.path,
+        byActor: file.byActor,
+        isSelf: file.isSelf,
+        bytes: bytes.length,
+        sha256: sha256(bytes),
+        content: opts.inline ? bytes.toString("utf8") : null
+      };
+    });
+    return {
+      artifact: input.artifact,
+      producedBy: input.producedBy,
+      invocation: input.invocation,
+      isAssembledAggregate: input.isAssembledAggregate,
+      aggregatePath: input.aggregatePath,
+      files
+    };
+  });
+  let schemaText = null;
+  if (plan.output.schemaKind) {
+    const schemaFile = (0, import_node_path10.join)(repoRoot, ".fadeno", "schemas", `${plan.output.schemaKind}.schema.json`);
+    if ((0, import_node_fs10.existsSync)(schemaFile)) {
+      schemaText = canonicalJson(JSON.parse((0, import_node_fs10.readFileSync)(schemaFile, "utf8")));
+    }
+  }
+  const policies = playbook.policies && typeof playbook.policies === "object" && !Array.isArray(playbook.policies) ? playbook.policies : null;
+  const ctx = {
+    runId: run.runId,
+    playbookName: typeof playbook.name === "string" ? playbook.name : run.playbook,
+    schemaVersion: playbook.schema_version != null ? String(playbook.schema_version) : "?",
+    task: run.task ?? "",
+    step: opts.step,
+    kind: plan.kind,
+    actor: plan.actor,
+    otherMembers: plan.otherMembers,
+    iteration: plan.iteration,
+    maxIterations: plan.maxIterations,
+    invocation: plan.invocation,
+    loopOwner: plan.loopOwner,
+    purpose: plan.purpose,
+    inputs,
+    output: plan.output,
+    downstream: plan.downstream,
+    policies,
+    schemaText,
+    inline: Boolean(opts.inline)
+  };
+  const prompt = renderStepPrompt(ctx);
+  const promptSha = sha256(prompt);
+  const record = opts.record !== false;
+  const terminal = run.status != null && run.status !== "running";
+  const previewOnly = !record || terminal || plan.cutoffLine == null;
+  if (previewOnly) {
+    return { prompt, sha256: promptSha, promptPath: null, recorded: "preview", plan };
+  }
+  let name = opts.step;
+  if (plan.actor) name += `--${plan.actor}`;
+  if (plan.iteration != null) name += `--v${plan.iteration + 1}`;
+  name += `--n${plan.invocation}`;
+  const promptRel = `artifacts/prompts/${name}.md`;
+  const promptAbs = (0, import_node_path10.join)(runDir, "artifacts", "prompts", `${name}.md`);
+  if ((0, import_node_fs10.existsSync)(promptAbs)) {
+    const existing = (0, import_node_fs10.readFileSync)(promptAbs, "utf8");
+    if (existing !== prompt) {
+      throw new PromptError(`existing prompt snapshot ${promptRel} differs from the newly assembled bytes; refusing to overwrite.`);
+    }
+    return { prompt, sha256: promptSha, promptPath: promptRel, recorded: "reused", plan };
+  }
+  (0, import_node_fs10.mkdirSync)((0, import_node_path10.dirname)(promptAbs), { recursive: true });
+  (0, import_node_fs10.writeFileSync)(promptAbs, prompt, "utf8");
+  const now = opts.now ?? /* @__PURE__ */ new Date();
+  const manifest = {
+    type: "prompt_assembled",
+    step: opts.step,
+    actor: plan.actor,
+    iteration: plan.iteration,
+    invocation: plan.invocation,
+    cutoff_line: plan.cutoffLine,
+    inputs: inputs.flatMap(
+      (input) => input.files.map((file) => ({
+        artifact: input.artifact,
+        path: file.path,
+        bytes: file.bytes,
+        sha256: file.sha256,
+        produced_by: file.byActor
+      }))
+    ),
+    output_path: plan.output.path,
+    playbook_sha256: sha256(playbookBytes),
+    prompt_sha256: promptSha,
+    prompt_path: promptRel,
+    manifest_version: 1,
+    timestamp: now.toISOString()
+  };
+  (0, import_node_fs10.appendFileSync)((0, import_node_path10.join)(runDir, "events.jsonl"), `${JSON.stringify(manifest)}
+`, "utf8");
+  return { prompt, sha256: promptSha, promptPath: promptRel, recorded: "created", plan };
+}
+
+// src/commands/run.ts
+var import_node_fs11 = require("node:fs");
+var import_node_path11 = require("node:path");
+var import_yaml7 = __toESM(require_dist(), 1);
+var RunError = class extends Error {
+};
+var TERMINAL_STATUSES = /* @__PURE__ */ new Set(["completed", "failed", "aborted"]);
+var VALID_STATUSES = /* @__PURE__ */ new Set(["running", ...TERMINAL_STATUSES]);
+var RUN_YAML_MODELINE = "# yaml-language-server: $schema=../../schemas/run.schema.json";
+function resolveRunDir2(repoRoot, cwd, run) {
+  const candidates = (0, import_node_path11.isAbsolute)(run) ? [run] : [(0, import_node_path11.join)(repoRoot, ".fadeno", "runs", run), (0, import_node_path11.resolve)(cwd, run)];
+  for (const candidate of candidates) {
+    const dir = candidate.endsWith("run.yaml") ? candidate.slice(0, -"run.yaml".length) : candidate;
+    if ((0, import_node_fs11.existsSync)((0, import_node_path11.join)(dir, "run.yaml"))) return dir;
+  }
+  throw new RunError(`No run found for "${run}" (looked for run.yaml under .fadeno/runs).`);
+}
+function runRun(opts) {
+  if (!opts.step && !opts.status && !opts.event && !opts.artifact) {
+    throw new RunError("Nothing to do: pass --step, --status, --event, and/or --artifact.");
+  }
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const runDir = resolveRunDir2(repoRoot, cwd, opts.run);
+  const runYamlPath = (0, import_node_path11.join)(runDir, "run.yaml");
+  const eventsPath = (0, import_node_path11.join)(runDir, "events.jsonl");
+  const run = (0, import_yaml7.parse)((0, import_node_fs11.readFileSync)(runYamlPath, "utf8"));
+  const iso = (opts.now ?? /* @__PURE__ */ new Date()).toISOString();
+  const appendedEvents = [];
+  const updatedFields = [];
+  const appendEvent = (event) => {
+    (0, import_node_fs11.appendFileSync)(eventsPath, `${JSON.stringify({ ...event, timestamp: iso })}
+`, "utf8");
+    appendedEvents.push(event.type);
+  };
+  if (opts.step) {
+    run.current_step = opts.step;
+    updatedFields.push("current_step");
+    appendEvent({ type: "step_started", step: opts.step });
+  }
+  const eventStep = opts.step ?? (run.current_step ?? null);
+  if (opts.event) {
+    const event = { type: opts.event, step: eventStep };
+    if (opts.artifact) event.artifact = opts.artifact;
+    appendEvent(event);
+  } else if (opts.artifact) {
+    appendEvent({ type: "artifact_created", step: eventStep, artifact: opts.artifact });
+  }
+  if (opts.status) {
+    if (!VALID_STATUSES.has(opts.status)) {
+      throw new RunError(
+        `Invalid status "${opts.status}". Use one of: ${[...VALID_STATUSES].join(", ")}.`
+      );
+    }
+    run.status = opts.status;
+    updatedFields.push("status");
+    if (TERMINAL_STATUSES.has(opts.status)) {
+      run.ended_at = iso;
+      updatedFields.push("ended_at");
+      run.current_step = null;
+      appendEvent({ type: `run_${opts.status}`, step: null });
+    }
+  }
+  (0, import_node_fs11.writeFileSync)(runYamlPath, `${RUN_YAML_MODELINE}
+${(0, import_yaml7.stringify)(run)}`, "utf8");
+  return { runDir, appendedEvents, updatedFields };
 }
 
 // src/commands/runs.ts
@@ -15358,15 +16146,15 @@ function runShow(opts) {
 }
 
 // src/commands/validate.ts
-var import_node_fs11 = require("node:fs");
-var import_node_path11 = require("node:path");
+var import_node_fs12 = require("node:fs");
+var import_node_path12 = require("node:path");
 var ValidateError = class extends Error {
 };
 function runValidate(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const schemasDir = (0, import_node_path11.join)(repoRoot, ".fadeno", "schemas");
-  if (!(0, import_node_fs11.existsSync)(schemasDir)) {
+  const schemasDir = (0, import_node_path12.join)(repoRoot, ".fadeno", "schemas");
+  if (!(0, import_node_fs12.existsSync)(schemasDir)) {
     throw new ValidateError(
       `No Fadeno schemas found at ${schemasDir}.
 Run \`fadeno init --codex\` or \`fadeno init --claude\` first.`
@@ -15376,15 +16164,15 @@ Run \`fadeno init --codex\` or \`fadeno init --claude\` first.`
   let files;
   let forcedKind;
   if (opts.path) {
-    files = [(0, import_node_path11.isAbsolute)(opts.path) ? opts.path : (0, import_node_path11.resolve)(cwd, opts.path)];
+    files = [(0, import_node_path12.isAbsolute)(opts.path) ? opts.path : (0, import_node_path12.resolve)(cwd, opts.path)];
     forcedKind = opts.schema;
   } else {
     forcedKind = "playbook";
-    const playbooksDir = (0, import_node_path11.join)(repoRoot, ".fadeno", "playbooks");
-    if (!(0, import_node_fs11.existsSync)(playbooksDir)) {
+    const playbooksDir = (0, import_node_path12.join)(repoRoot, ".fadeno", "playbooks");
+    if (!(0, import_node_fs12.existsSync)(playbooksDir)) {
       throw new ValidateError(`No playbooks directory at ${playbooksDir}.`);
     }
-    files = (0, import_node_fs11.readdirSync)(playbooksDir).filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort().map((f) => (0, import_node_path11.join)(playbooksDir, f));
+    files = (0, import_node_fs12.readdirSync)(playbooksDir).filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort().map((f) => (0, import_node_path12.join)(playbooksDir, f));
     if (files.length === 0) {
       throw new ValidateError(`No playbooks (*.yaml) found in ${playbooksDir}.`);
     }
@@ -15394,13 +16182,13 @@ Run \`fadeno init --codex\` or \`fadeno init --claude\` first.`
 }
 
 // src/commands/verify.ts
-var import_node_fs12 = require("node:fs");
-var import_node_path12 = require("node:path");
-var import_yaml7 = __toESM(require_dist(), 1);
+var import_node_fs13 = require("node:fs");
+var import_node_path13 = require("node:path");
+var import_yaml8 = __toESM(require_dist(), 1);
 var VerifyError = class extends Error {
 };
 function resolveArtifact(runDir, rel) {
-  return (0, import_node_path12.isAbsolute)(rel) ? rel : (0, import_node_path12.join)(runDir, rel);
+  return (0, import_node_path13.isAbsolute)(rel) ? rel : (0, import_node_path13.join)(runDir, rel);
 }
 function runVerify(opts) {
   const hasRun = opts.run != null;
@@ -15416,7 +16204,7 @@ function runVerify(opts) {
   } else {
     run = resolveRun(repoRoot, opts.run);
   }
-  const schemas = new SchemaSet((0, import_node_path12.join)(repoRoot, ".fadeno", "schemas"));
+  const schemas = new SchemaSet((0, import_node_path13.join)(repoRoot, ".fadeno", "schemas"));
   const findings = [];
   findings.push(checkRunSchema(run, schemas));
   const { events, badLines } = readEvents(run.dir);
@@ -15438,7 +16226,7 @@ function checkRunSchema(run, schemas) {
   const check = "run-schema";
   let doc;
   try {
-    doc = (0, import_yaml7.parse)((0, import_node_fs12.readFileSync)((0, import_node_path12.join)(run.dir, "run.yaml"), "utf8"));
+    doc = (0, import_yaml8.parse)((0, import_node_fs13.readFileSync)((0, import_node_path13.join)(run.dir, "run.yaml"), "utf8"));
   } catch (err) {
     return { check, status: "fail", detail: `run.yaml did not parse: ${err.message}` };
   }
@@ -15495,7 +16283,7 @@ function checkArtifactsExist(run, events) {
     if (event.type !== "artifact_created") continue;
     if (typeof event.extra.artifact === "string") paths.push(event.extra.artifact);
   }
-  const missing = paths.filter((p) => !(0, import_node_fs12.existsSync)(resolveArtifact(run.dir, p)));
+  const missing = paths.filter((p) => !(0, import_node_fs13.existsSync)(resolveArtifact(run.dir, p)));
   if (missing.length === 0) {
     return { check, status: "ok", detail: `${paths.length}/${paths.length} present` };
   }
@@ -15523,12 +16311,12 @@ function checkGateEvent(run, schemas, event, lastResultByCondition) {
     return { check, status: "fail", detail: "gate event recorded no artifact to recompute from" };
   }
   const artifactPath = resolveArtifact(run.dir, artifactRel);
-  if (!(0, import_node_fs12.existsSync)(artifactPath)) {
+  if (!(0, import_node_fs13.existsSync)(artifactPath)) {
     return { check, status: "fail", detail: `artifact ${artifactRel} is missing; cannot recompute` };
   }
   let parsed;
   try {
-    parsed = JSON.parse((0, import_node_fs12.readFileSync)(artifactPath, "utf8"));
+    parsed = JSON.parse((0, import_node_fs13.readFileSync)(artifactPath, "utf8"));
   } catch (err) {
     return { check, status: "fail", detail: `artifact ${artifactRel} is not valid JSON: ${err.message}` };
   }
@@ -15573,6 +16361,7 @@ Usage:
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
   fadeno run <run> [flags]              Update a run ledger (run.yaml + events.jsonl)
   fadeno gate <run> <condition>         Evaluate a gate condition from a structured artifact
+  fadeno prompt <run> <step> [flags]    Assemble (and record) a step's actor prompt
   fadeno runs                           List run ledgers under .fadeno/runs/
   fadeno show <run>                     Show a run summary, timeline, and artifacts
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic gate claims (or --latest)
@@ -15590,6 +16379,10 @@ Options:
   --artifact <path>       (run) Attach an artifact path to the event
   --artifact <path>       (gate) Artifact path relative to run (condition-specific default)
   --report <path>         (gate) Deprecated alias for --artifact
+  --actor <role>          (prompt) Map member / actor to assemble the prompt for
+  --iteration <n>         (prompt) Loop-body iteration to target (default: latest)
+  --inline                (prompt) Embed input file contents in the prompt
+  --no-record             (prompt) Preview only: write no snapshot or event
   --latest                (verify) Audit the newest run instead of a named one
   --allow-failed          (verify) Accept an honest failed/aborted terminal
   -h, --help              Show this help
@@ -15603,6 +16396,7 @@ Examples:
   fadeno run 2026-05-30-1132-csv --step review
   fadeno run 2026-05-30-1132-csv --status completed
   fadeno gate 2026-05-30-1132-csv no_blocking_issues --artifact artifacts/review-report.json
+  fadeno prompt 2026-05-30-1132-csv cross_review --actor architect_fable --no-record
   fadeno runs
   fadeno show 2026-07-10-2212
   fadeno verify --latest
@@ -15615,7 +16409,7 @@ function printInitSummary(target, repoRoot, results, withHooks, dataOnly) {
   console.log(`Fadeno initialized for ${target} in ${repoRoot}
 `);
   for (const r of results) {
-    console.log(`  ${r.status.padEnd(11)} ${(0, import_node_path13.relative)(repoRoot, r.path) || r.path}`);
+    console.log(`  ${r.status.padEnd(11)} ${(0, import_node_path14.relative)(repoRoot, r.path) || r.path}`);
   }
   console.log(
     `
@@ -15653,7 +16447,7 @@ function printIssue(issue) {
 function printValidate(outcome) {
   let warnings = 0;
   for (const result of outcome.results) {
-    const rel = (0, import_node_path13.relative)(outcome.repoRoot, result.file) || result.file;
+    const rel = (0, import_node_path14.relative)(outcome.repoRoot, result.file) || result.file;
     const fileWarnings = result.issues.filter((i) => i.severity === "warning").length;
     warnings += fileWarnings;
     if (result.ok) {
@@ -15737,7 +16531,7 @@ function renderEvent(event) {
 function printShow(repoRoot, result) {
   const { run, events, badLines, artifacts } = result;
   const dash = (value) => value ?? "\u2014";
-  const relDir = (0, import_node_path13.relative)(repoRoot, run.dir) || run.dir;
+  const relDir = (0, import_node_path14.relative)(repoRoot, run.dir) || run.dir;
   console.log(`run ${run.runId}`);
   console.log(`  playbook:  ${dash(run.playbook)}`);
   console.log(`  task:      ${dash(run.task)}`);
@@ -15803,6 +16597,10 @@ function main(argv) {
         event: { type: "string" },
         artifact: { type: "string" },
         report: { type: "string" },
+        actor: { type: "string" },
+        iteration: { type: "string" },
+        inline: { type: "boolean" },
+        "no-record": { type: "boolean" },
         latest: { type: "boolean" },
         "allow-failed": { type: "boolean" },
         help: { type: "boolean", short: "h" },
@@ -15893,7 +16691,7 @@ function main(argv) {
       const parts = [];
       if (result.updatedFields.length) parts.push(`updated ${result.updatedFields.join(", ")}`);
       if (result.appendedEvents.length) parts.push(`logged ${result.appendedEvents.join(", ")}`);
-      console.log(`${(0, import_node_path13.relative)(process.cwd(), result.runDir) || result.runDir}: ${parts.join("; ")}`);
+      console.log(`${(0, import_node_path14.relative)(process.cwd(), result.runDir) || result.runDir}: ${parts.join("; ")}`);
       return 0;
     }
     case "plugin": {
@@ -15902,7 +16700,7 @@ function main(argv) {
       for (const r of results) counts[r.status] += 1;
       console.log(`Generated Fadeno plugin in ${outDir}`);
       console.log(`  ${counts.created} created, ${counts.overwritten} overwritten, ${counts.skipped} skipped.`);
-      console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path13.relative)(process.cwd(), outDir) + "`");
+      console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path14.relative)(process.cwd(), outDir) + "`");
       return 0;
     }
     case "gate": {
@@ -15924,6 +16722,52 @@ function main(argv) {
         }
       }
       return result.pass ? 0 : 1;
+    }
+    case "prompt": {
+      const [, run, step] = positionals;
+      if (!run || !step) {
+        throw new Error("Usage: fadeno prompt <run> <step> [--actor <role>] [--iteration <n>] [--inline] [--no-record] [--format text|json]");
+      }
+      if (values.format && values.format !== "text" && values.format !== "json") {
+        throw new Error(`Invalid --format "${values.format}". Use: text | json.`);
+      }
+      let iteration;
+      if (values.iteration != null) {
+        const n = Number(values.iteration);
+        if (!Number.isInteger(n) || n < 1) {
+          throw new Error(`Invalid --iteration "${values.iteration}". Use a positive integer.`);
+        }
+        iteration = n;
+      }
+      const result = runPrompt({
+        run,
+        step,
+        actor: values.actor,
+        iteration,
+        inline: values.inline,
+        record: !values["no-record"]
+      });
+      if (values.format === "json") {
+        console.log(
+          JSON.stringify(
+            {
+              step,
+              actor: result.plan.actor,
+              iteration: result.plan.iteration,
+              invocation: result.plan.invocation,
+              recorded: result.recorded,
+              prompt_path: result.promptPath,
+              sha256: result.sha256,
+              prompt: result.prompt
+            },
+            null,
+            2
+          )
+        );
+      } else {
+        console.log(result.prompt);
+      }
+      return 0;
     }
     case "runs": {
       const { runs } = runRuns();
