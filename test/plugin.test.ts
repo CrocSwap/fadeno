@@ -27,23 +27,28 @@ test('plugin generates manifest, namespaced skills, and subagents', (t) => {
   assert.equal(manifest.name, 'fadeno');
   assert.equal(typeof manifest.version, 'string');
 
-  // skills use short dir names → /fadeno:runner, /fadeno:builder
+  // skills use short dir names → /fadeno:runner, /fadeno:builder, /fadeno:driver
   assert.ok(exists(outDir, 'skills/runner/SKILL.md'));
   assert.ok(exists(outDir, 'skills/runner/references/runtime.md'));
   assert.ok(exists(outDir, 'skills/builder/SKILL.md'));
+  assert.ok(exists(outDir, 'skills/driver/SKILL.md'));
 
   const runner = readFileSync(join(outDir, 'skills/runner/SKILL.md'), 'utf8');
   const builder = readFileSync(join(outDir, 'skills/builder/SKILL.md'), 'utf8');
+  const driver = readFileSync(join(outDir, 'skills/driver/SKILL.md'), 'utf8');
   assert.match(runner, /^name: runner$/m);
   assert.doesNotMatch(runner, /disable-model-invocation/);
   assert.match(builder, /^name: builder$/m);
   // Builder stays model-invocable — a builder gated with disable-model-invocation
   // was uninvocable (plugin skills aren't reliably slash-invocable).
   assert.doesNotMatch(builder, /disable-model-invocation/);
+  assert.match(driver, /^name: driver$/m);
+  assert.match(driver, /fadeno next/);
 
-  // slash-command entry points → /fadeno:runner, /fadeno:builder
+  // slash-command entry points → /fadeno:runner, /fadeno:builder, /fadeno:driver
   assert.ok(exists(outDir, 'commands/runner.md'));
   assert.ok(exists(outDir, 'commands/builder.md'));
+  assert.ok(exists(outDir, 'commands/driver.md'));
 
   // subagents — namespaced as fadeno:worker / :reviewer / :judge
   assert.ok(exists(outDir, 'agents/worker.md'));

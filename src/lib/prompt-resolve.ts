@@ -176,7 +176,7 @@ function templateMatches(template: string, member: string, path: string): boolea
 }
 
 /** Attribute one produced artifact path to a member via the producer's output_path. */
-function attributeToMember(producer: PlaybookStep, path: string): string | null {
+export function attributeToMember(producer: PlaybookStep, path: string): string | null {
   const spec = producer.output_path;
   if (spec == null) return null;
   if (typeof spec === 'object' && !Array.isArray(spec)) {
@@ -193,10 +193,15 @@ function attributeToMember(producer: PlaybookStep, path: string): string | null 
   return null;
 }
 
-function schemaKindFor(base: string): SchemaKind | null {
+export function schemaKindFor(base: string): SchemaKind | null {
   if (base === 'ReviewReport') return 'review-report';
   if (base === 'TestResult') return 'test-result';
   return null;
+}
+
+/** Strip a trailing `[]` array marker from a logical artifact type name. */
+export function baseArtifactName(name: string): string {
+  return name.replace(/\[\]$/, '');
 }
 
 interface CandidateEvent {
@@ -441,7 +446,13 @@ function resolveActor(
   return { actor: declared, otherMembers: [] };
 }
 
-function planOutput(
+/**
+ * Plan the output path/type for one step assignment. Shared by `fadeno prompt`
+ * and `fadeno next` so the cursor can never advertise a path the prompter will
+ * refuse. Throws `PromptResolveError` for unpromptable path shapes (e.g. a
+ * role-list map with an untyped output and no `output_path`).
+ */
+export function planOutput(
   playbook: Playbook,
   step: PlaybookStep,
   stepId: string,
@@ -485,6 +496,51 @@ function planOutput(
   return { path, mediaType, schemaKind, instructions, collectiveType, memberType, isMap };
 }
 
+/**
+ * Like `planOutput`, but returns `null` instead of throwing when the step is not
+ * path-resolvable under v1 prompt rules (used by the flow cursor).
+ */
+export function tryPlanOutput(
+  playbook: Playbook,
+  step: PlaybookStep,
+  stepId: string,
+  kind: string,
+  isMap: boolean,
+  actor: string | null,
+  iteration: number | null,
+  isBody: boolean,
+): PlannedOutput | null {
+  try {
+    return planOutput(playbook, step, stepId, kind, isMap, actor, iteration, isBody);
+  } catch (err) {
+    if (err instanceof PromptResolveError) return null;
+    throw err;
+  }
+}
+
+/**
+ * Plan every map-member output path using the same rules as `fadeno prompt`.
+ * Returns `null` if any member is not path-resolvable (so `next` will not claim
+ * the step is promptable).
+ */
+export function planMapMemberOutputs(
+  playbook: Playbook,
+  step: PlaybookStep,
+  members: string[],
+  iteration: number | null,
+  isBody: boolean,
+): PlannedOutput[] | null {
+  const stepId = typeof step.id === 'string' ? step.id : '';
+  const kind = typeof step.kind === 'string' ? step.kind : 'map';
+  const planned: PlannedOutput[] = [];
+  for (const member of members) {
+    const one = tryPlanOutput(playbook, step, stepId, kind, true, member, iteration, isBody);
+    if (one == null) return null;
+    planned.push(one);
+  }
+  return planned;
+}
+
 function resolveContract(playbook: Playbook, base: string): { media_type?: unknown; instructions?: unknown } | null {
   const contracts = playbook.artifact_contracts;
   if (!contracts || typeof contracts !== 'object' || Array.isArray(contracts)) return null;
@@ -492,7 +548,8 @@ function resolveContract(playbook: Playbook, base: string): { media_type?: unkno
   return contract && typeof contract === 'object' && !Array.isArray(contract) ? (contract as Record<string, unknown>) : null;
 }
 
-function resolveDownstream(flow: PlaybookStep[], collectiveType: string): DownstreamNote | null {
+/** Find a gate/loop that consumes this collective artifact type (for prompt notes + cursor). */
+export function resolveDownstream(flow: PlaybookStep[], collectiveType: string): DownstreamNote | null {
   const base = baseArtifact(collectiveType);
   if (!base) return null;
   const consumes = (step: PlaybookStep): boolean => asStringArray(step.input).some((type) => baseArtifact(type) === base);
@@ -507,6 +564,51 @@ function resolveDownstream(flow: PlaybookStep[], collectiveType: string): Downst
     }
   }
   return null;
+}
+
+/**
+ * Planned path for the assembled `Name[]` array a map writes when its output
+ * feeds a gate/loop. Prefers a stem derived from member `output_path`s (so
+ * `cross-review.architect_fable.json` → `cross-review.json`); otherwise the
+ * schema default (`artifacts/review-report.json`) with generation when in a
+ * loop body. Returns null when the output is not an array type or nothing
+ * downstream consumes it as a gate/loop input.
+ */
+export function planCollectivePath(
+  flow: PlaybookStep[],
+  step: PlaybookStep,
+  memberPaths: string[],
+  members: string[],
+  iteration: number | null,
+  isBody: boolean,
+): string | null {
+  const collectiveType = typeof step.output === 'string' ? step.output : '';
+  if (!collectiveType.endsWith('[]')) return null;
+  if (resolveDownstream(flow, collectiveType) == null) return null;
+
+  if (memberPaths.length > 0 && members.length > 0) {
+    const first = memberPaths[0]!;
+    const member = members[0]!;
+    for (const sep of [`.${member}`, `/${member}`, `-${member}`] as const) {
+      if (first.includes(sep)) {
+        let stem = first.split(sep).join('');
+        // If the member template already carried `.v<G>`, the stem does too.
+        if (isBody && iteration != null && !/\.v\d+(\.|$)/.test(stem)) {
+          stem = withGeneration(stem, iteration);
+        }
+        return stem;
+      }
+    }
+  }
+
+  const base = baseArtifact(collectiveType);
+  const schema = schemaKindFor(base);
+  let path: string;
+  if (schema === 'review-report') path = 'artifacts/review-report.json';
+  else if (schema === 'test-result') path = 'artifacts/test-result.json';
+  else path = `artifacts/${typeof step.id === 'string' ? step.id : 'collective'}.json`;
+  if (isBody && iteration != null) path = withGeneration(path, iteration);
+  return path;
 }
 
 function resolvePurpose(playbook: Playbook, actor: string | null): string | null {

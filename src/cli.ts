@@ -6,6 +6,7 @@ import { runGate } from './commands/gate.ts';
 import { runInit, type Target } from './commands/init.ts';
 import { runNewRun } from './commands/new-run.ts';
 import { runPlugin } from './commands/plugin.ts';
+import { runNext } from './commands/next.ts';
 import { runPrompt } from './commands/prompt.ts';
 import { runRun } from './commands/run.ts';
 import { runRuns } from './commands/runs.ts';
@@ -30,6 +31,7 @@ Usage:
   fadeno run <run> [flags]              Update a run ledger (run.yaml + events.jsonl)
   fadeno gate <run> <condition>         Evaluate a gate condition from a structured artifact
   fadeno prompt <run> <step> [flags]    Assemble (and record) a step's actor prompt
+  fadeno next <run>                     Emit the next actionable step (JSON flow cursor)
   fadeno runs                           List run ledgers under .fadeno/runs/
   fadeno show <run>                     Show a run summary, timeline, and artifacts
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic gate claims (or --latest)
@@ -45,6 +47,8 @@ Options:
   --status <status>       (run) Set status: running | completed | failed | aborted
   --event <type>          (run) Append a custom event
   --artifact <path>       (run) Attach an artifact path to the event
+  --member <role>         (run) Attribute the event to a map member / actor
+  --field <k=v>           (run) Extra field on the event (repeatable; e.g. branch=approve)
   --artifact <path>       (gate) Artifact path relative to run (condition-specific default)
   --report <path>         (gate) Deprecated alias for --artifact
   --actor <role>          (prompt) Map member / actor to assemble the prompt for
@@ -63,8 +67,11 @@ Examples:
   fadeno new-run code-change-review "Add CSV export for reports"
   fadeno run 2026-05-30-1132-csv --step review
   fadeno run 2026-05-30-1132-csv --status completed
+  fadeno run 2026-05-30-1132-csv --event artifact_created --artifact artifacts/x.json --member architect_fable
+  fadeno run 2026-05-30-1132-csv --step arbitrate --event human_decision --field branch=approve
   fadeno gate 2026-05-30-1132-csv no_blocking_issues --artifact artifacts/review-report.json
   fadeno prompt 2026-05-30-1132-csv cross_review --actor architect_fable --no-record
+  fadeno next 2026-05-30-1132-csv
   fadeno runs
   fadeno show 2026-07-10-2212
   fadeno verify --latest
@@ -294,6 +301,8 @@ function main(argv: string[]): number {
         event: { type: 'string' },
         artifact: { type: 'string' },
         report: { type: 'string' },
+        member: { type: 'string' },
+        field: { type: 'string', multiple: true },
         actor: { type: 'string' },
         iteration: { type: 'string' },
         inline: { type: 'boolean' },
@@ -379,13 +388,15 @@ function main(argv: string[]): number {
     }
     case 'run': {
       const run = positionals[1];
-      if (!run) throw new Error('Usage: fadeno run <run> [--step|--status|--event|--artifact]');
+      if (!run) throw new Error('Usage: fadeno run <run> [--step|--status|--event|--artifact|--member|--field]');
       const result = runRun({
         run,
         step: values.step,
         status: values.status,
         event: values.event,
         artifact: values.artifact,
+        member: values.member,
+        fields: values.field,
       });
       const parts: string[] = [];
       if (result.updatedFields.length) parts.push(`updated ${result.updatedFields.join(', ')}`);
@@ -466,6 +477,13 @@ function main(argv: string[]): number {
       } else {
         console.log(result.prompt);
       }
+      return 0;
+    }
+    case 'next': {
+      const run = positionals[1];
+      if (!run) throw new Error('Usage: fadeno next <run>');
+      const result = runNext({ run });
+      console.log(JSON.stringify(result, null, 2));
       return 0;
     }
     case 'runs': {

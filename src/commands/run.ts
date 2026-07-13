@@ -20,6 +20,17 @@ export interface RunOptions {
   event?: string;
   /** Artifact path to attach (with --event, or alone as an `artifact_created` event). */
   artifact?: string;
+  /**
+   * Attribute an artifact/event to a map member (role). Written as the event's
+   * `member` field — the same key `fadeno prompt` uses for per-member attribution.
+   */
+  member?: string;
+  /**
+   * Extra `k=v` pairs merged onto the appended event (e.g. `branch=approve` on
+   * a `human_decision`). Values that parse as JSON (numbers, booleans, null,
+   * objects/arrays) are stored decoded; everything else stays a string.
+   */
+  fields?: string[];
   cwd?: string;
   repoRoot?: string;
   now?: Date;
@@ -42,14 +53,48 @@ function resolveRunDir(repoRoot: string, cwd: string, run: string): string {
   throw new RunError(`No run found for "${run}" (looked for run.yaml under .fadeno/runs).`);
 }
 
+/** Parse a `--field k=v` value; JSON-decode when unambiguous, else keep string. */
+function parseFieldValue(raw: string): unknown {
+  const trimmed = raw.trim();
+  if (trimmed === '') return '';
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return raw;
+  }
+}
+
+function parseFields(fields: string[] | undefined): Record<string, unknown> {
+  if (!fields || fields.length === 0) return {};
+  const out: Record<string, unknown> = {};
+  for (const entry of fields) {
+    const eq = entry.indexOf('=');
+    if (eq <= 0) {
+      throw new RunError(`Invalid --field "${entry}"; expected k=v (e.g. branch=approve).`);
+    }
+    const key = entry.slice(0, eq).trim();
+    const value = entry.slice(eq + 1);
+    if (!key) {
+      throw new RunError(`Invalid --field "${entry}"; expected k=v (e.g. branch=approve).`);
+    }
+    out[key] = parseFieldValue(value);
+  }
+  return out;
+}
+
 /**
  * Update a run ledger: set `current_step`/`status` in run.yaml and append
  * lifecycle events to events.jsonl. This keeps the agent (or a script) from
  * hand-editing JSONL.
  */
 export function runRun(opts: RunOptions): RunResult {
-  if (!opts.step && !opts.status && !opts.event && !opts.artifact) {
+  const extraFields = parseFields(opts.fields);
+  const hasAttribution = opts.member != null || Object.keys(extraFields).length > 0;
+  if (!opts.step && !opts.status && !opts.event && !opts.artifact && !hasAttribution) {
     throw new RunError('Nothing to do: pass --step, --status, --event, and/or --artifact.');
+  }
+  if (hasAttribution && !opts.event && !opts.artifact && !opts.step && !opts.status) {
+    throw new RunError('--member / --field require an event to attach to (--event and/or --artifact).');
   }
 
   const cwd = opts.cwd ?? process.cwd();
@@ -79,12 +124,29 @@ export function runRun(opts: RunOptions): RunResult {
   // logged with a null step. (Run-level events like run_completed stay null.)
   const eventStep = opts.step ?? ((run.current_step as string | null | undefined) ?? null);
 
+  const attachAttribution = (event: Record<string, unknown>): void => {
+    if (opts.member != null) event.member = opts.member;
+    for (const [key, value] of Object.entries(extraFields)) {
+      event[key] = value;
+    }
+  };
+
   if (opts.event) {
     const event: Record<string, unknown> = { type: opts.event, step: eventStep };
     if (opts.artifact) event.artifact = opts.artifact;
+    attachAttribution(event);
     appendEvent(event);
   } else if (opts.artifact) {
-    appendEvent({ type: 'artifact_created', step: eventStep, artifact: opts.artifact });
+    const event: Record<string, unknown> = {
+      type: 'artifact_created',
+      step: eventStep,
+      artifact: opts.artifact,
+    };
+    attachAttribution(event);
+    appendEvent(event);
+  } else if (hasAttribution) {
+    // Attribution alone is invalid (caught above); status-only with fields is also invalid.
+    throw new RunError('--member / --field require an event to attach to (--event and/or --artifact).');
   }
 
   if (opts.status) {

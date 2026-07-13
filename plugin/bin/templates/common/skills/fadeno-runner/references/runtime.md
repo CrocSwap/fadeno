@@ -59,17 +59,25 @@ Update `status` to `completed`/`failed`/`aborted` at the end, and keep
 
 **Conventional event types** — the log is open (`fadeno run <run> --event <type>`
 appends any type), but these are the standard ones: `run_started`,
-`step_started`, `artifact_created`, `gate_evaluated`, `loop_iteration_started`,
-`loop_condition_evaluated`, `loop_succeeded`, `loop_exhausted`, `roles_degraded`,
-`prompt_assembled`, and a terminal `run_completed` / `run_failed` / `run_aborted`.
-Every line carries at least `type`, `step` (a step id, or `null` for run-level
-events), and `timestamp`.
+`step_started`, `artifact_created`, `gate_evaluated`, `human_decision`,
+`loop_iteration_started`, `loop_condition_evaluated`, `loop_succeeded`,
+`loop_exhausted`, `roles_degraded`, `prompt_assembled`, and a terminal
+`run_completed` / `run_failed` / `run_aborted`. Every line carries at least
+`type`, `step` (a step id, or `null` for run-level events), and `timestamp`.
 
 An artifact event (`artifact_created` / legacy `artifact_written`) may carry an
 optional **`member`** field naming the map member that produced it (e.g.
 `{"type":"artifact_created","step":"cross_review","artifact":"artifacts/cross-review.architect_fable.json","member":"architect_fable",...}`).
 When present it drives `fadeno prompt`'s per-member attribution directly; without
-it, attribution falls back to the producing step's `output_path` map.
+it, attribution falls back to the producing step's `output_path` map. Prefer
+`fadeno run <run> --event artifact_created --artifact <path> --member <role>`
+(and `--field k=v` for any extra keys) over hand-edited JSONL.
+
+**`human_decision`** is the honest event for a human_gate outcome:
+`{"type":"human_decision","step":"arbitrate","branch":"approve",...}` (or
+`"reject"`). Legacy `human_gate_approved` / `human_gate_rejected` are still
+recognized by `fadeno next`. Do **not** reuse `gate_evaluated` for human gates
+— that keeps `verify`'s gate recompute clean.
 
 The ledger is the *degraded runtime* for instruction-only hosts. Keep it honest:
 it is what makes the run inspectable, and the seam a future compiled runtime reads.
@@ -180,6 +188,46 @@ sub-harness: `fadeno prompt <run> <step> --actor <role> | { codex exec -; claude
   **generation-scoped** with `.v<G>`, where **G = N + 1** (pre-loop = generation
   1): a loop-body `output_path` template must contain `{iteration}`, which expands
   to the generation, so the first iteration (N = 1) writes `.v2`.
+
+## Driving a run (`fadeno next` + the driver)
+
+`fadeno next <run>` is the pure flow **cursor** — the third render twin of
+`diagram` (whole graph) and `prompt` (one step's input). It reads the validated
+playbook and `events.jsonl`, and emits one JSON object describing the single next
+actionable step, or a blocked/terminal state. It **writes nothing** (no event, no
+snapshot), unlike `prompt`, which records because it produces dispatched text.
+
+**`status` values:**
+
+| status | meaning | driver action |
+|---|---|---|
+| `ready` | a promptable/gate/tool/loop-until step is next | dispatch it (see `kind`) |
+| `blocked_human_gate` | human_gate with no decision recorded | **pause, return to host** |
+| `needs_decision` | `router` / `subworkflow` / `replicate` / artifact-field `map` | resolve per this doc; record; continue |
+| `terminal` | `terminal_status` reached, run event, or flow exhausted | set `run.yaml.status`; return summary |
+
+**Promptable kinds** match `fadeno prompt` (v1): `actor_call`, `evaluator`,
+`reduce`, and `map` over a literal role list. For those, `step.actors` /
+`step.outputs` / `step.collective` / `step.artifact_type` are populated.
+Gates carry a `gate` block `{condition, artifact, on_pass, on_fail}`. After a
+loop body completes with no `loop_condition_evaluated` yet, `next` returns the
+loop step with a `gate` block for `until` — evaluate via `fadeno gate`, then
+record `loop_condition_evaluated`.
+
+**Cursor rules (deterministic):** a step is done when its terminal event exists
+(`artifact_created` / `artifact_written` for producing steps; `gate_evaluated`
+for gates; `human_decision` or legacy `human_gate_approved` / `_rejected` for
+human gates; `loop_succeeded` / `loop_exhausted` for loops). Position is the last
+`step_started` without completion, else the flow successor of the last completed
+step. Gate/human_gate/loop successors follow the recorded branch; linear steps
+fall through the outer flow.
+
+The **driver** skill (`fadeno-driver`) owns the loop: `next` → dispatch →
+validate-on-arrival → record (`fadeno run … --member` / `--field k=v`) → repeat.
+On `blocked_human_gate` it returns to the host; the host records
+`human_decision` with `--field branch=approve|reject` and re-dispatches resume.
+`runner` remains the in-session / native-subagent orchestrator; driver is the
+cross-harness CLI-dispatch variant. They share this runtime.
 
 ## Gates, honestly
 

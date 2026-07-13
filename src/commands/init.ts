@@ -24,7 +24,7 @@ export interface InitResult {
   results: EmitResult[];
 }
 
-const SKILLS = ['fadeno-runner', 'fadeno-builder'] as const;
+const SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver'] as const;
 
 /**
  * Scaffold a Fadeno setup for the given target into the repository.

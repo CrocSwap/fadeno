@@ -32,6 +32,8 @@ test('init --codex creates the Codex target tree', (t) => {
   assert.ok(exists(root, '.agents/skills/fadeno-runner/agents/openai.yaml'));
   assert.ok(exists(root, '.agents/skills/fadeno-builder/SKILL.md'));
   assert.ok(exists(root, '.agents/skills/fadeno-builder/agents/openai.yaml'));
+  assert.ok(exists(root, '.agents/skills/fadeno-driver/SKILL.md'));
+  assert.ok(exists(root, '.agents/skills/fadeno-driver/agents/openai.yaml'));
   assert.ok(exists(root, '.codex/agents/worker.toml'));
   assert.ok(exists(root, '.codex/agents/reviewer.toml'));
   assert.ok(exists(root, '.codex/agents/judge.toml'));
@@ -54,6 +56,7 @@ test('init --claude creates the Claude target tree', (t) => {
   assert.ok(exists(root, '.claude/skills/fadeno-runner/SKILL.md'));
   assert.ok(exists(root, '.claude/skills/fadeno-runner/references/runtime.md'));
   assert.ok(exists(root, '.claude/skills/fadeno-builder/SKILL.md'));
+  assert.ok(exists(root, '.claude/skills/fadeno-driver/SKILL.md'));
   assert.ok(exists(root, '.claude/agents/worker.md'));
   assert.ok(exists(root, '.claude/agents/reviewer.md'));
   assert.ok(exists(root, '.claude/agents/judge.md'));
@@ -102,7 +105,9 @@ test('SKILL.md bodies are sigil-free; sigils live only in the bootstrap file', (
 
   // Bootstrap files carry the correct per-target sigil.
   assert.match(read(codexRoot, 'AGENTS.md'), /\$fadeno-runner/);
+  assert.match(read(codexRoot, 'AGENTS.md'), /\$fadeno-driver/);
   assert.match(read(claudeRoot, 'CLAUDE.md'), /\/fadeno-runner/);
+  assert.match(read(claudeRoot, 'CLAUDE.md'), /\/fadeno-driver/);
 });
 
 test('existing bootstrap content is preserved; section appended once', (t) => {

@@ -60,6 +60,7 @@ assert on return values and filesystem effects instead of scraping stdout.
 | `runRun` | updated fields + appended events | Mutates `run.yaml`, appends `events.jsonl`. |
 | `runGate` | pass/fail + blocking titles | The advisory→enforced bridge. |
 | `runPrompt` | prompt text + sha + record status + plan | Deterministic step-prompt assembler; records a snapshot + `prompt_assembled` by default. Pure resolution/rendering live in `lib/prompt-resolve.ts` + `lib/prompt.ts`. |
+| `runNext` | next-step JSON (`status`, `step`, `gate`, …) | Pure flow cursor over playbook + events; read-only. Logic in `lib/flow-cursor.ts`. |
 | `runPlugin` | `EmitResult[]` + `outDir` | Generates `plugin/` from templates. |
 
 All commands accept injectable `cwd` / `repoRoot` (and `now` where time matters)
@@ -77,6 +78,9 @@ so tests stay hermetic and deterministic.
   share the same skip/overwrite/append semantics and report an `EmitStatus`.
 - **`playbook-validate.ts`** — the validator (below).
 - **`diagram.ts`** — the renderer (below).
+- **`flow-cursor.ts`** — pure `computeNext(playbook, events)` for `fadeno next`.
+- **`prompt-resolve.ts` / `prompt.ts`** — pure step-prompt plan + render for `fadeno prompt`.
+- **`run-ledger.ts`** — list/resolve runs, parse events, list artifacts.
 
 ## The validator (`src/lib/playbook-validate.ts`)
 
@@ -132,10 +136,11 @@ Three commands drive its lifecycle:
   "today's run" sorts under today's date) while **`started_at` stays UTC ISO**;
   and `slugify()` cuts the task slug at a **word boundary** so ids never end
   mid-word.
-- **`run <id> [--step|--status|--event|--artifact]`** (`runRun`) mutates
-  `run.yaml` and appends to `events.jsonl`. It preserves the modeline, attributes
-  events to the in-progress step (an explicit `--step` wins, else the run's
-  `current_step`), and on a terminal status sets `ended_at` and clears
+- **`run <id> [--step|--status|--event|--artifact|--member|--field]`** (`runRun`)
+  mutates `run.yaml` and appends to `events.jsonl`. It preserves the modeline,
+  attributes events to the in-progress step (an explicit `--step` wins, else the
+  run's `current_step`), attaches optional `--member` / `--field k=v` onto the
+  event payload, and on a terminal status sets `ended_at` and clears
   `current_step`.
 - **`gate <id> <condition> --artifact <path>`** (`runGate`) validates a named
   artifact against the condition's schema, evaluates it deterministically, logs a

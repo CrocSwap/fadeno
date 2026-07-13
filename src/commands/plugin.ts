@@ -15,14 +15,15 @@ export interface PluginResult {
   results: EmitResult[];
 }
 
-// Plugin skill dirs are short (namespaced as fadeno:runner, fadeno:builder) and
-// are generated from the same shared SKILL.md bodies used by `fadeno init`.
-// Both stay model-invocable; the matching commands/ entries give explicit
-// /fadeno:runner and /fadeno:builder slash handles (plugin skills are not
-// reliably slash-invocable on their own).
+// Plugin skill dirs are short (namespaced as fadeno:runner, fadeno:builder,
+// fadeno:driver) and are generated from the same shared SKILL.md bodies used by
+// `fadeno init`. They stay model-invocable; the matching commands/ entries give
+// explicit /fadeno:runner, /fadeno:builder, /fadeno:driver slash handles (plugin
+// skills are not reliably slash-invocable on their own).
 const SKILLS = [
   { src: 'fadeno-runner', dst: 'runner' },
   { src: 'fadeno-builder', dst: 'builder' },
+  { src: 'fadeno-driver', dst: 'driver' },
 ] as const;
 
 /**
