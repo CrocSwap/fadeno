@@ -1,7 +1,7 @@
 {
   "name": "fadeno",
   "description": "Run and author Fadeno playbooks — repeatable plan/implement/review/test workflows with file-backed run traces. Seed a repo with `fadeno init --claude --data-only`.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": {
     "name": "Fadeno"
   },

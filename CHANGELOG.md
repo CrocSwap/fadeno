@@ -8,6 +8,44 @@ All notable changes to Fadeno are documented here. The format follows
 
 _Nothing yet._
 
+## [0.4.0] — 2026-07-13
+
+The coordinator layer — deterministic prompt assembly and a cross-harness
+driver. A run can now be assembled and advanced from its ledger alone: one
+command renders the exact prompt a step's actor receives, another computes the
+next actionable step, and a driver skill walks the two to run a playbook
+end-to-end across harnesses. `fadeno` still never invokes a model — it renders
+and computes; the harness does the dispatch.
+
+### Added
+
+- **`fadeno prompt <run> <step>`** — deterministic step-prompt assembly (the twin
+  of `fadeno diagram`). A pure function of the validated playbook, the run
+  ledger (events through the invocation's `step_started` cutoff), the referenced
+  artifact bytes, and the selection. Records an immutable snapshot under
+  `artifacts/prompts/**` plus a `prompt_assembled` manifest event (per-input
+  path/bytes/sha256, playbook + prompt sha256) by default; `--no-record` is a
+  read-only preview. Pipe it into a sub-harness: `fadeno prompt <run> <step>
+  --actor <role> | { claude -p; codex exec - }`.
+- **`fadeno next <run>`** — a pure, read-only flow cursor (the third render twin
+  of `diagram` and `prompt`). Emits the single next actionable step as JSON —
+  `status` one of `ready` / `blocked_human_gate` / `needs_decision` / `terminal`,
+  with the step's kind, actors, resolved output paths, gate/human-gate blocks,
+  and loop state — so a driver can advance a run mechanically. Shares one
+  output-path planner with `fadeno prompt`, so the cursor can never advertise a
+  path the prompter would refuse.
+- **`driver` skill** (Claude Code + Codex) — the cross-harness runner. The host
+  stays pure (pick a playbook, gather inputs, `fadeno new-run`, dispatch); a
+  driver subagent owns the ledger and runs each role as a uniform sub-harness CLI
+  call, pausing and returning to the host at a `human_gate` so state-on-disk
+  makes resume free.
+- **`fadeno run --member <m>` / `--field k=v`** — attach a map-member attribution
+  (`member`) or arbitrary fields to an appended event (e.g. `human_decision`
+  with `branch=approve`); values that parse as JSON are stored decoded.
+- **Playbook schema:** optional `output_path` (step template or member→template
+  map; tokens `{actor}` / `{iteration}`), `input_bindings`, and top-level
+  `artifact_contracts`, with matching validator checks.
+
 ## [0.3.0] — 2026-07-11
 
 Trace verification — the provenance layer. A run ledger's claims can now be
