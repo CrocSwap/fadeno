@@ -5,7 +5,7 @@ import { runDiagram } from './commands/diagram.ts';
 import { runGate } from './commands/gate.ts';
 import { runInit, type Target } from './commands/init.ts';
 import { runNewRun } from './commands/new-run.ts';
-import { runPlugin } from './commands/plugin.ts';
+import { runCodexPlugin, runPlugin } from './commands/plugin.ts';
 import { runNext } from './commands/next.ts';
 import { runPrompt } from './commands/prompt.ts';
 import { runRun } from './commands/run.ts';
@@ -35,7 +35,7 @@ Usage:
   fadeno runs                           List run ledgers under .fadeno/runs/
   fadeno show <run>                     Show a run summary, timeline, and artifacts
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic gate claims (or --latest)
-  fadeno plugin [dir]                   Generate a Claude Code plugin (default ./plugin)
+  fadeno plugin [dir] [--codex]         Generate a Claude Code (default) or Codex plugin
 
 Options:
   --with-hooks            (init) Also scaffold tier-2 enforcement hooks
@@ -405,12 +405,21 @@ function main(argv: string[]): number {
       return 0;
     }
     case 'plugin': {
-      const { outDir, results } = runPlugin({ outDir: positionals[1], force: values.force });
+      const codex = Boolean(values.codex);
+      const { outDir, results } = codex
+        ? runCodexPlugin({ outDir: positionals[1], force: values.force })
+        : runPlugin({ outDir: positionals[1], force: values.force });
       const counts = { created: 0, overwritten: 0, appended: 0, skipped: 0 };
       for (const r of results) counts[r.status] += 1;
-      console.log(`Generated Fadeno plugin in ${outDir}`);
+      console.log(`Generated Fadeno ${codex ? 'Codex' : 'Claude Code'} plugin in ${outDir}`);
       console.log(`  ${counts.created} created, ${counts.overwritten} overwritten, ${counts.skipped} skipped.`);
-      console.log('\nTest it: `claude --plugin-dir ' + relative(process.cwd(), outDir) + '`');
+      if (codex) {
+        // Marketplace root is the repo root (where .agents/plugins/marketplace.json
+        // lives), not the plugin dir — pass `.`, not the payload path.
+        console.log('\nTest it: `codex plugin marketplace add . && codex plugin add fadeno@fadeno`');
+      } else {
+        console.log('\nTest it: `claude --plugin-dir ' + relative(process.cwd(), outDir) + '`');
+      }
       return 0;
     }
     case 'gate': {

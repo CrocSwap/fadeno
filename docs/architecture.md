@@ -214,6 +214,23 @@ definitions** — plugin users seed those with `fadeno init --claude --data-only
 `build-bin.mjs`. The resulting `plugin/` is **committed** (unlike `dist/`, which is
 gitignored) so a git-URL install yields a working plugin with no build step.
 
+`fadeno plugin --codex` (`runCodexPlugin`, `npm run build:plugin:codex`) emits a
+**Codex** plugin into the committed, visible `plugin-codex/` (parallel to the
+Claude `plugin/`) from the same `templates/common/skills` bodies — but full-named
+(Codex invokes `$fadeno-runner`) and carrying each skill's `agents/openai.yaml`
+invocation policy (runner implicit; builder/driver explicit-only), the same file
+`fadeno init --codex` installs. A Codex plugin has **no manifest slot for subagents
+or a bundled binary**, so those stay with `fadeno init --codex` (`.codex/agents`)
+and npm (`npx fadeno`). The only piece that must live in a dot dir is the
+marketplace pointer `.agents/plugins/marketplace.json` — a fixed Codex convention
+(`codex plugin marketplace add owner/repo` looks there), the analog of the Claude
+plugin's hidden `.claude-plugin/marketplace.json`; the **marketplace root is the
+repo root** and the entry's `source.path` (`./plugin-codex`) is relative to it.
+Together they make the repo installable via `codex plugin marketplace add
+CrocSwap/fadeno` → `codex plugin add fadeno@fadeno`. The manifest
+`interface.category` is a capitalized bucket (`Engineering`) and the version is
+single-sourced from `package.json`, both verified against a real `codex plugin add`.
+
 ### Keeping the plugin in sync (the no-drift guard)
 
 Because `plugin/` is generated but committed, it can drift from `templates/`.

@@ -1,0 +1,24 @@
+{
+  "name": "fadeno",
+  "version": "0.4.0",
+  "description": "Run and author Fadeno playbooks — repeatable plan/implement/review/test workflows with file-backed run traces. Seed a repo with `fadeno init --codex --data-only`.",
+  "author": {
+    "name": "Fadeno"
+  },
+  "repository": "https://github.com/CrocSwap/fadeno",
+  "license": "MIT",
+  "keywords": [
+    "ai",
+    "agents",
+    "codex",
+    "playbook",
+    "workflow",
+    "skills"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Fadeno",
+    "shortDescription": "Plan/implement/review/test workflows with file-backed run traces.",
+    "category": "Engineering"
+  }
+}

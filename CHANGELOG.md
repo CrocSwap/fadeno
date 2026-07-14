@@ -6,7 +6,16 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`fadeno plugin --codex`** — generate a **Codex CLI plugin** (`plugin-codex/`
+  + a `.agents/plugins/marketplace.json` pointer) from the same shared skill
+  templates as the Claude plugin, so Codex users can install Fadeno the same way:
+  `codex plugin marketplace add CrocSwap/fadeno` → `codex plugin add
+  fadeno@fadeno`. Skills carry their per-skill `agents/openai.yaml` invocation
+  policy (runner implicit; builder/driver explicit-only). Role subagents and the
+  CLI binary aren't Codex-plugin components, so they stay with `fadeno init
+  --codex` and npm. `npm run build:plugin:codex` regenerates the committed bundle.
 
 ## [0.4.0] — 2026-07-13
 
