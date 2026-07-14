@@ -17,11 +17,14 @@ point you at the right place.
 Fadeno is a **portable playbook layer for AI coding agents** — a repo-native YAML
 playbook format, a set of agent **skills** that run/author them, and a small
 TypeScript **CLI** that scaffolds, validates, diagrams, and records runs. It is
-**not a runtime**: it's a protocol + file-backed run traces + thin per-host
-adapters. Targets today: **Codex** and **Claude Code** (the latter also packaged
-as a Claude Code **plugin**).
+currently a protocol + file-backed run traces + thin per-host adapters, **not a
+runtime**. The approved next-protocol direction adds a small deterministic,
+repo-local runtime in service of verification; it does not turn Fadeno into a
+daemon, cloud service, or general orchestration platform. Targets today:
+**Codex** and **Claude Code** (the latter also packaged as a Claude Code
+**plugin**).
 
-Three docs frame the rest:
+These docs frame the rest:
 
 | Doc | What it answers |
 |-----|-----------------|
@@ -30,6 +33,27 @@ Three docs frame the rest:
 | [`docs/architecture.md`](docs/architecture.md) | **How the code is built** — subsystems, data flows, the build/module system, gotchas, tests. |
 | [`docs/extending.md`](docs/extending.md) | **How to change it** — file-by-file recipes for common tasks. |
 | [`docs/roadmap.md`](docs/roadmap.md) | The shipped/deferred line and honest v0 gaps. |
+| [`docs/experimental/next-protocol.md`](docs/experimental/next-protocol.md) | The **current forward implementation boundary** — a small engine-backed, verification-centered protocol. Read this before planning protocol/runtime work. |
+| [`docs/experimental/ontology-and-execution-design.md`](docs/experimental/ontology-and-execution-design.md) | The evidence-tiered **North Star ontology**. It is a design horizon, not the next implementation scope. |
+
+### Design precedence for forward work
+
+The design documents intentionally describe different horizons:
+
+1. `docs/kickoff-memo.md` is the settled rationale for the shipped v0 advisory
+   protocol. Preserve it as history; do not retroactively rewrite it around the
+   next architecture.
+2. `docs/experimental/next-protocol.md` is the authoritative boundary for the
+   next implementation. Where its engine decision conflicts with v0's runtime
+   non-goal, the next-protocol document governs forward work.
+3. `docs/experimental/ontology-and-execution-design.md` is the long-horizon
+   vocabulary. A well-defined concept there is not approved implementation
+   scope: promotion requires both an observed receipt and a meaningful
+   verification check.
+
+The experimental directory name reflects implementation status, not a weak or
+superseded decision. Revisit the next-protocol boundary only with new dogfood
+evidence; do not silently promote North Star entities into the core schema.
 
 ## Orient in 60 seconds
 

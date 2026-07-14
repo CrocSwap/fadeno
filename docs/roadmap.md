@@ -1,13 +1,32 @@
 # Fadeno roadmap
 
 Where the shipped/deferred line sits, so it lives in the repo rather than in
-chat. v0's scope and non-goals come from `docs/kickoff-memo.md`.
+chat.
+
+## Design status and precedence
+
+Fadeno now has three intentionally different design horizons:
+
+1. [`kickoff-memo.md`](kickoff-memo.md) records the rationale and scope of the
+   shipped v0 advisory protocol. It remains historical design context.
+2. [`experimental/next-protocol.md`](experimental/next-protocol.md) is the
+   approved boundary for the next implementation: a small deterministic,
+   repo-local engine whose purpose is verification and legible execution
+   evidence.
+3. [`experimental/ontology-and-execution-design.md`](experimental/ontology-and-execution-design.md)
+   is the North Star vocabulary, not an implementation checklist. Concepts move
+   into the core only after an observed run needs them and `fadeno verify` can
+   check a meaningful property about them.
+
+The next-protocol engine decision deliberately supersedes v0's "no runtime"
+constraint for forward work. It does not authorize a daemon, cloud service,
+general scheduler, or orchestration platform.
 
 ## Shipped (v0)
 
 - CLI: `init --codex|--claude [--with-hooks] [--data-only] [--force]`,
   `validate [file] [--schema]`, `diagram [--format ascii|mermaid]`, `new-run`,
-  `run`, `gate`, `runs`, `show`, `plugin`.
+  `run`, `gate`, `prompt`, `next`, `runs`, `show`, `verify`, `plugin`.
 - Dual-target scaffolding from one template core (Codex + Claude Code), non-destructive.
 - **Claude plugin** packaging: `fadeno plugin` generates a `plugin/` (skills,
   `/fadeno:runner` + `/fadeno:builder` slash commands, and `worker`/`reviewer`/
@@ -29,8 +48,10 @@ chat. v0's scope and non-goals come from `docs/kickoff-memo.md`.
   validates `run.yaml` / `review-report.json` (auto-detected or `--schema`).
 - `$schema` editor modelines in generated YAML (playbooks + run ledgers).
 - Run ledger (`run.yaml` / `events.jsonl` / `artifacts/`) with CLI helpers (`run`,
-  `runs` list, `show` timeline) and a deterministic gate evaluator
-  (`gate no_blocking_issues`) — the advisory→enforced bridge.
+  `prompt`, `next`, `runs` list, `show` timeline, and whole-trace `verify`) and
+  deterministic gate evaluators (`no_blocking_issues`, `tests_pass`) — the
+  advisory→enforced bridge. The driver skill composes these helpers into the
+  current model-mediated execution procedure.
 - Tier-2 enforcement scaffold via `--with-hooks` (pre-commit, CI workflow, Claude hook example).
 - **Validated end-to-end in live Claude Code sessions** (through v0.1.2): bundled
   CLI on PATH, `Skill(fadeno:*)` model-invocation, `/fadeno:*` slash commands in
@@ -42,13 +63,41 @@ chat. v0's scope and non-goals come from `docs/kickoff-memo.md`.
   `router`, `replicate`, `join`, `artifact_op`, `subworkflow`. Documented contracts, not
   demonstrated behavior.
 - `require_user_approval_for` is advisory in tier-1 hosts (the model is *asked*).
-- `gate` only computes `no_blocking_issues` today; other conditions are agent-interpreted.
+- Conditions other than `no_blocking_issues` and `tests_pass` remain
+  agent-interpreted unless and until a deterministic evaluator ships.
 - Skill *sufficiency* (kickoff memo acceptance #8–#9) is model-mediated — needs live-session
   evaluation, not unit tests.
 - Codex subagent path (`.codex/agents/*.toml`) is provisional; runner degrades to role-passes.
   (The Claude plugin subagents are now verified live; Codex's remain unverified.)
 
-## Next (deferred, roughly prioritized)
+## Next protocol (design approved; implementation not started)
+
+The implementable boundary is defined in
+[`experimental/next-protocol.md`](experimental/next-protocol.md). Its six
+promoted capabilities are:
+
+1. a small deterministic engine grown from the existing `next` cursor and
+   driver procedure;
+2. runtime identity with flattened attempt ordinals and reasons, not a rich
+   attempt lifecycle;
+3. immutable artifact manifests and digests;
+4. minimal execution profiles with direct role-to-executor bindings, without
+   capability routing or ranking;
+5. one durable, named, idempotent human-decision structure, also used for
+   workflow-selection confirmation;
+6. canonical evidence, expanded verification, and a default human-legible run
+   projection.
+
+The protocol is not schema-frozen. Run two or three additional dogfood workflows
+and require both an observed receipt and a verification check before promoting
+more North Star entities. Old document versions must be rejected or read in an
+explicit compatibility mode, never silently reinterpreted. Preserve cheap or
+loud migration paths for user-authored playbooks; old ledgers may remain legacy
+output. Team-level provenance is anchored by committed evidence plus
+`fadeno verify` in CI; hash chaining remains a possible standalone mechanism,
+not current scope.
+
+## Other deferred work (roughly prioritized)
 
 1. **Authoring helpers** — `fadeno list` (playbooks + `when_to_use`),
    `fadeno new-playbook <pattern>` scaffolder. (`fadeno diagram` already ships.)
@@ -64,9 +113,11 @@ chat. v0's scope and non-goals come from `docs/kickoff-memo.md`.
 7. **Diagram artifact/data-flow edge labels** — `fadeno diagram` annotating the
    input/output artifacts that flow along each edge, not just the control flow.
 
-## Explicit non-goals (from the kickoff memo)
+## Continuing non-goals
 
-Full runtime / real execution engine, the primitive compiler (tier 3), background
-scheduler / daemon / cloud service, visual graph editor, web UI, real parallel execution,
-model-provider integrations, and hard permission enforcement *inside* Fadeno (enforcement
-belongs in git/CI/hooks — tier 2).
+The next protocol includes a deliberately small runtime, so the kickoff memo's
+blanket runtime non-goal is historical rather than forward policy. Still out of
+scope: a background scheduler, daemon, cloud service, general orchestration or
+provider platform, unrestricted parallel scheduler, visual graph editor, web
+UI, and hard permission enforcement *inside* Fadeno (enforcement belongs in
+git/CI/hooks — tier 2).
