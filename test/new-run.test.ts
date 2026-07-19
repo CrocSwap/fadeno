@@ -52,9 +52,11 @@ test('new-run writes a complete run ledger', (t) => {
   assert.equal(run.status, 'running');
   assert.equal(run.playbook, 'code-change-review');
   assert.equal(run.started_at, now.toISOString());
+  assert.equal(run.schema_version, '0.2');
 
   const firstEvent = JSON.parse(readFileSync(join(runDir, 'events.jsonl'), 'utf8').trim());
   assert.equal(firstEvent.type, 'run_started');
+  assert.equal(firstEvent.seq, 1);
 });
 
 test('emitted run.yaml conforms to run.schema.json', (t) => {

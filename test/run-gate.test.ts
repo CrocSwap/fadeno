@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { parse as parseYaml } from 'yaml';
@@ -43,6 +43,7 @@ test('an artifact/event logged without --step inherits the run current_step', (t
   runRun({ repoRoot: root, run: runId, step: 'implement' });
 
   // No --step here: should be attributed to the step in progress, not null.
+  writeFileSync(join(runDir, 'artifacts', 'impl.md'), 'impl notes', 'utf8');
   runRun({ repoRoot: root, run: runId, artifact: 'artifacts/impl.md' });
   const artifactEvent = readEvents(runDir).at(-1)!;
   assert.equal(artifactEvent.type, 'artifact_created');
@@ -86,6 +87,122 @@ test('run rejects an empty update and an invalid status', (t) => {
 test('run errors on an unknown run id', (t) => {
   const { root } = freshRun(t);
   assert.throws(() => runRun({ repoRoot: root, run: 'no-such-run', step: 'x' }), RunError);
+});
+
+// --- artifact manifests ---
+
+test('recording an artifact writes a manifest: id, digest, media type, seq', (t) => {
+  const { root, runId, runDir } = freshRun(t);
+  writeFileSync(join(runDir, 'artifacts', 'impl.md'), 'impl notes', 'utf8');
+  const result = runRun({ repoRoot: root, run: runId, artifact: 'artifacts/impl.md' });
+  assert.ok(result.manifest, 'runRun should return the recorded manifest');
+
+  const event = readEvents(runDir).at(-1)!;
+  assert.equal(event.type, 'artifact_created');
+  assert.equal(typeof event.seq, 'number');
+  assert.equal(event.artifact_id, `artifact-${String(event.seq)}`);
+  assert.equal(event.logical_name, 'artifacts/impl.md');
+  assert.equal(event.generation, 1);
+  assert.equal(event.bytes, 10);
+  assert.match(String(event.sha256), /^[0-9a-f]{64}$/);
+  assert.equal(event.media_type, 'text/markdown');
+  assert.deepEqual(event.validation, { schema: null });
+});
+
+test('a typed artifact is validated at record time and recorded honestly', (t) => {
+  const { root, runId, runDir } = freshRun(t);
+
+  const valid = { reviewer: 'r', summary: 's', issues: [], verdict: 'approve' };
+  writeFileSync(join(runDir, 'artifacts', 'review-report.json'), JSON.stringify(valid), 'utf8');
+  runRun({ repoRoot: root, run: runId, artifact: 'artifacts/review-report.json' });
+  assert.deepEqual(readEvents(runDir).at(-1)!.validation, { schema: 'review-report', ok: true });
+
+  // Invalid for its detected schema: recorded honestly (ok: false), not refused.
+  const invalid = { reviewer: 'r', issues: [{ severity: 'blocking' }], verdict: 'approve' };
+  mkdirSync(join(runDir, 'artifacts', 'bad'), { recursive: true });
+  writeFileSync(join(runDir, 'artifacts', 'bad', 'review-report.json'), JSON.stringify(invalid), 'utf8');
+  runRun({ repoRoot: root, run: runId, artifact: 'artifacts/bad/review-report.json' });
+  const recorded = readEvents(runDir).at(-1)!.validation as { schema: string; ok: boolean; errors: string[] };
+  assert.equal(recorded.schema, 'review-report');
+  assert.equal(recorded.ok, false);
+  assert.ok(recorded.errors.length > 0);
+});
+
+test('recording a missing artifact file is an error', (t) => {
+  const { root, runId } = freshRun(t);
+  assert.throws(
+    () => runRun({ repoRoot: root, run: runId, artifact: 'artifacts/ghost.md' }),
+    /write the artifact before recording it/,
+  );
+});
+
+test('re-recording a path with different bytes is refused; same bytes is idempotent', (t) => {
+  const { root, runId, runDir } = freshRun(t);
+  writeFileSync(join(runDir, 'artifacts', 'impl.md'), 'v1 bytes', 'utf8');
+  runRun({ repoRoot: root, run: runId, artifact: 'artifacts/impl.md' });
+
+  // Same bytes: idempotent re-record is allowed.
+  runRun({ repoRoot: root, run: runId, artifact: 'artifacts/impl.md' });
+
+  // Different bytes under the same path: immutability violation.
+  writeFileSync(join(runDir, 'artifacts', 'impl.md'), 'v2 bytes', 'utf8');
+  assert.throws(
+    () => runRun({ repoRoot: root, run: runId, artifact: 'artifacts/impl.md' }),
+    /immutable/,
+  );
+});
+
+test('a non-manifest event may reference an artifact without existence or digest', (t) => {
+  const { root, runId, runDir } = freshRun(t);
+  runRun({ repoRoot: root, run: runId, event: 'note', artifact: 'artifacts/ghost.md' });
+  const event = readEvents(runDir).at(-1)!;
+  assert.equal(event.type, 'note');
+  assert.equal(event.artifact, 'artifacts/ghost.md');
+  assert.equal(event.sha256, undefined);
+
+  // But an explicit artifact_created event goes through the manifest path.
+  assert.throws(
+    () => runRun({ repoRoot: root, run: runId, event: 'artifact_created', artifact: 'artifacts/ghost.md' }),
+    /write the artifact before recording it/,
+  );
+  assert.throws(
+    () => runRun({ repoRoot: root, run: runId, event: 'artifact_created' }),
+    /requires --artifact/,
+  );
+});
+
+// --- ledger versioning + seq ---
+
+function stripSchemaVersion(runDir: string): void {
+  const raw = readFileSync(join(runDir, 'run.yaml'), 'utf8');
+  writeFileSync(
+    join(runDir, 'run.yaml'),
+    raw
+      .split('\n')
+      .filter((line) => !line.startsWith('schema_version:'))
+      .join('\n'),
+    'utf8',
+  );
+}
+
+test('writers refuse a legacy ledger outright', (t) => {
+  const { root, runId, runDir } = freshRun(t);
+  stripSchemaVersion(runDir);
+  assert.throws(() => runRun({ repoRoot: root, run: runId, step: 'implement' }), /legacy ledger/);
+  writeFileSync(join(runDir, 'artifacts', 'review-report.json'), JSON.stringify({ reviewer: 'r', summary: 's', issues: [], verdict: 'approve' }), 'utf8');
+  assert.throws(() => runGate({ repoRoot: root, run: runId, condition: 'no_blocking_issues' }), /legacy ledger/);
+});
+
+test('events carry contiguous seq across new-run, run, and gate', (t) => {
+  const { root, runId, runDir } = freshRun(t);
+  runRun({ repoRoot: root, run: runId, step: 'implement' });
+  writeFileSync(join(runDir, 'artifacts', 'review-report.json'), JSON.stringify({ reviewer: 'r', summary: 's', issues: [], verdict: 'approve' }), 'utf8');
+  runRun({ repoRoot: root, run: runId, artifact: 'artifacts/review-report.json' });
+  runGate({ repoRoot: root, run: runId, condition: 'no_blocking_issues' });
+  runRun({ repoRoot: root, run: runId, status: 'completed' });
+
+  const seqs = readEvents(runDir).map((e) => e.seq);
+  assert.deepEqual(seqs, [1, 2, 3, 4, 5]);
 });
 
 // --- gate ---

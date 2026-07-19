@@ -92,7 +92,7 @@ export interface ResolutionPlan {
   purpose: string | null;
 }
 
-const ARTIFACT_EVENT_TYPES = new Set(['artifact_created', 'artifact_written']);
+const ARTIFACT_EVENT_TYPES = new Set(['artifact_created']);
 const NOT_PROMPTABLE = new Set(['tool_call', 'router', 'join', 'artifact_op', 'subworkflow', 'replicate']);
 
 function baseArtifact(name: string): string {
@@ -164,6 +164,19 @@ function withGeneration(path: string, iteration: number): string {
   const slash = path.lastIndexOf('/');
   if (dot > slash) return `${path.slice(0, dot)}.v${generation}${path.slice(dot)}`;
   return `${path}.v${generation}`;
+}
+
+/**
+ * Inverse of `withGeneration`: parse a `.v<G>` marker out of a path. A path
+ * with no marker is generation 1 (the pre-loop original).
+ */
+export function parseGeneration(path: string): { logicalPath: string; generation: number } {
+  const slash = path.lastIndexOf('/');
+  const dir = path.slice(0, slash + 1);
+  const base = path.slice(slash + 1);
+  const match = base.match(/^(.*)\.v(\d+)(\.[^.]*)?$/);
+  if (!match) return { logicalPath: path, generation: 1 };
+  return { logicalPath: `${dir}${match[1]}${match[3] ?? ''}`, generation: Number(match[2]) };
 }
 
 /** Does an artifact path match a producer's output_path template for `member`? */

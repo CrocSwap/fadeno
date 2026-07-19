@@ -1,8 +1,9 @@
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { findRepoRoot } from '../lib/paths.ts';
 import { SchemaSet, schemaErrorMessages, type SchemaKind } from '../lib/playbook-validate.ts';
+import { LedgerWriteError, LedgerWriter } from '../lib/run-ledger-write.ts';
 
 export class GateError extends Error {}
 
@@ -105,24 +106,19 @@ function resolveRunDir(repoRoot: string, cwd: string, run: string): string {
   throw new GateError(`No run found for "${run}" (looked for run.yaml under .fadeno/runs).`);
 }
 
-function appendGateEvent(runDir: string, condition: GateCondition, artifact: string, pass: boolean, now: Date): void {
+function appendGateEvent(writer: LedgerWriter, condition: GateCondition, artifact: string, pass: boolean, now: Date): void {
   let step: string | null = null;
   try {
-    const run = parseYaml(readFileSync(join(runDir, 'run.yaml'), 'utf8')) as { current_step?: unknown };
+    const run = parseYaml(readFileSync(join(writer.runDir, 'run.yaml'), 'utf8')) as { current_step?: unknown };
     if (typeof run.current_step === 'string') step = run.current_step;
   } catch {
     // The run was already resolved and the artifact validated; an unreadable
     // current_step should not change the gate decision or exit code.
   }
-  const event = {
-    type: 'gate_evaluated',
-    step,
-    condition,
-    artifact,
-    result: pass ? 'pass' : 'fail',
-    timestamp: now.toISOString(),
-  };
-  appendFileSync(join(runDir, 'events.jsonl'), `${JSON.stringify(event)}\n`, 'utf8');
+  writer.append(
+    { type: 'gate_evaluated', step, condition, artifact, result: pass ? 'pass' : 'fail' },
+    now,
+  );
 }
 
 /** Evaluate a named condition from one schema-valid artifact file. */
@@ -136,6 +132,15 @@ export function runGate(opts: GateOptions): GateResult {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const runDir = resolveRunDir(repoRoot, cwd, opts.run);
+  // Version-gate before evaluating: gate must never append into a legacy
+  // ledger, and it must refuse loudly rather than silently drop the event.
+  let writer: LedgerWriter;
+  try {
+    writer = new LedgerWriter(runDir);
+  } catch (err) {
+    if (err instanceof LedgerWriteError) throw new GateError(err.message);
+    throw err;
+  }
   const artifactArg = opts.artifact ?? opts.report ?? DEFAULT_ARTIFACTS[condition];
   const artifactPath = isAbsolute(artifactArg) ? artifactArg : join(runDir, artifactArg);
   if (!existsSync(artifactPath)) {
@@ -163,7 +168,7 @@ export function runGate(opts: GateOptions): GateResult {
   const evaluation = definition.evaluate(parsed);
   const now = opts.now ?? new Date();
   const artifactForEvent = isAbsolute(artifactArg) ? relative(runDir, artifactArg) : artifactArg;
-  appendGateEvent(runDir, condition, artifactForEvent, evaluation.pass, now);
+  appendGateEvent(writer, condition, artifactForEvent, evaluation.pass, now);
   const blockingTitles = Array.isArray(evaluation.details.blockingTitles)
     ? evaluation.details.blockingTitles.filter((title): title is string => typeof title === 'string')
     : [];

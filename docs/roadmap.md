@@ -70,7 +70,7 @@ general scheduler, or orchestration platform.
 - Codex subagent path (`.codex/agents/*.toml`) is provisional; runner degrades to role-passes.
   (The Claude plugin subagents are now verified live; Codex's remain unverified.)
 
-## Next protocol (design approved; implementation not started)
+## Next protocol (in progress — provenance slice shipped)
 
 The implementable boundary is defined in
 [`experimental/next-protocol.md`](experimental/next-protocol.md). Its six
@@ -87,6 +87,19 @@ promoted capabilities are:
    workflow-selection confirmation;
 6. canonical evidence, expanded verification, and a default human-legible run
    projection.
+
+**Capabilities 3 and 6 shipped thin (unreleased):** run-ledger format 0.2
+(`schema_version` in run.yaml + contiguous per-event `seq`), artifact
+manifests with sha256 digests and record-time typed-artifact validation on
+`artifact_created` (immutability guard included), a 16-check `fadeno verify`
+(digests, seq, terminal coherence, active/superseded resolution,
+prompt-snapshot integrity, conflicting human decisions — unrecomputable
+evidence reported as skipped, never silently valid), a logical-step
+projection as the default `fadeno show`, and an explicit `--legacy`
+compatibility mode (readers refuse unversioned ledgers; writers refuse them
+outright). Deliberately deferred to the engine slices: the engine loop (1),
+attempt ordinals / execution identities (2), executor profiles (4), the named
+human-decision structure (5), and an explicit supersede event.
 
 The protocol is not schema-frozen. Run two or three additional dogfood workflows
 and require both an observed receipt and a verification check before promoting

@@ -4,10 +4,14 @@
   "title": "Fadeno Run",
   "description": "One concrete execution of a playbook. Written to .fadeno/runs/<id>/run.yaml. This is the file-backed run ledger that makes a run inspectable and is the seam a future compiled runtime reads/writes.",
   "type": "object",
-  "required": ["run_id", "playbook", "status", "task", "started_at", "host"],
+  "required": ["run_id", "schema_version", "playbook", "status", "task", "started_at", "host"],
   "additionalProperties": true,
   "properties": {
     "run_id": { "type": "string", "minLength": 1 },
+    "schema_version": {
+      "const": "0.2",
+      "description": "Run-ledger format version. Ledgers without it are legacy (pre-0.2) and are readable only in an explicit compatibility mode (--legacy)."
+    },
     "playbook": { "type": "string", "minLength": 1 },
     "status": { "enum": ["running", "completed", "failed", "aborted"] },
     "task": { "type": "string" },

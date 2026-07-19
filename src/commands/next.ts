@@ -5,12 +5,21 @@ import { computeNext, FlowCursorError, type NextComputation } from '../lib/flow-
 import { findRepoRoot } from '../lib/paths.ts';
 import { SchemaSet, validateFile } from '../lib/playbook-validate.ts';
 import type { Playbook } from '../lib/prompt-resolve.ts';
-import { readEventsStrict, resolveRun, RunLedgerError } from '../lib/run-ledger.ts';
+import {
+  ledgerMode,
+  normalizeLegacyEvents,
+  readEventsStrict,
+  resolveRun,
+  RunLedgerError,
+  type LedgerMode,
+} from '../lib/run-ledger.ts';
 
 export class NextError extends Error {}
 
 export interface NextOptions {
   run: string;
+  /** Read a pre-0.2 ledger in explicit compatibility mode. */
+  legacy?: boolean;
   cwd?: string;
   repoRoot?: string;
 }
@@ -50,6 +59,17 @@ export function runNext(opts: NextOptions): NextResult {
     throw new NextError(`run "${run.runId}" has no playbook recorded in run.yaml.`);
   }
 
+  // Version gate BEFORE the terminal short-circuit below — a legacy terminal
+  // run must refuse loudly rather than silently succeed without ever reading
+  // its events.
+  let mode: LedgerMode;
+  try {
+    mode = ledgerMode(run, opts.legacy === true);
+  } catch (err) {
+    if (err instanceof RunLedgerError) throw new NextError(err.message);
+    throw err;
+  }
+
   // Trust run.yaml.status as authoritative for terminal short-circuit. This is
   // deliberately *not* a pure event walk: a completed/failed/aborted status
   // wins even if events.jsonl is incomplete or disagrees (the origin-run failure
@@ -75,6 +95,7 @@ export function runNext(opts: NextOptions): NextResult {
     if (err instanceof RunLedgerError) throw new NextError(err.message);
     throw err;
   }
+  if (mode === 'legacy') events = normalizeLegacyEvents(events);
 
   const playbookPath = locatePlaybook(repoRoot, run.playbook);
   let playbook: Playbook;

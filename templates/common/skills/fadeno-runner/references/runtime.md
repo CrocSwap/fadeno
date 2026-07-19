@@ -32,6 +32,7 @@ For each run, create:
 
 ```yaml
 run_id: 2026-05-30-1132-csv-export
+schema_version: "0.2"      # ledger format version — readers refuse ledgers without it
 playbook: code-change-review
 status: running            # running | completed | failed | aborted
 task: Add CSV export for reports.
@@ -44,17 +45,18 @@ current_step: plan
 Update `status` to `completed`/`failed`/`aborted` at the end, and keep
 `current_step` pointing at the step in progress.
 
-`events.jsonl` — append a line at each major transition:
+`events.jsonl` — append a line at each major transition (always via the CLI;
+see the seq note below):
 
 ```json
-{"type":"run_started","step":null,"timestamp":"2026-05-30T11:32:00Z"}
-{"type":"step_started","step":"plan","timestamp":"2026-05-30T11:33:00Z"}
-{"type":"artifact_created","step":"plan","artifact":"artifacts/plan.md","timestamp":"2026-05-30T11:35:00Z"}
-{"type":"gate_evaluated","step":"review_gate","condition":"no_blocking_issues","artifact":"artifacts/review-report.json","result":"pass","timestamp":"..."}
-{"type":"loop_iteration_started","step":"revise","iteration":1,"timestamp":"..."}
-{"type":"loop_condition_evaluated","step":"revise","condition":"no_blocking_issues","artifact":"artifacts/review-report.json","result":"pass","timestamp":"..."}
-{"type":"loop_succeeded","step":"revise","timestamp":"..."}
-{"type":"run_completed","step":null,"timestamp":"..."}
+{"type":"run_started","step":null,"seq":1,"timestamp":"2026-05-30T11:32:00Z"}
+{"type":"step_started","step":"plan","seq":2,"timestamp":"2026-05-30T11:33:00Z"}
+{"type":"artifact_created","step":"plan","artifact_id":"artifact-3","artifact":"artifacts/plan.md","logical_name":"artifacts/plan.md","generation":1,"bytes":1204,"sha256":"…","media_type":"text/markdown","validation":{"schema":null},"seq":3,"timestamp":"2026-05-30T11:35:00Z"}
+{"type":"gate_evaluated","step":"review_gate","condition":"no_blocking_issues","artifact":"artifacts/review-report.json","result":"pass","seq":4,"timestamp":"..."}
+{"type":"loop_iteration_started","step":"revise","iteration":1,"seq":5,"timestamp":"..."}
+{"type":"loop_condition_evaluated","step":"revise","condition":"no_blocking_issues","artifact":"artifacts/review-report.json","result":"pass","seq":6,"timestamp":"..."}
+{"type":"loop_succeeded","step":"revise","seq":7,"timestamp":"..."}
+{"type":"run_completed","step":null,"seq":8,"timestamp":"..."}
 ```
 
 **Conventional event types** — the log is open (`fadeno run <run> --event <type>`
@@ -63,15 +65,37 @@ appends any type), but these are the standard ones: `run_started`,
 `loop_iteration_started`, `loop_condition_evaluated`, `loop_succeeded`,
 `loop_exhausted`, `roles_degraded`, `prompt_assembled`, and a terminal
 `run_completed` / `run_failed` / `run_aborted`. Every line carries at least
-`type`, `step` (a step id, or `null` for run-level events), and `timestamp`.
+`type`, `step` (a step id, or `null` for run-level events), a contiguous
+1-based **`seq`**, and `timestamp`.
 
-An artifact event (`artifact_created` / legacy `artifact_written`) may carry an
-optional **`member`** field naming the map member that produced it (e.g.
+**Never hand-edit events.jsonl.** The CLI stamps `seq` (and, on artifact
+events, the manifest below); `fadeno verify` checks seq contiguity, so a
+hand-written line will fail the audit. One writer at a time is assumed — a
+run is driven by one coordinator, and `verify` catches after-the-fact what a
+concurrent writer would corrupt.
+
+**`artifact_created` carries the artifact manifest.** `fadeno run <run>
+--artifact <path>` reads the file (which must already exist — write the
+artifact, then record it), hashes it, and records `artifact_id`, `artifact`
+(run-dir-relative path), `logical_name` (generation-stripped path),
+`generation` (from the `.v<G>` marker), `bytes`, `sha256`, `media_type`, and
+`validation` (typed artifacts are shape-detected and schema-checked at record
+time; failures are recorded honestly as `ok: false`, and `verify` recomputes
+all of it). Artifacts are immutable: re-recording a path with different bytes
+is refused — write a new generation instead. The legacy `artifact_written`
+name is retired; pre-0.2 ledgers are readable only via `--legacy` on
+`show`/`verify`/`next`. (Runtime execution identities — `step_execution_id`,
+`actor_call_id`, `attempt` — are deliberately absent until the engine can mint
+real ones; the CLI will not fabricate them.)
+
+An artifact event may carry an optional **`member`** field naming the map
+member that produced it (e.g.
 `{"type":"artifact_created","step":"cross_review","artifact":"artifacts/cross-review.architect_fable.json","member":"architect_fable",...}`).
 When present it drives `fadeno prompt`'s per-member attribution directly; without
-it, attribution falls back to the producing step's `output_path` map. Prefer
+it, attribution falls back to the producing step's `output_path` map. Use
 `fadeno run <run> --event artifact_created --artifact <path> --member <role>`
-(and `--field k=v` for any extra keys) over hand-edited JSONL.
+(and `--field k=v` for any extra keys — measured manifest fields always win
+over a colliding `--field`).
 
 **`human_decision`** is the honest event for a human_gate outcome:
 `{"type":"human_decision","step":"arbitrate","branch":"approve",...}` (or
@@ -215,7 +239,7 @@ loop step with a `gate` block for `until` — evaluate via `fadeno gate`, then
 record `loop_condition_evaluated`.
 
 **Cursor rules (deterministic):** a step is done when its terminal event exists
-(`artifact_created` / `artifact_written` for producing steps; `gate_evaluated`
+(`artifact_created` for producing steps; `gate_evaluated`
 for gates; `human_decision` or legacy `human_gate_approved` / `_rejected` for
 human gates; `loop_succeeded` / `loop_exhausted` for loops). Position is the last
 `step_started` without completion, else the flow successor of the last completed

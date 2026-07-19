@@ -23,6 +23,7 @@ function seedRun(
     [
       '# yaml-language-server: $schema=../../schemas/run.schema.json',
       `run_id: ${runId}`,
+      'schema_version: "0.2"',
       'playbook: code-change-review',
       'status: running',
       'task: Add label normalization',
@@ -139,4 +140,104 @@ test('show throws RunLedgerError for unknown run', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno', 'runs'), { recursive: true });
   assert.throws(() => runShow({ repoRoot: root, run: 'missing' }), RunLedgerError);
+});
+
+// --- projection ---
+
+test('projection: steps in order with states, counts, gates, decisions, failures', (t) => {
+  const root = tempRepo(t);
+  const runId = '2026-07-10-2212-projection';
+  seedRun(root, runId, {
+    events: [
+      '{"type":"run_started","step":null,"seq":1,"timestamp":"2026-07-11T02:12:32.797Z"}',
+      '{"type":"step_started","step":"implement","seq":2,"timestamp":"2026-07-11T02:13:00.000Z"}',
+      '{"type":"artifact_created","step":"implement","artifact":"artifacts/impl.md","artifact_id":"artifact-3","logical_name":"artifacts/impl.md","generation":1,"bytes":5,"sha256":"ab","media_type":"text/markdown","validation":{"schema":null},"seq":3,"timestamp":"2026-07-11T02:13:10.000Z"}',
+      '{"type":"step_started","step":"review","seq":4,"timestamp":"2026-07-11T02:14:00.000Z"}',
+      '{"type":"gate_evaluated","step":"review","condition":"no_blocking_issues","artifact":"artifacts/review-report.json","result":"fail","seq":5,"timestamp":"2026-07-11T02:15:00.000Z"}',
+      '{"type":"step_started","step":"revise","seq":6,"timestamp":"2026-07-11T02:16:00.000Z"}',
+      '{"type":"loop_iteration_started","step":"revise","iteration":1,"seq":7,"timestamp":"2026-07-11T02:16:10.000Z"}',
+      '{"type":"human_decision","step":"arbitrate","branch":"approve","seq":8,"timestamp":"2026-07-11T02:17:00.000Z"}',
+      '',
+    ].join('\n'),
+  });
+
+  const result = runShow({ repoRoot: root, run: runId });
+  assert.equal(result.mode, 'current');
+  const p = result.projection!;
+  assert.deepEqual(
+    p.steps.map((s) => s.id),
+    ['implement', 'review', 'revise', 'arbitrate'],
+  );
+  // status running → the last-started step is current; arbitrate only appeared
+  // via its decision event, so it is not the cursor.
+  assert.deepEqual(
+    p.steps.map((s) => s.state),
+    ['done', 'done', 'current', 'done'],
+  );
+  assert.equal(p.steps[0]!.artifacts, 1);
+  assert.deepEqual(p.steps[1]!.gates, [{ condition: 'no_blocking_issues', result: 'fail' }]);
+  assert.equal(p.steps[2]!.iterations, 1);
+  assert.deepEqual(p.steps[3]!.decisions, ['approve']);
+  assert.deepEqual(p.decisions, [{ step: 'arbitrate', branch: 'approve' }]);
+  assert.deepEqual(p.failures, ['gate no_blocking_issues → fail (artifacts/review-report.json)']);
+  assert.equal(p.active.length, 1);
+  assert.equal(p.active[0]!.path, 'artifacts/impl.md');
+});
+
+test('projection: a .v2 generation supersedes the original as the active artifact', (t) => {
+  const root = tempRepo(t);
+  const runId = '2026-07-10-2212-generations';
+  seedRun(root, runId, {
+    events: [
+      '{"type":"run_started","step":null,"seq":1,"timestamp":"2026-07-11T02:12:32.797Z"}',
+      '{"type":"artifact_created","step":"draft","artifact":"artifacts/plan.md","artifact_id":"artifact-2","logical_name":"artifacts/plan.md","generation":1,"bytes":3,"sha256":"aa","media_type":"text/markdown","validation":{"schema":null},"seq":2,"timestamp":"2026-07-11T02:13:00.000Z"}',
+      '{"type":"artifact_created","step":"revise","artifact":"artifacts/plan.v2.md","artifact_id":"artifact-3","logical_name":"artifacts/plan.md","generation":2,"bytes":4,"sha256":"bb","media_type":"text/markdown","validation":{"schema":null},"seq":3,"timestamp":"2026-07-11T02:14:00.000Z"}',
+      '',
+    ].join('\n'),
+  });
+
+  const result = runShow({ repoRoot: root, run: runId });
+  const p = result.projection!;
+  assert.equal(p.active.length, 1);
+  assert.equal(p.active[0]!.path, 'artifacts/plan.v2.md');
+  assert.equal(p.active[0]!.generation, 2);
+});
+
+// --- legacy ledgers ---
+
+const LEGACY_YAML = [
+  '# yaml-language-server: $schema=../../schemas/run.schema.json',
+  'run_id: 2026-07-10-2212-legacy',
+  'playbook: code-change-review',
+  'status: running',
+  'task: Old-format run',
+  'started_at: 2026-07-11T02:12:32.797Z',
+  'host: cli',
+  'artifacts_dir: artifacts',
+  'current_step: null',
+  '',
+].join('\n');
+
+test('a legacy run.yaml is refused without --legacy and readable with it', (t) => {
+  const root = tempRepo(t);
+  const runId = '2026-07-10-2212-legacy';
+  seedRun(root, runId, {
+    yaml: LEGACY_YAML,
+    events: [
+      '{"type":"run_started","step":null,"timestamp":"2026-07-11T02:12:32.797Z"}',
+      '{"type":"artifact_written","step":"implement","artifact":"artifacts/impl.md","timestamp":"2026-07-11T02:13:00.000Z"}',
+      '',
+    ].join('\n'),
+  });
+
+  assert.throws(() => runShow({ repoRoot: root, run: runId }), /legacy ledger format/);
+
+  const result = runShow({ repoRoot: root, run: runId, legacy: true });
+  assert.equal(result.mode, 'legacy');
+  assert.equal(result.projection, null);
+  // The explicit legacy reader normalizes the retired event name.
+  assert.deepEqual(
+    result.events.map((e) => e.type),
+    ['run_started', 'artifact_created'],
+  );
 });

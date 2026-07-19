@@ -1,7 +1,15 @@
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import {
+  buildArtifactManifest,
+  ManifestError,
+  type ArtifactManifestFields,
+} from '../lib/artifact-manifest.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import { SchemaSet } from '../lib/playbook-validate.ts';
+import { readEvents } from '../lib/run-ledger.ts';
+import { LedgerWriteError, LedgerWriter } from '../lib/run-ledger-write.ts';
 
 export class RunError extends Error {}
 
@@ -40,6 +48,20 @@ export interface RunResult {
   runDir: string;
   appendedEvents: string[];
   updatedFields: string[];
+  /** Present when this call recorded an `artifact_created` manifest. */
+  manifest?: ArtifactManifestFields;
+}
+
+/** Normalize an artifact path to run-dir-relative form; reject escapes. */
+function normalizeArtifactPath(runDir: string, artifactArg: string): string {
+  const rel = isAbsolute(artifactArg) ? relative(runDir, artifactArg) : artifactArg;
+  const normalized = rel.split('\\').join('/');
+  if (normalized.startsWith('..')) {
+    throw new RunError(
+      `artifact path ${artifactArg} escapes the run directory; record paths under the run (e.g. artifacts/...).`,
+    );
+  }
+  return normalized;
 }
 
 function resolveRunDir(repoRoot: string, cwd: string, run: string): string {
@@ -101,16 +123,51 @@ export function runRun(opts: RunOptions): RunResult {
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const runDir = resolveRunDir(repoRoot, cwd, opts.run);
   const runYamlPath = join(runDir, 'run.yaml');
-  const eventsPath = join(runDir, 'events.jsonl');
+
+  // The version gate: refuses legacy or unknown-format ledgers before any
+  // mutation, so a pre-0.2 ledger can never become mixed-format.
+  let writer: LedgerWriter;
+  try {
+    writer = new LedgerWriter(runDir);
+  } catch (err) {
+    if (err instanceof LedgerWriteError) throw new RunError(err.message);
+    throw err;
+  }
 
   const run = parseYaml(readFileSync(runYamlPath, 'utf8')) as Record<string, unknown>;
-  const iso = (opts.now ?? new Date()).toISOString();
+  const now = opts.now ?? new Date();
+  const iso = now.toISOString();
   const appendedEvents: string[] = [];
   const updatedFields: string[] = [];
 
   const appendEvent = (event: Record<string, unknown>): void => {
-    appendFileSync(eventsPath, `${JSON.stringify({ ...event, timestamp: iso })}\n`, 'utf8');
+    writer.append(event, now);
     appendedEvents.push(event.type as string);
+  };
+
+  const buildManifestFor = (artifactArg: string): ArtifactManifestFields => {
+    const rel = normalizeArtifactPath(runDir, artifactArg);
+    const schemasDir = join(repoRoot, '.fadeno', 'schemas');
+    const schemas = existsSync(schemasDir) ? new SchemaSet(schemasDir) : null;
+    let fields: ArtifactManifestFields;
+    try {
+      fields = buildArtifactManifest(runDir, rel, `artifact-${writer.nextSeq}`, schemas);
+    } catch (err) {
+      if (err instanceof ManifestError) throw new RunError(err.message);
+      throw err;
+    }
+    // Artifacts are immutable: re-recording a path must carry the same bytes.
+    const { events: priorEvents } = readEvents(runDir);
+    for (const prior of priorEvents) {
+      if (prior.type !== 'artifact_created' || prior.extra.artifact !== fields.artifact) continue;
+      if (typeof prior.extra.sha256 === 'string' && prior.extra.sha256 !== fields.sha256) {
+        throw new RunError(
+          `${fields.artifact} was already recorded with a different sha256; artifacts are ` +
+            'immutable — write a new generation (.v<G>) instead.',
+        );
+      }
+    }
+    return fields;
   };
 
   if (opts.step) {
@@ -131,18 +188,33 @@ export function runRun(opts: RunOptions): RunResult {
     }
   };
 
+  let manifest: ArtifactManifestFields | undefined;
+
   if (opts.event) {
     const event: Record<string, unknown> = { type: opts.event, step: eventStep };
-    if (opts.artifact) event.artifact = opts.artifact;
-    attachAttribution(event);
+    if (opts.event === 'artifact_created') {
+      if (!opts.artifact) {
+        throw new RunError('An artifact_created event requires --artifact <path>.');
+      }
+      manifest = buildManifestFor(opts.artifact);
+      // Attribution first, manifest last: measured fields (sha256, bytes, …)
+      // are authoritative and must never be overridden by a --field value.
+      attachAttribution(event);
+      Object.assign(event, manifest);
+    } else {
+      if (opts.artifact) {
+        // A non-manifest event merely references an artifact; no existence
+        // requirement and no digest, by design.
+        event.artifact = opts.artifact;
+      }
+      attachAttribution(event);
+    }
     appendEvent(event);
   } else if (opts.artifact) {
-    const event: Record<string, unknown> = {
-      type: 'artifact_created',
-      step: eventStep,
-      artifact: opts.artifact,
-    };
+    manifest = buildManifestFor(opts.artifact);
+    const event: Record<string, unknown> = { type: 'artifact_created', step: eventStep };
     attachAttribution(event);
+    Object.assign(event, manifest);
     appendEvent(event);
   } else if (hasAttribution) {
     // Attribution alone is invalid (caught above); status-only with fields is also invalid.
@@ -166,5 +238,5 @@ export function runRun(opts: RunOptions): RunResult {
   }
 
   writeFileSync(runYamlPath, `${RUN_YAML_MODELINE}\n${stringifyYaml(run)}`, 'utf8');
-  return { runDir, appendedEvents, updatedFields };
+  return { runDir, appendedEvents, updatedFields, manifest };
 }

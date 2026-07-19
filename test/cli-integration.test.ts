@@ -31,8 +31,8 @@ function cliSplit(root: string, args: string[]): { status: number; stdout: strin
 const CROSS_REVIEW_EVENTS = [
   '{"type":"run_started","step":null,"timestamp":"2026-07-12T21:18:58.647Z"}',
   '{"type":"step_started","step":"draft_approaches","timestamp":"2026-07-12T21:21:10.416Z"}',
-  '{"type":"artifact_written","step":"draft_approaches","artifact":"artifacts/approach-sol.md","timestamp":"2026-07-12T21:28:35.231Z"}',
-  '{"type":"artifact_written","step":"draft_approaches","artifact":"artifacts/approach-fable.md","timestamp":"2026-07-12T21:31:15.350Z"}',
+  '{"type":"artifact_created","step":"draft_approaches","artifact":"artifacts/approach-sol.md","timestamp":"2026-07-12T21:28:35.231Z"}',
+  '{"type":"artifact_created","step":"draft_approaches","artifact":"artifacts/approach-fable.md","timestamp":"2026-07-12T21:31:15.350Z"}',
   '{"type":"step_started","step":"cross_review","timestamp":"2026-07-12T21:31:15.407Z"}',
   '',
 ].join('\n');
@@ -48,6 +48,7 @@ function seedCrossReview(root: string): string {
     join(dir, 'run.yaml'),
     [
       `run_id: ${runId}`,
+      'schema_version: "0.2"',
       'playbook: dual-architect-review',
       'status: running',
       'task: "Design and build fadeno prompt"',

@@ -103,6 +103,7 @@ test('validate auto-detects and checks a run.yaml', (t) => {
     root,
     '.fadeno/runs/sample/run.yaml',
     `run_id: sample
+schema_version: "0.2"
 playbook: code-change-review
 status: running
 task: x

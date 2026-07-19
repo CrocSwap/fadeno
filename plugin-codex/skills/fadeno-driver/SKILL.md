@@ -45,6 +45,7 @@ loop:
           # write bytes to N.step.outputs[i] (or the path prompt recorded)
           fadeno validate <output> --schema <N.step.artifact_type>   # when typed
           # one bounded re-ask on schema failure, then fail the step honestly
+          # (write the file FIRST — recording hashes it into the event manifest)
           fadeno run <run> --event artifact_created --artifact <output> --member <actor>
         if N.step.collective:
           merge member JSON objects into one JSON array at N.step.collective

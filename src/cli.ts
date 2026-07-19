@@ -19,7 +19,7 @@ import type { SchemaKind, ValidationIssue } from './lib/playbook-validate.ts';
 import { findRepoRoot, packageVersion } from './lib/paths.ts';
 import type { RunEvent, RunSummary } from './lib/run-ledger.ts';
 import type { ValidateOutcome } from './commands/validate.ts';
-import type { ShowResult } from './commands/show.ts';
+import type { ShowProjection, ShowResult, StepView } from './commands/show.ts';
 
 const HELP = `fadeno — the playbook layer for AI coding agents
 
@@ -33,8 +33,8 @@ Usage:
   fadeno prompt <run> <step> [flags]    Assemble (and record) a step's actor prompt
   fadeno next <run>                     Emit the next actionable step (JSON flow cursor)
   fadeno runs                           List run ledgers under .fadeno/runs/
-  fadeno show <run>                     Show a run summary, timeline, and artifacts
-  fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic gate claims (or --latest)
+  fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
+  fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic claims (or --latest)
   fadeno plugin [dir] [--codex]         Generate a Claude Code (default) or Codex plugin
 
 Options:
@@ -57,6 +57,8 @@ Options:
   --no-record             (prompt) Preview only: write no snapshot or event
   --latest                (verify) Audit the newest run instead of a named one
   --allow-failed          (verify) Accept an honest failed/aborted terminal
+  --legacy                (show/verify/next) Read a pre-0.2 ledger in explicit compatibility mode
+  --events                (show) Print the raw event timeline instead of the step projection
   -h, --help              Show this help
   -v, --version           Show version
 
@@ -169,7 +171,8 @@ function formatRunLine(run: RunSummary): string {
   const status = run.status ?? '?';
   const playbook = run.playbook ?? '?';
   const task = run.task ? truncateWithEllipsis(run.task, 60) : '?';
-  return `${run.runId}  [${status}]  ${playbook} — ${task}`;
+  const legacyTag = run.schemaVersion == null ? ' [legacy]' : '';
+  return `${run.runId}  [${status}]${legacyTag}  ${playbook} — ${task}`;
 }
 
 function printRuns(runs: RunSummary[]): void {
@@ -228,8 +231,48 @@ function renderEvent(event: RunEvent): string {
   }
 }
 
-function printShow(repoRoot: string, result: ShowResult): void {
-  const { run, events, badLines, artifacts } = result;
+const STEP_GLYPHS: Record<StepView['state'], string> = { done: '✓', current: '→', failed: '✗' };
+
+function stepSummary(step: StepView): string {
+  const parts: string[] = [];
+  if (step.artifacts > 0) parts.push(`${step.artifacts} artifact${step.artifacts === 1 ? '' : 's'}`);
+  for (const gate of step.gates) parts.push(`gate ${gate.condition} → ${gate.result}`);
+  if (step.iterations > 0) parts.push(`${step.iterations} iteration${step.iterations === 1 ? '' : 's'}`);
+  for (const decision of step.decisions) parts.push(`decision: ${decision}`);
+  return parts.join(' · ');
+}
+
+function printProjection(projection: ShowProjection): void {
+  console.log('\nsteps');
+  if (projection.steps.length === 0) console.log('  (no steps recorded)');
+  const width = Math.max(0, ...projection.steps.map((s) => s.id.length));
+  for (const step of projection.steps) {
+    const summary = stepSummary(step);
+    console.log(`  ${STEP_GLYPHS[step.state]} ${step.id.padEnd(width)}${summary ? `  ${summary}` : ''}`);
+  }
+
+  if (projection.active.length > 0) {
+    console.log('\nactive artifacts');
+    for (const art of projection.active) {
+      const memberNote = art.member != null ? ` · ${art.member}` : '';
+      const bytesNote = art.bytes != null ? ` · ${art.bytes} B` : '';
+      console.log(`  ${art.path}  (gen ${art.generation}${memberNote}${bytesNote})`);
+    }
+  }
+
+  if (projection.decisions.length > 0) {
+    console.log('\ndecisions');
+    for (const d of projection.decisions) console.log(`  ${d.step ?? '(run)'} → ${d.branch}`);
+  }
+
+  if (projection.failures.length > 0) {
+    console.log('\nfailures');
+    for (const f of projection.failures) console.log(`  ${f}`);
+  }
+}
+
+function printShow(repoRoot: string, result: ShowResult, rawTimeline: boolean): void {
+  const { run, mode, events, badLines, artifacts, projection } = result;
   const dash = (value: string | null): string => value ?? '—';
   const relDir = relative(repoRoot, run.dir) || run.dir;
 
@@ -241,11 +284,18 @@ function printShow(repoRoot: string, result: ShowResult): void {
   console.log(`  started:   ${dash(run.startedAt)}`);
   console.log(`  ended:     ${dash(run.endedAt)}`);
   console.log(`  dir:       ${relDir}`);
+  if (mode === 'legacy') {
+    console.log('\n  legacy ledger (read via --legacy; not verifiable to 0.2 guarantees)');
+  }
 
-  const eventLabel = events.length === 1 ? 'event' : 'events';
-  console.log(`\ntimeline (${events.length} ${eventLabel})`);
-  for (const event of events) {
-    console.log(`  ${utcTime(event.timestamp)}  ${renderEvent(event)}`);
+  if (projection != null && !rawTimeline) {
+    printProjection(projection);
+  } else {
+    const eventLabel = events.length === 1 ? 'event' : 'events';
+    console.log(`\ntimeline (${events.length} ${eventLabel})`);
+    for (const event of events) {
+      console.log(`  ${utcTime(event.timestamp)}  ${renderEvent(event)}`);
+    }
   }
   for (const lineNo of badLines) {
     console.log(`  line ${lineNo}: unparseable event (skipped)`);
@@ -263,7 +313,7 @@ function printVerify(result: VerifyResult): void {
   console.log('');
   for (const f of findings) {
     const token = f.status === 'fail' ? 'FAIL' : f.status;
-    const line = `  ${token.padEnd(4)}  ${f.check.padEnd(20)}  ${f.detail}`;
+    const line = `  ${token.padEnd(4)}  ${f.check.padEnd(22)}  ${f.detail}`;
     if (f.status === 'fail') console.error(line);
     else console.log(line);
   }
@@ -309,6 +359,8 @@ function main(argv: string[]): number {
         'no-record': { type: 'boolean' },
         latest: { type: 'boolean' },
         'allow-failed': { type: 'boolean' },
+        legacy: { type: 'boolean' },
+        events: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
       },
@@ -402,6 +454,14 @@ function main(argv: string[]): number {
       if (result.updatedFields.length) parts.push(`updated ${result.updatedFields.join(', ')}`);
       if (result.appendedEvents.length) parts.push(`logged ${result.appendedEvents.join(', ')}`);
       console.log(`${relative(process.cwd(), result.runDir) || result.runDir}: ${parts.join('; ')}`);
+      if (result.manifest) {
+        const v = result.manifest.validation;
+        const note = v.schema ? `, ${v.schema}: ${v.ok ? 'valid' : 'INVALID'}` : '';
+        console.log(
+          `  ${result.manifest.artifact_id}  sha256 ${result.manifest.sha256.slice(0, 12)}…  ` +
+            `gen ${result.manifest.generation}${note}`,
+        );
+      }
       return 0;
     }
     case 'plugin': {
@@ -491,7 +551,7 @@ function main(argv: string[]): number {
     case 'next': {
       const run = positionals[1];
       if (!run) throw new Error('Usage: fadeno next <run>');
-      const result = runNext({ run });
+      const result = runNext({ run, legacy: values.legacy });
       console.log(JSON.stringify(result, null, 2));
       return 0;
     }
@@ -502,9 +562,9 @@ function main(argv: string[]): number {
     }
     case 'show': {
       const run = positionals[1];
-      if (!run) throw new Error('Usage: fadeno show <run>');
-      const result = runShow({ run });
-      printShow(findRepoRoot(), result);
+      if (!run) throw new Error('Usage: fadeno show <run> [--events] [--legacy]');
+      const result = runShow({ run, legacy: values.legacy });
+      printShow(findRepoRoot(), result, Boolean(values.events));
       return 0;
     }
     case 'verify': {
@@ -512,6 +572,7 @@ function main(argv: string[]): number {
         run: positionals[1],
         latest: values.latest,
         allowFailed: values['allow-failed'],
+        legacy: values.legacy,
       });
       printVerify(result);
       return result.ok ? 0 : 1;

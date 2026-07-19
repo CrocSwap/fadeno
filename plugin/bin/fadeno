@@ -10968,49 +10968,49 @@ var require_fast_uri = __commonJS({
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
-    function resolveComponent(base, relative4, options, skipNormalization) {
+    function resolveComponent(base, relative5, options, skipNormalization) {
       const target = {};
       if (!skipNormalization) {
         base = parse(serialize(base, options), options);
-        relative4 = parse(serialize(relative4, options), options);
+        relative5 = parse(serialize(relative5, options), options);
       }
       options = options || {};
-      if (!options.tolerant && relative4.scheme) {
-        target.scheme = relative4.scheme;
-        target.userinfo = relative4.userinfo;
-        target.host = relative4.host;
-        target.port = relative4.port;
-        target.path = removeDotSegments(relative4.path || "");
-        target.query = relative4.query;
+      if (!options.tolerant && relative5.scheme) {
+        target.scheme = relative5.scheme;
+        target.userinfo = relative5.userinfo;
+        target.host = relative5.host;
+        target.port = relative5.port;
+        target.path = removeDotSegments(relative5.path || "");
+        target.query = relative5.query;
       } else {
-        if (relative4.userinfo !== void 0 || relative4.host !== void 0 || relative4.port !== void 0) {
-          target.userinfo = relative4.userinfo;
-          target.host = relative4.host;
-          target.port = relative4.port;
-          target.path = removeDotSegments(relative4.path || "");
-          target.query = relative4.query;
+        if (relative5.userinfo !== void 0 || relative5.host !== void 0 || relative5.port !== void 0) {
+          target.userinfo = relative5.userinfo;
+          target.host = relative5.host;
+          target.port = relative5.port;
+          target.path = removeDotSegments(relative5.path || "");
+          target.query = relative5.query;
         } else {
-          if (!relative4.path) {
+          if (!relative5.path) {
             target.path = base.path;
-            if (relative4.query !== void 0) {
-              target.query = relative4.query;
+            if (relative5.query !== void 0) {
+              target.query = relative5.query;
             } else {
               target.query = base.query;
             }
           } else {
-            if (relative4.path[0] === "/") {
-              target.path = removeDotSegments(relative4.path);
+            if (relative5.path[0] === "/") {
+              target.path = removeDotSegments(relative5.path);
             } else {
               if ((base.userinfo !== void 0 || base.host !== void 0 || base.port !== void 0) && !base.path) {
-                target.path = "/" + relative4.path;
+                target.path = "/" + relative5.path;
               } else if (!base.path) {
-                target.path = relative4.path;
+                target.path = relative5.path;
               } else {
-                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative4.path;
+                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative5.path;
               }
               target.path = removeDotSegments(target.path);
             }
-            target.query = relative4.query;
+            target.query = relative5.query;
           }
           target.userinfo = base.userinfo;
           target.host = base.host;
@@ -11018,7 +11018,7 @@ var require_fast_uri = __commonJS({
         }
         target.scheme = base.scheme;
       }
-      target.fragment = relative4.fragment;
+      target.fragment = relative5.fragment;
       return target;
     }
     function equal(uriA, uriB, options) {
@@ -13893,7 +13893,7 @@ var require_ajv = __commonJS({
 });
 
 // src/cli.ts
-var import_node_path15 = require("node:path");
+var import_node_path17 = require("node:path");
 var import_node_util = require("node:util");
 
 // src/commands/diagram.ts
@@ -14257,9 +14257,9 @@ function runDiagram(opts) {
 }
 
 // src/commands/gate.ts
-var import_node_fs4 = require("node:fs");
-var import_node_path4 = require("node:path");
-var import_yaml3 = __toESM(require_dist(), 1);
+var import_node_fs6 = require("node:fs");
+var import_node_path6 = require("node:path");
+var import_yaml5 = __toESM(require_dist(), 1);
 
 // src/lib/playbook-validate.ts
 var import_node_fs3 = require("node:fs");
@@ -14857,6 +14857,232 @@ function validateFile(file, schemas, forcedKind) {
   return { file, kind, ok: issues.every((issue) => issue.severity !== "error"), issues };
 }
 
+// src/lib/run-ledger-write.ts
+var import_node_fs5 = require("node:fs");
+var import_node_path5 = require("node:path");
+var import_yaml4 = __toESM(require_dist(), 1);
+
+// src/lib/run-ledger.ts
+var import_node_fs4 = require("node:fs");
+var import_node_path4 = require("node:path");
+var import_yaml3 = __toESM(require_dist(), 1);
+var RunLedgerError = class extends Error {
+};
+var RUN_LEDGER_SCHEMA_VERSION = "0.2";
+function ledgerMode(run, allowLegacy) {
+  if (run.schemaVersion === RUN_LEDGER_SCHEMA_VERSION) return "current";
+  if (run.schemaVersion == null) {
+    if (allowLegacy) return "legacy";
+    throw new RunLedgerError(
+      `run "${run.runId}" uses a legacy ledger format (run.yaml has no schema_version; current is "${RUN_LEDGER_SCHEMA_VERSION}"). Pass --legacy to read it in compatibility mode, or create a new run with \`fadeno new-run\`.`
+    );
+  }
+  throw new RunLedgerError(
+    `run "${run.runId}" has ledger schema_version "${run.schemaVersion}"; this fadeno reads "${RUN_LEDGER_SCHEMA_VERSION}".`
+  );
+}
+function normalizeLegacyEvents(events) {
+  return events.map(
+    (event) => event.type === "artifact_written" ? { ...event, type: "artifact_created" } : event
+  );
+}
+function stringOrNull(value) {
+  return typeof value === "string" ? value : null;
+}
+function summarizeRunDir(runId, dir) {
+  const yamlPath = (0, import_node_path4.join)(dir, "run.yaml");
+  const base = {
+    runId,
+    dir,
+    schemaVersion: null,
+    playbook: null,
+    status: null,
+    task: null,
+    host: null,
+    startedAt: null,
+    endedAt: null,
+    problems: []
+  };
+  let raw;
+  try {
+    raw = (0, import_node_fs4.readFileSync)(yamlPath, "utf8");
+  } catch (err) {
+    base.problems.push(`unreadable run.yaml: ${err.message}`);
+    return base;
+  }
+  let parsed;
+  try {
+    parsed = (0, import_yaml3.parse)(raw);
+  } catch (err) {
+    base.problems.push(`unparseable run.yaml: ${err.message}`);
+    return base;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    base.problems.push("unparseable run.yaml: not an object");
+    return base;
+  }
+  const doc = parsed;
+  base.schemaVersion = doc.schema_version != null ? String(doc.schema_version) : null;
+  base.playbook = stringOrNull(doc.playbook);
+  base.status = stringOrNull(doc.status);
+  base.task = stringOrNull(doc.task);
+  base.host = stringOrNull(doc.host);
+  base.startedAt = stringOrNull(doc.started_at);
+  base.endedAt = stringOrNull(doc.ended_at);
+  return base;
+}
+function listRuns(repoRoot) {
+  const runsDir = (0, import_node_path4.join)(repoRoot, ".fadeno", "runs");
+  if (!(0, import_node_fs4.existsSync)(runsDir)) return [];
+  const entries = (0, import_node_fs4.readdirSync)(runsDir, { withFileTypes: true });
+  const runs = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const dir = (0, import_node_path4.join)(runsDir, entry.name);
+    if (!(0, import_node_fs4.existsSync)((0, import_node_path4.join)(dir, "run.yaml"))) continue;
+    runs.push(summarizeRunDir(entry.name, dir));
+  }
+  runs.sort((a, b) => a.runId < b.runId ? 1 : a.runId > b.runId ? -1 : 0);
+  return runs;
+}
+function readEvents(runDir) {
+  const path = (0, import_node_path4.join)(runDir, "events.jsonl");
+  if (!(0, import_node_fs4.existsSync)(path)) return { events: [], badLines: [] };
+  const text = (0, import_node_fs4.readFileSync)(path, "utf8");
+  const lines = text.split("\n");
+  const events = [];
+  const badLines = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (line.trim() === "") continue;
+    const lineNo = i + 1;
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      badLines.push(lineNo);
+      continue;
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      badLines.push(lineNo);
+      continue;
+    }
+    const obj = parsed;
+    const type = typeof obj.type === "string" ? obj.type : "unknown";
+    const step = stringOrNull(obj.step);
+    const timestamp = stringOrNull(obj.timestamp);
+    const seq = typeof obj.seq === "number" ? obj.seq : null;
+    const extra = {};
+    for (const [key, value] of Object.entries(obj)) {
+      if (key === "type" || key === "step" || key === "timestamp" || key === "seq") continue;
+      extra[key] = value;
+    }
+    events.push({ type, step, timestamp, seq, extra });
+  }
+  return { events, badLines };
+}
+function readEventsStrict(runDir) {
+  const { events, badLines } = readEvents(runDir);
+  if (badLines.length > 0) {
+    throw new RunLedgerError(`events.jsonl has malformed lines: ${badLines.join(", ")}`);
+  }
+  return events;
+}
+function resolveRun(repoRoot, query) {
+  const runs = listRuns(repoRoot);
+  const exact = runs.find((r) => r.runId === query);
+  if (exact) return exact;
+  const matches = runs.filter((r) => r.runId.startsWith(query));
+  if (matches.length === 1) return matches[0];
+  if (matches.length === 0) {
+    throw new RunLedgerError(`No run matching "${query}" under .fadeno/runs.`);
+  }
+  const listed = matches.slice(0, 5).map((r) => r.runId).join(", ");
+  const more = matches.length > 5 ? `, \u2026(+${matches.length - 5} more)` : "";
+  throw new RunLedgerError(`Multiple runs match "${query}": ${listed}${more}.`);
+}
+function listArtifacts(runDir) {
+  const artifactsDir = (0, import_node_path4.join)(runDir, "artifacts");
+  if (!(0, import_node_fs4.existsSync)(artifactsDir)) return [];
+  const out = [];
+  function walk(dir) {
+    for (const entry of (0, import_node_fs4.readdirSync)(dir, { withFileTypes: true })) {
+      const full = (0, import_node_path4.join)(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (entry.isFile()) {
+        out.push({
+          path: (0, import_node_path4.relative)(runDir, full).split("\\").join("/"),
+          bytes: (0, import_node_fs4.statSync)(full).size
+        });
+      }
+    }
+  }
+  walk(artifactsDir);
+  out.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  return out;
+}
+
+// src/lib/run-ledger-write.ts
+var LedgerWriteError = class extends Error {
+};
+var LedgerWriter = class {
+  runDir;
+  lastSeq;
+  constructor(runDir) {
+    this.runDir = runDir;
+    const runYamlPath = (0, import_node_path5.join)(runDir, "run.yaml");
+    let doc;
+    try {
+      doc = (0, import_yaml4.parse)((0, import_node_fs5.readFileSync)(runYamlPath, "utf8"));
+    } catch (err) {
+      throw new LedgerWriteError(`cannot read ${runYamlPath}: ${err.message}`);
+    }
+    const version = doc !== null && typeof doc === "object" && !Array.isArray(doc) ? doc.schema_version : void 0;
+    const versionText = version != null ? String(version) : null;
+    if (versionText == null) {
+      throw new LedgerWriteError(
+        `run at ${runDir} is a legacy ledger (run.yaml has no schema_version); refusing to append new-format events. Create a new run with \`fadeno new-run\`.`
+      );
+    }
+    if (versionText !== RUN_LEDGER_SCHEMA_VERSION) {
+      throw new LedgerWriteError(
+        `run at ${runDir} has ledger schema_version "${versionText}"; this fadeno writes "${RUN_LEDGER_SCHEMA_VERSION}".`
+      );
+    }
+    this.lastSeq = scanLastSeq((0, import_node_path5.join)(runDir, "events.jsonl"));
+  }
+  /** The seq the next append will receive — lets callers mint ids up front. */
+  get nextSeq() {
+    return this.lastSeq + 1;
+  }
+  /** Stamp `seq` + `timestamp` and append one line; returns the seq used. */
+  append(event, now) {
+    const seq = this.nextSeq;
+    const line = JSON.stringify({ ...event, seq, timestamp: now.toISOString() });
+    (0, import_node_fs5.appendFileSync)((0, import_node_path5.join)(this.runDir, "events.jsonl"), `${line}
+`, "utf8");
+    this.lastSeq = seq;
+    return seq;
+  }
+};
+function scanLastSeq(eventsPath) {
+  if (!(0, import_node_fs5.existsSync)(eventsPath)) return 0;
+  const lines = (0, import_node_fs5.readFileSync)(eventsPath, "utf8").split("\n");
+  let maxSeq = 0;
+  let lineCount = 0;
+  for (const line of lines) {
+    if (line.trim() === "") continue;
+    lineCount += 1;
+    try {
+      const parsed = JSON.parse(line);
+      if (typeof parsed.seq === "number" && parsed.seq > maxSeq) maxSeq = parsed.seq;
+    } catch {
+    }
+  }
+  return Math.max(maxSeq, lineCount);
+}
+
 // src/commands/gate.ts
 var GateError = class extends Error {
 };
@@ -14895,34 +15121,28 @@ var CONDITION_REGISTRY = {
   }
 };
 var DEFAULT_ARTIFACTS = {
-  no_blocking_issues: (0, import_node_path4.join)("artifacts", "review-report.json"),
-  tests_pass: (0, import_node_path4.join)("artifacts", "test-result.json")
+  no_blocking_issues: (0, import_node_path6.join)("artifacts", "review-report.json"),
+  tests_pass: (0, import_node_path6.join)("artifacts", "test-result.json")
 };
 function resolveRunDir(repoRoot, cwd, run) {
-  const candidates = (0, import_node_path4.isAbsolute)(run) ? [run] : [(0, import_node_path4.join)(repoRoot, ".fadeno", "runs", run), (0, import_node_path4.resolve)(cwd, run)];
+  const candidates = (0, import_node_path6.isAbsolute)(run) ? [run] : [(0, import_node_path6.join)(repoRoot, ".fadeno", "runs", run), (0, import_node_path6.resolve)(cwd, run)];
   for (const candidate of candidates) {
     const dir = candidate.endsWith("run.yaml") ? candidate.slice(0, -"run.yaml".length) : candidate;
-    if ((0, import_node_fs4.existsSync)((0, import_node_path4.join)(dir, "run.yaml"))) return dir;
+    if ((0, import_node_fs6.existsSync)((0, import_node_path6.join)(dir, "run.yaml"))) return dir;
   }
   throw new GateError(`No run found for "${run}" (looked for run.yaml under .fadeno/runs).`);
 }
-function appendGateEvent(runDir, condition, artifact, pass, now) {
+function appendGateEvent(writer, condition, artifact, pass, now) {
   let step = null;
   try {
-    const run = (0, import_yaml3.parse)((0, import_node_fs4.readFileSync)((0, import_node_path4.join)(runDir, "run.yaml"), "utf8"));
+    const run = (0, import_yaml5.parse)((0, import_node_fs6.readFileSync)((0, import_node_path6.join)(writer.runDir, "run.yaml"), "utf8"));
     if (typeof run.current_step === "string") step = run.current_step;
   } catch {
   }
-  const event = {
-    type: "gate_evaluated",
-    step,
-    condition,
-    artifact,
-    result: pass ? "pass" : "fail",
-    timestamp: now.toISOString()
-  };
-  (0, import_node_fs4.appendFileSync)((0, import_node_path4.join)(runDir, "events.jsonl"), `${JSON.stringify(event)}
-`, "utf8");
+  writer.append(
+    { type: "gate_evaluated", step, condition, artifact, result: pass ? "pass" : "fail" },
+    now
+  );
 }
 function runGate(opts) {
   if (!SUPPORTED_CONDITIONS.includes(opts.condition)) {
@@ -14934,20 +15154,27 @@ function runGate(opts) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const runDir = resolveRunDir(repoRoot, cwd, opts.run);
+  let writer;
+  try {
+    writer = new LedgerWriter(runDir);
+  } catch (err) {
+    if (err instanceof LedgerWriteError) throw new GateError(err.message);
+    throw err;
+  }
   const artifactArg = opts.artifact ?? opts.report ?? DEFAULT_ARTIFACTS[condition];
-  const artifactPath = (0, import_node_path4.isAbsolute)(artifactArg) ? artifactArg : (0, import_node_path4.join)(runDir, artifactArg);
-  if (!(0, import_node_fs4.existsSync)(artifactPath)) {
+  const artifactPath = (0, import_node_path6.isAbsolute)(artifactArg) ? artifactArg : (0, import_node_path6.join)(runDir, artifactArg);
+  if (!(0, import_node_fs6.existsSync)(artifactPath)) {
     throw new GateError(`No artifact at ${artifactPath}. Produce a schema-valid ${definition.acceptedArtifacts.join(" or ")} artifact or pass --artifact <path>.`);
   }
   let parsed;
   try {
-    parsed = JSON.parse((0, import_node_fs4.readFileSync)(artifactPath, "utf8"));
+    parsed = JSON.parse((0, import_node_fs6.readFileSync)(artifactPath, "utf8"));
   } catch (err) {
     throw new GateError(`Could not parse artifact ${artifactPath}: ${err.message}`);
   }
   let validate;
   try {
-    validate = new SchemaSet((0, import_node_path4.join)(repoRoot, ".fadeno", "schemas")).get(definition.schema);
+    validate = new SchemaSet((0, import_node_path6.join)(repoRoot, ".fadeno", "schemas")).get(definition.schema);
   } catch (err) {
     throw new GateError(err.message);
   }
@@ -14957,8 +15184,8 @@ function runGate(opts) {
   }
   const evaluation = definition.evaluate(parsed);
   const now = opts.now ?? /* @__PURE__ */ new Date();
-  const artifactForEvent = (0, import_node_path4.isAbsolute)(artifactArg) ? (0, import_node_path4.relative)(runDir, artifactArg) : artifactArg;
-  appendGateEvent(runDir, condition, artifactForEvent, evaluation.pass, now);
+  const artifactForEvent = (0, import_node_path6.isAbsolute)(artifactArg) ? (0, import_node_path6.relative)(runDir, artifactArg) : artifactArg;
+  appendGateEvent(writer, condition, artifactForEvent, evaluation.pass, now);
   const blockingTitles = Array.isArray(evaluation.details.blockingTitles) ? evaluation.details.blockingTitles.filter((title) => typeof title === "string") : [];
   const blockingCount = typeof evaluation.details.blockingCount === "number" ? evaluation.details.blockingCount : blockingTitles.length;
   return {
@@ -14974,28 +15201,28 @@ function runGate(opts) {
 }
 
 // src/commands/init.ts
-var import_node_fs6 = require("node:fs");
-var import_node_path6 = require("node:path");
+var import_node_fs8 = require("node:fs");
+var import_node_path8 = require("node:path");
 
 // src/lib/fsutil.ts
-var import_node_fs5 = require("node:fs");
-var import_node_path5 = require("node:path");
+var import_node_fs7 = require("node:fs");
+var import_node_path7 = require("node:path");
 function emitFile(absPath, content, force) {
-  const exists = (0, import_node_fs5.existsSync)(absPath);
+  const exists = (0, import_node_fs7.existsSync)(absPath);
   if (exists && !force) return "skipped";
-  (0, import_node_fs5.mkdirSync)((0, import_node_path5.dirname)(absPath), { recursive: true });
-  (0, import_node_fs5.writeFileSync)(absPath, content, "utf8");
+  (0, import_node_fs7.mkdirSync)((0, import_node_path7.dirname)(absPath), { recursive: true });
+  (0, import_node_fs7.writeFileSync)(absPath, content, "utf8");
   return exists ? "overwritten" : "created";
 }
 function copyTree(srcDir, destDir, force, results) {
-  for (const entry of (0, import_node_fs5.readdirSync)(srcDir, { withFileTypes: true })) {
-    const srcPath = (0, import_node_path5.join)(srcDir, entry.name);
+  for (const entry of (0, import_node_fs7.readdirSync)(srcDir, { withFileTypes: true })) {
+    const srcPath = (0, import_node_path7.join)(srcDir, entry.name);
     const destName = entry.name === "gitkeep" ? ".gitkeep" : entry.name;
-    const destPath = (0, import_node_path5.join)(destDir, destName);
+    const destPath = (0, import_node_path7.join)(destDir, destName);
     if (entry.isDirectory()) {
       copyTree(srcPath, destPath, force, results);
     } else {
-      const content = (0, import_node_fs5.readFileSync)(srcPath, "utf8");
+      const content = (0, import_node_fs7.readFileSync)(srcPath, "utf8");
       results.push({ path: destPath, status: emitFile(destPath, content, force) });
     }
   }
@@ -15012,13 +15239,13 @@ ${section.trim()}
 
 ${FADENO_END}
 `;
-  if (!(0, import_node_fs5.existsSync)(absPath)) {
-    (0, import_node_fs5.mkdirSync)((0, import_node_path5.dirname)(absPath), { recursive: true });
-    (0, import_node_fs5.writeFileSync)(absPath, block, "utf8");
+  if (!(0, import_node_fs7.existsSync)(absPath)) {
+    (0, import_node_fs7.mkdirSync)((0, import_node_path7.dirname)(absPath), { recursive: true });
+    (0, import_node_fs7.writeFileSync)(absPath, block, "utf8");
     results.push({ path: absPath, status: "created" });
     return;
   }
-  const existing = (0, import_node_fs5.readFileSync)(absPath, "utf8");
+  const existing = (0, import_node_fs7.readFileSync)(absPath, "utf8");
   const hasBlock = existing.includes(FADENO_BEGIN);
   if (hasBlock) {
     if (!force) {
@@ -15028,12 +15255,12 @@ ${FADENO_END}
     const blockRe = new RegExp(
       `${escapeRegExp(FADENO_BEGIN)}[\\s\\S]*?${escapeRegExp(FADENO_END)}\\n?`
     );
-    (0, import_node_fs5.writeFileSync)(absPath, existing.replace(blockRe, block), "utf8");
+    (0, import_node_fs7.writeFileSync)(absPath, existing.replace(blockRe, block), "utf8");
     results.push({ path: absPath, status: "overwritten" });
     return;
   }
   const separator = existing.endsWith("\n") ? "\n" : "\n\n";
-  (0, import_node_fs5.writeFileSync)(absPath, existing + separator + block, "utf8");
+  (0, import_node_fs7.writeFileSync)(absPath, existing + separator + block, "utf8");
   results.push({ path: absPath, status: "appended" });
 }
 
@@ -15044,30 +15271,30 @@ function runInit(opts) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const force = opts.force ?? false;
   const results = [];
-  copyTree((0, import_node_path6.join)(tpl, "common", "fadeno"), (0, import_node_path6.join)(repoRoot, ".fadeno"), force, results);
+  copyTree((0, import_node_path8.join)(tpl, "common", "fadeno"), (0, import_node_path8.join)(repoRoot, ".fadeno"), force, results);
   if (!opts.dataOnly) {
-    const skillsBase = opts.target === "codex" ? (0, import_node_path6.join)(repoRoot, ".agents", "skills") : (0, import_node_path6.join)(repoRoot, ".claude", "skills");
+    const skillsBase = opts.target === "codex" ? (0, import_node_path8.join)(repoRoot, ".agents", "skills") : (0, import_node_path8.join)(repoRoot, ".claude", "skills");
     for (const skill of SKILLS) {
-      const skillSrc = (0, import_node_path6.join)(tpl, "common", "skills", skill);
-      const skillDest = (0, import_node_path6.join)(skillsBase, skill);
-      const skillMd = (0, import_node_fs6.readFileSync)((0, import_node_path6.join)(skillSrc, "SKILL.md"), "utf8");
-      const skillMdPath = (0, import_node_path6.join)(skillDest, "SKILL.md");
+      const skillSrc = (0, import_node_path8.join)(tpl, "common", "skills", skill);
+      const skillDest = (0, import_node_path8.join)(skillsBase, skill);
+      const skillMd = (0, import_node_fs8.readFileSync)((0, import_node_path8.join)(skillSrc, "SKILL.md"), "utf8");
+      const skillMdPath = (0, import_node_path8.join)(skillDest, "SKILL.md");
       results.push({ path: skillMdPath, status: emitFile(skillMdPath, skillMd, force) });
-      copyTree((0, import_node_path6.join)(skillSrc, "references"), (0, import_node_path6.join)(skillDest, "references"), force, results);
+      copyTree((0, import_node_path8.join)(skillSrc, "references"), (0, import_node_path8.join)(skillDest, "references"), force, results);
       if (opts.target === "codex") {
-        const policy = (0, import_node_fs6.readFileSync)((0, import_node_path6.join)(tpl, "codex", "openai", `${skill}.yaml`), "utf8");
-        const policyPath = (0, import_node_path6.join)(skillDest, "agents", "openai.yaml");
+        const policy = (0, import_node_fs8.readFileSync)((0, import_node_path8.join)(tpl, "codex", "openai", `${skill}.yaml`), "utf8");
+        const policyPath = (0, import_node_path8.join)(skillDest, "agents", "openai.yaml");
         results.push({ path: policyPath, status: emitFile(policyPath, policy, force) });
       }
     }
     if (opts.target === "codex") {
-      copyTree((0, import_node_path6.join)(tpl, "codex", "codex-agents"), (0, import_node_path6.join)(repoRoot, ".codex", "agents"), force, results);
+      copyTree((0, import_node_path8.join)(tpl, "codex", "codex-agents"), (0, import_node_path8.join)(repoRoot, ".codex", "agents"), force, results);
     } else {
-      copyTree((0, import_node_path6.join)(tpl, "claude", "claude-agents"), (0, import_node_path6.join)(repoRoot, ".claude", "agents"), force, results);
+      copyTree((0, import_node_path8.join)(tpl, "claude", "claude-agents"), (0, import_node_path8.join)(repoRoot, ".claude", "agents"), force, results);
     }
     const bootstrapName = opts.target === "codex" ? "AGENTS.md" : "CLAUDE.md";
-    const bootstrapBody = (0, import_node_fs6.readFileSync)((0, import_node_path6.join)(tpl, opts.target, bootstrapName), "utf8");
-    emitBootstrap((0, import_node_path6.join)(repoRoot, bootstrapName), bootstrapBody, force, results);
+    const bootstrapBody = (0, import_node_fs8.readFileSync)((0, import_node_path8.join)(tpl, opts.target, bootstrapName), "utf8");
+    emitBootstrap((0, import_node_path8.join)(repoRoot, bootstrapName), bootstrapBody, force, results);
   }
   if (opts.withHooks) emitHooks(tpl, repoRoot, opts.target, force, results);
   if (opts.target === "claude") emitClaudePermissions(repoRoot, results);
@@ -15075,12 +15302,12 @@ function runInit(opts) {
 }
 var FADENO_BASH_RULE = "Bash(fadeno:*)";
 function emitClaudePermissions(repoRoot, results) {
-  const settingsPath = (0, import_node_path6.join)(repoRoot, ".claude", "settings.local.json");
-  const existed = (0, import_node_fs6.existsSync)(settingsPath);
+  const settingsPath = (0, import_node_path8.join)(repoRoot, ".claude", "settings.local.json");
+  const existed = (0, import_node_fs8.existsSync)(settingsPath);
   let data = {};
   if (existed) {
     try {
-      const parsed = JSON.parse((0, import_node_fs6.readFileSync)(settingsPath, "utf8"));
+      const parsed = JSON.parse((0, import_node_fs8.readFileSync)(settingsPath, "utf8"));
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         results.push({ path: settingsPath, status: "skipped" });
         return;
@@ -15100,55 +15327,55 @@ function emitClaudePermissions(repoRoot, results) {
   allow.push(FADENO_BASH_RULE);
   perms.allow = allow;
   data.permissions = perms;
-  (0, import_node_fs6.mkdirSync)((0, import_node_path6.dirname)(settingsPath), { recursive: true });
-  (0, import_node_fs6.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
+  (0, import_node_fs8.mkdirSync)((0, import_node_path8.dirname)(settingsPath), { recursive: true });
+  (0, import_node_fs8.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
 `, "utf8");
   results.push({ path: settingsPath, status: existed ? "appended" : "created" });
   ensureGitignored(repoRoot, ".claude/settings.local.json", results);
 }
 function ensureGitignored(repoRoot, pattern, results) {
-  const gitignorePath = (0, import_node_path6.join)(repoRoot, ".gitignore");
-  const existed = (0, import_node_fs6.existsSync)(gitignorePath);
-  const content = existed ? (0, import_node_fs6.readFileSync)(gitignorePath, "utf8") : "";
+  const gitignorePath = (0, import_node_path8.join)(repoRoot, ".gitignore");
+  const existed = (0, import_node_fs8.existsSync)(gitignorePath);
+  const content = existed ? (0, import_node_fs8.readFileSync)(gitignorePath, "utf8") : "";
   const lines = content.split(/\r?\n/).map((line) => line.trim());
   if (lines.includes(pattern) || lines.includes(".claude") || lines.includes(".claude/")) return;
   const sep = content.length === 0 || content.endsWith("\n") ? "" : "\n";
   const block = `${sep}# Fadeno: per-user local Claude settings (not committed)
 ${pattern}
 `;
-  (0, import_node_fs6.writeFileSync)(gitignorePath, content + block, "utf8");
+  (0, import_node_fs8.writeFileSync)(gitignorePath, content + block, "utf8");
   results.push({ path: gitignorePath, status: existed ? "appended" : "created" });
 }
 function emitHooks(tpl, repoRoot, target, force, results) {
   const hookFile = (srcRel, destRel, executable = false) => {
-    const content = (0, import_node_fs6.readFileSync)((0, import_node_path6.join)(tpl, srcRel), "utf8");
-    const dest = (0, import_node_path6.join)(repoRoot, destRel);
+    const content = (0, import_node_fs8.readFileSync)((0, import_node_path8.join)(tpl, srcRel), "utf8");
+    const dest = (0, import_node_path8.join)(repoRoot, destRel);
     const status = emitFile(dest, content, force);
-    if (executable && (status === "created" || status === "overwritten")) (0, import_node_fs6.chmodSync)(dest, 493);
+    if (executable && (status === "created" || status === "overwritten")) (0, import_node_fs8.chmodSync)(dest, 493);
     results.push({ path: dest, status });
   };
-  hookFile((0, import_node_path6.join)("common", "hooks", "pre-commit"), (0, import_node_path6.join)(".fadeno", "hooks", "pre-commit"), true);
-  hookFile((0, import_node_path6.join)("common", "hooks", "README.md"), (0, import_node_path6.join)(".fadeno", "hooks", "README.md"));
+  hookFile((0, import_node_path8.join)("common", "hooks", "pre-commit"), (0, import_node_path8.join)(".fadeno", "hooks", "pre-commit"), true);
+  hookFile((0, import_node_path8.join)("common", "hooks", "README.md"), (0, import_node_path8.join)(".fadeno", "hooks", "README.md"));
   hookFile(
-    (0, import_node_path6.join)("common", "hooks", "fadeno-guard.yml"),
-    (0, import_node_path6.join)(".github", "workflows", "fadeno-guard.yml")
+    (0, import_node_path8.join)("common", "hooks", "fadeno-guard.yml"),
+    (0, import_node_path8.join)(".github", "workflows", "fadeno-guard.yml")
   );
   hookFile(
-    (0, import_node_path6.join)("common", "hooks", "fadeno-verify.yml"),
-    (0, import_node_path6.join)(".github", "workflows", "fadeno-verify.yml")
+    (0, import_node_path8.join)("common", "hooks", "fadeno-verify.yml"),
+    (0, import_node_path8.join)(".github", "workflows", "fadeno-verify.yml")
   );
   if (target === "claude") {
     hookFile(
-      (0, import_node_path6.join)("claude", "hooks", "settings.example.json"),
-      (0, import_node_path6.join)(".fadeno", "hooks", "claude-settings.example.json")
+      (0, import_node_path8.join)("claude", "hooks", "settings.example.json"),
+      (0, import_node_path8.join)(".fadeno", "hooks", "claude-settings.example.json")
     );
   }
 }
 
 // src/commands/new-run.ts
-var import_node_fs7 = require("node:fs");
-var import_node_path7 = require("node:path");
-var import_yaml4 = __toESM(require_dist(), 1);
+var import_node_fs9 = require("node:fs");
+var import_node_path9 = require("node:path");
+var import_yaml6 = __toESM(require_dist(), 1);
 var NewRunError = class extends Error {
 };
 function slugify(text, maxLen = 40) {
@@ -15165,36 +15392,37 @@ function slugify(text, maxLen = 40) {
 function resolvePlaybook(playbooksDir, name) {
   const stripped = name.replace(/\.(ya?ml)$/i, "");
   for (const candidate of [`${stripped}.yaml`, `${stripped}.yml`]) {
-    if ((0, import_node_fs7.existsSync)((0, import_node_path7.join)(playbooksDir, candidate))) return stripped;
+    if ((0, import_node_fs9.existsSync)((0, import_node_path9.join)(playbooksDir, candidate))) return stripped;
   }
   throw new NewRunError(`Playbook "${stripped}" not found in ${playbooksDir}.`);
 }
 function runNewRun(opts) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const fadenoDir = (0, import_node_path7.join)(repoRoot, ".fadeno");
-  if (!(0, import_node_fs7.existsSync)(fadenoDir)) {
+  const fadenoDir = (0, import_node_path9.join)(repoRoot, ".fadeno");
+  if (!(0, import_node_fs9.existsSync)(fadenoDir)) {
     throw new NewRunError(
       `No .fadeno directory at ${repoRoot}. Run \`fadeno init\` first.`
     );
   }
-  const playbook = resolvePlaybook((0, import_node_path7.join)(fadenoDir, "playbooks"), opts.playbook);
+  const playbook = resolvePlaybook((0, import_node_path9.join)(fadenoDir, "playbooks"), opts.playbook);
   const now = opts.now ?? /* @__PURE__ */ new Date();
   const iso = now.toISOString();
   const pad = (n) => String(n).padStart(2, "0");
   const datePart = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
   const timePart = `${pad(now.getHours())}${pad(now.getMinutes())}`;
   const slug = slugify(opts.task);
-  const runsDir = (0, import_node_path7.join)(fadenoDir, "runs");
+  const runsDir = (0, import_node_path9.join)(fadenoDir, "runs");
   let runId = `${datePart}-${timePart}-${slug}`;
-  let runDir = (0, import_node_path7.join)(runsDir, runId);
-  for (let n = 2; (0, import_node_fs7.existsSync)(runDir); n += 1) {
+  let runDir = (0, import_node_path9.join)(runsDir, runId);
+  for (let n = 2; (0, import_node_fs9.existsSync)(runDir); n += 1) {
     runId = `${datePart}-${timePart}-${slug}-${n}`;
-    runDir = (0, import_node_path7.join)(runsDir, runId);
+    runDir = (0, import_node_path9.join)(runsDir, runId);
   }
-  (0, import_node_fs7.mkdirSync)((0, import_node_path7.join)(runDir, "artifacts"), { recursive: true });
-  const runYaml = (0, import_yaml4.stringify)({
+  (0, import_node_fs9.mkdirSync)((0, import_node_path9.join)(runDir, "artifacts"), { recursive: true });
+  const runYaml = (0, import_yaml6.stringify)({
     run_id: runId,
+    schema_version: RUN_LEDGER_SCHEMA_VERSION,
     playbook,
     status: "running",
     task: opts.task,
@@ -15204,18 +15432,16 @@ function runNewRun(opts) {
     current_step: null
   });
   const modeline = "# yaml-language-server: $schema=../../schemas/run.schema.json";
-  (0, import_node_fs7.writeFileSync)((0, import_node_path7.join)(runDir, "run.yaml"), `${modeline}
+  (0, import_node_fs9.writeFileSync)((0, import_node_path9.join)(runDir, "run.yaml"), `${modeline}
 ${runYaml}`, "utf8");
-  const startEvent = JSON.stringify({ type: "run_started", step: null, timestamp: iso });
-  (0, import_node_fs7.writeFileSync)((0, import_node_path7.join)(runDir, "events.jsonl"), `${startEvent}
-`, "utf8");
-  (0, import_node_fs7.writeFileSync)((0, import_node_path7.join)(runDir, "artifacts", ".gitkeep"), "", "utf8");
+  new LedgerWriter(runDir).append({ type: "run_started", step: null }, now);
+  (0, import_node_fs9.writeFileSync)((0, import_node_path9.join)(runDir, "artifacts", ".gitkeep"), "", "utf8");
   return { runId, runDir, playbook };
 }
 
 // src/commands/plugin.ts
-var import_node_fs8 = require("node:fs");
-var import_node_path8 = require("node:path");
+var import_node_fs10 = require("node:fs");
+var import_node_path10 = require("node:path");
 var SKILLS2 = [
   { src: "fadeno-runner", dst: "runner" },
   { src: "fadeno-builder", dst: "builder" },
@@ -15225,7 +15451,7 @@ function runPlugin(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const tpl = templatesDir();
   const ref = opts.outDir ?? "plugin";
-  const outDir = (0, import_node_path8.isAbsolute)(ref) ? ref : (0, import_node_path8.resolve)(cwd, ref);
+  const outDir = (0, import_node_path10.isAbsolute)(ref) ? ref : (0, import_node_path10.resolve)(cwd, ref);
   const force = opts.force ?? false;
   const results = [];
   const manifest = JSON.stringify(
@@ -15239,34 +15465,79 @@ function runPlugin(opts = {}) {
     null,
     2
   ) + "\n";
-  const manifestPath = (0, import_node_path8.join)(outDir, ".claude-plugin", "plugin.json");
+  const manifestPath = (0, import_node_path10.join)(outDir, ".claude-plugin", "plugin.json");
   results.push({ path: manifestPath, status: emitFile(manifestPath, manifest, force) });
   for (const { src, dst } of SKILLS2) {
-    let md = (0, import_node_fs8.readFileSync)((0, import_node_path8.join)(tpl, "common", "skills", src, "SKILL.md"), "utf8");
+    let md = (0, import_node_fs10.readFileSync)((0, import_node_path10.join)(tpl, "common", "skills", src, "SKILL.md"), "utf8");
     md = md.replace(`name: ${src}`, `name: ${dst}`);
-    const skillPath = (0, import_node_path8.join)(outDir, "skills", dst, "SKILL.md");
+    const skillPath = (0, import_node_path10.join)(outDir, "skills", dst, "SKILL.md");
     results.push({ path: skillPath, status: emitFile(skillPath, md, force) });
     copyTree(
-      (0, import_node_path8.join)(tpl, "common", "skills", src, "references"),
-      (0, import_node_path8.join)(outDir, "skills", dst, "references"),
+      (0, import_node_path10.join)(tpl, "common", "skills", src, "references"),
+      (0, import_node_path10.join)(outDir, "skills", dst, "references"),
       force,
       results
     );
   }
-  copyTree((0, import_node_path8.join)(tpl, "common", "commands"), (0, import_node_path8.join)(outDir, "commands"), force, results);
-  copyTree((0, import_node_path8.join)(tpl, "claude", "claude-agents"), (0, import_node_path8.join)(outDir, "agents"), force, results);
+  copyTree((0, import_node_path10.join)(tpl, "common", "commands"), (0, import_node_path10.join)(outDir, "commands"), force, results);
+  copyTree((0, import_node_path10.join)(tpl, "claude", "claude-agents"), (0, import_node_path10.join)(outDir, "agents"), force, results);
+  return { outDir, results };
+}
+var CODEX_SKILLS = ["fadeno-runner", "fadeno-builder", "fadeno-driver"];
+function runCodexPlugin(opts = {}) {
+  const cwd = opts.cwd ?? process.cwd();
+  const tpl = templatesDir();
+  const ref = opts.outDir ?? "plugin-codex";
+  const outDir = (0, import_node_path10.isAbsolute)(ref) ? ref : (0, import_node_path10.resolve)(cwd, ref);
+  const force = opts.force ?? false;
+  const results = [];
+  const manifest = JSON.stringify(
+    {
+      name: "fadeno",
+      version: packageVersion(),
+      description: "Run and author Fadeno playbooks \u2014 repeatable plan/implement/review/test workflows with file-backed run traces. Seed a repo with `fadeno init --codex --data-only`.",
+      author: { name: "Fadeno" },
+      repository: "https://github.com/CrocSwap/fadeno",
+      license: "MIT",
+      keywords: ["ai", "agents", "codex", "playbook", "workflow", "skills"],
+      skills: "./skills/",
+      interface: {
+        displayName: "Fadeno",
+        shortDescription: "Plan/implement/review/test workflows with file-backed run traces.",
+        category: "Engineering"
+      }
+    },
+    null,
+    2
+  ) + "\n";
+  const manifestPath = (0, import_node_path10.join)(outDir, ".codex-plugin", "plugin.json");
+  results.push({ path: manifestPath, status: emitFile(manifestPath, manifest, force) });
+  for (const skill of CODEX_SKILLS) {
+    const skillMd = (0, import_node_fs10.readFileSync)((0, import_node_path10.join)(tpl, "common", "skills", skill, "SKILL.md"), "utf8");
+    const skillMdPath = (0, import_node_path10.join)(outDir, "skills", skill, "SKILL.md");
+    results.push({ path: skillMdPath, status: emitFile(skillMdPath, skillMd, force) });
+    copyTree(
+      (0, import_node_path10.join)(tpl, "common", "skills", skill, "references"),
+      (0, import_node_path10.join)(outDir, "skills", skill, "references"),
+      force,
+      results
+    );
+    const policy = (0, import_node_fs10.readFileSync)((0, import_node_path10.join)(tpl, "codex", "openai", `${skill}.yaml`), "utf8");
+    const policyPath = (0, import_node_path10.join)(outDir, "skills", skill, "agents", "openai.yaml");
+    results.push({ path: policyPath, status: emitFile(policyPath, policy, force) });
+  }
   return { outDir, results };
 }
 
 // src/commands/next.ts
-var import_node_fs10 = require("node:fs");
-var import_node_path10 = require("node:path");
-var import_yaml6 = __toESM(require_dist(), 1);
+var import_node_fs11 = require("node:fs");
+var import_node_path11 = require("node:path");
+var import_yaml7 = __toESM(require_dist(), 1);
 
 // src/lib/prompt-resolve.ts
 var PromptResolveError = class extends Error {
 };
-var ARTIFACT_EVENT_TYPES = /* @__PURE__ */ new Set(["artifact_created", "artifact_written"]);
+var ARTIFACT_EVENT_TYPES = /* @__PURE__ */ new Set(["artifact_created"]);
 var NOT_PROMPTABLE = /* @__PURE__ */ new Set(["tool_call", "router", "join", "artifact_op", "subworkflow", "replicate"]);
 function baseArtifact2(name) {
   return name.replace(/\[\]$/, "");
@@ -15314,6 +15585,14 @@ function withGeneration(path, iteration) {
   const slash = path.lastIndexOf("/");
   if (dot > slash) return `${path.slice(0, dot)}.v${generation}${path.slice(dot)}`;
   return `${path}.v${generation}`;
+}
+function parseGeneration(path) {
+  const slash = path.lastIndexOf("/");
+  const dir = path.slice(0, slash + 1);
+  const base = path.slice(slash + 1);
+  const match = base.match(/^(.*)\.v(\d+)(\.[^.]*)?$/);
+  if (!match) return { logicalPath: path, generation: 1 };
+  return { logicalPath: `${dir}${match[1]}${match[3] ?? ""}`, generation: Number(match[2]) };
 }
 function templateMatches(template, member, path) {
   const pattern = template.split(/(\{actor\}|\{iteration\})/).map((part) => part === "{actor}" ? escapeRegExp2(member) : part === "{iteration}" ? "\\d+" : escapeRegExp2(part)).join("");
@@ -15645,7 +15924,7 @@ function resolvePurpose(playbook, actor) {
 // src/lib/flow-cursor.ts
 var FlowCursorError = class extends Error {
 };
-var ARTIFACT_EVENT_TYPES2 = /* @__PURE__ */ new Set(["artifact_created", "artifact_written"]);
+var ARTIFACT_EVENT_TYPES2 = /* @__PURE__ */ new Set(["artifact_created"]);
 var PROMPTABLE_KINDS = /* @__PURE__ */ new Set(["actor_call", "evaluator", "reduce", "map"]);
 var NEEDS_DECISION_KINDS = /* @__PURE__ */ new Set(["router", "subworkflow", "replicate"]);
 function asStringArray2(value) {
@@ -16273,154 +16552,14 @@ function computeNext(playbook, events) {
   return resolveAt(ctx, entry);
 }
 
-// src/lib/run-ledger.ts
-var import_node_fs9 = require("node:fs");
-var import_node_path9 = require("node:path");
-var import_yaml5 = __toESM(require_dist(), 1);
-var RunLedgerError = class extends Error {
-};
-function stringOrNull(value) {
-  return typeof value === "string" ? value : null;
-}
-function summarizeRunDir(runId, dir) {
-  const yamlPath = (0, import_node_path9.join)(dir, "run.yaml");
-  const base = {
-    runId,
-    dir,
-    playbook: null,
-    status: null,
-    task: null,
-    host: null,
-    startedAt: null,
-    endedAt: null,
-    problems: []
-  };
-  let raw;
-  try {
-    raw = (0, import_node_fs9.readFileSync)(yamlPath, "utf8");
-  } catch (err) {
-    base.problems.push(`unreadable run.yaml: ${err.message}`);
-    return base;
-  }
-  let parsed;
-  try {
-    parsed = (0, import_yaml5.parse)(raw);
-  } catch (err) {
-    base.problems.push(`unparseable run.yaml: ${err.message}`);
-    return base;
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    base.problems.push("unparseable run.yaml: not an object");
-    return base;
-  }
-  const doc = parsed;
-  base.playbook = stringOrNull(doc.playbook);
-  base.status = stringOrNull(doc.status);
-  base.task = stringOrNull(doc.task);
-  base.host = stringOrNull(doc.host);
-  base.startedAt = stringOrNull(doc.started_at);
-  base.endedAt = stringOrNull(doc.ended_at);
-  return base;
-}
-function listRuns(repoRoot) {
-  const runsDir = (0, import_node_path9.join)(repoRoot, ".fadeno", "runs");
-  if (!(0, import_node_fs9.existsSync)(runsDir)) return [];
-  const entries = (0, import_node_fs9.readdirSync)(runsDir, { withFileTypes: true });
-  const runs = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const dir = (0, import_node_path9.join)(runsDir, entry.name);
-    if (!(0, import_node_fs9.existsSync)((0, import_node_path9.join)(dir, "run.yaml"))) continue;
-    runs.push(summarizeRunDir(entry.name, dir));
-  }
-  runs.sort((a, b) => a.runId < b.runId ? 1 : a.runId > b.runId ? -1 : 0);
-  return runs;
-}
-function readEvents(runDir) {
-  const path = (0, import_node_path9.join)(runDir, "events.jsonl");
-  if (!(0, import_node_fs9.existsSync)(path)) return { events: [], badLines: [] };
-  const text = (0, import_node_fs9.readFileSync)(path, "utf8");
-  const lines = text.split("\n");
-  const events = [];
-  const badLines = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i];
-    if (line.trim() === "") continue;
-    const lineNo = i + 1;
-    let parsed;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      badLines.push(lineNo);
-      continue;
-    }
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      badLines.push(lineNo);
-      continue;
-    }
-    const obj = parsed;
-    const type = typeof obj.type === "string" ? obj.type : "unknown";
-    const step = stringOrNull(obj.step);
-    const timestamp = stringOrNull(obj.timestamp);
-    const extra = {};
-    for (const [key, value] of Object.entries(obj)) {
-      if (key === "type" || key === "step" || key === "timestamp") continue;
-      extra[key] = value;
-    }
-    events.push({ type, step, timestamp, extra });
-  }
-  return { events, badLines };
-}
-function readEventsStrict(runDir) {
-  const { events, badLines } = readEvents(runDir);
-  if (badLines.length > 0) {
-    throw new RunLedgerError(`events.jsonl has malformed lines: ${badLines.join(", ")}`);
-  }
-  return events;
-}
-function resolveRun(repoRoot, query) {
-  const runs = listRuns(repoRoot);
-  const exact = runs.find((r) => r.runId === query);
-  if (exact) return exact;
-  const matches = runs.filter((r) => r.runId.startsWith(query));
-  if (matches.length === 1) return matches[0];
-  if (matches.length === 0) {
-    throw new RunLedgerError(`No run matching "${query}" under .fadeno/runs.`);
-  }
-  const listed = matches.slice(0, 5).map((r) => r.runId).join(", ");
-  const more = matches.length > 5 ? `, \u2026(+${matches.length - 5} more)` : "";
-  throw new RunLedgerError(`Multiple runs match "${query}": ${listed}${more}.`);
-}
-function listArtifacts(runDir) {
-  const artifactsDir = (0, import_node_path9.join)(runDir, "artifacts");
-  if (!(0, import_node_fs9.existsSync)(artifactsDir)) return [];
-  const out = [];
-  function walk(dir) {
-    for (const entry of (0, import_node_fs9.readdirSync)(dir, { withFileTypes: true })) {
-      const full = (0, import_node_path9.join)(dir, entry.name);
-      if (entry.isDirectory()) {
-        walk(full);
-      } else if (entry.isFile()) {
-        out.push({
-          path: (0, import_node_path9.relative)(runDir, full).split("\\").join("/"),
-          bytes: (0, import_node_fs9.statSync)(full).size
-        });
-      }
-    }
-  }
-  walk(artifactsDir);
-  out.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
-  return out;
-}
-
 // src/commands/next.ts
 var NextError = class extends Error {
 };
 function locatePlaybook(repoRoot, name) {
-  const dir = (0, import_node_path10.join)(repoRoot, ".fadeno", "playbooks");
+  const dir = (0, import_node_path11.join)(repoRoot, ".fadeno", "playbooks");
   for (const candidate of [`${name}.yaml`, `${name}.yml`]) {
-    const path = (0, import_node_path10.join)(dir, candidate);
-    if ((0, import_node_fs10.existsSync)(path)) return path;
+    const path = (0, import_node_path11.join)(dir, candidate);
+    if ((0, import_node_fs11.existsSync)(path)) return path;
   }
   throw new NextError(`Playbook "${name}" not found in ${dir}.`);
 }
@@ -16436,6 +16575,13 @@ function runNext(opts) {
   }
   if (run.playbook == null) {
     throw new NextError(`run "${run.runId}" has no playbook recorded in run.yaml.`);
+  }
+  let mode;
+  try {
+    mode = ledgerMode(run, opts.legacy === true);
+  } catch (err) {
+    if (err instanceof RunLedgerError) throw new NextError(err.message);
+    throw err;
   }
   if (run.status != null && run.status !== "running") {
     return {
@@ -16456,10 +16602,11 @@ function runNext(opts) {
     if (err instanceof RunLedgerError) throw new NextError(err.message);
     throw err;
   }
+  if (mode === "legacy") events = normalizeLegacyEvents(events);
   const playbookPath = locatePlaybook(repoRoot, run.playbook);
   let playbook;
   try {
-    const parsed = (0, import_yaml6.parse)((0, import_node_fs10.readFileSync)(playbookPath, "utf8"));
+    const parsed = (0, import_yaml7.parse)((0, import_node_fs11.readFileSync)(playbookPath, "utf8"));
     if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("playbook is not a mapping");
     }
@@ -16467,7 +16614,7 @@ function runNext(opts) {
   } catch (err) {
     throw new NextError(`could not parse playbook ${run.playbook}: ${err.message}`);
   }
-  const schemas = new SchemaSet((0, import_node_path10.join)(repoRoot, ".fadeno", "schemas"));
+  const schemas = new SchemaSet((0, import_node_path11.join)(repoRoot, ".fadeno", "schemas"));
   const validation = validateFile(playbookPath, schemas, "playbook");
   const errorIssues = validation.issues.filter((issue) => issue.severity === "error");
   if (errorIssues.length > 0) {
@@ -16489,10 +16636,137 @@ function runNext(opts) {
 }
 
 // src/commands/prompt.ts
+var import_node_fs13 = require("node:fs");
+var import_node_path13 = require("node:path");
+var import_yaml8 = __toESM(require_dist(), 1);
+
+// src/lib/artifact-manifest.ts
 var import_node_crypto = require("node:crypto");
-var import_node_fs11 = require("node:fs");
-var import_node_path11 = require("node:path");
-var import_yaml7 = __toESM(require_dist(), 1);
+var import_node_fs12 = require("node:fs");
+var import_node_path12 = require("node:path");
+var ManifestError = class extends Error {
+};
+function sha256Hex(data) {
+  return (0, import_node_crypto.createHash)("sha256").update(data).digest("hex");
+}
+var MEDIA_TYPES = {
+  ".json": "application/json",
+  ".jsonl": "application/jsonl",
+  ".md": "text/markdown",
+  ".txt": "text/plain",
+  ".yaml": "application/yaml",
+  ".yml": "application/yaml"
+};
+function mediaTypeFor(path) {
+  return MEDIA_TYPES[(0, import_node_path12.extname)(path).toLowerCase()] ?? "application/octet-stream";
+}
+function buildArtifactManifest(runDir, artifactRel, artifactId, schemas) {
+  const abs = (0, import_node_path12.join)(runDir, artifactRel);
+  if (!(0, import_node_fs12.existsSync)(abs)) {
+    throw new ManifestError(
+      `no file at ${artifactRel} under the run directory; write the artifact before recording it.`
+    );
+  }
+  const bytes = (0, import_node_fs12.readFileSync)(abs);
+  const { logicalPath, generation } = parseGeneration(artifactRel);
+  const mediaType = mediaTypeFor(artifactRel);
+  let validation = { schema: null };
+  if (mediaType === "application/json" && schemas != null) {
+    let parsed;
+    let parseOk = true;
+    try {
+      parsed = JSON.parse(bytes.toString("utf8"));
+    } catch {
+      parseOk = false;
+    }
+    if (parseOk) {
+      const kind = detectKind(abs, parsed);
+      if ((kind === "review-report" || kind === "test-result") && schemas.has(kind)) {
+        const validate = schemas.get(kind);
+        validation = validate(parsed) ? { schema: kind, ok: true } : { schema: kind, ok: false, errors: schemaErrorMessages(validate) };
+      }
+    }
+  }
+  return {
+    artifact_id: artifactId,
+    artifact: artifactRel,
+    logical_name: logicalPath,
+    generation,
+    bytes: bytes.length,
+    sha256: sha256Hex(bytes),
+    media_type: mediaType,
+    validation
+  };
+}
+function resolveActiveArtifacts(events) {
+  const records = [];
+  events.forEach((event, index) => {
+    if (event.type !== "artifact_created") return;
+    const path = typeof event.extra.artifact === "string" ? event.extra.artifact : null;
+    if (path == null) return;
+    const parsed = parseGeneration(path);
+    const validation = event.extra.validation;
+    const valid = !(validation !== null && typeof validation === "object" && validation.ok === false);
+    records.push({
+      artifactId: typeof event.extra.artifact_id === "string" ? event.extra.artifact_id : null,
+      path,
+      logicalName: typeof event.extra.logical_name === "string" ? event.extra.logical_name : parsed.logicalPath,
+      member: typeof event.extra.member === "string" ? event.extra.member : null,
+      generation: typeof event.extra.generation === "number" ? event.extra.generation : parsed.generation,
+      seq: event.seq,
+      sha256: typeof event.extra.sha256 === "string" ? event.extra.sha256 : null,
+      bytes: typeof event.extra.bytes === "number" ? event.extra.bytes : null,
+      valid,
+      index
+    });
+  });
+  const shaByPath = /* @__PURE__ */ new Map();
+  for (const record of records) {
+    if (record.sha256 == null) continue;
+    const set = shaByPath.get(record.path) ?? /* @__PURE__ */ new Set();
+    set.add(record.sha256);
+    shaByPath.set(record.path, set);
+  }
+  const immutabilityViolations = [...shaByPath.entries()].filter(([, shas]) => shas.size > 1).map(([path, shas]) => `${path} recorded with ${shas.size} different sha256 values`);
+  const groups = /* @__PURE__ */ new Map();
+  for (const record of records) {
+    const key = `${record.logicalName}\0${record.member ?? ""}`;
+    const group = groups.get(key);
+    if (group) group.push(record);
+    else groups.set(key, [record]);
+  }
+  const active = [];
+  const conflicts = [];
+  for (const group of groups.values()) {
+    const valid = group.filter((record) => record.valid);
+    if (valid.length === 0) continue;
+    const maxGeneration = Math.max(...valid.map((record) => record.generation));
+    const top = valid.filter((record) => record.generation === maxGeneration);
+    const distinctPaths = [...new Set(top.map((record) => record.path))];
+    if (distinctPaths.length > 1) {
+      const sample = top[0];
+      const scope = sample.member != null ? `${sample.logicalName} (member ${sample.member})` : sample.logicalName;
+      conflicts.push(
+        `${scope} has ${distinctPaths.length} paths at generation ${maxGeneration}: ${distinctPaths.join(", ")}`
+      );
+    }
+    const winner = top.reduce((a, b) => b.index >= a.index ? b : a);
+    active.push({
+      artifactId: winner.artifactId,
+      path: winner.path,
+      logicalName: winner.logicalName,
+      member: winner.member,
+      generation: winner.generation,
+      seq: winner.seq,
+      sha256: winner.sha256,
+      bytes: winner.bytes
+    });
+  }
+  active.sort(
+    (a, b) => a.logicalName < b.logicalName ? -1 : a.logicalName > b.logicalName ? 1 : (a.member ?? "") < (b.member ?? "") ? -1 : 1
+  );
+  return { active, conflicts, immutabilityViolations };
+}
 
 // src/lib/prompt.ts
 function canonicalJson(value) {
@@ -16656,14 +16930,11 @@ function renderStepPrompt(ctx) {
 // src/commands/prompt.ts
 var PromptError = class extends Error {
 };
-function sha256(data) {
-  return (0, import_node_crypto.createHash)("sha256").update(data).digest("hex");
-}
 function locatePlaybook2(repoRoot, name) {
-  const dir = (0, import_node_path11.join)(repoRoot, ".fadeno", "playbooks");
+  const dir = (0, import_node_path13.join)(repoRoot, ".fadeno", "playbooks");
   for (const candidate of [`${name}.yaml`, `${name}.yml`]) {
-    const path = (0, import_node_path11.join)(dir, candidate);
-    if ((0, import_node_fs11.existsSync)(path)) return path;
+    const path = (0, import_node_path13.join)(dir, candidate);
+    if ((0, import_node_fs13.existsSync)(path)) return path;
   }
   throw new PromptError(`Playbook "${name}" not found in ${dir}.`);
 }
@@ -16672,6 +16943,11 @@ function runPrompt(opts) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const run = resolveRun(repoRoot, opts.run);
   const runDir = run.dir;
+  if (run.schemaVersion !== RUN_LEDGER_SCHEMA_VERSION) {
+    throw new PromptError(
+      run.schemaVersion == null ? `run "${run.runId}" is a legacy ledger (run.yaml has no schema_version); prompt assembly reads only current-format ledgers. Create a new run with \`fadeno new-run\`.` : `run "${run.runId}" has ledger schema_version "${run.schemaVersion}"; this fadeno reads "${RUN_LEDGER_SCHEMA_VERSION}".`
+    );
+  }
   let events;
   try {
     events = readEventsStrict(runDir);
@@ -16683,10 +16959,10 @@ function runPrompt(opts) {
     throw new PromptError(`run "${run.runId}" has no playbook recorded in run.yaml.`);
   }
   const playbookPath = locatePlaybook2(repoRoot, run.playbook);
-  const playbookBytes = (0, import_node_fs11.readFileSync)(playbookPath);
+  const playbookBytes = (0, import_node_fs13.readFileSync)(playbookPath);
   let playbook;
   try {
-    const parsed = (0, import_yaml7.parse)(playbookBytes.toString("utf8"));
+    const parsed = (0, import_yaml8.parse)(playbookBytes.toString("utf8"));
     if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("playbook is not a mapping");
     }
@@ -16694,7 +16970,7 @@ function runPrompt(opts) {
   } catch (err) {
     throw new PromptError(`could not parse playbook ${run.playbook}: ${err.message}`);
   }
-  const schemas = new SchemaSet((0, import_node_path11.join)(repoRoot, ".fadeno", "schemas"));
+  const schemas = new SchemaSet((0, import_node_path13.join)(repoRoot, ".fadeno", "schemas"));
   const validation = validateFile(playbookPath, schemas, "playbook");
   const errorIssues = validation.issues.filter((issue) => issue.severity === "error");
   if (errorIssues.length > 0) {
@@ -16715,18 +16991,18 @@ function runPrompt(opts) {
   }
   const inputs = plan.inputs.map((input) => {
     const files = input.files.map((file) => {
-      const abs = (0, import_node_path11.join)(runDir, file.path);
-      if (!(0, import_node_fs11.existsSync)(abs)) {
+      const abs = (0, import_node_path13.join)(runDir, file.path);
+      if (!(0, import_node_fs13.existsSync)(abs)) {
         const producer = input.producedBy ?? "an upstream step";
         throw new PromptError(`input file "${file.path}" for ${input.artifact} (produced by ${producer}) is missing on disk.`);
       }
-      const bytes = (0, import_node_fs11.readFileSync)(abs);
+      const bytes = (0, import_node_fs13.readFileSync)(abs);
       return {
         path: file.path,
         byActor: file.byActor,
         isSelf: file.isSelf,
         bytes: bytes.length,
-        sha256: sha256(bytes),
+        sha256: sha256Hex(bytes),
         content: opts.inline ? bytes.toString("utf8") : null
       };
     });
@@ -16741,9 +17017,9 @@ function runPrompt(opts) {
   });
   let schemaText = null;
   if (plan.output.schemaKind) {
-    const schemaFile = (0, import_node_path11.join)(repoRoot, ".fadeno", "schemas", `${plan.output.schemaKind}.schema.json`);
-    if ((0, import_node_fs11.existsSync)(schemaFile)) {
-      schemaText = canonicalJson(JSON.parse((0, import_node_fs11.readFileSync)(schemaFile, "utf8")));
+    const schemaFile = (0, import_node_path13.join)(repoRoot, ".fadeno", "schemas", `${plan.output.schemaKind}.schema.json`);
+    if ((0, import_node_fs13.existsSync)(schemaFile)) {
+      schemaText = canonicalJson(JSON.parse((0, import_node_fs13.readFileSync)(schemaFile, "utf8")));
     }
   }
   const policies = playbook.policies && typeof playbook.policies === "object" && !Array.isArray(playbook.policies) ? playbook.policies : null;
@@ -16769,7 +17045,7 @@ function runPrompt(opts) {
     inline: Boolean(opts.inline)
   };
   const prompt = renderStepPrompt(ctx);
-  const promptSha = sha256(prompt);
+  const promptSha = sha256Hex(prompt);
   const record = opts.record !== false;
   const terminal2 = run.status != null && run.status !== "running";
   const previewOnly = !record || terminal2 || plan.cutoffLine == null;
@@ -16781,16 +17057,16 @@ function runPrompt(opts) {
   if (plan.iteration != null) name += `--v${plan.iteration + 1}`;
   name += `--n${plan.invocation}`;
   const promptRel = `artifacts/prompts/${name}.md`;
-  const promptAbs = (0, import_node_path11.join)(runDir, "artifacts", "prompts", `${name}.md`);
-  if ((0, import_node_fs11.existsSync)(promptAbs)) {
-    const existing = (0, import_node_fs11.readFileSync)(promptAbs, "utf8");
+  const promptAbs = (0, import_node_path13.join)(runDir, "artifacts", "prompts", `${name}.md`);
+  if ((0, import_node_fs13.existsSync)(promptAbs)) {
+    const existing = (0, import_node_fs13.readFileSync)(promptAbs, "utf8");
     if (existing !== prompt) {
       throw new PromptError(`existing prompt snapshot ${promptRel} differs from the newly assembled bytes; refusing to overwrite.`);
     }
     return { prompt, sha256: promptSha, promptPath: promptRel, recorded: "reused", plan };
   }
-  (0, import_node_fs11.mkdirSync)((0, import_node_path11.dirname)(promptAbs), { recursive: true });
-  (0, import_node_fs11.writeFileSync)(promptAbs, prompt, "utf8");
+  (0, import_node_fs13.mkdirSync)((0, import_node_path13.dirname)(promptAbs), { recursive: true });
+  (0, import_node_fs13.writeFileSync)(promptAbs, prompt, "utf8");
   const now = opts.now ?? /* @__PURE__ */ new Date();
   const manifest = {
     type: "prompt_assembled",
@@ -16809,31 +17085,46 @@ function runPrompt(opts) {
       }))
     ),
     output_path: plan.output.path,
-    playbook_sha256: sha256(playbookBytes),
+    playbook_sha256: sha256Hex(playbookBytes),
     prompt_sha256: promptSha,
     prompt_path: promptRel,
-    manifest_version: 1,
-    timestamp: now.toISOString()
+    manifest_version: 1
   };
-  (0, import_node_fs11.appendFileSync)((0, import_node_path11.join)(runDir, "events.jsonl"), `${JSON.stringify(manifest)}
-`, "utf8");
+  let writer;
+  try {
+    writer = new LedgerWriter(runDir);
+  } catch (err) {
+    if (err instanceof LedgerWriteError) throw new PromptError(err.message);
+    throw err;
+  }
+  writer.append(manifest, now);
   return { prompt, sha256: promptSha, promptPath: promptRel, recorded: "created", plan };
 }
 
 // src/commands/run.ts
-var import_node_fs12 = require("node:fs");
-var import_node_path12 = require("node:path");
-var import_yaml8 = __toESM(require_dist(), 1);
+var import_node_fs14 = require("node:fs");
+var import_node_path14 = require("node:path");
+var import_yaml9 = __toESM(require_dist(), 1);
 var RunError = class extends Error {
 };
 var TERMINAL_STATUSES = /* @__PURE__ */ new Set(["completed", "failed", "aborted"]);
 var VALID_STATUSES = /* @__PURE__ */ new Set(["running", ...TERMINAL_STATUSES]);
 var RUN_YAML_MODELINE = "# yaml-language-server: $schema=../../schemas/run.schema.json";
+function normalizeArtifactPath(runDir, artifactArg) {
+  const rel = (0, import_node_path14.isAbsolute)(artifactArg) ? (0, import_node_path14.relative)(runDir, artifactArg) : artifactArg;
+  const normalized = rel.split("\\").join("/");
+  if (normalized.startsWith("..")) {
+    throw new RunError(
+      `artifact path ${artifactArg} escapes the run directory; record paths under the run (e.g. artifacts/...).`
+    );
+  }
+  return normalized;
+}
 function resolveRunDir2(repoRoot, cwd, run) {
-  const candidates = (0, import_node_path12.isAbsolute)(run) ? [run] : [(0, import_node_path12.join)(repoRoot, ".fadeno", "runs", run), (0, import_node_path12.resolve)(cwd, run)];
+  const candidates = (0, import_node_path14.isAbsolute)(run) ? [run] : [(0, import_node_path14.join)(repoRoot, ".fadeno", "runs", run), (0, import_node_path14.resolve)(cwd, run)];
   for (const candidate of candidates) {
     const dir = candidate.endsWith("run.yaml") ? candidate.slice(0, -"run.yaml".length) : candidate;
-    if ((0, import_node_fs12.existsSync)((0, import_node_path12.join)(dir, "run.yaml"))) return dir;
+    if ((0, import_node_fs14.existsSync)((0, import_node_path14.join)(dir, "run.yaml"))) return dir;
   }
   throw new RunError(`No run found for "${run}" (looked for run.yaml under .fadeno/runs).`);
 }
@@ -16875,16 +17166,44 @@ function runRun(opts) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const runDir = resolveRunDir2(repoRoot, cwd, opts.run);
-  const runYamlPath = (0, import_node_path12.join)(runDir, "run.yaml");
-  const eventsPath = (0, import_node_path12.join)(runDir, "events.jsonl");
-  const run = (0, import_yaml8.parse)((0, import_node_fs12.readFileSync)(runYamlPath, "utf8"));
-  const iso = (opts.now ?? /* @__PURE__ */ new Date()).toISOString();
+  const runYamlPath = (0, import_node_path14.join)(runDir, "run.yaml");
+  let writer;
+  try {
+    writer = new LedgerWriter(runDir);
+  } catch (err) {
+    if (err instanceof LedgerWriteError) throw new RunError(err.message);
+    throw err;
+  }
+  const run = (0, import_yaml9.parse)((0, import_node_fs14.readFileSync)(runYamlPath, "utf8"));
+  const now = opts.now ?? /* @__PURE__ */ new Date();
+  const iso = now.toISOString();
   const appendedEvents = [];
   const updatedFields = [];
   const appendEvent = (event) => {
-    (0, import_node_fs12.appendFileSync)(eventsPath, `${JSON.stringify({ ...event, timestamp: iso })}
-`, "utf8");
+    writer.append(event, now);
     appendedEvents.push(event.type);
+  };
+  const buildManifestFor = (artifactArg) => {
+    const rel = normalizeArtifactPath(runDir, artifactArg);
+    const schemasDir = (0, import_node_path14.join)(repoRoot, ".fadeno", "schemas");
+    const schemas = (0, import_node_fs14.existsSync)(schemasDir) ? new SchemaSet(schemasDir) : null;
+    let fields;
+    try {
+      fields = buildArtifactManifest(runDir, rel, `artifact-${writer.nextSeq}`, schemas);
+    } catch (err) {
+      if (err instanceof ManifestError) throw new RunError(err.message);
+      throw err;
+    }
+    const { events: priorEvents } = readEvents(runDir);
+    for (const prior of priorEvents) {
+      if (prior.type !== "artifact_created" || prior.extra.artifact !== fields.artifact) continue;
+      if (typeof prior.extra.sha256 === "string" && prior.extra.sha256 !== fields.sha256) {
+        throw new RunError(
+          `${fields.artifact} was already recorded with a different sha256; artifacts are immutable \u2014 write a new generation (.v<G>) instead.`
+        );
+      }
+    }
+    return fields;
   };
   if (opts.step) {
     run.current_step = opts.step;
@@ -16898,18 +17217,28 @@ function runRun(opts) {
       event[key] = value;
     }
   };
+  let manifest;
   if (opts.event) {
     const event = { type: opts.event, step: eventStep };
-    if (opts.artifact) event.artifact = opts.artifact;
-    attachAttribution(event);
+    if (opts.event === "artifact_created") {
+      if (!opts.artifact) {
+        throw new RunError("An artifact_created event requires --artifact <path>.");
+      }
+      manifest = buildManifestFor(opts.artifact);
+      attachAttribution(event);
+      Object.assign(event, manifest);
+    } else {
+      if (opts.artifact) {
+        event.artifact = opts.artifact;
+      }
+      attachAttribution(event);
+    }
     appendEvent(event);
   } else if (opts.artifact) {
-    const event = {
-      type: "artifact_created",
-      step: eventStep,
-      artifact: opts.artifact
-    };
+    manifest = buildManifestFor(opts.artifact);
+    const event = { type: "artifact_created", step: eventStep };
     attachAttribution(event);
+    Object.assign(event, manifest);
     appendEvent(event);
   } else if (hasAttribution) {
     throw new RunError("--member / --field require an event to attach to (--event and/or --artifact).");
@@ -16929,9 +17258,9 @@ function runRun(opts) {
       appendEvent({ type: `run_${opts.status}`, step: null });
     }
   }
-  (0, import_node_fs12.writeFileSync)(runYamlPath, `${RUN_YAML_MODELINE}
-${(0, import_yaml8.stringify)(run)}`, "utf8");
-  return { runDir, appendedEvents, updatedFields };
+  (0, import_node_fs14.writeFileSync)(runYamlPath, `${RUN_YAML_MODELINE}
+${(0, import_yaml9.stringify)(run)}`, "utf8");
+  return { runDir, appendedEvents, updatedFields, manifest };
 }
 
 // src/commands/runs.ts
@@ -16946,21 +17275,85 @@ function runShow(opts) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const run = resolveRun(repoRoot, opts.run);
-  const { events, badLines } = readEvents(run.dir);
+  const mode = ledgerMode(run, opts.legacy === true);
+  const raw = readEvents(run.dir);
+  const events = mode === "legacy" ? normalizeLegacyEvents(raw.events) : raw.events;
   const artifacts = listArtifacts(run.dir);
-  return { run, events, badLines, artifacts };
+  const projection = mode === "current" ? projectRun(run, events) : null;
+  return { run, mode, events, badLines: raw.badLines, artifacts, projection };
+}
+function projectRun(run, events) {
+  const stepOrder = [];
+  const byStep = /* @__PURE__ */ new Map();
+  const view = (id) => {
+    let v = byStep.get(id);
+    if (!v) {
+      v = { id, state: "done", artifacts: 0, gates: [], iterations: 0, decisions: [] };
+      byStep.set(id, v);
+      stepOrder.push(id);
+    }
+    return v;
+  };
+  const decisions = [];
+  const failures = [];
+  let lastStarted = null;
+  for (const event of events) {
+    if (event.step != null) view(event.step);
+    switch (event.type) {
+      case "step_started":
+        if (event.step != null) lastStarted = event.step;
+        break;
+      case "artifact_created":
+        if (event.step != null) view(event.step).artifacts += 1;
+        break;
+      case "gate_evaluated": {
+        const condition = typeof event.extra.condition === "string" ? event.extra.condition : "?";
+        const result = typeof event.extra.result === "string" ? event.extra.result : "?";
+        if (event.step != null) view(event.step).gates.push({ condition, result });
+        if (result === "fail") {
+          const artifact = typeof event.extra.artifact === "string" ? ` (${event.extra.artifact})` : "";
+          failures.push(`gate ${condition} \u2192 fail${artifact}`);
+        }
+        break;
+      }
+      case "loop_iteration_started":
+        if (event.step != null) view(event.step).iterations += 1;
+        break;
+      case "human_decision": {
+        const branch = typeof event.extra.branch === "string" ? event.extra.branch : "?";
+        if (event.step != null) view(event.step).decisions.push(branch);
+        decisions.push({ step: event.step, branch });
+        break;
+      }
+      case "run_failed":
+        failures.push("run failed");
+        break;
+      case "run_aborted":
+        failures.push("run aborted");
+        break;
+      default:
+        break;
+    }
+  }
+  if (lastStarted != null) {
+    const last = view(lastStarted);
+    if (run.status === "running") last.state = "current";
+    else if (run.status === "failed" || run.status === "aborted") last.state = "failed";
+  }
+  const { active } = resolveActiveArtifacts(events);
+  return { steps: stepOrder.map((id) => byStep.get(id)), active, decisions, failures };
 }
 
 // src/commands/validate.ts
-var import_node_fs13 = require("node:fs");
-var import_node_path13 = require("node:path");
+var import_node_fs15 = require("node:fs");
+var import_node_path15 = require("node:path");
 var ValidateError = class extends Error {
 };
 function runValidate(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const schemasDir = (0, import_node_path13.join)(repoRoot, ".fadeno", "schemas");
-  if (!(0, import_node_fs13.existsSync)(schemasDir)) {
+  const schemasDir = (0, import_node_path15.join)(repoRoot, ".fadeno", "schemas");
+  if (!(0, import_node_fs15.existsSync)(schemasDir)) {
     throw new ValidateError(
       `No Fadeno schemas found at ${schemasDir}.
 Run \`fadeno init --codex\` or \`fadeno init --claude\` first.`
@@ -16970,15 +17363,15 @@ Run \`fadeno init --codex\` or \`fadeno init --claude\` first.`
   let files;
   let forcedKind;
   if (opts.path) {
-    files = [(0, import_node_path13.isAbsolute)(opts.path) ? opts.path : (0, import_node_path13.resolve)(cwd, opts.path)];
+    files = [(0, import_node_path15.isAbsolute)(opts.path) ? opts.path : (0, import_node_path15.resolve)(cwd, opts.path)];
     forcedKind = opts.schema;
   } else {
     forcedKind = "playbook";
-    const playbooksDir = (0, import_node_path13.join)(repoRoot, ".fadeno", "playbooks");
-    if (!(0, import_node_fs13.existsSync)(playbooksDir)) {
+    const playbooksDir = (0, import_node_path15.join)(repoRoot, ".fadeno", "playbooks");
+    if (!(0, import_node_fs15.existsSync)(playbooksDir)) {
       throw new ValidateError(`No playbooks directory at ${playbooksDir}.`);
     }
-    files = (0, import_node_fs13.readdirSync)(playbooksDir).filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort().map((f) => (0, import_node_path13.join)(playbooksDir, f));
+    files = (0, import_node_fs15.readdirSync)(playbooksDir).filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort().map((f) => (0, import_node_path15.join)(playbooksDir, f));
     if (files.length === 0) {
       throw new ValidateError(`No playbooks (*.yaml) found in ${playbooksDir}.`);
     }
@@ -16988,13 +17381,16 @@ Run \`fadeno init --codex\` or \`fadeno init --claude\` first.`
 }
 
 // src/commands/verify.ts
-var import_node_fs14 = require("node:fs");
-var import_node_path14 = require("node:path");
-var import_yaml9 = __toESM(require_dist(), 1);
+var import_node_fs16 = require("node:fs");
+var import_node_path16 = require("node:path");
+var import_yaml10 = __toESM(require_dist(), 1);
 var VerifyError = class extends Error {
 };
 function resolveArtifact(runDir, rel) {
-  return (0, import_node_path14.isAbsolute)(rel) ? rel : (0, import_node_path14.join)(runDir, rel);
+  return (0, import_node_path16.isAbsolute)(rel) ? rel : (0, import_node_path16.join)(runDir, rel);
+}
+function skip(check, detail2) {
+  return { check, status: "skip", detail: detail2 };
 }
 function runVerify(opts) {
   const hasRun = opts.run != null;
@@ -17010,13 +17406,48 @@ function runVerify(opts) {
   } else {
     run = resolveRun(repoRoot, opts.run);
   }
-  const schemas = new SchemaSet((0, import_node_path14.join)(repoRoot, ".fadeno", "schemas"));
+  let mode;
+  try {
+    mode = ledgerMode(run, opts.legacy === true);
+  } catch (err) {
+    if (err instanceof RunLedgerError) throw new VerifyError(err.message);
+    throw err;
+  }
+  const legacy = mode === "legacy";
+  const schemas = new SchemaSet((0, import_node_path16.join)(repoRoot, ".fadeno", "schemas"));
   const findings = [];
-  findings.push(checkRunSchema(run, schemas));
-  const { events, badLines } = readEvents(run.dir);
-  findings.push(checkEventsParseable(events, badLines));
+  findings.push(
+    legacy ? skip("ledger-version", "legacy ledger read in compatibility mode (--legacy)") : { check: "ledger-version", status: "ok", detail: `schema_version ${RUN_LEDGER_SCHEMA_VERSION}` }
+  );
+  findings.push(
+    legacy ? skip("run-schema", "legacy run.yaml predates the current schema") : checkRunSchema(run, schemas)
+  );
+  const raw = readEvents(run.dir);
+  const events = legacy ? normalizeLegacyEvents(raw.events) : raw.events;
+  findings.push(checkEventsParseable(events, raw.badLines));
+  findings.push(
+    legacy ? skip("events-seq", "no sequence numbers recorded (legacy ledger)") : checkEventsSeq(events)
+  );
   findings.push(checkTerminalStatus(run, opts.allowFailed === true));
+  findings.push(checkTerminalEvents(run, events));
+  findings.push(
+    legacy ? skip("artifact-manifests", "no manifests recorded (legacy ledger)") : checkArtifactManifests(events)
+  );
   findings.push(checkArtifactsExist(run, events));
+  findings.push(
+    legacy ? skip("artifact-digests", "no recorded digests (legacy ledger)") : checkArtifactDigests(run, events)
+  );
+  findings.push(
+    legacy ? skip("artifact-validation", "no recorded validation (legacy ledger)") : checkArtifactValidation(run, schemas, events)
+  );
+  const resolution = resolveActiveArtifacts(events);
+  findings.push(
+    legacy ? skip("artifact-immutability", "no recorded digests (legacy ledger)") : checkImmutability(resolution)
+  );
+  findings.push(
+    legacy ? skip("artifact-resolution", "no manifests recorded (legacy ledger)") : checkResolution(resolution)
+  );
+  findings.push(checkPromptSnapshots(run, events));
   const lastResultByCondition = /* @__PURE__ */ new Map();
   for (const event of events) {
     if (event.type !== "gate_evaluated") continue;
@@ -17025,14 +17456,15 @@ function runVerify(opts) {
   if (run.status === "completed") {
     findings.push(checkGateCoherence(lastResultByCondition));
   }
+  findings.push(checkHumanDecisions(events));
   const ok = !findings.some((f) => f.status === "fail");
-  return { run, findings, ok };
+  return { run, mode, findings, ok };
 }
 function checkRunSchema(run, schemas) {
   const check = "run-schema";
   let doc;
   try {
-    doc = (0, import_yaml9.parse)((0, import_node_fs14.readFileSync)((0, import_node_path14.join)(run.dir, "run.yaml"), "utf8"));
+    doc = (0, import_yaml10.parse)((0, import_node_fs16.readFileSync)((0, import_node_path16.join)(run.dir, "run.yaml"), "utf8"));
   } catch (err) {
     return { check, status: "fail", detail: `run.yaml did not parse: ${err.message}` };
   }
@@ -17064,6 +17496,22 @@ function checkEventsParseable(events, badLines) {
   }
   return { check, status: "ok", detail: `${events.length} events, 0 bad lines` };
 }
+function checkEventsSeq(events) {
+  const check = "events-seq";
+  const problems = [];
+  for (let i = 0; i < events.length; i += 1) {
+    const expected = i + 1;
+    const seq = events[i].seq;
+    if (seq == null) problems.push(`event ${expected} (${events[i].type}) has no seq`);
+    else if (seq !== expected) problems.push(`event ${expected} (${events[i].type}) has seq ${seq}, expected ${expected}`);
+  }
+  if (problems.length === 0) {
+    return { check, status: "ok", detail: `seq contiguous 1..${events.length}` };
+  }
+  const shown = problems.slice(0, 5).join("; ");
+  const more = problems.length > 5 ? `; \u2026(+${problems.length - 5} more)` : "";
+  return { check, status: "fail", detail: `${shown}${more}` };
+}
 function checkTerminalStatus(run, allowFailed) {
   const check = "terminal-status";
   const status = run.status;
@@ -17082,6 +17530,71 @@ function checkTerminalStatus(run, allowFailed) {
   }
   return { check, status: "fail", detail: `unexpected status: ${status ?? "(none)"}` };
 }
+var TERMINAL_EVENT_TYPES = /* @__PURE__ */ new Set(["run_completed", "run_failed", "run_aborted"]);
+function checkTerminalEvents(run, events) {
+  const check = "terminal-events";
+  let lastTerminal = null;
+  for (const event of events) {
+    if (TERMINAL_EVENT_TYPES.has(event.type)) lastTerminal = event.type;
+  }
+  const status = run.status;
+  const expected = status === "completed" || status === "failed" || status === "aborted" ? `run_${status}` : null;
+  if (expected == null) {
+    if (lastTerminal == null) {
+      return { check, status: "ok", detail: `status ${status ?? "(none)"}, no terminal event` };
+    }
+    return {
+      check,
+      status: "fail",
+      detail: `run.yaml says ${status ?? "(none)"} but events record ${lastTerminal}`
+    };
+  }
+  if (lastTerminal === expected) {
+    return { check, status: "ok", detail: `${expected} agrees with run.yaml status` };
+  }
+  if (lastTerminal == null) {
+    return { check, status: "fail", detail: `run.yaml says ${status} but no terminal event is recorded` };
+  }
+  return {
+    check,
+    status: "fail",
+    detail: `run.yaml says ${status} but the last terminal event is ${lastTerminal}`
+  };
+}
+var MANIFEST_FIELDS = [
+  ["artifact_id", (v) => typeof v === "string"],
+  ["artifact", (v) => typeof v === "string"],
+  ["logical_name", (v) => typeof v === "string"],
+  ["generation", (v) => typeof v === "number"],
+  ["bytes", (v) => typeof v === "number"],
+  ["sha256", (v) => typeof v === "string"],
+  ["media_type", (v) => typeof v === "string"],
+  ["validation", (v) => v !== null && typeof v === "object"]
+];
+function checkArtifactManifests(events) {
+  const check = "artifact-manifests";
+  let count = 0;
+  const problems = [];
+  const ids = /* @__PURE__ */ new Map();
+  for (const event of events) {
+    if (event.type !== "artifact_created") continue;
+    count += 1;
+    const missing = MANIFEST_FIELDS.filter(([key, okFn]) => !okFn(event.extra[key])).map(([key]) => key);
+    if (missing.length > 0) {
+      const label = typeof event.extra.artifact === "string" ? event.extra.artifact : `(seq ${event.seq ?? "?"})`;
+      problems.push(`${label}: missing ${missing.join(", ")}`);
+    }
+    const id = event.extra.artifact_id;
+    if (typeof id === "string") ids.set(id, (ids.get(id) ?? 0) + 1);
+  }
+  for (const [id, n] of ids) {
+    if (n > 1) problems.push(`artifact_id ${id} recorded ${n} times`);
+  }
+  if (problems.length === 0) {
+    return { check, status: "ok", detail: `${count} manifest(s), all fields present` };
+  }
+  return { check, status: "fail", detail: problems.join("; ") };
+}
 function checkArtifactsExist(run, events) {
   const check = "artifacts-exist";
   const paths = [];
@@ -17089,7 +17602,7 @@ function checkArtifactsExist(run, events) {
     if (event.type !== "artifact_created") continue;
     if (typeof event.extra.artifact === "string") paths.push(event.extra.artifact);
   }
-  const missing = paths.filter((p) => !(0, import_node_fs14.existsSync)(resolveArtifact(run.dir, p)));
+  const missing = paths.filter((p) => !(0, import_node_fs16.existsSync)(resolveArtifact(run.dir, p)));
   if (missing.length === 0) {
     return { check, status: "ok", detail: `${paths.length}/${paths.length} present` };
   }
@@ -17098,6 +17611,129 @@ function checkArtifactsExist(run, events) {
     status: "fail",
     detail: `missing ${missing.join(", ")} (${paths.length - missing.length}/${paths.length} present)`
   };
+}
+function checkArtifactDigests(run, events) {
+  const check = "artifact-digests";
+  let checked = 0;
+  let absent = 0;
+  const problems = [];
+  for (const event of events) {
+    if (event.type !== "artifact_created") continue;
+    const rel = typeof event.extra.artifact === "string" ? event.extra.artifact : null;
+    const recordedSha = typeof event.extra.sha256 === "string" ? event.extra.sha256 : null;
+    const recordedBytes = typeof event.extra.bytes === "number" ? event.extra.bytes : null;
+    if (rel == null || recordedSha == null) continue;
+    const abs = resolveArtifact(run.dir, rel);
+    if (!(0, import_node_fs16.existsSync)(abs)) {
+      absent += 1;
+      continue;
+    }
+    checked += 1;
+    const bytes = (0, import_node_fs16.readFileSync)(abs);
+    if (sha256Hex(bytes) !== recordedSha) {
+      problems.push(`${rel}: recorded sha256 does not match the bytes on disk`);
+    } else if (recordedBytes != null && bytes.length !== recordedBytes) {
+      problems.push(`${rel}: recorded ${recordedBytes} bytes, found ${bytes.length}`);
+    }
+  }
+  if (problems.length > 0) {
+    return { check, status: "fail", detail: problems.join("; ") };
+  }
+  const absentNote = absent > 0 ? `, ${absent} missing (see artifacts-exist)` : "";
+  return { check, status: "ok", detail: `${checked}/${checked} digests match${absentNote}` };
+}
+function checkArtifactValidation(run, schemas, events) {
+  const check = "artifact-validation";
+  let checked = 0;
+  const problems = [];
+  for (const event of events) {
+    if (event.type !== "artifact_created") continue;
+    const validation = event.extra.validation;
+    if (validation === null || typeof validation !== "object") continue;
+    const recorded = validation;
+    if (typeof recorded.schema !== "string" || typeof recorded.ok !== "boolean") continue;
+    const rel = typeof event.extra.artifact === "string" ? event.extra.artifact : null;
+    if (rel == null) continue;
+    const abs = resolveArtifact(run.dir, rel);
+    if (!(0, import_node_fs16.existsSync)(abs)) continue;
+    checked += 1;
+    let parsed;
+    try {
+      parsed = JSON.parse((0, import_node_fs16.readFileSync)(abs, "utf8"));
+    } catch {
+      problems.push(`${rel}: recorded as ${recorded.schema} but is not valid JSON`);
+      continue;
+    }
+    let validate;
+    try {
+      validate = schemas.get(recorded.schema);
+    } catch (err) {
+      problems.push(`${rel}: ${err.message}`);
+      continue;
+    }
+    const recomputedOk = Boolean(validate(parsed));
+    if (recomputedOk !== recorded.ok) {
+      problems.push(`${rel}: recorded validation ok=${String(recorded.ok)}, recomputed ok=${String(recomputedOk)}`);
+    }
+  }
+  if (problems.length > 0) {
+    return { check, status: "fail", detail: problems.join("; ") };
+  }
+  return { check, status: "ok", detail: `${checked} typed artifact(s) revalidated` };
+}
+function checkImmutability(resolution) {
+  const check = "artifact-immutability";
+  if (resolution.immutabilityViolations.length === 0) {
+    return { check, status: "ok", detail: "no path re-recorded with different bytes" };
+  }
+  return { check, status: "fail", detail: resolution.immutabilityViolations.join("; ") };
+}
+function checkResolution(resolution) {
+  const check = "artifact-resolution";
+  if (resolution.conflicts.length === 0) {
+    return {
+      check,
+      status: "ok",
+      detail: `${resolution.active.length} active artifact(s), resolution unambiguous`
+    };
+  }
+  return { check, status: "fail", detail: resolution.conflicts.join("; ") };
+}
+function checkPromptSnapshots(run, events) {
+  const check = "prompt-snapshots";
+  let count = 0;
+  const problems = [];
+  for (const event of events) {
+    if (event.type !== "prompt_assembled") continue;
+    count += 1;
+    const promptPath = typeof event.extra.prompt_path === "string" ? event.extra.prompt_path : null;
+    const promptSha = typeof event.extra.prompt_sha256 === "string" ? event.extra.prompt_sha256 : null;
+    if (promptPath == null || promptSha == null) {
+      problems.push(`prompt_assembled (seq ${event.seq ?? "?"}) records no snapshot path/digest`);
+      continue;
+    }
+    const abs = resolveArtifact(run.dir, promptPath);
+    if (!(0, import_node_fs16.existsSync)(abs)) {
+      problems.push(`${promptPath}: snapshot is missing`);
+    } else if (sha256Hex((0, import_node_fs16.readFileSync)(abs)) !== promptSha) {
+      problems.push(`${promptPath}: recorded sha256 does not match the snapshot on disk`);
+    }
+    const inputs = Array.isArray(event.extra.inputs) ? event.extra.inputs : [];
+    for (const input of inputs) {
+      if (input === null || typeof input !== "object") continue;
+      const rec = input;
+      if (typeof rec.path !== "string" || typeof rec.sha256 !== "string") continue;
+      const inputAbs = resolveArtifact(run.dir, rec.path);
+      if (!(0, import_node_fs16.existsSync)(inputAbs)) {
+        problems.push(`${promptPath}: input ${rec.path} is missing`);
+      } else if (sha256Hex((0, import_node_fs16.readFileSync)(inputAbs)) !== rec.sha256) {
+        problems.push(`${promptPath}: input ${rec.path} no longer matches its recorded sha256`);
+      }
+    }
+  }
+  if (count === 0) return skip(check, "no prompt snapshots recorded");
+  if (problems.length > 0) return { check, status: "fail", detail: problems.join("; ") };
+  return { check, status: "ok", detail: `${count} snapshot(s), all digests match` };
 }
 function checkGateEvent(run, schemas, event, lastResultByCondition) {
   const condition = typeof event.extra.condition === "string" ? event.extra.condition : "(unknown)";
@@ -17117,12 +17753,12 @@ function checkGateEvent(run, schemas, event, lastResultByCondition) {
     return { check, status: "fail", detail: "gate event recorded no artifact to recompute from" };
   }
   const artifactPath = resolveArtifact(run.dir, artifactRel);
-  if (!(0, import_node_fs14.existsSync)(artifactPath)) {
+  if (!(0, import_node_fs16.existsSync)(artifactPath)) {
     return { check, status: "fail", detail: `artifact ${artifactRel} is missing; cannot recompute` };
   }
   let parsed;
   try {
-    parsed = JSON.parse((0, import_node_fs14.readFileSync)(artifactPath, "utf8"));
+    parsed = JSON.parse((0, import_node_fs16.readFileSync)(artifactPath, "utf8"));
   } catch (err) {
     return { check, status: "fail", detail: `artifact ${artifactRel} is not valid JSON: ${err.message}` };
   }
@@ -17156,6 +17792,27 @@ function checkGateCoherence(lastResultByCondition) {
   const detail2 = incoherent.map(([cond, result]) => `${cond}=${result}`).join(", ");
   return { check, status: "fail", detail: `completed run with non-passing latest gate: ${detail2}` };
 }
+function checkHumanDecisions(events) {
+  const check = "human-decisions";
+  const byStep = /* @__PURE__ */ new Map();
+  let count = 0;
+  for (const event of events) {
+    if (event.type !== "human_decision") continue;
+    count += 1;
+    const key = event.step ?? "(no step)";
+    const branch = typeof event.extra.branch === "string" ? event.extra.branch : "(none)";
+    const set = byStep.get(key) ?? /* @__PURE__ */ new Set();
+    set.add(branch);
+    byStep.set(key, set);
+  }
+  if (count === 0) return skip(check, "no human decisions recorded");
+  const conflicting = [...byStep.entries()].filter(([, branches]) => branches.size > 1);
+  if (conflicting.length === 0) {
+    return { check, status: "ok", detail: `${count} decision(s), none conflicting` };
+  }
+  const detail2 = conflicting.map(([step, branches]) => `${step}: ${[...branches].join(" vs ")}`).join("; ");
+  return { check, status: "fail", detail: `conflicting decisions \u2014 ${detail2}` };
+}
 
 // src/cli.ts
 var HELP = `fadeno \u2014 the playbook layer for AI coding agents
@@ -17170,9 +17827,9 @@ Usage:
   fadeno prompt <run> <step> [flags]    Assemble (and record) a step's actor prompt
   fadeno next <run>                     Emit the next actionable step (JSON flow cursor)
   fadeno runs                           List run ledgers under .fadeno/runs/
-  fadeno show <run>                     Show a run summary, timeline, and artifacts
-  fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic gate claims (or --latest)
-  fadeno plugin [dir]                   Generate a Claude Code plugin (default ./plugin)
+  fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
+  fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic claims (or --latest)
+  fadeno plugin [dir] [--codex]         Generate a Claude Code (default) or Codex plugin
 
 Options:
   --with-hooks            (init) Also scaffold tier-2 enforcement hooks
@@ -17194,6 +17851,8 @@ Options:
   --no-record             (prompt) Preview only: write no snapshot or event
   --latest                (verify) Audit the newest run instead of a named one
   --allow-failed          (verify) Accept an honest failed/aborted terminal
+  --legacy                (show/verify/next) Read a pre-0.2 ledger in explicit compatibility mode
+  --events                (show) Print the raw event timeline instead of the step projection
   -h, --help              Show this help
   -v, --version           Show version
 
@@ -17221,7 +17880,7 @@ function printInitSummary(target, repoRoot, results, withHooks, dataOnly) {
   console.log(`Fadeno initialized for ${target} in ${repoRoot}
 `);
   for (const r of results) {
-    console.log(`  ${r.status.padEnd(11)} ${(0, import_node_path15.relative)(repoRoot, r.path) || r.path}`);
+    console.log(`  ${r.status.padEnd(11)} ${(0, import_node_path17.relative)(repoRoot, r.path) || r.path}`);
   }
   console.log(
     `
@@ -17259,7 +17918,7 @@ function printIssue(issue) {
 function printValidate(outcome) {
   let warnings = 0;
   for (const result of outcome.results) {
-    const rel = (0, import_node_path15.relative)(outcome.repoRoot, result.file) || result.file;
+    const rel = (0, import_node_path17.relative)(outcome.repoRoot, result.file) || result.file;
     const fileWarnings = result.issues.filter((i) => i.severity === "warning").length;
     warnings += fileWarnings;
     if (result.ok) {
@@ -17289,7 +17948,8 @@ function formatRunLine(run) {
   const status = run.status ?? "?";
   const playbook = run.playbook ?? "?";
   const task = run.task ? truncateWithEllipsis(run.task, 60) : "?";
-  return `${run.runId}  [${status}]  ${playbook} \u2014 ${task}`;
+  const legacyTag = run.schemaVersion == null ? " [legacy]" : "";
+  return `${run.runId}  [${status}]${legacyTag}  ${playbook} \u2014 ${task}`;
 }
 function printRuns(runs) {
   if (runs.length === 0) {
@@ -17340,10 +18000,44 @@ function renderEvent(event) {
     }
   }
 }
-function printShow(repoRoot, result) {
-  const { run, events, badLines, artifacts } = result;
+var STEP_GLYPHS = { done: "\u2713", current: "\u2192", failed: "\u2717" };
+function stepSummary(step) {
+  const parts = [];
+  if (step.artifacts > 0) parts.push(`${step.artifacts} artifact${step.artifacts === 1 ? "" : "s"}`);
+  for (const gate of step.gates) parts.push(`gate ${gate.condition} \u2192 ${gate.result}`);
+  if (step.iterations > 0) parts.push(`${step.iterations} iteration${step.iterations === 1 ? "" : "s"}`);
+  for (const decision of step.decisions) parts.push(`decision: ${decision}`);
+  return parts.join(" \xB7 ");
+}
+function printProjection(projection) {
+  console.log("\nsteps");
+  if (projection.steps.length === 0) console.log("  (no steps recorded)");
+  const width = Math.max(0, ...projection.steps.map((s) => s.id.length));
+  for (const step of projection.steps) {
+    const summary = stepSummary(step);
+    console.log(`  ${STEP_GLYPHS[step.state]} ${step.id.padEnd(width)}${summary ? `  ${summary}` : ""}`);
+  }
+  if (projection.active.length > 0) {
+    console.log("\nactive artifacts");
+    for (const art of projection.active) {
+      const memberNote = art.member != null ? ` \xB7 ${art.member}` : "";
+      const bytesNote = art.bytes != null ? ` \xB7 ${art.bytes} B` : "";
+      console.log(`  ${art.path}  (gen ${art.generation}${memberNote}${bytesNote})`);
+    }
+  }
+  if (projection.decisions.length > 0) {
+    console.log("\ndecisions");
+    for (const d of projection.decisions) console.log(`  ${d.step ?? "(run)"} \u2192 ${d.branch}`);
+  }
+  if (projection.failures.length > 0) {
+    console.log("\nfailures");
+    for (const f of projection.failures) console.log(`  ${f}`);
+  }
+}
+function printShow(repoRoot, result, rawTimeline) {
+  const { run, mode, events, badLines, artifacts, projection } = result;
   const dash = (value) => value ?? "\u2014";
-  const relDir = (0, import_node_path15.relative)(repoRoot, run.dir) || run.dir;
+  const relDir = (0, import_node_path17.relative)(repoRoot, run.dir) || run.dir;
   console.log(`run ${run.runId}`);
   console.log(`  playbook:  ${dash(run.playbook)}`);
   console.log(`  task:      ${dash(run.task)}`);
@@ -17352,11 +18046,18 @@ function printShow(repoRoot, result) {
   console.log(`  started:   ${dash(run.startedAt)}`);
   console.log(`  ended:     ${dash(run.endedAt)}`);
   console.log(`  dir:       ${relDir}`);
-  const eventLabel = events.length === 1 ? "event" : "events";
-  console.log(`
+  if (mode === "legacy") {
+    console.log("\n  legacy ledger (read via --legacy; not verifiable to 0.2 guarantees)");
+  }
+  if (projection != null && !rawTimeline) {
+    printProjection(projection);
+  } else {
+    const eventLabel = events.length === 1 ? "event" : "events";
+    console.log(`
 timeline (${events.length} ${eventLabel})`);
-  for (const event of events) {
-    console.log(`  ${utcTime(event.timestamp)}  ${renderEvent(event)}`);
+    for (const event of events) {
+      console.log(`  ${utcTime(event.timestamp)}  ${renderEvent(event)}`);
+    }
   }
   for (const lineNo of badLines) {
     console.log(`  line ${lineNo}: unparseable event (skipped)`);
@@ -17373,7 +18074,7 @@ function printVerify(result) {
   console.log("");
   for (const f of findings) {
     const token = f.status === "fail" ? "FAIL" : f.status;
-    const line = `  ${token.padEnd(4)}  ${f.check.padEnd(20)}  ${f.detail}`;
+    const line = `  ${token.padEnd(4)}  ${f.check.padEnd(22)}  ${f.detail}`;
     if (f.status === "fail") console.error(line);
     else console.log(line);
   }
@@ -17417,6 +18118,8 @@ function main(argv) {
         "no-record": { type: "boolean" },
         latest: { type: "boolean" },
         "allow-failed": { type: "boolean" },
+        legacy: { type: "boolean" },
+        events: { type: "boolean" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "v" }
       }
@@ -17507,16 +18210,28 @@ function main(argv) {
       const parts = [];
       if (result.updatedFields.length) parts.push(`updated ${result.updatedFields.join(", ")}`);
       if (result.appendedEvents.length) parts.push(`logged ${result.appendedEvents.join(", ")}`);
-      console.log(`${(0, import_node_path15.relative)(process.cwd(), result.runDir) || result.runDir}: ${parts.join("; ")}`);
+      console.log(`${(0, import_node_path17.relative)(process.cwd(), result.runDir) || result.runDir}: ${parts.join("; ")}`);
+      if (result.manifest) {
+        const v = result.manifest.validation;
+        const note = v.schema ? `, ${v.schema}: ${v.ok ? "valid" : "INVALID"}` : "";
+        console.log(
+          `  ${result.manifest.artifact_id}  sha256 ${result.manifest.sha256.slice(0, 12)}\u2026  gen ${result.manifest.generation}${note}`
+        );
+      }
       return 0;
     }
     case "plugin": {
-      const { outDir, results } = runPlugin({ outDir: positionals[1], force: values.force });
+      const codex = Boolean(values.codex);
+      const { outDir, results } = codex ? runCodexPlugin({ outDir: positionals[1], force: values.force }) : runPlugin({ outDir: positionals[1], force: values.force });
       const counts = { created: 0, overwritten: 0, appended: 0, skipped: 0 };
       for (const r of results) counts[r.status] += 1;
-      console.log(`Generated Fadeno plugin in ${outDir}`);
+      console.log(`Generated Fadeno ${codex ? "Codex" : "Claude Code"} plugin in ${outDir}`);
       console.log(`  ${counts.created} created, ${counts.overwritten} overwritten, ${counts.skipped} skipped.`);
-      console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path15.relative)(process.cwd(), outDir) + "`");
+      if (codex) {
+        console.log("\nTest it: `codex plugin marketplace add . && codex plugin add fadeno@fadeno`");
+      } else {
+        console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path17.relative)(process.cwd(), outDir) + "`");
+      }
       return 0;
     }
     case "gate": {
@@ -17588,7 +18303,7 @@ function main(argv) {
     case "next": {
       const run = positionals[1];
       if (!run) throw new Error("Usage: fadeno next <run>");
-      const result = runNext({ run });
+      const result = runNext({ run, legacy: values.legacy });
       console.log(JSON.stringify(result, null, 2));
       return 0;
     }
@@ -17599,16 +18314,17 @@ function main(argv) {
     }
     case "show": {
       const run = positionals[1];
-      if (!run) throw new Error("Usage: fadeno show <run>");
-      const result = runShow({ run });
-      printShow(findRepoRoot(), result);
+      if (!run) throw new Error("Usage: fadeno show <run> [--events] [--legacy]");
+      const result = runShow({ run, legacy: values.legacy });
+      printShow(findRepoRoot(), result, Boolean(values.events));
       return 0;
     }
     case "verify": {
       const result = runVerify({
         run: positionals[1],
         latest: values.latest,
-        allowFailed: values["allow-failed"]
+        allowFailed: values["allow-failed"],
+        legacy: values.legacy
       });
       printVerify(result);
       return result.ok ? 0 : 1;

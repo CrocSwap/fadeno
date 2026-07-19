@@ -18,6 +18,7 @@ interface SeedOpts {
   status?: string;
   currentStep?: string | null;
   events?: string;
+  legacy?: boolean;
 }
 
 function seed(root: string, opts: SeedOpts = {}): string {
@@ -34,6 +35,7 @@ function seed(root: string, opts: SeedOpts = {}): string {
     join(dir, 'run.yaml'),
     [
       `run_id: ${RUN_ID}`,
+      ...(opts.legacy ? [] : ['schema_version: "0.2"']),
       'playbook: dual-architect-review',
       `status: ${opts.status ?? 'running'}`,
       `task: "${TASK}"`,
@@ -74,10 +76,10 @@ test('next at cross_review returns the map with both architects', (t) => {
     events: lines(
       { type: 'run_started', step: null, timestamp: TS },
       { type: 'step_started', step: 'frame', timestamp: TS },
-      { type: 'artifact_written', step: 'frame', artifact: 'artifacts/brief.md', timestamp: TS },
+      { type: 'artifact_created', step: 'frame', artifact: 'artifacts/brief.md', timestamp: TS },
       { type: 'step_started', step: 'draft_approaches', timestamp: TS },
-      { type: 'artifact_written', step: 'draft_approaches', artifact: 'artifacts/approach-sol.md', timestamp: TS },
-      { type: 'artifact_written', step: 'draft_approaches', artifact: 'artifacts/approach-fable.md', timestamp: TS },
+      { type: 'artifact_created', step: 'draft_approaches', artifact: 'artifacts/approach-sol.md', timestamp: TS },
+      { type: 'artifact_created', step: 'draft_approaches', artifact: 'artifacts/approach-fable.md', timestamp: TS },
       { type: 'step_started', step: 'cross_review', timestamp: TS },
     ),
   });
@@ -103,24 +105,24 @@ test('next after cross_review complete returns convergence_gate', (t) => {
     events: lines(
       { type: 'run_started', step: null, timestamp: TS },
       { type: 'step_started', step: 'frame', timestamp: TS },
-      { type: 'artifact_written', step: 'frame', artifact: 'artifacts/brief.md', timestamp: TS },
+      { type: 'artifact_created', step: 'frame', artifact: 'artifacts/brief.md', timestamp: TS },
       { type: 'step_started', step: 'draft_approaches', timestamp: TS },
-      { type: 'artifact_written', step: 'draft_approaches', artifact: 'artifacts/approach-sol.md', timestamp: TS },
-      { type: 'artifact_written', step: 'draft_approaches', artifact: 'artifacts/approach-fable.md', timestamp: TS },
+      { type: 'artifact_created', step: 'draft_approaches', artifact: 'artifacts/approach-sol.md', timestamp: TS },
+      { type: 'artifact_created', step: 'draft_approaches', artifact: 'artifacts/approach-fable.md', timestamp: TS },
       { type: 'step_started', step: 'cross_review', timestamp: TS },
       {
-        type: 'artifact_written',
+        type: 'artifact_created',
         step: 'cross_review',
         artifact: 'artifacts/cross-review.architect_sol.json',
         timestamp: TS,
       },
       {
-        type: 'artifact_written',
+        type: 'artifact_created',
         step: 'cross_review',
         artifact: 'artifacts/cross-review.architect_fable.json',
         timestamp: TS,
       },
-      { type: 'artifact_written', step: 'cross_review', artifact: 'artifacts/cross-review.json', timestamp: TS },
+      { type: 'artifact_created', step: 'cross_review', artifact: 'artifacts/cross-review.json', timestamp: TS },
     ),
   });
   const result = runNext({ repoRoot: root, run: RUN_ID });
@@ -143,24 +145,24 @@ test('golden: re_cross_review / convergence boundary — condition fail, iters r
     events: lines(
       { type: 'run_started', step: null, timestamp: TS },
       { type: 'step_started', step: 'frame', timestamp: TS },
-      { type: 'artifact_written', step: 'frame', artifact: 'artifacts/brief.md', timestamp: TS },
+      { type: 'artifact_created', step: 'frame', artifact: 'artifacts/brief.md', timestamp: TS },
       { type: 'step_started', step: 'draft_approaches', timestamp: TS },
-      { type: 'artifact_written', step: 'draft_approaches', artifact: 'artifacts/approach-sol.md', timestamp: TS },
-      { type: 'artifact_written', step: 'draft_approaches', artifact: 'artifacts/approach-fable.md', timestamp: TS },
+      { type: 'artifact_created', step: 'draft_approaches', artifact: 'artifacts/approach-sol.md', timestamp: TS },
+      { type: 'artifact_created', step: 'draft_approaches', artifact: 'artifacts/approach-fable.md', timestamp: TS },
       { type: 'step_started', step: 'cross_review', timestamp: TS },
       {
-        type: 'artifact_written',
+        type: 'artifact_created',
         step: 'cross_review',
         artifact: 'artifacts/cross-review.architect_sol.json',
         timestamp: TS,
       },
       {
-        type: 'artifact_written',
+        type: 'artifact_created',
         step: 'cross_review',
         artifact: 'artifacts/cross-review.architect_fable.json',
         timestamp: TS,
       },
-      { type: 'artifact_written', step: 'cross_review', artifact: 'artifacts/cross-review.json', timestamp: TS },
+      { type: 'artifact_created', step: 'cross_review', artifact: 'artifacts/cross-review.json', timestamp: TS },
       { type: 'step_started', step: 'convergence_gate', timestamp: TS },
       {
         type: 'gate_evaluated',
@@ -174,32 +176,32 @@ test('golden: re_cross_review / convergence boundary — condition fail, iters r
       { type: 'loop_iteration_started', step: 'reconcile', iteration: 1, timestamp: TS },
       { type: 'step_started', step: 'revise_approaches', timestamp: TS },
       {
-        type: 'artifact_written',
+        type: 'artifact_created',
         step: 'revise_approaches',
         artifact: 'artifacts/approach-sol.v2.md',
         timestamp: TS,
       },
       {
-        type: 'artifact_written',
+        type: 'artifact_created',
         step: 'revise_approaches',
         artifact: 'artifacts/approach-fable.v2.md',
         timestamp: TS,
       },
       { type: 'step_started', step: 're_cross_review', timestamp: TS },
       {
-        type: 'artifact_written',
+        type: 'artifact_created',
         step: 're_cross_review',
         artifact: 'artifacts/cross-review.architect_sol.v2.json',
         timestamp: TS,
       },
       {
-        type: 'artifact_written',
+        type: 'artifact_created',
         step: 're_cross_review',
         artifact: 'artifacts/cross-review.architect_fable.v2.json',
         timestamp: TS,
       },
       {
-        type: 'artifact_written',
+        type: 'artifact_created',
         step: 're_cross_review',
         artifact: 'artifacts/cross-review.v2.json',
         timestamp: TS,
@@ -238,32 +240,32 @@ test('next after body complete without condition returns loop until evaluation',
       { type: 'loop_iteration_started', step: 'reconcile', iteration: 1, timestamp: TS },
       { type: 'step_started', step: 'revise_approaches', timestamp: TS },
       {
-        type: 'artifact_written',
+        type: 'artifact_created',
         step: 'revise_approaches',
         artifact: 'artifacts/approach-sol.v2.md',
         timestamp: TS,
       },
       {
-        type: 'artifact_written',
+        type: 'artifact_created',
         step: 'revise_approaches',
         artifact: 'artifacts/approach-fable.v2.md',
         timestamp: TS,
       },
       { type: 'step_started', step: 're_cross_review', timestamp: TS },
       {
-        type: 'artifact_written',
+        type: 'artifact_created',
         step: 're_cross_review',
         artifact: 'artifacts/cross-review.architect_sol.v2.json',
         timestamp: TS,
       },
       {
-        type: 'artifact_written',
+        type: 'artifact_created',
         step: 're_cross_review',
         artifact: 'artifacts/cross-review.architect_fable.v2.json',
         timestamp: TS,
       },
       {
-        type: 'artifact_written',
+        type: 'artifact_created',
         step: 're_cross_review',
         artifact: 'artifacts/cross-review.v2.json',
         timestamp: TS,
@@ -366,6 +368,15 @@ test('next errors on unknown run', (t) => {
   assert.throws(() => runNext({ repoRoot: root, run: 'nope' }), NextError);
 });
 
+test('legacy ledger without --legacy is refused', (t) => {
+  const root = tempRepo(t);
+  seed(root, { legacy: true });
+  assert.throws(
+    () => runNext({ repoRoot: root, run: RUN_ID }),
+    (err: unknown) => err instanceof NextError && /legacy ledger format/.test((err as Error).message),
+  );
+});
+
 test('untyped role-list map without output_path is not promptable (matches fadeno prompt)', (t) => {
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
@@ -400,6 +411,7 @@ flow:
     join(dir, 'run.yaml'),
     [
       `run_id: ${runId}`,
+      'schema_version: "0.2"',
       'playbook: untyped-map',
       'status: running',
       'task: "x"',
@@ -433,20 +445,20 @@ test('gated map with both members but no collective stays on the map (resume-saf
     events: lines(
       { type: 'run_started', step: null, timestamp: TS },
       { type: 'step_started', step: 'frame', timestamp: TS },
-      { type: 'artifact_written', step: 'frame', artifact: 'artifacts/brief.md', timestamp: TS },
+      { type: 'artifact_created', step: 'frame', artifact: 'artifacts/brief.md', timestamp: TS },
       { type: 'step_started', step: 'draft_approaches', timestamp: TS },
-      { type: 'artifact_written', step: 'draft_approaches', artifact: 'artifacts/approach-sol.md', timestamp: TS },
-      { type: 'artifact_written', step: 'draft_approaches', artifact: 'artifacts/approach-fable.md', timestamp: TS },
+      { type: 'artifact_created', step: 'draft_approaches', artifact: 'artifacts/approach-sol.md', timestamp: TS },
+      { type: 'artifact_created', step: 'draft_approaches', artifact: 'artifacts/approach-fable.md', timestamp: TS },
       { type: 'step_started', step: 'cross_review', timestamp: TS },
       {
-        type: 'artifact_written',
+        type: 'artifact_created',
         step: 'cross_review',
         artifact: 'artifacts/cross-review.architect_sol.json',
         member: 'architect_sol',
         timestamp: TS,
       },
       {
-        type: 'artifact_written',
+        type: 'artifact_created',
         step: 'cross_review',
         artifact: 'artifacts/cross-review.architect_fable.json',
         member: 'architect_fable',
@@ -486,10 +498,10 @@ test('next outputs for a promptable map match planMapMemberOutputs (shared with 
     events: lines(
       { type: 'run_started', step: null, timestamp: TS },
       { type: 'step_started', step: 'frame', timestamp: TS },
-      { type: 'artifact_written', step: 'frame', artifact: 'artifacts/brief.md', timestamp: TS },
+      { type: 'artifact_created', step: 'frame', artifact: 'artifacts/brief.md', timestamp: TS },
       { type: 'step_started', step: 'draft_approaches', timestamp: TS },
-      { type: 'artifact_written', step: 'draft_approaches', artifact: 'artifacts/approach-sol.md', timestamp: TS },
-      { type: 'artifact_written', step: 'draft_approaches', artifact: 'artifacts/approach-fable.md', timestamp: TS },
+      { type: 'artifact_created', step: 'draft_approaches', artifact: 'artifacts/approach-sol.md', timestamp: TS },
+      { type: 'artifact_created', step: 'draft_approaches', artifact: 'artifacts/approach-fable.md', timestamp: TS },
       { type: 'step_started', step: 'cross_review', timestamp: TS },
     ),
   });
@@ -518,6 +530,10 @@ test('run --member and --field attach to artifact/event records', (t) => {
   runInit({ target: 'codex', repoRoot: root });
   // Use a shipped starter so we don't need the experimental playbook.
   const { runId, runDir } = runNewRun({ repoRoot: root, playbook: 'code-change-review', task: 'member field demo' });
+
+  // artifact_created now builds a manifest, so the file must exist (12 bytes).
+  mkdirSync(join(runDir, 'artifacts', 'parts', 'review'), { recursive: true });
+  writeFileSync(join(runDir, 'artifacts', 'parts', 'review', 'substance_reviewer.json'), '{"ok":true}\n');
 
   runRun({
     repoRoot: root,

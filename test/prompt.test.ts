@@ -24,10 +24,10 @@ function sha256(text: string): string {
 const EVENTS_AT_CROSS_REVIEW = [
   '{"type":"run_started","step":null,"timestamp":"2026-07-12T21:18:58.647Z"}',
   '{"type":"step_started","step":"frame","timestamp":"2026-07-12T21:20:11.527Z"}',
-  '{"type":"artifact_written","step":"frame","artifact":"artifacts/brief.md","timestamp":"2026-07-12T21:21:10.365Z"}',
+  '{"type":"artifact_created","step":"frame","artifact":"artifacts/brief.md","timestamp":"2026-07-12T21:21:10.365Z"}',
   '{"type":"step_started","step":"draft_approaches","timestamp":"2026-07-12T21:21:10.416Z"}',
-  '{"type":"artifact_written","step":"draft_approaches","artifact":"artifacts/approach-sol.md","timestamp":"2026-07-12T21:28:35.231Z"}',
-  '{"type":"artifact_written","step":"draft_approaches","artifact":"artifacts/approach-fable.md","timestamp":"2026-07-12T21:31:15.350Z"}',
+  '{"type":"artifact_created","step":"draft_approaches","artifact":"artifacts/approach-sol.md","timestamp":"2026-07-12T21:28:35.231Z"}',
+  '{"type":"artifact_created","step":"draft_approaches","artifact":"artifacts/approach-fable.md","timestamp":"2026-07-12T21:31:15.350Z"}',
   '{"type":"step_started","step":"cross_review","timestamp":"2026-07-12T21:31:15.407Z"}',
   '',
 ].join('\n');
@@ -40,6 +40,7 @@ interface SeedOpts {
   artifacts?: Record<string, string>;
   playbook?: string;
   playbookName?: string;
+  legacy?: boolean;
 }
 
 function seed(root: string, opts: SeedOpts = {}): string {
@@ -55,6 +56,7 @@ function seed(root: string, opts: SeedOpts = {}): string {
     join(dir, 'run.yaml'),
     [
       `run_id: ${runId}`,
+      ...(opts.legacy ? [] : ['schema_version: "0.2"']),
       `playbook: ${name}`,
       `status: ${opts.status ?? 'running'}`,
       `task: "${TASK}"`,
@@ -167,10 +169,10 @@ test('a disk artifact with no event is invisible; an event after the cutoff is e
   const events = [
     '{"type":"run_started","step":null,"timestamp":"2026-07-12T21:18:58.647Z"}',
     '{"type":"step_started","step":"draft_approaches","timestamp":"2026-07-12T21:21:10.416Z"}',
-    '{"type":"artifact_written","step":"draft_approaches","artifact":"artifacts/approach-sol.md","timestamp":"2026-07-12T21:28:35.231Z"}',
-    '{"type":"artifact_written","step":"draft_approaches","artifact":"artifacts/approach-fable.md","timestamp":"2026-07-12T21:31:15.350Z"}',
+    '{"type":"artifact_created","step":"draft_approaches","artifact":"artifacts/approach-sol.md","timestamp":"2026-07-12T21:28:35.231Z"}',
+    '{"type":"artifact_created","step":"draft_approaches","artifact":"artifacts/approach-fable.md","timestamp":"2026-07-12T21:31:15.350Z"}',
     '{"type":"step_started","step":"cross_review","timestamp":"2026-07-12T21:31:15.407Z"}',
-    '{"type":"artifact_written","step":"revise_approaches","artifact":"artifacts/approach-fable.v2.md","timestamp":"2026-07-12T21:40:00.000Z"}',
+    '{"type":"artifact_created","step":"revise_approaches","artifact":"artifacts/approach-fable.v2.md","timestamp":"2026-07-12T21:40:00.000Z"}',
     '',
   ].join('\n');
   seed(root, {
@@ -212,8 +214,8 @@ test('a step with no step_started yet is preview-only (ahead of dispatch)', (t) 
   const events = [
     '{"type":"run_started","step":null,"timestamp":"2026-07-12T21:18:58.647Z"}',
     '{"type":"step_started","step":"draft_approaches","timestamp":"2026-07-12T21:21:10.416Z"}',
-    '{"type":"artifact_written","step":"draft_approaches","artifact":"artifacts/approach-sol.md","timestamp":"2026-07-12T21:28:35.231Z"}',
-    '{"type":"artifact_written","step":"draft_approaches","artifact":"artifacts/approach-fable.md","timestamp":"2026-07-12T21:31:15.350Z"}',
+    '{"type":"artifact_created","step":"draft_approaches","artifact":"artifacts/approach-sol.md","timestamp":"2026-07-12T21:28:35.231Z"}',
+    '{"type":"artifact_created","step":"draft_approaches","artifact":"artifacts/approach-fable.md","timestamp":"2026-07-12T21:31:15.350Z"}',
     '',
   ].join('\n');
   seed(root, { events });
@@ -230,7 +232,7 @@ test('an event `member` field drives attribution; otherwise it is neutral', (t) 
   const events = [
     '{"type":"run_started","step":null,"timestamp":"2026-07-12T21:18:58.647Z"}',
     '{"type":"step_started","step":"draft","timestamp":"2026-07-12T21:20:00.000Z"}',
-    '{"type":"artifact_written","step":"draft","artifact":"artifacts/note.md","member":"writer","timestamp":"2026-07-12T21:21:00.000Z"}',
+    '{"type":"artifact_created","step":"draft","artifact":"artifacts/note.md","member":"writer","timestamp":"2026-07-12T21:21:00.000Z"}',
     '{"type":"step_started","step":"review","timestamp":"2026-07-12T21:22:00.000Z"}',
     '',
   ].join('\n');
@@ -356,6 +358,7 @@ test('recording writes one snapshot + one prompt_assembled event; re-run reuses'
   assert.equal(assembled().length, 1);
   const manifest = assembled()[0]!;
   assert.equal(manifest.timestamp, '2026-07-12T22:00:00.000Z');
+  assert.equal(typeof manifest.seq, 'number');
   assert.equal(manifest.extra.prompt_sha256, first.sha256);
   assert.equal(manifest.extra.prompt_path, first.promptPath);
   assert.ok(typeof manifest.extra.playbook_sha256 === 'string');
@@ -400,6 +403,15 @@ test('a malformed events line fails before resolution', (t) => {
   assert.throws(
     () => runPrompt({ repoRoot: root, run: RUN_ID, step: 'cross_review', actor: 'architect_fable', record: false }),
     (err: unknown) => err instanceof PromptError && /events\.jsonl has malformed lines/.test((err as Error).message),
+  );
+});
+
+test('a legacy ledger (no schema_version) is refused even with --no-record', (t) => {
+  const root = tempRepo(t);
+  seed(root, { legacy: true });
+  assert.throws(
+    () => runPrompt({ repoRoot: root, run: RUN_ID, step: 'cross_review', actor: 'architect_fable', record: false }),
+    (err: unknown) => err instanceof PromptError && /legacy ledger/.test((err as Error).message),
   );
 });
 
@@ -507,12 +519,12 @@ flow:
 const RECONCILE_EVENTS = [
   '{"type":"run_started","step":null,"timestamp":"2026-07-12T21:18:58.647Z"}',
   '{"type":"step_started","step":"draft_approaches","timestamp":"2026-07-12T21:21:10.416Z"}',
-  '{"type":"artifact_written","step":"draft_approaches","artifact":"artifacts/approach-sol.md","timestamp":"2026-07-12T21:28:35.231Z"}',
-  '{"type":"artifact_written","step":"draft_approaches","artifact":"artifacts/approach-fable.md","timestamp":"2026-07-12T21:31:15.350Z"}',
+  '{"type":"artifact_created","step":"draft_approaches","artifact":"artifacts/approach-sol.md","timestamp":"2026-07-12T21:28:35.231Z"}',
+  '{"type":"artifact_created","step":"draft_approaches","artifact":"artifacts/approach-fable.md","timestamp":"2026-07-12T21:31:15.350Z"}',
   '{"type":"step_started","step":"cross_review","timestamp":"2026-07-12T21:31:15.407Z"}',
-  '{"type":"artifact_written","step":"cross_review","artifact":"artifacts/cross-review.architect_sol.json","timestamp":"2026-07-12T21:34:39.341Z"}',
-  '{"type":"artifact_written","step":"cross_review","artifact":"artifacts/cross-review.architect_fable.json","timestamp":"2026-07-12T21:39:45.934Z"}',
-  '{"type":"artifact_written","step":"cross_review","artifact":"artifacts/cross-review.json","timestamp":"2026-07-12T21:39:45.997Z"}',
+  '{"type":"artifact_created","step":"cross_review","artifact":"artifacts/cross-review.architect_sol.json","timestamp":"2026-07-12T21:34:39.341Z"}',
+  '{"type":"artifact_created","step":"cross_review","artifact":"artifacts/cross-review.architect_fable.json","timestamp":"2026-07-12T21:39:45.934Z"}',
+  '{"type":"artifact_created","step":"cross_review","artifact":"artifacts/cross-review.json","timestamp":"2026-07-12T21:39:45.997Z"}',
   '{"type":"step_started","step":"convergence_gate","timestamp":"2026-07-12T21:39:46.053Z"}',
   '{"type":"gate_evaluated","step":"convergence_gate","condition":"no_blocking_issues","artifact":"artifacts/cross-review.json","result":"fail","timestamp":"2026-07-12T21:39:46.132Z"}',
   '{"type":"step_started","step":"reconcile","timestamp":"2026-07-12T21:40:11.637Z"}',

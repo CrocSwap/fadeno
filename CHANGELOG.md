@@ -6,7 +6,61 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
+The provenance slice of the next protocol (capabilities 3 + 6 of
+`docs/experimental/next-protocol.md`): artifact manifests with sha256 digests,
+a much stricter `fadeno verify`, and a legible step projection as the default
+`fadeno show`. **Breaking: run-ledger format 0.2** — new ledgers carry
+`schema_version: "0.2"` and per-event `seq`; readers refuse unversioned
+(pre-0.2) ledgers unless `--legacy` is passed, and writers refuse them
+outright. Old traces stay auditable via `fadeno show|verify|next --legacy`, or
+with the fadeno version that produced them.
+
 ### Added
+
+- **Artifact manifests** — `fadeno run --artifact <path>` (and `--event
+  artifact_created`) now requires the file to exist, hashes it, and records
+  `artifact_id`, run-dir-relative `artifact` path, `logical_name`
+  (generation-stripped), `generation` (from the `.v<G>` marker), `bytes`,
+  `sha256`, `media_type`, and a record-time `validation` verdict (typed
+  artifacts are shape-detected and schema-checked; failures recorded honestly
+  as `ok: false`). Artifacts are immutable: re-recording a path with different
+  bytes is refused — write a new generation instead. Measured manifest fields
+  always win over colliding `--field` values.
+- **Sequence numbers** — every appended event carries a contiguous 1-based
+  `seq` (stamped by a shared ledger writer used by `new-run`, `run`, `gate`,
+  and `prompt`).
+- **`fadeno verify` expansion** — 16 canonical checks: ledger version, run
+  schema, event parseability, seq contiguity, terminal status, terminal-event
+  agreement with run.yaml, manifest completeness, artifact existence, digest
+  recomputation, typed-artifact revalidation, immutability, active-artifact
+  resolution, prompt-snapshot integrity (snapshot + every recorded input digest),
+  per-gate recomputation, completed-run gate coherence, and conflicting
+  human decisions. Anything unrecomputable is reported as skipped, never
+  silently valid.
+- **`fadeno show` projection** — the default view is now logical steps with
+  state glyphs and collapsed counts (artifacts, gates, loop iterations,
+  decisions), active artifacts (highest valid generation per logical name),
+  decisions, and failures. `--events` prints the raw timeline; `fadeno runs`
+  tags pre-0.2 ledgers `[legacy]`.
+- **`--legacy` compatibility mode** on `show`, `verify`, and `next` — the
+  explicit legacy reader for pre-0.2 ledgers (normalizes the retired
+  `artifact_written` event name; digest-family checks report as skipped).
+  `fadeno prompt` has no legacy mode by design: it refuses pre-0.2 ledgers
+  even for previews rather than silently resolving inputs differently.
+
+### Changed
+
+- **Run-ledger format 0.2** (breaking, see above). `run.schema.json` now
+  requires `schema_version`.
+- The legacy `artifact_written` event name is retired from all current-format
+  readers (`prompt`, `next`, the flow cursor); it is honored only under
+  `--legacy`.
+- Deliberately deferred to the engine slices: the engine loop (capability 1),
+  attempt ordinals / execution identities (2), executor profiles (4), the
+  named human-decision structure (5), and an explicit supersede event —
+  manifests carry no fabricated `step_execution_id`/`actor_call_id`.
+
+### Added (earlier, unreleased)
 
 - **`fadeno plugin --codex`** — generate a **Codex CLI plugin** (`plugin-codex/`
   + a `.agents/plugins/marketplace.json` pointer) from the same shared skill

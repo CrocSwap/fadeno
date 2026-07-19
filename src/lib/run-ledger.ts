@@ -4,9 +4,15 @@ import { parse as parseYaml } from 'yaml';
 
 export class RunLedgerError extends Error {}
 
+/** The run-ledger format version this fadeno reads and writes. */
+export const RUN_LEDGER_SCHEMA_VERSION = '0.2';
+
+export type LedgerMode = 'current' | 'legacy';
+
 export interface RunSummary {
   runId: string;
   dir: string;
+  schemaVersion: string | null;
   playbook: string | null;
   status: string | null;
   task: string | null;
@@ -20,7 +26,40 @@ export interface RunEvent {
   type: string;
   step: string | null;
   timestamp: string | null;
+  seq: number | null;
   extra: Record<string, unknown>;
+}
+
+/**
+ * Gate a reader on the ledger format version. A ledger without a
+ * `schema_version` is legacy (pre-0.2) and is readable only when the caller
+ * explicitly opted in; an unknown version is never reinterpreted.
+ */
+export function ledgerMode(run: RunSummary, allowLegacy: boolean): LedgerMode {
+  if (run.schemaVersion === RUN_LEDGER_SCHEMA_VERSION) return 'current';
+  if (run.schemaVersion == null) {
+    if (allowLegacy) return 'legacy';
+    throw new RunLedgerError(
+      `run "${run.runId}" uses a legacy ledger format (run.yaml has no schema_version; ` +
+        `current is "${RUN_LEDGER_SCHEMA_VERSION}"). Pass --legacy to read it in ` +
+        'compatibility mode, or create a new run with `fadeno new-run`.',
+    );
+  }
+  throw new RunLedgerError(
+    `run "${run.runId}" has ledger schema_version "${run.schemaVersion}"; ` +
+      `this fadeno reads "${RUN_LEDGER_SCHEMA_VERSION}".`,
+  );
+}
+
+/**
+ * The explicit legacy reader: normalize pre-0.2 event names to the canonical
+ * vocabulary so downstream logic handles one name per fact. Only ever applied
+ * under `--legacy` — a current-format ledger must not need it.
+ */
+export function normalizeLegacyEvents(events: RunEvent[]): RunEvent[] {
+  return events.map((event) =>
+    event.type === 'artifact_written' ? { ...event, type: 'artifact_created' } : event,
+  );
 }
 
 function stringOrNull(value: unknown): string | null {
@@ -32,6 +71,7 @@ function summarizeRunDir(runId: string, dir: string): RunSummary {
   const base: RunSummary = {
     runId,
     dir,
+    schemaVersion: null,
     playbook: null,
     status: null,
     task: null,
@@ -63,6 +103,7 @@ function summarizeRunDir(runId: string, dir: string): RunSummary {
   }
 
   const doc = parsed as Record<string, unknown>;
+  base.schemaVersion = doc.schema_version != null ? String(doc.schema_version) : null;
   base.playbook = stringOrNull(doc.playbook);
   base.status = stringOrNull(doc.status);
   base.task = stringOrNull(doc.task);
@@ -119,12 +160,13 @@ export function readEvents(runDir: string): { events: RunEvent[]; badLines: numb
     const type = typeof obj.type === 'string' ? obj.type : 'unknown';
     const step = stringOrNull(obj.step);
     const timestamp = stringOrNull(obj.timestamp);
+    const seq = typeof obj.seq === 'number' ? obj.seq : null;
     const extra: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj)) {
-      if (key === 'type' || key === 'step' || key === 'timestamp') continue;
+      if (key === 'type' || key === 'step' || key === 'timestamp' || key === 'seq') continue;
       extra[key] = value;
     }
-    events.push({ type, step, timestamp, extra });
+    events.push({ type, step, timestamp, seq, extra });
   }
 
   return { events, badLines };

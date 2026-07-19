@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stringify as stringifyYaml } from 'yaml';
 import { findRepoRoot } from '../lib/paths.ts';
+import { RUN_LEDGER_SCHEMA_VERSION } from '../lib/run-ledger.ts';
+import { LedgerWriter } from '../lib/run-ledger-write.ts';
 
 export interface NewRunOptions {
   /** Playbook name (with or without `.yaml`/`.yml`). */
@@ -90,6 +92,7 @@ export function runNewRun(opts: NewRunOptions): NewRunResult {
 
   const runYaml = stringifyYaml({
     run_id: runId,
+    schema_version: RUN_LEDGER_SCHEMA_VERSION,
     playbook,
     status: 'running',
     task: opts.task,
@@ -101,8 +104,7 @@ export function runNewRun(opts: NewRunOptions): NewRunResult {
   const modeline = '# yaml-language-server: $schema=../../schemas/run.schema.json';
   writeFileSync(join(runDir, 'run.yaml'), `${modeline}\n${runYaml}`, 'utf8');
 
-  const startEvent = JSON.stringify({ type: 'run_started', step: null, timestamp: iso });
-  writeFileSync(join(runDir, 'events.jsonl'), `${startEvent}\n`, 'utf8');
+  new LedgerWriter(runDir).append({ type: 'run_started', step: null }, now);
   writeFileSync(join(runDir, 'artifacts', '.gitkeep'), '', 'utf8');
 
   return { runId, runDir, playbook };

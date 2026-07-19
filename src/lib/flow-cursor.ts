@@ -69,7 +69,7 @@ export interface NextComputation {
   advice: string;
 }
 
-const ARTIFACT_EVENT_TYPES = new Set(['artifact_created', 'artifact_written']);
+const ARTIFACT_EVENT_TYPES = new Set(['artifact_created']);
 const PROMPTABLE_KINDS = new Set(['actor_call', 'evaluator', 'reduce', 'map']);
 const NEEDS_DECISION_KINDS = new Set(['router', 'subworkflow', 'replicate']);
 
