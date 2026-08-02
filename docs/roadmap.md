@@ -88,7 +88,7 @@ promoted capabilities are:
 6. canonical evidence, expanded verification, and a default human-legible run
    projection.
 
-**Capabilities 3 and 6 shipped thin (unreleased):** run-ledger format 0.2
+**Capabilities 3 and 6 shipped thin (released in v0.5.0, 2026-08-02):** run-ledger format 0.2
 (`schema_version` in run.yaml + contiguous per-event `seq`), artifact
 manifests with sha256 digests and record-time typed-artifact validation on
 `artifact_created` (immutability guard included), a 16-check `fadeno verify`
