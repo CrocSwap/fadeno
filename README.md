@@ -2,9 +2,13 @@
 
 **The playbook layer for AI coding agents.**
 
-Stop re-typing *"be careful, plan, review, test"* every run. Define your workflow once as a repo-native YAML playbook, and any agent runs it the same disciplined way — leaving an inspectable trace of what it did. No runtime, no service, no lock-in.
-
 > **Fadeno** /fah-DEH-no/ — Esperanto for *"thread."* The thread that runs through every agent task.
+
+When an agent cuts a PR it shows you diff, not the process that produced it. There's no evidence for what workflow produced the change or how it was reviewed or tested. Fadeno is agent workflows as code.
+
+Stop re-typing *"be careful, plan, review, test"* every run. Define your workflow once as a repo-native YAML playbook, and any agent runs it the same way. No daemon, no cloud service, no lock-in."
+
+## Quickstart
 
 ```bash
 npx fadeno init --codex     # or --claude
@@ -12,15 +16,22 @@ npx fadeno init --codex     # or --claude
 
 ---
 
+## Why Fadeno
+
+Fadeno makes complex AI-agent work **repeatable, inspectable, portable, and easy
+to customize**. It isn't intended to make the agent smarter, it makes the work verifiable and controllable. 
+
+It is intentionally **not** a background scheduler, a daemon, a cloud service, a
+visual graph editor, a real parallel execution engine, or a model-provider
+integration.
+
 ## The problem
 
-Coding agents are powerful but inconsistent. Every nontrivial task, you re-explain the same discipline:
+Coding agents produce unverifiable work. They are powerful but inconsistent. Every nontrivial task, you re-explain the same discipline:
 
 > *"Codex, please be careful. Make a plan first, then implement it. Review your own code for edge cases. Run the tests. If something's broken, fix it. Don't install new dependencies or run anything destructive without checking with me."*
 
-You retype some version of that every time. You get different behavior every run. And when the chat closes, there's no record of what the agent actually did.
-
-## The fix
+### The fix
 
 Define the workflow **once**, commit it to your repo, and then just say:
 
@@ -361,19 +372,7 @@ away.
 
 ---
 
-## Why Fadeno
-
-Fadeno makes complex AI-agent work **repeatable, inspectable, portable, and easy
-to customize** — without locking you into one agent platform or a heavyweight
-runtime. It's mostly files: schemas, starter playbooks, skills, and a small CLI.
-
-It is intentionally **not**: a background scheduler, a daemon, a cloud service, a
-visual graph editor, a real parallel execution engine, or a model-provider
-integration. Those are non-goals for v0.
-
----
-
-## Development
+### Development
 
 ```bash
 npm install
