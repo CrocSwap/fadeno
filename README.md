@@ -4,9 +4,9 @@
 
 > **Fadeno** /fah-DEH-no/ — Esperanto for *"thread."* The thread that runs through every agent task.
 
-When an agent cuts a PR it shows you diff, not the process that produced it. There's no evidence for what workflow produced the change or how it was reviewed or tested. Fadeno is agent workflows as code.
+When an agent cuts a PR it shows you the diff, not the process that produced it. There's no evidence for what workflow produced the change or how it was reviewed or tested. Fadeno is agent workflows as code.
 
-Stop re-typing *"be careful, plan, review, test"* every run. Define your workflow once as a repo-native YAML playbook, and any agent runs it the same way. No daemon, no cloud service, no lock-in."
+Stop re-typing *"be careful, plan, review, test"* every run. Define your workflow once as a repo-native YAML playbook, and any agent runs it the same way. No daemon, no cloud service, no lock-in.
 
 ## Quickstart
 
