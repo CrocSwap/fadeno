@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { relative } from 'node:path';
 import { parseArgs } from 'node:util';
+import { runDecide } from './commands/decide.ts';
 import { runDiagram } from './commands/diagram.ts';
+import { runDrive, type DriveResult } from './commands/drive.ts';
 import { runGate } from './commands/gate.ts';
 import { runInit, type Target } from './commands/init.ts';
 import { runNewRun } from './commands/new-run.ts';
@@ -32,6 +34,8 @@ Usage:
   fadeno gate <run> <condition>         Evaluate a gate condition from a structured artifact
   fadeno prompt <run> <step> [flags]    Assemble (and record) a step's actor prompt
   fadeno next <run>                     Emit the next actionable step (JSON flow cursor)
+  fadeno drive <run> [flags]            Engine: advance the run until terminal or paused
+  fadeno decide <run> <option> [flags]  Resolve a pending named human decision
   fadeno runs                           List run ledgers under .fadeno/runs/
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic claims (or --latest)
@@ -55,6 +59,10 @@ Options:
   --iteration <n>         (prompt) Loop-body iteration to target (default: latest)
   --inline                (prompt) Embed input file contents in the prompt
   --no-record             (prompt) Preview only: write no snapshot or event
+  --bind <role=executor>  (drive) Session executor override for a role (repeatable; recorded)
+  --max-transitions <n>   (drive) Engine transition cap per invocation (default 50)
+  --decision <id>         (decide) Target decision id (optional when exactly one is pending)
+  --feedback <text>       (decide) Free-text feedback recorded on the resolution
   --latest                (verify) Audit the newest run instead of a named one
   --allow-failed          (verify) Accept an honest failed/aborted terminal
   --legacy                (show/verify/next) Read a pre-0.2 ledger in explicit compatibility mode
@@ -231,10 +239,16 @@ function renderEvent(event: RunEvent): string {
   }
 }
 
-const STEP_GLYPHS: Record<StepView['state'], string> = { done: '✓', current: '→', failed: '✗' };
+const STEP_GLYPHS: Record<StepView['state'], string> = { done: '✓', current: '→', failed: '✗', waiting: '!' };
 
 function stepSummary(step: StepView): string {
   const parts: string[] = [];
+  if (step.state === 'waiting') parts.push('waiting for human decision');
+  if (step.actorCalls > 1) parts.push(`${step.actorCalls} actor calls`);
+  if (step.attempts > step.actorCalls) {
+    const repairNote = step.repairs > 0 ? `, ${step.repairs} schema repair${step.repairs === 1 ? '' : 's'}` : '';
+    parts.push(`${step.attempts} attempts${repairNote}`);
+  }
   if (step.artifacts > 0) parts.push(`${step.artifacts} artifact${step.artifacts === 1 ? '' : 's'}`);
   for (const gate of step.gates) parts.push(`gate ${gate.condition} → ${gate.result}`);
   if (step.iterations > 0) parts.push(`${step.iterations} iteration${step.iterations === 1 ? '' : 's'}`);
@@ -307,6 +321,25 @@ function printShow(repoRoot: string, result: ShowResult, rawTimeline: boolean): 
   }
 }
 
+function printDrive(result: DriveResult): number {
+  console.log('');
+  switch (result.outcome) {
+    case 'terminal':
+      console.log(`run ${result.run} is terminal (${result.status}).`);
+      return result.status === 'completed' ? 0 : 1;
+    case 'paused_human_gate': {
+      const d = result.decision!;
+      console.log(`paused at ${d.step} — ${d.prompt}`);
+      console.log(`  decision: ${d.decisionId}   options: ${d.options.join(' | ')}`);
+      console.log(`  resolve:  fadeno decide ${result.run} <option>   then re-run fadeno drive ${result.run}`);
+      return 0;
+    }
+    default:
+      console.error(`drive stopped (${result.outcome}): ${result.detail}`);
+      return 1;
+  }
+}
+
 function printVerify(result: VerifyResult): void {
   const { run, findings, ok } = result;
   console.log(`run ${run.runId}  [${run.status ?? '?'}]`);
@@ -357,6 +390,10 @@ function main(argv: string[]): number {
         iteration: { type: 'string' },
         inline: { type: 'boolean' },
         'no-record': { type: 'boolean' },
+        bind: { type: 'string', multiple: true },
+        'max-transitions': { type: 'string' },
+        decision: { type: 'string' },
+        feedback: { type: 'string' },
         latest: { type: 'boolean' },
         'allow-failed': { type: 'boolean' },
         legacy: { type: 'boolean' },
@@ -553,6 +590,39 @@ function main(argv: string[]): number {
       if (!run) throw new Error('Usage: fadeno next <run>');
       const result = runNext({ run, legacy: values.legacy });
       console.log(JSON.stringify(result, null, 2));
+      return 0;
+    }
+    case 'drive': {
+      const run = positionals[1];
+      if (!run) throw new Error('Usage: fadeno drive <run> [--bind role=executor] [--max-transitions n]');
+      let maxTransitions: number | undefined;
+      if (values['max-transitions'] != null) {
+        const n = Number(values['max-transitions']);
+        if (!Number.isInteger(n) || n < 1) {
+          throw new Error(`Invalid --max-transitions "${values['max-transitions']}". Use a positive integer.`);
+        }
+        maxTransitions = n;
+      }
+      const result = runDrive({
+        run,
+        bind: values.bind,
+        maxTransitions,
+        onAction: (line) => console.log(`  ${line}`),
+      });
+      return printDrive(result);
+    }
+    case 'decide': {
+      const [, run, option] = positionals;
+      if (!run || !option) {
+        throw new Error('Usage: fadeno decide <run> <option> [--decision <id>] [--feedback <text>]');
+      }
+      const result = runDecide({ run, option, decision: values.decision, feedback: values.feedback });
+      if (result.recorded === 'idempotent') {
+        console.log(`${result.decisionId} was already resolved as "${result.option}" (idempotent, nothing recorded).`);
+      } else {
+        console.log(`${result.decisionId} resolved: ${result.option}${result.step ? `  (step ${result.step})` : ''}`);
+        console.log(`Resume with \`fadeno drive ${result.run}\`.`);
+      }
       return 0;
     }
     case 'runs': {

@@ -61,12 +61,14 @@ see the seq note below):
 
 **Conventional event types** — the log is open (`fadeno run <run> --event <type>`
 appends any type), but these are the standard ones: `run_started`,
-`step_started`, `artifact_created`, `gate_evaluated`, `human_decision`,
-`loop_iteration_started`, `loop_condition_evaluated`, `loop_succeeded`,
-`loop_exhausted`, `roles_degraded`, `prompt_assembled`, and a terminal
-`run_completed` / `run_failed` / `run_aborted`. Every line carries at least
-`type`, `step` (a step id, or `null` for run-level events), a contiguous
-1-based **`seq`**, and `timestamp`.
+`step_started`, `artifact_created`, `artifact_superseded`, `gate_evaluated`,
+`human_decision`, `loop_iteration_started`, `loop_condition_evaluated`,
+`loop_succeeded`, `loop_exhausted`, `roles_degraded`, `prompt_assembled`, and a
+terminal `run_completed` / `run_failed` / `run_aborted`. Engine-driven runs
+(`fadeno drive`) additionally record `profile_snapshotted`, `executor_override`,
+`actor_dispatched`, `actor_completed`, `actor_failed`, `decision_requested`, and
+`decision_resolved`. Every line carries at least `type`, `step` (a step id, or
+`null` for run-level events), a contiguous 1-based **`seq`**, and `timestamp`.
 
 **Never hand-edit events.jsonl.** The CLI stamps `seq` (and, on artifact
 events, the manifest below); `fadeno verify` checks seq contiguity, so a
@@ -84,9 +86,17 @@ time; failures are recorded honestly as `ok: false`, and `verify` recomputes
 all of it). Artifacts are immutable: re-recording a path with different bytes
 is refused — write a new generation instead. The legacy `artifact_written`
 name is retired; pre-0.2 ledgers are readable only via `--legacy` on
-`show`/`verify`/`next`. (Runtime execution identities — `step_execution_id`,
-`actor_call_id`, `attempt` — are deliberately absent until the engine can mint
-real ones; the CLI will not fabricate them.)
+`show`/`verify`/`next`. To retire an artifact without a new generation, record
+an explicit supersession — `fadeno run <run> --event artifact_superseded
+--artifact <old> --field superseded_by=<new>` (both sides must already be
+recorded; the superseded path is excluded from active resolution).
+
+Runtime execution identities — `step_execution_id`, `actor_call_id`, `attempt`
++ `attempt_reason` — are minted **only by the engine** (`fadeno drive`) on its
+dispatch/output events; hand-driven ledgers simply omit them, and the CLI will
+not fabricate them. `verify` checks that attempt ordinals are contiguous per
+actor call and every redispatch carries an allowed reason (`schema_repair`,
+`executor_override`, `user_retry`).
 
 An artifact event may carry an optional **`member`** field naming the map
 member that produced it (e.g.
@@ -97,7 +107,12 @@ it, attribution falls back to the producing step's `output_path` map. Use
 (and `--field k=v` for any extra keys — measured manifest fields always win
 over a colliding `--field`).
 
-**`human_decision`** is the honest event for a human_gate outcome:
+**Human gates have one durable decision structure.** Engine-driven runs pause
+with a named `decision_requested` (`decision_id`, `prompt`, declared
+`options`); `fadeno decide <run> <option>` records the `decision_resolved`.
+The first valid resolution wins — identical re-submissions are idempotent,
+conflicting ones are refused and fail verification. In hand-driven runs,
+**`human_decision`** remains the honest event for a human_gate outcome:
 `{"type":"human_decision","step":"arbitrate","branch":"approve",...}` (or
 `"reject"`). Legacy `human_gate_approved` / `human_gate_rejected` are still
 recognized by `fadeno next`. Do **not** reuse `gate_evaluated` for human gates

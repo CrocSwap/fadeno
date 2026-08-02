@@ -201,6 +201,40 @@ export function runRun(opts: RunOptions): RunResult {
       // are authoritative and must never be overridden by a --field value.
       attachAttribution(event);
       Object.assign(event, manifest);
+    } else if (opts.event === 'artifact_superseded') {
+      // The explicit supersede event: later work supersedes prior evidence
+      // rather than overwriting it. Both sides must already be recorded
+      // artifacts — a supersession of nothing (or by nothing) is incoherent.
+      if (!opts.artifact) {
+        throw new RunError('An artifact_superseded event requires --artifact <superseded path>.');
+      }
+      const rel = normalizeArtifactPath(runDir, opts.artifact);
+      const byRaw = extraFields.superseded_by;
+      if (typeof byRaw !== 'string' || byRaw === '') {
+        throw new RunError(
+          'artifact_superseded requires --field superseded_by=<recorded artifact path>.',
+        );
+      }
+      const byRel = normalizeArtifactPath(runDir, byRaw);
+      if (byRel === rel) {
+        throw new RunError('artifact_superseded: superseded_by must name a different artifact.');
+      }
+      const { events: priorEvents } = readEvents(runDir);
+      const recorded = new Set(
+        priorEvents
+          .filter((e) => e.type === 'artifact_created' && typeof e.extra.artifact === 'string')
+          .map((e) => e.extra.artifact as string),
+      );
+      for (const [label, path] of [['artifact', rel], ['superseded_by', byRel]] as const) {
+        if (!recorded.has(path)) {
+          throw new RunError(
+            `artifact_superseded: ${label} ${path} was never recorded as artifact_created.`,
+          );
+        }
+      }
+      attachAttribution(event);
+      event.artifact = rel;
+      event.superseded_by = byRel;
     } else {
       if (opts.artifact) {
         // A non-manifest event merely references an artifact; no existence

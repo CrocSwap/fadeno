@@ -1,0 +1,20 @@
+# Fadeno executor profile — which command runs each role's prompts.
+#
+# Used by `fadeno drive` (the engine): playbooks stay semantic (roles, steps,
+# gates); THIS file holds the concrete harness/model choices. Each executor is
+# a one-shot command adapter — it receives the assembled step prompt on stdin
+# and must write the artifact content to stdout. Bindings map playbook roles
+# to executors; "*" is the default for any unbound role.
+#
+# No routing, ranking, or automatic fallback happens here: if a bound executor
+# fails, the run pauses and you substitute explicitly
+# (`fadeno drive <run> --bind <role>=<executor>`).
+executors:
+  claude-cli:
+    adapter: command
+    command: [claude, -p]
+  # codex-cli:
+  #   adapter: command
+  #   command: [codex, exec, -]
+bindings:
+  "*": claude-cli

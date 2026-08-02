@@ -21,11 +21,17 @@ export interface ShowOptions {
 
 export interface StepView {
   id: string;
-  state: 'done' | 'current' | 'failed';
+  state: 'done' | 'current' | 'failed' | 'waiting';
   artifacts: number;
   gates: { condition: string; result: string }[];
   iterations: number;
   decisions: string[];
+  /** Distinct engine actor calls (0 for hand-driven steps). */
+  actorCalls: number;
+  /** Engine dispatches across those calls; > actorCalls means retries. */
+  attempts: number;
+  /** Dispatches with attempt_reason schema_repair. */
+  repairs: number;
 }
 
 /**
@@ -69,7 +75,17 @@ function projectRun(run: RunSummary, events: RunEvent[]): ShowProjection {
   const view = (id: string): StepView => {
     let v = byStep.get(id);
     if (!v) {
-      v = { id, state: 'done', artifacts: 0, gates: [], iterations: 0, decisions: [] };
+      v = {
+        id,
+        state: 'done',
+        artifacts: 0,
+        gates: [],
+        iterations: 0,
+        decisions: [],
+        actorCalls: 0,
+        attempts: 0,
+        repairs: 0,
+      };
       byStep.set(id, v);
       stepOrder.push(id);
     }
@@ -78,6 +94,8 @@ function projectRun(run: RunSummary, events: RunEvent[]): ShowProjection {
 
   const decisions: { step: string | null; branch: string }[] = [];
   const failures: string[] = [];
+  const callsByStep = new Map<string, Set<string>>();
+  const pendingDecisions = new Map<string, string>(); // decision_id → step
   let lastStarted: string | null = null;
 
   for (const event of events) {
@@ -108,6 +126,36 @@ function projectRun(run: RunSummary, events: RunEvent[]): ShowProjection {
         decisions.push({ step: event.step, branch });
         break;
       }
+      case 'actor_dispatched': {
+        if (event.step == null) break;
+        const v = view(event.step);
+        v.attempts += 1;
+        if (event.extra.attempt_reason === 'schema_repair') v.repairs += 1;
+        const callId = typeof event.extra.actor_call_id === 'string' ? event.extra.actor_call_id : `?${v.attempts}`;
+        const set = callsByStep.get(event.step) ?? new Set<string>();
+        set.add(callId);
+        callsByStep.set(event.step, set);
+        break;
+      }
+      case 'actor_failed': {
+        const reason = typeof event.extra.reason === 'string' ? event.extra.reason : 'failed';
+        const executor = typeof event.extra.executor === 'string' ? ` (${event.extra.executor})` : '';
+        failures.push(`${event.step ?? '?'}: executor ${reason}${executor}`);
+        break;
+      }
+      case 'decision_requested': {
+        const id = typeof event.extra.decision_id === 'string' ? event.extra.decision_id : null;
+        if (id != null && event.step != null) pendingDecisions.set(id, event.step);
+        break;
+      }
+      case 'decision_resolved': {
+        const id = typeof event.extra.decision_id === 'string' ? event.extra.decision_id : null;
+        if (id != null) pendingDecisions.delete(id);
+        const option = typeof event.extra.option === 'string' ? event.extra.option : '?';
+        if (event.step != null) view(event.step).decisions.push(option);
+        decisions.push({ step: event.step, branch: option });
+        break;
+      }
       case 'run_failed':
         failures.push('run failed');
         break;
@@ -123,6 +171,11 @@ function projectRun(run: RunSummary, events: RunEvent[]): ShowProjection {
     const last = view(lastStarted);
     if (run.status === 'running') last.state = 'current';
     else if (run.status === 'failed' || run.status === 'aborted') last.state = 'failed';
+  }
+
+  for (const [stepId, calls] of callsByStep) view(stepId).actorCalls = calls.size;
+  if (run.status === 'running' || run.status == null) {
+    for (const stepId of pendingDecisions.values()) view(stepId).state = 'waiting';
   }
 
   const { active } = resolveActiveArtifacts(events);

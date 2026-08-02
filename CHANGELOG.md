@@ -4,6 +4,54 @@ All notable changes to Fadeno are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+The engine slices of the next protocol (capabilities 1, 2, 4 + 5 of
+`docs/experimental/next-protocol.md`, plus the explicit supersede event):
+Fadeno gains a small deterministic, repo-local engine. Ledger format stays
+0.2 — every engine addition is additive event evidence.
+
+### Added
+
+- **`fadeno drive <run>`** — the engine. Owns the run transition loop over the
+  same pure cursor as `fadeno next`: assembles/reuses prompt snapshots,
+  dispatches each actor step through its bound executor, validates typed
+  outputs (one bounded schema repair per actor call — rejected bytes are
+  parked under `artifacts/attempts/` as evidence, never at the planned path),
+  assembles map collectives, evaluates deterministic gates, records loop
+  iterations, pauses durably at human gates, and exits whenever it pauses
+  (`--max-transitions` caps a single invocation; resume is just re-running
+  drive). Steps it cannot execute (tool_call, undemonstrated primitives,
+  agent-interpreted gate conditions) are handed back honestly.
+- **Executor profiles** — `.fadeno/executors.yaml` (seeded by `init`): named
+  `command`-adapter executors plus direct role→executor bindings with a `"*"`
+  default. No routing, ranking, or automatic fallback. The profile is
+  snapshotted into the run dir (`profile.yaml` + `profile_snapshotted` event
+  with digest) on first engine contact; explicit substitution is
+  `fadeno drive --bind role=executor`, recorded as `executor_override`.
+- **Runtime identity** — engine dispatch/output events carry
+  `step_execution_id`, `actor_call_id`, and `attempt` + `attempt_reason`
+  (`initial` | `schema_repair` | `executor_override` | `user_retry`); new
+  canonical events `actor_dispatched`, `actor_completed`, `actor_failed`.
+  Identities are minted only by the engine — hand-driven ledgers omit them.
+- **Named human decisions** — human gates pause with a durable
+  `decision_requested` (id, prompt, declared options); **`fadeno decide
+  <run> <option>`** records `decision_resolved` (idempotent duplicates,
+  conflicting resolutions refused). The cursor accepts `decision_resolved`
+  alongside the hand-driven `human_decision`.
+- **`artifact_superseded`** — explicit supersession, validated at record time
+  (both sides must be recorded artifacts); a superseded path is excluded from
+  active-artifact resolution without a new generation.
+- **`fadeno verify` → 20 checks** — new: `actor-attempts` (ordinal contiguity,
+  allowed retry reasons, rejected-output digests), `executor-bindings`
+  (snapshot digest + every dispatch matches the binding in force),
+  `named-decisions` (declared options, at-most-once), `artifact-supersede`
+  (reference integrity).
+- **`fadeno show`** — projection surfaces actor calls, attempt counts, schema
+  repairs, executor failures, and `! waiting for human decision`.
+- **Driver skill** — engine-first: `fadeno drive` → `fadeno decide` → re-drive,
+  with the manual `fadeno next` loop as the fallback for handed-back steps.
+
 ## [0.5.0] — 2026-08-02
 
 The provenance slice of the next protocol (capabilities 3 + 6 of

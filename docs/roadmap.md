@@ -88,6 +88,29 @@ promoted capabilities are:
 6. canonical evidence, expanded verification, and a default human-legible run
    projection.
 
+**Capabilities 1, 2, 4, and 5 shipped thin (unreleased):** the engine —
+`fadeno drive` owns the transition loop over the same pure cursor (`next`),
+dispatching each actor step through a **command-adapter executor** from
+`.fadeno/executors.yaml` (direct role bindings + `"*"` default; profile
+snapshotted into the run dir and digest-checked), validating typed outputs
+with **one bounded schema repair** (rejected bytes parked under
+`artifacts/attempts/` as evidence, never at the planned path), and minting
+runtime identity on its events: `step_execution_id`, `actor_call_id`,
+`attempt` + `attempt_reason` (`initial`/`schema_repair`/`executor_override`/
+`user_retry`). Human gates pause the engine with a durable named
+`decision_requested`; `fadeno decide <run> <option>` records the idempotent,
+conflict-refusing `decision_resolved` (also readable by the cursor). Explicit
+substitution is `fadeno drive --bind role=executor`, recorded as
+`executor_override`. An explicit `artifact_superseded` event (validated at
+record time) retires an artifact from active resolution without a new
+generation. `fadeno verify` grew from 16 to **20 checks**: attempt-ordinal
+contiguity + reasons, binding-matches-snapshot-or-override, named-decision
+validity/at-most-once, and supersede reference integrity. `fadeno show`
+surfaces actor calls, attempts, schema repairs, and `! waiting for human
+decision`. Engine-executable today: actor_call/evaluator/reduce/role-maps
+(with collective assembly), deterministic gates, loops, human gates; tool_call
+and the undemonstrated primitives still hand back to the driver.
+
 **Capabilities 3 and 6 shipped thin (released in v0.5.0, 2026-08-02):** run-ledger format 0.2
 (`schema_version` in run.yaml + contiguous per-event `seq`), artifact
 manifests with sha256 digests and record-time typed-artifact validation on
@@ -97,9 +120,14 @@ prompt-snapshot integrity, conflicting human decisions — unrecomputable
 evidence reported as skipped, never silently valid), a logical-step
 projection as the default `fadeno show`, and an explicit `--legacy`
 compatibility mode (readers refuse unversioned ledgers; writers refuse them
-outright). Deliberately deferred to the engine slices: the engine loop (1),
-attempt ordinals / execution identities (2), executor profiles (4), the named
-human-decision structure (5), and an explicit supersede event.
+outright).
+
+**First format-0.2 dogfood receipt (2026-08-02):** the fadeno-demo exhibits
+were regenerated on 0.5.0 — PR #3 (genuine signed-durations trace, 16 ok / 2
+skipped) and PR #4 (a *non-gating* finding laundered from the review report:
+every gate still recomputes green, only the digest checks catch it — the
+tamper class the 0.3.0 verify could not see). Friction found there feeds the
+list below.
 
 The protocol is not schema-frozen. Run two or three additional dogfood workflows
 and require both an observed receipt and a verification check before promoting
@@ -112,6 +140,17 @@ not current scope.
 
 ## Other deferred work (roughly prioritized)
 
+0. **Dogfood friction (2026-08-02 demo regeneration)** — fix before/with the
+   engine release: (a) shipped `runtime.md` map guidance and the cursor
+   disagree on the gated-map collective path (`artifacts/review-report.json`
+   vs `artifacts/parts/<step>.json` + member parts) — reconcile doc and
+   cursor; (b) `fadeno gate` records `gate_evaluated` at `current_step`, but
+   the cursor keys gate completion on the *gate step's* id — `gate` should
+   take/infer the gate step id; (c) `fadeno verify --json` (and a
+   `--list-checks` enumeration) for CI and exhibit authors; (d) an escape
+   hatch to record an externally composed prompt as a snapshot (host-subagent
+   dispatch currently caps at prompt-snapshots: skip); (e) `fadeno show`
+   lists `artifacts/.gitkeep` in the artifacts section (cosmetic).
 1. **Authoring helpers** — `fadeno list` (playbooks + `when_to_use`),
    `fadeno new-playbook <pattern>` scaffolder. (`fadeno diagram` already ships.)
 2. **More gate conditions** in `fadeno gate` (e.g. `no_unsupported_claims` from a

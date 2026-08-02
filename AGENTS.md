@@ -16,13 +16,14 @@ point you at the right place.
 
 Fadeno is a **portable playbook layer for AI coding agents** — a repo-native YAML
 playbook format, a set of agent **skills** that run/author them, and a small
-TypeScript **CLI** that scaffolds, validates, diagrams, and records runs. It is
-currently a protocol + file-backed run traces + thin per-host adapters, **not a
-runtime**. The approved next-protocol direction adds a small deterministic,
-repo-local runtime in service of verification; it does not turn Fadeno into a
-daemon, cloud service, or general orchestration platform. Targets today:
-**Codex** and **Claude Code** (the latter also packaged as a Claude Code
-**plugin**).
+TypeScript **CLI** that scaffolds, validates, diagrams, records, **executes**,
+and verifies runs. It is a protocol + file-backed run traces + thin per-host
+adapters, plus a small deterministic, repo-local **engine** (`fadeno drive`,
+per the next-protocol boundary) that exists in service of verification — it
+dispatches configured executor commands, mints runtime identity, and pauses at
+human decisions. It is **not** a daemon, cloud service, or general
+orchestration platform. Targets today: **Codex** and **Claude Code** (the
+latter also packaged as a Claude Code **plugin**).
 
 These docs frame the rest:
 

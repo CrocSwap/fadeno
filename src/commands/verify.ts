@@ -179,8 +179,272 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
   //     an incoherent trace; identical duplicates are idempotent.
   findings.push(checkHumanDecisions(events));
 
+  // 17. actor-attempts — engine dispatch evidence: attempt ordinals contiguous
+  //     per actor call, redispatches carry an allowed reason, rejected-output
+  //     bytes still match their recorded digests.
+  findings.push(checkActorAttempts(run, events));
+
+  // 18. executor-bindings — every dispatch used the snapshotted binding or an
+  //     explicitly recorded override; the snapshot itself matches its digest.
+  findings.push(checkExecutorBindings(run, events));
+
+  // 19. named-decisions — resolutions reference a real request, select a
+  //     declared option, and resolve at most once (duplicates idempotent).
+  findings.push(checkNamedDecisions(events));
+
+  // 20. artifact-supersede — supersessions reference recorded artifacts on
+  //     both sides; superseding nothing (or by nothing) is incoherent.
+  findings.push(checkArtifactSupersede(events));
+
   const ok = !findings.some((f) => f.status === 'fail');
   return { run, mode, findings, ok };
+}
+
+const ATTEMPT_REASONS_FIRST = new Set(['initial']);
+const ATTEMPT_REASONS_RETRY = new Set(['schema_repair', 'executor_override', 'user_retry']);
+
+function checkActorAttempts(run: RunSummary, events: RunEvent[]): Finding {
+  const check = 'actor-attempts';
+  interface Dispatch {
+    attempt: number | null;
+    reason: string | null;
+    hasIds: boolean;
+  }
+  const byCall = new Map<string, Dispatch[]>();
+  for (const event of events) {
+    if (event.type !== 'actor_dispatched') continue;
+    const callId = typeof event.extra.actor_call_id === 'string' ? event.extra.actor_call_id : '(no actor_call_id)';
+    const list = byCall.get(callId) ?? [];
+    list.push({
+      attempt: typeof event.extra.attempt === 'number' ? event.extra.attempt : null,
+      reason: typeof event.extra.attempt_reason === 'string' ? event.extra.attempt_reason : null,
+      hasIds:
+        typeof event.extra.actor_call_id === 'string' &&
+        typeof event.extra.step_execution_id === 'string',
+    });
+    byCall.set(callId, list);
+  }
+  if (byCall.size === 0) return skip(check, 'no engine dispatches recorded');
+
+  const problems: string[] = [];
+  let dispatches = 0;
+  for (const [callId, list] of byCall) {
+    dispatches += list.length;
+    for (const d of list) {
+      if (!d.hasIds) problems.push(`${callId}: dispatch missing step_execution_id/actor_call_id`);
+      if (d.attempt == null) problems.push(`${callId}: dispatch missing attempt ordinal`);
+    }
+    const attempts = list.map((d) => d.attempt).filter((a): a is number => a != null).sort((a, b) => a - b);
+    for (let i = 0; i < attempts.length; i += 1) {
+      if (attempts[i] !== i + 1) {
+        problems.push(`${callId}: attempts are ${attempts.join(',')}, expected 1..${attempts.length}`);
+        break;
+      }
+    }
+    for (const d of list) {
+      if (d.attempt === 1 && d.reason != null && !ATTEMPT_REASONS_FIRST.has(d.reason)) {
+        problems.push(`${callId}: attempt 1 has reason "${d.reason}", expected "initial"`);
+      }
+      if (d.attempt != null && d.attempt > 1 && (d.reason == null || !ATTEMPT_REASONS_RETRY.has(d.reason))) {
+        problems.push(
+          `${callId}: attempt ${d.attempt} redispatched without an allowed reason ` +
+            `(${[...ATTEMPT_REASONS_RETRY].join(', ')})`,
+        );
+      }
+    }
+  }
+
+  // Rejected-output evidence carries its own digest (it never got a manifest).
+  for (const event of events) {
+    if (event.type !== 'actor_completed') continue;
+    const rel = typeof event.extra.output === 'string' ? event.extra.output : null;
+    const sha = typeof event.extra.output_sha256 === 'string' ? event.extra.output_sha256 : null;
+    if (rel == null || sha == null) continue;
+    const abs = resolveArtifact(run.dir, rel);
+    if (!existsSync(abs)) {
+      problems.push(`${rel}: rejected-attempt output is missing`);
+    } else if (sha256Hex(readFileSync(abs)) !== sha) {
+      problems.push(`${rel}: rejected-attempt output no longer matches its recorded sha256`);
+    }
+  }
+
+  if (problems.length > 0) return { check, status: 'fail', detail: problems.join('; ') };
+  return {
+    check,
+    status: 'ok',
+    detail: `${dispatches} dispatch(es) across ${byCall.size} actor call(s), ordinals contiguous`,
+  };
+}
+
+function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
+  const check = 'executor-bindings';
+  const snapshots = events.filter((e) => e.type === 'profile_snapshotted');
+  const dispatches = events.filter((e) => e.type === 'actor_dispatched');
+  if (snapshots.length === 0 && dispatches.length === 0) {
+    return skip(check, 'no executor profile in use');
+  }
+
+  const problems: string[] = [];
+  if (snapshots.length === 0) {
+    problems.push('dispatches recorded but no profile_snapshotted event');
+  }
+
+  let bindings: Record<string, string> | null = null;
+  let executors: Set<string> | null = null;
+  if (snapshots.length > 0) {
+    const snap = snapshots[0]!;
+    const rel = typeof snap.extra.profile === 'string' ? snap.extra.profile : 'profile.yaml';
+    const sha = typeof snap.extra.sha256 === 'string' ? snap.extra.sha256 : null;
+    const abs = join(run.dir, rel);
+    if (!existsSync(abs)) {
+      problems.push(`${rel}: profile snapshot is missing`);
+    } else {
+      const text = readFileSync(abs, 'utf8');
+      if (sha != null && sha256Hex(text) !== sha) {
+        problems.push(`${rel}: snapshot does not match its recorded sha256`);
+      }
+      try {
+        const doc = parseYaml(text) as { executors?: unknown; bindings?: unknown };
+        if (doc !== null && typeof doc === 'object') {
+          if (doc.bindings !== null && typeof doc.bindings === 'object' && !Array.isArray(doc.bindings)) {
+            bindings = {};
+            for (const [role, target] of Object.entries(doc.bindings as Record<string, unknown>)) {
+              if (typeof target === 'string') bindings[role] = target;
+            }
+          }
+          if (doc.executors !== null && typeof doc.executors === 'object' && !Array.isArray(doc.executors)) {
+            executors = new Set(Object.keys(doc.executors as Record<string, unknown>));
+          }
+        }
+      } catch (err) {
+        problems.push(`${rel}: snapshot did not parse: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  // Replay overrides in event order; a dispatch must match the binding in
+  // force at its position (or the snapshot default) and name a real executor.
+  const overridesInForce = new Map<string, string>();
+  for (const event of events) {
+    if (event.type === 'executor_override') {
+      const role = typeof event.extra.role === 'string' ? event.extra.role : null;
+      const executor = typeof event.extra.executor === 'string' ? event.extra.executor : null;
+      if (role != null && executor != null) overridesInForce.set(role, executor);
+      continue;
+    }
+    if (event.type !== 'actor_dispatched') continue;
+    const actor = typeof event.extra.actor === 'string' ? event.extra.actor : null;
+    const used = typeof event.extra.executor === 'string' ? event.extra.executor : null;
+    const label = `${event.step ?? '?'}${actor ? ` (${actor})` : ''}`;
+    if (used == null) {
+      problems.push(`${label}: dispatch records no executor`);
+      continue;
+    }
+    if (executors != null && !executors.has(used)) {
+      problems.push(`${label}: executor "${used}" is not in the snapshotted profile`);
+    }
+    if (bindings != null) {
+      const key = actor ?? '*';
+      const expected = overridesInForce.get(key) ?? bindings[key] ?? bindings['*'] ?? null;
+      if (expected != null && used !== expected) {
+        problems.push(`${label}: dispatched to "${used}" but the binding in force was "${expected}"`);
+      }
+    }
+  }
+
+  if (problems.length > 0) return { check, status: 'fail', detail: problems.join('; ') };
+  return {
+    check,
+    status: 'ok',
+    detail: `${dispatches.length} dispatch(es) match the snapshotted bindings${overridesInForce.size > 0 ? ` (+${overridesInForce.size} explicit override(s))` : ''}`,
+  };
+}
+
+function checkNamedDecisions(events: RunEvent[]): Finding {
+  const check = 'named-decisions';
+  const requests = new Map<string, { options: string[]; count: number }>();
+  for (const event of events) {
+    if (event.type !== 'decision_requested') continue;
+    const id = typeof event.extra.decision_id === 'string' ? event.extra.decision_id : null;
+    if (id == null) continue;
+    const options = Array.isArray(event.extra.options)
+      ? event.extra.options.filter((o): o is string => typeof o === 'string')
+      : [];
+    const existing = requests.get(id);
+    if (existing) existing.count += 1;
+    else requests.set(id, { options, count: 1 });
+  }
+  const resolutions: { id: string | null; option: string | null }[] = [];
+  for (const event of events) {
+    if (event.type !== 'decision_resolved') continue;
+    resolutions.push({
+      id: typeof event.extra.decision_id === 'string' ? event.extra.decision_id : null,
+      option: typeof event.extra.option === 'string' ? event.extra.option : null,
+    });
+  }
+  if (requests.size === 0 && resolutions.length === 0) return skip(check, 'no named decisions recorded');
+
+  const problems: string[] = [];
+  for (const [id, req] of requests) {
+    if (req.count > 1) problems.push(`decision ${id} requested ${req.count} times`);
+  }
+  const seen = new Map<string, string>();
+  for (const res of resolutions) {
+    if (res.id == null) {
+      problems.push('a decision_resolved event has no decision_id');
+      continue;
+    }
+    const req = requests.get(res.id);
+    if (req == null) {
+      problems.push(`resolution references unknown decision ${res.id}`);
+      continue;
+    }
+    if (res.option == null || !req.options.includes(res.option)) {
+      problems.push(
+        `decision ${res.id} resolved with ${res.option == null ? 'no option' : `undeclared option "${res.option}"`} ` +
+          `(declared: ${req.options.join(', ')})`,
+      );
+      continue;
+    }
+    const prior = seen.get(res.id);
+    if (prior != null && prior !== res.option) {
+      problems.push(`decision ${res.id} resolved as both "${prior}" and "${res.option}"`);
+    }
+    seen.set(res.id, prior ?? res.option);
+  }
+
+  if (problems.length > 0) return { check, status: 'fail', detail: problems.join('; ') };
+  return {
+    check,
+    status: 'ok',
+    detail: `${requests.size} request(s), ${resolutions.length} resolution(s), none conflicting`,
+  };
+}
+
+function checkArtifactSupersede(events: RunEvent[]): Finding {
+  const check = 'artifact-supersede';
+  const supersessions = events.filter((e) => e.type === 'artifact_superseded');
+  if (supersessions.length === 0) return skip(check, 'no supersessions recorded');
+
+  const recorded = new Set(
+    events
+      .filter((e) => e.type === 'artifact_created' && typeof e.extra.artifact === 'string')
+      .map((e) => e.extra.artifact as string),
+  );
+  const problems: string[] = [];
+  for (const event of supersessions) {
+    const target = typeof event.extra.artifact === 'string' ? event.extra.artifact : null;
+    const by = typeof event.extra.superseded_by === 'string' ? event.extra.superseded_by : null;
+    if (target == null || by == null) {
+      problems.push(`artifact_superseded (seq ${event.seq ?? '?'}) lacks artifact/superseded_by`);
+      continue;
+    }
+    if (target === by) problems.push(`${target} recorded as superseding itself`);
+    if (!recorded.has(target)) problems.push(`superseded ${target} was never recorded`);
+    if (!recorded.has(by)) problems.push(`superseded_by ${by} was never recorded`);
+  }
+  if (problems.length > 0) return { check, status: 'fail', detail: problems.join('; ') };
+  return { check, status: 'ok', detail: `${supersessions.length} supersession(s), all references recorded` };
 }
 
 function checkRunSchema(run: RunSummary, schemas: SchemaSet): Finding {

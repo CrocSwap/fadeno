@@ -170,6 +170,9 @@ fadeno gate <run-id> tests_pass \
 fadeno runs                                     # list run ledgers (newest first)
 fadeno show <run-id-or-prefix>                  # logical-step projection (--events for the raw timeline)
 fadeno verify <run-id>                          # recompute the ledger's checkable claims; exit 0/1 (--latest for newest)
+fadeno drive <run-id>                           # engine: advance until terminal or a human pause (uses .fadeno/executors.yaml)
+fadeno decide <run-id> <option>                 # resolve a paused human decision, then re-drive
+
 fadeno prompt <run-id> <step> --actor <role> \
   --no-record                                   # assemble a step's actor prompt (pipe to codex/claude)
 ```
@@ -353,12 +356,15 @@ categories map to concrete, detectable actions. Two ways to make that real:
   from its named artifact and exits 0/1 — drop it into CI, a git hook, or a
   Claude Code `Stop` hook.
 - **`fadeno verify <run>`** (or `--latest`) re-audits a whole run ledger
-  read-only against 16 checks — artifact digests recomputed from bytes,
+  read-only against 20 checks — artifact digests recomputed from bytes,
   typed-artifact schemas, artifact immutability, prompt-snapshot integrity,
-  event-sequence contiguity, and every deterministic gate result recomputed
-  from its artifact — so a trace can't claim what its evidence doesn't
-  support. The "no valid trace, no merge" check; anything unrecomputable is
-  reported as skipped, never silently treated as valid.
+  event-sequence contiguity, every deterministic gate result recomputed from
+  its artifact, attempt ordinals with allowed retry reasons, executor
+  bindings against the run's snapshotted profile, human-decision integrity
+  (declared options, at-most-once), and supersede references — so a trace
+  can't claim what its evidence doesn't support. The "no valid trace, no
+  merge" check; anything unrecomputable is reported as skipped, never
+  silently treated as valid.
 - **`fadeno init --with-hooks`** scaffolds runnable enforcement: an executable
   `.fadeno/hooks/pre-commit` (dependency/secret guard), a
   `.github/workflows/fadeno-guard.yml` CI guard, a

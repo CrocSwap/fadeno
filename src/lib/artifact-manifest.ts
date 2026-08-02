@@ -139,6 +139,14 @@ interface ArtifactRecord extends ActiveArtifact {
  * violation, not a supersession.
  */
 export function resolveActiveArtifacts(events: RunEvent[]): ActiveResolution {
+  // An explicitly superseded path can never be active, whatever its generation.
+  const superseded = new Set<string>();
+  for (const event of events) {
+    if (event.type === 'artifact_superseded' && typeof event.extra.artifact === 'string') {
+      superseded.add(event.extra.artifact);
+    }
+  }
+
   const records: ArtifactRecord[] = [];
   events.forEach((event, index) => {
     if (event.type !== 'artifact_created') return;
@@ -146,11 +154,13 @@ export function resolveActiveArtifacts(events: RunEvent[]): ActiveResolution {
     if (path == null) return;
     const parsed = parseGeneration(path);
     const validation = event.extra.validation;
-    const valid = !(
-      validation !== null &&
-      typeof validation === 'object' &&
-      (validation as Record<string, unknown>).ok === false
-    );
+    const valid =
+      !superseded.has(path) &&
+      !(
+        validation !== null &&
+        typeof validation === 'object' &&
+        (validation as Record<string, unknown>).ok === false
+      );
     records.push({
       artifactId: typeof event.extra.artifact_id === 'string' ? event.extra.artifact_id : null,
       path,

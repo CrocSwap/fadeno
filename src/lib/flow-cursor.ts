@@ -234,6 +234,15 @@ function humanDecision(events: RunEvent[], stepId: string): 'approve' | 'reject'
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const event = events[i]!;
     if (event.step !== stepId) continue;
+    if (event.type === 'decision_resolved') {
+      const option = event.extra.option;
+      if (option === 'approve') return 'approve';
+      if (option === 'reject') return 'reject';
+      const shown = option === undefined ? '(missing)' : JSON.stringify(option);
+      throw new FlowCursorError(
+        `decision_resolved on step "${stepId}" has unrecognized option ${shown}; expected "approve" or "reject".`,
+      );
+    }
     if (event.type === 'human_decision') {
       const branch = event.extra.branch;
       if (branch === 'approve' || branch === 'reject') return branch;
