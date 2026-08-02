@@ -157,7 +157,8 @@ fadeno gate <run-id> no_blocking_issues \
 fadeno gate <run-id> tests_pass \
   --artifact artifacts/test-result.json         # status passed + exit_code 0
 fadeno runs                                     # list run ledgers (newest first)
-fadeno show <run-id-or-prefix>                  # summary + timeline + artifacts
+fadeno show <run-id-or-prefix>                  # logical-step projection (--events for the raw timeline)
+fadeno verify <run-id>                          # recompute the ledger's checkable claims; exit 0/1 (--latest for newest)
 fadeno prompt <run-id> <step> --actor <role> \
   --no-record                                   # assemble a step's actor prompt (pipe to codex/claude)
 ```
@@ -180,10 +181,15 @@ inspectable (and is the seam a future compiled runtime reads/writes):
 
 ```
 .fadeno/runs/2026-05-30-1132-csv-export/
-  run.yaml        # metadata: playbook, status, task, started_at, host, current_step
-  events.jsonl    # append-only lifecycle log, one JSON object per line
+  run.yaml        # metadata: schema_version, playbook, status, task, started_at, host, current_step
+  events.jsonl    # append-only lifecycle log, one JSON object per line, contiguous seq
   artifacts/      # every durable output: plans, patches, reviews, test results…
 ```
+
+Since run-ledger format 0.2, every recorded artifact also gets an immutable
+manifest (sha256 digest, size, media type, validation verdict) in the event
+log — the evidence `fadeno verify` recomputes. Artifacts are immutable:
+revision writes a new generation, never overwrites.
 
 `runs/` is execution-trace output, **not source code**. It is safe to delete old
 runs.
@@ -335,9 +341,13 @@ categories map to concrete, detectable actions. Two ways to make that real:
 - **`fadeno gate <run> <condition> --artifact <path>`** computes a condition
   from its named artifact and exits 0/1 — drop it into CI, a git hook, or a
   Claude Code `Stop` hook.
-- **`fadeno verify <run>`** (or `--latest`) re-audits a whole run ledger read-only,
-  recomputing every deterministic gate result from its artifact so a trace can't
-  claim a gate it can't support — the "no valid trace, no merge" check.
+- **`fadeno verify <run>`** (or `--latest`) re-audits a whole run ledger
+  read-only against 16 checks — artifact digests recomputed from bytes,
+  typed-artifact schemas, artifact immutability, prompt-snapshot integrity,
+  event-sequence contiguity, and every deterministic gate result recomputed
+  from its artifact — so a trace can't claim what its evidence doesn't
+  support. The "no valid trace, no merge" check; anything unrecomputable is
+  reported as skipped, never silently treated as valid.
 - **`fadeno init --with-hooks`** scaffolds runnable enforcement: an executable
   `.fadeno/hooks/pre-commit` (dependency/secret guard), a
   `.github/workflows/fadeno-guard.yml` CI guard, a

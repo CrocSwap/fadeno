@@ -4,7 +4,7 @@ All notable changes to Fadeno are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.5.0] — 2026-08-02
 
 The provenance slice of the next protocol (capabilities 3 + 6 of
 `docs/experimental/next-protocol.md`): artifact manifests with sha256 digests,
