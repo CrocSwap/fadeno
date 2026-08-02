@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, extname, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -9,6 +10,8 @@ import {
   parseExecutorProfile,
   resolveBinding,
   serializeProfile,
+  SESSION_ID_PLACEHOLDER,
+  substituteSessionId,
   type ExecutorProfile,
   type ExecutorSpec,
 } from '../lib/executors.ts';
@@ -312,13 +315,32 @@ function validateTyped(
   return { ok: false, errors: schemaErrorMessages(validate) };
 }
 
-function repairAppendix(errors: string[]): string {
+function repairMessage(errors: string[]): string {
   const listed = errors.slice(0, 5).map((e) => `- ${e}`).join('\n');
   return (
-    '\n\n---\nREPAIR: your previous output failed schema validation:\n' +
+    'REPAIR: your previous output failed schema validation:\n' +
     `${listed}\n` +
     'Return ONLY a corrected artifact that satisfies the schema. No prose, no fences.'
   );
+}
+
+/**
+ * Latest session id recorded for this role under this executor. One harness
+ * session per role per run; a rebound role (different executor) never resumes
+ * the old executor's session.
+ */
+function latestSessionForRole(events: RunEvent[], role: string | null, executor: string): string | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i]!;
+    if (event.type !== 'actor_dispatched' && event.type !== 'actor_completed' && event.type !== 'actor_failed') {
+      continue;
+    }
+    if ((event.extra.actor ?? null) !== role) continue;
+    if (typeof event.extra.session_id !== 'string') continue;
+    if (typeof event.extra.executor === 'string' && event.extra.executor !== executor) continue;
+    return event.extra.session_id;
+  }
+  return null;
 }
 
 /**
@@ -357,8 +379,39 @@ function dispatchOnce(
   }
 
   const { executor, spec } = effectiveBinding(ctx, role);
-  const appendix = repairErrors != null ? repairAppendix(repairErrors) : null;
-  const stdin = appendix != null ? promptRes.prompt + appendix : promptRes.prompt;
+  const repairCore = repairErrors != null ? repairMessage(repairErrors) : null;
+
+  // Session state — only for executors that declare `resume`. One session per
+  // role per run; the mode and id are recorded on every dispatch so verify can
+  // check continuity, and resumed context is visibly attested, not recomputed.
+  let session: 'fresh' | 'resumed' | null = null;
+  let sessionId: string | null = null;
+  let argv = spec.command;
+  if (spec.resume != null) {
+    const prior = latestSessionForRole(freshEvents(ctx.runDir), role, executor);
+    if (prior != null) {
+      session = 'resumed';
+      sessionId = prior;
+      argv = substituteSessionId(spec.resume, prior);
+    } else {
+      session = 'fresh';
+      if (spec.command.some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
+        sessionId = randomUUID();
+        argv = substituteSessionId(spec.command, sessionId);
+      }
+    }
+  }
+
+  // A resumed session already holds the assembled prompt and its own failed
+  // output, so a repair re-ask sends only the repair message; every other
+  // dispatch sends the full deterministic prompt. `repair_appendix` records
+  // exactly what was sent beyond the snapshotted prompt.
+  const stdin =
+    repairCore == null
+      ? promptRes.prompt
+      : session === 'resumed'
+        ? repairCore
+        : `${promptRes.prompt}\n\n---\n${repairCore}`;
 
   const dispatched: Record<string, unknown> = {
     type: 'actor_dispatched',
@@ -369,18 +422,23 @@ function dispatchOnce(
     attempt,
     attempt_reason: reason,
     executor,
-    command: spec.command,
+    command: argv,
     model: spec.model,
     prompt_path: promptRes.promptPath,
     prompt_sha256: promptRes.sha256,
   };
-  if (appendix != null) dispatched.repair_appendix = appendix;
+  if (session != null) dispatched.session = session;
+  if (sessionId != null) dispatched.session_id = sessionId;
+  if (repairCore != null) {
+    dispatched.repair_appendix = session === 'resumed' ? repairCore : `\n\n---\n${repairCore}`;
+  }
   appendEvent(ctx.runDir, dispatched, ctx.now);
   ctx.act(
-    `dispatch ${stepId}${role ? ` (${role})` : ''} attempt ${attempt} [${reason}] → ${executor}`,
+    `dispatch ${stepId}${role ? ` (${role})` : ''} attempt ${attempt} [${reason}]` +
+      ` → ${executor}${session != null ? ` (${session} session)` : ''}`,
   );
 
-  const [cmd, ...args] = spec.command;
+  const [cmd, ...args] = argv;
   const spawned = spawnSync(cmd!, args, {
     input: stdin,
     encoding: 'utf8',
@@ -388,13 +446,23 @@ function dispatchOnce(
     maxBuffer: SPAWN_MAX_BUFFER,
   });
 
-  const base = {
+  // Harness-assigned ids (fresh call, pattern mode) are learned post-spawn and
+  // recorded on the completion event instead of the dispatch.
+  if (session === 'fresh' && sessionId == null && spec.sessionIdPattern != null) {
+    const pattern = new RegExp(spec.sessionIdPattern);
+    const match = pattern.exec(spawned.stderr ?? '') ?? pattern.exec(spawned.stdout ?? '');
+    sessionId = match?.[1] ?? null;
+  }
+
+  const base: Record<string, unknown> = {
     step: stepId,
     actor: role,
     step_execution_id: ids.stepExecutionId,
     actor_call_id: ids.actorCallId,
     attempt,
+    executor,
   };
+  if (sessionId != null) base.session_id = sessionId;
 
   if (spawned.error != null) {
     appendEvent(
@@ -459,17 +527,22 @@ function dispatchOnce(
   const abs = join(ctx.runDir, outputRel);
   mkdirSync(dirname(abs), { recursive: true });
   writeFileSync(abs, stdout, 'utf8');
+  const artifactFields = [
+    `step_execution_id=${ids.stepExecutionId}`,
+    `actor_call_id=${ids.actorCallId}`,
+    `attempt=${attempt}`,
+  ];
+  // Mark artifacts born from session context: the id is auditable, the prior
+  // session contents are attested rather than recomputable.
+  if (session != null) artifactFields.push(`session=${session}`);
+  if (sessionId != null) artifactFields.push(`session_id=${sessionId}`);
   try {
     runRun({
       run: ctx.runId,
       event: 'artifact_created',
       artifact: outputRel,
       member: role ?? undefined,
-      fields: [
-        `step_execution_id=${ids.stepExecutionId}`,
-        `actor_call_id=${ids.actorCallId}`,
-        `attempt=${attempt}`,
-      ],
+      fields: artifactFields,
       repoRoot: ctx.repoRoot,
       now: ctx.now,
     });

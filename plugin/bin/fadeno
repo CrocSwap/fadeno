@@ -14590,6 +14590,7 @@ function runDiagram(opts) {
 
 // src/commands/drive.ts
 var import_node_child_process = require("node:child_process");
+var import_node_crypto2 = require("node:crypto");
 var import_node_fs11 = require("node:fs");
 var import_node_path11 = require("node:path");
 var import_yaml9 = __toESM(require_dist(), 1);
@@ -15719,6 +15720,10 @@ var import_node_path7 = require("node:path");
 var import_yaml5 = __toESM(require_dist(), 1);
 var ExecutorProfileError = class extends Error {
 };
+var SESSION_ID_PLACEHOLDER = "{session_id}";
+function substituteSessionId(argv, sessionId) {
+  return argv.map((part) => part.split(SESSION_ID_PLACEHOLDER).join(sessionId));
+}
 var EXECUTORS_FILE = (0, import_node_path7.join)(".fadeno", "executors.yaml");
 function isMapping(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -15760,10 +15765,65 @@ function parseExecutorProfile(text, source) {
     if (raw.model != null && typeof raw.model !== "string") {
       throw new ExecutorProfileError(`${source}: executor "${name}" has a non-string \`model\`.`);
     }
+    let resume = null;
+    if (raw.resume != null) {
+      if (!Array.isArray(raw.resume) || raw.resume.length === 0 || !raw.resume.every((part) => typeof part === "string" && part.length > 0)) {
+        throw new ExecutorProfileError(
+          `${source}: executor "${name}" needs \`resume\` as a non-empty array of strings.`
+        );
+      }
+      resume = raw.resume;
+      if (!resume.some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
+        throw new ExecutorProfileError(
+          `${source}: executor "${name}" \`resume\` must contain the ${SESSION_ID_PLACEHOLDER} placeholder.`
+        );
+      }
+    }
+    let sessionIdPattern = null;
+    if (raw.session_id_pattern != null) {
+      if (typeof raw.session_id_pattern !== "string") {
+        throw new ExecutorProfileError(
+          `${source}: executor "${name}" has a non-string \`session_id_pattern\`.`
+        );
+      }
+      let compiled;
+      try {
+        compiled = new RegExp(raw.session_id_pattern);
+      } catch (err) {
+        throw new ExecutorProfileError(
+          `${source}: executor "${name}" session_id_pattern did not compile: ${err.message}`
+        );
+      }
+      if (compiled.source.indexOf("(") < 0) {
+        throw new ExecutorProfileError(
+          `${source}: executor "${name}" session_id_pattern needs one capture group for the id.`
+        );
+      }
+      sessionIdPattern = raw.session_id_pattern;
+    }
+    const mintsId = command.some((part) => part.includes(SESSION_ID_PLACEHOLDER));
+    if (resume != null) {
+      if (mintsId && sessionIdPattern != null) {
+        throw new ExecutorProfileError(
+          `${source}: executor "${name}" declares both a ${SESSION_ID_PLACEHOLDER} placeholder in \`command\` and a \`session_id_pattern\` \u2014 use one id source, not both.`
+        );
+      }
+      if (!mintsId && sessionIdPattern == null) {
+        throw new ExecutorProfileError(
+          `${source}: executor "${name}" declares \`resume\` but no session id source \u2014 put ${SESSION_ID_PLACEHOLDER} in \`command\` (engine-minted) or declare \`session_id_pattern\`.`
+        );
+      }
+    } else if (sessionIdPattern != null || mintsId) {
+      throw new ExecutorProfileError(
+        `${source}: executor "${name}" has a session id source but no \`resume\` \u2014 session-capable executors must declare how to resume.`
+      );
+    }
     executors[name] = {
       adapter: "command",
       command,
-      model: typeof raw.model === "string" ? raw.model : null
+      model: typeof raw.model === "string" ? raw.model : null,
+      resume,
+      sessionIdPattern
     };
   }
   const bindings = {};
@@ -15800,7 +15860,11 @@ function serializeProfile(profile) {
   const sortedExecutors = {};
   for (const name of Object.keys(profile.executors).sort()) {
     const spec = profile.executors[name];
-    sortedExecutors[name] = { adapter: spec.adapter, command: spec.command, model: spec.model };
+    const entry = { adapter: spec.adapter, command: spec.command };
+    if (spec.model != null) entry.model = spec.model;
+    if (spec.resume != null) entry.resume = spec.resume;
+    if (spec.sessionIdPattern != null) entry.session_id_pattern = spec.sessionIdPattern;
+    sortedExecutors[name] = entry;
   }
   const sortedBindings = {};
   for (const role of Object.keys(profile.bindings).sort()) {
@@ -17279,14 +17343,24 @@ function validateTyped(ctx, kind, text) {
   if (validate(parsed)) return { ok: true, parsed };
   return { ok: false, errors: schemaErrorMessages(validate) };
 }
-function repairAppendix(errors) {
+function repairMessage(errors) {
   const listed = errors.slice(0, 5).map((e) => `- ${e}`).join("\n");
-  return `
-
----
-REPAIR: your previous output failed schema validation:
+  return `REPAIR: your previous output failed schema validation:
 ${listed}
 Return ONLY a corrected artifact that satisfies the schema. No prose, no fences.`;
+}
+function latestSessionForRole(events, role, executor) {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    if (event.type !== "actor_dispatched" && event.type !== "actor_completed" && event.type !== "actor_failed") {
+      continue;
+    }
+    if ((event.extra.actor ?? null) !== role) continue;
+    if (typeof event.extra.session_id !== "string") continue;
+    if (typeof event.extra.executor === "string" && event.extra.executor !== executor) continue;
+    return event.extra.session_id;
+  }
+  return null;
 }
 function dispatchOnce(ctx, stepId, role, generation, inBody, outputRel, artifactType, ids, attempt, reason, repairErrors) {
   let promptRes;
@@ -17305,8 +17379,28 @@ function dispatchOnce(ctx, stepId, role, generation, inBody, outputRel, artifact
     throw err;
   }
   const { executor, spec } = effectiveBinding(ctx, role);
-  const appendix = repairErrors != null ? repairAppendix(repairErrors) : null;
-  const stdin = appendix != null ? promptRes.prompt + appendix : promptRes.prompt;
+  const repairCore = repairErrors != null ? repairMessage(repairErrors) : null;
+  let session = null;
+  let sessionId = null;
+  let argv = spec.command;
+  if (spec.resume != null) {
+    const prior = latestSessionForRole(freshEvents(ctx.runDir), role, executor);
+    if (prior != null) {
+      session = "resumed";
+      sessionId = prior;
+      argv = substituteSessionId(spec.resume, prior);
+    } else {
+      session = "fresh";
+      if (spec.command.some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
+        sessionId = (0, import_node_crypto2.randomUUID)();
+        argv = substituteSessionId(spec.command, sessionId);
+      }
+    }
+  }
+  const stdin = repairCore == null ? promptRes.prompt : session === "resumed" ? repairCore : `${promptRes.prompt}
+
+---
+${repairCore}`;
   const dispatched = {
     type: "actor_dispatched",
     step: stepId,
@@ -17316,30 +17410,44 @@ function dispatchOnce(ctx, stepId, role, generation, inBody, outputRel, artifact
     attempt,
     attempt_reason: reason,
     executor,
-    command: spec.command,
+    command: argv,
     model: spec.model,
     prompt_path: promptRes.promptPath,
     prompt_sha256: promptRes.sha256
   };
-  if (appendix != null) dispatched.repair_appendix = appendix;
+  if (session != null) dispatched.session = session;
+  if (sessionId != null) dispatched.session_id = sessionId;
+  if (repairCore != null) {
+    dispatched.repair_appendix = session === "resumed" ? repairCore : `
+
+---
+${repairCore}`;
+  }
   appendEvent(ctx.runDir, dispatched, ctx.now);
   ctx.act(
-    `dispatch ${stepId}${role ? ` (${role})` : ""} attempt ${attempt} [${reason}] \u2192 ${executor}`
+    `dispatch ${stepId}${role ? ` (${role})` : ""} attempt ${attempt} [${reason}] \u2192 ${executor}${session != null ? ` (${session} session)` : ""}`
   );
-  const [cmd, ...args] = spec.command;
+  const [cmd, ...args] = argv;
   const spawned = (0, import_node_child_process.spawnSync)(cmd, args, {
     input: stdin,
     encoding: "utf8",
     cwd: ctx.repoRoot,
     maxBuffer: SPAWN_MAX_BUFFER
   });
+  if (session === "fresh" && sessionId == null && spec.sessionIdPattern != null) {
+    const pattern = new RegExp(spec.sessionIdPattern);
+    const match = pattern.exec(spawned.stderr ?? "") ?? pattern.exec(spawned.stdout ?? "");
+    sessionId = match?.[1] ?? null;
+  }
   const base = {
     step: stepId,
     actor: role,
     step_execution_id: ids.stepExecutionId,
     actor_call_id: ids.actorCallId,
-    attempt
+    attempt,
+    executor
   };
+  if (sessionId != null) base.session_id = sessionId;
   if (spawned.error != null) {
     appendEvent(
       ctx.runDir,
@@ -17398,17 +17506,20 @@ function dispatchOnce(ctx, stepId, role, generation, inBody, outputRel, artifact
   const abs = (0, import_node_path11.join)(ctx.runDir, outputRel);
   (0, import_node_fs11.mkdirSync)((0, import_node_path11.dirname)(abs), { recursive: true });
   (0, import_node_fs11.writeFileSync)(abs, stdout, "utf8");
+  const artifactFields = [
+    `step_execution_id=${ids.stepExecutionId}`,
+    `actor_call_id=${ids.actorCallId}`,
+    `attempt=${attempt}`
+  ];
+  if (session != null) artifactFields.push(`session=${session}`);
+  if (sessionId != null) artifactFields.push(`session_id=${sessionId}`);
   try {
     runRun({
       run: ctx.runId,
       event: "artifact_created",
       artifact: outputRel,
       member: role ?? void 0,
-      fields: [
-        `step_execution_id=${ids.stepExecutionId}`,
-        `actor_call_id=${ids.actorCallId}`,
-        `attempt=${attempt}`
-      ],
+      fields: artifactFields,
       repoRoot: ctx.repoRoot,
       now: ctx.now
     });
@@ -18169,7 +18280,8 @@ function projectRun(run, events) {
         decisions: [],
         actorCalls: 0,
         attempts: 0,
-        repairs: 0
+        repairs: 0,
+        resumed: 0
       };
       byStep.set(id, v);
       stepOrder.push(id);
@@ -18214,6 +18326,7 @@ function projectRun(run, events) {
         const v = view(event.step);
         v.attempts += 1;
         if (event.extra.attempt_reason === "schema_repair") v.repairs += 1;
+        if (event.extra.session === "resumed") v.resumed += 1;
         const callId = typeof event.extra.actor_call_id === "string" ? event.extra.actor_call_id : `?${v.attempts}`;
         const set = callsByStep.get(event.step) ?? /* @__PURE__ */ new Set();
         set.add(callId);
@@ -18379,8 +18492,48 @@ function runVerify(opts) {
   findings.push(checkExecutorBindings(run, events));
   findings.push(checkNamedDecisions(events));
   findings.push(checkArtifactSupersede(events));
+  findings.push(checkSessionContinuity(events));
   const ok = !findings.some((f) => f.status === "fail");
   return { run, mode, findings, ok };
+}
+var ACTOR_EVENT_TYPES = /* @__PURE__ */ new Set(["actor_dispatched", "actor_completed", "actor_failed"]);
+function checkSessionContinuity(events) {
+  const check = "session-continuity";
+  const seen = /* @__PURE__ */ new Map();
+  let sessionDispatches = 0;
+  const problems = [];
+  for (const event of events) {
+    if (!ACTOR_EVENT_TYPES.has(event.type)) continue;
+    const roleKey = typeof event.extra.actor === "string" ? event.extra.actor : "(anon)";
+    const sid = typeof event.extra.session_id === "string" ? event.extra.session_id : null;
+    const executor = typeof event.extra.executor === "string" ? event.extra.executor : "";
+    if (event.type === "actor_dispatched" && event.extra.session != null) {
+      const mode = event.extra.session;
+      sessionDispatches += 1;
+      if (mode !== "fresh" && mode !== "resumed") {
+        problems.push(`${roleKey}: dispatch has unrecognized session mode ${JSON.stringify(mode)}`);
+      } else if (mode === "resumed") {
+        if (sid == null) {
+          problems.push(`${roleKey}: resumed dispatch records no session_id`);
+        } else {
+          const creator = seen.get(roleKey)?.get(sid);
+          if (creator == null) {
+            problems.push(`${roleKey}: resumed session ${sid} was never recorded earlier in the run`);
+          } else if (creator !== "" && executor !== "" && creator !== executor) {
+            problems.push(`${roleKey}: session ${sid} created under "${creator}" but resumed under "${executor}"`);
+          }
+        }
+      }
+    }
+    if (sid != null) {
+      const byId = seen.get(roleKey) ?? /* @__PURE__ */ new Map();
+      if (!byId.has(sid)) byId.set(sid, executor);
+      seen.set(roleKey, byId);
+    }
+  }
+  if (sessionDispatches === 0) return skip(check, "no session evidence recorded");
+  if (problems.length > 0) return { check, status: "fail", detail: problems.join("; ") };
+  return { check, status: "ok", detail: `${sessionDispatches} session dispatch(es), continuity holds` };
 }
 var ATTEMPT_REASONS_FIRST = /* @__PURE__ */ new Set(["initial"]);
 var ATTEMPT_REASONS_RETRY = /* @__PURE__ */ new Set(["schema_repair", "executor_override", "user_retry"]);
@@ -19152,6 +19305,9 @@ function stepSummary(step) {
   if (step.attempts > step.actorCalls) {
     const repairNote = step.repairs > 0 ? `, ${step.repairs} schema repair${step.repairs === 1 ? "" : "s"}` : "";
     parts.push(`${step.attempts} attempts${repairNote}`);
+  }
+  if (step.resumed > 0) {
+    parts.push(step.resumed === 1 ? "resumed session" : `${step.resumed} resumed-session calls`);
   }
   if (step.artifacts > 0) parts.push(`${step.artifacts} artifact${step.artifacts === 1 ? "" : "s"}`);
   for (const gate of step.gates) parts.push(`gate ${gate.condition} \u2192 ${gate.result}`);

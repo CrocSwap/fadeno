@@ -9,6 +9,16 @@
 # No routing, ranking, or automatic fallback happens here: if a bound executor
 # fails, the run pauses and you substitute explicitly
 # (`fadeno drive <run> --bind <role>=<executor>`).
+# Session-capable executors (OPTIONAL — bias toward memoryless): declaring
+# `resume` keeps ONE harness session per role per run, so later steps and
+# schema repairs reach a model that remembers its prior work. The trade:
+# resumed context is ATTESTED evidence (session id recorded, continuity
+# verified) but not recomputable from the ledger. Use it only for roles that
+# genuinely need memory (e.g. builders iterating on rework).
+#   - engine-minted id: put {session_id} in `command` (harness accepts a
+#     pinned id, e.g. `claude -p --session-id`)
+#   - harness-assigned id: declare `session_id_pattern` (one capture group,
+#     matched against stderr then stdout of the fresh call)
 executors:
   claude-cli:
     adapter: command
@@ -16,5 +26,14 @@ executors:
   # codex-cli:
   #   adapter: command
   #   command: [codex, exec, -]
+  # claude-session:
+  #   adapter: command
+  #   command: [claude, -p, --session-id, "{session_id}"]
+  #   resume: [claude, -p, --resume, "{session_id}"]
+  # codex-session:
+  #   adapter: command
+  #   command: [codex, exec, -]
+  #   resume: [codex, exec, resume, "{session_id}", -]
+  #   session_id_pattern: "session id: ([0-9a-f-]+)"
 bindings:
   "*": claude-cli

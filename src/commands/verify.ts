@@ -196,8 +196,61 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
   //     both sides; superseding nothing (or by nothing) is incoherent.
   findings.push(checkArtifactSupersede(events));
 
+  // 21. session-continuity — a resumed dispatch must reference a session id
+  //     previously recorded for the same role under the same executor. The
+  //     resumed context itself is attested (never recomputable); this checks
+  //     the reference chain around it.
+  findings.push(checkSessionContinuity(events));
+
   const ok = !findings.some((f) => f.status === 'fail');
   return { run, mode, findings, ok };
+}
+
+const ACTOR_EVENT_TYPES = new Set(['actor_dispatched', 'actor_completed', 'actor_failed']);
+
+function checkSessionContinuity(events: RunEvent[]): Finding {
+  const check = 'session-continuity';
+  /** roleKey → session_id → executor that first recorded it ('' if unknown). */
+  const seen = new Map<string, Map<string, string>>();
+  let sessionDispatches = 0;
+  const problems: string[] = [];
+
+  for (const event of events) {
+    if (!ACTOR_EVENT_TYPES.has(event.type)) continue;
+    const roleKey = typeof event.extra.actor === 'string' ? event.extra.actor : '(anon)';
+    const sid = typeof event.extra.session_id === 'string' ? event.extra.session_id : null;
+    const executor = typeof event.extra.executor === 'string' ? event.extra.executor : '';
+
+    if (event.type === 'actor_dispatched' && event.extra.session != null) {
+      const mode = event.extra.session;
+      sessionDispatches += 1;
+      if (mode !== 'fresh' && mode !== 'resumed') {
+        problems.push(`${roleKey}: dispatch has unrecognized session mode ${JSON.stringify(mode)}`);
+      } else if (mode === 'resumed') {
+        if (sid == null) {
+          problems.push(`${roleKey}: resumed dispatch records no session_id`);
+        } else {
+          const creator = seen.get(roleKey)?.get(sid);
+          if (creator == null) {
+            problems.push(`${roleKey}: resumed session ${sid} was never recorded earlier in the run`);
+          } else if (creator !== '' && executor !== '' && creator !== executor) {
+            problems.push(`${roleKey}: session ${sid} created under "${creator}" but resumed under "${executor}"`);
+          }
+        }
+      }
+    }
+
+    // Register after the check so a resumed dispatch cannot vouch for itself.
+    if (sid != null) {
+      const byId = seen.get(roleKey) ?? new Map<string, string>();
+      if (!byId.has(sid)) byId.set(sid, executor);
+      seen.set(roleKey, byId);
+    }
+  }
+
+  if (sessionDispatches === 0) return skip(check, 'no session evidence recorded');
+  if (problems.length > 0) return { check, status: 'fail', detail: problems.join('; ') };
+  return { check, status: 'ok', detail: `${sessionDispatches} session dispatch(es), continuity holds` };
 }
 
 const ATTEMPT_REASONS_FIRST = new Set(['initial']);

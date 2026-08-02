@@ -15,6 +15,28 @@ export interface ExecutorSpec {
   command: string[];
   /** Optional metadata recorded in dispatch evidence; never alters `command`. */
   model: string | null;
+  /**
+   * Optional session-resume argv (must contain `{session_id}`). Declaring it
+   * makes the executor **session-capable**: the engine reuses one harness
+   * session per role per run. Resumed context is attested evidence — the
+   * ledger records the session id, but cannot recompute what the session
+   * already contained. Bias toward memoryless executors when not needed.
+   */
+  resume: string[] | null;
+  /**
+   * How a fresh call's session id is learned when the harness assigns it:
+   * a regex with one capture group, matched against stderr then stdout.
+   * Mutually exclusive with a `{session_id}` placeholder in `command`
+   * (engine-minted id).
+   */
+  sessionIdPattern: string | null;
+}
+
+/** Placeholder substituted into command/resume argv. */
+export const SESSION_ID_PLACEHOLDER = '{session_id}';
+
+export function substituteSessionId(argv: string[], sessionId: string): string[] {
+  return argv.map((part) => part.split(SESSION_ID_PLACEHOLDER).join(sessionId));
 }
 
 export interface ExecutorProfile {
@@ -73,10 +95,76 @@ export function parseExecutorProfile(text: string, source: string): ExecutorProf
     if (raw.model != null && typeof raw.model !== 'string') {
       throw new ExecutorProfileError(`${source}: executor "${name}" has a non-string \`model\`.`);
     }
+
+    let resume: string[] | null = null;
+    if (raw.resume != null) {
+      if (
+        !Array.isArray(raw.resume) ||
+        raw.resume.length === 0 ||
+        !raw.resume.every((part) => typeof part === 'string' && part.length > 0)
+      ) {
+        throw new ExecutorProfileError(
+          `${source}: executor "${name}" needs \`resume\` as a non-empty array of strings.`,
+        );
+      }
+      resume = raw.resume as string[];
+      if (!resume.some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
+        throw new ExecutorProfileError(
+          `${source}: executor "${name}" \`resume\` must contain the ${SESSION_ID_PLACEHOLDER} placeholder.`,
+        );
+      }
+    }
+
+    let sessionIdPattern: string | null = null;
+    if (raw.session_id_pattern != null) {
+      if (typeof raw.session_id_pattern !== 'string') {
+        throw new ExecutorProfileError(
+          `${source}: executor "${name}" has a non-string \`session_id_pattern\`.`,
+        );
+      }
+      let compiled: RegExp;
+      try {
+        compiled = new RegExp(raw.session_id_pattern);
+      } catch (err) {
+        throw new ExecutorProfileError(
+          `${source}: executor "${name}" session_id_pattern did not compile: ${(err as Error).message}`,
+        );
+      }
+      if (compiled.source.indexOf('(') < 0) {
+        throw new ExecutorProfileError(
+          `${source}: executor "${name}" session_id_pattern needs one capture group for the id.`,
+        );
+      }
+      sessionIdPattern = raw.session_id_pattern;
+    }
+
+    const mintsId = (command as string[]).some((part) => part.includes(SESSION_ID_PLACEHOLDER));
+    if (resume != null) {
+      if (mintsId && sessionIdPattern != null) {
+        throw new ExecutorProfileError(
+          `${source}: executor "${name}" declares both a ${SESSION_ID_PLACEHOLDER} placeholder in ` +
+            '`command` and a `session_id_pattern` — use one id source, not both.',
+        );
+      }
+      if (!mintsId && sessionIdPattern == null) {
+        throw new ExecutorProfileError(
+          `${source}: executor "${name}" declares \`resume\` but no session id source — put ` +
+            `${SESSION_ID_PLACEHOLDER} in \`command\` (engine-minted) or declare \`session_id_pattern\`.`,
+        );
+      }
+    } else if (sessionIdPattern != null || mintsId) {
+      throw new ExecutorProfileError(
+        `${source}: executor "${name}" has a session id source but no \`resume\` — ` +
+          'session-capable executors must declare how to resume.',
+      );
+    }
+
     executors[name] = {
       adapter: 'command',
       command: command as string[],
       model: typeof raw.model === 'string' ? raw.model : null,
+      resume,
+      sessionIdPattern,
     };
   }
 
@@ -130,10 +218,16 @@ export function resolveBinding(
  * profile always yields the same bytes (and digest).
  */
 export function serializeProfile(profile: ExecutorProfile): string {
-  const sortedExecutors: Record<string, ExecutorSpec> = {};
+  // Emit exactly the document shape parseExecutorProfile reads (snake_case,
+  // optional keys omitted) so a snapshot round-trips byte-stable.
+  const sortedExecutors: Record<string, Record<string, unknown>> = {};
   for (const name of Object.keys(profile.executors).sort()) {
     const spec = profile.executors[name]!;
-    sortedExecutors[name] = { adapter: spec.adapter, command: spec.command, model: spec.model };
+    const entry: Record<string, unknown> = { adapter: spec.adapter, command: spec.command };
+    if (spec.model != null) entry.model = spec.model;
+    if (spec.resume != null) entry.resume = spec.resume;
+    if (spec.sessionIdPattern != null) entry.session_id_pattern = spec.sessionIdPattern;
+    sortedExecutors[name] = entry;
   }
   const sortedBindings: Record<string, string> = {};
   for (const role of Object.keys(profile.bindings).sort()) {

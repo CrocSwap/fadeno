@@ -150,6 +150,7 @@ test('happy path: a completed run with a recomputable passing gate verifies clea
       'executor-bindings',
       'named-decisions',
       'artifact-supersede',
+      'session-continuity',
     ],
   );
   assert.ok(result.findings.every((f) => f.status !== 'fail'));

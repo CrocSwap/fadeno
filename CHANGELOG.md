@@ -42,11 +42,23 @@ Fadeno gains a small deterministic, repo-local engine. Ledger format stays
 - **`artifact_superseded`** — explicit supersession, validated at record time
   (both sides must be recorded artifacts); a superseded path is excluded from
   active-artifact resolution without a new generation.
-- **`fadeno verify` → 20 checks** — new: `actor-attempts` (ordinal contiguity,
+- **Session-capable executors (opt-in; memoryless remains the default)** — an
+  executor that declares `resume` (argv with a `{session_id}` placeholder)
+  keeps one harness session per role per run, e.g. `claude -p
+  --session-id/--resume` or `codex exec resume`. Ids are engine-minted
+  (`{session_id}` in `command`) or harness-assigned (`session_id_pattern`
+  regex over stderr/stdout). Every dispatch and every artifact born from
+  resumed context is marked `session: fresh|resumed` + `session_id`; a schema
+  repair against a live session sends only the repair message (recorded as
+  `repair_appendix`). Honesty boundary: resumed prior context is attested by
+  session id, never recomputable — prefer memoryless executors when memory
+  isn't needed.
+- **`fadeno verify` → 21 checks** — new: `actor-attempts` (ordinal contiguity,
   allowed retry reasons, rejected-output digests), `executor-bindings`
   (snapshot digest + every dispatch matches the binding in force),
   `named-decisions` (declared options, at-most-once), `artifact-supersede`
-  (reference integrity).
+  (reference integrity), `session-continuity` (a resumed session id must
+  exist earlier in the run for the same role under the same executor).
 - **`fadeno show`** — projection surfaces actor calls, attempt counts, schema
   repairs, executor failures, and `! waiting for human decision`.
 - **Driver skill** — engine-first: `fadeno drive` → `fadeno decide` → re-drive,

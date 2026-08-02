@@ -103,11 +103,19 @@ conflict-refusing `decision_resolved` (also readable by the cursor). Explicit
 substitution is `fadeno drive --bind role=executor`, recorded as
 `executor_override`. An explicit `artifact_superseded` event (validated at
 record time) retires an artifact from active resolution without a new
-generation. `fadeno verify` grew from 16 to **20 checks**: attempt-ordinal
-contiguity + reasons, binding-matches-snapshot-or-override, named-decision
-validity/at-most-once, and supersede reference integrity. `fadeno show`
-surfaces actor calls, attempts, schema repairs, and `! waiting for human
-decision`. Engine-executable today: actor_call/evaluator/reduce/role-maps
+generation. Executors are **memoryless one-shot commands by default**; one
+that declares `resume` is session-capable — the engine keeps one harness
+session per role per run (engine-minted `{session_id}` or
+harness-assigned via `session_id_pattern`), marks every dispatch and
+resulting artifact `session: fresh|resumed` + id, and sends a resumed schema
+repair as only the repair message. Resumed context is **attested, not
+recomputable** — the honest trade for cross-step memory; bias memoryless.
+`fadeno verify` grew from 16 to **21 checks**: attempt-ordinal contiguity +
+reasons, binding-matches-snapshot-or-override, named-decision
+validity/at-most-once, supersede reference integrity, and session-continuity
+(a resumed id must exist earlier, same role, same executor). `fadeno show`
+surfaces actor calls, attempts, schema repairs, resumed sessions, and
+`! waiting for human decision`. Engine-executable today: actor_call/evaluator/reduce/role-maps
 (with collective assembly), deterministic gates, loops, human gates; tool_call
 and the undemonstrated primitives still hand back to the driver.
 

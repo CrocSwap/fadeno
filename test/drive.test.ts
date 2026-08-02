@@ -11,6 +11,7 @@ import { RunError, runRun } from '../src/commands/run.ts';
 import { runShow } from '../src/commands/show.ts';
 import { runVerify } from '../src/commands/verify.ts';
 import { resolveActiveArtifacts } from '../src/lib/artifact-manifest.ts';
+import { ExecutorProfileError, parseExecutorProfile } from '../src/lib/executors.ts';
 import { readEvents, type RunEvent } from '../src/lib/run-ledger.ts';
 import { LedgerWriter } from '../src/lib/run-ledger-write.ts';
 import { tempRepo } from './helpers.ts';
@@ -99,6 +100,50 @@ const EXECUTORS = {
     ],
   },
   dead: { adapter: 'command', command: ['node', '-e', 'process.exit(3)'] },
+  // Minted-id session executor: the engine passes a fresh UUID as argv; the
+  // fake harness persists "memory" in a session-keyed file in the repo cwd.
+  'session-worker': {
+    adapter: 'command',
+    command: [
+      'node',
+      '-e',
+      "const fs=require('fs');const id=process.argv[1];" +
+        "fs.writeFileSync('sess-store-'+id+'.txt','remembered-work');" +
+        "process.stdout.write('notes from session '+id);",
+      '{session_id}',
+    ],
+    resume: [
+      'node',
+      '-e',
+      "const fs=require('fs');const id=process.argv[1];" +
+        "process.stdout.write('RESUMED '+id+' '+fs.readFileSync('sess-store-'+id+'.txt','utf8'));",
+      '{session_id}',
+    ],
+  },
+  // Pattern-mode session executor that fails validation once: the harness
+  // assigns its own id (stderr banner); the repair attempt must resume it and
+  // send ONLY the repair message (captured to a file for assertion).
+  'flaky-session-reviewer': {
+    adapter: 'command',
+    command: [
+      'node',
+      '-e',
+      "const fs=require('fs');process.stderr.write('session id: flk-001\\n');" +
+        "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{" +
+        "if(fs.existsSync('flk-flag.tmp')){process.stdout.write(JSON.stringify(" +
+        `${VALID_REVIEW}));}else{fs.writeFileSync('flk-flag.tmp','1');` +
+        "process.stdout.write('garbage');}});",
+    ],
+    resume: [
+      'node',
+      '-e',
+      "const fs=require('fs');let d='';process.stdin.on('data',c=>d+=c);" +
+        "process.stdin.on('end',()=>{fs.writeFileSync('stdin-a2.txt',d);" +
+        `process.stdout.write(JSON.stringify(${VALID_REVIEW}));});`,
+      '{session_id}',
+    ],
+    session_id_pattern: 'session id: (\\S+)',
+  },
 };
 
 const DEFAULT_BINDINGS = { worker: 'ok-worker', reviewer: 'ok-reviewer', '*': 'ok-worker' };
@@ -205,7 +250,7 @@ test('engine: drives actor steps and gates to the human pause with full identity
   assert.equal(ofType(events(root, runId), 'decision_requested').length, 1);
 });
 
-test('engine: decide resolves the pause; resume drives to terminal; verify passes all 20 checks', (t) => {
+test('engine: decide resolves the pause; resume drives to terminal; verify passes all 21 checks', (t) => {
   const { root, runId } = completeHappyRun(t);
 
   const all = events(root, runId);
@@ -431,6 +476,151 @@ test('supersede: validated at record time, excluded from active resolution, veri
   const tampered = runVerify({ run: runId, repoRoot: root });
   assert.equal(tampered.ok, false);
   assert.match(finding(tampered, 'artifact-supersede').detail, /ghost\.md was never recorded/);
+});
+
+test('sessions: a minted session carries role memory across steps and the human pause', (t) => {
+  const { root, runId } = seed(t, {
+    bindings: { worker: 'session-worker', reviewer: 'ok-reviewer', '*': 'ok-worker' },
+  });
+
+  const paused = runDrive({ run: runId, repoRoot: root });
+  assert.equal(paused.outcome, 'paused_human_gate');
+  runDecide({ run: runId, option: 'approve', repoRoot: root });
+  const done = runDrive({ run: runId, repoRoot: root });
+  assert.equal(done.outcome, 'terminal');
+
+  const all = events(root, runId);
+  const workerDispatches = ofType(all, 'actor_dispatched').filter((e) => e.extra.actor === 'worker');
+  assert.equal(workerDispatches.length, 2); // implement, then ship after the pause
+
+  const [implementD, shipD] = workerDispatches;
+  assert.equal(implementD!.extra.session, 'fresh');
+  const sessionId = implementD!.extra.session_id;
+  assert.equal(typeof sessionId, 'string');
+  assert.equal(shipD!.extra.session, 'resumed');
+  assert.equal(shipD!.extra.session_id, sessionId);
+  assert.ok((shipD!.extra.command as string[]).includes(sessionId as string), 'resume argv carries the id');
+
+  // The resumed call really saw the fresh call's state — memory, not re-derivation.
+  const summary = readFileSync(join(root, '.fadeno', 'runs', runId, 'artifacts', 'summary.md'), 'utf8');
+  assert.equal(summary, `RESUMED ${sessionId} remembered-work`);
+
+  // The artifact born from resumed context is marked as such.
+  const summaryEvent = ofType(all, 'artifact_created').find((e) => e.extra.artifact === 'artifacts/summary.md');
+  assert.ok(summaryEvent);
+  assert.equal(summaryEvent.extra.session, 'resumed');
+  assert.equal(summaryEvent.extra.session_id, sessionId);
+
+  const verify = runVerify({ run: runId, repoRoot: root });
+  assert.equal(verify.ok, true);
+  assert.match(finding(verify, 'session-continuity').detail, /2 session dispatch\(es\), continuity holds/);
+});
+
+test('sessions: pattern-extracted id + repair resumes the session with only the repair message', (t) => {
+  const { root, runId } = seed(t, {
+    bindings: { worker: 'ok-worker', reviewer: 'flaky-session-reviewer', '*': 'ok-worker' },
+  });
+  const result = runDrive({ run: runId, repoRoot: root });
+  assert.equal(result.outcome, 'paused_human_gate'); // repair succeeded on the resumed session
+
+  const all = events(root, runId);
+  const reviewDispatches = ofType(all, 'actor_dispatched').filter(
+    (e) => e.extra.actor_call_id === 'ac-review-g1-reviewer',
+  );
+  assert.equal(reviewDispatches.length, 2);
+  const [first, second] = reviewDispatches;
+
+  // Fresh call: id unknown at dispatch, harvested from stderr onto the completion.
+  assert.equal(first!.extra.session, 'fresh');
+  assert.equal(first!.extra.session_id, undefined);
+  const firstCompletion = ofType(all, 'actor_completed').find(
+    (e) => e.extra.actor_call_id === 'ac-review-g1-reviewer' && e.extra.attempt === 1,
+  );
+  assert.ok(firstCompletion);
+  assert.equal(firstCompletion.extra.output_valid, false);
+  assert.equal(firstCompletion.extra.session_id, 'flk-001');
+
+  // Repair attempt: resumed, and stdin was the repair message alone.
+  assert.equal(second!.extra.attempt_reason, 'schema_repair');
+  assert.equal(second!.extra.session, 'resumed');
+  assert.equal(second!.extra.session_id, 'flk-001');
+  const capturedStdin = readFileSync(join(root, 'stdin-a2.txt'), 'utf8');
+  assert.equal(capturedStdin, second!.extra.repair_appendix);
+  assert.match(capturedStdin, /^REPAIR: your previous output failed schema validation:/);
+  assert.ok(!capturedStdin.includes('# Fadeno'), 'resumed repair must not re-send the assembled prompt');
+
+  runDecide({ run: runId, option: 'approve', repoRoot: root });
+  runDrive({ run: runId, repoRoot: root });
+  const verify = runVerify({ run: runId, repoRoot: root });
+  assert.equal(verify.ok, true);
+  assert.equal(finding(verify, 'session-continuity').status, 'ok');
+});
+
+test('verify: a forged resumed dispatch with an unknown session fails session-continuity', (t) => {
+  const { root, runId } = completeHappyRun(t);
+  new LedgerWriter(join(root, '.fadeno', 'runs', runId)).append(
+    {
+      type: 'actor_dispatched',
+      step: 'ship',
+      actor: 'worker',
+      step_execution_id: 'se-ship-g1',
+      actor_call_id: 'ac-ship-g1-worker',
+      attempt: 2,
+      attempt_reason: 'user_retry',
+      executor: 'ok-worker',
+      session: 'resumed',
+      session_id: 'sess-zzz',
+    },
+    new Date(),
+  );
+
+  const verify = runVerify({ run: runId, repoRoot: root });
+  assert.equal(verify.ok, false);
+  assert.match(
+    finding(verify, 'session-continuity').detail,
+    /resumed session sess-zzz was never recorded earlier/,
+  );
+});
+
+test('sessions: profile validation rejects resume without an id source, and double id sources', (t) => {
+  const base = {
+    executors: {
+      broken: { adapter: 'command', command: ['node', '-e', 'x'], resume: ['node', '{session_id}'] },
+    },
+    bindings: { '*': 'broken' },
+  };
+  assert.throws(
+    () => parseExecutorProfile(stringifyYaml(base), 'test.yaml'),
+    /no session id source/,
+  );
+
+  const doubled = {
+    executors: {
+      broken: {
+        adapter: 'command',
+        command: ['node', '{session_id}'],
+        resume: ['node', '{session_id}'],
+        session_id_pattern: 'id: (\\S+)',
+      },
+    },
+    bindings: { '*': 'broken' },
+  };
+  assert.throws(
+    () => parseExecutorProfile(stringifyYaml(doubled), 'test.yaml'),
+    /use one id source, not both/,
+  );
+
+  assert.throws(
+    () =>
+      parseExecutorProfile(
+        stringifyYaml({
+          executors: { broken: { adapter: 'command', command: ['node', '-e', 'x'], resume: ['node', 'resume'] } },
+          bindings: { '*': 'broken' },
+        }),
+        'test.yaml',
+      ),
+    ExecutorProfileError,
+  );
 });
 
 test('engine: refuses legacy ledgers and honors the transition cap', (t) => {

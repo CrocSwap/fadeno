@@ -249,6 +249,9 @@ function stepSummary(step: StepView): string {
     const repairNote = step.repairs > 0 ? `, ${step.repairs} schema repair${step.repairs === 1 ? '' : 's'}` : '';
     parts.push(`${step.attempts} attempts${repairNote}`);
   }
+  if (step.resumed > 0) {
+    parts.push(step.resumed === 1 ? 'resumed session' : `${step.resumed} resumed-session calls`);
+  }
   if (step.artifacts > 0) parts.push(`${step.artifacts} artifact${step.artifacts === 1 ? '' : 's'}`);
   for (const gate of step.gates) parts.push(`gate ${gate.condition} → ${gate.result}`);
   if (step.iterations > 0) parts.push(`${step.iterations} iteration${step.iterations === 1 ? '' : 's'}`);

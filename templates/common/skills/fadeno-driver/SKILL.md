@@ -103,6 +103,14 @@ bindings; `"*"` is the default). Playbooks stay semantic — no harness names in
 role prose. Substitution is explicit and recorded:
 `fadeno drive <run> --bind <role>=<executor>`.
 
+Executors are **memoryless one-shot commands by default**. An executor that
+declares `resume` keeps one harness session per role per run (`claude -p
+--session-id/--resume`, `codex exec resume`); the engine records
+`session: fresh|resumed` + the session id on every dispatch and on the
+artifacts it produces, and `verify` checks the continuity chain. Prefer
+memoryless unless the role genuinely needs cross-step memory — resumed
+context is attested, not recomputable.
+
 Manual fallback map (override with playbook role purpose hints or host policy):
 
 | Role pattern | Command |

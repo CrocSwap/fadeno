@@ -98,6 +98,17 @@ not fabricate them. `verify` checks that attempt ordinals are contiguous per
 actor call and every redispatch carries an allowed reason (`schema_repair`,
 `executor_override`, `user_retry`).
 
+**Sessions are opt-in and marked.** An executor that declares `resume` in
+`.fadeno/executors.yaml` keeps one harness session per role per run; its
+dispatches carry `session: fresh|resumed` + `session_id`, artifacts born from
+resumed context carry the same marks, and a resumed repair sends only the
+repair message (the session already holds the prompt and the failed output —
+recorded as `repair_appendix`). Honesty boundary: the prompt snapshot covers
+the bytes sent *this* call; resumed prior context is **attested by session
+id, not recomputable** — `verify`'s `session-continuity` check enforces the
+reference chain (a resumed id must exist earlier, for the same role, under
+the same executor). Default to memoryless executors when memory isn't needed.
+
 An artifact event may carry an optional **`member`** field naming the map
 member that produced it (e.g.
 `{"type":"artifact_created","step":"cross_review","artifact":"artifacts/cross-review.architect_fable.json","member":"architect_fable",...}`).

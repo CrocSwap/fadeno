@@ -32,6 +32,8 @@ export interface StepView {
   attempts: number;
   /** Dispatches with attempt_reason schema_repair. */
   repairs: number;
+  /** Dispatches into a resumed harness session (attested context). */
+  resumed: number;
 }
 
 /**
@@ -85,6 +87,7 @@ function projectRun(run: RunSummary, events: RunEvent[]): ShowProjection {
         actorCalls: 0,
         attempts: 0,
         repairs: 0,
+        resumed: 0,
       };
       byStep.set(id, v);
       stepOrder.push(id);
@@ -131,6 +134,7 @@ function projectRun(run: RunSummary, events: RunEvent[]): ShowProjection {
         const v = view(event.step);
         v.attempts += 1;
         if (event.extra.attempt_reason === 'schema_repair') v.repairs += 1;
+        if (event.extra.session === 'resumed') v.resumed += 1;
         const callId = typeof event.extra.actor_call_id === 'string' ? event.extra.actor_call_id : `?${v.attempts}`;
         const set = callsByStep.get(event.step) ?? new Set<string>();
         set.add(callId);
