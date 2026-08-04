@@ -125,7 +125,7 @@ export function runRun(opts: RunOptions): RunResult {
   const runYamlPath = join(runDir, 'run.yaml');
 
   // The version gate: refuses legacy or unknown-format ledgers before any
-  // mutation, so a pre-0.2 ledger can never become mixed-format.
+  // mutation, so an older ledger can never become mixed-format.
   let writer: LedgerWriter;
   try {
     writer = new LedgerWriter(runDir);

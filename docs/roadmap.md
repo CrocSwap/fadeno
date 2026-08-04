@@ -42,12 +42,12 @@ general scheduler, or orchestration platform.
   the playbook → renders it (`fadeno diagram`, ASCII or Mermaid) → human-gate
   approval → hands off to the runner; runner explains role↔subagent management.
 - Schemas: `playbook`, `run`, `review-report`. Starter playbooks: `code-change-review`,
-  `research-synthesis`, `pr-review`. Runner + builder skills.
+  `research-synthesis`, `pr-review`. Runner, builder, and driver skills.
 - Validation: schema + reference-integrity (errors) + **semantics** — `actor` must be a
   declared role (error); unproduced `input` artifact and unused role (warnings). Also
   validates `run.yaml` / `review-report.json` (auto-detected or `--schema`).
 - `$schema` editor modelines in generated YAML (playbooks + run ledgers).
-- Run ledger (`run.yaml` / `events.jsonl` / `artifacts/`) with CLI helpers (`run`,
+- Repo-local runtime and run ledger (`run.yaml` / `events.jsonl` / `artifacts/`) with CLI helpers (`run`,
   `prompt`, `next`, `runs` list, `show` timeline, and whole-trace `verify`) and
   deterministic gate evaluators (`no_blocking_issues`, `tests_pass`) — the
   advisory→enforced bridge. The driver skill composes these helpers into the
@@ -88,7 +88,7 @@ promoted capabilities are:
 6. canonical evidence, expanded verification, and a default human-legible run
    projection.
 
-**Capabilities 1, 2, 4, and 5 shipped thin (unreleased):** the engine —
+**Capabilities 1, 2, 4, and 5 shipped thin:** the engine —
 `fadeno drive` owns the transition loop over the same pure cursor (`next`),
 dispatching each actor step through a **command-adapter executor** from
 `.fadeno/executors.yaml` (direct role bindings + `"*"` default; profile
@@ -110,7 +110,7 @@ harness-assigned via `session_id_pattern`), marks every dispatch and
 resulting artifact `session: fresh|resumed` + id, and sends a resumed schema
 repair as only the repair message. Resumed context is **attested, not
 recomputable** — the honest trade for cross-step memory; bias memoryless.
-`fadeno verify` grew from 16 to **21 checks**: attempt-ordinal contiguity +
+`fadeno verify` grew from 16 to **25 checks**: attempt-ordinal contiguity +
 reasons, binding-matches-snapshot-or-override, named-decision
 validity/at-most-once, supersede reference integrity, and session-continuity
 (a resumed id must exist earlier, same role, same executor). `fadeno show`
@@ -119,16 +119,25 @@ surfaces actor calls, attempts, schema repairs, resumed sessions, and
 (with collective assembly), deterministic gates, loops, human gates; tool_call
 and the undemonstrated primitives still hand back to the driver.
 
-**Capabilities 3 and 6 shipped thin (released in v0.5.0, 2026-08-02):** run-ledger format 0.2
+**Capabilities 3 and 6 shipped thin (format 0.3):** run-ledger format 0.3
 (`schema_version` in run.yaml + contiguous per-event `seq`), artifact
 manifests with sha256 digests and record-time typed-artifact validation on
-`artifact_created` (immutability guard included), a 16-check `fadeno verify`
+`artifact_created` (immutability guard included), host-dispatch lifecycle and
+native-attestation checks in `fadeno verify`,
 (digests, seq, terminal coherence, active/superseded resolution,
 prompt-snapshot integrity, conflicting human decisions — unrecomputable
 evidence reported as skipped, never silently valid), a logical-step
 projection as the default `fadeno show`, and an explicit `--legacy`
-compatibility mode (readers refuse unversioned ledgers; writers refuse them
-outright).
+compatibility mode for 0.2 and unversioned ledgers (writers refuse all older
+ledgers outright).
+
+**Native host dispatch is now implemented:** `adapter: host` profiles retain
+model, reasoning effort, and agent type in the run snapshot. `fadeno drive`
+batches all pending host calls and returns `awaiting_host_dispatch` with stable
+request ids. The host submits serial `dispatch-start`, `dispatch-complete`, or
+`dispatch-fail` receipts; valid output receives an immutable manifest and
+invalid output is parked under `artifacts/attempts/`. The director remains the
+sole ledger writer.
 
 **First format-0.2 dogfood receipt (2026-08-02):** the fadeno-demo exhibits
 were regenerated on 0.5.0 — PR #3 (genuine signed-durations trace, 16 ok / 2

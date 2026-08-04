@@ -28,6 +28,7 @@ import {
 } from '../lib/run-ledger.ts';
 import { LedgerWriteError, LedgerWriter } from '../lib/run-ledger-write.ts';
 import { GateError, runGate, SUPPORTED_CONDITIONS, type GateCondition } from './gate.ts';
+import { requestHostDispatch, type HostDispatchRequest } from '../lib/host-dispatch.ts';
 import { PromptError, runPrompt } from './prompt.ts';
 import { RunError, runRun } from './run.ts';
 
@@ -48,6 +49,7 @@ export type DriveOutcome =
   | 'needs_decision'
   | 'executor_failed'
   | 'output_invalid'
+  | 'awaiting_host_dispatch'
   | 'max_transitions';
 
 export interface DriveDecision {
@@ -80,6 +82,10 @@ export interface DriveResult {
   detail: string;
   actions: string[];
   transitions: number;
+  /** Durable native-host requests still awaiting start/terminal receipt. */
+  requests: HostDispatchRequest[];
+  /** Named alias for callers that prefer the protocol vocabulary. */
+  unresolvedRequests: HostDispatchRequest[];
 }
 
 const MAX_TRANSITIONS_DEFAULT = 50;
@@ -296,6 +302,8 @@ type DispatchFailure =
 
 type DispatchOutcome = { kind: 'valid' } | DispatchFailure;
 
+type PromptableOutcome = DispatchFailure | { kind: 'awaiting_host_dispatch'; requests: HostDispatchRequest[] };
+
 function validateTyped(
   ctx: EngineCtx,
   kind: string | null,
@@ -379,6 +387,9 @@ function dispatchOnce(
   }
 
   const { executor, spec } = effectiveBinding(ctx, role);
+  if (spec.adapter !== 'command') {
+    throw new DriveError(`host executor "${executor}" must be handled by the host dispatch protocol.`);
+  }
   const repairCore = repairErrors != null ? repairMessage(repairErrors) : null;
 
   // Session state — only for executors that declare `resume`. One session per
@@ -559,8 +570,115 @@ function dispatchOnce(
   return { kind: 'valid' };
 }
 
+function pendingHostRequest(events: RunEvent[], actorCallId: string, runId: string): HostDispatchRequest | null {
+  const requested = events.filter(
+    (event) => event.type === 'host_dispatch_requested' && event.extra.actor_call_id === actorCallId,
+  );
+  for (let i = requested.length - 1; i >= 0; i -= 1) {
+    const event = requested[i]!;
+    const dispatchId = event.extra.dispatch_id;
+    if (typeof dispatchId !== 'string') continue;
+    const terminal = events.some(
+      (candidate) =>
+        (candidate.type === 'actor_completed' || candidate.type === 'actor_failed') &&
+        candidate.extra.dispatch_id === dispatchId,
+    );
+    if (terminal) continue;
+    const attempt = event.extra.attempt;
+    const step = event.step;
+    const actor = typeof event.extra.actor === 'string' ? event.extra.actor : null;
+    if (
+      step == null ||
+      typeof attempt !== 'number' ||
+      typeof event.extra.step_execution_id !== 'string' ||
+      typeof event.extra.executor !== 'string' ||
+      typeof event.extra.model !== 'string' ||
+      typeof event.extra.reasoning_effort !== 'string' ||
+      typeof event.extra.agent_type !== 'string' ||
+      typeof event.extra.prompt_path !== 'string' ||
+      typeof event.extra.prompt_sha256 !== 'string' ||
+      typeof event.extra.output_path !== 'string'
+    ) {
+      throw new DriveError(`host dispatch request "${dispatchId}" is malformed.`);
+    }
+    return {
+      dispatchId,
+      run: runId,
+      step,
+      actor,
+      stepExecutionId: event.extra.step_execution_id,
+      actorCallId,
+      attempt,
+      attemptReason: typeof event.extra.attempt_reason === 'string' ? event.extra.attempt_reason : 'initial',
+      executor: event.extra.executor,
+      model: event.extra.model,
+      reasoningEffort: event.extra.reasoning_effort,
+      agentType: event.extra.agent_type,
+      promptPath: event.extra.prompt_path,
+      promptSha256: event.extra.prompt_sha256,
+      outputPath: event.extra.output_path,
+      artifactType: typeof event.extra.artifact_type === 'string' ? event.extra.artifact_type as HostDispatchRequest['artifactType'] : null,
+      ...(Array.isArray(event.extra.validation_errors)
+        ? { validationErrors: event.extra.validation_errors.filter((error): error is string => typeof error === 'string') }
+        : {}),
+      ...(typeof event.extra.repair_appendix === 'string' ? { repairAppendix: event.extra.repair_appendix } : {}),
+    };
+  }
+  return null;
+}
+
+function hostRequestFor(
+  ctx: EngineCtx,
+  stepId: string,
+  role: string | null,
+  outputRel: string,
+  artifactType: string | null,
+  ids: { stepExecutionId: string; actorCallId: string },
+  attempt: number,
+  reason: string,
+  promptPath: string | null,
+  promptSha256: string,
+  validationErrors: string[] | null,
+): HostDispatchRequest {
+  if (promptPath == null) throw new DriveError(`host dispatch for ${stepId} has no recorded prompt snapshot.`);
+  const { executor, spec } = effectiveBinding(ctx, role);
+  if (spec.adapter !== 'host') throw new DriveError(`internal error: ${executor} is not a host executor.`);
+  const dispatchId = `hd-${ids.actorCallId}-a${attempt}`;
+  const repairAppendix = validationErrors != null && validationErrors.length > 0 ? repairMessage(validationErrors) : undefined;
+  const request = requestHostDispatch({
+    dispatchId,
+    run: ctx.runId,
+    step: stepId,
+    actor: role,
+    stepExecutionId: ids.stepExecutionId,
+    actorCallId: ids.actorCallId,
+    attempt,
+    attemptReason: reason,
+    executor,
+    model: spec.model,
+    reasoningEffort: spec.reasoningEffort,
+    agentType: spec.agentType,
+    promptPath,
+    promptSha256,
+    outputPath: outputRel,
+    artifactType: artifactType as HostDispatchRequest['artifactType'],
+    ...(validationErrors != null && validationErrors.length > 0 ? { validationErrors } : {}),
+    ...(repairAppendix != null ? { repairAppendix } : {}),
+    repoRoot: ctx.repoRoot,
+    now: ctx.now,
+  });
+  ctx.act(`host dispatch requested ${dispatchId}${role ? ` (${role})` : ''} → ${executor}`);
+  return request;
+}
+
+function hostRequestAttempts(events: RunEvent[], actorCallId: string): number {
+  return events.filter(
+    (event) => event.type === 'host_dispatch_requested' && event.extra.actor_call_id === actorCallId,
+  ).length;
+}
+
 /** Drive one promptable step: every pending actor call, then the collective. */
-function drivePromptable(ctx: EngineCtx, comp: NextComputation): DispatchFailure | null {
+function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutcome | null {
   const step = comp.step!;
   const stepId = step.id;
   const generation = step.loop.iteration ?? 1;
@@ -598,6 +716,7 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): DispatchFailure
   }
 
   const stepExecutionId = `se-${stepId}-g${generation}`;
+  const hostRequests: HostDispatchRequest[] = [];
 
   for (let i = 0; i < actors.length; i += 1) {
     const role = actors[i];
@@ -607,6 +726,68 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): DispatchFailure
 
     const actorCallId = role ? `ac-${stepId}-g${generation}-${role}` : `ac-${stepId}-g${generation}`;
     const ids = { stepExecutionId, actorCallId };
+
+    events = freshEvents(ctx.runDir);
+    const binding = effectiveBinding(ctx, role);
+    if (binding.spec.adapter === 'host') {
+      const pending = pendingHostRequest(events, actorCallId, ctx.runId);
+      if (pending != null) {
+        hostRequests.push(pending);
+        continue;
+      }
+      const priorHostAttempts = hostRequestAttempts(events, actorCallId);
+      const attempt = priorHostAttempts + 1;
+      const priorHostRequest = events
+        .filter((event) => event.type === 'host_dispatch_requested' && event.extra.actor_call_id === actorCallId)
+        .at(-1);
+      const priorHostTerminal = priorHostRequest == null
+        ? null
+        : events.findLast(
+            (event) =>
+              (event.type === 'actor_completed' || event.type === 'actor_failed') &&
+              event.extra.dispatch_id === priorHostRequest.extra.dispatch_id,
+          );
+      const reason = priorHostAttempts === 0
+        ? 'initial'
+        : priorHostTerminal?.type === 'actor_completed' && priorHostTerminal.extra.output_valid === false
+          ? 'schema_repair'
+          : binding.executor !== priorHostRequest?.extra.executor
+            ? 'executor_override'
+            : 'user_retry';
+      const repairErrors = reason === 'schema_repair' && priorHostTerminal != null && Array.isArray(priorHostTerminal.extra.validation_errors)
+        ? priorHostTerminal.extra.validation_errors.filter((error): error is string => typeof error === 'string')
+        : null;
+      const promptRes = (() => {
+        try {
+          return runPrompt({
+            run: ctx.runId,
+            step: stepId,
+            actor: role ?? undefined,
+            iteration: step.loop.in_body ? generation : undefined,
+            record: true,
+            repoRoot: ctx.repoRoot,
+            now: ctx.now,
+          });
+        } catch (err) {
+          if (err instanceof PromptError) throw new DriveError(err.message);
+          throw err;
+        }
+      })();
+      hostRequests.push(hostRequestFor(
+        ctx,
+        stepId,
+        role,
+        outputRel,
+        step.artifact_type,
+        ids,
+        attempt,
+        reason,
+        promptRes.promptPath,
+        promptRes.sha256,
+        repairErrors,
+      ));
+      continue;
+    }
 
     let repairErrors: string[] | null = null;
     for (;;) {
@@ -644,6 +825,10 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): DispatchFailure
       }
       return outcome;
     }
+  }
+
+  if (hostRequests.length > 0) {
+    return { kind: 'awaiting_host_dispatch', requests: hostRequests };
   }
 
   if (step.collective != null) {
@@ -834,7 +1019,18 @@ export function runDrive(opts: DriveOptions): DriveResult {
     detail: string,
     status: string | null = null,
     decision: DriveDecision | null = null,
-  ): DriveResult => ({ run: run.runId, outcome, status, decision, detail, actions, transitions });
+    requests: HostDispatchRequest[] = [],
+  ): DriveResult => ({
+    run: run.runId,
+    outcome,
+    status,
+    decision,
+    detail,
+    actions,
+    transitions,
+    requests,
+    unresolvedRequests: requests,
+  });
 
   for (;;) {
     if (transitions >= maxTransitions) {
@@ -901,6 +1097,15 @@ export function runDrive(opts: DriveOptions): DriveResult {
 
     const failure = drivePromptable(ctx, comp);
     if (failure != null) {
+      if (failure.kind === 'awaiting_host_dispatch') {
+        return finish(
+          'awaiting_host_dispatch',
+          `${failure.requests.length} host dispatch request(s) are awaiting native receipts.`,
+          null,
+          null,
+          failure.requests,
+        );
+      }
       if (failure.kind === 'invalid_output') {
         return finish(
           'output_invalid',

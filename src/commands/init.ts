@@ -56,7 +56,7 @@ export function runInit(opts: InitOptions): InitResult {
       const skillSrc = join(tpl, 'common', 'skills', skill);
       const skillDest = join(skillsBase, skill);
 
-      // Both skills are invocable: the runner fires on a described task, the
+      // Runner and builder skills are invocable: the runner fires on a described task, the
       // builder on explicit "author a playbook" intent (its description is
       // scoped to that). Codex's narrower invocation policy lives in openai.yaml
       // (below); Claude relies on the scoped description, not a frontmatter gate.

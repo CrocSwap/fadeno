@@ -48,7 +48,7 @@ function seedCrossReview(root: string): string {
     join(dir, 'run.yaml'),
     [
       `run_id: ${runId}`,
-      'schema_version: "0.2"',
+      'schema_version: "0.3"',
       'playbook: dual-architect-review',
       'status: running',
       'task: "Design and build fadeno prompt"',

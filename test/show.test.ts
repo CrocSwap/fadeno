@@ -23,7 +23,7 @@ function seedRun(
     [
       '# yaml-language-server: $schema=../../schemas/run.schema.json',
       `run_id: ${runId}`,
-      'schema_version: "0.2"',
+      'schema_version: "0.3"',
       'playbook: code-change-review',
       'status: running',
       'task: Add label normalization',

@@ -1,7 +1,8 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { resolveActiveArtifacts, sha256Hex, type ActiveResolution } from '../lib/artifact-manifest.ts';
+import { parseExecutorProfile } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { SchemaSet, schemaErrorMessages, type SchemaKind } from '../lib/playbook-validate.ts';
 import {
@@ -27,7 +28,7 @@ export interface VerifyOptions {
   latest?: boolean;
   /** Accept an honest `failed`/`aborted` terminal instead of failing on it. */
   allowFailed?: boolean;
-  /** Audit a pre-0.2 ledger in explicit compatibility mode. */
+  /** Audit a 0.2 or unversioned pre-0.3 ledger in explicit compatibility mode. */
   legacy?: boolean;
   cwd?: string;
   repoRoot?: string;
@@ -51,6 +52,39 @@ export interface VerifyResult {
 
 function resolveArtifact(runDir: string, rel: string): string {
   return isAbsolute(rel) ? rel : join(runDir, rel);
+}
+
+function isInsideRun(runDir: string, path: string): boolean {
+  const runAbsolute = resolve(runDir);
+  const target = resolveArtifact(runDir, path);
+  const rel = relative(runAbsolute, target).split('\\').join('/');
+  if (rel === '..' || rel.startsWith('../') || isAbsolute(rel)) return false;
+  let cursor = runAbsolute;
+  for (const segment of rel.split('/').filter(Boolean)) {
+    cursor = join(cursor, segment);
+    try {
+      if (lstatSync(cursor).isSymbolicLink()) return false;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') break;
+      return false;
+    }
+  }
+  let existing = target;
+  let existingReal: string;
+  for (;;) {
+    try {
+      existingReal = realpathSync(existing);
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+      const parent = dirname(existing);
+      if (parent === existing) return false;
+      existing = parent;
+    }
+  }
+  const realTarget = resolve(existingReal, relative(existing, target));
+  const realRel = relative(realpathSync(runAbsolute), realTarget).split('\\').join('/');
+  return realRel !== '..' && !realRel.startsWith('../') && !isAbsolute(realRel);
 }
 
 function skip(check: string, detail: string): Finding {
@@ -90,20 +124,21 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
     throw err;
   }
   const legacy = mode === 'legacy';
+  const compatibility = mode === 'compatibility';
 
   const schemas = new SchemaSet(join(repoRoot, '.fadeno', 'schemas'));
   const findings: Finding[] = [];
 
   // 1. ledger-version
   findings.push(
-    legacy
-      ? skip('ledger-version', 'legacy ledger read in compatibility mode (--legacy)')
+    legacy || compatibility
+      ? skip('ledger-version', `${run.schemaVersion ?? 'pre-0.3'} ledger read in explicit compatibility mode (--legacy)`)
       : { check: 'ledger-version', status: 'ok', detail: `schema_version ${RUN_LEDGER_SCHEMA_VERSION}` },
   );
 
   // 2. run-schema
   findings.push(
-    legacy
+    legacy || compatibility
       ? skip('run-schema', 'legacy run.yaml predates the current schema')
       : checkRunSchema(run, schemas),
   );
@@ -202,8 +237,285 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
   //     the reference chain around it.
   findings.push(checkSessionContinuity(events));
 
+  // 22-25. Native host dispatches are a first-class lifecycle. A verifier must
+  // fail loudly on malformed host evidence, especially when reading an older
+  // ledger explicitly, rather than treating those events as ordinary actor
+  // dispatches and silently dropping their native identity claims.
+  findings.push(checkHostDispatchRequests(run, events, mode));
+  findings.push(checkHostDispatchLifecycle(run, events, mode));
+  findings.push(checkHostDispatchArtifacts(run, events, mode));
+  findings.push(checkNativeAttestation(run, events, mode));
+
   const ok = !findings.some((f) => f.status === 'fail');
   return { run, mode, findings, ok };
+}
+
+interface HostRequestRecord {
+  id: string;
+  event: RunEvent;
+}
+
+function hostRequestRecords(events: RunEvent[]): HostRequestRecord[] {
+  return events
+    .filter((event) => event.type === 'host_dispatch_requested' && typeof event.extra.dispatch_id === 'string')
+    .map((event) => ({ id: event.extra.dispatch_id as string, event }));
+}
+
+function hostEvidencePresent(events: RunEvent[]): boolean {
+  return events.some((event) => event.type === 'host_dispatch_requested' || event.extra.dispatch_id != null);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+function checkHostDispatchRequests(run: RunSummary, events: RunEvent[], mode: LedgerMode): Finding {
+  const check = 'host-dispatch-requests';
+  if (!hostEvidencePresent(events)) return skip(check, 'no native host dispatches recorded');
+  if (mode !== 'current') {
+    return { check, status: 'fail', detail: `schema ${run.schemaVersion ?? 'pre-0.3'} compatibility cannot ignore host-dispatch lifecycle evidence; recreate the run as ${RUN_LEDGER_SCHEMA_VERSION}` };
+  }
+  const records = hostRequestRecords(events);
+  const counts = new Map<string, number>();
+  for (const record of records) counts.set(record.id, (counts.get(record.id) ?? 0) + 1);
+  const problems: string[] = [];
+  for (const event of events) {
+    if (event.type === 'host_dispatch_requested' && typeof event.extra.dispatch_id !== 'string') {
+      problems.push('host_dispatch_requested has no string dispatch_id');
+    }
+  }
+  for (const [id, count] of counts) if (count > 1) problems.push(`dispatch ${id} requested ${count} times`);
+  for (const event of events) {
+    if (event.type !== 'actor_dispatched' && event.type !== 'actor_completed' && event.type !== 'actor_failed') continue;
+    if (event.extra.dispatch_id != null && typeof event.extra.dispatch_id !== 'string') problems.push(`${event.type} has a non-string dispatch_id`);
+    if (typeof event.extra.dispatch_id === 'string' && !counts.has(event.extra.dispatch_id)) problems.push(`${event.type} references orphan dispatch ${event.extra.dispatch_id}`);
+  }
+  if (problems.length > 0) return { check, status: 'fail', detail: problems.join('; ') };
+  return { check, status: 'ok', detail: `${records.length} unique host dispatch request(s)` };
+}
+
+function checkHostDispatchLifecycle(run: RunSummary, events: RunEvent[], mode: LedgerMode): Finding {
+  const check = 'host-dispatch-lifecycle';
+  if (!hostEvidencePresent(events)) return skip(check, 'no native host dispatches recorded');
+  if (mode !== 'current') return { check, status: 'fail', detail: 'host lifecycle evidence is not verifiable from a 0.2 compatibility ledger' };
+  const records = hostRequestRecords(events);
+  const problems: string[] = [];
+  const requestById = new Map(records.map((record) => [record.id, record.event]));
+  const snapshotEvent = events.find((event) => event.type === 'profile_snapshotted');
+  let profile: ReturnType<typeof parseExecutorProfile> | null = null;
+  if (snapshotEvent == null) problems.push('host dispatch evidence has no profile_snapshotted event');
+  if (snapshotEvent != null) {
+    const profileRel = typeof snapshotEvent.extra.profile === 'string' ? snapshotEvent.extra.profile : 'profile.yaml';
+    const profilePath = join(run.dir, profileRel);
+    if (existsSync(profilePath)) {
+      try {
+        profile = parseExecutorProfile(readFileSync(profilePath, 'utf8'), profileRel);
+      } catch (err) {
+        problems.push(`host profile snapshot is invalid: ${(err as Error).message}`);
+      }
+    } else {
+      problems.push(`host profile snapshot is missing: ${profileRel}`);
+    }
+  }
+  for (const [id, request] of requestById) {
+    for (const field of ['step_execution_id', 'actor_call_id', 'executor', 'model', 'reasoning_effort', 'agent_type', 'prompt_path', 'prompt_sha256', 'output_path'] as const) {
+      if (typeof request.extra[field] !== 'string' || request.extra[field] === '') problems.push(`${id}: request is missing ${field}`);
+    }
+    if (request.extra.adapter !== 'host') problems.push(`${id}: request is not marked adapter host`);
+    const hostAttested = request.extra.host_attested;
+    if (!isStringArray(hostAttested) || !['model', 'reasoning_effort', 'agent_type', 'agent_id'].every((field) => hostAttested.includes(field))) {
+      problems.push(`${id}: request does not declare model, effort, agent type, and agent identity as host-attested`);
+    }
+    if (request.extra.validation_errors !== undefined && !isStringArray(request.extra.validation_errors)) {
+      problems.push(`${id}: validation_errors must be an array of strings`);
+    }
+    if (typeof request.extra.attempt !== 'number' || !Number.isInteger(request.extra.attempt) || request.extra.attempt < 1) {
+      problems.push(`${id}: request has an invalid attempt`);
+    }
+    if (typeof request.extra.prompt_path === 'string' && !isInsideRun(run.dir, request.extra.prompt_path)) problems.push(`${id}: prompt path escapes the run directory`);
+    if (typeof request.extra.output_path === 'string' && !isInsideRun(run.dir, request.extra.output_path)) problems.push(`${id}: output path escapes the run directory`);
+    if (profile != null) {
+      const executor = profile.executors[request.extra.executor as string];
+      if (executor == null || executor.adapter !== 'host') {
+        problems.push(`${id}: request executor is not a host executor in the profile snapshot`);
+      } else if (
+        executor.model !== request.extra.model ||
+        executor.reasoningEffort !== request.extra.reasoning_effort ||
+        executor.agentType !== request.extra.agent_type
+      ) {
+        problems.push(`${id}: host model/effort/agent_type does not match the snapshotted executor profile`);
+      }
+    }
+    const starts = events.filter((event) => event.type === 'actor_dispatched' && event.extra.dispatch_id === id);
+    const terminals = events.filter(
+      (event) => (event.type === 'actor_completed' || event.type === 'actor_failed') && event.extra.dispatch_id === id,
+    );
+    if (starts.length === 0) {
+      if (terminals.length > 0) problems.push(`${id}: terminal receipt has no actor_dispatched start`);
+      else if (run.status === 'completed') problems.push(`${id}: completed run has no actor_dispatched start`);
+      continue;
+    }
+    if (starts.length > 1) problems.push(`${id}: started ${starts.length} times`);
+    if (terminals.length > 1) problems.push(`${id}: has conflicting/multiple terminal receipts`);
+    const start = starts[0]!;
+    const terminal = terminals[0];
+    const requestIndex = events.indexOf(request);
+    const startIndex = events.indexOf(start);
+    if (startIndex <= requestIndex) problems.push(`${id}: actor_dispatched must follow host_dispatch_requested`);
+    if (terminal != null && events.indexOf(terminal) <= startIndex) problems.push(`${id}: terminal receipt must follow actor_dispatched`);
+    if (terminal != null && terminal.extra.agent_id !== start.extra.agent_id) problems.push(`${id}: terminal agent_id does not match start`);
+    for (const field of ['step', 'actor', 'step_execution_id', 'actor_call_id', 'attempt', 'executor', 'adapter', 'model', 'reasoning_effort', 'agent_type', 'prompt_path', 'prompt_sha256', 'output_path'] as const) {
+      const requestValue = field === 'step' ? request.step : request.extra[field];
+      const startValue = field === 'step' ? start.step : field === 'actor' ? start.extra.actor : start.extra[field];
+      if (startValue !== requestValue) problems.push(`${id}: start ${field} does not match request`);
+      if (terminal != null) {
+        const terminalValue = field === 'step' ? terminal.step : field === 'actor' ? terminal.extra.actor : terminal.extra[field];
+        if (terminalValue !== startValue) problems.push(`${id}: terminal ${field} does not match start`);
+      }
+    }
+    if (start.extra.validation_errors !== undefined && !isStringArray(start.extra.validation_errors)) {
+      problems.push(`${id}: start validation_errors must be an array of strings`);
+    }
+    if (terminal?.extra.validation_errors !== undefined && !isStringArray(terminal.extra.validation_errors)) {
+      problems.push(`${id}: terminal validation_errors must be an array of strings`);
+    }
+    const startErrors = isStringArray(start.extra.validation_errors) ? start.extra.validation_errors : null;
+    const requestErrorsForStart = isStringArray(request.extra.validation_errors) ? request.extra.validation_errors : null;
+    if (JSON.stringify(startErrors) !== JSON.stringify(requestErrorsForStart)) problems.push(`${id}: start validation_errors do not match request`);
+    if (start.extra.repair_appendix !== request.extra.repair_appendix) problems.push(`${id}: start repair_appendix does not match request`);
+    if (terminal != null && terminal.extra.repair_appendix !== start.extra.repair_appendix) problems.push(`${id}: terminal repair_appendix does not match start`);
+    const requestErrors = isStringArray(request.extra.validation_errors) ? request.extra.validation_errors : null;
+    if (request.extra.attempt_reason === 'schema_repair') {
+      const requestAppendix = typeof request.extra.repair_appendix === 'string' ? request.extra.repair_appendix : null;
+      if (requestErrors == null || requestErrors.length === 0) {
+        problems.push(`${id}: schema_repair request lacks immutable validation_errors`);
+      }
+      if (requestAppendix == null || requestErrors?.some((error) => !requestAppendix.includes(error))) {
+        problems.push(`${id}: schema_repair request lacks validation feedback in repair_appendix`);
+      }
+      const priorInvalid = events
+        .slice(0, requestIndex)
+        .findLast((event) => event.type === 'actor_completed' && event.extra.actor_call_id === request.extra.actor_call_id && event.extra.output_valid === false);
+      if (priorInvalid != null && JSON.stringify(requestErrors) !== JSON.stringify(
+        Array.isArray(priorInvalid.extra.validation_errors)
+          ? priorInvalid.extra.validation_errors.filter((error): error is string => typeof error === 'string')
+          : null,
+      )) {
+        problems.push(`${id}: schema_repair validation_errors do not match the rejected attempt`);
+      }
+    }
+    if (terminal?.type === 'actor_completed' && terminal.extra.output_valid === false && (!isStringArray(terminal.extra.validation_errors) || terminal.extra.validation_errors.length === 0)) {
+      problems.push(`${id}: invalid completion lacks validation_errors`);
+    }
+    if (terminal?.type === 'actor_failed' && (typeof terminal.extra.failure_reason !== 'string' || terminal.extra.failure_reason.length === 0)) problems.push(`${id}: failed receipt lacks a failure reason`);
+    if (run.status === 'completed' && terminal == null) problems.push(`${id}: unresolved host dispatch remains in completed run`);
+    if (run.status === 'completed' && terminal?.type === 'actor_failed') problems.push(`${id}: completed run contains a failed host dispatch`);
+  }
+  if (problems.length > 0) return { check, status: 'fail', detail: problems.join('; ') };
+  return { check, status: 'ok', detail: `${records.length} request → start → terminal lifecycle(s) are coherent` };
+}
+
+function checkHostDispatchArtifacts(run: RunSummary, events: RunEvent[], mode: LedgerMode): Finding {
+  const check = 'host-dispatch-artifacts';
+  if (!hostEvidencePresent(events)) return skip(check, 'no native host dispatches recorded');
+  if (mode !== 'current') return { check, status: 'fail', detail: 'host output evidence is not verifiable from a 0.2 compatibility ledger' };
+  const problems: string[] = [];
+  for (const request of hostRequestRecords(events)) {
+    const terminal = events.find(
+      (event) => (event.type === 'actor_completed' || event.type === 'actor_failed') && event.extra.dispatch_id === request.id,
+    );
+    const promptPath = typeof request.event.extra.prompt_path === 'string' ? request.event.extra.prompt_path : null;
+    const promptSha = typeof request.event.extra.prompt_sha256 === 'string' ? request.event.extra.prompt_sha256 : null;
+    const prompt = events.find(
+      (event) => event.type === 'prompt_assembled' && event.step === request.event.step && event.extra.actor === request.event.extra.actor && event.extra.prompt_path === promptPath && event.extra.prompt_sha256 === promptSha,
+    );
+    if (promptPath == null || promptSha == null || prompt == null) problems.push(`${request.id}: prompt path/digest does not match a recorded snapshot`);
+    else if (!isInsideRun(run.dir, promptPath)) problems.push(`${request.id}: prompt snapshot path escapes the run directory`);
+    else {
+      const abs = resolveArtifact(run.dir, promptPath);
+      if (!existsSync(abs) || sha256Hex(readFileSync(abs)) !== promptSha) problems.push(`${request.id}: prompt snapshot digest does not match disk`);
+    }
+    if (terminal?.type !== 'actor_completed') continue;
+    const output = typeof terminal.extra.output === 'string' ? terminal.extra.output : null;
+    const sha = typeof terminal.extra.output_sha256 === 'string' ? terminal.extra.output_sha256 : null;
+    if (output == null || sha == null) {
+      problems.push(`${request.id}: completion lacks output path/digest`);
+      continue;
+    }
+    const outputAbs = resolveArtifact(run.dir, output);
+    if (!isInsideRun(run.dir, output) || !existsSync(outputAbs) || sha256Hex(readFileSync(outputAbs)) !== sha) problems.push(`${request.id}: completion output digest does not match a run-local file`);
+    if (terminal.extra.output_valid === true) {
+      if (output !== request.event.extra.output_path) problems.push(`${request.id}: successful output does not match planned immutable path`);
+      const manifest = events.find((event) => event.type === 'artifact_created' && event.extra.artifact === output && event.extra.dispatch_id === request.id && event.extra.actor_call_id === request.event.extra.actor_call_id);
+      if (manifest == null) problems.push(`${request.id}: successful completion has no matching artifact manifest`);
+      else if (manifest.extra.sha256 !== sha) problems.push(`${request.id}: artifact manifest digest does not match completion`);
+    } else if (!output.startsWith('artifacts/attempts/')) {
+      problems.push(`${request.id}: invalid output was not parked under artifacts/attempts/`);
+    }
+  }
+  if (problems.length > 0) return { check, status: 'fail', detail: problems.join('; ') };
+  return { check, status: 'ok', detail: 'host prompts, receipts, and output manifests match recorded digests' };
+}
+
+function checkNativeAttestation(run: RunSummary, events: RunEvent[], mode: LedgerMode): Finding {
+  const check = 'native-attestation';
+  const starts = events.filter((event) => event.type === 'actor_dispatched' && event.extra.dispatch_id != null);
+  if (starts.length === 0) return skip(check, 'no native model, effort, or agent identity evidence recorded');
+  if (mode !== 'current') return { check, status: 'fail', detail: 'native attestation cannot be silently ignored in compatibility mode' };
+  const requests = new Map(
+    hostRequestRecords(events).map((request) => [request.id, request.event]),
+  );
+  let profile: ReturnType<typeof parseExecutorProfile> | null = null;
+  const snapshot = events.find((event) => event.type === 'profile_snapshotted');
+  if (snapshot != null) {
+    const profileRel = typeof snapshot.extra.profile === 'string' ? snapshot.extra.profile : 'profile.yaml';
+    const profilePath = join(run.dir, profileRel);
+    if (existsSync(profilePath)) {
+      try {
+        profile = parseExecutorProfile(readFileSync(profilePath, 'utf8'), profileRel);
+      } catch {
+        // host-dispatch-lifecycle reports the detailed profile parse failure;
+        // this finding remains focused on attested field agreement.
+      }
+    }
+  }
+  const problems: string[] = [];
+  for (const start of starts) {
+    const dispatchId = typeof start.extra.dispatch_id === 'string' ? start.extra.dispatch_id : '(unknown)';
+    const request = requests.get(dispatchId);
+    for (const field of ['model', 'reasoning_effort', 'agent_type', 'agent_id'] as const) {
+      if (typeof start.extra[field] !== 'string' || start.extra[field] === '') problems.push(`${dispatchId}: missing host-attested ${field}`);
+    }
+    if (start.extra.host_attested !== true) problems.push(`${dispatchId}: start is not marked host_attested`);
+    const attestation = start.extra.attestation;
+    if (attestation === null || typeof attestation !== 'object' || Array.isArray(attestation)) {
+      problems.push(`${dispatchId}: attestation object is missing`);
+      continue;
+    }
+    const attested = attestation as Record<string, unknown>;
+    for (const field of ['model', 'reasoning_effort', 'agent_type', 'agent_id'] as const) {
+      if (attested[field] !== start.extra[field]) problems.push(`${dispatchId}: attestation ${field} does not match the start receipt`);
+    }
+    if (request == null) {
+      problems.push(`${dispatchId}: start has no matching host dispatch request`);
+    } else {
+      for (const field of ['model', 'reasoning_effort', 'agent_type'] as const) {
+        if (start.extra[field] !== request.extra[field]) problems.push(`${dispatchId}: start ${field} does not match the request`);
+      }
+      if (profile != null) {
+        const executor = typeof request.extra.executor === 'string' ? profile.executors[request.extra.executor] : undefined;
+        if (executor == null || executor.adapter !== 'host') {
+          problems.push(`${dispatchId}: request executor is not a host profile entry`);
+        } else {
+          if (start.extra.model !== executor.model) problems.push(`${dispatchId}: attested model does not match the host profile`);
+          if (start.extra.reasoning_effort !== executor.reasoningEffort) problems.push(`${dispatchId}: attested reasoning effort does not match the host profile`);
+          if (start.extra.agent_type !== executor.agentType) problems.push(`${dispatchId}: attested agent type does not match the host profile`);
+        }
+      }
+    }
+  }
+  if (problems.length > 0) return { check, status: 'fail', detail: problems.join('; ') };
+  return { check, status: 'ok', detail: `${starts.length} native dispatch(es) explicitly attest model, effort, and agent identity` };
 }
 
 const ACTOR_EVENT_TYPES = new Set(['actor_dispatched', 'actor_completed', 'actor_failed']);

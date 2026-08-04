@@ -39,7 +39,7 @@ Define the workflow **once**, commit it to your repo, and then just say:
 
 Same discipline — plan → implement → review → test → bounded revision — every time. Inspectable. Shareable. Portable across the agents your team actually uses.
 
-Fadeno is **harness-neutral**: the same playbooks run on Codex and Claude Code today, and are designed to compile into a real orchestration runtime later. Only a thin per-target adapter differs.
+Fadeno is **harness-neutral**: the same playbooks run on Codex and Claude Code today. Its repo-local runtime records durable execution evidence; only a thin per-target adapter differs, while richer compiled orchestration remains future work.
 
 > **Honest about enforcement, up front:** in instruction-only hosts, approval policies are *advisory* — the model is asked to honor them, with no hard guarantee. For real guarantees, wire gates to your git/CI/pre-commit layer (or Claude Code hooks). See [Enforcement](#enforcement-advisory-vs-enforced). We'd rather you trust the tool because it's honest than because it overclaims.
 
@@ -86,6 +86,8 @@ AGENTS.md                                CLAUDE.md
                   agents/openai.yaml)      fadeno-builder/ (SKILL.md, refs)
   fadeno-builder/ (SKILL.md, refs,       .claude/agents/  (worker/reviewer/judge.md)
                   agents/openai.yaml)
+  fadeno-driver/  (SKILL.md, refs,
+                  agents/openai.yaml)
 .codex/agents/  (worker/reviewer/judge.toml)
 ```
 
@@ -95,7 +97,7 @@ policy, and subagent format differ.
 
 ### Or install as a Claude Code plugin
 
-`init --claude` copies the skills into one repo. For Claude Code, you can instead
+`init --claude` copies the three skills into one repo. For Claude Code, you can instead
 install Fadeno's **skills + role subagents once, for every project**, as a
 plugin — and let the CLI seed just the per-repo playbooks. (This is the
 capability/definitions split: the plugin carries *how to run playbooks*; the repo
@@ -127,17 +129,23 @@ To test the plugin locally before publishing: `claude --plugin-dir ./plugin`.
 The `plugin/` directory is generated from the same templates as the CLI
 (`npm run build:plugin`), so the skills never drift.
 
-The plugin is **self-contained**: it bundles the `fadeno` CLI as a single
+The Claude plugin is **self-contained**: it bundles the `fadeno` CLI as a single
 executable in `plugin/bin/` (auto-added to your PATH while the plugin is
 enabled), so the skills can call `fadeno validate` / `diagram` / `gate` with
 nothing else to install. A git-URL plugin install gives you a working `fadeno`
 out of the box.
 
+Codex plugin installation is intentionally different: the Codex plugin carries
+the three skills and invocation metadata, but has no bundled CLI and no bundled
+subagents. Install or expose the CLI separately (`npx fadeno` works), and use
+`fadeno init --codex` when you need the repo-local `.codex/agents` definitions.
+
 ---
 
 ## Running a playbook
 
-Fadeno ships two skills. Point your agent at the **runner**:
+Fadeno ships three skills: runner, builder, and driver. Point your agent at the
+**runner**:
 
 | Host | How |
 |------|-----|
@@ -161,6 +169,8 @@ the agent doesn't hand-edit JSONL:
 
 ```bash
 fadeno new-run code-change-review "Add CSV export for reports"
+fadeno new-run code-change-review "Review the supplied specs" \
+  --input Agent1Spec=specs/agent-1.md --input Agent3Spec=specs/agent-3.md
 fadeno run <run-id> --step implement            # set current_step + log step_started
 fadeno run <run-id> --status completed           # finalize: status + ended_at + run_completed
 fadeno gate <run-id> no_blocking_issues \
@@ -172,6 +182,9 @@ fadeno show <run-id-or-prefix>                  # logical-step projection (--eve
 fadeno verify <run-id>                          # recompute the ledger's checkable claims; exit 0/1 (--latest for newest)
 fadeno drive <run-id>                           # engine: advance until terminal or a human pause (uses .fadeno/executors.yaml)
 fadeno decide <run-id> <option>                 # resolve a paused human decision, then re-drive
+fadeno dispatch-start <run-id> <dispatch-id> --agent-id <native-id>
+fadeno dispatch-complete <run-id> <dispatch-id> --output <temporary-file>
+fadeno dispatch-fail <run-id> <dispatch-id> --reason "blocked"
 
 fadeno prompt <run-id> <step> --actor <role> \
   --no-record                                   # assemble a step's actor prompt (pipe to codex/claude)
@@ -182,6 +195,11 @@ receives — from the validated playbook, the ledger, and the referenced artifac
 bytes — and records it as an immutable snapshot (`artifacts/prompts/…`) plus a
 `prompt_assembled` manifest event, unless `--no-record`. A driver runs a role
 with `fadeno prompt <run> <step> --actor <role> | codex exec -`.
+
+When a role binds to a native host executor, `fadeno drive` plans all pending
+calls and returns `awaiting_host_dispatch` with stable request ids. The host
+starts each native agent and submits the receipts above; model, reasoning
+effort, and native agent identity are recorded as explicit host attestations.
 
 `fadeno gate` is the **advisory→enforced bridge**: it computes a gate condition
 from a structured judgment artifact on disk (same check the runner applies), so
@@ -200,7 +218,7 @@ inspectable (and is the seam a future compiled runtime reads/writes):
   artifacts/      # every durable output: plans, patches, reviews, test results…
 ```
 
-Since run-ledger format 0.2, every recorded artifact also gets an immutable
+Since run-ledger format 0.3, every recorded artifact also gets an immutable
 manifest (sha256 digest, size, media type, validation verdict) in the event
 log — the evidence `fadeno verify` recomputes. Artifacts are immutable:
 revision writes a new generation, never overwrites.
@@ -356,13 +374,13 @@ categories map to concrete, detectable actions. Two ways to make that real:
   from its named artifact and exits 0/1 — drop it into CI, a git hook, or a
   Claude Code `Stop` hook.
 - **`fadeno verify <run>`** (or `--latest`) re-audits a whole run ledger
-  read-only against 21 checks — artifact digests recomputed from bytes,
+  read-only against 25 checks — artifact digests recomputed from bytes,
   typed-artifact schemas, artifact immutability, prompt-snapshot integrity,
   event-sequence contiguity, every deterministic gate result recomputed from
   its artifact, attempt ordinals with allowed retry reasons, executor
   bindings against the run's snapshotted profile, human-decision integrity
-  (declared options, at-most-once), supersede references, and harness-session
-  continuity — so a trace
+  (declared options, at-most-once), supersede references, harness-session
+  continuity, and native host-dispatch lifecycle/attestation — so a trace
   can't claim what its evidence doesn't support. The "no valid trace, no
   merge" check; anything unrecomputable is reported as skipped, never
   silently treated as valid.

@@ -2,6 +2,7 @@
 import { relative } from 'node:path';
 import { parseArgs } from 'node:util';
 import { runDecide } from './commands/decide.ts';
+import { runDispatchComplete, runDispatchFail, runDispatchStart } from './commands/dispatch.ts';
 import { runDiagram } from './commands/diagram.ts';
 import { runDrive, type DriveResult } from './commands/drive.ts';
 import { runGate } from './commands/gate.ts';
@@ -30,6 +31,9 @@ Usage:
   fadeno validate [file] [--schema K]   Validate playbooks (schema + references + semantics)
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
+  fadeno dispatch-start <run> <id>      Start a native host dispatch
+  fadeno dispatch-complete <run> <id>   Submit a native host result
+  fadeno dispatch-fail <run> <id>       Submit a native host failure
   fadeno run <run> [flags]              Update a run ledger (run.yaml + events.jsonl)
   fadeno gate <run> <condition>         Evaluate a gate condition from a structured artifact
   fadeno prompt <run> <step> [flags]    Assemble (and record) a step's actor prompt
@@ -61,11 +65,18 @@ Options:
   --no-record             (prompt) Preview only: write no snapshot or event
   --bind <role=executor>  (drive) Session executor override for a role (repeatable; recorded)
   --max-transitions <n>   (drive) Engine transition cap per invocation (default 50)
+  --input <Name=path>     (new-run) Supply a declared input (repeatable)
+  --agent-id <id>         (dispatch-start) Native host agent identity
+  --workspace <path>      (dispatch-start) Native workspace provenance
+  --branch <name>         (dispatch-start) Native branch provenance
+  --output <path>         (dispatch-complete) Temporary output file
+  --commit <sha>          (dispatch-complete) Optional commit provenance
+  --reason <text>         (dispatch-fail) Host-attested failure reason
   --decision <id>         (decide) Target decision id (optional when exactly one is pending)
   --feedback <text>       (decide) Free-text feedback recorded on the resolution
   --latest                (verify) Audit the newest run instead of a named one
   --allow-failed          (verify) Accept an honest failed/aborted terminal
-  --legacy                (show/verify/next) Read a pre-0.2 ledger in explicit compatibility mode
+  --legacy                (show/verify/next) Read a 0.2 or unversioned pre-0.3 ledger in explicit compatibility mode
   --events                (show) Print the raw event timeline instead of the step projection
   -h, --help              Show this help
   -v, --version           Show version
@@ -126,7 +137,11 @@ function printInitSummary(
   console.log('  1. Review .fadeno/playbooks and .fadeno/vocabulary.md');
   console.log('  2. Run `fadeno validate` to check the playbooks');
   if (dataOnly) {
-    console.log('  3. Use the /fadeno:runner skill (from the installed Fadeno plugin)');
+    console.log(
+      target === 'codex'
+        ? '  3. Use the $fadeno-runner skill (from the installed Fadeno plugin)'
+        : '  3. Use the /fadeno:runner skill (from the installed Fadeno plugin)',
+    );
   } else {
     console.log(`  3. Ask your agent to use the ${SIGIL[target]}fadeno-runner skill on a complex task`);
   }
@@ -268,6 +283,27 @@ function printProjection(projection: ShowProjection): void {
     console.log(`  ${STEP_GLYPHS[step.state]} ${step.id.padEnd(width)}${summary ? `  ${summary}` : ''}`);
   }
 
+  if (projection.requests.length > 0) {
+    console.log('\nhost dispatches');
+    const byStep = new Map<string, typeof projection.requests>();
+    for (const request of projection.requests) {
+      const list = byStep.get(request.step) ?? [];
+      list.push(request);
+      byStep.set(request.step, list);
+    }
+    for (const [step, requests] of byStep) {
+      const counts = new Map<string, number>();
+      for (const request of requests) counts.set(request.state, (counts.get(request.state) ?? 0) + 1);
+      const summary = [...counts.entries()].map(([state, count]) => `${count} ${state}`).join(' · ');
+      console.log(`  ${step}  ${summary}`);
+      for (const request of requests) {
+        const member = request.actor ?? '(anonymous)';
+        const model = request.model != null && request.reasoningEffort != null ? `${request.model}/${request.reasoningEffort}` : request.executor;
+        console.log(`      ${member}  ${model}  ${request.state}`);
+      }
+    }
+  }
+
   if (projection.active.length > 0) {
     console.log('\nactive artifacts');
     for (const art of projection.active) {
@@ -301,8 +337,8 @@ function printShow(repoRoot: string, result: ShowResult, rawTimeline: boolean): 
   console.log(`  started:   ${dash(run.startedAt)}`);
   console.log(`  ended:     ${dash(run.endedAt)}`);
   console.log(`  dir:       ${relDir}`);
-  if (mode === 'legacy') {
-    console.log('\n  legacy ledger (read via --legacy; not verifiable to 0.2 guarantees)');
+  if (mode !== 'current') {
+    console.log('\n  compatibility ledger (read via --legacy; not verifiable to 0.3 guarantees)');
   }
 
   if (projection != null && !rawTimeline) {
@@ -337,6 +373,12 @@ function printDrive(result: DriveResult): number {
       console.log(`  resolve:  fadeno decide ${result.run} <option>   then re-run fadeno drive ${result.run}`);
       return 0;
     }
+    case 'awaiting_host_dispatch':
+      console.log(`awaiting ${result.requests.length} native host dispatch(es) for run ${result.run}`);
+      for (const request of result.requests) {
+        console.log(`  ${request.dispatchId}  ${request.step}${request.actor ? ` (${request.actor})` : ''}  ${request.model}/${request.reasoningEffort}`);
+      }
+      return 0;
     default:
       console.error(`drive stopped (${result.outcome}): ${result.detail}`);
       return 1;
@@ -395,6 +437,13 @@ function main(argv: string[]): number {
         'no-record': { type: 'boolean' },
         bind: { type: 'string', multiple: true },
         'max-transitions': { type: 'string' },
+        input: { type: 'string', multiple: true },
+        'agent-id': { type: 'string' },
+        workspace: { type: 'string' },
+        branch: { type: 'string' },
+        output: { type: 'string' },
+        commit: { type: 'string' },
+        reason: { type: 'string' },
         decision: { type: 'string' },
         feedback: { type: 'string' },
         latest: { type: 'boolean' },
@@ -470,9 +519,10 @@ function main(argv: string[]): number {
       if (!playbook || !task) {
         throw new Error('Usage: fadeno new-run <playbook> "<task description>"');
       }
-      const { runId, runDir } = runNewRun({ playbook, task });
+      const { runId, runDir, inputs } = runNewRun({ playbook, task, inputs: values.input });
       console.log(`Created run ${runId}`);
       console.log(`  ${runDir}`);
+      if (inputs.length > 0) console.log(`  inputs: ${inputs.join(', ')}`);
       console.log('\nAdvance it with `fadeno run` as the playbook executes:');
       console.log(`  fadeno run ${runId} --step <step-id>`);
       console.log(`  fadeno run ${runId} --status completed`);
@@ -613,6 +663,39 @@ function main(argv: string[]): number {
         onAction: (line) => console.log(`  ${line}`),
       });
       return printDrive(result);
+    }
+    case 'dispatch-start': {
+      const [, run, dispatchId] = positionals;
+      if (!run || !dispatchId || !values['agent-id']) {
+        throw new Error('Usage: fadeno dispatch-start <run> <dispatch-id> --agent-id <native-id> [--workspace <path>] [--branch <branch>]');
+      }
+      const result = runDispatchStart({
+        run,
+        dispatchId,
+        agentId: values['agent-id'],
+        workspace: values.workspace,
+        branch: values.branch,
+      });
+      console.log(`${result.dispatchId} started${result.idempotent ? ' (idempotent)' : ''}`);
+      return 0;
+    }
+    case 'dispatch-complete': {
+      const [, run, dispatchId] = positionals;
+      if (!run || !dispatchId || !values.output) {
+        throw new Error('Usage: fadeno dispatch-complete <run> <dispatch-id> --output <temporary-file> [--commit <sha>]');
+      }
+      const result = runDispatchComplete({ run, dispatchId, output: values.output, commit: values.commit });
+      console.log(`${result.dispatchId} completed${result.idempotent ? ' (idempotent)' : ''}`);
+      return 0;
+    }
+    case 'dispatch-fail': {
+      const [, run, dispatchId] = positionals;
+      if (!run || !dispatchId || !values.reason) {
+        throw new Error('Usage: fadeno dispatch-fail <run> <dispatch-id> --reason <text>');
+      }
+      const result = runDispatchFail({ run, dispatchId, reason: values.reason });
+      console.log(`${result.dispatchId} failed${result.idempotent ? ' (idempotent)' : ''}`);
+      return 0;
     }
     case 'decide': {
       const [, run, option] = positionals;

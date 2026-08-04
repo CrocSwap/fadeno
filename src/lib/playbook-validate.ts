@@ -69,6 +69,7 @@ interface Step {
 }
 
 interface Playbook {
+  inputs?: unknown;
   roles?: unknown;
   flow?: unknown;
   [key: string]: unknown;
@@ -377,7 +378,7 @@ function buildFlowModel(playbook: Playbook, issues: ValidationIssue[], file: str
       if (!reachable.has(id)) continue;
       const predecessors = predecessorIds.get(id) ?? [];
       let nextIncoming: Set<string> | undefined;
-      if (id === entryId) nextIncoming = new Set();
+      if (id === entryId) nextIncoming = declaredInputBases(playbook);
       else if (predecessors.length > 0 && predecessors.every((pred) => outgoing.has(pred))) {
         nextIncoming = intersection(predecessors.map((pred) => outgoing.get(pred)!));
       }
@@ -391,6 +392,12 @@ function buildFlowModel(playbook: Playbook, issues: ValidationIssue[], file: str
   }
 
   return { flow, byId, indexById, bodyOwner, outerIds, outerEdges, incoming, reachable };
+}
+
+/** Logical artifacts supplied at run creation and available at flow entry. */
+function declaredInputBases(playbook: Playbook): Set<string> {
+  if (playbook.inputs === null || typeof playbook.inputs !== 'object' || Array.isArray(playbook.inputs)) return new Set();
+  return new Set(Object.keys(playbook.inputs as Record<string, unknown>).map(baseArtifact));
 }
 
 function conditionIssues(step: Step, index: number, available: Set<string>, producedByBody: Set<string>, file: string, issues: ValidationIssue[]): void {

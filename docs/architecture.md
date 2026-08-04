@@ -80,7 +80,10 @@ so tests stay hermetic and deterministic.
 - **`diagram.ts`** — the renderer (below).
 - **`flow-cursor.ts`** — pure `computeNext(playbook, events)` for `fadeno next`.
 - **`prompt-resolve.ts` / `prompt.ts`** — pure step-prompt plan + render for `fadeno prompt`.
-- **`run-ledger.ts`** — list/resolve runs, parse events, list artifacts.
+- **`run-ledger.ts`** — list/resolve runs, parse events, list artifacts, and
+  gate format-0.3 readers behind explicit 0.2 compatibility mode.
+- **`host-dispatch.ts`** — durable native-host request/start/terminal receipt
+  protocol with immutable output placement and attempt evidence.
 
 ## The validator (`src/lib/playbook-validate.ts`)
 
@@ -128,7 +131,8 @@ hosts, and the seam a future compiled runtime would read/write.
   artifacts/     # every durable step output (plans, patches, reports, …)
 ```
 
-Three commands drive its lifecycle:
+Three commands drive its original lifecycle, and native host work adds three
+receipt commands:
 
 - **`new-run <playbook> "<task>"`** (`runNewRun`) creates the directory, writes
   `run.yaml` with a `$schema` modeline, seeds a `run_started` event, and makes
@@ -148,6 +152,10 @@ Three commands drive its lifecycle:
   `tests_pass`; `--report` remains a deprecated alias. This is the
   **advisory→enforced bridge**: the same check the runner applies can run in CI, a
   pre-commit hook, or a Claude Code `Stop` hook. See `enforcement.md`.
+- **`dispatch-start|dispatch-complete|dispatch-fail`** are host receipts. A
+  host executor request is durable before native work begins; the host attests
+  model, effort, native agent id, and terminal output/failure. The director is
+  the only ledger writer during this MVP.
 
 The runner skill *can* hand-edit these files, but the CLI keeps them schema-valid.
 
@@ -179,7 +187,7 @@ Everything `init` emits and everything the plugin bundles comes from `templates/
 templates/
   common/                 # identical across targets
     fadeno/               # → .fadeno/ : vocabulary, playbooks, schemas, enforcement, runs/gitkeep
-    skills/               # the two SKILL.md bodies + references (sigil-free)
+    skills/               # the three SKILL.md bodies + references (sigil-free)
     commands/             # /fadeno:* slash-command files (plugin)
     hooks/                # pre-commit, CI workflow, README (tier-2 scaffold)
   codex/                  # Codex adapter: AGENTS.md, codex-agents/*.toml, openai/*.yaml
@@ -237,11 +245,10 @@ Because `plugin/` is generated but committed, it can drift from `templates/`.
 `test/plugin.test.ts` guards this — but **narrowly**: it asserts a freshly
 generated `skills/builder/SKILL.md` equals the committed one, and that
 `plugin/bin/fadeno` exists, is executable, starts with the node shebang, and is
-pinned to CommonJS. It does **not** diff the whole tree or the bundled binary's
-baked version. Practical rule: **after editing any template or bumping the
-version, run `npm run build:plugin` and commit `plugin/`.** (Strengthening this
-guard — a full-tree diff plus a bundled-version check — is a candidate
-improvement.)
+pinned to CommonJS. The broader drift suite also covers Codex payloads, target
+invocation policy, generated templates, and the committed marketplace pointer.
+Practical rule: **after editing any template or bumping the version, run both
+plugin build commands and commit the generated payloads.**
 
 ## Build & module system
 

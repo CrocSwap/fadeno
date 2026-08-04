@@ -18,6 +18,20 @@
       "description": "Kebab-case identifier; should match the file name."
     },
     "description": { "type": "string", "minLength": 1 },
+    "inputs": {
+      "type": "object",
+      "description": "Named files supplied when a run is created. Declared inputs are available at flow entry.",
+      "propertyNames": { "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$" },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["media_type"],
+        "additionalProperties": false,
+        "properties": {
+          "media_type": { "type": "string", "minLength": 1 },
+          "description": { "type": "string" }
+        }
+      }
+    },
     "when_to_use": {
       "type": "array",
       "items": { "type": "string" },

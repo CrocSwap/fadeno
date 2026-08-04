@@ -1,44 +1,54 @@
 ---
 name: runner
-description: Execute Fadeno playbooks from `.fadeno/playbooks` for complex coding, review, research, or multi-step agent workflows. Use when the user asks to run a Fadeno playbook or names one, or when a task is complex enough to benefit from a repeatable plan/review/test workflow.
+description: Execute or resume Fadeno playbooks from `.fadeno/playbooks` for complex coding, review, research, or multi-step agent workflows. Use when the user says “Use Fadeno”, asks to run a playbook, names one, or provides a run id.
 ---
 
 # Fadeno Runner
 
 Execute a Fadeno playbook as a bounded, inspectable workflow backed by files on
-disk. You are the orchestrator: you read the playbook, perform each step (using
-subagents when available, separate passes otherwise), and record what happened in
-a run ledger so the result is reproducible and reviewable.
+disk. You are the director and sole Fadeno ledger writer: native workers return
+outputs and receipts to you; they never invoke Fadeno ledger commands.
 
 ## Procedure
 
-1. Read `.fadeno/vocabulary.md` and `references/runtime.md` (the operational
+1. **Route the request.** For “Use Fadeno”: a matching playbook goes directly
+   to run; a described workflow with no match goes to the builder, then
+   validate → diagram → one approval → run; an existing run id resumes that
+   run. Announce the run id immediately after creating it.
+2. Read `.fadeno/vocabulary.md` and `references/runtime.md` (the operational
    detail lives there — keep it out of working memory until needed).
-2. Select the best playbook from `.fadeno/playbooks` using each playbook's
+3. Select the best playbook from `.fadeno/playbooks` using each playbook's
    `when_to_use`. If the user named one, use it. State which you chose and why.
-3. Validate required inputs are present; ask the user for anything missing.
-4. Create a new run directory: `.fadeno/runs/<timestamp>-<slug>/` (or run
+4. Validate required declared inputs are present; preserve long specifications
+   as `fadeno new-run --input Name=path` files rather than shortening them.
+5. Create a new run directory: `.fadeno/runs/<timestamp>-<slug>/` (or run
    `fadeno new-run <playbook> "<task>"` if the CLI is available).
-5. Write `run.yaml` (see `references/runtime.md` for the shape).
-6. Append major lifecycle events to `events.jsonl` as you go. Gate events must
+6. Write `run.yaml` (see `references/runtime.md` for the shape).
+7. Append major lifecycle events to `events.jsonl` as you go. Gate events must
    include `condition`, the concrete artifact path, and `result`; loops must
    record iteration start, condition evaluation, and success or exhaustion.
-7. Execute each step in `flow` using available host capabilities.
-8. If native subagents are available, delegate role-specific work to them — but
+8. Execute each step in `flow` using available host capabilities. When
+   `fadeno drive` returns `awaiting_host_dispatch`, start each request with the
+   native facility, attach its native agent id, and submit exactly one receipt
+   serially with `dispatch-complete` or `dispatch-fail` before driving again.
+9. If native subagents are available, delegate role-specific work to them — but
    **one level only**; do not assume a subagent can spawn its own subagents.
-9. If native subagents are unavailable, simulate role separation with separate
+10. If native subagents are unavailable, degrade loudly: use a declared command
+   executor or stop with the unavailable model/facility named. Never silently
+   substitute a requested native model.
+11. If native subagents are unavailable, simulate role separation with separate
    passes and save each pass as a distinct artifact.
-10. Save every major output under `artifacts/`.
-11. Apply gates using the **structured judgment artifact**, not vague prose: an
+12. Save every major output under `artifacts/`.
+13. Apply gates using the **structured judgment artifact**, not vague prose: an
     evaluator writes a schema-valid report or test result, then run
     `fadeno gate <run> <condition> --artifact <path>` and follow the explicit
     branch. Do not infer `tests_pass` from a prose summary.
-12. Respect loop limits. Execute body steps in listed order, evaluate the loop
+14. Respect loop limits. Execute body steps in listed order, evaluate the loop
     condition against the latest body-produced artifact, then follow
     `on_success` or `on_exhausted`. Version iteration artifacts (`.v1`, `.v2`);
     never overwrite a prior iteration.
-13. Run tests or checks when the playbook requires them.
-14. When a step declares `terminal_status`, stop there and set `run.yaml.status`
+15. Run tests or checks when the playbook requires them.
+16. When a step declares `terminal_status`, stop there and set `run.yaml.status`
     to the same value. A failed review exhaustion or failed test path must not
     be reported as completed. Return a final answer with: what changed, checks
     performed, gates passed/failed, terminal status, and the run path.
@@ -49,6 +59,12 @@ a run ledger so the result is reproducible and reviewable.
 - Never skip a required gate silently. If you skip or override one, say so.
 - Never overwrite iteration artifacts; version them.
 - Do not treat `.fadeno/runs/` as source code.
+- Attach native agent ids to host starts and keep model, effort, and agent type
+  as host-attested evidence.
+- Use original native agents for revision when possible; ask `fadeno show` and
+  merge its request-level projection with host/Codex activity for status.
+- Parallel writers use worktrees or patch-only output when the host supports it;
+  automatic worktree creation/merging is not part of Fadeno's MVP.
 - Ask for user approval before destructive commands, dependency additions,
   deployments, or external sends (the `require_user_approval_for` categories).
 

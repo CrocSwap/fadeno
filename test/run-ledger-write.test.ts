@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -12,7 +13,7 @@ function seedRunDir(root: string, runYaml: string): string {
   return dir;
 }
 
-const CURRENT_YAML = 'run_id: x\nschema_version: "0.2"\nplaybook: p\nstatus: running\ntask: t\nstarted_at: 2026-07-19T12:00:00Z\nhost: cli\n';
+const CURRENT_YAML = 'run_id: x\nschema_version: "0.3"\nplaybook: p\nstatus: running\ntask: t\nstarted_at: 2026-07-19T12:00:00Z\nhost: cli\n';
 
 function events(dir: string): Array<Record<string, unknown>> {
   return readFileSync(join(dir, 'events.jsonl'), 'utf8')
@@ -50,6 +51,31 @@ test('nextSeq peek matches the seq the next append receives', (t) => {
   assert.equal(used, peeked);
 });
 
+test('concurrent writer processes serialize sequence assignment under the run lock', async (t) => {
+  const root = tempRepo(t);
+  const dir = seedRunDir(root, CURRENT_YAML);
+  const writerModule = join(import.meta.dirname, '..', 'src', 'lib', 'run-ledger-write.ts');
+  const script = [
+    `import { LedgerWriter } from ${JSON.stringify(writerModule)};`,
+    'const writer = new LedgerWriter(process.env.FADENO_RUN_DIR);',
+    'writer.append({ type: "receipt", step: null }, new Date("2026-07-19T12:00:00.000Z"));',
+  ].join('\n');
+  const launch = (): Promise<void> =>
+    new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+        env: { ...process.env, FADENO_RUN_DIR: dir },
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      let stderr = '';
+      child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+      child.once('error', reject);
+      child.once('exit', (code) => code === 0 ? resolve() : reject(new Error(`writer exited ${code}: ${stderr}`)));
+    });
+
+  await Promise.all(Array.from({ length: 8 }, launch));
+  assert.deepEqual(events(dir).map((event) => event.seq), [1, 2, 3, 4, 5, 6, 7, 8]);
+});
+
 test('a corrupt or seq-less line still occupies its position (line-count floor)', (t) => {
   const root = tempRepo(t);
   const dir = seedRunDir(root, CURRENT_YAML);
@@ -67,12 +93,12 @@ test('a corrupt or seq-less line still occupies its position (line-count floor)'
 
 test('the writer refuses legacy and unknown-version ledgers', (t) => {
   const root = tempRepo(t);
-  const legacyDir = seedRunDir(root, CURRENT_YAML.replace('schema_version: "0.2"\n', ''));
+  const legacyDir = seedRunDir(root, CURRENT_YAML.replace('schema_version: "0.3"\n', ''));
   assert.throws(() => new LedgerWriter(legacyDir), LedgerWriteError);
   assert.throws(() => new LedgerWriter(legacyDir), /legacy ledger/);
 
   const futureDir = join(root, '.fadeno', 'runs', 'future');
   mkdirSync(futureDir, { recursive: true });
-  writeFileSync(join(futureDir, 'run.yaml'), CURRENT_YAML.replace('"0.2"', '"9.9"'), 'utf8');
+  writeFileSync(join(futureDir, 'run.yaml'), CURRENT_YAML.replace('"0.3"', '"9.9"'), 'utf8');
   assert.throws(() => new LedgerWriter(futureDir), /schema_version "9\.9"/);
 });

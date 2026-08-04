@@ -35,7 +35,7 @@ function seed(root: string, opts: SeedOpts = {}): string {
     join(dir, 'run.yaml'),
     [
       `run_id: ${RUN_ID}`,
-      ...(opts.legacy ? [] : ['schema_version: "0.2"']),
+      ...(opts.legacy ? [] : ['schema_version: "0.3"']),
       'playbook: dual-architect-review',
       `status: ${opts.status ?? 'running'}`,
       `task: "${TASK}"`,
@@ -411,7 +411,7 @@ flow:
     join(dir, 'run.yaml'),
     [
       `run_id: ${runId}`,
-      'schema_version: "0.2"',
+      'schema_version: "0.3"',
       'playbook: untyped-map',
       'status: running',
       'task: "x"',

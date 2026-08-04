@@ -3,7 +3,7 @@
 # seq-contiguous, terminal-coherent, every artifact present with its recorded
 # sha256, typed artifacts revalidated, and every deterministic gate result
 # RECOMPUTED from its artifact — a trace can't claim what its artifacts don't
-# support. Traces produced before ledger format 0.2 need `verify --legacy`
+# support. Traces produced in format 0.2 or earlier need `verify --legacy`.
 # (or a fadeno version pinned to the one that produced them).
 name: fadeno-verify
 on:

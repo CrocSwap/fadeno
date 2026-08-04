@@ -10,7 +10,7 @@ export class ExecutorProfileError extends Error {}
  * routing, ranking, stickiness, or fallback — if a bound executor fails, the
  * run pauses and the user substitutes explicitly.
  */
-export interface ExecutorSpec {
+export interface CommandExecutorSpec {
   adapter: 'command';
   command: string[];
   /** Optional metadata recorded in dispatch evidence; never alters `command`. */
@@ -31,6 +31,19 @@ export interface ExecutorSpec {
    */
   sessionIdPattern: string | null;
 }
+
+/** A native host facility invoked outside the command adapter. */
+export interface HostExecutorSpec {
+  adapter: 'host';
+  /** Host-attested native model identifier. */
+  model: string;
+  /** Host-attested reasoning effort/profile. */
+  reasoningEffort: string;
+  /** Host-attested native agent type/identity class. */
+  agentType: string;
+}
+
+export type ExecutorSpec = CommandExecutorSpec | HostExecutorSpec;
 
 /** Placeholder substituted into command/resume argv. */
 export const SESSION_ID_PLACEHOLDER = '{session_id}';
@@ -76,10 +89,37 @@ export function parseExecutorProfile(text: string, source: string): ExecutorProf
     if (!isMapping(raw)) {
       throw new ExecutorProfileError(`${source}: executor "${name}" is not a mapping.`);
     }
-    if (raw.adapter !== 'command') {
+    if (raw.adapter !== 'command' && raw.adapter !== 'host') {
       throw new ExecutorProfileError(
         `${source}: executor "${name}" has adapter ${JSON.stringify(raw.adapter)}; ` +
-          'only `command` is supported.',
+          'expected `command` or `host`.',
+      );
+    }
+    if (raw.adapter === 'host') {
+      const forbidden = ['command', 'resume', 'session_id_pattern'].filter((key) => raw[key] !== undefined);
+      if (forbidden.length > 0) {
+        throw new ExecutorProfileError(
+          `${source}: host executor "${name}" rejects command/session field(s): ${forbidden.join(', ')}.`,
+        );
+      }
+      const model = raw.model;
+      const reasoningEffort = raw.reasoning_effort;
+      const agentType = raw.agent_type;
+      if (typeof model !== 'string' || model.length === 0) {
+        throw new ExecutorProfileError(`${source}: host executor "${name}" needs a non-empty \`model\`.`);
+      }
+      if (typeof reasoningEffort !== 'string' || reasoningEffort.length === 0) {
+        throw new ExecutorProfileError(`${source}: host executor "${name}" needs a non-empty \`reasoning_effort\`.`);
+      }
+      if (typeof agentType !== 'string' || agentType.length === 0) {
+        throw new ExecutorProfileError(`${source}: host executor "${name}" needs a non-empty \`agent_type\`.`);
+      }
+      executors[name] = { adapter: 'host', model, reasoningEffort, agentType };
+      continue;
+    }
+    if (raw.reasoning_effort !== undefined || raw.agent_type !== undefined) {
+      throw new ExecutorProfileError(
+        `${source}: command executor "${name}" rejects host-only field(s) \`reasoning_effort\`/\`agent_type\`.`,
       );
     }
     const command = raw.command;
@@ -223,10 +263,17 @@ export function serializeProfile(profile: ExecutorProfile): string {
   const sortedExecutors: Record<string, Record<string, unknown>> = {};
   for (const name of Object.keys(profile.executors).sort()) {
     const spec = profile.executors[name]!;
-    const entry: Record<string, unknown> = { adapter: spec.adapter, command: spec.command };
-    if (spec.model != null) entry.model = spec.model;
-    if (spec.resume != null) entry.resume = spec.resume;
-    if (spec.sessionIdPattern != null) entry.session_id_pattern = spec.sessionIdPattern;
+    const entry: Record<string, unknown> = spec.adapter === 'host'
+      ? {
+          adapter: spec.adapter,
+          model: spec.model,
+          reasoning_effort: spec.reasoningEffort,
+          agent_type: spec.agentType,
+        }
+      : { adapter: spec.adapter, command: spec.command };
+    if (spec.adapter === 'command' && spec.model != null) entry.model = spec.model;
+    if (spec.adapter === 'command' && spec.resume != null) entry.resume = spec.resume;
+    if (spec.adapter === 'command' && spec.sessionIdPattern != null) entry.session_id_pattern = spec.sessionIdPattern;
     sortedExecutors[name] = entry;
   }
   const sortedBindings: Record<string, string> = {};

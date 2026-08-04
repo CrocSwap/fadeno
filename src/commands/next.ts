@@ -18,7 +18,7 @@ export class NextError extends Error {}
 
 export interface NextOptions {
   run: string;
-  /** Read a pre-0.2 ledger in explicit compatibility mode. */
+  /** Read a 0.2 or unversioned pre-0.3 ledger in explicit compatibility mode. */
   legacy?: boolean;
   cwd?: string;
   repoRoot?: string;
@@ -95,7 +95,7 @@ export function runNext(opts: NextOptions): NextResult {
     if (err instanceof RunLedgerError) throw new NextError(err.message);
     throw err;
   }
-  if (mode === 'legacy') events = normalizeLegacyEvents(events);
+  if (mode !== 'current') events = normalizeLegacyEvents(events);
 
   const playbookPath = locatePlaybook(repoRoot, run.playbook);
   let playbook: Playbook;

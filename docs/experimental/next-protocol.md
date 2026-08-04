@@ -1,7 +1,7 @@
 # Fadeno next protocol — engine-backed, verification-centered
 
-**Status:** approved implementable design boundary; not yet implemented or
-schema-frozen
+**Status:** approved implementation boundary; the 0.3 host-dispatch slice is
+implemented and contract-frozen
 **Decision date:** 2026-07-14
 **Relationship:** small promoted subset of
 [`ontology-and-execution-design.md`](ontology-and-execution-design.md)
@@ -218,6 +218,28 @@ canonical name for each fact. In particular, emit `artifact_created`; accept
 `artifact_written` only through an explicit legacy reader until old fixtures are
 regenerated.
 
+### Native host dispatch (format 0.3)
+
+The host adapter is named `host`. When a host-bound actor call is planned,
+`fadeno drive` records `host_dispatch_requested` and returns
+`awaiting_host_dispatch` with a stable request id. The host owns native
+execution and submits receipts serially:
+
+```text
+dispatch-start <run> <dispatch-id> --agent-id <native-id>
+dispatch-complete <run> <dispatch-id> --output <temporary-file> [--commit <sha>]
+dispatch-fail <run> <dispatch-id> --reason <text>
+```
+
+The start receipt appends the existing `actor_dispatched` event and explicitly
+attests native model, reasoning effort, agent type, and agent identity. A valid
+completion is manifested at the planned immutable path; invalid bytes are
+preserved under `artifacts/attempts/`. Repeated drives reuse request ids, and
+repeated receipts are idempotent for the same native identity or output digest.
+The director is the only ledger writer during this MVP. Format 0.2 and
+unversioned ledgers are readable only through explicit compatibility mode, and
+verifiers fail rather than ignore host lifecycle evidence in those ledgers.
+
 `fadeno verify` must check at least:
 
 - recognized document and event schema versions;
@@ -231,6 +253,12 @@ regenerated.
 - attempt ordinals are contiguous within an actor call and redispatches carry an
   allowed reason;
 - execution bindings match the snapshotted profile or explicit override;
+- host dispatch requests are unique and have coherent request → start →
+  terminal lifecycles;
+- host prompt snapshots and successful output manifests match their digests;
+- completed runs have no unresolved host requests;
+- native model, effort, and agent identity are explicitly attested or visibly
+  skipped when no host dispatch is present;
 - human decisions select declared options and resolve at most once;
 - run terminal status agrees with terminal events.
 

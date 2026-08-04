@@ -1,7 +1,8 @@
 # Fadeno Vocabulary
 
-Fadeno is a portable **playbook protocol** for AI coding agents — not a runtime.
-A small, orthogonal vocabulary composes more reliably than a sprawling one. The
+Fadeno is a portable **playbook protocol** for AI coding agents with a repo-local,
+file-backed runtime — not a daemon, cloud service, or scheduler. A small,
+orthogonal vocabulary composes more reliably than a sprawling one. The
 [`playbook.schema.json`](schemas/playbook.schema.json) is the single source of
 truth for the vocabulary; this file explains what each term *means*.
 
@@ -39,8 +40,8 @@ evaluator actor  →  structured judgment artifact  →  deterministic gate cond
 Judgment lives in an artifact (which models are good at producing); control flow
 lives in a deterministic check on that artifact (which is verifiable). The
 artifact shape is defined by [`review-report.schema.json`](schemas/review-report.schema.json),
-so a gate condition like `no_blocking_issues` is computable on disk — by the
-agent today, and by a hook/CI/runtime tomorrow.
+so a gate condition like `no_blocking_issues` is computable on disk by the
+repo-local runtime today, or by a hook/CI integration.
 
 ## Loops are bounded
 

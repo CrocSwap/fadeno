@@ -32,7 +32,7 @@ For each run, create:
 
 ```yaml
 run_id: 2026-05-30-1132-csv-export
-schema_version: "0.2"      # ledger format version — readers refuse ledgers without it
+schema_version: "0.3"      # 0.2 and pre-versioned traces require explicit --legacy
 playbook: code-change-review
 status: running            # running | completed | failed | aborted
 task: Add CSV export for reports.
@@ -66,7 +66,7 @@ appends any type), but these are the standard ones: `run_started`,
 `loop_succeeded`, `loop_exhausted`, `roles_degraded`, `prompt_assembled`, and a
 terminal `run_completed` / `run_failed` / `run_aborted`. Engine-driven runs
 (`fadeno drive`) additionally record `profile_snapshotted`, `executor_override`,
-`actor_dispatched`, `actor_completed`, `actor_failed`, `decision_requested`, and
+`host_dispatch_requested`, `actor_dispatched`, `actor_completed`, `actor_failed`, `decision_requested`, and
 `decision_resolved`. Every line carries at least `type`, `step` (a step id, or
 `null` for run-level events), a contiguous 1-based **`seq`**, and `timestamp`.
 
@@ -85,7 +85,7 @@ artifact, then record it), hashes it, and records `artifact_id`, `artifact`
 time; failures are recorded honestly as `ok: false`, and `verify` recomputes
 all of it). Artifacts are immutable: re-recording a path with different bytes
 is refused — write a new generation instead. The legacy `artifact_written`
-name is retired; pre-0.2 ledgers are readable only via `--legacy` on
+name is retired; pre-0.3 ledgers are readable only via `--legacy` on
 `show`/`verify`/`next`. To retire an artifact without a new generation, record
 an explicit supersession — `fadeno run <run> --event artifact_superseded
 --artifact <old> --field superseded_by=<new>` (both sides must already be
@@ -97,6 +97,24 @@ dispatch/output events; hand-driven ledgers simply omit them, and the CLI will
 not fabricate them. `verify` checks that attempt ordinals are contiguous per
 actor call and every redispatch carries an allowed reason (`schema_repair`,
 `executor_override`, `user_retry`).
+
+**Native host dispatches pause the engine durably.** A host executor profile
+uses `adapter: host` plus `model`, `reasoning_effort`, and `agent_type`. Drive
+records `host_dispatch_requested` for every pending member and returns
+`awaiting_host_dispatch`; the host then runs, starts, and receipts each native
+agent serially:
+
+```text
+fadeno dispatch-start <run> <dispatch-id> --agent-id <native-id>
+fadeno dispatch-complete <run> <dispatch-id> --output <temporary-file> [--commit <sha>]
+fadeno dispatch-fail <run> <dispatch-id> --reason <text>
+```
+
+The start event attests the native agent id, model, effort, and agent type. A
+valid completion is copied to the planned immutable artifact path and gets a
+manifest; invalid bytes are retained under `artifacts/attempts/`. Native
+workers do not invoke Fadeno ledger commands — the host coordinator is the
+sole writer.
 
 **Sessions are opt-in and marked.** An executor that declares `resume` in
 `.fadeno/executors.yaml` keeps one harness session per role per run; its

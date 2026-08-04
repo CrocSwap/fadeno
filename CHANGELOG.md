@@ -7,11 +7,26 @@ All notable changes to Fadeno are documented here. The format follows
 ## [Unreleased]
 
 The engine slices of the next protocol (capabilities 1, 2, 4 + 5 of
-`docs/experimental/next-protocol.md`, plus the explicit supersede event):
-Fadeno gains a small deterministic, repo-local engine. Ledger format stays
-0.2 — every engine addition is additive event evidence.
+`docs/experimental/next-protocol.md`, plus the explicit supersede event and
+native host dispatch): Fadeno gains a small deterministic, repo-local engine.
+Native dispatch advances the run ledger to format 0.3; format 0.2 and
+unversioned traces remain explicitly readable through `--legacy`, while
+writers accept only 0.3.
 
 ### Added
+
+- **Native host dispatch** — executor profiles now discriminate `command` and
+  `host` adapters. `fadeno drive` batches durable native-agent requests and
+  pauses at `awaiting_host_dispatch`; the host records idempotent lifecycle
+  receipts with `dispatch-start`, `dispatch-complete`, and `dispatch-fail`.
+  Requests and receipts attest the requested model, reasoning effort, agent
+  type, native agent id, workspace, branch, output digest, and optional commit.
+- **Declared run inputs** — repeated `fadeno new-run --input Name=path` copies
+  exact input bytes into the run, records digest/provenance manifests, rejects
+  unsafe paths, and supports per-actor filtering for literal role maps.
+- **Native-dispatch verification** — `fadeno verify` checks strict request →
+  start → terminal ordering, profile/request/receipt attestation consistency,
+  immutable schema-repair feedback, and symlink-safe output placement.
 
 - **`fadeno drive <run>`** — the engine. Owns the run transition loop over the
   same pure cursor as `fadeno next`: assembles/reuses prompt snapshots,

@@ -5,9 +5,10 @@ import { parse as parseYaml } from 'yaml';
 export class RunLedgerError extends Error {}
 
 /** The run-ledger format version this fadeno reads and writes. */
-export const RUN_LEDGER_SCHEMA_VERSION = '0.2';
+export const RUN_LEDGER_SCHEMA_VERSION = '0.3';
+export const PREVIOUS_RUN_LEDGER_SCHEMA_VERSION = '0.2';
 
-export type LedgerMode = 'current' | 'legacy';
+export type LedgerMode = 'current' | 'compatibility' | 'legacy';
 
 export interface RunSummary {
   runId: string;
@@ -32,11 +33,19 @@ export interface RunEvent {
 
 /**
  * Gate a reader on the ledger format version. A ledger without a
- * `schema_version` is legacy (pre-0.2) and is readable only when the caller
- * explicitly opted in; an unknown version is never reinterpreted.
+ * `schema_version` 0.2 and unversioned (pre-0.3) ledgers are readable only
+ * when the caller explicitly opts in; an unknown version is never reinterpreted.
  */
 export function ledgerMode(run: RunSummary, allowLegacy: boolean): LedgerMode {
   if (run.schemaVersion === RUN_LEDGER_SCHEMA_VERSION) return 'current';
+  if (run.schemaVersion === PREVIOUS_RUN_LEDGER_SCHEMA_VERSION) {
+    if (allowLegacy) return 'compatibility';
+    throw new RunLedgerError(
+      `run "${run.runId}" uses ledger schema_version "${PREVIOUS_RUN_LEDGER_SCHEMA_VERSION}"; ` +
+        `current is "${RUN_LEDGER_SCHEMA_VERSION}". Pass --legacy to read it in ` +
+        'explicit compatibility mode. Writers refuse older ledgers.',
+    );
+  }
   if (run.schemaVersion == null) {
     if (allowLegacy) return 'legacy';
     throw new RunLedgerError(
@@ -52,7 +61,7 @@ export function ledgerMode(run: RunSummary, allowLegacy: boolean): LedgerMode {
 }
 
 /**
- * The explicit legacy reader: normalize pre-0.2 event names to the canonical
+ * The explicit compatibility reader: normalize pre-0.3 event names to the canonical
  * vocabulary so downstream logic handles one name per fact. Only ever applied
  * under `--legacy` — a current-format ledger must not need it.
  */

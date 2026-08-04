@@ -30,6 +30,7 @@ export interface PlaybookStep {
 export interface Playbook {
   name?: unknown;
   schema_version?: unknown;
+  inputs?: unknown;
   roles?: unknown;
   flow?: unknown;
   policies?: unknown;
@@ -240,13 +241,16 @@ function resolveInput(
   for (let i = 0; i < cutoff; i += 1) {
     const event = events[i]!;
     if (!ARTIFACT_EVENT_TYPES.has(event.type)) continue;
-    if (event.step == null || !producerIds.has(event.step)) continue;
+    const declaredInput =
+      event.step == null &&
+      (event.extra.input_name === inputType || event.extra.input === inputType || event.extra.logical_name === inputType);
+    if (!declaredInput && (event.step == null || !producerIds.has(event.step))) continue;
     const path = event.extra.artifact;
     if (typeof path !== 'string') continue;
     const memberField = typeof event.extra.member === 'string' ? event.extra.member : null;
-    const producer = findStep(flow, event.step);
+    const producer = event.step == null ? undefined : findStep(flow, event.step);
     const member = memberField ?? (producer ? attributeToMember(producer, path) : null);
-    candidates.push({ index: i, path, producer: event.step, member });
+    candidates.push({ index: i, path, producer: event.step ?? '(declared input)', member });
   }
 
   // Latest event per attributed member; latest aggregate; unattributed kept in order.
@@ -259,7 +263,7 @@ function resolveInput(
       if (!prior || candidate.index > prior.index) byMember.set(candidate.member, candidate);
       continue;
     }
-    const producer = findStep(flow, candidate.producer);
+    const producer = candidate.producer === '(declared input)' ? undefined : findStep(flow, candidate.producer);
     if (producer && producer.output_path != null) {
       // Producer attributes by member, yet this path matched none: it is the
       // assembled aggregate (e.g. cross-review.json alongside the member files).
@@ -293,10 +297,10 @@ function resolveInput(
   let invocation: number | null = null;
   if (all.length > 0) {
     const last = all.reduce((a, b) => (a.index >= b.index ? a : b));
-    producedBy = last.producer;
+    producedBy = last.producer === '(declared input)' ? null : last.producer;
     let count = 0;
     for (let i = 0; i < cutoff; i += 1) {
-      if (events[i]!.type === 'step_started' && events[i]!.step === producedBy) count += 1;
+      if (producedBy != null && events[i]!.type === 'step_started' && events[i]!.step === producedBy) count += 1;
     }
     invocation = count > 0 ? count : null;
   }
@@ -309,6 +313,28 @@ function resolveInput(
     isAssembledAggregate: aggregate != null,
     aggregatePath: aggregate ? aggregate.path : null,
   };
+}
+
+/**
+ * A map member with an explicit binding receives only the declared artifacts
+ * listed in its primary/context buckets. Members without a binding retain the
+ * historical all-input view, which keeps partial binding maps backwards
+ * compatible while making an authored binding an actual routing decision.
+ */
+function boundInputNames(step: PlaybookStep, actor: string | null): Set<string> | null {
+  if (actor == null || !step.input_bindings || typeof step.input_bindings !== 'object' || Array.isArray(step.input_bindings)) {
+    return null;
+  }
+  const binding = (step.input_bindings as Record<string, unknown>)[actor];
+  if (binding == null || typeof binding !== 'object' || Array.isArray(binding)) return null;
+  const result = new Set<string>();
+  for (const bucket of ['primary', 'context'] as const) {
+    const values = (binding as Record<string, unknown>)[bucket];
+    if (Array.isArray(values)) {
+      for (const value of values) if (typeof value === 'string') result.add(value);
+    }
+  }
+  return result;
 }
 
 /** Resolve the full assignment plan for one step selection. Pure. */
@@ -394,7 +420,10 @@ export function resolveStepPlan(playbook: Playbook, events: RunEvent[], sel: Sel
   }
   const inputCutoff = cutoffIndex ?? spanEnd;
 
-  const inputs = asStringArray(step.input).map((type) => resolveInput(type, flow, events, inputCutoff, actor));
+  const allowed = boundInputNames(step, actor);
+  const inputs = asStringArray(step.input)
+    .filter((type) => allowed == null || allowed.has(type))
+    .map((type) => resolveInput(type, flow, events, inputCutoff, actor));
 
   const output = planOutput(playbook, step, sel.step, kind, isMap, actor, iteration, isBody);
   const downstream = resolveDownstream(flow, output.collectiveType);

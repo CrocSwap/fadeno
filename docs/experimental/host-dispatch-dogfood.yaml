@@ -1,0 +1,30 @@
+kind: AgentPlaybook
+schema_version: "0.1"
+name: host-dispatch-dogfood
+description: Five-member native host dispatch acceptance fixture.
+roles:
+  agent_1: { purpose: Implementer one. }
+  agent_2: { purpose: Implementer two. }
+  agent_3: { purpose: Implementer three. }
+  agent_4: { purpose: Implementer four. }
+  agent_5: { purpose: Implementer five. }
+inputs:
+  Agent1Spec: { media_type: text/markdown }
+  Agent2Spec: { media_type: text/markdown }
+  Agent3Spec: { media_type: text/markdown }
+  Agent4Spec: { media_type: text/markdown }
+  Agent5Spec: { media_type: text/markdown }
+flow:
+  - id: implement_items
+    kind: map
+    over: [agent_1, agent_2, agent_3, agent_4, agent_5]
+    input: [Agent1Spec, Agent2Spec, Agent3Spec, Agent4Spec, Agent5Spec]
+    input_bindings:
+      agent_1: { primary: [Agent1Spec] }
+      agent_2: { primary: [Agent2Spec] }
+      agent_3: { primary: [Agent3Spec] }
+      agent_4: { primary: [Agent4Spec] }
+      agent_5: { primary: [Agent5Spec] }
+    output: Notes[]
+    output_path: artifacts/parts/{actor}.md
+    terminal_status: completed

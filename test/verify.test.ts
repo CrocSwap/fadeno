@@ -46,7 +46,7 @@ function writeArtifact(root: string, id: string, rel: string, content: string): 
 function baseRun(id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     run_id: id,
-    schema_version: '0.2',
+    schema_version: '0.3',
     playbook: 'code-change-review',
     status: 'completed',
     task: 'demo',
@@ -151,10 +151,14 @@ test('happy path: a completed run with a recomputable passing gate verifies clea
       'named-decisions',
       'artifact-supersede',
       'session-continuity',
+      'host-dispatch-requests',
+      'host-dispatch-lifecycle',
+      'host-dispatch-artifacts',
+      'native-attestation',
     ],
   );
   assert.ok(result.findings.every((f) => f.status !== 'fail'));
-  assert.equal(finding(result, 'ledger-version').detail, 'schema_version 0.2');
+  assert.equal(finding(result, 'ledger-version').detail, 'schema_version 0.3');
   assert.equal(finding(result, 'events-seq').detail, 'seq contiguous 1..4');
   assert.equal(finding(result, 'terminal-events').detail, 'run_completed agrees with run.yaml status');
   assert.equal(finding(result, 'gate-no_blocking_issues').detail, 'recorded pass, recomputed pass  (artifacts/review-report.json)');

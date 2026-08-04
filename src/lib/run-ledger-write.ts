@@ -1,15 +1,65 @@
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { RUN_LEDGER_SCHEMA_VERSION } from './run-ledger.ts';
 
 export class LedgerWriteError extends Error {}
 
+const LOCK_NAME = '.ledger.lock';
+const LOCK_WAIT_MS = 10;
+const LOCK_TIMEOUT_MS = 30_000;
+const LOCK_STALE_MS = 120_000;
+
+function waitSync(milliseconds: number): void {
+  const signal = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(signal, 0, 0, milliseconds);
+}
+
+/**
+ * Acquire an atomic per-run lock. `mkdir` is the lock acquisition primitive:
+ * it succeeds for exactly one process, so sequence scanning and append happen
+ * as one serialized critical section. A stale lock is recoverable after a
+ * crashed writer; normal contention waits rather than allocating duplicate
+ * sequence numbers.
+ */
+function withRunLock<T>(runDir: string, action: () => T): T {
+  const lockPath = join(runDir, LOCK_NAME);
+  const started = Date.now();
+  for (;;) {
+    try {
+      mkdirSync(lockPath);
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      let stale = false;
+      try {
+        stale = Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS;
+      } catch {
+        // The competing writer may have released the lock between mkdir/stat.
+      }
+      if (stale) {
+        rmSync(lockPath, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() - started >= LOCK_TIMEOUT_MS) {
+        throw new LedgerWriteError(`timed out waiting for the ledger lock at ${lockPath}.`);
+      }
+      waitSync(LOCK_WAIT_MS);
+    }
+  }
+  try {
+    return action();
+  } finally {
+    rmSync(lockPath, { recursive: true, force: true });
+  }
+}
+
 /**
  * Append-side twin of `run-ledger.ts`: stamps every event with a contiguous
  * 1-based `seq` and refuses to write into a ledger of another format version,
- * so a legacy ledger can never become mixed-format. One instance per command
- * invocation; `lastSeq` advances in memory across that invocation's appends.
+ * so a legacy ledger can never become mixed-format. Every append takes the
+ * per-run lock and rescans the ledger while holding it; the in-memory value is
+ * only a convenience for the read-only `nextSeq` peek.
  */
 export class LedgerWriter {
   readonly runDir: string;
@@ -51,11 +101,14 @@ export class LedgerWriter {
 
   /** Stamp `seq` + `timestamp` and append one line; returns the seq used. */
   append(event: Record<string, unknown>, now: Date): number {
-    const seq = this.nextSeq;
-    const line = JSON.stringify({ ...event, seq, timestamp: now.toISOString() });
-    appendFileSync(join(this.runDir, 'events.jsonl'), `${line}\n`, 'utf8');
-    this.lastSeq = seq;
-    return seq;
+    return withRunLock(this.runDir, () => {
+      const eventsPath = join(this.runDir, 'events.jsonl');
+      const seq = scanLastSeq(eventsPath) + 1;
+      const line = JSON.stringify({ ...event, seq, timestamp: now.toISOString() });
+      appendFileSync(eventsPath, `${line}\n`, 'utf8');
+      this.lastSeq = seq;
+      return seq;
+    });
   }
 }
 

@@ -118,7 +118,9 @@ function renderInputs(ctx: PromptContext): string[] {
   ctx.inputs.forEach((input, index) => {
     const producer =
       input.producedBy == null
-        ? 'produced upstream'
+        ? input.files.some((file) => file.path.startsWith('artifacts/inputs/'))
+          ? 'declared at run entry'
+          : 'produced upstream'
         : input.invocation == null
           ? `produced by step \`${input.producedBy}\``
           : `produced by step \`${input.producedBy}\` (invocation ${input.invocation})`;

@@ -56,7 +56,7 @@ function seed(root: string, opts: SeedOpts = {}): string {
     join(dir, 'run.yaml'),
     [
       `run_id: ${runId}`,
-      ...(opts.legacy ? [] : ['schema_version: "0.2"']),
+      ...(opts.legacy ? [] : ['schema_version: "0.3"']),
       `playbook: ${name}`,
       `status: ${opts.status ?? 'running'}`,
       `task: "${TASK}"`,

@@ -9,8 +9,8 @@
   "properties": {
     "run_id": { "type": "string", "minLength": 1 },
     "schema_version": {
-      "const": "0.2",
-      "description": "Run-ledger format version. Ledgers without it are legacy (pre-0.2) and are readable only in an explicit compatibility mode (--legacy)."
+      "const": "0.3",
+      "description": "Run-ledger format version. 0.2 and unversioned pre-0.3 ledgers are readable only in explicit compatibility mode (--legacy); writers accept only 0.3."
     },
     "playbook": { "type": "string", "minLength": 1 },
     "status": { "enum": ["running", "completed", "failed", "aborted"] },

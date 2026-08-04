@@ -13,7 +13,7 @@ import {
 
 export interface ShowOptions {
   run: string;
-  /** Read a pre-0.2 ledger in explicit compatibility mode. */
+  /** Read a 0.2 or unversioned pre-0.3 ledger in explicit compatibility mode. */
   legacy?: boolean;
   cwd?: string;
   repoRoot?: string;
@@ -46,6 +46,18 @@ export interface ShowProjection {
   active: ActiveArtifact[];
   decisions: { step: string | null; branch: string }[];
   failures: string[];
+  requests: HostRequestView[];
+}
+
+export interface HostRequestView {
+  dispatchId: string;
+  step: string;
+  actor: string | null;
+  executor: string;
+  model: string | null;
+  reasoningEffort: string | null;
+  state: 'requested' | 'running' | 'completed' | 'failed';
+  agentId: string | null;
 }
 
 export interface ShowResult {
@@ -54,7 +66,7 @@ export interface ShowResult {
   events: RunEvent[];
   badLines: number[];
   artifacts: { path: string; bytes: number }[];
-  /** Null in legacy mode — pre-0.2 ledgers get only the raw timeline. */
+  /** Null in compatibility mode — older ledgers get only the raw timeline. */
   projection: ShowProjection | null;
 }
 
@@ -65,7 +77,7 @@ export function runShow(opts: ShowOptions): ShowResult {
   const run = resolveRun(repoRoot, opts.run);
   const mode = ledgerMode(run, opts.legacy === true);
   const raw = readEvents(run.dir);
-  const events = mode === 'legacy' ? normalizeLegacyEvents(raw.events) : raw.events;
+  const events = mode !== 'current' ? normalizeLegacyEvents(raw.events) : raw.events;
   const artifacts = listArtifacts(run.dir);
   const projection = mode === 'current' ? projectRun(run, events) : null;
   return { run, mode, events, badLines: raw.badLines, artifacts, projection };
@@ -97,6 +109,7 @@ function projectRun(run: RunSummary, events: RunEvent[]): ShowProjection {
 
   const decisions: { step: string | null; branch: string }[] = [];
   const failures: string[] = [];
+  const requests = projectHostRequests(events);
   const callsByStep = new Map<string, Set<string>>();
   const pendingDecisions = new Map<string, string>(); // decision_id → step
   let lastStarted: string | null = null;
@@ -183,5 +196,30 @@ function projectRun(run: RunSummary, events: RunEvent[]): ShowProjection {
   }
 
   const { active } = resolveActiveArtifacts(events);
-  return { steps: stepOrder.map((id) => byStep.get(id)!), active, decisions, failures };
+  return { steps: stepOrder.map((id) => byStep.get(id)!), active, decisions, failures, requests };
+}
+
+function projectHostRequests(events: RunEvent[]): HostRequestView[] {
+  const requested = events.filter(
+    (event) => event.type === 'host_dispatch_requested' && typeof event.extra.dispatch_id === 'string',
+  );
+  const out: HostRequestView[] = [];
+  for (const event of requested) {
+    const dispatchId = event.extra.dispatch_id as string;
+    const start = events.find((candidate) => candidate.type === 'actor_dispatched' && candidate.extra.dispatch_id === dispatchId);
+    const terminal = events.find(
+      (candidate) => (candidate.type === 'actor_completed' || candidate.type === 'actor_failed') && candidate.extra.dispatch_id === dispatchId,
+    );
+    out.push({
+      dispatchId,
+      step: event.step ?? '?',
+      actor: typeof event.extra.actor === 'string' ? event.extra.actor : null,
+      executor: typeof event.extra.executor === 'string' ? event.extra.executor : '?',
+      model: typeof event.extra.model === 'string' ? event.extra.model : null,
+      reasoningEffort: typeof event.extra.reasoning_effort === 'string' ? event.extra.reasoning_effort : null,
+      state: terminal?.type === 'actor_completed' ? 'completed' : terminal?.type === 'actor_failed' ? 'failed' : start ? 'running' : 'requested',
+      agentId: typeof start?.extra.agent_id === 'string' ? start.extra.agent_id : null,
+    });
+  }
+  return out;
 }
