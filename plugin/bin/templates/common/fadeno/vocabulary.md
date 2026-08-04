@@ -22,10 +22,11 @@ truth for the vocabulary; this file explains what each term *means*.
 - **Evaluator** — An actor that produces a *structured judgment artifact*.
 - **Loop** — A bounded, repeated subgraph (usually revise/review or
   plan/execute/verify). Always bounded; never "keep trying until good."
-- **Map** — Apply work over a list of items.
+- **Map** — Apply work over a list of items. With `body`, each item owns an
+  independently advancing child graph; bodies may contain bounded loops.
 - **Replicate** — Ask multiple actors to independently attempt the same task.
-- **Join** — Wait for multiple branches or artifacts.
-- **Reduce** — Merge many artifacts into one.
+- **Join** — Wait for multiple branches or artifacts in the current scope.
+- **Reduce** — Merge a scoped collection of artifacts into one.
 - **Host adapter** — How a playbook maps onto a specific environment (Codex,
   Claude Code, hook-enabled, compiled runtime).
 - **Progress observation** — A provenance-labelled, host-recorded snapshot of
@@ -55,7 +56,8 @@ limits:
 ```
 
 Iterations are versioned (`ReviewReport.v1`, `ReviewReport.v2`, …) and never
-overwritten. A loop has separate `on_success` and `on_exhausted` exits.
+overwritten. An outer loop has separate `on_success` and `on_exhausted` exits;
+a loop nested in a container returns to its parent and uses `exhaustion`.
 
 ## Primitives (step `kind`s)
 

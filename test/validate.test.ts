@@ -32,7 +32,7 @@ test('the shipped starter playbooks all validate', (t) => {
   const root = initRepo(t);
   const outcome = runValidate({ repoRoot: root });
   assert.ok(outcome.ok, JSON.stringify(outcome.results, null, 2));
-  assert.equal(outcome.results.length, 3);
+  assert.equal(outcome.results.length, 4);
 });
 
 test('malformed YAML is reported', (t) => {

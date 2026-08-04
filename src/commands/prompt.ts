@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
+import { hasCompositeContainers } from '../lib/composite-flow.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { SchemaSet, validateFile } from '../lib/playbook-validate.ts';
 import { canonicalJson, renderStepPrompt, type PromptContext, type PromptInput } from '../lib/prompt.ts';
@@ -109,6 +110,9 @@ export function runPrompt(opts: PromptOptions): PromptResult {
   if (errorIssues.length > 0) {
     const detail = errorIssues.map((issue) => `${issue.path || '/'}: ${issue.message}`).join('; ');
     throw new PromptError(`playbook ${run.playbook} is invalid; fix it before assembling a prompt: ${detail}`);
+  }
+  if (hasCompositeContainers(playbook)) {
+    throw new PromptError('compositional map/loop prompts are instance-scoped and assembled by `fadeno drive`; direct `fadeno prompt` is not available for them.');
   }
 
   const sel: Selection = {

@@ -151,6 +151,7 @@ test('happy path: a completed run with a recomputable passing gate verifies clea
       'named-decisions',
       'artifact-supersede',
       'session-continuity',
+      'node-instances',
       'host-dispatch-requests',
       'host-dispatch-lifecycle',
       'host-dispatch-artifacts',

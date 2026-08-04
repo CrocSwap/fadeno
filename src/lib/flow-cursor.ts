@@ -10,6 +10,7 @@ import {
   type PlaybookStep,
 } from './prompt-resolve.ts';
 import type { RunEvent } from './run-ledger.ts';
+import { hasCompositeContainers } from './composite-flow.ts';
 
 /**
  * Pure, deterministic flow cursor — the third render twin of `diagram` (whole
@@ -878,6 +879,9 @@ function successorOfCompleted(ctx: ResolveCtx, stepId: string): string | null {
  * Compute the next actionable step for a run. Pure function of (playbook, events).
  */
 export function computeNext(playbook: Playbook, events: RunEvent[]): NextComputation {
+  if (hasCompositeContainers(playbook)) {
+    throw new FlowCursorError('compositional map/loop playbooks use the runnable frontier; drive them with `fadeno drive`, not `fadeno next`.');
+  }
   const flow = asFlow(playbook.flow);
   if (flow.length === 0) {
     throw new FlowCursorError('playbook has no flow steps.');

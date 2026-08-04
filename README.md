@@ -73,6 +73,7 @@ guard + a CI workflow).
     code-change-review.yaml
     research-synthesis.yaml
     pr-review.yaml
+    compositional-review.yaml
   schemas/
     playbook.schema.json        # the source of truth for the vocabulary
     run.schema.json
@@ -206,8 +207,18 @@ update that JSON at meaningful checkpoints; the host records provenance-labelled
 observations with `dispatch-progress`. Progress is attested observability, never
 a gate input.
 
+Compositional maps add `body`: Fadeno instantiates that child graph once per
+literal member. A body may contain a bounded loop, and a loop body may contain a
+map. Each leaf has a canonical path such as
+`complete_items[member=item_3]/revision_cycle[generation=2]/review`, allowing
+members to advance independently while artifacts, progress, `show`, and
+verification remain aligned. The first executable slice supports native `host`
+adapters and linear container bodies; dynamic maps, branchy bodies, and command
+adapter leaves remain follow-up scope.
+
 `fadeno show` projects the ledger onto the original playbook graph, including
-nodes that have not started. Every step and literal map actor appears as
+nodes that have not started. Every step, literal map actor, and compositional
+map member appears as
 pending, running, waiting, blocked, completed, or failed, with actor/step
 elapsed time and total run time. When progress exists, the view includes its
 phase and current action; it never infers internal state from busy/idle alone.
@@ -385,7 +396,7 @@ categories map to concrete, detectable actions. Two ways to make that real:
   from its named artifact and exits 0/1 — drop it into CI, a git hook, or a
   Claude Code `Stop` hook.
 - **`fadeno verify <run>`** (or `--latest`) re-audits a whole run ledger
-  read-only against 25 checks — artifact digests recomputed from bytes,
+  read-only against 26 checks — artifact digests recomputed from bytes,
   typed-artifact schemas, artifact immutability, prompt-snapshot integrity,
   event-sequence contiguity, every deterministic gate result recomputed from
   its artifact, attempt ordinals with allowed retry reasons, executor

@@ -158,6 +158,15 @@
             { "type": "string" }
           ]
         },
+        "as": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "Lexical name bound to the current compositional map member."
+        },
+        "completion": {
+          "enum": ["all", "collect"],
+          "description": "Container completion policy."
+        },
         "routes": {
           "type": "object",
           "description": "Router branches: label -> step id.",
@@ -168,11 +177,15 @@
           "type": "array",
           "minItems": 1,
           "items": { "$ref": "#/definitions/stepId" },
-          "description": "Step ids re-run each loop iteration."
+          "description": "Lexically owned child step ids instantiated by a loop or compositional map."
         },
         "max_iterations": { "type": "integer", "minimum": 1 },
         "until": { "type": "string", "description": "Named condition that ends the loop early." },
         "on_exhausted": { "$ref": "#/definitions/stepId" },
+        "exhaustion": {
+          "enum": ["fail", "collect"],
+          "description": "Nested-loop exhaustion policy; defaults to fail."
+        },
         "terminal_status": {
           "enum": ["completed", "failed", "aborted"],
           "description": "Explicit terminal run status. A terminal step has no outgoing edge."
@@ -213,7 +226,7 @@
         { "if": { "properties": { "kind": { "const": "replicate" } } }, "then": { "required": ["actor"] } },
         { "if": { "properties": { "kind": { "const": "join" } } }, "then": { "required": ["wait_for"] } },
         { "if": { "properties": { "kind": { "const": "reduce" } } }, "then": { "required": ["actor", "input"] } },
-        { "if": { "properties": { "kind": { "const": "loop" } } }, "then": { "required": ["body", "max_iterations", "input", "until", "on_success", "on_exhausted"] } },
+        { "if": { "properties": { "kind": { "const": "loop" } } }, "then": { "required": ["body", "max_iterations", "input", "until"] } },
         { "if": { "properties": { "kind": { "const": "artifact_op" } } }, "then": { "required": ["op"] } },
         { "if": { "properties": { "kind": { "const": "subworkflow" } } }, "then": { "required": ["playbook"] } }
       ]

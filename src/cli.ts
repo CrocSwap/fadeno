@@ -322,6 +322,16 @@ function printProjection(projection: ShowProjection): void {
       if (actor.source != null) details.push(`${actor.source}-reported`);
       console.log(`${indent}    ${STEP_GLYPHS[actor.state]} ${actor.actor}  ${details.join(' · ')}`);
     }
+    for (const instance of step.instances) {
+      // Nested leaf/generation instances are already visible under their
+      // logical step; map-member roots are the useful branch summary here.
+      if (instance.parentId != null) continue;
+      const details: string[] = [instance.state];
+      const runtime = formatDuration(instance.runtimeMs);
+      if (runtime != null) details.push(runtime);
+      if (instance.generation != null) details.push(`generation ${instance.generation}`);
+      console.log(`${indent}    ${STEP_GLYPHS[instance.state]} ${instance.member ?? instance.id}  ${details.join(' · ')}`);
+    }
   }
 
   if (projection.requests.length > 0) {
@@ -427,7 +437,11 @@ function printDrive(result: DriveResult): number {
       console.log(`awaiting ${result.requests.length} native host dispatch(es) for run ${result.run}`);
       for (const request of result.requests) {
         console.log(`  ${request.dispatchId}  ${request.step}${request.actor ? ` (${request.actor})` : ''}  ${request.model}/${request.reasoningEffort}`);
-        console.log(`      progress: <workspace>/${progressSidecarPath(request.run, request.step, request.actor)}`);
+        if (request.nodeInstanceId != null) console.log(`      instance: ${request.nodeInstanceId}`);
+        const progress = request.nodeInstanceId == null
+          ? progressSidecarPath(request.run, request.step, request.actor)
+          : `.fadeno/progress/${request.run}/${request.stepExecutionId}.json`;
+        console.log(`      progress: <workspace>/${progress}`);
       }
       return 0;
     default:

@@ -186,7 +186,9 @@ it is what makes the run inspectable, and the seam a future compiled runtime rea
   that collective feeds a gate (e.g. a `ReviewReport[]` consumed by
   `no_blocking_issues`), write the items as a single JSON array in one file —
   `artifacts/review-report.json` — so the gate reads them in one place; separate
-  per-item files are fine for maps whose output isn't gated.
+  per-item files are fine for maps whose output isn't gated. When `body` is
+  present, the map instantiates that child graph once per member. Members
+  advance independently and the body may contain a bounded loop.
 - **replicate** — Ask `count` (or `actors`) independent attempts at the same task;
   save each separately.
 - **join** — Wait until every artifact in `wait_for` exists before proceeding.
@@ -197,8 +199,9 @@ it is what makes the run inspectable, and the seam a future compiled runtime rea
   it passes, otherwise repeat while iterations remain, then route to
   `on_exhausted`. Record `loop_iteration_started`, `loop_condition_evaluated`,
   and `loop_succeeded` or `loop_exhausted`. Version every iteration artifact;
-  never overwrite. Milestone 1 loop bodies are linear: body steps cannot branch,
-  contain gates/conditions or `terminal_status`, or contain nested loops.
+  never overwrite. Container bodies are linear in the first compositional
+  milestone, but may nest maps and loops. Every runtime instance is scoped by a
+  canonical `node_instance_id`; nested loops return to their parent.
 - **router** — Pick a branch from `routes` (label → step id), falling back to
   `default`.
 - **subworkflow** — Run another playbook by name and treat its result as one
@@ -227,8 +230,9 @@ subagents aren't available, to a separate role-pass.
   `.codex/agents/<name>.toml` (Codex). Repo-local definitions take precedence over
   the shipped defaults — the same capability/definition split as playbooks.
 - **Delegate one level only.** A subagent may **not** spawn its own subagents.
-  `map`/`replicate` fan out one level; loop bodies re-run at the top level, not
-  nested inside a subagent. This keeps playbooks safe under Codex `max_depth: 1`.
+  Runtime containers may nest without requiring native subagents to spawn other
+  native subagents: the director owns the frontier and dispatches each ready
+  leaf. This keeps playbooks safe under Codex `max_depth: 1`.
 - **Graceful degradation — but say so.** When the role subagents aren't
   available, perform the roles yourself in separate passes and save each as a
   distinct artifact so the role separation stays visible in the ledger. Make the

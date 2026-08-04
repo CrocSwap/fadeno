@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { resolveActiveArtifacts, type ActiveArtifact } from '../lib/artifact-manifest.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import { mapMemberInstance, parseNodeInstanceId } from '../lib/node-instance.ts';
 import {
   ledgerMode,
   listArtifacts,
@@ -47,6 +48,7 @@ export interface StepView {
   state: WorkflowState;
   runtimeMs: number | null;
   actors: ActorView[];
+  instances: NodeInstanceView[];
   artifacts: number;
   gates: { condition: string; result: string }[];
   iterations: number;
@@ -59,6 +61,15 @@ export interface StepView {
   repairs: number;
   /** Dispatches into a resumed harness session (attested context). */
   resumed: number;
+}
+
+export interface NodeInstanceView {
+  id: string;
+  parentId: string | null;
+  member: string | null;
+  generation: number | null;
+  state: WorkflowState;
+  runtimeMs: number | null;
 }
 
 /**
@@ -127,6 +138,7 @@ interface WorkflowStep {
   kind: string | null;
   actors: string[];
   loopBodyOf: string | null;
+  mapMembers: string[];
 }
 
 function workflowSteps(repoRoot: string, playbook: string | null): WorkflowStep[] {
@@ -148,7 +160,8 @@ function workflowSteps(repoRoot: string, playbook: string | null): WorkflowStep[
     }
     return raw.flatMap((step) => {
       if (typeof step.id !== 'string') return [];
-      const actors = Array.isArray(step.over)
+      const compositionalMap = step.kind === 'map' && Array.isArray(step.body);
+      const actors = Array.isArray(step.over) && !compositionalMap
         ? step.over.filter((actor): actor is string => typeof actor === 'string')
         : typeof step.actor === 'string'
           ? [step.actor]
@@ -158,6 +171,9 @@ function workflowSteps(repoRoot: string, playbook: string | null): WorkflowStep[
         kind: typeof step.kind === 'string' ? step.kind : null,
         actors,
         loopBodyOf: bodyOwner.get(step.id) ?? null,
+        mapMembers: compositionalMap && Array.isArray(step.over)
+          ? step.over.filter((member): member is string => typeof member === 'string')
+          : [],
       }];
     });
   } catch {
@@ -204,6 +220,10 @@ function projectRun(repoRoot: string, run: RunSummary, events: RunEvent[], now: 
           updatedAt: null,
           source: null,
         })),
+        instances: (definition?.mapMembers ?? []).map((member) => {
+          const instance = mapMemberInstance(null, id, member);
+          return { id: instance.id, parentId: instance.parentId, member, generation: null, state: 'pending', runtimeMs: null };
+        }),
         artifacts: 0,
         gates: [],
         iterations: 0,
@@ -228,8 +248,38 @@ function projectRun(repoRoot: string, run: RunSummary, events: RunEvent[], now: 
   const pendingDecisions = new Map<string, string>(); // decision_id → step
   const firstAt = new Map<string, string>();
   const lastAt = new Map<string, string>();
+  const instanceFirstAt = new Map<string, string>();
+  const instanceLastAt = new Map<string, string>();
+  const instanceById = new Map<string, NodeInstanceView>();
+  for (const step of byStep.values()) for (const instance of step.instances) instanceById.set(instance.id, instance);
+
+  const instanceView = (id: string): NodeInstanceView | null => {
+    const existing = instanceById.get(id);
+    if (existing != null) return existing;
+    try {
+      const parsed = parseNodeInstanceId(id);
+      const instance = { id, parentId: parsed.parentId, member: parsed.member, generation: parsed.generation, state: 'pending' as WorkflowState, runtimeMs: null };
+      view(parsed.step).instances.push(instance);
+      instanceById.set(id, instance);
+      return instance;
+    } catch {
+      return null;
+    }
+  };
 
   for (const event of events) {
+    const nodeId = typeof event.extra.node_instance_id === 'string' ? event.extra.node_instance_id : null;
+    const node = nodeId == null ? null : instanceView(nodeId);
+    if (node != null && event.timestamp != null) {
+      if (!instanceFirstAt.has(node.id)) instanceFirstAt.set(node.id, event.timestamp);
+      instanceLastAt.set(node.id, event.timestamp);
+    }
+    if (node != null) {
+      if (event.type === 'actor_failed' || event.type === 'step_failed') node.state = 'failed';
+      else if (event.type === 'actor_dispatched' || event.type === 'step_started' || event.type === 'loop_iteration_started') node.state = 'running';
+      else if (event.type === 'artifact_created' || event.type === 'actor_completed' || event.type === 'step_completed') node.state = event.extra.output_valid === false ? 'pending' : 'completed';
+      else if (event.type === 'loop_condition_evaluated') node.state = event.extra.result === 'pass' ? 'completed' : 'running';
+    }
     if (event.step != null) {
       view(event.step);
       if (event.timestamp != null) {
@@ -395,6 +445,48 @@ function projectRun(repoRoot: string, run: RunSummary, events: RunEvent[], now: 
     const startedAt = firstAt.get(step.id) ?? null;
     const isOpen = step.state === 'running' || step.state === 'waiting' || step.state === 'blocked';
     step.runtimeMs = step.state === 'pending' ? null : elapsed(startedAt, isOpen ? null : lastAt.get(step.id) ?? null, now);
+  }
+
+  // A compositional map member is represented by its selected container path;
+  // descendant events drive its aggregate state even though the container does
+  // not need a synthetic lifecycle event of its own.
+  for (const instance of instanceById.values()) {
+    if (instance.generation != null && instance.state === 'running') {
+      const parsed = parseNodeInstanceId(instance.id);
+      const later = [...instanceById.values()].some((candidate) => {
+        if (candidate.generation == null || candidate.generation <= instance.generation!) return false;
+        const other = parseNodeInstanceId(candidate.id);
+        return other.parentId === parsed.parentId && other.step === parsed.step;
+      });
+      if (later) instance.state = 'completed';
+    }
+    const descendants = [...instanceById.values()].filter((candidate) => candidate.id.startsWith(`${instance.id}/`));
+    if (descendants.length > 0) {
+      if (descendants.some((candidate) => candidate.state === 'failed')) instance.state = 'failed';
+      else if (descendants.some((candidate) => candidate.state === 'running')) instance.state = 'running';
+      else if (descendants.some((candidate) => candidate.state === 'waiting')) instance.state = 'waiting';
+      else if (descendants.every((candidate) => candidate.state === 'completed')) instance.state = 'completed';
+    }
+    const latestCondition = events.findLast(
+      (event) => event.type === 'loop_condition_evaluated' &&
+        typeof event.extra.node_instance_id === 'string' &&
+        event.extra.node_instance_id.startsWith(`${instance.id}/`),
+    );
+    if (latestCondition?.extra.result === 'pass') instance.state = 'completed';
+    const start = instanceFirstAt.get(instance.id) ?? descendants.map((candidate) => instanceFirstAt.get(candidate.id)).find((value) => value != null) ?? null;
+    const end = instanceLastAt.get(instance.id) ?? descendants.map((candidate) => instanceLastAt.get(candidate.id)).filter((value): value is string => value != null).at(-1) ?? null;
+    const open = instance.state === 'running' || instance.state === 'waiting' || instance.state === 'blocked';
+    instance.runtimeMs = instance.state === 'pending' ? null : elapsed(start, open ? null : end, now);
+  }
+  for (const step of byStep.values()) {
+    if (step.instances.length === 0) continue;
+    const states = step.instances.map((instance) => instance.state);
+    if (states.some((state) => state === 'failed')) step.state = 'failed';
+    else if (states.some((state) => state === 'blocked')) step.state = 'blocked';
+    else if (states.some((state) => state === 'running')) step.state = 'running';
+    else if (states.some((state) => state === 'waiting')) step.state = 'waiting';
+    else if (states.every((state) => state === 'completed')) step.state = 'completed';
+    else step.state = 'pending';
   }
 
   for (const step of byStep.values()) {

@@ -250,7 +250,7 @@ test('engine: drives actor steps and gates to the human pause with full identity
   assert.equal(ofType(events(root, runId), 'decision_requested').length, 1);
 });
 
-test('engine: decide resolves the pause; resume drives to terminal; verify passes all 25 checks', (t) => {
+test('engine: decide resolves the pause; resume drives to terminal; verify passes all 26 checks', (t) => {
   const { root, runId } = completeHappyRun(t);
 
   const all = events(root, runId);

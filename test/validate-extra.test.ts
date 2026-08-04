@@ -295,7 +295,7 @@ test('loop references and ownership are statically checked', (t) => {
 `);
   assert.ok(runValidate({ repoRoot: root, path: dangling }).results[0]!.issues.some((i) => /undefined step "nowhere"/.test(i.message)));
   assert.ok(runValidate({ repoRoot: root, path: recursive }).results[0]!.issues.some((i) => /recursively/.test(i.message)));
-  assert.ok(runValidate({ repoRoot: root, path: shared }).results[0]!.issues.some((i) => /multiple loops/.test(i.message)));
+  assert.ok(runValidate({ repoRoot: root, path: shared }).results[0]!.issues.some((i) => /multiple containers/.test(i.message)));
 });
 
 test('reachability and definite artifacts follow branches, not YAML position', (t) => {
@@ -444,7 +444,7 @@ test('loop-body steps reject explicit control flow and gate conditions', (t) => 
   assert.ok(issues.some((issue) => /gates? or declare a condition|loop bodies are linear/.test(issue.message)));
 });
 
-test('nested loops are rejected inside Milestone 1 loop bodies', (t) => {
+test('nested loops are accepted with lexical exhaustion instead of outer-flow jumps', (t) => {
   const root = initRepo(t);
   const file = fixture(root, 'nested-body-loop', `  - id: start
     kind: actor_call
@@ -464,8 +464,7 @@ test('nested loops are rejected inside Milestone 1 loop bodies', (t) => {
     body: [inner_step]
     max_iterations: 1
     until: tests_pass
-    on_success: done
-    on_exhausted: done
+    exhaustion: fail
   - id: inner_step
     kind: actor_call
     actor: c
@@ -476,7 +475,7 @@ test('nested loops are rejected inside Milestone 1 loop bodies', (t) => {
     terminal_status: completed
 `);
   const issues = runValidate({ repoRoot: root, path: file }).results[0]!.issues;
-  assert.ok(issues.some((issue) => /nested loop/.test(issue.message)), JSON.stringify(issues));
+  assert.equal(issues.filter((issue) => issue.severity === 'error').length, 0, JSON.stringify(issues));
 });
 
 test('terminal_status remains forbidden on loop-body steps', (t) => {

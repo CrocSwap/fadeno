@@ -35,7 +35,7 @@ These docs frame the rest:
 | [`docs/extending.md`](docs/extending.md) | **How to change it** — file-by-file recipes for common tasks. |
 | [`docs/roadmap.md`](docs/roadmap.md) | The shipped/deferred line and honest v0 gaps. |
 | [`docs/experimental/next-protocol.md`](docs/experimental/next-protocol.md) | The **current forward implementation boundary** — a small engine-backed, verification-centered protocol. Read this before planning protocol/runtime work. |
-| [`docs/experimental/compositional-runtime.md`](docs/experimental/compositional-runtime.md) | Dogfood-promoted extension to the next protocol: recursive `map`/`replicate`/`loop` containers and a runnable-instance frontier. Accepted design; implementation in progress. |
+| [`docs/experimental/compositional-runtime.md`](docs/experimental/compositional-runtime.md) | Dogfood-promoted extension to the next protocol: recursive container semantics and a runnable-instance frontier. The literal-map/native-host slice is shipped; read its explicit deferred boundary. |
 | [`docs/experimental/ontology-and-execution-design.md`](docs/experimental/ontology-and-execution-design.md) | The evidence-tiered **North Star ontology**. It is a design horizon, not the next implementation scope. |
 
 ### Design precedence for forward work

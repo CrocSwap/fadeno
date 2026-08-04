@@ -47,10 +47,11 @@ outputs and receipts to you; they never invoke Fadeno ledger commands.
     evaluator writes a schema-valid report or test result, then run
     `fadeno gate <run> <condition> --artifact <path>` and follow the explicit
     branch. Do not infer `tests_pass` from a prose summary.
-14. Respect loop limits. Execute body steps in listed order, evaluate the loop
-    condition against the latest body-produced artifact, then follow
-    `on_success` or `on_exhausted`. Version iteration artifacts (`.v1`, `.v2`);
-    never overwrite a prior iteration.
+14. Respect loop limits. Execute body steps in listed order and evaluate the
+    latest body-produced artifact deterministically. A compositional map may
+    own independent loop instances per member; a loop may contain a map. Never
+    collapse those instances into one global generation counter. Version every
+    iteration artifact and never overwrite a prior iteration.
 15. Run tests or checks when the playbook requires them.
 16. When a step declares `terminal_status`, stop there and set `run.yaml.status`
     to the same value. A failed review exhaustion or failed test path must not

@@ -97,18 +97,19 @@ so tests stay hermetic and deterministic.
    checked and Ajv doesn't warn about an unknown format.
 2. **Reference integrity** *(playbook only, errors)* — every step id referenced by
    a control-flow field (`next`, `on_pass`, `on_fail`, `on_approve`, `on_reject`,
-   `on_success`, `on_exhausted`, `default`), a loop `body`, or a `routes` map must
+   `on_success`, `on_exhausted`, `default`), a container `body`, or a `routes` map must
    resolve to a defined step; duplicate ids are flagged.
 3. **Normalized control flow and definite artifacts** *(playbook only)* — physical
    fallthrough is added only for steps without explicit outgoing control flow;
-   loop-body definitions are reachable only through their owning loop. The
-   validator reports unreachable steps, loop recursion/multiple ownership,
+   container-body definitions are reachable only through their lexical owner.
+   The validator reports unreachable steps, container recursion/multiple ownership,
    invalid terminal declarations, unsupported condition bindings, and inputs that
-   are absent from the intersection of incoming artifact paths. Loop body outputs
-   are available on both success and exhaustion.
+   are absent from the intersection of incoming artifact paths. Container body
+   outputs are available to their parent scope.
 4. **Role semantics** *(playbook only)* — every `actor`/`actors` entry must be a
-   declared role *(error)*; declared-but-unused roles are *warnings*. `over` items
-   count as role usage (a `map` over roles), which is why they aren't error-checked.
+   declared role *(error)*; declared-but-unused roles are *warnings*. `over`
+   items count as roles only for the legacy leaf-map form; compositional map
+   members are data identities.
 
 Semantic analysis runs only when the playbook schema and references are clean.
 `detectKind()` infers the document type from its shape (then its path) when
@@ -160,6 +161,14 @@ receipt commands:
   retains graph order and pending actors, then overlays lifecycle/progress
   events and derives actor/step/total runtime. The director is the only ledger
   writer during this MVP.
+
+Compositional playbooks use `lib/composite-flow.ts` instead of the legacy
+single cursor. It computes a pure runnable frontier from events. Canonical paths
+from `lib/node-instance.ts` distinguish map members and loop generations; drive
+batches every ready native-host leaf, scopes its prompt/output, and recomputes
+the frontier after receipts. Literal maps and linear bodies are the deliberate
+first boundary. `show` groups observed paths back under their declared graph,
+while `verify` recomputes path, parent, member, generation, and dispatch ids.
 
 The runner skill *can* hand-edit these files, but the CLI keeps them schema-valid.
 

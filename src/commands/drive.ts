@@ -5,6 +5,11 @@ import { dirname, extname, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import {
+  computeCompositeFrontier,
+  hasCompositeContainers,
+  type CompositeAction,
+} from '../lib/composite-flow.ts';
+import {
   ExecutorProfileError,
   loadExecutorProfile,
   parseExecutorProfile,
@@ -17,8 +22,14 @@ import {
 } from '../lib/executors.ts';
 import { computeNext, FlowCursorError, type NextComputation } from '../lib/flow-cursor.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import {
+  actorCallIdFor,
+  nodeInstanceArtifactScope,
+  parseNodeInstanceId,
+  stepExecutionIdFor,
+} from '../lib/node-instance.ts';
 import { SchemaSet, schemaErrorMessages, validateFile, type SchemaKind } from '../lib/playbook-validate.ts';
-import type { Playbook, PlaybookStep } from '../lib/prompt-resolve.ts';
+import { baseArtifactName, schemaKindFor, type Playbook, type PlaybookStep } from '../lib/prompt-resolve.ts';
 import {
   readEventsStrict,
   resolveRun,
@@ -27,7 +38,7 @@ import {
   type RunEvent,
 } from '../lib/run-ledger.ts';
 import { LedgerWriteError, LedgerWriter } from '../lib/run-ledger-write.ts';
-import { GateError, runGate, SUPPORTED_CONDITIONS, type GateCondition } from './gate.ts';
+import { CONDITION_REGISTRY, GateError, runGate, SUPPORTED_CONDITIONS, type GateCondition } from './gate.ts';
 import { requestHostDispatch, type HostDispatchRequest } from '../lib/host-dispatch.ts';
 import { PromptError, runPrompt } from './prompt.ts';
 import { RunError, runRun } from './run.ts';
@@ -97,6 +108,7 @@ interface EngineCtx {
   runDir: string;
   repoRoot: string;
   playbook: Playbook;
+  task: string;
   schemas: SchemaSet;
   profile: ExecutorProfile;
   /** Session overrides: role key → executor name. */
@@ -618,6 +630,11 @@ function pendingHostRequest(events: RunEvent[], actorCallId: string, runId: stri
       promptSha256: event.extra.prompt_sha256,
       outputPath: event.extra.output_path,
       artifactType: typeof event.extra.artifact_type === 'string' ? event.extra.artifact_type as HostDispatchRequest['artifactType'] : null,
+      ...(typeof event.extra.node_instance_id === 'string' ? { nodeInstanceId: event.extra.node_instance_id } : {}),
+      ...(typeof event.extra.parent_instance_id === 'string' ? { parentInstanceId: event.extra.parent_instance_id } : {}),
+      ...(typeof event.extra.map_member === 'string' ? { mapMember: event.extra.map_member } : {}),
+      ...(typeof event.extra.generation === 'number' ? { generation: event.extra.generation } : {}),
+      ...(typeof event.extra.logical_artifact === 'string' ? { logicalArtifact: event.extra.logical_artifact } : {}),
       ...(Array.isArray(event.extra.validation_errors)
         ? { validationErrors: event.extra.validation_errors.filter((error): error is string => typeof error === 'string') }
         : {}),
@@ -639,6 +656,13 @@ function hostRequestFor(
   promptPath: string | null,
   promptSha256: string,
   validationErrors: string[] | null,
+  instance?: {
+    nodeInstanceId: string;
+    parentInstanceId?: string;
+    mapMember?: string;
+    generation?: number;
+    logicalArtifact?: string;
+  },
 ): HostDispatchRequest {
   if (promptPath == null) throw new DriveError(`host dispatch for ${stepId} has no recorded prompt snapshot.`);
   const { executor, spec } = effectiveBinding(ctx, role);
@@ -662,6 +686,7 @@ function hostRequestFor(
     promptSha256,
     outputPath: outputRel,
     artifactType: artifactType as HostDispatchRequest['artifactType'],
+    ...(instance ?? {}),
     ...(validationErrors != null && validationErrors.length > 0 ? { validationErrors } : {}),
     ...(repairAppendix != null ? { repairAppendix } : {}),
     repoRoot: ctx.repoRoot,
@@ -958,6 +983,329 @@ function ensureDecisionRequested(ctx: EngineCtx, comp: NextComputation): DriveDe
   return { decisionId, step: stepId, prompt, options };
 }
 
+interface CompositePromptPlan {
+  prompt: string;
+  promptPath: string;
+  promptSha256: string;
+  outputPath: string;
+  artifactType: SchemaKind | null;
+  logicalArtifact: string;
+}
+
+function compositeStep(ctx: EngineCtx, stepId: string): PlaybookStep {
+  const flow = Array.isArray(ctx.playbook.flow) ? ctx.playbook.flow as PlaybookStep[] : [];
+  const step = flow.find((candidate) => candidate.id === stepId);
+  if (step == null) throw new DriveError(`compositional step "${stepId}" is missing.`);
+  return step;
+}
+
+function compositeOutputPlan(ctx: EngineCtx, action: Extract<CompositeAction, { kind: 'actor' }>): {
+  outputPath: string;
+  artifactType: SchemaKind | null;
+  logicalArtifact: string;
+} {
+  const step = compositeStep(ctx, action.step);
+  const declared = typeof step.output === 'string' ? step.output : '';
+  const logicalArtifact = baseArtifactName(declared);
+  if (logicalArtifact === '') throw new DriveError(`compositional actor step "${action.step}" requires output.`);
+  const artifactType = schemaKindFor(logicalArtifact);
+  const stem = logicalArtifact.replace(/([a-z0-9])([A-Z])/g, '$1-$2').replace(/[^A-Za-z0-9]+/g, '-').toLowerCase();
+  const extension = artifactType == null ? '.md' : '.json';
+  return {
+    outputPath: `${nodeInstanceArtifactScope(action.instance.id)}/${stem}${extension}`,
+    artifactType,
+    logicalArtifact,
+  };
+}
+
+function latestCompositeInputs(ctx: EngineCtx, action: Extract<CompositeAction, { kind: 'actor' }>): Array<{
+  logical: string;
+  path: string;
+  sha256: string | null;
+}> {
+  const step = compositeStep(ctx, action.step);
+  const wanted = Array.isArray(step.input)
+    ? step.input.filter((item): item is string => typeof item === 'string').map((ref) => ({
+        logical: baseArtifactName(ref),
+        collection: ref.endsWith('[]'),
+      }))
+    : [];
+  const instance = parseNodeInstanceId(action.instance.id);
+  const events = freshEvents(ctx.runDir);
+  return wanted.flatMap(({ logical, collection }) => {
+    const candidates = events.filter((event) => {
+      if (event.type !== 'artifact_created' || event.extra.logical_artifact !== logical) return false;
+      if (typeof event.extra.artifact !== 'string') return false;
+      if (instance.member != null && event.extra.map_member !== instance.member) return false;
+      return true;
+    });
+    const selected = collection
+      ? [...new Map(candidates.map((event) => [String(event.extra.map_member ?? event.extra.member ?? event.extra.node_instance_id ?? event.extra.artifact), event])).values()]
+      : candidates.slice(-1);
+    return selected.map((event) => ({
+      logical,
+      path: event.extra.artifact as string,
+      sha256: typeof event.extra.sha256 === 'string' ? event.extra.sha256 : null,
+    }));
+  });
+}
+
+function assembleCompositePrompt(
+  ctx: EngineCtx,
+  action: Extract<CompositeAction, { kind: 'actor' }>,
+  ids: { stepExecutionId: string; actorCallId: string },
+): CompositePromptPlan {
+  const plan = compositeOutputPlan(ctx, action);
+  const roles = ctx.playbook.roles && typeof ctx.playbook.roles === 'object' && !Array.isArray(ctx.playbook.roles)
+    ? ctx.playbook.roles as Record<string, unknown>
+    : {};
+  const role = roles[action.actor];
+  const purpose = role && typeof role === 'object' && !Array.isArray(role) && typeof (role as Record<string, unknown>).purpose === 'string'
+    ? (role as Record<string, unknown>).purpose as string
+    : '';
+  const inputs = latestCompositeInputs(ctx, action);
+  const progressPath = `.fadeno/progress/${ctx.runId}/${ids.stepExecutionId}.json`;
+  const lines = [
+    '# Fadeno assignment',
+    '',
+    `- run: ${ctx.runId}`,
+    `- node instance: ${action.instance.id}`,
+    `- role: ${action.actor}`,
+    `- task: ${ctx.task}`,
+    ...(purpose === '' ? [] : [`- role purpose: ${purpose}`]),
+    '',
+    '## Inputs',
+    ...(inputs.length === 0
+      ? ['- No upstream artifact files are bound. Use the repository and task statement.']
+      : inputs.map((input) => `- ${input.logical}: ${input.path}${input.sha256 == null ? '' : ` (sha256 ${input.sha256})`}`)),
+    '',
+    '## Output contract',
+    `Return only the ${plan.logicalArtifact} artifact body. Do not wrap it in a code fence.`,
+    plan.artifactType == null
+      ? '- Format: Markdown.'
+      : `- Format: JSON satisfying .fadeno/schemas/${plan.artifactType}.schema.json.`,
+    `- The director records it at ${plan.outputPath}.`,
+    '',
+    '## Cooperative progress',
+    `Update ${progressPath} at meaningful phases using the Fadeno progress JSON shape.`,
+    'Progress is attested observability only and never controls a gate. Do not include secrets or private reasoning.',
+    '',
+  ];
+  const prompt = lines.join('\n');
+  const promptSha256 = sha256Hex(prompt);
+  const promptPath = `artifacts/prompts/${ids.actorCallId}.md`;
+  const promptAbs = join(ctx.runDir, promptPath);
+  if (existsSync(promptAbs)) {
+    if (readFileSync(promptAbs, 'utf8') !== prompt) {
+      throw new DriveError(`existing composite prompt ${promptPath} differs; refusing to overwrite.`);
+    }
+  } else {
+    mkdirSync(dirname(promptAbs), { recursive: true });
+    writeFileSync(promptAbs, prompt, 'utf8');
+    appendEvent(ctx.runDir, {
+      type: 'prompt_assembled',
+      step: action.step,
+      actor: action.actor,
+      node_instance_id: action.instance.id,
+      parent_instance_id: action.instance.parentId,
+      inputs: inputs.map((input) => ({ artifact: input.logical, path: input.path, sha256: input.sha256 })),
+      output_path: plan.outputPath,
+      prompt_sha256: promptSha256,
+      prompt_path: promptPath,
+      manifest_version: 1,
+    }, ctx.now);
+  }
+  return { prompt, promptPath, promptSha256, ...plan };
+}
+
+function compositeRequest(
+  ctx: EngineCtx,
+  action: Extract<CompositeAction, { kind: 'actor' }>,
+): HostDispatchRequest {
+  const stepExecutionId = stepExecutionIdFor(action.instance.id);
+  const actorCallId = actorCallIdFor(action.instance.id, action.actor);
+  const ids = { stepExecutionId, actorCallId };
+  const events = freshEvents(ctx.runDir);
+  const pending = pendingHostRequest(events, actorCallId, ctx.runId);
+  if (pending != null) return pending;
+  const binding = effectiveBinding(ctx, action.actor);
+  if (binding.spec.adapter !== 'host') {
+    throw new DriveError(
+      `compositional execution currently requires a host adapter; role "${action.actor}" is bound to command executor "${binding.executor}".`,
+    );
+  }
+  if (!events.some((event) => event.type === 'step_started' && event.extra.node_instance_id === action.instance.id)) {
+    appendEvent(ctx.runDir, {
+      type: 'step_started',
+      step: action.step,
+      node_instance_id: action.instance.id,
+      parent_instance_id: action.instance.parentId,
+      map_member: action.instance.member,
+      generation: action.instance.generation,
+    }, ctx.now);
+  }
+  const prompt = assembleCompositePrompt(ctx, action, ids);
+  const priorRequests = events.filter(
+    (event) => event.type === 'host_dispatch_requested' && event.extra.actor_call_id === actorCallId,
+  );
+  const priorTerminal = events.findLast(
+    (event) => (event.type === 'actor_completed' || event.type === 'actor_failed') && event.extra.actor_call_id === actorCallId,
+  );
+  const validationErrors = priorTerminal?.type === 'actor_completed' && priorTerminal.extra.output_valid === false && Array.isArray(priorTerminal.extra.validation_errors)
+    ? priorTerminal.extra.validation_errors.filter((item): item is string => typeof item === 'string')
+    : null;
+  const attempt = priorRequests.length + 1;
+  const reason = attempt === 1 ? 'initial' : validationErrors != null ? 'schema_repair' : 'user_retry';
+  return hostRequestFor(
+    ctx,
+    action.step,
+    action.actor,
+    prompt.outputPath,
+    prompt.artifactType,
+    ids,
+    attempt,
+    reason,
+    prompt.promptPath,
+    prompt.promptSha256,
+    validationErrors,
+    {
+      nodeInstanceId: action.instance.id,
+      parentInstanceId: action.instance.parentId ?? undefined,
+      mapMember: action.instance.member ?? undefined,
+      generation: action.instance.generation ?? undefined,
+      logicalArtifact: prompt.logicalArtifact,
+    },
+  );
+}
+
+function compositeGateArtifacts(ctx: EngineCtx, action: Extract<CompositeAction, { kind: 'evaluate_loop' }>): string[] {
+  const logical = baseArtifactName(action.input);
+  return freshEvents(ctx.runDir).flatMap((event) =>
+    event.type === 'artifact_created' &&
+    event.extra.logical_artifact === logical &&
+    typeof event.extra.node_instance_id === 'string' &&
+    event.extra.node_instance_id.startsWith(`${action.instance.id}/`) &&
+    typeof event.extra.artifact === 'string'
+      ? [event.extra.artifact]
+      : [],
+  );
+}
+
+function evaluateCompositeLoop(ctx: EngineCtx, action: Extract<CompositeAction, { kind: 'evaluate_loop' }>): void {
+  if (!SUPPORTED_CONDITIONS.includes(action.condition as GateCondition)) {
+    throw new DriveError(`unsupported compositional loop condition "${action.condition}".`);
+  }
+  const condition = action.condition as GateCondition;
+  const paths = compositeGateArtifacts(ctx, action);
+  if (paths.length === 0) throw new DriveError(`loop ${action.instance.id} has no scoped ${action.input} artifact.`);
+  const documents = paths.map((path) => JSON.parse(readFileSync(join(ctx.runDir, path), 'utf8')) as unknown);
+  const document = action.input.endsWith('[]') ? documents : documents.at(-1);
+  const definition = CONDITION_REGISTRY[condition];
+  const validate = ctx.schemas.get(definition.schema);
+  const values = Array.isArray(document) && action.input.endsWith('[]') ? document : [document];
+  for (const value of values) {
+    if (!validate(value)) throw new DriveError(`scoped artifact for ${action.instance.id} is invalid for ${condition}.`);
+  }
+  const evaluation = definition.evaluate(document);
+  appendEvent(ctx.runDir, {
+    type: 'loop_condition_evaluated',
+    step: action.step,
+    node_instance_id: action.instance.id,
+    parent_instance_id: action.instance.parentId,
+    generation: action.instance.generation,
+    condition,
+    artifacts: paths,
+    result: evaluation.pass ? 'pass' : 'fail',
+    details: evaluation.details,
+  }, ctx.now);
+  ctx.act(`loop ${action.instance.id}: ${condition} → ${evaluation.pass ? 'pass' : 'fail'}`);
+}
+
+function driveComposite(ctx: EngineCtx, maxTransitions: number, actions: string[]): DriveResult {
+  let transitions = 0;
+  const finish = (
+    outcome: DriveOutcome,
+    detail: string,
+    status: string | null = null,
+    requests: HostDispatchRequest[] = [],
+  ): DriveResult => ({
+    run: ctx.runId,
+    outcome,
+    status,
+    decision: null,
+    detail,
+    actions,
+    transitions,
+    requests,
+    unresolvedRequests: requests,
+  });
+
+  for (;;) {
+    if (transitions >= maxTransitions) {
+      return finish('max_transitions', `stopped after ${maxTransitions} compositional transitions; re-run to continue.`);
+    }
+    const frontier = computeCompositeFrontier(ctx.playbook, freshEvents(ctx.runDir));
+    if (frontier.complete || frontier.failed) {
+      const status = frontier.failed ? 'failed' : 'completed';
+      runRun({ run: ctx.runId, status, repoRoot: ctx.repoRoot, now: ctx.now });
+      ctx.act(`run ${status}`);
+      return finish('terminal', `compositional run is terminal (${status}).`, status);
+    }
+    if (frontier.actions.length === 0) {
+      return finish('needs_decision', 'compositional frontier has no runnable action and is not terminal.');
+    }
+
+    const requests: HostDispatchRequest[] = [];
+    let advanced = false;
+    for (const action of frontier.actions) {
+      if (transitions >= maxTransitions) break;
+      transitions += 1;
+      if (action.kind === 'start_loop') {
+        appendEvent(ctx.runDir, {
+          type: 'loop_iteration_started',
+          step: action.step,
+          node_instance_id: action.instance.id,
+          parent_instance_id: action.instance.parentId,
+          member: action.instance.member,
+          generation: action.generation,
+          iteration: action.generation,
+        }, ctx.now);
+        ctx.act(`loop ${action.instance.id}: generation ${action.generation} started`);
+        advanced = true;
+        continue;
+      }
+      if (action.kind === 'evaluate_loop') {
+        evaluateCompositeLoop(ctx, action);
+        advanced = true;
+        continue;
+      }
+      if (action.kind === 'actor') {
+        requests.push(compositeRequest(ctx, action));
+        continue;
+      }
+      if (action.kind === 'human_gate') {
+        return finish(
+          'needs_decision',
+          `member-scoped human gate ${action.instance.id} is awaiting host integration: ${action.prompt}`,
+        );
+      }
+      return finish(
+        'needs_decision',
+        `node ${action.instance.id} (kind ${action.stepKind}) is not executable in the first compositional milestone.`,
+      );
+    }
+    if (requests.length > 0) {
+      return finish(
+        'awaiting_host_dispatch',
+        `${requests.length} compositional host dispatch request(s) are awaiting native receipts.`,
+        null,
+        requests,
+      );
+    }
+    if (!advanced) return finish('needs_decision', 'compositional frontier did not advance.');
+  }
+}
+
 /**
  * Advance a run until it is terminal, pauses on a human decision, or hits
  * something the engine cannot resolve. Deterministic: every consequential
@@ -1001,6 +1349,7 @@ export function runDrive(opts: DriveOptions): DriveResult {
     runDir: run.dir,
     repoRoot,
     playbook,
+    task: run.task ?? '',
     schemas,
     overrides: new Map<string, string>(),
     repaired: new Set<string>(),
@@ -1012,6 +1361,7 @@ export function runDrive(opts: DriveOptions): DriveResult {
   recordOverrides(ctx, parseBinds(opts.bind));
 
   const maxTransitions = opts.maxTransitions ?? MAX_TRANSITIONS_DEFAULT;
+  if (hasCompositeContainers(playbook)) return driveComposite(ctx, maxTransitions, actions);
   let transitions = 0;
 
   const finish = (

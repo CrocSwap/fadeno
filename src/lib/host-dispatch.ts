@@ -25,6 +25,12 @@ export interface HostDispatchRequest {
   promptSha256: string;
   outputPath: string;
   artifactType: SchemaKind | null;
+  /** Hierarchical execution identity for compositional playbooks. */
+  nodeInstanceId?: string;
+  parentInstanceId?: string;
+  mapMember?: string;
+  generation?: number;
+  logicalArtifact?: string;
   /** Immutable feedback from the prior rejected attempt, for schema repair. */
   validationErrors?: string[];
   repairAppendix?: string;
@@ -239,6 +245,11 @@ function requestFromEvent(run: string, event: RunEvent): HostDispatchRequest {
     promptSha256: stringField('prompt_sha256'),
     outputPath: stringField('output_path'),
     artifactType: typeof artifactType === 'string' ? artifactType as SchemaKind : null,
+    ...(typeof event.extra.node_instance_id === 'string' ? { nodeInstanceId: event.extra.node_instance_id } : {}),
+    ...(typeof event.extra.parent_instance_id === 'string' ? { parentInstanceId: event.extra.parent_instance_id } : {}),
+    ...(typeof event.extra.map_member === 'string' ? { mapMember: event.extra.map_member } : {}),
+    ...(typeof event.extra.generation === 'number' ? { generation: event.extra.generation } : {}),
+    ...(typeof event.extra.logical_artifact === 'string' ? { logicalArtifact: event.extra.logical_artifact } : {}),
     ...(validationErrors != null ? { validationErrors } : {}),
     ...(repairAppendix != null ? { repairAppendix } : {}),
   };
@@ -353,6 +364,11 @@ export function requestHostDispatch(opts: HostDispatchRequestOptions): HostDispa
       current.promptSha256 === opts.promptSha256 &&
       current.outputPath === opts.outputPath &&
       current.artifactType === opts.artifactType &&
+      current.nodeInstanceId === opts.nodeInstanceId &&
+      current.parentInstanceId === opts.parentInstanceId &&
+      current.mapMember === opts.mapMember &&
+      current.generation === opts.generation &&
+      current.logicalArtifact === opts.logicalArtifact &&
       JSON.stringify(current.validationErrors ?? null) === JSON.stringify(opts.validationErrors ?? null) &&
       current.repairAppendix === opts.repairAppendix;
     if (!same) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" conflicts with its existing request.`);
@@ -378,6 +394,11 @@ export function requestHostDispatch(opts: HostDispatchRequestOptions): HostDispa
       prompt_sha256: opts.promptSha256,
       output_path: opts.outputPath,
       artifact_type: opts.artifactType,
+      node_instance_id: opts.nodeInstanceId,
+      parent_instance_id: opts.parentInstanceId,
+      map_member: opts.mapMember,
+      generation: opts.generation,
+      logical_artifact: opts.logicalArtifact,
       host_attested: ['model', 'reasoning_effort', 'agent_type', 'agent_id'],
       ...(opts.validationErrors != null ? { validation_errors: opts.validationErrors } : {}),
       ...(opts.repairAppendix != null ? { repair_appendix: opts.repairAppendix } : {}),
@@ -434,6 +455,11 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
         agent_type: request.agentType,
         agent_id: opts.agentId,
       },
+      node_instance_id: request.nodeInstanceId,
+      parent_instance_id: request.parentInstanceId,
+      map_member: request.mapMember,
+      generation: request.generation,
+      logical_artifact: request.logicalArtifact,
     },
     opts.now,
   );
@@ -504,6 +530,11 @@ export function progressHostDispatch(opts: DispatchProgressOptions): HostDispatc
       reported_at: report.updatedAt,
       report_sha256: digest,
       host_attested: true,
+      node_instance_id: request.nodeInstanceId,
+      parent_instance_id: request.parentInstanceId,
+      map_member: request.mapMember,
+      generation: request.generation,
+      logical_artifact: request.logicalArtifact,
     },
     opts.now,
   );
@@ -567,6 +598,11 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
         output_valid: false,
         validation_errors: verdict.errors.slice(0, 5),
         host_attested: true,
+        node_instance_id: request.nodeInstanceId,
+        parent_instance_id: request.parentInstanceId,
+        map_member: request.mapMember,
+        generation: request.generation,
+        logical_artifact: request.logicalArtifact,
       },
       opts.now,
     );
@@ -590,7 +626,8 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
       {
         type: 'artifact_created',
         step: request.step,
-        member: request.actor,
+        actor: request.actor,
+        member: request.mapMember ?? request.actor,
         ...manifest,
         dispatch_id: request.dispatchId,
         step_execution_id: request.stepExecutionId,
@@ -599,6 +636,11 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
         agent_id: agentId,
         executor: request.executor,
         adapter: 'host',
+        node_instance_id: request.nodeInstanceId,
+        parent_instance_id: request.parentInstanceId,
+        map_member: request.mapMember,
+        generation: request.generation ?? manifest.generation,
+        logical_artifact: request.logicalArtifact,
       },
       opts.now,
     );
@@ -632,6 +674,11 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
       output_valid: true,
       commit: opts.commit,
       host_attested: true,
+      node_instance_id: request.nodeInstanceId,
+      parent_instance_id: request.parentInstanceId,
+      map_member: request.mapMember,
+      generation: request.generation,
+      logical_artifact: request.logicalArtifact,
     },
     opts.now,
   );
@@ -679,6 +726,11 @@ export function failHostDispatch(opts: DispatchFailOptions): HostDispatchReceipt
       reason: 'host_failed',
       failure_reason: opts.reason,
       host_attested: true,
+      node_instance_id: request.nodeInstanceId,
+      parent_instance_id: request.parentInstanceId,
+      map_member: request.mapMember,
+      generation: request.generation,
+      logical_artifact: request.logicalArtifact,
     },
     opts.now,
   );

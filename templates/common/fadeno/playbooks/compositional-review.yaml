@@ -1,0 +1,76 @@
+# yaml-language-server: $schema=../schemas/playbook.schema.json
+kind: AgentPlaybook
+schema_version: "0.2"
+name: compositional-review
+description: >-
+  Fan out independent bounded implement/review loops, then reduce their accepted
+  results through one final integration review.
+when_to_use:
+  - Several known work items should advance independently through implement/review cycles.
+roles:
+  luna_worker:
+    purpose: Implement or revise one isolated work item.
+  terra_reviewer:
+    purpose: Adversarially review one work item and emit a structured report.
+  sol_finalizer:
+    purpose: Review and integrate all accepted work-item results.
+flow:
+  - id: complete_items
+    kind: map
+    over:
+      - dogfood_1
+      - dogfood_2
+      - dogfood_3
+      - dogfood_4
+      - dogfood_5
+    as: item
+    body:
+      - revision_cycle
+    completion: all
+
+  - id: revision_cycle
+    kind: loop
+    body:
+      - implement
+      - adversarial_review
+    input:
+      - ReviewReport
+    until: no_blocking_issues
+    max_iterations: 3
+    exhaustion: fail
+
+  - id: implement
+    kind: actor_call
+    actor: luna_worker
+    input:
+      - ReviewReport
+    output: Implementation
+
+  - id: adversarial_review
+    kind: evaluator
+    actor: terra_reviewer
+    input:
+      - Implementation
+    output: ReviewReport
+
+  - id: final_review
+    kind: reduce
+    actor: sol_finalizer
+    input:
+      - "ReviewReport[]"
+    output: FinalSummary
+    terminal_status: completed
+
+limits:
+  max_iterations: 3
+  max_actor_calls: 31
+
+policies:
+  max_revision_loops: 3
+  max_subagents: 11
+  max_actor_calls: 31
+  require_user_approval_for:
+    - destructive_commands
+    - dependency_addition
+    - deploy
+    - external_send

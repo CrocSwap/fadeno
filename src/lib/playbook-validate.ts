@@ -46,6 +46,10 @@ const OUTGOING_FIELDS = SINGLE_REF_FIELDS;
 
 const LOOP_BODY_CONTROL_FIELDS = [...OUTGOING_FIELDS, 'routes'] as const;
 
+function isContainer(step: Step): boolean {
+  return (step.kind === 'loop' || step.kind === 'map') && Array.isArray(step.body);
+}
+
 /** Condition registry shared conceptually with the gate command. */
 const CONDITION_ARTIFACTS: Record<string, string[]> = {
   no_blocking_issues: ['ReviewReport'],
@@ -231,7 +235,7 @@ function addStepOutput(available: Set<string>, step: Step): void {
   if (typeof step.output === 'string') available.add(baseArtifact(step.output));
 }
 
-/** Return logical artifact types produced by a loop body in listed order. */
+/** Return logical artifact types produced by a container body. */
 function bodyOutputs(loop: Step, byId: Map<string, Step>, visiting = new Set<string>()): Set<string> {
   const available = new Set<string>();
   const loopId = typeof loop.id === 'string' ? loop.id : undefined;
@@ -243,14 +247,14 @@ function bodyOutputs(loop: Step, byId: Map<string, Step>, visiting = new Set<str
     const bodyStep = byId.get(id);
     if (!bodyStep) continue;
     addStepOutput(available, bodyStep);
-    if (bodyStep.kind === 'loop') unionInto(available, bodyOutputs(bodyStep, byId, nextVisiting));
+    if (isContainer(bodyStep)) unionInto(available, bodyOutputs(bodyStep, byId, nextVisiting));
   }
   return available;
 }
 
 function transfer(step: Step, incoming: Set<string>, byId: Map<string, Step>): Set<string> {
   const outgoing = cloneSet(incoming);
-  if (step.kind === 'loop') unionInto(outgoing, bodyOutputs(step, byId));
+  if (isContainer(step)) unionInto(outgoing, bodyOutputs(step, byId));
   else addStepOutput(outgoing, step);
   return outgoing;
 }
@@ -260,9 +264,9 @@ function bodyReachability(id: string, byId: Map<string, Step>, reachable: Set<st
   const step = byId.get(id);
   if (!step) return;
   reachable.add(id);
-  if (step.kind !== 'loop' || !Array.isArray(step.body)) return;
+  if (!isContainer(step)) return;
   const nextVisiting = new Set(visiting).add(id);
-  for (const bodyId of step.body) if (typeof bodyId === 'string') bodyReachability(bodyId, byId, reachable, nextVisiting);
+  for (const bodyId of step.body as unknown[]) if (typeof bodyId === 'string') bodyReachability(bodyId, byId, reachable, nextVisiting);
 }
 
 interface FlowModel {
@@ -289,28 +293,28 @@ function buildFlowModel(playbook: Playbook, issues: ValidationIssue[], file: str
 
   const bodyOwner = new Map<string, string>();
   flow.forEach((step, index) => {
-    if (step.kind !== 'loop' || !Array.isArray(step.body)) return;
-    for (const [bodyIndex, bodyId] of step.body.entries()) {
+    if (!isContainer(step)) return;
+    for (const [bodyIndex, bodyId] of (step.body as unknown[]).entries()) {
       if (typeof bodyId !== 'string') continue;
       const existing = bodyOwner.get(bodyId);
       if (existing && existing !== step.id) {
-        issues.push({ file, path: `${stepWhere(step, index)}/body/${bodyIndex}`, message: `loop body step "${bodyId}" belongs to multiple loops (already owned by "${existing}")`, severity: 'error' });
+        issues.push({ file, path: `${stepWhere(step, index)}/body/${bodyIndex}`, message: `container body step "${bodyId}" belongs to multiple containers (already owned by "${existing}")`, severity: 'error' });
       } else if (!existing && typeof step.id === 'string') {
         bodyOwner.set(bodyId, step.id);
       }
     }
   });
 
-  const contains = (loopId: string, targetId: string, seen = new Set<string>()): boolean => {
-    if (seen.has(loopId)) return false;
-    const loop = byId.get(loopId);
-    if (!loop || loop.kind !== 'loop' || !Array.isArray(loop.body)) return false;
-    const nextSeen = new Set(seen).add(loopId);
-    return loop.body.some((bodyId) => typeof bodyId === 'string' && (bodyId === targetId || contains(bodyId, targetId, nextSeen)));
+  const contains = (containerId: string, targetId: string, seen = new Set<string>()): boolean => {
+    if (seen.has(containerId)) return false;
+    const container = byId.get(containerId);
+    if (!container || !isContainer(container)) return false;
+    const nextSeen = new Set(seen).add(containerId);
+    return (container.body as unknown[]).some((bodyId) => typeof bodyId === 'string' && (bodyId === targetId || contains(bodyId, targetId, nextSeen)));
   };
   flow.forEach((step, index) => {
-    if (step.kind === 'loop' && typeof step.id === 'string' && contains(step.id, step.id)) {
-      issues.push({ file, path: `${stepWhere(step, index)}/body`, message: `loop body recursively contains loop "${step.id}"`, severity: 'error' });
+    if (isContainer(step) && typeof step.id === 'string' && contains(step.id, step.id)) {
+      issues.push({ file, path: `${stepWhere(step, index)}/body`, message: `container body recursively contains "${step.id}"`, severity: 'error' });
     }
   });
 
@@ -351,8 +355,8 @@ function buildFlowModel(playbook: Playbook, issues: ValidationIssue[], file: str
     if (!step) return;
     reachable.add(id);
     const nextVisiting = new Set(visiting).add(id);
-    if (step.kind === 'loop' && Array.isArray(step.body)) {
-      for (const bodyId of step.body) if (typeof bodyId === 'string') bodyReachability(bodyId, byId, reachable);
+    if (isContainer(step)) {
+      for (const bodyId of step.body as unknown[]) if (typeof bodyId === 'string') bodyReachability(bodyId, byId, reachable);
     }
     for (const target of outerEdges.get(id) ?? []) visitOuter(target, nextVisiting);
   };
@@ -453,7 +457,7 @@ function flowAndArtifactChecks(playbook: Playbook, file: string): ValidationIssu
           });
         }
       }
-      if (step.kind === 'gate' || typeof step.condition === 'string' || typeof step.until === 'string') {
+      if (step.kind === 'gate' || typeof step.condition === 'string') {
         issues.push({
           file,
           path: `${where}/kind`,
@@ -461,16 +465,12 @@ function flowAndArtifactChecks(playbook: Playbook, file: string): ValidationIssu
           severity: 'error',
         });
       }
-      if (step.kind === 'loop') {
-        issues.push({
-          file,
-          path: `${where}/kind`,
-          message: `loop-body step "${id}" cannot be a nested loop in Milestone 1`,
-          severity: 'error',
-        });
-      }
       if (step.terminal_status !== undefined) issues.push({ file, path: `${where}/terminal_status`, message: 'terminal_status is not allowed on a loop-body step', severity: 'error' });
       continue;
+    }
+    if (step.kind === 'loop') {
+      if (typeof step.on_success !== 'string') issues.push({ file, path: `${where}/on_success`, message: 'outer-flow loop requires on_success', severity: 'error' });
+      if (typeof step.on_exhausted !== 'string') issues.push({ file, path: `${where}/on_exhausted`, message: 'outer-flow loop requires on_exhausted', severity: 'error' });
     }
     if (step.terminal_status !== undefined && hasExplicitOutgoing(step)) {
       issues.push({ file, path: `${where}/terminal_status`, message: 'terminal_status is only valid on a terminal step; this step has an outgoing control-flow edge', severity: 'error' });
@@ -503,9 +503,10 @@ function flowAndArtifactChecks(playbook: Playbook, file: string): ValidationIssu
         const bodyStep = byId.get(bodyId);
         if (!bodyStep) continue;
         const bodyIndex = model.indexById.get(bodyId)!;
+        const nestedProduced = isContainer(bodyStep) ? bodyOutputs(bodyStep, byId) : new Set<string>();
         if (Array.isArray(bodyStep.input)) {
           for (const [inputIndex, input] of bodyStep.input.entries()) {
-            if (typeof input === 'string' && !bodyAvailable.has(baseArtifact(input))) issues.push({ file, path: `${stepWhere(bodyStep, bodyIndex)}/input/${inputIndex}`, message: `loop-body input artifact "${input}" is not definitely available when "${step.id}" runs`, severity: 'error' });
+            if (typeof input === 'string' && !bodyAvailable.has(baseArtifact(input)) && !nestedProduced.has(baseArtifact(input))) issues.push({ file, path: `${stepWhere(bodyStep, bodyIndex)}/input/${inputIndex}`, message: `container-body input artifact "${input}" is not definitely available when "${step.id}" runs`, severity: 'error' });
           }
         }
         if (bodyStep.kind === 'loop') unionInto(bodyAvailable, bodyOutputs(bodyStep, byId));
@@ -565,11 +566,17 @@ function outputContractChecks(playbook: Playbook, file: string): ValidationIssue
   const issues: ValidationIssue[] = [];
   const flow = Array.isArray(playbook.flow) ? (playbook.flow as Step[]) : [];
   const bodyIds = loopBodyIds(flow);
+  const compositional = flow.some((step) => step.kind === 'map' && Array.isArray(step.body));
 
   flow.forEach((step, index) => {
     const where = stepWhere(step, index);
     const overList = stringList(step.over);
     const outputPath = step.output_path;
+
+    if (compositional && outputPath !== undefined) {
+      issues.push({ file, path: `${where}/output_path`, message: 'compositional execution derives an instance-scoped output path; explicit output_path is not supported in the first milestone', severity: 'error' });
+      return;
+    }
 
     if (outputPath !== undefined && outputPath !== null) {
       // 1. output_path on a step that produces nothing.
@@ -678,13 +685,18 @@ export function semanticChecks(playbook: Playbook, file: string): ValidationIssu
   flow.forEach((step, index) => {
     const where = stepWhere(step, index);
     const actorRefs: Array<[string, string]> = [];
+    if (step.kind === 'map' && Array.isArray(step.body) && (!Array.isArray(step.over) || step.over.length === 0)) {
+      issues.push({ file, path: `${where}/over`, message: 'compositional map requires a non-empty literal over list in the first milestone', severity: 'error' });
+    }
     if (typeof step.actor === 'string') actorRefs.push(['actor', step.actor]);
     if (Array.isArray(step.actors)) step.actors.forEach((actor, actorIndex) => { if (typeof actor === 'string') actorRefs.push([`actors/${actorIndex}`, actor]); });
     for (const [field, role] of actorRefs) {
       usedRoles.add(role);
       if (!roles.has(role)) issues.push({ file, path: `${where}/${field}`, message: `actor "${role}" is not a declared role`, severity: 'error' });
     }
-    if (Array.isArray(step.over)) for (const item of step.over) if (typeof item === 'string') usedRoles.add(item);
+    if (Array.isArray(step.over) && !Array.isArray(step.body)) {
+      for (const item of step.over) if (typeof item === 'string') usedRoles.add(item);
+    }
   });
 
   for (const role of roles) if (!usedRoles.has(role)) issues.push({ file, path: `/roles/${role}`, message: `role "${role}" is declared but never used`, severity: 'warning' });

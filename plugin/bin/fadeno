@@ -13938,7 +13938,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.2";
+  if (true) return "0.6.0-rc.3";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -14362,6 +14362,9 @@ var SINGLE_REF_FIELDS = [
 ];
 var OUTGOING_FIELDS = SINGLE_REF_FIELDS;
 var LOOP_BODY_CONTROL_FIELDS = [...OUTGOING_FIELDS, "routes"];
+function isContainer(step) {
+  return (step.kind === "loop" || step.kind === "map") && Array.isArray(step.body);
+}
 var CONDITION_ARTIFACTS = {
   no_blocking_issues: ["ReviewReport"],
   tests_pass: ["TestResult"]
@@ -14506,13 +14509,13 @@ function bodyOutputs(loop, byId, visiting = /* @__PURE__ */ new Set()) {
     const bodyStep = byId.get(id);
     if (!bodyStep) continue;
     addStepOutput(available, bodyStep);
-    if (bodyStep.kind === "loop") unionInto(available, bodyOutputs(bodyStep, byId, nextVisiting));
+    if (isContainer(bodyStep)) unionInto(available, bodyOutputs(bodyStep, byId, nextVisiting));
   }
   return available;
 }
 function transfer(step, incoming, byId) {
   const outgoing = cloneSet(incoming);
-  if (step.kind === "loop") unionInto(outgoing, bodyOutputs(step, byId));
+  if (isContainer(step)) unionInto(outgoing, bodyOutputs(step, byId));
   else addStepOutput(outgoing, step);
   return outgoing;
 }
@@ -14521,7 +14524,7 @@ function bodyReachability(id, byId, reachable, visiting = /* @__PURE__ */ new Se
   const step = byId.get(id);
   if (!step) return;
   reachable.add(id);
-  if (step.kind !== "loop" || !Array.isArray(step.body)) return;
+  if (!isContainer(step)) return;
   const nextVisiting = new Set(visiting).add(id);
   for (const bodyId of step.body) if (typeof bodyId === "string") bodyReachability(bodyId, byId, reachable, nextVisiting);
 }
@@ -14537,27 +14540,27 @@ function buildFlowModel(playbook, issues, file) {
   });
   const bodyOwner = /* @__PURE__ */ new Map();
   flow.forEach((step, index) => {
-    if (step.kind !== "loop" || !Array.isArray(step.body)) return;
+    if (!isContainer(step)) return;
     for (const [bodyIndex, bodyId] of step.body.entries()) {
       if (typeof bodyId !== "string") continue;
       const existing = bodyOwner.get(bodyId);
       if (existing && existing !== step.id) {
-        issues.push({ file, path: `${stepWhere(step, index)}/body/${bodyIndex}`, message: `loop body step "${bodyId}" belongs to multiple loops (already owned by "${existing}")`, severity: "error" });
+        issues.push({ file, path: `${stepWhere(step, index)}/body/${bodyIndex}`, message: `container body step "${bodyId}" belongs to multiple containers (already owned by "${existing}")`, severity: "error" });
       } else if (!existing && typeof step.id === "string") {
         bodyOwner.set(bodyId, step.id);
       }
     }
   });
-  const contains = (loopId, targetId, seen = /* @__PURE__ */ new Set()) => {
-    if (seen.has(loopId)) return false;
-    const loop = byId.get(loopId);
-    if (!loop || loop.kind !== "loop" || !Array.isArray(loop.body)) return false;
-    const nextSeen = new Set(seen).add(loopId);
-    return loop.body.some((bodyId) => typeof bodyId === "string" && (bodyId === targetId || contains(bodyId, targetId, nextSeen)));
+  const contains = (containerId, targetId, seen = /* @__PURE__ */ new Set()) => {
+    if (seen.has(containerId)) return false;
+    const container = byId.get(containerId);
+    if (!container || !isContainer(container)) return false;
+    const nextSeen = new Set(seen).add(containerId);
+    return container.body.some((bodyId) => typeof bodyId === "string" && (bodyId === targetId || contains(bodyId, targetId, nextSeen)));
   };
   flow.forEach((step, index) => {
-    if (step.kind === "loop" && typeof step.id === "string" && contains(step.id, step.id)) {
-      issues.push({ file, path: `${stepWhere(step, index)}/body`, message: `loop body recursively contains loop "${step.id}"`, severity: "error" });
+    if (isContainer(step) && typeof step.id === "string" && contains(step.id, step.id)) {
+      issues.push({ file, path: `${stepWhere(step, index)}/body`, message: `container body recursively contains "${step.id}"`, severity: "error" });
     }
   });
   const outerIds2 = flow.filter((step) => typeof step.id === "string" && !bodyOwner.has(step.id)).map((step) => step.id);
@@ -14591,7 +14594,7 @@ function buildFlowModel(playbook, issues, file) {
     if (!step) return;
     reachable.add(id);
     const nextVisiting = new Set(visiting).add(id);
-    if (step.kind === "loop" && Array.isArray(step.body)) {
+    if (isContainer(step)) {
       for (const bodyId of step.body) if (typeof bodyId === "string") bodyReachability(bodyId, byId, reachable);
     }
     for (const target of outerEdges.get(id) ?? []) visitOuter(target, nextVisiting);
@@ -14682,7 +14685,7 @@ function flowAndArtifactChecks(playbook, file) {
           });
         }
       }
-      if (step.kind === "gate" || typeof step.condition === "string" || typeof step.until === "string") {
+      if (step.kind === "gate" || typeof step.condition === "string") {
         issues.push({
           file,
           path: `${where}/kind`,
@@ -14690,16 +14693,12 @@ function flowAndArtifactChecks(playbook, file) {
           severity: "error"
         });
       }
-      if (step.kind === "loop") {
-        issues.push({
-          file,
-          path: `${where}/kind`,
-          message: `loop-body step "${id}" cannot be a nested loop in Milestone 1`,
-          severity: "error"
-        });
-      }
       if (step.terminal_status !== void 0) issues.push({ file, path: `${where}/terminal_status`, message: "terminal_status is not allowed on a loop-body step", severity: "error" });
       continue;
+    }
+    if (step.kind === "loop") {
+      if (typeof step.on_success !== "string") issues.push({ file, path: `${where}/on_success`, message: "outer-flow loop requires on_success", severity: "error" });
+      if (typeof step.on_exhausted !== "string") issues.push({ file, path: `${where}/on_exhausted`, message: "outer-flow loop requires on_exhausted", severity: "error" });
     }
     if (step.terminal_status !== void 0 && hasExplicitOutgoing(step)) {
       issues.push({ file, path: `${where}/terminal_status`, message: "terminal_status is only valid on a terminal step; this step has an outgoing control-flow edge", severity: "error" });
@@ -14729,9 +14728,10 @@ function flowAndArtifactChecks(playbook, file) {
         const bodyStep = byId.get(bodyId);
         if (!bodyStep) continue;
         const bodyIndex = model.indexById.get(bodyId);
+        const nestedProduced = isContainer(bodyStep) ? bodyOutputs(bodyStep, byId) : /* @__PURE__ */ new Set();
         if (Array.isArray(bodyStep.input)) {
           for (const [inputIndex, input] of bodyStep.input.entries()) {
-            if (typeof input === "string" && !bodyAvailable.has(baseArtifact(input))) issues.push({ file, path: `${stepWhere(bodyStep, bodyIndex)}/input/${inputIndex}`, message: `loop-body input artifact "${input}" is not definitely available when "${step.id}" runs`, severity: "error" });
+            if (typeof input === "string" && !bodyAvailable.has(baseArtifact(input)) && !nestedProduced.has(baseArtifact(input))) issues.push({ file, path: `${stepWhere(bodyStep, bodyIndex)}/input/${inputIndex}`, message: `container-body input artifact "${input}" is not definitely available when "${step.id}" runs`, severity: "error" });
           }
         }
         if (bodyStep.kind === "loop") unionInto(bodyAvailable, bodyOutputs(bodyStep, byId));
@@ -14775,10 +14775,15 @@ function outputContractChecks(playbook, file) {
   const issues = [];
   const flow = Array.isArray(playbook.flow) ? playbook.flow : [];
   const bodyIds = loopBodyIds(flow);
+  const compositional = flow.some((step) => step.kind === "map" && Array.isArray(step.body));
   flow.forEach((step, index) => {
     const where = stepWhere(step, index);
     const overList = stringList(step.over);
     const outputPath = step.output_path;
+    if (compositional && outputPath !== void 0) {
+      issues.push({ file, path: `${where}/output_path`, message: "compositional execution derives an instance-scoped output path; explicit output_path is not supported in the first milestone", severity: "error" });
+      return;
+    }
     if (outputPath !== void 0 && outputPath !== null) {
       if (typeof step.output !== "string" && step.over === void 0) {
         issues.push({ file, path: `${where}/output_path`, message: "output_path on a step that produces nothing (no output or over)", severity: "error" });
@@ -14866,6 +14871,9 @@ function semanticChecks(playbook, file) {
   flow.forEach((step, index) => {
     const where = stepWhere(step, index);
     const actorRefs = [];
+    if (step.kind === "map" && Array.isArray(step.body) && (!Array.isArray(step.over) || step.over.length === 0)) {
+      issues.push({ file, path: `${where}/over`, message: "compositional map requires a non-empty literal over list in the first milestone", severity: "error" });
+    }
     if (typeof step.actor === "string") actorRefs.push(["actor", step.actor]);
     if (Array.isArray(step.actors)) step.actors.forEach((actor, actorIndex) => {
       if (typeof actor === "string") actorRefs.push([`actors/${actorIndex}`, actor]);
@@ -14874,7 +14882,7 @@ function semanticChecks(playbook, file) {
       usedRoles.add(role);
       if (!roles.has(role)) issues.push({ file, path: `${where}/${field}`, message: `actor "${role}" is not a declared role`, severity: "error" });
     }
-    if (Array.isArray(step.over)) {
+    if (Array.isArray(step.over) && !Array.isArray(step.body)) {
       for (const item of step.over) if (typeof item === "string") usedRoles.add(item);
     }
   });
@@ -14922,7 +14930,7 @@ function validateFile(file, schemas, forcedKind) {
     return fail(forcedKind ?? "playbook", `invalid YAML/JSON: ${err.message}`);
   }
   if (doc === null || typeof doc !== "object") return fail(forcedKind ?? "playbook", "document must be a mapping or a supported artifact array");
-  const record = !Array.isArray(doc) ? doc : void 0;
+  const record2 = !Array.isArray(doc) ? doc : void 0;
   const kind = forcedKind ?? detectKind(file, doc);
   if (!kind) return fail("playbook", "could not determine document type (playbook | run | review-report | test-result); pass --schema to force it");
   let validate;
@@ -14932,9 +14940,9 @@ function validateFile(file, schemas, forcedKind) {
     return fail(kind, err.message);
   }
   const issues = schemaIssues(file, validate, doc);
-  if (kind === "playbook" && record) {
-    issues.push(...referenceIntegrity(record, file));
-    if (issues.length === 0) issues.push(...semanticChecks(record, file));
+  if (kind === "playbook" && record2) {
+    issues.push(...referenceIntegrity(record2, file));
+    if (issues.length === 0) issues.push(...semanticChecks(record2, file));
   }
   return { file, kind, ok: issues.every((issue) => issue.severity !== "error"), issues };
 }
@@ -15427,28 +15435,28 @@ function resolveActiveArtifacts(events) {
     });
   });
   const shaByPath = /* @__PURE__ */ new Map();
-  for (const record of records) {
-    if (record.sha256 == null) continue;
-    const set = shaByPath.get(record.path) ?? /* @__PURE__ */ new Set();
-    set.add(record.sha256);
-    shaByPath.set(record.path, set);
+  for (const record2 of records) {
+    if (record2.sha256 == null) continue;
+    const set = shaByPath.get(record2.path) ?? /* @__PURE__ */ new Set();
+    set.add(record2.sha256);
+    shaByPath.set(record2.path, set);
   }
   const immutabilityViolations = [...shaByPath.entries()].filter(([, shas]) => shas.size > 1).map(([path, shas]) => `${path} recorded with ${shas.size} different sha256 values`);
   const groups = /* @__PURE__ */ new Map();
-  for (const record of records) {
-    const key = `${record.logicalName}\0${record.member ?? ""}`;
+  for (const record2 of records) {
+    const key = `${record2.logicalName}\0${record2.member ?? ""}`;
     const group = groups.get(key);
-    if (group) group.push(record);
-    else groups.set(key, [record]);
+    if (group) group.push(record2);
+    else groups.set(key, [record2]);
   }
   const active = [];
   const conflicts = [];
   for (const group of groups.values()) {
-    const valid = group.filter((record) => record.valid);
+    const valid = group.filter((record2) => record2.valid);
     if (valid.length === 0) continue;
-    const maxGeneration = Math.max(...valid.map((record) => record.generation));
-    const top = valid.filter((record) => record.generation === maxGeneration);
-    const distinctPaths = [...new Set(top.map((record) => record.path))];
+    const maxGeneration = Math.max(...valid.map((record2) => record2.generation));
+    const top = valid.filter((record2) => record2.generation === maxGeneration);
+    const distinctPaths = [...new Set(top.map((record2) => record2.path))];
     if (distinctPaths.length > 1) {
       const sample = top[0];
       const scope = sample.member != null ? `${sample.logicalName} (member ${sample.member})` : sample.logicalName;
@@ -15600,6 +15608,11 @@ function requestFromEvent(run, event) {
     promptSha256: stringField("prompt_sha256"),
     outputPath: stringField("output_path"),
     artifactType: typeof artifactType === "string" ? artifactType : null,
+    ...typeof event.extra.node_instance_id === "string" ? { nodeInstanceId: event.extra.node_instance_id } : {},
+    ...typeof event.extra.parent_instance_id === "string" ? { parentInstanceId: event.extra.parent_instance_id } : {},
+    ...typeof event.extra.map_member === "string" ? { mapMember: event.extra.map_member } : {},
+    ...typeof event.extra.generation === "number" ? { generation: event.extra.generation } : {},
+    ...typeof event.extra.logical_artifact === "string" ? { logicalArtifact: event.extra.logical_artifact } : {},
     ...validationErrors != null ? { validationErrors } : {},
     ...repairAppendix != null ? { repairAppendix } : {}
   };
@@ -15687,7 +15700,7 @@ function requestHostDispatch(opts) {
   if (existing.length > 1) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" was requested more than once.`);
   if (existing.length === 1) {
     const current = requestFromEvent(runId, existing[0]);
-    const same = current.step === opts.step && current.actor === opts.actor && current.stepExecutionId === opts.stepExecutionId && current.actorCallId === opts.actorCallId && current.attempt === opts.attempt && current.attemptReason === opts.attemptReason && current.executor === opts.executor && current.model === opts.model && current.reasoningEffort === opts.reasoningEffort && current.agentType === opts.agentType && current.promptPath === opts.promptPath && current.promptSha256 === opts.promptSha256 && current.outputPath === opts.outputPath && current.artifactType === opts.artifactType && JSON.stringify(current.validationErrors ?? null) === JSON.stringify(opts.validationErrors ?? null) && current.repairAppendix === opts.repairAppendix;
+    const same = current.step === opts.step && current.actor === opts.actor && current.stepExecutionId === opts.stepExecutionId && current.actorCallId === opts.actorCallId && current.attempt === opts.attempt && current.attemptReason === opts.attemptReason && current.executor === opts.executor && current.model === opts.model && current.reasoningEffort === opts.reasoningEffort && current.agentType === opts.agentType && current.promptPath === opts.promptPath && current.promptSha256 === opts.promptSha256 && current.outputPath === opts.outputPath && current.artifactType === opts.artifactType && current.nodeInstanceId === opts.nodeInstanceId && current.parentInstanceId === opts.parentInstanceId && current.mapMember === opts.mapMember && current.generation === opts.generation && current.logicalArtifact === opts.logicalArtifact && JSON.stringify(current.validationErrors ?? null) === JSON.stringify(opts.validationErrors ?? null) && current.repairAppendix === opts.repairAppendix;
     if (!same) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" conflicts with its existing request.`);
     return current;
   }
@@ -15711,6 +15724,11 @@ function requestHostDispatch(opts) {
       prompt_sha256: opts.promptSha256,
       output_path: opts.outputPath,
       artifact_type: opts.artifactType,
+      node_instance_id: opts.nodeInstanceId,
+      parent_instance_id: opts.parentInstanceId,
+      map_member: opts.mapMember,
+      generation: opts.generation,
+      logical_artifact: opts.logicalArtifact,
       host_attested: ["model", "reasoning_effort", "agent_type", "agent_id"],
       ...opts.validationErrors != null ? { validation_errors: opts.validationErrors } : {},
       ...opts.repairAppendix != null ? { repair_appendix: opts.repairAppendix } : {}
@@ -15765,7 +15783,12 @@ function startHostDispatch(opts) {
         reasoning_effort: request.reasoningEffort,
         agent_type: request.agentType,
         agent_id: opts.agentId
-      }
+      },
+      node_instance_id: request.nodeInstanceId,
+      parent_instance_id: request.parentInstanceId,
+      map_member: request.mapMember,
+      generation: request.generation,
+      logical_artifact: request.logicalArtifact
     },
     opts.now
   );
@@ -15833,7 +15856,12 @@ function progressHostDispatch(opts) {
       blockers: report.blockers,
       reported_at: report.updatedAt,
       report_sha256: digest,
-      host_attested: true
+      host_attested: true,
+      node_instance_id: request.nodeInstanceId,
+      parent_instance_id: request.parentInstanceId,
+      map_member: request.mapMember,
+      generation: request.generation,
+      logical_artifact: request.logicalArtifact
     },
     opts.now
   );
@@ -15894,7 +15922,12 @@ function completeHostDispatch(opts) {
         output_sha256: digest,
         output_valid: false,
         validation_errors: verdict.errors.slice(0, 5),
-        host_attested: true
+        host_attested: true,
+        node_instance_id: request.nodeInstanceId,
+        parent_instance_id: request.parentInstanceId,
+        map_member: request.mapMember,
+        generation: request.generation,
+        logical_artifact: request.logicalArtifact
       },
       opts.now
     );
@@ -15917,7 +15950,8 @@ function completeHostDispatch(opts) {
       {
         type: "artifact_created",
         step: request.step,
-        member: request.actor,
+        actor: request.actor,
+        member: request.mapMember ?? request.actor,
         ...manifest,
         dispatch_id: request.dispatchId,
         step_execution_id: request.stepExecutionId,
@@ -15925,7 +15959,12 @@ function completeHostDispatch(opts) {
         attempt: request.attempt,
         agent_id: agentId,
         executor: request.executor,
-        adapter: "host"
+        adapter: "host",
+        node_instance_id: request.nodeInstanceId,
+        parent_instance_id: request.parentInstanceId,
+        map_member: request.mapMember,
+        generation: request.generation ?? manifest.generation,
+        logical_artifact: request.logicalArtifact
       },
       opts.now
     );
@@ -15958,7 +15997,12 @@ function completeHostDispatch(opts) {
       output_sha256: digest,
       output_valid: true,
       commit: opts.commit,
-      host_attested: true
+      host_attested: true,
+      node_instance_id: request.nodeInstanceId,
+      parent_instance_id: request.parentInstanceId,
+      map_member: request.mapMember,
+      generation: request.generation,
+      logical_artifact: request.logicalArtifact
     },
     opts.now
   );
@@ -16004,7 +16048,12 @@ function failHostDispatch(opts) {
       agent_id: starts[0].extra.agent_id,
       reason: "host_failed",
       failure_reason: opts.reason,
-      host_attested: true
+      host_attested: true,
+      node_instance_id: request.nodeInstanceId,
+      parent_instance_id: request.parentInstanceId,
+      map_member: request.mapMember,
+      generation: request.generation,
+      logical_artifact: request.logicalArtifact
     },
     opts.now
   );
@@ -16355,10 +16404,339 @@ function runDiagram(opts) {
 
 // src/commands/drive.ts
 var import_node_child_process = require("node:child_process");
-var import_node_crypto2 = require("node:crypto");
+var import_node_crypto3 = require("node:crypto");
 var import_node_fs12 = require("node:fs");
 var import_node_path12 = require("node:path");
 var import_yaml9 = __toESM(require_dist(), 1);
+
+// src/lib/node-instance.ts
+var import_node_crypto2 = require("node:crypto");
+var NodeInstanceError = class extends Error {
+};
+var STEP = /^[a-z0-9][a-z0-9_]*$/;
+var MEMBER_PREFIX = "[member=";
+var GENERATION_PREFIX = "[generation=";
+function assertStep(step) {
+  if (!STEP.test(step)) {
+    throw new NodeInstanceError(`invalid step id "${step}" in node instance; expected ${STEP.source}.`);
+  }
+}
+function encodeMember(member) {
+  if (member.length === 0) throw new NodeInstanceError("map member identity must not be empty.");
+  return encodeURIComponent(member).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+function decodeMember(encoded) {
+  try {
+    const member = decodeURIComponent(encoded);
+    if (member.length === 0) throw new NodeInstanceError("map member identity must not be empty.");
+    if (encodeMember(member) !== encoded) {
+      throw new NodeInstanceError(`map member encoding is not canonical: "${encoded}".`);
+    }
+    return member;
+  } catch (err) {
+    if (err instanceof NodeInstanceError) throw err;
+    throw new NodeInstanceError(`invalid map member encoding "${encoded}".`);
+  }
+}
+function renderSegment(segment) {
+  assertStep(segment.step);
+  if (segment.selector == null) return segment.step;
+  if (segment.selector.kind === "member") {
+    return `${segment.step}${MEMBER_PREFIX}${encodeMember(segment.selector.value)}]`;
+  }
+  const generation = segment.selector.value;
+  if (!Number.isSafeInteger(generation) || generation < 1) {
+    throw new NodeInstanceError(`loop generation must be a positive safe integer; got ${generation}.`);
+  }
+  return `${segment.step}${GENERATION_PREFIX}${generation}]`;
+}
+function nodeInstanceId(segments) {
+  if (segments.length === 0) throw new NodeInstanceError("a node instance must contain at least one segment.");
+  return segments.map(renderSegment).join("/");
+}
+function parseSegment(raw) {
+  const bracket = raw.indexOf("[");
+  const step = bracket < 0 ? raw : raw.slice(0, bracket);
+  assertStep(step);
+  if (bracket < 0) return { step, selector: null };
+  if (!raw.endsWith("]")) throw new NodeInstanceError(`invalid node instance segment "${raw}".`);
+  const selector = raw.slice(bracket);
+  if (selector.startsWith(MEMBER_PREFIX)) {
+    const encoded = selector.slice(MEMBER_PREFIX.length, -1);
+    return { step, selector: { kind: "member", value: decodeMember(encoded) } };
+  }
+  if (selector.startsWith(GENERATION_PREFIX)) {
+    const encoded = selector.slice(GENERATION_PREFIX.length, -1);
+    if (!/^[1-9][0-9]*$/.test(encoded)) {
+      throw new NodeInstanceError(`invalid loop generation "${encoded}" in node instance.`);
+    }
+    const value = Number(encoded);
+    if (!Number.isSafeInteger(value)) throw new NodeInstanceError(`loop generation exceeds the safe integer range: ${encoded}.`);
+    return { step, selector: { kind: "generation", value } };
+  }
+  throw new NodeInstanceError(`unknown node instance selector in "${raw}".`);
+}
+function parseNodeInstanceId(id) {
+  if (id.length === 0) throw new NodeInstanceError("node instance id must not be empty.");
+  const rawSegments = id.split("/");
+  if (rawSegments.some((segment) => segment.length === 0)) {
+    throw new NodeInstanceError(`node instance id contains an empty path segment: "${id}".`);
+  }
+  const segments = rawSegments.map(parseSegment);
+  const canonical2 = nodeInstanceId(segments);
+  if (canonical2 !== id) throw new NodeInstanceError(`node instance id is not canonical: "${id}".`);
+  const parentSegments = segments.slice(0, -1);
+  let member = null;
+  let generation = null;
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const selector = segments[index].selector;
+    if (member == null && selector?.kind === "member") member = selector.value;
+    if (generation == null && selector?.kind === "generation") generation = selector.value;
+  }
+  return {
+    id: canonical2,
+    parentId: parentSegments.length === 0 ? null : nodeInstanceId(parentSegments),
+    step: segments.at(-1).step,
+    segments,
+    member,
+    generation
+  };
+}
+function rootNodeInstance(step) {
+  return parseNodeInstanceId(nodeInstanceId([{ step, selector: null }]));
+}
+function childNodeInstance(parentId, step) {
+  const parent = parseNodeInstanceId(parentId);
+  return parseNodeInstanceId(nodeInstanceId([...parent.segments, { step, selector: null }]));
+}
+function mapMemberInstance(parentId, step, member) {
+  const prefix = parentId == null ? [] : parseNodeInstanceId(parentId).segments;
+  return parseNodeInstanceId(nodeInstanceId([...prefix, { step, selector: { kind: "member", value: member } }]));
+}
+function loopGenerationInstance(parentId, step, generation) {
+  const prefix = parentId == null ? [] : parseNodeInstanceId(parentId).segments;
+  return parseNodeInstanceId(nodeInstanceId([...prefix, { step, selector: { kind: "generation", value: generation } }]));
+}
+function nodeInstanceArtifactScope(id) {
+  const instance = parseNodeInstanceId(id);
+  return `artifacts/instances/${instance.segments.map((segment) => {
+    if (segment.selector == null) return segment.step;
+    if (segment.selector.kind === "member") return `${segment.step}/member-${encodeMember(segment.selector.value)}`;
+    return `${segment.step}/g${segment.selector.value}`;
+  }).join("/")}`;
+}
+function digestId(prefix, parts) {
+  const digest = (0, import_node_crypto2.createHash)("sha256").update(parts.join("\0")).digest("hex").slice(0, 20);
+  return `${prefix}-${digest}`;
+}
+function stepExecutionIdFor(nodeInstance) {
+  parseNodeInstanceId(nodeInstance);
+  return digestId("se", [nodeInstance]);
+}
+function actorCallIdFor(nodeInstance, actor) {
+  parseNodeInstanceId(nodeInstance);
+  return digestId("ac", [nodeInstance, actor ?? ""]);
+}
+
+// src/lib/composite-flow.ts
+var CompositeFlowError = class extends Error {
+};
+var PROMPTABLE = /* @__PURE__ */ new Set(["actor_call", "evaluator", "reduce"]);
+function strings(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+}
+function eventInstance(event) {
+  return typeof event.extra.node_instance_id === "string" ? event.extra.node_instance_id : null;
+}
+function hasEvent(ctx, instanceId, types) {
+  return ctx.events.some((event) => eventInstance(event) === instanceId && types.has(event.type));
+}
+function terminalFor(ctx, instanceId) {
+  const event = ctx.events.findLast(
+    (candidate) => eventInstance(candidate) === instanceId && (candidate.type === "actor_completed" || candidate.type === "actor_failed" || candidate.type === "step_completed" || candidate.type === "step_failed")
+  );
+  if (event == null) return null;
+  if (event.type === "actor_completed" && event.extra.output_valid === false) return null;
+  return event.type === "actor_failed" || event.type === "step_failed" ? "failed" : "completed";
+}
+function record(ctx, instance, state) {
+  const existing = ctx.instances.get(instance.id);
+  const rank = { pending: 0, running: 1, completed: 2, exhausted: 3, failed: 4 };
+  if (existing != null && rank[existing.state] >= rank[state]) return;
+  ctx.instances.set(instance.id, {
+    step: instance.step,
+    instanceId: instance.id,
+    parentInstanceId: instance.parentId,
+    state,
+    member: instance.member,
+    generation: instance.generation
+  });
+}
+function ordinaryInstance(parentId, stepId) {
+  return parentId == null ? rootNodeInstance(stepId) : childNodeInstance(parentId, stepId);
+}
+function requireStep(ctx, id) {
+  const step = ctx.byId.get(id);
+  if (step == null) throw new CompositeFlowError(`container body references missing step "${id}".`);
+  return step;
+}
+function evalSequence(ctx, ids, parentId) {
+  for (const id of ids) {
+    const result = evalNode(ctx, requireStep(ctx, id), parentId);
+    if (result.state === "failed" || result.state === "exhausted") return result;
+    if (result.state !== "completed") return result;
+  }
+  return { state: "completed", actions: [] };
+}
+function evalMap(ctx, step, parentId) {
+  const id = step.id;
+  const members = strings(step.over);
+  const body = strings(step.body);
+  if (members.length === 0) throw new CompositeFlowError(`compositional map "${id}" requires a non-empty literal over list.`);
+  if (body.length === 0) throw new CompositeFlowError(`compositional map "${id}" requires a non-empty body.`);
+  const actions = [];
+  const states = [];
+  for (const member of members) {
+    const instance = mapMemberInstance(parentId, id, member);
+    const result = evalSequence(ctx, body, instance.id);
+    states.push(result.state);
+    actions.push(...result.actions);
+    record(ctx, instance, result.state === "pending" && result.actions.length > 0 ? "running" : result.state);
+  }
+  const failed = states.some((state) => state === "failed" || state === "exhausted");
+  if (failed && step.completion !== "collect") return { state: "failed", actions: [] };
+  if (states.every((state) => state === "completed" || step.completion === "collect" && (state === "failed" || state === "exhausted"))) {
+    return { state: "completed", actions: [] };
+  }
+  return { state: "running", actions };
+}
+function startedGenerations(ctx, parentId, stepId) {
+  const out = /* @__PURE__ */ new Set();
+  for (const event of ctx.events) {
+    if (event.type !== "loop_iteration_started") continue;
+    const generation = event.extra.generation ?? event.extra.iteration;
+    if (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1) continue;
+    const expected = loopGenerationInstance(parentId, stepId, generation).id;
+    if (eventInstance(event) === expected) out.add(generation);
+  }
+  return [...out].sort((left, right) => left - right);
+}
+function loopResult(ctx, instanceId) {
+  const event = ctx.events.findLast(
+    (candidate) => candidate.type === "loop_condition_evaluated" && eventInstance(candidate) === instanceId
+  );
+  return event?.extra.result === "pass" || event?.extra.result === "fail" ? event.extra.result : null;
+}
+function evalLoop(ctx, step, parentId) {
+  const id = step.id;
+  const body = strings(step.body);
+  const max = step.max_iterations;
+  const condition = step.until;
+  const inputs = strings(step.input);
+  if (body.length === 0) throw new CompositeFlowError(`loop "${id}" requires a non-empty body.`);
+  if (typeof max !== "number" || !Number.isSafeInteger(max) || max < 1) throw new CompositeFlowError(`loop "${id}" requires a positive max_iterations.`);
+  if (typeof condition !== "string" || inputs.length !== 1) throw new CompositeFlowError(`loop "${id}" requires one input and an until condition.`);
+  const generations = startedGenerations(ctx, parentId, id);
+  const expected = generations.length + 1;
+  if (generations.some((generation2, index) => generation2 !== index + 1)) {
+    throw new CompositeFlowError(`loop "${id}" has non-contiguous generations: ${generations.join(", ")}.`);
+  }
+  if (generations.length === 0) {
+    const instance2 = loopGenerationInstance(parentId, id, 1);
+    record(ctx, instance2, "pending");
+    return { state: "pending", actions: [{ kind: "start_loop", step: id, instance: instance2, generation: 1 }] };
+  }
+  const generation = generations.at(-1);
+  const instance = loopGenerationInstance(parentId, id, generation);
+  const result = loopResult(ctx, instance.id);
+  if (result === "pass") {
+    record(ctx, instance, "completed");
+    return { state: "completed", actions: [] };
+  }
+  if (result === "fail") {
+    if (generation >= max) {
+      record(ctx, instance, "exhausted");
+      return { state: step.exhaustion === "collect" ? "completed" : "exhausted", actions: [] };
+    }
+    const next = loopGenerationInstance(parentId, id, expected);
+    record(ctx, instance, "completed");
+    record(ctx, next, "pending");
+    return { state: "running", actions: [{ kind: "start_loop", step: id, instance: next, generation: expected }] };
+  }
+  const bodyResult = evalSequence(ctx, body, instance.id);
+  if (bodyResult.state === "failed" || bodyResult.state === "exhausted") {
+    record(ctx, instance, bodyResult.state);
+    return bodyResult;
+  }
+  if (bodyResult.state !== "completed") {
+    record(ctx, instance, "running");
+    return { state: "running", actions: bodyResult.actions };
+  }
+  record(ctx, instance, "running");
+  return {
+    state: "running",
+    actions: [{ kind: "evaluate_loop", step: id, instance, condition, input: inputs[0] }]
+  };
+}
+function evalLeaf(ctx, step, parentId) {
+  const id = step.id;
+  const kind = step.kind;
+  const instance = ordinaryInstance(parentId, id);
+  const terminal2 = terminalFor(ctx, instance.id);
+  if (terminal2 != null) {
+    record(ctx, instance, terminal2);
+    return { state: terminal2, actions: [] };
+  }
+  if (hasEvent(ctx, instance.id, /* @__PURE__ */ new Set(["artifact_created", "human_decision", "decision_resolved"]))) {
+    record(ctx, instance, "completed");
+    return { state: "completed", actions: [] };
+  }
+  if (PROMPTABLE.has(kind)) {
+    if (typeof step.actor !== "string") throw new CompositeFlowError(`promptable step "${id}" requires an actor.`);
+    record(ctx, instance, "pending");
+    return { state: "pending", actions: [{ kind: "actor", step: id, instance, actor: step.actor, stepKind: kind }] };
+  }
+  if (kind === "human_gate") {
+    const prompt = typeof step.prompt === "string" ? step.prompt : "";
+    record(ctx, instance, "pending");
+    return { state: "pending", actions: [{ kind: "human_gate", step: id, instance, prompt }] };
+  }
+  record(ctx, instance, "pending");
+  return { state: "pending", actions: [{ kind: "needs_decision", step: id, instance, stepKind: kind }] };
+}
+function evalNode(ctx, step, parentId) {
+  if (typeof step.id !== "string" || typeof step.kind !== "string") {
+    throw new CompositeFlowError("every compositional step requires string id and kind fields.");
+  }
+  if (step.kind === "map" && Array.isArray(step.body)) return evalMap(ctx, step, parentId);
+  if (step.kind === "loop") return evalLoop(ctx, step, parentId);
+  return evalLeaf(ctx, step, parentId);
+}
+function hasCompositeContainers(playbook) {
+  return Array.isArray(playbook.flow) && playbook.flow.some(
+    (step) => (step.kind === "map" || step.kind === "replicate") && Array.isArray(step.body)
+  );
+}
+function computeCompositeFrontier(playbook, events) {
+  const flow = Array.isArray(playbook.flow) ? playbook.flow : [];
+  const byId = /* @__PURE__ */ new Map();
+  const owned = /* @__PURE__ */ new Set();
+  for (const step of flow) {
+    if (typeof step.id === "string") byId.set(step.id, step);
+    if ((step.kind === "map" || step.kind === "loop" || step.kind === "replicate") && Array.isArray(step.body)) {
+      for (const id of step.body) if (typeof id === "string") owned.add(id);
+    }
+  }
+  const roots = flow.flatMap((step) => typeof step.id === "string" && !owned.has(step.id) ? [step.id] : []);
+  const ctx = { byId, roots, events, instances: /* @__PURE__ */ new Map() };
+  const result = evalSequence(ctx, roots, null);
+  return {
+    actions: result.actions,
+    instances: [...ctx.instances.values()],
+    complete: result.state === "completed",
+    failed: result.state === "failed" || result.state === "exhausted"
+  };
+}
 
 // src/lib/executors.ts
 var import_node_fs8 = require("node:fs");
@@ -17145,6 +17523,9 @@ function successorOfCompleted(ctx, stepId) {
   return outerFallthrough(ctx.outer, stepId);
 }
 function computeNext(playbook, events) {
+  if (hasCompositeContainers(playbook)) {
+    throw new FlowCursorError("compositional map/loop playbooks use the runnable frontier; drive them with `fadeno drive`, not `fadeno next`.");
+  }
   const flow = asFlow2(playbook.flow);
   if (flow.length === 0) {
     throw new FlowCursorError("playbook has no flow steps.");
@@ -17544,6 +17925,9 @@ function runPrompt(opts) {
     const detail2 = errorIssues.map((issue) => `${issue.path || "/"}: ${issue.message}`).join("; ");
     throw new PromptError(`playbook ${run.playbook} is invalid; fix it before assembling a prompt: ${detail2}`);
   }
+  if (hasCompositeContainers(playbook)) {
+    throw new PromptError("compositional map/loop prompts are instance-scoped and assembled by `fadeno drive`; direct `fadeno prompt` is not available for them.");
+  }
   const sel = {
     step: opts.step,
     actor: opts.actor ?? null,
@@ -17613,9 +17997,9 @@ function runPrompt(opts) {
   };
   const prompt = renderStepPrompt(ctx);
   const promptSha = sha256Hex(prompt);
-  const record = opts.record !== false;
+  const record2 = opts.record !== false;
   const terminal2 = run.status != null && run.status !== "running";
-  const previewOnly = !record || terminal2 || plan.cutoffLine == null;
+  const previewOnly = !record2 || terminal2 || plan.cutoffLine == null;
   if (previewOnly) {
     return { prompt, sha256: promptSha, promptPath: null, recorded: "preview", plan };
   }
@@ -18092,7 +18476,7 @@ function dispatchOnce(ctx, stepId, role, generation, inBody, outputRel, artifact
     } else {
       session = "fresh";
       if (spec.command.some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
-        sessionId = (0, import_node_crypto2.randomUUID)();
+        sessionId = (0, import_node_crypto3.randomUUID)();
         argv = substituteSessionId(spec.command, sessionId);
       }
     }
@@ -18270,13 +18654,18 @@ function pendingHostRequest(events, actorCallId, runId) {
       promptSha256: event.extra.prompt_sha256,
       outputPath: event.extra.output_path,
       artifactType: typeof event.extra.artifact_type === "string" ? event.extra.artifact_type : null,
+      ...typeof event.extra.node_instance_id === "string" ? { nodeInstanceId: event.extra.node_instance_id } : {},
+      ...typeof event.extra.parent_instance_id === "string" ? { parentInstanceId: event.extra.parent_instance_id } : {},
+      ...typeof event.extra.map_member === "string" ? { mapMember: event.extra.map_member } : {},
+      ...typeof event.extra.generation === "number" ? { generation: event.extra.generation } : {},
+      ...typeof event.extra.logical_artifact === "string" ? { logicalArtifact: event.extra.logical_artifact } : {},
       ...Array.isArray(event.extra.validation_errors) ? { validationErrors: event.extra.validation_errors.filter((error) => typeof error === "string") } : {},
       ...typeof event.extra.repair_appendix === "string" ? { repairAppendix: event.extra.repair_appendix } : {}
     };
   }
   return null;
 }
-function hostRequestFor(ctx, stepId, role, outputRel, artifactType, ids, attempt, reason, promptPath, promptSha256, validationErrors) {
+function hostRequestFor(ctx, stepId, role, outputRel, artifactType, ids, attempt, reason, promptPath, promptSha256, validationErrors, instance) {
   if (promptPath == null) throw new DriveError(`host dispatch for ${stepId} has no recorded prompt snapshot.`);
   const { executor, spec } = effectiveBinding(ctx, role);
   if (spec.adapter !== "host") throw new DriveError(`internal error: ${executor} is not a host executor.`);
@@ -18299,6 +18688,7 @@ function hostRequestFor(ctx, stepId, role, outputRel, artifactType, ids, attempt
     promptSha256,
     outputPath: outputRel,
     artifactType,
+    ...instance ?? {},
     ...validationErrors != null && validationErrors.length > 0 ? { validationErrors } : {},
     ...repairAppendix != null ? { repairAppendix } : {},
     repoRoot: ctx.repoRoot,
@@ -18548,6 +18938,270 @@ function ensureDecisionRequested(ctx, comp) {
   ctx.act(`decision requested: ${decisionId} \u2014 ${prompt}`);
   return { decisionId, step: stepId, prompt, options };
 }
+function compositeStep(ctx, stepId) {
+  const flow = Array.isArray(ctx.playbook.flow) ? ctx.playbook.flow : [];
+  const step = flow.find((candidate) => candidate.id === stepId);
+  if (step == null) throw new DriveError(`compositional step "${stepId}" is missing.`);
+  return step;
+}
+function compositeOutputPlan(ctx, action) {
+  const step = compositeStep(ctx, action.step);
+  const declared = typeof step.output === "string" ? step.output : "";
+  const logicalArtifact = baseArtifactName(declared);
+  if (logicalArtifact === "") throw new DriveError(`compositional actor step "${action.step}" requires output.`);
+  const artifactType = schemaKindFor(logicalArtifact);
+  const stem = logicalArtifact.replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/[^A-Za-z0-9]+/g, "-").toLowerCase();
+  const extension = artifactType == null ? ".md" : ".json";
+  return {
+    outputPath: `${nodeInstanceArtifactScope(action.instance.id)}/${stem}${extension}`,
+    artifactType,
+    logicalArtifact
+  };
+}
+function latestCompositeInputs(ctx, action) {
+  const step = compositeStep(ctx, action.step);
+  const wanted = Array.isArray(step.input) ? step.input.filter((item) => typeof item === "string").map((ref) => ({
+    logical: baseArtifactName(ref),
+    collection: ref.endsWith("[]")
+  })) : [];
+  const instance = parseNodeInstanceId(action.instance.id);
+  const events = freshEvents(ctx.runDir);
+  return wanted.flatMap(({ logical, collection }) => {
+    const candidates = events.filter((event) => {
+      if (event.type !== "artifact_created" || event.extra.logical_artifact !== logical) return false;
+      if (typeof event.extra.artifact !== "string") return false;
+      if (instance.member != null && event.extra.map_member !== instance.member) return false;
+      return true;
+    });
+    const selected = collection ? [...new Map(candidates.map((event) => [String(event.extra.map_member ?? event.extra.member ?? event.extra.node_instance_id ?? event.extra.artifact), event])).values()] : candidates.slice(-1);
+    return selected.map((event) => ({
+      logical,
+      path: event.extra.artifact,
+      sha256: typeof event.extra.sha256 === "string" ? event.extra.sha256 : null
+    }));
+  });
+}
+function assembleCompositePrompt(ctx, action, ids) {
+  const plan = compositeOutputPlan(ctx, action);
+  const roles = ctx.playbook.roles && typeof ctx.playbook.roles === "object" && !Array.isArray(ctx.playbook.roles) ? ctx.playbook.roles : {};
+  const role = roles[action.actor];
+  const purpose = role && typeof role === "object" && !Array.isArray(role) && typeof role.purpose === "string" ? role.purpose : "";
+  const inputs = latestCompositeInputs(ctx, action);
+  const progressPath = `.fadeno/progress/${ctx.runId}/${ids.stepExecutionId}.json`;
+  const lines = [
+    "# Fadeno assignment",
+    "",
+    `- run: ${ctx.runId}`,
+    `- node instance: ${action.instance.id}`,
+    `- role: ${action.actor}`,
+    `- task: ${ctx.task}`,
+    ...purpose === "" ? [] : [`- role purpose: ${purpose}`],
+    "",
+    "## Inputs",
+    ...inputs.length === 0 ? ["- No upstream artifact files are bound. Use the repository and task statement."] : inputs.map((input) => `- ${input.logical}: ${input.path}${input.sha256 == null ? "" : ` (sha256 ${input.sha256})`}`),
+    "",
+    "## Output contract",
+    `Return only the ${plan.logicalArtifact} artifact body. Do not wrap it in a code fence.`,
+    plan.artifactType == null ? "- Format: Markdown." : `- Format: JSON satisfying .fadeno/schemas/${plan.artifactType}.schema.json.`,
+    `- The director records it at ${plan.outputPath}.`,
+    "",
+    "## Cooperative progress",
+    `Update ${progressPath} at meaningful phases using the Fadeno progress JSON shape.`,
+    "Progress is attested observability only and never controls a gate. Do not include secrets or private reasoning.",
+    ""
+  ];
+  const prompt = lines.join("\n");
+  const promptSha256 = sha256Hex(prompt);
+  const promptPath = `artifacts/prompts/${ids.actorCallId}.md`;
+  const promptAbs = (0, import_node_path12.join)(ctx.runDir, promptPath);
+  if ((0, import_node_fs12.existsSync)(promptAbs)) {
+    if ((0, import_node_fs12.readFileSync)(promptAbs, "utf8") !== prompt) {
+      throw new DriveError(`existing composite prompt ${promptPath} differs; refusing to overwrite.`);
+    }
+  } else {
+    (0, import_node_fs12.mkdirSync)((0, import_node_path12.dirname)(promptAbs), { recursive: true });
+    (0, import_node_fs12.writeFileSync)(promptAbs, prompt, "utf8");
+    appendEvent(ctx.runDir, {
+      type: "prompt_assembled",
+      step: action.step,
+      actor: action.actor,
+      node_instance_id: action.instance.id,
+      parent_instance_id: action.instance.parentId,
+      inputs: inputs.map((input) => ({ artifact: input.logical, path: input.path, sha256: input.sha256 })),
+      output_path: plan.outputPath,
+      prompt_sha256: promptSha256,
+      prompt_path: promptPath,
+      manifest_version: 1
+    }, ctx.now);
+  }
+  return { prompt, promptPath, promptSha256, ...plan };
+}
+function compositeRequest(ctx, action) {
+  const stepExecutionId = stepExecutionIdFor(action.instance.id);
+  const actorCallId = actorCallIdFor(action.instance.id, action.actor);
+  const ids = { stepExecutionId, actorCallId };
+  const events = freshEvents(ctx.runDir);
+  const pending = pendingHostRequest(events, actorCallId, ctx.runId);
+  if (pending != null) return pending;
+  const binding = effectiveBinding(ctx, action.actor);
+  if (binding.spec.adapter !== "host") {
+    throw new DriveError(
+      `compositional execution currently requires a host adapter; role "${action.actor}" is bound to command executor "${binding.executor}".`
+    );
+  }
+  if (!events.some((event) => event.type === "step_started" && event.extra.node_instance_id === action.instance.id)) {
+    appendEvent(ctx.runDir, {
+      type: "step_started",
+      step: action.step,
+      node_instance_id: action.instance.id,
+      parent_instance_id: action.instance.parentId,
+      map_member: action.instance.member,
+      generation: action.instance.generation
+    }, ctx.now);
+  }
+  const prompt = assembleCompositePrompt(ctx, action, ids);
+  const priorRequests = events.filter(
+    (event) => event.type === "host_dispatch_requested" && event.extra.actor_call_id === actorCallId
+  );
+  const priorTerminal = events.findLast(
+    (event) => (event.type === "actor_completed" || event.type === "actor_failed") && event.extra.actor_call_id === actorCallId
+  );
+  const validationErrors = priorTerminal?.type === "actor_completed" && priorTerminal.extra.output_valid === false && Array.isArray(priorTerminal.extra.validation_errors) ? priorTerminal.extra.validation_errors.filter((item) => typeof item === "string") : null;
+  const attempt = priorRequests.length + 1;
+  const reason = attempt === 1 ? "initial" : validationErrors != null ? "schema_repair" : "user_retry";
+  return hostRequestFor(
+    ctx,
+    action.step,
+    action.actor,
+    prompt.outputPath,
+    prompt.artifactType,
+    ids,
+    attempt,
+    reason,
+    prompt.promptPath,
+    prompt.promptSha256,
+    validationErrors,
+    {
+      nodeInstanceId: action.instance.id,
+      parentInstanceId: action.instance.parentId ?? void 0,
+      mapMember: action.instance.member ?? void 0,
+      generation: action.instance.generation ?? void 0,
+      logicalArtifact: prompt.logicalArtifact
+    }
+  );
+}
+function compositeGateArtifacts(ctx, action) {
+  const logical = baseArtifactName(action.input);
+  return freshEvents(ctx.runDir).flatMap(
+    (event) => event.type === "artifact_created" && event.extra.logical_artifact === logical && typeof event.extra.node_instance_id === "string" && event.extra.node_instance_id.startsWith(`${action.instance.id}/`) && typeof event.extra.artifact === "string" ? [event.extra.artifact] : []
+  );
+}
+function evaluateCompositeLoop(ctx, action) {
+  if (!SUPPORTED_CONDITIONS.includes(action.condition)) {
+    throw new DriveError(`unsupported compositional loop condition "${action.condition}".`);
+  }
+  const condition = action.condition;
+  const paths = compositeGateArtifacts(ctx, action);
+  if (paths.length === 0) throw new DriveError(`loop ${action.instance.id} has no scoped ${action.input} artifact.`);
+  const documents = paths.map((path) => JSON.parse((0, import_node_fs12.readFileSync)((0, import_node_path12.join)(ctx.runDir, path), "utf8")));
+  const document = action.input.endsWith("[]") ? documents : documents.at(-1);
+  const definition = CONDITION_REGISTRY[condition];
+  const validate = ctx.schemas.get(definition.schema);
+  const values = Array.isArray(document) && action.input.endsWith("[]") ? document : [document];
+  for (const value of values) {
+    if (!validate(value)) throw new DriveError(`scoped artifact for ${action.instance.id} is invalid for ${condition}.`);
+  }
+  const evaluation = definition.evaluate(document);
+  appendEvent(ctx.runDir, {
+    type: "loop_condition_evaluated",
+    step: action.step,
+    node_instance_id: action.instance.id,
+    parent_instance_id: action.instance.parentId,
+    generation: action.instance.generation,
+    condition,
+    artifacts: paths,
+    result: evaluation.pass ? "pass" : "fail",
+    details: evaluation.details
+  }, ctx.now);
+  ctx.act(`loop ${action.instance.id}: ${condition} \u2192 ${evaluation.pass ? "pass" : "fail"}`);
+}
+function driveComposite(ctx, maxTransitions, actions) {
+  let transitions = 0;
+  const finish = (outcome, detail2, status = null, requests = []) => ({
+    run: ctx.runId,
+    outcome,
+    status,
+    decision: null,
+    detail: detail2,
+    actions,
+    transitions,
+    requests,
+    unresolvedRequests: requests
+  });
+  for (; ; ) {
+    if (transitions >= maxTransitions) {
+      return finish("max_transitions", `stopped after ${maxTransitions} compositional transitions; re-run to continue.`);
+    }
+    const frontier = computeCompositeFrontier(ctx.playbook, freshEvents(ctx.runDir));
+    if (frontier.complete || frontier.failed) {
+      const status = frontier.failed ? "failed" : "completed";
+      runRun({ run: ctx.runId, status, repoRoot: ctx.repoRoot, now: ctx.now });
+      ctx.act(`run ${status}`);
+      return finish("terminal", `compositional run is terminal (${status}).`, status);
+    }
+    if (frontier.actions.length === 0) {
+      return finish("needs_decision", "compositional frontier has no runnable action and is not terminal.");
+    }
+    const requests = [];
+    let advanced = false;
+    for (const action of frontier.actions) {
+      if (transitions >= maxTransitions) break;
+      transitions += 1;
+      if (action.kind === "start_loop") {
+        appendEvent(ctx.runDir, {
+          type: "loop_iteration_started",
+          step: action.step,
+          node_instance_id: action.instance.id,
+          parent_instance_id: action.instance.parentId,
+          member: action.instance.member,
+          generation: action.generation,
+          iteration: action.generation
+        }, ctx.now);
+        ctx.act(`loop ${action.instance.id}: generation ${action.generation} started`);
+        advanced = true;
+        continue;
+      }
+      if (action.kind === "evaluate_loop") {
+        evaluateCompositeLoop(ctx, action);
+        advanced = true;
+        continue;
+      }
+      if (action.kind === "actor") {
+        requests.push(compositeRequest(ctx, action));
+        continue;
+      }
+      if (action.kind === "human_gate") {
+        return finish(
+          "needs_decision",
+          `member-scoped human gate ${action.instance.id} is awaiting host integration: ${action.prompt}`
+        );
+      }
+      return finish(
+        "needs_decision",
+        `node ${action.instance.id} (kind ${action.stepKind}) is not executable in the first compositional milestone.`
+      );
+    }
+    if (requests.length > 0) {
+      return finish(
+        "awaiting_host_dispatch",
+        `${requests.length} compositional host dispatch request(s) are awaiting native receipts.`,
+        null,
+        requests
+      );
+    }
+    if (!advanced) return finish("needs_decision", "compositional frontier did not advance.");
+  }
+}
 function runDrive(opts) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
@@ -18578,6 +19232,7 @@ function runDrive(opts) {
     runDir: run.dir,
     repoRoot,
     playbook,
+    task: run.task ?? "",
     schemas,
     overrides: /* @__PURE__ */ new Map(),
     repaired: /* @__PURE__ */ new Set(),
@@ -18588,6 +19243,7 @@ function runDrive(opts) {
   const ctx = { ...base, profile };
   recordOverrides(ctx, parseBinds(opts.bind));
   const maxTransitions = opts.maxTransitions ?? MAX_TRANSITIONS_DEFAULT;
+  if (hasCompositeContainers(playbook)) return driveComposite(ctx, maxTransitions, actions);
   let transitions = 0;
   const finish = (outcome, detail2, status = null, decision = null, requests = []) => ({
     run: run.runId,
@@ -19241,12 +19897,14 @@ function workflowSteps(repoRoot, playbook) {
     }
     return raw.flatMap((step) => {
       if (typeof step.id !== "string") return [];
-      const actors = Array.isArray(step.over) ? step.over.filter((actor) => typeof actor === "string") : typeof step.actor === "string" ? [step.actor] : [];
+      const compositionalMap = step.kind === "map" && Array.isArray(step.body);
+      const actors = Array.isArray(step.over) && !compositionalMap ? step.over.filter((actor) => typeof actor === "string") : typeof step.actor === "string" ? [step.actor] : [];
       return [{
         id: step.id,
         kind: typeof step.kind === "string" ? step.kind : null,
         actors,
-        loopBodyOf: bodyOwner.get(step.id) ?? null
+        loopBodyOf: bodyOwner.get(step.id) ?? null,
+        mapMembers: compositionalMap && Array.isArray(step.over) ? step.over.filter((member) => typeof member === "string") : []
       }];
     });
   } catch {
@@ -19290,6 +19948,10 @@ function projectRun(repoRoot, run, events, now) {
           updatedAt: null,
           source: null
         })),
+        instances: (definition?.mapMembers ?? []).map((member) => {
+          const instance = mapMemberInstance(null, id, member);
+          return { id: instance.id, parentId: instance.parentId, member, generation: null, state: "pending", runtimeMs: null };
+        }),
         artifacts: 0,
         gates: [],
         iterations: 0,
@@ -19312,7 +19974,36 @@ function projectRun(repoRoot, run, events, now) {
   const pendingDecisions = /* @__PURE__ */ new Map();
   const firstAt = /* @__PURE__ */ new Map();
   const lastAt = /* @__PURE__ */ new Map();
+  const instanceFirstAt = /* @__PURE__ */ new Map();
+  const instanceLastAt = /* @__PURE__ */ new Map();
+  const instanceById = /* @__PURE__ */ new Map();
+  for (const step of byStep.values()) for (const instance of step.instances) instanceById.set(instance.id, instance);
+  const instanceView = (id) => {
+    const existing = instanceById.get(id);
+    if (existing != null) return existing;
+    try {
+      const parsed = parseNodeInstanceId(id);
+      const instance = { id, parentId: parsed.parentId, member: parsed.member, generation: parsed.generation, state: "pending", runtimeMs: null };
+      view(parsed.step).instances.push(instance);
+      instanceById.set(id, instance);
+      return instance;
+    } catch {
+      return null;
+    }
+  };
   for (const event of events) {
+    const nodeId = typeof event.extra.node_instance_id === "string" ? event.extra.node_instance_id : null;
+    const node = nodeId == null ? null : instanceView(nodeId);
+    if (node != null && event.timestamp != null) {
+      if (!instanceFirstAt.has(node.id)) instanceFirstAt.set(node.id, event.timestamp);
+      instanceLastAt.set(node.id, event.timestamp);
+    }
+    if (node != null) {
+      if (event.type === "actor_failed" || event.type === "step_failed") node.state = "failed";
+      else if (event.type === "actor_dispatched" || event.type === "step_started" || event.type === "loop_iteration_started") node.state = "running";
+      else if (event.type === "artifact_created" || event.type === "actor_completed" || event.type === "step_completed") node.state = event.extra.output_valid === false ? "pending" : "completed";
+      else if (event.type === "loop_condition_evaluated") node.state = event.extra.result === "pass" ? "completed" : "running";
+    }
     if (event.step != null) {
       view(event.step);
       if (event.timestamp != null) {
@@ -19474,6 +20165,42 @@ function projectRun(repoRoot, run, events, now) {
     const startedAt = firstAt.get(step.id) ?? null;
     const isOpen = step.state === "running" || step.state === "waiting" || step.state === "blocked";
     step.runtimeMs = step.state === "pending" ? null : elapsed(startedAt, isOpen ? null : lastAt.get(step.id) ?? null, now);
+  }
+  for (const instance of instanceById.values()) {
+    if (instance.generation != null && instance.state === "running") {
+      const parsed = parseNodeInstanceId(instance.id);
+      const later = [...instanceById.values()].some((candidate) => {
+        if (candidate.generation == null || candidate.generation <= instance.generation) return false;
+        const other = parseNodeInstanceId(candidate.id);
+        return other.parentId === parsed.parentId && other.step === parsed.step;
+      });
+      if (later) instance.state = "completed";
+    }
+    const descendants = [...instanceById.values()].filter((candidate) => candidate.id.startsWith(`${instance.id}/`));
+    if (descendants.length > 0) {
+      if (descendants.some((candidate) => candidate.state === "failed")) instance.state = "failed";
+      else if (descendants.some((candidate) => candidate.state === "running")) instance.state = "running";
+      else if (descendants.some((candidate) => candidate.state === "waiting")) instance.state = "waiting";
+      else if (descendants.every((candidate) => candidate.state === "completed")) instance.state = "completed";
+    }
+    const latestCondition = events.findLast(
+      (event) => event.type === "loop_condition_evaluated" && typeof event.extra.node_instance_id === "string" && event.extra.node_instance_id.startsWith(`${instance.id}/`)
+    );
+    if (latestCondition?.extra.result === "pass") instance.state = "completed";
+    const start = instanceFirstAt.get(instance.id) ?? descendants.map((candidate) => instanceFirstAt.get(candidate.id)).find((value) => value != null) ?? null;
+    const end = instanceLastAt.get(instance.id) ?? descendants.map((candidate) => instanceLastAt.get(candidate.id)).filter((value) => value != null).at(-1) ?? null;
+    const open = instance.state === "running" || instance.state === "waiting" || instance.state === "blocked";
+    instance.runtimeMs = instance.state === "pending" ? null : elapsed(start, open ? null : end, now);
+  }
+  for (const step of byStep.values()) {
+    if (step.instances.length === 0) continue;
+    const states = step.instances.map((instance) => instance.state);
+    if (states.some((state) => state === "failed")) step.state = "failed";
+    else if (states.some((state) => state === "blocked")) step.state = "blocked";
+    else if (states.some((state) => state === "running")) step.state = "running";
+    else if (states.some((state) => state === "waiting")) step.state = "waiting";
+    else if (states.every((state) => state === "completed")) step.state = "completed";
+    else step.state = "pending";
   }
   for (const step of byStep.values()) {
     if (step.kind !== "loop") continue;
@@ -19687,12 +20414,69 @@ function runVerify(opts) {
   findings.push(checkNamedDecisions(events));
   findings.push(checkArtifactSupersede(events));
   findings.push(checkSessionContinuity(events));
+  findings.push(checkNodeInstances(events));
   findings.push(checkHostDispatchRequests(run, events, mode));
   findings.push(checkHostDispatchLifecycle(run, events, mode));
   findings.push(checkHostDispatchArtifacts(run, events, mode));
   findings.push(checkNativeAttestation(run, events, mode));
   const ok = !findings.some((f) => f.status === "fail");
   return { run, mode, findings, ok };
+}
+function checkNodeInstances(events) {
+  const check = "node-instances";
+  const scoped = events.filter((event) => typeof event.extra.node_instance_id === "string");
+  if (scoped.length === 0) return skip(check, "no compositional node instances recorded");
+  const problems = [];
+  const generations = /* @__PURE__ */ new Map();
+  for (const event of scoped) {
+    const id = event.extra.node_instance_id;
+    let instance;
+    try {
+      instance = parseNodeInstanceId(id);
+    } catch (err) {
+      problems.push(`${event.type} seq ${event.seq ?? "?"}: ${err.message}`);
+      continue;
+    }
+    if (event.step != null && event.step !== instance.step) {
+      problems.push(`${id}: event step "${event.step}" does not match instance step "${instance.step}"`);
+    }
+    if (event.extra.parent_instance_id !== void 0 && event.extra.parent_instance_id !== instance.parentId) {
+      problems.push(`${id}: parent_instance_id does not match canonical parent`);
+    }
+    const member = event.extra.map_member ?? event.extra.member;
+    if (member !== void 0 && instance.member != null && member !== instance.member) {
+      problems.push(`${id}: member does not match canonical instance member`);
+    }
+    if (event.extra.generation !== void 0 && instance.generation != null && event.extra.generation !== instance.generation) {
+      problems.push(`${id}: generation does not match canonical instance generation`);
+    }
+    if (typeof event.extra.step_execution_id === "string" && event.extra.step_execution_id !== stepExecutionIdFor(id)) {
+      problems.push(`${id}: step_execution_id is not derived from the complete node instance`);
+    }
+    if (typeof event.extra.actor_call_id === "string") {
+      const actor = typeof event.extra.actor === "string" ? event.extra.actor : null;
+      if (event.extra.actor_call_id !== actorCallIdFor(id, actor)) {
+        problems.push(`${id}: actor_call_id is not derived from the node instance and actor`);
+      }
+    }
+    if (event.type === "host_dispatch_requested" && typeof event.extra.output_path === "string") {
+      const scope = `${nodeInstanceArtifactScope(id)}/`;
+      if (!event.extra.output_path.startsWith(scope)) problems.push(`${id}: planned output is outside its instance artifact scope`);
+    }
+    if (event.type === "loop_iteration_started" && instance.generation != null) {
+      const key = `${instance.parentId ?? ""}\0${instance.step}`;
+      const set = generations.get(key) ?? /* @__PURE__ */ new Set();
+      set.add(instance.generation);
+      generations.set(key, set);
+    }
+  }
+  for (const [key, values] of generations) {
+    const ordered = [...values].sort((left, right) => left - right);
+    if (ordered.some((value, index) => value !== index + 1)) {
+      problems.push(`${key.replace("\0", "/")}: non-contiguous loop generations ${ordered.join(", ")}`);
+    }
+  }
+  return problems.length === 0 ? { check, status: "ok", detail: `${scoped.length} scoped event(s) have coherent instance identity` } : { check, status: "fail", detail: problems.join("; ") };
 }
 function hostRequestRecords(events) {
   return events.filter((event) => event.type === "host_dispatch_requested" && typeof event.extra.dispatch_id === "string").map((event) => ({ id: event.extra.dispatch_id, event }));
@@ -19711,7 +20495,7 @@ function checkHostDispatchRequests(run, events, mode) {
   }
   const records = hostRequestRecords(events);
   const counts = /* @__PURE__ */ new Map();
-  for (const record of records) counts.set(record.id, (counts.get(record.id) ?? 0) + 1);
+  for (const record2 of records) counts.set(record2.id, (counts.get(record2.id) ?? 0) + 1);
   const problems = [];
   for (const event of events) {
     if (event.type === "host_dispatch_requested" && typeof event.extra.dispatch_id !== "string") {
@@ -19733,7 +20517,7 @@ function checkHostDispatchLifecycle(run, events, mode) {
   if (mode !== "current") return { check, status: "fail", detail: "host lifecycle evidence is not verifiable from a 0.2 compatibility ledger" };
   const records = hostRequestRecords(events);
   const problems = [];
-  const requestById = new Map(records.map((record) => [record.id, record.event]));
+  const requestById = new Map(records.map((record2) => [record2.id, record2.event]));
   const snapshotEvent = events.find((event) => event.type === "profile_snapshotted");
   let profile = null;
   if (snapshotEvent == null) problems.push("host dispatch evidence has no profile_snapshotted event");
@@ -20855,6 +21639,14 @@ workflow${projection.playbook ? ` \xB7 ${projection.playbook}` : ""}${total ? ` 
       if (actor.source != null) details.push(`${actor.source}-reported`);
       console.log(`${indent}    ${STEP_GLYPHS[actor.state]} ${actor.actor}  ${details.join(" \xB7 ")}`);
     }
+    for (const instance of step.instances) {
+      if (instance.parentId != null) continue;
+      const details = [instance.state];
+      const runtime = formatDuration(instance.runtimeMs);
+      if (runtime != null) details.push(runtime);
+      if (instance.generation != null) details.push(`generation ${instance.generation}`);
+      console.log(`${indent}    ${STEP_GLYPHS[instance.state]} ${instance.member ?? instance.id}  ${details.join(" \xB7 ")}`);
+    }
   }
   if (projection.requests.length > 0) {
     console.log("\nhost dispatches");
@@ -20953,7 +21745,9 @@ function printDrive(result) {
       console.log(`awaiting ${result.requests.length} native host dispatch(es) for run ${result.run}`);
       for (const request of result.requests) {
         console.log(`  ${request.dispatchId}  ${request.step}${request.actor ? ` (${request.actor})` : ""}  ${request.model}/${request.reasoningEffort}`);
-        console.log(`      progress: <workspace>/${progressSidecarPath(request.run, request.step, request.actor)}`);
+        if (request.nodeInstanceId != null) console.log(`      instance: ${request.nodeInstanceId}`);
+        const progress = request.nodeInstanceId == null ? progressSidecarPath(request.run, request.step, request.actor) : `.fadeno/progress/${request.run}/${request.stepExecutionId}.json`;
+        console.log(`      progress: <workspace>/${progress}`);
       }
       return 0;
     default:

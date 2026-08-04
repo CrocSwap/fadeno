@@ -4,6 +4,13 @@ import { parse as parseYaml } from 'yaml';
 import { resolveActiveArtifacts, sha256Hex, type ActiveResolution } from '../lib/artifact-manifest.ts';
 import { parseExecutorProfile } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import {
+  actorCallIdFor,
+  nodeInstanceArtifactScope,
+  NodeInstanceError,
+  parseNodeInstanceId,
+  stepExecutionIdFor,
+} from '../lib/node-instance.ts';
 import { SchemaSet, schemaErrorMessages, type SchemaKind } from '../lib/playbook-validate.ts';
 import {
   ledgerMode,
@@ -237,7 +244,11 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
   //     the reference chain around it.
   findings.push(checkSessionContinuity(events));
 
-  // 22-25. Native host dispatches are a first-class lifecycle. A verifier must
+  // 22. node-instances — compositional evidence is scoped to a canonical
+  // containment path and dispatch identities are derived from that full path.
+  findings.push(checkNodeInstances(events));
+
+  // 23-26. Native host dispatches are a first-class lifecycle. A verifier must
   // fail loudly on malformed host evidence, especially when reading an older
   // ledger explicitly, rather than treating those events as ordinary actor
   // dispatches and silently dropping their native identity claims.
@@ -248,6 +259,65 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
 
   const ok = !findings.some((f) => f.status === 'fail');
   return { run, mode, findings, ok };
+}
+
+function checkNodeInstances(events: RunEvent[]): Finding {
+  const check = 'node-instances';
+  const scoped = events.filter((event) => typeof event.extra.node_instance_id === 'string');
+  if (scoped.length === 0) return skip(check, 'no compositional node instances recorded');
+  const problems: string[] = [];
+  const generations = new Map<string, Set<number>>();
+  for (const event of scoped) {
+    const id = event.extra.node_instance_id as string;
+    let instance;
+    try {
+      instance = parseNodeInstanceId(id);
+    } catch (err) {
+      problems.push(`${event.type} seq ${event.seq ?? '?'}: ${(err as NodeInstanceError).message}`);
+      continue;
+    }
+    if (event.step != null && event.step !== instance.step) {
+      problems.push(`${id}: event step "${event.step}" does not match instance step "${instance.step}"`);
+    }
+    if (event.extra.parent_instance_id !== undefined && event.extra.parent_instance_id !== instance.parentId) {
+      problems.push(`${id}: parent_instance_id does not match canonical parent`);
+    }
+    const member = event.extra.map_member ?? event.extra.member;
+    if (member !== undefined && instance.member != null && member !== instance.member) {
+      problems.push(`${id}: member does not match canonical instance member`);
+    }
+    if (event.extra.generation !== undefined && instance.generation != null && event.extra.generation !== instance.generation) {
+      problems.push(`${id}: generation does not match canonical instance generation`);
+    }
+    if (typeof event.extra.step_execution_id === 'string' && event.extra.step_execution_id !== stepExecutionIdFor(id)) {
+      problems.push(`${id}: step_execution_id is not derived from the complete node instance`);
+    }
+    if (typeof event.extra.actor_call_id === 'string') {
+      const actor = typeof event.extra.actor === 'string' ? event.extra.actor : null;
+      if (event.extra.actor_call_id !== actorCallIdFor(id, actor)) {
+        problems.push(`${id}: actor_call_id is not derived from the node instance and actor`);
+      }
+    }
+    if (event.type === 'host_dispatch_requested' && typeof event.extra.output_path === 'string') {
+      const scope = `${nodeInstanceArtifactScope(id)}/`;
+      if (!event.extra.output_path.startsWith(scope)) problems.push(`${id}: planned output is outside its instance artifact scope`);
+    }
+    if (event.type === 'loop_iteration_started' && instance.generation != null) {
+      const key = `${instance.parentId ?? ''}\0${instance.step}`;
+      const set = generations.get(key) ?? new Set<number>();
+      set.add(instance.generation);
+      generations.set(key, set);
+    }
+  }
+  for (const [key, values] of generations) {
+    const ordered = [...values].sort((left, right) => left - right);
+    if (ordered.some((value, index) => value !== index + 1)) {
+      problems.push(`${key.replace('\0', '/')}: non-contiguous loop generations ${ordered.join(', ')}`);
+    }
+  }
+  return problems.length === 0
+    ? { check, status: 'ok', detail: `${scoped.length} scoped event(s) have coherent instance identity` }
+    : { check, status: 'fail', detail: problems.join('; ') };
 }
 
 interface HostRequestRecord {

@@ -44,6 +44,10 @@ fadeno drive <run>
     submit dispatch-complete or dispatch-fail, then re-run drive
 ```
 
+For compositional maps, one drive result may contain ready leaves from different
+members or loop generations. Dispatch every returned request and preserve its
+`node_instance_id`; do not merge member loops into a batch-wide loop.
+
    The engine snapshots the executor profile into the run, mints attempt
    ordinals and execution ids, validates typed outputs (one bounded schema
    repair), and records every dispatch — do not duplicate its work by hand.

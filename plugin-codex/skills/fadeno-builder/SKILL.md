@@ -21,7 +21,8 @@ reliably than a sprawling graph.
 2. **Start from a pattern, not a blank page.** Offer the user a choice:
    - adapt a **starter** (read it from `.fadeno/playbooks/`): `code-change-review`
      (plan → implement → review → test → bounded revise), `research-synthesis`
-     (gather → synthesize → fact-check → revise), or `pr-review` (review → merge →
+     (gather → synthesize → fact-check → revise), `compositional-review`
+     (independent mapped revision loops → final reduce), or `pr-review` (review → merge →
      gate → post behind a human gate); **or**
    - author a new playbook from their description.
    Match it to the closest pattern in `references/playbook-authoring.md`.

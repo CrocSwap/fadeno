@@ -1,6 +1,7 @@
 # Compositional runtime boundary
 
-Status: **accepted for implementation from dogfood evidence (2026-08-04)**.
+Status: **first native-host vertical slice shipped from dogfood evidence
+(2026-08-04)**.
 
 The five-item Luna/Terra dogfood exposed a structural limitation in the first
 engine milestone: `map` was implemented as a special promptable actor fan-out,
@@ -146,5 +147,11 @@ Terra sessions at the same logical `review` step.
 
 Legacy actor-list maps remain readable during the transition and normalize to
 a map whose implicit body is one actor call per listed role. New compositional
-maps require `body`. Old ledgers are never silently reinterpreted; the first
-writer of compositional-instance events requires a new ledger schema version.
+maps require `body`. Node-instance fields are additive, explicitly verified
+evidence in the existing 0.3 ledger envelope; events without them retain legacy
+semantics and are never reinterpreted as compositional instances.
+
+The shipped slice supports literal member lists, linear map/loop bodies,
+deterministic loop conditions, collection inputs to reducers, and native `host`
+executor leaves. Dynamic maps, branchy bodies, member-scoped human gates,
+replicate/subworkflow containers, and command-adapter leaves remain deferred.

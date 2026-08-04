@@ -15,6 +15,13 @@ writers accept only 0.3.
 
 ### Added
 
+- **Compositional map/loop runtime** — literal-member maps may own linear child
+  graphs, including independently advancing bounded loops; loops may contain
+  maps. The engine computes a runnable frontier, batches native host leaves,
+  scopes prompts/artifacts/progress with canonical `node_instance_id`, and
+  supplies scoped collections to downstream reducers. `show` expands member
+  state and `verify` checks containment plus dispatch identity.
+
 - **Native host dispatch** — executor profiles now discriminate `command` and
   `host` adapters. `fadeno drive` batches durable native-agent requests and
   pauses at `awaiting_host_dispatch`; the host records idempotent lifecycle
