@@ -37,6 +37,7 @@ test('init --codex creates the Codex target tree', (t) => {
   assert.ok(exists(root, '.codex/agents/worker.toml'));
   assert.ok(exists(root, '.codex/agents/reviewer.toml'));
   assert.ok(exists(root, '.codex/agents/judge.toml'));
+  assert.match(read(root, '.gitignore'), /^\.fadeno\/progress\/$/m);
 
   // No Claude artifacts leak in
   assert.ok(!exists(root, 'CLAUDE.md'));

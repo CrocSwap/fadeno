@@ -27,6 +27,12 @@ writers accept only 0.3.
 - **Native-dispatch verification** — `fadeno verify` checks strict request →
   start → terminal ordering, profile/request/receipt attestation consistency,
   immutable schema-repair feedback, and symlink-safe output placement.
+- **Cross-harness progress projection** — `dispatch-progress` records bounded
+  JSON observations labelled as agent-, harness-, or director-reported.
+  Immutable prompts name an ephemeral sidecar, verification enforces lifecycle
+  placement and identity agreement, and `show` projects every graph step and
+  literal map actor as pending/running/waiting/blocked/completed/failed with
+  per-actor, per-step, and total runtime. Progress is never a gate input.
 
 - **`fadeno drive <run>`** — the engine. Owns the run transition loop over the
   same pure cursor as `fadeno next`: assembles/reuses prompt snapshots,

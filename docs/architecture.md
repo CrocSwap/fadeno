@@ -152,10 +152,14 @@ receipt commands:
   `tests_pass`; `--report` remains a deprecated alias. This is the
   **advisory→enforced bridge**: the same check the runner applies can run in CI, a
   pre-commit hook, or a Claude Code `Stop` hook. See `enforcement.md`.
-- **`dispatch-start|dispatch-complete|dispatch-fail`** are host receipts. A
+- **`dispatch-start|dispatch-progress|dispatch-complete|dispatch-fail`** are
+  host receipts. A
   host executor request is durable before native work begins; the host attests
-  model, effort, native agent id, and terminal output/failure. The director is
-  the only ledger writer during this MVP.
+  model, effort, native agent id, provenance-labelled non-gating progress, and
+  terminal output/failure. `show` reloads the run's playbook so the projection
+  retains graph order and pending actors, then overlays lifecycle/progress
+  events and derives actor/step/total runtime. The director is the only ledger
+  writer during this MVP.
 
 The runner skill *can* hand-edit these files, but the CLI keeps them schema-valid.
 

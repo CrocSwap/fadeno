@@ -2,7 +2,7 @@
 import { relative } from 'node:path';
 import { parseArgs } from 'node:util';
 import { runDecide } from './commands/decide.ts';
-import { runDispatchComplete, runDispatchFail, runDispatchStart } from './commands/dispatch.ts';
+import { runDispatchComplete, runDispatchFail, runDispatchProgress, runDispatchStart } from './commands/dispatch.ts';
 import { runDiagram } from './commands/diagram.ts';
 import { runDrive, type DriveResult } from './commands/drive.ts';
 import { runGate } from './commands/gate.ts';
@@ -17,10 +17,12 @@ import { runShow } from './commands/show.ts';
 import { runValidate } from './commands/validate.ts';
 import { runVerify, type VerifyResult } from './commands/verify.ts';
 import type { DiagramFormat } from './lib/diagram.ts';
+import { progressSidecarPath } from './lib/prompt.ts';
 import type { EmitResult } from './lib/fsutil.ts';
 import type { SchemaKind, ValidationIssue } from './lib/playbook-validate.ts';
 import { findRepoRoot, packageVersion } from './lib/paths.ts';
 import type { RunEvent, RunSummary } from './lib/run-ledger.ts';
+import type { DispatchProgressSource } from './lib/host-dispatch.ts';
 import type { ValidateOutcome } from './commands/validate.ts';
 import type { ShowProjection, ShowResult, StepView } from './commands/show.ts';
 
@@ -32,6 +34,7 @@ Usage:
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
   fadeno dispatch-start <run> <id>      Start a native host dispatch
+  fadeno dispatch-progress <run> <id>   Record an attested progress observation
   fadeno dispatch-complete <run> <id>   Submit a native host result
   fadeno dispatch-fail <run> <id>       Submit a native host failure
   fadeno run <run> [flags]              Update a run ledger (run.yaml + events.jsonl)
@@ -69,6 +72,8 @@ Options:
   --agent-id <id>         (dispatch-start) Native host agent identity
   --workspace <path>      (dispatch-start) Native workspace provenance
   --branch <name>         (dispatch-start) Native branch provenance
+  --file <path>           (dispatch-progress) Agent/harness status JSON file
+  --source <kind>         (dispatch-progress) agent | harness | director
   --output <path>         (dispatch-complete) Temporary output file
   --commit <sha>          (dispatch-complete) Optional commit provenance
   --reason <text>         (dispatch-fail) Host-attested failure reason
@@ -254,11 +259,31 @@ function renderEvent(event: RunEvent): string {
   }
 }
 
-const STEP_GLYPHS: Record<StepView['state'], string> = { done: '✓', current: '→', failed: '✗', waiting: '!' };
+const STEP_GLYPHS: Record<StepView['state'], string> = {
+  pending: '○',
+  running: '→',
+  waiting: '!',
+  blocked: '■',
+  completed: '✓',
+  failed: '✗',
+};
+
+function formatDuration(ms: number | null): string | null {
+  if (ms == null) return null;
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ${remainder}s`;
+  if (minutes > 0) return `${minutes}m ${remainder}s`;
+  return `${remainder}s`;
+}
 
 function stepSummary(step: StepView): string {
   const parts: string[] = [];
-  if (step.state === 'waiting') parts.push('waiting for human decision');
+  parts.push(step.state);
+  const runtime = formatDuration(step.runtimeMs);
+  if (runtime != null) parts.push(runtime);
   if (step.actorCalls > 1) parts.push(`${step.actorCalls} actor calls`);
   if (step.attempts > step.actorCalls) {
     const repairNote = step.repairs > 0 ? `, ${step.repairs} schema repair${step.repairs === 1 ? '' : 's'}` : '';
@@ -275,12 +300,28 @@ function stepSummary(step: StepView): string {
 }
 
 function printProjection(projection: ShowProjection): void {
-  console.log('\nsteps');
+  const total = formatDuration(projection.runtimeMs);
+  console.log(`\nworkflow${projection.playbook ? ` · ${projection.playbook}` : ''}${total ? ` · total ${total}` : ''}`);
   if (projection.steps.length === 0) console.log('  (no steps recorded)');
   const width = Math.max(0, ...projection.steps.map((s) => s.id.length));
   for (const step of projection.steps) {
     const summary = stepSummary(step);
-    console.log(`  ${STEP_GLYPHS[step.state]} ${step.id.padEnd(width)}${summary ? `  ${summary}` : ''}`);
+    const indent = step.loopBodyOf != null ? '    ↳ ' : '  ';
+    const kind = step.kind != null ? ` [${step.kind}]` : '';
+    console.log(`${indent}${STEP_GLYPHS[step.state]} ${step.id.padEnd(width)}${kind}${summary ? `  ${summary}` : ''}`);
+    for (const actor of step.actors) {
+      const details: string[] = [actor.state];
+      const actorRuntime = formatDuration(actor.runtimeMs);
+      if (actorRuntime != null) details.push(actorRuntime);
+      if (actor.phase != null) details.push(actor.phase);
+      if (actor.summary != null) details.push(truncateWithEllipsis(actor.summary, 120));
+      if (actor.completed.length > 0) details.push(`${actor.completed.length} checkpoint${actor.completed.length === 1 ? '' : 's'}`);
+      if (actor.current != null) details.push(truncateWithEllipsis(actor.current, 120));
+      if (actor.next != null) details.push(`next: ${truncateWithEllipsis(actor.next, 100)}`);
+      if (actor.blockers.length > 0) details.push(`blocked: ${truncateWithEllipsis(actor.blockers.join('; '), 120)}`);
+      if (actor.source != null) details.push(`${actor.source}-reported`);
+      console.log(`${indent}    ${STEP_GLYPHS[actor.state]} ${actor.actor}  ${details.join(' · ')}`);
+    }
   }
 
   if (projection.requests.length > 0) {
@@ -299,7 +340,16 @@ function printProjection(projection: ShowProjection): void {
       for (const request of requests) {
         const member = request.actor ?? '(anonymous)';
         const model = request.model != null && request.reasoningEffort != null ? `${request.model}/${request.reasoningEffort}` : request.executor;
-        console.log(`      ${member}  ${model}  ${request.state}`);
+        const details: string[] = [request.state];
+        const runtime = formatDuration(request.runtimeMs);
+        if (runtime != null) details.push(runtime);
+        if (request.phase != null) details.push(request.phase);
+        if (request.summary != null) details.push(truncateWithEllipsis(request.summary, 120));
+        if (request.completed.length > 0) details.push(`${request.completed.length} checkpoint${request.completed.length === 1 ? '' : 's'}`);
+        if (request.current != null) details.push(truncateWithEllipsis(request.current, 120));
+        if (request.next != null) details.push(`next: ${truncateWithEllipsis(request.next, 100)}`);
+        if (request.progressSource != null) details.push(`${request.progressSource}-reported`);
+        console.log(`      ${member}  ${model}  ${details.join(' · ')}`);
       }
     }
   }
@@ -377,6 +427,7 @@ function printDrive(result: DriveResult): number {
       console.log(`awaiting ${result.requests.length} native host dispatch(es) for run ${result.run}`);
       for (const request of result.requests) {
         console.log(`  ${request.dispatchId}  ${request.step}${request.actor ? ` (${request.actor})` : ''}  ${request.model}/${request.reasoningEffort}`);
+        console.log(`      progress: <workspace>/${progressSidecarPath(request.run, request.step, request.actor)}`);
       }
       return 0;
     default:
@@ -441,6 +492,8 @@ function main(argv: string[]): number {
         'agent-id': { type: 'string' },
         workspace: { type: 'string' },
         branch: { type: 'string' },
+        file: { type: 'string' },
+        source: { type: 'string' },
         output: { type: 'string' },
         commit: { type: 'string' },
         reason: { type: 'string' },
@@ -686,6 +739,25 @@ function main(argv: string[]): number {
       }
       const result = runDispatchComplete({ run, dispatchId, output: values.output, commit: values.commit });
       console.log(`${result.dispatchId} completed${result.idempotent ? ' (idempotent)' : ''}`);
+      return 0;
+    }
+    case 'dispatch-progress': {
+      const [, run, dispatchId] = positionals;
+      if (!run || !dispatchId || !values.file) {
+        throw new Error('Usage: fadeno dispatch-progress <run> <dispatch-id> --file <status.json> [--source agent|harness|director]');
+      }
+      if (values.source && !['agent', 'harness', 'director'].includes(values.source)) {
+        throw new Error(`Invalid --source "${values.source}". Use: agent | harness | director.`);
+      }
+      const result = runDispatchProgress({
+        run,
+        dispatchId,
+        file: values.file,
+        source: values.source as DispatchProgressSource | undefined,
+      });
+      console.log(
+        `${result.dispatchId} progress: ${result.state} (${result.source})${result.idempotent ? ' (idempotent)' : ''}`,
+      );
       return 0;
     }
     case 'dispatch-fail': {

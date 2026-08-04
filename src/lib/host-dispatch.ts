@@ -39,6 +39,28 @@ export interface HostDispatchReceipt {
   outputSha256?: string;
 }
 
+export type DispatchProgressState = 'running' | 'waiting_input' | 'blocked' | 'idle';
+export type DispatchProgressSource = 'agent' | 'harness' | 'director';
+
+export interface DispatchProgressReport {
+  state: DispatchProgressState;
+  phase?: string;
+  summary?: string;
+  completed?: string[];
+  current?: string;
+  next?: string;
+  blockers?: string[];
+  updatedAt?: string;
+}
+
+export interface HostDispatchProgressReceipt {
+  dispatchId: string;
+  state: DispatchProgressState;
+  source: DispatchProgressSource;
+  idempotent: boolean;
+  reportSha256: string;
+}
+
 export interface HostDispatchRequestOptions extends HostDispatchRequest {
   repoRoot?: string;
   cwd?: string;
@@ -73,6 +95,75 @@ export interface DispatchFailOptions {
   repoRoot?: string;
   cwd?: string;
   now?: Date;
+}
+
+export interface DispatchProgressOptions {
+  run: string;
+  dispatchId: string;
+  file: string;
+  source?: DispatchProgressSource;
+  repoRoot?: string;
+  cwd?: string;
+  now?: Date;
+}
+
+const PROGRESS_STATES = new Set<DispatchProgressState>(['running', 'waiting_input', 'blocked', 'idle']);
+const PROGRESS_SOURCES = new Set<DispatchProgressSource>(['agent', 'harness', 'director']);
+const MAX_PROGRESS_BYTES = 64 * 1024;
+
+function parseProgressReport(bytes: Buffer): DispatchProgressReport {
+  let value: unknown;
+  try {
+    value = JSON.parse(bytes.toString('utf8'));
+  } catch (err) {
+    throw new HostDispatchError(`progress report is not valid JSON: ${(err as Error).message}`);
+  }
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new HostDispatchError('progress report must be a JSON object.');
+  }
+  const doc = value as Record<string, unknown>;
+  const allowed = new Set(['state', 'phase', 'summary', 'completed', 'current', 'next', 'blockers', 'updated_at']);
+  const unknown = Object.keys(doc).filter((key) => !allowed.has(key));
+  if (unknown.length > 0) throw new HostDispatchError(`progress report has unknown field(s): ${unknown.join(', ')}.`);
+  if (typeof doc.state !== 'string' || !PROGRESS_STATES.has(doc.state as DispatchProgressState)) {
+    throw new HostDispatchError(`progress report state must be one of: ${[...PROGRESS_STATES].join(', ')}.`);
+  }
+  const optionalString = (key: string, max: number): string | undefined => {
+    const item = doc[key];
+    if (item === undefined) return undefined;
+    if (typeof item !== 'string' || item.trim() === '') throw new HostDispatchError(`progress report ${key} must be a non-empty string.`);
+    if (item.length > max) throw new HostDispatchError(`progress report ${key} exceeds ${max} characters.`);
+    return item;
+  };
+  const optionalStrings = (key: string): string[] | undefined => {
+    const item = doc[key];
+    if (item === undefined) return undefined;
+    if (!Array.isArray(item) || item.some((entry) => typeof entry !== 'string' || entry.trim() === '' || entry.length > 500)) {
+      throw new HostDispatchError(`progress report ${key} must be an array of non-empty strings up to 500 characters.`);
+    }
+    if (item.length > 50) throw new HostDispatchError(`progress report ${key} exceeds 50 entries.`);
+    return item as string[];
+  };
+  const updatedAt = optionalString('updated_at', 100);
+  if (updatedAt != null && Number.isNaN(Date.parse(updatedAt))) {
+    throw new HostDispatchError('progress report updated_at must be an ISO-compatible timestamp.');
+  }
+  const phase = optionalString('phase', 200);
+  const summary = optionalString('summary', 2_000);
+  const completed = optionalStrings('completed');
+  const current = optionalString('current', 1_000);
+  const next = optionalString('next', 1_000);
+  const blockers = optionalStrings('blockers');
+  return {
+    state: doc.state as DispatchProgressState,
+    ...(phase != null ? { phase } : {}),
+    ...(summary != null ? { summary } : {}),
+    ...(completed != null ? { completed } : {}),
+    ...(current != null ? { current } : {}),
+    ...(next != null ? { next } : {}),
+    ...(blockers != null ? { blockers } : {}),
+    ...(updatedAt != null ? { updatedAt } : {}),
+  };
 }
 
 function assertCurrentLedger(repoRoot: string, runQuery: string): { runDir: string; runId: string } {
@@ -347,6 +438,76 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
     opts.now,
   );
   return { dispatchId: opts.dispatchId, state: 'started', idempotent: false, agentId: opts.agentId };
+}
+
+/** Record one provenance-labelled, non-gating observation of a running host dispatch. */
+export function progressHostDispatch(opts: DispatchProgressOptions): HostDispatchProgressReceipt {
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const { runDir, runId } = assertCurrentLedger(repoRoot, opts.run);
+  const source = opts.source ?? 'agent';
+  if (!PROGRESS_SOURCES.has(source)) {
+    throw new HostDispatchError(`--source must be one of: ${[...PROGRESS_SOURCES].join(', ')}.`);
+  }
+  const events = eventsFor(runDir);
+  const { request } = findRequest(runId, events, opts.dispatchId);
+  const starts = startsFor(events, opts.dispatchId);
+  if (starts.length === 0) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" cannot report progress before dispatch-start.`);
+  if (starts.length > 1) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" was started more than once.`);
+  if (terminalsFor(events, opts.dispatchId).length > 0) {
+    throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already has a terminal receipt.`);
+  }
+  const reportFile = isAbsolute(opts.file) ? opts.file : resolve(cwd, opts.file);
+  if (!existsSync(reportFile) || !statSync(reportFile).isFile()) {
+    throw new HostDispatchError(`progress report does not exist: ${opts.file}`);
+  }
+  if (lstatSync(reportFile).isSymbolicLink()) {
+    throw new HostDispatchError(`progress report must not be a symlink: ${opts.file}`);
+  }
+  const bytes = readFileSync(reportFile);
+  if (bytes.length > MAX_PROGRESS_BYTES) {
+    throw new HostDispatchError(`progress report exceeds ${MAX_PROGRESS_BYTES} bytes.`);
+  }
+  const report = parseProgressReport(bytes);
+  const digest = sha256Hex(bytes);
+  const prior = events.findLast(
+    (event) => event.type === 'host_dispatch_progress' && event.extra.dispatch_id === opts.dispatchId,
+  );
+  if (prior?.extra.report_sha256 === digest && prior.extra.observation_source === source) {
+    return { dispatchId: opts.dispatchId, state: report.state, source, idempotent: true, reportSha256: digest };
+  }
+  const agentId = starts[0]!.extra.agent_id;
+  append(
+    runDir,
+    {
+      type: 'host_dispatch_progress',
+      step: request.step,
+      actor: request.actor,
+      dispatch_id: request.dispatchId,
+      step_execution_id: request.stepExecutionId,
+      actor_call_id: request.actorCallId,
+      attempt: request.attempt,
+      executor: request.executor,
+      adapter: 'host',
+      model: request.model,
+      reasoning_effort: request.reasoningEffort,
+      agent_type: request.agentType,
+      agent_id: agentId,
+      observation_source: source,
+      progress_state: report.state,
+      phase: report.phase,
+      summary: report.summary,
+      completed: report.completed,
+      current: report.current,
+      next: report.next,
+      blockers: report.blockers,
+      reported_at: report.updatedAt,
+      report_sha256: digest,
+      host_attested: true,
+    },
+    opts.now,
+  );
+  return { dispatchId: opts.dispatchId, state: report.state, source, idempotent: false, reportSha256: digest };
 }
 
 export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatchReceipt {

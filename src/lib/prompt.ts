@@ -88,6 +88,12 @@ export function fenceFor(content: string): string {
   return '`'.repeat(Math.max(3, longest + 1));
 }
 
+/** Workspace-relative cooperative status path embedded in the immutable prompt. */
+export function progressSidecarPath(runId: string, step: string, actor: string | null): string {
+  const safe = (value: string): string => value.replace(/[^A-Za-z0-9_.-]+/g, '_');
+  return `.fadeno/progress/${safe(runId)}/${safe(step)}--${safe(actor ?? 'anonymous')}.json`;
+}
+
 function blockquote(text: string): string[] {
   return text
     .replace(/\s+$/, '')
@@ -166,7 +172,7 @@ function renderConstraints(ctx: PromptContext): string[] {
     );
   }
   lines.push(
-    '- You may read the repository, but must not modify `run.yaml`, `events.jsonl`, prompt snapshots under `artifacts/prompts/`, or any artifact other than your declared output below.',
+    '- You may read the repository, but must not modify `run.yaml`, `events.jsonl`, prompt snapshots under `artifacts/prompts/`, or any artifact other than your declared output below. The cooperative progress sidecar is the sole non-artifact exception.',
   );
   return lines;
 }
@@ -230,8 +236,24 @@ export function renderStepPrompt(ctx: PromptContext): string {
   lines.push(...renderConstraints(ctx), '');
   lines.push(...renderOutput(ctx), '');
 
+  const progressPath = progressSidecarPath(ctx.runId, ctx.step, ctx.actor);
+  lines.push('## Cooperative progress', '');
+  lines.push(`- Status sidecar: \`${progressPath}\` (workspace-relative, ephemeral, never commit it; create parent directories if needed).`);
+  lines.push('- Update it after meaningful phases and whenever blocked or waiting for input. Write a JSON object with:');
+  lines.push('- Keep reports concise and never include secrets, credentials, raw prompts, or private reasoning.');
+  lines.push('', '```json', '{');
+  lines.push('  "state": "running | waiting_input | blocked | idle",');
+  lines.push('  "phase": "short phase name",');
+  lines.push('  "completed": ["finished checkpoint"],');
+  lines.push('  "current": "what is happening now",');
+  lines.push('  "next": "next intended action",');
+  lines.push('  "blockers": [],');
+  lines.push('  "updated_at": "ISO-8601 timestamp"');
+  lines.push('}', '```', '');
+  lines.push('- This report is attested progress evidence only. It never controls a gate or replaces the declared output.', '');
+
   lines.push('## Completion protocol', '');
-  lines.push('- Produce exactly the one declared artifact above; write nothing else.');
+  lines.push('- Produce exactly the one declared artifact above; aside from the progress sidecar, write nothing else.');
   lines.push('- Do not modify the run ledger (`run.yaml`, `events.jsonl`) or any prompt snapshot.');
   lines.push('- Keep all commentary inside the artifact; emit no other prose.');
   lines.push('- If your harness cannot write files, return only the artifact body for the coordinator to save.');

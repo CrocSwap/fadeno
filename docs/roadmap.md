@@ -139,6 +139,13 @@ request ids. The host submits serial `dispatch-start`, `dispatch-complete`, or
 invalid output is parked under `artifacts/attempts/`. The director remains the
 sole ledger writer.
 
+**Cross-harness progress is now explicit:** immutable actor prompts name an
+ephemeral status sidecar and the host records source-labelled
+`host_dispatch_progress` observations between start and terminal. The default
+`show` view is workflow-aligned: it includes unstarted graph nodes, literal map
+members, pending/running/waiting/blocked/completed state, and actor/step/total
+runtime. Progress remains non-gating attestation, never semantic truth.
+
 **First format-0.2 dogfood receipt (2026-08-02):** the fadeno-demo exhibits
 were regenerated on 0.5.0 — PR #3 (genuine signed-durations trace, 16 ok / 2
 skipped) and PR #4 (a *non-gating* finding laundered from the review report:

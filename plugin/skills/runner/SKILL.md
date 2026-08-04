@@ -29,8 +29,12 @@ outputs and receipts to you; they never invoke Fadeno ledger commands.
    record iteration start, condition evaluation, and success or exhaustion.
 8. Execute each step in `flow` using available host capabilities. When
    `fadeno drive` returns `awaiting_host_dispatch`, start each request with the
-   native facility, attach its native agent id, and submit exactly one receipt
-   serially with `dispatch-complete` or `dispatch-fail` before driving again.
+   native facility, attach its native agent id, and submit exactly one terminal
+   receipt serially with `dispatch-complete` or `dispatch-fail` before driving
+   again. The immutable prompt names an ephemeral progress sidecar. Poll it
+   without interrupting the agent and record meaningful changes with `fadeno
+   dispatch-progress <run> <dispatch> --file <workspace>/<sidecar> --source
+   agent`.
 9. If native subagents are available, delegate role-specific work to them — but
    **one level only**; do not assume a subagent can spawn its own subagents.
 10. If native subagents are unavailable, degrade loudly: use a declared command
@@ -62,7 +66,11 @@ outputs and receipts to you; they never invoke Fadeno ledger commands.
 - Attach native agent ids to host starts and keep model, effort, and agent type
   as host-attested evidence.
 - Use original native agents for revision when possible; ask `fadeno show` and
-  merge its request-level projection with host/Codex activity for status.
+  merge its workflow-aligned actor projection with host/Codex activity for
+  status. Report pending/running/waiting/blocked/completed actors plus total
+  runtime; never infer internal progress from idle/busy alone.
+- Progress is attested observability, never a gate input. Preserve its source
+  (`agent`, `harness`, or `director`) and say `unavailable` when no channel exists.
 - Parallel writers use worktrees or patch-only output when the host supports it;
   automatic worktree creation/merging is not part of Fadeno's MVP.
 - Ask for user approval before destructive commands, dependency additions,

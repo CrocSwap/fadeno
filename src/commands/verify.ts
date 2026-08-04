@@ -286,7 +286,12 @@ function checkHostDispatchRequests(run: RunSummary, events: RunEvent[], mode: Le
   }
   for (const [id, count] of counts) if (count > 1) problems.push(`dispatch ${id} requested ${count} times`);
   for (const event of events) {
-    if (event.type !== 'actor_dispatched' && event.type !== 'actor_completed' && event.type !== 'actor_failed') continue;
+    if (
+      event.type !== 'actor_dispatched' &&
+      event.type !== 'host_dispatch_progress' &&
+      event.type !== 'actor_completed' &&
+      event.type !== 'actor_failed'
+    ) continue;
     if (event.extra.dispatch_id != null && typeof event.extra.dispatch_id !== 'string') problems.push(`${event.type} has a non-string dispatch_id`);
     if (typeof event.extra.dispatch_id === 'string' && !counts.has(event.extra.dispatch_id)) problems.push(`${event.type} references orphan dispatch ${event.extra.dispatch_id}`);
   }
@@ -350,7 +355,11 @@ function checkHostDispatchLifecycle(run: RunSummary, events: RunEvent[], mode: L
     const terminals = events.filter(
       (event) => (event.type === 'actor_completed' || event.type === 'actor_failed') && event.extra.dispatch_id === id,
     );
+    const progress = events.filter(
+      (event) => event.type === 'host_dispatch_progress' && event.extra.dispatch_id === id,
+    );
     if (starts.length === 0) {
+      if (progress.length > 0) problems.push(`${id}: progress receipt has no actor_dispatched start`);
       if (terminals.length > 0) problems.push(`${id}: terminal receipt has no actor_dispatched start`);
       else if (run.status === 'completed') problems.push(`${id}: completed run has no actor_dispatched start`);
       continue;
@@ -361,6 +370,7 @@ function checkHostDispatchLifecycle(run: RunSummary, events: RunEvent[], mode: L
     const terminal = terminals[0];
     const requestIndex = events.indexOf(request);
     const startIndex = events.indexOf(start);
+    const terminalIndex = terminal == null ? null : events.indexOf(terminal);
     if (startIndex <= requestIndex) problems.push(`${id}: actor_dispatched must follow host_dispatch_requested`);
     if (terminal != null && events.indexOf(terminal) <= startIndex) problems.push(`${id}: terminal receipt must follow actor_dispatched`);
     if (terminal != null && terminal.extra.agent_id !== start.extra.agent_id) problems.push(`${id}: terminal agent_id does not match start`);
@@ -371,6 +381,41 @@ function checkHostDispatchLifecycle(run: RunSummary, events: RunEvent[], mode: L
       if (terminal != null) {
         const terminalValue = field === 'step' ? terminal.step : field === 'actor' ? terminal.extra.actor : terminal.extra[field];
         if (terminalValue !== startValue) problems.push(`${id}: terminal ${field} does not match start`);
+      }
+    }
+    for (const observation of progress) {
+      const observationIndex = events.indexOf(observation);
+      if (observationIndex <= startIndex) problems.push(`${id}: progress receipt must follow actor_dispatched`);
+      if (terminalIndex != null && observationIndex >= terminalIndex) problems.push(`${id}: progress receipt must precede the terminal receipt`);
+      if (!['agent', 'harness', 'director'].includes(String(observation.extra.observation_source))) {
+        problems.push(`${id}: progress receipt has an invalid observation_source`);
+      }
+      if (!['running', 'waiting_input', 'blocked', 'idle'].includes(String(observation.extra.progress_state))) {
+        problems.push(`${id}: progress receipt has an invalid progress_state`);
+      }
+      if (typeof observation.extra.report_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(observation.extra.report_sha256)) {
+        problems.push(`${id}: progress receipt has an invalid report_sha256`);
+      }
+      if (observation.extra.host_attested !== true) problems.push(`${id}: progress receipt is not host-attested`);
+      if (observation.extra.agent_id !== start.extra.agent_id) problems.push(`${id}: progress agent_id does not match start`);
+      for (const field of ['step', 'actor', 'step_execution_id', 'actor_call_id', 'attempt', 'executor', 'adapter', 'model', 'reasoning_effort', 'agent_type'] as const) {
+        const observed = field === 'step' ? observation.step : field === 'actor' ? observation.extra.actor : observation.extra[field];
+        const started = field === 'step' ? start.step : field === 'actor' ? start.extra.actor : start.extra[field];
+        if (observed !== started) problems.push(`${id}: progress ${field} does not match start`);
+      }
+      if (observation.extra.completed !== undefined && !isStringArray(observation.extra.completed)) {
+        problems.push(`${id}: progress completed must be an array of strings`);
+      }
+      if (observation.extra.blockers !== undefined && !isStringArray(observation.extra.blockers)) {
+        problems.push(`${id}: progress blockers must be an array of strings`);
+      }
+      for (const field of ['phase', 'summary', 'current', 'next', 'reported_at'] as const) {
+        if (observation.extra[field] !== undefined && typeof observation.extra[field] !== 'string') {
+          problems.push(`${id}: progress ${field} must be a string when present`);
+        }
+      }
+      if (typeof observation.extra.reported_at === 'string' && Number.isNaN(Date.parse(observation.extra.reported_at))) {
+        problems.push(`${id}: progress reported_at is not a timestamp`);
       }
     }
     if (start.extra.validation_errors !== undefined && !isStringArray(start.extra.validation_errors)) {

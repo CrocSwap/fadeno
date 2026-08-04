@@ -66,7 +66,8 @@ appends any type), but these are the standard ones: `run_started`,
 `loop_succeeded`, `loop_exhausted`, `roles_degraded`, `prompt_assembled`, and a
 terminal `run_completed` / `run_failed` / `run_aborted`. Engine-driven runs
 (`fadeno drive`) additionally record `profile_snapshotted`, `executor_override`,
-`host_dispatch_requested`, `actor_dispatched`, `actor_completed`, `actor_failed`, `decision_requested`, and
+`host_dispatch_requested`, `actor_dispatched`, `host_dispatch_progress`,
+`actor_completed`, `actor_failed`, `decision_requested`, and
 `decision_resolved`. Every line carries at least `type`, `step` (a step id, or
 `null` for run-level events), a contiguous 1-based **`seq`**, and `timestamp`.
 
@@ -106,6 +107,7 @@ agent serially:
 
 ```text
 fadeno dispatch-start <run> <dispatch-id> --agent-id <native-id>
+fadeno dispatch-progress <run> <dispatch-id> --file <status.json> [--source agent|harness|director]
 fadeno dispatch-complete <run> <dispatch-id> --output <temporary-file> [--commit <sha>]
 fadeno dispatch-fail <run> <dispatch-id> --reason <text>
 ```
@@ -115,6 +117,17 @@ valid completion is copied to the planned immutable artifact path and gets a
 manifest; invalid bytes are retained under `artifacts/attempts/`. Native
 workers do not invoke Fadeno ledger commands — the host coordinator is the
 sole writer.
+
+The immutable actor prompt also names a workspace-relative cooperative status
+sidecar. An agent or harness may update that JSON while it works; the host polls
+it and records provenance-labelled `host_dispatch_progress` observations.
+Progress states are `running`, `waiting_input`, `blocked`, and `idle`. They are
+attested and intentionally non-gating: verification checks lifecycle order,
+identity, source labels, and shape, but cannot prove the semantic report true.
+`fadeno show` projects those observations back onto the original workflow and
+shows pending/running/waiting/blocked/completed actors with elapsed and total
+runtime. Missing observations remain visibly unavailable rather than inferred
+from harness busy/idle state.
 
 **Sessions are opt-in and marked.** An executor that declares `resume` in
 `.fadeno/executors.yaml` keeps one harness session per role per run; its

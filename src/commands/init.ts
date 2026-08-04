@@ -41,6 +41,7 @@ export function runInit(opts: InitOptions): InitResult {
   // 1. Shared `.fadeno/` tree (vocabulary, playbooks, schemas, runs, enforcement).
   //    This is the per-repo "definitions" layer — always written.
   copyTree(join(tpl, 'common', 'fadeno'), join(repoRoot, '.fadeno'), force, results);
+  ensureGitignored(repoRoot, '.fadeno/progress/', results);
 
   // Steps 2–4 install the "capability" layer (skills, subagents, bootstrap).
   // --data-only skips them: a plugin user gets capability from the plugin, so
@@ -155,6 +156,7 @@ function ensureGitignored(repoRoot: string, pattern: string, results: EmitResult
   const content = existed ? readFileSync(gitignorePath, 'utf8') : '';
   const lines = content.split(/\r?\n/).map((line) => line.trim());
   if (lines.includes(pattern) || lines.includes('.claude') || lines.includes('.claude/')) return;
+  if (pattern.startsWith('.fadeno/') && (lines.includes('.fadeno') || lines.includes('.fadeno/'))) return;
 
   const sep = content.length === 0 || content.endsWith('\n') ? '' : '\n';
   const block = `${sep}# Fadeno: per-user local Claude settings (not committed)\n${pattern}\n`;

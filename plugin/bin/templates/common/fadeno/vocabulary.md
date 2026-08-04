@@ -28,6 +28,9 @@ truth for the vocabulary; this file explains what each term *means*.
 - **Reduce** — Merge many artifacts into one.
 - **Host adapter** — How a playbook maps onto a specific environment (Codex,
   Claude Code, hook-enabled, compiled runtime).
+- **Progress observation** — A provenance-labelled, host-recorded snapshot of
+  what a native actor or harness reports between start and terminal. It is
+  attested observability, not a judgment artifact, and can never control a gate.
 
 ## The most important design rule
 

@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import { resolveActiveArtifacts, type ActiveArtifact } from '../lib/artifact-manifest.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import {
@@ -17,11 +20,33 @@ export interface ShowOptions {
   legacy?: boolean;
   cwd?: string;
   repoRoot?: string;
+  /** Injectable clock for stable running-duration projections. */
+  now?: Date;
+}
+
+export type WorkflowState = 'pending' | 'running' | 'waiting' | 'blocked' | 'completed' | 'failed';
+
+export interface ActorView {
+  actor: string;
+  state: WorkflowState;
+  runtimeMs: number | null;
+  phase: string | null;
+  summary: string | null;
+  completed: string[];
+  current: string | null;
+  next: string | null;
+  blockers: string[];
+  updatedAt: string | null;
+  source: string | null;
 }
 
 export interface StepView {
   id: string;
-  state: 'done' | 'current' | 'failed' | 'waiting';
+  kind: string | null;
+  loopBodyOf: string | null;
+  state: WorkflowState;
+  runtimeMs: number | null;
+  actors: ActorView[];
   artifacts: number;
   gates: { condition: string; result: string }[];
   iterations: number;
@@ -42,6 +67,8 @@ export interface StepView {
  * remain available for drill-down.
  */
 export interface ShowProjection {
+  playbook: string | null;
+  runtimeMs: number | null;
   steps: StepView[];
   active: ActiveArtifact[];
   decisions: { step: string | null; branch: string }[];
@@ -56,8 +83,20 @@ export interface HostRequestView {
   executor: string;
   model: string | null;
   reasoningEffort: string | null;
-  state: 'requested' | 'running' | 'completed' | 'failed';
+  state: 'requested' | 'running' | 'waiting' | 'blocked' | 'completed' | 'failed';
   agentId: string | null;
+  requestedAt: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  runtimeMs: number | null;
+  phase: string | null;
+  summary: string | null;
+  completed: string[];
+  current: string | null;
+  next: string | null;
+  blockers: string[];
+  progressUpdatedAt: string | null;
+  progressSource: string | null;
 }
 
 export interface ShowResult {
@@ -79,19 +118,92 @@ export function runShow(opts: ShowOptions): ShowResult {
   const raw = readEvents(run.dir);
   const events = mode !== 'current' ? normalizeLegacyEvents(raw.events) : raw.events;
   const artifacts = listArtifacts(run.dir);
-  const projection = mode === 'current' ? projectRun(run, events) : null;
+  const projection = mode === 'current' ? projectRun(repoRoot, run, events, opts.now ?? new Date()) : null;
   return { run, mode, events, badLines: raw.badLines, artifacts, projection };
 }
 
-function projectRun(run: RunSummary, events: RunEvent[]): ShowProjection {
+interface WorkflowStep {
+  id: string;
+  kind: string | null;
+  actors: string[];
+  loopBodyOf: string | null;
+}
+
+function workflowSteps(repoRoot: string, playbook: string | null): WorkflowStep[] {
+  if (playbook == null) return [];
+  const file = [`${playbook}.yaml`, `${playbook}.yml`]
+    .map((name) => join(repoRoot, '.fadeno', 'playbooks', name))
+    .find((candidate) => existsSync(candidate));
+  if (file == null) return [];
+  try {
+    const parsed = parseYaml(readFileSync(file, 'utf8')) as { flow?: unknown };
+    if (!Array.isArray(parsed?.flow)) return [];
+    const raw = parsed.flow.filter(
+      (step): step is Record<string, unknown> => step != null && typeof step === 'object' && !Array.isArray(step),
+    );
+    const bodyOwner = new Map<string, string>();
+    for (const step of raw) {
+      if (typeof step.id !== 'string' || !Array.isArray(step.body)) continue;
+      for (const member of step.body) if (typeof member === 'string') bodyOwner.set(member, step.id);
+    }
+    return raw.flatMap((step) => {
+      if (typeof step.id !== 'string') return [];
+      const actors = Array.isArray(step.over)
+        ? step.over.filter((actor): actor is string => typeof actor === 'string')
+        : typeof step.actor === 'string'
+          ? [step.actor]
+          : [];
+      return [{
+        id: step.id,
+        kind: typeof step.kind === 'string' ? step.kind : null,
+        actors,
+        loopBodyOf: bodyOwner.get(step.id) ?? null,
+      }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function timeMs(value: string | null): number | null {
+  if (value == null) return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function elapsed(start: string | null, end: string | null, now: Date): number | null {
+  const from = timeMs(start);
+  const to = timeMs(end) ?? now.getTime();
+  return from == null ? null : Math.max(0, to - from);
+}
+
+function projectRun(repoRoot: string, run: RunSummary, events: RunEvent[], now: Date): ShowProjection {
   const stepOrder: string[] = [];
   const byStep = new Map<string, StepView>();
+  const definitions = new Map(workflowSteps(repoRoot, run.playbook).map((step) => [step.id, step]));
   const view = (id: string): StepView => {
     let v = byStep.get(id);
     if (!v) {
+      const definition = definitions.get(id);
       v = {
         id,
-        state: 'done',
+        kind: definition?.kind ?? null,
+        loopBodyOf: definition?.loopBodyOf ?? null,
+        state: 'pending',
+        runtimeMs: null,
+        actors: (definition?.actors ?? []).map((actor) => ({
+          actor,
+          state: 'pending',
+          runtimeMs: null,
+          phase: null,
+          summary: null,
+          completed: [],
+          current: null,
+          next: null,
+          blockers: [],
+          updatedAt: null,
+          source: null,
+        })),
         artifacts: 0,
         gates: [],
         iterations: 0,
@@ -107,26 +219,41 @@ function projectRun(run: RunSummary, events: RunEvent[]): ShowProjection {
     return v;
   };
 
+  for (const step of definitions.values()) view(step.id);
+
   const decisions: { step: string | null; branch: string }[] = [];
   const failures: string[] = [];
-  const requests = projectHostRequests(events);
+  const requests = projectHostRequests(events, now);
   const callsByStep = new Map<string, Set<string>>();
   const pendingDecisions = new Map<string, string>(); // decision_id → step
-  let lastStarted: string | null = null;
+  const firstAt = new Map<string, string>();
+  const lastAt = new Map<string, string>();
 
   for (const event of events) {
-    if (event.step != null) view(event.step);
+    if (event.step != null) {
+      view(event.step);
+      if (event.timestamp != null) {
+        if (!firstAt.has(event.step)) firstAt.set(event.step, event.timestamp);
+        lastAt.set(event.step, event.timestamp);
+      }
+    }
     switch (event.type) {
       case 'step_started':
-        if (event.step != null) lastStarted = event.step;
+        if (event.step != null) view(event.step).state = 'running';
         break;
       case 'artifact_created':
-        if (event.step != null) view(event.step).artifacts += 1;
+        if (event.step != null) {
+          view(event.step).artifacts += 1;
+          view(event.step).state = 'completed';
+        }
         break;
       case 'gate_evaluated': {
         const condition = typeof event.extra.condition === 'string' ? event.extra.condition : '?';
         const result = typeof event.extra.result === 'string' ? event.extra.result : '?';
-        if (event.step != null) view(event.step).gates.push({ condition, result });
+        if (event.step != null) {
+          view(event.step).gates.push({ condition, result });
+          view(event.step).state = 'completed';
+        }
         if (result === 'fail') {
           const artifact = typeof event.extra.artifact === 'string' ? ` (${event.extra.artifact})` : '';
           failures.push(`gate ${condition} → fail${artifact}`);
@@ -134,17 +261,22 @@ function projectRun(run: RunSummary, events: RunEvent[]): ShowProjection {
         break;
       }
       case 'loop_iteration_started':
-        if (event.step != null) view(event.step).iterations += 1;
+        if (event.step != null) {
+          view(event.step).iterations += 1;
+          view(event.step).state = 'running';
+        }
         break;
       case 'human_decision': {
         const branch = typeof event.extra.branch === 'string' ? event.extra.branch : '?';
         if (event.step != null) view(event.step).decisions.push(branch);
+        if (event.step != null) view(event.step).state = 'completed';
         decisions.push({ step: event.step, branch });
         break;
       }
       case 'actor_dispatched': {
         if (event.step == null) break;
         const v = view(event.step);
+        v.state = 'running';
         v.attempts += 1;
         if (event.extra.attempt_reason === 'schema_repair') v.repairs += 1;
         if (event.extra.session === 'resumed') v.resumed += 1;
@@ -158,11 +290,16 @@ function projectRun(run: RunSummary, events: RunEvent[]): ShowProjection {
         const reason = typeof event.extra.reason === 'string' ? event.extra.reason : 'failed';
         const executor = typeof event.extra.executor === 'string' ? ` (${event.extra.executor})` : '';
         failures.push(`${event.step ?? '?'}: executor ${reason}${executor}`);
+        if (event.step != null) view(event.step).state = 'failed';
         break;
       }
+      case 'actor_completed':
+        if (event.step != null) view(event.step).state = event.extra.output_valid === false ? 'pending' : 'completed';
+        break;
       case 'decision_requested': {
         const id = typeof event.extra.decision_id === 'string' ? event.extra.decision_id : null;
         if (id != null && event.step != null) pendingDecisions.set(id, event.step);
+        if (event.step != null) view(event.step).state = 'waiting';
         break;
       }
       case 'decision_resolved': {
@@ -170,6 +307,7 @@ function projectRun(run: RunSummary, events: RunEvent[]): ShowProjection {
         if (id != null) pendingDecisions.delete(id);
         const option = typeof event.extra.option === 'string' ? event.extra.option : '?';
         if (event.step != null) view(event.step).decisions.push(option);
+        if (event.step != null) view(event.step).state = 'completed';
         decisions.push({ step: event.step, branch: option });
         break;
       }
@@ -184,22 +322,103 @@ function projectRun(run: RunSummary, events: RunEvent[]): ShowProjection {
     }
   }
 
-  if (lastStarted != null) {
-    const last = view(lastStarted);
-    if (run.status === 'running') last.state = 'current';
-    else if (run.status === 'failed' || run.status === 'aborted') last.state = 'failed';
-  }
-
   for (const [stepId, calls] of callsByStep) view(stepId).actorCalls = calls.size;
   if (run.status === 'running' || run.status == null) {
     for (const stepId of pendingDecisions.values()) view(stepId).state = 'waiting';
   }
 
+  const commandActors = new Map<string, { actor: string; state: WorkflowState; startedAt: string | null; endedAt: string | null }>();
+  for (const event of events) {
+    if (event.type !== 'actor_dispatched' && event.type !== 'actor_completed' && event.type !== 'actor_failed') continue;
+    if (event.step == null || typeof event.extra.actor !== 'string') continue;
+    const key = `${event.step}\0${event.extra.actor}`;
+    const current = commandActors.get(key) ?? {
+      actor: event.extra.actor,
+      state: 'pending' as WorkflowState,
+      startedAt: null,
+      endedAt: null,
+    };
+    if (event.type === 'actor_dispatched') {
+      current.state = 'running';
+      current.startedAt ??= event.timestamp;
+      current.endedAt = null;
+    } else {
+      current.state = event.type === 'actor_completed' ? 'completed' : 'failed';
+      current.endedAt = event.timestamp;
+    }
+    commandActors.set(key, current);
+  }
+  for (const [key, lifecycle] of commandActors) {
+    const stepId = key.split('\0', 1)[0]!;
+    const step = view(stepId);
+    let actor = step.actors.find((candidate) => candidate.actor === lifecycle.actor);
+    if (actor == null) {
+      actor = { actor: lifecycle.actor, state: 'pending', runtimeMs: null, phase: null, summary: null, completed: [], current: null, next: null, blockers: [], updatedAt: null, source: null };
+      step.actors.push(actor);
+    }
+    actor.state = lifecycle.state;
+    actor.runtimeMs = lifecycle.startedAt == null ? null : elapsed(lifecycle.startedAt, lifecycle.endedAt, now);
+  }
+
+  const latestByActor = new Map<string, HostRequestView>();
+  for (const request of requests) latestByActor.set(`${request.step}\0${request.actor ?? ''}`, request);
+  for (const request of latestByActor.values()) {
+    const step = view(request.step);
+    const actorName = request.actor ?? '(anonymous)';
+    let actor = step.actors.find((candidate) => candidate.actor === actorName);
+    if (actor == null) {
+      actor = { actor: actorName, state: 'pending', runtimeMs: null, phase: null, summary: null, completed: [], current: null, next: null, blockers: [], updatedAt: null, source: null };
+      step.actors.push(actor);
+    }
+    actor.state = request.state === 'requested' ? 'pending' : request.state;
+    actor.runtimeMs = request.runtimeMs;
+    actor.phase = request.phase;
+    actor.summary = request.summary;
+    actor.completed = request.completed;
+    actor.current = request.current;
+    actor.next = request.next;
+    actor.blockers = request.blockers;
+    actor.updatedAt = request.progressUpdatedAt;
+    actor.source = request.progressSource;
+  }
+
+  for (const step of byStep.values()) {
+    if (step.actors.length > 0) {
+      const states = step.actors.map((actor) => actor.state);
+      if (states.some((state) => state === 'failed')) step.state = 'failed';
+      else if (states.some((state) => state === 'blocked')) step.state = 'blocked';
+      else if (states.some((state) => state === 'running')) step.state = 'running';
+      else if (states.some((state) => state === 'waiting')) step.state = 'waiting';
+      else if (states.every((state) => state === 'completed')) step.state = 'completed';
+      else step.state = 'pending';
+    }
+    const startedAt = firstAt.get(step.id) ?? null;
+    const isOpen = step.state === 'running' || step.state === 'waiting' || step.state === 'blocked';
+    step.runtimeMs = step.state === 'pending' ? null : elapsed(startedAt, isOpen ? null : lastAt.get(step.id) ?? null, now);
+  }
+
+  for (const step of byStep.values()) {
+    if (step.kind !== 'loop') continue;
+    const body = [...byStep.values()].filter((candidate) => candidate.loopBodyOf === step.id);
+    if (body.some((candidate) => candidate.state === 'failed')) step.state = 'failed';
+    else if (body.some((candidate) => candidate.state === 'blocked')) step.state = 'blocked';
+    else if (body.some((candidate) => candidate.state === 'running')) step.state = 'running';
+    else if (body.some((candidate) => candidate.state === 'waiting')) step.state = 'waiting';
+  }
+
   const { active } = resolveActiveArtifacts(events);
-  return { steps: stepOrder.map((id) => byStep.get(id)!), active, decisions, failures, requests };
+  return {
+    playbook: run.playbook,
+    runtimeMs: elapsed(run.startedAt, run.endedAt, now),
+    steps: stepOrder.map((id) => byStep.get(id)!),
+    active,
+    decisions,
+    failures,
+    requests,
+  };
 }
 
-function projectHostRequests(events: RunEvent[]): HostRequestView[] {
+function projectHostRequests(events: RunEvent[], now: Date): HostRequestView[] {
   const requested = events.filter(
     (event) => event.type === 'host_dispatch_requested' && typeof event.extra.dispatch_id === 'string',
   );
@@ -210,6 +429,21 @@ function projectHostRequests(events: RunEvent[]): HostRequestView[] {
     const terminal = events.find(
       (candidate) => (candidate.type === 'actor_completed' || candidate.type === 'actor_failed') && candidate.extra.dispatch_id === dispatchId,
     );
+    const progress = events.findLast(
+      (candidate) => candidate.type === 'host_dispatch_progress' && candidate.extra.dispatch_id === dispatchId,
+    );
+    const progressState = progress?.extra.progress_state;
+    const state: HostRequestView['state'] = terminal?.type === 'actor_completed'
+      ? 'completed'
+      : terminal?.type === 'actor_failed'
+        ? 'failed'
+        : progressState === 'blocked'
+          ? 'blocked'
+          : progressState === 'waiting_input' || progressState === 'idle'
+            ? 'waiting'
+            : start
+              ? 'running'
+              : 'requested';
     out.push({
       dispatchId,
       step: event.step ?? '?',
@@ -217,8 +451,24 @@ function projectHostRequests(events: RunEvent[]): HostRequestView[] {
       executor: typeof event.extra.executor === 'string' ? event.extra.executor : '?',
       model: typeof event.extra.model === 'string' ? event.extra.model : null,
       reasoningEffort: typeof event.extra.reasoning_effort === 'string' ? event.extra.reasoning_effort : null,
-      state: terminal?.type === 'actor_completed' ? 'completed' : terminal?.type === 'actor_failed' ? 'failed' : start ? 'running' : 'requested',
+      state,
       agentId: typeof start?.extra.agent_id === 'string' ? start.extra.agent_id : null,
+      requestedAt: event.timestamp,
+      startedAt: start?.timestamp ?? null,
+      endedAt: terminal?.timestamp ?? null,
+      runtimeMs: start == null ? null : elapsed(start.timestamp, terminal?.timestamp ?? null, now),
+      phase: typeof progress?.extra.phase === 'string' ? progress.extra.phase : null,
+      summary: typeof progress?.extra.summary === 'string' ? progress.extra.summary : null,
+      completed: Array.isArray(progress?.extra.completed)
+        ? progress.extra.completed.filter((item): item is string => typeof item === 'string')
+        : [],
+      current: typeof progress?.extra.current === 'string' ? progress.extra.current : null,
+      next: typeof progress?.extra.next === 'string' ? progress.extra.next : null,
+      blockers: Array.isArray(progress?.extra.blockers)
+        ? progress.extra.blockers.filter((blocker): blocker is string => typeof blocker === 'string')
+        : [],
+      progressUpdatedAt: typeof progress?.extra.reported_at === 'string' ? progress.extra.reported_at : progress?.timestamp ?? null,
+      progressSource: typeof progress?.extra.observation_source === 'string' ? progress.extra.observation_source : null,
     });
   }
   return out;

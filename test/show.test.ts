@@ -70,6 +70,54 @@ test('show returns summary, events, and empty badLines for a clean run', (t) => 
   assert.deepEqual(result.badLines, []);
 });
 
+test('projection starts from the playbook graph so unstarted steps and actors are pending', (t) => {
+  const root = tempRepo(t);
+  const runId = '2026-07-10-2212-pending-graph';
+  seedRun(root, runId);
+  const playbooks = join(root, '.fadeno', 'playbooks');
+  mkdirSync(playbooks, { recursive: true });
+  writeFileSync(join(playbooks, 'code-change-review.yaml'), `kind: AgentPlaybook
+schema_version: "0.1"
+name: code-change-review
+description: Projection fixture.
+roles:
+  agent_1: { purpose: First. }
+  agent_2: { purpose: Second. }
+  finalizer: { purpose: Finish. }
+flow:
+  - id: implement
+    kind: map
+    over: [agent_1, agent_2]
+  - id: finalize
+    kind: actor_call
+    actor: finalizer
+    terminal_status: completed
+`);
+
+  const result = runShow({ repoRoot: root, run: runId, now: new Date('2026-07-11T02:12:42.797Z') });
+  const projection = result.projection!;
+  assert.equal(projection.runtimeMs, 10_000);
+  assert.deepEqual(projection.steps.map((step) => step.id), ['implement', 'finalize']);
+  assert.deepEqual(projection.steps.map((step) => step.state), ['pending', 'pending']);
+  assert.deepEqual(projection.steps[0]!.actors.map((actor) => [actor.actor, actor.state]), [
+    ['agent_1', 'pending'],
+    ['agent_2', 'pending'],
+  ]);
+  assert.deepEqual(projection.steps[1]!.actors.map((actor) => [actor.actor, actor.state]), [['finalizer', 'pending']]);
+
+  const runDir = join(root, '.fadeno', 'runs', runId);
+  writeFileSync(join(runDir, 'events.jsonl'), [
+    '{"type":"run_started","step":null,"seq":1,"timestamp":"2026-07-11T02:12:32.797Z"}',
+    '{"type":"actor_dispatched","step":"implement","actor":"agent_1","executor":"opus","seq":2,"timestamp":"2026-07-11T02:12:34.000Z"}',
+    '{"type":"actor_failed","step":"implement","actor":"agent_1","executor":"opus","reason":"exit_nonzero","seq":3,"timestamp":"2026-07-11T02:12:39.000Z"}',
+    '',
+  ].join('\n'));
+  const failed = runShow({ repoRoot: root, run: runId, now: new Date('2026-07-11T02:12:42.797Z') }).projection!;
+  assert.equal(failed.steps[0]!.actors.find((actor) => actor.actor === 'agent_1')!.state, 'failed');
+  assert.equal(failed.steps[0]!.actors.find((actor) => actor.actor === 'agent_1')!.runtimeMs, 5_000);
+  assert.equal(failed.steps[0]!.state, 'failed');
+});
+
 test('unparseable event lines land in badLines; others still parse', (t) => {
   const root = tempRepo(t);
   const runId = '2026-07-10-2212-mixed-events';
@@ -172,7 +220,7 @@ test('projection: steps in order with states, counts, gates, decisions, failures
   // via its decision event, so it is not the cursor.
   assert.deepEqual(
     p.steps.map((s) => s.state),
-    ['done', 'done', 'current', 'done'],
+    ['completed', 'completed', 'running', 'completed'],
   );
   assert.equal(p.steps[0]!.artifacts, 1);
   assert.deepEqual(p.steps[1]!.gates, [{ condition: 'no_blocking_issues', result: 'fail' }]);

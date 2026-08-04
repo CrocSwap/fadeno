@@ -113,7 +113,7 @@ ${TASK}
 
 - Map step: perform only the \`architect_fable\` member. The other members (\`architect_sol\`) are handled separately — do not coordinate with them or produce their outputs.
 - Policies (advisory unless enforced by hooks/CI): max_revision_loops = 2; max_subagents = 6; require_user_approval_for = [destructive_commands, dependency_addition, deploy, external_send].
-- You may read the repository, but must not modify \`run.yaml\`, \`events.jsonl\`, prompt snapshots under \`artifacts/prompts/\`, or any artifact other than your declared output below.
+- You may read the repository, but must not modify \`run.yaml\`, \`events.jsonl\`, prompt snapshots under \`artifacts/prompts/\`, or any artifact other than your declared output below. The cooperative progress sidecar is the sole non-artifact exception.
 
 ## Output contract
 
@@ -129,9 +129,29 @@ ${schemaText}
 - Self-check before finishing: \`fadeno validate artifacts/cross-review.architect_fable.json --schema review-report\`.
 - Downstream: gate \`convergence_gate\` computes \`no_blocking_issues\` from ReviewReport[]. A \`blocking\`-severity issue fails it. The coordinator first assembles all map members into one array.
 
+## Cooperative progress
+
+- Status sidecar: \`.fadeno/progress/${RUN_ID}/cross_review--architect_fable.json\` (workspace-relative, ephemeral, never commit it; create parent directories if needed).
+- Update it after meaningful phases and whenever blocked or waiting for input. Write a JSON object with:
+- Keep reports concise and never include secrets, credentials, raw prompts, or private reasoning.
+
+\`\`\`json
+{
+  "state": "running | waiting_input | blocked | idle",
+  "phase": "short phase name",
+  "completed": ["finished checkpoint"],
+  "current": "what is happening now",
+  "next": "next intended action",
+  "blockers": [],
+  "updated_at": "ISO-8601 timestamp"
+}
+\`\`\`
+
+- This report is attested progress evidence only. It never controls a gate or replaces the declared output.
+
 ## Completion protocol
 
-- Produce exactly the one declared artifact above; write nothing else.
+- Produce exactly the one declared artifact above; aside from the progress sidecar, write nothing else.
 - Do not modify the run ledger (\`run.yaml\`, \`events.jsonl\`) or any prompt snapshot.
 - Keep all commentary inside the artifact; emit no other prose.
 - If your harness cannot write files, return only the artifact body for the coordinator to save.

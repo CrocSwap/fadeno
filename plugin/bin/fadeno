@@ -13893,7 +13893,7 @@ var require_ajv = __commonJS({
 });
 
 // src/cli.ts
-var import_node_path20 = require("node:path");
+var import_node_path21 = require("node:path");
 var import_node_util = require("node:util");
 
 // src/lib/paths.ts
@@ -13938,7 +13938,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.1";
+  if (true) return "0.6.0-rc.2";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -15477,6 +15477,63 @@ function resolveActiveArtifacts(events) {
 // src/lib/host-dispatch.ts
 var HostDispatchError = class extends Error {
 };
+var PROGRESS_STATES = /* @__PURE__ */ new Set(["running", "waiting_input", "blocked", "idle"]);
+var PROGRESS_SOURCES = /* @__PURE__ */ new Set(["agent", "harness", "director"]);
+var MAX_PROGRESS_BYTES = 64 * 1024;
+function parseProgressReport(bytes) {
+  let value;
+  try {
+    value = JSON.parse(bytes.toString("utf8"));
+  } catch (err) {
+    throw new HostDispatchError(`progress report is not valid JSON: ${err.message}`);
+  }
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    throw new HostDispatchError("progress report must be a JSON object.");
+  }
+  const doc = value;
+  const allowed = /* @__PURE__ */ new Set(["state", "phase", "summary", "completed", "current", "next", "blockers", "updated_at"]);
+  const unknown = Object.keys(doc).filter((key) => !allowed.has(key));
+  if (unknown.length > 0) throw new HostDispatchError(`progress report has unknown field(s): ${unknown.join(", ")}.`);
+  if (typeof doc.state !== "string" || !PROGRESS_STATES.has(doc.state)) {
+    throw new HostDispatchError(`progress report state must be one of: ${[...PROGRESS_STATES].join(", ")}.`);
+  }
+  const optionalString = (key, max) => {
+    const item = doc[key];
+    if (item === void 0) return void 0;
+    if (typeof item !== "string" || item.trim() === "") throw new HostDispatchError(`progress report ${key} must be a non-empty string.`);
+    if (item.length > max) throw new HostDispatchError(`progress report ${key} exceeds ${max} characters.`);
+    return item;
+  };
+  const optionalStrings = (key) => {
+    const item = doc[key];
+    if (item === void 0) return void 0;
+    if (!Array.isArray(item) || item.some((entry) => typeof entry !== "string" || entry.trim() === "" || entry.length > 500)) {
+      throw new HostDispatchError(`progress report ${key} must be an array of non-empty strings up to 500 characters.`);
+    }
+    if (item.length > 50) throw new HostDispatchError(`progress report ${key} exceeds 50 entries.`);
+    return item;
+  };
+  const updatedAt = optionalString("updated_at", 100);
+  if (updatedAt != null && Number.isNaN(Date.parse(updatedAt))) {
+    throw new HostDispatchError("progress report updated_at must be an ISO-compatible timestamp.");
+  }
+  const phase = optionalString("phase", 200);
+  const summary = optionalString("summary", 2e3);
+  const completed = optionalStrings("completed");
+  const current = optionalString("current", 1e3);
+  const next = optionalString("next", 1e3);
+  const blockers = optionalStrings("blockers");
+  return {
+    state: doc.state,
+    ...phase != null ? { phase } : {},
+    ...summary != null ? { summary } : {},
+    ...completed != null ? { completed } : {},
+    ...current != null ? { current } : {},
+    ...next != null ? { next } : {},
+    ...blockers != null ? { blockers } : {},
+    ...updatedAt != null ? { updatedAt } : {}
+  };
+}
 function assertCurrentLedger(repoRoot, runQuery) {
   let run;
   try {
@@ -15714,6 +15771,74 @@ function startHostDispatch(opts) {
   );
   return { dispatchId: opts.dispatchId, state: "started", idempotent: false, agentId: opts.agentId };
 }
+function progressHostDispatch(opts) {
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const { runDir, runId } = assertCurrentLedger(repoRoot, opts.run);
+  const source = opts.source ?? "agent";
+  if (!PROGRESS_SOURCES.has(source)) {
+    throw new HostDispatchError(`--source must be one of: ${[...PROGRESS_SOURCES].join(", ")}.`);
+  }
+  const events = eventsFor(runDir);
+  const { request } = findRequest(runId, events, opts.dispatchId);
+  const starts = startsFor(events, opts.dispatchId);
+  if (starts.length === 0) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" cannot report progress before dispatch-start.`);
+  if (starts.length > 1) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" was started more than once.`);
+  if (terminalsFor(events, opts.dispatchId).length > 0) {
+    throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already has a terminal receipt.`);
+  }
+  const reportFile = (0, import_node_path6.isAbsolute)(opts.file) ? opts.file : (0, import_node_path6.resolve)(cwd, opts.file);
+  if (!(0, import_node_fs6.existsSync)(reportFile) || !(0, import_node_fs6.statSync)(reportFile).isFile()) {
+    throw new HostDispatchError(`progress report does not exist: ${opts.file}`);
+  }
+  if ((0, import_node_fs6.lstatSync)(reportFile).isSymbolicLink()) {
+    throw new HostDispatchError(`progress report must not be a symlink: ${opts.file}`);
+  }
+  const bytes = (0, import_node_fs6.readFileSync)(reportFile);
+  if (bytes.length > MAX_PROGRESS_BYTES) {
+    throw new HostDispatchError(`progress report exceeds ${MAX_PROGRESS_BYTES} bytes.`);
+  }
+  const report = parseProgressReport(bytes);
+  const digest = sha256Hex(bytes);
+  const prior = events.findLast(
+    (event) => event.type === "host_dispatch_progress" && event.extra.dispatch_id === opts.dispatchId
+  );
+  if (prior?.extra.report_sha256 === digest && prior.extra.observation_source === source) {
+    return { dispatchId: opts.dispatchId, state: report.state, source, idempotent: true, reportSha256: digest };
+  }
+  const agentId = starts[0].extra.agent_id;
+  append(
+    runDir,
+    {
+      type: "host_dispatch_progress",
+      step: request.step,
+      actor: request.actor,
+      dispatch_id: request.dispatchId,
+      step_execution_id: request.stepExecutionId,
+      actor_call_id: request.actorCallId,
+      attempt: request.attempt,
+      executor: request.executor,
+      adapter: "host",
+      model: request.model,
+      reasoning_effort: request.reasoningEffort,
+      agent_type: request.agentType,
+      agent_id: agentId,
+      observation_source: source,
+      progress_state: report.state,
+      phase: report.phase,
+      summary: report.summary,
+      completed: report.completed,
+      current: report.current,
+      next: report.next,
+      blockers: report.blockers,
+      reported_at: report.updatedAt,
+      report_sha256: digest,
+      host_attested: true
+    },
+    opts.now
+  );
+  return { dispatchId: opts.dispatchId, state: report.state, source, idempotent: false, reportSha256: digest };
+}
 function completeHostDispatch(opts) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
@@ -15908,6 +16033,14 @@ function runDispatchComplete(opts) {
 function runDispatchFail(opts) {
   try {
     return failHostDispatch(opts);
+  } catch (err) {
+    if (err instanceof Error) throw new DispatchCommandError(err.message);
+    throw err;
+  }
+}
+function runDispatchProgress(opts) {
+  try {
+    return progressHostDispatch(opts);
   } catch (err) {
     if (err instanceof Error) throw new DispatchCommandError(err.message);
     throw err;
@@ -17213,6 +17346,10 @@ function fenceFor(content) {
   if (runs) for (const run of runs) longest = Math.max(longest, run.length);
   return "`".repeat(Math.max(3, longest + 1));
 }
+function progressSidecarPath(runId, step, actor) {
+  const safe = (value) => value.replace(/[^A-Za-z0-9_.-]+/g, "_");
+  return `.fadeno/progress/${safe(runId)}/${safe(step)}--${safe(actor ?? "anonymous")}.json`;
+}
 function blockquote(text) {
   return text.replace(/\s+$/, "").split("\n").map((line) => line.trim() === "" ? ">" : `> ${line.trim()}`);
 }
@@ -17277,7 +17414,7 @@ function renderConstraints(ctx) {
     );
   }
   lines.push(
-    "- You may read the repository, but must not modify `run.yaml`, `events.jsonl`, prompt snapshots under `artifacts/prompts/`, or any artifact other than your declared output below."
+    "- You may read the repository, but must not modify `run.yaml`, `events.jsonl`, prompt snapshots under `artifacts/prompts/`, or any artifact other than your declared output below. The cooperative progress sidecar is the sole non-artifact exception."
   );
   return lines;
 }
@@ -17333,8 +17470,23 @@ function renderStepPrompt(ctx) {
   lines.push(...renderInputs(ctx), "");
   lines.push(...renderConstraints(ctx), "");
   lines.push(...renderOutput(ctx), "");
+  const progressPath = progressSidecarPath(ctx.runId, ctx.step, ctx.actor);
+  lines.push("## Cooperative progress", "");
+  lines.push(`- Status sidecar: \`${progressPath}\` (workspace-relative, ephemeral, never commit it; create parent directories if needed).`);
+  lines.push("- Update it after meaningful phases and whenever blocked or waiting for input. Write a JSON object with:");
+  lines.push("- Keep reports concise and never include secrets, credentials, raw prompts, or private reasoning.");
+  lines.push("", "```json", "{");
+  lines.push('  "state": "running | waiting_input | blocked | idle",');
+  lines.push('  "phase": "short phase name",');
+  lines.push('  "completed": ["finished checkpoint"],');
+  lines.push('  "current": "what is happening now",');
+  lines.push('  "next": "next intended action",');
+  lines.push('  "blockers": [],');
+  lines.push('  "updated_at": "ISO-8601 timestamp"');
+  lines.push("}", "```", "");
+  lines.push("- This report is attested progress evidence only. It never controls a gate or replaces the declared output.", "");
   lines.push("## Completion protocol", "");
-  lines.push("- Produce exactly the one declared artifact above; write nothing else.");
+  lines.push("- Produce exactly the one declared artifact above; aside from the progress sidecar, write nothing else.");
   lines.push("- Do not modify the run ledger (`run.yaml`, `events.jsonl`) or any prompt snapshot.");
   lines.push("- Keep all commentary inside the artifact; emit no other prose.");
   lines.push("- If your harness cannot write files, return only the artifact body for the coordinator to save.");
@@ -18598,6 +18750,7 @@ function runInit(opts) {
   const force = opts.force ?? false;
   const results = [];
   copyTree((0, import_node_path14.join)(tpl, "common", "fadeno"), (0, import_node_path14.join)(repoRoot, ".fadeno"), force, results);
+  ensureGitignored(repoRoot, ".fadeno/progress/", results);
   if (!opts.dataOnly) {
     const skillsBase = opts.target === "codex" ? (0, import_node_path14.join)(repoRoot, ".agents", "skills") : (0, import_node_path14.join)(repoRoot, ".claude", "skills");
     for (const skill of SKILLS) {
@@ -18665,6 +18818,7 @@ function ensureGitignored(repoRoot, pattern, results) {
   const content = existed ? (0, import_node_fs14.readFileSync)(gitignorePath, "utf8") : "";
   const lines = content.split(/\r?\n/).map((line) => line.trim());
   if (lines.includes(pattern) || lines.includes(".claude") || lines.includes(".claude/")) return;
+  if (pattern.startsWith(".fadeno/") && (lines.includes(".fadeno") || lines.includes(".fadeno/"))) return;
   const sep = content.length === 0 || content.endsWith("\n") ? "" : "\n";
   const block = `${sep}# Fadeno: per-user local Claude settings (not committed)
 ${pattern}
@@ -19056,6 +19210,9 @@ function runRuns(opts = {}) {
 }
 
 // src/commands/show.ts
+var import_node_fs18 = require("node:fs");
+var import_node_path18 = require("node:path");
+var import_yaml12 = __toESM(require_dist(), 1);
 function runShow(opts) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
@@ -19064,18 +19221,75 @@ function runShow(opts) {
   const raw = readEvents(run.dir);
   const events = mode !== "current" ? normalizeLegacyEvents(raw.events) : raw.events;
   const artifacts = listArtifacts(run.dir);
-  const projection = mode === "current" ? projectRun(run, events) : null;
+  const projection = mode === "current" ? projectRun(repoRoot, run, events, opts.now ?? /* @__PURE__ */ new Date()) : null;
   return { run, mode, events, badLines: raw.badLines, artifacts, projection };
 }
-function projectRun(run, events) {
+function workflowSteps(repoRoot, playbook) {
+  if (playbook == null) return [];
+  const file = [`${playbook}.yaml`, `${playbook}.yml`].map((name) => (0, import_node_path18.join)(repoRoot, ".fadeno", "playbooks", name)).find((candidate) => (0, import_node_fs18.existsSync)(candidate));
+  if (file == null) return [];
+  try {
+    const parsed = (0, import_yaml12.parse)((0, import_node_fs18.readFileSync)(file, "utf8"));
+    if (!Array.isArray(parsed?.flow)) return [];
+    const raw = parsed.flow.filter(
+      (step) => step != null && typeof step === "object" && !Array.isArray(step)
+    );
+    const bodyOwner = /* @__PURE__ */ new Map();
+    for (const step of raw) {
+      if (typeof step.id !== "string" || !Array.isArray(step.body)) continue;
+      for (const member of step.body) if (typeof member === "string") bodyOwner.set(member, step.id);
+    }
+    return raw.flatMap((step) => {
+      if (typeof step.id !== "string") return [];
+      const actors = Array.isArray(step.over) ? step.over.filter((actor) => typeof actor === "string") : typeof step.actor === "string" ? [step.actor] : [];
+      return [{
+        id: step.id,
+        kind: typeof step.kind === "string" ? step.kind : null,
+        actors,
+        loopBodyOf: bodyOwner.get(step.id) ?? null
+      }];
+    });
+  } catch {
+    return [];
+  }
+}
+function timeMs(value) {
+  if (value == null) return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+function elapsed(start, end, now) {
+  const from = timeMs(start);
+  const to = timeMs(end) ?? now.getTime();
+  return from == null ? null : Math.max(0, to - from);
+}
+function projectRun(repoRoot, run, events, now) {
   const stepOrder = [];
   const byStep = /* @__PURE__ */ new Map();
+  const definitions = new Map(workflowSteps(repoRoot, run.playbook).map((step) => [step.id, step]));
   const view = (id) => {
     let v = byStep.get(id);
     if (!v) {
+      const definition = definitions.get(id);
       v = {
         id,
-        state: "done",
+        kind: definition?.kind ?? null,
+        loopBodyOf: definition?.loopBodyOf ?? null,
+        state: "pending",
+        runtimeMs: null,
+        actors: (definition?.actors ?? []).map((actor) => ({
+          actor,
+          state: "pending",
+          runtimeMs: null,
+          phase: null,
+          summary: null,
+          completed: [],
+          current: null,
+          next: null,
+          blockers: [],
+          updatedAt: null,
+          source: null
+        })),
         artifacts: 0,
         gates: [],
         iterations: 0,
@@ -19090,25 +19304,39 @@ function projectRun(run, events) {
     }
     return v;
   };
+  for (const step of definitions.values()) view(step.id);
   const decisions = [];
   const failures = [];
-  const requests = projectHostRequests(events);
+  const requests = projectHostRequests(events, now);
   const callsByStep = /* @__PURE__ */ new Map();
   const pendingDecisions = /* @__PURE__ */ new Map();
-  let lastStarted = null;
+  const firstAt = /* @__PURE__ */ new Map();
+  const lastAt = /* @__PURE__ */ new Map();
   for (const event of events) {
-    if (event.step != null) view(event.step);
+    if (event.step != null) {
+      view(event.step);
+      if (event.timestamp != null) {
+        if (!firstAt.has(event.step)) firstAt.set(event.step, event.timestamp);
+        lastAt.set(event.step, event.timestamp);
+      }
+    }
     switch (event.type) {
       case "step_started":
-        if (event.step != null) lastStarted = event.step;
+        if (event.step != null) view(event.step).state = "running";
         break;
       case "artifact_created":
-        if (event.step != null) view(event.step).artifacts += 1;
+        if (event.step != null) {
+          view(event.step).artifacts += 1;
+          view(event.step).state = "completed";
+        }
         break;
       case "gate_evaluated": {
         const condition = typeof event.extra.condition === "string" ? event.extra.condition : "?";
         const result = typeof event.extra.result === "string" ? event.extra.result : "?";
-        if (event.step != null) view(event.step).gates.push({ condition, result });
+        if (event.step != null) {
+          view(event.step).gates.push({ condition, result });
+          view(event.step).state = "completed";
+        }
         if (result === "fail") {
           const artifact = typeof event.extra.artifact === "string" ? ` (${event.extra.artifact})` : "";
           failures.push(`gate ${condition} \u2192 fail${artifact}`);
@@ -19116,17 +19344,22 @@ function projectRun(run, events) {
         break;
       }
       case "loop_iteration_started":
-        if (event.step != null) view(event.step).iterations += 1;
+        if (event.step != null) {
+          view(event.step).iterations += 1;
+          view(event.step).state = "running";
+        }
         break;
       case "human_decision": {
         const branch = typeof event.extra.branch === "string" ? event.extra.branch : "?";
         if (event.step != null) view(event.step).decisions.push(branch);
+        if (event.step != null) view(event.step).state = "completed";
         decisions.push({ step: event.step, branch });
         break;
       }
       case "actor_dispatched": {
         if (event.step == null) break;
         const v = view(event.step);
+        v.state = "running";
         v.attempts += 1;
         if (event.extra.attempt_reason === "schema_repair") v.repairs += 1;
         if (event.extra.session === "resumed") v.resumed += 1;
@@ -19140,11 +19373,16 @@ function projectRun(run, events) {
         const reason = typeof event.extra.reason === "string" ? event.extra.reason : "failed";
         const executor = typeof event.extra.executor === "string" ? ` (${event.extra.executor})` : "";
         failures.push(`${event.step ?? "?"}: executor ${reason}${executor}`);
+        if (event.step != null) view(event.step).state = "failed";
         break;
       }
+      case "actor_completed":
+        if (event.step != null) view(event.step).state = event.extra.output_valid === false ? "pending" : "completed";
+        break;
       case "decision_requested": {
         const id = typeof event.extra.decision_id === "string" ? event.extra.decision_id : null;
         if (id != null && event.step != null) pendingDecisions.set(id, event.step);
+        if (event.step != null) view(event.step).state = "waiting";
         break;
       }
       case "decision_resolved": {
@@ -19152,6 +19390,7 @@ function projectRun(run, events) {
         if (id != null) pendingDecisions.delete(id);
         const option = typeof event.extra.option === "string" ? event.extra.option : "?";
         if (event.step != null) view(event.step).decisions.push(option);
+        if (event.step != null) view(event.step).state = "completed";
         decisions.push({ step: event.step, branch: option });
         break;
       }
@@ -19165,19 +19404,97 @@ function projectRun(run, events) {
         break;
     }
   }
-  if (lastStarted != null) {
-    const last = view(lastStarted);
-    if (run.status === "running") last.state = "current";
-    else if (run.status === "failed" || run.status === "aborted") last.state = "failed";
-  }
   for (const [stepId, calls] of callsByStep) view(stepId).actorCalls = calls.size;
   if (run.status === "running" || run.status == null) {
     for (const stepId of pendingDecisions.values()) view(stepId).state = "waiting";
   }
+  const commandActors = /* @__PURE__ */ new Map();
+  for (const event of events) {
+    if (event.type !== "actor_dispatched" && event.type !== "actor_completed" && event.type !== "actor_failed") continue;
+    if (event.step == null || typeof event.extra.actor !== "string") continue;
+    const key = `${event.step}\0${event.extra.actor}`;
+    const current = commandActors.get(key) ?? {
+      actor: event.extra.actor,
+      state: "pending",
+      startedAt: null,
+      endedAt: null
+    };
+    if (event.type === "actor_dispatched") {
+      current.state = "running";
+      current.startedAt ??= event.timestamp;
+      current.endedAt = null;
+    } else {
+      current.state = event.type === "actor_completed" ? "completed" : "failed";
+      current.endedAt = event.timestamp;
+    }
+    commandActors.set(key, current);
+  }
+  for (const [key, lifecycle] of commandActors) {
+    const stepId = key.split("\0", 1)[0];
+    const step = view(stepId);
+    let actor = step.actors.find((candidate) => candidate.actor === lifecycle.actor);
+    if (actor == null) {
+      actor = { actor: lifecycle.actor, state: "pending", runtimeMs: null, phase: null, summary: null, completed: [], current: null, next: null, blockers: [], updatedAt: null, source: null };
+      step.actors.push(actor);
+    }
+    actor.state = lifecycle.state;
+    actor.runtimeMs = lifecycle.startedAt == null ? null : elapsed(lifecycle.startedAt, lifecycle.endedAt, now);
+  }
+  const latestByActor = /* @__PURE__ */ new Map();
+  for (const request of requests) latestByActor.set(`${request.step}\0${request.actor ?? ""}`, request);
+  for (const request of latestByActor.values()) {
+    const step = view(request.step);
+    const actorName = request.actor ?? "(anonymous)";
+    let actor = step.actors.find((candidate) => candidate.actor === actorName);
+    if (actor == null) {
+      actor = { actor: actorName, state: "pending", runtimeMs: null, phase: null, summary: null, completed: [], current: null, next: null, blockers: [], updatedAt: null, source: null };
+      step.actors.push(actor);
+    }
+    actor.state = request.state === "requested" ? "pending" : request.state;
+    actor.runtimeMs = request.runtimeMs;
+    actor.phase = request.phase;
+    actor.summary = request.summary;
+    actor.completed = request.completed;
+    actor.current = request.current;
+    actor.next = request.next;
+    actor.blockers = request.blockers;
+    actor.updatedAt = request.progressUpdatedAt;
+    actor.source = request.progressSource;
+  }
+  for (const step of byStep.values()) {
+    if (step.actors.length > 0) {
+      const states = step.actors.map((actor) => actor.state);
+      if (states.some((state) => state === "failed")) step.state = "failed";
+      else if (states.some((state) => state === "blocked")) step.state = "blocked";
+      else if (states.some((state) => state === "running")) step.state = "running";
+      else if (states.some((state) => state === "waiting")) step.state = "waiting";
+      else if (states.every((state) => state === "completed")) step.state = "completed";
+      else step.state = "pending";
+    }
+    const startedAt = firstAt.get(step.id) ?? null;
+    const isOpen = step.state === "running" || step.state === "waiting" || step.state === "blocked";
+    step.runtimeMs = step.state === "pending" ? null : elapsed(startedAt, isOpen ? null : lastAt.get(step.id) ?? null, now);
+  }
+  for (const step of byStep.values()) {
+    if (step.kind !== "loop") continue;
+    const body = [...byStep.values()].filter((candidate) => candidate.loopBodyOf === step.id);
+    if (body.some((candidate) => candidate.state === "failed")) step.state = "failed";
+    else if (body.some((candidate) => candidate.state === "blocked")) step.state = "blocked";
+    else if (body.some((candidate) => candidate.state === "running")) step.state = "running";
+    else if (body.some((candidate) => candidate.state === "waiting")) step.state = "waiting";
+  }
   const { active } = resolveActiveArtifacts(events);
-  return { steps: stepOrder.map((id) => byStep.get(id)), active, decisions, failures, requests };
+  return {
+    playbook: run.playbook,
+    runtimeMs: elapsed(run.startedAt, run.endedAt, now),
+    steps: stepOrder.map((id) => byStep.get(id)),
+    active,
+    decisions,
+    failures,
+    requests
+  };
 }
-function projectHostRequests(events) {
+function projectHostRequests(events, now) {
   const requested = events.filter(
     (event) => event.type === "host_dispatch_requested" && typeof event.extra.dispatch_id === "string"
   );
@@ -19188,6 +19505,11 @@ function projectHostRequests(events) {
     const terminal2 = events.find(
       (candidate) => (candidate.type === "actor_completed" || candidate.type === "actor_failed") && candidate.extra.dispatch_id === dispatchId
     );
+    const progress = events.findLast(
+      (candidate) => candidate.type === "host_dispatch_progress" && candidate.extra.dispatch_id === dispatchId
+    );
+    const progressState = progress?.extra.progress_state;
+    const state = terminal2?.type === "actor_completed" ? "completed" : terminal2?.type === "actor_failed" ? "failed" : progressState === "blocked" ? "blocked" : progressState === "waiting_input" || progressState === "idle" ? "waiting" : start ? "running" : "requested";
     out.push({
       dispatchId,
       step: event.step ?? "?",
@@ -19195,23 +19517,35 @@ function projectHostRequests(events) {
       executor: typeof event.extra.executor === "string" ? event.extra.executor : "?",
       model: typeof event.extra.model === "string" ? event.extra.model : null,
       reasoningEffort: typeof event.extra.reasoning_effort === "string" ? event.extra.reasoning_effort : null,
-      state: terminal2?.type === "actor_completed" ? "completed" : terminal2?.type === "actor_failed" ? "failed" : start ? "running" : "requested",
-      agentId: typeof start?.extra.agent_id === "string" ? start.extra.agent_id : null
+      state,
+      agentId: typeof start?.extra.agent_id === "string" ? start.extra.agent_id : null,
+      requestedAt: event.timestamp,
+      startedAt: start?.timestamp ?? null,
+      endedAt: terminal2?.timestamp ?? null,
+      runtimeMs: start == null ? null : elapsed(start.timestamp, terminal2?.timestamp ?? null, now),
+      phase: typeof progress?.extra.phase === "string" ? progress.extra.phase : null,
+      summary: typeof progress?.extra.summary === "string" ? progress.extra.summary : null,
+      completed: Array.isArray(progress?.extra.completed) ? progress.extra.completed.filter((item) => typeof item === "string") : [],
+      current: typeof progress?.extra.current === "string" ? progress.extra.current : null,
+      next: typeof progress?.extra.next === "string" ? progress.extra.next : null,
+      blockers: Array.isArray(progress?.extra.blockers) ? progress.extra.blockers.filter((blocker) => typeof blocker === "string") : [],
+      progressUpdatedAt: typeof progress?.extra.reported_at === "string" ? progress.extra.reported_at : progress?.timestamp ?? null,
+      progressSource: typeof progress?.extra.observation_source === "string" ? progress.extra.observation_source : null
     });
   }
   return out;
 }
 
 // src/commands/validate.ts
-var import_node_fs18 = require("node:fs");
-var import_node_path18 = require("node:path");
+var import_node_fs19 = require("node:fs");
+var import_node_path19 = require("node:path");
 var ValidateError = class extends Error {
 };
 function runValidate(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const schemasDir = (0, import_node_path18.join)(repoRoot, ".fadeno", "schemas");
-  if (!(0, import_node_fs18.existsSync)(schemasDir)) {
+  const schemasDir = (0, import_node_path19.join)(repoRoot, ".fadeno", "schemas");
+  if (!(0, import_node_fs19.existsSync)(schemasDir)) {
     throw new ValidateError(
       `No Fadeno schemas found at ${schemasDir}.
 Run \`fadeno init --codex\` or \`fadeno init --claude\` first.`
@@ -19221,15 +19555,15 @@ Run \`fadeno init --codex\` or \`fadeno init --claude\` first.`
   let files;
   let forcedKind;
   if (opts.path) {
-    files = [(0, import_node_path18.isAbsolute)(opts.path) ? opts.path : (0, import_node_path18.resolve)(cwd, opts.path)];
+    files = [(0, import_node_path19.isAbsolute)(opts.path) ? opts.path : (0, import_node_path19.resolve)(cwd, opts.path)];
     forcedKind = opts.schema;
   } else {
     forcedKind = "playbook";
-    const playbooksDir = (0, import_node_path18.join)(repoRoot, ".fadeno", "playbooks");
-    if (!(0, import_node_fs18.existsSync)(playbooksDir)) {
+    const playbooksDir = (0, import_node_path19.join)(repoRoot, ".fadeno", "playbooks");
+    if (!(0, import_node_fs19.existsSync)(playbooksDir)) {
       throw new ValidateError(`No playbooks directory at ${playbooksDir}.`);
     }
-    files = (0, import_node_fs18.readdirSync)(playbooksDir).filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort().map((f) => (0, import_node_path18.join)(playbooksDir, f));
+    files = (0, import_node_fs19.readdirSync)(playbooksDir).filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort().map((f) => (0, import_node_path19.join)(playbooksDir, f));
     if (files.length === 0) {
       throw new ValidateError(`No playbooks (*.yaml) found in ${playbooksDir}.`);
     }
@@ -19239,24 +19573,24 @@ Run \`fadeno init --codex\` or \`fadeno init --claude\` first.`
 }
 
 // src/commands/verify.ts
-var import_node_fs19 = require("node:fs");
-var import_node_path19 = require("node:path");
-var import_yaml12 = __toESM(require_dist(), 1);
+var import_node_fs20 = require("node:fs");
+var import_node_path20 = require("node:path");
+var import_yaml13 = __toESM(require_dist(), 1);
 var VerifyError = class extends Error {
 };
 function resolveArtifact(runDir, rel) {
-  return (0, import_node_path19.isAbsolute)(rel) ? rel : (0, import_node_path19.join)(runDir, rel);
+  return (0, import_node_path20.isAbsolute)(rel) ? rel : (0, import_node_path20.join)(runDir, rel);
 }
 function isInsideRun(runDir, path) {
-  const runAbsolute = (0, import_node_path19.resolve)(runDir);
+  const runAbsolute = (0, import_node_path20.resolve)(runDir);
   const target = resolveArtifact(runDir, path);
-  const rel = (0, import_node_path19.relative)(runAbsolute, target).split("\\").join("/");
-  if (rel === ".." || rel.startsWith("../") || (0, import_node_path19.isAbsolute)(rel)) return false;
+  const rel = (0, import_node_path20.relative)(runAbsolute, target).split("\\").join("/");
+  if (rel === ".." || rel.startsWith("../") || (0, import_node_path20.isAbsolute)(rel)) return false;
   let cursor = runAbsolute;
   for (const segment of rel.split("/").filter(Boolean)) {
-    cursor = (0, import_node_path19.join)(cursor, segment);
+    cursor = (0, import_node_path20.join)(cursor, segment);
     try {
-      if ((0, import_node_fs19.lstatSync)(cursor).isSymbolicLink()) return false;
+      if ((0, import_node_fs20.lstatSync)(cursor).isSymbolicLink()) return false;
     } catch (err) {
       if (err.code === "ENOENT") break;
       return false;
@@ -19266,18 +19600,18 @@ function isInsideRun(runDir, path) {
   let existingReal;
   for (; ; ) {
     try {
-      existingReal = (0, import_node_fs19.realpathSync)(existing);
+      existingReal = (0, import_node_fs20.realpathSync)(existing);
       break;
     } catch (err) {
       if (err.code !== "ENOENT") return false;
-      const parent = (0, import_node_path19.dirname)(existing);
+      const parent = (0, import_node_path20.dirname)(existing);
       if (parent === existing) return false;
       existing = parent;
     }
   }
-  const realTarget = (0, import_node_path19.resolve)(existingReal, (0, import_node_path19.relative)(existing, target));
-  const realRel = (0, import_node_path19.relative)((0, import_node_fs19.realpathSync)(runAbsolute), realTarget).split("\\").join("/");
-  return realRel !== ".." && !realRel.startsWith("../") && !(0, import_node_path19.isAbsolute)(realRel);
+  const realTarget = (0, import_node_path20.resolve)(existingReal, (0, import_node_path20.relative)(existing, target));
+  const realRel = (0, import_node_path20.relative)((0, import_node_fs20.realpathSync)(runAbsolute), realTarget).split("\\").join("/");
+  return realRel !== ".." && !realRel.startsWith("../") && !(0, import_node_path20.isAbsolute)(realRel);
 }
 function skip(check, detail2) {
   return { check, status: "skip", detail: detail2 };
@@ -19305,7 +19639,7 @@ function runVerify(opts) {
   }
   const legacy = mode === "legacy";
   const compatibility = mode === "compatibility";
-  const schemas = new SchemaSet((0, import_node_path19.join)(repoRoot, ".fadeno", "schemas"));
+  const schemas = new SchemaSet((0, import_node_path20.join)(repoRoot, ".fadeno", "schemas"));
   const findings = [];
   findings.push(
     legacy || compatibility ? skip("ledger-version", `${run.schemaVersion ?? "pre-0.3"} ledger read in explicit compatibility mode (--legacy)`) : { check: "ledger-version", status: "ok", detail: `schema_version ${RUN_LEDGER_SCHEMA_VERSION}` }
@@ -19386,7 +19720,7 @@ function checkHostDispatchRequests(run, events, mode) {
   }
   for (const [id, count] of counts) if (count > 1) problems.push(`dispatch ${id} requested ${count} times`);
   for (const event of events) {
-    if (event.type !== "actor_dispatched" && event.type !== "actor_completed" && event.type !== "actor_failed") continue;
+    if (event.type !== "actor_dispatched" && event.type !== "host_dispatch_progress" && event.type !== "actor_completed" && event.type !== "actor_failed") continue;
     if (event.extra.dispatch_id != null && typeof event.extra.dispatch_id !== "string") problems.push(`${event.type} has a non-string dispatch_id`);
     if (typeof event.extra.dispatch_id === "string" && !counts.has(event.extra.dispatch_id)) problems.push(`${event.type} references orphan dispatch ${event.extra.dispatch_id}`);
   }
@@ -19405,10 +19739,10 @@ function checkHostDispatchLifecycle(run, events, mode) {
   if (snapshotEvent == null) problems.push("host dispatch evidence has no profile_snapshotted event");
   if (snapshotEvent != null) {
     const profileRel = typeof snapshotEvent.extra.profile === "string" ? snapshotEvent.extra.profile : "profile.yaml";
-    const profilePath = (0, import_node_path19.join)(run.dir, profileRel);
-    if ((0, import_node_fs19.existsSync)(profilePath)) {
+    const profilePath = (0, import_node_path20.join)(run.dir, profileRel);
+    if ((0, import_node_fs20.existsSync)(profilePath)) {
       try {
-        profile = parseExecutorProfile((0, import_node_fs19.readFileSync)(profilePath, "utf8"), profileRel);
+        profile = parseExecutorProfile((0, import_node_fs20.readFileSync)(profilePath, "utf8"), profileRel);
       } catch (err) {
         problems.push(`host profile snapshot is invalid: ${err.message}`);
       }
@@ -19445,7 +19779,11 @@ function checkHostDispatchLifecycle(run, events, mode) {
     const terminals = events.filter(
       (event) => (event.type === "actor_completed" || event.type === "actor_failed") && event.extra.dispatch_id === id
     );
+    const progress = events.filter(
+      (event) => event.type === "host_dispatch_progress" && event.extra.dispatch_id === id
+    );
     if (starts.length === 0) {
+      if (progress.length > 0) problems.push(`${id}: progress receipt has no actor_dispatched start`);
       if (terminals.length > 0) problems.push(`${id}: terminal receipt has no actor_dispatched start`);
       else if (run.status === "completed") problems.push(`${id}: completed run has no actor_dispatched start`);
       continue;
@@ -19456,6 +19794,7 @@ function checkHostDispatchLifecycle(run, events, mode) {
     const terminal2 = terminals[0];
     const requestIndex = events.indexOf(request);
     const startIndex = events.indexOf(start);
+    const terminalIndex = terminal2 == null ? null : events.indexOf(terminal2);
     if (startIndex <= requestIndex) problems.push(`${id}: actor_dispatched must follow host_dispatch_requested`);
     if (terminal2 != null && events.indexOf(terminal2) <= startIndex) problems.push(`${id}: terminal receipt must follow actor_dispatched`);
     if (terminal2 != null && terminal2.extra.agent_id !== start.extra.agent_id) problems.push(`${id}: terminal agent_id does not match start`);
@@ -19466,6 +19805,41 @@ function checkHostDispatchLifecycle(run, events, mode) {
       if (terminal2 != null) {
         const terminalValue = field === "step" ? terminal2.step : field === "actor" ? terminal2.extra.actor : terminal2.extra[field];
         if (terminalValue !== startValue) problems.push(`${id}: terminal ${field} does not match start`);
+      }
+    }
+    for (const observation of progress) {
+      const observationIndex = events.indexOf(observation);
+      if (observationIndex <= startIndex) problems.push(`${id}: progress receipt must follow actor_dispatched`);
+      if (terminalIndex != null && observationIndex >= terminalIndex) problems.push(`${id}: progress receipt must precede the terminal receipt`);
+      if (!["agent", "harness", "director"].includes(String(observation.extra.observation_source))) {
+        problems.push(`${id}: progress receipt has an invalid observation_source`);
+      }
+      if (!["running", "waiting_input", "blocked", "idle"].includes(String(observation.extra.progress_state))) {
+        problems.push(`${id}: progress receipt has an invalid progress_state`);
+      }
+      if (typeof observation.extra.report_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(observation.extra.report_sha256)) {
+        problems.push(`${id}: progress receipt has an invalid report_sha256`);
+      }
+      if (observation.extra.host_attested !== true) problems.push(`${id}: progress receipt is not host-attested`);
+      if (observation.extra.agent_id !== start.extra.agent_id) problems.push(`${id}: progress agent_id does not match start`);
+      for (const field of ["step", "actor", "step_execution_id", "actor_call_id", "attempt", "executor", "adapter", "model", "reasoning_effort", "agent_type"]) {
+        const observed = field === "step" ? observation.step : field === "actor" ? observation.extra.actor : observation.extra[field];
+        const started = field === "step" ? start.step : field === "actor" ? start.extra.actor : start.extra[field];
+        if (observed !== started) problems.push(`${id}: progress ${field} does not match start`);
+      }
+      if (observation.extra.completed !== void 0 && !isStringArray(observation.extra.completed)) {
+        problems.push(`${id}: progress completed must be an array of strings`);
+      }
+      if (observation.extra.blockers !== void 0 && !isStringArray(observation.extra.blockers)) {
+        problems.push(`${id}: progress blockers must be an array of strings`);
+      }
+      for (const field of ["phase", "summary", "current", "next", "reported_at"]) {
+        if (observation.extra[field] !== void 0 && typeof observation.extra[field] !== "string") {
+          problems.push(`${id}: progress ${field} must be a string when present`);
+        }
+      }
+      if (typeof observation.extra.reported_at === "string" && Number.isNaN(Date.parse(observation.extra.reported_at))) {
+        problems.push(`${id}: progress reported_at is not a timestamp`);
       }
     }
     if (start.extra.validation_errors !== void 0 && !isStringArray(start.extra.validation_errors)) {
@@ -19523,7 +19897,7 @@ function checkHostDispatchArtifacts(run, events, mode) {
     else if (!isInsideRun(run.dir, promptPath)) problems.push(`${request.id}: prompt snapshot path escapes the run directory`);
     else {
       const abs = resolveArtifact(run.dir, promptPath);
-      if (!(0, import_node_fs19.existsSync)(abs) || sha256Hex((0, import_node_fs19.readFileSync)(abs)) !== promptSha) problems.push(`${request.id}: prompt snapshot digest does not match disk`);
+      if (!(0, import_node_fs20.existsSync)(abs) || sha256Hex((0, import_node_fs20.readFileSync)(abs)) !== promptSha) problems.push(`${request.id}: prompt snapshot digest does not match disk`);
     }
     if (terminal2?.type !== "actor_completed") continue;
     const output = typeof terminal2.extra.output === "string" ? terminal2.extra.output : null;
@@ -19533,7 +19907,7 @@ function checkHostDispatchArtifacts(run, events, mode) {
       continue;
     }
     const outputAbs = resolveArtifact(run.dir, output);
-    if (!isInsideRun(run.dir, output) || !(0, import_node_fs19.existsSync)(outputAbs) || sha256Hex((0, import_node_fs19.readFileSync)(outputAbs)) !== sha) problems.push(`${request.id}: completion output digest does not match a run-local file`);
+    if (!isInsideRun(run.dir, output) || !(0, import_node_fs20.existsSync)(outputAbs) || sha256Hex((0, import_node_fs20.readFileSync)(outputAbs)) !== sha) problems.push(`${request.id}: completion output digest does not match a run-local file`);
     if (terminal2.extra.output_valid === true) {
       if (output !== request.event.extra.output_path) problems.push(`${request.id}: successful output does not match planned immutable path`);
       const manifest = events.find((event) => event.type === "artifact_created" && event.extra.artifact === output && event.extra.dispatch_id === request.id && event.extra.actor_call_id === request.event.extra.actor_call_id);
@@ -19558,10 +19932,10 @@ function checkNativeAttestation(run, events, mode) {
   const snapshot = events.find((event) => event.type === "profile_snapshotted");
   if (snapshot != null) {
     const profileRel = typeof snapshot.extra.profile === "string" ? snapshot.extra.profile : "profile.yaml";
-    const profilePath = (0, import_node_path19.join)(run.dir, profileRel);
-    if ((0, import_node_fs19.existsSync)(profilePath)) {
+    const profilePath = (0, import_node_path20.join)(run.dir, profileRel);
+    if ((0, import_node_fs20.existsSync)(profilePath)) {
       try {
-        profile = parseExecutorProfile((0, import_node_fs19.readFileSync)(profilePath, "utf8"), profileRel);
+        profile = parseExecutorProfile((0, import_node_fs20.readFileSync)(profilePath, "utf8"), profileRel);
       } catch {
       }
     }
@@ -19692,9 +20066,9 @@ function checkActorAttempts(run, events) {
     const sha = typeof event.extra.output_sha256 === "string" ? event.extra.output_sha256 : null;
     if (rel == null || sha == null) continue;
     const abs = resolveArtifact(run.dir, rel);
-    if (!(0, import_node_fs19.existsSync)(abs)) {
+    if (!(0, import_node_fs20.existsSync)(abs)) {
       problems.push(`${rel}: rejected-attempt output is missing`);
-    } else if (sha256Hex((0, import_node_fs19.readFileSync)(abs)) !== sha) {
+    } else if (sha256Hex((0, import_node_fs20.readFileSync)(abs)) !== sha) {
       problems.push(`${rel}: rejected-attempt output no longer matches its recorded sha256`);
     }
   }
@@ -19722,16 +20096,16 @@ function checkExecutorBindings(run, events) {
     const snap = snapshots[0];
     const rel = typeof snap.extra.profile === "string" ? snap.extra.profile : "profile.yaml";
     const sha = typeof snap.extra.sha256 === "string" ? snap.extra.sha256 : null;
-    const abs = (0, import_node_path19.join)(run.dir, rel);
-    if (!(0, import_node_fs19.existsSync)(abs)) {
+    const abs = (0, import_node_path20.join)(run.dir, rel);
+    if (!(0, import_node_fs20.existsSync)(abs)) {
       problems.push(`${rel}: profile snapshot is missing`);
     } else {
-      const text = (0, import_node_fs19.readFileSync)(abs, "utf8");
+      const text = (0, import_node_fs20.readFileSync)(abs, "utf8");
       if (sha != null && sha256Hex(text) !== sha) {
         problems.push(`${rel}: snapshot does not match its recorded sha256`);
       }
       try {
-        const doc = (0, import_yaml12.parse)(text);
+        const doc = (0, import_yaml13.parse)(text);
         if (doc !== null && typeof doc === "object") {
           if (doc.bindings !== null && typeof doc.bindings === "object" && !Array.isArray(doc.bindings)) {
             bindings = {};
@@ -19863,7 +20237,7 @@ function checkRunSchema(run, schemas) {
   const check = "run-schema";
   let doc;
   try {
-    doc = (0, import_yaml12.parse)((0, import_node_fs19.readFileSync)((0, import_node_path19.join)(run.dir, "run.yaml"), "utf8"));
+    doc = (0, import_yaml13.parse)((0, import_node_fs20.readFileSync)((0, import_node_path20.join)(run.dir, "run.yaml"), "utf8"));
   } catch (err) {
     return { check, status: "fail", detail: `run.yaml did not parse: ${err.message}` };
   }
@@ -20001,7 +20375,7 @@ function checkArtifactsExist(run, events) {
     if (event.type !== "artifact_created") continue;
     if (typeof event.extra.artifact === "string") paths.push(event.extra.artifact);
   }
-  const missing = paths.filter((p) => !(0, import_node_fs19.existsSync)(resolveArtifact(run.dir, p)));
+  const missing = paths.filter((p) => !(0, import_node_fs20.existsSync)(resolveArtifact(run.dir, p)));
   if (missing.length === 0) {
     return { check, status: "ok", detail: `${paths.length}/${paths.length} present` };
   }
@@ -20023,12 +20397,12 @@ function checkArtifactDigests(run, events) {
     const recordedBytes = typeof event.extra.bytes === "number" ? event.extra.bytes : null;
     if (rel == null || recordedSha == null) continue;
     const abs = resolveArtifact(run.dir, rel);
-    if (!(0, import_node_fs19.existsSync)(abs)) {
+    if (!(0, import_node_fs20.existsSync)(abs)) {
       absent += 1;
       continue;
     }
     checked += 1;
-    const bytes = (0, import_node_fs19.readFileSync)(abs);
+    const bytes = (0, import_node_fs20.readFileSync)(abs);
     if (sha256Hex(bytes) !== recordedSha) {
       problems.push(`${rel}: recorded sha256 does not match the bytes on disk`);
     } else if (recordedBytes != null && bytes.length !== recordedBytes) {
@@ -20054,11 +20428,11 @@ function checkArtifactValidation(run, schemas, events) {
     const rel = typeof event.extra.artifact === "string" ? event.extra.artifact : null;
     if (rel == null) continue;
     const abs = resolveArtifact(run.dir, rel);
-    if (!(0, import_node_fs19.existsSync)(abs)) continue;
+    if (!(0, import_node_fs20.existsSync)(abs)) continue;
     checked += 1;
     let parsed;
     try {
-      parsed = JSON.parse((0, import_node_fs19.readFileSync)(abs, "utf8"));
+      parsed = JSON.parse((0, import_node_fs20.readFileSync)(abs, "utf8"));
     } catch {
       problems.push(`${rel}: recorded as ${recorded.schema} but is not valid JSON`);
       continue;
@@ -20112,9 +20486,9 @@ function checkPromptSnapshots(run, events) {
       continue;
     }
     const abs = resolveArtifact(run.dir, promptPath);
-    if (!(0, import_node_fs19.existsSync)(abs)) {
+    if (!(0, import_node_fs20.existsSync)(abs)) {
       problems.push(`${promptPath}: snapshot is missing`);
-    } else if (sha256Hex((0, import_node_fs19.readFileSync)(abs)) !== promptSha) {
+    } else if (sha256Hex((0, import_node_fs20.readFileSync)(abs)) !== promptSha) {
       problems.push(`${promptPath}: recorded sha256 does not match the snapshot on disk`);
     }
     const inputs = Array.isArray(event.extra.inputs) ? event.extra.inputs : [];
@@ -20123,9 +20497,9 @@ function checkPromptSnapshots(run, events) {
       const rec = input;
       if (typeof rec.path !== "string" || typeof rec.sha256 !== "string") continue;
       const inputAbs = resolveArtifact(run.dir, rec.path);
-      if (!(0, import_node_fs19.existsSync)(inputAbs)) {
+      if (!(0, import_node_fs20.existsSync)(inputAbs)) {
         problems.push(`${promptPath}: input ${rec.path} is missing`);
-      } else if (sha256Hex((0, import_node_fs19.readFileSync)(inputAbs)) !== rec.sha256) {
+      } else if (sha256Hex((0, import_node_fs20.readFileSync)(inputAbs)) !== rec.sha256) {
         problems.push(`${promptPath}: input ${rec.path} no longer matches its recorded sha256`);
       }
     }
@@ -20152,12 +20526,12 @@ function checkGateEvent(run, schemas, event, lastResultByCondition) {
     return { check, status: "fail", detail: "gate event recorded no artifact to recompute from" };
   }
   const artifactPath = resolveArtifact(run.dir, artifactRel);
-  if (!(0, import_node_fs19.existsSync)(artifactPath)) {
+  if (!(0, import_node_fs20.existsSync)(artifactPath)) {
     return { check, status: "fail", detail: `artifact ${artifactRel} is missing; cannot recompute` };
   }
   let parsed;
   try {
-    parsed = JSON.parse((0, import_node_fs19.readFileSync)(artifactPath, "utf8"));
+    parsed = JSON.parse((0, import_node_fs20.readFileSync)(artifactPath, "utf8"));
   } catch (err) {
     return { check, status: "fail", detail: `artifact ${artifactRel} is not valid JSON: ${err.message}` };
   }
@@ -20222,6 +20596,7 @@ Usage:
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
   fadeno dispatch-start <run> <id>      Start a native host dispatch
+  fadeno dispatch-progress <run> <id>   Record an attested progress observation
   fadeno dispatch-complete <run> <id>   Submit a native host result
   fadeno dispatch-fail <run> <id>       Submit a native host failure
   fadeno run <run> [flags]              Update a run ledger (run.yaml + events.jsonl)
@@ -20259,6 +20634,8 @@ Options:
   --agent-id <id>         (dispatch-start) Native host agent identity
   --workspace <path>      (dispatch-start) Native workspace provenance
   --branch <name>         (dispatch-start) Native branch provenance
+  --file <path>           (dispatch-progress) Agent/harness status JSON file
+  --source <kind>         (dispatch-progress) agent | harness | director
   --output <path>         (dispatch-complete) Temporary output file
   --commit <sha>          (dispatch-complete) Optional commit provenance
   --reason <text>         (dispatch-fail) Host-attested failure reason
@@ -20295,7 +20672,7 @@ function printInitSummary(target, repoRoot, results, withHooks, dataOnly) {
   console.log(`Fadeno initialized for ${target} in ${repoRoot}
 `);
   for (const r of results) {
-    console.log(`  ${r.status.padEnd(11)} ${(0, import_node_path20.relative)(repoRoot, r.path) || r.path}`);
+    console.log(`  ${r.status.padEnd(11)} ${(0, import_node_path21.relative)(repoRoot, r.path) || r.path}`);
   }
   console.log(
     `
@@ -20335,7 +20712,7 @@ function printIssue(issue) {
 function printValidate(outcome) {
   let warnings = 0;
   for (const result of outcome.results) {
-    const rel = (0, import_node_path20.relative)(outcome.repoRoot, result.file) || result.file;
+    const rel = (0, import_node_path21.relative)(outcome.repoRoot, result.file) || result.file;
     const fileWarnings = result.issues.filter((i) => i.severity === "warning").length;
     warnings += fileWarnings;
     if (result.ok) {
@@ -20417,10 +20794,29 @@ function renderEvent(event) {
     }
   }
 }
-var STEP_GLYPHS = { done: "\u2713", current: "\u2192", failed: "\u2717", waiting: "!" };
+var STEP_GLYPHS = {
+  pending: "\u25CB",
+  running: "\u2192",
+  waiting: "!",
+  blocked: "\u25A0",
+  completed: "\u2713",
+  failed: "\u2717"
+};
+function formatDuration(ms) {
+  if (ms == null) return null;
+  const seconds = Math.max(0, Math.floor(ms / 1e3));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor(seconds % 3600 / 60);
+  const remainder = seconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ${remainder}s`;
+  if (minutes > 0) return `${minutes}m ${remainder}s`;
+  return `${remainder}s`;
+}
 function stepSummary(step) {
   const parts = [];
-  if (step.state === "waiting") parts.push("waiting for human decision");
+  parts.push(step.state);
+  const runtime = formatDuration(step.runtimeMs);
+  if (runtime != null) parts.push(runtime);
   if (step.actorCalls > 1) parts.push(`${step.actorCalls} actor calls`);
   if (step.attempts > step.actorCalls) {
     const repairNote = step.repairs > 0 ? `, ${step.repairs} schema repair${step.repairs === 1 ? "" : "s"}` : "";
@@ -20436,12 +20832,29 @@ function stepSummary(step) {
   return parts.join(" \xB7 ");
 }
 function printProjection(projection) {
-  console.log("\nsteps");
+  const total = formatDuration(projection.runtimeMs);
+  console.log(`
+workflow${projection.playbook ? ` \xB7 ${projection.playbook}` : ""}${total ? ` \xB7 total ${total}` : ""}`);
   if (projection.steps.length === 0) console.log("  (no steps recorded)");
   const width = Math.max(0, ...projection.steps.map((s) => s.id.length));
   for (const step of projection.steps) {
     const summary = stepSummary(step);
-    console.log(`  ${STEP_GLYPHS[step.state]} ${step.id.padEnd(width)}${summary ? `  ${summary}` : ""}`);
+    const indent = step.loopBodyOf != null ? "    \u21B3 " : "  ";
+    const kind = step.kind != null ? ` [${step.kind}]` : "";
+    console.log(`${indent}${STEP_GLYPHS[step.state]} ${step.id.padEnd(width)}${kind}${summary ? `  ${summary}` : ""}`);
+    for (const actor of step.actors) {
+      const details = [actor.state];
+      const actorRuntime = formatDuration(actor.runtimeMs);
+      if (actorRuntime != null) details.push(actorRuntime);
+      if (actor.phase != null) details.push(actor.phase);
+      if (actor.summary != null) details.push(truncateWithEllipsis(actor.summary, 120));
+      if (actor.completed.length > 0) details.push(`${actor.completed.length} checkpoint${actor.completed.length === 1 ? "" : "s"}`);
+      if (actor.current != null) details.push(truncateWithEllipsis(actor.current, 120));
+      if (actor.next != null) details.push(`next: ${truncateWithEllipsis(actor.next, 100)}`);
+      if (actor.blockers.length > 0) details.push(`blocked: ${truncateWithEllipsis(actor.blockers.join("; "), 120)}`);
+      if (actor.source != null) details.push(`${actor.source}-reported`);
+      console.log(`${indent}    ${STEP_GLYPHS[actor.state]} ${actor.actor}  ${details.join(" \xB7 ")}`);
+    }
   }
   if (projection.requests.length > 0) {
     console.log("\nhost dispatches");
@@ -20459,7 +20872,16 @@ function printProjection(projection) {
       for (const request of requests) {
         const member = request.actor ?? "(anonymous)";
         const model = request.model != null && request.reasoningEffort != null ? `${request.model}/${request.reasoningEffort}` : request.executor;
-        console.log(`      ${member}  ${model}  ${request.state}`);
+        const details = [request.state];
+        const runtime = formatDuration(request.runtimeMs);
+        if (runtime != null) details.push(runtime);
+        if (request.phase != null) details.push(request.phase);
+        if (request.summary != null) details.push(truncateWithEllipsis(request.summary, 120));
+        if (request.completed.length > 0) details.push(`${request.completed.length} checkpoint${request.completed.length === 1 ? "" : "s"}`);
+        if (request.current != null) details.push(truncateWithEllipsis(request.current, 120));
+        if (request.next != null) details.push(`next: ${truncateWithEllipsis(request.next, 100)}`);
+        if (request.progressSource != null) details.push(`${request.progressSource}-reported`);
+        console.log(`      ${member}  ${model}  ${details.join(" \xB7 ")}`);
       }
     }
   }
@@ -20483,7 +20905,7 @@ function printProjection(projection) {
 function printShow(repoRoot, result, rawTimeline) {
   const { run, mode, events, badLines, artifacts, projection } = result;
   const dash = (value) => value ?? "\u2014";
-  const relDir = (0, import_node_path20.relative)(repoRoot, run.dir) || run.dir;
+  const relDir = (0, import_node_path21.relative)(repoRoot, run.dir) || run.dir;
   console.log(`run ${run.runId}`);
   console.log(`  playbook:  ${dash(run.playbook)}`);
   console.log(`  task:      ${dash(run.task)}`);
@@ -20531,6 +20953,7 @@ function printDrive(result) {
       console.log(`awaiting ${result.requests.length} native host dispatch(es) for run ${result.run}`);
       for (const request of result.requests) {
         console.log(`  ${request.dispatchId}  ${request.step}${request.actor ? ` (${request.actor})` : ""}  ${request.model}/${request.reasoningEffort}`);
+        console.log(`      progress: <workspace>/${progressSidecarPath(request.run, request.step, request.actor)}`);
       }
       return 0;
     default:
@@ -20592,6 +21015,8 @@ function main(argv) {
         "agent-id": { type: "string" },
         workspace: { type: "string" },
         branch: { type: "string" },
+        file: { type: "string" },
+        source: { type: "string" },
         output: { type: "string" },
         commit: { type: "string" },
         reason: { type: "string" },
@@ -20692,7 +21117,7 @@ function main(argv) {
       const parts = [];
       if (result.updatedFields.length) parts.push(`updated ${result.updatedFields.join(", ")}`);
       if (result.appendedEvents.length) parts.push(`logged ${result.appendedEvents.join(", ")}`);
-      console.log(`${(0, import_node_path20.relative)(process.cwd(), result.runDir) || result.runDir}: ${parts.join("; ")}`);
+      console.log(`${(0, import_node_path21.relative)(process.cwd(), result.runDir) || result.runDir}: ${parts.join("; ")}`);
       if (result.manifest) {
         const v = result.manifest.validation;
         const note = v.schema ? `, ${v.schema}: ${v.ok ? "valid" : "INVALID"}` : "";
@@ -20712,7 +21137,7 @@ function main(argv) {
       if (codex) {
         console.log("\nTest it: `codex plugin marketplace add . && codex plugin add fadeno@fadeno`");
       } else {
-        console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path20.relative)(process.cwd(), outDir) + "`");
+        console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path21.relative)(process.cwd(), outDir) + "`");
       }
       return 0;
     }
@@ -20830,6 +21255,25 @@ function main(argv) {
       }
       const result = runDispatchComplete({ run, dispatchId, output: values.output, commit: values.commit });
       console.log(`${result.dispatchId} completed${result.idempotent ? " (idempotent)" : ""}`);
+      return 0;
+    }
+    case "dispatch-progress": {
+      const [, run, dispatchId] = positionals;
+      if (!run || !dispatchId || !values.file) {
+        throw new Error("Usage: fadeno dispatch-progress <run> <dispatch-id> --file <status.json> [--source agent|harness|director]");
+      }
+      if (values.source && !["agent", "harness", "director"].includes(values.source)) {
+        throw new Error(`Invalid --source "${values.source}". Use: agent | harness | director.`);
+      }
+      const result = runDispatchProgress({
+        run,
+        dispatchId,
+        file: values.file,
+        source: values.source
+      });
+      console.log(
+        `${result.dispatchId} progress: ${result.state} (${result.source})${result.idempotent ? " (idempotent)" : ""}`
+      );
       return 0;
     }
     case "dispatch-fail": {

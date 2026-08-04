@@ -183,6 +183,7 @@ fadeno verify <run-id>                          # recompute the ledger's checkab
 fadeno drive <run-id>                           # engine: advance until terminal or a human pause (uses .fadeno/executors.yaml)
 fadeno decide <run-id> <option>                 # resolve a paused human decision, then re-drive
 fadeno dispatch-start <run-id> <dispatch-id> --agent-id <native-id>
+fadeno dispatch-progress <run-id> <dispatch-id> --file <status.json> --source agent
 fadeno dispatch-complete <run-id> <dispatch-id> --output <temporary-file>
 fadeno dispatch-fail <run-id> <dispatch-id> --reason "blocked"
 
@@ -200,6 +201,16 @@ When a role binds to a native host executor, `fadeno drive` plans all pending
 calls and returns `awaiting_host_dispatch` with stable request ids. The host
 starts each native agent and submits the receipts above; model, reasoning
 effort, and native agent identity are recorded as explicit host attestations.
+The immutable prompt names an ephemeral progress sidecar. Agents or harnesses
+update that JSON at meaningful checkpoints; the host records provenance-labelled
+observations with `dispatch-progress`. Progress is attested observability, never
+a gate input.
+
+`fadeno show` projects the ledger onto the original playbook graph, including
+nodes that have not started. Every step and literal map actor appears as
+pending, running, waiting, blocked, completed, or failed, with actor/step
+elapsed time and total run time. When progress exists, the view includes its
+phase and current action; it never infers internal state from busy/idle alone.
 
 `fadeno gate` is the **advisory→enforced bridge**: it computes a gate condition
 from a structured judgment artifact on disk (same check the runner applies), so

@@ -38,11 +38,17 @@ fadeno drive <run>
   executor_failed / output_invalid:
     report honestly; the user may re-run drive (retry) or substitute:
     fadeno drive <run> --bind <role>=<executor>     # recorded as evidence
+  awaiting_host_dispatch:
+    start each native agent and record dispatch-start
+    poll the prompt-declared progress sidecar and record dispatch-progress
+    submit dispatch-complete or dispatch-fail, then re-run drive
 ```
 
    The engine snapshots the executor profile into the run, mints attempt
    ordinals and execution ids, validates typed outputs (one bounded schema
    repair), and records every dispatch — do not duplicate its work by hand.
+   Progress observations are provenance-labelled attestations only; never use
+   them to choose a control-flow branch or satisfy a gate.
 
 3. **Manual loop** (no executor profile, or for the one step drive handed back):
 

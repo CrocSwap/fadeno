@@ -240,6 +240,14 @@ The director is the only ledger writer during this MVP. Format 0.2 and
 unversioned ledgers are readable only through explicit compatibility mode, and
 verifiers fail rather than ignore host lifecycle evidence in those ledgers.
 
+Live cross-harness dogfood exposed a separate observability boundary: start and
+terminal receipts do not reveal what an external session is doing. The
+additive `host_dispatch_progress` event records provenance-labelled
+agent/harness/director observations between start and terminal. Actor prompts
+name an ephemeral JSON sidecar, and `fadeno show` projects its latest phase,
+current action, blockers, and runtime onto the original workflow graph. These
+observations are attested, not recomputable, and are forbidden as gate inputs.
+
 `fadeno verify` must check at least:
 
 - recognized document and event schema versions;

@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'nod
 import { join } from 'node:path';
 import test from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
-import { runDispatchComplete, runDispatchStart } from '../src/commands/dispatch.ts';
+import { runDispatchComplete, runDispatchProgress, runDispatchStart } from '../src/commands/dispatch.ts';
 import { runDrive } from '../src/commands/drive.ts';
 import { runInit } from '../src/commands/init.ts';
 import { runNewRun } from '../src/commands/new-run.ts';
@@ -11,6 +11,7 @@ import { runPrompt } from '../src/commands/prompt.ts';
 import { parseExecutorProfile, serializeProfile } from '../src/lib/executors.ts';
 import { readEvents } from '../src/lib/run-ledger.ts';
 import { runVerify } from '../src/commands/verify.ts';
+import { runShow } from '../src/commands/show.ts';
 import { tempRepo } from './helpers.ts';
 
 const PLAYBOOK = `kind: AgentPlaybook
@@ -145,6 +146,77 @@ test('drive batches host requests and receipts are idempotent and verifiable', (
   const all = readEvents(runDir).events;
   assert.equal(all.filter((event) => event.type === 'host_dispatch_requested').length, 2);
   assert.equal(runVerify({ repoRoot: root, run: runId }).ok, true);
+});
+
+test('host progress is provenance-labelled, idempotent, projected, and lifecycle-checked', (t) => {
+  const { root, runId, runDir, request } = seedPendingHostRun(t);
+  const startedAt = new Date('2026-08-04T18:00:00.000Z');
+  runDispatchStart({
+    repoRoot: root,
+    run: runId,
+    dispatchId: request.dispatchId,
+    agentId: 'native-agent-1',
+    now: startedAt,
+  });
+  const report = join(root, 'progress.json');
+  writeFileSync(report, JSON.stringify({ state: 'completed', current: 'trying to forge a terminal state' }));
+  assert.throws(
+    () => runDispatchProgress({ repoRoot: root, run: runId, dispatchId: request.dispatchId, file: report }),
+    /state must be one of/,
+  );
+  writeFileSync(report, JSON.stringify({
+    state: 'running',
+    phase: 'verification',
+    completed: ['read instructions', 'implemented change'],
+    current: 'running npm test',
+    next: 'commit result',
+    blockers: [],
+    updated_at: '2026-08-04T18:00:20.000Z',
+  }));
+  const observed = runDispatchProgress({
+    repoRoot: root,
+    run: runId,
+    dispatchId: request.dispatchId,
+    file: report,
+    source: 'agent',
+    now: new Date('2026-08-04T18:00:21.000Z'),
+  });
+  assert.equal(observed.idempotent, false);
+  assert.equal(runDispatchProgress({
+    repoRoot: root,
+    run: runId,
+    dispatchId: request.dispatchId,
+    file: report,
+    source: 'agent',
+  }).idempotent, true);
+
+  const shown = runShow({ repoRoot: root, run: runId, now: new Date('2026-08-04T18:00:30.000Z') });
+  const projected = shown.projection!.requests.find((item) => item.dispatchId === request.dispatchId)!;
+  assert.equal(projected.state, 'running');
+  assert.equal(projected.phase, 'verification');
+  assert.equal(projected.current, 'running npm test');
+  assert.equal(projected.progressSource, 'agent');
+  assert.equal(projected.runtimeMs, 30_000);
+  const actor = shown.projection!.steps.find((step) => step.id === 'implement_items')!.actors.find((item) => item.actor === 'agent_1')!;
+  assert.equal(actor.state, 'running');
+  assert.equal(actor.phase, 'verification');
+  assert.equal(runVerify({ repoRoot: root, run: runId }).findings.find((finding) => finding.check === 'host-dispatch-lifecycle')!.status, 'ok');
+
+  const output = join(root, 'output.md');
+  writeFileSync(output, 'done');
+  runDispatchComplete({ repoRoot: root, run: runId, dispatchId: request.dispatchId, output });
+  assert.throws(
+    () => runDispatchProgress({ repoRoot: root, run: runId, dispatchId: request.dispatchId, file: report }),
+    /terminal receipt/,
+  );
+
+  const lines = readFileSync(join(runDir, 'events.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+  const progress = lines.find((event) => event.type === 'host_dispatch_progress')!;
+  progress.observation_source = 'omniscient';
+  writeFileSync(join(runDir, 'events.jsonl'), `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`);
+  const tampered = runVerify({ repoRoot: root, run: runId });
+  assert.equal(tampered.findings.find((finding) => finding.check === 'host-dispatch-lifecycle')!.status, 'fail');
+  assert.match(tampered.findings.find((finding) => finding.check === 'host-dispatch-lifecycle')!.detail, /observation_source/);
 });
 
 test('host schema repair requests carry immutable validation feedback', (t) => {
