@@ -5,7 +5,7 @@ chat.
 
 ## Design status and precedence
 
-Fadeno now has three intentionally different design horizons:
+Fadeno now has four intentionally different design horizons:
 
 1. [`kickoff-memo.md`](kickoff-memo.md) records the rationale and scope of the
    shipped v0 advisory protocol. It remains historical design context.
@@ -17,6 +17,10 @@ Fadeno now has three intentionally different design horizons:
    is the North Star vocabulary, not an implementation checklist. Concepts move
    into the core only after an observed run needs them and `fadeno verify` can
    check a meaningful property about them.
+4. [`experimental/compositional-runtime.md`](experimental/compositional-runtime.md)
+   is a dogfood-promoted extension of the next protocol. It specifies recursive
+   fan-out/aggregation containers and durable node-instance identity; it does
+   not authorize a daemon or general distributed scheduler.
 
 The next-protocol engine decision deliberately supersedes v0's "no runtime"
 constraint for forward work. It does not authorize a daemon, cloud service,
@@ -118,6 +122,26 @@ surfaces actor calls, attempts, schema repairs, resumed sessions, and
 `! waiting for human decision`. Engine-executable today: actor_call/evaluator/reduce/role-maps
 (with collective assembly), deterministic gates, loops, human gates; tool_call
 and the undemonstrated primitives still hand back to the driver.
+
+### Accepted next slice: compositional containers
+
+The five-item Luna/Terra dogfood showed that a role-list map plus one global
+loop cannot represent independently advancing review cycles. The accepted
+boundary is now recursive composition: `map`, `replicate`, and `loop` own child
+graphs, so `map(loop(...))` and `loop(map(...))` have distinct, executable
+semantics. `join` and `reduce` operate on child-instance results.
+
+This is **specified, not shipped**. Implementation must land as one verified
+vertical slice rather than making the schema accept graphs the engine cannot
+drive:
+
+1. hierarchical `node_instance_id` and lexical artifact scope;
+2. a deterministic runnable frontier replacing the single global cursor for
+   compositional playbooks;
+3. independent map-member and loop-generation state;
+4. batched host dispatch and progress attributed to node instances;
+5. graph-expanded `show` and containment-aware `verify`;
+6. map-of-loop and loop-of-map acceptance fixtures.
 
 **Capabilities 3 and 6 shipped thin (format 0.3):** run-ledger format 0.3
 (`schema_version` in run.yaml + contiguous per-event `seq`), artifact

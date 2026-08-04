@@ -35,6 +35,7 @@ These docs frame the rest:
 | [`docs/extending.md`](docs/extending.md) | **How to change it** — file-by-file recipes for common tasks. |
 | [`docs/roadmap.md`](docs/roadmap.md) | The shipped/deferred line and honest v0 gaps. |
 | [`docs/experimental/next-protocol.md`](docs/experimental/next-protocol.md) | The **current forward implementation boundary** — a small engine-backed, verification-centered protocol. Read this before planning protocol/runtime work. |
+| [`docs/experimental/compositional-runtime.md`](docs/experimental/compositional-runtime.md) | Dogfood-promoted extension to the next protocol: recursive `map`/`replicate`/`loop` containers and a runnable-instance frontier. Accepted design; implementation in progress. |
 | [`docs/experimental/ontology-and-execution-design.md`](docs/experimental/ontology-and-execution-design.md) | The evidence-tiered **North Star ontology**. It is a design horizon, not the next implementation scope. |
 
 ### Design precedence for forward work
@@ -51,6 +52,10 @@ The design documents intentionally describe different horizons:
    vocabulary. A well-defined concept there is not approved implementation
    scope: promotion requires both an observed receipt and a meaningful
    verification check.
+
+The compositional-runtime document is an additive, dogfood-evidenced extension
+to item 2. It governs recursive container work without promoting unrelated
+North Star scheduler concepts.
 
 The experimental directory name reflects implementation status, not a weak or
 superseded decision. Revisit the next-protocol boundary only with new dogfood

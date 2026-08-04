@@ -337,7 +337,10 @@ There is no established user base justifying permanent ledger compatibility.
 - Full agent-session and tool-invocation lifecycle ontologies
 - Required transcript capture
 - Workspace strategy taxonomy or automatic worktree management
-- Child-run/subworkflow runtime design
+- Cross-run child-ledger orchestration. In-run recursive container composition
+  is now governed by
+  [`compositional-runtime.md`](compositional-runtime.md), promoted from the
+  five-item Luna/Terra dogfood evidence recorded on 2026-08-04.
 - Cloud service, daemon, remote scheduler, or provider integrations
 - Cryptographic signatures or hash chaining
 
