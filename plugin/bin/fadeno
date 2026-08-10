@@ -10304,7 +10304,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve11.call(this, root, ref);
+      let _sch = resolve12.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a = root.localRefs) === null || _a === void 0 ? void 0 : _a[ref];
         const { schemaId } = this.opts;
@@ -10331,7 +10331,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve11(root, ref) {
+    function resolve12(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -10962,7 +10962,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve11(baseURI, relativeURI, options) {
+    function resolve12(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const resolved = resolveComponent(parse(baseURI, schemelessOptions), parse(relativeURI, schemelessOptions), schemelessOptions, true);
       schemelessOptions.skipEscape = true;
@@ -11220,7 +11220,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve11,
+      resolve: resolve12,
       resolveComponent,
       equal,
       serialize,
@@ -13893,8 +13893,8 @@ var require_ajv = __commonJS({
 });
 
 // src/cli.ts
-var import_node_fs23 = require("node:fs");
-var import_node_path23 = require("node:path");
+var import_node_fs24 = require("node:fs");
+var import_node_path25 = require("node:path");
 var import_node_util = require("node:util");
 
 // src/lib/paths.ts
@@ -14419,8 +14419,8 @@ function parseExecutorProfile(text, source) {
         `${source}: command executor "${name}" rejects host-only field(s) \`reasoning_effort\`/\`agent_type\`.`
       );
     }
-    const command = raw.command;
-    if (!Array.isArray(command) || command.length === 0 || !command.every((part) => typeof part === "string" && part.length > 0)) {
+    const command2 = raw.command;
+    if (!Array.isArray(command2) || command2.length === 0 || !command2.every((part) => typeof part === "string" && part.length > 0)) {
       throw new ExecutorProfileError(
         `${source}: executor "${name}" needs \`command\` as a non-empty array of strings.`
       );
@@ -14464,7 +14464,7 @@ function parseExecutorProfile(text, source) {
       }
       sessionIdPattern = raw.session_id_pattern;
     }
-    const mintsId = command.some((part) => part.includes(SESSION_ID_PLACEHOLDER));
+    const mintsId = command2.some((part) => part.includes(SESSION_ID_PLACEHOLDER));
     if (resume != null) {
       if (mintsId && sessionIdPattern != null) {
         throw new ExecutorProfileError(
@@ -14483,7 +14483,7 @@ function parseExecutorProfile(text, source) {
     }
     executors[name] = {
       adapter: "command",
-      command,
+      command: command2,
       model: typeof raw.model === "string" ? raw.model : null,
       resume,
       sessionIdPattern
@@ -15855,7 +15855,8 @@ function parseProgressReport(bytes) {
   const allowed = /* @__PURE__ */ new Set(["state", "phase", "summary", "completed", "current", "next", "blockers", "updated_at"]);
   const unknown = Object.keys(doc).filter((key) => !allowed.has(key));
   if (unknown.length > 0) throw new HostDispatchError(`progress report has unknown field(s): ${unknown.join(", ")}.`);
-  if (typeof doc.state !== "string" || !PROGRESS_STATES.has(doc.state)) {
+  const state = doc.state === "in_progress" ? "running" : doc.state;
+  if (typeof state !== "string" || !PROGRESS_STATES.has(state)) {
     throw new HostDispatchError(`progress report state must be one of: ${[...PROGRESS_STATES].join(", ")}.`);
   }
   const optionalString = (key, max) => {
@@ -15868,11 +15869,12 @@ function parseProgressReport(bytes) {
   const optionalStrings = (key) => {
     const item = doc[key];
     if (item === void 0) return void 0;
-    if (!Array.isArray(item) || item.some((entry) => typeof entry !== "string" || entry.trim() === "" || entry.length > 500)) {
+    const items = typeof item === "string" ? [item] : item;
+    if (!Array.isArray(items) || items.some((entry) => typeof entry !== "string" || entry.trim() === "" || entry.length > 500)) {
       throw new HostDispatchError(`progress report ${key} must be an array of non-empty strings up to 500 characters.`);
     }
-    if (item.length > 50) throw new HostDispatchError(`progress report ${key} exceeds 50 entries.`);
-    return item;
+    if (items.length > 50) throw new HostDispatchError(`progress report ${key} exceeds 50 entries.`);
+    return items;
   };
   const updatedAt = optionalString("updated_at", 100);
   if (updatedAt != null && Number.isNaN(Date.parse(updatedAt))) {
@@ -15885,7 +15887,7 @@ function parseProgressReport(bytes) {
   const next = optionalString("next", 1e3);
   const blockers = optionalStrings("blockers");
   return {
-    state: doc.state,
+    state,
     ...phase != null ? { phase } : {},
     ...summary != null ? { summary } : {},
     ...completed != null ? { completed } : {},
@@ -16082,7 +16084,7 @@ function requestHostDispatch(opts) {
       map_member: opts.mapMember,
       generation: opts.generation,
       logical_artifact: opts.logicalArtifact,
-      host_attested: ["model", "reasoning_effort", "agent_type", "agent_id"],
+      requested_identity: ["model", "reasoning_effort", "agent_type"],
       ...opts.validationErrors != null ? { validation_errors: opts.validationErrors } : {},
       ...opts.repairAppendix != null ? { repair_appendix: opts.repairAppendix } : {}
     },
@@ -16131,6 +16133,7 @@ function startHostDispatch(opts) {
       workspace: opts.workspace,
       branch: opts.branch,
       host_attested: true,
+      identity_evidence: "requested_only",
       attestation: {
         model: request.model,
         reasoning_effort: request.reasoningEffort,
@@ -17584,7 +17587,7 @@ function adviceFor(info, gate) {
     return "pause and return to the host; do not auto-approve.";
   }
   if (kind === "tool_call") {
-    return "invoke the named tool capability; save the result; record an artifact event; then re-call `fadeno next`.";
+    return "invoke the named tool capability, save its structured result, then atomically attribute it with `fadeno tool-complete <run> --output <artifact-path>` before re-calling `fadeno next`.";
   }
   return `handle kind \`${kind}\` per runtime.md; record the outcome; then re-call \`fadeno next\`.`;
 }
@@ -18116,6 +18119,9 @@ function renderOutput(ctx) {
     lines.push(`- Output: ${out.collectiveType || out.memberType}.`);
   }
   lines.push(`- Write exactly one artifact to \`${out.path}\`.`);
+  lines.push(
+    `- Artifact paths beginning with \`artifacts/\` are relative to the run directory \`.fadeno/runs/${ctx.runId}/\`, not the repository root.`
+  );
   lines.push(`- Media type: ${out.mediaType}.`);
   if (out.schemaKind && ctx.schemaText != null) {
     lines.push("- Emit JSON only \u2014 no prose, no code fences around it \u2014 conforming to this schema:");
@@ -18161,7 +18167,7 @@ function renderStepPrompt(ctx) {
   lines.push(...renderOutput(ctx), "");
   const progressPath = progressSidecarPath(ctx.runId, ctx.step, ctx.actor);
   lines.push("## Cooperative progress", "");
-  lines.push(`- Status sidecar: \`${progressPath}\` (workspace-relative, ephemeral, never commit it; create parent directories if needed).`);
+  lines.push(`- Status sidecar: \`${progressPath}\` (repository-root-relative, ephemeral, never commit it; create parent directories if needed).`);
   lines.push("- Update it after meaningful phases and whenever blocked or waiting for input. Write a JSON object with:");
   lines.push("- Keep reports concise and never include secrets, credentials, raw prompts, or private reasoning.");
   lines.push("", "```json", "{");
@@ -19389,9 +19395,10 @@ function assembleCompositePrompt(ctx, action, ids) {
     `Return only the ${plan.logicalArtifact} artifact body. Do not wrap it in a code fence.`,
     plan.artifactType == null ? "- Format: Markdown." : `- Format: JSON satisfying .fadeno/schemas/${plan.artifactType}.schema.json.`,
     `- The director records it at ${plan.outputPath}.`,
+    `- That artifact path is relative to run directory .fadeno/runs/${ctx.runId}/, not the repository root.`,
     "",
     "## Cooperative progress",
-    `Update ${progressPath} at meaningful phases using the Fadeno progress JSON shape.`,
+    `Update repository-root-relative ${progressPath} at meaningful phases using the Fadeno progress JSON shape.`,
     "Progress is attested observability only and never controls a gate. Do not include secrets or private reasoning.",
     ""
   ];
@@ -19818,7 +19825,11 @@ function runInit(opts) {
   const tpl = templatesDir();
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const force = opts.force ?? false;
+  const withSteering = opts.withSteering ?? false;
   const results = [];
+  if (withSteering && opts.target === "grok") {
+    throw new Error("Loadout steering is currently supported for Codex and Claude Code, not Grok Build.");
+  }
   copyTree((0, import_node_path15.join)(tpl, "common", "fadeno"), (0, import_node_path15.join)(repoRoot, ".fadeno"), force, results);
   ensureGitignored(
     repoRoot,
@@ -19853,7 +19864,12 @@ function runInit(opts) {
     }
     switch (opts.target) {
       case "codex":
-        copyTree((0, import_node_path15.join)(tpl, "codex", "codex-agents"), (0, import_node_path15.join)(repoRoot, ".codex", "agents"), force, results);
+        copyTree(
+          (0, import_node_path15.join)(tpl, "codex", withSteering ? "codex-steering-agents" : "codex-agents"),
+          (0, import_node_path15.join)(repoRoot, ".codex", "agents"),
+          force,
+          results
+        );
         break;
       case "claude":
         copyTree((0, import_node_path15.join)(tpl, "claude", "claude-agents"), (0, import_node_path15.join)(repoRoot, ".claude", "agents"), force, results);
@@ -19875,12 +19891,30 @@ function runInit(opts) {
     const bootstrapBody = (0, import_node_fs15.readFileSync)((0, import_node_path15.join)(tpl, opts.target, bootstrapName), "utf8");
     emitBootstrap((0, import_node_path15.join)(repoRoot, bootstrapName), bootstrapBody, force, results);
   }
+  if (opts.dataOnly && withSteering && opts.target === "codex") {
+    copyTree(
+      (0, import_node_path15.join)(tpl, "codex", "codex-steering-agents"),
+      (0, import_node_path15.join)(repoRoot, ".codex", "agents"),
+      force,
+      results
+    );
+  }
   if (opts.withHooks) emitHooks(tpl, repoRoot, opts.target, force, results);
-  if (opts.target === "claude") emitClaudePermissions(repoRoot, results);
+  if (withSteering && opts.target === "claude") {
+    const steeringPath = (0, import_node_path15.join)(repoRoot, CLAUDE_STEERING_SCRIPT);
+    const steeringBody = (0, import_node_fs15.readFileSync)(
+      (0, import_node_path15.join)(tpl, "claude", "hooks", "dispatch-steering.mjs"),
+      "utf8"
+    );
+    results.push({ path: steeringPath, status: emitFile(steeringPath, steeringBody, force) });
+  }
+  if (opts.target === "claude") emitClaudeSettings(repoRoot, withSteering, results);
   return { target: opts.target, repoRoot, results };
 }
 var FADENO_BASH_RULE = "Bash(fadeno:*)";
-function emitClaudePermissions(repoRoot, results) {
+var CLAUDE_STEERING_SCRIPT = (0, import_node_path15.join)(".fadeno", "local", "claude-dispatch-steering.mjs");
+var CLAUDE_STEERING_COMMAND = `node ${CLAUDE_STEERING_SCRIPT}`;
+function emitClaudeSettings(repoRoot, withSteering, results) {
   const settingsPath = (0, import_node_path15.join)(repoRoot, ".claude", "settings.local.json");
   const existed = (0, import_node_fs15.existsSync)(settingsPath);
   let data = {};
@@ -19899,13 +19933,46 @@ function emitClaudePermissions(repoRoot, results) {
   }
   const perms = data.permissions && typeof data.permissions === "object" && !Array.isArray(data.permissions) ? data.permissions : {};
   const allow = Array.isArray(perms.allow) ? [...perms.allow] : [];
-  if (allow.includes(FADENO_BASH_RULE)) {
+  let changed = false;
+  if (!allow.includes(FADENO_BASH_RULE)) {
+    allow.push(FADENO_BASH_RULE);
+    perms.allow = allow;
+    data.permissions = perms;
+    changed = true;
+  }
+  if (withSteering) {
+    const hooks = data.hooks == null ? {} : data.hooks && typeof data.hooks === "object" && !Array.isArray(data.hooks) ? data.hooks : null;
+    if (hooks == null) {
+      results.push({ path: settingsPath, status: "skipped" });
+      return;
+    }
+    const rawPreToolUse = hooks.PreToolUse;
+    if (rawPreToolUse != null && !Array.isArray(rawPreToolUse)) {
+      results.push({ path: settingsPath, status: "skipped" });
+      return;
+    }
+    const preToolUse = Array.isArray(rawPreToolUse) ? [...rawPreToolUse] : [];
+    const alreadyPresent = preToolUse.some((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+      const handlers = entry.hooks;
+      return Array.isArray(handlers) && handlers.some(
+        (handler) => handler != null && typeof handler === "object" && !Array.isArray(handler) && handler.command === CLAUDE_STEERING_COMMAND
+      );
+    });
+    if (!alreadyPresent) {
+      preToolUse.push({
+        matcher: "Agent",
+        hooks: [{ type: "command", command: CLAUDE_STEERING_COMMAND }]
+      });
+      hooks.PreToolUse = preToolUse;
+      data.hooks = hooks;
+      changed = true;
+    }
+  }
+  if (!changed) {
     results.push({ path: settingsPath, status: "skipped" });
     return;
   }
-  allow.push(FADENO_BASH_RULE);
-  perms.allow = allow;
-  data.permissions = perms;
   (0, import_node_fs15.mkdirSync)((0, import_node_path15.dirname)(settingsPath), { recursive: true });
   (0, import_node_fs15.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
 `, "utf8");
@@ -19996,7 +20063,8 @@ function slotViews(profile, name) {
   const slots = profile.loadouts[name] ?? {};
   return Object.keys(slots).sort().map((archetype) => {
     const executor = slots[archetype];
-    return { archetype, executor, model: profile.executors[executor]?.model ?? null };
+    const spec = profile.executors[executor];
+    return { archetype, executor, model: spec.model, adapter: spec.adapter };
   });
 }
 function runLoadoutShow(opts = {}) {
@@ -21127,9 +21195,9 @@ function checkHostDispatchLifecycle(run, events, mode) {
       if (typeof request.extra[field] !== "string" || request.extra[field] === "") problems.push(`${id}: request is missing ${field}`);
     }
     if (request.extra.adapter !== "host") problems.push(`${id}: request is not marked adapter host`);
-    const hostAttested = request.extra.host_attested;
-    if (!isStringArray(hostAttested) || !["model", "reasoning_effort", "agent_type", "agent_id"].every((field) => hostAttested.includes(field))) {
-      problems.push(`${id}: request does not declare model, effort, agent type, and agent identity as host-attested`);
+    const requestedIdentity = request.extra.requested_identity ?? request.extra.host_attested;
+    if (!isStringArray(requestedIdentity) || !["model", "reasoning_effort", "agent_type"].every((field) => requestedIdentity.includes(field))) {
+      problems.push(`${id}: request does not declare the requested model, effort, and agent type`);
     }
     if (request.extra.validation_errors !== void 0 && !isStringArray(request.extra.validation_errors)) {
       problems.push(`${id}: validation_errors must be an array of strings`);
@@ -21313,6 +21381,7 @@ function checkNativeAttestation(run, events, mode) {
     }
   }
   const problems = [];
+  let requestedOnly = 0;
   for (const start of starts) {
     const dispatchId = typeof start.extra.dispatch_id === "string" ? start.extra.dispatch_id : "(unknown)";
     const request = requests.get(dispatchId);
@@ -21320,6 +21389,11 @@ function checkNativeAttestation(run, events, mode) {
       if (typeof start.extra[field] !== "string" || start.extra[field] === "") problems.push(`${dispatchId}: missing host-attested ${field}`);
     }
     if (start.extra.host_attested !== true) problems.push(`${dispatchId}: start is not marked host_attested`);
+    if (start.extra.identity_evidence === void 0 || start.extra.identity_evidence === "requested_only") {
+      requestedOnly += 1;
+    } else {
+      problems.push(`${dispatchId}: unrecognized identity_evidence ${JSON.stringify(start.extra.identity_evidence)}`);
+    }
     const attestation = start.extra.attestation;
     if (attestation === null || typeof attestation !== "object" || Array.isArray(attestation)) {
       problems.push(`${dispatchId}: attestation object is missing`);
@@ -21348,7 +21422,10 @@ function checkNativeAttestation(run, events, mode) {
     }
   }
   if (problems.length > 0) return { check, status: "fail", detail: problems.join("; ") };
-  return { check, status: "ok", detail: `${starts.length} native dispatch(es) explicitly attest model, effort, and agent identity` };
+  return skip(
+    check,
+    `${requestedOnly} native dispatch(es) are internally consistent with requested model/effort/type, but the host supplied no independently observed runtime identity`
+  );
 }
 var ACTOR_EVENT_TYPES = /* @__PURE__ */ new Set(["actor_dispatched", "actor_completed", "actor_failed"]);
 function checkSessionContinuity(events) {
@@ -21982,21 +22059,652 @@ function checkHumanDecisions(events) {
   return { check, status: "fail", detail: `conflicting decisions \u2014 ${detail2}` };
 }
 
+// src/commands/completion.ts
+var import_node_fs23 = require("node:fs");
+var import_node_path23 = require("node:path");
+var import_yaml14 = __toESM(require_dist(), 1);
+var CompletionError = class extends Error {
+};
+var GLOBAL_OPTIONS = {
+  "--help": { kind: "none" },
+  "--version": { kind: "none" }
+};
+var globalOptions = () => ({ ...GLOBAL_OPTIONS });
+var command = (options, positionals = [], subcommands) => ({ options: { ...globalOptions(), ...options }, positionals, subcommands });
+var NONE = { kind: "none" };
+var PATH = { kind: "path" };
+var LOADOUT = { kind: "loadout" };
+var COMMANDS = {
+  init: command({
+    "--codex": NONE,
+    "--claude": NONE,
+    "--grok": NONE,
+    "--force": NONE,
+    "--with-hooks": NONE,
+    "--with-steering": NONE,
+    "--data-only": NONE
+  }),
+  validate: command({ "--schema": { kind: "enum", values: ["playbook", "run", "review-report", "test-result"] } }, ["path"]),
+  diagram: command({ "--format": { kind: "enum", values: ["ascii", "mermaid"] } }, ["playbook"]),
+  "new-run": command({ "--input": { kind: "input" }, "--loadout": LOADOUT }, ["playbook", "free"]),
+  loadout: command(
+    { "--loadout": LOADOUT },
+    [],
+    {
+      list: command({}),
+      use: command({}, ["loadout"]),
+      clear: command({})
+    }
+  ),
+  steering: command(
+    {},
+    [],
+    {
+      resolve: command({
+        "--archetype": { kind: "archetype" },
+        "--native-executor": { kind: "executor" },
+        "--role": { kind: "free" },
+        "--loadout": LOADOUT
+      }),
+      apply: command({ "--codex": NONE, "--force": NONE }, ["loadout"])
+    }
+  ),
+  dispatch: command(
+    {
+      "--loadout": LOADOUT,
+      "--archetype": { kind: "archetype" },
+      "--role": { kind: "free" },
+      "--executor": { kind: "executor" },
+      "--prompt-file": PATH
+    }
+  ),
+  "dispatch-start": command({ "--agent-id": { kind: "free" }, "--workspace": PATH, "--branch": { kind: "free" } }, ["run", "free"]),
+  "dispatch-progress": command({ "--file": PATH, "--source": { kind: "enum", values: ["agent", "harness", "director"] } }, ["run", "free"]),
+  "dispatch-complete": command({ "--output": PATH, "--commit": { kind: "free" } }, ["run", "free"]),
+  "dispatch-fail": command({ "--reason": { kind: "free" } }, ["run", "free"]),
+  run: command(
+    {
+      "--step": { kind: "step" },
+      "--status": { kind: "enum", values: ["running", "completed", "failed", "aborted"] },
+      "--event": { kind: "free" },
+      "--artifact": PATH,
+      "--member": { kind: "free" },
+      "--field": { kind: "free" }
+    },
+    ["run"]
+  ),
+  "tool-complete": command({ "--output": PATH }, ["run"]),
+  gate: command(
+    { "--artifact": PATH, "--report": PATH },
+    ["run", "enum"]
+  ),
+  prompt: command(
+    {
+      "--actor": { kind: "free" },
+      "--iteration": { kind: "free" },
+      "--inline": NONE,
+      "--no-record": NONE,
+      "--format": { kind: "enum", values: ["text", "json"] }
+    },
+    ["run", "step"]
+  ),
+  next: command({ "--legacy": NONE }, ["run"]),
+  drive: command({ "--bind": { kind: "bind" }, "--max-transitions": { kind: "free" }, "--loadout": LOADOUT }, ["run"]),
+  decide: command({ "--decision": { kind: "free" }, "--feedback": { kind: "free" } }, ["run", "free"]),
+  runs: command({}),
+  show: command({ "--legacy": NONE, "--events": NONE }, ["run"]),
+  verify: command({ "--latest": NONE, "--allow-failed": NONE, "--legacy": NONE }, ["run"]),
+  plugin: command({ "--codex": NONE, "--force": NONE }, ["path"]),
+  completion: command({}, [], {
+    bash: command({})
+  })
+};
+var GATE_CONDITIONS = ["no_blocking_issues", "tests_pass"];
+function runCompletion() {
+  return [
+    "# bash completion for Fadeno",
+    "# Enable for this shell with: source <(fadeno completion bash)",
+    "_fadeno_complete() {",
+    "  local cword=${COMP_CWORD:-0}",
+    "  local cur=${COMP_WORDS[cword]:-}",
+    '  local -a words=("${COMP_WORDS[@]}")',
+    "  local -a candidates=()",
+    "  if command -v fadeno >/dev/null 2>&1; then",
+    '    mapfile -t candidates < <(fadeno completion candidates "$cword" -- "${words[@]}" 2>/dev/null)',
+    "  fi",
+    "  if ((${#candidates[@]})); then",
+    '    COMPREPLY=("${candidates[@]}")',
+    "  else",
+    '    mapfile -t COMPREPLY < <(compgen -f -- "$cur")',
+    "  fi",
+    "}",
+    "complete -F _fadeno_complete fadeno",
+    ""
+  ].join("\n");
+}
+function isExecutableWord(word) {
+  if (word == null) return false;
+  const name = (0, import_node_path23.basename)(word);
+  return name === "fadeno" || name === "fadeno.js";
+}
+function commandStart(words) {
+  return isExecutableWord(words[0]) ? 1 : 0;
+}
+function uniqueSorted(values) {
+  return [...new Set([...values].filter((value) => value.length > 0))].sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
+}
+function startsWith(values, prefix) {
+  return uniqueSorted(values).filter((value) => value.startsWith(prefix));
+}
+function optionName(token) {
+  const eq = token.indexOf("=");
+  return eq < 0 ? token : token.slice(0, eq);
+}
+function optionSpec(spec, token) {
+  return spec.options[optionName(token)];
+}
+function firstPositionalIndex(words, start, end, spec) {
+  for (let i = start; i < end; i += 1) {
+    const token = words[i];
+    if (token === "--") return null;
+    const found = optionSpec(spec, token);
+    if (found != null) {
+      if (found.kind !== "none" && !token.includes("=")) i += 1;
+      continue;
+    }
+    if (token.startsWith("-")) continue;
+    return i;
+  }
+  return null;
+}
+function commandContext(words, cword) {
+  const start = commandStart(words);
+  const name = words[start];
+  const base = name == null ? void 0 : COMMANDS[name];
+  if (base == null) return { name, spec: void 0, start: start + 1, before: [], positionals: [] };
+  const first = base.subcommands == null ? null : firstPositionalIndex(words, start + 1, Math.min(cword, words.length), base);
+  const subName = first == null ? void 0 : words[first];
+  const sub = subName == null ? void 0 : base.subcommands?.[subName];
+  const active = sub ?? base;
+  const activeStart = sub == null ? start + 1 : first + 1;
+  const before = words.slice(activeStart, Math.min(cword, words.length));
+  const positionals = [];
+  for (let i = 0; i < before.length; i += 1) {
+    const token = before[i];
+    const found = optionSpec(active, token);
+    if (found != null) {
+      if (found.kind !== "none" && !token.includes("=")) i += 1;
+      continue;
+    }
+    if (token === "--" || token.startsWith("-")) continue;
+    positionals.push(token);
+  }
+  return { name, spec: active, start: activeStart, before, positionals };
+}
+function readDirEntries(dir) {
+  try {
+    return (0, import_node_fs23.readdirSync)(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+function pathCandidates(prefix, cwd) {
+  const slash = prefix.endsWith("/") || prefix.endsWith("\\");
+  const dirPart = slash ? prefix : (0, import_node_path23.dirname)(prefix);
+  const base = slash ? "" : (0, import_node_path23.basename)(prefix);
+  const lookup = (0, import_node_path23.resolve)(cwd, dirPart === "." ? "." : dirPart);
+  const entries = readDirEntries(lookup);
+  const out = [];
+  for (const entry of entries) {
+    if (!entry.name.startsWith(base)) continue;
+    const cleanDir = dirPart.replaceAll("\\", "/");
+    const rendered = cleanDir === "." ? entry.name : cleanDir === "./" ? `./${entry.name}` : cleanDir === "/" ? `/${entry.name}` : `${cleanDir.replace(/\/+$/, "")}/${entry.name}`;
+    out.push(entry.isDirectory() ? `${rendered}/` : rendered);
+  }
+  return startsWith(out, prefix);
+}
+function readPlaybookNames(repoRoot) {
+  const dir = (0, import_node_path23.join)(repoRoot, ".fadeno", "playbooks");
+  return uniqueSorted(
+    readDirEntries(dir).filter((entry) => entry.isFile() && /\.ya?ml$/i.test(entry.name)).map((entry) => entry.name.replace(/\.ya?ml$/i, ""))
+  );
+}
+function safeRuns(repoRoot) {
+  try {
+    return listRuns(repoRoot);
+  } catch {
+    return [];
+  }
+}
+function readProfile(repoRoot) {
+  try {
+    return loadExecutorProfile(repoRoot).profile;
+  } catch {
+    return null;
+  }
+}
+function profileValues(repoRoot, kind) {
+  const profile = readProfile(repoRoot);
+  if (profile == null) return [];
+  if (kind === "loadout") return Object.keys(profile.loadouts);
+  if (kind === "executor") return Object.keys(profile.executors);
+  const names = /* @__PURE__ */ new Set();
+  for (const slots of Object.values(profile.loadouts)) for (const name of Object.keys(slots)) names.add(name);
+  return [...names];
+}
+function resolveRun2(runs, ref) {
+  const exact = runs.find((run) => run.runId === ref);
+  if (exact != null) return exact;
+  const matches = runs.filter((run) => run.runId.startsWith(ref));
+  return matches.length === 1 ? matches[0] : null;
+}
+function playbookFile(repoRoot, run) {
+  if (run.playbook == null) return null;
+  const stripped = run.playbook.replace(/\.ya?ml$/i, "");
+  for (const suffix of [".yaml", ".yml"]) {
+    const path = (0, import_node_path23.join)(repoRoot, ".fadeno", "playbooks", `${stripped}${suffix}`);
+    if ((0, import_node_fs23.existsSync)(path)) return path;
+  }
+  return null;
+}
+function readStepIds(repoRoot, runRef) {
+  const run = resolveRun2(safeRuns(repoRoot), runRef);
+  if (run == null) return [];
+  const file = playbookFile(repoRoot, run);
+  if (file == null) return [];
+  try {
+    const doc = (0, import_yaml14.parse)((0, import_node_fs23.readFileSync)(file, "utf8"));
+    if (!Array.isArray(doc?.flow)) return [];
+    const byId = /* @__PURE__ */ new Map();
+    for (const raw of doc.flow) {
+      if (raw != null && typeof raw === "object" && !Array.isArray(raw)) {
+        const id = raw.id;
+        if (typeof id === "string") byId.set(id, raw);
+      }
+    }
+    const found = /* @__PURE__ */ new Set();
+    const visit = (id) => {
+      if (found.has(id)) return;
+      const step = byId.get(id);
+      if (step == null) return;
+      found.add(id);
+      if (Array.isArray(step.body)) {
+        for (const child of step.body) if (typeof child === "string") visit(child);
+      }
+    };
+    for (const id of byId.keys()) visit(id);
+    return uniqueSorted(found);
+  } catch {
+    return [];
+  }
+}
+function readPlaybookRoles(repoRoot, runRef) {
+  const run = resolveRun2(safeRuns(repoRoot), runRef);
+  if (run == null) return [];
+  const file = playbookFile(repoRoot, run);
+  if (file == null) return [];
+  try {
+    const doc = (0, import_yaml14.parse)((0, import_node_fs23.readFileSync)(file, "utf8"));
+    if (doc?.roles == null || typeof doc.roles !== "object" || Array.isArray(doc.roles)) return [];
+    return Object.keys(doc.roles);
+  } catch {
+    return [];
+  }
+}
+function readPlaybookInputs(repoRoot, runRef) {
+  const run = resolveRun2(safeRuns(repoRoot), runRef);
+  if (run == null) return [];
+  const file = playbookFile(repoRoot, run);
+  if (file == null) return [];
+  try {
+    const doc = (0, import_yaml14.parse)((0, import_node_fs23.readFileSync)(file, "utf8"));
+    if (doc?.inputs == null || typeof doc.inputs !== "object" || Array.isArray(doc.inputs)) return [];
+    return Object.keys(doc.inputs);
+  } catch {
+    return [];
+  }
+}
+function dynamicValues(kind, prefix, repoRoot, cwd, runRef, optionToken) {
+  let values;
+  switch (kind) {
+    case "enum":
+      values = optionToken === "--schema" ? ["playbook", "run", "review-report", "test-result"] : optionToken === "--format" ? ["ascii", "mermaid", "text", "json"] : optionToken === "--status" ? ["running", "completed", "failed", "aborted"] : optionToken === "--source" ? ["agent", "harness", "director"] : GATE_CONDITIONS;
+      return startsWith(values, prefix);
+    case "path":
+      return pathCandidates(prefix, cwd);
+    case "playbook":
+      return startsWith(readPlaybookNames(repoRoot), prefix);
+    case "run":
+      return startsWith(safeRuns(repoRoot).map((run) => run.runId), prefix);
+    case "step":
+      return startsWith(runRef == null ? [] : readStepIds(repoRoot, runRef), prefix);
+    case "loadout":
+    case "executor":
+    case "archetype":
+      return startsWith(profileValues(repoRoot, kind), prefix);
+    case "bind": {
+      const equals = prefix.indexOf("=");
+      const rolePrefix = equals < 0 ? "" : prefix.slice(0, equals + 1);
+      const executorPrefix = equals < 0 ? prefix : prefix.slice(equals + 1);
+      const executors = profileValues(repoRoot, "executor");
+      if (equals < 0) return [];
+      const roles = runRef == null ? [] : readPlaybookRoles(repoRoot, runRef);
+      const role = prefix.slice(0, equals);
+      const roleValues = roles.includes(role) ? roles : [...roles, role];
+      return startsWith(roleValues.flatMap((name) => executors.map((executor) => `${name}=${executor}`)), `${rolePrefix}${executorPrefix}`);
+    }
+    case "input": {
+      const equals = prefix.indexOf("=");
+      if (equals < 0) {
+        const names = runRef == null ? [] : readPlaybookInputs(repoRoot, runRef);
+        return startsWith(names.map((name) => `${name}=`), prefix);
+      }
+      const left = prefix.slice(0, equals + 1);
+      return pathCandidates(prefix.slice(equals + 1), cwd).map((value) => `${left}${value}`);
+    }
+    default:
+      return [];
+  }
+}
+function currentRun(positionals) {
+  return positionals[0];
+}
+function commandOptions(spec) {
+  const options = Object.keys(spec.options);
+  if (spec.options["--help"] != null) options.push("-h");
+  if (spec.options["--version"] != null) options.push("-v");
+  return uniqueSorted(options);
+}
+function runCompletionCandidates(opts) {
+  if (!Number.isInteger(opts.cword) || opts.cword < 0) {
+    throw new CompletionError("completion candidates needs a non-negative integer cword");
+  }
+  if (!Array.isArray(opts.words) || opts.words.length === 0) {
+    throw new CompletionError("completion candidates needs a non-empty words vector");
+  }
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const words = opts.words;
+  const cword = Math.min(opts.cword, words.length - 1);
+  const current = words[cword] ?? "";
+  const context = commandContext(words, cword);
+  if (context.name == null || context.spec == null) {
+    return startsWith(
+      [...Object.keys(COMMANDS), "-h", "--help", "-v", "--version"],
+      current
+    );
+  }
+  const base = COMMANDS[context.name];
+  if (base?.subcommands != null && context.spec === base) {
+    const first = firstPositionalIndex(words, context.start, cword, base);
+    if (first == null || first === cword) return startsWith(Object.keys(base.subcommands), current);
+  }
+  const previous = cword > 0 ? words[cword - 1] : void 0;
+  const previousSpec = previous == null ? void 0 : optionSpec(context.spec, previous);
+  const runRef = currentRun(context.positionals);
+  if (previousSpec != null && previousSpec.kind !== "none" && previous != null && !previous.includes("=")) {
+    if (previousSpec.kind === "enum" && previousSpec.values != null) return startsWith(previousSpec.values, current);
+    return dynamicValues(previousSpec.kind, current, repoRoot, cwd, runRef, previous);
+  }
+  const equal = current.indexOf("=");
+  if (equal > 1 && current.startsWith("--")) {
+    const tokenName = current.slice(0, equal);
+    const found = optionSpec(context.spec, tokenName);
+    if (found != null && found.kind !== "none") {
+      if (found.kind === "enum" && found.values != null) {
+        return startsWith(found.values, current.slice(equal + 1)).map((value) => `${tokenName}=${value}`);
+      }
+      return dynamicValues(found.kind, current.slice(equal + 1), repoRoot, cwd, runRef, tokenName).map((value) => `${tokenName}=${value}`);
+    }
+  }
+  if (current.startsWith("-")) {
+    return startsWith(commandOptions(context.spec), current);
+  }
+  const positionalIndex = context.positionals.length;
+  const kind = context.spec.positionals[positionalIndex];
+  if (kind != null) return dynamicValues(kind, current, repoRoot, cwd, runRef);
+  if (current === "") return commandOptions(context.spec);
+  return [];
+}
+
+// src/commands/steering.ts
+var import_node_path24 = require("node:path");
+var SteeringError = class extends Error {
+};
+function rootOf(opts) {
+  return opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
+}
+function profileOf(repoRoot) {
+  try {
+    return loadExecutorProfile(repoRoot).profile;
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+    throw err;
+  }
+}
+function validateArchetype(archetype) {
+  const value = archetype.trim();
+  if (!BARE_IDENTIFIER_RE.test(value)) {
+    throw new SteeringError(
+      `archetype "${value}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`
+    );
+  }
+  return value;
+}
+function runSteeringResolve(opts) {
+  const repoRoot = rootOf(opts);
+  const profile = profileOf(repoRoot);
+  const archetype = validateArchetype(opts.archetype);
+  const role = opts.role?.trim() ? opts.role.trim() : null;
+  const nativeExecutor = opts.nativeExecutor?.trim() ? opts.nativeExecutor.trim() : null;
+  const nativeSpec = nativeExecutor == null ? null : profile.executors[nativeExecutor];
+  if (nativeExecutor != null && (nativeSpec == null || nativeSpec.adapter !== "host")) {
+    throw new SteeringError(
+      `native executor "${nativeExecutor}" is not a declared host executor; re-apply Codex steering from a host-backed baseline loadout.`
+    );
+  }
+  let active;
+  try {
+    active = resolveActiveLoadout({
+      flagValue: opts.loadout ?? null,
+      envValue: opts.env !== void 0 ? opts.env : process.env.FADENO_LOADOUT ?? null,
+      localFileValue: readLocalLoadout(repoRoot),
+      profile
+    });
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+    throw err;
+  }
+  if (active == null) {
+    if (nativeExecutor == null || nativeSpec == null) {
+      throw new SteeringError(
+        "no loadout is active and this Codex role agent has no native baseline; run `fadeno steering apply <loadout> --codex --force` and start a fresh Codex session."
+      );
+    }
+    return {
+      mode: "native",
+      archetype,
+      role,
+      activeLoadout: null,
+      executor: nativeExecutor,
+      adapter: "host",
+      model: nativeSpec.model,
+      source: "native-baseline",
+      nativeExecutor,
+      detail: `no loadout is active; execute natively as baseline ${nativeExecutor}`
+    };
+  }
+  let resolved;
+  try {
+    resolved = role != null ? resolveRole(role, archetype, profile, active.name) : resolveRole(
+      archetype,
+      archetype,
+      { ...profile, bindings: profile.bindings["*"] != null ? { "*": profile.bindings["*"] } : {} },
+      active.name
+    );
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+    throw err;
+  }
+  if (resolved.executor.adapter === "command") {
+    return {
+      mode: "command",
+      archetype,
+      role,
+      activeLoadout: active,
+      executor: resolved.executorName,
+      adapter: "command",
+      model: resolved.executor.model,
+      source: resolved.source,
+      nativeExecutor,
+      detail: `dispatch through command executor ${resolved.executorName}; effective immediately`
+    };
+  }
+  if (nativeExecutor === resolved.executorName) {
+    return {
+      mode: "native",
+      archetype,
+      role,
+      activeLoadout: active,
+      executor: resolved.executorName,
+      adapter: "host",
+      model: resolved.executor.model,
+      source: resolved.source,
+      nativeExecutor,
+      detail: `host executor ${resolved.executorName} matches this session's native baseline`
+    };
+  }
+  return {
+    mode: "restart_required",
+    archetype,
+    role,
+    activeLoadout: active,
+    executor: resolved.executorName,
+    adapter: "host",
+    model: resolved.executor.model,
+    source: resolved.source,
+    nativeExecutor,
+    detail: `loadout ${active.name} requests host executor ${resolved.executorName}, but this session was materialized for ${nativeExecutor ?? "no native executor"}; apply the loadout and start a fresh Codex session`
+  };
+}
+var ROLE_BEHAVIOR = {
+  worker: "Implement the requested change, preserving unrelated work and validating the behavior you changed.",
+  reviewer: "Review correctness, security, regressions, edge cases, and tests; report concrete findings before summary.",
+  judge: "Evaluate against the stated criteria and emit the requested structured judgment; never decide Fadeno control flow yourself."
+};
+function tomlString(value) {
+  return JSON.stringify(value);
+}
+function renderCodexAgent(archetype, executorName, spec) {
+  const behavior = ROLE_BEHAVIOR[archetype] ?? `Perform the ${archetype} role exactly as requested.`;
+  return `name = ${tomlString(archetype)}
+description = ${tomlString(`Fadeno hybrid ${archetype}: native on the session baseline, command-dispatched when the active loadout switches providers.`)}
+model = ${tomlString(spec.model)}
+model_reasoning_effort = ${tomlString(spec.reasoningEffort)}
+sandbox_mode = "workspace-write"
+
+developer_instructions = """
+You are Fadeno's hybrid ${archetype}. Do not spawn subagents.
+
+Before every task, run:
+\`fadeno steering resolve --archetype ${archetype} --native-executor ${executorName}\`
+
+- mode=native: ${behavior}
+- mode=command: write the ENTIRE task prompt you received verbatim to a unique
+  file under .fadeno/local/prompts/, run
+  \`fadeno dispatch --archetype ${archetype} --prompt-file <path>\`, and relay
+  stdout verbatim. On a non-zero exit, report the error and do not perform the
+  task yourself. The command executor runs outside this subagent's sandbox.
+- mode=restart_required: stop and relay the resolver's restart instruction.
+
+Never call fadeno dispatch for a host executor and never silently substitute a
+different model or executor.
+"""
+`;
+}
+function runSteeringApply(opts) {
+  const repoRoot = rootOf(opts);
+  const profile = profileOf(repoRoot);
+  const loadout = opts.loadout.trim();
+  const slots = profile.loadouts[loadout];
+  if (slots == null) {
+    throw new SteeringError(
+      `"${loadout}" is not a declared loadout (${Object.keys(profile.loadouts).sort().join(", ")}).`
+    );
+  }
+  const baseline = {};
+  const results = [];
+  for (const archetype of ["worker", "reviewer", "judge"]) {
+    const executorName = slots[archetype];
+    const spec = executorName == null ? null : profile.executors[executorName];
+    if (executorName == null || spec == null || spec.adapter !== "host") {
+      throw new SteeringError(
+        `loadout "${loadout}" needs a host executor in its "${archetype}" slot to materialize a native Codex baseline; found ${executorName ?? "no slot"}.`
+      );
+    }
+    if (spec.agentType !== archetype) {
+      throw new SteeringError(
+        `loadout "${loadout}" ${archetype} slot targets ${executorName} with agent_type "${spec.agentType}"; expected "${archetype}".`
+      );
+    }
+    baseline[archetype] = executorName;
+    const path = (0, import_node_path24.join)(repoRoot, ".codex", "agents", `${archetype}.toml`);
+    results.push({ path, status: emitFile(path, renderCodexAgent(archetype, executorName, spec), opts.force ?? false) });
+  }
+  return { loadout, results, baseline, restartRequired: true };
+}
+
+// src/commands/tool-complete.ts
+var ToolCompleteError = class extends Error {
+};
+function runToolComplete(opts) {
+  const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
+  let next;
+  try {
+    next = runNext({ run: opts.run, cwd: opts.cwd, repoRoot });
+  } catch (err) {
+    if (err instanceof NextError) throw new ToolCompleteError(err.message);
+    throw err;
+  }
+  if (next.status !== "ready" || next.step?.kind !== "tool_call") {
+    throw new ToolCompleteError(
+      `run "${opts.run}" is not waiting at a tool_call step` + (next.step == null ? ` (status ${next.status}).` : `; next is ${next.step.id} (${next.step.kind}).`)
+    );
+  }
+  try {
+    const result = runRun({
+      run: opts.run,
+      step: next.step.id,
+      event: "artifact_created",
+      artifact: opts.output,
+      cwd: opts.cwd,
+      repoRoot,
+      now: opts.now
+    });
+    return { ...result, step: next.step.id };
+  } catch (err) {
+    if (err instanceof RunError) throw new ToolCompleteError(err.message);
+    throw err;
+  }
+}
+
 // src/cli.ts
 var HELP = `fadeno \u2014 the playbook layer for AI coding agents
 
 Usage:
-  fadeno init --codex|--claude|--grok [opts]   Scaffold (see --with-hooks, --data-only)
+  fadeno init --codex|--claude|--grok [opts]   Scaffold (see --with-steering, --with-hooks)
   fadeno validate [file] [--schema K]   Validate playbooks (schema + references + semantics)
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
   fadeno loadout [list|use <n>|clear]   Show, list, pin, or clear the active loadout
+  fadeno steering resolve|apply [...]   Resolve or materialize hybrid Codex steering
   fadeno dispatch [flags]               Resolve archetype \u2192 executor and invoke it once (ad hoc)
   fadeno dispatch-start <run> <id>      Start a native host dispatch
   fadeno dispatch-progress <run> <id>   Record an attested progress observation
   fadeno dispatch-complete <run> <id>   Submit a native host result
   fadeno dispatch-fail <run> <id>       Submit a native host failure
   fadeno run <run> [flags]              Update a run ledger (run.yaml + events.jsonl)
+  fadeno tool-complete <run> --output P Atomically record the next tool_call result
   fadeno gate <run> <condition>         Evaluate a gate condition from a structured artifact
   fadeno prompt <run> <step> [flags]    Assemble (and record) a step's actor prompt
   fadeno next <run>                     Emit the next actionable step (JSON flow cursor)
@@ -22006,9 +22714,11 @@ Usage:
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic claims (or --latest)
   fadeno plugin [dir] [--codex]         Generate a Claude Code (default) or Codex plugin
+  fadeno completion bash                Emit a sourceable Bash completion script
 
 Options:
   --with-hooks            (init) Also scaffold tier-2 enforcement hooks
+  --with-steering         (init) Opt into loadout-aware Codex/Claude subagent steering
   --data-only             (init) Seed only .fadeno/ definitions (capability via plugin)
   --force                 (init) Overwrite existing files / refresh the bootstrap section
   --schema <kind>         (validate) Force document kind: playbook | run | review-report | test-result
@@ -22032,6 +22742,7 @@ Options:
   --archetype <a>         (dispatch) Archetype to resolve (required unless --executor)
   --role <name>           (dispatch) Role name: enables binding pins + evidence attribution
   --executor <name>       (dispatch) Bypass resolution and invoke a named executor (debugging)
+  --native-executor <n>   (steering resolve) Host executor materialized into this native role
   --prompt-file <path>    (dispatch) Read the prompt from a file instead of stdin
   --agent-id <id>         (dispatch-start) Native host agent identity
   --workspace <path>      (dispatch-start) Native workspace provenance
@@ -22065,6 +22776,7 @@ Examples:
   fadeno run 2026-05-30-1132-csv --event artifact_created --artifact artifacts/x.json --member architect_fable
   fadeno run 2026-05-30-1132-csv --step arbitrate --event human_decision --field branch=approve
   fadeno loadout use openai-primary
+  fadeno steering apply codex-only --codex --force
   echo "Summarize the repo layout." | fadeno dispatch --archetype worker
   fadeno gate 2026-05-30-1132-csv no_blocking_issues --artifact artifacts/review-report.json
   fadeno prompt 2026-05-30-1132-csv cross_review --actor architect_fable --no-record
@@ -22072,16 +22784,17 @@ Examples:
   fadeno runs
   fadeno show 2026-07-10-2212
   fadeno verify --latest
+  source <(fadeno completion bash)
 `;
 var SIGIL = { codex: "$", claude: "/", grok: "/" };
 var SCHEMA_KINDS = ["playbook", "run", "review-report", "test-result"];
-function printInitSummary(target, repoRoot, results, withHooks, dataOnly) {
+function printInitSummary(target, repoRoot, results, withHooks, withSteering, dataOnly) {
   const counts = { created: 0, overwritten: 0, appended: 0, skipped: 0 };
   for (const r of results) counts[r.status] += 1;
   console.log(`Fadeno initialized for ${target} in ${repoRoot}
 `);
   for (const r of results) {
-    console.log(`  ${r.status.padEnd(11)} ${(0, import_node_path23.relative)(repoRoot, r.path) || r.path}`);
+    console.log(`  ${r.status.padEnd(11)} ${(0, import_node_path25.relative)(repoRoot, r.path) || r.path}`);
   }
   console.log(
     `
@@ -22108,8 +22821,15 @@ ${counts.created} created, ${counts.appended} appended, ${counts.overwritten} ov
   } else {
     console.log(`  3. Ask your agent to use the ${SIGIL[target]}fadeno-runner skill on a complex task`);
   }
+  let nextStep = 4;
   if (withHooks) {
-    console.log("  4. Activate enforcement: see .fadeno/hooks/README.md");
+    console.log(`  ${nextStep}. Activate enforcement: see .fadeno/hooks/README.md`);
+    nextStep += 1;
+  }
+  if (withSteering) {
+    console.log(
+      target === "claude" ? `  ${nextStep}. Steering is active locally; restart Claude Code so the Agent hook is loaded` : `  ${nextStep}. Configure a native baseline with \`fadeno steering apply <loadout> --codex --force\`, then start a fresh Codex session`
+    );
   }
 }
 function printIssue(issue) {
@@ -22121,7 +22841,7 @@ function printIssue(issue) {
 function printValidate(outcome) {
   let warnings = 0;
   for (const result of outcome.results) {
-    const rel = (0, import_node_path23.relative)(outcome.repoRoot, result.file) || result.file;
+    const rel = (0, import_node_path25.relative)(outcome.repoRoot, result.file) || result.file;
     const fileWarnings = result.issues.filter((i) => i.severity === "warning").length;
     warnings += fileWarnings;
     if (result.ok) {
@@ -22322,7 +23042,7 @@ workflow${projection.playbook ? ` \xB7 ${projection.playbook}` : ""}${total ? ` 
 function printShow(repoRoot, result, rawTimeline) {
   const { run, mode, events, badLines, artifacts, projection } = result;
   const dash = (value) => value ?? "\u2014";
-  const relDir = (0, import_node_path23.relative)(repoRoot, run.dir) || run.dir;
+  const relDir = (0, import_node_path25.relative)(repoRoot, run.dir) || run.dir;
   console.log(`run ${run.runId}`);
   console.log(`  playbook:  ${dash(run.playbook)}`);
   console.log(`  task:      ${dash(run.task)}`);
@@ -22363,7 +23083,7 @@ function printSlots(slots, indent) {
   const width = Math.max(0, ...slots.map((s) => s.archetype.length));
   for (const slot of slots) {
     const model = slot.model != null ? ` (${slot.model})` : "";
-    console.log(`${indent}${slot.archetype.padEnd(width)} \u2192 ${slot.executor}${model}`);
+    console.log(`${indent}${slot.archetype.padEnd(width)} \u2192 ${slot.executor}${model} [${slot.adapter}]`);
   }
 }
 function printStalePin(stalePin) {
@@ -22463,6 +23183,20 @@ function requireTarget(values) {
   );
 }
 function main(argv) {
+  if (argv[0] === "completion" && argv[1] === "candidates") {
+    const separator = argv.indexOf("--", 3);
+    if (separator !== 3 || argv.length <= separator + 1) {
+      throw new Error("Usage: fadeno completion candidates <cword> -- <words...>");
+    }
+    const cword = Number(argv[2]);
+    if (!Number.isInteger(cword) || cword < 0) {
+      throw new Error("Usage: fadeno completion candidates <cword> -- <words...>");
+    }
+    const candidates = runCompletionCandidates({ cword, words: argv.slice(separator + 1) });
+    if (candidates.length > 0) process.stdout.write(`${candidates.join("\n")}
+`);
+    return 0;
+  }
   let parsed;
   try {
     parsed = (0, import_node_util.parseArgs)({
@@ -22474,6 +23208,7 @@ function main(argv) {
         grok: { type: "boolean" },
         force: { type: "boolean" },
         "with-hooks": { type: "boolean" },
+        "with-steering": { type: "boolean" },
         "data-only": { type: "boolean" },
         schema: { type: "string" },
         format: { type: "string" },
@@ -22495,6 +23230,7 @@ function main(argv) {
         archetype: { type: "string" },
         role: { type: "string" },
         executor: { type: "string" },
+        "native-executor": { type: "string" },
         "prompt-file": { type: "string" },
         "agent-id": { type: "string" },
         workspace: { type: "string" },
@@ -22521,7 +23257,7 @@ function main(argv) {
     return 1;
   }
   const { values, positionals } = parsed;
-  const command = positionals[0];
+  const command2 = positionals[0];
   if (values.version) {
     console.log(packageVersion());
     return 0;
@@ -22530,17 +23266,18 @@ function main(argv) {
     console.log(HELP);
     return 0;
   }
-  if (!command) {
+  if (!command2) {
     console.log(HELP);
     return 1;
   }
-  switch (command) {
+  switch (command2) {
     case "init": {
       const target = requireTarget(values);
       const { repoRoot, results } = runInit({
         target,
         force: values.force,
         withHooks: values["with-hooks"],
+        withSteering: values["with-steering"],
         dataOnly: values["data-only"]
       });
       printInitSummary(
@@ -22548,9 +23285,55 @@ function main(argv) {
         repoRoot,
         results,
         Boolean(values["with-hooks"]),
+        Boolean(values["with-steering"]),
         Boolean(values["data-only"])
       );
       return 0;
+    }
+    case "steering": {
+      const sub = positionals[1];
+      if (sub === "resolve") {
+        if (!values.archetype) {
+          throw new Error(
+            "Usage: fadeno steering resolve --archetype <name> [--native-executor <name>] [--role <name>] [--loadout <name>]"
+          );
+        }
+        const result = runSteeringResolve({
+          archetype: values.archetype,
+          nativeExecutor: values["native-executor"],
+          role: values.role,
+          loadout: values.loadout
+        });
+        console.log(JSON.stringify({
+          mode: result.mode,
+          archetype: result.archetype,
+          role: result.role,
+          loadout: result.activeLoadout,
+          executor: result.executor,
+          adapter: result.adapter,
+          model: result.model,
+          native_executor: result.nativeExecutor,
+          resolution: result.source,
+          detail: result.detail
+        }, null, 2));
+        return result.mode === "restart_required" ? 2 : 0;
+      }
+      if (sub === "apply") {
+        const loadout = positionals[2];
+        if (!loadout || !values.codex || values.claude || values.grok) {
+          throw new Error("Usage: fadeno steering apply <loadout> --codex [--force]");
+        }
+        const result = runSteeringApply({ loadout, target: "codex", force: values.force });
+        const changed = result.results.filter((item) => item.status !== "skipped").length;
+        console.log(`Codex native steering baseline: ${result.loadout}`);
+        for (const archetype of ["worker", "reviewer", "judge"]) {
+          console.log(`  ${archetype} \u2192 ${result.baseline[archetype]}`);
+        }
+        console.log(`  ${changed} agent definition(s) written; start a fresh Codex session to load them.`);
+        if (changed === 0) console.log("  Existing files were preserved; pass --force to replace them.");
+        return 0;
+      }
+      throw new Error("Usage: fadeno steering resolve|apply [...]");
     }
     case "validate": {
       if (values.schema && !SCHEMA_KINDS.includes(values.schema)) {
@@ -22612,10 +23395,26 @@ resolution${via}:`);
       const parts = [];
       if (result.updatedFields.length) parts.push(`updated ${result.updatedFields.join(", ")}`);
       if (result.appendedEvents.length) parts.push(`logged ${result.appendedEvents.join(", ")}`);
-      console.log(`${(0, import_node_path23.relative)(process.cwd(), result.runDir) || result.runDir}: ${parts.join("; ")}`);
+      console.log(`${(0, import_node_path25.relative)(process.cwd(), result.runDir) || result.runDir}: ${parts.join("; ")}`);
       if (result.manifest) {
         const v = result.manifest.validation;
         const note = v.schema ? `, ${v.schema}: ${v.ok ? "valid" : "INVALID"}` : "";
+        console.log(
+          `  ${result.manifest.artifact_id}  sha256 ${result.manifest.sha256.slice(0, 12)}\u2026  gen ${result.manifest.generation}${note}`
+        );
+      }
+      return 0;
+    }
+    case "tool-complete": {
+      const run = positionals[1];
+      if (!run || !values.output) {
+        throw new Error("Usage: fadeno tool-complete <run> --output <artifact-path>");
+      }
+      const result = runToolComplete({ run, output: values.output });
+      console.log(`${(0, import_node_path25.relative)(process.cwd(), result.runDir) || result.runDir}: completed tool step ${result.step}`);
+      if (result.manifest) {
+        const validation = result.manifest.validation;
+        const note = validation.schema ? `, ${validation.schema}: ${validation.ok ? "valid" : "INVALID"}` : "";
         console.log(
           `  ${result.manifest.artifact_id}  sha256 ${result.manifest.sha256.slice(0, 12)}\u2026  gen ${result.manifest.generation}${note}`
         );
@@ -22635,8 +23434,15 @@ resolution${via}:`);
       if (codex) {
         console.log("\nTest it: `codex plugin marketplace add . && codex plugin add fadeno@fadeno`");
       } else {
-        console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path23.relative)(process.cwd(), outDir) + "`");
+        console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path25.relative)(process.cwd(), outDir) + "`");
       }
+      return 0;
+    }
+    case "completion": {
+      if (positionals[1] !== "bash" || positionals.length > 2) {
+        throw new Error("Usage: fadeno completion bash");
+      }
+      process.stdout.write(runCompletion());
       return 0;
     }
     case "gate": {
@@ -22750,6 +23556,17 @@ resolution${via}:`);
           if (result.previous != null && result.previous !== result.name) {
             console.log(`  (was ${result.previous})`);
           }
+          const selected = runLoadoutShow({});
+          const commandSlots = selected.slots.filter((slot) => slot.adapter === "command").length;
+          const hostSlots = selected.slots.filter((slot) => slot.adapter === "host").length;
+          if (commandSlots > 0) {
+            console.log(`  ${commandSlots} command slot(s) switch on the next dispatch.`);
+          }
+          if (hostSlots > 0) {
+            console.log(
+              `  ${hostSlots} host slot(s) require a matching materialized native baseline; run \`fadeno steering apply ${result.name} --codex --force\` and start a fresh Codex session when they differ.`
+            );
+          }
           return 0;
         }
         case "clear": {
@@ -22773,7 +23590,7 @@ resolution${via}:`);
         promptFile,
         // Prompt defaults to stdin; the echo goes to stderr so stdout stays
         // the executor's pure report.
-        prompt: promptFile == null ? (0, import_node_fs23.readFileSync)(0, "utf8") : void 0,
+        prompt: promptFile == null ? (0, import_node_fs24.readFileSync)(0, "utf8") : void 0,
         onEcho: (line) => console.error(line)
       });
       if (result.stdout.length > 0) process.stdout.write(result.stdout);
@@ -22872,7 +23689,7 @@ resolution${via}:`);
       return result.ok ? 0 : 1;
     }
     default:
-      console.error(`Unknown command: ${command}
+      console.error(`Unknown command: ${command2}
 `);
       console.error(HELP);
       return 1;

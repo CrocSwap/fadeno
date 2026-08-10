@@ -64,7 +64,9 @@ npx fadeno init --grok
 `AGENTS.md`/`CLAUDE.md` content is preserved — Fadeno only appends a marked
 section). Use `--force` to overwrite. Add `--with-hooks` to also scaffold the
 tier-2 [enforcement](#enforcement-advisory-vs-enforced) layer (a pre-commit
-guard + a CI workflow).
+guard + a CI workflow). Add `--with-steering` on Codex or Claude Code to make
+worker/reviewer/judge subagent launches follow the active Fadeno loadout; this
+is an explicit opt-in because the selected executor runs under its own sandbox.
 
 ### What gets created
 
@@ -259,12 +261,16 @@ one is a session-scoped command, not a repo edit:
 loadouts:
   anthropic-primary: { worker: opus-xhigh,     reviewer: terra-high, judge: terra-high }
   openai-primary:    { worker: luna-cli-xhigh, reviewer: terra-high, judge: terra-high }
+  codex-native:      { worker: luna-xhigh,     reviewer: terra-high, judge: sol-medium }
 default_loadout: anthropic-primary
 ```
 
 ```bash
 fadeno loadout use openai-primary          # sticky for this machine (git-ignored) until cleared
 echo "task…" | fadeno dispatch --archetype worker   # ad-hoc: resolve → invoke → evidence row
+npx fadeno init --codex --with-steering    # steer Codex role subagents through that loadout
+fadeno steering apply codex-native --codex --force  # materialize an all-host native baseline
+# or: npx fadeno init --claude --with-steering
 ```
 
 Roles resolve at dispatch time — explicit binding pin, else the active
@@ -274,6 +280,18 @@ and every run start and dispatch echoes where each role landed
 record the resolution in their ledger and ad-hoc dispatches append to
 `.fadeno/dispatches.jsonl`, so which provider produced an artifact stays
 auditable after the fact.
+
+With `--with-steering`, expensive role-shaped subagent work follows that same
+resolver. Codex first installs honest, command-only brokers; use `fadeno
+steering apply <all-host-loadout> --codex --force` to materialize
+worker/reviewer/judge as session-native project agents with that loadout's model
+and effort, then start a fresh Codex session. Before each task the materialized
+agent resolves again: a matching host slot executes natively, a command slot
+switches immediately out-of-process, and a different host slot stops with
+`restart_required` instead of silently using the wrong model. Claude installs a
+local `PreToolUse` rewrite that redirects role launches to bundled dispatch
+proxies. Explore/Plan-style scouting stays native. Existing files retain the
+normal non-destructive rule; `steering apply` needs `--force` to replace them.
 
 ### What `.fadeno/runs/` contains
 
@@ -416,6 +434,25 @@ It also validates `run.yaml` and `review-report.json` documents (auto-detected,
 or forced with `--schema playbook|run|review-report`). Exits non-zero on any
 error; warnings are reported but don't fail.
 
+### Bash completion
+
+The CLI can emit its own sourceable Bash completion script:
+
+```bash
+source <(fadeno completion bash)
+```
+
+Add that line to `~/.bashrc` to enable it in future shells. Completion covers
+commands, their relevant flags, finite option values, paths, and (when the
+current directory is a Fadeno repository) playbook names, run ids, steps,
+loadouts, executors, and declared archetypes. It is a read-only best-effort
+query: malformed or partially initialized repository data simply contributes
+no dynamic candidates, and ordinary Bash file completion remains available.
+
+The generated function asks `fadeno completion candidates` for one candidate
+per line, preserving paths containing spaces. No optional `bash-completion`
+package or extra command-line dependencies are required.
+
 ---
 
 ## Enforcement: advisory vs. enforced
@@ -449,7 +486,7 @@ categories map to concrete, detectable actions. Two ways to make that real:
   its artifact, attempt ordinals with allowed retry reasons, executor
   bindings against the run's snapshotted profile, human-decision integrity
   (declared options, at-most-once), supersede references, harness-session
-  continuity, and native host-dispatch lifecycle/attestation — so a trace
+  continuity, and native host-dispatch lifecycle/request consistency — so a trace
   can't claim what its evidence doesn't support. The "no valid trace, no
   merge" check; anything unrecomputable is reported as skipped, never
   silently treated as valid.

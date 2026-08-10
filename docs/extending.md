@@ -148,7 +148,7 @@ pins and evidence attribution (without it, step 1 above has nothing to match);
 adapters are directly invokable — resolving to a `host` executor is a clear
 error telling you to bind a command executor or run via host dispatch.
 
-### Cross-harness subagents (dispatch proxies)
+### Cross-harness subagents (dispatch proxies and steering)
 
 `init --claude` and the plugin install three **dispatch proxy agents** beside
 the native role subagents: `dispatch-worker` / `dispatch-reviewer` /
@@ -160,6 +160,25 @@ verbatim — so a Claude Code session can route worker/reviewer/judge-shaped
 subtasks to whatever executor the active loadout binds, including a
 non-Anthropic one. On a non-zero exit the proxy reports the failure plainly
 and never attempts the task itself as a fallback.
+
+`fadeno init --claude --with-steering` installs a local `PreToolUse` hook that
+checks `fadeno loadout` and, only while a loadout is active, rewrites
+general-purpose/worker, reviewer, and judge `Agent` calls to those proxies. It
+preserves the rest of the Agent input and leaves Explore/Plan and unrelated
+specialists native. Plugin users can combine the flag with `--data-only`; the
+hook then targets the plugin-scoped `fadeno:dispatch-*` agents.
+
+Codex has no equivalent spawn-rewrite hook, and project custom-agent model
+configuration is session-static. `fadeno init --codex --with-steering` installs
+honest broker definitions named `worker`, `reviewer`, and `judge`; materialize a
+all-host native baseline with `fadeno steering apply <loadout> --codex
+--force`, then start a fresh Codex session. Before each task the role resolves
+the active loadout: a command executor switches immediately through `fadeno
+dispatch`, a matching host executor runs natively, and a different host
+executor stops with `restart_required`. The Codex plugin cannot bundle these
+project agents, so `--data-only --with-steering` still emits
+`.codex/agents/*.toml`. Existing files remain protected unless `--force` is
+supplied.
 
 What stays native: Explore/Plan-style read-only scouting — cheap, tightly
 integrated with the harness's codebase tools, and not where quota pressure

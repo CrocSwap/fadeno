@@ -1,0 +1,523 @@
+import { existsSync, readdirSync, readFileSync, type Dirent } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
+import { parse as parseYaml } from 'yaml';
+import { loadExecutorProfile, type ExecutorProfile } from '../lib/executors.ts';
+import { listRuns, type RunSummary } from '../lib/run-ledger.ts';
+import { findRepoRoot } from '../lib/paths.ts';
+
+/** Arguments supplied by the generated Bash completion function. */
+export interface CompletionCandidatesOptions {
+  /** Bash's `COMP_CWORD` index into `words`. */
+  cword: number;
+  /** The complete `COMP_WORDS` vector, including the executable. */
+  words: string[];
+  cwd?: string;
+  repoRoot?: string;
+}
+
+export class CompletionError extends Error {}
+
+type ValueKind =
+  | 'none'
+  | 'enum'
+  | 'path'
+  | 'run'
+  | 'playbook'
+  | 'step'
+  | 'loadout'
+  | 'executor'
+  | 'archetype'
+  | 'bind'
+  | 'input'
+  | 'free';
+
+interface OptionSpec {
+  kind: ValueKind;
+  values?: string[];
+}
+
+interface CommandSpec {
+  options: Record<string, OptionSpec>;
+  positionals: ValueKind[];
+  subcommands?: Record<string, CommandSpec>;
+}
+
+const GLOBAL_OPTIONS: Record<string, OptionSpec> = {
+  '--help': { kind: 'none' },
+  '--version': { kind: 'none' },
+};
+
+const globalOptions = (): Record<string, OptionSpec> => ({ ...GLOBAL_OPTIONS });
+
+const command = (
+  options: Record<string, OptionSpec>,
+  positionals: ValueKind[] = [],
+  subcommands?: Record<string, CommandSpec>,
+): CommandSpec => ({ options: { ...globalOptions(), ...options }, positionals, subcommands });
+
+const NONE: OptionSpec = { kind: 'none' };
+const PATH: OptionSpec = { kind: 'path' };
+const LOADOUT: OptionSpec = { kind: 'loadout' };
+
+const COMMANDS: Record<string, CommandSpec> = {
+  init: command({
+    '--codex': NONE,
+    '--claude': NONE,
+    '--grok': NONE,
+    '--force': NONE,
+    '--with-hooks': NONE,
+    '--with-steering': NONE,
+    '--data-only': NONE,
+  }),
+  validate: command({ '--schema': { kind: 'enum', values: ['playbook', 'run', 'review-report', 'test-result'] } }, ['path']),
+  diagram: command({ '--format': { kind: 'enum', values: ['ascii', 'mermaid'] } }, ['playbook']),
+  'new-run': command({ '--input': { kind: 'input' }, '--loadout': LOADOUT }, ['playbook', 'free']),
+  loadout: command(
+    { '--loadout': LOADOUT },
+    [],
+    {
+      list: command({}),
+      use: command({}, ['loadout']),
+      clear: command({}),
+    },
+  ),
+  steering: command(
+    {},
+    [],
+    {
+      resolve: command({
+        '--archetype': { kind: 'archetype' },
+        '--native-executor': { kind: 'executor' },
+        '--role': { kind: 'free' },
+        '--loadout': LOADOUT,
+      }),
+      apply: command({ '--codex': NONE, '--force': NONE }, ['loadout']),
+    },
+  ),
+  dispatch: command(
+    {
+      '--loadout': LOADOUT,
+      '--archetype': { kind: 'archetype' },
+      '--role': { kind: 'free' },
+      '--executor': { kind: 'executor' },
+      '--prompt-file': PATH,
+    },
+  ),
+  'dispatch-start': command({ '--agent-id': { kind: 'free' }, '--workspace': PATH, '--branch': { kind: 'free' } }, ['run', 'free']),
+  'dispatch-progress': command({ '--file': PATH, '--source': { kind: 'enum', values: ['agent', 'harness', 'director'] } }, ['run', 'free']),
+  'dispatch-complete': command({ '--output': PATH, '--commit': { kind: 'free' } }, ['run', 'free']),
+  'dispatch-fail': command({ '--reason': { kind: 'free' } }, ['run', 'free']),
+  run: command(
+    {
+      '--step': { kind: 'step' },
+      '--status': { kind: 'enum', values: ['running', 'completed', 'failed', 'aborted'] },
+      '--event': { kind: 'free' },
+      '--artifact': PATH,
+      '--member': { kind: 'free' },
+      '--field': { kind: 'free' },
+    },
+    ['run'],
+  ),
+  'tool-complete': command({ '--output': PATH }, ['run']),
+  gate: command(
+    { '--artifact': PATH, '--report': PATH },
+    ['run', 'enum'],
+  ),
+  prompt: command(
+    {
+      '--actor': { kind: 'free' },
+      '--iteration': { kind: 'free' },
+      '--inline': NONE,
+      '--no-record': NONE,
+      '--format': { kind: 'enum', values: ['text', 'json'] },
+    },
+    ['run', 'step'],
+  ),
+  next: command({ '--legacy': NONE }, ['run']),
+  drive: command({ '--bind': { kind: 'bind' }, '--max-transitions': { kind: 'free' }, '--loadout': LOADOUT }, ['run']),
+  decide: command({ '--decision': { kind: 'free' }, '--feedback': { kind: 'free' } }, ['run', 'free']),
+  runs: command({}),
+  show: command({ '--legacy': NONE, '--events': NONE }, ['run']),
+  verify: command({ '--latest': NONE, '--allow-failed': NONE, '--legacy': NONE }, ['run']),
+  plugin: command({ '--codex': NONE, '--force': NONE }, ['path']),
+  completion: command({}, [], {
+    bash: command({}),
+  }),
+};
+
+// `CommandSpec` is deliberately small, but gate conditions are useful values
+// just like enum options. Keeping this separate avoids a second parser while
+// retaining the static type of ordinary positional kinds.
+const GATE_CONDITIONS = ['no_blocking_issues', 'tests_pass'];
+
+/** Render a sourceable Bash completion definition. */
+export function runCompletion(): string {
+  return [
+    '# bash completion for Fadeno',
+    '# Enable for this shell with: source <(fadeno completion bash)',
+    '_fadeno_complete() {',
+    '  local cword=${COMP_CWORD:-0}',
+    '  local cur=${COMP_WORDS[cword]:-}',
+    '  local -a words=("${COMP_WORDS[@]}")',
+    '  local -a candidates=()',
+    '  if command -v fadeno >/dev/null 2>&1; then',
+    '    mapfile -t candidates < <(fadeno completion candidates "$cword" -- "${words[@]}" 2>/dev/null)',
+    '  fi',
+    '  if ((${#candidates[@]})); then',
+    '    COMPREPLY=("${candidates[@]}")',
+    '  else',
+    '    mapfile -t COMPREPLY < <(compgen -f -- "$cur")',
+    '  fi',
+    '}',
+    'complete -F _fadeno_complete fadeno',
+    '',
+  ].join('\n');
+}
+
+function isExecutableWord(word: string | undefined): boolean {
+  if (word == null) return false;
+  const name = basename(word);
+  return name === 'fadeno' || name === 'fadeno.js';
+}
+
+function commandStart(words: string[]): number {
+  return isExecutableWord(words[0]) ? 1 : 0;
+}
+
+function uniqueSorted(values: Iterable<string>): string[] {
+  return [...new Set([...values].filter((value) => value.length > 0))].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+function startsWith(values: Iterable<string>, prefix: string): string[] {
+  return uniqueSorted(values).filter((value) => value.startsWith(prefix));
+}
+
+function optionName(token: string): string {
+  const eq = token.indexOf('=');
+  return eq < 0 ? token : token.slice(0, eq);
+}
+
+function optionSpec(spec: CommandSpec, token: string): OptionSpec | undefined {
+  return spec.options[optionName(token)];
+}
+
+function firstPositionalIndex(words: string[], start: number, end: number, spec: CommandSpec): number | null {
+  for (let i = start; i < end; i += 1) {
+    const token = words[i]!;
+    if (token === '--') return null;
+    const found = optionSpec(spec, token);
+    if (found != null) {
+      if (found.kind !== 'none' && !token.includes('=')) i += 1;
+      continue;
+    }
+    if (token.startsWith('-')) continue;
+    return i;
+  }
+  return null;
+}
+
+function commandContext(words: string[], cword: number): {
+  name: string | undefined;
+  spec: CommandSpec | undefined;
+  start: number;
+  before: string[];
+  positionals: string[];
+} {
+  const start = commandStart(words);
+  const name = words[start];
+  const base = name == null ? undefined : COMMANDS[name];
+  if (base == null) return { name, spec: undefined, start: start + 1, before: [], positionals: [] };
+
+  const first = base.subcommands == null ? null : firstPositionalIndex(words, start + 1, Math.min(cword, words.length), base);
+  const subName = first == null ? undefined : words[first];
+  const sub = subName == null ? undefined : base.subcommands?.[subName];
+  const active = sub ?? base;
+  const activeStart = sub == null ? start + 1 : first! + 1;
+  const before = words.slice(activeStart, Math.min(cword, words.length));
+  const positionals: string[] = [];
+  for (let i = 0; i < before.length; i += 1) {
+    const token = before[i]!;
+    const found = optionSpec(active, token);
+    if (found != null) {
+      if (found.kind !== 'none' && !token.includes('=')) i += 1;
+      continue;
+    }
+    if (token === '--' || token.startsWith('-')) continue;
+    positionals.push(token);
+  }
+  return { name, spec: active, start: activeStart, before, positionals };
+}
+
+function readDirEntries(dir: string): Dirent[] {
+  try {
+    return readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
+function pathCandidates(prefix: string, cwd: string): string[] {
+  const slash = prefix.endsWith('/') || prefix.endsWith('\\');
+  const dirPart = slash ? prefix : dirname(prefix);
+  const base = slash ? '' : basename(prefix);
+  const lookup = resolve(cwd, dirPart === '.' ? '.' : dirPart);
+  const entries = readDirEntries(lookup);
+  const out: string[] = [];
+  for (const entry of entries) {
+    if (!entry.name.startsWith(base)) continue;
+    const cleanDir = dirPart.replaceAll('\\', '/');
+    const rendered = cleanDir === '.'
+      ? entry.name
+      : cleanDir === './'
+        ? `./${entry.name}`
+        : cleanDir === '/'
+          ? `/${entry.name}`
+          : `${cleanDir.replace(/\/+$/, '')}/${entry.name}`;
+    out.push(entry.isDirectory() ? `${rendered}/` : rendered);
+  }
+  return startsWith(out, prefix);
+}
+
+function readPlaybookNames(repoRoot: string): string[] {
+  const dir = join(repoRoot, '.fadeno', 'playbooks');
+  return uniqueSorted(
+    readDirEntries(dir)
+      .filter((entry) => entry.isFile() && /\.ya?ml$/i.test(entry.name))
+      .map((entry) => entry.name.replace(/\.ya?ml$/i, '')),
+  );
+}
+
+function safeRuns(repoRoot: string): RunSummary[] {
+  try {
+    return listRuns(repoRoot);
+  } catch {
+    return [];
+  }
+}
+
+function readProfile(repoRoot: string): ExecutorProfile | null {
+  try {
+    return loadExecutorProfile(repoRoot).profile;
+  } catch {
+    return null;
+  }
+}
+
+function profileValues(repoRoot: string, kind: 'loadout' | 'executor' | 'archetype'): string[] {
+  const profile = readProfile(repoRoot);
+  if (profile == null) return [];
+  if (kind === 'loadout') return Object.keys(profile.loadouts);
+  if (kind === 'executor') return Object.keys(profile.executors);
+  const names = new Set<string>();
+  for (const slots of Object.values(profile.loadouts)) for (const name of Object.keys(slots)) names.add(name);
+  return [...names];
+}
+
+function resolveRun(runs: RunSummary[], ref: string): RunSummary | null {
+  const exact = runs.find((run) => run.runId === ref);
+  if (exact != null) return exact;
+  const matches = runs.filter((run) => run.runId.startsWith(ref));
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+function playbookFile(repoRoot: string, run: RunSummary): string | null {
+  if (run.playbook == null) return null;
+  const stripped = run.playbook.replace(/\.ya?ml$/i, '');
+  for (const suffix of ['.yaml', '.yml']) {
+    const path = join(repoRoot, '.fadeno', 'playbooks', `${stripped}${suffix}`);
+    if (existsSync(path)) return path;
+  }
+  return null;
+}
+
+function readStepIds(repoRoot: string, runRef: string): string[] {
+  const run = resolveRun(safeRuns(repoRoot), runRef);
+  if (run == null) return [];
+  const file = playbookFile(repoRoot, run);
+  if (file == null) return [];
+  try {
+    const doc = parseYaml(readFileSync(file, 'utf8')) as { flow?: unknown };
+    if (!Array.isArray(doc?.flow)) return [];
+    const byId = new Map<string, Record<string, unknown>>();
+    for (const raw of doc.flow) {
+      if (raw != null && typeof raw === 'object' && !Array.isArray(raw)) {
+        const id = (raw as Record<string, unknown>).id;
+        if (typeof id === 'string') byId.set(id, raw as Record<string, unknown>);
+      }
+    }
+    const found = new Set<string>();
+    const visit = (id: string): void => {
+      if (found.has(id)) return;
+      const step = byId.get(id);
+      if (step == null) return;
+      found.add(id);
+      if (Array.isArray(step.body)) for (const child of step.body) if (typeof child === 'string') visit(child);
+    };
+    for (const id of byId.keys()) visit(id);
+    return uniqueSorted(found);
+  } catch {
+    return [];
+  }
+}
+
+function readPlaybookRoles(repoRoot: string, runRef: string): string[] {
+  const run = resolveRun(safeRuns(repoRoot), runRef);
+  if (run == null) return [];
+  const file = playbookFile(repoRoot, run);
+  if (file == null) return [];
+  try {
+    const doc = parseYaml(readFileSync(file, 'utf8')) as { roles?: unknown };
+    if (doc?.roles == null || typeof doc.roles !== 'object' || Array.isArray(doc.roles)) return [];
+    return Object.keys(doc.roles as Record<string, unknown>);
+  } catch {
+    return [];
+  }
+}
+
+function readPlaybookInputs(repoRoot: string, runRef: string): string[] {
+  const run = resolveRun(safeRuns(repoRoot), runRef);
+  if (run == null) return [];
+  const file = playbookFile(repoRoot, run);
+  if (file == null) return [];
+  try {
+    const doc = parseYaml(readFileSync(file, 'utf8')) as { inputs?: unknown };
+    if (doc?.inputs == null || typeof doc.inputs !== 'object' || Array.isArray(doc.inputs)) return [];
+    return Object.keys(doc.inputs as Record<string, unknown>);
+  } catch {
+    return [];
+  }
+}
+
+function dynamicValues(
+  kind: ValueKind,
+  prefix: string,
+  repoRoot: string,
+  cwd: string,
+  runRef: string | undefined,
+  optionToken?: string,
+): string[] {
+  let values: string[];
+  switch (kind) {
+    case 'enum':
+      values = optionToken === '--schema'
+        ? ['playbook', 'run', 'review-report', 'test-result']
+        : optionToken === '--format'
+          ? ['ascii', 'mermaid', 'text', 'json']
+          : optionToken === '--status'
+            ? ['running', 'completed', 'failed', 'aborted']
+            : optionToken === '--source'
+              ? ['agent', 'harness', 'director']
+              : GATE_CONDITIONS;
+      return startsWith(values, prefix);
+    case 'path':
+      return pathCandidates(prefix, cwd);
+    case 'playbook':
+      return startsWith(readPlaybookNames(repoRoot), prefix);
+    case 'run':
+      return startsWith(safeRuns(repoRoot).map((run) => run.runId), prefix);
+    case 'step':
+      return startsWith(runRef == null ? [] : readStepIds(repoRoot, runRef), prefix);
+    case 'loadout':
+    case 'executor':
+    case 'archetype':
+      return startsWith(profileValues(repoRoot, kind), prefix);
+    case 'bind': {
+      const equals = prefix.indexOf('=');
+      const rolePrefix = equals < 0 ? '' : prefix.slice(0, equals + 1);
+      const executorPrefix = equals < 0 ? prefix : prefix.slice(equals + 1);
+      const executors = profileValues(repoRoot, 'executor');
+      // `parseBinds()` accepts only role=executor. Bare executor names are
+      // tempting suggestions here, but would be rejected by the CLI; wait for
+      // the user to type a role prefix (and `=`) before suggesting values.
+      if (equals < 0) return [];
+      const roles = runRef == null ? [] : readPlaybookRoles(repoRoot, runRef);
+      const role = prefix.slice(0, equals);
+      const roleValues = roles.includes(role) ? roles : [...roles, role];
+      return startsWith(roleValues.flatMap((name) => executors.map((executor) => `${name}=${executor}`)), `${rolePrefix}${executorPrefix}`);
+    }
+    case 'input': {
+      const equals = prefix.indexOf('=');
+      if (equals < 0) {
+        const names = runRef == null ? [] : readPlaybookInputs(repoRoot, runRef);
+        return startsWith(names.map((name) => `${name}=`), prefix);
+      }
+      const left = prefix.slice(0, equals + 1);
+      return pathCandidates(prefix.slice(equals + 1), cwd).map((value) => `${left}${value}`);
+    }
+    default:
+      return [];
+  }
+}
+
+function currentRun(positionals: string[]): string | undefined {
+  return positionals[0];
+}
+
+function commandOptions(spec: CommandSpec): string[] {
+  const options = Object.keys(spec.options);
+  if (spec.options['--help'] != null) options.push('-h');
+  if (spec.options['--version'] != null) options.push('-v');
+  return uniqueSorted(options);
+}
+
+/** Return newline-equivalent Bash candidates as plain data. */
+export function runCompletionCandidates(opts: CompletionCandidatesOptions): string[] {
+  if (!Number.isInteger(opts.cword) || opts.cword < 0) {
+    throw new CompletionError('completion candidates needs a non-negative integer cword');
+  }
+  if (!Array.isArray(opts.words) || opts.words.length === 0) {
+    throw new CompletionError('completion candidates needs a non-empty words vector');
+  }
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const words = opts.words;
+  const cword = Math.min(opts.cword, words.length - 1);
+  const current = words[cword] ?? '';
+  const context = commandContext(words, cword);
+  if (context.name == null || context.spec == null) {
+    return startsWith(
+      [...Object.keys(COMMANDS), '-h', '--help', '-v', '--version'],
+      current,
+    );
+  }
+
+  const base = COMMANDS[context.name];
+  if (base?.subcommands != null && context.spec === base) {
+    const first = firstPositionalIndex(words, context.start, cword, base);
+    if (first == null || first === cword) return startsWith(Object.keys(base.subcommands), current);
+  }
+
+  const previous = cword > 0 ? words[cword - 1] : undefined;
+  const previousSpec = previous == null ? undefined : optionSpec(context.spec, previous);
+  const runRef = currentRun(context.positionals);
+  if (previousSpec != null && previousSpec.kind !== 'none' && previous != null && !previous.includes('=')) {
+    if (previousSpec.kind === 'enum' && previousSpec.values != null) return startsWith(previousSpec.values, current);
+    return dynamicValues(previousSpec.kind, current, repoRoot, cwd, runRef, previous);
+  }
+
+  const equal = current.indexOf('=');
+  if (equal > 1 && current.startsWith('--')) {
+    const tokenName = current.slice(0, equal);
+    const found = optionSpec(context.spec, tokenName);
+    if (found != null && found.kind !== 'none') {
+      if (found.kind === 'enum' && found.values != null) {
+        return startsWith(found.values, current.slice(equal + 1)).map((value) => `${tokenName}=${value}`);
+      }
+      return dynamicValues(found.kind, current.slice(equal + 1), repoRoot, cwd, runRef, tokenName)
+        .map((value) => `${tokenName}=${value}`);
+    }
+  }
+
+  if (current.startsWith('-')) {
+    return startsWith(commandOptions(context.spec), current);
+  }
+
+  const positionalIndex = context.positionals.length;
+  const kind = context.spec.positionals[positionalIndex];
+  if (kind != null) return dynamicValues(kind, current, repoRoot, cwd, runRef);
+
+  // A free-form positional (task, feedback, reason, and so on) has no useful
+  // semantic candidates. An empty next word still benefits from relevant flags.
+  if (current === '') return commandOptions(context.spec);
+  return [];
+}

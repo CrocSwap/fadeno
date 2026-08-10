@@ -555,7 +555,10 @@ function adviceFor(info: NextStepInfo, gate: NextGateInfo | null): string {
     return 'pause and return to the host; do not auto-approve.';
   }
   if (kind === 'tool_call') {
-    return 'invoke the named tool capability; save the result; record an artifact event; then re-call `fadeno next`.';
+    return (
+      'invoke the named tool capability, save its structured result, then atomically attribute it with ' +
+      '`fadeno tool-complete <run> --output <artifact-path>` before re-calling `fadeno next`.'
+    );
   }
   return `handle kind \`${kind}\` per runtime.md; record the outcome; then re-call \`fadeno next\`.`;
 }

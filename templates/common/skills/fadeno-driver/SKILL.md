@@ -92,7 +92,9 @@ loop:
             --field result=pass|fail \
             --artifact <N.gate.artifact>
       else:
-        handle tool_call / join / … per runtime.md; record; continue
+        for tool_call: invoke the tool, write its output, then run
+          fadeno tool-complete <run> --output <artifact-path>
+        handle join / … per runtime.md; record; continue
 ```
 
 4. **Honor loop iteration starts** (manual loop only — drive does this itself).

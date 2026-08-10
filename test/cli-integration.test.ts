@@ -100,6 +100,25 @@ test('committed bundled CLI supports Grok init and rejects mixed target flags', 
   assert.match(`${mixed.stdout}${mixed.stderr}`, /choose exactly one target/i);
 });
 
+test('committed bundled CLI emits Bash completion and preserves candidate flags after --', (t) => {
+  const root = tempRepo(t);
+  const script = cliSplit(root, ['completion', 'bash']);
+  assert.equal(script.status, 0);
+  assert.equal(script.stderr, '');
+  assert.match(script.stdout, /complete -F _fadeno_complete fadeno/);
+  execFileSync('bash', ['-n'], { input: script.stdout });
+
+  const globalFlags = cliSplit(root, ['completion', 'candidates', '1', '--', 'fadeno', '-']);
+  assert.equal(globalFlags.status, 0);
+  assert.deepEqual(globalFlags.stdout.trim().split('\n'), ['--help', '--version', '-h', '-v']);
+
+  const candidates = cliSplit(root, ['completion', 'candidates', '3', '--', 'fadeno', 'validate', '--schema', 'r']);
+  assert.equal(candidates.status, 0);
+  assert.equal(candidates.stderr, '');
+  assert.match(candidates.stdout, /review-report/);
+  assert.match(candidates.stdout, /run/);
+});
+
 test('built CLI rejects invalid artifacts and path-dependent playbooks', (t) => {
   const root = tempRepo(t);
   const runId = fresh(root);

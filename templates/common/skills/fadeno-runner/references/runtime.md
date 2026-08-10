@@ -112,11 +112,13 @@ fadeno dispatch-complete <run> <dispatch-id> --output <temporary-file> [--commit
 fadeno dispatch-fail <run> <dispatch-id> --reason <text>
 ```
 
-The start event attests the native agent id, model, effort, and agent type. A
+The start event records the native agent id and echoes the requested model,
+effort, and agent type with `identity_evidence: requested_only`. Those fields
+are internally checked against the snapshotted profile, but are not verified
+runtime identity unless the host later supplies an independent observation. A
 valid completion is copied to the planned immutable artifact path and gets a
-manifest; invalid bytes are retained under `artifacts/attempts/`. Native
-workers do not invoke Fadeno ledger commands — the host coordinator is the
-sole writer.
+manifest; invalid bytes are retained under `artifacts/attempts/`. Native workers
+do not invoke Fadeno ledger commands — the host coordinator is the sole writer.
 
 The immutable actor prompt also names a workspace-relative cooperative status
 sidecar. An agent or harness may update that JSON while it works; the host polls
@@ -167,7 +169,9 @@ it is what makes the run inspectable, and the seam a future compiled runtime rea
 
 - **actor_call** — Have the named role do the work. Save its output as the named
   artifact under `artifacts/`.
-- **tool_call** — Invoke the named capability (e.g. `test_runner`, `diff_loader`).
+- **tool_call** — Invoke the named capability (e.g. `test_runner`, `diff_loader`),
+  write its output, then atomically attribute it to the current step with
+  `fadeno tool-complete <run> --output <artifact-path>`.
   Map it to a real host action; save the result.
 - **evaluator** — Have the actor produce a *structured* judgment artifact, e.g.
   `artifacts/review-report.json` conforming to `review-report.schema.json`. Do

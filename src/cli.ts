@@ -32,6 +32,9 @@ import { runRuns } from './commands/runs.ts';
 import { runShow } from './commands/show.ts';
 import { runValidate } from './commands/validate.ts';
 import { runVerify, type VerifyResult } from './commands/verify.ts';
+import { runCompletion, runCompletionCandidates } from './commands/completion.ts';
+import { runSteeringApply, runSteeringResolve } from './commands/steering.ts';
+import { runToolComplete } from './commands/tool-complete.ts';
 import type { DiagramFormat } from './lib/diagram.ts';
 import { progressSidecarPath } from './lib/prompt.ts';
 import type { EmitResult } from './lib/fsutil.ts';
@@ -45,17 +48,19 @@ import type { ShowProjection, ShowResult, StepView } from './commands/show.ts';
 const HELP = `fadeno — the playbook layer for AI coding agents
 
 Usage:
-  fadeno init --codex|--claude|--grok [opts]   Scaffold (see --with-hooks, --data-only)
+  fadeno init --codex|--claude|--grok [opts]   Scaffold (see --with-steering, --with-hooks)
   fadeno validate [file] [--schema K]   Validate playbooks (schema + references + semantics)
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
   fadeno loadout [list|use <n>|clear]   Show, list, pin, or clear the active loadout
+  fadeno steering resolve|apply [...]   Resolve or materialize hybrid Codex steering
   fadeno dispatch [flags]               Resolve archetype → executor and invoke it once (ad hoc)
   fadeno dispatch-start <run> <id>      Start a native host dispatch
   fadeno dispatch-progress <run> <id>   Record an attested progress observation
   fadeno dispatch-complete <run> <id>   Submit a native host result
   fadeno dispatch-fail <run> <id>       Submit a native host failure
   fadeno run <run> [flags]              Update a run ledger (run.yaml + events.jsonl)
+  fadeno tool-complete <run> --output P Atomically record the next tool_call result
   fadeno gate <run> <condition>         Evaluate a gate condition from a structured artifact
   fadeno prompt <run> <step> [flags]    Assemble (and record) a step's actor prompt
   fadeno next <run>                     Emit the next actionable step (JSON flow cursor)
@@ -65,9 +70,11 @@ Usage:
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic claims (or --latest)
   fadeno plugin [dir] [--codex]         Generate a Claude Code (default) or Codex plugin
+  fadeno completion bash                Emit a sourceable Bash completion script
 
 Options:
   --with-hooks            (init) Also scaffold tier-2 enforcement hooks
+  --with-steering         (init) Opt into loadout-aware Codex/Claude subagent steering
   --data-only             (init) Seed only .fadeno/ definitions (capability via plugin)
   --force                 (init) Overwrite existing files / refresh the bootstrap section
   --schema <kind>         (validate) Force document kind: playbook | run | review-report | test-result
@@ -91,6 +98,7 @@ Options:
   --archetype <a>         (dispatch) Archetype to resolve (required unless --executor)
   --role <name>           (dispatch) Role name: enables binding pins + evidence attribution
   --executor <name>       (dispatch) Bypass resolution and invoke a named executor (debugging)
+  --native-executor <n>   (steering resolve) Host executor materialized into this native role
   --prompt-file <path>    (dispatch) Read the prompt from a file instead of stdin
   --agent-id <id>         (dispatch-start) Native host agent identity
   --workspace <path>      (dispatch-start) Native workspace provenance
@@ -124,6 +132,7 @@ Examples:
   fadeno run 2026-05-30-1132-csv --event artifact_created --artifact artifacts/x.json --member architect_fable
   fadeno run 2026-05-30-1132-csv --step arbitrate --event human_decision --field branch=approve
   fadeno loadout use openai-primary
+  fadeno steering apply codex-only --codex --force
   echo "Summarize the repo layout." | fadeno dispatch --archetype worker
   fadeno gate 2026-05-30-1132-csv no_blocking_issues --artifact artifacts/review-report.json
   fadeno prompt 2026-05-30-1132-csv cross_review --actor architect_fable --no-record
@@ -131,6 +140,7 @@ Examples:
   fadeno runs
   fadeno show 2026-07-10-2212
   fadeno verify --latest
+  source <(fadeno completion bash)
 `;
 
 const SIGIL: Record<Target, string> = { codex: '$', claude: '/', grok: '/' };
@@ -141,6 +151,7 @@ function printInitSummary(
   repoRoot: string,
   results: EmitResult[],
   withHooks: boolean,
+  withSteering: boolean,
   dataOnly: boolean,
 ): void {
   const counts = { created: 0, overwritten: 0, appended: 0, skipped: 0 };
@@ -180,8 +191,17 @@ function printInitSummary(
   } else {
     console.log(`  3. Ask your agent to use the ${SIGIL[target]}fadeno-runner skill on a complex task`);
   }
+  let nextStep = 4;
   if (withHooks) {
-    console.log('  4. Activate enforcement: see .fadeno/hooks/README.md');
+    console.log(`  ${nextStep}. Activate enforcement: see .fadeno/hooks/README.md`);
+    nextStep += 1;
+  }
+  if (withSteering) {
+    console.log(
+      target === 'claude'
+        ? `  ${nextStep}. Steering is active locally; restart Claude Code so the Agent hook is loaded`
+        : `  ${nextStep}. Configure a native baseline with \`fadeno steering apply <loadout> --codex --force\`, then start a fresh Codex session`,
+    );
   }
 }
 
@@ -461,7 +481,7 @@ function printSlots(slots: LoadoutSlotView[], indent: string): void {
   const width = Math.max(0, ...slots.map((s) => s.archetype.length));
   for (const slot of slots) {
     const model = slot.model != null ? ` (${slot.model})` : '';
-    console.log(`${indent}${slot.archetype.padEnd(width)} → ${slot.executor}${model}`);
+    console.log(`${indent}${slot.archetype.padEnd(width)} → ${slot.executor}${model} [${slot.adapter}]`);
   }
 }
 
@@ -570,6 +590,22 @@ function requireTarget(values: { codex?: boolean; claude?: boolean; grok?: boole
 }
 
 function main(argv: string[]): number {
+  // The generated completer places the complete COMP_WORDS vector after an
+  // explicit `--` boundary. Parse this tiny protocol before node:util.parseArgs
+  // so partially typed flags in that vector cannot be consumed as CLI options.
+  if (argv[0] === 'completion' && argv[1] === 'candidates') {
+    const separator = argv.indexOf('--', 3);
+    if (separator !== 3 || argv.length <= separator + 1) {
+      throw new Error('Usage: fadeno completion candidates <cword> -- <words...>');
+    }
+    const cword = Number(argv[2]);
+    if (!Number.isInteger(cword) || cword < 0) {
+      throw new Error('Usage: fadeno completion candidates <cword> -- <words...>');
+    }
+    const candidates = runCompletionCandidates({ cword, words: argv.slice(separator + 1) });
+    if (candidates.length > 0) process.stdout.write(`${candidates.join('\n')}\n`);
+    return 0;
+  }
   let parsed;
   try {
     parsed = parseArgs({
@@ -581,6 +617,7 @@ function main(argv: string[]): number {
         grok: { type: 'boolean' },
         force: { type: 'boolean' },
         'with-hooks': { type: 'boolean' },
+        'with-steering': { type: 'boolean' },
         'data-only': { type: 'boolean' },
         schema: { type: 'string' },
         format: { type: 'string' },
@@ -602,6 +639,7 @@ function main(argv: string[]): number {
         archetype: { type: 'string' },
         role: { type: 'string' },
         executor: { type: 'string' },
+        'native-executor': { type: 'string' },
         'prompt-file': { type: 'string' },
         'agent-id': { type: 'string' },
         workspace: { type: 'string' },
@@ -650,6 +688,7 @@ function main(argv: string[]): number {
         target,
         force: values.force,
         withHooks: values['with-hooks'],
+        withSteering: values['with-steering'],
         dataOnly: values['data-only'],
       });
       printInitSummary(
@@ -657,9 +696,55 @@ function main(argv: string[]): number {
         repoRoot,
         results,
         Boolean(values['with-hooks']),
+        Boolean(values['with-steering']),
         Boolean(values['data-only']),
       );
       return 0;
+    }
+    case 'steering': {
+      const sub = positionals[1];
+      if (sub === 'resolve') {
+        if (!values.archetype) {
+          throw new Error(
+            'Usage: fadeno steering resolve --archetype <name> [--native-executor <name>] [--role <name>] [--loadout <name>]',
+          );
+        }
+        const result = runSteeringResolve({
+          archetype: values.archetype,
+          nativeExecutor: values['native-executor'],
+          role: values.role,
+          loadout: values.loadout,
+        });
+        console.log(JSON.stringify({
+          mode: result.mode,
+          archetype: result.archetype,
+          role: result.role,
+          loadout: result.activeLoadout,
+          executor: result.executor,
+          adapter: result.adapter,
+          model: result.model,
+          native_executor: result.nativeExecutor,
+          resolution: result.source,
+          detail: result.detail,
+        }, null, 2));
+        return result.mode === 'restart_required' ? 2 : 0;
+      }
+      if (sub === 'apply') {
+        const loadout = positionals[2];
+        if (!loadout || !values.codex || values.claude || values.grok) {
+          throw new Error('Usage: fadeno steering apply <loadout> --codex [--force]');
+        }
+        const result = runSteeringApply({ loadout, target: 'codex', force: values.force });
+        const changed = result.results.filter((item) => item.status !== 'skipped').length;
+        console.log(`Codex native steering baseline: ${result.loadout}`);
+        for (const archetype of ['worker', 'reviewer', 'judge']) {
+          console.log(`  ${archetype} → ${result.baseline[archetype]}`);
+        }
+        console.log(`  ${changed} agent definition(s) written; start a fresh Codex session to load them.`);
+        if (changed === 0) console.log('  Existing files were preserved; pass --force to replace them.');
+        return 0;
+      }
+      throw new Error('Usage: fadeno steering resolve|apply [...]');
     }
     case 'validate': {
       if (values.schema && !SCHEMA_KINDS.includes(values.schema as SchemaKind)) {
@@ -733,6 +818,23 @@ function main(argv: string[]): number {
       }
       return 0;
     }
+    case 'tool-complete': {
+      const run = positionals[1];
+      if (!run || !values.output) {
+        throw new Error('Usage: fadeno tool-complete <run> --output <artifact-path>');
+      }
+      const result = runToolComplete({ run, output: values.output });
+      console.log(`${relative(process.cwd(), result.runDir) || result.runDir}: completed tool step ${result.step}`);
+      if (result.manifest) {
+        const validation = result.manifest.validation;
+        const note = validation.schema ? `, ${validation.schema}: ${validation.ok ? 'valid' : 'INVALID'}` : '';
+        console.log(
+          `  ${result.manifest.artifact_id}  sha256 ${result.manifest.sha256.slice(0, 12)}…  ` +
+            `gen ${result.manifest.generation}${note}`,
+        );
+      }
+      return 0;
+    }
     case 'plugin': {
       if (values.grok) {
         throw new Error('The --grok target is supported by init only; no Grok plugin generator exists.');
@@ -752,6 +854,13 @@ function main(argv: string[]): number {
       } else {
         console.log('\nTest it: `claude --plugin-dir ' + relative(process.cwd(), outDir) + '`');
       }
+      return 0;
+    }
+    case 'completion': {
+      if (positionals[1] !== 'bash' || positionals.length > 2) {
+        throw new Error('Usage: fadeno completion bash');
+      }
+      process.stdout.write(runCompletion());
       return 0;
     }
     case 'gate': {
@@ -864,6 +973,18 @@ function main(argv: string[]): number {
           console.log(`active loadout pinned: ${result.name} → .fadeno/local/loadout`);
           if (result.previous != null && result.previous !== result.name) {
             console.log(`  (was ${result.previous})`);
+          }
+          const selected = runLoadoutShow({});
+          const commandSlots = selected.slots.filter((slot) => slot.adapter === 'command').length;
+          const hostSlots = selected.slots.filter((slot) => slot.adapter === 'host').length;
+          if (commandSlots > 0) {
+            console.log(`  ${commandSlots} command slot(s) switch on the next dispatch.`);
+          }
+          if (hostSlots > 0) {
+            console.log(
+              `  ${hostSlots} host slot(s) require a matching materialized native baseline; ` +
+                `run \`fadeno steering apply ${result.name} --codex --force\` and start a fresh Codex session when they differ.`,
+            );
           }
           return 0;
         }

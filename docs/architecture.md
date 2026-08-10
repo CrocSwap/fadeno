@@ -63,10 +63,26 @@ assert on return values and filesystem effects instead of scraping stdout.
 | `runNext` | next-step JSON (`status`, `step`, `gate`, …) | Pure flow cursor over playbook + events; read-only. Logic in `lib/flow-cursor.ts`. |
 | `runLoadoutShow` / `…List` / `…Use` / `…Clear` | active loadout + slot tables | `use` pins `.fadeno/local/loadout`; `clear` removes it. Resolution logic in `lib/executors.ts`. |
 | `runDispatch` | executor report + evidence row | Ad-hoc archetype→executor dispatch; appends one row to `.fadeno/dispatches.jsonl`. Echo goes to stderr so stdout stays the executor's pure report. |
+| `runSteeringResolve` / `runSteeringApply` | hybrid mode / emitted Codex agents | Resolves native vs command vs restart-required per invocation; materializes a host-backed session baseline. |
+| `runToolComplete` | run update + artifact manifest | Atomically starts the exact next `tool_call` and records its result. |
 | `runPlugin` | `EmitResult[]` + `outDir` | Generates `plugin/` from templates. |
+| `runCompletion` / `runCompletionCandidates` | Bash source + candidate strings | Emits the `fadeno completion bash` script and serves its read-only candidate protocol. |
 
 All commands accept injectable `cwd` / `repoRoot` (and `now` where time matters)
 so tests stay hermetic and deterministic.
+
+### Bash completion protocol
+
+`fadeno completion bash` prints a dependency-free Bash function and registers
+it for the `fadeno` executable. On each Tab press the function calls
+`fadeno completion candidates <COMP_CWORD> -- <COMP_WORDS...>`; the `--`
+boundary keeps partially typed Fadeno flags in the word vector out of the
+outer argument parser. Candidate calculation stays in `commands/completion.ts`
+as plain data, while `cli.ts` owns printing and exit status. It reads only
+repo-local playbooks, ledgers, and executor profiles, sorts and de-duplicates
+results, and suppresses errors for malformed or incomplete repositories. The
+script uses Bash built-ins (`complete`, arrays, `mapfile`, `compgen`) and falls
+back to ordinary file completion when no specialized candidates apply.
 
 ### Shared libs (`src/lib/`)
 
@@ -172,9 +188,11 @@ receipt commands:
   pre-commit hook, or a Claude Code `Stop` hook. See `enforcement.md`.
 - **`dispatch-start|dispatch-progress|dispatch-complete|dispatch-fail`** are
   host receipts. A
-  host executor request is durable before native work begins; the host attests
-  model, effort, native agent id, provenance-labelled non-gating progress, and
-  terminal output/failure. `show` reloads the run's playbook so the projection
+  host executor request is durable before native work begins; receipts record
+  the requested model/effort/type, native agent id, provenance-labelled
+  non-gating progress, and terminal output/failure. Requested identity is
+  internally checked but stays visibly unverified unless a future host supplies
+  authoritative runtime metadata. `show` reloads the run's playbook so the projection
   retains graph order and pending actors, then overlays lifecycle/progress
   events and derives actor/step/total runtime. The director is the only ledger
   writer during this MVP.
@@ -250,8 +268,8 @@ templates/
     skills/               # the three SKILL.md bodies + references (sigil-free)
     commands/             # /fadeno:* slash-command files (plugin)
     hooks/                # pre-commit, CI workflow, README (tier-2 scaffold)
-  codex/                  # Codex adapter: AGENTS.md, codex-agents/*.toml, openai/*.yaml
-  claude/                 # Claude adapter: CLAUDE.md, claude-agents/*.md, hooks/settings.example.json
+  codex/                  # Codex adapter: AGENTS.md, native + steering agent TOML, openai/*.yaml
+  claude/                 # Claude adapter: CLAUDE.md, agents, enforcement + steering hooks
   grok/                   # Grok Build adapter: AGENTS.md, grok-agents/*.md
 ```
 
@@ -264,6 +282,20 @@ permissions, so `init` is the seam for this). Grok receives the shared
 capabilities and native `.grok/agents` definitions without an automatic
 `.grok/config.toml` mutation or permission grant.
 
+`--with-steering` is a separate, explicit opt-in for loadout-aware host
+delegation. On Codex, `runInit` selects honest unmaterialized brokers from
+`codex-steering-agents/` (also with `--data-only`, because Codex plugins cannot
+carry project custom agents). `fadeno steering apply <loadout> --codex --force`
+then materializes an all-host loadout into session-static role TOML. Before
+each task, matching host executor → native, command executor → dispatch proxy,
+and different host executor → restart required. Host adapters are never
+recursively sent through `fadeno dispatch`. On Claude, init emits a local
+`PreToolUse` script under `.fadeno/local/` and non-destructively merges one
+`Agent` hook into `.claude/settings.local.json`. The hook first asks the CLI
+whether a loadout is active; only then does it map general-purpose/worker,
+reviewer, and judge launches to the corresponding dispatch proxy. Explore,
+Plan, and unrelated specialists stay native. Grok currently rejects the flag.
+
 The Claude `claude-agents/` dir carries two kinds of subagents: the native role
 subagents (`worker`/`reviewer`/`judge`) and the **dispatch proxy agents**
 (`dispatch-worker`/`dispatch-reviewer`/`dispatch-judge`). Claude Code can't run
@@ -274,8 +306,9 @@ a file under `.fadeno/local/prompts/`, runs
 `fadeno dispatch --archetype <a> --prompt-file <path>`, and relays the report
 verbatim. On a non-zero exit it reports the failure and never attempts the task
 itself — silently substituting which provider does the work is an explicit
-non-goal. Routing is by description ("MUST BE USED for <archetype>-shaped
-subtasks when a Fadeno loadout is active"); resolution stays in the CLI. The
+non-goal. Routing is by description by default and can be made deterministic
+at the host boundary with `init --claude --with-steering`; resolution stays in
+the CLI. The
 permission boundary stays loud: the external executor a proxy dispatches runs
 *outside* the harness's permission fences, under its own sandbox flags — a
 deliberate user choice made by binding that executor in a loadout, with the
@@ -386,8 +419,8 @@ Footguns that cost time and aren't obvious from the final code:
   `run*()` function, and assert on the returned data and the files on disk.
 - **No CLI spawning.** Tests import and call `runInit` / `runValidate` / … directly
   with `cwd`/`repoRoot`/`now` injected — fast and hermetic.
-- **Coverage** (~50 cases): `init` (Codex, Claude, and Grok targets; hooks,
-  force/idempotency),
+- **Coverage** (hundreds of cases): `init` (Codex, Claude, and Grok targets;
+  hooks, loadout steering, force/idempotency),
   schema + reference + semantic validation, run-ledger lifecycle + gate, diagram
   rendering, and plugin generation + the no-drift/binary guards.
 

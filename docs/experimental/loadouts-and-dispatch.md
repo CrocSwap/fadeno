@@ -1,6 +1,6 @@
 # Loadouts and the dispatch kernel
 
-**Status:** approved design boundary; implementation starting
+**Status:** kernel, proxy surface, and opt-in host steering implemented; strict mode deferred
 **Decision date:** 2026-08-09
 **Relationship:** extends the executor profile of
 [`next-protocol.md`](next-protocol.md); sibling of
@@ -151,7 +151,7 @@ This makes Fadeno the only layer that sees cross-provider usage — the natural
 future home of per-provider burn reporting (a later `fadeno usage`; not in
 this boundary), which closes the loop on the subscription-cycling need.
 
-## Claude Code integration (plugin)
+## Host steering integration
 
 The harness will never run non-Anthropic inference natively (custom-agent
 `model:` accepts Claude models only), so cross-harness subagents go
@@ -169,17 +169,26 @@ archetype (`dispatch-worker`, `dispatch-reviewer`, `dispatch-judge`):
   shared conversation context — is byte-for-byte the one-shot executor
   contract, which is why this substitution is architecturally honest.
 
-Steering ladder, shipped in this order:
+Steering ladder:
 
-1. **Description routing** (now): proxy descriptions carry "use proactively /
+1. **Description routing** (shipped): proxy descriptions carry "use proactively /
    MUST BE USED for <archetype>-shaped subtasks when a Fadeno loadout is
    active." Soft but supported.
-2. **PreToolUse rewrite hook** (opt-in, later slice): match the `Agent` tool,
-   return `updatedInput` rewriting worker-shaped `agent_type`s to the
+2. **PreToolUse rewrite hook** (shipped, opt-in): match the `Agent` tool,
+   return `updatedInput` rewriting worker-shaped `subagent_type`s to the
    dispatch proxies. Deterministic — covers automatically-launched
    subagents. The hook stays dumb; resolution stays in the CLI.
-3. **Strict mode** (last, opt-in): disable built-in agent types via
+3. **Strict mode** (deferred, opt-in): disable built-in agent types via
    `permissions.deny` / harness env flags so proxies are the only targets.
+
+Codex does not expose the same spawn-rewrite hook. Its opt-in installs project
+custom-agent brokers, then `fadeno steering apply <loadout> --codex --force`
+materializes one all-host loadout as the session-native baseline. Each role
+checks the kernel before every task: a matching host slot runs locally, a
+command slot dispatches out-of-process immediately, and a different host slot
+returns `restart_required`. Host executors are never recursively sent through
+`fadeno dispatch`. Switching the native baseline requires a fresh Codex
+session; switching to command executors does not.
 
 **What stays native:** Explore/Plan-style read-only scouting — cheap, tightly
 integrated with the harness's codebase tools, and not where quota pressure
@@ -210,7 +219,8 @@ compensating audit trail.
    resolution + `fadeno loadout` + `fadeno dispatch` + evidence + echo.
 2. **Plugin surface:** dispatch proxy agents + description routing +
    prompt-file relay convention.
-3. **Hook rewrite** (opt-in), then **strict mode**.
+3. **Host steering** (opt-in): Claude hook rewrite + Codex role overrides.
+4. **Strict mode** (deferred).
 
-Slices 1–2 are soft and shippable independently; each later slice only
-sharpens routing, never changes resolution semantics.
+Slices 1–3 are shipped; strict mode would only sharpen routing, never change
+resolution semantics.

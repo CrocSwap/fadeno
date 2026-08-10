@@ -18,6 +18,7 @@ export interface LoadoutSlotView {
   archetype: string;
   executor: string;
   model: string | null;
+  adapter: 'command' | 'host';
 }
 
 export interface LoadoutInfo {
@@ -90,7 +91,8 @@ function slotViews(profile: ExecutorProfile, name: string): LoadoutSlotView[] {
     .sort()
     .map((archetype) => {
       const executor = slots[archetype]!;
-      return { archetype, executor, model: profile.executors[executor]?.model ?? null };
+      const spec = profile.executors[executor]!;
+      return { archetype, executor, model: spec.model, adapter: spec.adapter };
     });
 }
 

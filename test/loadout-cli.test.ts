@@ -46,8 +46,8 @@ test('loadout show: default loadout with its archetype table, available names, a
 
   assert.deepEqual(result.active, { name: 'anthropic-primary', source: 'default' });
   assert.deepEqual(result.slots, [
-    { archetype: 'reviewer', executor: 'terra-host', model: 'gpt-5.6-terra' },
-    { archetype: 'worker', executor: 'opus-cmd', model: 'opus' },
+    { archetype: 'reviewer', executor: 'terra-host', model: 'gpt-5.6-terra', adapter: 'host' },
+    { archetype: 'worker', executor: 'opus-cmd', model: 'opus', adapter: 'command' },
   ]);
   assert.deepEqual(result.available, ['anthropic-primary', 'openai-primary']);
   assert.equal(result.defaultLoadout, 'anthropic-primary');
@@ -165,8 +165,8 @@ test('loadout list: marks the active and default loadouts with their slot tables
   assert.deepEqual(result.active, { name: 'openai-primary', source: 'local' });
   const openai = result.loadouts.find((l) => l.name === 'openai-primary')!;
   assert.deepEqual(openai.slots, [
-    { archetype: 'reviewer', executor: 'terra-host', model: 'gpt-5.6-terra' },
-    { archetype: 'worker', executor: 'luna-cmd', model: 'gpt-5.6-luna' },
+    { archetype: 'reviewer', executor: 'terra-host', model: 'gpt-5.6-terra', adapter: 'host' },
+    { archetype: 'worker', executor: 'luna-cmd', model: 'gpt-5.6-luna', adapter: 'command' },
   ]);
 });
 

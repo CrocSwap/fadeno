@@ -34,9 +34,10 @@ general scheduler, or orchestration platform.
 
 ## Shipped (v0)
 
-- CLI: `init --codex|--claude|--grok [--with-hooks] [--data-only] [--force]`,
+- CLI: `init --codex|--claude|--grok [--with-hooks] [--with-steering] [--data-only] [--force]`,
   `validate [file] [--schema]`, `diagram [--format ascii|mermaid]`, `new-run`,
-  `run`, `gate`, `prompt`, `next`, `runs`, `show`, `verify`, `plugin`.
+  `run`, `tool-complete`, `gate`, `prompt`, `next`, `drive`, `loadout`,
+  `steering`, `dispatch*`, `completion`, `runs`, `show`, `verify`, `plugin`.
 - Tri-target scaffolding from one template core (Codex, Claude Code, and Grok Build),
   non-destructive. Grok's native adapter emits `.grok/skills`, `.grok/agents`,
   and `AGENTS.md` without mutating permission files.
@@ -66,6 +67,11 @@ general scheduler, or orchestration platform.
   advisory→enforced bridge. The driver skill composes these helpers into the
   current model-mediated execution procedure.
 - Tier-2 enforcement scaffold via `--with-hooks` (pre-commit, CI workflow, Claude hook example).
+- Opt-in loadout steering via `--with-steering`: hybrid Codex custom agents plus
+  `fadeno steering apply`, and a selective Claude `PreToolUse` rewrite. Codex
+  switches command slots live, executes host slots only when they match its
+  session-static native baseline, and reports `restart_required` otherwise;
+  Explore/Plan stays native. Grok steering remains unsupported.
 - **Validated end-to-end in live Claude Code sessions** (through v0.1.2): bundled
   CLI on PATH, `Skill(fadeno:*)` model-invocation, `/fadeno:*` slash commands in
   the `/` menu, and `fadeno:*` role-subagent dispatch after `/reload-plugins`.
@@ -80,8 +86,10 @@ general scheduler, or orchestration platform.
   agent-interpreted unless and until a deterministic evaluator ships.
 - Skill *sufficiency* (kickoff memo acceptance #8–#9) is model-mediated — needs live-session
   evaluation, not unit tests.
-- Codex subagent path (`.codex/agents/*.toml`) is provisional; runner degrades to role-passes.
-  (The Claude plugin subagents are now verified live; Codex's remain unverified.)
+- Codex custom-agent definitions now match the documented project TOML schema,
+  but their Fadeno steering behavior remains unverified in a live Codex session.
+  (The Claude plugin subagents are verified live; the new Claude rewrite hook
+  still needs the same live-session dogfood pass.)
 
 ## Next protocol (in progress — provenance slice shipped)
 

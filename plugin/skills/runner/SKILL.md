@@ -64,8 +64,9 @@ outputs and receipts to you; they never invoke Fadeno ledger commands.
 - Never skip a required gate silently. If you skip or override one, say so.
 - Never overwrite iteration artifacts; version them.
 - Do not treat `.fadeno/runs/` as source code.
-- Attach native agent ids to host starts and keep model, effort, and agent type
-  as host-attested evidence.
+- Attach native agent ids to host starts. Treat model, effort, and agent type as
+  requested configuration unless the host supplies independently observed
+  runtime identity; never describe an echoed request as verified.
 - Use original native agents for revision when possible; ask `fadeno show` and
   merge its workflow-aligned actor projection with host/Codex activity for
   status. Report pending/running/waiting/blocked/completed actors plus total
