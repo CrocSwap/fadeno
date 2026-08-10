@@ -5,7 +5,7 @@ chat.
 
 ## Design status and precedence
 
-Fadeno now has four intentionally different design horizons:
+Fadeno now has five intentionally different design horizons:
 
 1. [`kickoff-memo.md`](kickoff-memo.md) records the rationale and scope of the
    shipped v0 advisory protocol. It remains historical design context.
@@ -21,6 +21,12 @@ Fadeno now has four intentionally different design horizons:
    is a dogfood-promoted extension of the next protocol. It specifies recursive
    fan-out/aggregation containers and durable node-instance identity; it does
    not authorize a daemon or general distributed scheduler.
+5. [`experimental/loadouts-and-dispatch.md`](experimental/loadouts-and-dispatch.md)
+   is the approved boundary for the dispatch kernel: archetype→executor
+   loadouts switchable at session level, and ad-hoc cross-harness dispatch
+   (`fadeno dispatch`) with the playbook engine as one client of the same
+   resolver. It does not authorize auto-fallback across providers or a
+   resident router.
 
 The next-protocol engine decision deliberately supersedes v0's "no runtime"
 constraint for forward work. It does not authorize a daemon, cloud service,
@@ -28,10 +34,12 @@ general scheduler, or orchestration platform.
 
 ## Shipped (v0)
 
-- CLI: `init --codex|--claude [--with-hooks] [--data-only] [--force]`,
+- CLI: `init --codex|--claude|--grok [--with-hooks] [--data-only] [--force]`,
   `validate [file] [--schema]`, `diagram [--format ascii|mermaid]`, `new-run`,
   `run`, `gate`, `prompt`, `next`, `runs`, `show`, `verify`, `plugin`.
-- Dual-target scaffolding from one template core (Codex + Claude Code), non-destructive.
+- Tri-target scaffolding from one template core (Codex, Claude Code, and Grok Build),
+  non-destructive. Grok's native adapter emits `.grok/skills`, `.grok/agents`,
+  and `AGENTS.md` without mutating permission files.
 - **Claude plugin** packaging: `fadeno plugin` generates a `plugin/` (skills,
   `/fadeno:runner` + `/fadeno:builder` slash commands, and `worker`/`reviewer`/
   `judge` role subagents) from the same templates; repo root carries a

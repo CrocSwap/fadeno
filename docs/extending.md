@@ -83,6 +83,96 @@ be able to evaluate the condition from the artifact **without re-asking a model*
 
 ---
 
+## Bind roles to executors (profiles + loadouts)
+
+`fadeno drive` and `fadeno dispatch` resolve every actor through
+`.fadeno/executors.yaml` (parsed by `src/lib/executors.ts`). Beside the
+original per-role `bindings:`, the profile can declare **loadouts** — named
+archetype → executor tables, the switchable unit for rotating providers
+without editing role bindings:
+
+```yaml
+executors:
+  opus-xhigh:     { adapter: command, command: [claude, -p, --model, opus], model: opus }
+  luna-cli-xhigh: { adapter: command, command: [codex, exec, "-"], model: gpt-5.6-luna }
+
+loadouts:
+  anthropic-primary: { worker: opus-xhigh,     reviewer: opus-xhigh }
+  openai-primary:    { worker: luna-cli-xhigh, reviewer: opus-xhigh }
+
+default_loadout: anthropic-primary   # optional
+
+bindings:                            # per-role pins; optional when loadouts exist
+  opus_reviewer: opus-xhigh          # deliberately-multi-model playbooks pin here
+  "*": opus-xhigh
+```
+
+Every loadout slot must name a declared executor; loadout names and archetype
+keys are bare lowercase identifiers (`[a-z][a-z0-9_-]*`); at least one of
+`bindings` / `loadouts` must be non-empty. Playbook roles opt into loadout
+routing with one advisory field — `archetype: worker` — validated for
+identifier shape only, so the playbook stays harness- and provider-neutral.
+
+**Resolution order** (per role, computed at dispatch time inside the CLI,
+never cached anywhere else):
+
+1. explicit `bindings[role]` pin;
+2. the active loadout's slot for the role's declared `archetype`;
+3. `bindings["*"]`;
+4. otherwise a hard error naming the role, its archetype, and what to add.
+
+The **active loadout** resolves `--loadout` flag → `FADENO_LOADOUT` env →
+`.fadeno/local/loadout` → `default_loadout:` → none. Switch it per session:
+
+```bash
+fadeno loadout use openai-primary   # writes .fadeno/local/loadout (git-ignored)
+fadeno loadout                      # active loadout, its source, its slot table
+fadeno loadout list                 # every declared loadout (* marks active)
+fadeno loadout clear                # remove the local pin
+```
+
+`.fadeno/local/` is per-machine session state — `init` gitignores it — which is
+what makes a loadout switch session-scoped instead of a repo edit that dirties
+git for a quota condition that expires tomorrow. The switch takes effect on the
+next dispatch. Evidence: runs record a `resolution_snapshot` event in their
+ledger; ad-hoc dispatches append one row each to `.fadeno/dispatches.jsonl`
+(also gitignored by `init` — per-machine evidence like `.fadeno/local/`,
+auditable locally, never committed). Each row's `resolution` field records how
+the executor was chosen (`binding` | `loadout` | `fallback` | `executor-flag`).
+
+Ad-hoc dispatch runs the same chain outside any playbook:
+`fadeno dispatch --archetype worker` with the prompt on stdin or via
+`--prompt-file <path>`. `--role <name>` additionally enables per-role binding
+pins and evidence attribution (without it, step 1 above has nothing to match);
+`--executor <name>` bypasses resolution entirely (debugging). Only `command`
+adapters are directly invokable — resolving to a `host` executor is a clear
+error telling you to bind a command executor or run via host dispatch.
+
+### Cross-harness subagents (dispatch proxies)
+
+`init --claude` and the plugin install three **dispatch proxy agents** beside
+the native role subagents: `dispatch-worker` / `dispatch-reviewer` /
+`dispatch-judge` (source: `templates/claude/claude-agents/dispatch-*.md`).
+Each is a Bash-only `model: haiku` agent that writes the received task prompt
+verbatim to a file under `.fadeno/local/prompts/`, runs
+`fadeno dispatch --archetype <a> --prompt-file <path>`, and relays the report
+verbatim — so a Claude Code session can route worker/reviewer/judge-shaped
+subtasks to whatever executor the active loadout binds, including a
+non-Anthropic one. On a non-zero exit the proxy reports the failure plainly
+and never attempts the task itself as a fallback.
+
+What stays native: Explore/Plan-style read-only scouting — cheap, tightly
+integrated with the harness's codebase tools, and not where quota pressure
+lives. The arbitrage win is expensive worker turns.
+
+> **Permission boundary:** the external executor a proxy dispatches runs
+> *outside* the host harness's permission fences, under its own sandbox flags
+> (e.g. `codex exec -s workspace-write`). Binding that executor in your
+> loadout is the explicit opt-in; the `.fadeno/dispatches.jsonl` evidence row
+> is the compensating audit trail.
+
+---
+
 ## Change templates (skills, playbooks, schemas, agents, hooks)
 
 `templates/` is the single source of truth. The catch is that `plugin/` is a
@@ -113,15 +203,17 @@ Never edit files under `plugin/` directly — they're build output.
    offers it.
 4. `npm run build:plugin` + commit `plugin/`.
 
-Starters ship to **both** targets (they're under `common/fadeno`) and are seeded
-by `init` / `init --data-only`. The plugin itself carries no playbooks.
+Starters ship to **all supported targets** (they're under `common/fadeno`) and
+are seeded by `init` / `init --data-only`. The plugin itself carries no
+playbooks.
 
 ---
 
 ## Add a harness target
 
 Adding a host (e.g. Cursor) is mostly **adapter work** — the skill *content* is a
-cross-harness standard and is reused unchanged. Define the four adapter surfaces:
+cross-harness standard and is reused unchanged. Define the four adapter surfaces
+alongside the current Codex, Claude Code, and Grok Build adapters:
 install dir, bootstrap file + invocation sigil, invocation policy, and subagent
 format.
 
@@ -132,9 +224,12 @@ format.
    non-destructive via the `fsutil` helpers.
 3. **`src/cli.ts`** — add the target to the `Target` type, the `SIGIL` map,
    `requireTarget`, the `parseArgs` options, and `HELP`.
-4. **README** + the dual-target table in `docs/kickoff-memo.md` — document the new
-   adapter row.
-5. Tests in `test/init.test.ts` for the new tree.
+4. **README** + the current adapter note/table in `docs/kickoff-memo.md` — document
+   the new adapter row and distinguish native handles from namespaced plugin
+   commands where applicable.
+5. Tests in `test/init.test.ts` for the new tree, plus built-boundary assertions in
+   `test/cli-integration.test.ts` and `test/plugin.test.ts` when bundled templates
+   or CLI flags change.
 
 If the host lacks native subagents, that's fine — the runner skill already
 degrades to separate role-passes (and says so in the ledger).

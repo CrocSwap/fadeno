@@ -24,7 +24,7 @@ Three layers, mirrored in the directory split (the organizing principle from the
 kickoff memo):
 
 - **Capability** — skills + subagents + CLI. Source under `templates/common/skills`,
-  `templates/{codex,claude}/*-agents`, and `src/`.
+  `templates/{codex,claude,grok}/*-agents`, and `src/`.
 - **Definitions** — the `.fadeno/` tree. Source under `templates/common/fadeno`.
 - **Traces** — `.fadeno/runs/<id>/`. Created at runtime by the CLI; no template.
 
@@ -61,6 +61,8 @@ assert on return values and filesystem effects instead of scraping stdout.
 | `runGate` | pass/fail + blocking titles | The advisory→enforced bridge. |
 | `runPrompt` | prompt text + sha + record status + plan | Deterministic step-prompt assembler; records a snapshot + `prompt_assembled` by default. Pure resolution/rendering live in `lib/prompt-resolve.ts` + `lib/prompt.ts`. |
 | `runNext` | next-step JSON (`status`, `step`, `gate`, …) | Pure flow cursor over playbook + events; read-only. Logic in `lib/flow-cursor.ts`. |
+| `runLoadoutShow` / `…List` / `…Use` / `…Clear` | active loadout + slot tables | `use` pins `.fadeno/local/loadout`; `clear` removes it. Resolution logic in `lib/executors.ts`. |
+| `runDispatch` | executor report + evidence row | Ad-hoc archetype→executor dispatch; appends one row to `.fadeno/dispatches.jsonl`. Echo goes to stderr so stdout stays the executor's pure report. |
 | `runPlugin` | `EmitResult[]` + `outDir` | Generates `plugin/` from templates. |
 
 All commands accept injectable `cwd` / `repoRoot` (and `now` where time matters)
@@ -84,6 +86,18 @@ so tests stay hermetic and deterministic.
   gate format-0.3 readers behind explicit 0.2 compatibility mode.
 - **`host-dispatch.ts`** — durable native-host request/start/terminal receipt
   protocol with immutable output placement and attempt evidence.
+- **`executors.ts`** — the executor profile (`.fadeno/executors.yaml`): named
+  executors (`command`/`host` adapters), per-role `bindings`, and named
+  **loadouts** — archetype → executor tables, the switchable unit of the
+  dispatch kernel — plus an optional `default_loadout`. Two pure resolvers:
+  `resolveActiveLoadout` (`--loadout` flag → `FADENO_LOADOUT` env →
+  `.fadeno/local/loadout`, written by `fadeno loadout use` → `default_loadout:`
+  → none) and `resolveRole` (explicit `bindings[role]` pin → active loadout's
+  slot for the role's declared `archetype` → `bindings["*"]` → hard, actionable
+  error). Resolution is computed at dispatch time, inside the CLI, and never
+  cached in config emitted elsewhere — integrations (plugin agents, hooks) stay
+  dumb and call `fadeno`, so a loadout switch takes effect on the next dispatch
+  with no config churn.
 
 ## The validator (`src/lib/playbook-validate.ts`)
 
@@ -109,7 +123,10 @@ so tests stay hermetic and deterministic.
 4. **Role semantics** *(playbook only)* — every `actor`/`actors` entry must be a
    declared role *(error)*; declared-but-unused roles are *warnings*. `over`
    items count as roles only for the legacy leaf-map form; compositional map
-   members are data identities.
+   members are data identities. A role may declare an advisory `archetype:` —
+   its identity for the dispatch kernel's loadout routing, never routing config
+   in the playbook — and only its bare-lowercase-identifier shape is checked
+   *(error)*; absence is fine.
 
 Semantic analysis runs only when the playbook schema and references are clean.
 `detectKind()` infers the document type from its shape (then its path) when
@@ -170,6 +187,36 @@ the frontier after receipts. Literal maps and linear bodies are the deliberate
 first boundary. `show` groups observed paths back under their declared graph,
 while `verify` recomputes path, parent, member, generation, and dispatch ids.
 
+Two loadout-era evidence surfaces sit beside the step lifecycle:
+
+- **`resolution_snapshot`** — appended by `drive` at first engine contact
+  (right after the repo profile is snapshotted into the run dir as
+  `profile.yaml`), recording the active loadout (name + source) and, per
+  declared role, its `(archetype, executor, model, resolution source)`. Later
+  invocations re-append it **only when the resolution in force changed** (a
+  loadout switch, a `--bind` override); the echo prints on every invocation
+  regardless, so the ledger stays quiet while the user still sees which
+  provider the run is spending. `new-run` prints a best-effort preview of the
+  same table but writes no ledger event — resolution is computed at dispatch
+  time and the engine owns the durable record. `verify`'s executor-bindings
+  check replays these events (plus `executor_override`s, in order) to recompute
+  every dispatch's resolution from ledger contents alone.
+- **`.fadeno/dispatches.jsonl`** — the append-only evidence log for ad-hoc
+  `fadeno dispatch`, which has no run dir: one JSON row per dispatch with
+  timestamp, archetype, role, resolution path (`resolution`: `binding` |
+  `loadout` | `fallback` | `executor-flag` — how the executor was chosen; the
+  `loadout` field records which loadout was *active*, which may not be what
+  supplied the executor), loadout + source, executor, model, exit code,
+  duration, and prompt/output sha256 digests. The row is written even when the
+  spawn itself fails — a failed dispatch is still a dispatch that happened.
+  Like `.fadeno/local/`, it is per-machine evidence — auditable locally, never
+  committed.
+
+`.fadeno/local/` is per-machine session state (the sticky loadout pin, proxy
+prompt relays) and is never committed — `init` appends `.fadeno/local/` (along
+with `.fadeno/progress/` and `.fadeno/dispatches.jsonl`) to the repo's
+`.gitignore`.
+
 The runner skill *can* hand-edit these files, but the CLI keeps them schema-valid.
 
 ## The diagram renderer (`src/lib/diagram.ts`)
@@ -205,6 +252,7 @@ templates/
     hooks/                # pre-commit, CI workflow, README (tier-2 scaffold)
   codex/                  # Codex adapter: AGENTS.md, codex-agents/*.toml, openai/*.yaml
   claude/                 # Claude adapter: CLAUDE.md, claude-agents/*.md, hooks/settings.example.json
+  grok/                   # Grok Build adapter: AGENTS.md, grok-agents/*.md
 ```
 
 `runInit` (`src/commands/init.ts`) composes these: always copy `common/fadeno` →
@@ -212,7 +260,26 @@ templates/
 dir/policy), subagents, and the bootstrap file; optionally the hooks scaffold
 (`--with-hooks`); and on Claude, merge a `Bash(fadeno:*)` allow-rule into
 git-ignored `.claude/settings.local.json` (plugins can't grant themselves Bash
-permissions, so `init` is the seam for this).
+permissions, so `init` is the seam for this). Grok receives the shared
+capabilities and native `.grok/agents` definitions without an automatic
+`.grok/config.toml` mutation or permission grant.
+
+The Claude `claude-agents/` dir carries two kinds of subagents: the native role
+subagents (`worker`/`reviewer`/`judge`) and the **dispatch proxy agents**
+(`dispatch-worker`/`dispatch-reviewer`/`dispatch-judge`). Claude Code can't run
+non-Anthropic inference natively, so cross-harness subagents go out-of-process
+through these proxies. Each is `tools: Bash`, `model: haiku` — the proxy does
+no thinking about the task: it writes the received task prompt **verbatim** to
+a file under `.fadeno/local/prompts/`, runs
+`fadeno dispatch --archetype <a> --prompt-file <path>`, and relays the report
+verbatim. On a non-zero exit it reports the failure and never attempts the task
+itself — silently substituting which provider does the work is an explicit
+non-goal. Routing is by description ("MUST BE USED for <archetype>-shaped
+subtasks when a Fadeno loadout is active"); resolution stays in the CLI. The
+permission boundary stays loud: the external executor a proxy dispatches runs
+*outside* the harness's permission fences, under its own sandbox flags — a
+deliberate user choice made by binding that executor in a loadout, with the
+dispatch evidence row as the audit trail.
 
 Two non-obvious template rules:
 
@@ -233,7 +300,10 @@ definitions** — plugin users seed those with `fadeno init --claude --data-only
 
 `npm run build:plugin` runs `fadeno plugin ./plugin --force` **and**
 `build-bin.mjs`. The resulting `plugin/` is **committed** (unlike `dist/`, which is
-gitignored) so a git-URL install yields a working plugin with no build step.
+gitignored) so a git-URL install yields a working plugin with no build step. The
+bundled binary carries the complete `templates/` tree, including the Grok adapter,
+so its `fadeno init --grok` path is self-contained even though `fadeno plugin`
+itself remains a Claude Code plugin generator.
 
 `fadeno plugin --codex` (`runCodexPlugin`, `npm run build:plugin:codex`) emits a
 **Codex** plugin into the committed, visible `plugin-codex/` (parallel to the
@@ -316,7 +386,8 @@ Footguns that cost time and aren't obvious from the final code:
   `run*()` function, and assert on the returned data and the files on disk.
 - **No CLI spawning.** Tests import and call `runInit` / `runValidate` / … directly
   with `cwd`/`repoRoot`/`now` injected — fast and hermetic.
-- **Coverage** (~50 cases): `init` (both targets, hooks, force/idempotency),
+- **Coverage** (~50 cases): `init` (Codex, Claude, and Grok targets; hooks,
+  force/idempotency),
   schema + reference + semantic validation, run-ledger lifecycle + gate, diagram
   rendering, and plugin generation + the no-drift/binary guards.
 

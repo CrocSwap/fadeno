@@ -11,7 +11,7 @@ Stop re-typing *"be careful, plan, review, test"* every run. Define your workflo
 ## Quickstart
 
 ```bash
-npx fadeno init --codex     # or --claude
+npx fadeno init --codex     # or --claude / --grok
 ```
 
 ---
@@ -39,7 +39,7 @@ Define the workflow **once**, commit it to your repo, and then just say:
 
 Same discipline — plan → implement → review → test → bounded revision — every time. Inspectable. Shareable. Portable across the agents your team actually uses.
 
-Fadeno is **harness-neutral**: the same playbooks run on Codex and Claude Code today. Its repo-local runtime records durable execution evidence; only a thin per-target adapter differs, while richer compiled orchestration remains future work.
+Fadeno is **harness-neutral**: the same playbooks run on Codex, Claude Code, and Grok Build today. Its repo-local runtime records durable execution evidence; only a thin per-target adapter differs, while richer compiled orchestration remains future work.
 
 > **Honest about enforcement, up front:** in instruction-only hosts, approval policies are *advisory* — the model is asked to honor them, with no hard guarantee. For real guarantees, wire gates to your git/CI/pre-commit layer (or Claude Code hooks). See [Enforcement](#enforcement-advisory-vs-enforced). We'd rather you trust the tool because it's honest than because it overclaims.
 
@@ -55,6 +55,9 @@ npx fadeno init --codex
 
 # Claude Code target → .claude/skills/, CLAUDE.md, /-style invocation
 npx fadeno init --claude
+
+# Grok Build target → .grok/skills/, AGENTS.md, /-style invocation
+npx fadeno init --grok
 ```
 
 `init` is safe to re-run: existing files are left untouched (and your
@@ -90,11 +93,17 @@ AGENTS.md                                CLAUDE.md
   fadeno-driver/  (SKILL.md, refs,
                   agents/openai.yaml)
 .codex/agents/  (worker/reviewer/judge.toml)
+
+# Grok Build (--grok):
+AGENTS.md
+.grok/skills/                         # shared SKILL.md bodies + references
+.grok/agents/                         # worker/reviewer/judge.md
 ```
 
 The playbooks, schemas, vocabulary, and SKILL.md *bodies* are **identical** on
-both targets. Only the install dir, bootstrap file + invocation sigil, invocation
-policy, and subagent format differ.
+all targets. Only the install dir, bootstrap file + invocation sigil, invocation
+policy, and subagent format differ. Grok uses `.grok/skills/`, `.grok/agents/`,
+and `AGENTS.md`; it does not create `.grok/config.toml` or change Claude settings.
 
 ### Or install as a Claude Code plugin
 
@@ -141,6 +150,11 @@ the three skills and invocation metadata, but has no bundled CLI and no bundled
 subagents. Install or expose the CLI separately (`npx fadeno` works), and use
 `fadeno init --codex` when you need the repo-local `.codex/agents` definitions.
 
+Grok Build has native repo-local support through `npx fadeno init --grok`; this
+release does not add a separate Grok plugin generator or mutate Grok permission
+files. Use `--data-only` when the Grok session already has the shared skills from
+another compatible installation.
+
 ---
 
 ## Running a playbook
@@ -152,6 +166,10 @@ Fadeno ships three skills: runner, builder, and driver. Point your agent at the
 |------|-----|
 | Codex | `$fadeno-runner`, or `/skills` to browse, or just describe a complex task (implicit). |
 | Claude Code | `/fadeno:runner` (plugin command), or describe a complex task (implicit). |
+| Grok Build | `/fadeno-runner`, or describe a complex task (implicit). |
+
+`/fadeno:runner` is the namespaced Claude plugin command. Native Grok projects
+use the repo-local `/fadeno-runner` skill emitted by `init --grok`.
 
 The runner will:
 
@@ -227,6 +245,35 @@ phase and current action; it never infers internal state from busy/idle alone.
 from a structured judgment artifact on disk (same check the runner applies), so
 the identical condition can run in CI, a pre-commit/pre-push hook, or a Claude
 Code `Stop` hook. Exits non-zero when the gate fails.
+
+### Loadouts: switch who does the work
+
+If you rotate metered subscriptions across providers — one model as the worker
+until that quota runs low, then another — the unit you think in is *"who is my
+worker / reviewer / judge right now,"* not a dozen per-role YAML edits.
+`.fadeno/executors.yaml` can declare **loadouts**: named archetype → executor
+tables (each slot names an executor declared in the same file), and switching
+one is a session-scoped command, not a repo edit:
+
+```yaml
+loadouts:
+  anthropic-primary: { worker: opus-xhigh,     reviewer: terra-high, judge: terra-high }
+  openai-primary:    { worker: luna-cli-xhigh, reviewer: terra-high, judge: terra-high }
+default_loadout: anthropic-primary
+```
+
+```bash
+fadeno loadout use openai-primary          # sticky for this machine (git-ignored) until cleared
+echo "task…" | fadeno dispatch --archetype worker   # ad-hoc: resolve → invoke → evidence row
+```
+
+Roles resolve at dispatch time — explicit binding pin, else the active
+loadout's slot for the role's declared `archetype`, else the `"*"` default —
+and every run start and dispatch echoes where each role landed
+(`implementer → luna-cli-xhigh (gpt-5.6-luna) [loadout openai-primary]`). Runs
+record the resolution in their ledger and ad-hoc dispatches append to
+`.fadeno/dispatches.jsonl`, so which provider produced an artifact stays
+auditable after the fact.
 
 ### What `.fadeno/runs/` contains
 
@@ -378,7 +425,7 @@ three; only the host adapter changes.
 
 | Tier | Hosts | Gate / approval enforcement |
 |------|-------|------------------------------|
-| **1. Instruction-only** | Codex, Claude Code | **Advisory** — the model is *asked* to honor `require_user_approval_for`. No hard guarantee. |
+| **1. Instruction-only** | Codex, Claude Code, Grok Build | **Advisory** — the model is *asked* to honor `require_user_approval_for`. No hard guarantee. |
 | **2. Hook-enabled** | CI, pre-commit, Claude Code hooks | **Enforced** — deterministic checks run regardless of model compliance. |
 | **3. Compiled runtime** *(future)* | purpose-built orchestrator | **Enforced** at the runtime level. |
 
