@@ -2,7 +2,19 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileS
 import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { buildArtifactManifest } from '../lib/artifact-manifest.ts';
+import {
+  ExecutorProfileError,
+  loadExecutorProfile,
+  readLocalLoadout,
+  resolveActiveLoadout,
+  resolveRole,
+  roleResolutionEchoLabel,
+  type ActiveLoadout,
+  type ExecutorProfile,
+  type RoleResolutionSource,
+} from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import { roleArchetype } from '../lib/playbook-validate.ts';
 import { RUN_LEDGER_SCHEMA_VERSION } from '../lib/run-ledger.ts';
 import { LedgerWriter } from '../lib/run-ledger-write.ts';
 
@@ -15,10 +27,34 @@ export interface NewRunOptions {
   inputs?: string[];
   /** Singular alias for argv-like callers. */
   input?: string[];
+  /** `--loadout` override for the resolution preview. */
+  loadout?: string;
+  /**
+   * `FADENO_LOADOUT` value; injectable for hermetic tests. `undefined` reads
+   * the real environment; `null` means explicitly absent.
+   */
+  env?: string | null;
   cwd?: string;
   repoRoot?: string;
   /** Injectable clock for deterministic tests. */
   now?: Date;
+}
+
+export interface NewRunRoleResolution {
+  role: string;
+  archetype: string | null;
+  executor: string | null;
+  model: string | null;
+  source: RoleResolutionSource | null;
+  /** The kernel's actionable message when nothing serves the role. */
+  error: string | null;
+}
+
+export interface NewRunResolution {
+  loadout: ActiveLoadout | null;
+  roles: NewRunRoleResolution[];
+  /** Rendering-ready echo lines (`role → executor (model) [source]`). */
+  echo: string[];
 }
 
 export interface NewRunResult {
@@ -26,6 +62,12 @@ export interface NewRunResult {
   runDir: string;
   playbook: string;
   inputs: string[];
+  /**
+   * Dispatch-resolution preview for the run-start echo, or null when the repo
+   * has no usable executor profile. Advisory: `fadeno drive` recomputes and
+   * records the authoritative resolution at dispatch time.
+   */
+  resolution: NewRunResolution | null;
 }
 
 export class NewRunError extends Error {}
@@ -174,6 +216,73 @@ function recordDeclaredInputs(
 }
 
 /**
+ * Best-effort dispatch-resolution preview for the run-start echo. Run creation
+ * never dispatches, so executor-profile problems (missing/invalid profile, an
+ * unknown loadout name in the environment) yield null here instead of failing
+ * the run — `fadeno drive` raises them loudly at dispatch time. Read-only: no
+ * ledger event is written; the durable `resolution_snapshot` belongs to the
+ * engine, which computes resolution at dispatch time.
+ */
+function computeResolution(
+  repoRoot: string,
+  playbookPath: string,
+  flagValue: string | null,
+  envRaw: string | null | undefined,
+): NewRunResolution | null {
+  let profile: ExecutorProfile;
+  try {
+    profile = loadExecutorProfile(repoRoot).profile;
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) return null;
+    throw err;
+  }
+  let active: ActiveLoadout | null;
+  try {
+    active = resolveActiveLoadout({
+      flagValue,
+      envValue: envRaw !== undefined ? envRaw : process.env.FADENO_LOADOUT ?? null,
+      localFileValue: readLocalLoadout(repoRoot),
+      profile,
+    });
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) return null;
+    throw err;
+  }
+  let playbookDoc: unknown;
+  try {
+    playbookDoc = parseYaml(readFileSync(playbookPath, 'utf8'));
+  } catch {
+    return null;
+  }
+  const rolesRaw =
+    playbookDoc != null && typeof playbookDoc === 'object' && !Array.isArray(playbookDoc)
+      ? (playbookDoc as Record<string, unknown>).roles
+      : null;
+  const roleNames =
+    rolesRaw != null && typeof rolesRaw === 'object' && !Array.isArray(rolesRaw)
+      ? Object.keys(rolesRaw)
+      : [];
+
+  const roles: NewRunRoleResolution[] = [];
+  const echo: string[] = [];
+  for (const role of roleNames) {
+    const archetype = roleArchetype(playbookDoc, role);
+    try {
+      const resolved = resolveRole(role, archetype, profile, active?.name ?? null);
+      const model = resolved.executor.model;
+      roles.push({ role, archetype, executor: resolved.executorName, model, source: resolved.source, error: null });
+      const label = roleResolutionEchoLabel(resolved.source, active?.name ?? null);
+      echo.push(`${role} → ${resolved.executorName}${model != null ? ` (${model})` : ''} [${label}]`);
+    } catch (err) {
+      if (!(err instanceof ExecutorProfileError)) throw err;
+      roles.push({ role, archetype, executor: null, model: null, source: null, error: err.message });
+      echo.push(`${role} → (unresolved)`);
+    }
+  }
+  return { loadout: active, roles, echo };
+}
+
+/**
  * Create a new run ledger directory under `.fadeno/runs/` with a `run.yaml`,
  * an initial `run_started` event in `events.jsonl`, and an `artifacts/` dir.
  * This is the file-backed "degraded runtime" the runner skill writes into.
@@ -233,6 +342,7 @@ export function runNewRun(opts: NewRunOptions): NewRunResult {
   new LedgerWriter(runDir).append({ type: 'run_started', step: null }, now);
   writeFileSync(join(runDir, 'artifacts', '.gitkeep'), '', 'utf8');
   const recordedInputs = recordDeclaredInputs(runDir, repoRoot, declared, supplied, now);
+  const resolution = computeResolution(repoRoot, playbookPath, opts.loadout ?? null, opts.env);
 
-  return { runId, runDir, playbook, inputs: recordedInputs };
+  return { runId, runDir, playbook, inputs: recordedInputs, resolution };
 }

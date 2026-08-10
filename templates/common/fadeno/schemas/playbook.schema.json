@@ -45,7 +45,14 @@
         "type": "object",
         "required": ["purpose"],
         "additionalProperties": false,
-        "properties": { "purpose": { "type": "string", "minLength": 1 } }
+        "properties": {
+          "purpose": { "type": "string", "minLength": 1 },
+          "archetype": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]*$",
+            "description": "Advisory functional class of the role (e.g. worker, reviewer, judge). Used by loadout-based executor resolution; never routing config — the playbook stays harness- and provider-neutral."
+          }
+        }
       }
     },
     "flow": {

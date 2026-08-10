@@ -15,10 +15,13 @@ roles:
     purpose: Plan, route, merge, and decide completion.
   implementer:
     purpose: Make the code change.
+    archetype: worker
   substance_reviewer:
     purpose: Review correctness, architecture, edge cases, safety, and tests.
+    archetype: reviewer
   style_reviewer:
     purpose: Review clarity, maintainability, conventions, and docs.
+    archetype: reviewer
 flow:
   - id: plan
     kind: actor_call

@@ -1,12 +1,28 @@
 #!/usr/bin/env node
+import { readFileSync } from 'node:fs';
 import { relative } from 'node:path';
 import { parseArgs } from 'node:util';
 import { runDecide } from './commands/decide.ts';
-import { runDispatchComplete, runDispatchFail, runDispatchProgress, runDispatchStart } from './commands/dispatch.ts';
+import {
+  runDispatch,
+  runDispatchComplete,
+  runDispatchFail,
+  runDispatchProgress,
+  runDispatchStart,
+} from './commands/dispatch.ts';
 import { runDiagram } from './commands/diagram.ts';
 import { runDrive, type DriveResult } from './commands/drive.ts';
 import { runGate } from './commands/gate.ts';
 import { runInit, type Target } from './commands/init.ts';
+import {
+  runLoadoutClear,
+  runLoadoutList,
+  runLoadoutShow,
+  runLoadoutUse,
+  type LoadoutListResult,
+  type LoadoutShowResult,
+  type LoadoutSlotView,
+} from './commands/loadout.ts';
 import { runNewRun } from './commands/new-run.ts';
 import { runCodexPlugin, runPlugin } from './commands/plugin.ts';
 import { runNext } from './commands/next.ts';
@@ -33,6 +49,8 @@ Usage:
   fadeno validate [file] [--schema K]   Validate playbooks (schema + references + semantics)
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
+  fadeno loadout [list|use <n>|clear]   Show, list, pin, or clear the active loadout
+  fadeno dispatch [flags]               Resolve archetype → executor and invoke it once (ad hoc)
   fadeno dispatch-start <run> <id>      Start a native host dispatch
   fadeno dispatch-progress <run> <id>   Record an attested progress observation
   fadeno dispatch-complete <run> <id>   Submit a native host result
@@ -69,6 +87,11 @@ Options:
   --bind <role=executor>  (drive) Session executor override for a role (repeatable; recorded)
   --max-transitions <n>   (drive) Engine transition cap per invocation (default 50)
   --input <Name=path>     (new-run) Supply a declared input (repeatable)
+  --loadout <name>        (loadout/dispatch/drive/new-run) Active-loadout override for this invocation
+  --archetype <a>         (dispatch) Archetype to resolve (required unless --executor)
+  --role <name>           (dispatch) Role name: enables binding pins + evidence attribution
+  --executor <name>       (dispatch) Bypass resolution and invoke a named executor (debugging)
+  --prompt-file <path>    (dispatch) Read the prompt from a file instead of stdin
   --agent-id <id>         (dispatch-start) Native host agent identity
   --workspace <path>      (dispatch-start) Native workspace provenance
   --branch <name>         (dispatch-start) Native branch provenance
@@ -86,6 +109,10 @@ Options:
   -h, --help              Show this help
   -v, --version           Show version
 
+Environment:
+  FADENO_LOADOUT          Active-loadout override for this shell
+                          (precedence: --loadout > FADENO_LOADOUT > .fadeno/local/loadout > default_loadout)
+
 Examples:
   fadeno init --codex --with-hooks
   fadeno init --grok
@@ -96,6 +123,8 @@ Examples:
   fadeno run 2026-05-30-1132-csv --status completed
   fadeno run 2026-05-30-1132-csv --event artifact_created --artifact artifacts/x.json --member architect_fable
   fadeno run 2026-05-30-1132-csv --step arbitrate --event human_decision --field branch=approve
+  fadeno loadout use openai-primary
+  echo "Summarize the repo layout." | fadeno dispatch --archetype worker
   fadeno gate 2026-05-30-1132-csv no_blocking_issues --artifact artifacts/review-report.json
   fadeno prompt 2026-05-30-1132-csv cross_review --actor architect_fable --no-record
   fadeno next 2026-05-30-1132-csv
@@ -144,9 +173,9 @@ function printInitSummary(
   console.log('  2. Run `fadeno validate` to check the playbooks');
   if (dataOnly) {
     console.log(
-      target === 'codex'
-        ? '  3. Use the $fadeno-runner skill (from the installed Fadeno plugin)'
-        : '  3. Use the /fadeno:runner skill (from the installed Fadeno plugin)',
+        target === 'codex'
+          ? '  3. Use the $fadeno-runner skill (from the installed Fadeno plugin)'
+          : '  3. Use the /fadeno:runner skill (from the installed Fadeno plugin)',
     );
   } else {
     console.log(`  3. Ask your agent to use the ${SIGIL[target]}fadeno-runner skill on a complex task`);
@@ -421,6 +450,63 @@ function printShow(repoRoot: string, result: ShowResult, rawTimeline: boolean): 
   }
 }
 
+const LOADOUT_SOURCE_TEXT: Record<string, string> = {
+  flag: '--loadout',
+  env: 'FADENO_LOADOUT',
+  local: '.fadeno/local/loadout',
+  default: 'default_loadout',
+};
+
+function printSlots(slots: LoadoutSlotView[], indent: string): void {
+  const width = Math.max(0, ...slots.map((s) => s.archetype.length));
+  for (const slot of slots) {
+    const model = slot.model != null ? ` (${slot.model})` : '';
+    console.log(`${indent}${slot.archetype.padEnd(width)} → ${slot.executor}${model}`);
+  }
+}
+
+function printStalePin(stalePin: string | null): void {
+  if (stalePin == null) return;
+  console.error(
+    `warning: .fadeno/local/loadout pins "${stalePin}", which is no longer declared — ` +
+      'run `fadeno loadout clear` (or `fadeno loadout use <name>`); the pin is ignored below.',
+  );
+}
+
+function printLoadoutShow(result: LoadoutShowResult): void {
+  printStalePin(result.stalePin);
+  if (result.active == null) {
+    console.log('no active loadout (no --loadout, FADENO_LOADOUT, .fadeno/local/loadout, or default_loadout)');
+  } else {
+    console.log(`active loadout: ${result.active.name} (via ${LOADOUT_SOURCE_TEXT[result.active.source]})`);
+    printSlots(result.slots, '  ');
+  }
+  if (result.available.length === 0) {
+    console.log('\nThe profile declares no loadouts (add a `loadouts:` mapping to .fadeno/executors.yaml).');
+    return;
+  }
+  const names = result.available.map((name) => (name === result.defaultLoadout ? `${name} (default)` : name));
+  console.log(`\navailable: ${names.join(', ')}`);
+}
+
+function printLoadoutList(result: LoadoutListResult): void {
+  printStalePin(result.stalePin);
+  if (result.loadouts.length === 0) {
+    console.log('No loadouts declared (add a `loadouts:` mapping to .fadeno/executors.yaml).');
+    return;
+  }
+  for (const loadout of result.loadouts) {
+    const notes: string[] = [];
+    if (loadout.isActive && result.active != null) {
+      notes.push(`active via ${LOADOUT_SOURCE_TEXT[result.active.source]}`);
+    }
+    if (loadout.isDefault) notes.push('default');
+    const marker = loadout.isActive ? '*' : ' ';
+    console.log(`${marker} ${loadout.name}${notes.length > 0 ? `  (${notes.join(', ')})` : ''}`);
+    printSlots(loadout.slots, '    ');
+  }
+}
+
 function printDrive(result: DriveResult): number {
   console.log('');
   switch (result.outcome) {
@@ -512,6 +598,11 @@ function main(argv: string[]): number {
         bind: { type: 'string', multiple: true },
         'max-transitions': { type: 'string' },
         input: { type: 'string', multiple: true },
+        loadout: { type: 'string' },
+        archetype: { type: 'string' },
+        role: { type: 'string' },
+        executor: { type: 'string' },
+        'prompt-file': { type: 'string' },
         'agent-id': { type: 'string' },
         workspace: { type: 'string' },
         branch: { type: 'string' },
@@ -595,10 +686,22 @@ function main(argv: string[]): number {
       if (!playbook || !task) {
         throw new Error('Usage: fadeno new-run <playbook> "<task description>"');
       }
-      const { runId, runDir, inputs } = runNewRun({ playbook, task, inputs: values.input });
+      const { runId, runDir, inputs, resolution } = runNewRun({
+        playbook,
+        task,
+        inputs: values.input,
+        loadout: values.loadout,
+      });
       console.log(`Created run ${runId}`);
       console.log(`  ${runDir}`);
       if (inputs.length > 0) console.log(`  inputs: ${inputs.join(', ')}`);
+      if (resolution != null && resolution.echo.length > 0) {
+        const via = resolution.loadout != null
+          ? ` (loadout ${resolution.loadout.name} via ${LOADOUT_SOURCE_TEXT[resolution.loadout.source]})`
+          : '';
+        console.log(`\nresolution${via}:`);
+        for (const line of resolution.echo) console.log(`  ${line}`);
+      }
       console.log('\nAdvance it with `fadeno run` as the playbook executes:');
       console.log(`  fadeno run ${runId} --step <step-id>`);
       console.log(`  fadeno run ${runId} --status completed`);
@@ -738,10 +841,66 @@ function main(argv: string[]): number {
       const result = runDrive({
         run,
         bind: values.bind,
+        loadout: values.loadout,
         maxTransitions,
         onAction: (line) => console.log(`  ${line}`),
       });
       return printDrive(result);
+    }
+    case 'loadout': {
+      const sub = positionals[1];
+      if (sub == null) {
+        printLoadoutShow(runLoadoutShow({ loadout: values.loadout }));
+        return 0;
+      }
+      switch (sub) {
+        case 'list':
+          printLoadoutList(runLoadoutList({ loadout: values.loadout }));
+          return 0;
+        case 'use': {
+          const name = positionals[2];
+          if (!name) throw new Error('Usage: fadeno loadout use <name>');
+          const result = runLoadoutUse({ name });
+          console.log(`active loadout pinned: ${result.name} → .fadeno/local/loadout`);
+          if (result.previous != null && result.previous !== result.name) {
+            console.log(`  (was ${result.previous})`);
+          }
+          return 0;
+        }
+        case 'clear': {
+          const result = runLoadoutClear({});
+          console.log(
+            result.removed
+              ? 'cleared .fadeno/local/loadout'
+              : 'no local loadout to clear (.fadeno/local/loadout absent)',
+          );
+          return 0;
+        }
+        default:
+          throw new Error(`Unknown loadout subcommand "${sub}". Usage: fadeno loadout [list | use <name> | clear]`);
+      }
+    }
+    case 'dispatch': {
+      const promptFile = values['prompt-file'];
+      const result = runDispatch({
+        archetype: values.archetype,
+        role: values.role,
+        loadout: values.loadout,
+        executor: values.executor,
+        promptFile,
+        // Prompt defaults to stdin; the echo goes to stderr so stdout stays
+        // the executor's pure report.
+        prompt: promptFile == null ? readFileSync(0, 'utf8') : undefined,
+        onEcho: (line) => console.error(line),
+      });
+      if (result.stdout.length > 0) process.stdout.write(result.stdout);
+      if (result.stderr.length > 0) process.stderr.write(result.stderr);
+      if (result.exitCode !== 0) {
+        // CLI-level diagnosis on stderr — a quiet executor otherwise leaves
+        // only a bare exit code. stdout stays the executor's pure report.
+        console.error(`dispatch: executor ${result.executor} exited ${result.exitCode}`);
+      }
+      return result.exitCode;
     }
     case 'dispatch-start': {
       const [, run, dispatchId] = positionals;

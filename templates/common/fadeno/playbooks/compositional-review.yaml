@@ -8,11 +8,13 @@ description: >-
 when_to_use:
   - Several known work items should advance independently through implement/review cycles.
 roles:
-  luna_worker:
+  implementer:
     purpose: Implement or revise one isolated work item.
-  terra_reviewer:
+    archetype: worker
+  adversarial_reviewer:
     purpose: Adversarially review one work item and emit a structured report.
-  sol_finalizer:
+    archetype: reviewer
+  finalizer:
     purpose: Review and integrate all accepted work-item results.
 flow:
   - id: complete_items
@@ -41,21 +43,21 @@ flow:
 
   - id: implement
     kind: actor_call
-    actor: luna_worker
+    actor: implementer
     input:
       - ReviewReport
     output: Implementation
 
   - id: adversarial_review
     kind: evaluator
-    actor: terra_reviewer
+    actor: adversarial_reviewer
     input:
       - Implementation
     output: ReviewReport
 
   - id: final_review
     kind: reduce
-    actor: sol_finalizer
+    actor: finalizer
     input:
       - "ReviewReport[]"
     output: FinalSummary

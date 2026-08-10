@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { Ajv } from 'ajv';
 import type { ErrorObject, ValidateFunction } from 'ajv';
 import { parse as parseYaml } from 'yaml';
+import { BARE_IDENTIFIER_RE } from './executors.ts';
 
 export type Severity = 'error' | 'warning';
 
@@ -672,6 +673,44 @@ function outputContractChecks(playbook: Playbook, file: string): ValidationIssue
 }
 
 /**
+ * Role `archetype:` shape check. The archetype is advisory identity for the
+ * dispatch kernel (loadout routing), never routing config in the playbook —
+ * only the identifier shape is validated; absence is fine.
+ */
+function archetypeChecks(playbook: Playbook, file: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  if (!playbook.roles || typeof playbook.roles !== 'object' || Array.isArray(playbook.roles)) return issues;
+  for (const [name, role] of Object.entries(playbook.roles as Record<string, unknown>)) {
+    if (!role || typeof role !== 'object' || Array.isArray(role)) continue;
+    const archetype = (role as Record<string, unknown>).archetype;
+    if (archetype === undefined) continue;
+    if (typeof archetype !== 'string' || !BARE_IDENTIFIER_RE.test(archetype)) {
+      issues.push({
+        file,
+        path: `/roles/${name}/archetype`,
+        message: `role archetype ${JSON.stringify(archetype)} must be a bare lowercase identifier (${BARE_IDENTIFIER_RE.source})`,
+        severity: 'error',
+      });
+    }
+  }
+  return issues;
+}
+
+/**
+ * A role's declared `archetype`, or null when the role or field is absent.
+ * Accessor for the dispatch kernel's role resolution (`resolveRole`).
+ */
+export function roleArchetype(playbook: unknown, role: string): string | null {
+  if (!playbook || typeof playbook !== 'object' || Array.isArray(playbook)) return null;
+  const roles = (playbook as Record<string, unknown>).roles;
+  if (!roles || typeof roles !== 'object' || Array.isArray(roles)) return null;
+  const entry = (roles as Record<string, unknown>)[role];
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  const archetype = (entry as Record<string, unknown>).archetype;
+  return typeof archetype === 'string' && archetype.length > 0 ? archetype : null;
+}
+
+/**
  * Semantic checks: actor references, role usage, normalized control flow,
  * terminal declarations, condition bindings, reachability, and definite
  * artifact availability on every incoming path.
@@ -679,6 +718,7 @@ function outputContractChecks(playbook: Playbook, file: string): ValidationIssue
 export function semanticChecks(playbook: Playbook, file: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const roles = playbook.roles && typeof playbook.roles === 'object' ? new Set(Object.keys(playbook.roles)) : new Set<string>();
+  issues.push(...archetypeChecks(playbook, file));
   const flow = Array.isArray(playbook.flow) ? (playbook.flow as Step[]) : [];
   const usedRoles = new Set<string>();
 

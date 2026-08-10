@@ -41,7 +41,14 @@ export function runInit(opts: InitOptions): InitResult {
   // 1. Shared `.fadeno/` tree (vocabulary, playbooks, schemas, runs, enforcement).
   //    This is the per-repo "definitions" layer — always written.
   copyTree(join(tpl, 'common', 'fadeno'), join(repoRoot, '.fadeno'), force, results);
-  ensureGitignored(repoRoot, '.fadeno/progress/', results);
+  // `.fadeno/local/` is per-machine session state (sticky loadout, prompt
+  // relays) and `.fadeno/dispatches.jsonl` is per-machine dispatch evidence
+  // (auditable locally, never committed) — scaffolding adds the ignore entries.
+  ensureGitignored(
+    repoRoot,
+    ['.fadeno/progress/', '.fadeno/local/', '.fadeno/dispatches.jsonl'],
+    results,
+  );
 
   // Steps 2–4 install the "capability" layer (skills, subagents, bootstrap).
   // --data-only skips them: a plugin user gets capability from the plugin, so

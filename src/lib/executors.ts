@@ -4,6 +4,9 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
 export class ExecutorProfileError extends Error {}
 
+/** Bare lowercase identifier: loadout names, archetype keys, role archetypes. */
+export const BARE_IDENTIFIER_RE = /^[a-z][a-z0-9_-]*$/;
+
 /**
  * The minimal execution profile of the next protocol: named executors (each a
  * one-shot command adapter) plus direct role→executor bindings. No capability
@@ -55,6 +58,13 @@ export function substituteSessionId(argv: string[], sessionId: string): string[]
 export interface ExecutorProfile {
   executors: Record<string, ExecutorSpec>;
   bindings: Record<string, string>;
+  /**
+   * Named archetype→executor tables — the switchable unit of the dispatch
+   * kernel. Empty when the profile declares none.
+   */
+  loadouts: Record<string, Record<string, string>>;
+  /** Loadout used when no flag/env/local override selects one. */
+  defaultLoadout: string | null;
 }
 
 /** Repo-relative location of the profile (playbooks stay harness-neutral). */
@@ -78,9 +88,12 @@ export function parseExecutorProfile(text: string, source: string): ExecutorProf
   if (!isMapping(doc.executors) || Object.keys(doc.executors).length === 0) {
     throw new ExecutorProfileError(`${source} needs a non-empty \`executors\` mapping.`);
   }
-  if (!isMapping(doc.bindings) || Object.keys(doc.bindings).length === 0) {
+  const hasBindings = isMapping(doc.bindings) && Object.keys(doc.bindings).length > 0;
+  const hasLoadouts = isMapping(doc.loadouts) && Object.keys(doc.loadouts).length > 0;
+  if (!hasBindings && !hasLoadouts) {
     throw new ExecutorProfileError(
-      `${source} needs a non-empty \`bindings\` mapping (role → executor; "*" is the default).`,
+      `${source} needs a non-empty \`bindings\` mapping (role → executor; "*" is the default) ` +
+        'or a non-empty `loadouts` mapping (loadout → archetype → executor).',
     );
   }
 
@@ -208,18 +221,74 @@ export function parseExecutorProfile(text: string, source: string): ExecutorProf
     };
   }
 
-  const bindings: Record<string, string> = {};
-  for (const [role, target] of Object.entries(doc.bindings)) {
-    if (typeof target !== 'string' || !(target in executors)) {
+  const loadouts: Record<string, Record<string, string>> = {};
+  if (doc.loadouts != null) {
+    if (!isMapping(doc.loadouts)) {
       throw new ExecutorProfileError(
-        `${source}: binding "${role}" targets ${JSON.stringify(target)}, ` +
-          `which is not a declared executor (${Object.keys(executors).join(', ')}).`,
+        `${source} \`loadouts\` is not a mapping (loadout → archetype → executor).`,
       );
     }
-    bindings[role] = target;
+    for (const [name, rawSlots] of Object.entries(doc.loadouts)) {
+      if (!BARE_IDENTIFIER_RE.test(name)) {
+        throw new ExecutorProfileError(
+          `${source}: loadout name "${name}" is not a bare lowercase identifier ` +
+            `(${BARE_IDENTIFIER_RE.source}).`,
+        );
+      }
+      if (!isMapping(rawSlots)) {
+        throw new ExecutorProfileError(
+          `${source}: loadout "${name}" is not a mapping (archetype → executor).`,
+        );
+      }
+      const slots: Record<string, string> = {};
+      for (const [archetype, target] of Object.entries(rawSlots)) {
+        if (!BARE_IDENTIFIER_RE.test(archetype)) {
+          throw new ExecutorProfileError(
+            `${source}: loadout "${name}" archetype key "${archetype}" is not a bare lowercase ` +
+              `identifier (${BARE_IDENTIFIER_RE.source}).`,
+          );
+        }
+        if (typeof target !== 'string' || !(target in executors)) {
+          throw new ExecutorProfileError(
+            `${source}: loadout "${name}" slot "${archetype}" targets ${JSON.stringify(target)}, ` +
+              `which is not a declared executor (${Object.keys(executors).join(', ')}).`,
+          );
+        }
+        slots[archetype] = target;
+      }
+      loadouts[name] = slots;
+    }
   }
 
-  return { executors, bindings };
+  let defaultLoadout: string | null = null;
+  if (doc.default_loadout != null) {
+    const declared = Object.keys(loadouts);
+    if (typeof doc.default_loadout !== 'string' || !(doc.default_loadout in loadouts)) {
+      throw new ExecutorProfileError(
+        `${source}: default_loadout ${JSON.stringify(doc.default_loadout)} does not name a ` +
+          `declared loadout${declared.length > 0 ? ` (${declared.join(', ')})` : ' (no loadouts declared)'}.`,
+      );
+    }
+    defaultLoadout = doc.default_loadout;
+  }
+
+  const bindings: Record<string, string> = {};
+  if (doc.bindings != null) {
+    if (!isMapping(doc.bindings)) {
+      throw new ExecutorProfileError(`${source} \`bindings\` is not a mapping (role → executor).`);
+    }
+    for (const [role, target] of Object.entries(doc.bindings)) {
+      if (typeof target !== 'string' || !(target in executors)) {
+        throw new ExecutorProfileError(
+          `${source}: binding "${role}" targets ${JSON.stringify(target)}, ` +
+            `which is not a declared executor (${Object.keys(executors).join(', ')}).`,
+        );
+      }
+      bindings[role] = target;
+    }
+  }
+
+  return { executors, bindings, loadouts, defaultLoadout };
 }
 
 /** Load the repo's executor profile, or explain how to create one. */
@@ -253,6 +322,147 @@ export function resolveBinding(
   return { role: key, executor: target, spec: profile.executors[target]! };
 }
 
+/** Repo-relative sticky session loadout file, written by `fadeno loadout use`. */
+export const LOADOUT_LOCAL_FILE = join('.fadeno', 'local', 'loadout');
+
+/**
+ * Read the sticky session loadout name from `.fadeno/local/loadout` (first
+ * line, trimmed). Missing or blank file → null.
+ */
+export function readLocalLoadout(repoRoot: string): string | null {
+  const path = join(repoRoot, LOADOUT_LOCAL_FILE);
+  if (!existsSync(path)) return null;
+  const name = (readFileSync(path, 'utf8').split(/\r?\n/, 1)[0] ?? '').trim();
+  return name.length > 0 ? name : null;
+}
+
+/** Where the active loadout name came from, in precedence order. */
+export type LoadoutSource = 'flag' | 'env' | 'local' | 'default';
+
+export interface ActiveLoadout {
+  name: string;
+  source: LoadoutSource;
+}
+
+const LOADOUT_SOURCE_LABEL: Record<LoadoutSource, string> = {
+  flag: '--loadout',
+  env: 'FADENO_LOADOUT',
+  local: LOADOUT_LOCAL_FILE,
+  default: 'default_loadout',
+};
+
+/**
+ * Resolve the active loadout: `--loadout` flag → `FADENO_LOADOUT` env →
+ * `.fadeno/local/loadout` → `default_loadout:` in the profile → none. Pure —
+ * callers pass each source's raw value (null/blank = absent). A source that
+ * names an undeclared loadout is a hard error attributed to that source.
+ */
+export function resolveActiveLoadout(opts: {
+  flagValue?: string | null;
+  envValue?: string | null;
+  localFileValue?: string | null;
+  profile: ExecutorProfile;
+}): ActiveLoadout | null {
+  const candidates: Array<[LoadoutSource, string | null | undefined]> = [
+    ['flag', opts.flagValue],
+    ['env', opts.envValue],
+    ['local', opts.localFileValue],
+    ['default', opts.profile.defaultLoadout],
+  ];
+  for (const [sourceKind, raw] of candidates) {
+    const name = typeof raw === 'string' ? raw.trim() : '';
+    if (name.length === 0) continue;
+    if (!(name in opts.profile.loadouts)) {
+      const declared = Object.keys(opts.profile.loadouts);
+      // A stale sticky pin is repo state the tool itself owns — name the fix.
+      const suggestion =
+        sourceKind === 'local'
+          ? ' Run `fadeno loadout clear` (or `fadeno loadout use <name>`) to replace the stale pin.'
+          : '';
+      throw new ExecutorProfileError(
+        `${LOADOUT_SOURCE_LABEL[sourceKind]} names loadout "${name}", which is not declared` +
+          (declared.length > 0 ? ` (${declared.join(', ')}).` : ' — the profile has no `loadouts`.') +
+          suggestion,
+      );
+    }
+    return { name, source: sourceKind };
+  }
+  return null;
+}
+
+/** How a role landed on its executor, in resolution order. */
+export type RoleResolutionSource = 'binding' | 'loadout' | 'default';
+
+export interface RoleResolution {
+  executorName: string;
+  executor: ExecutorSpec;
+  source: RoleResolutionSource;
+}
+
+/**
+ * Display tag for a role-resolution source in echo lines. The `"*"`-wildcard
+ * fallback renders as `fallback "*"` — never "default", which names the
+ * `default_loadout` concept elsewhere (one word, two concepts otherwise).
+ * Display-only: recorded evidence keeps the raw `RoleResolutionSource` value.
+ */
+export function roleResolutionEchoLabel(
+  source: RoleResolutionSource,
+  activeLoadoutName: string | null,
+): string {
+  if (source === 'loadout') return `loadout ${activeLoadoutName ?? '?'}`;
+  if (source === 'default') return 'fallback "*"';
+  return source;
+}
+
+/**
+ * Dispatch-kernel role resolution: explicit `bindings[role]` pin → active
+ * loadout's slot for the role's archetype → `bindings["*"]` → hard error.
+ * Pure; resolution is computed at dispatch time and never cached in config.
+ */
+export function resolveRole(
+  role: string,
+  archetype: string | null,
+  profile: ExecutorProfile,
+  activeLoadout: string | null,
+): RoleResolution {
+  const pick = (executorName: string, source: RoleResolutionSource): RoleResolution => ({
+    executorName,
+    executor: profile.executors[executorName]!,
+    source,
+  });
+  const pinned = profile.bindings[role];
+  if (pinned != null) return pick(pinned, 'binding');
+  if (archetype != null && activeLoadout != null) {
+    const slot = profile.loadouts[activeLoadout]?.[archetype];
+    if (slot != null) return pick(slot, 'loadout');
+  }
+  const fallback = profile.bindings['*'];
+  if (fallback != null) return pick(fallback, 'default');
+
+  const archetypePart = archetype == null ? 'no declared archetype' : `archetype "${archetype}"`;
+  const loadoutPart = activeLoadout == null
+    ? 'no active loadout'
+    : archetype == null
+      ? `active loadout "${activeLoadout}" cannot route a role without an archetype`
+      : `active loadout "${activeLoadout}" has no "${archetype}" slot`;
+  const fixes: string[] = [];
+  if (archetype == null) {
+    fixes.push(`declare \`archetype:\` on role "${role}" in the playbook so a loadout can route it`);
+  } else if (activeLoadout == null) {
+    fixes.push(
+      `activate a loadout that maps "${archetype}" (--loadout, FADENO_LOADOUT, ` +
+        '`fadeno loadout use`, or `default_loadout:`)',
+    );
+  } else {
+    fixes.push(`add a "${archetype}" slot to loadout "${activeLoadout}"`);
+  }
+  fixes.push(`pin \`bindings.${role}\` to an executor`, 'add a "*" default binding');
+  throw new ExecutorProfileError(
+    `No executor for role "${role}" (${archetypePart}; ${loadoutPart}; no "*" default binding). ` +
+      `Fix: ${fixes.join(', or ')}.`,
+  );
+}
+
 /**
  * Canonical serialization for the run-dir snapshot: sorted keys so the same
  * profile always yields the same bytes (and digest).
@@ -276,9 +486,24 @@ export function serializeProfile(profile: ExecutorProfile): string {
     if (spec.adapter === 'command' && spec.sessionIdPattern != null) entry.session_id_pattern = spec.sessionIdPattern;
     sortedExecutors[name] = entry;
   }
-  const sortedBindings: Record<string, string> = {};
-  for (const role of Object.keys(profile.bindings).sort()) {
-    sortedBindings[role] = profile.bindings[role]!;
+  const out: Record<string, unknown> = { executors: sortedExecutors };
+  if (Object.keys(profile.loadouts).length > 0) {
+    const sortedLoadouts: Record<string, Record<string, string>> = {};
+    for (const name of Object.keys(profile.loadouts).sort()) {
+      const slots = profile.loadouts[name]!;
+      const sortedSlots: Record<string, string> = {};
+      for (const archetype of Object.keys(slots).sort()) sortedSlots[archetype] = slots[archetype]!;
+      sortedLoadouts[name] = sortedSlots;
+    }
+    out.loadouts = sortedLoadouts;
   }
-  return stringifyYaml({ executors: sortedExecutors, bindings: sortedBindings });
+  if (profile.defaultLoadout != null) out.default_loadout = profile.defaultLoadout;
+  if (Object.keys(profile.bindings).length > 0) {
+    const sortedBindings: Record<string, string> = {};
+    for (const role of Object.keys(profile.bindings).sort()) {
+      sortedBindings[role] = profile.bindings[role]!;
+    }
+    out.bindings = sortedBindings;
+  }
+  return stringifyYaml(out);
 }

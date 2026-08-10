@@ -13,12 +13,17 @@ import {
   ExecutorProfileError,
   loadExecutorProfile,
   parseExecutorProfile,
-  resolveBinding,
+  readLocalLoadout,
+  resolveActiveLoadout,
+  resolveRole,
+  roleResolutionEchoLabel,
   serializeProfile,
   SESSION_ID_PLACEHOLDER,
   substituteSessionId,
+  type ActiveLoadout,
   type ExecutorProfile,
   type ExecutorSpec,
+  type RoleResolutionSource,
 } from '../lib/executors.ts';
 import { computeNext, FlowCursorError, type NextComputation } from '../lib/flow-cursor.ts';
 import { findRepoRoot } from '../lib/paths.ts';
@@ -28,7 +33,7 @@ import {
   parseNodeInstanceId,
   stepExecutionIdFor,
 } from '../lib/node-instance.ts';
-import { SchemaSet, schemaErrorMessages, validateFile, type SchemaKind } from '../lib/playbook-validate.ts';
+import { roleArchetype, SchemaSet, schemaErrorMessages, validateFile, type SchemaKind } from '../lib/playbook-validate.ts';
 import { baseArtifactName, schemaKindFor, type Playbook, type PlaybookStep } from '../lib/prompt-resolve.ts';
 import {
   readEventsStrict,
@@ -76,6 +81,13 @@ export interface DriveOptions {
   maxTransitions?: number;
   /** Session binding overrides, each `role=executor`. Recorded as events. */
   bind?: string[];
+  /** `--loadout` override for this invocation (active-loadout resolution). */
+  loadout?: string;
+  /**
+   * `FADENO_LOADOUT` value; injectable for hermetic tests. `undefined` reads
+   * the real environment; `null` means explicitly absent.
+   */
+  env?: string | null;
   cwd?: string;
   repoRoot?: string;
   now?: Date;
@@ -111,6 +123,8 @@ interface EngineCtx {
   task: string;
   schemas: SchemaSet;
   profile: ExecutorProfile;
+  /** Active loadout for this invocation — resolved fresh at engine start. */
+  activeLoadout: ActiveLoadout | null;
   /** Session overrides: role key → executor name. */
   overrides: Map<string, string>;
   /** Actor calls that already consumed their one bounded repair this invocation. */
@@ -186,7 +200,7 @@ function parseBinds(bind: string[] | undefined): Map<string, string> {
 /** Snapshot the repo profile into the run dir on first engine contact; later
  *  invocations run against the snapshot (the run's truth), never a silently
  *  edited repo profile. */
-function ensureProfileSnapshot(ctx: Omit<EngineCtx, 'profile'>): ExecutorProfile {
+function ensureProfileSnapshot(ctx: Omit<EngineCtx, 'profile' | 'activeLoadout'>): ExecutorProfile {
   const snapshotPath = join(ctx.runDir, 'profile.yaml');
   if (existsSync(snapshotPath)) {
     try {
@@ -220,6 +234,23 @@ function ensureProfileSnapshot(ctx: Omit<EngineCtx, 'profile'>): ExecutorProfile
   return profile;
 }
 
+/**
+ * Full dispatch-kernel resolution for one role: explicit `bindings[role]` pin
+ * → active loadout's slot for the role's declared archetype → `"*"` default.
+ * Computed at dispatch time against the run's snapshotted profile; never
+ * cached in config. Throws `ExecutorProfileError` when nothing serves.
+ */
+function resolveChain(
+  ctx: EngineCtx,
+  role: string | null,
+): { executor: string; spec: ExecutorSpec; source: RoleResolutionSource } {
+  const archetype = role == null ? null : roleArchetype(ctx.playbook, role);
+  const resolved = resolveRole(role ?? '*', archetype, ctx.profile, ctx.activeLoadout?.name ?? null);
+  // The anonymous "*" key is by definition the default, not a per-role pin.
+  const source = role == null && resolved.source === 'binding' ? 'default' : resolved.source;
+  return { executor: resolved.executorName, spec: resolved.executor, source };
+}
+
 /** Validate overrides against the snapshot and record each as an event once. */
 function recordOverrides(ctx: EngineCtx, binds: Map<string, string>): void {
   for (const [role, executor] of binds) {
@@ -229,7 +260,12 @@ function recordOverrides(ctx: EngineCtx, binds: Map<string, string>): void {
           `(${Object.keys(ctx.profile.executors).join(', ')}).`,
       );
     }
-    const prior = ctx.profile.bindings[role] ?? ctx.profile.bindings['*'] ?? null;
+    let prior: string | null = null;
+    try {
+      prior = resolveChain(ctx, role).executor;
+    } catch {
+      prior = null; // an unresolvable role is simply "unbound" before override
+    }
     ctx.overrides.set(role, executor);
     if (prior === executor) continue; // no-op override, no evidence needed
     appendEvent(
@@ -246,12 +282,67 @@ function effectiveBinding(ctx: EngineCtx, role: string | null): { executor: stri
   const overridden = ctx.overrides.get(key);
   if (overridden != null) return { executor: overridden, spec: ctx.profile.executors[overridden]! };
   try {
-    const bound = resolveBinding(ctx.profile, role);
-    return { executor: bound.executor, spec: bound.spec };
+    const { executor, spec } = resolveChain(ctx, role);
+    return { executor, spec };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new DriveError(err.message);
     throw err;
   }
+}
+
+/**
+ * Record where every declared role lands under this invocation's resolution
+ * (active loadout + source, per-role executor/model/source), and echo it so a
+ * user burning a metered subscription sees which provider the run spends. The
+ * ledger event is appended only when the resolution differs from the last
+ * recorded snapshot; the echo prints every invocation.
+ */
+function recordResolutionSnapshot(ctx: EngineCtx): void {
+  const rolesDoc = ctx.playbook.roles;
+  const roleNames =
+    rolesDoc != null && typeof rolesDoc === 'object' && !Array.isArray(rolesDoc)
+      ? Object.keys(rolesDoc)
+      : [];
+  if (roleNames.length === 0) return;
+
+  const entries: Record<string, unknown>[] = [];
+  for (const role of roleNames) {
+    const archetype = roleArchetype(ctx.playbook, role);
+    const overridden = ctx.overrides.get(role);
+    if (overridden != null) {
+      const spec = ctx.profile.executors[overridden]!;
+      entries.push({ role, archetype, executor: overridden, model: spec.model, source: 'override' });
+      ctx.act(`${role} → ${overridden}${spec.model != null ? ` (${spec.model})` : ''} [override]`);
+      continue;
+    }
+    try {
+      const { executor, spec, source } = resolveChain(ctx, role);
+      const label = roleResolutionEchoLabel(source, ctx.activeLoadout?.name ?? null);
+      entries.push({ role, archetype, executor, model: spec.model, source });
+      ctx.act(`${role} → ${executor}${spec.model != null ? ` (${spec.model})` : ''} [${label}]`);
+    } catch (err) {
+      if (!(err instanceof ExecutorProfileError)) throw err;
+      entries.push({ role, archetype, executor: null, model: null, source: null, error: err.message });
+      ctx.act(`${role} → (unresolved)`);
+    }
+  }
+
+  const payload = {
+    loadout:
+      ctx.activeLoadout == null
+        ? null
+        : { name: ctx.activeLoadout.name, source: ctx.activeLoadout.source },
+    roles: entries,
+  };
+  const prior = freshEvents(ctx.runDir).findLast((e) => e.type === 'resolution_snapshot');
+  if (
+    prior != null &&
+    JSON.stringify({ loadout: prior.extra.loadout ?? null, roles: prior.extra.roles ?? [] }) ===
+      JSON.stringify(payload)
+  ) {
+    return; // unchanged since last recorded — the ledger stays quiet
+  }
+  appendEvent(ctx.runDir, { type: 'resolution_snapshot', step: null, ...payload }, ctx.now);
 }
 
 function bodyOwnerOf(playbook: Playbook, stepId: string): string | null {
@@ -314,7 +405,9 @@ type DispatchFailure =
 
 type DispatchOutcome = { kind: 'valid' } | DispatchFailure;
 
-type PromptableOutcome = DispatchFailure | { kind: 'awaiting_host_dispatch'; requests: HostDispatchRequest[] };
+type PromptableOutcome =
+  | DispatchFailure
+  | { kind: 'awaiting_host_dispatch'; requests: HostDispatchRequest[]; notes: string[] };
 
 function validateTyped(
   ctx: EngineCtx,
@@ -644,6 +737,60 @@ function pendingHostRequest(events: RunEvent[], actorCallId: string, runId: stri
   return null;
 }
 
+/**
+ * Divergence note for an in-flight host dispatch whose role would resolve
+ * differently under the current loadout/profile resolution. The pending
+ * dispatch is honored — a resolution change affects future dispatches only —
+ * and this note keeps the divergence visible instead of a silent substitution
+ * (the design's explicit non-goal). The contract's only sanctioned path to
+ * substitute is a host terminal receipt; drive never invents another.
+ */
+function pendingResolutionNote(
+  ctx: EngineCtx,
+  stepId: string,
+  role: string | null,
+  pending: HostDispatchRequest,
+): string | null {
+  let current: { executor: string; spec: ExecutorSpec } | null = null;
+  try {
+    current = effectiveBinding(ctx, role);
+  } catch (err) {
+    if (!(err instanceof DriveError)) throw err;
+  }
+  if (current != null && current.executor === pending.executor) return null;
+  const currently =
+    current == null
+      ? 'the current resolution leaves this role unbound'
+      : `the current resolution is ${current.executor} (${current.spec.adapter} adapter)`;
+  return (
+    `step ${stepId}${role ? ` (${role})` : ''} still awaits host dispatch ${pending.dispatchId} → ` +
+    `${pending.executor}; ${currently} — the pending dispatch is honored, and the resolution change ` +
+    'applies to future dispatches only. To substitute explicitly, submit its host receipts ' +
+    '(dispatch-start, then dispatch-complete or dispatch-fail) and re-run drive.'
+  );
+}
+
+/**
+ * Every host dispatch still in requested state (no terminal receipt), across
+ * the whole run. Terminal invariant: a run may never reach a terminal status
+ * while any of these exist — drive refuses the transition instead of leaving
+ * verify to catch the corrupted "completed but still pending" state post-hoc.
+ */
+function unresolvedHostDispatches(events: RunEvent[], runId: string): HostDispatchRequest[] {
+  const actorCallIds = new Set<string>();
+  for (const event of events) {
+    if (event.type === 'host_dispatch_requested' && typeof event.extra.actor_call_id === 'string') {
+      actorCallIds.add(event.extra.actor_call_id);
+    }
+  }
+  const out: HostDispatchRequest[] = [];
+  for (const actorCallId of actorCallIds) {
+    const pending = pendingHostRequest(events, actorCallId, runId);
+    if (pending != null) out.push(pending);
+  }
+  return out;
+}
+
 function hostRequestFor(
   ctx: EngineCtx,
   stepId: string,
@@ -742,6 +889,7 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
 
   const stepExecutionId = `se-${stepId}-g${generation}`;
   const hostRequests: HostDispatchRequest[] = [];
+  const hostNotes: string[] = [];
 
   for (let i = 0; i < actors.length; i += 1) {
     const role = actors[i];
@@ -753,13 +901,22 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
     const ids = { stepExecutionId, actorCallId };
 
     events = freshEvents(ctx.runDir);
+    // An in-flight (requested, unresolved) host dispatch is attested pending
+    // work: it stays binding regardless of what the current loadout/profile
+    // resolution now says. Checked before resolution so a loadout switch can
+    // never silently abandon the request and execute the step another way.
+    const pendingDispatch = pendingHostRequest(events, actorCallId, ctx.runId);
+    if (pendingDispatch != null) {
+      const note = pendingResolutionNote(ctx, stepId, role, pendingDispatch);
+      if (note != null) {
+        hostNotes.push(note);
+        ctx.act(note);
+      }
+      hostRequests.push(pendingDispatch);
+      continue;
+    }
     const binding = effectiveBinding(ctx, role);
     if (binding.spec.adapter === 'host') {
-      const pending = pendingHostRequest(events, actorCallId, ctx.runId);
-      if (pending != null) {
-        hostRequests.push(pending);
-        continue;
-      }
       const priorHostAttempts = hostRequestAttempts(events, actorCallId);
       const attempt = priorHostAttempts + 1;
       const priorHostRequest = events
@@ -853,7 +1010,7 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
   }
 
   if (hostRequests.length > 0) {
-    return { kind: 'awaiting_host_dispatch', requests: hostRequests };
+    return { kind: 'awaiting_host_dispatch', requests: hostRequests, notes: hostNotes };
   }
 
   if (step.collective != null) {
@@ -1244,9 +1401,22 @@ function driveComposite(ctx: EngineCtx, maxTransitions: number, actions: string[
     if (transitions >= maxTransitions) {
       return finish('max_transitions', `stopped after ${maxTransitions} compositional transitions; re-run to continue.`);
     }
-    const frontier = computeCompositeFrontier(ctx.playbook, freshEvents(ctx.runDir));
+    const compositeEvents = freshEvents(ctx.runDir);
+    const frontier = computeCompositeFrontier(ctx.playbook, compositeEvents);
     if (frontier.complete || frontier.failed) {
       const status = frontier.failed ? 'failed' : 'completed';
+      // Same terminal invariant as the sequential engine: never terminal while
+      // any host dispatch is still in requested state.
+      const outstanding = unresolvedHostDispatches(compositeEvents, ctx.runId);
+      if (outstanding.length > 0) {
+        const ids = outstanding.map((request) => request.dispatchId).join(', ');
+        const detail =
+          `compositional frontier computes terminal (${status}) but ${outstanding.length} host ` +
+          `dispatch(es) are still in requested state (${ids}); a run never terminates over an ` +
+          'in-flight host dispatch — submit its receipts and re-run drive.';
+        ctx.act(detail);
+        return finish('awaiting_host_dispatch', detail, null, outstanding);
+      }
       runRun({ run: ctx.runId, status, repoRoot: ctx.repoRoot, now: ctx.now });
       ctx.act(`run ${status}`);
       return finish('terminal', `compositional run is terminal (${status}).`, status);
@@ -1357,8 +1527,25 @@ export function runDrive(opts: DriveOptions): DriveResult {
     act,
   };
   const profile = ensureProfileSnapshot(base);
-  const ctx: EngineCtx = { ...base, profile };
+  // Active loadout: --loadout flag → FADENO_LOADOUT → .fadeno/local/loadout →
+  // default_loadout, resolved fresh every invocation (dispatch time), against
+  // the run's snapshotted profile. An unknown name is a hard error naming its
+  // source — never a silent fallback.
+  let activeLoadout: ActiveLoadout | null;
+  try {
+    activeLoadout = resolveActiveLoadout({
+      flagValue: opts.loadout ?? null,
+      envValue: opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null,
+      localFileValue: readLocalLoadout(repoRoot),
+      profile,
+    });
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new DriveError(err.message);
+    throw err;
+  }
+  const ctx: EngineCtx = { ...base, profile, activeLoadout };
   recordOverrides(ctx, parseBinds(opts.bind));
+  recordResolutionSnapshot(ctx);
 
   const maxTransitions = opts.maxTransitions ?? MAX_TRANSITIONS_DEFAULT;
   if (hasCompositeContainers(playbook)) return driveComposite(ctx, maxTransitions, actions);
@@ -1402,6 +1589,20 @@ export function runDrive(opts: DriveOptions): DriveResult {
 
     if (comp.status === 'terminal') {
       const status = comp.terminal?.status ?? 'completed';
+      // Terminal invariant: a run never reaches a terminal status while any
+      // host dispatch is still in requested state. The engine refuses the
+      // transition here so the corrupted "terminal run, pending dispatch"
+      // combination is unrepresentable, not merely caught by verify post-hoc.
+      const outstanding = unresolvedHostDispatches(events, ctx.runId);
+      if (outstanding.length > 0) {
+        const ids = outstanding.map((request) => request.dispatchId).join(', ');
+        const detail =
+          `flow computes terminal (${status}) but ${outstanding.length} host dispatch(es) are still ` +
+          `in requested state (${ids}); a run never terminates over an in-flight host dispatch — ` +
+          'submit its receipts (dispatch-start, then dispatch-complete or dispatch-fail) and re-run drive.';
+        act(detail);
+        return finish('awaiting_host_dispatch', detail, null, null, outstanding);
+      }
       const current = parseYaml(readFileSync(join(ctx.runDir, 'run.yaml'), 'utf8')) as {
         status?: unknown;
       };
@@ -1448,9 +1649,10 @@ export function runDrive(opts: DriveOptions): DriveResult {
     const failure = drivePromptable(ctx, comp);
     if (failure != null) {
       if (failure.kind === 'awaiting_host_dispatch') {
+        const base = `${failure.requests.length} host dispatch request(s) are awaiting native receipts.`;
         return finish(
           'awaiting_host_dispatch',
-          `${failure.requests.length} host dispatch request(s) are awaiting native receipts.`,
+          failure.notes.length > 0 ? `${base} ${failure.notes.join(' ')}` : base,
           null,
           null,
           failure.requests,

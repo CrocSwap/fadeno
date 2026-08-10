@@ -40,5 +40,24 @@ executors:
   #   model: gpt-5.6-luna
   #   reasoning_effort: xhigh
   #   agent_type: worker
+# Loadouts (OPTIONAL) — named archetype → executor tables, the switchable unit
+# for rotating providers without editing per-role bindings. The starter
+# playbooks declare `archetype: worker|reviewer|judge` on their roles, so a
+# loadout slot for those archetypes routes them. Switch per session with
+# `fadeno loadout use <name>` (also: --loadout flag, FADENO_LOADOUT env);
+# inspect with `fadeno loadout` / `fadeno loadout list`. Ad-hoc dispatch runs
+# the same resolution outside a run: `fadeno dispatch --archetype worker`.
+# loadouts:
+#   anthropic-primary:
+#     worker: claude-cli
+#     reviewer: claude-cli
+#     judge: claude-cli
+#   # Every slot must name a declared executor — e.g. uncomment codex-cli
+#   # above before enabling:
+#   # openai-primary:
+#   #   worker: codex-cli
+#   #   reviewer: codex-cli
+#   #   judge: codex-cli
+# default_loadout: anthropic-primary
 bindings:
   "*": claude-cli

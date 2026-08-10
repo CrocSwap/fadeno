@@ -14,10 +14,13 @@ roles:
     purpose: Merge perspective reviews and produce the final review summary.
   correctness_reviewer:
     purpose: Review logic, correctness, edge cases, and tests.
+    archetype: reviewer
   style_reviewer:
     purpose: Review clarity, naming, conventions, and documentation.
+    archetype: reviewer
   security_reviewer:
     purpose: Review for security issues, secrets, and unsafe operations.
+    archetype: reviewer
 flow:
   - id: load_diff
     kind: tool_call

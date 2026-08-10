@@ -2,7 +2,7 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { resolveActiveArtifacts, sha256Hex, type ActiveResolution } from '../lib/artifact-manifest.ts';
-import { parseExecutorProfile } from '../lib/executors.ts';
+import { parseExecutorProfile, resolveRole, type ExecutorProfile } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import {
   actorCallIdFor,
@@ -226,8 +226,11 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
   //     bytes still match their recorded digests.
   findings.push(checkActorAttempts(run, events));
 
-  // 18. executor-bindings — every dispatch used the snapshotted binding or an
-  //     explicitly recorded override; the snapshot itself matches its digest.
+  // 18. executor-bindings — every dispatch used the resolution in force at its
+  //     position: explicit override → per-role pin → active loadout's archetype
+  //     slot → "*" default, recomputed via the kernel's resolveRole from the
+  //     profile snapshot plus the ledger's resolution_snapshot; the snapshot
+  //     itself matches its digest.
   findings.push(checkExecutorBindings(run, events));
 
   // 19. named-decisions — resolutions reference a real request, select a
@@ -769,8 +772,7 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
     problems.push('dispatches recorded but no profile_snapshotted event');
   }
 
-  let bindings: Record<string, string> | null = null;
-  let executors: Set<string> | null = null;
+  let profile: ExecutorProfile | null = null;
   if (snapshots.length > 0) {
     const snap = snapshots[0]!;
     const rel = typeof snap.extra.profile === 'string' ? snap.extra.profile : 'profile.yaml';
@@ -784,27 +786,36 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
         problems.push(`${rel}: snapshot does not match its recorded sha256`);
       }
       try {
-        const doc = parseYaml(text) as { executors?: unknown; bindings?: unknown };
-        if (doc !== null && typeof doc === 'object') {
-          if (doc.bindings !== null && typeof doc.bindings === 'object' && !Array.isArray(doc.bindings)) {
-            bindings = {};
-            for (const [role, target] of Object.entries(doc.bindings as Record<string, unknown>)) {
-              if (typeof target === 'string') bindings[role] = target;
-            }
-          }
-          if (doc.executors !== null && typeof doc.executors === 'object' && !Array.isArray(doc.executors)) {
-            executors = new Set(Object.keys(doc.executors as Record<string, unknown>));
-          }
-        }
+        profile = parseExecutorProfile(text, rel);
       } catch (err) {
         problems.push(`${rel}: snapshot did not parse: ${(err as Error).message}`);
       }
     }
   }
 
-  // Replay overrides in event order; a dispatch must match the binding in
-  // force at its position (or the snapshot default) and name a real executor.
+  // Recompute each dispatch's resolution with the kernel's own chain — per-role
+  // pin → active loadout's archetype slot → "*" default (resolveRole; never a
+  // reimplemented precedence) — from ledger contents alone: the snapshotted
+  // profile plus the resolution_snapshot in force at that position (active
+  // loadout name + per-role archetype), with explicit overrides replayed in
+  // event order. An unresolvable role is never claimed as a mismatch.
+  const recompute = (
+    role: string,
+    archetype: string | null,
+    loadout: string | null,
+  ): { executor: string; source: string } | null => {
+    if (profile == null) return null;
+    try {
+      const resolved = resolveRole(role, archetype, profile, loadout);
+      return { executor: resolved.executorName, source: resolved.source };
+    } catch {
+      return null;
+    }
+  };
+
   const overridesInForce = new Map<string, string>();
+  const archetypeByRole = new Map<string, string | null>();
+  let activeLoadout: string | null = null;
   for (const event of events) {
     if (event.type === 'executor_override') {
       const role = typeof event.extra.role === 'string' ? event.extra.role : null;
@@ -812,7 +823,49 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
       if (role != null && executor != null) overridesInForce.set(role, executor);
       continue;
     }
-    if (event.type !== 'actor_dispatched') continue;
+    if (event.type === 'resolution_snapshot') {
+      const loadout = event.extra.loadout;
+      activeLoadout =
+        loadout != null && typeof loadout === 'object' && !Array.isArray(loadout) &&
+        typeof (loadout as Record<string, unknown>).name === 'string'
+          ? ((loadout as Record<string, unknown>).name as string)
+          : null;
+      const roles = Array.isArray(event.extra.roles) ? event.extra.roles : [];
+      for (const row of roles) {
+        if (row == null || typeof row !== 'object' || Array.isArray(row)) continue;
+        const rec = row as Record<string, unknown>;
+        if (typeof rec.role !== 'string') continue;
+        const archetype = typeof rec.archetype === 'string' ? rec.archetype : null;
+        archetypeByRole.set(rec.role, archetype);
+        // The snapshot's own per-role rows are ledger claims, so they must
+        // recompute too. Overridden rows follow session overrides (which may
+        // legitimately go unrecorded when they are no-ops) and unresolved rows
+        // carry no chain claim — neither is recomputable here.
+        if (rec.source === 'override' || typeof rec.executor !== 'string') continue;
+        const recomputed = recompute(rec.role, archetype, activeLoadout);
+        if (recomputed == null) {
+          problems.push(
+            `resolution_snapshot: role "${rec.role}" records executor "${rec.executor}" but the chain resolves nothing`,
+          );
+        } else if (recomputed.executor !== rec.executor || (typeof rec.source === 'string' && recomputed.source !== rec.source)) {
+          problems.push(
+            `resolution_snapshot: role "${rec.role}" records "${rec.executor}" [${String(rec.source)}] ` +
+              `but recomputes to "${recomputed.executor}" [${recomputed.source}]`,
+          );
+        }
+      }
+      continue;
+    }
+    if (event.type !== 'actor_dispatched' && event.type !== 'host_dispatch_requested') continue;
+    // A host dispatch's binding decision happens at host_dispatch_requested;
+    // the later actor_dispatched is the host's start receipt, which must match
+    // the request byte-for-byte (host-dispatch-lifecycle enforces that). An
+    // in-flight request stays binding across later resolution changes, so the
+    // request position — not the receipt position — anchors this check: the
+    // start receipt of a host dispatch is skipped here, and each request is
+    // validated against the resolution in force where it was recorded.
+    if (event.type === 'actor_dispatched' && typeof event.extra.dispatch_id === 'string') continue;
+    const decision = event.type === 'host_dispatch_requested' ? 'host dispatch requested' : 'dispatched to';
     const actor = typeof event.extra.actor === 'string' ? event.extra.actor : null;
     const used = typeof event.extra.executor === 'string' ? event.extra.executor : null;
     const label = `${event.step ?? '?'}${actor ? ` (${actor})` : ''}`;
@@ -820,15 +873,16 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
       problems.push(`${label}: dispatch records no executor`);
       continue;
     }
-    if (executors != null && !executors.has(used)) {
+    if (profile != null && !(used in profile.executors)) {
       problems.push(`${label}: executor "${used}" is not in the snapshotted profile`);
     }
-    if (bindings != null) {
-      const key = actor ?? '*';
-      const expected = overridesInForce.get(key) ?? bindings[key] ?? bindings['*'] ?? null;
-      if (expected != null && used !== expected) {
-        problems.push(`${label}: dispatched to "${used}" but the binding in force was "${expected}"`);
-      }
+    const key = actor ?? '*';
+    const expected =
+      overridesInForce.get(key) ??
+      recompute(key, archetypeByRole.get(key) ?? null, activeLoadout)?.executor ??
+      null;
+    if (expected != null && used !== expected) {
+      problems.push(`${label}: ${decision} "${used}" but the resolution in force was "${expected}"`);
     }
   }
 
@@ -836,7 +890,7 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
   return {
     check,
     status: 'ok',
-    detail: `${dispatches.length} dispatch(es) match the snapshotted bindings${overridesInForce.size > 0 ? ` (+${overridesInForce.size} explicit override(s))` : ''}`,
+    detail: `${dispatches.length} dispatch(es) match the recomputed resolution chain${overridesInForce.size > 0 ? ` (+${overridesInForce.size} explicit override(s))` : ''}`,
   };
 }
 
