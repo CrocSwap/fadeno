@@ -109,3 +109,13 @@ test('the committed plugin ships a self-contained CJS binary + templates', () =>
   assert.ok(existsSync(join(binDir, 'templates', 'common', 'fadeno', 'vocabulary.md')));
 });
 
+test('the bundled CLI carries the Grok adapter templates', () => {
+  const grokDir = join(import.meta.dirname, '..', 'plugin', 'bin', 'templates', 'grok');
+  assert.ok(existsSync(join(grokDir, 'AGENTS.md')));
+  for (const role of ['worker', 'reviewer', 'judge']) {
+    const agent = join(grokDir, 'grok-agents', `${role}.md`);
+    assert.ok(existsSync(agent), `bundled Grok ${role} agent template missing`);
+    assert.match(readFileSync(agent, 'utf8'), new RegExp(`^name: ${role}$`, 'm'));
+  }
+  assert.match(readFileSync(join(grokDir, 'AGENTS.md'), 'utf8'), /\/fadeno-runner/);
+});

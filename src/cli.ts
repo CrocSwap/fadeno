@@ -29,7 +29,7 @@ import type { ShowProjection, ShowResult, StepView } from './commands/show.ts';
 const HELP = `fadeno — the playbook layer for AI coding agents
 
 Usage:
-  fadeno init --codex|--claude [opts]   Scaffold (see --with-hooks, --data-only)
+  fadeno init --codex|--claude|--grok [opts]   Scaffold (see --with-hooks, --data-only)
   fadeno validate [file] [--schema K]   Validate playbooks (schema + references + semantics)
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
@@ -88,6 +88,7 @@ Options:
 
 Examples:
   fadeno init --codex --with-hooks
+  fadeno init --grok
   fadeno validate
   fadeno validate .fadeno/runs/2026-05-30-1132-csv/run.yaml --schema run
   fadeno new-run code-change-review "Add CSV export for reports"
@@ -103,7 +104,7 @@ Examples:
   fadeno verify --latest
 `;
 
-const SIGIL: Record<Target, string> = { codex: '$', claude: '/' };
+const SIGIL: Record<Target, string> = { codex: '$', claude: '/', grok: '/' };
 const SCHEMA_KINDS: SchemaKind[] = ['playbook', 'run', 'review-report', 'test-result'];
 
 function printInitSummary(
@@ -468,11 +469,18 @@ function printVerify(result: VerifyResult): void {
   else console.error(summary);
 }
 
-function requireTarget(values: { codex?: boolean; claude?: boolean }): Target {
-  if (values.codex && values.claude) throw new Error('Choose only one target: --codex or --claude.');
-  if (values.codex) return 'codex';
-  if (values.claude) return 'claude';
-  throw new Error('Specify a target: `fadeno init --codex` or `fadeno init --claude`.');
+function requireTarget(values: { codex?: boolean; claude?: boolean; grok?: boolean }): Target {
+  const selected: Target[] = [];
+  if (values.codex) selected.push('codex');
+  if (values.claude) selected.push('claude');
+  if (values.grok) selected.push('grok');
+  if (selected.length > 1) {
+    throw new Error('Choose exactly one target: --codex, --claude, or --grok.');
+  }
+  if (selected.length === 1) return selected[0];
+  throw new Error(
+    'Specify a target: `fadeno init --codex`, `fadeno init --claude`, or `fadeno init --grok`.',
+  );
 }
 
 function main(argv: string[]): number {
@@ -484,6 +492,7 @@ function main(argv: string[]): number {
       options: {
         codex: { type: 'boolean' },
         claude: { type: 'boolean' },
+        grok: { type: 'boolean' },
         force: { type: 'boolean' },
         'with-hooks': { type: 'boolean' },
         'data-only': { type: 'boolean' },
@@ -622,6 +631,9 @@ function main(argv: string[]): number {
       return 0;
     }
     case 'plugin': {
+      if (values.grok) {
+        throw new Error('The --grok target is supported by init only; no Grok plugin generator exists.');
+      }
       const codex = Boolean(values.codex);
       const { outDir, results } = codex
         ? runCodexPlugin({ outDir: positionals[1], force: values.force })

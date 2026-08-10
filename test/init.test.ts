@@ -68,6 +68,56 @@ test('init --claude creates the Claude target tree', (t) => {
   assert.ok(!exists(root, '.agents/skills/fadeno-runner/SKILL.md'));
 });
 
+test('init --grok creates the Grok target tree without other host artifacts', (t) => {
+  const root = tempRepo(t);
+  const { results } = runInit({ target: 'grok', repoRoot: root });
+
+  for (const f of SHARED_FILES) assert.ok(exists(root, f), `missing ${f}`);
+
+  assert.ok(exists(root, 'AGENTS.md'));
+  for (const skill of ['fadeno-runner', 'fadeno-builder', 'fadeno-driver']) {
+    assert.ok(exists(root, `.grok/skills/${skill}/SKILL.md`));
+  }
+  assert.ok(exists(root, '.grok/skills/fadeno-runner/references/runtime.md'));
+  assert.ok(exists(root, '.grok/skills/fadeno-runner/references/playbook-format.md'));
+  assert.ok(exists(root, '.grok/skills/fadeno-builder/references/playbook-authoring.md'));
+  assert.ok(exists(root, '.grok/skills/fadeno-driver/references/README.md'));
+  assert.ok(exists(root, '.grok/agents/worker.md'));
+  assert.ok(exists(root, '.grok/agents/reviewer.md'));
+  assert.ok(exists(root, '.grok/agents/judge.md'));
+
+  assert.ok(!exists(root, '.agents/skills/fadeno-runner/SKILL.md'));
+  assert.ok(!exists(root, '.codex/agents/worker.toml'));
+  assert.ok(!exists(root, '.claude/skills/fadeno-runner/SKILL.md'));
+  assert.ok(!exists(root, '.claude/agents/worker.md'));
+  assert.ok(!exists(root, 'CLAUDE.md'));
+  assert.ok(!exists(root, '.grok/skills/fadeno-runner/agents/openai.yaml'));
+  assert.ok(!exists(root, '.grok/config.toml'));
+  assert.ok(!exists(root, '.claude/settings.local.json'));
+
+  assert.ok(results.every((r) => r.status === 'created'));
+});
+
+test('Grok receives shared skill bodies and slash handles only in its bootstrap', (t) => {
+  const grokRoot = tempRepo(t);
+  const codexRoot = tempRepo(t);
+  runInit({ target: 'grok', repoRoot: grokRoot });
+  runInit({ target: 'codex', repoRoot: codexRoot });
+
+  for (const skill of ['fadeno-runner', 'fadeno-builder', 'fadeno-driver']) {
+    const grokBody = read(grokRoot, `.grok/skills/${skill}/SKILL.md`);
+    const codexBody = read(codexRoot, `.agents/skills/${skill}/SKILL.md`);
+    assert.equal(grokBody, codexBody, `${skill}/SKILL.md differs between Grok and Codex`);
+    assert.doesNotMatch(grokBody, /\$fadeno-(runner|builder|driver)/);
+    assert.doesNotMatch(grokBody, /\/fadeno-(runner|builder|driver)/);
+  }
+
+  const bootstrap = read(grokRoot, 'AGENTS.md');
+  assert.match(bootstrap, /\/fadeno-runner/);
+  assert.match(bootstrap, /\/fadeno-driver/);
+  assert.match(bootstrap, /\/fadeno-builder/);
+});
+
 test('invocation policy: Claude skills stay model-invocable; Codex builder is gated', (t) => {
   const codexRoot = tempRepo(t);
   const claudeRoot = tempRepo(t);
@@ -134,6 +184,28 @@ test('existing bootstrap content is preserved; section appended once', (t) => {
     second.results.find((r) => r.path.endsWith('AGENTS.md'))?.status,
     'skipped',
   );
+});
+
+test('Grok init preserves and refreshes one managed AGENTS.md section', (t) => {
+  const root = tempRepo(t);
+  writeFileSync(join(root, 'AGENTS.md'), '# My Project\n\nExisting instructions.\n');
+
+  const first = runInit({ target: 'grok', repoRoot: root });
+  const agents1 = read(root, 'AGENTS.md');
+  assert.match(agents1, /Existing instructions\./);
+  assert.match(agents1, /\/fadeno-runner/);
+  assert.equal((agents1.match(/fadeno:begin/g) ?? []).length, 1);
+  assert.equal(first.results.find((r) => r.path.endsWith('AGENTS.md'))?.status, 'appended');
+
+  const second = runInit({ target: 'grok', repoRoot: root });
+  assert.equal(read(root, 'AGENTS.md'), agents1);
+  assert.equal(second.results.find((r) => r.path.endsWith('AGENTS.md'))?.status, 'skipped');
+
+  const forced = runInit({ target: 'grok', repoRoot: root, force: true });
+  const agents3 = read(root, 'AGENTS.md');
+  assert.match(agents3, /Existing instructions\./);
+  assert.equal((agents3.match(/fadeno:begin/g) ?? []).length, 1);
+  assert.equal(forced.results.find((r) => r.path.endsWith('AGENTS.md'))?.status, 'overwritten');
 });
 
 test('re-running init without --force skips everything', (t) => {
@@ -254,4 +326,19 @@ test('--data-only still scaffolds hooks when requested', (t) => {
   runInit({ target: 'claude', repoRoot: root, dataOnly: true, withHooks: true });
   assert.ok(exists(root, '.fadeno/hooks/pre-commit'));
   assert.ok(!exists(root, '.claude/skills/fadeno-runner/SKILL.md'));
+});
+
+test('--data-only Grok init has no capability or Claude-specific settings', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'grok', repoRoot: root, dataOnly: true, withHooks: true });
+
+  assert.ok(exists(root, '.fadeno/hooks/pre-commit'));
+  assert.ok(exists(root, '.fadeno/hooks/README.md'));
+  assert.ok(exists(root, '.github/workflows/fadeno-guard.yml'));
+  assert.ok(!exists(root, 'AGENTS.md'));
+  assert.ok(!exists(root, '.grok/skills/fadeno-runner/SKILL.md'));
+  assert.ok(!exists(root, '.grok/agents/worker.md'));
+  assert.ok(!exists(root, '.grok/config.toml'));
+  assert.ok(!exists(root, '.claude/settings.local.json'));
+  assert.ok(!exists(root, '.fadeno/hooks/claude-settings.example.json'));
 });

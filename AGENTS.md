@@ -22,8 +22,8 @@ adapters, plus a small deterministic, repo-local **engine** (`fadeno drive`,
 per the next-protocol boundary) that exists in service of verification — it
 dispatches configured executor commands, mints runtime identity, and pauses at
 human decisions. It is **not** a daemon, cloud service, or general
-orchestration platform. Targets today: **Codex** and **Claude Code** (the
-latter also packaged as a Claude Code **plugin**).
+orchestration platform. Targets today: **Codex**, **Claude Code**, and **Grok
+Build** (Claude Code is also packaged as a Claude Code **plugin**).
 
 These docs frame the rest:
 
@@ -69,7 +69,8 @@ Fadeno is organized around **one split** and **one rule**:
   - *Capability* = how to run/author playbooks: the **skills** (`runner`,
     `builder`), the role **subagents** (`worker`/`reviewer`/`judge`), and the
     **CLI**. Delivered by `fadeno init` (copied into a repo) **or** by the Claude
-    plugin (installed once, globally).
+    plugin (installed once, globally). Grok uses the native `.grok/` adapter
+    emitted by `fadeno init --grok`; there is no separate Grok plugin generator.
   - *Definitions* = which playbooks: the per-repo **`.fadeno/`** tree
     (`vocabulary.md`, `playbooks/`, `schemas/`, `enforcement.md`). Seeded by
     `fadeno init` (or `init --data-only` for plugin users).
@@ -91,10 +92,10 @@ asked); real guarantees come from git/CI/pre-commit/hooks (tier 2). See
 | `src/cli.ts` | Entry point: arg parsing (`node:util.parseArgs`), command dispatch, **all** stdout/exit-code formatting (the "view"). | architecture.md → *The CLI* |
 | `src/commands/*.ts` | One file per command. Each exports a `run*()` that **returns data and throws on error** — no `console.*`. | architecture.md, extending.md |
 | `src/lib/*.ts` | Shared logic: `paths.ts` (root/templates/version resolution), `fsutil.ts` (non-destructive emit), `playbook-validate.ts` (3-pass validator), `diagram.ts` (ASCII/Mermaid). | architecture.md |
-| `templates/` | **Single source of truth** for everything `init` emits *and* the plugin bundles. `common/` (shared) + `codex/` + `claude/` (per-target adapters). | architecture.md → *Templates & the plugin* |
-| `plugin/` | The **generated, committed** Claude plugin (skills/commands/agents + the bundled `bin/fadeno`). A build artifact — never hand-edit; regenerate. | architecture.md, extending.md |
+| `templates/` | **Single source of truth** for everything `init` emits *and* the plugin bundles. `common/` (shared) + `codex/` + `claude/` + `grok/` (per-target adapters). | architecture.md → *Templates & the plugin* |
+| `plugin/` | The **generated, committed** Claude plugin (skills/commands/agents + the bundled `bin/fadeno`). Its bundled CLI also carries the Grok templates. A build artifact — never hand-edit; regenerate. | architecture.md, extending.md |
 | `scripts/build-bin.mjs` | esbuild bundler → `plugin/bin/fadeno` (standalone CJS, deps inlined) + adjacent templates. | architecture.md → *Build & module system* |
-| `test/` | `node:test` suite (~50 cases). `helpers.ts` = `tempRepo`/`exists`/`read`. Tests call `run*()` directly. | architecture.md → *Tests* |
+| `test/` | `node:test` suite (~50 cases). `helpers.ts` = `tempRepo`/`exists`/`read`. Tests call `run*()` directly, with built-boundary checks for the bundled CLI. | architecture.md → *Tests* |
 | `docs/` | This guide's companions + the design spec, roadmap, and `product/` (marketing — **not** for code contributors). | — |
 | `.claude-plugin/marketplace.json` | Makes the repo itself a one-repo plugin marketplace. | — |
 

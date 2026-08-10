@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { copyTree, emitBootstrap, emitFile, type EmitResult } from '../lib/fsutil.ts';
 import { findRepoRoot, templatesDir } from '../lib/paths.ts';
 
-export type Target = 'codex' | 'claude';
+export type Target = 'codex' | 'claude' | 'grok';
 
 export interface InitOptions {
   target: Target;
@@ -48,10 +48,18 @@ export function runInit(opts: InitOptions): InitResult {
   // init only needs to seed the definitions above.
   if (!opts.dataOnly) {
     // 2. Skills — shared bodies, per-target install dir and invocation policy.
-    const skillsBase =
-      opts.target === 'codex'
-        ? join(repoRoot, '.agents', 'skills')
-        : join(repoRoot, '.claude', 'skills');
+    let skillsBase: string;
+    switch (opts.target) {
+      case 'codex':
+        skillsBase = join(repoRoot, '.agents', 'skills');
+        break;
+      case 'claude':
+        skillsBase = join(repoRoot, '.claude', 'skills');
+        break;
+      case 'grok':
+        skillsBase = join(repoRoot, '.grok', 'skills');
+        break;
+    }
 
     for (const skill of SKILLS) {
       const skillSrc = join(tpl, 'common', 'skills', skill);
@@ -60,7 +68,8 @@ export function runInit(opts: InitOptions): InitResult {
       // Runner and builder skills are invocable: the runner fires on a described task, the
       // builder on explicit "author a playbook" intent (its description is
       // scoped to that). Codex's narrower invocation policy lives in openai.yaml
-      // (below); Claude relies on the scoped description, not a frontmatter gate.
+      // (below); Claude and Grok rely on the scoped description, not a
+      // frontmatter gate.
       const skillMd = readFileSync(join(skillSrc, 'SKILL.md'), 'utf8');
       const skillMdPath = join(skillDest, 'SKILL.md');
       results.push({ path: skillMdPath, status: emitFile(skillMdPath, skillMd, force) });
@@ -76,14 +85,29 @@ export function runInit(opts: InitOptions): InitResult {
 
     // 3. Subagent definitions (provisional path/format — runner degrades when
     //    native subagents are unavailable).
-    if (opts.target === 'codex') {
-      copyTree(join(tpl, 'codex', 'codex-agents'), join(repoRoot, '.codex', 'agents'), force, results);
-    } else {
-      copyTree(join(tpl, 'claude', 'claude-agents'), join(repoRoot, '.claude', 'agents'), force, results);
+    switch (opts.target) {
+      case 'codex':
+        copyTree(join(tpl, 'codex', 'codex-agents'), join(repoRoot, '.codex', 'agents'), force, results);
+        break;
+      case 'claude':
+        copyTree(join(tpl, 'claude', 'claude-agents'), join(repoRoot, '.claude', 'agents'), force, results);
+        break;
+      case 'grok':
+        copyTree(join(tpl, 'grok', 'grok-agents'), join(repoRoot, '.grok', 'agents'), force, results);
+        break;
     }
 
     // 4. Bootstrap instruction file (append-or-create, never clobber).
-    const bootstrapName = opts.target === 'codex' ? 'AGENTS.md' : 'CLAUDE.md';
+    let bootstrapName: 'AGENTS.md' | 'CLAUDE.md';
+    switch (opts.target) {
+      case 'claude':
+        bootstrapName = 'CLAUDE.md';
+        break;
+      case 'codex':
+      case 'grok':
+        bootstrapName = 'AGENTS.md';
+        break;
+    }
     const bootstrapBody = readFileSync(join(tpl, opts.target, bootstrapName), 'utf8');
     emitBootstrap(join(repoRoot, bootstrapName), bootstrapBody, force, results);
   }
@@ -146,20 +170,32 @@ function emitClaudePermissions(repoRoot: string, results: EmitResult[]): void {
   writeFileSync(settingsPath, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
   results.push({ path: settingsPath, status: existed ? 'appended' : 'created' });
 
-  ensureGitignored(repoRoot, '.claude/settings.local.json', results);
+  ensureGitignored(repoRoot, ['.claude/settings.local.json'], results);
 }
 
-/** Append `pattern` to `.gitignore` (creating it if needed) unless already ignored. */
-function ensureGitignored(repoRoot: string, pattern: string, results: EmitResult[]): void {
+/**
+ * Append the given patterns to `.gitignore` (creating it if needed), skipping
+ * any that are already ignored. Missing patterns land as one commented block
+ * in one write, so repeated `init` runs never duplicate entries.
+ */
+function ensureGitignored(repoRoot: string, patterns: string[], results: EmitResult[]): void {
   const gitignorePath = join(repoRoot, '.gitignore');
   const existed = existsSync(gitignorePath);
   const content = existed ? readFileSync(gitignorePath, 'utf8') : '';
   const lines = content.split(/\r?\n/).map((line) => line.trim());
-  if (lines.includes(pattern) || lines.includes('.claude') || lines.includes('.claude/')) return;
-  if (pattern.startsWith('.fadeno/') && (lines.includes('.fadeno') || lines.includes('.fadeno/'))) return;
+  const missing = patterns.filter((pattern) => {
+    if (lines.includes(pattern) || lines.includes('.claude') || lines.includes('.claude/')) return false;
+    if (pattern.startsWith('.fadeno/') && (lines.includes('.fadeno') || lines.includes('.fadeno/'))) return false;
+    return true;
+  });
+  if (missing.length === 0) return;
 
   const sep = content.length === 0 || content.endsWith('\n') ? '' : '\n';
-  const block = `${sep}# Fadeno: per-user local Claude settings (not committed)\n${pattern}\n`;
+  const comment =
+    missing[0] === '.claude/settings.local.json'
+      ? '# Fadeno: per-user local Claude settings (not committed)'
+      : '# Fadeno: local generated files (not committed)';
+  const block = `${sep}${comment}\n${missing.join('\n')}\n`;
   writeFileSync(gitignorePath, content + block, 'utf8');
   results.push({ path: gitignorePath, status: existed ? 'appended' : 'created' });
 }

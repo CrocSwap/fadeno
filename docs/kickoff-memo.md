@@ -439,6 +439,29 @@ The long-term goal is **harness neutrality**. v0 ships both `--codex` and `--cla
 | Subagent defs | `.codex/agents/*.toml` *(path provisional)* | `.claude/agents/*.md` |
 | Deterministic gates | external CI/pre-commit | CI/pre-commit **or** Claude Code hooks (`.claude/settings.json`) |
 
+### Post-v0 Grok Build adapter note (2026-08-08)
+
+The dual-target table above remains the settled v0 history; it is not being
+rewritten as though Grok shipped in v0. A post-v0 adapter now adds native Grok
+Build support through `fadeno init --grok` while keeping the shared playbooks,
+schemas, vocabulary, and sigil-free skill bodies unchanged:
+
+| Concern | Grok Build (`--grok`) |
+|---|---|
+| Skill dir | `.grok/skills/<name>/` |
+| Bootstrap file | `AGENTS.md` |
+| Invocation | native `/fadeno-runner`, `/fadeno-builder`, `/fadeno-driver` |
+| Subagent defs | `.grok/agents/{worker,reviewer,judge}.md` |
+| Enforcement | common CI/pre-commit scaffold; no Grok-specific hook scaffold |
+
+Grok's native agent definitions are depth-one safe and use the existing runner
+degradation path when native subagents are unavailable. `init --grok` does not
+create or edit `.grok/config.toml`, add bypass-permission settings, or claim a
+portable headless executor profile: the current command adapter sends prompts on
+stdin, while Grok's documented one-shot interfaces use explicit prompt options.
+The packaged `/fadeno:runner` form is the Claude plugin namespace; Grok's native
+repo-local form is `/fadeno-runner`.
+
 Implementation guidance: a single template core with per-target emit. The `init` command takes the target flag and chooses (a) skill dir, (b) bootstrap filename + sigil, (c) subagent def format, (d) whether to scaffold a hooks/CI enforcement stub. **Do not fork the SKILL.md bodies per target** — keep one source and substitute the sigil/path tokens at emit time, or keep the bodies sigil-free and put sigils only in the bootstrap file.
 
 ### Tier-2 enforcement scaffold (forward-looking, optional in v0)

@@ -80,6 +80,26 @@ test('built CLI gate exits 0 for pass and 1 for fail', (t) => {
   assert.equal(cli(root, ['gate', runId, 'tests_pass', '--artifact', 'artifacts/test-result.json']).status, 1);
 });
 
+test('committed bundled CLI supports Grok init and rejects mixed target flags', (t) => {
+  const root = tempRepo(t);
+
+  const help = cliSplit(root, ['--help']);
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /fadeno init --codex\|--claude\|--grok/);
+  assert.match(help.stdout, /fadeno init --grok/);
+
+  const initialized = cliSplit(root, ['init', '--grok']);
+  assert.equal(initialized.status, 0);
+  assert.match(initialized.stdout, /Fadeno initialized for grok/);
+  assert.ok(readFileSync(join(root, 'AGENTS.md'), 'utf8').includes('/fadeno-runner'));
+  assert.ok(readFileSync(join(root, '.grok', 'skills', 'fadeno-runner', 'SKILL.md'), 'utf8'));
+  assert.ok(readFileSync(join(root, '.grok', 'agents', 'worker.md'), 'utf8'));
+
+  const mixed = cliSplit(root, ['init', '--grok', '--codex']);
+  assert.equal(mixed.status, 1);
+  assert.match(`${mixed.stdout}${mixed.stderr}`, /choose exactly one target/i);
+});
+
 test('built CLI rejects invalid artifacts and path-dependent playbooks', (t) => {
   const root = tempRepo(t);
   const runId = fresh(root);
