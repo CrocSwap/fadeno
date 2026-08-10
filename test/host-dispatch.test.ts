@@ -165,12 +165,12 @@ test('host progress is provenance-labelled, idempotent, projected, and lifecycle
     /state must be one of/,
   );
   writeFileSync(report, JSON.stringify({
-    state: 'running',
+    state: 'in_progress',
     phase: 'verification',
-    completed: ['read instructions', 'implemented change'],
+    completed: 'read instructions and implemented change',
     current: 'running npm test',
     next: 'commit result',
-    blockers: [],
+    blockers: 'none',
     updated_at: '2026-08-04T18:00:20.000Z',
   }));
   const observed = runDispatchProgress({
@@ -201,6 +201,10 @@ test('host progress is provenance-labelled, idempotent, projected, and lifecycle
   assert.equal(actor.state, 'running');
   assert.equal(actor.phase, 'verification');
   assert.equal(runVerify({ repoRoot: root, run: runId }).findings.find((finding) => finding.check === 'host-dispatch-lifecycle')!.status, 'ok');
+  const normalized = readEvents(runDir).events.find((event) => event.type === 'host_dispatch_progress')!;
+  assert.equal(normalized.extra.progress_state, 'running');
+  assert.deepEqual(normalized.extra.completed, ['read instructions and implemented change']);
+  assert.deepEqual(normalized.extra.blockers, ['none']);
 
   const output = join(root, 'output.md');
   writeFileSync(output, 'done');
@@ -292,4 +296,12 @@ test('native attestation values must match request, profile, and start receipt',
   const result = runVerify({ repoRoot: root, run: runId });
   assert.equal(result.findings.find((finding) => finding.check === 'native-attestation')!.status, 'fail');
   assert.match(result.findings.find((finding) => finding.check === 'native-attestation')!.detail, /does not match/);
+});
+
+test('native identity remains explicitly unverified when the host only echoes the request', (t) => {
+  const { root, runId, request } = seedPendingHostRun(t);
+  runDispatchStart({ repoRoot: root, run: runId, dispatchId: request.dispatchId, agentId: 'native-agent-1' });
+  const finding = runVerify({ repoRoot: root, run: runId }).findings.find((item) => item.check === 'native-attestation')!;
+  assert.equal(finding.status, 'skip');
+  assert.match(finding.detail, /no independently observed runtime identity/);
 });

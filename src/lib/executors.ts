@@ -38,11 +38,11 @@ export interface CommandExecutorSpec {
 /** A native host facility invoked outside the command adapter. */
 export interface HostExecutorSpec {
   adapter: 'host';
-  /** Host-attested native model identifier. */
+  /** Requested native model identifier; not proof of the host's runtime model. */
   model: string;
-  /** Host-attested reasoning effort/profile. */
+  /** Requested reasoning effort/profile. */
   reasoningEffort: string;
-  /** Host-attested native agent type/identity class. */
+  /** Requested native agent type/identity class. */
   agentType: string;
 }
 

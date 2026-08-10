@@ -400,9 +400,9 @@ function checkHostDispatchLifecycle(run: RunSummary, events: RunEvent[], mode: L
       if (typeof request.extra[field] !== 'string' || request.extra[field] === '') problems.push(`${id}: request is missing ${field}`);
     }
     if (request.extra.adapter !== 'host') problems.push(`${id}: request is not marked adapter host`);
-    const hostAttested = request.extra.host_attested;
-    if (!isStringArray(hostAttested) || !['model', 'reasoning_effort', 'agent_type', 'agent_id'].every((field) => hostAttested.includes(field))) {
-      problems.push(`${id}: request does not declare model, effort, agent type, and agent identity as host-attested`);
+    const requestedIdentity = request.extra.requested_identity ?? request.extra.host_attested;
+    if (!isStringArray(requestedIdentity) || !['model', 'reasoning_effort', 'agent_type'].every((field) => requestedIdentity.includes(field))) {
+      problems.push(`${id}: request does not declare the requested model, effort, and agent type`);
     }
     if (request.extra.validation_errors !== undefined && !isStringArray(request.extra.validation_errors)) {
       problems.push(`${id}: validation_errors must be an array of strings`);
@@ -598,6 +598,7 @@ function checkNativeAttestation(run: RunSummary, events: RunEvent[], mode: Ledge
     }
   }
   const problems: string[] = [];
+  let requestedOnly = 0;
   for (const start of starts) {
     const dispatchId = typeof start.extra.dispatch_id === 'string' ? start.extra.dispatch_id : '(unknown)';
     const request = requests.get(dispatchId);
@@ -605,6 +606,11 @@ function checkNativeAttestation(run: RunSummary, events: RunEvent[], mode: Ledge
       if (typeof start.extra[field] !== 'string' || start.extra[field] === '') problems.push(`${dispatchId}: missing host-attested ${field}`);
     }
     if (start.extra.host_attested !== true) problems.push(`${dispatchId}: start is not marked host_attested`);
+    if (start.extra.identity_evidence === undefined || start.extra.identity_evidence === 'requested_only') {
+      requestedOnly += 1;
+    } else {
+      problems.push(`${dispatchId}: unrecognized identity_evidence ${JSON.stringify(start.extra.identity_evidence)}`);
+    }
     const attestation = start.extra.attestation;
     if (attestation === null || typeof attestation !== 'object' || Array.isArray(attestation)) {
       problems.push(`${dispatchId}: attestation object is missing`);
@@ -633,7 +639,11 @@ function checkNativeAttestation(run: RunSummary, events: RunEvent[], mode: Ledge
     }
   }
   if (problems.length > 0) return { check, status: 'fail', detail: problems.join('; ') };
-  return { check, status: 'ok', detail: `${starts.length} native dispatch(es) explicitly attest model, effort, and agent identity` };
+  return skip(
+    check,
+    `${requestedOnly} native dispatch(es) are internally consistent with requested model/effort/type, ` +
+      'but the host supplied no independently observed runtime identity',
+  );
 }
 
 const ACTOR_EVENT_TYPES = new Set(['actor_dispatched', 'actor_completed', 'actor_failed']);

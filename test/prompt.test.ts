@@ -119,6 +119,7 @@ ${TASK}
 
 - Collective output: ReviewReport[]. Your output: ReviewReport.
 - Write exactly one artifact to \`artifacts/cross-review.architect_fable.json\`.
+- Artifact paths beginning with \`artifacts/\` are relative to the run directory \`.fadeno/runs/${RUN_ID}/\`, not the repository root.
 - Media type: application/json.
 - Emit JSON only — no prose, no code fences around it — conforming to this schema:
 
@@ -131,7 +132,7 @@ ${schemaText}
 
 ## Cooperative progress
 
-- Status sidecar: \`.fadeno/progress/${RUN_ID}/cross_review--architect_fable.json\` (workspace-relative, ephemeral, never commit it; create parent directories if needed).
+- Status sidecar: \`.fadeno/progress/${RUN_ID}/cross_review--architect_fable.json\` (repository-root-relative, ephemeral, never commit it; create parent directories if needed).
 - Update it after meaningful phases and whenever blocked or waiting for input. Write a JSON object with:
 - Keep reports concise and never include secrets, credentials, raw prompts, or private reasoning.
 

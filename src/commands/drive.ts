@@ -1242,9 +1242,10 @@ function assembleCompositePrompt(
       ? '- Format: Markdown.'
       : `- Format: JSON satisfying .fadeno/schemas/${plan.artifactType}.schema.json.`,
     `- The director records it at ${plan.outputPath}.`,
+    `- That artifact path is relative to run directory .fadeno/runs/${ctx.runId}/, not the repository root.`,
     '',
     '## Cooperative progress',
-    `Update ${progressPath} at meaningful phases using the Fadeno progress JSON shape.`,
+    `Update repository-root-relative ${progressPath} at meaningful phases using the Fadeno progress JSON shape.`,
     'Progress is attested observability only and never controls a gate. Do not include secrets or private reasoning.',
     '',
   ];

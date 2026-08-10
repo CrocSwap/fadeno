@@ -131,7 +131,10 @@ function parseProgressReport(bytes: Buffer): DispatchProgressReport {
   const allowed = new Set(['state', 'phase', 'summary', 'completed', 'current', 'next', 'blockers', 'updated_at']);
   const unknown = Object.keys(doc).filter((key) => !allowed.has(key));
   if (unknown.length > 0) throw new HostDispatchError(`progress report has unknown field(s): ${unknown.join(', ')}.`);
-  if (typeof doc.state !== 'string' || !PROGRESS_STATES.has(doc.state as DispatchProgressState)) {
+  // Common host-agent variants are normalized at this non-gating boundary;
+  // the ledger still records the canonical vocabulary.
+  const state = doc.state === 'in_progress' ? 'running' : doc.state;
+  if (typeof state !== 'string' || !PROGRESS_STATES.has(state as DispatchProgressState)) {
     throw new HostDispatchError(`progress report state must be one of: ${[...PROGRESS_STATES].join(', ')}.`);
   }
   const optionalString = (key: string, max: number): string | undefined => {
@@ -144,11 +147,12 @@ function parseProgressReport(bytes: Buffer): DispatchProgressReport {
   const optionalStrings = (key: string): string[] | undefined => {
     const item = doc[key];
     if (item === undefined) return undefined;
-    if (!Array.isArray(item) || item.some((entry) => typeof entry !== 'string' || entry.trim() === '' || entry.length > 500)) {
+    const items = typeof item === 'string' ? [item] : item;
+    if (!Array.isArray(items) || items.some((entry) => typeof entry !== 'string' || entry.trim() === '' || entry.length > 500)) {
       throw new HostDispatchError(`progress report ${key} must be an array of non-empty strings up to 500 characters.`);
     }
-    if (item.length > 50) throw new HostDispatchError(`progress report ${key} exceeds 50 entries.`);
-    return item as string[];
+    if (items.length > 50) throw new HostDispatchError(`progress report ${key} exceeds 50 entries.`);
+    return items as string[];
   };
   const updatedAt = optionalString('updated_at', 100);
   if (updatedAt != null && Number.isNaN(Date.parse(updatedAt))) {
@@ -161,7 +165,7 @@ function parseProgressReport(bytes: Buffer): DispatchProgressReport {
   const next = optionalString('next', 1_000);
   const blockers = optionalStrings('blockers');
   return {
-    state: doc.state as DispatchProgressState,
+    state: state as DispatchProgressState,
     ...(phase != null ? { phase } : {}),
     ...(summary != null ? { summary } : {}),
     ...(completed != null ? { completed } : {}),
@@ -399,7 +403,7 @@ export function requestHostDispatch(opts: HostDispatchRequestOptions): HostDispa
       map_member: opts.mapMember,
       generation: opts.generation,
       logical_artifact: opts.logicalArtifact,
-      host_attested: ['model', 'reasoning_effort', 'agent_type', 'agent_id'],
+      requested_identity: ['model', 'reasoning_effort', 'agent_type'],
       ...(opts.validationErrors != null ? { validation_errors: opts.validationErrors } : {}),
       ...(opts.repairAppendix != null ? { repair_appendix: opts.repairAppendix } : {}),
     },
@@ -449,6 +453,7 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
       workspace: opts.workspace,
       branch: opts.branch,
       host_attested: true,
+      identity_evidence: 'requested_only',
       attestation: {
         model: request.model,
         reasoning_effort: request.reasoningEffort,

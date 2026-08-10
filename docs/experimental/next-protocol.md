@@ -231,8 +231,9 @@ dispatch-complete <run> <dispatch-id> --output <temporary-file> [--commit <sha>]
 dispatch-fail <run> <dispatch-id> --reason <text>
 ```
 
-The start receipt appends the existing `actor_dispatched` event and explicitly
-attests native model, reasoning effort, agent type, and agent identity. A valid
+The start receipt appends the existing `actor_dispatched` event and records the
+requested native model, reasoning effort, and agent type plus the supplied
+agent identity. These are `requested_only`, not independently observed. A valid
 completion is manifested at the planned immutable path; invalid bytes are
 preserved under `artifacts/attempts/`. Repeated drives reuse request ids, and
 repeated receipts are idempotent for the same native identity or output digest.
@@ -265,14 +266,15 @@ observations are attested, not recomputable, and are forbidden as gate inputs.
   terminal lifecycles;
 - host prompt snapshots and successful output manifests match their digests;
 - completed runs have no unresolved host requests;
-- native model, effort, and agent identity are explicitly attested or visibly
-  skipped when no host dispatch is present;
+- requested native model, effort, and agent type remain internally consistent
+  with the profile and receipts; runtime identity is visibly skipped/unverified
+  unless the host supplies independently observed metadata;
 - human decisions select declared options and resolve at most once;
 - run terminal status agrees with terminal events.
 
-Adapter attestations that cannot be independently recomputed must be labeled as
-attested. Missing evidence must be reported as skipped/unverifiable rather than
-silently treated as valid.
+Adapter claims that cannot be independently recomputed must be labeled
+`requested_only`, not verified attestation. Missing runtime identity evidence
+must be reported as skipped/unverifiable rather than silently treated as valid.
 
 `fadeno show` is the human projection, not a dump of normalized events. By
 default it shows logical steps, decisions, failures, active artifacts, and a

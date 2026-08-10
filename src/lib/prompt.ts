@@ -186,6 +186,10 @@ function renderOutput(ctx: PromptContext): string[] {
     lines.push(`- Output: ${out.collectiveType || out.memberType}.`);
   }
   lines.push(`- Write exactly one artifact to \`${out.path}\`.`);
+  lines.push(
+    `- Artifact paths beginning with \`artifacts/\` are relative to the run directory ` +
+      `\`.fadeno/runs/${ctx.runId}/\`, not the repository root.`,
+  );
   lines.push(`- Media type: ${out.mediaType}.`);
 
   if (out.schemaKind && ctx.schemaText != null) {
@@ -238,7 +242,7 @@ export function renderStepPrompt(ctx: PromptContext): string {
 
   const progressPath = progressSidecarPath(ctx.runId, ctx.step, ctx.actor);
   lines.push('## Cooperative progress', '');
-  lines.push(`- Status sidecar: \`${progressPath}\` (workspace-relative, ephemeral, never commit it; create parent directories if needed).`);
+  lines.push(`- Status sidecar: \`${progressPath}\` (repository-root-relative, ephemeral, never commit it; create parent directories if needed).`);
   lines.push('- Update it after meaningful phases and whenever blocked or waiting for input. Write a JSON object with:');
   lines.push('- Keep reports concise and never include secrets, credentials, raw prompts, or private reasoning.');
   lines.push('', '```json', '{');
