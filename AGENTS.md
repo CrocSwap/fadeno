@@ -99,10 +99,13 @@ asked); real guarantees come from git/CI/pre-commit/hooks (tier 2). See
 | `docs/` | This guide's companions + the design spec, roadmap, and `product/` (marketing — **not** for code contributors). | — |
 | `.claude-plugin/marketplace.json` | Makes the repo itself a one-repo plugin marketplace. | — |
 
-The repo **dogfoods itself**: there's a gitignored `.fadeno/` at the root (a real
-`init` instance) that `npm run validate:self` checks. The committed,
-source-of-truth playbooks/schemas live under `templates/common/fadeno/`, not in
-that gitignored tree.
+The repo **dogfoods itself**: there may be a gitignored `.fadeno/` at the root (a
+real `init` instance). `npm run validate:self` first validates a temporary,
+clean projection of the committed templates, then also checks that local
+dogfood installation when it exists. It is read-only: refresh stale generated
+definitions deliberately rather than silently overwriting local executors or
+playbooks. The committed, source-of-truth playbooks/schemas live under
+`templates/common/fadeno/`, not in the gitignored tree.
 
 ## Invariants — don't break these
 
@@ -140,7 +143,7 @@ npm test               # node --test over test/**/*.test.ts (no test-framework d
 npm run dev -- --help  # run the CLI from source: node src/cli.ts <args>
 npm run build          # tsc → dist/ (rewrites .ts imports to .js), chmods the bin
 npm run build:plugin   # regenerate plugin/ from templates/ + rebuild the bundled bin
-npm run validate:self  # validate the repo's own (gitignored) .fadeno/ playbooks
+npm run validate:self  # validate committed templates, then local dogfood when present
 ```
 
 Runtime deps are only `ajv` + `yaml`; arg parsing and tests use Node built-ins.
