@@ -76,7 +76,9 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
   copyTree(join(tpl, 'common', 'commands'), join(outDir, 'commands'), force, results);
 
   // Subagents: reuse the Claude markdown agent definitions (no hooks/mcp/perms,
-  // which plugin agents disallow). They namespace as fadeno:worker / :reviewer / :judge.
+  // which plugin agents disallow). They namespace as fadeno:worker / :reviewer /
+  // :judge, plus the fadeno:dispatch-* proxies that relay archetype-shaped
+  // subtasks to `fadeno dispatch` (loadouts-and-dispatch.md, plugin surface).
   copyTree(join(tpl, 'claude', 'claude-agents'), join(outDir, 'agents'), force, results);
 
   return { outDir, results };
