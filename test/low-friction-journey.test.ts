@@ -14,6 +14,9 @@ import { runUse } from '../src/commands/use.ts';
 import { runVendor } from '../src/commands/vendor.ts';
 import { runVerify } from '../src/commands/verify.ts';
 import { userPaths, type UserPathOptions } from '../src/lib/user-paths.ts';
+import { LedgerWriter } from '../src/lib/run-ledger-write.ts';
+import { readEvents } from '../src/lib/run-ledger.ts';
+import { runDrive } from '../src/commands/drive.ts';
 import { exists, read, tempRepo } from './helpers.ts';
 
 const REPO = join(import.meta.dirname, '..');
@@ -77,6 +80,47 @@ test('setup remembers Codex so later loadout switches materialize native agents 
   const native = runUse({ repoRoot: root, userPathOptions: paths, name: 'native' });
   assert.ok(native.steering, 'remembered Codex harness should trigger materialization without --codex');
   assert.ok(existsSync(join(paths.home!, '.codex', 'agents', 'fadeno-worker.toml')));
+});
+
+test('drive recovers a command start left without a terminal receipt', (t) => {
+  const root = tempRepo(t);
+  const paths = isolatedUser(root);
+  const run = runNewRun({
+    repoRoot: root,
+    userPathOptions: paths,
+    playbook: 'code-change-review',
+    task: 'recover interrupted dispatch',
+    now: new Date('2026-08-11T03:00:00.000Z'),
+  });
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), [
+    'executors:',
+    '  fail:',
+    '    adapter: command',
+    `    command: [${JSON.stringify(process.execPath)}, -e, ${JSON.stringify('process.exit(7)')}]`,
+    'loadouts:',
+    '  broken: { worker: fail, reviewer: fail, judge: fail }',
+    'default_loadout: broken',
+    'bindings: { "*": fail }',
+    '',
+  ].join('\n'));
+  new LedgerWriter(run.runDir).append({
+    type: 'actor_dispatched',
+    step: 'plan',
+    actor: 'planner',
+    step_execution_id: 'plan@1',
+    actor_call_id: 'plan@1/planner@1',
+    attempt: 1,
+    executor: 'fail',
+  }, new Date('2026-08-11T03:00:01.000Z'));
+
+  const result = runDrive({ repoRoot: root, userPathOptions: paths, run: run.runId, env: null });
+  assert.equal(result.outcome, 'executor_failed');
+  const recovered = readEvents(run.runDir).events.find((event) =>
+    event.type === 'actor_failed' && event.extra.reason === 'engine_interrupted',
+  );
+  assert.equal(recovered?.extra.recovered, true);
+  assert.match(result.actions.join('\n'), /recovered 1 interrupted command dispatch receipt/);
 });
 
 test('doctor checks a repo-selected executable without executing it', (t) => {

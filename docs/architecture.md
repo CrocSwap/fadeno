@@ -121,6 +121,10 @@ back to ordinary file completion when no specialized candidates apply.
   gate format-0.3 readers behind explicit 0.2 compatibility mode.
 - **`host-dispatch.ts`** — durable native-host request/start/terminal receipt
   protocol with immutable output placement and attempt evidence.
+- **Command dispatch recovery** — a normal signal produces `actor_failed`
+  immediately; if the engine is hard-killed before it can append, the next
+  `fadeno drive` closes every dangling command start with a recovered
+  `engine_interrupted` terminal receipt before retrying.
 - **`executors.ts`** — the executor profile (`.fadeno/executors.yaml`): named
   executors (`command`/`host` adapters), per-role `bindings`, and named
   **loadouts** — archetype → executor tables, the switchable unit of the

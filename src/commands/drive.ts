@@ -187,6 +187,46 @@ function freshEvents(runDir: string): RunEvent[] {
   }
 }
 
+/**
+ * A hard-killed engine cannot append from a signal handler. On the next drive,
+ * close every command-backed start that has no terminal event so the ledger
+ * never remains permanently ambiguous. Native host starts carry dispatch_id
+ * and are recovered through the host receipt protocol instead.
+ */
+function recoverInterruptedCommandDispatches(ctx: EngineCtx): number {
+  const events = freshEvents(ctx.runDir);
+  const terminal = new Set(
+    events
+      .filter((event) => event.type === 'actor_completed' || event.type === 'actor_failed')
+      .map((event) => event.extra.actor_call_id)
+      .filter((value): value is string => typeof value === 'string'),
+  );
+  const dangling = events.filter((event) =>
+    event.type === 'actor_dispatched' &&
+    typeof event.extra.actor_call_id === 'string' &&
+    event.extra.dispatch_id == null &&
+    !terminal.has(event.extra.actor_call_id),
+  );
+  for (const event of dangling) {
+    appendEvent(ctx.runDir, {
+      type: 'actor_failed',
+      step: event.step,
+      actor: event.extra.actor ?? null,
+      step_execution_id: event.extra.step_execution_id,
+      actor_call_id: event.extra.actor_call_id,
+      attempt: event.extra.attempt,
+      executor: event.extra.executor,
+      reason: 'engine_interrupted',
+      error: 'the previous drive process ended before recording a terminal command receipt',
+      recovered: true,
+    }, ctx.now);
+  }
+  if (dangling.length > 0) {
+    ctx.act(`recovered ${dangling.length} interrupted command dispatch receipt(s)`);
+  }
+  return dangling.length;
+}
+
 function parseBinds(bind: string[] | undefined): Map<string, string> {
   const out = new Map<string, string>();
   for (const entry of bind ?? []) {
@@ -548,6 +588,7 @@ function dispatchOnce(
   };
   if (session != null) dispatched.session = session;
   if (sessionId != null) dispatched.session_id = sessionId;
+  dispatched.engine_pid = process.pid;
   if (repairCore != null) {
     dispatched.repair_appendix = session === 'resumed' ? repairCore : `\n\n---\n${repairCore}`;
   }
@@ -591,6 +632,24 @@ function dispatchOnce(
       ctx.now,
     );
     return { kind: 'spawn_failed', detail: `${executor}: ${spawned.error.message}` };
+  }
+  if (spawned.signal != null) {
+    const stderrTail = (spawned.stderr ?? '').slice(-STDERR_TAIL);
+    appendEvent(
+      ctx.runDir,
+      {
+        type: 'actor_failed',
+        ...base,
+        reason: 'signal',
+        signal: spawned.signal,
+        stderr_tail: stderrTail,
+      },
+      ctx.now,
+    );
+    return {
+      kind: 'exit_nonzero',
+      detail: `${executor} was interrupted by ${spawned.signal} on ${stepId}${role ? ` (${role})` : ''}`,
+    };
   }
   if (spawned.status !== 0) {
     const stderrTail = (spawned.stderr ?? '').slice(-STDERR_TAIL);
@@ -1560,6 +1619,7 @@ export function runDrive(opts: DriveOptions): DriveResult {
     throw err;
   }
   const ctx: EngineCtx = { ...base, profile, activeLoadout };
+  recoverInterruptedCommandDispatches(ctx);
   if (opts.loadout != null && opts.loadout !== requestedLoadout && requestedLoadout != null) {
     appendEvent(
       ctx.runDir,

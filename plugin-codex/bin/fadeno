@@ -18887,6 +18887,33 @@ function freshEvents(runDir) {
     throw err;
   }
 }
+function recoverInterruptedCommandDispatches(ctx) {
+  const events = freshEvents(ctx.runDir);
+  const terminal2 = new Set(
+    events.filter((event) => event.type === "actor_completed" || event.type === "actor_failed").map((event) => event.extra.actor_call_id).filter((value) => typeof value === "string")
+  );
+  const dangling = events.filter(
+    (event) => event.type === "actor_dispatched" && typeof event.extra.actor_call_id === "string" && event.extra.dispatch_id == null && !terminal2.has(event.extra.actor_call_id)
+  );
+  for (const event of dangling) {
+    appendEvent(ctx.runDir, {
+      type: "actor_failed",
+      step: event.step,
+      actor: event.extra.actor ?? null,
+      step_execution_id: event.extra.step_execution_id,
+      actor_call_id: event.extra.actor_call_id,
+      attempt: event.extra.attempt,
+      executor: event.extra.executor,
+      reason: "engine_interrupted",
+      error: "the previous drive process ended before recording a terminal command receipt",
+      recovered: true
+    }, ctx.now);
+  }
+  if (dangling.length > 0) {
+    ctx.act(`recovered ${dangling.length} interrupted command dispatch receipt(s)`);
+  }
+  return dangling.length;
+}
 function parseBinds(bind) {
   const out = /* @__PURE__ */ new Map();
   for (const entry of bind ?? []) {
@@ -19140,6 +19167,7 @@ ${repairCore}`;
   };
   if (session != null) dispatched.session = session;
   if (sessionId != null) dispatched.session_id = sessionId;
+  dispatched.engine_pid = process.pid;
   if (repairCore != null) {
     dispatched.repair_appendix = session === "resumed" ? repairCore : `
 
@@ -19179,6 +19207,24 @@ ${repairCore}`;
       ctx.now
     );
     return { kind: "spawn_failed", detail: `${executor}: ${spawned.error.message}` };
+  }
+  if (spawned.signal != null) {
+    const stderrTail = (spawned.stderr ?? "").slice(-STDERR_TAIL);
+    appendEvent(
+      ctx.runDir,
+      {
+        type: "actor_failed",
+        ...base,
+        reason: "signal",
+        signal: spawned.signal,
+        stderr_tail: stderrTail
+      },
+      ctx.now
+    );
+    return {
+      kind: "exit_nonzero",
+      detail: `${executor} was interrupted by ${spawned.signal} on ${stepId}${role ? ` (${role})` : ""}`
+    };
   }
   if (spawned.status !== 0) {
     const stderrTail = (spawned.stderr ?? "").slice(-STDERR_TAIL);
@@ -19944,6 +19990,7 @@ function runDrive(opts) {
     throw err;
   }
   const ctx = { ...base, profile, activeLoadout };
+  recoverInterruptedCommandDispatches(ctx);
   if (opts.loadout != null && opts.loadout !== requestedLoadout && requestedLoadout != null) {
     appendEvent(
       ctx.runDir,
