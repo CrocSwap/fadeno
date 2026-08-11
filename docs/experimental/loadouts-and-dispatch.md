@@ -183,12 +183,20 @@ Steering ladder:
 
 Codex does not expose the same spawn-rewrite hook. Its opt-in installs project
 custom-agent brokers, then `fadeno steering apply <loadout> --codex --force`
-materializes one all-host loadout as the session-native baseline. Each role
-checks the kernel before every task: a matching host slot runs locally, a
-command slot dispatches out-of-process immediately, and a different host slot
-returns `restart_required`. Host executors are never recursively sent through
-`fadeno dispatch`. Switching the native baseline requires a fresh Codex
-session; switching to command executors does not.
+materializes every loadout slot: host slots become session-native agents and
+command slots become cheap brokers. Each role checks the kernel before every
+task: a matching host slot runs locally, a command slot dispatches out-of-process
+immediately, and a different host slot returns `restart_required`. Host
+executors are never recursively sent through `fadeno dispatch`. Applying changed
+agent definitions requires a fresh Codex session; switching to command
+executors takes effect at the next role invocation.
+
+This ambient precedence applies to ordinary ad-hoc role invocations and to
+future engine requests before they are minted. Once `fadeno drive` records a
+`host_dispatch_requested` event, that request is immutable: its delivered agent
+must resolve the run/dispatch pair against the run's profile snapshot, and the
+minted executor takes precedence over later environment, sticky-local, default,
+or live-profile changes.
 
 **What stays native:** Explore/Plan-style read-only scouting — cheap, tightly
 integrated with the harness's codebase tools, and not where quota pressure

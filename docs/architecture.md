@@ -63,8 +63,8 @@ assert on return values and filesystem effects instead of scraping stdout.
 | `runNext` | next-step JSON (`status`, `step`, `gate`, …) | Pure flow cursor over playbook + events; read-only. Logic in `lib/flow-cursor.ts`. |
 | `runLoadoutShow` / `…List` / `…Use` / `…Clear` | active loadout + slot tables | `use` pins `.fadeno/local/loadout`; `clear` removes it. Resolution logic in `lib/executors.ts`. |
 | `runDispatch` | executor report + evidence row | Ad-hoc archetype→executor dispatch; appends one row to `.fadeno/dispatches.jsonl`. Echo goes to stderr so stdout stays the executor's pure report. |
-| `runSteeringResolve` / `runSteeringApply` | hybrid mode / emitted Codex agents | Resolves native vs command vs restart-required per invocation; materializes a host-backed session baseline. |
-| `runToolComplete` | run update + artifact manifest | Atomically starts the exact next `tool_call` and records its result. |
+| `runSteeringResolve` / `runSteeringApply` | hybrid mode / emitted Codex agents | Resolves native vs command vs restart-required per invocation; materializes per-slot native host agents or cheap command brokers. |
+| `runToolComplete` | run update + artifact manifest | Validates a typed tool result before atomically starting the exact next `tool_call` and recording its result. |
 | `runPlugin` | `EmitResult[]` + `outDir` | Generates `plugin/` from templates. |
 | `runCompletion` / `runCompletionCandidates` | Bash source + candidate strings | Emits the `fadeno completion bash` script and serves its read-only candidate protocol. |
 
@@ -197,6 +197,13 @@ receipt commands:
   events and derives actor/step/total runtime. The director is the only ledger
   writer during this MVP.
 
+  `steering resolve --run <run> --dispatch-id <id>` is the engine-delivery
+  branch: it reads the unique immutable host request and run profile snapshot,
+  ignoring ambient loadout state. Native executor mismatch is a deterministic
+  restart requirement. Whole-trace verification accepts a historical failed
+  host attempt only when the same actor call has a later higher-ordinal valid
+  success; the final attempt must still succeed.
+
 Compositional playbooks use `lib/composite-flow.ts` instead of the legacy
 single cursor. It computes a pure runnable frontier from events. Canonical paths
 from `lib/node-instance.ts` distinguish map members and loop generations; drive
@@ -282,13 +289,15 @@ permissions, so `init` is the seam for this). Grok receives the shared
 capabilities and native `.grok/agents` definitions without an automatic
 `.grok/config.toml` mutation or permission grant.
 
-`--with-steering` is a separate, explicit opt-in for loadout-aware host
-delegation. On Codex, `runInit` selects honest unmaterialized brokers from
+`--with-steering` is a separate, explicit opt-in for loadout-aware delegation.
+On Codex, `runInit` selects honest unmaterialized brokers from
 `codex-steering-agents/` (also with `--data-only`, because Codex plugins cannot
 carry project custom agents). `fadeno steering apply <loadout> --codex --force`
-then materializes an all-host loadout into session-static role TOML. Before
-each task, matching host executor → native, command executor → dispatch proxy,
-and different host executor → restart required. Host adapters are never
+then materializes every required slot into session-static role TOML: host slots
+become native agents using their configured model/effort, while command slots
+become cheap brokers that delegate through `fadeno dispatch`. Before each task,
+matching host executor → native, command executor → dispatch proxy, and a
+different host executor → restart required. Host adapters are never
 recursively sent through `fadeno dispatch`. On Claude, init emits a local
 `PreToolUse` script under `.fadeno/local/` and non-destructively merges one
 `Agent` hook into `.claude/settings.local.json`. The hook first asks the CLI

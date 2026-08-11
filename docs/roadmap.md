@@ -70,7 +70,8 @@ general scheduler, or orchestration platform.
 - Opt-in loadout steering via `--with-steering`: hybrid Codex custom agents plus
   `fadeno steering apply`, and a selective Claude `PreToolUse` rewrite. Codex
   switches command slots live, executes host slots only when they match its
-  session-static native baseline, and reports `restart_required` otherwise;
+  session-static native/command-broker role agents, and reports
+  `restart_required` when a host slot needs a different native executor;
   Explore/Plan stays native. Grok steering remains unsupported.
 - **Validated end-to-end in live Claude Code sessions** (through v0.1.2): bundled
   CLI on PATH, `Skill(fadeno:*)` model-invocation, `/fadeno:*` slash commands in

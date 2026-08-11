@@ -231,6 +231,16 @@ dispatch-complete <run> <dispatch-id> --output <temporary-file> [--commit <sha>]
 dispatch-fail <run> <dispatch-id> --reason <text>
 ```
 
+The coordinator delivers the immutable actor prompt in an envelope beginning
+`# Fadeno engine step assignment` with both `run: <run-id>` and
+`dispatch_id: <dispatch-id>`. The Codex steering preflight resolves the pair
+with `fadeno steering resolve --archetype <a> [--native-executor <embedded-host>]`
+`--run <run-id> --dispatch-id <dispatch-id>`. This request-locked path reads
+the run's profile snapshot and rejects missing, terminal, duplicate, orphaned,
+or mismatched evidence. It never consults ambient loadout state or routes a
+host request through the command broker. Ordinary ad-hoc steering retains
+ambient loadout precedence.
+
 The start receipt appends the existing `actor_dispatched` event and records the
 requested native model, reasoning effort, and agent type plus the supplied
 agent identity. These are `requested_only`, not independently observed. A valid
@@ -264,6 +274,9 @@ observations are attested, not recomputable, and are forbidden as gate inputs.
 - execution bindings match the snapshotted profile or explicit override;
 - host dispatch requests are unique and have coherent request → start →
   terminal lifecycles;
+- an earlier failed host attempt in a completed run is accepted only when the
+  same actor call has a later, higher-ordinal valid successful retry; final,
+  unresolved, invalid, later-failed, and cross-actor attempts remain failures;
 - host prompt snapshots and successful output manifests match their digests;
 - completed runs have no unresolved host requests;
 - requested native model, effort, and agent type remain internally consistent

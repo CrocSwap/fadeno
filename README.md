@@ -208,6 +208,10 @@ fadeno dispatch-progress <run-id> <dispatch-id> --file <status.json> --source ag
 fadeno dispatch-complete <run-id> <dispatch-id> --output <temporary-file>
 fadeno dispatch-fail <run-id> <dispatch-id> --reason "blocked"
 
+# Engine-delivered Codex steering resolves the immutable request envelope:
+fadeno steering resolve --archetype worker --native-executor luna \
+  --run <run-id> --dispatch-id <dispatch-id>
+
 fadeno prompt <run-id> <step> --actor <role> \
   --no-record                                   # assemble a step's actor prompt (pipe to codex/claude)
 ```
@@ -226,6 +230,9 @@ The immutable prompt names an ephemeral progress sidecar. Agents or harnesses
 update that JSON at meaningful checkpoints; the host records provenance-labelled
 observations with `dispatch-progress`. Progress is attested observability, never
 a gate input.
+An earlier failed host attempt is accepted in a completed trace only when a
+higher-ordinal successful retry for the same actor call is recorded; final or
+unresolved failures remain verification failures.
 
 Compositional maps add `body`: Fadeno instantiates that child graph once per
 literal member. A body may contain a bounded loop, and a loop body may contain a
@@ -269,7 +276,7 @@ default_loadout: anthropic-primary
 fadeno loadout use openai-primary          # sticky for this machine (git-ignored) until cleared
 echo "task…" | fadeno dispatch --archetype worker   # ad-hoc: resolve → invoke → evidence row
 npx fadeno init --codex --with-steering    # steer Codex role subagents through that loadout
-fadeno steering apply codex-native --codex --force  # materialize an all-host native baseline
+fadeno steering apply codex-native --codex --force  # materialize native and command-broker role agents
 # or: npx fadeno init --claude --with-steering
 ```
 
@@ -282,12 +289,13 @@ record the resolution in their ledger and ad-hoc dispatches append to
 auditable after the fact.
 
 With `--with-steering`, expensive role-shaped subagent work follows that same
-resolver. Codex first installs honest, command-only brokers; use `fadeno
-steering apply <all-host-loadout> --codex --force` to materialize
-worker/reviewer/judge as session-native project agents with that loadout's model
-and effort, then start a fresh Codex session. Before each task the materialized
-agent resolves again: a matching host slot executes natively, a command slot
-switches immediately out-of-process, and a different host slot stops with
+resolver. Codex first installs honest, cheap command brokers; use `fadeno
+steering apply <loadout> --codex --force` to materialize each worker/reviewer/
+judge slot as either a native host agent (with that executor's model and effort)
+or a command broker (which delegates through `fadeno dispatch`). Start a fresh
+Codex session after applying changed definitions. Before each task, native
+agents resolve again: command slots switch immediately out-of-process, matching
+host slots execute natively, and a different host slot stops with
 `restart_required` instead of silently using the wrong model. Claude installs a
 local `PreToolUse` rewrite that redirects role launches to bundled dispatch
 proxies. Explore/Plan-style scouting stays native. Existing files retain the
