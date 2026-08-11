@@ -34,7 +34,8 @@ general scheduler, or orchestration platform.
 
 ## Shipped (v0)
 
-- CLI: `setup`, `use`, `status`, `doctor`, `vendor`, `evidence promote`, plus
+- CLI: `setup`, `use`, `status`, `doctor`, `vendor`, `uninstall`, `clean`,
+  `unvendor`, `evidence promote`, plus
   `init --codex|--claude|--grok [--with-hooks] [--with-steering|--no-steering] [--data-only] [--force]`,
   `validate [file] [--schema]`, `diagram [--format ascii|mermaid]`, `new-run`,
   `run`, `tool-complete`, `gate`, `prompt`, `next`, `drive`, `loadout`,
@@ -221,7 +222,19 @@ session-static and therefore still require one fresh session after setup/use.
 Grok has no steering integration. External command executors remain explicit,
 are announced with their sandbox boundary, and never fall back silently.
 
+Plugin skills now invoke a private launcher rather than relying on `PATH`.
+First setup installs a stable, manifest-tracked user runtime; managed Codex
+agents point there instead of into an ephemeral plugin cache. `uninstall` is
+ownership-aware, `clean` removes only repo-local runtime output, and `unvendor`
+uses the vendor lock's file digests. See
+[`distribution-lifecycle.md`](experimental/distribution-lifecycle.md).
+
 ## Other deferred work (roughly prioritized)
+
+- **Native distribution.** The bundled JavaScript runtime still requires Node
+  20. Signed platform binaries are deferred until Node is demonstrated to be
+  the dominant onboarding failure; the launcher/runtime boundary allows that
+  payload swap without changing the setup contract.
 
 0. **Dogfood friction (2026-08-02 demo regeneration)** — fix before/with the
    engine release: (a) shipped `runtime.md` map guidance and the cursor

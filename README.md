@@ -10,14 +10,19 @@ Stop re-typing *"be careful, plan, review, test"* every run. Define your workflo
 
 ## Quickstart
 
-```bash
-# After installing the Codex or Claude plugin, built-ins work in any Git repo:
-fadeno validate
-fadeno new-run code-change-review "Add CSV export for reports"
+Install the Fadeno plugin for your harness, start a fresh session, and ask the
+agent to set up Fadeno. The plugin's private CLI installs a stable user runtime
+and safe native defaults; no separate global `fadeno` install or repository
+initialization is required. Then ask for a normal task—the runner can use the
+built-in playbooks in any Git repository.
 
-# Optional one-time user-scoped setup (safe native defaults):
-fadeno setup --codex
+```text
+Set up Fadeno for Codex.
+Use Fadeno to add CSV export for reports, including review and tests.
 ```
+
+Terminal use is optional. Install the standalone npm CLI only when humans or CI
+need to invoke `fadeno` directly.
 
 ---
 
@@ -54,10 +59,24 @@ Fadeno is **harness-neutral**: the same playbooks run on Codex, Claude Code, and
 
 Requires Node.js ≥ 20.
 
-Installing the Codex or Claude plugin supplies the CLI, skills, schemas, starter
-playbooks, and safe native loadout. A repository does not need `.fadeno/`
-definitions to run a built-in playbook. Use `fadeno setup --codex` or
-`fadeno setup --claude` once only when user-scoped host integration is wanted.
+Installing the Codex or Claude plugin supplies skills, a private bundled CLI,
+schemas, starter playbooks, and a safe native loadout. On first setup that CLI
+copies itself to a stable user data path, records the harness integration, and
+materializes user-scoped agents where the host requires them. A repository does
+not need `.fadeno/` definitions to run a built-in playbook.
+
+| User | First-run path | Separate global CLI? |
+|------|----------------|----------------------|
+| Codex | Install plugin → fresh session → ask to “set up Fadeno for Codex” | No |
+| Claude Code | Install plugin → reload plugins → `/fadeno:setup` | No |
+| Terminal / CI / Grok | Install the npm package, then use `fadeno` or `npx fadeno` | Yes |
+
+`setup` is user-only: it does not write `.gitignore`, `.fadeno/`, or any other
+project file. Codex needs one fresh session after setup or a native-loadout
+change because its custom-agent definitions are session-static. Claude plugin
+skills and commands become active after `/reload-plugins` or a restart.
+
+Project installation is a separate, deliberate choice:
 
 ```bash
 # Codex target  → .agents/skills/, AGENTS.md, $-style invocation
@@ -118,18 +137,22 @@ all targets. Only the install dir, bootstrap file + invocation sigil, invocation
 policy, and subagent format differ. Grok uses `.grok/skills/`, `.grok/agents/`,
 and `AGENTS.md`; it does not create `.grok/config.toml` or change Claude settings.
 
-### Or install as a Claude Code plugin
+### Plugin-first installation
 
-`init --claude` copies the skills into one repo. For Claude Code, you can instead
-install Fadeno's **skills + role subagents once, for every project**, as a
-plugin. The plugin also carries the bundled CLI and immutable built-in
-definitions, so starter playbooks work without a project data seed. Use
+`init` copies capabilities into one repo. Codex and Claude Code users can instead
+install Fadeno once as a plugin for every project. Each plugin carries the
+bundled CLI and immutable built-in definitions, so starter playbooks work
+without a project data seed. Use
 `init --data-only` when you want only project-owned definitions. `vendor` is the
 deliberate full-capability path (skills, bootstrap, agents, definitions, and a
 lock); do not use it merely to make plugin built-ins available.
 
 ```bash
-# the Fadeno repo doubles as a plugin marketplace
+# Codex: the Fadeno repo contains the marketplace pointer and plugin payload
+codex plugin marketplace add CrocSwap/fadeno
+codex plugin add fadeno@fadeno
+
+# Claude Code: the same repo doubles as a Claude plugin marketplace
 /plugin marketplace add <owner>/fadeno      # or a local path for testing
 /plugin install fadeno@fadeno               # provides /fadeno:runner and /fadeno:builder
 
@@ -148,28 +171,50 @@ A full run makes many `fadeno` CLI calls, so `init --claude` pre-approves
 `Bash(fadeno:*)` in `.claude/settings.local.json` (local, git-ignored) — the CLI
 then stops prompting on every call. It's a per-user convenience, never committed;
 delete that allow rule to restore prompts. (Plugins can't grant Bash permissions
-to themselves, so this is seeded by `init` rather than the plugin.)
+to themselves; the explicit plugin setup instead adds a user-scoped rule for
+the stable managed-runtime path and records that exact rule for uninstall.)
 
 To test the plugin locally before publishing: `claude --plugin-dir ./plugin`.
 The `plugin/` directory is generated from the same templates as the CLI
 (`npm run build:plugin`), so the skills never drift.
 
-The Claude plugin is **self-contained**: it bundles the `fadeno` CLI as a single
-executable in `plugin/bin/` (auto-added to your PATH while the plugin is
-enabled), so the skills can call `fadeno validate` / `diagram` / `gate` with
-nothing else to install. A git-URL plugin install gives you a working `fadeno`
-out of the box.
+The Claude plugin is **self-contained**: every skill carries a private launcher
+for the bundled CLI in `plugin/bin/`. Skills do not depend on shell `PATH`.
+First setup copies that bundle to a stable user runtime so managed agents remain
+valid across plugin cache/version changes. A plugin install therefore gives the
+harness a working Fadeno runtime without claiming to install a global shell
+command.
 
 The Codex plugin carries the skills, invocation metadata, a self-contained
-`bin/fadeno`, and adjacent built-in definitions. `fadeno setup --codex` is only
-needed for user-scoped managed native agents; a fresh session is required after
-those agents change. Project overrides remain available through `fadeno vendor`
-or `fadeno steering apply ... --scope project`.
+`bin/fadeno`, and adjacent built-in definitions. `$fadeno-setup` installs the
+stable user runtime and user-scoped managed native agents; a fresh session is
+required after those agents change. Project overrides remain available through
+`fadeno vendor` or `fadeno steering apply ... --scope project`.
 
 Grok Build has native repo-local support through `npx fadeno init --grok`; this
 release does not add a separate Grok plugin generator or mutate Grok permission
 files. Use `--data-only` when the Grok session already has the shared skills from
 another compatible installation.
+
+### Ownership and removal
+
+Fadeno records plugin-created user integrations in
+`~/.local/state/fadeno/installations.json` (respecting XDG paths). Removal is
+ownership-aware: managed or byte-identical files are removed, while edited files
+are reported and preserved.
+
+```bash
+fadeno uninstall --codex               # remove one harness integration
+fadeno uninstall --all                 # remove all recorded integrations/runtime
+fadeno uninstall --purge-user-data --force
+fadeno clean                            # preview removal of repo-local runtime output
+fadeno clean --force                    # remove runs/progress/local dispatch state
+fadeno unvendor                         # remove digest-matching files from fadeno.lock
+```
+
+Global uninstall never walks repositories. `clean` preserves project definitions
+and promoted evidence. `unvendor` preserves locally edited vendored files unless
+explicitly forced.
 
 ---
 

@@ -85,6 +85,7 @@ assert on return values and filesystem effects instead of scraping stdout.
 | `runSetup` / `runUse` | user paths, probes, loadout state, restart notices | Safe native setup and user-scoped selection. |
 | `runStatus` / `runDoctor` | effective routing / findings | Read-only diagnostics. |
 | `runVendor` / `runEvidencePromote` | lock / promoted receipt | Explicit committed project capability and evidence. |
+| `runUninstall` / `runClean` / `runUnvendor` | removed + preserved paths | Ownership-aware user removal, repo runtime cleanup, and digest-backed vendored removal. |
 | `runCompletion` / `runCompletionCandidates` | Bash source + candidate strings | Emits the `fadeno completion bash` script and serves its read-only candidate protocol. |
 
 All commands accept injectable `cwd` / `repoRoot` (and `now` where time matters)
@@ -316,7 +317,13 @@ Steering is enabled by default for Codex and Claude; `--no-steering` is the
 explicit opt-out and `--with-steering` remains a compatibility alias. On Codex,
 `runInit` selects honest unmaterialized brokers from `codex-steering-agents/`.
 `fadeno setup --codex` records the harness and materializes managed agents in
-the user Codex home. Later `fadeno use <loadout>` calls refresh them
+the user Codex home. When setup is invoked from a plugin, it first copies the
+bundled CLI to the stable user data directory and records runtime and harness
+ownership in the user state directory. Managed agents point at that stable
+runtime, never at a versioned plugin cache path. Setup is strictly user-scoped
+and does not modify the current repository. For Claude it also merges one exact
+stable-runtime Bash allow rule into user settings; uninstall removes only that
+recorded rule. Later `fadeno use <loadout>` calls refresh them
 automatically. `fadeno steering apply <loadout>
 --codex --scope project` remains the explicit project override and
 then materializes every required slot into session-static role TOML: host slots
@@ -365,7 +372,9 @@ Two non-obvious template rules:
 `name: runner` for the short `fadeno:runner` namespace), plus the shared
 `commands/`, the Claude `claude-agents/`, a setup skill and hook, and a manifest.
 The build adds a standalone CLI plus immutable built-in definitions under
-`plugin/bin/`; plugin users can run starter playbooks without project init.
+`plugin/bin/`; every skill also gets an executable private launcher under
+`scripts/fadeno.cjs`, so plugin operation does not depend on shell `PATH`. Plugin
+users can run starter playbooks without project init.
 `init --data-only` is the definitions-only project seam. `vendor` deliberately
 emits the full project capability surface plus definitions and a lock.
 
