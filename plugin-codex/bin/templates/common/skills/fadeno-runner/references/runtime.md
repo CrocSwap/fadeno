@@ -4,16 +4,17 @@ Operational detail for executing a playbook. Load this when you actually run one
 
 ## Running the `fadeno` CLI
 
-The runner shells out to `fadeno` (`new-run`, `run`, `gate`, `validate`,
-`diagram`). Prefer the bare command — when the plugin is enabled its `bin/` is on
-the Bash `PATH`. If bare `fadeno` is "command not found" (the plugin's PATH entry
-can lag a `/reload-plugins` within a session), call the bundled binary directly:
+The runner shells out to the CLI (`new-run`, `run`, `gate`, `validate`,
+`diagram`). A plugin skill must use its private `scripts/fadeno.cjs` launcher;
+this keeps the runtime independent of shell `PATH` and plugin-cache layout. The
+launcher resolves the bundled binary and marks the invocation as plugin-owned:
 
 ```
-"${CLAUDE_PLUGIN_ROOT}/bin/fadeno" <args>
+<skill-dir>/scripts/fadeno.cjs <args>
 ```
 
-For a repo-native (non-plugin) setup, `npx fadeno <args>` works. The CLI is
+On Windows, invoke the launcher with `node`. For a repo-native (non-plugin)
+setup, `npx fadeno <args>` works. The CLI is
 optional — you *can* hand-write `run.yaml` / `events.jsonl` — but it keeps the
 ledger schema-valid.
 

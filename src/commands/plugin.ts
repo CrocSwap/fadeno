@@ -65,6 +65,12 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
     results.push({ path: skillPath, status: emitFile(skillPath, md, force) });
     const references = join(tpl, 'common', 'skills', src, 'references');
     if (existsSync(references)) copyTree(references, join(outDir, 'skills', dst, 'references'), force, results);
+    const launcherPath = join(outDir, 'skills', dst, 'scripts', 'fadeno.cjs');
+    results.push({
+      path: launcherPath,
+      status: emitFile(launcherPath, readFileSync(join(tpl, 'common', 'plugin', 'fadeno.cjs'), 'utf8'), force),
+    });
+    chmodSync(launcherPath, 0o755);
   }
 
   // Slash-command entry points (/fadeno:runner, /fadeno:builder). Plugin skills
@@ -77,7 +83,7 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
   // :judge, plus the fadeno:dispatch-* proxies that relay archetype-shaped
   // subtasks to `fadeno dispatch` (loadouts-and-dispatch.md, plugin surface).
   copyTree(join(tpl, 'claude', 'claude-agents'), join(outDir, 'agents'), force, results);
-  // Claude plugin hook surface: use the plugin-local `fadeno` on PATH and keep
+  // Claude plugin hook surface: use the plugin-local bundled `fadeno` and keep
   // the hook selective/inert for the native loadout.
   const hookPath = join(outDir, 'hooks', 'dispatch-steering.mjs');
   results.push({
@@ -157,6 +163,12 @@ export function runCodexPlugin(opts: PluginOptions = {}): PluginResult {
     const policy = readFileSync(join(tpl, 'codex', 'openai', `${skill}.yaml`), 'utf8');
     const policyPath = join(outDir, 'skills', skill, 'agents', 'openai.yaml');
     results.push({ path: policyPath, status: emitFile(policyPath, policy, force) });
+    const launcherPath = join(outDir, 'skills', skill, 'scripts', 'fadeno.cjs');
+    results.push({
+      path: launcherPath,
+      status: emitFile(launcherPath, readFileSync(join(tpl, 'common', 'plugin', 'fadeno.cjs'), 'utf8'), force),
+    });
+    chmodSync(launcherPath, 0o755);
   }
 
   // The committed standalone bundle is copied during generation and rebuilt by

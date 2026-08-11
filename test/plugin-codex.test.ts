@@ -57,6 +57,9 @@ test('codex plugin: skills are the shared bodies + in-plugin invocation policy',
       readFileSync(join(REPO, 'templates', 'codex', 'openai', `${skill}.yaml`), 'utf8'),
       `${skill}/agents/openai.yaml drifted from templates/codex/openai`,
     );
+    const launcher = join(outDir, 'skills', skill, 'scripts', 'fadeno.cjs');
+    assert.ok(exists(outDir, `skills/${skill}/scripts/fadeno.cjs`), `${skill} must carry its private CLI launcher`);
+    assert.notEqual(statSync(launcher).mode & 0o111, 0, `${skill} CLI launcher must be executable`);
   }
 
   // Policy correctness: runner fires implicitly; builder/driver are explicit-only.

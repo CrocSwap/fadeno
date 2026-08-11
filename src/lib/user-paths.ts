@@ -12,12 +12,17 @@ export interface UserPathOptions {
 export interface FadenoUserPaths {
   configHome: string;
   stateHome: string;
+  dataHome: string;
   configDir: string;
   stateDir: string;
+  dataDir: string;
   executorsFile: string;
   configFile: string;
   loadoutFile: string;
   harnessFile: string;
+  installationsFile: string;
+  managedRuntimeDir: string;
+  managedCli: string;
 }
 
 /**
@@ -35,17 +40,27 @@ export function userPaths(options: UserPathOptions = {}): FadenoUserPaths {
   const stateHome = env.FADENO_STATE_HOME ??
     (windows ? env.LOCALAPPDATA : env.XDG_STATE_HOME) ??
     (windows ? join(home, 'AppData', 'Local') : join(home, '.local', 'state'));
+  const dataHome = env.FADENO_DATA_HOME ??
+    (windows ? env.LOCALAPPDATA : env.XDG_DATA_HOME) ??
+    (windows ? join(home, 'AppData', 'Local') : join(home, '.local', 'share'));
   const configDir = join(configHome, 'fadeno');
   const stateDir = join(stateHome, 'fadeno');
+  const dataDir = join(dataHome, 'fadeno');
+  const managedRuntimeDir = join(dataDir, 'runtime');
   return {
     configHome,
     stateHome,
+    dataHome,
     configDir,
     stateDir,
+    dataDir,
     executorsFile: join(configDir, 'executors.yaml'),
     configFile: join(configDir, 'config.yaml'),
     loadoutFile: join(stateDir, 'loadout'),
     harnessFile: join(stateDir, 'harness'),
+    installationsFile: join(stateDir, 'installations.json'),
+    managedRuntimeDir,
+    managedCli: join(managedRuntimeDir, windows ? 'fadeno.cmd' : 'fadeno'),
   };
 }
 

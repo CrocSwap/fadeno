@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runSteeringApply, type SteeringApplyResult } from './steering.ts';
 import { loadExecutorProfile, readLocalLoadout, readUserLoadout } from '../lib/executors.ts';
@@ -61,6 +61,7 @@ export function runUse(opts: UseOptions): UseResult {
         target: 'codex',
         scope: 'user',
         userPathOptions: opts.userPathOptions,
+        cliPath: existsSync(paths.managedCli) ? paths.managedCli : undefined,
       })
     : null;
   const steeringChanged = steering?.restartRequired ?? false;

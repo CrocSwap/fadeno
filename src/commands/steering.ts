@@ -19,7 +19,7 @@ import { emitFile, type EmitResult } from '../lib/fsutil.ts';
 import { HostDispatchError, readHostDispatchRequest, type HostDispatchRequestLookup } from '../lib/host-dispatch.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
-import type { UserPathOptions } from '../lib/user-paths.ts';
+import { userPaths, type UserPathOptions } from '../lib/user-paths.ts';
 
 export class SteeringError extends Error {}
 
@@ -296,8 +296,10 @@ function renderCodexNativeAgent(
   archetype: string,
   executorName: string,
   spec: Extract<ExecutorSpec, { adapter: 'host' }>,
+  cliPath: string,
 ): string {
   const behavior = ROLE_BEHAVIOR[archetype] ?? `Perform the ${archetype} role exactly as requested.`;
+  const cli = /\s/.test(cliPath) ? JSON.stringify(cliPath) : cliPath;
   return `name = ${tomlString(archetype)}
 description = ${tomlString(`Fadeno hybrid ${archetype}: native on the session baseline, command-dispatched when the active loadout switches providers.`)}
 model = ${tomlString(spec.model)}
@@ -310,16 +312,16 @@ You are Fadeno's hybrid ${archetype}. Do not spawn subagents.
 Before every task, inspect whether the delivery begins with \`# Fadeno engine step assignment\`.
 For an engine assignment, the host coordinator must provide both \`run: <run-id>\`
 and \`dispatch_id: <dispatch-id>\` in the delivery envelope. Run:
-\`fadeno steering resolve --archetype ${archetype} --native-executor ${executorName} --run <run-id> --dispatch-id <dispatch-id>\`
+\`${cli} steering resolve --archetype ${archetype} --native-executor ${executorName} --run <run-id> --dispatch-id <dispatch-id>\`
 If either identity is absent or validation fails, stop and report the resolver
 error; never fall back to the ordinary ambient preflight for an engine assignment.
 For an ordinary task beginning with the ordinary \`# Fadeno step assignment\` heading, run:
-\`fadeno steering resolve --archetype ${archetype} --native-executor ${executorName}\`
+\`${cli} steering resolve --archetype ${archetype} --native-executor ${executorName}\`
 
 - mode=native: ${behavior}
 - mode=command: write the ENTIRE task prompt you received verbatim to a unique
   file under .fadeno/local/prompts/, run
-  \`fadeno dispatch --archetype ${archetype} --prompt-file <path>\`, and relay stdout
+  \`${cli} dispatch --archetype ${archetype} --prompt-file <path>\`, and relay stdout
   verbatim. On a non-zero exit, report the error and do not perform the
   task yourself. The command executor runs outside this subagent's sandbox.
 - mode=restart_required: stop and relay the resolver's restart instruction.
@@ -330,7 +332,8 @@ different model or executor.
 `;
 }
 
-function renderCodexCommandBroker(archetype: string): string {
+function renderCodexCommandBroker(archetype: string, cliPath: string): string {
+  const cli = /\s/.test(cliPath) ? JSON.stringify(cliPath) : cliPath;
   return `name = ${tomlString(archetype)}
 description = ${tomlString(`Fadeno command broker ${archetype}: delegates command slots through the active loadout and stops when a host slot needs native materialization.`)}
 model = "gpt-5.6-luna"
@@ -343,15 +346,15 @@ You are Fadeno's command-broker ${archetype}. Do not spawn subagents.
 Before every task, inspect whether the delivery begins with \`# Fadeno engine step assignment\`.
 For an engine assignment, the host coordinator must provide both \`run: <run-id>\`
 and \`dispatch_id: <dispatch-id>\` in the delivery envelope. Run:
-\`fadeno steering resolve --archetype ${archetype} --run <run-id> --dispatch-id <dispatch-id>\`
+\`${cli} steering resolve --archetype ${archetype} --run <run-id> --dispatch-id <dispatch-id>\`
 If either identity is absent or validation fails, stop and report the resolver
 error; never fall back to the ordinary ambient preflight for an engine assignment.
 For an ordinary task beginning with the ordinary \`# Fadeno step assignment\` heading, run:
-\`fadeno steering resolve --archetype ${archetype}\`
+\`${cli} steering resolve --archetype ${archetype}\`
 
 - mode=command: write the ENTIRE task prompt you received verbatim to a unique
   file under .fadeno/local/prompts/, run
-  \`fadeno dispatch --archetype ${archetype} --prompt-file <path>\`, and relay stdout verbatim.
+  \`${cli} dispatch --archetype ${archetype} --prompt-file <path>\`, and relay stdout verbatim.
   On a non-zero exit, report the error and do not perform the
   task yourself.
 - mode=native or mode=restart_required: stop and relay the resolver's
@@ -371,6 +374,8 @@ export interface SteeringApplyOptions extends CommonOptions {
   force?: boolean;
   /** Advanced override; normal setup/use materialize at user scope. */
   scope?: 'project' | 'user';
+  /** Stable managed CLI used by user-scoped agents; bare `fadeno` is fallback. */
+  cliPath?: string;
 }
 
 export interface SteeringApplyResult {
@@ -430,6 +435,8 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
   const results: EmitResult[] = [];
   const scope = opts.scope ?? 'project';
   const agentDir = codexAgentDir(scope, repoRoot, opts.userPathOptions);
+  const managedCli = userPaths(opts.userPathOptions).managedCli;
+  const cliPath = opts.cliPath ?? (scope === 'user' && existsSync(managedCli) ? managedCli : 'fadeno');
   for (const archetype of ['worker', 'reviewer', 'judge']) {
     const executorName = slots[archetype];
     const spec = executorName == null ? null : profile.executors[executorName];
@@ -453,12 +460,12 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
       materialization[archetype] = {
         kind: 'native', adapter: 'host', executor: executorName, model: spec.model,
       };
-      body = renderCodexNativeAgent(archetype, executorName, spec);
+      body = renderCodexNativeAgent(archetype, executorName, spec, cliPath);
     } else {
       materialization[archetype] = {
         kind: 'command-broker', adapter: 'command', executor: executorName, model: spec.model,
       };
-      body = renderCodexCommandBroker(archetype);
+      body = renderCodexCommandBroker(archetype, cliPath);
     }
     const managed = scope === 'user'
       ? `# fadeno:managed version=${packageVersion()} digest=${sha256Hex(body)}\n`

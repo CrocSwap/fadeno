@@ -66,6 +66,9 @@ const COMMANDS: Record<string, CommandSpec> = {
   status: command({ '--verbose': NONE }),
   doctor: command({ '--codex': NONE, '--claude': NONE }),
   vendor: command({ '--codex': NONE, '--claude': NONE, '--grok': NONE, '--with-hooks': NONE, '--force': NONE }),
+  uninstall: command({ '--codex': NONE, '--claude': NONE, '--all': NONE, '--purge-user-data': NONE, '--force': NONE }),
+  clean: command({ '--force': NONE }),
+  unvendor: command({ '--force': NONE }),
   evidence: command({}, ['free'], { promote: command({}, ['run']) }),
   init: command({
     '--codex': NONE,

@@ -28,7 +28,7 @@ Follow these steps exactly, using Bash:
 2. Run the dispatch:
 
    ```bash
-   fadeno dispatch --archetype reviewer --prompt-file "$f"
+   "${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/bin/}fadeno" dispatch --archetype reviewer --prompt-file "$f"
    ```
 
 3. Relay the command's stdout report **verbatim** as your final response. Do

@@ -1,11 +1,19 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { runSteeringApply, type SteeringApplyResult } from './steering.ts';
 import { loadExecutorProfile, type ExecutorProfile } from '../lib/executors.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
 import { userPaths, type FadenoUserPaths, type UserPathOptions } from '../lib/user-paths.ts';
-import { ensureFadenoIgnore } from '../lib/source-control.ts';
+import {
+  installManagedRuntime,
+  readInstallationManifest,
+  recordHarnessInstallation,
+  writeInstallationManifest,
+  type ManagedPermissionRule,
+} from '../lib/installations.ts';
 
 export class SetupError extends Error {}
 
@@ -18,6 +26,8 @@ export interface SetupOptions {
   repoRoot?: string;
   userPathOptions?: UserPathOptions;
   probeCommand?: (command: string) => CommandProbe;
+  /** Plugin `bin/` directory; normally supplied by its launcher environment. */
+  runtimeSource?: string | null;
 }
 
 export interface CommandProbe {
@@ -117,6 +127,54 @@ function rememberHarness(paths: FadenoUserPaths, target: Exclude<SetupTarget, nu
   created.push(paths.harnessFile);
 }
 
+function ensureClaudePermission(
+  paths: FadenoUserPaths,
+  options: UserPathOptions | undefined,
+  notices: string[],
+): ManagedPermissionRule | null {
+  if (!existsSync(paths.managedCli)) return null;
+  const env = options?.env ?? process.env;
+  const settingsPath = join(env.CLAUDE_CONFIG_DIR?.trim() || join(options?.home ?? homedir(), '.claude'), 'settings.json');
+  const createdFile = !existsSync(settingsPath);
+  let data: Record<string, unknown> = {};
+  if (!createdFile) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(settingsPath, 'utf8'));
+      if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        notices.push(`Claude user settings ${settingsPath} are not an object; permission setup left them untouched.`);
+        return null;
+      }
+      data = parsed as Record<string, unknown>;
+    } catch {
+      notices.push(`Claude user settings ${settingsPath} are malformed; permission setup left them untouched.`);
+      return null;
+    }
+  }
+  const permissions = data.permissions == null
+    ? {}
+    : typeof data.permissions === 'object' && !Array.isArray(data.permissions)
+      ? data.permissions as Record<string, unknown>
+      : null;
+  if (permissions == null || (permissions.allow != null && !Array.isArray(permissions.allow))) {
+    notices.push(`Claude permission settings in ${settingsPath} have an unexpected shape; they were left untouched.`);
+    return null;
+  }
+  const allow = [...(permissions.allow as unknown[] | undefined ?? [])];
+  if (/[\r\n)]/.test(paths.managedCli)) {
+    notices.push(`Managed runtime path ${paths.managedCli} cannot be represented safely in a Claude permission rule.`);
+    return null;
+  }
+  const rule = `Bash(${paths.managedCli}:*)`;
+  if (allow.includes(rule)) return null;
+  allow.push(rule);
+  permissions.allow = allow;
+  data.permissions = permissions;
+  mkdirSync(dirname(settingsPath), { recursive: true });
+  writeFileSync(settingsPath, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
+  notices.push(`Claude user permission added for the managed Fadeno runtime only: ${rule}`);
+  return { path: settingsPath, rule, createdFile };
+}
+
 /** One explicit, read-only-probe setup action for user-scoped integration. */
 export function runSetup(opts: SetupOptions = {}): SetupResult {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
@@ -124,7 +182,13 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
   const probeCommand = opts.probeCommand ?? probe;
   const probes = PROBES.map((item) => probeCommand(item.command));
   const created: string[] = [];
-  if (ensureFadenoIgnore(repoRoot)) created.push(`${repoRoot}/.gitignore`);
+  const setupNotices: string[] = [];
+  const manifestExisted = existsSync(paths.installationsFile);
+  const manifest = readInstallationManifest(opts.userPathOptions);
+  const runtimeSource = opts.runtimeSource !== undefined
+    ? opts.runtimeSource
+    : (opts.userPathOptions?.env ?? process.env).FADENO_BUNDLED_RUNTIME ?? null;
+  if (installManagedRuntime(paths, runtimeSource, manifest)) created.push(paths.managedRuntimeDir);
   ensureUserCatalog(paths, probes, created);
   if (opts.target != null) rememberHarness(paths, opts.target, created);
 
@@ -148,11 +212,36 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
       target: 'codex',
       scope: 'user',
       userPathOptions: opts.userPathOptions,
+      cliPath: existsSync(paths.managedCli) ? paths.managedCli : undefined,
     });
+  }
+  const priorPermissionRules = opts.target == null ? [] : manifest.harnesses[opts.target]?.permissionRules ?? [];
+  const addedPermission = opts.target === 'claude'
+    ? ensureClaudePermission(paths, opts.userPathOptions, setupNotices)
+    : null;
+  if (opts.target != null) {
+    const managedFiles = steering?.results
+      .map((item) => item.path)
+      .filter((path) => existsSync(path) && readFileSync(path, 'utf8').startsWith('# fadeno:managed')) ?? [];
+    const permissionRules = (addedPermission == null ? priorPermissionRules : [...priorPermissionRules, addedPermission])
+      .filter((item, index, all) => all.findIndex((other) => other.path === item.path && other.rule === item.rule) === index);
+    recordHarnessInstallation(
+      paths,
+      opts.target,
+      managedFiles,
+      manifest,
+      permissionRules,
+    );
+    if (!manifestExisted && !created.includes(paths.installationsFile)) created.push(paths.installationsFile);
+  } else if (manifest.runtime != null) {
+    writeInstallationManifest(paths, manifest);
+    if (!manifestExisted && !created.includes(paths.installationsFile)) created.push(paths.installationsFile);
   }
   const notices: string[] = [
     `Fadeno ${packageVersion()} is using bundled definitions; project files remain optional.`,
-    `User configuration was written under ${paths.configDir}; restart the current session if host integration was installed.`,
+    `User configuration and state live under ${paths.configDir} and ${paths.stateDir}; project files were not changed.`,
+    ...(manifest.runtime != null ? [`Managed runtime: ${manifest.runtime.path}`] : []),
+    ...setupNotices,
   ];
   if (opts.target === 'claude') {
     notices.push('Claude steering is installed by the plugin and remains inert while the native loadout is active.');

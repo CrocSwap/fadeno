@@ -5,6 +5,15 @@ description: Execute or resume Fadeno playbooks from the bundled catalog or proj
 
 # Fadeno Runner
 
+Resolve the CLI first: when `scripts/fadeno.cjs` exists beside this `SKILL.md`, use
+that plugin-bundled launcher for every command written below as `fadeno`
+(invoke it with `node` on Windows).
+Otherwise use `fadeno` from `PATH`. Never prefer an unrelated global CLI over
+the plugin launcher. Before the first run in a session, call `<cli> status`; if
+the current harness is not installed, invoke the setup skill and resume only
+after any required fresh-session boundary. When status reports a stable managed
+runtime, use that path for the rest of the session.
+
 Execute a Fadeno playbook as a bounded, inspectable workflow backed by files on
 disk. You are the director and sole Fadeno ledger writer: native workers return
 only declared artifact bodies and receipts to you, and you materialize those

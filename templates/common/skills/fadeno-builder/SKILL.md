@@ -5,6 +5,12 @@ description: Create or modify Fadeno playbooks from natural-language workflow de
 
 # Fadeno Builder
 
+Resolve the CLI first: when `scripts/fadeno.cjs` exists beside this `SKILL.md`, use
+that plugin-bundled launcher for every command written below as `fadeno`
+(invoke it with `node` on Windows).
+Otherwise use `fadeno` from `PATH`. Never prefer an unrelated global CLI over
+the plugin launcher.
+
 Turn a described workflow into a small, valid Fadeno playbook — then show it back
 as a diagram and hand it to the runner once the user approves. Bias toward the
 simplest thing that works: a handful of well-defined primitives composes more

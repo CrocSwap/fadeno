@@ -20,7 +20,11 @@ if (event?.tool_name !== 'Agent' || event.tool_input == null || typeof event.too
 }
 
 const cwd = typeof event.cwd === 'string' && event.cwd.length > 0 ? event.cwd : process.cwd();
-const active = spawnSync('fadeno', ['loadout'], {
+const bundled = typeof process.env.CLAUDE_PLUGIN_ROOT === 'string'
+  ? join(process.env.CLAUDE_PLUGIN_ROOT, 'bin', 'fadeno')
+  : null;
+const cli = bundled != null && existsSync(bundled) ? bundled : 'fadeno';
+const active = spawnSync(cli, ['loadout'], {
   cwd,
   env: process.env,
   encoding: 'utf8',

@@ -5,6 +5,13 @@ description: Drive a Fadeno run ledger end-to-end — engine-first via `fadeno d
 
 # Fadeno Driver
 
+Resolve the CLI first: when `scripts/fadeno.cjs` exists beside this `SKILL.md`, use
+that plugin-bundled launcher for every command written below as `fadeno`
+(invoke it with `node` on Windows).
+Otherwise use `fadeno` from `PATH`. Never prefer an unrelated global CLI over
+the plugin launcher. Before driving, call `<cli> status`; if the current
+harness is not installed, invoke the setup skill first.
+
 You own a **run ledger** and advance it mechanically. The host harness stays pure:
 it picks a playbook, gathers inputs, creates the run (`fadeno new-run`), and
 dispatches you with the run id.

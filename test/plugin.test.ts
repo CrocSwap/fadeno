@@ -33,6 +33,11 @@ test('plugin generates manifest, namespaced skills, and subagents', (t) => {
   assert.ok(exists(outDir, 'skills/builder/SKILL.md'));
   assert.ok(exists(outDir, 'skills/driver/SKILL.md'));
   assert.ok(exists(outDir, 'skills/setup/SKILL.md'));
+  for (const skill of ['runner', 'builder', 'driver', 'setup']) {
+    const launcher = join(outDir, 'skills', skill, 'scripts', 'fadeno.cjs');
+    assert.ok(existsSync(launcher), `${skill} must carry its private CLI launcher`);
+    assert.notEqual(statSync(launcher).mode & 0o111, 0, `${skill} CLI launcher must be executable`);
+  }
 
   const runner = readFileSync(join(outDir, 'skills/runner/SKILL.md'), 'utf8');
   const builder = readFileSync(join(outDir, 'skills/builder/SKILL.md'), 'utf8');

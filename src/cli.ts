@@ -41,6 +41,9 @@ import { runStatus } from './commands/status.ts';
 import { runDoctor } from './commands/doctor.ts';
 import { runVendor } from './commands/vendor.ts';
 import { runEvidencePromote } from './commands/evidence.ts';
+import { runUninstall } from './commands/uninstall.ts';
+import { runClean } from './commands/clean.ts';
+import { runUnvendor } from './commands/unvendor.ts';
 import type { DiagramFormat } from './lib/diagram.ts';
 import { progressSidecarPath } from './lib/prompt.ts';
 import type { EmitResult } from './lib/fsutil.ts';
@@ -61,6 +64,9 @@ Usage:
   fadeno doctor [--codex|--claude]            Run read-only diagnostics
   fadeno vendor --codex|--claude|--grok       Vendor capability and definitions into a project
   fadeno evidence promote <run>               Promote a verified run receipt
+  fadeno uninstall --codex|--claude|--all     Remove managed user integration
+  fadeno clean [--force]                      Preview/remove ignored repo runtime state
+  fadeno unvendor [--force]                   Remove lock-owned vendored files
   fadeno validate [file] [--schema K]   Validate playbooks (schema + references + semantics)
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
@@ -89,6 +95,8 @@ Options:
   --with-steering         (init) Deprecated compatibility alias; steering is now default
   --no-steering           (init) Opt out of default Codex/Claude steering
   --non-interactive       (setup) Accepted compatibility no-op; setup never prompts
+  --all                   (uninstall) Remove every registered harness integration
+  --purge-user-data       (uninstall) Also remove shared config/state/data; requires --force
   --project               (use) Pin the loadout in this repository
   --scope <scope>         (steering apply) project (default) | user
   --data-only             (init) Seed only .fadeno/ definitions (capability via plugin)
@@ -653,6 +661,8 @@ function main(argv: string[]): number {
         'no-steering': { type: 'boolean' },
         'data-only': { type: 'boolean' },
         'non-interactive': { type: 'boolean' },
+        all: { type: 'boolean' },
+        'purge-user-data': { type: 'boolean' },
         project: { type: 'boolean' },
         verbose: { type: 'boolean' },
         scope: { type: 'string' },
@@ -755,6 +765,8 @@ function main(argv: string[]): number {
       if (target === 'grok') throw new Error('Use `fadeno status` without --grok; Grok steering is intentionally unsupported.');
       const result = runStatus({ verbose: values.verbose, target: target ?? null });
       console.log(`Fadeno ${result.version} · harness ${result.harness ?? 'unknown'}`);
+      console.log(`runtime: ${result.runtime.invocationSource}; managed ${result.runtime.managedVersion ?? 'not installed'}${result.runtime.managedPath ? ` at ${result.runtime.managedPath}` : ''}${result.runtime.versionCurrent ? '' : ' (version skew)'}`);
+      console.log(`integrations: ${result.runtime.installedHarnesses.join(', ') || 'none'}`);
       console.log(`definitions: ${result.definitions.playbooks.length} effective playbooks (project shadows bundled)`);
       console.log(`active loadout: ${result.activeLoadout?.name ?? 'none'}${result.activeLoadout ? ` [${result.activeLoadout.source}]` : ''}`);
       for (const role of result.roles) console.log(`  ${role.archetype} → ${role.executor} (${role.adapter})${role.command ? ` ${role.command.join(' ')}` : ''}`);
@@ -784,6 +796,34 @@ function main(argv: string[]): number {
       console.log(`Fadeno vendored for ${result.target} in ${result.repoRoot}`);
       console.log(`  ${result.lock.status} fadeno.lock`);
       return 0;
+    }
+    case 'unvendor': {
+      const result = runUnvendor({ force: values.force });
+      for (const path of result.removed) console.log(`removed ${path}`);
+      for (const path of result.preserved) console.log(`preserved modified ${path}`);
+      if (!result.lockRemoved) console.log('fadeno.lock preserved because modified files remain.');
+      return result.preserved.length === 0 ? 0 : 2;
+    }
+    case 'clean': {
+      const result = runClean({ force: values.force });
+      const paths = result.dryRun ? result.candidates : result.removed;
+      for (const path of paths) console.log(`${result.dryRun ? 'would remove' : 'removed'} ${path}`);
+      if (result.dryRun && paths.length > 0) console.log('Re-run with --force to remove these ignored runtime files.');
+      return 0;
+    }
+    case 'uninstall': {
+      const target = optionalTarget(values);
+      if (target === 'grok') throw new Error('Grok has no user-scoped Fadeno integration to uninstall.');
+      const result = runUninstall({
+        target: target ?? null,
+        all: values.all,
+        purgeUserData: values['purge-user-data'],
+        force: values.force,
+      });
+      for (const path of result.removed) console.log(`removed ${path}`);
+      for (const path of result.preserved) console.log(`preserved modified ${path}`);
+      if (result.purged) console.log('purged Fadeno user configuration, state, and managed runtime.');
+      return result.preserved.length === 0 ? 0 : 2;
     }
     case 'evidence': {
       if (positionals[1] !== 'promote' || !positionals[2]) throw new Error('Usage: fadeno evidence promote <run>');

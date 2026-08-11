@@ -5,11 +5,17 @@ description: Set up Fadeno's user-scoped executor catalog and native host integr
 
 # Fadeno setup
 
-Run the bundled Fadeno executable with the current host identity:
+Resolve the CLI first: when `scripts/fadeno.cjs` exists beside this `SKILL.md`, use
+that plugin-bundled launcher for every command (invoke it with `node` on
+Windows). Otherwise use `fadeno` from `PATH`. Never silently substitute a
+different global CLI when the launcher is
+present.
+
+Run the resolved executable with the current host identity:
 
 ```text
-fadeno setup --codex   # from Codex
-fadeno setup --claude  # from Claude Code
+<cli> setup --codex   # from Codex
+<cli> setup --claude  # from Claude Code
 ```
 
 Explain that setup writes user-scoped configuration and may require a fresh host
@@ -17,3 +23,4 @@ session for managed native agents. It probes provider CLIs with read-only versio
 checks, keeps `native` selected unless the user explicitly chooses another
 loadout, and never silently falls back after an executor is selected. Use only
 the line matching the current host; never install another harness's integration.
+After setup, use the reported stable managed runtime for subsequent commands.

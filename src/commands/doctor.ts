@@ -59,6 +59,10 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
   try {
     status = runStatus(opts);
     findings.push(finding('runtime', 'ok', `Fadeno ${status.version} and bundled definitions are available.`));
+    findings.push(finding('runtime-source', 'ok', `${status.runtime.invocationSource}; managed runtime ${status.runtime.managedVersion ?? 'not installed'}`));
+    if (!status.runtime.versionCurrent) {
+      findings.push(finding('runtime-version', 'warning', `managed runtime ${status.runtime.managedVersion} differs from caller ${status.version}`, 'Run the current plugin setup skill to refresh it.'));
+    }
   } catch (err) {
     findings.push(finding('configuration', 'error', (err as Error).message, 'Fix the malformed YAML or missing catalog before running a playbook.'));
     return { repoRoot, findings, ok: false };
@@ -86,16 +90,16 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
       findings.push(finding(`executor:${role.executor}`, 'ok', 'executable is present on PATH (not executed)'));
     }
   }
-  if (opts.target === 'codex' && status.codexMaterialization?.restartRequired) {
+  if (status.harness === 'codex' && status.codexMaterialization?.restartRequired) {
     findings.push(finding('codex-agents', 'warning', 'managed native agents are missing or stale', 'Run `fadeno setup --codex` and start a fresh Codex session.'));
-  } else if (opts.target === 'codex') {
+  } else if (status.harness === 'codex') {
     findings.push(finding('codex-agents', 'ok', 'managed native-agent state is current'));
   }
   const gitignore = join(repoRoot, '.gitignore');
   const ignored = existsSync(gitignore) ? readFileSync(gitignore, 'utf8') : '';
   const ignoreLines = ignored.split(/\r?\n/).map((line) => line.trim());
   for (const pattern of ['.fadeno/runs/', '.fadeno/progress/', '.fadeno/local/', '.fadeno/dispatches.jsonl', '.codex/agents/fadeno-*.toml', '.claude/settings.local.json']) {
-    if (!isFadenoPathIgnored(ignoreLines, pattern)) findings.push(finding(`ignore:${pattern}`, 'warning', 'managed ignore entry is absent', 'Run `fadeno setup`, `fadeno init`, or `fadeno vendor` to add it non-destructively.'));
+    if (!isFadenoPathIgnored(ignoreLines, pattern)) findings.push(finding(`ignore:${pattern}`, 'warning', 'managed ignore entry is absent', 'The first `new-run`/`dispatch`, `fadeno init`, or `fadeno vendor` adds it non-destructively.'));
   }
   return { repoRoot, findings, ok: findings.every((item) => item.severity !== 'error') };
 }

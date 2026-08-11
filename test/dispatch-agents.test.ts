@@ -60,8 +60,9 @@ test('dispatch proxy bodies relay the prompt file verbatim through fadeno dispat
     // 2. The fixed CLI contract.
     assert.match(
       body,
-      new RegExp(`fadeno dispatch --archetype ${archetype} --prompt-file`),
+      new RegExp(`fadeno["}]? dispatch --archetype ${archetype} --prompt-file`),
     );
+    assert.match(body, /CLAUDE_PLUGIN_ROOT/, 'plugin proxies must prefer their bundled CLI');
     // 3. Verbatim relay of the stdout report as the final response.
     assert.match(body, /stdout report \*\*verbatim\*\* as your final response/);
     // 4. No native fallback on failure — silent provider substitution is a

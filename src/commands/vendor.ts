@@ -47,6 +47,21 @@ function digestTree(root: string): Record<string, string> {
   return files;
 }
 
+function ownedVendoredFiles(repoRoot: string, init: InitResult): Record<string, string> {
+  const owned: Record<string, string> = {};
+  // Own every byte-emitted init result except shared/merged surfaces. The lock
+  // digest still preserves later edits; these exclusions avoid ever treating a
+  // user's bootstrap, ignore policy, or merged Claude settings as wholly ours.
+  const shared = new Set(['AGENTS.md', 'CLAUDE.md', '.gitignore', '.claude/settings.local.json']);
+  for (const result of init.results) {
+    if (result.status !== 'created' && result.status !== 'overwritten') continue;
+    const rel = relative(repoRoot, result.path).split('\\').join('/');
+    if (shared.has(rel) || rel.startsWith('../') || !existsSync(result.path)) continue;
+    owned[rel] = createHash('sha256').update(readFileSync(result.path)).digest('hex');
+  }
+  return owned;
+}
+
 /** Explicitly vendor capability/definitions into a repository with a lock. */
 export function runVendor(opts: VendorOptions): VendorResult {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
@@ -66,6 +81,7 @@ export function runVendor(opts: VendorOptions): VendorResult {
     mode: 'vendored',
     definitions: digestTree(join(templatesDir(), 'common', 'fadeno')),
     capability: digestTree(join(templatesDir(), opts.target)),
+    files: ownedVendoredFiles(repoRoot, init),
   };
   const lock = emitFile(lockPath, `${JSON.stringify(lockDoc, null, 2)}\n`, opts.force ?? false);
   return { target: opts.target, repoRoot, init, lockPath, lock: { path: lockPath, status: lock } };

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   ExecutorProfileError,
   loadExecutorProfile,
@@ -13,6 +13,7 @@ import {
 import { definitionSourceSummary } from '../lib/definitions.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
 import { readUserHarness, type UserPathOptions } from '../lib/user-paths.ts';
+import { readInstallationManifest } from '../lib/installations.ts';
 
 export class StatusError extends Error {}
 
@@ -48,6 +49,13 @@ export interface StatusResult {
   projectCustomized: boolean;
   verbose: boolean;
   next: string | null;
+  runtime: {
+    invocationSource: string;
+    managedVersion: string | null;
+    managedPath: string | null;
+    versionCurrent: boolean;
+    installedHarnesses: string[];
+  };
 }
 
 function harnessOf(target: StatusOptions['target'], userPathOptions?: UserPathOptions): StatusResult['harness'] {
@@ -119,6 +127,9 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
   }
   const external = roles.filter((role) => role.adapter === 'command');
   const harness = harnessOf(opts.target, opts.userPathOptions);
+  const installation = readInstallationManifest(opts.userPathOptions);
+  const invocationSource = process.env.FADENO_INVOCATION_SOURCE?.trim()
+    || (installation.runtime != null && resolve(process.argv[1] ?? '') === resolve(installation.runtime.path) ? 'managed' : 'path');
   const materialized = materialization(active?.name ?? null, loaded.profile, harness, opts.userPathOptions);
   const next = staleProjectPin || staleUserPin
     ? 'clear or replace the stale loadout pin'
@@ -141,5 +152,12 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
     projectCustomized: existsSync(join(repoRoot, '.fadeno')),
     verbose: Boolean(opts.verbose),
     next,
+    runtime: {
+      invocationSource,
+      managedVersion: installation.runtime?.version ?? null,
+      managedPath: installation.runtime?.path ?? null,
+      versionCurrent: installation.runtime == null || installation.runtime.version === packageVersion(),
+      installedHarnesses: Object.keys(installation.harnesses).sort(),
+    },
   };
 }

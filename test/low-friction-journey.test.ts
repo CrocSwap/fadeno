@@ -17,6 +17,9 @@ import { userPaths, type UserPathOptions } from '../src/lib/user-paths.ts';
 import { LedgerWriter } from '../src/lib/run-ledger-write.ts';
 import { readEvents } from '../src/lib/run-ledger.ts';
 import { runDrive } from '../src/commands/drive.ts';
+import { runUninstall, UninstallError } from '../src/commands/uninstall.ts';
+import { runClean } from '../src/commands/clean.ts';
+import { runUnvendor } from '../src/commands/unvendor.ts';
 import { exists, read, tempRepo } from './helpers.ts';
 
 const REPO = join(import.meta.dirname, '..');
@@ -80,6 +83,112 @@ test('setup remembers Codex so later loadout switches materialize native agents 
   const native = runUse({ repoRoot: root, userPathOptions: paths, name: 'native' });
   assert.ok(native.steering, 'remembered Codex harness should trigger materialization without --codex');
   assert.ok(existsSync(join(paths.home!, '.codex', 'agents', 'fadeno-worker.toml')));
+});
+
+test('plugin-backed setup is user-only, installs a stable runtime, and uninstalls by ownership', (t) => {
+  const root = tempRepo(t);
+  const paths = isolatedUser(root);
+  const runtime = join(root, 'plugin-bin');
+  mkdirSync(runtime, { recursive: true });
+  const bundled = join(runtime, 'fadeno');
+  writeFileSync(bundled, '#!/bin/sh\nexit 0\n');
+  chmodSync(bundled, 0o755);
+
+  const setup = runSetup({
+    repoRoot: root,
+    userPathOptions: paths,
+    target: 'codex',
+    runtimeSource: runtime,
+    probeCommand: unavailable,
+  });
+  const resolved = userPaths(paths);
+  assert.equal(existsSync(join(root, '.gitignore')), false, 'user setup must not mutate the current repo');
+  assert.ok(existsSync(resolved.managedCli));
+  assert.ok(existsSync(resolved.installationsFile));
+  assert.match(readFileSync(join(paths.home!, '.codex', 'agents', 'fadeno-worker.toml'), 'utf8'), new RegExp(resolved.managedCli.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+
+  const removed = runUninstall({ target: 'codex', userPathOptions: paths });
+  assert.equal(removed.preserved.length, 0);
+  assert.equal(existsSync(resolved.managedRuntimeDir), false);
+  assert.equal(existsSync(resolved.executorsFile), false, 'no provider probes meant no generated catalog');
+  assert.throws(
+    () => runUninstall({ purgeUserData: true, userPathOptions: paths }),
+    UninstallError,
+  );
+  runUninstall({ purgeUserData: true, force: true, userPathOptions: paths });
+  assert.equal(existsSync(resolved.stateDir), false);
+  assert.ok(setup.created.includes(resolved.managedRuntimeDir));
+});
+
+test('Claude setup owns only its stable-runtime permission rule', (t) => {
+  const root = tempRepo(t);
+  const paths = isolatedUser(root);
+  const runtime = join(root, 'plugin-bin');
+  mkdirSync(runtime, { recursive: true });
+  writeFileSync(join(runtime, 'fadeno'), '#!/bin/sh\nexit 0\n');
+  const settings = join(paths.home!, '.claude', 'settings.json');
+  mkdirSync(join(settings, '..'), { recursive: true });
+  writeFileSync(settings, `${JSON.stringify({ permissions: { allow: ['Bash(git status)'] }, theme: 'dark' }, null, 2)}\n`);
+
+  runSetup({
+    repoRoot: root,
+    userPathOptions: paths,
+    target: 'claude',
+    runtimeSource: runtime,
+    probeCommand: unavailable,
+  });
+  const resolved = userPaths(paths);
+  const installed = JSON.parse(readFileSync(settings, 'utf8')) as { permissions: { allow: string[] }; theme: string };
+  assert.deepEqual(installed.permissions.allow, ['Bash(git status)', `Bash(${resolved.managedCli}:*)`]);
+
+  runUninstall({ target: 'claude', userPathOptions: paths });
+  const remaining = JSON.parse(readFileSync(settings, 'utf8')) as typeof installed;
+  assert.deepEqual(remaining.permissions.allow, ['Bash(git status)']);
+  assert.equal(remaining.theme, 'dark');
+});
+
+test('plugin runtime installation emits a Windows command shim', (t) => {
+  const root = tempRepo(t);
+  const runtime = join(root, 'plugin-bin');
+  mkdirSync(runtime, { recursive: true });
+  writeFileSync(join(runtime, 'fadeno'), '#!/usr/bin/env node\n');
+  const paths: UserPathOptions = {
+    home: join(root, 'home'),
+    platform: 'win32',
+    env: { LOCALAPPDATA: join(root, 'local-app-data'), APPDATA: join(root, 'app-data') },
+  };
+  runSetup({ repoRoot: root, userPathOptions: paths, runtimeSource: runtime, probeCommand: unavailable });
+  const resolved = userPaths(paths);
+  assert.ok(resolved.managedCli.endsWith('fadeno.cmd'));
+  assert.match(readFileSync(resolved.managedCli, 'utf8'), /node "%~dp0fadeno" %\*/);
+});
+
+test('clean is dry-run by default and removes only runtime state with --force', (t) => {
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno', 'runs', 'r'), { recursive: true });
+  mkdirSync(join(root, '.fadeno', 'playbooks'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'runs', 'r', 'run.yaml'), 'status: running\n');
+  writeFileSync(join(root, '.fadeno', 'playbooks', 'keep.yaml'), 'kind: AgentPlaybook\n');
+  assert.equal(runClean({ repoRoot: root }).dryRun, true);
+  assert.ok(existsSync(join(root, '.fadeno', 'runs', 'r', 'run.yaml')));
+  runClean({ repoRoot: root, force: true });
+  assert.equal(existsSync(join(root, '.fadeno', 'runs')), false);
+  assert.ok(existsSync(join(root, '.fadeno', 'playbooks', 'keep.yaml')));
+});
+
+test('unvendor removes only lock-owned unmodified files and preserves edits', (t) => {
+  const root = tempRepo(t);
+  runVendor({ repoRoot: root, target: 'codex', withSteering: true });
+  const modified = join(root, '.codex', 'agents', 'worker.toml');
+  writeFileSync(modified, `${readFileSync(modified, 'utf8')}\n# user edit\n`);
+  const first = runUnvendor({ repoRoot: root });
+  assert.ok(first.preserved.includes(modified));
+  assert.equal(first.lockRemoved, false);
+  const forced = runUnvendor({ repoRoot: root, force: true });
+  assert.equal(forced.lockRemoved, true);
+  assert.equal(existsSync(modified), false);
+  assert.equal(existsSync(join(root, '.fadeno', 'vocabulary.md')), false);
+  assert.ok(existsSync(join(root, 'AGENTS.md')), 'shared bootstrap is not wholly owned by the lock');
 });
 
 test('drive recovers a command start left without a terminal receipt', (t) => {
