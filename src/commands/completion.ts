@@ -90,6 +90,8 @@ const COMMANDS: Record<string, CommandSpec> = {
         '--native-executor': { kind: 'executor' },
         '--role': { kind: 'free' },
         '--loadout': LOADOUT,
+        '--run': { kind: 'run' },
+        '--dispatch-id': { kind: 'free' },
       }),
       apply: command({ '--codex': NONE, '--force': NONE }, ['loadout']),
     },

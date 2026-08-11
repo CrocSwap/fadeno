@@ -73,6 +73,16 @@ export interface HostDispatchRequestOptions extends HostDispatchRequest {
   now?: Date;
 }
 
+/** Read one immutable engine request and its current receipt state. */
+export interface HostDispatchRequestLookup {
+  runId: string;
+  runDir: string;
+  events: RunEvent[];
+  event: RunEvent;
+  request: HostDispatchRequest;
+  terminal: RunEvent | null;
+}
+
 export interface DispatchStartOptions {
   run: string;
   dispatchId: string;
@@ -274,6 +284,33 @@ function terminalsFor(events: RunEvent[], dispatchId: string): RunEvent[] {
   return events.filter(
     (event) => (event.type === 'actor_completed' || event.type === 'actor_failed') && event.extra.dispatch_id === dispatchId,
   );
+}
+
+/**
+ * Resolve a request by its run/dispatch identity without consulting any live
+ * executor profile or ambient loadout. This is the read-only counterpart to
+ * the receipt writers and is used by engine-delivered native agents.
+ */
+export function readHostDispatchRequest(opts: {
+  run: string;
+  dispatchId: string;
+  repoRoot?: string;
+  cwd?: string;
+}): HostDispatchRequestLookup {
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const { runDir, runId } = assertCurrentLedger(repoRoot, opts.run);
+  const events = eventsFor(runDir);
+  const { request, event } = findRequest(runId, events, opts.dispatchId);
+  const starts = startsFor(events, opts.dispatchId);
+  if (starts.length > 1) {
+    throw new HostDispatchError(`host dispatch "${opts.dispatchId}" was started more than once.`);
+  }
+  const terminals = terminalsFor(events, opts.dispatchId);
+  if (terminals.length > 1) {
+    throw new HostDispatchError(`host dispatch "${opts.dispatchId}" has multiple terminal receipts.`);
+  }
+  return { runId, runDir, events, event, request, terminal: terminals[0] ?? null };
 }
 
 function safeRunRelative(runDir: string, value: string, label: string): string {

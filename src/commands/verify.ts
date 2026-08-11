@@ -379,6 +379,27 @@ function checkHostDispatchLifecycle(run: RunSummary, events: RunEvent[], mode: L
   const records = hostRequestRecords(events);
   const problems: string[] = [];
   const requestById = new Map(records.map((record) => [record.id, record.event]));
+  const terminalFor = (id: string): RunEvent | undefined => events.find(
+    (event) => (event.type === 'actor_completed' || event.type === 'actor_failed') && event.extra.dispatch_id === id,
+  );
+  const attemptsByActorCall = new Map<string, HostRequestRecord[]>();
+  const actorsByActorCall = new Map<string, Set<string | null>>();
+  for (const record of records) {
+    const actorCallId = record.event.extra.actor_call_id;
+    if (typeof actorCallId !== 'string') continue;
+    const group = attemptsByActorCall.get(actorCallId) ?? [];
+    group.push(record);
+    attemptsByActorCall.set(actorCallId, group);
+    const actors = actorsByActorCall.get(actorCallId) ?? new Set<string | null>();
+    actors.add(typeof record.event.extra.actor === 'string' ? record.event.extra.actor : null);
+    actorsByActorCall.set(actorCallId, actors);
+  }
+  for (const [actorCallId, actors] of actorsByActorCall) {
+    if (actors.size > 1) {
+      const labels = [...actors].map((actor) => actor ?? '(null)').sort();
+      problems.push(`${actorCallId}: actor_call_id is associated with multiple actors: ${labels.join(', ')}`);
+    }
+  }
   const snapshotEvent = events.find((event) => event.type === 'profile_snapshotted');
   let profile: ReturnType<typeof parseExecutorProfile> | null = null;
   if (snapshotEvent == null) problems.push('host dispatch evidence has no profile_snapshotted event');
@@ -527,10 +548,42 @@ function checkHostDispatchLifecycle(run: RunSummary, events: RunEvent[], mode: L
     }
     if (terminal?.type === 'actor_failed' && (typeof terminal.extra.failure_reason !== 'string' || terminal.extra.failure_reason.length === 0)) problems.push(`${id}: failed receipt lacks a failure reason`);
     if (run.status === 'completed' && terminal == null) problems.push(`${id}: unresolved host dispatch remains in completed run`);
-    if (run.status === 'completed' && terminal?.type === 'actor_failed') problems.push(`${id}: completed run contains a failed host dispatch`);
+  }
+  let recoveredFailures = 0;
+  if (run.status === 'completed') {
+    for (const [actorCallId, attempts] of attemptsByActorCall) {
+      const ordered = [...attempts].sort((a, b) => {
+        const left = typeof a.event.extra.attempt === 'number' ? a.event.extra.attempt : Number.MAX_SAFE_INTEGER;
+        const right = typeof b.event.extra.attempt === 'number' ? b.event.extra.attempt : Number.MAX_SAFE_INTEGER;
+        return left - right;
+      });
+      const final = ordered[ordered.length - 1];
+      if (final == null) continue;
+      const finalTerminal = terminalFor(final.id);
+      if (finalTerminal?.type !== 'actor_completed' || finalTerminal.extra.output_valid !== true) {
+        problems.push(`${actorCallId}: completed run final host attempt must be a valid successful completion`);
+      }
+      for (const attempt of ordered) {
+        const failed = terminalFor(attempt.id);
+        if (failed?.type !== 'actor_failed') continue;
+        const failedTerminalIndex = events.indexOf(failed);
+        const ordinal = attempt.event.extra.attempt;
+        const recovered = typeof ordinal === 'number' && ordered.some((candidate) => {
+          const candidateOrdinal = candidate.event.extra.attempt;
+          if (candidate === attempt || typeof candidateOrdinal !== 'number' || candidateOrdinal <= ordinal) return false;
+          if (events.indexOf(candidate.event) <= failedTerminalIndex) return false;
+          const candidateTerminal = terminalFor(candidate.id);
+          if (candidateTerminal == null || events.indexOf(candidateTerminal) <= failedTerminalIndex) return false;
+          return candidateTerminal?.type === 'actor_completed' && candidateTerminal.extra.output_valid === true;
+        });
+        if (recovered) recoveredFailures += 1;
+        else problems.push(`${attempt.id}: completed run contains an unrecovered failed host dispatch`);
+      }
+    }
   }
   if (problems.length > 0) return { check, status: 'fail', detail: problems.join('; ') };
-  return { check, status: 'ok', detail: `${records.length} request → start → terminal lifecycle(s) are coherent` };
+  const recoveredDetail = recoveredFailures > 0 ? `; recovered ${recoveredFailures} historical failed attempt(s)` : '';
+  return { check, status: 'ok', detail: `${records.length} request → start → terminal lifecycle(s) are coherent${recoveredDetail}` };
 }
 
 function checkHostDispatchArtifacts(run: RunSummary, events: RunEvent[], mode: LedgerMode): Finding {

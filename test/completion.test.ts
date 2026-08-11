@@ -66,6 +66,8 @@ test('completion discovers repo-local playbooks, runs, steps, profiles, and path
   assert.ok(complete(root, ['fadeno', 'loadout', 'use', '']).includes('sample'));
   assert.ok(complete(root, ['fadeno', 'steering', 'apply', '']).includes('sample'));
   assert.deepEqual(complete(root, ['fadeno', 'steering', 'resolve', '--native-executor', '']), ['alpha', 'beta']);
+  assert.ok(complete(root, ['fadeno', 'steering', 'resolve', '--run', '']).includes(runId));
+  assert.deepEqual(complete(root, ['fadeno', 'steering', 'resolve', '--dispatch-id', 'abc']), []);
   assert.deepEqual(complete(root, ['fadeno', 'dispatch', '--executor', '']), ['alpha', 'beta']);
   assert.deepEqual(complete(root, ['fadeno', 'dispatch', '--archetype', '']), ['reviewer', 'worker']);
   assert.deepEqual(complete(root, ['fadeno', 'drive', runId, '--bind', '']), []);

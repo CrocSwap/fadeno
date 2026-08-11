@@ -99,6 +99,8 @@ Options:
   --role <name>           (dispatch) Role name: enables binding pins + evidence attribution
   --executor <name>       (dispatch) Bypass resolution and invoke a named executor (debugging)
   --native-executor <n>   (steering resolve) Host executor materialized into this native role
+  --run <id>              (steering resolve) Immutable engine run identity for a delivered host request
+  --dispatch-id <id>      (steering resolve) Immutable host dispatch identity paired with --run
   --prompt-file <path>    (dispatch) Read the prompt from a file instead of stdin
   --agent-id <id>         (dispatch-start) Native host agent identity
   --workspace <path>      (dispatch-start) Native workspace provenance
@@ -200,7 +202,7 @@ function printInitSummary(
     console.log(
       target === 'claude'
         ? `  ${nextStep}. Steering is active locally; restart Claude Code so the Agent hook is loaded`
-        : `  ${nextStep}. Configure a native baseline with \`fadeno steering apply <loadout> --codex --force\`, then start a fresh Codex session`,
+        : `  ${nextStep}. Materialize Codex steering with \`fadeno steering apply <loadout> --codex --force\`; command slots switch live, while host changes require a fresh session`,
     );
   }
 }
@@ -640,6 +642,8 @@ function main(argv: string[]): number {
         role: { type: 'string' },
         executor: { type: 'string' },
         'native-executor': { type: 'string' },
+        run: { type: 'string' },
+        'dispatch-id': { type: 'string' },
         'prompt-file': { type: 'string' },
         'agent-id': { type: 'string' },
         workspace: { type: 'string' },
@@ -667,6 +671,13 @@ function main(argv: string[]): number {
 
   const { values, positionals } = parsed;
   const command = positionals[0];
+
+  if (
+    (values.run !== undefined || values['dispatch-id'] !== undefined) &&
+    !(command === 'steering' && positionals[1] === 'resolve')
+  ) {
+    throw new Error('--run and --dispatch-id are valid only for `fadeno steering resolve`.');
+  }
 
   if (values.version) {
     console.log(packageVersion());
@@ -706,7 +717,7 @@ function main(argv: string[]): number {
       if (sub === 'resolve') {
         if (!values.archetype) {
           throw new Error(
-            'Usage: fadeno steering resolve --archetype <name> [--native-executor <name>] [--role <name>] [--loadout <name>]',
+            'Usage: fadeno steering resolve --archetype <name> [--native-executor <name>] [--role <name>] [--loadout <name>] [--run <id> --dispatch-id <id>]',
           );
         }
         const result = runSteeringResolve({
@@ -714,6 +725,8 @@ function main(argv: string[]): number {
           nativeExecutor: values['native-executor'],
           role: values.role,
           loadout: values.loadout,
+          run: values.run,
+          dispatchId: values['dispatch-id'],
         });
         console.log(JSON.stringify({
           mode: result.mode,
@@ -725,6 +738,8 @@ function main(argv: string[]): number {
           model: result.model,
           native_executor: result.nativeExecutor,
           resolution: result.source,
+          run: values.run ?? null,
+          dispatch_id: values['dispatch-id'] ?? null,
           detail: result.detail,
         }, null, 2));
         return result.mode === 'restart_required' ? 2 : 0;
@@ -736,9 +751,12 @@ function main(argv: string[]): number {
         }
         const result = runSteeringApply({ loadout, target: 'codex', force: values.force });
         const changed = result.results.filter((item) => item.status !== 'skipped').length;
-        console.log(`Codex native steering baseline: ${result.loadout}`);
+        console.log(`Codex steering materialized: ${result.loadout}`);
         for (const archetype of ['worker', 'reviewer', 'judge']) {
-          console.log(`  ${archetype} → ${result.baseline[archetype]}`);
+          const slot = result.materialization[archetype]!;
+          console.log(
+            `  ${archetype} → ${slot.kind === 'native' ? 'native host' : 'command broker'} ${slot.executor}`,
+          );
         }
         console.log(`  ${changed} agent definition(s) written; start a fresh Codex session to load them.`);
         if (changed === 0) console.log('  Existing files were preserved; pass --force to replace them.');
@@ -974,16 +992,18 @@ function main(argv: string[]): number {
           if (result.previous != null && result.previous !== result.name) {
             console.log(`  (was ${result.previous})`);
           }
-          const selected = runLoadoutShow({});
+          // Summarize the name just pinned, independent of FADENO_LOADOUT's
+          // higher-precedence value in the current shell.
+          const selected = runLoadoutShow({ loadout: result.name, env: null });
           const commandSlots = selected.slots.filter((slot) => slot.adapter === 'command').length;
           const hostSlots = selected.slots.filter((slot) => slot.adapter === 'host').length;
           if (commandSlots > 0) {
-            console.log(`  ${commandSlots} command slot(s) switch on the next dispatch.`);
+            console.log(`  ${commandSlots} command slot(s) take effect on the next role dispatch/invocation; no restart is needed.`);
           }
           if (hostSlots > 0) {
             console.log(
-              `  ${hostSlots} host slot(s) require a matching materialized native baseline; ` +
-                `run \`fadeno steering apply ${result.name} --codex --force\` and start a fresh Codex session when they differ.`,
+              `  ${hostSlots} host slot(s) run natively only when the current session's materialized native executor matches; ` +
+                `otherwise run \`fadeno steering apply ${result.name} --codex --force\` and start a fresh Codex session.`,
             );
           }
           return 0;

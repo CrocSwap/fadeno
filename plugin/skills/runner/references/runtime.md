@@ -77,9 +77,9 @@ hand-written line will fail the audit. One writer at a time is assumed — a
 run is driven by one coordinator, and `verify` catches after-the-fact what a
 concurrent writer would corrupt.
 
-**`artifact_created` carries the artifact manifest.** `fadeno run <run>
---artifact <path>` reads the file (which must already exist — write the
-artifact, then record it), hashes it, and records `artifact_id`, `artifact`
+**`artifact_created` carries the artifact manifest.** The director writes the
+returned actor/tool body to the planned path, then `fadeno run <run>
+--artifact <path>` reads the file (which must already exist), hashes it, and records `artifact_id`, `artifact`
 (run-dir-relative path), `logical_name` (generation-stripped path),
 `generation` (from the `.v<G>` marker), `bytes`, `sha256`, `media_type`, and
 `validation` (typed artifacts are shape-detected and schema-checked at record
@@ -112,6 +112,24 @@ fadeno dispatch-complete <run> <dispatch-id> --output <temporary-file> [--commit
 fadeno dispatch-fail <run> <dispatch-id> --reason <text>
 ```
 
+The host delivery envelope is part of the routing contract. Prefix an engine
+assignment with `# Fadeno engine step assignment` and include the exact `run` and
+`dispatch_id` above. A Codex role agent resolves the immutable request before
+working:
+
+```text
+fadeno steering resolve --archetype <archetype> [--native-executor <embedded-host>] \
+  --run <run-id> --dispatch-id <dispatch-id>
+```
+
+Both identities are required. Missing or invalid identity is fail-closed; an
+engine assignment never falls back to ambient `FADENO_LOADOUT`, sticky local
+loadout, default loadout, or a live edited profile. Ambient resolution remains
+the behavior for ordinary ad-hoc role invocations, including ordinary prompts
+that begin with `# Fadeno step assignment`. A request minted by the
+engine keeps the executor and requested identity from its run snapshot even if
+loadout steering changes after minting.
+
 The start event records the native agent id and echoes the requested model,
 effort, and agent type with `identity_evidence: requested_only`. Those fields
 are internally checked against the snapshotted profile, but are not verified
@@ -119,6 +137,13 @@ runtime identity unless the host later supplies an independent observation. A
 valid completion is copied to the planned immutable artifact path and gets a
 manifest; invalid bytes are retained under `artifacts/attempts/`. Native workers
 do not invoke Fadeno ledger commands — the host coordinator is the sole writer.
+
+Retries retain one `actor_call_id` and use strictly increasing attempt ordinals.
+Whole-trace verification permits an earlier `actor_failed` host attempt in a
+completed run only when a later, higher-ordinal request for that same actor call
+has a valid successful completion. A final failure, unresolved request, invalid
+completion, later failure, or success belonging to another actor call remains a
+verification failure; `--allow-failed` does not excuse incoherent host traces.
 
 The immutable actor prompt also names a workspace-relative cooperative status
 sidecar. An agent or harness may update that JSON while it works; the host polls
@@ -167,12 +192,16 @@ it is what makes the run inspectable, and the seam a future compiled runtime rea
 
 ## Executing each primitive
 
-- **actor_call** — Have the named role do the work. Save its output as the named
-  artifact under `artifacts/`.
+- **actor_call** — Have the named role do the work and return only the declared
+  artifact body. The director materializes that body at the resolved path under
+  `artifacts/`; native host submissions use a temporary file with
+  `dispatch-complete`.
 - **tool_call** — Invoke the named capability (e.g. `test_runner`, `diff_loader`),
-  write its output, then atomically attribute it to the current step with
-  `fadeno tool-complete <run> --output <artifact-path>`.
-  Map it to a real host action; save the result.
+  write its result to the planned artifact path, then atomically validate and
+  attribute it to the current step with `fadeno tool-complete <run>
+  --output <artifact-path>`. A typed result that fails its schema is rejected
+  before `step_started` or `artifact_created` is recorded, leaving the tool step
+  retryable.
 - **evaluator** — Have the actor produce a *structured* judgment artifact, e.g.
   `artifacts/review-report.json` conforming to `review-report.schema.json`. Do
   not let the evaluator make the control-flow decision.

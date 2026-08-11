@@ -10304,7 +10304,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve12.call(this, root, ref);
+      let _sch = resolve13.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a = root.localRefs) === null || _a === void 0 ? void 0 : _a[ref];
         const { schemaId } = this.opts;
@@ -10331,7 +10331,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve12(root, ref) {
+    function resolve13(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -10962,55 +10962,55 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve12(baseURI, relativeURI, options) {
+    function resolve13(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const resolved = resolveComponent(parse(baseURI, schemelessOptions), parse(relativeURI, schemelessOptions), schemelessOptions, true);
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
-    function resolveComponent(base, relative8, options, skipNormalization) {
+    function resolveComponent(base, relative9, options, skipNormalization) {
       const target = {};
       if (!skipNormalization) {
         base = parse(serialize(base, options), options);
-        relative8 = parse(serialize(relative8, options), options);
+        relative9 = parse(serialize(relative9, options), options);
       }
       options = options || {};
-      if (!options.tolerant && relative8.scheme) {
-        target.scheme = relative8.scheme;
-        target.userinfo = relative8.userinfo;
-        target.host = relative8.host;
-        target.port = relative8.port;
-        target.path = removeDotSegments(relative8.path || "");
-        target.query = relative8.query;
+      if (!options.tolerant && relative9.scheme) {
+        target.scheme = relative9.scheme;
+        target.userinfo = relative9.userinfo;
+        target.host = relative9.host;
+        target.port = relative9.port;
+        target.path = removeDotSegments(relative9.path || "");
+        target.query = relative9.query;
       } else {
-        if (relative8.userinfo !== void 0 || relative8.host !== void 0 || relative8.port !== void 0) {
-          target.userinfo = relative8.userinfo;
-          target.host = relative8.host;
-          target.port = relative8.port;
-          target.path = removeDotSegments(relative8.path || "");
-          target.query = relative8.query;
+        if (relative9.userinfo !== void 0 || relative9.host !== void 0 || relative9.port !== void 0) {
+          target.userinfo = relative9.userinfo;
+          target.host = relative9.host;
+          target.port = relative9.port;
+          target.path = removeDotSegments(relative9.path || "");
+          target.query = relative9.query;
         } else {
-          if (!relative8.path) {
+          if (!relative9.path) {
             target.path = base.path;
-            if (relative8.query !== void 0) {
-              target.query = relative8.query;
+            if (relative9.query !== void 0) {
+              target.query = relative9.query;
             } else {
               target.query = base.query;
             }
           } else {
-            if (relative8.path[0] === "/") {
-              target.path = removeDotSegments(relative8.path);
+            if (relative9.path[0] === "/") {
+              target.path = removeDotSegments(relative9.path);
             } else {
               if ((base.userinfo !== void 0 || base.host !== void 0 || base.port !== void 0) && !base.path) {
-                target.path = "/" + relative8.path;
+                target.path = "/" + relative9.path;
               } else if (!base.path) {
-                target.path = relative8.path;
+                target.path = relative9.path;
               } else {
-                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative8.path;
+                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative9.path;
               }
               target.path = removeDotSegments(target.path);
             }
-            target.query = relative8.query;
+            target.query = relative9.query;
           }
           target.userinfo = base.userinfo;
           target.host = base.host;
@@ -11018,7 +11018,7 @@ var require_fast_uri = __commonJS({
         }
         target.scheme = base.scheme;
       }
-      target.fragment = relative8.fragment;
+      target.fragment = relative9.fragment;
       return target;
     }
     function equal(uriA, uriB, options) {
@@ -11220,7 +11220,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve12,
+      resolve: resolve13,
       resolveComponent,
       equal,
       serialize,
@@ -13893,8 +13893,8 @@ var require_ajv = __commonJS({
 });
 
 // src/cli.ts
-var import_node_fs24 = require("node:fs");
-var import_node_path25 = require("node:path");
+var import_node_fs25 = require("node:fs");
+var import_node_path26 = require("node:path");
 var import_node_util = require("node:util");
 
 // src/lib/paths.ts
@@ -15985,6 +15985,22 @@ function terminalsFor(events, dispatchId) {
   return events.filter(
     (event) => (event.type === "actor_completed" || event.type === "actor_failed") && event.extra.dispatch_id === dispatchId
   );
+}
+function readHostDispatchRequest(opts) {
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const { runDir, runId } = assertCurrentLedger(repoRoot, opts.run);
+  const events = eventsFor(runDir);
+  const { request, event } = findRequest(runId, events, opts.dispatchId);
+  const starts = startsFor(events, opts.dispatchId);
+  if (starts.length > 1) {
+    throw new HostDispatchError(`host dispatch "${opts.dispatchId}" was started more than once.`);
+  }
+  const terminals = terminalsFor(events, opts.dispatchId);
+  if (terminals.length > 1) {
+    throw new HostDispatchError(`host dispatch "${opts.dispatchId}" has multiple terminal receipts.`);
+  }
+  return { runId, runDir, events, event, request, terminal: terminals[0] ?? null };
 }
 function safeRunRelative(runDir, value, label) {
   const runAbsolute = (0, import_node_path7.resolve)(runDir);
@@ -18102,11 +18118,11 @@ function renderConstraints(ctx) {
   if (ctx.loopOwner && ctx.iteration != null) {
     const bound = ctx.maxIterations != null ? ` of at most ${ctx.maxIterations}` : "";
     lines.push(
-      `- This step is body of loop \`${ctx.loopOwner}\`, iteration ${ctx.iteration}${bound}. Write this generation's artifact; never overwrite an earlier generation.`
+      `- This step is body of loop \`${ctx.loopOwner}\`, iteration ${ctx.iteration}${bound}. Return this generation's artifact body; never overwrite an earlier generation.`
     );
   }
   lines.push(
-    "- You may read the repository, but must not modify `run.yaml`, `events.jsonl`, prompt snapshots under `artifacts/prompts/`, or any artifact other than your declared output below. The cooperative progress sidecar is the sole non-artifact exception."
+    "- You may modify task-relevant repository source and update only the ephemeral progress sidecar below. Do not write run artifacts, `run.yaml`, `events.jsonl`, or prompt snapshots under `artifacts/prompts/`."
   );
   return lines;
 }
@@ -18118,7 +18134,8 @@ function renderOutput(ctx) {
   } else {
     lines.push(`- Output: ${out.collectiveType || out.memberType}.`);
   }
-  lines.push(`- Write exactly one artifact to \`${out.path}\`.`);
+  lines.push("- Return only the declared artifact body \u2014 no surrounding prose or code fence.");
+  lines.push(`- The director records your returned body at \`${out.path}\` under the run directory.`);
   lines.push(
     `- Artifact paths beginning with \`artifacts/\` are relative to the run directory \`.fadeno/runs/${ctx.runId}/\`, not the repository root.`
   );
@@ -18126,11 +18143,10 @@ function renderOutput(ctx) {
   if (out.schemaKind && ctx.schemaText != null) {
     lines.push("- Emit JSON only \u2014 no prose, no code fences around it \u2014 conforming to this schema:");
     lines.push("", "```json", ctx.schemaText, "```", "");
-    lines.push(`- Self-check before finishing: \`fadeno validate ${out.path} --schema ${out.schemaKind}\`.`);
   } else if (out.instructions != null) {
     lines.push(`- ${out.instructions}`);
   } else {
-    lines.push("- Produce one self-contained markdown document.");
+    lines.push("- Produce one self-contained markdown document as the artifact body.");
   }
   if (ctx.downstream) {
     let note = `- Downstream: gate \`${ctx.downstream.gateStep}\` computes \`${ctx.downstream.condition}\` from ${out.collectiveType || out.memberType}.`;
@@ -18181,9 +18197,9 @@ function renderStepPrompt(ctx) {
   lines.push("}", "```", "");
   lines.push("- This report is attested progress evidence only. It never controls a gate or replaces the declared output.", "");
   lines.push("## Completion protocol", "");
-  lines.push("- Produce exactly the one declared artifact above; aside from the progress sidecar, write nothing else.");
+  lines.push("- Return exactly the one declared artifact body above; the director materializes it at the canonical path.");
   lines.push("- Do not modify the run ledger (`run.yaml`, `events.jsonl`) or any prompt snapshot.");
-  lines.push("- Keep all commentary inside the artifact; emit no other prose.");
+  lines.push("- Emit no commentary outside the artifact body.");
   lines.push("- If your harness cannot write files, return only the artifact body for the coordinator to save.");
   return `${lines.join("\n")}
 `;
@@ -21174,6 +21190,27 @@ function checkHostDispatchLifecycle(run, events, mode) {
   const records = hostRequestRecords(events);
   const problems = [];
   const requestById = new Map(records.map((record2) => [record2.id, record2.event]));
+  const terminalFor2 = (id) => events.find(
+    (event) => (event.type === "actor_completed" || event.type === "actor_failed") && event.extra.dispatch_id === id
+  );
+  const attemptsByActorCall = /* @__PURE__ */ new Map();
+  const actorsByActorCall = /* @__PURE__ */ new Map();
+  for (const record2 of records) {
+    const actorCallId = record2.event.extra.actor_call_id;
+    if (typeof actorCallId !== "string") continue;
+    const group = attemptsByActorCall.get(actorCallId) ?? [];
+    group.push(record2);
+    attemptsByActorCall.set(actorCallId, group);
+    const actors = actorsByActorCall.get(actorCallId) ?? /* @__PURE__ */ new Set();
+    actors.add(typeof record2.event.extra.actor === "string" ? record2.event.extra.actor : null);
+    actorsByActorCall.set(actorCallId, actors);
+  }
+  for (const [actorCallId, actors] of actorsByActorCall) {
+    if (actors.size > 1) {
+      const labels = [...actors].map((actor) => actor ?? "(null)").sort();
+      problems.push(`${actorCallId}: actor_call_id is associated with multiple actors: ${labels.join(", ")}`);
+    }
+  }
   const snapshotEvent = events.find((event) => event.type === "profile_snapshotted");
   let profile = null;
   if (snapshotEvent == null) problems.push("host dispatch evidence has no profile_snapshotted event");
@@ -21314,10 +21351,42 @@ function checkHostDispatchLifecycle(run, events, mode) {
     }
     if (terminal2?.type === "actor_failed" && (typeof terminal2.extra.failure_reason !== "string" || terminal2.extra.failure_reason.length === 0)) problems.push(`${id}: failed receipt lacks a failure reason`);
     if (run.status === "completed" && terminal2 == null) problems.push(`${id}: unresolved host dispatch remains in completed run`);
-    if (run.status === "completed" && terminal2?.type === "actor_failed") problems.push(`${id}: completed run contains a failed host dispatch`);
+  }
+  let recoveredFailures = 0;
+  if (run.status === "completed") {
+    for (const [actorCallId, attempts] of attemptsByActorCall) {
+      const ordered = [...attempts].sort((a, b) => {
+        const left = typeof a.event.extra.attempt === "number" ? a.event.extra.attempt : Number.MAX_SAFE_INTEGER;
+        const right = typeof b.event.extra.attempt === "number" ? b.event.extra.attempt : Number.MAX_SAFE_INTEGER;
+        return left - right;
+      });
+      const final = ordered[ordered.length - 1];
+      if (final == null) continue;
+      const finalTerminal = terminalFor2(final.id);
+      if (finalTerminal?.type !== "actor_completed" || finalTerminal.extra.output_valid !== true) {
+        problems.push(`${actorCallId}: completed run final host attempt must be a valid successful completion`);
+      }
+      for (const attempt of ordered) {
+        const failed = terminalFor2(attempt.id);
+        if (failed?.type !== "actor_failed") continue;
+        const failedTerminalIndex = events.indexOf(failed);
+        const ordinal = attempt.event.extra.attempt;
+        const recovered = typeof ordinal === "number" && ordered.some((candidate) => {
+          const candidateOrdinal = candidate.event.extra.attempt;
+          if (candidate === attempt || typeof candidateOrdinal !== "number" || candidateOrdinal <= ordinal) return false;
+          if (events.indexOf(candidate.event) <= failedTerminalIndex) return false;
+          const candidateTerminal = terminalFor2(candidate.id);
+          if (candidateTerminal == null || events.indexOf(candidateTerminal) <= failedTerminalIndex) return false;
+          return candidateTerminal?.type === "actor_completed" && candidateTerminal.extra.output_valid === true;
+        });
+        if (recovered) recoveredFailures += 1;
+        else problems.push(`${attempt.id}: completed run contains an unrecovered failed host dispatch`);
+      }
+    }
   }
   if (problems.length > 0) return { check, status: "fail", detail: problems.join("; ") };
-  return { check, status: "ok", detail: `${records.length} request \u2192 start \u2192 terminal lifecycle(s) are coherent` };
+  const recoveredDetail = recoveredFailures > 0 ? `; recovered ${recoveredFailures} historical failed attempt(s)` : "";
+  return { check, status: "ok", detail: `${records.length} request \u2192 start \u2192 terminal lifecycle(s) are coherent${recoveredDetail}` };
 }
 function checkHostDispatchArtifacts(run, events, mode) {
   const check = "host-dispatch-artifacts";
@@ -22104,7 +22173,9 @@ var COMMANDS = {
         "--archetype": { kind: "archetype" },
         "--native-executor": { kind: "executor" },
         "--role": { kind: "free" },
-        "--loadout": LOADOUT
+        "--loadout": LOADOUT,
+        "--run": { kind: "run" },
+        "--dispatch-id": { kind: "free" }
       }),
       apply: command({ "--codex": NONE, "--force": NONE }, ["loadout"])
     }
@@ -22468,6 +22539,7 @@ function runCompletionCandidates(opts) {
 }
 
 // src/commands/steering.ts
+var import_node_fs24 = require("node:fs");
 var import_node_path24 = require("node:path");
 var SteeringError = class extends Error {
 };
@@ -22491,12 +22563,111 @@ function validateArchetype(archetype) {
   }
   return value;
 }
+function snapshotProfileForRequest(lookup) {
+  const snapshots = lookup.events.filter((event) => event.type === "profile_snapshotted");
+  if (snapshots.length !== 1) {
+    throw new SteeringError(
+      `run "${lookup.runId}" must contain exactly one profile_snapshotted event for a locked host request; found ${snapshots.length}.`
+    );
+  }
+  const snapshot = snapshots[0];
+  const profileRel = typeof snapshot.extra.profile === "string" && snapshot.extra.profile.length > 0 ? snapshot.extra.profile : "profile.yaml";
+  const runAbsolute = (0, import_node_path24.resolve)(lookup.runDir);
+  const profilePath = (0, import_node_path24.isAbsolute)(profileRel) ? (0, import_node_path24.resolve)(profileRel) : (0, import_node_path24.resolve)(runAbsolute, profileRel);
+  const profileRelative = (0, import_node_path24.relative)(runAbsolute, profilePath).split("\\").join("/");
+  if (profileRelative === "" || profileRelative === ".." || profileRelative.startsWith("../") || (0, import_node_path24.isAbsolute)(profileRelative)) {
+    throw new SteeringError(`run "${lookup.runId}" profile snapshot escapes the run directory: ${profileRel}`);
+  }
+  if (!(0, import_node_fs24.existsSync)(profilePath)) throw new SteeringError(`run "${lookup.runId}" profile snapshot is missing: ${profileRel}`);
+  const text = (0, import_node_fs24.readFileSync)(profilePath, "utf8");
+  const digest = snapshot.extra.sha256;
+  if (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest)) {
+    throw new SteeringError(`run "${lookup.runId}" profile snapshot is missing or has an invalid sha256 digest.`);
+  }
+  if (digest !== sha256Hex(text)) {
+    throw new SteeringError(`run "${lookup.runId}" profile snapshot digest does not match its recorded sha256.`);
+  }
+  try {
+    return parseExecutorProfile(text, `${profileRel} (run snapshot)`);
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+    throw err;
+  }
+}
+function runLockedSteeringResolve(opts, archetype, role, nativeExecutor) {
+  const run = opts.run?.trim() ?? "";
+  const dispatchId = opts.dispatchId?.trim() ?? "";
+  if (run === "" || dispatchId === "") {
+    throw new SteeringError("locked steering resolution requires both --run and --dispatch-id.");
+  }
+  let lookup;
+  try {
+    lookup = readHostDispatchRequest({ repoRoot: rootOf(opts), cwd: opts.cwd, run, dispatchId });
+  } catch (err) {
+    if (err instanceof HostDispatchError) throw new SteeringError(err.message);
+    throw err;
+  }
+  const request = lookup.request;
+  if (lookup.terminal != null) {
+    throw new SteeringError(`host dispatch "${dispatchId}" already has a terminal receipt; it cannot be delivered as a live request.`);
+  }
+  const requestedIdentity = lookup.event.extra.requested_identity;
+  if (!Array.isArray(requestedIdentity) || !["model", "reasoning_effort", "agent_type"].every((field) => requestedIdentity.includes(field))) {
+    throw new SteeringError(
+      `host dispatch "${dispatchId}" does not declare the requested model, effort, and agent type.`
+    );
+  }
+  if (request.actor == null) {
+    throw new SteeringError(`host dispatch "${dispatchId}" has no actor identity for locked steering.`);
+  }
+  if (request.agentType !== archetype) {
+    throw new SteeringError(
+      `host dispatch "${dispatchId}" requests agent_type "${request.agentType}", not archetype "${archetype}".`
+    );
+  }
+  if (role != null && role !== request.actor) {
+    throw new SteeringError(
+      `host dispatch "${dispatchId}" requests actor "${request.actor}", not role "${role}".`
+    );
+  }
+  const profile = snapshotProfileForRequest(lookup);
+  const executor = profile.executors[request.executor];
+  if (executor == null || executor.adapter !== "host") {
+    throw new SteeringError(
+      `host dispatch "${dispatchId}" requests executor "${request.executor}", which is not a host executor in the run profile snapshot.`
+    );
+  }
+  if (request.model !== executor.model || request.reasoningEffort !== executor.reasoningEffort || request.agentType !== executor.agentType) {
+    throw new SteeringError(
+      `host dispatch "${dispatchId}" request identity does not match executor "${request.executor}" in the run profile snapshot.`
+    );
+  }
+  const detail2 = nativeExecutor === request.executor ? `host request ${dispatchId} is locked to run-snapshotted executor ${request.executor}; execute natively` : `host request ${dispatchId} requires native executor ${request.executor}; this session is materialized for ${nativeExecutor ?? "no native executor"}, so start a matching Codex session`;
+  return {
+    mode: nativeExecutor === request.executor ? "native" : "restart_required",
+    archetype,
+    role,
+    activeLoadout: null,
+    executor: request.executor,
+    adapter: "host",
+    model: request.model,
+    source: "host-request",
+    nativeExecutor,
+    detail: detail2
+  };
+}
 function runSteeringResolve(opts) {
   const repoRoot = rootOf(opts);
-  const profile = profileOf(repoRoot);
   const archetype = validateArchetype(opts.archetype);
   const role = opts.role?.trim() ? opts.role.trim() : null;
   const nativeExecutor = opts.nativeExecutor?.trim() ? opts.nativeExecutor.trim() : null;
+  const hasRun = opts.run != null;
+  const hasDispatchId = opts.dispatchId != null;
+  if (hasRun !== hasDispatchId || hasRun && (opts.run.trim() === "" || opts.dispatchId.trim() === "")) {
+    throw new SteeringError("locked steering resolution requires both --run and --dispatch-id.");
+  }
+  if (hasRun && hasDispatchId) return runLockedSteeringResolve(opts, archetype, role, nativeExecutor);
+  const profile = profileOf(repoRoot);
   const nativeSpec = nativeExecutor == null ? null : profile.executors[nativeExecutor];
   if (nativeExecutor != null && (nativeSpec == null || nativeSpec.adapter !== "host")) {
     throw new SteeringError(
@@ -22595,7 +22766,7 @@ var ROLE_BEHAVIOR = {
 function tomlString(value) {
   return JSON.stringify(value);
 }
-function renderCodexAgent(archetype, executorName, spec) {
+function renderCodexNativeAgent(archetype, executorName, spec) {
   const behavior = ROLE_BEHAVIOR[archetype] ?? `Perform the ${archetype} role exactly as requested.`;
   return `name = ${tomlString(archetype)}
 description = ${tomlString(`Fadeno hybrid ${archetype}: native on the session baseline, command-dispatched when the active loadout switches providers.`)}
@@ -22606,19 +22777,59 @@ sandbox_mode = "workspace-write"
 developer_instructions = """
 You are Fadeno's hybrid ${archetype}. Do not spawn subagents.
 
-Before every task, run:
+Before every task, inspect whether the delivery begins with \`# Fadeno engine step assignment\`.
+For an engine assignment, the host coordinator must provide both \`run: <run-id>\`
+and \`dispatch_id: <dispatch-id>\` in the delivery envelope. Run:
+\`fadeno steering resolve --archetype ${archetype} --native-executor ${executorName} --run <run-id> --dispatch-id <dispatch-id>\`
+If either identity is absent or validation fails, stop and report the resolver
+error; never fall back to the ordinary ambient preflight for an engine assignment.
+For an ordinary task beginning with the ordinary \`# Fadeno step assignment\` heading, run:
 \`fadeno steering resolve --archetype ${archetype} --native-executor ${executorName}\`
 
 - mode=native: ${behavior}
 - mode=command: write the ENTIRE task prompt you received verbatim to a unique
   file under .fadeno/local/prompts/, run
-  \`fadeno dispatch --archetype ${archetype} --prompt-file <path>\`, and relay
-  stdout verbatim. On a non-zero exit, report the error and do not perform the
+  \`fadeno dispatch --archetype ${archetype} --prompt-file <path>\`, and relay stdout
+  verbatim. On a non-zero exit, report the error and do not perform the
   task yourself. The command executor runs outside this subagent's sandbox.
 - mode=restart_required: stop and relay the resolver's restart instruction.
 
 Never call fadeno dispatch for a host executor and never silently substitute a
 different model or executor.
+"""
+`;
+}
+function renderCodexCommandBroker(archetype) {
+  return `name = ${tomlString(archetype)}
+description = ${tomlString(`Fadeno command broker ${archetype}: delegates command slots through the active loadout and stops when a host slot needs native materialization.`)}
+model = "gpt-5.6-luna"
+model_reasoning_effort = "low"
+sandbox_mode = "workspace-write"
+
+developer_instructions = """
+You are Fadeno's command-broker ${archetype}. Do not spawn subagents.
+
+Before every task, inspect whether the delivery begins with \`# Fadeno engine step assignment\`.
+For an engine assignment, the host coordinator must provide both \`run: <run-id>\`
+and \`dispatch_id: <dispatch-id>\` in the delivery envelope. Run:
+\`fadeno steering resolve --archetype ${archetype} --run <run-id> --dispatch-id <dispatch-id>\`
+If either identity is absent or validation fails, stop and report the resolver
+error; never fall back to the ordinary ambient preflight for an engine assignment.
+For an ordinary task beginning with the ordinary \`# Fadeno step assignment\` heading, run:
+\`fadeno steering resolve --archetype ${archetype}\`
+
+- mode=command: write the ENTIRE task prompt you received verbatim to a unique
+  file under .fadeno/local/prompts/, run
+  \`fadeno dispatch --archetype ${archetype} --prompt-file <path>\`, and relay stdout verbatim.
+  On a non-zero exit, report the error and do not perform the
+  task yourself.
+- mode=native or mode=restart_required: stop and relay the resolver's
+  instruction; a host slot must run in a matching native Codex agent.
+- If the resolver errors, stop and report the error rather than doing the role
+  work on this broker.
+
+Never dispatch a host executor and never silently substitute a different model
+or executor. The command executor named by the resolver owns the work.
 """
 `;
 }
@@ -22633,28 +22844,52 @@ function runSteeringApply(opts) {
     );
   }
   const baseline = {};
+  const materialization = {};
+  const pending = [];
   const results = [];
   for (const archetype of ["worker", "reviewer", "judge"]) {
     const executorName = slots[archetype];
     const spec = executorName == null ? null : profile.executors[executorName];
-    if (executorName == null || spec == null || spec.adapter !== "host") {
+    if (executorName == null || spec == null) {
       throw new SteeringError(
-        `loadout "${loadout}" needs a host executor in its "${archetype}" slot to materialize a native Codex baseline; found ${executorName ?? "no slot"}.`
+        `loadout "${loadout}" needs an executor in its "${archetype}" slot to materialize a Codex role agent; found ${executorName ?? "no slot"}.`
       );
     }
-    if (spec.agentType !== archetype) {
-      throw new SteeringError(
-        `loadout "${loadout}" ${archetype} slot targets ${executorName} with agent_type "${spec.agentType}"; expected "${archetype}".`
-      );
-    }
-    baseline[archetype] = executorName;
     const path = (0, import_node_path24.join)(repoRoot, ".codex", "agents", `${archetype}.toml`);
-    results.push({ path, status: emitFile(path, renderCodexAgent(archetype, executorName, spec), opts.force ?? false) });
+    let body;
+    if (spec.adapter === "host") {
+      if (spec.agentType !== archetype) {
+        throw new SteeringError(
+          `loadout "${loadout}" ${archetype} slot targets ${executorName} with agent_type "${spec.agentType}"; expected "${archetype}".`
+        );
+      }
+      baseline[archetype] = executorName;
+      materialization[archetype] = {
+        kind: "native",
+        adapter: "host",
+        executor: executorName,
+        model: spec.model
+      };
+      body = renderCodexNativeAgent(archetype, executorName, spec);
+    } else {
+      materialization[archetype] = {
+        kind: "command-broker",
+        adapter: "command",
+        executor: executorName,
+        model: spec.model
+      };
+      body = renderCodexCommandBroker(archetype);
+    }
+    pending.push({ path, body });
   }
-  return { loadout, results, baseline, restartRequired: true };
+  for (const item of pending) {
+    results.push({ path: item.path, status: emitFile(item.path, item.body, opts.force ?? false) });
+  }
+  return { loadout, results, materialization, baseline, restartRequired: true };
 }
 
 // src/commands/tool-complete.ts
+var import_node_path25 = require("node:path");
 var ToolCompleteError = class extends Error {
 };
 function runToolComplete(opts) {
@@ -22670,6 +22905,25 @@ function runToolComplete(opts) {
     throw new ToolCompleteError(
       `run "${opts.run}" is not waiting at a tool_call step` + (next.step == null ? ` (status ${next.status}).` : `; next is ${next.step.id} (${next.step.kind}).`)
     );
+  }
+  if (next.step.artifact_type != null) {
+    const schemaKinds = /* @__PURE__ */ new Set(["playbook", "run", "review-report", "test-result"]);
+    if (!schemaKinds.has(next.step.artifact_type)) {
+      throw new ToolCompleteError(`tool step "${next.step.id}" declares unsupported artifact schema "${next.step.artifact_type}".`);
+    }
+    let runDir;
+    try {
+      runDir = resolveRun(repoRoot, next.run).dir;
+    } catch (err) {
+      if (err instanceof RunLedgerError) throw new ToolCompleteError(err.message);
+      throw err;
+    }
+    const outputPath = (0, import_node_path25.isAbsolute)(opts.output) ? opts.output : (0, import_node_path25.join)(runDir, opts.output);
+    const validation = validateFile(outputPath, new SchemaSet((0, import_node_path25.join)(repoRoot, ".fadeno", "schemas")), next.step.artifact_type);
+    if (!validation.ok) {
+      const detail2 = validation.issues.filter((issue) => issue.severity === "error").map((issue) => `${issue.path || "/"}: ${issue.message}`).join("; ");
+      throw new ToolCompleteError(`tool step "${next.step.id}" output failed ${next.step.artifact_type} validation: ${detail2}`);
+    }
   }
   try {
     const result = runRun({
@@ -22743,6 +22997,8 @@ Options:
   --role <name>           (dispatch) Role name: enables binding pins + evidence attribution
   --executor <name>       (dispatch) Bypass resolution and invoke a named executor (debugging)
   --native-executor <n>   (steering resolve) Host executor materialized into this native role
+  --run <id>              (steering resolve) Immutable engine run identity for a delivered host request
+  --dispatch-id <id>      (steering resolve) Immutable host dispatch identity paired with --run
   --prompt-file <path>    (dispatch) Read the prompt from a file instead of stdin
   --agent-id <id>         (dispatch-start) Native host agent identity
   --workspace <path>      (dispatch-start) Native workspace provenance
@@ -22794,7 +23050,7 @@ function printInitSummary(target, repoRoot, results, withHooks, withSteering, da
   console.log(`Fadeno initialized for ${target} in ${repoRoot}
 `);
   for (const r of results) {
-    console.log(`  ${r.status.padEnd(11)} ${(0, import_node_path25.relative)(repoRoot, r.path) || r.path}`);
+    console.log(`  ${r.status.padEnd(11)} ${(0, import_node_path26.relative)(repoRoot, r.path) || r.path}`);
   }
   console.log(
     `
@@ -22828,7 +23084,7 @@ ${counts.created} created, ${counts.appended} appended, ${counts.overwritten} ov
   }
   if (withSteering) {
     console.log(
-      target === "claude" ? `  ${nextStep}. Steering is active locally; restart Claude Code so the Agent hook is loaded` : `  ${nextStep}. Configure a native baseline with \`fadeno steering apply <loadout> --codex --force\`, then start a fresh Codex session`
+      target === "claude" ? `  ${nextStep}. Steering is active locally; restart Claude Code so the Agent hook is loaded` : `  ${nextStep}. Materialize Codex steering with \`fadeno steering apply <loadout> --codex --force\`; command slots switch live, while host changes require a fresh session`
     );
   }
 }
@@ -22841,7 +23097,7 @@ function printIssue(issue) {
 function printValidate(outcome) {
   let warnings = 0;
   for (const result of outcome.results) {
-    const rel = (0, import_node_path25.relative)(outcome.repoRoot, result.file) || result.file;
+    const rel = (0, import_node_path26.relative)(outcome.repoRoot, result.file) || result.file;
     const fileWarnings = result.issues.filter((i) => i.severity === "warning").length;
     warnings += fileWarnings;
     if (result.ok) {
@@ -23042,7 +23298,7 @@ workflow${projection.playbook ? ` \xB7 ${projection.playbook}` : ""}${total ? ` 
 function printShow(repoRoot, result, rawTimeline) {
   const { run, mode, events, badLines, artifacts, projection } = result;
   const dash = (value) => value ?? "\u2014";
-  const relDir = (0, import_node_path25.relative)(repoRoot, run.dir) || run.dir;
+  const relDir = (0, import_node_path26.relative)(repoRoot, run.dir) || run.dir;
   console.log(`run ${run.runId}`);
   console.log(`  playbook:  ${dash(run.playbook)}`);
   console.log(`  task:      ${dash(run.task)}`);
@@ -23231,6 +23487,8 @@ function main(argv) {
         role: { type: "string" },
         executor: { type: "string" },
         "native-executor": { type: "string" },
+        run: { type: "string" },
+        "dispatch-id": { type: "string" },
         "prompt-file": { type: "string" },
         "agent-id": { type: "string" },
         workspace: { type: "string" },
@@ -23258,6 +23516,9 @@ function main(argv) {
   }
   const { values, positionals } = parsed;
   const command2 = positionals[0];
+  if ((values.run !== void 0 || values["dispatch-id"] !== void 0) && !(command2 === "steering" && positionals[1] === "resolve")) {
+    throw new Error("--run and --dispatch-id are valid only for `fadeno steering resolve`.");
+  }
   if (values.version) {
     console.log(packageVersion());
     return 0;
@@ -23295,14 +23556,16 @@ function main(argv) {
       if (sub === "resolve") {
         if (!values.archetype) {
           throw new Error(
-            "Usage: fadeno steering resolve --archetype <name> [--native-executor <name>] [--role <name>] [--loadout <name>]"
+            "Usage: fadeno steering resolve --archetype <name> [--native-executor <name>] [--role <name>] [--loadout <name>] [--run <id> --dispatch-id <id>]"
           );
         }
         const result = runSteeringResolve({
           archetype: values.archetype,
           nativeExecutor: values["native-executor"],
           role: values.role,
-          loadout: values.loadout
+          loadout: values.loadout,
+          run: values.run,
+          dispatchId: values["dispatch-id"]
         });
         console.log(JSON.stringify({
           mode: result.mode,
@@ -23314,6 +23577,8 @@ function main(argv) {
           model: result.model,
           native_executor: result.nativeExecutor,
           resolution: result.source,
+          run: values.run ?? null,
+          dispatch_id: values["dispatch-id"] ?? null,
           detail: result.detail
         }, null, 2));
         return result.mode === "restart_required" ? 2 : 0;
@@ -23325,9 +23590,12 @@ function main(argv) {
         }
         const result = runSteeringApply({ loadout, target: "codex", force: values.force });
         const changed = result.results.filter((item) => item.status !== "skipped").length;
-        console.log(`Codex native steering baseline: ${result.loadout}`);
+        console.log(`Codex steering materialized: ${result.loadout}`);
         for (const archetype of ["worker", "reviewer", "judge"]) {
-          console.log(`  ${archetype} \u2192 ${result.baseline[archetype]}`);
+          const slot = result.materialization[archetype];
+          console.log(
+            `  ${archetype} \u2192 ${slot.kind === "native" ? "native host" : "command broker"} ${slot.executor}`
+          );
         }
         console.log(`  ${changed} agent definition(s) written; start a fresh Codex session to load them.`);
         if (changed === 0) console.log("  Existing files were preserved; pass --force to replace them.");
@@ -23395,7 +23663,7 @@ resolution${via}:`);
       const parts = [];
       if (result.updatedFields.length) parts.push(`updated ${result.updatedFields.join(", ")}`);
       if (result.appendedEvents.length) parts.push(`logged ${result.appendedEvents.join(", ")}`);
-      console.log(`${(0, import_node_path25.relative)(process.cwd(), result.runDir) || result.runDir}: ${parts.join("; ")}`);
+      console.log(`${(0, import_node_path26.relative)(process.cwd(), result.runDir) || result.runDir}: ${parts.join("; ")}`);
       if (result.manifest) {
         const v = result.manifest.validation;
         const note = v.schema ? `, ${v.schema}: ${v.ok ? "valid" : "INVALID"}` : "";
@@ -23411,7 +23679,7 @@ resolution${via}:`);
         throw new Error("Usage: fadeno tool-complete <run> --output <artifact-path>");
       }
       const result = runToolComplete({ run, output: values.output });
-      console.log(`${(0, import_node_path25.relative)(process.cwd(), result.runDir) || result.runDir}: completed tool step ${result.step}`);
+      console.log(`${(0, import_node_path26.relative)(process.cwd(), result.runDir) || result.runDir}: completed tool step ${result.step}`);
       if (result.manifest) {
         const validation = result.manifest.validation;
         const note = validation.schema ? `, ${validation.schema}: ${validation.ok ? "valid" : "INVALID"}` : "";
@@ -23434,7 +23702,7 @@ resolution${via}:`);
       if (codex) {
         console.log("\nTest it: `codex plugin marketplace add . && codex plugin add fadeno@fadeno`");
       } else {
-        console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path25.relative)(process.cwd(), outDir) + "`");
+        console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path26.relative)(process.cwd(), outDir) + "`");
       }
       return 0;
     }
@@ -23556,15 +23824,15 @@ resolution${via}:`);
           if (result.previous != null && result.previous !== result.name) {
             console.log(`  (was ${result.previous})`);
           }
-          const selected = runLoadoutShow({});
+          const selected = runLoadoutShow({ loadout: result.name, env: null });
           const commandSlots = selected.slots.filter((slot) => slot.adapter === "command").length;
           const hostSlots = selected.slots.filter((slot) => slot.adapter === "host").length;
           if (commandSlots > 0) {
-            console.log(`  ${commandSlots} command slot(s) switch on the next dispatch.`);
+            console.log(`  ${commandSlots} command slot(s) take effect on the next role dispatch/invocation; no restart is needed.`);
           }
           if (hostSlots > 0) {
             console.log(
-              `  ${hostSlots} host slot(s) require a matching materialized native baseline; run \`fadeno steering apply ${result.name} --codex --force\` and start a fresh Codex session when they differ.`
+              `  ${hostSlots} host slot(s) run natively only when the current session's materialized native executor matches; otherwise run \`fadeno steering apply ${result.name} --codex --force\` and start a fresh Codex session.`
             );
           }
           return 0;
@@ -23590,7 +23858,7 @@ resolution${via}:`);
         promptFile,
         // Prompt defaults to stdin; the echo goes to stderr so stdout stays
         // the executor's pure report.
-        prompt: promptFile == null ? (0, import_node_fs24.readFileSync)(0, "utf8") : void 0,
+        prompt: promptFile == null ? (0, import_node_fs25.readFileSync)(0, "utf8") : void 0,
         onEcho: (line) => console.error(line)
       });
       if (result.stdout.length > 0) process.stdout.write(result.stdout);

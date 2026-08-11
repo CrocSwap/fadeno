@@ -39,6 +39,9 @@ fadeno drive <run>
     report honestly; the user may re-run drive (retry) or substitute:
     fadeno drive <run> --bind <role>=<executor>     # recorded as evidence
   awaiting_host_dispatch:
+    deliver each immutable prompt with an envelope beginning `# Fadeno engine step assignment`
+    and exact `run: <run>` plus `dispatch_id: <dispatch-id>` fields; the native
+    Codex agent resolves that pair before doing work
     start each native agent and record dispatch-start
     poll the prompt-declared progress sidecar and record dispatch-progress
     submit dispatch-complete or dispatch-fail, then re-run drive
@@ -74,10 +77,8 @@ loop:
         for actor in (N.step.actors or [single]):
           fadeno run <run> --step <N.step.id>   # once per step entry (not per actor)
           fadeno prompt <run> <N.step.id> --actor <actor> | <harness(actor)>  > <tmp>
-          # write bytes to N.step.outputs[i] (or the path prompt recorded)
-          fadeno validate <output> --schema <N.step.artifact_type>   # when typed
-          # one bounded re-ask on schema failure, then fail the step honestly
-          # (write the file FIRST — recording hashes it into the event manifest)
+          # capture the returned body bytes; the director writes them to N.step.outputs[i]
+          # (or the path prompt recorded); artifact_created hashes and schema-checks them
           fadeno run <run> --event artifact_created --artifact <output> --member <actor>
         if N.step.collective:
           merge member JSON objects into one JSON array at N.step.collective
@@ -94,6 +95,7 @@ loop:
       else:
         for tool_call: invoke the tool, write its output, then run
           fadeno tool-complete <run> --output <artifact-path>
+          # typed output is validated atomically before step/artifact events append
         handle join / … per runtime.md; record; continue
 ```
 
@@ -131,7 +133,8 @@ Manual fallback map (override with playbook role purpose hints or host policy):
 | everything else | `claude -p` |
 
 Keep it dumb: the point is one provenance story, not smart routing. Pipe prompt
-text on stdin; write stdout to the planned artifact path.
+text on stdin; capture stdout as the body and let the director write it to the
+planned artifact path.
 
 ## Host ↔ driver handoff (pause / resume)
 

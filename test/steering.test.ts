@@ -178,6 +178,6 @@ test('bundled CLI parses --with-steering and carries its templates', (t) => {
     encoding: 'utf8',
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Configure a native baseline with .*fadeno steering apply/);
+  assert.match(result.stdout, /Materialize Codex steering with .*fadeno steering apply/);
   assert.match(read(root, '.codex/agents/worker.toml'), /Unmaterialized Fadeno worker broker/i);
 });

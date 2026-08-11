@@ -7,7 +7,8 @@ description: Execute or resume Fadeno playbooks from `.fadeno/playbooks` for com
 
 Execute a Fadeno playbook as a bounded, inspectable workflow backed by files on
 disk. You are the director and sole Fadeno ledger writer: native workers return
-outputs and receipts to you; they never invoke Fadeno ledger commands.
+only declared artifact bodies and receipts to you, and you materialize those
+bodies at canonical run paths; workers never invoke Fadeno ledger commands.
 
 ## Procedure
 
@@ -28,13 +29,16 @@ outputs and receipts to you; they never invoke Fadeno ledger commands.
    include `condition`, the concrete artifact path, and `result`; loops must
    record iteration start, condition evaluation, and success or exhaustion.
 8. Execute each step in `flow` using available host capabilities. When
-   `fadeno drive` returns `awaiting_host_dispatch`, start each request with the
-   native facility, attach its native agent id, and submit exactly one terminal
-   receipt serially with `dispatch-complete` or `dispatch-fail` before driving
-   again. The immutable prompt names an ephemeral progress sidecar. Poll it
-   without interrupting the agent and record meaningful changes with `fadeno
-   dispatch-progress <run> <dispatch> --file <workspace>/<sidecar> --source
-   agent`.
+   `fadeno drive` returns `awaiting_host_dispatch`, deliver the immutable actor
+   prompt with an envelope beginning `# Fadeno engine step assignment` and containing
+   both `run: <run-id>` and `dispatch_id: <dispatch-id>`. The delivered Codex
+   agent must resolve that pair before doing work; it must not fall back to an
+   ambient loadout. Start each request with the native facility, attach its
+   native agent id, and submit exactly one terminal receipt serially with
+   `dispatch-complete` or `dispatch-fail` before driving again. The immutable
+   prompt names an ephemeral progress sidecar. Poll it without interrupting the
+   agent and record meaningful changes with `fadeno dispatch-progress <run>
+   <dispatch> --file <workspace>/<sidecar> --source agent`.
 9. If native subagents are available, delegate role-specific work to them — but
    **one level only**; do not assume a subagent can spawn its own subagents.
 10. If native subagents are unavailable, degrade loudly: use a declared command

@@ -168,11 +168,11 @@ function renderConstraints(ctx: PromptContext): string[] {
   if (ctx.loopOwner && ctx.iteration != null) {
     const bound = ctx.maxIterations != null ? ` of at most ${ctx.maxIterations}` : '';
     lines.push(
-      `- This step is body of loop \`${ctx.loopOwner}\`, iteration ${ctx.iteration}${bound}. Write this generation's artifact; never overwrite an earlier generation.`,
+      `- This step is body of loop \`${ctx.loopOwner}\`, iteration ${ctx.iteration}${bound}. Return this generation's artifact body; never overwrite an earlier generation.`,
     );
   }
   lines.push(
-    '- You may read the repository, but must not modify `run.yaml`, `events.jsonl`, prompt snapshots under `artifacts/prompts/`, or any artifact other than your declared output below. The cooperative progress sidecar is the sole non-artifact exception.',
+    '- You may modify task-relevant repository source and update only the ephemeral progress sidecar below. Do not write run artifacts, `run.yaml`, `events.jsonl`, or prompt snapshots under `artifacts/prompts/`.',
   );
   return lines;
 }
@@ -185,7 +185,8 @@ function renderOutput(ctx: PromptContext): string[] {
   } else {
     lines.push(`- Output: ${out.collectiveType || out.memberType}.`);
   }
-  lines.push(`- Write exactly one artifact to \`${out.path}\`.`);
+  lines.push('- Return only the declared artifact body — no surrounding prose or code fence.');
+  lines.push(`- The director records your returned body at \`${out.path}\` under the run directory.`);
   lines.push(
     `- Artifact paths beginning with \`artifacts/\` are relative to the run directory ` +
       `\`.fadeno/runs/${ctx.runId}/\`, not the repository root.`,
@@ -195,11 +196,10 @@ function renderOutput(ctx: PromptContext): string[] {
   if (out.schemaKind && ctx.schemaText != null) {
     lines.push('- Emit JSON only — no prose, no code fences around it — conforming to this schema:');
     lines.push('', '```json', ctx.schemaText, '```', '');
-    lines.push(`- Self-check before finishing: \`fadeno validate ${out.path} --schema ${out.schemaKind}\`.`);
   } else if (out.instructions != null) {
     lines.push(`- ${out.instructions}`);
   } else {
-    lines.push('- Produce one self-contained markdown document.');
+    lines.push('- Produce one self-contained markdown document as the artifact body.');
   }
 
   if (ctx.downstream) {
@@ -257,9 +257,9 @@ export function renderStepPrompt(ctx: PromptContext): string {
   lines.push('- This report is attested progress evidence only. It never controls a gate or replaces the declared output.', '');
 
   lines.push('## Completion protocol', '');
-  lines.push('- Produce exactly the one declared artifact above; aside from the progress sidecar, write nothing else.');
+  lines.push('- Return exactly the one declared artifact body above; the director materializes it at the canonical path.');
   lines.push('- Do not modify the run ledger (`run.yaml`, `events.jsonl`) or any prompt snapshot.');
-  lines.push('- Keep all commentary inside the artifact; emit no other prose.');
+  lines.push('- Emit no commentary outside the artifact body.');
   lines.push('- If your harness cannot write files, return only the artifact body for the coordinator to save.');
 
   return `${lines.join('\n')}\n`;

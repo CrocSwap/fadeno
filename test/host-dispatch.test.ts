@@ -3,13 +3,15 @@ import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'nod
 import { join } from 'node:path';
 import test from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
-import { runDispatchComplete, runDispatchProgress, runDispatchStart } from '../src/commands/dispatch.ts';
+import { runDispatchComplete, runDispatchFail, runDispatchProgress, runDispatchStart } from '../src/commands/dispatch.ts';
 import { runDrive } from '../src/commands/drive.ts';
 import { runInit } from '../src/commands/init.ts';
 import { runNewRun } from '../src/commands/new-run.ts';
 import { runPrompt } from '../src/commands/prompt.ts';
 import { parseExecutorProfile, serializeProfile } from '../src/lib/executors.ts';
+import { listHostDispatchRequests, requestHostDispatch } from '../src/lib/host-dispatch.ts';
 import { readEvents } from '../src/lib/run-ledger.ts';
+import { runRun } from '../src/commands/run.ts';
 import { runVerify } from '../src/commands/verify.ts';
 import { runShow } from '../src/commands/show.ts';
 import { tempRepo } from './helpers.ts';
@@ -146,6 +148,94 @@ test('drive batches host requests and receipts are idempotent and verifiable', (
   const all = readEvents(runDir).events;
   assert.equal(all.filter((event) => event.type === 'host_dispatch_requested').length, 2);
   assert.equal(runVerify({ repoRoot: root, run: runId }).ok, true);
+});
+
+test('verification accepts a failed host attempt recovered by a higher ordinal retry', (t) => {
+  const { root, runId, runDir, request } = seedPendingHostRun(t);
+  runDispatchStart({ repoRoot: root, run: runId, dispatchId: request.dispatchId, agentId: 'native-attempt-1' });
+  runDispatchFail({ repoRoot: root, run: runId, dispatchId: request.dispatchId, reason: 'host interrupted' });
+  const peer = listHostDispatchRequests(runDir).find((candidate) => candidate.dispatchId !== request.dispatchId)!;
+  runDispatchStart({ repoRoot: root, run: runId, dispatchId: peer.dispatchId, agentId: 'native-peer' });
+  const peerOutput = join(root, 'peer.md');
+  writeFileSync(peerOutput, 'peer output');
+  runDispatchComplete({ repoRoot: root, run: runId, dispatchId: peer.dispatchId, output: peerOutput });
+
+  const retryId = `${request.dispatchId}-retry`;
+  const retry = requestHostDispatch({
+    ...request,
+    dispatchId: retryId,
+    attempt: 2,
+    attemptReason: 'user_retry',
+  });
+  runDispatchStart({ repoRoot: root, run: runId, dispatchId: retry.dispatchId, agentId: 'native-attempt-2' });
+  const output = join(root, 'recovered.md');
+  writeFileSync(output, 'recovered output');
+  runDispatchComplete({ repoRoot: root, run: runId, dispatchId: retry.dispatchId, output });
+  runRun({ repoRoot: root, run: runId, status: 'completed' });
+
+  const lifecycle = runVerify({ repoRoot: root, run: runId }).findings.find((finding) => finding.check === 'host-dispatch-lifecycle')!;
+  assert.equal(lifecycle.status, 'ok', lifecycle.detail);
+  assert.match(lifecycle.detail, /recovered 1 historical failed attempt/);
+  assert.equal(runVerify({ repoRoot: root, run: runId }).ok, true);
+  assert.ok(readEvents(runDir).events.some((event) => event.type === 'actor_failed'));
+});
+
+test('verification rejects a retry whose request and success were recorded before the failed terminal', (t) => {
+  const { root, runId, runDir, request } = seedPendingHostRun(t);
+  runDispatchStart({ repoRoot: root, run: runId, dispatchId: request.dispatchId, agentId: 'native-attempt-1' });
+  const retry = requestHostDispatch({
+    ...request,
+    dispatchId: `${request.dispatchId}-out-of-order-retry`,
+    attempt: 2,
+    attemptReason: 'user_retry',
+  });
+  runDispatchStart({ repoRoot: root, run: runId, dispatchId: retry.dispatchId, agentId: 'native-attempt-2' });
+  const retryOutput = join(root, 'out-of-order-retry.md');
+  writeFileSync(retryOutput, 'retry completed before the first failure');
+  runDispatchComplete({ repoRoot: root, run: runId, dispatchId: retry.dispatchId, output: retryOutput });
+  runDispatchFail({ repoRoot: root, run: runId, dispatchId: request.dispatchId, reason: 'host interrupted after retry receipt' });
+
+  const peer = listHostDispatchRequests(runDir).find((candidate) => candidate.dispatchId !== request.dispatchId && candidate.dispatchId !== retry.dispatchId)!;
+  runDispatchStart({ repoRoot: root, run: runId, dispatchId: peer.dispatchId, agentId: 'native-peer' });
+  const peerOutput = join(root, 'out-of-order-peer.md');
+  writeFileSync(peerOutput, 'peer output');
+  runDispatchComplete({ repoRoot: root, run: runId, dispatchId: peer.dispatchId, output: peerOutput });
+  runRun({ repoRoot: root, run: runId, status: 'completed' });
+
+  const lifecycle = runVerify({ repoRoot: root, run: runId }).findings.find((finding) => finding.check === 'host-dispatch-lifecycle')!;
+  assert.equal(lifecycle.status, 'fail');
+  assert.match(lifecycle.detail, /unrecovered failed host dispatch/);
+});
+
+test('verification rejects a recovered retry that changes actors for one actor_call_id', (t) => {
+  const { root, runId, runDir, request } = seedPendingHostRun(t);
+  runDispatchStart({ repoRoot: root, run: runId, dispatchId: request.dispatchId, agentId: 'native-attempt-1' });
+  runDispatchFail({ repoRoot: root, run: runId, dispatchId: request.dispatchId, reason: 'host interrupted' });
+
+  const peer = listHostDispatchRequests(runDir).find((candidate) => candidate.dispatchId !== request.dispatchId)!;
+  runDispatchStart({ repoRoot: root, run: runId, dispatchId: peer.dispatchId, agentId: 'native-peer' });
+  const peerOutput = join(root, 'cross-actor-peer.md');
+  writeFileSync(peerOutput, 'peer output');
+  runDispatchComplete({ repoRoot: root, run: runId, dispatchId: peer.dispatchId, output: peerOutput });
+
+  const retry = requestHostDispatch({
+    ...request,
+    dispatchId: `${request.dispatchId}-cross-actor-retry`,
+    actor: 'agent_3',
+    attempt: 2,
+    attemptReason: 'user_retry',
+  });
+  runDispatchStart({ repoRoot: root, run: runId, dispatchId: retry.dispatchId, agentId: 'native-cross-actor' });
+  const retryOutput = join(root, 'cross-actor-retry.md');
+  writeFileSync(retryOutput, 'cross-actor retry output');
+  runDispatchComplete({ repoRoot: root, run: runId, dispatchId: retry.dispatchId, output: retryOutput });
+  runRun({ repoRoot: root, run: runId, status: 'completed' });
+
+  const verification = runVerify({ repoRoot: root, run: runId });
+  const lifecycle = verification.findings.find((finding) => finding.check === 'host-dispatch-lifecycle')!;
+  assert.equal(lifecycle.status, 'fail');
+  assert.match(lifecycle.detail, new RegExp(`${request.actorCallId}: actor_call_id is associated with multiple actors: agent_1, agent_3`));
+  assert.equal(verification.ok, false);
 });
 
 test('host progress is provenance-labelled, idempotent, projected, and lifecycle-checked', (t) => {

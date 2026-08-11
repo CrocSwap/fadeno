@@ -113,12 +113,13 @@ ${TASK}
 
 - Map step: perform only the \`architect_fable\` member. The other members (\`architect_sol\`) are handled separately — do not coordinate with them or produce their outputs.
 - Policies (advisory unless enforced by hooks/CI): max_revision_loops = 2; max_subagents = 6; require_user_approval_for = [destructive_commands, dependency_addition, deploy, external_send].
-- You may read the repository, but must not modify \`run.yaml\`, \`events.jsonl\`, prompt snapshots under \`artifacts/prompts/\`, or any artifact other than your declared output below. The cooperative progress sidecar is the sole non-artifact exception.
+- You may modify task-relevant repository source and update only the ephemeral progress sidecar below. Do not write run artifacts, \`run.yaml\`, \`events.jsonl\`, or prompt snapshots under \`artifacts/prompts/\`.
 
 ## Output contract
 
 - Collective output: ReviewReport[]. Your output: ReviewReport.
-- Write exactly one artifact to \`artifacts/cross-review.architect_fable.json\`.
+- Return only the declared artifact body — no surrounding prose or code fence.
+- The director records your returned body at \`artifacts/cross-review.architect_fable.json\` under the run directory.
 - Artifact paths beginning with \`artifacts/\` are relative to the run directory \`.fadeno/runs/${RUN_ID}/\`, not the repository root.
 - Media type: application/json.
 - Emit JSON only — no prose, no code fences around it — conforming to this schema:
@@ -127,7 +128,6 @@ ${TASK}
 ${schemaText}
 \`\`\`
 
-- Self-check before finishing: \`fadeno validate artifacts/cross-review.architect_fable.json --schema review-report\`.
 - Downstream: gate \`convergence_gate\` computes \`no_blocking_issues\` from ReviewReport[]. A \`blocking\`-severity issue fails it. The coordinator first assembles all map members into one array.
 
 ## Cooperative progress
@@ -152,12 +152,14 @@ ${schemaText}
 
 ## Completion protocol
 
-- Produce exactly the one declared artifact above; aside from the progress sidecar, write nothing else.
+- Return exactly the one declared artifact body above; the director materializes it at the canonical path.
 - Do not modify the run ledger (\`run.yaml\`, \`events.jsonl\`) or any prompt snapshot.
-- Keep all commentary inside the artifact; emit no other prose.
+- Emit no commentary outside the artifact body.
 - If your harness cannot write files, return only the artifact body for the coordinator to save.
 `;
   assert.equal(result.prompt, expected);
+  assert.doesNotMatch(result.prompt, /fadeno validate artifacts\/cross-review\.architect_fable\.json/);
+  assert.match(result.prompt, /director records your returned body/);
 });
 
 test('golden: single actor_call with an untyped output', (t) => {
@@ -166,7 +168,9 @@ test('golden: single actor_call with an untyped output', (t) => {
   const result = runPrompt({ repoRoot: root, run: RUN_ID, step: 'draft', record: false });
   assert.equal(result.plan.output.path, 'artifacts/note.md');
   assert.match(result.prompt, /- Output: Note\./);
-  assert.match(result.prompt, /- Produce one self-contained markdown document\./);
+  assert.match(result.prompt, /- Produce one self-contained markdown document as the artifact body\./);
+  assert.match(result.prompt, /- Return only the declared artifact body/);
+  assert.doesNotMatch(result.prompt, /Write exactly one artifact to/);
   assert.match(result.prompt, /- actor: writer/);
 });
 

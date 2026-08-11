@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
+import { stringify as stringifyYaml } from 'yaml';
 import { runInit } from '../src/commands/init.ts';
 import { runNewRun } from '../src/commands/new-run.ts';
 import { runPrompt } from '../src/commands/prompt.ts';
@@ -19,9 +20,13 @@ function cli(root: string, args: string[]): { status: number; output: string } {
   }
 }
 
-function cliSplit(root: string, args: string[]): { status: number; stdout: string; stderr: string } {
+function cliSplit(
+  root: string,
+  args: string[],
+  env: NodeJS.ProcessEnv = process.env,
+): { status: number; stdout: string; stderr: string } {
   try {
-    return { status: 0, stdout: execFileSync(BIN, args, { cwd: root, encoding: 'utf8', stdio: 'pipe' }), stderr: '' };
+    return { status: 0, stdout: execFileSync(BIN, args, { cwd: root, env, encoding: 'utf8', stdio: 'pipe' }), stderr: '' };
   } catch (error) {
     const err = error as { status?: number; stdout?: string; stderr?: string };
     return { status: err.status ?? 1, stdout: err.stdout ?? '', stderr: err.stderr ?? '' };
@@ -98,6 +103,37 @@ test('committed bundled CLI supports Grok init and rejects mixed target flags', 
   const mixed = cliSplit(root, ['init', '--grok', '--codex']);
   assert.equal(mixed.status, 1);
   assert.match(`${mixed.stdout}${mixed.stderr}`, /choose exactly one target/i);
+});
+
+test('bundled CLI reports mixed steering materialization and pinned-loadout guidance truthfully', (t) => {
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    executors: {
+      nativeWorker: { adapter: 'host', model: 'gpt-5.6-luna', reasoning_effort: 'xhigh', agent_type: 'worker' },
+      nativeReviewer: { adapter: 'host', model: 'gpt-5.6-terra', reasoning_effort: 'high', agent_type: 'reviewer' },
+      nativeJudge: { adapter: 'host', model: 'gpt-5.6-sol', reasoning_effort: 'medium', agent_type: 'judge' },
+      command: { adapter: 'command', command: ['node', '-e', '0'], model: 'opus' },
+    },
+    loadouts: {
+      mixed: { worker: 'nativeWorker', reviewer: 'command', judge: 'nativeJudge' },
+      'command-only': { worker: 'command', reviewer: 'command', judge: 'command' },
+    },
+  }));
+
+  const applied = cliSplit(root, ['steering', 'apply', 'mixed', '--codex', '--force']);
+  assert.equal(applied.status, 0, applied.stderr);
+  assert.match(applied.stdout, /Codex steering materialized: mixed/);
+  assert.match(applied.stdout, /worker → native host nativeWorker/);
+  assert.match(applied.stdout, /reviewer → command broker command/);
+  assert.match(applied.stdout, /start a fresh Codex session/);
+
+  const env = { ...process.env, FADENO_LOADOUT: 'command-only' };
+  const used = cliSplit(root, ['loadout', 'use', 'mixed'], env);
+  assert.equal(used.status, 0, used.stderr);
+  assert.match(used.stdout, /active loadout pinned: mixed/);
+  assert.match(used.stdout, /2 host slot\(s\)/);
+  assert.match(used.stdout, /1 command slot\(s\).*next role dispatch\/invocation; no restart is needed/);
 });
 
 test('committed bundled CLI emits Bash completion and preserves candidate flags after --', (t) => {
