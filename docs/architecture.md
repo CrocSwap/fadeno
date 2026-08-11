@@ -26,7 +26,23 @@ kickoff memo):
 - **Capability** — skills + subagents + CLI. Source under `templates/common/skills`,
   `templates/{codex,claude,grok}/*-agents`, and `src/`.
 - **Definitions** — the `.fadeno/` tree. Source under `templates/common/fadeno`.
-- **Traces** — `.fadeno/runs/<id>/`. Created at runtime by the CLI; no template.
+- **Traces** — `.fadeno/runs/<id>/`. Created lazily by the CLI; no template or
+  committed `.gitkeep` is required.
+
+The bundled definition resolver (`src/lib/definitions.ts`) applies project
+shadowing over immutable plugin-adjacent definitions. `SchemaSet` accepts a
+project directory plus a bundled fallback, so validation, prompting, driving,
+diagrams, and verification all use the same logical catalog.
+
+Executor configuration is layered by `src/lib/config-layers.ts`:
+
+```text
+bundled catalog → user executors.yaml → project .fadeno/executors.yaml
+```
+
+Named executors, loadouts, and bindings merge by key; scalar defaults use the
+highest declaring layer. A malformed present layer is an error. User paths are
+resolved by `src/lib/user-paths.ts` with injectable XDG/Windows overrides.
 
 ## The CLI
 
@@ -66,6 +82,9 @@ assert on return values and filesystem effects instead of scraping stdout.
 | `runSteeringResolve` / `runSteeringApply` | hybrid mode / emitted Codex agents | Resolves native vs command vs restart-required per invocation; materializes per-slot native host agents or cheap command brokers. |
 | `runToolComplete` | run update + artifact manifest | Validates a typed tool result before atomically starting the exact next `tool_call` and recording its result. |
 | `runPlugin` | `EmitResult[]` + `outDir` | Generates `plugin/` from templates. |
+| `runSetup` / `runUse` | user paths, probes, loadout state, restart notices | Safe native setup and user-scoped selection. |
+| `runStatus` / `runDoctor` | effective routing / findings | Read-only diagnostics. |
+| `runVendor` / `runEvidencePromote` | lock / promoted receipt | Explicit committed project capability and evidence. |
 | `runCompletion` / `runCompletionCandidates` | Bash source + candidate strings | Emits the `fadeno completion bash` script and serves its read-only candidate protocol. |
 
 All commands accept injectable `cwd` / `repoRoot` (and `now` where time matters)
@@ -271,7 +290,7 @@ Everything `init` emits and everything the plugin bundles comes from `templates/
 ```
 templates/
   common/                 # identical across targets
-    fadeno/               # → .fadeno/ : vocabulary, playbooks, schemas, enforcement, runs/gitkeep
+    fadeno/               # → .fadeno/ : vocabulary, playbooks, schemas, enforcement
     skills/               # the three SKILL.md bodies + references (sigil-free)
     commands/             # /fadeno:* slash-command files (plugin)
     hooks/                # pre-commit, CI workflow, README (tier-2 scaffold)
@@ -289,10 +308,13 @@ permissions, so `init` is the seam for this). Grok receives the shared
 capabilities and native `.grok/agents` definitions without an automatic
 `.grok/config.toml` mutation or permission grant.
 
-`--with-steering` is a separate, explicit opt-in for loadout-aware delegation.
-On Codex, `runInit` selects honest unmaterialized brokers from
-`codex-steering-agents/` (also with `--data-only`, because Codex plugins cannot
-carry project custom agents). `fadeno steering apply <loadout> --codex --force`
+Steering is enabled by default for Codex and Claude; `--no-steering` is the
+explicit opt-out and `--with-steering` remains a compatibility alias. On Codex,
+`runInit` selects honest unmaterialized brokers from `codex-steering-agents/`.
+`fadeno setup --codex` records the harness and materializes managed agents in
+the user Codex home. Later `fadeno use <loadout>` calls refresh them
+automatically. `fadeno steering apply <loadout>
+--codex --scope project` remains the explicit project override and
 then materializes every required slot into session-static role TOML: host slots
 become native agents using their configured model/effort, while command slots
 become cheap brokers that delegate through `fadeno dispatch`. Before each task,
@@ -315,8 +337,9 @@ a file under `.fadeno/local/prompts/`, runs
 `fadeno dispatch --archetype <a> --prompt-file <path>`, and relays the report
 verbatim. On a non-zero exit it reports the failure and never attempts the task
 itself — silently substituting which provider does the work is an explicit
-non-goal. Routing is by description by default and can be made deterministic
-at the host boundary with `init --claude --with-steering`; resolution stays in
+non-goal. Routing is by description by default and is made deterministic at
+the host boundary by default with `init --claude`; `--no-steering` opts out.
+Resolution stays in
 the CLI. The
 permission boundary stays loud: the external executor a proxy dispatches runs
 *outside* the harness's permission fences, under its own sandbox flags — a
@@ -325,8 +348,8 @@ dispatch evidence row as the audit trail.
 
 Two non-obvious template rules:
 
-- **Dotfiles ship un-dotted.** npm doesn't reliably publish dotfiles, so
-  `runs/.gitkeep` is stored as `runs/gitkeep` and `copyTree` renames it on emit.
+- **Traces are lazy.** Runtime directories are created by the first command that
+  needs them; no committed `.gitkeep` is required.
 - **`emitBootstrap` is idempotent.** It wraps the Fadeno section in
   `<!-- fadeno:begin … -->` / `<!-- fadeno:end -->` markers: absent file → create;
   markers absent → append; markers present → skip (or replace under `--force`).
@@ -336,9 +359,11 @@ Two non-obvious template rules:
 `fadeno plugin` (`runPlugin`) emits a Claude Code plugin from the **same**
 `templates/common/skills` bodies (rewriting `name: fadeno-runner` →
 `name: runner` for the short `fadeno:runner` namespace), plus the shared
-`commands/`, the Claude `claude-agents/`, and a manifest. It carries **no per-repo
-definitions** — plugin users seed those with `fadeno init --claude --data-only`
-(the capability/definitions split).
+`commands/`, the Claude `claude-agents/`, a setup skill and hook, and a manifest.
+The build adds a standalone CLI plus immutable built-in definitions under
+`plugin/bin/`; plugin users can run starter playbooks without project init.
+`init --data-only` is the definitions-only project seam. `vendor` deliberately
+emits the full project capability surface plus definitions and a lock.
 
 `npm run build:plugin` runs `fadeno plugin ./plugin --force` **and**
 `build-bin.mjs`. The resulting `plugin/` is **committed** (unlike `dist/`, which is
@@ -351,10 +376,10 @@ itself remains a Claude Code plugin generator.
 **Codex** plugin into the committed, visible `plugin-codex/` (parallel to the
 Claude `plugin/`) from the same `templates/common/skills` bodies — but full-named
 (Codex invokes `$fadeno-runner`) and carrying each skill's `agents/openai.yaml`
-invocation policy (runner implicit; builder/driver explicit-only), the same file
-`fadeno init --codex` installs. A Codex plugin has **no manifest slot for subagents
-or a bundled binary**, so those stay with `fadeno init --codex` (`.codex/agents`)
-and npm (`npx fadeno`). The only piece that must live in a dot dir is the
+invocation policy (runner implicit; builder/driver explicit-only), the setup
+skill, bundled CLI, and immutable definitions. User-scoped host agents are
+materialized outside the plugin; project overrides remain available through
+`init`, `vendor`, or `steering apply --scope project`. The only piece that must live in a dot dir is the
 marketplace pointer `.agents/plugins/marketplace.json` — a fixed Codex convention
 (`codex plugin marketplace add owner/repo` looks there), the analog of the Claude
 plugin's hidden `.claude-plugin/marketplace.json`; the **marketplace root is the

@@ -170,11 +170,11 @@ test('loadout list: marks the active and default loadouts with their slot tables
   ]);
 });
 
-test('loadout: show/list/use need a profile; clear works without one', (t) => {
+test('loadout: built-in profile is available without project initialization', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
-  assert.throws(() => runLoadoutShow({ repoRoot: root, env: null }), LoadoutError);
-  assert.throws(() => runLoadoutList({ repoRoot: root, env: null }), LoadoutError);
+  assert.deepEqual(runLoadoutShow({ repoRoot: root, env: null }).active, { name: 'native', source: 'default' });
+  assert.ok(runLoadoutList({ repoRoot: root, env: null }).loadouts.some((item) => item.name === 'native'));
   assert.throws(() => runLoadoutUse({ repoRoot: root, name: 'x' }), LoadoutError);
   assert.equal(runLoadoutClear({ repoRoot: root }).removed, false);
 });

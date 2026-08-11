@@ -89,10 +89,9 @@ test('new-run rejects an unknown playbook', (t) => {
   );
 });
 
-test('new-run requires an initialized .fadeno directory', (t) => {
+test('new-run uses bundled playbooks without project initialization', (t) => {
   const root = tempRepo(t);
-  assert.throws(
-    () => runNewRun({ repoRoot: root, playbook: 'code-change-review', task: 'x' }),
-    NewRunError,
-  );
+  const created = runNewRun({ repoRoot: root, playbook: 'code-change-review', task: 'x' });
+  assert.ok(exists(root, join('.fadeno', 'runs', created.runId, 'run.yaml')));
+  assert.equal(created.resolution?.loadout?.name, 'native');
 });

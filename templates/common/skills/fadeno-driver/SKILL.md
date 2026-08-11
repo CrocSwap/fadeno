@@ -11,8 +11,10 @@ dispatches you with the run id.
 
 You never invent control flow. The **engine** (`fadeno drive`) owns transitions
 where it can; the manual loop (`fadeno next` + `fadeno prompt | <harness>`) covers
-what it can't. Gates are always `fadeno gate`. Fadeno's engine invokes executors
-from `.fadeno/executors.yaml`; in the manual loop, *you* do the dispatch.
+what it can't. Gates are always `fadeno gate`. Fadeno's engine invokes
+executors from the effective bundled → user → project catalog; in the manual
+loop, *you* do the dispatch. A project `.fadeno/executors.yaml` shadows
+bundled entries, while user state normally selects the active loadout.
 
 Load the runner's `references/runtime.md` for primitive semantics (see
 `references/README.md` for install paths). This skill adds the **drive/fallback
@@ -22,8 +24,8 @@ procedure**, **harness mapping**, and **pause/resume**.
 
 1. Confirm you have a **run id**. If the host only gave a task/playbook, create
    the run first: `fadeno new-run <playbook> "<task>"`, then continue with that id.
-2. **Engine first:** if `.fadeno/executors.yaml` exists (or the user asked for
-   engine execution), run `fadeno drive <run>` and act on its exit state:
+2. **Engine first:** run `fadeno drive <run>` (the bundled plugin runtime works
+   without `.fadeno/` definitions) and act on its exit state:
 
 ```
 fadeno drive <run>

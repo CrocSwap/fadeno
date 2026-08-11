@@ -4,6 +4,7 @@ import { parse as parseYaml } from 'yaml';
 import { resolveActiveArtifacts, sha256Hex, type ActiveResolution } from '../lib/artifact-manifest.ts';
 import { parseExecutorProfile, resolveRole, type ExecutorProfile } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import { schemaDirectories } from '../lib/definitions.ts';
 import {
   actorCallIdFor,
   nodeInstanceArtifactScope,
@@ -37,6 +38,8 @@ export interface VerifyOptions {
   allowFailed?: boolean;
   /** Audit a 0.2 or unversioned pre-0.3 ledger in explicit compatibility mode. */
   legacy?: boolean;
+  /** Promoted evidence directory containing run.yaml and definitions/. */
+  evidence?: string;
   cwd?: string;
   repoRoot?: string;
 }
@@ -59,6 +62,30 @@ export interface VerifyResult {
 
 function resolveArtifact(runDir: string, rel: string): string {
   return isAbsolute(rel) ? rel : join(runDir, rel);
+}
+
+function summaryFromDirectory(dir: string): RunSummary {
+  let doc: unknown;
+  try { doc = parseYaml(readFileSync(join(dir, 'run.yaml'), 'utf8')); } catch (err) {
+    throw new VerifyError(`evidence run.yaml did not parse: ${(err as Error).message}`);
+  }
+  if (doc == null || typeof doc !== 'object' || Array.isArray(doc)) throw new VerifyError('evidence run.yaml is not a mapping.');
+  const value = doc as Record<string, unknown>;
+  const text = (key: string): string | null => typeof value[key] === 'string' ? value[key] as string : null;
+  const runId = text('run_id');
+  if (runId == null) throw new VerifyError('evidence run.yaml has no run_id.');
+  return {
+    runId,
+    dir,
+    schemaVersion: text('schema_version'),
+    playbook: text('playbook'),
+    status: text('status'),
+    task: text('task'),
+    host: text('host'),
+    startedAt: text('started_at'),
+    endedAt: text('ended_at'),
+    problems: [],
+  };
 }
 
 function isInsideRun(runDir: string, path: string): boolean {
@@ -113,7 +140,12 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
 
   let run: RunSummary;
-  if (wantsLatest) {
+  const runPathCandidate = opts.run == null ? null : resolve(cwd, opts.run);
+  const evidenceDir = opts.evidence ?? (runPathCandidate != null && existsSync(join(runPathCandidate, 'run.yaml')) ? runPathCandidate : null);
+  if (evidenceDir != null) {
+    if (wantsLatest) throw new VerifyError('evidence is mutually exclusive with --latest.');
+    run = summaryFromDirectory(resolve(evidenceDir));
+  } else if (wantsLatest) {
     const runs = listRuns(repoRoot);
     if (runs.length === 0) throw new VerifyError('No runs found under .fadeno/runs.');
     run = runs[0]!;
@@ -133,7 +165,11 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
   const legacy = mode === 'legacy';
   const compatibility = mode === 'compatibility';
 
-  const schemas = new SchemaSet(join(repoRoot, '.fadeno', 'schemas'));
+  const schemaPaths = schemaDirectories(repoRoot);
+  const snapshotSchemas = join(run.dir, 'definitions', 'schemas');
+  const schemas = existsSync(snapshotSchemas)
+    ? new SchemaSet(snapshotSchemas, schemaPaths.project, schemaPaths.builtin)
+    : new SchemaSet(schemaPaths.project, schemaPaths.builtin);
   const findings: Finding[] = [];
 
   // 1. ledger-version
@@ -142,6 +178,22 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
       ? skip('ledger-version', `${run.schemaVersion ?? 'pre-0.3'} ledger read in explicit compatibility mode (--legacy)`)
       : { check: 'ledger-version', status: 'ok', detail: `schema_version ${RUN_LEDGER_SCHEMA_VERSION}` },
   );
+
+  const runDocument = parseYaml(readFileSync(join(run.dir, 'run.yaml'), 'utf8')) as Record<string, unknown>;
+  const snapshotRel = typeof runDocument.playbook_snapshot === 'string' ? runDocument.playbook_snapshot : null;
+  const expectedPlaybookSha = typeof runDocument.playbook_sha256 === 'string' ? runDocument.playbook_sha256 : null;
+  if (snapshotRel == null || expectedPlaybookSha == null) {
+    findings.push(skip('playbook-provenance', 'run predates immutable playbook snapshots'));
+  } else if (snapshotRel !== 'definitions/playbook.yaml') {
+    findings.push({ check: 'playbook-provenance', status: 'fail', detail: `unexpected snapshot path ${snapshotRel}` });
+  } else {
+    const snapshotPath = join(run.dir, snapshotRel);
+    findings.push(
+      existsSync(snapshotPath) && sha256Hex(readFileSync(snapshotPath)) === expectedPlaybookSha
+        ? { check: 'playbook-provenance', status: 'ok', detail: `${snapshotRel} matches ${expectedPlaybookSha}` }
+        : { check: 'playbook-provenance', status: 'fail', detail: `${snapshotRel} is missing or its digest changed` },
+    );
+  }
 
   // 2. run-schema
   findings.push(

@@ -11,7 +11,12 @@ Stop re-typing *"be careful, plan, review, test"* every run. Define your workflo
 ## Quickstart
 
 ```bash
-npx fadeno init --codex     # or --claude / --grok
+# After installing the Codex or Claude plugin, built-ins work in any Git repo:
+fadeno validate
+fadeno new-run code-change-review "Add CSV export for reports"
+
+# Optional one-time user-scoped setup (safe native defaults):
+fadeno setup --codex
 ```
 
 ---
@@ -49,6 +54,11 @@ Fadeno is **harness-neutral**: the same playbooks run on Codex, Claude Code, and
 
 Requires Node.js ≥ 20.
 
+Installing the Codex or Claude plugin supplies the CLI, skills, schemas, starter
+playbooks, and safe native loadout. A repository does not need `.fadeno/`
+definitions to run a built-in playbook. Use `fadeno setup --codex` or
+`fadeno setup --claude` once only when user-scoped host integration is wanted.
+
 ```bash
 # Codex target  → .agents/skills/, AGENTS.md, $-style invocation
 npx fadeno init --codex
@@ -60,13 +70,14 @@ npx fadeno init --claude
 npx fadeno init --grok
 ```
 
-`init` is safe to re-run: existing files are left untouched (and your
+`init` remains the explicit project-vendoring path and is safe to re-run: existing files are left untouched (and your
 `AGENTS.md`/`CLAUDE.md` content is preserved — Fadeno only appends a marked
 section). Use `--force` to overwrite. Add `--with-hooks` to also scaffold the
 tier-2 [enforcement](#enforcement-advisory-vs-enforced) layer (a pre-commit
-guard + a CI workflow). Add `--with-steering` on Codex or Claude Code to make
-worker/reviewer/judge subagent launches follow the active Fadeno loadout; this
-is an explicit opt-in because the selected executor runs under its own sandbox.
+guard + a CI workflow). Steering is installed by default for Codex and Claude.
+Use `--no-steering` for the legacy native-only project surface;
+`--with-steering` remains an accepted compatibility alias. Selecting a command
+loadout is still explicit and always announces the external sandbox boundary.
 
 ### What gets created
 
@@ -83,7 +94,7 @@ is an explicit opt-in because the selected executor runs under its own sandbox.
     playbook.schema.json        # the source of truth for the vocabulary
     run.schema.json
     review-report.schema.json
-  runs/                         # run ledgers (execution traces, not source)
+  runs/                         # created lazily; ignored execution traces
 
 # Codex (--codex):                      # Claude Code (--claude):
 AGENTS.md                                CLAUDE.md
@@ -109,18 +120,20 @@ and `AGENTS.md`; it does not create `.grok/config.toml` or change Claude setting
 
 ### Or install as a Claude Code plugin
 
-`init --claude` copies the three skills into one repo. For Claude Code, you can instead
+`init --claude` copies the skills into one repo. For Claude Code, you can instead
 install Fadeno's **skills + role subagents once, for every project**, as a
-plugin — and let the CLI seed just the per-repo playbooks. (This is the
-capability/definitions split: the plugin carries *how to run playbooks*; the repo
-carries *which playbooks*.)
+plugin. The plugin also carries the bundled CLI and immutable built-in
+definitions, so starter playbooks work without a project data seed. Use
+`init --data-only` when you want only project-owned definitions. `vendor` is the
+deliberate full-capability path (skills, bootstrap, agents, definitions, and a
+lock); do not use it merely to make plugin built-ins available.
 
 ```bash
 # the Fadeno repo doubles as a plugin marketplace
 /plugin marketplace add <owner>/fadeno      # or a local path for testing
 /plugin install fadeno@fadeno               # provides /fadeno:runner and /fadeno:builder
 
-# then, in any project, seed just the playbooks/schemas (no skill copy):
+# built-in playbooks work immediately; optional definitions-only customization:
 npx fadeno init --claude --data-only
 ```
 
@@ -147,10 +160,11 @@ enabled), so the skills can call `fadeno validate` / `diagram` / `gate` with
 nothing else to install. A git-URL plugin install gives you a working `fadeno`
 out of the box.
 
-Codex plugin installation is intentionally different: the Codex plugin carries
-the three skills and invocation metadata, but has no bundled CLI and no bundled
-subagents. Install or expose the CLI separately (`npx fadeno` works), and use
-`fadeno init --codex` when you need the repo-local `.codex/agents` definitions.
+The Codex plugin carries the skills, invocation metadata, a self-contained
+`bin/fadeno`, and adjacent built-in definitions. `fadeno setup --codex` is only
+needed for user-scoped managed native agents; a fresh session is required after
+those agents change. Project overrides remain available through `fadeno vendor`
+or `fadeno steering apply ... --scope project`.
 
 Grok Build has native repo-local support through `npx fadeno init --grok`; this
 release does not add a separate Grok plugin generator or mutate Grok permission
@@ -175,8 +189,8 @@ use the repo-local `/fadeno-runner` skill emitted by `init --grok`.
 
 The runner will:
 
-1. pick the best playbook from `.fadeno/playbooks` (using each playbook's
-   `when_to_use`),
+1. pick the best playbook from the bundled-plus-project catalog (using each
+   playbook's `when_to_use`; project names shadow bundled names),
 2. create a run directory under `.fadeno/runs/`,
 3. execute each step — delegating roles to native subagents when available, or
    simulating them with separate passes otherwise (depth-1; a subagent never
@@ -273,11 +287,12 @@ default_loadout: anthropic-primary
 ```
 
 ```bash
-fadeno loadout use openai-primary          # sticky for this machine (git-ignored) until cleared
+fadeno use openai-primary                  # user-scoped; remembers setup's harness
+fadeno loadout use openai-primary           # compatibility: project-local pin
 echo "task…" | fadeno dispatch --archetype worker   # ad-hoc: resolve → invoke → evidence row
-npx fadeno init --codex --with-steering    # steer Codex role subagents through that loadout
-fadeno steering apply codex-native --codex --force  # materialize native and command-broker role agents
-# or: npx fadeno init --claude --with-steering
+fadeno setup --codex                        # one-time user-scoped native integration
+fadeno use codex-native                     # auto-materializes changed Codex role agents
+# or: npx fadeno init --claude --no-steering
 ```
 
 Roles resolve at dispatch time — explicit binding pin, else the active
@@ -288,12 +303,14 @@ record the resolution in their ledger and ad-hoc dispatches append to
 `.fadeno/dispatches.jsonl`, so which provider produced an artifact stays
 auditable after the fact.
 
-With `--with-steering`, expensive role-shaped subagent work follows that same
-resolver. Codex first installs honest, cheap command brokers; use `fadeno
-steering apply <loadout> --codex --force` to materialize each worker/reviewer/
-judge slot as either a native host agent (with that executor's model and effort)
-or a command broker (which delegates through `fadeno dispatch`). Start a fresh
-Codex session after applying changed definitions. Before each task, native
+With steering enabled by default, expensive role-shaped subagent work follows that same
+resolver. `fadeno setup --codex` remembers the harness, so later `fadeno use
+<loadout>` calls automatically materialize each worker/reviewer/judge slot as
+either a native host agent (with that executor's model and effort) or a command
+broker (which delegates through `fadeno dispatch`). Start one fresh Codex
+session only when the command reports that native definitions changed; Codex
+loads custom-agent models at session start and cannot safely mutate them in an
+already-running session. Before each task, native
 agents resolve again: command slots switch immediately out-of-process, matching
 host slots execute natively, and a different host slot stops with
 `restart_required` instead of silently using the wrong model. Claude installs a
@@ -319,7 +336,12 @@ log — the evidence `fadeno verify` recomputes. Artifacts are immutable:
 revision writes a new generation, never overwrites.
 
 `runs/` is execution-trace output, **not source code**. It is safe to delete old
-runs.
+runs. Fadeno's managed ignore block keeps `.fadeno/runs/`, `.fadeno/progress/`,
+`.fadeno/local/`, ad-hoc dispatch evidence, local Claude settings, and
+materialized steering brokers out of commits. Commit project-owned playbooks,
+schemas, policy, hooks, and `fadeno.lock`. To retain a run as source-controlled
+evidence, use `fadeno evidence promote <run>`; it first verifies the receipt and
+copies its immutable ledger plus snapshotted definitions to `.fadeno/evidence/`.
 
 ---
 
@@ -333,7 +355,9 @@ runs a short loop:
 
 > **describe the flow** (or pick a starter to adapt) → builder **writes the YAML**
 > → shows it back as a **diagram** + summary → you **approve** → it **hands off to
-> the runner**. On first use it seeds `.fadeno/` for you (`init --data-only`).
+> the runner**. Built-in playbooks work without a project seed; use
+> `init --data-only` for project-owned definition copies, or `vendor` only when
+> you deliberately want the complete capability surface committed.
 
 You can render any playbook's flow yourself:
 

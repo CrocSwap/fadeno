@@ -15,7 +15,6 @@ const SHARED_FILES = [
   '.fadeno/schemas/run.schema.json',
   '.fadeno/schemas/review-report.schema.json',
   '.fadeno/schemas/test-result.schema.json',
-  '.fadeno/runs/.gitkeep',
 ];
 
 test('init --codex creates the Codex target tree', (t) => {

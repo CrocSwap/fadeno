@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import { dirname, join } from 'node:path';
 import { copyTree, emitBootstrap, emitFile, type EmitResult } from '../lib/fsutil.ts';
 import { findRepoRoot, templatesDir } from '../lib/paths.ts';
+import { FADENO_IGNORE_PATTERNS } from '../lib/source-control.ts';
 
 export type Target = 'codex' | 'claude' | 'grok';
 
@@ -10,8 +11,10 @@ export interface InitOptions {
   force?: boolean;
   /** Also scaffold tier-2 enforcement hooks (pre-commit, CI workflow, examples). */
   withHooks?: boolean;
-  /** Opt into loadout-aware host steering for Codex or Claude Code. */
+  /** Compatibility alias for the default loadout-aware steering. */
   withSteering?: boolean;
+  /** Explicitly keep the legacy native-only project surface. */
+  noSteering?: boolean;
   /** Seed only the per-repo `.fadeno/` definitions; skip skills/subagents/bootstrap. */
   dataOnly?: boolean;
   /** Working directory used to locate the repo root. Defaults to process.cwd(). */
@@ -38,7 +41,9 @@ export function runInit(opts: InitOptions): InitResult {
   const tpl = templatesDir();
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const force = opts.force ?? false;
-  const withSteering = opts.withSteering ?? false;
+  const withSteering = opts.noSteering === true
+    ? false
+    : opts.withSteering ?? opts.target !== 'grok';
   const results: EmitResult[] = [];
 
   if (withSteering && opts.target === 'grok') {
@@ -53,7 +58,7 @@ export function runInit(opts: InitOptions): InitResult {
   // (auditable locally, never committed) — scaffolding adds the ignore entries.
   ensureGitignored(
     repoRoot,
-    ['.fadeno/progress/', '.fadeno/local/', '.fadeno/dispatches.jsonl'],
+    [...FADENO_IGNORE_PATTERNS],
     results,
   );
 
@@ -265,7 +270,7 @@ function emitClaudeSettings(
   writeFileSync(settingsPath, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
   results.push({ path: settingsPath, status: existed ? 'appended' : 'created' });
 
-  ensureGitignored(repoRoot, ['.claude/settings.local.json'], results);
+  ensureGitignored(repoRoot, [...FADENO_IGNORE_PATTERNS], results);
 }
 
 /**
@@ -279,8 +284,9 @@ function ensureGitignored(repoRoot: string, patterns: string[], results: EmitRes
   const content = existed ? readFileSync(gitignorePath, 'utf8') : '';
   const lines = content.split(/\r?\n/).map((line) => line.trim());
   const missing = patterns.filter((pattern) => {
-    if (lines.includes(pattern) || lines.includes('.claude') || lines.includes('.claude/')) return false;
+    if (lines.includes(pattern)) return false;
     if (pattern.startsWith('.fadeno/') && (lines.includes('.fadeno') || lines.includes('.fadeno/'))) return false;
+    if (pattern.startsWith('.claude/') && (lines.includes('.claude') || lines.includes('.claude/'))) return false;
     return true;
   });
   if (missing.length === 0) return;

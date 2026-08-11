@@ -1,6 +1,7 @@
-import { existsSync, readdirSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { isAbsolute, resolve } from 'node:path';
 import { findRepoRoot } from '../lib/paths.ts';
+import { listDefinitionNames, resolvePlaybookFile, schemaDirectories } from '../lib/definitions.ts';
 import {
   SchemaSet,
   validateFile,
@@ -29,16 +30,11 @@ export class ValidateError extends Error {}
 export function runValidate(opts: ValidateOptions = {}): ValidateOutcome {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const schemasDir = join(repoRoot, '.fadeno', 'schemas');
-
-  if (!existsSync(schemasDir)) {
-    throw new ValidateError(
-      `No Fadeno schemas found at ${schemasDir}.\n` +
-        'Run `fadeno init --codex` or `fadeno init --claude` first.',
-    );
+  const schemaPaths = schemaDirectories(repoRoot);
+  if (!existsSync(schemaPaths.project) && !existsSync(schemaPaths.builtin)) {
+    throw new ValidateError('No bundled or project Fadeno schemas are available.');
   }
-
-  const schemas = new SchemaSet(schemasDir);
+  const schemas = new SchemaSet(schemaPaths.project, schemaPaths.builtin);
 
   let files: string[];
   let forcedKind: SchemaKind | undefined;
@@ -48,16 +44,12 @@ export function runValidate(opts: ValidateOptions = {}): ValidateOutcome {
   } else {
     // Bare `fadeno validate` validates the playbook set (not the run ledgers).
     forcedKind = 'playbook';
-    const playbooksDir = join(repoRoot, '.fadeno', 'playbooks');
-    if (!existsSync(playbooksDir)) {
-      throw new ValidateError(`No playbooks directory at ${playbooksDir}.`);
-    }
-    files = readdirSync(playbooksDir)
-      .filter((f) => f.endsWith('.yaml') || f.endsWith('.yml'))
-      .sort()
-      .map((f) => join(playbooksDir, f));
+    files = listDefinitionNames(repoRoot).flatMap((name) => {
+      const source = resolvePlaybookFile(repoRoot, name);
+      return source ? [source.path] : [];
+    });
     if (files.length === 0) {
-      throw new ValidateError(`No playbooks (*.yaml) found in ${playbooksDir}.`);
+      throw new ValidateError('No bundled or project playbooks are available.');
     }
   }
 

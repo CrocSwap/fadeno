@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join, relative } from 'node:path';
 import test from 'node:test';
 import { runCodexPlugin } from '../src/commands/plugin.ts';
 import { exists, read, tempRepo } from './helpers.ts';
 
 const REPO = join(import.meta.dirname, '..');
-const SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver'] as const;
+const SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-setup'] as const;
 
 function listFilesRel(dir: string, base = dir): string[] {
   const out: string[] = [];
@@ -68,16 +69,21 @@ test('codex plugin: skills are the shared bodies + in-plugin invocation policy',
   assert.ok(exists(outDir, 'skills/fadeno-driver/references/README.md'));
 });
 
-test('codex plugin: carries no subagents, commands, or bundled binary', (t) => {
+test('codex plugin: carries setup, bundled CLI, and built-in definitions', (t) => {
   const root = tempRepo(t);
   const { outDir } = runCodexPlugin({ cwd: root, outDir: join(root, 'plugin-codex') });
 
-  // Codex plugins have no manifest slot for these — subagents come from
-  // `fadeno init --codex` (.codex/agents), the CLI from npm. Emitting them would
-  // be dead weight the marketplace validator ignores.
+  // User-scoped host agents remain outside the plugin; the runtime and immutable
+  // definitions are self-contained inside it.
   assert.ok(!exists(outDir, 'agents'), 'codex plugin must not ship subagents');
   assert.ok(!exists(outDir, 'commands'), 'codex plugin has no commands component');
-  assert.ok(!exists(outDir, 'bin'), 'codex plugin does not bundle a binary');
+  assert.ok(exists(outDir, 'skills/fadeno-setup/SKILL.md'));
+  assert.ok(exists(outDir, 'bin/fadeno'), 'codex plugin must bundle a binary');
+  assert.ok(exists(outDir, 'bin/templates/common/fadeno/playbooks/code-change-review.yaml'));
+  const binary = join(outDir, 'bin', 'fadeno');
+  assert.notEqual(statSync(binary).mode & 0o111, 0, 'generated Codex plugin CLI must be executable');
+  const expectedVersion = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).version;
+  assert.equal(execFileSync(binary, ['--version'], { encoding: 'utf8' }).trim(), expectedVersion);
 });
 
 test('the committed plugin-codex/ matches a fresh generation (no drift)', (t) => {

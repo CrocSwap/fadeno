@@ -2,6 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync,
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { buildArtifactManifest, sha256Hex } from './artifact-manifest.ts';
 import { SchemaSet, schemaErrorMessages, type SchemaKind } from './playbook-validate.ts';
+import { runSchemaDirectories } from './definitions.ts';
 import { findRepoRoot } from './paths.ts';
 import { readEventsStrict, resolveRun, RUN_LEDGER_SCHEMA_VERSION, RunLedgerError, type RunEvent } from './run-ledger.ts';
 import { LedgerWriteError, LedgerWriter } from './run-ledger-write.ts';
@@ -358,6 +359,7 @@ function safeRunRelative(runDir: string, value: string, label: string): string {
 
 function validationFor(
   repoRoot: string,
+  runDir: string,
   request: HostDispatchRequest,
   bytes: Buffer,
 ): { ok: true } | { ok: false; errors: string[] } {
@@ -368,7 +370,8 @@ function validationFor(
   } catch (err) {
     return { ok: false, errors: [`output is not valid JSON: ${(err as Error).message}`] };
   }
-  const schemas = new SchemaSet(join(repoRoot, '.fadeno', 'schemas'));
+  const schemaPaths = runSchemaDirectories(runDir, repoRoot);
+  const schemas = new SchemaSet(schemaPaths.snapshot, schemaPaths.project, schemaPaths.builtin);
   if (!schemas.has(request.artifactType)) return { ok: true };
   const validate = schemas.get(request.artifactType);
   return validate(parsed) ? { ok: true } : { ok: false, errors: schemaErrorMessages(validate) };
@@ -605,7 +608,7 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
     throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already has a different terminal receipt.`);
   }
 
-  const verdict = validationFor(repoRoot, request, bytes);
+  const verdict = validationFor(repoRoot, runDir, request, bytes);
   const agentId = typeof starts[0]!.extra.agent_id === 'string' ? starts[0]!.extra.agent_id : undefined;
   if (!verdict.ok) {
     const parked = safeRunRelative(runDir, attemptPath(request), 'invalid output attempt');
@@ -658,7 +661,8 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
   }
   mkdirSync(dirname(outputAbs), { recursive: true });
   if (!existsSync(outputAbs)) writeFileSync(outputAbs, bytes);
-  const manifest = buildArtifactManifest(runDir, outputRel, `artifact-${request.dispatchId}`, new SchemaSet(join(repoRoot, '.fadeno', 'schemas')));
+  const schemaPaths = runSchemaDirectories(runDir, repoRoot);
+  const manifest = buildArtifactManifest(runDir, outputRel, `artifact-${request.dispatchId}`, new SchemaSet(schemaPaths.snapshot, schemaPaths.project, schemaPaths.builtin));
   const existingManifest = events.find(
     (event) => event.type === 'artifact_created' && event.extra.dispatch_id === request.dispatchId,
   );

@@ -5,3 +5,8 @@ dist/
 .fadeno
 .codex/
 .claude/
+# Fadeno: local generated files (not committed)
+.codex/agents/worker.toml
+.codex/agents/reviewer.toml
+.codex/agents/judge.toml
+.codex/agents/fadeno-*.toml

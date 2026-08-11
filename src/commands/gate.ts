@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { findRepoRoot } from '../lib/paths.ts';
+import { runSchemaDirectories } from '../lib/definitions.ts';
 import { SchemaSet, schemaErrorMessages, type SchemaKind } from '../lib/playbook-validate.ts';
 import { LedgerWriteError, LedgerWriter } from '../lib/run-ledger-write.ts';
 
@@ -156,7 +157,8 @@ export function runGate(opts: GateOptions): GateResult {
 
   let validate;
   try {
-    validate = new SchemaSet(join(repoRoot, '.fadeno', 'schemas')).get(definition.schema);
+    const schemaPaths = runSchemaDirectories(runDir, repoRoot);
+    validate = new SchemaSet(schemaPaths.snapshot, schemaPaths.project, schemaPaths.builtin).get(definition.schema);
   } catch (err) {
     throw new GateError((err as Error).message);
   }

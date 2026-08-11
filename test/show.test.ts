@@ -194,6 +194,25 @@ test('show throws RunLedgerError for unknown run', (t) => {
 
 test('projection: steps in order with states, counts, gates, decisions, failures', (t) => {
   const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno', 'playbooks'), { recursive: true });
+  writeFileSync(
+    join(root, '.fadeno', 'playbooks', 'code-change-review.yaml'),
+    [
+      'flow:',
+      '  - id: implement',
+      '    kind: actor_call',
+      '    actor: implementer',
+      '  - id: review',
+      '    kind: actor_call',
+      '    actor: reviewer',
+      '  - id: revise',
+      '    kind: actor_call',
+      '    actor: implementer',
+      '  - id: arbitrate',
+      '    kind: human_gate',
+      '',
+    ].join('\n'),
+  );
   const runId = '2026-07-10-2212-projection';
   seedRun(root, runId, {
     events: [

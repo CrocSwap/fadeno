@@ -7,6 +7,7 @@ import {
   type ArtifactManifestFields,
 } from '../lib/artifact-manifest.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import { runSchemaDirectories } from '../lib/definitions.ts';
 import { SchemaSet } from '../lib/playbook-validate.ts';
 import { readEvents } from '../lib/run-ledger.ts';
 import { LedgerWriteError, LedgerWriter } from '../lib/run-ledger-write.ts';
@@ -15,7 +16,7 @@ export class RunError extends Error {}
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'aborted']);
 const VALID_STATUSES = new Set(['running', ...TERMINAL_STATUSES]);
-const RUN_YAML_MODELINE = '# yaml-language-server: $schema=../../schemas/run.schema.json';
+const RUN_YAML_MODELINE = '# yaml-language-server: $schema=definitions/schemas/run.schema.json';
 
 export interface RunOptions {
   /** Run id (under .fadeno/runs) or a path to a run directory / run.yaml. */
@@ -147,8 +148,8 @@ export function runRun(opts: RunOptions): RunResult {
 
   const buildManifestFor = (artifactArg: string): ArtifactManifestFields => {
     const rel = normalizeArtifactPath(runDir, artifactArg);
-    const schemasDir = join(repoRoot, '.fadeno', 'schemas');
-    const schemas = existsSync(schemasDir) ? new SchemaSet(schemasDir) : null;
+    const schemaPaths = runSchemaDirectories(runDir, repoRoot);
+    const schemas = new SchemaSet(schemaPaths.snapshot, schemaPaths.project, schemaPaths.builtin);
     let fields: ArtifactManifestFields;
     try {
       fields = buildArtifactManifest(runDir, rel, `artifact-${writer.nextSeq}`, schemas);

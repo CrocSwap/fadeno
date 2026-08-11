@@ -2,6 +2,7 @@ import { isAbsolute, join } from 'node:path';
 import { runNext, NextError } from './next.ts';
 import { runRun, RunError, type RunResult } from './run.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import { runSchemaDirectories } from '../lib/definitions.ts';
 import { resolveRun, RunLedgerError } from '../lib/run-ledger.ts';
 import { SchemaSet, validateFile, type SchemaKind } from '../lib/playbook-validate.ts';
 
@@ -48,7 +49,8 @@ export function runToolComplete(opts: ToolCompleteOptions): ToolCompleteResult {
       throw err;
     }
     const outputPath = isAbsolute(opts.output) ? opts.output : join(runDir, opts.output);
-    const validation = validateFile(outputPath, new SchemaSet(join(repoRoot, '.fadeno', 'schemas')), next.step.artifact_type as SchemaKind);
+    const schemaPaths = runSchemaDirectories(runDir, repoRoot);
+    const validation = validateFile(outputPath, new SchemaSet(schemaPaths.snapshot, schemaPaths.project, schemaPaths.builtin), next.step.artifact_type as SchemaKind);
     if (!validation.ok) {
       const detail = validation.issues
         .filter((issue) => issue.severity === 'error')

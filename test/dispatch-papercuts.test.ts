@@ -69,37 +69,20 @@ function cli(
 
 // --- 1. scaffold discoverability -------------------------------------------
 
-test('scaffold: executors.yaml carries a commented loadouts example that survives init + validate', (t) => {
+test('scaffold: executors.yaml carries the built-in safe catalog', (t) => {
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
 
   const content = read(root, join('.fadeno', 'executors.yaml'));
-  assert.match(content, /^# loadouts:$/m);
-  assert.match(content, /^# default_loadout: anthropic-primary$/m);
-  assert.match(content, /^#     worker: claude-cli$/m);
-  assert.match(content, /^#     reviewer: claude-cli$/m);
-  assert.match(content, /^#     judge: claude-cli$/m);
-  assert.match(content, /fadeno loadout use/);
-  assert.match(content, /FADENO_LOADOUT/);
+  assert.match(content, /^loadouts:$/m);
+  assert.match(content, /^default_loadout: native$/m);
+  assert.match(content, /^  native:$/m);
+  assert.match(content, /^  codex:$/m);
 
-  // The scaffold (comments and all) still parses as a valid profile...
   const asShipped = parseExecutorProfile(content, 'executors.yaml');
-  assert.deepEqual(asShipped.loadouts, {});
-  assert.deepEqual(asShipped.bindings, { '*': 'claude-cli' });
-  // ...and the whole scaffold validates.
+  assert.ok(asShipped.loadouts.native);
+  assert.equal(asShipped.bindings['*'], 'native-worker');
   assert.ok(runValidate({ repoRoot: root }).ok);
-
-  // Uncommenting exactly the example block yields a valid loadout profile.
-  const lines = content.split('\n');
-  const start = lines.indexOf('# loadouts:');
-  const end = lines.indexOf('# default_loadout: anthropic-primary');
-  assert.ok(start >= 0 && end > start, 'the example block is present and contiguous');
-  for (let i = start; i <= end; i += 1) lines[i] = lines[i]!.replace(/^# ?/, '');
-  const uncommented = parseExecutorProfile(lines.join('\n'), 'executors.yaml');
-  assert.deepEqual(uncommented.loadouts, {
-    'anthropic-primary': { worker: 'claude-cli', reviewer: 'claude-cli', judge: 'claude-cli' },
-  });
-  assert.equal(uncommented.defaultLoadout, 'anthropic-primary');
 });
 
 // --- 2. help text -----------------------------------------------------------
@@ -109,7 +92,7 @@ test('help: FADENO_LOADOUT is discoverable in --help', (t) => {
   const result = cli(root, ['--help']);
   assert.equal(result.status, 0);
   assert.match(result.stdout, /FADENO_LOADOUT/);
-  assert.match(result.stdout, /--loadout > FADENO_LOADOUT > \.fadeno\/local\/loadout > default_loadout/);
+  assert.match(result.stdout, /--loadout > run-persisted > FADENO_LOADOUT > \.fadeno\/local\/loadout > user state > default_loadout/);
 });
 
 // --- 3. echo-tag disambiguation ---------------------------------------------

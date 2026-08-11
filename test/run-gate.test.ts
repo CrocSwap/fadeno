@@ -73,7 +73,7 @@ test('run --status completed finalizes the ledger and keeps it schema-valid', (t
 
   // modeline preserved + still valid against run.schema
   const raw = readFileSync(join(runDir, 'run.yaml'), 'utf8');
-  assert.match(raw, /yaml-language-server: \$schema=\.\.\/\.\.\/schemas\/run\.schema\.json/);
+  assert.match(raw, /yaml-language-server: \$schema=definitions\/schemas\/run\.schema\.json/);
   const outcome = runValidate({ repoRoot: root, path: join(runDir, 'run.yaml') });
   assert.equal(outcome.ok, true);
 });

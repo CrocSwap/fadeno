@@ -32,6 +32,7 @@ test('plugin generates manifest, namespaced skills, and subagents', (t) => {
   assert.ok(exists(outDir, 'skills/runner/references/runtime.md'));
   assert.ok(exists(outDir, 'skills/builder/SKILL.md'));
   assert.ok(exists(outDir, 'skills/driver/SKILL.md'));
+  assert.ok(exists(outDir, 'skills/setup/SKILL.md'));
 
   const runner = readFileSync(join(outDir, 'skills/runner/SKILL.md'), 'utf8');
   const builder = readFileSync(join(outDir, 'skills/builder/SKILL.md'), 'utf8');
@@ -49,6 +50,12 @@ test('plugin generates manifest, namespaced skills, and subagents', (t) => {
   assert.ok(exists(outDir, 'commands/runner.md'));
   assert.ok(exists(outDir, 'commands/builder.md'));
   assert.ok(exists(outDir, 'commands/driver.md'));
+  assert.ok(exists(outDir, 'commands/setup.md'));
+
+  // Claude plugins register the inert-native steering hook explicitly.
+  assert.ok(exists(outDir, 'hooks/dispatch-steering.mjs'));
+  const hooks = JSON.parse(read(outDir, 'hooks/hooks.json'));
+  assert.equal(hooks.hooks.PreToolUse[0].matcher, 'Agent');
 
   // subagents — namespaced as fadeno:worker / :reviewer / :judge
   assert.ok(exists(outDir, 'agents/worker.md'));

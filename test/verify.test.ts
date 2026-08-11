@@ -131,6 +131,7 @@ test('happy path: a completed run with a recomputable passing gate verifies clea
     result.findings.map((f) => f.check),
     [
       'ledger-version',
+      'playbook-provenance',
       'run-schema',
       'events-parseable',
       'events-seq',

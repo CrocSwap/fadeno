@@ -1,9 +1,10 @@
-import { existsSync, readdirSync, readFileSync, type Dirent } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { readdirSync, readFileSync, type Dirent } from 'node:fs';
+import { basename, dirname, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { loadExecutorProfile, type ExecutorProfile } from '../lib/executors.ts';
 import { listRuns, type RunSummary } from '../lib/run-ledger.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import { listDefinitionNames, resolvePlaybookFile } from '../lib/definitions.ts';
 
 /** Arguments supplied by the generated Bash completion function. */
 export interface CompletionCandidatesOptions {
@@ -60,6 +61,12 @@ const PATH: OptionSpec = { kind: 'path' };
 const LOADOUT: OptionSpec = { kind: 'loadout' };
 
 const COMMANDS: Record<string, CommandSpec> = {
+  setup: command({ '--codex': NONE, '--claude': NONE, '--non-interactive': NONE }),
+  use: command({ '--project': NONE, '--codex': NONE }, ['loadout']),
+  status: command({ '--verbose': NONE }),
+  doctor: command({ '--codex': NONE, '--claude': NONE }),
+  vendor: command({ '--codex': NONE, '--claude': NONE, '--grok': NONE, '--with-hooks': NONE, '--force': NONE }),
+  evidence: command({}, ['free'], { promote: command({}, ['run']) }),
   init: command({
     '--codex': NONE,
     '--claude': NONE,
@@ -67,6 +74,7 @@ const COMMANDS: Record<string, CommandSpec> = {
     '--force': NONE,
     '--with-hooks': NONE,
     '--with-steering': NONE,
+    '--no-steering': NONE,
     '--data-only': NONE,
   }),
   validate: command({ '--schema': { kind: 'enum', values: ['playbook', 'run', 'review-report', 'test-result'] } }, ['path']),
@@ -93,7 +101,7 @@ const COMMANDS: Record<string, CommandSpec> = {
         '--run': { kind: 'run' },
         '--dispatch-id': { kind: 'free' },
       }),
-      apply: command({ '--codex': NONE, '--force': NONE }, ['loadout']),
+      apply: command({ '--codex': NONE, '--force': NONE, '--scope': { kind: 'enum', values: ['project', 'user'] } }, ['loadout']),
     },
   ),
   dispatch: command(
@@ -281,12 +289,7 @@ function pathCandidates(prefix: string, cwd: string): string[] {
 }
 
 function readPlaybookNames(repoRoot: string): string[] {
-  const dir = join(repoRoot, '.fadeno', 'playbooks');
-  return uniqueSorted(
-    readDirEntries(dir)
-      .filter((entry) => entry.isFile() && /\.ya?ml$/i.test(entry.name))
-      .map((entry) => entry.name.replace(/\.ya?ml$/i, '')),
-  );
+  return uniqueSorted(listDefinitionNames(repoRoot));
 }
 
 function safeRuns(repoRoot: string): RunSummary[] {
@@ -325,11 +328,7 @@ function resolveRun(runs: RunSummary[], ref: string): RunSummary | null {
 function playbookFile(repoRoot: string, run: RunSummary): string | null {
   if (run.playbook == null) return null;
   const stripped = run.playbook.replace(/\.ya?ml$/i, '');
-  for (const suffix of ['.yaml', '.yml']) {
-    const path = join(repoRoot, '.fadeno', 'playbooks', `${stripped}${suffix}`);
-    if (existsSync(path)) return path;
-  }
-  return null;
+  return resolvePlaybookFile(repoRoot, stripped)?.path ?? null;
 }
 
 function readStepIds(repoRoot: string, runRef: string): string[] {

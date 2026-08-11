@@ -1,11 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { buildArtifactManifest } from '../lib/artifact-manifest.ts';
+import { buildArtifactManifest, sha256Hex } from '../lib/artifact-manifest.ts';
 import {
   ExecutorProfileError,
   loadExecutorProfile,
   readLocalLoadout,
+  readUserLoadout,
   resolveActiveLoadout,
   resolveRole,
   roleResolutionEchoLabel,
@@ -13,10 +14,13 @@ import {
   type ExecutorProfile,
   type RoleResolutionSource,
 } from '../lib/executors.ts';
+import { resolveDefinition, resolvePlaybookFile } from '../lib/definitions.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { roleArchetype } from '../lib/playbook-validate.ts';
 import { RUN_LEDGER_SCHEMA_VERSION } from '../lib/run-ledger.ts';
 import { LedgerWriter } from '../lib/run-ledger-write.ts';
+import { ensureFadenoIgnore } from '../lib/source-control.ts';
+import type { UserPathOptions } from '../lib/user-paths.ts';
 
 export interface NewRunOptions {
   /** Playbook name (with or without `.yaml`/`.yml`). */
@@ -36,6 +40,7 @@ export interface NewRunOptions {
   env?: string | null;
   cwd?: string;
   repoRoot?: string;
+  userPathOptions?: UserPathOptions;
   /** Injectable clock for deterministic tests. */
   now?: Date;
 }
@@ -92,14 +97,6 @@ export function slugify(text: string, maxLen = 40): string {
   // A single leading word longer than maxLen still has to be hard-cut.
   if (!slug && words.length) slug = words[0]!.slice(0, maxLen);
   return slug || 'run';
-}
-
-function resolvePlaybook(playbooksDir: string, name: string): string {
-  const stripped = name.replace(/\.(ya?ml)$/i, '');
-  for (const candidate of [`${stripped}.yaml`, `${stripped}.yml`]) {
-    if (existsSync(join(playbooksDir, candidate))) return stripped;
-  }
-  throw new NewRunError(`Playbook "${stripped}" not found in ${playbooksDir}.`);
 }
 
 interface DeclaredInput { mediaType: string }
@@ -228,10 +225,11 @@ function computeResolution(
   playbookPath: string,
   flagValue: string | null,
   envRaw: string | null | undefined,
+  userPathOptions?: UserPathOptions,
 ): NewRunResolution | null {
   let profile: ExecutorProfile;
   try {
-    profile = loadExecutorProfile(repoRoot).profile;
+    profile = loadExecutorProfile(repoRoot, userPathOptions).profile;
   } catch (err) {
     if (err instanceof ExecutorProfileError) return null;
     throw err;
@@ -242,6 +240,7 @@ function computeResolution(
       flagValue,
       envValue: envRaw !== undefined ? envRaw : process.env.FADENO_LOADOUT ?? null,
       localFileValue: readLocalLoadout(repoRoot),
+      userFileValue: readUserLoadout(userPathOptions),
       profile,
     });
   } catch (err) {
@@ -291,17 +290,13 @@ export function runNewRun(opts: NewRunOptions): NewRunResult {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const fadenoDir = join(repoRoot, '.fadeno');
-  if (!existsSync(fadenoDir)) {
-    throw new NewRunError(
-      `No .fadeno directory at ${repoRoot}. Run \`fadeno init\` first.`,
-    );
+  ensureFadenoIgnore(repoRoot);
+  const resolved = resolvePlaybookFile(repoRoot, opts.playbook);
+  if (resolved == null) {
+    throw new NewRunError(`Playbook "${opts.playbook.replace(/\.ya?ml$/i, '')}" not found in bundled or project definitions.`);
   }
-
-  const playbooksDir = join(fadenoDir, 'playbooks');
-  const playbook = resolvePlaybook(playbooksDir, opts.playbook);
-  const playbookPath = existsSync(join(playbooksDir, `${playbook}.yaml`))
-    ? join(playbooksDir, `${playbook}.yaml`)
-    : join(playbooksDir, `${playbook}.yml`);
+  const playbook = opts.playbook.replace(/\.ya?ml$/i, '');
+  const playbookPath = resolved.path;
   const declared = readDeclaredInputs(playbookPath);
   const supplied = parseInputArgs(opts.inputs ?? opts.input);
   validateInputSources(repoRoot, declared, supplied);
@@ -324,25 +319,40 @@ export function runNewRun(opts: NewRunOptions): NewRunResult {
   }
 
   mkdirSync(join(runDir, 'artifacts'), { recursive: true });
+  const definitionsDir = join(runDir, 'definitions');
+  const snapshotPlaybook = join(definitionsDir, 'playbook.yaml');
+  mkdirSync(join(definitionsDir, 'schemas'), { recursive: true });
+  copyFileSync(playbookPath, snapshotPlaybook);
+  for (const schemaName of ['playbook.schema.json', 'run.schema.json', 'review-report.schema.json', 'test-result.schema.json']) {
+    const schema = resolveDefinition(repoRoot, 'schema', schemaName);
+    if (schema != null) copyFileSync(schema.path, join(definitionsDir, 'schemas', schemaName));
+  }
+  const playbookSha256 = sha256Hex(readFileSync(snapshotPlaybook));
 
-  const runYaml = stringifyYaml({
+  const runDocument: Record<string, unknown> = {
     run_id: runId,
     schema_version: RUN_LEDGER_SCHEMA_VERSION,
     playbook,
+    playbook_snapshot: 'definitions/playbook.yaml',
+    playbook_sha256: playbookSha256,
     status: 'running',
     task: opts.task,
     started_at: iso,
     host: opts.host ?? 'cli',
     artifacts_dir: 'artifacts',
     current_step: null,
-  });
-  const modeline = '# yaml-language-server: $schema=../../schemas/run.schema.json';
+  };
+  // Persist only an explicit creation-time selection. Ambient state remains
+  // ambient for old scripts; drive gives this intent precedence when present.
+  if (opts.loadout != null && opts.loadout.trim() !== '') runDocument.requested_loadout = opts.loadout.trim();
+  const runYaml = stringifyYaml(runDocument);
+  const modeline = '# yaml-language-server: $schema=definitions/schemas/run.schema.json';
   writeFileSync(join(runDir, 'run.yaml'), `${modeline}\n${runYaml}`, 'utf8');
 
   new LedgerWriter(runDir).append({ type: 'run_started', step: null }, now);
   writeFileSync(join(runDir, 'artifacts', '.gitkeep'), '', 'utf8');
   const recordedInputs = recordDeclaredInputs(runDir, repoRoot, declared, supplied, now);
-  const resolution = computeResolution(repoRoot, playbookPath, opts.loadout ?? null, opts.env);
+  const resolution = computeResolution(repoRoot, playbookPath, opts.loadout ?? null, opts.env, opts.userPathOptions);
 
   return { runId, runDir, playbook, inputs: recordedInputs, resolution };
 }

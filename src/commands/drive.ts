@@ -14,6 +14,7 @@ import {
   loadExecutorProfile,
   parseExecutorProfile,
   readLocalLoadout,
+  readUserLoadout,
   resolveActiveLoadout,
   resolveRole,
   roleResolutionEchoLabel,
@@ -27,6 +28,7 @@ import {
 } from '../lib/executors.ts';
 import { computeNext, FlowCursorError, type NextComputation } from '../lib/flow-cursor.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import { resolveRunPlaybookFile, runSchemaDirectories } from '../lib/definitions.ts';
 import {
   actorCallIdFor,
   nodeInstanceArtifactScope,
@@ -47,6 +49,7 @@ import { CONDITION_REGISTRY, GateError, runGate, SUPPORTED_CONDITIONS, type Gate
 import { requestHostDispatch, type HostDispatchRequest } from '../lib/host-dispatch.ts';
 import { PromptError, runPrompt } from './prompt.ts';
 import { RunError, runRun } from './run.ts';
+import type { UserPathOptions } from '../lib/user-paths.ts';
 
 export class DriveError extends Error {}
 
@@ -90,6 +93,7 @@ export interface DriveOptions {
   env?: string | null;
   cwd?: string;
   repoRoot?: string;
+  userPathOptions?: UserPathOptions;
   now?: Date;
   /** Progress callback — `cli.ts` passes console.log; the engine never prints. */
   onAction?: (line: string) => void;
@@ -119,6 +123,7 @@ interface EngineCtx {
   runId: string;
   runDir: string;
   repoRoot: string;
+  userPathOptions?: UserPathOptions;
   playbook: Playbook;
   task: string;
   schemas: SchemaSet;
@@ -133,17 +138,14 @@ interface EngineCtx {
   act: (line: string) => void;
 }
 
-function locatePlaybook(repoRoot: string, name: string): string {
-  const dir = join(repoRoot, '.fadeno', 'playbooks');
-  for (const candidate of [`${name}.yaml`, `${name}.yml`]) {
-    const path = join(dir, candidate);
-    if (existsSync(path)) return path;
-  }
-  throw new DriveError(`Playbook "${name}" not found in ${dir}.`);
+function locatePlaybook(runDir: string, repoRoot: string, name: string): string {
+  const found = resolveRunPlaybookFile(runDir, repoRoot, name);
+  if (found) return found.path;
+  throw new DriveError(`Playbook "${name}" not found in bundled or project definitions.`);
 }
 
-function loadValidatedPlaybook(repoRoot: string, name: string, schemas: SchemaSet): Playbook {
-  const playbookPath = locatePlaybook(repoRoot, name);
+function loadValidatedPlaybook(runDir: string, repoRoot: string, name: string, schemas: SchemaSet): Playbook {
+  const playbookPath = locatePlaybook(runDir, repoRoot, name);
   let playbook: Playbook;
   try {
     const parsed = parseYaml(readFileSync(playbookPath, 'utf8'));
@@ -212,7 +214,7 @@ function ensureProfileSnapshot(ctx: Omit<EngineCtx, 'profile' | 'activeLoadout'>
   }
   let profile: ExecutorProfile;
   try {
-    profile = loadExecutorProfile(ctx.repoRoot).profile;
+    profile = loadExecutorProfile(ctx.repoRoot, ctx.userPathOptions).profile;
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new DriveError(err.message);
     throw err;
@@ -539,6 +541,7 @@ function dispatchOnce(
     attempt_reason: reason,
     executor,
     command: argv,
+    command_sha256: sha256Hex(JSON.stringify(argv)),
     model: spec.model,
     prompt_path: promptRes.promptPath,
     prompt_sha256: promptRes.sha256,
@@ -553,6 +556,7 @@ function dispatchOnce(
     `dispatch ${stepId}${role ? ` (${role})` : ''} attempt ${attempt} [${reason}]` +
       ` → ${executor}${session != null ? ` (${session} session)` : ''}`,
   );
+  ctx.act(`external sandbox: ${executor} (${argv.join(' ')}) runs outside the current harness; evidence is recorded in the run ledger`);
 
   const [cmd, ...args] = argv;
   const spawned = spawnSync(cmd!, args, {
@@ -1512,13 +1516,15 @@ export function runDrive(opts: DriveOptions): DriveResult {
     opts.onAction?.(line);
   };
 
-  const schemas = new SchemaSet(join(repoRoot, '.fadeno', 'schemas'));
-  const playbook = loadValidatedPlaybook(repoRoot, run.playbook, schemas);
+  const schemaPaths = runSchemaDirectories(run.dir, repoRoot);
+  const schemas = new SchemaSet(schemaPaths.snapshot, schemaPaths.project, schemaPaths.builtin);
+  const playbook = loadValidatedPlaybook(run.dir, repoRoot, run.playbook, schemas);
 
   const base = {
     runId: run.runId,
     runDir: run.dir,
     repoRoot,
+    userPathOptions: opts.userPathOptions,
     playbook,
     task: run.task ?? '',
     schemas,
@@ -1533,11 +1539,20 @@ export function runDrive(opts: DriveOptions): DriveResult {
   // the run's snapshotted profile. An unknown name is a hard error naming its
   // source — never a silent fallback.
   let activeLoadout: ActiveLoadout | null;
+  let requestedLoadout: string | null = null;
+  try {
+    const runDoc = parseYaml(readFileSync(join(run.dir, 'run.yaml'), 'utf8')) as Record<string, unknown>;
+    requestedLoadout = typeof runDoc.requested_loadout === 'string' ? runDoc.requested_loadout : null;
+  } catch {
+    requestedLoadout = null;
+  }
   try {
     activeLoadout = resolveActiveLoadout({
       flagValue: opts.loadout ?? null,
+      runValue: requestedLoadout,
       envValue: opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null,
       localFileValue: readLocalLoadout(repoRoot),
+      userFileValue: readUserLoadout(opts.userPathOptions),
       profile,
     });
   } catch (err) {
@@ -1545,6 +1560,14 @@ export function runDrive(opts: DriveOptions): DriveResult {
     throw err;
   }
   const ctx: EngineCtx = { ...base, profile, activeLoadout };
+  if (opts.loadout != null && opts.loadout !== requestedLoadout && requestedLoadout != null) {
+    appendEvent(
+      ctx.runDir,
+      { type: 'loadout_override', step: null, prior: requestedLoadout, loadout: opts.loadout, source: 'flag' },
+      ctx.now,
+    );
+    ctx.act(`loadout override: ${requestedLoadout} → ${opts.loadout}`);
+  }
   recordOverrides(ctx, parseBinds(opts.bind));
   recordResolutionSnapshot(ctx);
 

@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
   BARE_IDENTIFIER_RE,
@@ -6,6 +7,7 @@ import {
   loadExecutorProfile,
   parseExecutorProfile,
   readLocalLoadout,
+  readUserLoadout,
   resolveActiveLoadout,
   resolveRole,
   type ActiveLoadout,
@@ -15,8 +17,9 @@ import {
 } from '../lib/executors.ts';
 import { emitFile, type EmitResult } from '../lib/fsutil.ts';
 import { HostDispatchError, readHostDispatchRequest, type HostDispatchRequestLookup } from '../lib/host-dispatch.ts';
-import { findRepoRoot } from '../lib/paths.ts';
+import { findRepoRoot, packageVersion } from '../lib/paths.ts';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
+import type { UserPathOptions } from '../lib/user-paths.ts';
 
 export class SteeringError extends Error {}
 
@@ -38,15 +41,16 @@ export interface SteeringResolution {
 interface CommonOptions {
   cwd?: string;
   repoRoot?: string;
+  userPathOptions?: UserPathOptions;
 }
 
 function rootOf(opts: CommonOptions): string {
   return opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
 }
 
-function profileOf(repoRoot: string): ExecutorProfile {
+function profileOf(repoRoot: string, userPathOptions?: UserPathOptions): ExecutorProfile {
   try {
-    return loadExecutorProfile(repoRoot).profile;
+    return loadExecutorProfile(repoRoot, userPathOptions).profile;
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
     throw err;
@@ -200,7 +204,7 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
   }
   if (hasRun && hasDispatchId) return runLockedSteeringResolve(opts, archetype, role, nativeExecutor);
 
-  const profile = profileOf(repoRoot);
+  const profile = profileOf(repoRoot, opts.userPathOptions);
   const nativeSpec = nativeExecutor == null ? null : profile.executors[nativeExecutor];
   if (nativeExecutor != null && (nativeSpec == null || nativeSpec.adapter !== 'host')) {
     throw new SteeringError(
@@ -215,6 +219,7 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
       flagValue: opts.loadout ?? null,
       envValue: opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null,
       localFileValue: readLocalLoadout(repoRoot),
+      userFileValue: readUserLoadout(opts.userPathOptions),
       profile,
     });
   } catch (err) {
@@ -364,6 +369,8 @@ export interface SteeringApplyOptions extends CommonOptions {
   loadout: string;
   target: 'codex';
   force?: boolean;
+  /** Advanced override; normal setup/use materialize at user scope. */
+  scope?: 'project' | 'user';
 }
 
 export interface SteeringApplyResult {
@@ -377,13 +384,39 @@ export interface SteeringApplyResult {
   }>;
   /** Host-only compatibility view; command-broker slots are omitted. */
   baseline: Record<string, string>;
-  restartRequired: true;
+  restartRequired: boolean;
+  /** Files that were preserved because they are not Fadeno-managed. */
+  conflicts: string[];
+  scope: 'project' | 'user';
+}
+
+function codexAgentDir(scope: 'project' | 'user', repoRoot: string, userPathOptions?: UserPathOptions): string {
+  if (scope === 'project') return join(repoRoot, '.codex', 'agents');
+  const codexHome = userPathOptions?.env?.CODEX_HOME?.trim() ||
+    process.env.CODEX_HOME?.trim() ||
+    join(userPathOptions?.home ?? homedir(), '.codex');
+  return join(codexHome, 'agents');
+}
+
+function managedAgentEmit(path: string, body: string, force: boolean, scope: 'project' | 'user'): EmitResult['status'] {
+  if (scope === 'project') return emitFile(path, body, force);
+  if (existsSync(path)) {
+    const existing = readFileSync(path, 'utf8');
+    if (!existing.startsWith('# fadeno:managed')) return 'skipped';
+    if (existing === body) return 'skipped';
+    mkdirSync(join(path, '..'), { recursive: true });
+    writeFileSync(path, body, 'utf8');
+    return 'overwritten';
+  }
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, body, 'utf8');
+  return 'created';
 }
 
 /** Materialize every required loadout slot into a session-static Codex role agent. */
 export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResult {
   const repoRoot = rootOf(opts);
-  const profile = profileOf(repoRoot);
+  const profile = profileOf(repoRoot, opts.userPathOptions);
   const loadout = opts.loadout.trim();
   const slots = profile.loadouts[loadout];
   if (slots == null) {
@@ -395,6 +428,8 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
   const materialization: SteeringApplyResult['materialization'] = {};
   const pending: Array<{ path: string; body: string }> = [];
   const results: EmitResult[] = [];
+  const scope = opts.scope ?? 'project';
+  const agentDir = codexAgentDir(scope, repoRoot, opts.userPathOptions);
   for (const archetype of ['worker', 'reviewer', 'judge']) {
     const executorName = slots[archetype];
     const spec = executorName == null ? null : profile.executors[executorName];
@@ -404,7 +439,8 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
           `a Codex role agent; found ${executorName ?? 'no slot'}.`,
       );
     }
-    const path = join(repoRoot, '.codex', 'agents', `${archetype}.toml`);
+    const filename = scope === 'user' ? `fadeno-${archetype}.toml` : `${archetype}.toml`;
+    const path = join(agentDir, filename);
     let body: string;
     if (spec.adapter === 'host') {
       if (spec.agentType !== archetype) {
@@ -424,10 +460,17 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
       };
       body = renderCodexCommandBroker(archetype);
     }
-    pending.push({ path, body });
+    const managed = scope === 'user'
+      ? `# fadeno:managed version=${packageVersion()} digest=${sha256Hex(body)}\n`
+      : '';
+    pending.push({ path, body: `${managed}${body}` });
   }
   for (const item of pending) {
-    results.push({ path: item.path, status: emitFile(item.path, item.body, opts.force ?? false) });
+    results.push({ path: item.path, status: managedAgentEmit(item.path, item.body, opts.force ?? false, scope) });
   }
-  return { loadout, results, materialization, baseline, restartRequired: true };
+  const conflicts = pending
+    .filter((item) => !existsSync(item.path) || readFileSync(item.path, 'utf8') !== item.body)
+    .map((item) => item.path);
+  const restartRequired = results.some((item) => item.status === 'created' || item.status === 'overwritten');
+  return { loadout, results, materialization, baseline, restartRequired, conflicts, scope };
 }

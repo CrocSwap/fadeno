@@ -41,6 +41,13 @@ const archetype =
         : null;
 if (archetype == null) finish(null); // Explore, Plan, and unrelated specialists stay native.
 
+// The safe bundled `native` loadout is intentionally inert. Only a declared
+// command slot crosses the Claude sandbox boundary; resolution stays live in
+// the CLI and is never cached in this hook.
+const slot = new RegExp(`^\\s*${archetype}\\s+→.*\\[command\\]`, 'm');
+const hasSlots = /^\s*(worker|reviewer|judge)\s+→/m.test(active.stdout ?? '');
+if (!hasSlots || !slot.test(active.stdout ?? '')) finish(null);
+
 const localProxy = join(cwd, '.claude', 'agents', `dispatch-${archetype}.md`);
 const target = existsSync(localProxy)
   ? `dispatch-${archetype}`

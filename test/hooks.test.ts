@@ -27,7 +27,7 @@ test('Claude Stop hook handles missing runs and preserves gate failures', (t) =>
   const mockBin = join(root, 'mock-bin');
   mkdirSync(mockBin);
   const fadeno = join(mockBin, 'fadeno');
-  writeFileSync(fadeno, '#!/bin/sh\nif grep -Rq "blocking" .fadeno/runs 2>/dev/null; then exit 1; fi\nexit 0\n');
+  writeFileSync(fadeno, '#!/bin/sh\nif grep -Rq "blocking" .fadeno/runs/*/artifacts 2>/dev/null; then exit 1; fi\nexit 0\n');
   chmodSync(fadeno, 0o755);
 
   assert.equal(runShell(command, root, mockBin), 0); // no run: explicit early success

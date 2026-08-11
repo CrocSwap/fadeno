@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { loadLayeredProfile, type ProfileProvenance } from './config-layers.ts';
+import { userPaths, type UserPathOptions } from './user-paths.ts';
 
 export class ExecutorProfileError extends Error {}
 
@@ -65,6 +67,13 @@ export interface ExecutorProfile {
   loadouts: Record<string, Record<string, string>>;
   /** Loadout used when no flag/env/local override selects one. */
   defaultLoadout: string | null;
+}
+
+export interface LoadedExecutorProfile {
+  profile: ExecutorProfile;
+  path: string;
+  layers?: Array<'builtin' | 'user' | 'project'>;
+  provenance?: ProfileProvenance;
 }
 
 /** Repo-relative location of the profile (playbooks stay harness-neutral). */
@@ -292,16 +301,19 @@ export function parseExecutorProfile(text: string, source: string): ExecutorProf
 }
 
 /** Load the repo's executor profile, or explain how to create one. */
-export function loadExecutorProfile(repoRoot: string): { profile: ExecutorProfile; path: string } {
-  const path = join(repoRoot, EXECUTORS_FILE);
-  if (!existsSync(path)) {
-    throw new ExecutorProfileError(
-      `No executor profile at ${EXECUTORS_FILE}. The engine needs one to dispatch actors — ` +
-        'declare executors (adapter: command) and role bindings there ' +
-        '(re-run `fadeno init` to seed an example, or copy templates/common/fadeno/executors.yaml).',
-    );
+export function loadExecutorProfile(repoRoot: string, options: UserPathOptions = {}): LoadedExecutorProfile {
+  try {
+    const loaded = loadLayeredProfile(repoRoot, options);
+    return {
+      profile: loaded.profile,
+      path: loaded.path,
+      layers: loaded.layers,
+      provenance: loaded.provenance,
+    };
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw err;
+    throw new ExecutorProfileError((err as Error).message);
   }
-  return { profile: parseExecutorProfile(readFileSync(path, 'utf8'), EXECUTORS_FILE), path };
 }
 
 /**
@@ -337,7 +349,7 @@ export function readLocalLoadout(repoRoot: string): string | null {
 }
 
 /** Where the active loadout name came from, in precedence order. */
-export type LoadoutSource = 'flag' | 'env' | 'local' | 'default';
+export type LoadoutSource = 'flag' | 'run' | 'env' | 'local' | 'user' | 'default';
 
 export interface ActiveLoadout {
   name: string;
@@ -346,27 +358,34 @@ export interface ActiveLoadout {
 
 const LOADOUT_SOURCE_LABEL: Record<LoadoutSource, string> = {
   flag: '--loadout',
+  run: 'run-persisted loadout',
   env: 'FADENO_LOADOUT',
   local: LOADOUT_LOCAL_FILE,
+  user: 'user loadout',
   default: 'default_loadout',
 };
 
 /**
- * Resolve the active loadout: `--loadout` flag → `FADENO_LOADOUT` env →
- * `.fadeno/local/loadout` → `default_loadout:` in the profile → none. Pure —
+ * Resolve the active loadout: explicit flag → persisted run intent →
+ * `FADENO_LOADOUT` env → `.fadeno/local/loadout` → user state →
+ * `default_loadout:` in the profile → none. Pure —
  * callers pass each source's raw value (null/blank = absent). A source that
  * names an undeclared loadout is a hard error attributed to that source.
  */
 export function resolveActiveLoadout(opts: {
   flagValue?: string | null;
+  runValue?: string | null;
   envValue?: string | null;
   localFileValue?: string | null;
+  userFileValue?: string | null;
   profile: ExecutorProfile;
 }): ActiveLoadout | null {
   const candidates: Array<[LoadoutSource, string | null | undefined]> = [
     ['flag', opts.flagValue],
+    ['run', opts.runValue],
     ['env', opts.envValue],
     ['local', opts.localFileValue],
+    ['user', opts.userFileValue],
     ['default', opts.profile.defaultLoadout],
   ];
   for (const [sourceKind, raw] of candidates) {
@@ -388,6 +407,14 @@ export function resolveActiveLoadout(opts: {
     return { name, source: sourceKind };
   }
   return null;
+}
+
+/** Read the user-scoped sticky loadout without creating state. */
+export function readUserLoadout(options: UserPathOptions = {}): string | null {
+  const path = userPaths(options).loadoutFile;
+  if (!existsSync(path)) return null;
+  const name = (readFileSync(path, 'utf8').split(/\r?\n/, 1)[0] ?? '').trim();
+  return name.length > 0 ? name : null;
 }
 
 /** How a role landed on its executor, in resolution order. */

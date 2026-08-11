@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { chmodSync, existsSync, readFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { copyTree, emitFile, type EmitResult } from '../lib/fsutil.ts';
 import { packageVersion, templatesDir } from '../lib/paths.ts';
 
@@ -24,13 +24,14 @@ const SKILLS = [
   { src: 'fadeno-runner', dst: 'runner' },
   { src: 'fadeno-builder', dst: 'builder' },
   { src: 'fadeno-driver', dst: 'driver' },
+  { src: 'fadeno-setup', dst: 'setup' },
 ] as const;
 
 /**
  * Emit a Claude Code plugin (the "capability" layer) from the shared templates,
  * so the skills/subagents stay in sync with `fadeno init` rather than being a
- * hand-maintained copy. The per-repo "definitions" (playbooks/schemas) are NOT
- * part of the plugin — a user seeds those with `fadeno init --claude --data-only`.
+ * hand-maintained copy. The plugin also carries the bundled CLI and immutable
+ * built-in definitions, so a repo-local data-only init is optional.
  */
 export function runPlugin(opts: PluginOptions = {}): PluginResult {
   const cwd = opts.cwd ?? process.cwd();
@@ -62,12 +63,8 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
     md = md.replace(`name: ${src}`, `name: ${dst}`);
     const skillPath = join(outDir, 'skills', dst, 'SKILL.md');
     results.push({ path: skillPath, status: emitFile(skillPath, md, force) });
-    copyTree(
-      join(tpl, 'common', 'skills', src, 'references'),
-      join(outDir, 'skills', dst, 'references'),
-      force,
-      results,
-    );
+    const references = join(tpl, 'common', 'skills', src, 'references');
+    if (existsSync(references)) copyTree(references, join(outDir, 'skills', dst, 'references'), force, results);
   }
 
   // Slash-command entry points (/fadeno:runner, /fadeno:builder). Plugin skills
@@ -80,6 +77,18 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
   // :judge, plus the fadeno:dispatch-* proxies that relay archetype-shaped
   // subtasks to `fadeno dispatch` (loadouts-and-dispatch.md, plugin surface).
   copyTree(join(tpl, 'claude', 'claude-agents'), join(outDir, 'agents'), force, results);
+  // Claude plugin hook surface: use the plugin-local `fadeno` on PATH and keep
+  // the hook selective/inert for the native loadout.
+  const hookPath = join(outDir, 'hooks', 'dispatch-steering.mjs');
+  results.push({
+    path: hookPath,
+    status: emitFile(hookPath, readFileSync(join(tpl, 'claude', 'hooks', 'dispatch-steering.mjs'), 'utf8'), force),
+  });
+  const hookManifestPath = join(outDir, 'hooks', 'hooks.json');
+  results.push({
+    path: hookManifestPath,
+    status: emitFile(hookManifestPath, readFileSync(join(tpl, 'claude', 'hooks', 'hooks.json'), 'utf8'), force),
+  });
 
   return { outDir, results };
 }
@@ -88,15 +97,14 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
 // `$fadeno-runner` / `$fadeno-builder` / `$fadeno-driver` (the openai.yaml
 // policies reference those handles), unlike the Claude plugin which shortens to
 // the `fadeno:runner` namespace form.
-const CODEX_SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver'] as const;
+const CODEX_SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-setup'] as const;
 
 /**
  * Emit a Codex CLI plugin (`.codex-plugin/plugin.json` + `skills/`) from the
- * SAME shared skill templates as the Claude plugin and `fadeno init`. Two things
- * a Codex plugin does NOT carry — role subagents and a bundled CLI binary — stay
- * with `fadeno init --codex` (`.codex/agents/*.toml`) and npm (`npx fadeno`)
- * respectively; Codex plugins have no manifest slot for either. The per-repo
- * definitions (playbooks/schemas) are seeded with `fadeno init --codex --data-only`.
+ * SAME shared skill templates as the Claude plugin and `fadeno init`. Codex
+ * role subagents remain user-scoped host materialization, while the plugin
+ * carries its own CLI and immutable built-in definitions. Project init remains
+ * available for explicit overrides and vendoring.
  */
 export function runCodexPlugin(opts: PluginOptions = {}): PluginResult {
   const cwd = opts.cwd ?? process.cwd();
@@ -142,18 +150,31 @@ export function runCodexPlugin(opts: PluginOptions = {}): PluginResult {
     const skillMd = readFileSync(join(tpl, 'common', 'skills', skill, 'SKILL.md'), 'utf8');
     const skillMdPath = join(outDir, 'skills', skill, 'SKILL.md');
     results.push({ path: skillMdPath, status: emitFile(skillMdPath, skillMd, force) });
-    copyTree(
-      join(tpl, 'common', 'skills', skill, 'references'),
-      join(outDir, 'skills', skill, 'references'),
-      force,
-      results,
-    );
+    const references = join(tpl, 'common', 'skills', skill, 'references');
+    if (existsSync(references)) copyTree(references, join(outDir, 'skills', skill, 'references'), force, results);
     // Per-skill invocation policy (runner implicit; builder/driver explicit-only)
     // — the same openai.yaml `fadeno init --codex` installs, honored in-plugin.
     const policy = readFileSync(join(tpl, 'codex', 'openai', `${skill}.yaml`), 'utf8');
     const policyPath = join(outDir, 'skills', skill, 'agents', 'openai.yaml');
     results.push({ path: policyPath, status: emitFile(policyPath, policy, force) });
   }
+
+  // The committed standalone bundle is copied during generation and rebuilt by
+  // scripts/build-bin.mjs. Keeping it in the generator's result means a fresh
+  // Codex plugin has the same self-contained runtime surface as Claude.
+  const repoBundle = join(tpl, '..', 'plugin-codex', 'bin');
+  const adjacentBundle = dirname(tpl);
+  const bundledBin = existsSync(join(repoBundle, 'fadeno'))
+    ? repoBundle
+    : existsSync(join(adjacentBundle, 'fadeno'))
+      ? adjacentBundle
+      : null;
+  const destinationBin = join(outDir, 'bin');
+  if (bundledBin != null && resolve(bundledBin) !== resolve(destinationBin)) {
+    copyTree(bundledBin, destinationBin, force, results);
+  }
+  const destinationCli = join(destinationBin, 'fadeno');
+  if (existsSync(destinationCli)) chmodSync(destinationCli, 0o755);
 
   return { outDir, results };
 }

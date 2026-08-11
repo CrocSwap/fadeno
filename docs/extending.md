@@ -26,6 +26,17 @@ Example: a hypothetical `fadeno list`.
 
 Keep all printing in `cli.ts`; the command stays a pure function over the FS.
 
+The low-friction commands follow the same rule: `setup`, `use`, `status`,
+`doctor`, `vendor`, and `evidence promote` each return structured results and
+keep rendering in `cli.ts`. User-level paths must accept injectable
+`UserPathOptions`; project writes must use non-destructive `emitFile` or the
+managed marker helpers. Add tests for no-init execution, malformed layer
+errors, idempotency, and stale pins before adding convenience output.
+
+Definition and executor changes use the effective layers rather than creating a
+second resolver. Built-in files are immutable plugin assets; project files
+shadow them by logical name, and user executor/loadout entries merge by key.
+
 ---
 
 ## Add a step kind (primitive)
@@ -161,7 +172,8 @@ subtasks to whatever executor the active loadout binds, including a
 non-Anthropic one. On a non-zero exit the proxy reports the failure plainly
 and never attempts the task itself as a fallback.
 
-`fadeno init --claude --with-steering` installs a local `PreToolUse` hook that
+`fadeno init --claude` installs a local `PreToolUse` hook by default; use
+`--no-steering` to opt out. The hook
 checks `fadeno loadout` and, only while a loadout is active, rewrites
 general-purpose/worker, reviewer, and judge `Agent` calls to those proxies. It
 preserves the rest of the Agent input and leaves Explore/Plan and unrelated
@@ -169,17 +181,18 @@ specialists native. Plugin users can combine the flag with `--data-only`; the
 hook then targets the plugin-scoped `fadeno:dispatch-*` agents.
 
 Codex has no equivalent spawn-rewrite hook, and project custom-agent model
-configuration is session-static. `fadeno init --codex --with-steering` installs
-honest broker definitions named `worker`, `reviewer`, and `judge`; materialize
-`fadeno steering apply <loadout> --codex --force`, then start a fresh Codex
-session. Each host slot becomes a native agent with that executor's model and
-effort; each command slot becomes a cheap broker that delegates through
-`fadeno dispatch`. Before each task the role resolves the active loadout: a
+configuration is session-static. `fadeno init --codex` installs honest broker
+definitions named `worker`, `reviewer`, and `judge`; `fadeno setup --codex`
+records the harness, and later `fadeno use <loadout>` automatically refreshes
+the user-scoped agents when needed.
+Use `fadeno steering apply <loadout> --codex --scope project` for a project
+override, then start a fresh Codex session. Each host slot becomes a native
+agent with that executor's model and effort; each command slot becomes a cheap
+broker that delegates through `fadeno dispatch`. Before each task the role resolves the active loadout: a
 command executor switches immediately, a matching host executor runs natively,
 and a different host executor stops with `restart_required`. The Codex plugin
-cannot bundle these project agents, so `--data-only --with-steering` still emits
-`.codex/agents/*.toml`. Existing files remain protected unless `--force` is
-supplied.
+bundles the CLI and built-in definitions; it does not overwrite unrelated user
+agents. Existing files remain protected unless `--force` is supplied.
 
 What stays native: Explore/Plan-style read-only scouting — cheap, tightly
 integrated with the harness's codebase tools, and not where quota pressure
@@ -224,8 +237,8 @@ Never edit files under `plugin/` directly — they're build output.
 4. `npm run build:plugin` + commit `plugin/`.
 
 Starters ship to **all supported targets** (they're under `common/fadeno`) and
-are seeded by `init` / `init --data-only`. The plugin itself carries no
-playbooks.
+are available from the bundled plugin runtime. `init` / `init --data-only` and
+`vendor` remain the explicit project-copy paths.
 
 ---
 

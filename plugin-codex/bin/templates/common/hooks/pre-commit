@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Fadeno pre-commit guard (tier-2, enforced).
+#
+# Turns advisory `require_user_approval_for` categories into real, deterministic
+# blocks that protect against agent AND human mistakes. Adapt the patterns to
+# your stack. Activate by linking this into your git hooks:
+#
+#   ln -s ../../.fadeno/hooks/pre-commit .git/hooks/pre-commit
+#   # (or: cp .fadeno/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit)
+#
+set -euo pipefail
+
+staged() { git diff --cached --name-only --diff-filter=ACMR; }
+fail=0
+
+# --- dependency_addition: block dependency-manifest changes unless approved ---
+if staged | grep -qE '(^|/)(package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|requirements\.txt|poetry\.lock|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock|Gemfile\.lock)$'; then
+  if [ "${FADENO_APPROVE_DEPS:-}" != "1" ]; then
+    echo "✗ Dependency manifest changed (Fadeno: dependency_addition)." >&2
+    echo "  Re-commit with FADENO_APPROVE_DEPS=1 to confirm." >&2
+    fail=1
+  fi
+fi
+
+# --- secret_access: block obvious secret material from being committed ---
+if staged | grep -qE '(^|/)(\.env|\.env\.[^/]+|id_rsa|id_ed25519|.*\.pem)$'; then
+  echo "✗ A file that looks like a secret is staged (Fadeno: secret_access)." >&2
+  echo "  Remove it from the commit or add it to .gitignore." >&2
+  fail=1
+fi
+
+exit "$fail"

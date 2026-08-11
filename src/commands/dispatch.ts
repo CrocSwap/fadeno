@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import {
@@ -7,6 +7,7 @@ import {
   ExecutorProfileError,
   loadExecutorProfile,
   readLocalLoadout,
+  readUserLoadout,
   resolveActiveLoadout,
   resolveRole,
   roleResolutionEchoLabel,
@@ -28,6 +29,8 @@ import {
   type HostDispatchProgressReceipt,
 } from '../lib/host-dispatch.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import { ensureFadenoIgnore } from '../lib/source-control.ts';
+import type { UserPathOptions } from '../lib/user-paths.ts';
 
 export class DispatchCommandError extends Error {}
 
@@ -72,6 +75,7 @@ export interface AdHocDispatchOptions {
   env?: string | null;
   cwd?: string;
   repoRoot?: string;
+  userPathOptions?: UserPathOptions;
   /** Injectable clock for the evidence timestamp. */
   now?: Date;
   /** Resolution echo callback — cli.ts prints it to stderr; the command never prints. */
@@ -99,9 +103,9 @@ export interface AdHocDispatchResult {
   evidencePath: string;
 }
 
-function loadProfileOrThrow(repoRoot: string): ExecutorProfile {
+function loadProfileOrThrow(repoRoot: string, userPathOptions?: UserPathOptions): ExecutorProfile {
   try {
-    return loadExecutorProfile(repoRoot).profile;
+    return loadExecutorProfile(repoRoot, userPathOptions).profile;
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new DispatchCommandError(err.message);
     throw err;
@@ -117,7 +121,7 @@ function loadProfileOrThrow(repoRoot: string): ExecutorProfile {
 export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const profile = loadProfileOrThrow(repoRoot);
+  const profile = loadProfileOrThrow(repoRoot, opts.userPathOptions);
 
   const archetype = opts.archetype?.trim() ? opts.archetype.trim() : null;
   const role = opts.role?.trim() ? opts.role.trim() : null;
@@ -152,9 +156,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     try {
       active = resolveActiveLoadout({
         flagValue: opts.loadout ?? null,
-        envValue: opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null,
-        localFileValue: readLocalLoadout(repoRoot),
-        profile,
+      envValue: opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null,
+      localFileValue: readLocalLoadout(repoRoot),
+      userFileValue: readUserLoadout(opts.userPathOptions),
+      profile,
       });
       // Per-role binding pins apply only when --role names one. Without a role
       // the chain is loadout slot → "*" → error, so resolveRole runs against a
@@ -215,6 +220,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     `${role ?? archetype ?? executorName} → ${executorName}` +
     `${spec.model != null ? ` (${spec.model})` : ''} [${sourceLabel}]`;
   opts.onEcho?.(echo);
+  opts.onEcho?.(`external sandbox: ${executorName} (${spec.command.join(' ')}) runs outside the current harness; evidence → ${DISPATCHES_FILE}`);
 
   const started = Date.now();
   const [cmd, ...args] = spec.command;
@@ -245,7 +251,13 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     output_sha256: outputSha256,
   };
   if (spawned.error != null) row.error = spawned.error.message;
-  appendFileSync(join(repoRoot, DISPATCHES_FILE), `${JSON.stringify(row)}\n`, 'utf8');
+  ensureFadenoIgnore(repoRoot);
+  mkdirSync(join(repoRoot, '.fadeno'), { recursive: true });
+  appendFileSync(
+    join(repoRoot, DISPATCHES_FILE),
+    `${JSON.stringify({ ...row, command: spec.command, command_sha256: sha256Hex(JSON.stringify(spec.command)) })}\n`,
+    'utf8',
+  );
 
   if (spawned.error != null) {
     throw new DispatchCommandError(

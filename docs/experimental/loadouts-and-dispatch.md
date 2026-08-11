@@ -1,6 +1,7 @@
 # Loadouts and the dispatch kernel
 
-**Status:** kernel, proxy surface, and opt-in host steering implemented; strict mode deferred
+**Status:** layered catalog, safe-native defaults, user-scoped selection, and
+explicit external dispatch implemented; strict mode remains deferred
 **Decision date:** 2026-08-09
 **Relationship:** extends the executor profile of
 [`next-protocol.md`](next-protocol.md); sibling of
@@ -92,9 +93,11 @@ For each role, at dispatch time:
 4. otherwise a hard, actionable error naming the role, its archetype, and
    what to add.
 
-The **active loadout** is resolved: `--loadout` flag → `FADENO_LOADOUT` env →
-`.fadeno/local/loadout` (sticky session state, one line, written by
-`fadeno loadout use`) → `default_loadout:` in `executors.yaml` → none.
+The **active loadout** is resolved: explicit `--loadout` → run-persisted intent
+→ `FADENO_LOADOUT` → `.fadeno/local/loadout` → user state
+`<state>/fadeno/loadout` → highest-layer `default_loadout` → bundled `native`.
+The simple `fadeno use <name>` command writes user state; compatibility
+`fadeno loadout use <name>` continues to write the repository-local pin.
 
 `.fadeno/local/` is per-machine session state and must never be committed:
 repos that commit `.fadeno/` should gitignore `.fadeno/local/` (scaffolding
@@ -108,8 +111,10 @@ dispatch with no config churn.
 
 ## CLI
 
-- `fadeno loadout` — show the active loadout, its source (flag/env/local/
-  default), and the full archetype→executor table.
+- `fadeno setup` / `fadeno use` / `fadeno status` / `fadeno doctor` — the
+  low-friction setup path, user selection, effective state, and read-only checks.
+- `fadeno loadout` — show the active loadout, its source, and the full
+  archetype→executor table.
 - `fadeno loadout list` / `fadeno loadout use <name>` / `fadeno loadout clear`
   — `use` writes `.fadeno/local/loadout`; `clear` removes it.
 - `fadeno dispatch --archetype <a> [--role <name>] [--loadout <name>]
@@ -174,15 +179,20 @@ Steering ladder:
 1. **Description routing** (shipped): proxy descriptions carry "use proactively /
    MUST BE USED for <archetype>-shaped subtasks when a Fadeno loadout is
    active." Soft but supported.
-2. **PreToolUse rewrite hook** (shipped, opt-in): match the `Agent` tool,
+2. **PreToolUse rewrite hook** (shipped by default for Claude): match the `Agent` tool,
    return `updatedInput` rewriting worker-shaped `subagent_type`s to the
    dispatch proxies. Deterministic — covers automatically-launched
    subagents. The hook stays dumb; resolution stays in the CLI.
 3. **Strict mode** (deferred, opt-in): disable built-in agent types via
    `permissions.deny` / harness env flags so proxies are the only targets.
 
-Codex does not expose the same spawn-rewrite hook. Its opt-in installs project
-custom-agent brokers, then `fadeno steering apply <loadout> --codex --force`
+Codex does not expose the same spawn-rewrite hook. Project `init` installs
+safe native broker agents by default; `--no-steering` selects the static legacy
+agents instead. `fadeno setup --codex` records the harness and materializes
+user-scoped managed agents; later `fadeno use <loadout>` refreshes them
+automatically and requires a fresh session only when they changed. Explicit
+project overrides remain available with `fadeno steering apply
+<loadout> --codex --scope project`, which
 materializes every loadout slot: host slots become session-native agents and
 command slots become cheap brokers. Each role checks the kernel before every
 task: a matching host slot runs locally, a command slot dispatches out-of-process
@@ -227,7 +237,7 @@ compensating audit trail.
    resolution + `fadeno loadout` + `fadeno dispatch` + evidence + echo.
 2. **Plugin surface:** dispatch proxy agents + description routing +
    prompt-file relay convention.
-3. **Host steering** (opt-in): Claude hook rewrite + Codex role overrides.
+3. **Host steering** (default for Codex/Claude): Claude hook rewrite + Codex role overrides.
 4. **Strict mode** (deferred).
 
 Slices 1–3 are shipped; strict mode would only sharpen routing, never change

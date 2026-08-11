@@ -4,6 +4,7 @@ import { parse as parseYaml } from 'yaml';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { hasCompositeContainers } from '../lib/composite-flow.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import { resolveDefinition, resolveRunPlaybookFile, runSchemaDirectories } from '../lib/definitions.ts';
 import { SchemaSet, validateFile } from '../lib/playbook-validate.ts';
 import { canonicalJson, renderStepPrompt, type PromptContext, type PromptInput } from '../lib/prompt.ts';
 import {
@@ -45,13 +46,10 @@ export interface PromptResult {
   plan: ResolutionPlan;
 }
 
-function locatePlaybook(repoRoot: string, name: string): string {
-  const dir = join(repoRoot, '.fadeno', 'playbooks');
-  for (const candidate of [`${name}.yaml`, `${name}.yml`]) {
-    const path = join(dir, candidate);
-    if (existsSync(path)) return path;
-  }
-  throw new PromptError(`Playbook "${name}" not found in ${dir}.`);
+function locatePlaybook(runDir: string, repoRoot: string, name: string): string {
+  const found = resolveRunPlaybookFile(runDir, repoRoot, name);
+  if (found) return found.path;
+  throw new PromptError(`Playbook "${name}" not found in bundled or project definitions.`);
 }
 
 /**
@@ -91,7 +89,7 @@ export function runPrompt(opts: PromptOptions): PromptResult {
   if (run.playbook == null) {
     throw new PromptError(`run "${run.runId}" has no playbook recorded in run.yaml.`);
   }
-  const playbookPath = locatePlaybook(repoRoot, run.playbook);
+  const playbookPath = locatePlaybook(run.dir, repoRoot, run.playbook);
   const playbookBytes = readFileSync(playbookPath);
   let playbook: Playbook;
   try {
@@ -104,7 +102,8 @@ export function runPrompt(opts: PromptOptions): PromptResult {
     throw new PromptError(`could not parse playbook ${run.playbook}: ${(err as Error).message}`);
   }
 
-  const schemas = new SchemaSet(join(repoRoot, '.fadeno', 'schemas'));
+  const schemaPaths = runSchemaDirectories(run.dir, repoRoot);
+  const schemas = new SchemaSet(schemaPaths.snapshot, schemaPaths.project, schemaPaths.builtin);
   const validation = validateFile(playbookPath, schemas, 'playbook');
   const errorIssues = validation.issues.filter((issue) => issue.severity === 'error');
   if (errorIssues.length > 0) {
@@ -158,9 +157,11 @@ export function runPrompt(opts: PromptOptions): PromptResult {
 
   let schemaText: string | null = null;
   if (plan.output.schemaKind) {
-    const schemaFile = join(repoRoot, '.fadeno', 'schemas', `${plan.output.schemaKind}.schema.json`);
-    if (existsSync(schemaFile)) {
-      schemaText = canonicalJson(JSON.parse(readFileSync(schemaFile, 'utf8')));
+    const schemaSource = resolveDefinition(repoRoot, 'schema', `${plan.output.schemaKind}.schema.json`);
+    const snapshotSchema = join(run.dir, 'definitions', 'schemas', `${plan.output.schemaKind}.schema.json`);
+    const schemaPath = existsSync(snapshotSchema) ? snapshotSchema : schemaSource?.path;
+    if (schemaPath) {
+      schemaText = canonicalJson(JSON.parse(readFileSync(schemaPath, 'utf8')));
     }
   }
 

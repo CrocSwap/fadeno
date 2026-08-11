@@ -12,14 +12,12 @@ reliably than a sprawling graph.
 
 ## Procedure
 
-1. **Ensure the repo is set up.** If `.fadeno/` is missing, seed the per-repo
-   definitions for the current host: run `fadeno init --codex --data-only` in
-   Codex or `fadeno init --claude --data-only` in Claude (if bare `fadeno` isn't
-   on your PATH yet, use the installed plugin binary or `npx fadeno …`). That writes `.fadeno/schemas`,
-   `vocabulary.md`, and the starter playbooks — **not** skills/subagents, which
-   come from the installed Fadeno skill/plugin.
+1. **Use the effective catalog.** The installed plugin already supplies bundled
+   schemas, vocabulary, and starter playbooks; no per-repo init is needed for a
+   built-in. If the user is authoring a custom playbook, write it under
+   `.fadeno/playbooks/` and let project definitions shadow bundled names.
 2. **Start from a pattern, not a blank page.** Offer the user a choice:
-   - adapt a **starter** (read it from `.fadeno/playbooks/`): `code-change-review`
+   - adapt a **starter** from the effective catalog: `code-change-review`
      (plan → implement → review → test → bounded revise), `research-synthesis`
      (gather → synthesize → fact-check → revise), `compositional-review`
      (independent mapped revision loops → final reduce), or `pr-review` (review → merge →

@@ -1,8 +1,9 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { renderDiagram, type DiagramFormat } from '../lib/diagram.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import { resolvePlaybookFile as resolveDefinitionPlaybook } from '../lib/definitions.ts';
 
 export class DiagramError extends Error {}
 
@@ -19,12 +20,9 @@ function resolvePlaybookFile(repoRoot: string, cwd: string, ref: string): string
     const direct = isAbsolute(ref) ? ref : resolve(cwd, ref);
     if (existsSync(direct)) return direct;
   }
-  const stripped = ref.replace(/\.(ya?ml)$/i, '');
-  for (const candidate of [`${stripped}.yaml`, `${stripped}.yml`]) {
-    const path = join(repoRoot, '.fadeno', 'playbooks', candidate);
-    if (existsSync(path)) return path;
-  }
-  throw new DiagramError(`Playbook "${ref}" not found (looked under .fadeno/playbooks).`);
+  const found = resolveDefinitionPlaybook(repoRoot, ref);
+  if (found) return found.path;
+  throw new DiagramError(`Playbook "${ref}" not found in bundled or project definitions.`);
 }
 
 /** Render a playbook's control flow as ASCII (default) or Mermaid. */

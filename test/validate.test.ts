@@ -3,7 +3,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { runInit } from '../src/commands/init.ts';
-import { runValidate, ValidateError } from '../src/commands/validate.ts';
+import { runValidate } from '../src/commands/validate.ts';
 import { tempRepo } from './helpers.ts';
 
 function initRepo(t: Parameters<typeof tempRepo>[0]): string {
@@ -144,7 +144,9 @@ test('reference integrity: duplicate step id is caught', (t) => {
   assert.ok(outcome.results[0]!.issues.some((i) => /duplicate step id/.test(i.message)));
 });
 
-test('validate throws a helpful error when no schema is present', (t) => {
+test('validate uses bundled schemas without project initialization', (t) => {
   const root = tempRepo(t); // not initialized
-  assert.throws(() => runValidate({ repoRoot: root }), ValidateError);
+  const result = runValidate({ repoRoot: root });
+  assert.ok(result.ok);
+  assert.ok(result.results.length > 0);
 });

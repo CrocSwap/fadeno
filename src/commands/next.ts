@@ -1,8 +1,8 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import { computeNext, FlowCursorError, type NextComputation } from '../lib/flow-cursor.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import { resolveRunPlaybookFile, runSchemaDirectories } from '../lib/definitions.ts';
 import { SchemaSet, validateFile } from '../lib/playbook-validate.ts';
 import type { Playbook } from '../lib/prompt-resolve.ts';
 import {
@@ -29,13 +29,10 @@ export interface NextResult extends NextComputation {
   playbook: string;
 }
 
-function locatePlaybook(repoRoot: string, name: string): string {
-  const dir = join(repoRoot, '.fadeno', 'playbooks');
-  for (const candidate of [`${name}.yaml`, `${name}.yml`]) {
-    const path = join(dir, candidate);
-    if (existsSync(path)) return path;
-  }
-  throw new NextError(`Playbook "${name}" not found in ${dir}.`);
+function locatePlaybook(runDir: string, repoRoot: string, name: string): string {
+  const found = resolveRunPlaybookFile(runDir, repoRoot, name);
+  if (found) return found.path;
+  throw new NextError(`Playbook "${name}" not found in bundled or project definitions.`);
 }
 
 /**
@@ -97,7 +94,7 @@ export function runNext(opts: NextOptions): NextResult {
   }
   if (mode !== 'current') events = normalizeLegacyEvents(events);
 
-  const playbookPath = locatePlaybook(repoRoot, run.playbook);
+  const playbookPath = locatePlaybook(run.dir, repoRoot, run.playbook);
   let playbook: Playbook;
   try {
     const parsed = parseYaml(readFileSync(playbookPath, 'utf8'));
@@ -109,7 +106,8 @@ export function runNext(opts: NextOptions): NextResult {
     throw new NextError(`could not parse playbook ${run.playbook}: ${(err as Error).message}`);
   }
 
-  const schemas = new SchemaSet(join(repoRoot, '.fadeno', 'schemas'));
+  const schemaPaths = runSchemaDirectories(run.dir, repoRoot);
+  const schemas = new SchemaSet(schemaPaths.snapshot, schemaPaths.project, schemaPaths.builtin);
   const validation = validateFile(playbookPath, schemas, 'playbook');
   const errorIssues = validation.issues.filter((issue) => issue.severity === 'error');
   if (errorIssues.length > 0) {

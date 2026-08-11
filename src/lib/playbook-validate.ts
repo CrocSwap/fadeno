@@ -84,26 +84,36 @@ interface Playbook {
 export class SchemaSet {
   private readonly cache = new Map<SchemaKind, ValidateFunction>();
   private readonly ajv: Ajv;
-  private readonly schemasDir: string;
+  private readonly schemaDirs: string[];
 
-  constructor(schemasDir: string) {
-    this.schemasDir = schemasDir;
+  constructor(schemasDir: string, ...fallbackSchemasDirs: Array<string | null>) {
+    this.schemaDirs = [schemasDir, ...fallbackSchemasDirs.filter((dir): dir is string => dir != null)];
     this.ajv = new Ajv({ allErrors: true, strict: false });
     this.ajv.addFormat('date-time', (value: string) => !Number.isNaN(Date.parse(value)));
   }
 
   has(kind: SchemaKind): boolean {
-    return existsSync(join(this.schemasDir, SCHEMA_FILE[kind]));
+    return this.schemaPath(kind) != null;
   }
 
   get(kind: SchemaKind): ValidateFunction {
     const cached = this.cache.get(kind);
     if (cached) return cached;
-    const path = join(this.schemasDir, SCHEMA_FILE[kind]);
-    if (!existsSync(path)) throw new Error(`Missing schema: ${path}`);
+    const path = this.schemaPath(kind);
+    if (path == null) {
+      throw new Error(`Missing schema: ${join(this.schemaDirs[0]!, SCHEMA_FILE[kind])}`);
+    }
     const validate = this.ajv.compile(JSON.parse(readFileSync(path, 'utf8')));
     this.cache.set(kind, validate);
     return validate;
+  }
+
+  private schemaPath(kind: SchemaKind): string | null {
+    for (const dir of this.schemaDirs) {
+      const candidate = join(dir, SCHEMA_FILE[kind]);
+      if (existsSync(candidate)) return candidate;
+    }
+    return null;
   }
 }
 

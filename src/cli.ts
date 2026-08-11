@@ -35,6 +35,12 @@ import { runVerify, type VerifyResult } from './commands/verify.ts';
 import { runCompletion, runCompletionCandidates } from './commands/completion.ts';
 import { runSteeringApply, runSteeringResolve } from './commands/steering.ts';
 import { runToolComplete } from './commands/tool-complete.ts';
+import { runSetup } from './commands/setup.ts';
+import { runUse } from './commands/use.ts';
+import { runStatus } from './commands/status.ts';
+import { runDoctor } from './commands/doctor.ts';
+import { runVendor } from './commands/vendor.ts';
+import { runEvidencePromote } from './commands/evidence.ts';
 import type { DiagramFormat } from './lib/diagram.ts';
 import { progressSidecarPath } from './lib/prompt.ts';
 import type { EmitResult } from './lib/fsutil.ts';
@@ -48,7 +54,13 @@ import type { ShowProjection, ShowResult, StepView } from './commands/show.ts';
 const HELP = `fadeno — the playbook layer for AI coding agents
 
 Usage:
-  fadeno init --codex|--claude|--grok [opts]   Scaffold (see --with-steering, --with-hooks)
+  fadeno init --codex|--claude|--grok [opts]   Explicitly scaffold project-owned capability
+  fadeno setup [--codex|--claude]              Install safe user-scoped integration
+  fadeno use <loadout> [--project]            Select the user (or project) default loadout
+  fadeno status [--verbose]                   Show effective definitions, routing, and state
+  fadeno doctor [--codex|--claude]            Run read-only diagnostics
+  fadeno vendor --codex|--claude|--grok       Vendor capability and definitions into a project
+  fadeno evidence promote <run>               Promote a verified run receipt
   fadeno validate [file] [--schema K]   Validate playbooks (schema + references + semantics)
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
@@ -74,7 +86,11 @@ Usage:
 
 Options:
   --with-hooks            (init) Also scaffold tier-2 enforcement hooks
-  --with-steering         (init) Opt into loadout-aware Codex/Claude subagent steering
+  --with-steering         (init) Deprecated compatibility alias; steering is now default
+  --no-steering           (init) Opt out of default Codex/Claude steering
+  --non-interactive       (setup) Accepted compatibility no-op; setup never prompts
+  --project               (use) Pin the loadout in this repository
+  --scope <scope>         (steering apply) project (default) | user
   --data-only             (init) Seed only .fadeno/ definitions (capability via plugin)
   --force                 (init) Overwrite existing files / refresh the bootstrap section
   --schema <kind>         (validate) Force document kind: playbook | run | review-report | test-result
@@ -121,19 +137,22 @@ Options:
 
 Environment:
   FADENO_LOADOUT          Active-loadout override for this shell
-                          (precedence: --loadout > FADENO_LOADOUT > .fadeno/local/loadout > default_loadout)
-
+                          (precedence: --loadout > run-persisted > FADENO_LOADOUT > .fadeno/local/loadout > user state > default_loadout)
 Examples:
+  fadeno validate
+  fadeno new-run code-change-review "Add CSV export for reports"
+  fadeno setup --codex
+  fadeno status
+  fadeno use claude
+  fadeno doctor --codex
   fadeno init --codex --with-hooks
   fadeno init --grok
-  fadeno validate
   fadeno validate .fadeno/runs/2026-05-30-1132-csv/run.yaml --schema run
-  fadeno new-run code-change-review "Add CSV export for reports"
   fadeno run 2026-05-30-1132-csv --step review
   fadeno run 2026-05-30-1132-csv --status completed
   fadeno run 2026-05-30-1132-csv --event artifact_created --artifact artifacts/x.json --member architect_fable
   fadeno run 2026-05-30-1132-csv --step arbitrate --event human_decision --field branch=approve
-  fadeno loadout use openai-primary
+  fadeno loadout use openai-primary  # advanced compatibility surface
   fadeno steering apply codex-only --codex --force
   echo "Summarize the repo layout." | fadeno dispatch --archetype worker
   fadeno gate 2026-05-30-1132-csv no_blocking_issues --artifact artifacts/review-report.json
@@ -474,8 +493,10 @@ function printShow(repoRoot: string, result: ShowResult, rawTimeline: boolean): 
 
 const LOADOUT_SOURCE_TEXT: Record<string, string> = {
   flag: '--loadout',
+  run: 'run-persisted loadout',
   env: 'FADENO_LOADOUT',
   local: '.fadeno/local/loadout',
+  user: 'user state',
   default: 'default_loadout',
 };
 
@@ -591,6 +612,15 @@ function requireTarget(values: { codex?: boolean; claude?: boolean; grok?: boole
   );
 }
 
+function optionalTarget(values: { codex?: boolean; claude?: boolean; grok?: boolean }): Target | undefined {
+  const selected: Target[] = [];
+  if (values.codex) selected.push('codex');
+  if (values.claude) selected.push('claude');
+  if (values.grok) selected.push('grok');
+  if (selected.length > 1) throw new Error('Choose at most one target: --codex, --claude, or --grok.');
+  return selected[0];
+}
+
 function main(argv: string[]): number {
   // The generated completer places the complete COMP_WORDS vector after an
   // explicit `--` boundary. Parse this tiny protocol before node:util.parseArgs
@@ -620,7 +650,12 @@ function main(argv: string[]): number {
         force: { type: 'boolean' },
         'with-hooks': { type: 'boolean' },
         'with-steering': { type: 'boolean' },
+        'no-steering': { type: 'boolean' },
         'data-only': { type: 'boolean' },
+        'non-interactive': { type: 'boolean' },
+        project: { type: 'boolean' },
+        verbose: { type: 'boolean' },
+        scope: { type: 'string' },
         schema: { type: 'string' },
         format: { type: 'string' },
         step: { type: 'string' },
@@ -693,6 +728,70 @@ function main(argv: string[]): number {
   }
 
   switch (command) {
+    case 'setup': {
+      const target = optionalTarget(values);
+      if (target === 'grok') throw new Error('`fadeno setup` supports --codex or --claude; Grok has no steering setup.');
+      const result = runSetup({ target: target ?? null, nonInteractive: values['non-interactive'] });
+      console.log(`Fadeno setup (${result.target ?? 'standalone'})`);
+      for (const probe of result.probes) console.log(`  ${probe.name}: ${probe.available ? `available${probe.version ? ` (${probe.version})` : ''}` : 'not found'}`);
+      for (const path of result.created) console.log(`  created ${path}`);
+      for (const notice of result.notices) console.log(`  ${notice}`);
+      if (result.restartRequired) console.log('  restart required: managed host integration changed.');
+      return 0;
+    }
+    case 'use': {
+      const name = positionals[1];
+      if (!name) throw new Error('Usage: fadeno use <loadout> [--project] [--codex]');
+      const target = optionalTarget(values);
+      if (target === 'grok') throw new Error('Grok does not support steering materialization; use an explicit loadout without --grok.');
+      const result = runUse({ name, project: values.project, target: target === 'codex' ? 'codex' : undefined });
+      console.log(`active loadout selected: ${result.name} (${result.scope})`);
+      for (const notice of result.notices) console.log(`  ${notice}`);
+      if (result.restartRequired) console.log('  restart required: start a fresh Codex session.');
+      return 0;
+    }
+    case 'status': {
+      const target = optionalTarget(values);
+      if (target === 'grok') throw new Error('Use `fadeno status` without --grok; Grok steering is intentionally unsupported.');
+      const result = runStatus({ verbose: values.verbose, target: target ?? null });
+      console.log(`Fadeno ${result.version} · harness ${result.harness ?? 'unknown'}`);
+      console.log(`definitions: ${result.definitions.playbooks.length} effective playbooks (project shadows bundled)`);
+      console.log(`active loadout: ${result.activeLoadout?.name ?? 'none'}${result.activeLoadout ? ` [${result.activeLoadout.source}]` : ''}`);
+      for (const role of result.roles) console.log(`  ${role.archetype} → ${role.executor} (${role.adapter})${role.command ? ` ${role.command.join(' ')}` : ''}`);
+      if (result.external.length > 0) console.log('external sandbox: selected command slots leave the current harness; evidence → .fadeno/dispatches.jsonl');
+      if (result.staleProjectPin) console.log(`stale project pin: ${result.staleProjectPin}`);
+      if (result.staleUserPin) console.log(`stale user pin: ${result.staleUserPin}`);
+      if (result.codexMaterialization) console.log(`Codex managed agents: ${result.codexMaterialization.fresh ? 'current' : 'missing/stale'}${result.codexMaterialization.restartRequired ? ' (restart required)' : ''}`);
+      if (result.next) console.log(`next: ${result.next}`);
+      if (values.verbose) console.log(JSON.stringify({ repoRoot: result.repoRoot, paths: result.definitions, roles: result.roles }, null, 2));
+      return 0;
+    }
+    case 'doctor': {
+      const target = optionalTarget(values);
+      if (target === 'grok') throw new Error('Use `fadeno doctor` without --grok; Grok steering is intentionally unsupported.');
+      const result = runDoctor({ target: target ?? null });
+      for (const item of result.findings) console.log(`${item.severity.padEnd(7)} ${item.check}: ${item.detail}${item.remediation ? ` — ${item.remediation}` : ''}`);
+      return result.ok ? 0 : 1;
+    }
+    case 'vendor': {
+      const target = requireTarget(values);
+      const result = runVendor({
+        target,
+        withHooks: values['with-hooks'],
+        withSteering: target !== 'grok' && !values['no-steering'],
+        force: values.force,
+      });
+      console.log(`Fadeno vendored for ${result.target} in ${result.repoRoot}`);
+      console.log(`  ${result.lock.status} fadeno.lock`);
+      return 0;
+    }
+    case 'evidence': {
+      if (positionals[1] !== 'promote' || !positionals[2]) throw new Error('Usage: fadeno evidence promote <run>');
+      const result = runEvidencePromote({ run: positionals[2] });
+      console.log(`verified evidence promoted: ${result.destination}`);
+      console.log(`  ${result.files.length} immutable files; manifest ${result.manifest}`);
+      return 0;
+    }
     case 'init': {
       const target = requireTarget(values);
       const { repoRoot, results } = runInit({
@@ -700,6 +799,7 @@ function main(argv: string[]): number {
         force: values.force,
         withHooks: values['with-hooks'],
         withSteering: values['with-steering'],
+        noSteering: values['no-steering'],
         dataOnly: values['data-only'],
       });
       printInitSummary(
@@ -707,7 +807,7 @@ function main(argv: string[]): number {
         repoRoot,
         results,
         Boolean(values['with-hooks']),
-        Boolean(values['with-steering']),
+        Boolean(values['with-steering'] || (target !== 'grok' && !values['no-steering'])),
         Boolean(values['data-only']),
       );
       return 0;
@@ -749,7 +849,8 @@ function main(argv: string[]): number {
         if (!loadout || !values.codex || values.claude || values.grok) {
           throw new Error('Usage: fadeno steering apply <loadout> --codex [--force]');
         }
-        const result = runSteeringApply({ loadout, target: 'codex', force: values.force });
+        if (values.scope && values.scope !== 'project' && values.scope !== 'user') throw new Error('Invalid --scope. Use project or user.');
+        const result = runSteeringApply({ loadout, target: 'codex', force: values.force, scope: values.scope as 'project' | 'user' | undefined });
         const changed = result.results.filter((item) => item.status !== 'skipped').length;
         console.log(`Codex steering materialized: ${result.loadout}`);
         for (const archetype of ['worker', 'reviewer', 'judge']) {

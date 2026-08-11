@@ -122,7 +122,7 @@ test('Claude steering rewrites worker-shaped Agent input and preserves Explore',
       model: 'opus',
     },
   };
-  const rewritten = JSON.parse(runClaudeSteering(root, base, 'active loadout: main')) as {
+  const rewritten = JSON.parse(runClaudeSteering(root, base, 'active loadout: main\n  worker → remote-worker [command]')) as {
     hookSpecificOutput: { updatedInput: Record<string, unknown> };
   };
   assert.deepEqual(rewritten.hookSpecificOutput.updatedInput, {
@@ -137,7 +137,7 @@ test('Claude steering rewrites worker-shaped Agent input and preserves Explore',
     ...base,
     tool_input: { ...base.tool_input, subagent_type: 'Explore' },
   };
-  assert.equal(runClaudeSteering(root, explore, 'active loadout: main'), '');
+  assert.equal(runClaudeSteering(root, explore, 'active loadout: main\n  worker → remote-worker [command]'), '');
 });
 
 test('Claude steering is inactive without a loadout and uses plugin-scoped proxies in data-only flow', (t) => {
@@ -156,7 +156,7 @@ test('Claude steering is inactive without a loadout and uses plugin-scoped proxi
     ...event,
     cwd: pluginRoot,
   };
-  const rewritten = JSON.parse(runClaudeSteering(pluginRoot, pluginEvent, 'active loadout: main')) as {
+  const rewritten = JSON.parse(runClaudeSteering(pluginRoot, pluginEvent, 'active loadout: main\n  reviewer → remote-reviewer [command]')) as {
     hookSpecificOutput: { updatedInput: { subagent_type: string } };
   };
   assert.equal(rewritten.hookSpecificOutput.updatedInput.subagent_type, 'fadeno:dispatch-reviewer');

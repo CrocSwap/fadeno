@@ -13,6 +13,19 @@
       "description": "Run-ledger format version. 0.2 and unversioned pre-0.3 ledgers are readable only in explicit compatibility mode (--legacy); writers accept only 0.3."
     },
     "playbook": { "type": "string", "minLength": 1 },
+    "playbook_snapshot": {
+      "type": "string",
+      "const": "definitions/playbook.yaml"
+    },
+    "playbook_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "requested_loadout": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Invocation-level loadout requested when the run was created. Drive reuses it unless an explicit later override is recorded."
+    },
     "status": { "enum": ["running", "completed", "failed", "aborted"] },
     "task": { "type": "string" },
     "started_at": { "type": "string", "format": "date-time" },

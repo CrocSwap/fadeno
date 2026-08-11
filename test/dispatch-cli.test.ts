@@ -73,7 +73,10 @@ test('dispatch: resolves the archetype via the active loadout, relays the report
   assert.equal(result.source, 'loadout');
   assert.deepEqual(result.loadout, { name: 'main', source: 'default' });
   assert.equal(result.echo, 'worker → echo-worker (opus) [loadout main]');
-  assert.deepEqual(echoes, [result.echo]);
+  assert.deepEqual(echoes, [
+    result.echo,
+    "external sandbox: echo-worker (node -e let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('REPORT:'+d));) runs outside the current harness; evidence → .fadeno/dispatches.jsonl",
+  ]);
   assert.equal(result.evidencePath, DISPATCHES_FILE);
 
   const rows = evidenceRows(root);
@@ -437,11 +440,12 @@ test('run path: an unknown FADENO_LOADOUT is a hard drive error but a silent new
   assert.equal(done.status, 'completed');
 });
 
-test('run path: new-run without an executor profile yields no resolution preview', (t) => {
+test('run path: new-run uses the bundled executor profile', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno', 'playbooks'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'playbooks', 'loadout-e2e.yaml'), LOADOUT_PLAYBOOK);
   const created = runNewRun({ playbook: 'loadout-e2e', task: 'No profile', repoRoot: root, env: null });
-  assert.equal(created.resolution, null);
+  assert.equal(created.resolution?.loadout?.name, 'native');
+  assert.equal(created.resolution?.roles[0]?.executor, 'native-worker');
   assert.deepEqual(events(root, created.runId).map((e) => e.type), ['run_started']);
 });

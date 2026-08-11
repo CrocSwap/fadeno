@@ -1,63 +1,57 @@
-# Fadeno executor profile — which command runs each role's prompts.
-#
-# Used by `fadeno drive` (the engine): playbooks stay semantic (roles, steps,
-# gates); THIS file holds the concrete harness/model choices. Each executor is
-# a one-shot command adapter — it receives the assembled step prompt on stdin
-# and must write the artifact content to stdout. Bindings map playbook roles
-# to executors; "*" is the default for any unbound role.
-#
-# No routing, ranking, or automatic fallback happens here: if a bound executor
-# fails, the run pauses and you substitute explicitly
-# (`fadeno drive <run> --bind <role>=<executor>`).
-# Session-capable executors (OPTIONAL — bias toward memoryless): declaring
-# `resume` keeps ONE harness session per role per run, so later steps and
-# schema repairs reach a model that remembers its prior work. The trade:
-# resumed context is ATTESTED evidence (session id recorded, continuity
-# verified) but not recomputable from the ledger. Use it only for roles that
-# genuinely need memory (e.g. builders iterating on rework).
-#   - engine-minted id: put {session_id} in `command` (harness accepts a
-#     pinned id, e.g. `claude -p --session-id`)
-#   - harness-assigned id: declare `session_id_pattern` (one capture group,
-#     matched against stderr then stdout of the fresh call)
+# Fadeno's bundled executor catalog. This is intentionally conservative:
+# native is the safe default and command adapters are only used after an
+# explicit loadout selection. User ~/.config/fadeno/executors.yaml and a
+# project .fadeno/executors.yaml may override entries by name.
 executors:
+  native-worker:
+    adapter: host
+    model: current-host
+    reasoning_effort: default
+    agent_type: worker
+  native-reviewer:
+    adapter: host
+    model: current-host
+    reasoning_effort: default
+    agent_type: reviewer
+  native-judge:
+    adapter: host
+    model: current-host
+    reasoning_effort: default
+    agent_type: judge
+  codex-cli:
+    adapter: command
+    command: [codex, exec, "-"]
+    model: codex-cli
   claude-cli:
     adapter: command
     command: [claude, -p]
-  # codex-cli:
-  #   adapter: command
-  #   command: [codex, exec, -]
-  # claude-session:
-  #   adapter: command
-  #   command: [claude, -p, --session-id, "{session_id}"]
-  #   resume: [claude, -p, --resume, "{session_id}"]
-  # codex-session:
-  #   adapter: command
-  #   command: [codex, exec, -]
-  #   resume: [codex, exec, resume, "{session_id}", -]
-  #   session_id_pattern: "session id: ([0-9a-f-]+)"
-  # luna-xhigh:
-  #   adapter: host
-  #   model: gpt-5.6-luna
-  #   reasoning_effort: xhigh
-  #   agent_type: worker
-# Loadouts (OPTIONAL) — named archetype → executor tables, the switchable unit
-# for rotating providers without editing per-role bindings. The starter
-# playbooks declare `archetype: worker|reviewer|judge` on their roles, so a
-# loadout slot for those archetypes routes them. Switch per session with
-# `fadeno loadout use <name>` (also: --loadout flag, FADENO_LOADOUT env);
-# inspect with `fadeno loadout` / `fadeno loadout list`. Ad-hoc dispatch runs
-# the same resolution outside a run: `fadeno dispatch --archetype worker`.
-# loadouts:
-#   anthropic-primary:
-#     worker: claude-cli
-#     reviewer: claude-cli
-#     judge: claude-cli
-#   # Every slot must name a declared executor — e.g. uncomment codex-cli
-#   # above before enabling:
-#   # openai-primary:
-#   #   worker: codex-cli
-#   #   reviewer: codex-cli
-#   #   judge: codex-cli
-# default_loadout: anthropic-primary
+    model: claude-cli
+  grok-cli:
+    adapter: command
+    command: [grok, build, "-"]
+    model: grok-cli
+
+loadouts:
+  native:
+    worker: native-worker
+    reviewer: native-reviewer
+    judge: native-judge
+  codex:
+    worker: codex-cli
+    reviewer: codex-cli
+    judge: codex-cli
+  claude:
+    worker: claude-cli
+    reviewer: claude-cli
+    judge: claude-cli
+  grok-worker:
+    worker: grok-cli
+    reviewer: grok-cli
+    judge: grok-cli
+
+default_loadout: native
+
+# Direct bindings remain available for repo-native compatibility. Loadout
+# slots win for archetyped roles; an explicit role binding still wins first.
 bindings:
-  "*": claude-cli
+  "*": native-worker

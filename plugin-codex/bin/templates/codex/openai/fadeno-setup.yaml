@@ -1,0 +1,3 @@
+name: fadeno-setup
+description: Set up Fadeno's user-scoped catalog and native host integration.
+allow_implicit_invocation: false

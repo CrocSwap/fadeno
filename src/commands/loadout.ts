@@ -5,11 +5,13 @@ import {
   loadExecutorProfile,
   LOADOUT_LOCAL_FILE,
   readLocalLoadout,
+  readUserLoadout,
   resolveActiveLoadout,
   type ActiveLoadout,
   type ExecutorProfile,
 } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import type { UserPathOptions } from '../lib/user-paths.ts';
 
 export class LoadoutError extends Error {}
 
@@ -38,6 +40,7 @@ export interface LoadoutCommonOptions {
   env?: string | null;
   cwd?: string;
   repoRoot?: string;
+  userPathOptions?: UserPathOptions;
 }
 
 function repoRootOf(opts: LoadoutCommonOptions): string {
@@ -48,9 +51,9 @@ function envValue(opts: LoadoutCommonOptions): string | null {
   return opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null;
 }
 
-function loadProfile(repoRoot: string): ExecutorProfile {
+function loadProfile(repoRoot: string, userPathOptions?: UserPathOptions): ExecutorProfile {
   try {
-    return loadExecutorProfile(repoRoot).profile;
+    return loadExecutorProfile(repoRoot, userPathOptions).profile;
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new LoadoutError(err.message);
     throw err;
@@ -70,12 +73,15 @@ function activeFor(
   profile: ExecutorProfile,
 ): { active: ActiveLoadout | null; stalePin: string | null } {
   const localValue = readLocalLoadout(repoRoot);
+  const userValue = readUserLoadout(opts.userPathOptions);
   const stalePin = localValue != null && !(localValue in profile.loadouts) ? localValue : null;
+  const staleUserPin = userValue != null && !(userValue in profile.loadouts) ? userValue : null;
   try {
     const active = resolveActiveLoadout({
       flagValue: opts.loadout ?? null,
       envValue: envValue(opts),
       localFileValue: stalePin == null ? localValue : null,
+      userFileValue: staleUserPin == null ? userValue : null,
       profile,
     });
     return { active, stalePin };
@@ -109,7 +115,7 @@ export interface LoadoutShowResult {
 /** `fadeno loadout` — the active loadout, its source, and its slot table. */
 export function runLoadoutShow(opts: LoadoutCommonOptions = {}): LoadoutShowResult {
   const repoRoot = repoRootOf(opts);
-  const profile = loadProfile(repoRoot);
+  const profile = loadProfile(repoRoot, opts.userPathOptions);
   const { active, stalePin } = activeFor(opts, repoRoot, profile);
   return {
     active,
@@ -131,7 +137,7 @@ export interface LoadoutListResult {
 /** `fadeno loadout list` — every declared loadout, marking active + default. */
 export function runLoadoutList(opts: LoadoutCommonOptions = {}): LoadoutListResult {
   const repoRoot = repoRootOf(opts);
-  const profile = loadProfile(repoRoot);
+  const profile = loadProfile(repoRoot, opts.userPathOptions);
   const { active, stalePin } = activeFor(opts, repoRoot, profile);
   const loadouts = Object.keys(profile.loadouts)
     .sort()
@@ -155,7 +161,7 @@ export interface LoadoutUseResult {
 /** `fadeno loadout use <name>` — pin the session loadout in `.fadeno/local/loadout`. */
 export function runLoadoutUse(opts: LoadoutCommonOptions & { name: string }): LoadoutUseResult {
   const repoRoot = repoRootOf(opts);
-  const profile = loadProfile(repoRoot);
+  const profile = loadProfile(repoRoot, opts.userPathOptions);
   const name = opts.name.trim();
   if (name.length === 0) throw new LoadoutError('Usage: fadeno loadout use <name>');
   if (!(name in profile.loadouts)) {

@@ -1,6 +1,6 @@
 ---
 name: fadeno-runner
-description: Execute or resume Fadeno playbooks from `.fadeno/playbooks` for complex coding, review, research, or multi-step agent workflows. Use when the user says “Use Fadeno”, asks to run a playbook, names one, or provides a run id.
+description: Execute or resume Fadeno playbooks from the bundled catalog or project `.fadeno/playbooks` for complex coding, review, research, or multi-step agent workflows. Use when the user says “Use Fadeno”, asks to run a playbook, names one, or provides a run id.
 ---
 
 # Fadeno Runner
@@ -16,14 +16,17 @@ bodies at canonical run paths; workers never invoke Fadeno ledger commands.
    to run; a described workflow with no match goes to the builder, then
    validate → diagram → one approval → run; an existing run id resumes that
    run. Announce the run id immediately after creating it.
-2. Read `.fadeno/vocabulary.md` and `references/runtime.md` (the operational
-   detail lives there — keep it out of working memory until needed).
-3. Select the best playbook from `.fadeno/playbooks` using each playbook's
-   `when_to_use`. If the user named one, use it. State which you chose and why.
+2. Read `references/runtime.md`; when present, read the project
+   `.fadeno/vocabulary.md`, otherwise use the bundled vocabulary carried by the
+   plugin runtime.
+3. Select the best playbook from the effective bundled-plus-project catalog
+   using each playbook's `when_to_use`. Project files shadow bundled names. If
+   the user named one, use it. State which you chose and why.
 4. Validate required declared inputs are present; preserve long specifications
    as `fadeno new-run --input Name=path` files rather than shortening them.
-5. Create a new run directory: `.fadeno/runs/<timestamp>-<slug>/` (or run
-   `fadeno new-run <playbook> "<task>"` if the CLI is available).
+5. Create a new run directory lazily with `fadeno new-run <playbook> "<task>"`.
+   A fresh plugin user does not need `fadeno init`; only runtime state is
+   created in `.fadeno/runs/` and related local paths.
 6. Write `run.yaml` (see `references/runtime.md` for the shape).
 7. Append major lifecycle events to `events.jsonl` as you go. Gate events must
    include `condition`, the concrete artifact path, and `result`; loops must

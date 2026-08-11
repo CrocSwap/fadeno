@@ -1,8 +1,8 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import { resolveActiveArtifacts, type ActiveArtifact } from '../lib/artifact-manifest.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import { resolveRunPlaybookFile } from '../lib/definitions.ts';
 import { mapMemberInstance, parseNodeInstanceId } from '../lib/node-instance.ts';
 import {
   ledgerMode,
@@ -141,11 +141,9 @@ interface WorkflowStep {
   mapMembers: string[];
 }
 
-function workflowSteps(repoRoot: string, playbook: string | null): WorkflowStep[] {
+function workflowSteps(runDir: string, repoRoot: string, playbook: string | null): WorkflowStep[] {
   if (playbook == null) return [];
-  const file = [`${playbook}.yaml`, `${playbook}.yml`]
-    .map((name) => join(repoRoot, '.fadeno', 'playbooks', name))
-    .find((candidate) => existsSync(candidate));
+  const file = resolveRunPlaybookFile(runDir, repoRoot, playbook)?.path;
   if (file == null) return [];
   try {
     const parsed = parseYaml(readFileSync(file, 'utf8')) as { flow?: unknown };
@@ -196,7 +194,7 @@ function elapsed(start: string | null, end: string | null, now: Date): number | 
 function projectRun(repoRoot: string, run: RunSummary, events: RunEvent[], now: Date): ShowProjection {
   const stepOrder: string[] = [];
   const byStep = new Map<string, StepView>();
-  const definitions = new Map(workflowSteps(repoRoot, run.playbook).map((step) => [step.id, step]));
+  const definitions = new Map(workflowSteps(run.dir, repoRoot, run.playbook).map((step) => [step.id, step]));
   const view = (id: string): StepView => {
     let v = byStep.get(id);
     if (!v) {
@@ -378,10 +376,12 @@ function projectRun(repoRoot: string, run: RunSummary, events: RunEvent[], now: 
   }
 
   const commandActors = new Map<string, { actor: string; state: WorkflowState; startedAt: string | null; endedAt: string | null }>();
+  const actorEvidenceSteps = new Set<string>();
   for (const event of events) {
     if (event.type !== 'actor_dispatched' && event.type !== 'actor_completed' && event.type !== 'actor_failed') continue;
     if (event.step == null || typeof event.extra.actor !== 'string') continue;
     const key = `${event.step}\0${event.extra.actor}`;
+    actorEvidenceSteps.add(event.step);
     const current = commandActors.get(key) ?? {
       actor: event.extra.actor,
       state: 'pending' as WorkflowState,
@@ -413,6 +413,7 @@ function projectRun(repoRoot: string, run: RunSummary, events: RunEvent[], now: 
   const latestByActor = new Map<string, HostRequestView>();
   for (const request of requests) latestByActor.set(`${request.step}\0${request.actor ?? ''}`, request);
   for (const request of latestByActor.values()) {
+    actorEvidenceSteps.add(request.step);
     const step = view(request.step);
     const actorName = request.actor ?? '(anonymous)';
     let actor = step.actors.find((candidate) => candidate.actor === actorName);
@@ -433,7 +434,10 @@ function projectRun(repoRoot: string, run: RunSummary, events: RunEvent[], now: 
   }
 
   for (const step of byStep.values()) {
-    if (step.actors.length > 0) {
+    // Declared actors are useful pending placeholders, but legacy/manual traces
+    // may advance a step without actor lifecycle receipts. Only let actor state
+    // override the step-level event projection when actor evidence exists.
+    if (step.actors.length > 0 && actorEvidenceSteps.has(step.id)) {
       const states = step.actors.map((actor) => actor.state);
       if (states.some((state) => state === 'failed')) step.state = 'failed';
       else if (states.some((state) => state === 'blocked')) step.state = 'blocked';

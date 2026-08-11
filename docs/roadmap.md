@@ -34,7 +34,8 @@ general scheduler, or orchestration platform.
 
 ## Shipped (v0)
 
-- CLI: `init --codex|--claude|--grok [--with-hooks] [--with-steering] [--data-only] [--force]`,
+- CLI: `setup`, `use`, `status`, `doctor`, `vendor`, `evidence promote`, plus
+  `init --codex|--claude|--grok [--with-hooks] [--with-steering|--no-steering] [--data-only] [--force]`,
   `validate [file] [--schema]`, `diagram [--format ascii|mermaid]`, `new-run`,
   `run`, `tool-complete`, `gate`, `prompt`, `next`, `drive`, `loadout`,
   `steering`, `dispatch*`, `completion`, `runs`, `show`, `verify`, `plugin`.
@@ -45,8 +46,10 @@ general scheduler, or orchestration platform.
   `/fadeno:runner` + `/fadeno:builder` slash commands, and `worker`/`reviewer`/
   `judge` role subagents) from the same templates; repo root carries a
   `.claude-plugin/marketplace.json`, so the repo is directly installable
-  (`/plugin install fadeno@fadeno`). `init --data-only` seeds just the per-repo
-  definitions for plugin users (the capability/definitions split). The plugin is
+  (`/plugin install fadeno@fadeno`). The plugin carries the CLI and immutable
+  built-in definitions. `init --data-only` seeds only per-repo definitions;
+  `vendor` deliberately emits the complete project capability and definition
+  surface plus a lock. The plugin is
   **self-contained**: `npm run build:bin` bundles the CLI (deps inlined) into
   `plugin/bin/fadeno` + adjacent templates, committed so a git-URL install yields
   a working `fadeno` with no extra step. (A `prepare` script also makes
@@ -67,8 +70,8 @@ general scheduler, or orchestration platform.
   advisory→enforced bridge. The driver skill composes these helpers into the
   current model-mediated execution procedure.
 - Tier-2 enforcement scaffold via `--with-hooks` (pre-commit, CI workflow, Claude hook example).
-- Opt-in loadout steering via `--with-steering`: hybrid Codex custom agents plus
-  `fadeno steering apply`, and a selective Claude `PreToolUse` rewrite. Codex
+- Default loadout steering for Codex and Claude (with `--no-steering` opt-out):
+  hybrid Codex custom agents plus `fadeno steering apply`, and a selective Claude `PreToolUse` rewrite. Codex
   switches command slots live, executes host slots only when they match its
   session-static native/command-broker role agents, and reports
   `restart_required` when a host slot needs a different native executor;
@@ -207,6 +210,16 @@ loud migration paths for user-authored playbooks; old ledgers may remain legacy
 output. Team-level provenance is anchored by committed evidence plus
 `fadeno verify` in CI; hash chaining remains a possible standalone mechanism,
 not current scope.
+
+## Low-friction release boundary
+
+The plugin runtime now carries the CLI and immutable built-in definitions, so
+built-in playbooks run without `fadeno init`. `setup`, `use`, `status`, and
+`doctor` keep personal configuration at user scope; `vendor` and evidence
+promotion are the explicit project-commit seams. Codex managed agents remain
+session-static and therefore still require one fresh session after setup/use.
+Grok has no steering integration. External command executors remain explicit,
+are announced with their sandbox boundary, and never fall back silently.
 
 ## Other deferred work (roughly prioritized)
 
