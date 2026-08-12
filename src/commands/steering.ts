@@ -4,11 +4,12 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
+  applicableOverrides,
   executorForArchetype,
   explainWriteConflict,
   loadExecutorProfile,
   parseExecutorProfile,
-  readLocalLoadout,
+  readLocalLoadoutState,
   readUserLoadout,
   resolveActiveLoadout,
   resolveRole,
@@ -42,6 +43,13 @@ export interface SteeringResolution {
   adapter: ExecutorSpec['adapter'];
   model: string | null;
   source: RoleResolutionSource | 'native-baseline' | 'host-request';
+  /**
+   * Whether a session slot override — not the loadout's own slot — produced
+   * this binding. Redundant with `source === 'override'` by construction, and
+   * deliberately so: the steering hook and the Codex role agents branch on a
+   * flag they cannot mis-parse, without enumerating resolution sources.
+   */
+  override: boolean;
   nativeExecutor: string | null;
   detail: string;
   /** The shared refusal, present only on a `write_conflict` resolution. */
@@ -200,6 +208,7 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
     adapter: 'host',
     model: request.model,
     source: 'host-request',
+    override: false,
     nativeExecutor,
     detail,
   };
@@ -232,14 +241,19 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
   }
 
   let active: ActiveLoadout | null;
+  // Overrides ride the same read as the pin's base name and apply only when
+  // that base is the loadout in force — a `--loadout other` resolves clean.
+  let overrides: Record<string, string>;
   try {
+    const pin = readLocalLoadoutState(repoRoot);
     active = resolveActiveLoadout({
       flagValue: opts.loadout ?? null,
       envValue: opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null,
-      localFileValue: readLocalLoadout(repoRoot),
+      localFileValue: pin.loadout,
       userFileValue: readUserLoadout(opts.userPathOptions),
       profile,
     });
+    overrides = applicableOverrides(pin, active);
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
     throw err;
@@ -254,7 +268,7 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     }
     return {
       mode: 'native', archetype, role, activeLoadout: null, executor: nativeExecutor,
-      adapter: 'host', model: nativeSpec.model, source: 'native-baseline', nativeExecutor,
+      adapter: 'host', model: nativeSpec.model, source: 'native-baseline', override: false, nativeExecutor,
       detail: `no loadout is active; execute natively as baseline ${nativeExecutor}`,
     };
   }
@@ -262,12 +276,13 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
   let resolved;
   try {
     resolved = role != null
-      ? resolveRole(role, archetype, profile, active.name)
+      ? resolveRole(role, archetype, profile, active.name, overrides)
       : resolveRole(
           archetype,
           archetype,
           { ...profile, bindings: profile.bindings['*'] != null ? { '*': profile.bindings['*'] } : {} },
           active.name,
+          overrides,
         );
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
@@ -284,7 +299,7 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     return {
       mode: 'write_conflict', archetype, role, activeLoadout: active,
       executor: executorName, adapter: spec.adapter, model: spec.model,
-      source: resolved.source, nativeExecutor,
+      source: resolved.source, override: resolved.source === 'override', nativeExecutor,
       detail: conflict,
       writeConflict: conflict,
     };
@@ -294,7 +309,7 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     return refusal(resolved.executor, resolved.executorName) ?? {
       mode: 'command', archetype, role, activeLoadout: active,
       executor: resolved.executorName, adapter: 'command', model: resolved.executor.model,
-      source: resolved.source, nativeExecutor,
+      source: resolved.source, override: resolved.source === 'override', nativeExecutor,
       detail: `dispatch through command executor ${resolved.executorName}; effective immediately`,
     };
   }
@@ -302,7 +317,7 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     return {
       mode: 'native', archetype, role, activeLoadout: active,
       executor: resolved.executorName, adapter: 'host', model: resolved.executor.model,
-      source: resolved.source, nativeExecutor,
+      source: resolved.source, override: resolved.source === 'override', nativeExecutor,
       detail: `host executor ${resolved.executorName} matches this session's native baseline`,
     };
   }
@@ -310,7 +325,7 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     return refusal(resolved.executor, resolved.executorName) ?? {
       mode: 'command', archetype, role, activeLoadout: active,
       executor: resolved.executorName, adapter: 'host', model: resolved.executor.model,
-      source: resolved.source, nativeExecutor,
+      source: resolved.source, override: resolved.source === 'override', nativeExecutor,
       detail:
         `host executor ${resolved.executorName} differs from this session's native baseline ` +
         `${nativeExecutor ?? '(none)'}; use its declared command fallback immediately`,
@@ -319,7 +334,7 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
   return {
     mode: 'restart_required', archetype, role, activeLoadout: active,
     executor: resolved.executorName, adapter: 'host', model: resolved.executor.model,
-    source: resolved.source, nativeExecutor,
+    source: resolved.source, override: resolved.source === 'override', nativeExecutor,
     detail:
       `loadout ${active.name} requests host executor ${resolved.executorName}, but this session was ` +
       `materialized for ${nativeExecutor ?? 'no native executor'}; apply the loadout and start a fresh Codex session`,

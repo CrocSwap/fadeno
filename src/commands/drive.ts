@@ -11,10 +11,11 @@ import {
 } from '../lib/composite-flow.ts';
 import {
   ExecutorProfileError,
+  applicableOverrides,
   explainWriteConflict,
   loadExecutorProfile,
   parseExecutorProfile,
-  readLocalLoadout,
+  readLocalLoadoutState,
   readUserLoadout,
   resolveActiveLoadout,
   resolveRole,
@@ -25,6 +26,7 @@ import {
   type ActiveLoadout,
   type ExecutorProfile,
   type ExecutorSpec,
+  type LocalLoadoutState,
   type RoleResolutionSource,
 } from '../lib/executors.ts';
 import { computeNext, FlowCursorError, type NextComputation } from '../lib/flow-cursor.ts';
@@ -131,7 +133,13 @@ interface EngineCtx {
   profile: ExecutorProfile;
   /** Active loadout for this invocation — resolved fresh at engine start. */
   activeLoadout: ActiveLoadout | null;
-  /** Session overrides: role key → executor name. */
+  /**
+   * Session slot overrides from the sticky pin (archetype → executor), already
+   * scoped to `activeLoadout` by name. Distinct from `overrides` below: these
+   * decorate the loadout's archetype slots, `--bind` pins a role outright.
+   */
+  slotOverrides: Record<string, string>;
+  /** Explicit `--bind` overrides: role key → executor name. */
   overrides: Map<string, string>;
   /** Actor calls that already consumed their one bounded repair this invocation. */
   repaired: Set<string>;
@@ -243,7 +251,7 @@ function parseBinds(bind: string[] | undefined): Map<string, string> {
 /** Snapshot the repo profile into the run dir on first engine contact; later
  *  invocations run against the snapshot (the run's truth), never a silently
  *  edited repo profile. */
-function ensureProfileSnapshot(ctx: Omit<EngineCtx, 'profile' | 'activeLoadout'>): ExecutorProfile {
+function ensureProfileSnapshot(ctx: Omit<EngineCtx, 'profile' | 'activeLoadout' | 'slotOverrides'>): ExecutorProfile {
   const snapshotPath = join(ctx.runDir, 'profile.yaml');
   if (existsSync(snapshotPath)) {
     try {
@@ -279,16 +287,23 @@ function ensureProfileSnapshot(ctx: Omit<EngineCtx, 'profile' | 'activeLoadout'>
 
 /**
  * Full dispatch-kernel resolution for one role: explicit `bindings[role]` pin
- * → active loadout's slot for the role's declared archetype → `"*"` default.
- * Computed at dispatch time against the run's snapshotted profile; never
- * cached in config. Throws `ExecutorProfileError` when nothing serves.
+ * → session override for the role's archetype → active loadout's slot for that
+ * archetype → `"*"` default. Computed at dispatch time against the run's
+ * snapshotted profile; never cached in config. Throws `ExecutorProfileError`
+ * when nothing serves.
  */
 function resolveChain(
   ctx: EngineCtx,
   role: string | null,
 ): { executor: string; spec: ExecutorSpec; source: RoleResolutionSource } {
   const archetype = role == null ? null : roleArchetype(ctx.playbook, role);
-  const resolved = resolveRole(role ?? '*', archetype, ctx.profile, ctx.activeLoadout?.name ?? null);
+  const resolved = resolveRole(
+    role ?? '*',
+    archetype,
+    ctx.profile,
+    ctx.activeLoadout?.name ?? null,
+    ctx.slotOverrides,
+  );
   // The anonymous "*" key is by definition the default, not a per-role pin.
   const source = role == null && resolved.source === 'binding' ? 'default' : resolved.source;
   return { executor: resolved.executorName, spec: resolved.executor, source };
@@ -370,18 +385,24 @@ function recordResolutionSnapshot(ctx: EngineCtx): void {
     }
   }
 
+  // The overlay in force at snapshot time, omitted entirely when empty so a
+  // run with no session overrides records exactly the event it always did —
+  // and so a later verify can tell "no overrides" from "overrides unrecorded".
+  const slotOverrides = { ...ctx.slotOverrides };
   const payload = {
     loadout:
       ctx.activeLoadout == null
         ? null
         : { name: ctx.activeLoadout.name, source: ctx.activeLoadout.source },
+    ...(Object.keys(slotOverrides).length > 0 ? { overrides: slotOverrides } : {}),
     roles: entries,
   };
   const prior = freshEvents(ctx.runDir).findLast((e) => e.type === 'resolution_snapshot');
   if (
     prior != null &&
-    JSON.stringify({ loadout: prior.extra.loadout ?? null, roles: prior.extra.roles ?? [] }) ===
-      JSON.stringify(payload)
+    JSON.stringify(prior.extra.loadout ?? null) === JSON.stringify(payload.loadout) &&
+    JSON.stringify(prior.extra.overrides ?? {}) === JSON.stringify(slotOverrides) &&
+    JSON.stringify(prior.extra.roles ?? []) === JSON.stringify(entries)
   ) {
     return; // unchanged since last recorded — the ledger stays quiet
   }
@@ -1644,12 +1665,14 @@ export function runDrive(opts: DriveOptions): DriveResult {
   } catch {
     requestedLoadout = null;
   }
+  let pin: LocalLoadoutState;
   try {
+    pin = readLocalLoadoutState(repoRoot);
     activeLoadout = resolveActiveLoadout({
       flagValue: opts.loadout ?? null,
       runValue: requestedLoadout,
       envValue: opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null,
-      localFileValue: readLocalLoadout(repoRoot),
+      localFileValue: pin.loadout,
       userFileValue: readUserLoadout(opts.userPathOptions),
       profile,
     });
@@ -1657,7 +1680,15 @@ export function runDrive(opts: DriveOptions): DriveResult {
     if (err instanceof ExecutorProfileError) throw new DriveError(err.message);
     throw err;
   }
-  const ctx: EngineCtx = { ...base, profile, activeLoadout };
+  // Overrides belong to their base loadout by name, so a run that persisted a
+  // different loadout (or a `--loadout` flag on this invocation) sees none of
+  // this pin's overlay.
+  const ctx: EngineCtx = {
+    ...base,
+    profile,
+    activeLoadout,
+    slotOverrides: applicableOverrides(pin, activeLoadout),
+  };
   recoverInterruptedCommandDispatches(ctx);
   if (opts.loadout != null && opts.loadout !== requestedLoadout && requestedLoadout != null) {
     appendEvent(

@@ -7,9 +7,10 @@ import { sha256Hex } from '../lib/artifact-manifest.ts';
 import {
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
+  applicableOverrides,
   explainWriteConflict,
   loadExecutorProfile,
-  readLocalLoadout,
+  readLocalLoadoutState,
   readUserLoadout,
   resolveActiveLoadout,
   resolveRole,
@@ -118,6 +119,7 @@ export type DispatchResolutionSource = RoleResolutionSource | 'flag';
  */
 const ROW_RESOLUTION: Record<DispatchResolutionSource, string> = {
   binding: 'binding',
+  override: 'override',
   loadout: 'loadout',
   default: 'fallback',
   flag: 'executor-flag',
@@ -247,6 +249,8 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   let executorName: string;
   let spec: ExecutorSpec;
   let active: ActiveLoadout | null = null;
+  // The pin's overlay, already scoped to the loadout that won (name-match).
+  let overrides: Record<string, string> = {};
   let source: DispatchResolutionSource;
 
   if (opts.executor != null && opts.executor.trim() !== '') {
@@ -272,20 +276,25 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       );
     }
     try {
+      const pin = readLocalLoadoutState(repoRoot);
       active = resolveActiveLoadout({
         flagValue: opts.loadout ?? null,
       envValue: opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null,
-      localFileValue: readLocalLoadout(repoRoot),
+      localFileValue: pin.loadout,
       userFileValue: readUserLoadout(opts.userPathOptions),
       profile,
       });
+      // Overrides decorate their base loadout by name: a `--loadout other` on
+      // this invocation drops the overlay rather than re-binding somebody
+      // else's loadout.
+      overrides = applicableOverrides(pin, active);
       // Per-role binding pins apply only when --role names one. Without a role
       // the chain is loadout slot → "*" → error, so resolveRole runs against a
       // bindings view holding only the "*" default — kernel precedence reused,
       // with no per-role pin to hit (an archetype can never be named "*").
       const resolved =
         role != null
-          ? resolveRole(role, archetype, profile, active?.name ?? null)
+          ? resolveRole(role, archetype, profile, active?.name ?? null, overrides)
           : resolveRole(
               archetype,
               archetype,
@@ -294,6 +303,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
                 bindings: profile.bindings['*'] != null ? { '*': profile.bindings['*'] } : {},
               },
               active?.name ?? null,
+              overrides,
             );
       executorName = resolved.executorName;
       spec = resolved.executor;
@@ -395,6 +405,12 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     role,
     resolution: ROW_RESOLUTION[source],
     loadout: active == null ? null : { name: active.name, source: active.source },
+    // The overlay that produced this binding, recorded only when it actually
+    // did: `loadout` alone would name the base and quietly misattribute the
+    // executor an override dialed on top of it. Absent on every other path.
+    ...(source === 'override' && archetype != null
+      ? { override: { [archetype]: executorName } }
+      : {}),
     executor: executorName,
     ...(spec.target != null ? { target: spec.target, provider: spec.provider ?? null } : {}),
     model: spec.model,

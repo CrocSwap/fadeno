@@ -4,8 +4,9 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { buildArtifactManifest, sha256Hex } from '../lib/artifact-manifest.ts';
 import {
   ExecutorProfileError,
+  applicableOverrides,
   loadExecutorProfile,
-  readLocalLoadout,
+  readLocalLoadoutState,
   readUserLoadout,
   resolveActiveLoadout,
   resolveRole,
@@ -235,14 +236,20 @@ function computeResolution(
     throw err;
   }
   let active: ActiveLoadout | null;
+  // Name-matched overlay only: the preview shows what `fadeno drive` will
+  // resolve, and drive scopes overrides to the loadout that actually won. An
+  // unreadable pin stays best-effort here, like every other profile problem.
+  let overrides: Record<string, string>;
   try {
+    const pin = readLocalLoadoutState(repoRoot);
     active = resolveActiveLoadout({
       flagValue,
       envValue: envRaw !== undefined ? envRaw : process.env.FADENO_LOADOUT ?? null,
-      localFileValue: readLocalLoadout(repoRoot),
+      localFileValue: pin.loadout,
       userFileValue: readUserLoadout(userPathOptions),
       profile,
     });
+    overrides = applicableOverrides(pin, active);
   } catch (err) {
     if (err instanceof ExecutorProfileError) return null;
     throw err;
@@ -267,7 +274,7 @@ function computeResolution(
   for (const role of roleNames) {
     const archetype = roleArchetype(playbookDoc, role);
     try {
-      const resolved = resolveRole(role, archetype, profile, active?.name ?? null);
+      const resolved = resolveRole(role, archetype, profile, active?.name ?? null, overrides);
       const model = resolved.executor.model;
       roles.push({ role, archetype, executor: resolved.executorName, model, source: resolved.source, error: null });
       const label = roleResolutionEchoLabel(resolved.source, active?.name ?? null);

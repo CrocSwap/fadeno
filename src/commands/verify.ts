@@ -279,10 +279,10 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
   findings.push(checkActorAttempts(run, events));
 
   // 18. executor-bindings — every dispatch used the resolution in force at its
-  //     position: explicit override → per-role pin → active loadout's archetype
-  //     slot → "*" default, recomputed via the kernel's resolveRole from the
-  //     profile snapshot plus the ledger's resolution_snapshot; the snapshot
-  //     itself matches its digest.
+  //     position: explicit override → per-role pin → the run's recorded session
+  //     overrides → active loadout's archetype slot → "*" default, recomputed
+  //     via the kernel's resolveRole from the profile snapshot plus the ledger's
+  //     resolution_snapshot; the snapshot itself matches its digest.
   findings.push(checkExecutorBindings(run, events));
 
   // 19. named-decisions — resolutions reference a real request, select a
@@ -952,19 +952,26 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
   }
 
   // Recompute each dispatch's resolution with the kernel's own chain — per-role
-  // pin → active loadout's archetype slot → "*" default (resolveRole; never a
-  // reimplemented precedence) — from ledger contents alone: the snapshotted
-  // profile plus the resolution_snapshot in force at that position (active
-  // loadout name + per-role archetype), with explicit overrides replayed in
-  // event order. An unresolvable role is never claimed as a mismatch.
+  // pin → session slot override → active loadout's archetype slot → "*" default
+  // (resolveRole; never a reimplemented precedence) — from ledger contents
+  // alone: the snapshotted profile plus the resolution_snapshot in force at that
+  // position (active loadout name + its overrides + per-role archetype), with
+  // explicit overrides replayed in event order. An unresolvable role is never
+  // claimed as a mismatch.
+  //
+  // The live pin is deliberately never read here: a verify that consulted
+  // today's session state would fail a finished run because somebody cleared an
+  // override afterwards. Same rule as the run-persisted loadout — replay is
+  // from what the run recorded, not from what the session now says.
   const recompute = (
     role: string,
     archetype: string | null,
     loadout: string | null,
+    overrides: Record<string, string>,
   ): { executor: string; source: string } | null => {
     if (profile == null) return null;
     try {
-      const resolved = resolveRole(role, archetype, profile, loadout);
+      const resolved = resolveRole(role, archetype, profile, loadout, overrides);
       return { executor: resolved.executorName, source: resolved.source };
     } catch {
       return null;
@@ -974,6 +981,9 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
   const overridesInForce = new Map<string, string>();
   const archetypeByRole = new Map<string, string | null>();
   let activeLoadout: string | null = null;
+  // Runs recorded before session overrides existed carry no `overrides` field;
+  // `{}` replays them exactly as they resolved.
+  let slotOverrides: Record<string, string> = {};
   for (const event of events) {
     if (event.type === 'executor_override') {
       const role = typeof event.extra.role === 'string' ? event.extra.role : null;
@@ -988,6 +998,13 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
         typeof (loadout as Record<string, unknown>).name === 'string'
           ? ((loadout as Record<string, unknown>).name as string)
           : null;
+      const recorded = event.extra.overrides;
+      slotOverrides = {};
+      if (recorded != null && typeof recorded === 'object' && !Array.isArray(recorded)) {
+        for (const [archetype, target] of Object.entries(recorded as Record<string, unknown>)) {
+          if (typeof target === 'string') slotOverrides[archetype] = target;
+        }
+      }
       const roles = Array.isArray(event.extra.roles) ? event.extra.roles : [];
       for (const row of roles) {
         if (row == null || typeof row !== 'object' || Array.isArray(row)) continue;
@@ -996,11 +1013,14 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
         const archetype = typeof rec.archetype === 'string' ? rec.archetype : null;
         archetypeByRole.set(rec.role, archetype);
         // The snapshot's own per-role rows are ledger claims, so they must
-        // recompute too. Overridden rows follow session overrides (which may
-        // legitimately go unrecorded when they are no-ops) and unresolved rows
-        // carry no chain claim — neither is recomputable here.
+        // recompute too. Rows sourced `override` are the exception: a `--bind`
+        // pin and a session slot override share that spelling, and a no-op
+        // `--bind` legitimately records no `executor_override` event, so the
+        // row cannot be attributed to a replayable chain. Unresolved rows carry
+        // no chain claim at all. The dispatch events below still recompute — an
+        // overridden binding is checked where it was actually used.
         if (rec.source === 'override' || typeof rec.executor !== 'string') continue;
-        const recomputed = recompute(rec.role, archetype, activeLoadout);
+        const recomputed = recompute(rec.role, archetype, activeLoadout, slotOverrides);
         if (recomputed == null) {
           problems.push(
             `resolution_snapshot: role "${rec.role}" records executor "${rec.executor}" but the chain resolves nothing`,
@@ -1037,7 +1057,7 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
     const key = actor ?? '*';
     const expected =
       overridesInForce.get(key) ??
-      recompute(key, archetypeByRole.get(key) ?? null, activeLoadout)?.executor ??
+      recompute(key, archetypeByRole.get(key) ?? null, activeLoadout, slotOverrides)?.executor ??
       null;
     if (expected != null && used !== expected) {
       problems.push(`${label}: ${decision} "${used}" but the resolution in force was "${expected}"`);
