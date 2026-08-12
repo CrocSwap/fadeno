@@ -15,6 +15,44 @@ writers accept only 0.3.
 
 ### Added
 
+- **Two-row ad-hoc dispatch evidence** — `fadeno dispatch` now appends a
+  `dispatch_requested` row *before* invoking the executor and a correlated
+  `dispatch_completed` row (shared `dispatch_id`) after, so a dispatch killed
+  mid-flight (harness timeout, SIGTERM) still leaves a trace in
+  `.fadeno/dispatches.jsonl`. Completion rows record the terminating `signal`
+  when there is one, plus `prompt_source` and `prompt_snapshot`.
+
+- **Kernel-owned prompt snapshots** — a dispatch prompt arriving on stdin is
+  written by the kernel itself to `.fadeno/local/prompts/` and referenced
+  from the evidence rows; a single writer means the recorded `prompt_sha256`
+  attests exactly the bytes received. Callers no longer pre-write prompt
+  files.
+
+- **Dispatch proxy relay guard** — a `PreToolUse` Bash hook
+  (`dispatch-proxy-guard.mjs`, shipped in the plugin's hook manifest and
+  installed by `init --claude` steering) that fires only inside the
+  `dispatch-*` proxy agents. It allowlists exactly the relay contract — the
+  single stdin-heredoc `fadeno dispatch` statement (heredoc body deliberately
+  uninspected), the prompt-file retry, and the legacy prompt-file-write
+  shapes older init-emitted agents still use — denies everything else with
+  an actionable reason, and raises the dispatch call's Bash `timeout` to
+  600000 ms. Instruction-only proxies were observed defecting on the relay
+  contract in a 2026-08-12 dogfood A/B; this makes the contract tier-2. On
+  harness versions that omit `agent_type` from hook input the guard no-ops
+  (advisory-only).
+
+- **Relay attestation** — the Claude steering hook stashes the spawn-side
+  prompt digest whenever a subtask heads to a dispatch proxy; the kernel
+  consumes a matching stash at dispatch time and marks the evidence row
+  `relay_attested` (true / false / absent), turning the proxy's "verbatim
+  relay" from an instruction into a checked claim. Content-keyed and
+  age-limited; never blocks a dispatch.
+
+- **Version-stamped plugin surface** — plugin generation appends
+  `[fadeno <version>]` to every agent and skill description, so a live
+  session's loaded surface can be checked for staleness against
+  `claude plugin list` (loaded surfaces only refresh at reload/restart).
+
 - **Compositional map/loop runtime** — literal-member maps may own linear child
   graphs, including independently advancing bounded loops; loops may contain
   maps. The engine computes a runnable frontier, batches native host leaves,
@@ -91,6 +129,26 @@ writers accept only 0.3.
   repairs, executor failures, and `! waiting for human decision`.
 - **Driver skill** — engine-first: `fadeno drive` → `fadeno decide` → re-drive,
   with the manual `fadeno next` loop as the fallback for handed-back steps.
+
+### Changed
+
+- **Dispatch proxies run on `model: sonnet`** (was `haiku`) and their bodies
+  are hardened: the whole relay is ONE Bash call — the task prompt piped to
+  `fadeno dispatch` as a quoted heredoc on stdin — run with the tool
+  `timeout` raised to 600000 ms; the verbatim rule spells out "starting at
+  the very first line", and the proxy may never assert kernel-side effects it
+  didn't observe. The bare `fadeno` spelling keeps the call inside the
+  `Bash(fadeno:*)` permission rule init pre-approves, so default-permission
+  users stop getting a prompt wall per dispatch. A 2026-08-12 dogfood A/B
+  caught the haiku proxy performing a task itself with no dispatch and, on a
+  compliant retry, dropping the prompt's first line and claiming an evidence
+  row that was never written; sonnet relayed flawlessly. The spawn-rewrite
+  steering hook routes command-delivered archetypes to sonnet proxies
+  accordingly.
+
+- **Host-executor refusal points home** — `fadeno dispatch` resolving to a
+  host executor without a fallback now names the native in-session agent to
+  use instead.
 
 ## [0.5.0] — 2026-08-02
 

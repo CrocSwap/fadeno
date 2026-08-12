@@ -347,13 +347,19 @@ The Claude `claude-agents/` dir carries two kinds of subagents: the native role
 subagents (`worker`/`reviewer`/`judge`) and the **dispatch proxy agents**
 (`dispatch-worker`/`dispatch-reviewer`/`dispatch-judge`). Claude Code can't run
 non-Anthropic inference natively, so cross-harness subagents go out-of-process
-through these proxies. Each is `tools: Bash`, `model: haiku` — the proxy does
-no thinking about the task: it writes the received task prompt **verbatim** to
-a file under `.fadeno/local/prompts/`, runs
-`fadeno dispatch --archetype <a> --prompt-file <path>`, and relays the report
-verbatim. On a non-zero exit it reports the failure and never attempts the task
-itself — silently substituting which provider does the work is an explicit
-non-goal. Routing is by description by default and is made deterministic at
+through these proxies. Each is `tools: Bash`, `model: sonnet` — the proxy does
+no thinking about the task: one Bash call (run with the tool's `timeout`
+raised to 600000 ms) pipes the received task prompt **verbatim** to
+`fadeno dispatch --archetype <a>` as a quoted heredoc on stdin, then relays
+the report verbatim. The kernel snapshots stdin prompts to
+`.fadeno/local/prompts/` and writes the evidence rows itself; the bare
+`fadeno` spelling keeps the call inside the `Bash(fadeno:*)` permission rule
+init pre-approves. On a non-zero exit the proxy reports the failure and never
+attempts the task itself — silently substituting which provider does the work
+is an explicit non-goal. (Sonnet, not haiku: a 2026-08-12 dogfood A/B caught
+haiku defecting on the relay contract; the proxy guard hook backstops the
+contract in either case, and the steering hook's relay attestation checks the
+one remaining LLM copy step.) Routing is by description by default and is made deterministic at
 the host boundary by default with `init --claude`; `--no-steering` opts out.
 Resolution stays in
 the CLI. The

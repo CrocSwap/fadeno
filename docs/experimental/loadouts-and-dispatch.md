@@ -163,13 +163,23 @@ The harness will never run non-Anthropic inference natively (custom-agent
 out-of-process: **dispatch proxy agents**, shipped in the plugin, one per
 archetype (`dispatch-worker`, `dispatch-reviewer`, `dispatch-judge`):
 
-- `tools: Bash`, `model: haiku` — the proxy does no thinking; don't pay
-  frontier rates to babysit a subprocess.
-- Behavior: write the received task prompt **verbatim** to a file under
-  `.fadeno/local/prompts/`, run
-  `fadeno dispatch --archetype <a> --prompt-file <path>`, relay the report
-  verbatim. (The prompt-file convention exists because one LLM copy step is
-  unavoidable; minimize its surface.)
+- `tools: Bash`, `model: sonnet` — the proxy does no thinking, so the smallest
+  model looked right; a dogfood A/B (2026-08-12) revised that. Haiku defected
+  on the relay contract — performed a survey task itself with no dispatch and
+  no evidence, and when it did comply it dropped the prompt's first line and
+  asserted an evidence row that was never written. Sonnet relayed flawlessly,
+  and a proxy turn is only a few relay tokens, so the upgrade costs cents.
+- Behavior: ONE Bash call (tool `timeout` raised to 600000 ms — external
+  executors routinely exceed the 2-minute default) that pipes the received
+  task prompt **verbatim** to `fadeno dispatch --archetype <a>` as a quoted
+  heredoc on stdin, then relays the report verbatim. The kernel writes the
+  prompt snapshot to `.fadeno/local/prompts/` and the evidence rows itself —
+  a single writer, so the recorded digest attests exactly the bytes it
+  received. The call is spelled with bare `fadeno` first so the
+  `Bash(fadeno:*)` rule `init` pre-approves also covers dispatches under
+  default permissions (the `$CLAUDE_PLUGIN_ROOT/bin/fadeno` spelling is the
+  not-on-PATH retry). One LLM copy step — prompt into heredoc — remains
+  unavoidable; the relay attestation below checks it.
 - The Agent-tool contract — self-contained prompt in, final report out, no
   shared conversation context — is byte-for-byte the one-shot executor
   contract, which is why this substitution is architecturally honest.
@@ -183,8 +193,33 @@ Steering ladder:
    return `updatedInput` rewriting worker-shaped `subagent_type`s to the
    dispatch proxies. Deterministic — covers automatically-launched
    subagents. The hook stays dumb; resolution stays in the CLI.
-3. **Strict mode** (deferred, opt-in): disable built-in agent types via
+3. **Proxy contract guard** (shipped): a `PreToolUse` Bash hook scoped by the
+   hook input's `agent_type` to the dispatch proxies. It allowlists exactly
+   the contract call — the single stdin-heredoc dispatch statement, with the
+   heredoc *body* (the user's task prompt) deliberately never inspected, plus
+   the prompt-file retry and the legacy prompt-file-write shapes older
+   init-emitted agents still use — denies everything else with an actionable
+   reason, and rewrites the dispatch call's Bash `timeout` up to 600000 ms.
+   The routing rungs steer *to* the proxy; this rung is tier-2 enforcement
+   that the proxy *body* honors verbatim relay — instruction-only proxies
+   were observed defecting (see the model note above). Caveat: the guard
+   keys on the harness supplying `agent_type` in hook input; on harness
+   versions that omit it the guard no-ops silently and the contract degrades
+   to advisory.
+4. **Strict mode** (deferred, opt-in): disable built-in agent types via
    `permissions.deny` / harness env flags so proxies are the only targets.
+
+**Relay attestation.** The one unverifiable step left is the proxy copying
+the prompt into its heredoc. The spawn-side steering hook closes it: whenever
+a subtask heads to a dispatch proxy (rewritten *or* explicitly targeted), it
+stashes `{timestamp, prompt_sha256}` of the Agent call's prompt to
+`.fadeno/local/pending-relays.jsonl`. At dispatch time the kernel matches the
+received prompt against fresh stashes (content-keyed, so concurrency is safe;
+tolerant of the single trailing newline a heredoc appends; entries expire
+after an hour) and marks the evidence row `relay_attested: true` (consumed
+match), `false` (fresh stashes pending but none matched — the relay altered
+the prompt), or omits the field (no hook flow in play). Evidence-only: it
+never blocks a dispatch.
 
 Codex does not expose the same spawn-rewrite hook. Project `init` installs
 safe native broker agents by default; `--no-steering` selects the static legacy

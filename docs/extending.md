@@ -177,16 +177,18 @@ error telling you to bind a command executor or run via host dispatch.
 `init --claude` and the plugin install three **dispatch proxy agents** beside
 the native role subagents: `dispatch-worker` / `dispatch-reviewer` /
 `dispatch-judge` (source: `templates/claude/claude-agents/dispatch-*.md`).
-Each is a Bash-only `model: haiku` agent that writes the received task prompt
-verbatim to a file under `.fadeno/local/prompts/`, runs
-`fadeno dispatch --archetype <a> --prompt-file <path>`, and relays the report
-verbatim — so a Claude Code session can route worker/reviewer/judge-shaped
-subtasks to whatever executor the active loadout binds, including a
-non-Anthropic one. On a non-zero exit the proxy reports the failure plainly
-and never attempts the task itself as a fallback.
+Each is a Bash-only `model: sonnet` agent whose single Bash call pipes the
+received task prompt verbatim to `fadeno dispatch --archetype <a>` as a
+quoted heredoc on stdin and relays the report verbatim — so a Claude Code
+session can route worker/reviewer/judge-shaped subtasks to whatever executor
+the active loadout binds, including a non-Anthropic one. The kernel snapshots
+the prompt under `.fadeno/local/prompts/` and writes the evidence rows; the
+bare `fadeno` spelling keeps the call inside the `Bash(fadeno:*)` rule init
+pre-approves. On a non-zero exit the proxy reports the failure plainly and
+never attempts the task itself as a fallback.
 
-`fadeno init --claude` installs a local `PreToolUse` hook by default; use
-`--no-steering` to opt out. The hook calls the structured
+`fadeno init --claude` installs two local `PreToolUse` hooks by default; use
+`--no-steering` to opt out. The **spawn-rewrite hook** calls the structured
 `fadeno loadout resolve --archetype …` surface with the Claude harness identity
 and rewrites command-delivered general-purpose/worker, reviewer, and judge
 `Agent` calls to proxies. Native targets are rewritten to the matching Fadeno
@@ -194,6 +196,26 @@ role agent and requested model; the `current-host` default remains inert. It
 preserves the rest of the Agent input and leaves Explore/Plan and unrelated
 specialists native. Plugin users can combine the flag with `--data-only`; the
 hook then targets the plugin-scoped `fadeno:dispatch-*` agents.
+
+The **proxy relay guard** (`dispatch-proxy-guard.mjs`, also shipped in the
+plugin's `hooks/hooks.json`) matches Bash and no-ops unless the hook input's
+`agent_type` is a dispatch proxy. Inside a proxy it allowlists exactly the
+relay-contract statements — this archetype's stdin-heredoc `fadeno dispatch`
+line (the heredoc *body* is the user's task prompt and is never inspected),
+the prompt-file retry, and the legacy prompt-file-write shapes older
+init-emitted agents still use — denying anything else with an actionable
+reason, and rewrites the dispatch call's Bash `timeout` up to 600000 ms.
+Caveat: on harness versions that omit `agent_type` from hook input, the guard
+no-ops silently (advisory-only). This is the tier-2 backstop for the proxy
+body's instructions: source `templates/claude/hooks/dispatch-proxy-guard.mjs`,
+tests `test/dispatch-proxy-guard.test.ts`.
+
+The steering hook also stashes a **relay attestation** — `{timestamp,
+prompt_sha256}` of the Agent call's prompt, appended to
+`.fadeno/local/pending-relays.jsonl` — whenever a subtask heads to a dispatch
+proxy. The kernel consumes a matching stash at dispatch time and marks the
+evidence row `relay_attested` (true / false / absent), turning the proxy's
+"verbatim" from an instruction into a checked claim.
 
 Codex has no equivalent spawn-rewrite hook, and project custom-agent model
 configuration is session-static. `fadeno init --codex` installs honest broker
