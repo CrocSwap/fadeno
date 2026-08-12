@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
+  executorForArchetype,
   loadExecutorProfile,
   parseExecutorProfile,
   readLocalLoadout,
@@ -50,7 +51,7 @@ function rootOf(opts: CommonOptions): string {
 
 function profileOf(repoRoot: string, userPathOptions?: UserPathOptions): ExecutorProfile {
   try {
-    return loadExecutorProfile(repoRoot, userPathOptions).profile;
+    return loadExecutorProfile(repoRoot, userPathOptions, 'codex').profile;
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
     throw err;
@@ -168,7 +169,7 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
   if (
     request.model !== executor.model ||
     request.reasoningEffort !== executor.reasoningEffort ||
-    request.agentType !== executor.agentType
+    (executor.agentType !== '*' && request.agentType !== executor.agentType)
   ) {
     throw new SteeringError(
       `host dispatch "${dispatchId}" request identity does not match executor "${request.executor}" in the run profile snapshot.`,
@@ -469,7 +470,7 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
   const cliPath = opts.cliPath ?? (scope === 'user' && existsSync(managedCli) ? managedCli : 'fadeno');
   for (const archetype of ['worker', 'reviewer', 'judge']) {
     const executorName = slots[archetype];
-    const spec = executorName == null ? null : profile.executors[executorName];
+    const spec = executorName == null ? null : executorForArchetype(profile, executorName, archetype);
     if (executorName == null || spec == null) {
       throw new SteeringError(
         `loadout "${loadout}" needs an executor in its "${archetype}" slot to materialize ` +

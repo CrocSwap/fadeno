@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { ExecutorProfileError, parseExecutorProfile, type ExecutorProfile } from './executors.ts';
+import { ExecutorProfileError, parseExecutorProfile, type ExecutorProfile, type HarnessId } from './executors.ts';
 import { templatesDir } from './paths.ts';
 import { userPaths, type FadenoUserPaths, type UserPathOptions } from './user-paths.ts';
 
@@ -41,12 +41,12 @@ function parseLayer(path: string): Record<string, unknown> {
 }
 
 function mergeLayer(target: Record<string, unknown>, source: Record<string, unknown>, layer: ConfigLayer, provenance: ProfileProvenance): void {
-  for (const key of ['executors', 'loadouts', 'bindings']) {
+  for (const key of ['executors', 'targets', 'routes', 'loadouts', 'bindings']) {
     const entries = mapping(source[key]);
     if (entries == null) continue;
     const current = mapping(target[key]) ?? {};
     for (const [name, value] of Object.entries(entries)) {
-      if (key === 'loadouts' && mapping(value) != null && mapping(current[name]) != null) {
+      if ((key === 'loadouts' || key === 'routes') && mapping(value) != null && mapping(current[name]) != null) {
         current[name] = { ...(current[name] as Record<string, unknown>), ...(value as Record<string, unknown>) };
       } else {
         current[name] = value;
@@ -57,7 +57,7 @@ function mergeLayer(target: Record<string, unknown>, source: Record<string, unkn
     }
     target[key] = current;
   }
-  for (const key of ['default_loadout']) {
+  for (const key of ['schema_version', 'default_loadout']) {
     if (source[key] !== undefined) {
       target[key] = source[key];
       provenance.defaultLoadout = layer;
@@ -66,13 +66,13 @@ function mergeLayer(target: Record<string, unknown>, source: Record<string, unkn
 }
 
 function projectIsComplete(doc: Record<string, unknown>): boolean {
-  const executors = mapping(doc.executors);
-  if (executors == null || Object.keys(executors).length === 0) return false;
+  const catalog = mapping(doc.targets) ?? mapping(doc.executors);
+  if (catalog == null || Object.keys(catalog).length === 0) return false;
   const bindings = mapping(doc.bindings);
   const loadouts = mapping(doc.loadouts);
   if ((bindings == null || Object.keys(bindings).length === 0) &&
       (loadouts == null || Object.keys(loadouts).length === 0)) return false;
-  const declared = new Set(Object.keys(executors));
+  const declared = new Set(Object.keys(catalog));
   if (bindings && Object.values(bindings).some((target) => typeof target !== 'string' || !declared.has(target))) return false;
   if (loadouts) {
     for (const slots of Object.values(loadouts)) {
@@ -87,7 +87,7 @@ function projectIsComplete(doc: Record<string, unknown>): boolean {
  * Compose bundled → user → project profiles. A self-contained legacy project
  * profile remains authoritative, preserving the pre-layering contract.
  */
-export function loadLayeredProfile(repoRoot: string, options: UserPathOptions = {}): LayeredProfile {
+export function loadLayeredProfile(repoRoot: string, options: UserPathOptions = {}, harness?: HarnessId): LayeredProfile {
   const paths = userPaths(options);
   const layers: Array<{ layer: ConfigLayer; path: string }> = [
     { layer: 'builtin', path: `${templatesDir()}/common/fadeno/executors.yaml` },
@@ -114,7 +114,7 @@ export function loadLayeredProfile(repoRoot: string, options: UserPathOptions = 
   }
   const text = stringifyObject(document);
   return {
-    profile: parseExecutorProfile(text, effective.map((entry) => entry.layer).join(' + ')),
+    profile: parseExecutorProfile(text, effective.map((entry) => entry.layer).join(' + '), harness),
     path: project?.path ?? present.find((entry) => entry.layer === 'user')?.path ?? present[0]!.path,
     layers: effective.map((entry) => entry.layer),
     provenance,

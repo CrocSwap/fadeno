@@ -24,14 +24,6 @@ const bundled = typeof process.env.CLAUDE_PLUGIN_ROOT === 'string'
   ? join(process.env.CLAUDE_PLUGIN_ROOT, 'bin', 'fadeno')
   : null;
 const cli = bundled != null && existsSync(bundled) ? bundled : 'fadeno';
-const active = spawnSync(cli, ['loadout'], {
-  cwd,
-  env: process.env,
-  encoding: 'utf8',
-  timeout: 10_000,
-});
-if (active.status !== 0 || !/^active loadout:/m.test(active.stdout ?? '')) finish(null);
-
 const requested = event.tool_input.subagent_type;
 if (typeof requested !== 'string') finish(null);
 const bare = requested.split(':').at(-1);
@@ -45,17 +37,36 @@ const archetype =
         : null;
 if (archetype == null) finish(null); // Explore, Plan, and unrelated specialists stay native.
 
-// The safe bundled `native` loadout is intentionally inert. Only a declared
-// command slot crosses the Claude sandbox boundary; resolution stays live in
-// the CLI and is never cached in this hook.
-const slot = new RegExp(`^\\s*${archetype}\\s+→.*\\[command\\]`, 'm');
-const hasSlots = /^\s*(worker|reviewer|judge)\s+→/m.test(active.stdout ?? '');
-if (!hasSlots || !slot.test(active.stdout ?? '')) finish(null);
+// Resolve through a structured CLI surface. The same neutral loadout can be
+// native in Claude and command-delivered in Codex (or vice versa).
+const resolution = spawnSync(cli, ['loadout', 'resolve', '--archetype', archetype], {
+  cwd,
+  env: { ...process.env, FADENO_HARNESS: 'claude' },
+  encoding: 'utf8',
+  timeout: 10_000,
+});
+if (resolution.status !== 0) finish(null);
+let slot;
+try {
+  slot = JSON.parse(resolution.stdout ?? '');
+} catch {
+  finish(null);
+}
+if (slot?.adapter !== 'command' && slot?.adapter !== 'host') finish(null);
+if (slot.adapter === 'host' && (typeof slot.model !== 'string' || slot.model === 'current-host')) {
+  finish(null); // The safe default inherits the caller's native model unchanged.
+}
 
-const localProxy = join(cwd, '.claude', 'agents', `dispatch-${archetype}.md`);
-const target = existsSync(localProxy)
-  ? `dispatch-${archetype}`
-  : `fadeno:dispatch-${archetype}`;
+const commandDelivery = slot.adapter === 'command';
+const localAgent = join(
+  cwd,
+  '.claude',
+  'agents',
+  `${commandDelivery ? 'dispatch-' : ''}${archetype}.md`,
+);
+const target = existsSync(localAgent)
+  ? `${commandDelivery ? 'dispatch-' : ''}${archetype}`
+  : `fadeno:${commandDelivery ? 'dispatch-' : ''}${archetype}`;
 
 finish({
   hookSpecificOutput: {
@@ -63,7 +74,7 @@ finish({
     updatedInput: {
       ...event.tool_input,
       subagent_type: target,
-      model: 'haiku',
+      model: commandDelivery ? 'haiku' : slot.model,
     },
   },
 });

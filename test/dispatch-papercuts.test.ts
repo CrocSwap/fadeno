@@ -85,14 +85,14 @@ test('scaffold: executors.yaml carries the built-in safe catalog', (t) => {
 
   const asShipped = parseExecutorProfile(content, 'executors.yaml');
   assert.ok(asShipped.loadouts.native);
-  assert.equal(asShipped.loadouts.sol?.worker, 'sol-worker');
-  const sol = asShipped.executors['sol-worker'];
-  assert.equal(sol?.adapter, 'host');
-  assert.deepEqual(sol?.adapter === 'host' ? sol.fallbackCommand : null, [
+  assert.equal(asShipped.loadouts.sol?.worker, 'sol-high');
+  const sol = asShipped.executors['sol-high'];
+  assert.equal(sol?.adapter, 'command');
+  assert.deepEqual(sol?.adapter === 'command' ? sol.command : null, [
     'codex', 'exec', '--model', 'gpt-5.6-sol', '--sandbox', 'workspace-write',
     '-c', 'model_reasoning_effort="high"', '-',
   ]);
-  assert.equal(asShipped.bindings['*'], 'native-worker');
+  assert.equal(asShipped.bindings['*'], 'current-host');
   assert.ok(runValidate({ repoRoot: root }).ok);
 });
 
@@ -102,12 +102,12 @@ test('built-in Codex model loadouts fall back immediately across native baseline
   const result = runSteeringResolve({
     repoRoot: root,
     archetype: 'worker',
-    nativeExecutor: 'luna-worker',
+    nativeExecutor: 'luna-medium',
     loadout: 'sol',
     env: null,
   });
   assert.equal(result.mode, 'command');
-  assert.equal(result.executor, 'sol-worker');
+  assert.equal(result.executor, 'sol-high');
   assert.equal(result.model, 'gpt-5.6-sol');
   assert.match(result.detail, /declared command fallback/);
 });

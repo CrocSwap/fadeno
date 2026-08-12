@@ -91,9 +91,10 @@ function materialization(
 /** Read the effective configuration without creating a file or probing commands. */
 export function runStatus(opts: StatusOptions = {}): StatusResult {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
+  const harness = harnessOf(opts.target, opts.userPathOptions);
   let loaded;
   try {
-    loaded = loadExecutorProfile(repoRoot, opts.userPathOptions);
+    loaded = loadExecutorProfile(repoRoot, opts.userPathOptions, harness ?? 'standalone');
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new StatusError(err.message);
     throw err;
@@ -126,7 +127,6 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
     roles.push({ archetype, executor, adapter: spec.adapter, model: spec.model, source, command: spec.adapter === 'command' ? spec.command : null });
   }
   const external = roles.filter((role) => role.adapter === 'command');
-  const harness = harnessOf(opts.target, opts.userPathOptions);
   const installation = readInstallationManifest(opts.userPathOptions);
   const invocationSource = process.env.FADENO_INVOCATION_SOURCE?.trim()
     || (installation.runtime != null && resolve(process.argv[1] ?? '') === resolve(installation.runtime.path) ? 'managed' : 'path');

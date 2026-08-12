@@ -465,6 +465,6 @@ test('run path: new-run uses the bundled executor profile', (t) => {
   writeFileSync(join(root, '.fadeno', 'playbooks', 'loadout-e2e.yaml'), LOADOUT_PLAYBOOK);
   const created = runNewRun({ playbook: 'loadout-e2e', task: 'No profile', repoRoot: root, env: null });
   assert.equal(created.resolution?.loadout?.name, 'native');
-  assert.equal(created.resolution?.roles[0]?.executor, 'native-worker');
+  assert.equal(created.resolution?.roles[0]?.executor, 'current-host');
   assert.deepEqual(events(root, created.runId).map((e) => e.type), ['run_started']);
 });

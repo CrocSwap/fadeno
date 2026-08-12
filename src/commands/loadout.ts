@@ -7,6 +7,7 @@ import {
   readLocalLoadout,
   readUserLoadout,
   resolveActiveLoadout,
+  resolveRole,
   type ActiveLoadout,
   type ExecutorProfile,
 } from '../lib/executors.ts';
@@ -181,6 +182,44 @@ export function runLoadoutUse(opts: LoadoutCommonOptions & { name: string }): Lo
 export interface LoadoutClearResult {
   removed: boolean;
   path: string;
+}
+
+export interface LoadoutResolveResult {
+  archetype: string;
+  active: ActiveLoadout;
+  executor: string;
+  model: string | null;
+  adapter: 'command' | 'host';
+  harness: string;
+}
+
+/** Structured, harness-relative slot resolution for host adapters and hooks. */
+export function runLoadoutResolve(
+  opts: LoadoutCommonOptions & { archetype: string },
+): LoadoutResolveResult {
+  const repoRoot = repoRootOf(opts);
+  const profile = loadProfile(repoRoot, opts.userPathOptions);
+  const { active } = activeFor(opts, repoRoot, profile);
+  if (active == null) throw new LoadoutError('No loadout is active.');
+  try {
+    const resolved = resolveRole(
+      opts.archetype,
+      opts.archetype,
+      { ...profile, bindings: profile.bindings['*'] != null ? { '*': profile.bindings['*'] } : {} },
+      active.name,
+    );
+    return {
+      archetype: opts.archetype,
+      active,
+      executor: resolved.executorName,
+      model: resolved.executor.model,
+      adapter: resolved.executor.adapter,
+      harness: profile.harness ?? 'standalone',
+    };
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new LoadoutError(err.message);
+    throw err;
+  }
 }
 
 /** `fadeno loadout clear` — remove the sticky session file (idempotent). */

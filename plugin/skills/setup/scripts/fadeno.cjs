@@ -12,6 +12,7 @@ const result = spawnSync(process.execPath, [join(binDir, 'fadeno'), ...process.a
     ...process.env,
     FADENO_BUNDLED_RUNTIME: binDir,
     FADENO_INVOCATION_SOURCE: 'plugin',
+    FADENO_HARNESS: 'claude',
   },
 });
 if (result.error) throw result.error;

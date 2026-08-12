@@ -38,6 +38,18 @@ function unavailable(command: string): CommandProbe {
   return { name: command, command, available: false, version: null };
 }
 
+test('setup uses bundled neutral routes instead of generating a user executor catalog', (t) => {
+  const root = tempRepo(t);
+  const paths = isolatedUser(root);
+  runSetup({
+    repoRoot: root,
+    userPathOptions: paths,
+    target: 'codex',
+    probeCommand: (command) => ({ name: command, command, available: true, version: 'test' }),
+  });
+  assert.equal(existsSync(userPaths(paths).executorsFile), false);
+});
+
 test('setup is idempotent and never plants a stale native pin into a complete legacy project profile', (t) => {
   const root = tempRepo(t);
   const paths = isolatedUser(root);
@@ -318,7 +330,7 @@ test('Claude steering hook remains inert for native slots and is registered by t
   const bin = join(root, 'bin');
   mkdirSync(bin, { recursive: true });
   const fake = join(bin, 'fadeno');
-  writeFileSync(fake, '#!/bin/sh\nprintf "active loadout: native [default]\\n  worker   → native-worker [host]\\n"\n');
+  writeFileSync(fake, '#!/bin/sh\nprintf \'%s\\n\' \'{"adapter":"host"}\'\n');
   chmodSync(fake, 0o755);
   const event = JSON.stringify({ tool_name: 'Agent', cwd: root, tool_input: { subagent_type: 'worker', prompt: 'x' } });
   const result = spawnSync(process.execPath, [join(REPO, 'templates', 'claude', 'hooks', 'dispatch-steering.mjs')], {

@@ -122,7 +122,7 @@ test('Claude steering rewrites worker-shaped Agent input and preserves Explore',
       model: 'opus',
     },
   };
-  const rewritten = JSON.parse(runClaudeSteering(root, base, 'active loadout: main\n  worker → remote-worker [command]')) as {
+  const rewritten = JSON.parse(runClaudeSteering(root, base, '{"adapter":"command"}')) as {
     hookSpecificOutput: { updatedInput: Record<string, unknown> };
   };
   assert.deepEqual(rewritten.hookSpecificOutput.updatedInput, {
@@ -137,7 +137,23 @@ test('Claude steering rewrites worker-shaped Agent input and preserves Explore',
     ...base,
     tool_input: { ...base.tool_input, subagent_type: 'Explore' },
   };
-  assert.equal(runClaudeSteering(root, explore, 'active loadout: main\n  worker → remote-worker [command]'), '');
+  assert.equal(runClaudeSteering(root, explore, '{"adapter":"command"}'), '');
+});
+
+test('Claude steering selects a native target model without a command proxy', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: root, withSteering: true });
+  const event = {
+    cwd: root,
+    tool_name: 'Agent',
+    tool_input: { prompt: 'Review it.', description: 'Review', subagent_type: 'reviewer', model: 'sonnet' },
+  };
+  const rewritten = JSON.parse(runClaudeSteering(root, event, '{"adapter":"host","model":"opus"}')) as {
+    hookSpecificOutput: { updatedInput: { subagent_type: string; model: string } };
+  };
+  assert.equal(rewritten.hookSpecificOutput.updatedInput.subagent_type, 'reviewer');
+  assert.equal(rewritten.hookSpecificOutput.updatedInput.model, 'opus');
+  assert.equal(runClaudeSteering(root, event, '{"adapter":"host","model":"current-host"}'), '');
 });
 
 test('Claude steering is inactive without a loadout and uses plugin-scoped proxies in data-only flow', (t) => {
@@ -148,7 +164,7 @@ test('Claude steering is inactive without a loadout and uses plugin-scoped proxi
     tool_name: 'Agent',
     tool_input: { prompt: 'Review it.', description: 'Review', subagent_type: 'reviewer' },
   };
-  assert.equal(runClaudeSteering(nativeRoot, event, 'no active loadout'), '');
+  assert.equal(runClaudeSteering(nativeRoot, event, '{"adapter":"host"}'), '');
 
   const pluginRoot = tempRepo(t);
   runInit({ target: 'claude', repoRoot: pluginRoot, dataOnly: true, withSteering: true });
@@ -156,7 +172,7 @@ test('Claude steering is inactive without a loadout and uses plugin-scoped proxi
     ...event,
     cwd: pluginRoot,
   };
-  const rewritten = JSON.parse(runClaudeSteering(pluginRoot, pluginEvent, 'active loadout: main\n  reviewer → remote-reviewer [command]')) as {
+  const rewritten = JSON.parse(runClaudeSteering(pluginRoot, pluginEvent, '{"adapter":"command"}')) as {
     hookSpecificOutput: { updatedInput: { subagent_type: string } };
   };
   assert.equal(rewritten.hookSpecificOutput.updatedInput.subagent_type, 'fadeno:dispatch-reviewer');

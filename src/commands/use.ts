@@ -36,7 +36,8 @@ export function runUse(opts: UseOptions): UseResult {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const name = opts.name.trim();
   if (name.length === 0) throw new UseError('Usage: fadeno use <loadout>');
-  const loaded = loadExecutorProfile(repoRoot, opts.userPathOptions);
+  const target = opts.target ?? readUserHarness(opts.userPathOptions);
+  const loaded = loadExecutorProfile(repoRoot, opts.userPathOptions, target ?? 'standalone');
   if (!(name in loaded.profile.loadouts)) {
     throw new UseError(`"${name}" is not a declared loadout (${Object.keys(loaded.profile.loadouts).sort().join(', ')}).`);
   }
@@ -52,7 +53,6 @@ export function runUse(opts: UseOptions): UseResult {
     const spec = loaded.profile.executors[executor]!;
     return spec.adapter === 'command' ? [{ archetype, executor, command: spec.command }] : [];
   });
-  const target = opts.target ?? readUserHarness(opts.userPathOptions);
   const needsNativeMaterialization = target === 'codex' && Object.values(slots).some((executor) => loaded.profile.executors[executor]?.adapter === 'host');
   const steering = needsNativeMaterialization
     ? runSteeringApply({

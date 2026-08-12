@@ -36,6 +36,61 @@ function parseDoc(doc: Record<string, unknown>): ExecutorProfile {
 
 // --- loadouts / default_loadout parsing ---
 
+test('v2 targets compile through the active harness route', () => {
+  const document = stringifyYaml({
+    schema_version: 2,
+    targets: {
+      opus: { provider: 'anthropic', model: 'opus', reasoning_effort: 'high' },
+    },
+    routes: {
+      codex: {
+        anthropic: { command: ['claude', '-p', '--model', '{model}'] },
+        opus: { command: ['claude', '-p', '--model', '{model}', '--permission-mode', 'plan'] },
+      },
+      claude: { anthropic: { native: true, command: ['claude', '-p', '--model', '{model}'] } },
+    },
+    loadouts: { main: { worker: 'opus' } },
+    default_loadout: 'main',
+  });
+  const codex = parseExecutorProfile(document, 'v2.yaml', 'codex');
+  const claude = parseExecutorProfile(document, 'v2.yaml', 'claude');
+  assert.deepEqual(codex.executors.opus, {
+    adapter: 'command', command: ['claude', '-p', '--model', 'opus', '--permission-mode', 'plan'], model: 'opus',
+    resume: null, sessionIdPattern: null, target: 'opus', provider: 'anthropic',
+  });
+  const native = resolveRole('implementer', 'worker', claude, 'main');
+  assert.equal(native.executor.adapter, 'host');
+  assert.equal(native.executor.adapter === 'host' ? native.executor.agentType : null, 'worker');
+  assert.equal(native.executor.provider, 'anthropic');
+});
+
+test('v2 reports a missing provider route for the active harness', () => {
+  assert.throws(
+    () => parseExecutorProfile(stringifyYaml({
+      schema_version: 2,
+      targets: { opus: { provider: 'anthropic', model: 'opus' } },
+      routes: { codex: { openai: { native: true } } },
+      loadouts: { main: { worker: 'opus' } },
+    }), 'v2.yaml', 'codex'),
+    /routes\.codex\.anthropic/,
+  );
+});
+
+test('target catalogs require the explicit v2 schema boundary', () => {
+  assert.throws(
+    () => parseExecutorProfile(stringifyYaml({
+      targets: { opus: { provider: 'anthropic', model: 'opus' } },
+      routes: { codex: { anthropic: { native: true } } },
+      loadouts: { main: { worker: 'opus' } },
+    }), 'unversioned.yaml', 'codex'),
+    /schema_version: 2/,
+  );
+  assert.throws(
+    () => parseExecutorProfile('schema_version: 3\nexecutors: {x: {adapter: command, command: [x]}}\nbindings: {"*": x}\n', 'future.yaml'),
+    /unsupported schema_version 3/,
+  );
+});
+
 test('loadouts: happy path parses without bindings', () => {
   const profile = parseDoc({ executors: EXECUTORS, loadouts: LOADOUTS, default_loadout: 'anthropic-primary' });
   assert.deepEqual(profile.loadouts, LOADOUTS);

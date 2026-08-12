@@ -68,7 +68,12 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
     const launcherPath = join(outDir, 'skills', dst, 'scripts', 'fadeno.cjs');
     results.push({
       path: launcherPath,
-      status: emitFile(launcherPath, readFileSync(join(tpl, 'common', 'plugin', 'fadeno.cjs'), 'utf8'), force),
+      status: emitFile(
+        launcherPath,
+        readFileSync(join(tpl, 'common', 'plugin', 'fadeno.cjs'), 'utf8')
+          .replace('__FADENO_HARNESS__', 'claude'),
+        force,
+      ),
     });
     chmodSync(launcherPath, 0o755);
   }
@@ -166,7 +171,12 @@ export function runCodexPlugin(opts: PluginOptions = {}): PluginResult {
     const launcherPath = join(outDir, 'skills', skill, 'scripts', 'fadeno.cjs');
     results.push({
       path: launcherPath,
-      status: emitFile(launcherPath, readFileSync(join(tpl, 'common', 'plugin', 'fadeno.cjs'), 'utf8'), force),
+      status: emitFile(
+        launcherPath,
+        readFileSync(join(tpl, 'common', 'plugin', 'fadeno.cjs'), 'utf8')
+          .replace('__FADENO_HARNESS__', 'codex'),
+        force,
+      ),
     });
     chmodSync(launcherPath, 0o755);
   }

@@ -18,6 +18,7 @@ import { runInit, type Target } from './commands/init.ts';
 import {
   runLoadoutClear,
   runLoadoutList,
+  runLoadoutResolve,
   runLoadoutShow,
   runLoadoutUse,
   type LoadoutListResult,
@@ -71,7 +72,7 @@ Usage:
   fadeno validate [file] [--schema K]   Validate playbooks (schema + references + semantics)
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
-  fadeno loadout [list|use <n>|clear]   Show, list, pin, or clear the active loadout
+  fadeno loadout [list|resolve|use|clear] Show, resolve, pin, or clear the active loadout
   fadeno steering resolve|apply [...]   Resolve or materialize hybrid Codex steering
   fadeno dispatch [flags]               Resolve archetype → executor and invoke it once (ad hoc)
   fadeno dispatch-fallback <run> <id>   Deliver a locked host request by declared fallback
@@ -1132,6 +1133,12 @@ function main(argv: string[]): number {
         case 'list':
           printLoadoutList(runLoadoutList({ loadout: values.loadout }));
           return 0;
+        case 'resolve': {
+          if (!values.archetype) throw new Error('Usage: fadeno loadout resolve --archetype <name>');
+          const result = runLoadoutResolve({ archetype: values.archetype, loadout: values.loadout });
+          console.log(JSON.stringify(result, null, 2));
+          return 0;
+        }
         case 'use': {
           const name = positionals[2];
           if (!name) throw new Error('Usage: fadeno loadout use <name>');

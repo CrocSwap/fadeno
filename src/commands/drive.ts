@@ -353,14 +353,14 @@ function recordResolutionSnapshot(ctx: EngineCtx): void {
     const overridden = ctx.overrides.get(role);
     if (overridden != null) {
       const spec = ctx.profile.executors[overridden]!;
-      entries.push({ role, archetype, executor: overridden, model: spec.model, source: 'override' });
+      entries.push({ role, archetype, executor: overridden, model: spec.model, source: 'override', ...(spec.target != null ? { target: spec.target, provider: spec.provider ?? null, delivery: spec.adapter } : {}) });
       ctx.act(`${role} → ${overridden}${spec.model != null ? ` (${spec.model})` : ''} [override]`);
       continue;
     }
     try {
       const { executor, spec, source } = resolveChain(ctx, role);
       const label = roleResolutionEchoLabel(source, ctx.activeLoadout?.name ?? null);
-      entries.push({ role, archetype, executor, model: spec.model, source });
+      entries.push({ role, archetype, executor, model: spec.model, source, ...(spec.target != null ? { target: spec.target, provider: spec.provider ?? null, delivery: spec.adapter } : {}) });
       ctx.act(`${role} → ${executor}${spec.model != null ? ` (${spec.model})` : ''} [${label}]`);
     } catch (err) {
       if (!(err instanceof ExecutorProfileError)) throw err;

@@ -1,123 +1,109 @@
-# Fadeno's bundled executor catalog. This is intentionally conservative:
-# native is the safe default and command adapters are only used after an
-# explicit loadout selection. User ~/.config/fadeno/executors.yaml and a
-# project .fadeno/executors.yaml may override entries by name.
-executors:
-  native-worker:
-    adapter: host
+# Fadeno's harness-neutral executor catalog. Loadouts select model targets;
+# routes decide how the active harness delivers each provider (native or command).
+# User ~/.config/fadeno/executors.yaml and project .fadeno/executors.yaml may
+# extend or override these names.
+schema_version: 2
+
+targets:
+  current-host:
+    provider: current-host
     model: current-host
     reasoning_effort: default
-    agent_type: worker
-  native-reviewer:
-    adapter: host
-    model: current-host
-    reasoning_effort: default
-    agent_type: reviewer
-  native-judge:
-    adapter: host
-    model: current-host
-    reasoning_effort: default
-    agent_type: judge
-  luna-worker:
-    adapter: host
+  luna-medium:
+    provider: openai
     model: gpt-5.6-luna
     reasoning_effort: medium
-    agent_type: worker
-    fallback_command: [codex, exec, --model, gpt-5.6-luna, --sandbox, workspace-write, -c, 'model_reasoning_effort="medium"', "-"]
-  luna-reviewer:
-    adapter: host
-    model: gpt-5.6-luna
-    reasoning_effort: medium
-    agent_type: reviewer
-    fallback_command: [codex, exec, --model, gpt-5.6-luna, --sandbox, workspace-write, -c, 'model_reasoning_effort="medium"', "-"]
-  luna-judge:
-    adapter: host
-    model: gpt-5.6-luna
-    reasoning_effort: medium
-    agent_type: judge
-    fallback_command: [codex, exec, --model, gpt-5.6-luna, --sandbox, workspace-write, -c, 'model_reasoning_effort="medium"', "-"]
-  terra-worker:
-    adapter: host
+  terra-medium:
+    provider: openai
     model: gpt-5.6-terra
     reasoning_effort: medium
-    agent_type: worker
-    fallback_command: [codex, exec, --model, gpt-5.6-terra, --sandbox, workspace-write, -c, 'model_reasoning_effort="medium"', "-"]
-  terra-reviewer:
-    adapter: host
-    model: gpt-5.6-terra
-    reasoning_effort: medium
-    agent_type: reviewer
-    fallback_command: [codex, exec, --model, gpt-5.6-terra, --sandbox, workspace-write, -c, 'model_reasoning_effort="medium"', "-"]
-  terra-judge:
-    adapter: host
-    model: gpt-5.6-terra
-    reasoning_effort: medium
-    agent_type: judge
-    fallback_command: [codex, exec, --model, gpt-5.6-terra, --sandbox, workspace-write, -c, 'model_reasoning_effort="medium"', "-"]
-  sol-worker:
-    adapter: host
+  sol-high:
+    provider: openai
     model: gpt-5.6-sol
     reasoning_effort: high
-    agent_type: worker
-    fallback_command: [codex, exec, --model, gpt-5.6-sol, --sandbox, workspace-write, -c, 'model_reasoning_effort="high"', "-"]
-  sol-reviewer:
-    adapter: host
-    model: gpt-5.6-sol
+  claude-default:
+    provider: anthropic
+    model: opus
     reasoning_effort: high
-    agent_type: reviewer
-    fallback_command: [codex, exec, --model, gpt-5.6-sol, --sandbox, workspace-write, -c, 'model_reasoning_effort="high"', "-"]
-  sol-judge:
-    adapter: host
-    model: gpt-5.6-sol
+  grok-default:
+    provider: xai
+    model: grok
     reasoning_effort: high
-    agent_type: judge
-    fallback_command: [codex, exec, --model, gpt-5.6-sol, --sandbox, workspace-write, -c, 'model_reasoning_effort="high"', "-"]
-  codex-cli:
-    adapter: command
-    command: [codex, exec, "-"]
-    model: codex-cli
-  claude-cli:
-    adapter: command
-    command: [claude, -p]
-    model: claude-cli
-  grok-cli:
-    adapter: command
-    command: [grok, build, "-"]
-    model: grok-cli
+
+routes:
+  codex:
+    current-host:
+      native: true
+    openai:
+      native: true
+      command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
+    anthropic:
+      command: [claude, -p, --model, "{model}"]
+    xai:
+      command: [grok, build, "-"]
+  claude:
+    current-host:
+      native: true
+    anthropic:
+      native: true
+      command: [claude, -p, --model, "{model}"]
+    openai:
+      command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
+    xai:
+      command: [grok, build, "-"]
+  grok:
+    current-host:
+      native: true
+    xai:
+      native: true
+      command: [grok, build, "-"]
+    openai:
+      command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
+    anthropic:
+      command: [claude, -p, --model, "{model}"]
+  standalone:
+    current-host:
+      native: true
+    openai:
+      command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
+    anthropic:
+      command: [claude, -p, --model, "{model}"]
+    xai:
+      command: [grok, build, "-"]
 
 loadouts:
   native:
-    worker: native-worker
-    reviewer: native-reviewer
-    judge: native-judge
+    worker: current-host
+    reviewer: current-host
+    judge: current-host
   luna:
-    worker: luna-worker
-    reviewer: luna-reviewer
-    judge: luna-judge
+    worker: luna-medium
+    reviewer: luna-medium
+    judge: luna-medium
   terra:
-    worker: terra-worker
-    reviewer: terra-reviewer
-    judge: terra-judge
+    worker: terra-medium
+    reviewer: terra-medium
+    judge: terra-medium
   sol:
-    worker: sol-worker
-    reviewer: sol-reviewer
-    judge: sol-judge
+    worker: sol-high
+    reviewer: sol-high
+    judge: sol-high
   codex:
-    worker: codex-cli
-    reviewer: codex-cli
-    judge: codex-cli
+    worker: terra-medium
+    reviewer: terra-medium
+    judge: sol-high
   claude:
-    worker: claude-cli
-    reviewer: claude-cli
-    judge: claude-cli
+    worker: claude-default
+    reviewer: claude-default
+    judge: claude-default
   grok-worker:
-    worker: grok-cli
-    reviewer: grok-cli
-    judge: grok-cli
+    worker: grok-default
+    reviewer: terra-medium
+    judge: sol-high
 
 default_loadout: native
 
 # Direct bindings remain available for repo-native compatibility. Loadout
 # slots win for archetyped roles; an explicit role binding still wins first.
 bindings:
-  "*": native-worker
+  "*": current-host

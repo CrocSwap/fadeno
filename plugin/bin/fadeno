@@ -14416,12 +14416,12 @@ function parseLayer(path) {
   return doc;
 }
 function mergeLayer(target, source, layer, provenance) {
-  for (const key of ["executors", "loadouts", "bindings"]) {
+  for (const key of ["executors", "targets", "routes", "loadouts", "bindings"]) {
     const entries = mapping(source[key]);
     if (entries == null) continue;
     const current = mapping(target[key]) ?? {};
     for (const [name, value] of Object.entries(entries)) {
-      if (key === "loadouts" && mapping(value) != null && mapping(current[name]) != null) {
+      if ((key === "loadouts" || key === "routes") && mapping(value) != null && mapping(current[name]) != null) {
         current[name] = { ...current[name], ...value };
       } else {
         current[name] = value;
@@ -14432,7 +14432,7 @@ function mergeLayer(target, source, layer, provenance) {
     }
     target[key] = current;
   }
-  for (const key of ["default_loadout"]) {
+  for (const key of ["schema_version", "default_loadout"]) {
     if (source[key] !== void 0) {
       target[key] = source[key];
       provenance.defaultLoadout = layer;
@@ -14440,12 +14440,12 @@ function mergeLayer(target, source, layer, provenance) {
   }
 }
 function projectIsComplete(doc) {
-  const executors = mapping(doc.executors);
-  if (executors == null || Object.keys(executors).length === 0) return false;
+  const catalog = mapping(doc.targets) ?? mapping(doc.executors);
+  if (catalog == null || Object.keys(catalog).length === 0) return false;
   const bindings = mapping(doc.bindings);
   const loadouts = mapping(doc.loadouts);
   if ((bindings == null || Object.keys(bindings).length === 0) && (loadouts == null || Object.keys(loadouts).length === 0)) return false;
-  const declared = new Set(Object.keys(executors));
+  const declared = new Set(Object.keys(catalog));
   if (bindings && Object.values(bindings).some((target) => typeof target !== "string" || !declared.has(target))) return false;
   if (loadouts) {
     for (const slots of Object.values(loadouts)) {
@@ -14455,7 +14455,7 @@ function projectIsComplete(doc) {
   }
   return doc.default_loadout == null || typeof doc.default_loadout === "string" && loadouts != null && doc.default_loadout in loadouts;
 }
-function loadLayeredProfile(repoRoot, options = {}) {
+function loadLayeredProfile(repoRoot, options = {}, harness) {
   const paths = userPaths(options);
   const layers = [
     { layer: "builtin", path: `${templatesDir()}/common/fadeno/executors.yaml` },
@@ -14480,7 +14480,7 @@ function loadLayeredProfile(repoRoot, options = {}) {
   }
   const text = stringifyObject(document);
   return {
-    profile: parseExecutorProfile(text, effective.map((entry) => entry.layer).join(" + ")),
+    profile: parseExecutorProfile(text, effective.map((entry) => entry.layer).join(" + "), harness),
     path: project?.path ?? present.find((entry) => entry.layer === "user")?.path ?? present[0].path,
     layers: effective.map((entry) => entry.layer),
     provenance,
@@ -14499,11 +14499,16 @@ var SESSION_ID_PLACEHOLDER = "{session_id}";
 function substituteSessionId(argv, sessionId) {
   return argv.map((part) => part.split(SESSION_ID_PLACEHOLDER).join(sessionId));
 }
+function activeHarness(explicit, options = {}) {
+  if (explicit != null) return explicit;
+  const raw = (options.env ?? process.env).FADENO_HARNESS?.trim();
+  return raw === "codex" || raw === "claude" || raw === "grok" || raw === "standalone" ? raw : readUserHarness(options) ?? "standalone";
+}
 var EXECUTORS_FILE = (0, import_node_path6.join)(".fadeno", "executors.yaml");
 function isMapping(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
-function parseExecutorProfile(text, source) {
+function parseExecutorProfile(text, source, harness = "standalone") {
   let doc;
   try {
     doc = (0, import_yaml4.parse)(text);
@@ -14513,8 +14518,19 @@ function parseExecutorProfile(text, source) {
   if (!isMapping(doc)) {
     throw new ExecutorProfileError(`${source} is not a mapping.`);
   }
-  if (!isMapping(doc.executors) || Object.keys(doc.executors).length === 0) {
-    throw new ExecutorProfileError(`${source} needs a non-empty \`executors\` mapping.`);
+  const hasLegacyExecutors = isMapping(doc.executors) && Object.keys(doc.executors).length > 0;
+  const hasTargets = isMapping(doc.targets) && Object.keys(doc.targets).length > 0;
+  if (doc.schema_version !== void 0 && doc.schema_version !== 1 && doc.schema_version !== 2) {
+    throw new ExecutorProfileError(`${source}: unsupported schema_version ${JSON.stringify(doc.schema_version)}; expected 1 or 2.`);
+  }
+  if (hasTargets && doc.schema_version !== 2) {
+    throw new ExecutorProfileError(`${source}: a \`targets\` catalog requires \`schema_version: 2\`.`);
+  }
+  if (doc.schema_version === 2 && !hasTargets) {
+    throw new ExecutorProfileError(`${source}: \`schema_version: 2\` requires a non-empty \`targets\` mapping.`);
+  }
+  if (!hasLegacyExecutors && !hasTargets) {
+    throw new ExecutorProfileError(`${source} needs a non-empty \`targets\` (v2) or \`executors\` (v1) mapping.`);
   }
   const hasBindings = isMapping(doc.bindings) && Object.keys(doc.bindings).length > 0;
   const hasLoadouts = isMapping(doc.loadouts) && Object.keys(doc.loadouts).length > 0;
@@ -14524,7 +14540,7 @@ function parseExecutorProfile(text, source) {
     );
   }
   const executors = {};
-  for (const [name, raw] of Object.entries(doc.executors)) {
+  for (const [name, raw] of Object.entries(isMapping(doc.executors) ? doc.executors : {})) {
     if (!isMapping(raw)) {
       throw new ExecutorProfileError(`${source}: executor "${name}" is not a mapping.`);
     }
@@ -14561,7 +14577,17 @@ function parseExecutorProfile(text, source) {
         }
         fallbackCommand = raw.fallback_command;
       }
-      executors[name] = { adapter: "host", model, reasoningEffort, agentType, fallbackCommand };
+      const target = typeof raw.target === "string" ? raw.target : void 0;
+      const provider = typeof raw.provider === "string" ? raw.provider : void 0;
+      executors[name] = {
+        adapter: "host",
+        model,
+        reasoningEffort,
+        agentType,
+        fallbackCommand,
+        ...target != null ? { target } : {},
+        ...provider != null ? { provider } : {}
+      };
       continue;
     }
     if (raw.reasoning_effort !== void 0 || raw.agent_type !== void 0 || raw.fallback_command !== void 0) {
@@ -14636,8 +14662,117 @@ function parseExecutorProfile(text, source) {
       command: command2,
       model: typeof raw.model === "string" ? raw.model : null,
       resume,
-      sessionIdPattern
+      sessionIdPattern,
+      ...typeof raw.target === "string" ? { target: raw.target } : {},
+      ...typeof raw.provider === "string" ? { provider: raw.provider } : {}
     };
+  }
+  if (hasTargets) {
+    const routes = isMapping(doc.routes) ? doc.routes : null;
+    const harnessRoutes = routes != null && isMapping(routes[harness]) ? routes[harness] : null;
+    if (harnessRoutes == null) {
+      throw new ExecutorProfileError(
+        `${source}: v2 targets require a \`routes.${harness}\` mapping for the active harness.`
+      );
+    }
+    const substituteTarget = (argv, model, effort) => argv.map((part) => part.split("{model}").join(model).split("{reasoning_effort}").join(effort));
+    for (const [name, rawTarget] of Object.entries(doc.targets)) {
+      if (!isMapping(rawTarget)) throw new ExecutorProfileError(`${source}: target "${name}" is not a mapping.`);
+      const provider = rawTarget.provider;
+      const model = rawTarget.model;
+      const effort = rawTarget.reasoning_effort ?? "default";
+      if (typeof provider !== "string" || provider.length === 0) {
+        throw new ExecutorProfileError(`${source}: target "${name}" needs a non-empty \`provider\`.`);
+      }
+      if (typeof model !== "string" || model.length === 0) {
+        throw new ExecutorProfileError(`${source}: target "${name}" needs a non-empty \`model\`.`);
+      }
+      if (typeof effort !== "string" || effort.length === 0) {
+        throw new ExecutorProfileError(`${source}: target "${name}" has an invalid \`reasoning_effort\`.`);
+      }
+      const routeKey = isMapping(harnessRoutes[name]) ? name : provider;
+      const route = isMapping(harnessRoutes[routeKey]) ? harnessRoutes[routeKey] : null;
+      if (route == null) {
+        throw new ExecutorProfileError(
+          `${source}: target "${name}" uses provider "${provider}", but neither \`routes.${harness}.${name}\` nor \`routes.${harness}.${provider}\` is declared.`
+        );
+      }
+      if (route.native !== void 0 && typeof route.native !== "boolean") {
+        throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.native\` must be boolean.`);
+      }
+      const rawCommand = route.command;
+      if (rawCommand != null && (!Array.isArray(rawCommand) || rawCommand.length === 0 || !rawCommand.every((part) => typeof part === "string" && part.length > 0))) {
+        throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.command\` must be a non-empty string array.`);
+      }
+      const command2 = rawCommand == null ? null : substituteTarget(rawCommand, model, effort);
+      const rawResume = route.resume;
+      if (rawResume != null && (!Array.isArray(rawResume) || rawResume.length === 0 || !rawResume.every((part) => typeof part === "string" && part.length > 0))) {
+        throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.resume\` must be a non-empty string array.`);
+      }
+      const resume = rawResume == null ? null : substituteTarget(rawResume, model, effort);
+      if (resume != null && !resume.some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
+        throw new ExecutorProfileError(
+          `${source}: route \`routes.${harness}.${routeKey}.resume\` must contain ${SESSION_ID_PLACEHOLDER}.`
+        );
+      }
+      const sessionIdPattern = route.session_id_pattern == null ? null : route.session_id_pattern;
+      if (sessionIdPattern != null && typeof sessionIdPattern !== "string") {
+        throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.session_id_pattern\` must be a string.`);
+      }
+      if (typeof sessionIdPattern === "string") {
+        try {
+          new RegExp(sessionIdPattern);
+        } catch (err) {
+          throw new ExecutorProfileError(
+            `${source}: route \`routes.${harness}.${routeKey}.session_id_pattern\` did not compile: ${err.message}`
+          );
+        }
+        if (!sessionIdPattern.includes("(")) {
+          throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.session_id_pattern\` needs a capture group.`);
+        }
+      }
+      if (route.native === true) {
+        if (resume != null || sessionIdPattern != null) {
+          throw new ExecutorProfileError(
+            `${source}: native route \`routes.${harness}.${routeKey}\` rejects command-session fields.`
+          );
+        }
+        executors[name] = {
+          adapter: "host",
+          model,
+          reasoningEffort: effort,
+          agentType: "*",
+          fallbackCommand: command2,
+          target: name,
+          provider
+        };
+      } else {
+        if (command2 == null) {
+          throw new ExecutorProfileError(
+            `${source}: route \`routes.${harness}.${routeKey}\` needs \`native: true\` or a non-empty \`command\`.`
+          );
+        }
+        const mintsId = command2.some((part) => part.includes(SESSION_ID_PLACEHOLDER));
+        if (resume != null && mintsId && sessionIdPattern != null) {
+          throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}\` declares two session id sources.`);
+        }
+        if (resume != null && !mintsId && sessionIdPattern == null) {
+          throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}\` has resume argv but no session id source.`);
+        }
+        if (resume == null && (mintsId || sessionIdPattern != null)) {
+          throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}\` has a session id source but no resume argv.`);
+        }
+        executors[name] = {
+          adapter: "command",
+          command: command2,
+          model,
+          resume,
+          sessionIdPattern,
+          target: name,
+          provider
+        };
+      }
+    }
   }
   const loadouts = {};
   if (doc.loadouts != null) {
@@ -14698,11 +14833,11 @@ function parseExecutorProfile(text, source) {
       bindings[role] = target;
     }
   }
-  return { executors, bindings, loadouts, defaultLoadout };
+  return { executors, bindings, loadouts, defaultLoadout, harness, schemaVersion: hasTargets ? 2 : 1 };
 }
-function loadExecutorProfile(repoRoot, options = {}) {
+function loadExecutorProfile(repoRoot, options = {}, harness) {
   try {
-    const loaded = loadLayeredProfile(repoRoot, options);
+    const loaded = loadLayeredProfile(repoRoot, options, activeHarness(harness, options));
     return {
       profile: loaded.profile,
       path: loaded.path,
@@ -14766,7 +14901,7 @@ function roleResolutionEchoLabel(source, activeLoadoutName) {
 function resolveRole(role, archetype, profile, activeLoadout) {
   const pick = (executorName, source) => ({
     executorName,
-    executor: profile.executors[executorName],
+    executor: executorForArchetype(profile, executorName, archetype),
     source
   });
   const pinned = profile.bindings[role];
@@ -14794,6 +14929,11 @@ function resolveRole(role, archetype, profile, activeLoadout) {
     `No executor for role "${role}" (${archetypePart}; ${loadoutPart}; no "*" default binding). Fix: ${fixes.join(", or ")}.`
   );
 }
+function executorForArchetype(profile, executorName, archetype) {
+  const spec = profile.executors[executorName];
+  if (spec.adapter !== "host" || spec.agentType !== "*" || archetype == null) return spec;
+  return { ...spec, agentType: archetype };
+}
 function serializeProfile(profile) {
   const sortedExecutors = {};
   for (const name of Object.keys(profile.executors).sort()) {
@@ -14805,6 +14945,8 @@ function serializeProfile(profile) {
       agent_type: spec.agentType,
       ...spec.fallbackCommand != null ? { fallback_command: spec.fallbackCommand } : {}
     } : { adapter: spec.adapter, command: spec.command };
+    if (spec.target != null) entry.target = spec.target;
+    if (spec.provider != null) entry.provider = spec.provider;
     if (spec.adapter === "command" && spec.model != null) entry.model = spec.model;
     if (spec.adapter === "command" && spec.resume != null) entry.resume = spec.resume;
     if (spec.adapter === "command" && spec.sessionIdPattern != null) entry.session_id_pattern = spec.sessionIdPattern;
@@ -16922,8 +17064,10 @@ function runDispatch(opts) {
     resolution: ROW_RESOLUTION[source],
     loadout: active == null ? null : { name: active.name, source: active.source },
     executor: executorName,
+    ...spec.target != null ? { target: spec.target, provider: spec.provider ?? null } : {},
     model: spec.model,
     transport,
+    ...spec.target != null ? { delivery_transport: transport } : {},
     exit_code: spawned.error != null ? null : spawned.status,
     duration_ms: durationMs,
     prompt_sha256: promptSha256,
@@ -19224,14 +19368,14 @@ function recordResolutionSnapshot(ctx) {
     const overridden = ctx.overrides.get(role);
     if (overridden != null) {
       const spec = ctx.profile.executors[overridden];
-      entries.push({ role, archetype, executor: overridden, model: spec.model, source: "override" });
+      entries.push({ role, archetype, executor: overridden, model: spec.model, source: "override", ...spec.target != null ? { target: spec.target, provider: spec.provider ?? null, delivery: spec.adapter } : {} });
       ctx.act(`${role} \u2192 ${overridden}${spec.model != null ? ` (${spec.model})` : ""} [override]`);
       continue;
     }
     try {
       const { executor, spec, source } = resolveChain(ctx, role);
       const label = roleResolutionEchoLabel(source, ctx.activeLoadout?.name ?? null);
-      entries.push({ role, archetype, executor, model: spec.model, source });
+      entries.push({ role, archetype, executor, model: spec.model, source, ...spec.target != null ? { target: spec.target, provider: spec.provider ?? null, delivery: spec.adapter } : {} });
       ctx.act(`${role} \u2192 ${executor}${spec.model != null ? ` (${spec.model})` : ""} [${label}]`);
     } catch (err) {
       if (!(err instanceof ExecutorProfileError)) throw err;
@@ -20674,6 +20818,31 @@ function runLoadoutUse(opts) {
 `, "utf8");
   return { name, path, previous };
 }
+function runLoadoutResolve(opts) {
+  const repoRoot = repoRootOf(opts);
+  const profile = loadProfile(repoRoot, opts.userPathOptions);
+  const { active } = activeFor(opts, repoRoot, profile);
+  if (active == null) throw new LoadoutError("No loadout is active.");
+  try {
+    const resolved = resolveRole(
+      opts.archetype,
+      opts.archetype,
+      { ...profile, bindings: profile.bindings["*"] != null ? { "*": profile.bindings["*"] } : {} },
+      active.name
+    );
+    return {
+      archetype: opts.archetype,
+      active,
+      executor: resolved.executorName,
+      model: resolved.executor.model,
+      adapter: resolved.executor.adapter,
+      harness: profile.harness ?? "standalone"
+    };
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new LoadoutError(err.message);
+    throw err;
+  }
+}
 function runLoadoutClear(opts = {}) {
   const repoRoot = repoRootOf(opts);
   const path = (0, import_node_path20.join)(repoRoot, LOADOUT_LOCAL_FILE);
@@ -20948,7 +21117,11 @@ function runPlugin(opts = {}) {
     const launcherPath = (0, import_node_path22.join)(outDir, "skills", dst, "scripts", "fadeno.cjs");
     results.push({
       path: launcherPath,
-      status: emitFile(launcherPath, (0, import_node_fs22.readFileSync)((0, import_node_path22.join)(tpl, "common", "plugin", "fadeno.cjs"), "utf8"), force)
+      status: emitFile(
+        launcherPath,
+        (0, import_node_fs22.readFileSync)((0, import_node_path22.join)(tpl, "common", "plugin", "fadeno.cjs"), "utf8").replace("__FADENO_HARNESS__", "claude"),
+        force
+      )
     });
     (0, import_node_fs22.chmodSync)(launcherPath, 493);
   }
@@ -21007,7 +21180,11 @@ function runCodexPlugin(opts = {}) {
     const launcherPath = (0, import_node_path22.join)(outDir, "skills", skill, "scripts", "fadeno.cjs");
     results.push({
       path: launcherPath,
-      status: emitFile(launcherPath, (0, import_node_fs22.readFileSync)((0, import_node_path22.join)(tpl, "common", "plugin", "fadeno.cjs"), "utf8"), force)
+      status: emitFile(
+        launcherPath,
+        (0, import_node_fs22.readFileSync)((0, import_node_path22.join)(tpl, "common", "plugin", "fadeno.cjs"), "utf8").replace("__FADENO_HARNESS__", "codex"),
+        force
+      )
     });
     (0, import_node_fs22.chmodSync)(launcherPath, 493);
   }
@@ -23214,7 +23391,7 @@ function rootOf(opts) {
 }
 function profileOf(repoRoot, userPathOptions) {
   try {
-    return loadExecutorProfile(repoRoot, userPathOptions).profile;
+    return loadExecutorProfile(repoRoot, userPathOptions, "codex").profile;
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
     throw err;
@@ -23307,7 +23484,7 @@ function runLockedSteeringResolve(opts, archetype, role, nativeExecutor) {
       `host dispatch "${dispatchId}" requests executor "${request.executor}", which is not a host executor in the run profile snapshot.`
     );
   }
-  if (request.model !== executor.model || request.reasoningEffort !== executor.reasoningEffort || request.agentType !== executor.agentType) {
+  if (request.model !== executor.model || request.reasoningEffort !== executor.reasoningEffort || executor.agentType !== "*" && request.agentType !== executor.agentType) {
     throw new SteeringError(
       `host dispatch "${dispatchId}" request identity does not match executor "${request.executor}" in the run profile snapshot.`
     );
@@ -23573,7 +23750,7 @@ function runSteeringApply(opts) {
   const cliPath = opts.cliPath ?? (scope === "user" && (0, import_node_fs28.existsSync)(managedCli) ? managedCli : "fadeno");
   for (const archetype of ["worker", "reviewer", "judge"]) {
     const executorName = slots[archetype];
-    const spec = executorName == null ? null : profile.executors[executorName];
+    const spec = executorName == null ? null : executorForArchetype(profile, executorName, archetype);
     if (executorName == null || spec == null) {
       throw new SteeringError(
         `loadout "${loadout}" needs an executor in its "${archetype}" slot to materialize a Codex role agent; found ${executorName ?? "no slot"}.`
@@ -23677,7 +23854,6 @@ var import_node_child_process3 = require("node:child_process");
 var import_node_fs30 = require("node:fs");
 var import_node_os4 = require("node:os");
 var import_node_path29 = require("node:path");
-var import_yaml16 = __toESM(require_dist(), 1);
 
 // src/lib/installations.ts
 var import_node_crypto4 = require("node:crypto");
@@ -23752,41 +23928,6 @@ function probe(command2) {
     version: output.length > 0 ? output.split(/\r?\n/, 1)[0] ?? null : null
   };
 }
-function validUserYaml(path) {
-  if (!(0, import_node_fs30.existsSync)(path)) return null;
-  let parsed;
-  try {
-    parsed = (0, import_yaml16.parse)((0, import_node_fs30.readFileSync)(path, "utf8"));
-  } catch (err) {
-    throw new SetupError(`user executor configuration ${path} did not parse: ${err.message}`);
-  }
-  if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new SetupError(`user executor configuration ${path} must be a mapping; it was left untouched.`);
-  }
-  return parsed;
-}
-function generatedUserCatalog(probes) {
-  const executors = {};
-  for (const item of probes) {
-    if (!item.available) continue;
-    const executor = `${item.name}-cli`;
-    const command2 = item.name === "codex" ? ["codex", "exec", "-"] : item.name === "claude" ? ["claude", "-p"] : ["grok", "build", "-"];
-    executors[executor] = { adapter: "command", command: command2, model: `${item.name}-cli` };
-  }
-  if (Object.keys(executors).length === 0) return null;
-  return { executors };
-}
-function ensureUserCatalog(paths, probes, created) {
-  const current = validUserYaml(paths.executorsFile);
-  if (current != null) {
-    return;
-  }
-  const generated = generatedUserCatalog(probes);
-  if (generated == null) return;
-  (0, import_node_fs30.mkdirSync)(paths.configDir, { recursive: true });
-  (0, import_node_fs30.writeFileSync)(paths.executorsFile, (0, import_yaml16.stringify)(generated), "utf8");
-  created.push(paths.executorsFile);
-}
 function ensureNativeState(paths, created) {
   if ((0, import_node_fs30.existsSync)(paths.loadoutFile)) return;
   (0, import_node_fs30.mkdirSync)(paths.stateDir, { recursive: true });
@@ -23852,7 +23993,6 @@ function runSetup(opts = {}) {
   const manifest = readInstallationManifest(opts.userPathOptions);
   const runtimeSource = opts.runtimeSource !== void 0 ? opts.runtimeSource : (opts.userPathOptions?.env ?? process.env).FADENO_BUNDLED_RUNTIME ?? null;
   if (installManagedRuntime(paths, runtimeSource, manifest)) created.push(paths.managedRuntimeDir);
-  ensureUserCatalog(paths, probes, created);
   if (opts.target != null) rememberHarness(paths, opts.target, created);
   let profile;
   try {
@@ -23927,7 +24067,8 @@ function runUse(opts) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const name = opts.name.trim();
   if (name.length === 0) throw new UseError("Usage: fadeno use <loadout>");
-  const loaded = loadExecutorProfile(repoRoot, opts.userPathOptions);
+  const target = opts.target ?? readUserHarness(opts.userPathOptions);
+  const loaded = loadExecutorProfile(repoRoot, opts.userPathOptions, target ?? "standalone");
   if (!(name in loaded.profile.loadouts)) {
     throw new UseError(`"${name}" is not a declared loadout (${Object.keys(loaded.profile.loadouts).sort().join(", ")}).`);
   }
@@ -23943,7 +24084,6 @@ function runUse(opts) {
     const spec = loaded.profile.executors[executor];
     return spec.adapter === "command" ? [{ archetype, executor, command: spec.command }] : [];
   });
-  const target = opts.target ?? readUserHarness(opts.userPathOptions);
   const needsNativeMaterialization = target === "codex" && Object.values(slots).some((executor) => loaded.profile.executors[executor]?.adapter === "host");
   const steering = needsNativeMaterialization ? runSteeringApply({
     repoRoot,
@@ -24009,9 +24149,10 @@ function materialization(loadout, profile, target, userPathOptions) {
 }
 function runStatus(opts = {}) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
+  const harness = harnessOf(opts.target, opts.userPathOptions);
   let loaded;
   try {
-    loaded = loadExecutorProfile(repoRoot, opts.userPathOptions);
+    loaded = loadExecutorProfile(repoRoot, opts.userPathOptions, harness ?? "standalone");
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new StatusError(err.message);
     throw err;
@@ -24042,7 +24183,6 @@ function runStatus(opts = {}) {
     roles.push({ archetype, executor, adapter: spec.adapter, model: spec.model, source, command: spec.adapter === "command" ? spec.command : null });
   }
   const external = roles.filter((role) => role.adapter === "command");
-  const harness = harnessOf(opts.target, opts.userPathOptions);
   const installation = readInstallationManifest(opts.userPathOptions);
   const invocationSource = process.env.FADENO_INVOCATION_SOURCE?.trim() || (installation.runtime != null && (0, import_node_path31.resolve)(process.argv[1] ?? "") === (0, import_node_path31.resolve)(installation.runtime.path) ? "managed" : "path");
   const materialized = materialization(active?.name ?? null, loaded.profile, harness, opts.userPathOptions);
@@ -24440,7 +24580,7 @@ Usage:
   fadeno validate [file] [--schema K]   Validate playbooks (schema + references + semantics)
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
-  fadeno loadout [list|use <n>|clear]   Show, list, pin, or clear the active loadout
+  fadeno loadout [list|resolve|use|clear] Show, resolve, pin, or clear the active loadout
   fadeno steering resolve|apply [...]   Resolve or materialize hybrid Codex steering
   fadeno dispatch [flags]               Resolve archetype \u2192 executor and invoke it once (ad hoc)
   fadeno dispatch-fallback <run> <id>   Deliver a locked host request by declared fallback
@@ -25433,6 +25573,12 @@ resolution${via}:`);
         case "list":
           printLoadoutList(runLoadoutList({ loadout: values.loadout }));
           return 0;
+        case "resolve": {
+          if (!values.archetype) throw new Error("Usage: fadeno loadout resolve --archetype <name>");
+          const result = runLoadoutResolve({ archetype: values.archetype, loadout: values.loadout });
+          console.log(JSON.stringify(result, null, 2));
+          return 0;
+        }
         case "use": {
           const name = positionals[2];
           if (!name) throw new Error("Usage: fadeno loadout use <name>");

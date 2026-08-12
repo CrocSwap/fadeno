@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { loadLayeredProfile, type ProfileProvenance } from './config-layers.ts';
-import { userPaths, type UserPathOptions } from './user-paths.ts';
+import { readUserHarness, userPaths, type UserPathOptions } from './user-paths.ts';
 
 export class ExecutorProfileError extends Error {}
 
@@ -35,6 +35,9 @@ export interface CommandExecutorSpec {
    * (engine-minted id).
    */
   sessionIdPattern: string | null;
+  /** Neutral v2 target metadata; absent for legacy v1 executors. */
+  target?: string;
+  provider?: string;
 }
 
 /** A native host facility invoked outside the command adapter. */
@@ -52,6 +55,9 @@ export interface HostExecutorSpec {
    * explicit delivery fallback, never an executor/provider substitution.
    */
   fallbackCommand?: string[] | null;
+  /** Neutral v2 target metadata; absent for legacy v1 executors. */
+  target?: string;
+  provider?: string;
 }
 
 export type ExecutorSpec = CommandExecutorSpec | HostExecutorSpec;
@@ -73,6 +79,19 @@ export interface ExecutorProfile {
   loadouts: Record<string, Record<string, string>>;
   /** Loadout used when no flag/env/local override selects one. */
   defaultLoadout: string | null;
+  /** Harness used to compile neutral v2 targets into delivery adapters. */
+  harness?: HarnessId;
+  schemaVersion?: 1 | 2;
+}
+
+export type HarnessId = 'codex' | 'claude' | 'grok' | 'standalone';
+
+export function activeHarness(explicit?: HarnessId, options: UserPathOptions = {}): HarnessId {
+  if (explicit != null) return explicit;
+  const raw = (options.env ?? process.env).FADENO_HARNESS?.trim();
+  return raw === 'codex' || raw === 'claude' || raw === 'grok' || raw === 'standalone'
+    ? raw
+    : readUserHarness(options) ?? 'standalone';
 }
 
 export interface LoadedExecutorProfile {
@@ -90,7 +109,7 @@ function isMapping(value: unknown): value is Record<string, unknown> {
 }
 
 /** Parse + structurally validate an executor profile document. */
-export function parseExecutorProfile(text: string, source: string): ExecutorProfile {
+export function parseExecutorProfile(text: string, source: string, harness: HarnessId = 'standalone'): ExecutorProfile {
   let doc: unknown;
   try {
     doc = parseYaml(text);
@@ -100,8 +119,19 @@ export function parseExecutorProfile(text: string, source: string): ExecutorProf
   if (!isMapping(doc)) {
     throw new ExecutorProfileError(`${source} is not a mapping.`);
   }
-  if (!isMapping(doc.executors) || Object.keys(doc.executors).length === 0) {
-    throw new ExecutorProfileError(`${source} needs a non-empty \`executors\` mapping.`);
+  const hasLegacyExecutors = isMapping(doc.executors) && Object.keys(doc.executors).length > 0;
+  const hasTargets = isMapping(doc.targets) && Object.keys(doc.targets).length > 0;
+  if (doc.schema_version !== undefined && doc.schema_version !== 1 && doc.schema_version !== 2) {
+    throw new ExecutorProfileError(`${source}: unsupported schema_version ${JSON.stringify(doc.schema_version)}; expected 1 or 2.`);
+  }
+  if (hasTargets && doc.schema_version !== 2) {
+    throw new ExecutorProfileError(`${source}: a \`targets\` catalog requires \`schema_version: 2\`.`);
+  }
+  if (doc.schema_version === 2 && !hasTargets) {
+    throw new ExecutorProfileError(`${source}: \`schema_version: 2\` requires a non-empty \`targets\` mapping.`);
+  }
+  if (!hasLegacyExecutors && !hasTargets) {
+    throw new ExecutorProfileError(`${source} needs a non-empty \`targets\` (v2) or \`executors\` (v1) mapping.`);
   }
   const hasBindings = isMapping(doc.bindings) && Object.keys(doc.bindings).length > 0;
   const hasLoadouts = isMapping(doc.loadouts) && Object.keys(doc.loadouts).length > 0;
@@ -113,7 +143,7 @@ export function parseExecutorProfile(text: string, source: string): ExecutorProf
   }
 
   const executors: Record<string, ExecutorSpec> = {};
-  for (const [name, raw] of Object.entries(doc.executors)) {
+  for (const [name, raw] of Object.entries(isMapping(doc.executors) ? doc.executors : {})) {
     if (!isMapping(raw)) {
       throw new ExecutorProfileError(`${source}: executor "${name}" is not a mapping.`);
     }
@@ -155,7 +185,13 @@ export function parseExecutorProfile(text: string, source: string): ExecutorProf
         }
         fallbackCommand = raw.fallback_command as string[];
       }
-      executors[name] = { adapter: 'host', model, reasoningEffort, agentType, fallbackCommand };
+      const target = typeof raw.target === 'string' ? raw.target : undefined;
+      const provider = typeof raw.provider === 'string' ? raw.provider : undefined;
+      executors[name] = {
+        adapter: 'host', model, reasoningEffort, agentType, fallbackCommand,
+        ...(target != null ? { target } : {}),
+        ...(provider != null ? { provider } : {}),
+      };
       continue;
     }
     if (raw.reasoning_effort !== undefined || raw.agent_type !== undefined || raw.fallback_command !== undefined) {
@@ -247,7 +283,111 @@ export function parseExecutorProfile(text: string, source: string): ExecutorProf
       model: typeof raw.model === 'string' ? raw.model : null,
       resume,
       sessionIdPattern,
+      ...(typeof raw.target === 'string' ? { target: raw.target } : {}),
+      ...(typeof raw.provider === 'string' ? { provider: raw.provider } : {}),
     };
+  }
+
+  if (hasTargets) {
+    const routes = isMapping(doc.routes) ? doc.routes : null;
+    const harnessRoutes = routes != null && isMapping(routes[harness]) ? routes[harness] : null;
+    if (harnessRoutes == null) {
+      throw new ExecutorProfileError(
+        `${source}: v2 targets require a \`routes.${harness}\` mapping for the active harness.`,
+      );
+    }
+    const substituteTarget = (argv: string[], model: string, effort: string): string[] =>
+      argv.map((part) => part.split('{model}').join(model).split('{reasoning_effort}').join(effort));
+    for (const [name, rawTarget] of Object.entries(doc.targets as Record<string, unknown>)) {
+      if (!isMapping(rawTarget)) throw new ExecutorProfileError(`${source}: target "${name}" is not a mapping.`);
+      const provider = rawTarget.provider;
+      const model = rawTarget.model;
+      const effort = rawTarget.reasoning_effort ?? 'default';
+      if (typeof provider !== 'string' || provider.length === 0) {
+        throw new ExecutorProfileError(`${source}: target "${name}" needs a non-empty \`provider\`.`);
+      }
+      if (typeof model !== 'string' || model.length === 0) {
+        throw new ExecutorProfileError(`${source}: target "${name}" needs a non-empty \`model\`.`);
+      }
+      if (typeof effort !== 'string' || effort.length === 0) {
+        throw new ExecutorProfileError(`${source}: target "${name}" has an invalid \`reasoning_effort\`.`);
+      }
+      // A target-specific route may refine a provider default (for example a
+      // read-only CLI policy) without putting delivery semantics in a loadout.
+      const routeKey = isMapping(harnessRoutes[name]) ? name : provider;
+      const route = isMapping(harnessRoutes[routeKey]) ? harnessRoutes[routeKey] : null;
+      if (route == null) {
+        throw new ExecutorProfileError(
+          `${source}: target "${name}" uses provider "${provider}", but neither ` +
+            `\`routes.${harness}.${name}\` nor \`routes.${harness}.${provider}\` is declared.`,
+        );
+      }
+      if (route.native !== undefined && typeof route.native !== 'boolean') {
+        throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.native\` must be boolean.`);
+      }
+      const rawCommand = route.command;
+      if (rawCommand != null && (!Array.isArray(rawCommand) || rawCommand.length === 0 ||
+        !rawCommand.every((part) => typeof part === 'string' && part.length > 0))) {
+        throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.command\` must be a non-empty string array.`);
+      }
+      const command = rawCommand == null ? null : substituteTarget(rawCommand as string[], model, effort);
+      const rawResume = route.resume;
+      if (rawResume != null && (!Array.isArray(rawResume) || rawResume.length === 0 ||
+        !rawResume.every((part) => typeof part === 'string' && part.length > 0))) {
+        throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.resume\` must be a non-empty string array.`);
+      }
+      const resume = rawResume == null ? null : substituteTarget(rawResume as string[], model, effort);
+      if (resume != null && !resume.some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
+        throw new ExecutorProfileError(
+          `${source}: route \`routes.${harness}.${routeKey}.resume\` must contain ${SESSION_ID_PLACEHOLDER}.`,
+        );
+      }
+      const sessionIdPattern = route.session_id_pattern == null ? null : route.session_id_pattern;
+      if (sessionIdPattern != null && typeof sessionIdPattern !== 'string') {
+        throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.session_id_pattern\` must be a string.`);
+      }
+      if (typeof sessionIdPattern === 'string') {
+        try { new RegExp(sessionIdPattern); } catch (err) {
+          throw new ExecutorProfileError(
+            `${source}: route \`routes.${harness}.${routeKey}.session_id_pattern\` did not compile: ${(err as Error).message}`,
+          );
+        }
+        if (!sessionIdPattern.includes('(')) {
+          throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.session_id_pattern\` needs a capture group.`);
+        }
+      }
+      if (route.native === true) {
+        if (resume != null || sessionIdPattern != null) {
+          throw new ExecutorProfileError(
+            `${source}: native route \`routes.${harness}.${routeKey}\` rejects command-session fields.`,
+          );
+        }
+        executors[name] = {
+          adapter: 'host', model, reasoningEffort: effort, agentType: '*', fallbackCommand: command,
+          target: name, provider,
+        };
+      } else {
+        if (command == null) {
+          throw new ExecutorProfileError(
+            `${source}: route \`routes.${harness}.${routeKey}\` needs \`native: true\` or a non-empty \`command\`.`,
+          );
+        }
+        const mintsId = command.some((part) => part.includes(SESSION_ID_PLACEHOLDER));
+        if (resume != null && mintsId && sessionIdPattern != null) {
+          throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}\` declares two session id sources.`);
+        }
+        if (resume != null && !mintsId && sessionIdPattern == null) {
+          throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}\` has resume argv but no session id source.`);
+        }
+        if (resume == null && (mintsId || sessionIdPattern != null)) {
+          throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}\` has a session id source but no resume argv.`);
+        }
+        executors[name] = {
+          adapter: 'command', command, model, resume, sessionIdPattern: sessionIdPattern as string | null,
+          target: name, provider,
+        };
+      }
+    }
   }
 
   const loadouts: Record<string, Record<string, string>> = {};
@@ -317,13 +457,13 @@ export function parseExecutorProfile(text: string, source: string): ExecutorProf
     }
   }
 
-  return { executors, bindings, loadouts, defaultLoadout };
+  return { executors, bindings, loadouts, defaultLoadout, harness, schemaVersion: hasTargets ? 2 : 1 };
 }
 
 /** Load the repo's executor profile, or explain how to create one. */
-export function loadExecutorProfile(repoRoot: string, options: UserPathOptions = {}): LoadedExecutorProfile {
+export function loadExecutorProfile(repoRoot: string, options: UserPathOptions = {}, harness?: HarnessId): LoadedExecutorProfile {
   try {
-    const loaded = loadLayeredProfile(repoRoot, options);
+    const loaded = loadLayeredProfile(repoRoot, options, activeHarness(harness, options));
     return {
       profile: loaded.profile,
       path: loaded.path,
@@ -474,7 +614,7 @@ export function resolveRole(
 ): RoleResolution {
   const pick = (executorName: string, source: RoleResolutionSource): RoleResolution => ({
     executorName,
-    executor: profile.executors[executorName]!,
+    executor: executorForArchetype(profile, executorName, archetype),
     source,
   });
   const pinned = profile.bindings[role];
@@ -510,6 +650,17 @@ export function resolveRole(
   );
 }
 
+/** Bind a neutral native target to the archetype requested by this invocation. */
+export function executorForArchetype(
+  profile: ExecutorProfile,
+  executorName: string,
+  archetype: string | null,
+): ExecutorSpec {
+  const spec = profile.executors[executorName]!;
+  if (spec.adapter !== 'host' || spec.agentType !== '*' || archetype == null) return spec;
+  return { ...spec, agentType: archetype };
+}
+
 /**
  * Canonical serialization for the run-dir snapshot: sorted keys so the same
  * profile always yields the same bytes (and digest).
@@ -529,6 +680,8 @@ export function serializeProfile(profile: ExecutorProfile): string {
           ...(spec.fallbackCommand != null ? { fallback_command: spec.fallbackCommand } : {}),
         }
       : { adapter: spec.adapter, command: spec.command };
+    if (spec.target != null) entry.target = spec.target;
+    if (spec.provider != null) entry.provider = spec.provider;
     if (spec.adapter === 'command' && spec.model != null) entry.model = spec.model;
     if (spec.adapter === 'command' && spec.resume != null) entry.resume = spec.resume;
     if (spec.adapter === 'command' && spec.sessionIdPattern != null) entry.session_id_pattern = spec.sessionIdPattern;

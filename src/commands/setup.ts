@@ -2,7 +2,6 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { runSteeringApply, type SteeringApplyResult } from './steering.ts';
 import { loadExecutorProfile, type ExecutorProfile } from '../lib/executors.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
@@ -64,52 +63,6 @@ function probe(command: string): CommandProbe {
     available: result.error == null && result.status === 0,
     version: output.length > 0 ? output.split(/\r?\n/, 1)[0] ?? null : null,
   };
-}
-
-function validUserYaml(path: string): Record<string, unknown> | null {
-  if (!existsSync(path)) return null;
-  let parsed: unknown;
-  try {
-    parsed = parseYaml(readFileSync(path, 'utf8'));
-  } catch (err) {
-    throw new SetupError(`user executor configuration ${path} did not parse: ${(err as Error).message}`);
-  }
-  if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new SetupError(`user executor configuration ${path} must be a mapping; it was left untouched.`);
-  }
-  return parsed as Record<string, unknown>;
-}
-
-function generatedUserCatalog(probes: CommandProbe[]): Record<string, unknown> | null {
-  const executors: Record<string, unknown> = {};
-  for (const item of probes) {
-    if (!item.available) continue;
-    const executor = `${item.name}-cli`;
-    const command = item.name === 'codex'
-      ? ['codex', 'exec', '-']
-      : item.name === 'claude'
-        ? ['claude', '-p']
-        : ['grok', 'build', '-'];
-    executors[executor] = { adapter: 'command', command, model: `${item.name}-cli` };
-  }
-  if (Object.keys(executors).length === 0) return null;
-  // Ready, named patterns live in the bundled catalog. User setup only records
-  // provider command overrides; it never invents a cross-provider routing
-  // policy from probe order.
-  return { executors };
-}
-
-function ensureUserCatalog(paths: FadenoUserPaths, probes: CommandProbe[], created: string[]): void {
-  const current = validUserYaml(paths.executorsFile);
-  if (current != null) {
-    // Existing user configuration is authoritative and never rewritten by setup.
-    return;
-  }
-  const generated = generatedUserCatalog(probes);
-  if (generated == null) return;
-  mkdirSync(paths.configDir, { recursive: true });
-  writeFileSync(paths.executorsFile, stringifyYaml(generated), 'utf8');
-  created.push(paths.executorsFile);
 }
 
 function ensureNativeState(paths: FadenoUserPaths, created: string[]): void {
@@ -189,7 +142,6 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
     ? opts.runtimeSource
     : (opts.userPathOptions?.env ?? process.env).FADENO_BUNDLED_RUNTIME ?? null;
   if (installManagedRuntime(paths, runtimeSource, manifest)) created.push(paths.managedRuntimeDir);
-  ensureUserCatalog(paths, probes, created);
   if (opts.target != null) rememberHarness(paths, opts.target, created);
 
   // Compose before pinning. A self-contained legacy project profile remains
