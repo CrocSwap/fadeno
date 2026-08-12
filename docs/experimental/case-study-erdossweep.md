@@ -351,3 +351,10 @@ evaluated against data the evidence ledger already records.
 Follow-ups filed to the loadouts/dispatch backlog, smallest first:
 three-valued `requires_write`; `distinct_provider_from` dispatch predicate;
 `shadow` dispatch flag + ledger tag; route operational-policy fields.
+
+**Update 2026-08-12:** the first three follow-ups (plus session slot
+overrides, the `generator` archetype, fallback chains, and shadow-based
+model tryouts) are now designed in
+[`slots-and-archetypes.md`](slots-and-archetypes.md). Route
+operational-policy fields remain backlog, named there as an explicit
+non-goal.
