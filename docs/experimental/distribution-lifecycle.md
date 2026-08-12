@@ -11,11 +11,14 @@ a daemon or global environment manager.
    bundle through its own `scripts/fadeno.cjs` launcher, so it does not depend on a
    shell `PATH` entry.
 2. **User integration.** First `setup` copies the bundle to the stable XDG user
-   data directory, writes shared executor/loadout configuration under the XDG
-   config directory, records ownership under the XDG state directory, and
+   data directory, records the selected harness/loadout and ownership under the
+   XDG state directory, and
    materializes host-specific managed agents. Claude setup also records one
    user permission for the stable runtime, avoiding per-repo command prompts
    without granting a wildcard shell permission. This layer works across repos.
+   Bundled neutral targets and harness routes require no generated user config;
+   `~/.config/fadeno/executors.yaml` exists only when the user chooses to add or
+   override targets, routes, loadouts, or legacy v1 executors.
 3. **Project customization.** `init` or `vendor` is explicit. It writes
    `.fadeno/` definitions and optional harness adapters into a repo. Built-in
    workflows do not require this layer.

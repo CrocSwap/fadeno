@@ -40,9 +40,11 @@ Executor configuration is layered by `src/lib/config-layers.ts`:
 bundled catalog → user executors.yaml → project .fadeno/executors.yaml
 ```
 
-Named executors, loadouts, and bindings merge by key; scalar defaults use the
+Named targets, harness routes, legacy executors, loadouts, and bindings merge by key; scalar defaults use the
 highest declaring layer. A malformed present layer is an error. User paths are
 resolved by `src/lib/user-paths.ts` with injectable XDG/Windows overrides.
+Setup does not synthesize a catalog from installed CLI probes: the bundled v2
+targets/routes are working defaults, and the user file is an optional override.
 
 ## The CLI
 
@@ -126,10 +128,11 @@ back to ordinary file completion when no specialized candidates apply.
   immediately; if the engine is hard-killed before it can append, the next
   `fadeno drive` closes every dangling command start with a recovered
   `engine_interrupted` terminal receipt before retrying.
-- **`executors.ts`** — the executor profile (`.fadeno/executors.yaml`): named
-  executors (`command`/`host` adapters), per-role `bindings`, and named
-  **loadouts** — archetype → executor tables, the switchable unit of the
-  dispatch kernel — plus an optional `default_loadout`. Two pure resolvers:
+- **`executors.ts`** — the executor profile (`.fadeno/executors.yaml`): neutral
+  provider/model **targets**, per-harness delivery **routes**, per-role
+  `bindings`, and named **loadouts** (archetype → target). At load time v2 is
+  compiled into the existing `command`/`host` execution shape; v1 executor
+  profiles remain supported. Two pure resolvers:
   `resolveActiveLoadout` (`--loadout` flag → `FADENO_LOADOUT` env →
   `.fadeno/local/loadout`, written by `fadeno loadout use` → `default_loadout:`
   → none) and `resolveRole` (explicit `bindings[role]` pin → active loadout's

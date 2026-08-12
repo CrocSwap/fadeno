@@ -97,28 +97,41 @@ be able to evaluate the condition from the artifact **without re-asking a model*
 ## Bind roles to executors (profiles + loadouts)
 
 `fadeno drive` and `fadeno dispatch` resolve every actor through
-`.fadeno/executors.yaml` (parsed by `src/lib/executors.ts`). Beside the
-original per-role `bindings:`, the profile can declare **loadouts** — named
-archetype → executor tables, the switchable unit for rotating providers
-without editing role bindings:
+`.fadeno/executors.yaml` (parsed by `src/lib/executors.ts`). Version 2 separates
+model choice from delivery: **targets** are harness-neutral provider/model
+profiles, **routes** say how each harness reaches a provider, and **loadouts**
+map archetypes to targets:
 
 ```yaml
-executors:
-  opus-xhigh:     { adapter: command, command: [claude, -p, --model, opus], model: opus }
-  luna-cli-xhigh: { adapter: command, command: [codex, exec, "-"], model: gpt-5.6-luna }
+schema_version: 2
+targets:
+  opus-high: { provider: anthropic, model: opus, reasoning_effort: high }
+  luna-high: { provider: openai, model: gpt-5.6-luna, reasoning_effort: high }
+
+routes:
+  codex:
+    openai: { native: true, command: [codex, exec, --model, "{model}", "-"] }
+    anthropic: { command: [claude, -p, --model, "{model}"] }
+  claude:
+    anthropic: { native: true, command: [claude, -p, --model, "{model}"] }
+    openai: { command: [codex, exec, --model, "{model}", "-"] }
 
 loadouts:
-  anthropic-primary: { worker: opus-xhigh,     reviewer: opus-xhigh }
-  openai-primary:    { worker: luna-cli-xhigh, reviewer: opus-xhigh }
+  anthropic-primary: { worker: opus-high, reviewer: opus-high }
+  openai-primary:    { worker: luna-high, reviewer: opus-high }
 
 default_loadout: anthropic-primary   # optional
 
 bindings:                            # per-role pins; optional when loadouts exist
-  opus_reviewer: opus-xhigh          # deliberately-multi-model playbooks pin here
-  "*": opus-xhigh
+  opus_reviewer: opus-high           # deliberately-multi-model playbooks pin here
+  "*": opus-high
 ```
 
-Every loadout slot must name a declared executor; loadout names and archetype
+A harness route normally keys by provider. A route keyed by the exact target
+name takes precedence, allowing a special sandbox or read-only command policy
+without making the loadout itself harness-specific.
+
+Every loadout slot must name a declared target; loadout names and archetype
 keys are bare lowercase identifiers (`[a-z][a-z0-9_-]*`); at least one of
 `bindings` / `loadouts` must be non-empty. Playbook roles opt into loadout
 routing with one advisory field — `archetype: worker` — validated for
@@ -173,9 +186,11 @@ non-Anthropic one. On a non-zero exit the proxy reports the failure plainly
 and never attempts the task itself as a fallback.
 
 `fadeno init --claude` installs a local `PreToolUse` hook by default; use
-`--no-steering` to opt out. The hook
-checks `fadeno loadout` and, only while a loadout is active, rewrites
-general-purpose/worker, reviewer, and judge `Agent` calls to those proxies. It
+`--no-steering` to opt out. The hook calls the structured
+`fadeno loadout resolve --archetype …` surface with the Claude harness identity
+and rewrites command-delivered general-purpose/worker, reviewer, and judge
+`Agent` calls to proxies. Native targets are rewritten to the matching Fadeno
+role agent and requested model; the `current-host` default remains inert. It
 preserves the rest of the Agent input and leaves Explore/Plan and unrelated
 specialists native. Plugin users can combine the flag with `--data-only`; the
 hook then targets the plugin-scoped `fadeno:dispatch-*` agents.

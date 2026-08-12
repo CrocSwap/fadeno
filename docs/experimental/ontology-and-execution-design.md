@@ -346,17 +346,28 @@ properties from its name.
 An agent product or runtime that manages a model session, tools, context, and
 possibly native child agents.
 
+**ExecutionTarget**
+A harness-neutral user choice of provider, model, reasoning profile, and
+optional account preference. Loadouts select execution targets; they do not
+declare whether delivery is native or command-backed.
+
+**DeliveryRoute**
+A harness-specific way to deliver an execution target, such as a native child
+agent, CLI command, or provider API. Native versus command is a property of the
+route relative to the active harness, never an intrinsic target property.
+
 **Executor**
-A user-configured, routable endpoint capable of performing actor calls. It
-combines an adapter, harness or provider access path, model selection, execution
-environment, capability declaration, and non-secret authentication reference.
+The resolved endpoint capable of performing actor calls: an ExecutionTarget
+combined with a DeliveryRoute, execution environment, capability declaration,
+and non-secret authentication reference. It is a runtime resolution, not what
+a portable loadout stores.
 
 **ExecutorAdapter**
 The implementation that dispatches, observes, steers, and cancels work on an
 executor.
 
 **ExecutionProfile**
-A user- or repository-scoped set of executors, routing preferences, fallback
+A user- or repository-scoped set of targets, harness routes, routing preferences, fallback
 rules, budgets, retention policy, and workspace policy. It is not part of a
 portable playbook.
 
@@ -364,7 +375,7 @@ portable playbook.
 A rule that ranks eligible executors for a role or capability class.
 
 **ExecutionBinding**
-The concrete executor, model, environment, and policy resolution selected for
+The concrete target, delivery route, executor, environment, and policy resolution selected for
 one actor-call attempt. A binding is immutable once that attempt starts.
 
 ### 4.4 Runtime instances

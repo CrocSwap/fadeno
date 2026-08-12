@@ -324,17 +324,34 @@ Code `Stop` hook. Exits non-zero when the gate fails.
 If you rotate metered subscriptions across providers — one model as the worker
 until that quota runs low, then another — the unit you think in is *"who is my
 worker / reviewer / judge right now,"* not a dozen per-role YAML edits.
-`.fadeno/executors.yaml` can declare **loadouts**: named archetype → executor
-tables (each slot names an executor declared in the same file), and switching
-one is a session-scoped command, not a repo edit:
+`.fadeno/executors.yaml` declares harness-neutral **targets** (provider, model,
+effort), harness-specific **routes** for delivering those targets, and
+**loadouts** that map archetypes to targets. The same loadout therefore remains
+portable: Claude may run an Anthropic target natively while Codex delivers that
+same target through `claude -p`.
 
 ```yaml
+schema_version: 2
+targets:
+  opus-high: { provider: anthropic, model: opus, reasoning_effort: high }
+  terra-high: { provider: openai, model: gpt-5.6-terra, reasoning_effort: high }
+  sol-high: { provider: openai, model: gpt-5.6-sol, reasoning_effort: high }
+routes:
+  codex:
+    openai: { native: true, command: [codex, exec, --model, "{model}", "-"] }
+    anthropic: { command: [claude, -p, --model, "{model}"] }
+  claude:
+    anthropic: { native: true, command: [claude, -p, --model, "{model}"] }
+    openai: { command: [codex, exec, --model, "{model}", "-"] }
 loadouts:
-  anthropic-primary: { worker: opus-xhigh,     reviewer: terra-high, judge: terra-high }
-  openai-primary:    { worker: luna-cli-xhigh, reviewer: terra-high, judge: terra-high }
-  codex-native:      { worker: luna-xhigh,     reviewer: terra-high, judge: sol-medium }
+  anthropic-primary: { worker: opus-high, reviewer: opus-high, judge: opus-high }
+  openai-primary:    { worker: terra-high, reviewer: terra-high, judge: sol-high }
 default_loadout: anthropic-primary
 ```
+
+Put shared personal overrides in `~/.config/fadeno/executors.yaml`; use a
+project `.fadeno/executors.yaml` only when the repository truly needs different
+targets or policy. Legacy v1 `executors` profiles remain supported.
 
 ```bash
 fadeno use openai-primary                  # user-scoped; remembers setup's harness
@@ -353,12 +370,13 @@ record the resolution in their ledger and ad-hoc dispatches append to
 `.fadeno/dispatches.jsonl`, so which provider produced an artifact stays
 auditable after the fact.
 
-With steering enabled by default, expensive role-shaped subagent work follows that same
-resolver. `fadeno setup --codex` remembers the harness, so later `fadeno use
-<loadout>` calls automatically materialize each worker/reviewer/judge slot as
-either a native host agent (with that executor's model and effort) or a command
-broker (which delegates through `fadeno dispatch`). Built-in `luna`, `terra`,
-and `sol` host loadouts also declare exact `codex exec --model …` fallbacks.
+With steering enabled by default, expensive role-shaped subagent work follows
+that same resolver. `fadeno setup --codex` remembers the harness, so later
+`fadeno use <loadout>` calls materialize each worker/reviewer/judge target as
+either a native host agent or a command broker according to the Codex route.
+The Claude hook performs the same resolution for Claude rather than relying on
+adapter labels stored in the loadout: native slots select the requested Claude
+model, while command slots use dispatch proxies.
 Start a fresh Codex session after definitions change only to make the new model
 session-native; fallback-capable switches work on the next invocation. Before
 each task, native agents resolve again: command slots switch immediately,
