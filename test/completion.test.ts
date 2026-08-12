@@ -6,7 +6,7 @@ import test from 'node:test';
 import { runCompletion, runCompletionCandidates } from '../src/commands/completion.ts';
 import { runInit } from '../src/commands/init.ts';
 import { runNewRun } from '../src/commands/new-run.ts';
-import { tempRepo } from './helpers.ts';
+import { starterPlaybooks, tempRepo } from './helpers.ts';
 
 function complete(root: string, words: string[], cword = words.length - 1): string[] {
   return runCompletionCandidates({ cwd: root, repoRoot: root, cword, words });
@@ -61,7 +61,8 @@ test('completion discovers repo-local playbooks, runs, steps, profiles, and path
   writeFileSync(join(root, 'folder', 'file with spaces.txt'), 'x');
   const runId = runNewRun({ repoRoot: root, playbook: 'zeta', task: 'completion test' }).runId;
 
-  assert.deepEqual(complete(root, ['fadeno', 'diagram', '']), ['code-change-review', 'compositional-review', 'pr-review', 'research-synthesis', 'zeta']);
+  // Exact match, not a superset check: every starter plus the repo-local `zeta`, sorted.
+  assert.deepEqual(complete(root, ['fadeno', 'diagram', '']), [...starterPlaybooks(), 'zeta'].sort());
   assert.ok(complete(root, ['fadeno', 'show', '']).includes(runId));
   assert.ok(complete(root, ['fadeno', 'loadout', 'use', '']).includes('sample'));
   assert.ok(complete(root, ['fadeno', 'steering', 'apply', '']).includes('sample'));

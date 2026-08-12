@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { runDiagram, DiagramError } from '../src/commands/diagram.ts';
 import { runInit } from '../src/commands/init.ts';
-import { tempRepo } from './helpers.ts';
+import { starterPlaybooks, tempRepo } from './helpers.ts';
 
 function initRepo(t: Parameters<typeof tempRepo>[0]): string {
   const root = tempRepo(t);
@@ -41,7 +41,7 @@ test('mermaid diagram is a flowchart with shaped nodes and labelled edges', (t) 
 
 test('all starter playbooks render in both formats without throwing', (t) => {
   const root = initRepo(t);
-  for (const pb of ['code-change-review', 'research-synthesis', 'pr-review']) {
+  for (const pb of starterPlaybooks()) {
     for (const format of ['ascii', 'mermaid'] as const) {
       assert.doesNotThrow(() => runDiagram({ repoRoot: root, playbook: pb, format }));
     }

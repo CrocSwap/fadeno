@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { runInit } from '../src/commands/init.ts';
 import { runValidate } from '../src/commands/validate.ts';
-import { tempRepo } from './helpers.ts';
+import { starterPlaybooks, tempRepo } from './helpers.ts';
 
 function initRepo(t: Parameters<typeof tempRepo>[0]): string {
   const root = tempRepo(t);
@@ -32,7 +32,17 @@ test('the shipped starter playbooks all validate', (t) => {
   const root = initRepo(t);
   const outcome = runValidate({ repoRoot: root });
   assert.ok(outcome.ok, JSON.stringify(outcome.results, null, 2));
-  assert.equal(outcome.results.length, 4);
+  assert.equal(outcome.results.length, starterPlaybooks().length);
+});
+
+test('every starter playbook is listed in the builder skill catalog', () => {
+  const catalog = readFileSync(
+    join(import.meta.dirname, '..', 'templates', 'common', 'skills', 'fadeno-builder', 'SKILL.md'),
+    'utf8',
+  );
+  for (const pb of starterPlaybooks()) {
+    assert.match(catalog, new RegExp(`\`${pb}\``), `starter "${pb}" is missing from the fadeno-builder catalog`);
+  }
 });
 
 test('malformed YAML is reported', (t) => {

@@ -26,7 +26,9 @@ reliably than a sprawling graph.
    - adapt a **starter** from the effective catalog: `code-change-review`
      (plan → implement → review → test → bounded revise), `research-synthesis`
      (gather → synthesize → fact-check → revise), `compositional-review`
-     (independent mapped revision loops → final reduce), or `pr-review` (review → merge →
+     (independent mapped revision loops → final reduce), `parallel-workstreams`
+     (freeze contract + ownership manifests → parallel workstreams → integrate →
+     verify → gate), or `pr-review` (review → merge →
      gate → post behind a human gate); **or**
    - author a new playbook from their description.
    Match it to the closest pattern in `references/playbook-authoring.md`.

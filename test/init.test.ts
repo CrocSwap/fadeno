@@ -3,14 +3,13 @@ import { mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { runInit } from '../src/commands/init.ts';
-import { exists, read, tempRepo } from './helpers.ts';
+import { exists, read, starterPlaybooks, tempRepo } from './helpers.ts';
 
 const SHARED_FILES = [
   '.fadeno/vocabulary.md',
   '.fadeno/enforcement.md',
-  '.fadeno/playbooks/code-change-review.yaml',
-  '.fadeno/playbooks/pr-review.yaml',
-  '.fadeno/playbooks/research-synthesis.yaml',
+  // Playbooks are derived so a new starter is covered without editing this list.
+  ...starterPlaybooks().map((pb) => `.fadeno/playbooks/${pb}.yaml`),
   '.fadeno/schemas/playbook.schema.json',
   '.fadeno/schemas/run.schema.json',
   '.fadeno/schemas/review-report.schema.json',
