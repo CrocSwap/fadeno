@@ -3,7 +3,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
-import { DispatchCommandError, DISPATCHES_FILE, PENDING_RELAYS_FILE, runDispatch } from '../src/commands/dispatch.ts';
+import {
+  DispatchCommandError,
+  DISPATCHES_FILE,
+  DISPATCHES_FORMAT,
+  PENDING_RELAYS_FILE,
+  runDispatch,
+} from '../src/commands/dispatch.ts';
 import { runDrive } from '../src/commands/drive.ts';
 import { runInit } from '../src/commands/init.ts';
 import { runLoadoutUse } from '../src/commands/loadout.ts';
@@ -90,6 +96,12 @@ test('dispatch: resolves the archetype via the active loadout, relays the report
   const [requested, completed] = rows as [Record<string, unknown>, Record<string, unknown>];
   assert.equal(requested.event, 'dispatch_requested');
   assert.equal(completed.event, 'dispatch_completed');
+  // Both rows carry the evidence-format stamp. The log is append-only and
+  // outlives its shape, so a row that cannot name its own format leaves a
+  // future reader guessing whether it is old or merely unfamiliar.
+  assert.equal(requested.format, DISPATCHES_FORMAT);
+  assert.equal(completed.format, DISPATCHES_FORMAT);
+  assert.equal(DISPATCHES_FORMAT, '0.1');
   assert.equal(typeof requested.dispatch_id, 'string');
   assert.equal(requested.dispatch_id, completed.dispatch_id);
   assert.equal(requested.dispatch_id, result.dispatchId);
@@ -365,6 +377,107 @@ test('dispatch: requires --archetype (bare identifier) unless --executor bypasse
   assert.throws(
     () => runDispatch({ archetype: 'Worker', prompt: 'p', repoRoot: root, env: null }),
     /--archetype "Worker" is not a bare lowercase identifier/,
+  );
+});
+
+// --- write capability: a mutating archetype needs a mutating delivery ---
+
+/**
+ * `ro-*` stands in for a headless CLI in a read-only permission mode: it can
+ * read and reason, but a commit ends in refusal. `silent` declares nothing.
+ */
+const WRITE_EXECUTORS = {
+  'ro-claude': { adapter: 'command', command: STDIN_ECHO('RO:'), model: 'opus', write_access: false },
+  'rw-codex': { adapter: 'command', command: STDIN_ECHO('RW:'), model: 'gpt-5.6-sol', write_access: true },
+  silent: { adapter: 'command', command: STDIN_ECHO('SILENT:'), model: 'm' },
+};
+
+test('dispatch: a write-needing archetype is refused on a delivery that cannot write', (t) => {
+  const root = seedProfile(t, {
+    executors: WRITE_EXECUTORS,
+    archetypes: { worker: { requires_write: true } },
+    loadouts: { main: { worker: 'ro-claude' } },
+    default_loadout: 'main',
+  });
+  assert.throws(
+    () => runDispatch({ archetype: 'worker', prompt: 'ship the fix', repoRoot: root, env: null }),
+    (err: unknown) =>
+      err instanceof DispatchCommandError &&
+      /archetype "worker" declares `requires_write: true`, but executor "ro-claude"/.test(err.message) &&
+      /`write_access: false`/.test(err.message) &&
+      // Three ways out: rebind, re-permission the command, or stay in-session.
+      /bind "worker" to a write-capable executor/.test(err.message) &&
+      /permission mode/.test(err.message) &&
+      /native in-session worker agent/.test(err.message),
+  );
+  // Refused before the spawn: no run burned, nothing recorded.
+  assert.deepEqual(evidenceRows(root), []);
+});
+
+test('dispatch: a write-capable delivery serves the same archetype and records write_access', (t) => {
+  const root = seedProfile(t, {
+    executors: WRITE_EXECUTORS,
+    archetypes: { worker: { requires_write: true } },
+    loadouts: { main: { worker: 'rw-codex' } },
+    default_loadout: 'main',
+  });
+  const result = runDispatch({ archetype: 'worker', prompt: 'ship the fix', repoRoot: root, env: null });
+  assert.equal(result.stdout, 'RW:ship the fix');
+  assert.equal(result.echo, 'worker → rw-codex (gpt-5.6-sol) [loadout main]');
+  const rows = evidenceRows(root);
+  assert.deepEqual(rows.map((r) => r.write_access), [true, true]);
+});
+
+test('dispatch: an archetype claiming no write need proceeds, with a tagged echo', (t) => {
+  const root = seedProfile(t, {
+    executors: WRITE_EXECUTORS,
+    // `worker` is undeclared entirely; `reviewer` declares it needs no writes.
+    archetypes: { reviewer: { requires_write: false } },
+    loadouts: { main: { worker: 'ro-claude', reviewer: 'ro-claude' } },
+    default_loadout: 'main',
+  });
+
+  const undeclared = runDispatch({ archetype: 'worker', prompt: 'read this', repoRoot: root, env: null });
+  assert.equal(undeclared.stdout, 'RO:read this');
+  assert.equal(undeclared.echo, 'worker → ro-claude (opus) [loadout main] [write_access: none]');
+
+  const readOnly = runDispatch({ archetype: 'reviewer', prompt: 'review this', repoRoot: root, env: null });
+  assert.equal(readOnly.stdout, 'RO:review this');
+  assert.equal(readOnly.echo, 'reviewer → ro-claude (opus) [loadout main] [write_access: none]');
+
+  // Both rows of both pairs carry the declared capability.
+  assert.deepEqual(evidenceRows(root).map((r) => r.write_access), [false, false, false, false]);
+});
+
+test('dispatch: a delivery that declares nothing constrains nothing', (t) => {
+  const root = seedProfile(t, {
+    executors: WRITE_EXECUTORS,
+    archetypes: { worker: { requires_write: true } },
+    loadouts: { main: { worker: 'silent' } },
+    default_loadout: 'main',
+  });
+  const result = runDispatch({ archetype: 'worker', prompt: 'ship the fix', repoRoot: root, env: null });
+  assert.equal(result.stdout, 'SILENT:ship the fix');
+  assert.equal(result.echo, 'worker → silent (m) [loadout main]');
+  // Undeclared is absent from evidence, not `null` — nothing was attested.
+  assert.ok(evidenceRows(root).every((r) => !('write_access' in r)));
+});
+
+test('dispatch: --executor keeps the guard when an archetype is still named', (t) => {
+  const root = seedProfile(t, {
+    executors: WRITE_EXECUTORS,
+    archetypes: { worker: { requires_write: true } },
+    loadouts: { main: { worker: 'rw-codex' } },
+    default_loadout: 'main',
+  });
+  assert.throws(
+    () => runDispatch({ archetype: 'worker', executor: 'ro-claude', prompt: 'p', repoRoot: root, env: null }),
+    /archetype "worker" declares `requires_write: true`, but executor "ro-claude"/,
+  );
+  // No archetype named, no claim to check: the bypass still runs.
+  assert.equal(
+    runDispatch({ executor: 'ro-claude', prompt: 'p', repoRoot: root, env: null }).stdout,
+    'RO:p',
   );
 });
 

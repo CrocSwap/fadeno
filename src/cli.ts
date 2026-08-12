@@ -11,6 +11,7 @@ import {
   runDispatchProgress,
   runDispatchStart,
 } from './commands/dispatch.ts';
+import { runDispatches, type DispatchesResult } from './commands/dispatches.ts';
 import { runDiagram } from './commands/diagram.ts';
 import { runDrive, type DriveResult } from './commands/drive.ts';
 import { runGate } from './commands/gate.ts';
@@ -88,6 +89,7 @@ Usage:
   fadeno drive <run> [flags]            Engine: advance the run until terminal or paused
   fadeno decide <run> <option> [flags]  Resolve a pending named human decision
   fadeno runs                           List run ledgers under .fadeno/runs/
+  fadeno dispatches [--tail n] [--json] Show which executor ran what (.fadeno/dispatches.jsonl)
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic claims (or --latest)
   fadeno plugin [dir] [--codex]         Generate a Claude Code (default) or Codex plugin
@@ -129,6 +131,8 @@ Options:
   --run <id>              (steering resolve) Immutable engine run identity for a delivered host request
   --dispatch-id <id>      (steering resolve) Immutable host dispatch identity paired with --run
   --prompt-file <path>    (dispatch) Read the prompt from a file instead of stdin
+  --tail <n>              (dispatches) Logical entries to show, newest last (default 10)
+  --json                  (dispatches) Emit structured entries on stdout for scripting
   --agent-id <id>         (dispatch-start) Native host agent identity
   --workspace <path>      (dispatch-start) Native workspace provenance
   --branch <name>         (dispatch-start) Native branch provenance
@@ -170,6 +174,7 @@ Examples:
   fadeno prompt 2026-05-30-1132-csv cross_review --actor architect_fable --no-record
   fadeno next 2026-05-30-1132-csv
   fadeno runs
+  fadeno dispatches --tail 20
   fadeno show 2026-07-10-2212
   fadeno verify --latest
   source <(fadeno completion bash)
@@ -302,6 +307,15 @@ function printRuns(runs: RunSummary[]): void {
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
     .map(([status, n]) => `${n} ${status}`);
   console.log(`\n${runs.length} run${runs.length === 1 ? '' : 's'} (${parts.join(', ')})`);
+}
+
+function printDispatches(result: DispatchesResult): void {
+  if (result.lines.length === 0) {
+    console.log(result.summary);
+    return;
+  }
+  for (const line of result.lines) console.log(line);
+  console.log(`\n${result.summary}`);
 }
 
 function utcTime(timestamp: string | null): string {
@@ -693,6 +707,8 @@ function main(argv: string[]): number {
         run: { type: 'string' },
         'dispatch-id': { type: 'string' },
         'prompt-file': { type: 'string' },
+        tail: { type: 'string' },
+        json: { type: 'boolean' },
         'agent-id': { type: 'string' },
         workspace: { type: 'string' },
         branch: { type: 'string' },
@@ -886,8 +902,11 @@ function main(argv: string[]): number {
           run: values.run ?? null,
           dispatch_id: values['dispatch-id'] ?? null,
           detail: result.detail,
+          writeConflict: result.writeConflict ?? null,
         }, null, 2));
-        return result.mode === 'restart_required' ? 2 : 0;
+        // A refused slot is not runnable here, same as a restart: non-zero, so
+        // a caller that only checks the exit code still stops.
+        return result.mode === 'restart_required' || result.mode === 'write_conflict' ? 2 : 0;
       }
       if (sub === 'apply') {
         const loadout = positionals[2];
@@ -900,6 +919,10 @@ function main(argv: string[]): number {
         console.log(`Codex steering materialized: ${result.loadout}`);
         for (const archetype of ['worker', 'reviewer', 'judge']) {
           const slot = result.materialization[archetype]!;
+          if (slot.kind === 'write-conflict') {
+            console.log(`  ${archetype} → refused (write conflict) ${slot.executor}: ${slot.writeConflict}`);
+            continue;
+          }
           console.log(
             `  ${archetype} → ${slot.kind === 'native' ? 'native host' : 'command broker'} ${slot.executor}`,
           );
@@ -1281,6 +1304,36 @@ function main(argv: string[]): number {
     case 'runs': {
       const { runs } = runRuns();
       printRuns(runs);
+      return 0;
+    }
+    case 'dispatches': {
+      let tail: number | undefined;
+      if (values.tail != null) {
+        const n = Number(values.tail);
+        if (!Number.isInteger(n) || n < 1) {
+          throw new Error(`Invalid --tail "${values.tail}". Use a positive integer.`);
+        }
+        tail = n;
+      }
+      const result = runDispatches({ tail });
+      if (values.json) {
+        console.log(
+          JSON.stringify(
+            {
+              path: result.path,
+              total: result.total,
+              shown: result.entries.length,
+              skipped: result.skipped,
+              skippedNewerFormat: result.skippedNewerFormat,
+              entries: result.entries,
+            },
+            null,
+            2,
+          ),
+        );
+        return 0;
+      }
+      printDispatches(result);
       return 0;
     }
     case 'show': {

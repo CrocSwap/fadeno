@@ -7,6 +7,7 @@ import { sha256Hex } from '../lib/artifact-manifest.ts';
 import {
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
+  explainWriteConflict,
   loadExecutorProfile,
   readLocalLoadout,
   readUserLoadout,
@@ -40,6 +41,19 @@ export class DispatchCommandError extends Error {}
 
 /** Repo-relative append-only evidence log for ad-hoc dispatches. */
 export const DISPATCHES_FILE = join('.fadeno', 'dispatches.jsonl');
+
+/**
+ * Format version stamped on every evidence row this kernel writes. The log is
+ * append-only and long-lived, so rows outlive the shape they were written in:
+ * without a stamp a reader can only guess whether an unfamiliar row is old or
+ * new. Minor bumps add fields (readers stay forward-compatible within `0.x`);
+ * a major bump re-spells what is already here, and readers that predate it
+ * must set those rows aside rather than misread them.
+ *
+ * The Claude steering hook writes the same stamp as a literal — it runs as a
+ * standalone script and cannot import this constant. Bump both together.
+ */
+export const DISPATCHES_FORMAT = '0.1';
 
 /**
  * Spawn-side relay attestations awaiting a matching dispatch — rows of
@@ -301,6 +315,14 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const command = spec.adapter === 'command' ? spec.command : spec.fallbackCommand!;
   const transport = spec.adapter === 'command' ? 'command' : 'host-command-fallback';
 
+  // Every dispatch that gets this far executes a command (`command` or
+  // `host-command-fallback`), so a mutating archetype delivered through a
+  // command that cannot mutate the workspace is a refusal waiting to happen:
+  // an expensive run that ends in "I can't write here". Catch it before the
+  // spawn. Undeclared on either side means no constraint.
+  const writeConflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile);
+  if (writeConflict != null) throw new DispatchCommandError(writeConflict);
+
   let prompt: string;
   let promptSource: 'stdin' | 'file';
   let promptPath: string | null = null;
@@ -330,7 +352,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     source === 'flag' ? '--executor' : roleResolutionEchoLabel(source, active?.name ?? null);
   const echo =
     `${role ?? archetype ?? executorName} → ${executorName}` +
-    `${spec.model != null ? ` (${spec.model})` : ''} [${sourceLabel}]`;
+    `${spec.model != null ? ` (${spec.model})` : ''} [${sourceLabel}]` +
+    // Proceeding onto a read-only delivery is legal (the archetype claims no
+    // write need) but worth saying out loud before the work starts.
+    (spec.writeAccess === false ? ' [write_access: none]' : '');
   opts.onEcho?.(echo);
   opts.onEcho?.(`external sandbox: ${executorName} (${command.join(' ')}) runs outside the current harness via ${transport}; evidence → ${DISPATCHES_FILE}`);
 
@@ -374,6 +399,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     ...(spec.target != null ? { target: spec.target, provider: spec.provider ?? null } : {}),
     model: spec.model,
     transport,
+    ...(spec.writeAccess != null ? { write_access: spec.writeAccess } : {}),
     ...(spec.target != null ? { delivery_transport: transport } : {}),
     prompt_source: promptSource,
     prompt_snapshot: promptSnapshot,
@@ -387,7 +413,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const evidenceFile = join(repoRoot, DISPATCHES_FILE);
   appendFileSync(
     evidenceFile,
-    `${JSON.stringify({ timestamp: (opts.now ?? new Date()).toISOString(), event: 'dispatch_requested', ...identity })}\n`,
+    `${JSON.stringify({ format: DISPATCHES_FORMAT, timestamp: (opts.now ?? new Date()).toISOString(), event: 'dispatch_requested', ...identity })}\n`,
     'utf8',
   );
 
@@ -405,6 +431,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const outputSha256 = sha256Hex(stdout);
 
   const row: Record<string, unknown> = {
+    format: DISPATCHES_FORMAT,
     timestamp: (opts.now ?? new Date()).toISOString(),
     event: 'dispatch_completed',
     ...identity,

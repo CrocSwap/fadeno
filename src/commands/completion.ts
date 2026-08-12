@@ -151,6 +151,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   drive: command({ '--bind': { kind: 'bind' }, '--max-transitions': { kind: 'free' }, '--loadout': LOADOUT }, ['run']),
   decide: command({ '--decision': { kind: 'free' }, '--feedback': { kind: 'free' } }, ['run', 'free']),
   runs: command({}),
+  dispatches: command({ '--tail': { kind: 'free' }, '--json': NONE }),
   show: command({ '--legacy': NONE, '--events': NONE }, ['run']),
   verify: command({ '--latest': NONE, '--allow-failed': NONE, '--legacy': NONE }, ['run']),
   plugin: command({ '--codex': NONE, '--force': NONE }, ['path']),
