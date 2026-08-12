@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { runInit } from '../src/commands/init.ts';
+import { sha256Hex } from '../src/lib/artifact-manifest.ts';
 import { exists, read, tempRepo } from './helpers.ts';
 
 const ARCHETYPES = ['worker', 'reviewer', 'judge'] as const;
@@ -49,7 +50,7 @@ test('Codex data-only plugin flow still emits explicitly requested steering agen
   assert.ok(!exists(root, 'AGENTS.md'));
 });
 
-test('Claude --with-steering merges one local Agent hook without clobbering settings', (t) => {
+test('Claude --with-steering merges the local steering hooks without clobbering settings', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.claude'), { recursive: true });
   writeFileSync(
@@ -64,17 +65,24 @@ test('Claude --with-steering merges one local Agent hook without clobbering sett
 
   runInit({ target: 'claude', repoRoot: root, withSteering: true });
   assert.ok(exists(root, '.fadeno/local/claude-dispatch-steering.mjs'));
+  assert.ok(exists(root, '.fadeno/local/claude-dispatch-proxy-guard.mjs'));
   const first = JSON.parse(read(root, '.claude/settings.local.json')) as {
     permissions: { allow: string[] };
     hooks: { PreToolUse: Array<{ matcher: string; hooks: Array<{ command: string }> }> };
   };
   assert.deepEqual(first.permissions.allow, ['Bash(ls:*)', 'Bash(fadeno:*)']);
-  assert.equal(first.hooks.PreToolUse.length, 2);
+  // Existing entry preserved, then spawn-rewrite + proxy relay guard.
+  assert.equal(first.hooks.PreToolUse.length, 3);
   assert.equal(first.hooks.PreToolUse[0]!.hooks[0]!.command, './check-write');
   assert.equal(first.hooks.PreToolUse[1]!.matcher, 'Agent');
   assert.equal(
     first.hooks.PreToolUse[1]!.hooks[0]!.command,
     'node .fadeno/local/claude-dispatch-steering.mjs',
+  );
+  assert.equal(first.hooks.PreToolUse[2]!.matcher, 'Bash');
+  assert.equal(
+    first.hooks.PreToolUse[2]!.hooks[0]!.command,
+    'node .fadeno/local/claude-dispatch-proxy-guard.mjs',
   );
 
   runInit({ target: 'claude', repoRoot: root, withSteering: true });
@@ -130,7 +138,9 @@ test('Claude steering rewrites worker-shaped Agent input and preserves Explore',
     description: 'Implement change',
     subagent_type: 'dispatch-worker',
     run_in_background: true,
-    model: 'haiku',
+    // Proxy relays run on sonnet since the 2026-08-12 dogfood A/B caught
+    // haiku defecting on the relay contract.
+    model: 'sonnet',
   });
 
   const explore = {
@@ -138,6 +148,42 @@ test('Claude steering rewrites worker-shaped Agent input and preserves Explore',
     tool_input: { ...base.tool_input, subagent_type: 'Explore' },
   };
   assert.equal(runClaudeSteering(root, explore, '{"adapter":"command"}'), '');
+});
+
+test('Claude steering stashes a relay attestation for proxy-bound spawns', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: root, withSteering: true });
+  const rewritten = {
+    cwd: root,
+    tool_name: 'Agent',
+    tool_input: { prompt: 'Implement the change exactly.', description: 'x', subagent_type: 'general-purpose' },
+  };
+  runClaudeSteering(root, rewritten, '{"adapter":"command"}'); // rewrite → proxy: stash
+
+  const explicit = {
+    ...rewritten,
+    tool_input: { ...rewritten.tool_input, prompt: 'Second prompt.', subagent_type: 'fadeno:dispatch-reviewer' },
+  };
+  // Explicitly-targeted proxies are not rewritten but still get attested.
+  assert.equal(runClaudeSteering(root, explicit, '{"adapter":"command"}'), '');
+
+  const rows = read(root, '.fadeno/local/pending-relays.jsonl')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as { timestamp: string; prompt_sha256: string });
+  assert.deepEqual(
+    rows.map((row) => row.prompt_sha256),
+    [sha256Hex('Implement the change exactly.'), sha256Hex('Second prompt.')],
+  );
+  assert.ok(rows.every((row) => !Number.isNaN(Date.parse(row.timestamp))));
+
+  // Host-native rewrites are not relays: nothing further stashed.
+  const native = {
+    ...rewritten,
+    tool_input: { ...rewritten.tool_input, subagent_type: 'reviewer' },
+  };
+  runClaudeSteering(root, native, '{"adapter":"host","model":"opus"}');
+  assert.equal(read(root, '.fadeno/local/pending-relays.jsonl').trim().split('\n').length, 2);
 });
 
 test('Claude steering selects a native target model without a command proxy', (t) => {

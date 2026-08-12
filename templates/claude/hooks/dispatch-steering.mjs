@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 function finish(value) {
@@ -27,6 +28,35 @@ const cli = bundled != null && existsSync(bundled) ? bundled : 'fadeno';
 const requested = event.tool_input.subagent_type;
 if (typeof requested !== 'string') finish(null);
 const bare = requested.split(':').at(-1);
+
+// Relay-fidelity attestation: whenever a subtask heads to a dispatch proxy,
+// stash the spawn-side prompt digest. The kernel consumes a matching entry at
+// dispatch time and marks the evidence row `relay_attested` — turning the
+// proxy's "verbatim" from an instruction into a checked claim. Content-keyed
+// (sha256), so concurrent dispatches match without ordering.
+function stashRelay() {
+  const prompt = event.tool_input.prompt;
+  if (typeof prompt !== 'string' || prompt.length === 0) return;
+  if (!existsSync(join(cwd, '.fadeno'))) return; // not a Fadeno repo
+  try {
+    const dir = join(cwd, '.fadeno', 'local');
+    mkdirSync(dir, { recursive: true });
+    appendFileSync(
+      join(dir, 'pending-relays.jsonl'),
+      `${JSON.stringify({
+        timestamp: new Date().toISOString(),
+        prompt_sha256: createHash('sha256').update(prompt).digest('hex'),
+      })}\n`,
+    );
+  } catch {
+    // best-effort: attestation is evidence, never a gate on the spawn
+  }
+}
+
+if (/^dispatch-(worker|reviewer|judge)$/.test(bare)) {
+  stashRelay(); // explicitly-targeted proxy: no rewrite, but attest the relay
+  finish(null);
+}
 const archetype =
   bare === 'general-purpose' || bare === 'worker'
     ? 'worker'
@@ -58,6 +88,7 @@ if (slot.adapter === 'host' && (typeof slot.model !== 'string' || slot.model ===
 }
 
 const commandDelivery = slot.adapter === 'command';
+if (commandDelivery) stashRelay(); // rewritten-to-proxy spawns get attested too
 const localAgent = join(
   cwd,
   '.claude',
@@ -74,7 +105,11 @@ finish({
     updatedInput: {
       ...event.tool_input,
       subagent_type: target,
-      model: commandDelivery ? 'haiku' : slot.model,
+      // Proxy relays run on sonnet: the 2026-08-12 dogfood A/B showed haiku
+      // defecting on the relay contract (did the task itself, dropped the
+      // prompt's first line, asserted unwritten evidence); sonnet relayed
+      // flawlessly, and a proxy turn is only a few relay tokens.
+      model: commandDelivery ? 'sonnet' : slot.model,
     },
   },
 });

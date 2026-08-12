@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { copyTree, emitFile, type EmitResult } from '../lib/fsutil.ts';
 import { packageVersion, templatesDir } from '../lib/paths.ts';
@@ -26,6 +26,17 @@ const SKILLS = [
   { src: 'fadeno-driver', dst: 'driver' },
   { src: 'fadeno-setup', dst: 'setup' },
 ] as const;
+
+/**
+ * Append `[fadeno <version>]` to a definition's frontmatter description. The
+ * agent/skill listing is the only view of the plugin surface a live session
+ * has, and it loads at session start — the stamp makes a stale surface
+ * *detectable* (ask the session what version its fadeno surface reports and
+ * compare against `claude plugin list`).
+ */
+export function stampSurfaceVersion(md: string): string {
+  return md.replace(/^(description:.*?)\s*$/m, `$1 [fadeno ${packageVersion()}]`);
+}
 
 /**
  * Emit a Claude Code plugin (the "capability" layer) from the shared templates,
@@ -60,7 +71,7 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
   for (const { src, dst } of SKILLS) {
     let md = readFileSync(join(tpl, 'common', 'skills', src, 'SKILL.md'), 'utf8');
     // Use the short, namespaced skill name (fadeno:runner, fadeno:builder).
-    md = md.replace(`name: ${src}`, `name: ${dst}`);
+    md = stampSurfaceVersion(md.replace(`name: ${src}`, `name: ${dst}`));
     const skillPath = join(outDir, 'skills', dst, 'SKILL.md');
     results.push({ path: skillPath, status: emitFile(skillPath, md, force) });
     const references = join(tpl, 'common', 'skills', src, 'references');
@@ -87,13 +98,29 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
   // which plugin agents disallow). They namespace as fadeno:worker / :reviewer /
   // :judge, plus the fadeno:dispatch-* proxies that relay archetype-shaped
   // subtasks to `fadeno dispatch` (loadouts-and-dispatch.md, plugin surface).
-  copyTree(join(tpl, 'claude', 'claude-agents'), join(outDir, 'agents'), force, results);
+  // Descriptions get the version stamp for surface-staleness detection.
+  for (const file of readdirSync(join(tpl, 'claude', 'claude-agents')).sort()) {
+    const agentPath = join(outDir, 'agents', file);
+    results.push({
+      path: agentPath,
+      status: emitFile(
+        agentPath,
+        stampSurfaceVersion(readFileSync(join(tpl, 'claude', 'claude-agents', file), 'utf8')),
+        force,
+      ),
+    });
+  }
   // Claude plugin hook surface: use the plugin-local bundled `fadeno` and keep
   // the hook selective/inert for the native loadout.
   const hookPath = join(outDir, 'hooks', 'dispatch-steering.mjs');
   results.push({
     path: hookPath,
     status: emitFile(hookPath, readFileSync(join(tpl, 'claude', 'hooks', 'dispatch-steering.mjs'), 'utf8'), force),
+  });
+  const guardPath = join(outDir, 'hooks', 'dispatch-proxy-guard.mjs');
+  results.push({
+    path: guardPath,
+    status: emitFile(guardPath, readFileSync(join(tpl, 'claude', 'hooks', 'dispatch-proxy-guard.mjs'), 'utf8'), force),
   });
   const hookManifestPath = join(outDir, 'hooks', 'hooks.json');
   results.push({

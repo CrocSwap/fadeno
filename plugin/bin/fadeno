@@ -13939,7 +13939,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.3";
+  if (true) return "0.6.0-rc.5";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -14333,6 +14333,7 @@ function runDecide(opts) {
 
 // src/commands/dispatch.ts
 var import_node_child_process = require("node:child_process");
+var import_node_crypto2 = require("node:crypto");
 var import_node_fs12 = require("node:fs");
 var import_node_os2 = require("node:os");
 var import_node_path12 = require("node:path");
@@ -16932,6 +16933,33 @@ ${missing.join("\n")}
 var DispatchCommandError = class extends Error {
 };
 var DISPATCHES_FILE = (0, import_node_path12.join)(".fadeno", "dispatches.jsonl");
+var PENDING_RELAYS_FILE = (0, import_node_path12.join)(".fadeno", "local", "pending-relays.jsonl");
+var PENDING_RELAY_MAX_AGE_MS = 60 * 60 * 1e3;
+function consumePendingRelay(repoRoot, prompt, now) {
+  const path = (0, import_node_path12.join)(repoRoot, PENDING_RELAYS_FILE);
+  if (!(0, import_node_fs12.existsSync)(path)) return null;
+  let rows;
+  try {
+    rows = (0, import_node_fs12.readFileSync)(path, "utf8").split("\n").filter((line) => line.trim() !== "").map((line) => JSON.parse(line));
+  } catch {
+    return null;
+  }
+  const fresh = rows.filter((row) => {
+    const ts = typeof row.timestamp === "string" ? Date.parse(row.timestamp) : NaN;
+    return Number.isFinite(ts) && now.getTime() - ts <= PENDING_RELAY_MAX_AGE_MS && typeof row.prompt_sha256 === "string";
+  });
+  const digests = /* @__PURE__ */ new Set([sha256Hex(prompt), sha256Hex(prompt.replace(/\n$/, ""))]);
+  const hit = fresh.findIndex((row) => digests.has(row.prompt_sha256));
+  const remaining = hit === -1 ? fresh : fresh.filter((_, index) => index !== hit);
+  try {
+    if (remaining.length === 0) (0, import_node_fs12.rmSync)(path, { force: true });
+    else (0, import_node_fs12.writeFileSync)(path, `${remaining.map((row) => JSON.stringify(row)).join("\n")}
+`, "utf8");
+  } catch {
+  }
+  if (hit !== -1) return true;
+  return fresh.length > 0 ? false : null;
+}
 var SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
 var ROW_RESOLUTION = {
   binding: "binding",
@@ -17019,20 +17047,24 @@ function runDispatch(opts) {
   }
   if (spec.adapter === "host" && spec.fallbackCommand == null) {
     throw new DispatchCommandError(
-      `resolved to host executor "${executorName}"; ad-hoc dispatch invokes command adapters only \u2014 declare fallback_command, bind a command executor, or run via native host dispatch.`
+      `resolved to host executor "${executorName}"; ad-hoc dispatch invokes command adapters only \u2014 run this ${archetype ?? role ?? "role"}-shaped task with the native in-session ${archetype ?? "role"} agent instead, declare fallback_command on the executor, or bind a command executor.`
     );
   }
   const command2 = spec.adapter === "command" ? spec.command : spec.fallbackCommand;
   const transport = spec.adapter === "command" ? "command" : "host-command-fallback";
   let prompt;
+  let promptSource;
+  let promptPath = null;
   if (opts.promptFile != null && opts.promptFile !== "") {
-    const promptPath = (0, import_node_path12.resolve)(cwd, opts.promptFile);
+    promptPath = (0, import_node_path12.resolve)(cwd, opts.promptFile);
     if (!(0, import_node_fs12.existsSync)(promptPath)) {
       throw new DispatchCommandError(`--prompt-file ${opts.promptFile} does not exist.`);
     }
     prompt = (0, import_node_fs12.readFileSync)(promptPath, "utf8");
+    promptSource = "file";
   } else if (opts.prompt != null) {
     prompt = opts.prompt;
+    promptSource = "stdin";
   } else {
     throw new DispatchCommandError("no prompt: pass --prompt-file <path> or pipe the prompt on stdin.");
   }
@@ -17045,6 +17077,53 @@ function runDispatch(opts) {
   const echo = `${role ?? archetype ?? executorName} \u2192 ${executorName}${spec.model != null ? ` (${spec.model})` : ""} [${sourceLabel}]`;
   opts.onEcho?.(echo);
   opts.onEcho?.(`external sandbox: ${executorName} (${command2.join(" ")}) runs outside the current harness via ${transport}; evidence \u2192 ${DISPATCHES_FILE}`);
+  const dispatchId = (0, import_node_crypto2.randomUUID)();
+  let promptSnapshot;
+  if (promptSource === "stdin") {
+    const snapshotRel = (0, import_node_path12.join)(
+      ".fadeno",
+      "local",
+      "prompts",
+      `${archetype ?? role ?? "dispatch"}-${dispatchId.slice(0, 8)}.md`
+    );
+    const snapshotAbs = (0, import_node_path12.join)(repoRoot, snapshotRel);
+    (0, import_node_fs12.mkdirSync)((0, import_node_path12.join)(repoRoot, ".fadeno", "local", "prompts"), { recursive: true });
+    (0, import_node_fs12.writeFileSync)(snapshotAbs, prompt, "utf8");
+    promptSnapshot = snapshotRel.split("\\").join("/");
+  } else {
+    const rel = (0, import_node_path12.relative)(repoRoot, promptPath).split("\\").join("/");
+    promptSnapshot = rel === "" || rel.startsWith("../") || (0, import_node_path12.isAbsolute)(rel) ? promptPath : rel;
+  }
+  const relayAttested = consumePendingRelay(repoRoot, prompt, opts.now ?? /* @__PURE__ */ new Date());
+  const promptSha256 = sha256Hex(prompt);
+  const commandSha256 = sha256Hex(JSON.stringify(command2));
+  const identity = {
+    dispatch_id: dispatchId,
+    archetype,
+    role,
+    resolution: ROW_RESOLUTION[source],
+    loadout: active == null ? null : { name: active.name, source: active.source },
+    executor: executorName,
+    ...spec.target != null ? { target: spec.target, provider: spec.provider ?? null } : {},
+    model: spec.model,
+    transport,
+    ...spec.target != null ? { delivery_transport: transport } : {},
+    prompt_source: promptSource,
+    prompt_snapshot: promptSnapshot,
+    prompt_sha256: promptSha256,
+    ...relayAttested != null ? { relay_attested: relayAttested } : {},
+    command: command2,
+    command_sha256: commandSha256
+  };
+  ensureFadenoIgnore(repoRoot);
+  (0, import_node_fs12.mkdirSync)((0, import_node_path12.join)(repoRoot, ".fadeno"), { recursive: true });
+  const evidenceFile = (0, import_node_path12.join)(repoRoot, DISPATCHES_FILE);
+  (0, import_node_fs12.appendFileSync)(
+    evidenceFile,
+    `${JSON.stringify({ timestamp: (opts.now ?? /* @__PURE__ */ new Date()).toISOString(), event: "dispatch_requested", ...identity })}
+`,
+    "utf8"
+  );
   const started = Date.now();
   const [cmd, ...args] = command2;
   const spawned = (0, import_node_child_process.spawnSync)(cmd, args, {
@@ -17055,39 +17134,29 @@ function runDispatch(opts) {
   });
   const durationMs = Date.now() - started;
   const stdout = spawned.stdout ?? "";
-  const promptSha256 = sha256Hex(prompt);
   const outputSha256 = sha256Hex(stdout);
   const row = {
     timestamp: (opts.now ?? /* @__PURE__ */ new Date()).toISOString(),
-    archetype,
-    role,
-    resolution: ROW_RESOLUTION[source],
-    loadout: active == null ? null : { name: active.name, source: active.source },
-    executor: executorName,
-    ...spec.target != null ? { target: spec.target, provider: spec.provider ?? null } : {},
-    model: spec.model,
-    transport,
-    ...spec.target != null ? { delivery_transport: transport } : {},
+    event: "dispatch_completed",
+    ...identity,
     exit_code: spawned.error != null ? null : spawned.status,
+    ...spawned.signal != null ? { signal: spawned.signal } : {},
     duration_ms: durationMs,
-    prompt_sha256: promptSha256,
     output_sha256: outputSha256
   };
   if (spawned.error != null) row.error = spawned.error.message;
-  ensureFadenoIgnore(repoRoot);
-  (0, import_node_fs12.mkdirSync)((0, import_node_path12.join)(repoRoot, ".fadeno"), { recursive: true });
-  (0, import_node_fs12.appendFileSync)(
-    (0, import_node_path12.join)(repoRoot, DISPATCHES_FILE),
-    `${JSON.stringify({ ...row, command: command2, command_sha256: sha256Hex(JSON.stringify(command2)) })}
-`,
-    "utf8"
-  );
+  (0, import_node_fs12.appendFileSync)(evidenceFile, `${JSON.stringify(row)}
+`, "utf8");
   if (spawned.error != null) {
     throw new DispatchCommandError(
       `executor "${executorName}" failed to spawn: ${spawned.error.message}`
     );
   }
   return {
+    dispatchId,
+    promptSource,
+    promptSnapshot,
+    relayAttested,
     archetype,
     role,
     loadout: active,
@@ -17545,13 +17614,13 @@ function runDiagram(opts) {
 
 // src/commands/drive.ts
 var import_node_child_process2 = require("node:child_process");
-var import_node_crypto3 = require("node:crypto");
+var import_node_crypto4 = require("node:crypto");
 var import_node_fs17 = require("node:fs");
 var import_node_path17 = require("node:path");
 var import_yaml10 = __toESM(require_dist(), 1);
 
 // src/lib/node-instance.ts
-var import_node_crypto2 = require("node:crypto");
+var import_node_crypto3 = require("node:crypto");
 var NodeInstanceError = class extends Error {
 };
 var STEP = /^[a-z0-9][a-z0-9_]*$/;
@@ -17667,7 +17736,7 @@ function nodeInstanceArtifactScope(id) {
   }).join("/")}`;
 }
 function digestId(prefix, parts) {
-  const digest2 = (0, import_node_crypto2.createHash)("sha256").update(parts.join("\0")).digest("hex").slice(0, 20);
+  const digest2 = (0, import_node_crypto3.createHash)("sha256").update(parts.join("\0")).digest("hex").slice(0, 20);
   return `${prefix}-${digest2}`;
 }
 function stepExecutionIdFor(nodeInstance) {
@@ -19500,7 +19569,7 @@ function dispatchOnce(ctx, stepId, role, generation, inBody, outputRel, artifact
     } else {
       session = "fresh";
       if (spec.command.some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
-        sessionId = (0, import_node_crypto3.randomUUID)();
+        sessionId = (0, import_node_crypto4.randomUUID)();
         argv = substituteSessionId(spec.command, sessionId);
       }
     }
@@ -20612,6 +20681,12 @@ function runInit(opts) {
       "utf8"
     );
     results.push({ path: steeringPath, status: emitFile(steeringPath, steeringBody, force) });
+    const guardPath = (0, import_node_path19.join)(repoRoot, CLAUDE_GUARD_SCRIPT);
+    const guardBody = (0, import_node_fs19.readFileSync)(
+      (0, import_node_path19.join)(tpl, "claude", "hooks", "dispatch-proxy-guard.mjs"),
+      "utf8"
+    );
+    results.push({ path: guardPath, status: emitFile(guardPath, guardBody, force) });
   }
   if (opts.target === "claude") emitClaudeSettings(repoRoot, withSteering, results);
   return { target: opts.target, repoRoot, results };
@@ -20619,6 +20694,12 @@ function runInit(opts) {
 var FADENO_BASH_RULE = "Bash(fadeno:*)";
 var CLAUDE_STEERING_SCRIPT = (0, import_node_path19.join)(".fadeno", "local", "claude-dispatch-steering.mjs");
 var CLAUDE_STEERING_COMMAND = `node ${CLAUDE_STEERING_SCRIPT}`;
+var CLAUDE_GUARD_SCRIPT = (0, import_node_path19.join)(".fadeno", "local", "claude-dispatch-proxy-guard.mjs");
+var CLAUDE_GUARD_COMMAND = `node ${CLAUDE_GUARD_SCRIPT}`;
+var CLAUDE_STEERING_HOOKS = [
+  { matcher: "Agent", command: CLAUDE_STEERING_COMMAND },
+  { matcher: "Bash", command: CLAUDE_GUARD_COMMAND }
+];
 function emitClaudeSettings(repoRoot, withSteering, results) {
   const settingsPath = (0, import_node_path19.join)(repoRoot, ".claude", "settings.local.json");
   const existed = (0, import_node_fs19.existsSync)(settingsPath);
@@ -20657,18 +20738,20 @@ function emitClaudeSettings(repoRoot, withSteering, results) {
       return;
     }
     const preToolUse = Array.isArray(rawPreToolUse) ? [...rawPreToolUse] : [];
-    const alreadyPresent = preToolUse.some((entry) => {
+    const hasCommand = (command2) => preToolUse.some((entry) => {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
       const handlers = entry.hooks;
       return Array.isArray(handlers) && handlers.some(
-        (handler) => handler != null && typeof handler === "object" && !Array.isArray(handler) && handler.command === CLAUDE_STEERING_COMMAND
+        (handler) => handler != null && typeof handler === "object" && !Array.isArray(handler) && handler.command === command2
       );
     });
-    if (!alreadyPresent) {
-      preToolUse.push({
-        matcher: "Agent",
-        hooks: [{ type: "command", command: CLAUDE_STEERING_COMMAND }]
-      });
+    let hooksChanged = false;
+    for (const { matcher, command: command2 } of CLAUDE_STEERING_HOOKS) {
+      if (hasCommand(command2)) continue;
+      preToolUse.push({ matcher, hooks: [{ type: "command", command: command2 }] });
+      hooksChanged = true;
+    }
+    if (hooksChanged) {
       hooks.PreToolUse = preToolUse;
       data.hooks = hooks;
       changed = true;
@@ -21087,6 +21170,9 @@ var SKILLS2 = [
   { src: "fadeno-driver", dst: "driver" },
   { src: "fadeno-setup", dst: "setup" }
 ];
+function stampSurfaceVersion(md) {
+  return md.replace(/^(description:.*?)\s*$/m, `$1 [fadeno ${packageVersion()}]`);
+}
 function runPlugin(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const tpl = templatesDir();
@@ -21109,7 +21195,7 @@ function runPlugin(opts = {}) {
   results.push({ path: manifestPath, status: emitFile(manifestPath, manifest, force) });
   for (const { src, dst } of SKILLS2) {
     let md = (0, import_node_fs22.readFileSync)((0, import_node_path22.join)(tpl, "common", "skills", src, "SKILL.md"), "utf8");
-    md = md.replace(`name: ${src}`, `name: ${dst}`);
+    md = stampSurfaceVersion(md.replace(`name: ${src}`, `name: ${dst}`));
     const skillPath = (0, import_node_path22.join)(outDir, "skills", dst, "SKILL.md");
     results.push({ path: skillPath, status: emitFile(skillPath, md, force) });
     const references = (0, import_node_path22.join)(tpl, "common", "skills", src, "references");
@@ -21126,11 +21212,26 @@ function runPlugin(opts = {}) {
     (0, import_node_fs22.chmodSync)(launcherPath, 493);
   }
   copyTree((0, import_node_path22.join)(tpl, "common", "commands"), (0, import_node_path22.join)(outDir, "commands"), force, results);
-  copyTree((0, import_node_path22.join)(tpl, "claude", "claude-agents"), (0, import_node_path22.join)(outDir, "agents"), force, results);
+  for (const file of (0, import_node_fs22.readdirSync)((0, import_node_path22.join)(tpl, "claude", "claude-agents")).sort()) {
+    const agentPath = (0, import_node_path22.join)(outDir, "agents", file);
+    results.push({
+      path: agentPath,
+      status: emitFile(
+        agentPath,
+        stampSurfaceVersion((0, import_node_fs22.readFileSync)((0, import_node_path22.join)(tpl, "claude", "claude-agents", file), "utf8")),
+        force
+      )
+    });
+  }
   const hookPath = (0, import_node_path22.join)(outDir, "hooks", "dispatch-steering.mjs");
   results.push({
     path: hookPath,
     status: emitFile(hookPath, (0, import_node_fs22.readFileSync)((0, import_node_path22.join)(tpl, "claude", "hooks", "dispatch-steering.mjs"), "utf8"), force)
+  });
+  const guardPath = (0, import_node_path22.join)(outDir, "hooks", "dispatch-proxy-guard.mjs");
+  results.push({
+    path: guardPath,
+    status: emitFile(guardPath, (0, import_node_fs22.readFileSync)((0, import_node_path22.join)(tpl, "claude", "hooks", "dispatch-proxy-guard.mjs"), "utf8"), force)
   });
   const hookManifestPath = (0, import_node_path22.join)(outDir, "hooks", "hooks.json");
   results.push({
@@ -23856,7 +23957,7 @@ var import_node_os4 = require("node:os");
 var import_node_path29 = require("node:path");
 
 // src/lib/installations.ts
-var import_node_crypto4 = require("node:crypto");
+var import_node_crypto5 = require("node:crypto");
 var import_node_fs29 = require("node:fs");
 var import_node_path28 = require("node:path");
 var InstallationError = class extends Error {
@@ -23884,7 +23985,7 @@ function writeInstallationManifest(paths, manifest) {
 `, "utf8");
 }
 function fileDigest(path) {
-  return (0, import_node_crypto4.createHash)("sha256").update((0, import_node_fs29.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto5.createHash)("sha256").update((0, import_node_fs29.readFileSync)(path)).digest("hex");
 }
 function installManagedRuntime(paths, sourceDir, manifest) {
   if (sourceDir == null || !(0, import_node_fs29.existsSync)((0, import_node_path28.join)(sourceDir, "fadeno"))) return false;
@@ -24286,7 +24387,7 @@ function runDoctor(opts = {}) {
 }
 
 // src/commands/vendor.ts
-var import_node_crypto5 = require("node:crypto");
+var import_node_crypto6 = require("node:crypto");
 var import_node_fs34 = require("node:fs");
 var import_node_path33 = require("node:path");
 function makeVendoredCodexAgentsTrackable(repoRoot) {
@@ -24306,7 +24407,7 @@ function digestTree(root) {
     for (const entry of (0, import_node_fs34.readdirSync)(dir, { withFileTypes: true })) {
       const full = (0, import_node_path33.join)(dir, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (entry.isFile()) files[(0, import_node_path33.relative)(root, full).split("\\").join("/")] = (0, import_node_crypto5.createHash)("sha256").update((0, import_node_fs34.readFileSync)(full)).digest("hex");
+      else if (entry.isFile()) files[(0, import_node_path33.relative)(root, full).split("\\").join("/")] = (0, import_node_crypto6.createHash)("sha256").update((0, import_node_fs34.readFileSync)(full)).digest("hex");
     }
   }
   walk(root);
@@ -24319,7 +24420,7 @@ function ownedVendoredFiles(repoRoot, init) {
     if (result.status !== "created" && result.status !== "overwritten") continue;
     const rel = (0, import_node_path33.relative)(repoRoot, result.path).split("\\").join("/");
     if (shared.has(rel) || rel.startsWith("../") || !(0, import_node_fs34.existsSync)(result.path)) continue;
-    owned[rel] = (0, import_node_crypto5.createHash)("sha256").update((0, import_node_fs34.readFileSync)(result.path)).digest("hex");
+    owned[rel] = (0, import_node_crypto6.createHash)("sha256").update((0, import_node_fs34.readFileSync)(result.path)).digest("hex");
   }
   return owned;
 }
@@ -24349,13 +24450,13 @@ function runVendor(opts) {
 }
 
 // src/commands/evidence.ts
-var import_node_crypto6 = require("node:crypto");
+var import_node_crypto7 = require("node:crypto");
 var import_node_fs35 = require("node:fs");
 var import_node_path34 = require("node:path");
 var EvidenceError = class extends Error {
 };
 function sha256(path) {
-  return (0, import_node_crypto6.createHash)("sha256").update((0, import_node_fs35.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto7.createHash)("sha256").update((0, import_node_fs35.readFileSync)(path)).digest("hex");
 }
 function copyOne(source, destination, rel, files) {
   if ((0, import_node_fs35.existsSync)(destination)) {
@@ -24533,13 +24634,13 @@ function runClean(opts = {}) {
 }
 
 // src/commands/unvendor.ts
-var import_node_crypto7 = require("node:crypto");
+var import_node_crypto8 = require("node:crypto");
 var import_node_fs38 = require("node:fs");
 var import_node_path37 = require("node:path");
 var UnvendorError = class extends Error {
 };
 function digest(path) {
-  return (0, import_node_crypto7.createHash)("sha256").update((0, import_node_fs38.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto8.createHash)("sha256").update((0, import_node_fs38.readFileSync)(path)).digest("hex");
 }
 function runUnvendor(opts = {}) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());

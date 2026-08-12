@@ -1,5 +1,5 @@
 {
-  "description": "Route only command-backed Fadeno archetype agents; native slots remain in Claude Code.",
+  "description": "Route only command-backed Fadeno archetype agents; native slots remain in Claude Code. Inside dispatch proxies, enforce the relay contract on Bash.",
   "hooks": {
     "PreToolUse": [
       {
@@ -8,6 +8,15 @@
           {
             "type": "command",
             "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/dispatch-steering.mjs"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/dispatch-proxy-guard.mjs"
           }
         ]
       }

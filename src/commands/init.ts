@@ -161,6 +161,12 @@ export function runInit(opts: InitOptions): InitResult {
       'utf8',
     );
     results.push({ path: steeringPath, status: emitFile(steeringPath, steeringBody, force) });
+    const guardPath = join(repoRoot, CLAUDE_GUARD_SCRIPT);
+    const guardBody = readFileSync(
+      join(tpl, 'claude', 'hooks', 'dispatch-proxy-guard.mjs'),
+      'utf8',
+    );
+    results.push({ path: guardPath, status: emitFile(guardPath, guardBody, force) });
   }
 
   // 7. Pre-approve the fadeno CLI locally so it stops prompting on every call
@@ -175,6 +181,13 @@ export function runInit(opts: InitOptions): InitResult {
 const FADENO_BASH_RULE = 'Bash(fadeno:*)';
 const CLAUDE_STEERING_SCRIPT = join('.fadeno', 'local', 'claude-dispatch-steering.mjs');
 const CLAUDE_STEERING_COMMAND = `node ${CLAUDE_STEERING_SCRIPT}`;
+const CLAUDE_GUARD_SCRIPT = join('.fadeno', 'local', 'claude-dispatch-proxy-guard.mjs');
+const CLAUDE_GUARD_COMMAND = `node ${CLAUDE_GUARD_SCRIPT}`;
+/** PreToolUse entries steering installs: spawn rewrite + proxy relay guard. */
+const CLAUDE_STEERING_HOOKS: ReadonlyArray<{ matcher: string; command: string }> = [
+  { matcher: 'Agent', command: CLAUDE_STEERING_COMMAND },
+  { matcher: 'Bash', command: CLAUDE_GUARD_COMMAND },
+];
 
 /**
  * Merge a `Bash(fadeno:*)` allow rule into the repo's *local* Claude settings so
@@ -236,25 +249,28 @@ function emitClaudeSettings(
       return;
     }
     const preToolUse = Array.isArray(rawPreToolUse) ? [...rawPreToolUse] : [];
-    const alreadyPresent = preToolUse.some((entry) => {
-      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
-      const handlers = (entry as Record<string, unknown>).hooks;
-      return (
-        Array.isArray(handlers) &&
-        handlers.some(
-          (handler) =>
-            handler != null &&
-            typeof handler === 'object' &&
-            !Array.isArray(handler) &&
-            (handler as Record<string, unknown>).command === CLAUDE_STEERING_COMMAND,
-        )
-      );
-    });
-    if (!alreadyPresent) {
-      preToolUse.push({
-        matcher: 'Agent',
-        hooks: [{ type: 'command', command: CLAUDE_STEERING_COMMAND }],
+    const hasCommand = (command: string): boolean =>
+      preToolUse.some((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+        const handlers = (entry as Record<string, unknown>).hooks;
+        return (
+          Array.isArray(handlers) &&
+          handlers.some(
+            (handler) =>
+              handler != null &&
+              typeof handler === 'object' &&
+              !Array.isArray(handler) &&
+              (handler as Record<string, unknown>).command === command,
+          )
+        );
       });
+    let hooksChanged = false;
+    for (const { matcher, command } of CLAUDE_STEERING_HOOKS) {
+      if (hasCommand(command)) continue;
+      preToolUse.push({ matcher, hooks: [{ type: 'command', command }] });
+      hooksChanged = true;
+    }
+    if (hooksChanged) {
       hooks.PreToolUse = preToolUse;
       data.hooks = hooks;
       changed = true;
