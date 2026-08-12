@@ -11,6 +11,7 @@ import {
 } from '../lib/composite-flow.ts';
 import {
   ExecutorProfileError,
+  explainWriteConflict,
   loadExecutorProfile,
   parseExecutorProfile,
   readLocalLoadout,
@@ -443,6 +444,7 @@ function priorAttempts(events: RunEvent[], actorCallId: string): PriorAttempts {
 type DispatchFailure =
   | { kind: 'spawn_failed'; detail: string }
   | { kind: 'exit_nonzero'; detail: string }
+  | { kind: 'write_conflict'; detail: string }
   | { kind: 'invalid_output'; detail: string; errors: string[] };
 
 type DispatchOutcome = { kind: 'valid' } | DispatchFailure;
@@ -1032,6 +1034,43 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
         repairErrors,
       ));
       continue;
+    }
+
+    // The delivery is a command, so the role's archetype needs a command that
+    // can do its work. Refused here — before the prompt is assembled and long
+    // before the spawn — in the same words `fadeno dispatch` refuses, so a
+    // playbook run cannot hand worker-shaped work to a read-only executor.
+    // Host dispatch requests are exempt above: in-session permissions belong
+    // to the host, not to this policy.
+    const archetype = role == null ? null : roleArchetype(ctx.playbook, role);
+    const writeConflict = explainWriteConflict(
+      { executor: binding.executor, spec: binding.spec },
+      archetype,
+      ctx.profile,
+    );
+    if (writeConflict != null) {
+      appendEvent(
+        ctx.runDir,
+        {
+          type: 'actor_failed',
+          step: stepId,
+          actor: role,
+          step_execution_id: stepExecutionId,
+          actor_call_id: actorCallId,
+          attempt: priorAttempts(events, actorCallId).count + 1,
+          executor: binding.executor,
+          archetype,
+          write_access: false,
+          reason: 'write_access_denied',
+          error: writeConflict,
+        },
+        ctx.now,
+      );
+      ctx.act(`dispatch refused ${stepId}${role ? ` (${role})` : ''}: ${writeConflict}`);
+      return {
+        kind: 'write_conflict',
+        detail: `${stepId}${role ? ` (${role})` : ''} was not dispatched: ${writeConflict}`,
+      };
     }
 
     let repairErrors: string[] | null = null;
@@ -1742,6 +1781,9 @@ export function runDrive(opts: DriveOptions): DriveResult {
           failure.requests,
         );
       }
+      // A refused delivery is a failed dispatch like any other, but re-running
+      // drive unchanged would refuse identically: the message carries the fixes.
+      if (failure.kind === 'write_conflict') return finish('executor_failed', failure.detail);
       if (failure.kind === 'invalid_output') {
         return finish(
           'output_invalid',

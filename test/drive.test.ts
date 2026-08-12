@@ -372,6 +372,96 @@ test('engine: a dead executor pauses the run; explicit --bind substitution is th
   assert.match(finding(verify, 'executor-bindings').detail, /1 explicit override/);
 });
 
+/**
+ * A role whose archetype declares `requires_write`, routed by an active
+ * loadout onto a command delivery that declares it cannot write. The executor
+ * would leave a witness file if it ever ran.
+ */
+const WRITE_GUARD_PLAYBOOK = `kind: AgentPlaybook
+schema_version: "0.1"
+name: write-guard
+description: One implementation step whose role declares a mutating archetype.
+when_to_use:
+  - engine write-capability tests
+roles:
+  builder:
+    purpose: Implement the task.
+    archetype: worker
+flow:
+  - id: implement
+    kind: actor_call
+    actor: builder
+    output: Notes
+    output_path: artifacts/notes.md
+    terminal_status: completed
+`;
+
+test('engine: a write-needing role is refused before the spawn on a read-only delivery', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'codex', repoRoot: root });
+  writeFileSync(join(root, '.fadeno', 'playbooks', 'write-guard.yaml'), WRITE_GUARD_PLAYBOOK);
+  writeFileSync(
+    join(root, '.fadeno', 'executors.yaml'),
+    stringifyYaml({
+      executors: {
+        'ro-worker': {
+          adapter: 'command',
+          command: ['node', '-e', "require('fs').writeFileSync('ran.tmp','1');process.stdout.write('NOTES')"],
+          write_access: false,
+        },
+        'rw-worker': {
+          adapter: 'command',
+          command: ['node', '-e', "process.stdout.write('NOTES')"],
+          write_access: true,
+        },
+      },
+      archetypes: { worker: { requires_write: true } },
+      loadouts: { main: { worker: 'ro-worker' } },
+      default_loadout: 'main',
+    }),
+  );
+  const { runId } = runNewRun({ playbook: 'write-guard', task: 'Ship the fix', repoRoot: root });
+
+  const refused = runDrive({ run: runId, repoRoot: root, env: null });
+  assert.equal(refused.outcome, 'executor_failed');
+  assert.match(refused.detail, /implement \(builder\) was not dispatched/);
+  assert.match(refused.detail, /archetype "worker" declares `requires_write: true`, but executor "ro-worker"/);
+  assert.match(refused.detail, /native in-session worker agent/);
+
+  // Nothing was spawned, nothing was assembled, nothing was produced.
+  assert.equal(existsSync(join(root, 'ran.tmp')), false);
+  const all = events(root, runId);
+  assert.equal(ofType(all, 'actor_dispatched').length, 0);
+  assert.equal(ofType(all, 'prompt_assembled').length, 0);
+  assert.equal(ofType(all, 'artifact_created').length, 0);
+
+  // The failure is recorded like any other failed dispatch, with the delivery's
+  // declared (in)capability on the row.
+  const failures = ofType(all, 'actor_failed');
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.extra.reason, 'write_access_denied');
+  assert.equal(failures[0]!.extra.executor, 'ro-worker');
+  assert.equal(failures[0]!.extra.actor, 'builder');
+  assert.equal(failures[0]!.extra.archetype, 'worker');
+  assert.equal(failures[0]!.extra.write_access, false);
+  assert.equal(failures[0]!.extra.attempt, 1);
+  assert.match(String(failures[0]!.extra.error), /requires_write: true/);
+
+  // The run is paused, not terminal: re-driving repeats the refusal.
+  assert.equal(runDrive({ run: runId, repoRoot: root, env: null }).outcome, 'executor_failed');
+  assert.equal(ofType(events(root, runId), 'actor_failed').length, 2);
+
+  // Rebinding to a write-capable delivery is one of the fixes the message
+  // names, and it clears the guard without any special case.
+  const recovered = runDrive({ run: runId, repoRoot: root, env: null, bind: ['builder=rw-worker'] });
+  assert.equal(recovered.outcome, 'terminal');
+  assert.equal(recovered.status, 'completed');
+  assert.equal(
+    ofType(events(root, runId), 'actor_dispatched').map((e) => e.extra.executor).join(),
+    'rw-worker',
+  );
+});
+
 test('verify: tampered profile snapshot fails executor-bindings', (t) => {
   const { root, runId } = completeHappyRun(t);
   const snapshotPath = join(root, '.fadeno', 'runs', runId, 'profile.yaml');

@@ -5,6 +5,7 @@ import {
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
   executorForArchetype,
+  explainWriteConflict,
   loadExecutorProfile,
   parseExecutorProfile,
   readLocalLoadout,
@@ -24,7 +25,13 @@ import { userPaths, type UserPathOptions } from '../lib/user-paths.ts';
 
 export class SteeringError extends Error {}
 
-export type SteeringMode = 'native' | 'command' | 'restart_required';
+/**
+ * `write_conflict` is a command slot the resolver refuses to present as
+ * runnable: the archetype declares `requires_write` and the delivery command
+ * cannot mutate the workspace. Distinct from `restart_required` — a fresh
+ * session does not fix it; the binding or the command's permission mode does.
+ */
+export type SteeringMode = 'native' | 'command' | 'restart_required' | 'write_conflict';
 
 export interface SteeringResolution {
   mode: SteeringMode;
@@ -37,6 +44,8 @@ export interface SteeringResolution {
   source: RoleResolutionSource | 'native-baseline' | 'host-request';
   nativeExecutor: string | null;
   detail: string;
+  /** The shared refusal, present only on a `write_conflict` resolution. */
+  writeConflict?: string;
 }
 
 interface CommonOptions {
@@ -265,8 +274,24 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     throw err;
   }
 
-  if (resolved.executor.adapter === 'command') {
+  // Both command deliveries below (a command executor, and a host executor's
+  // declared fallback) are checked against the archetype's write requirement:
+  // a slot that would refuse the work is never presented as a clean command
+  // slot. A native slot is exempt — the host owns its agent's permissions.
+  const refusal = (spec: ExecutorSpec, executorName: string): SteeringResolution | null => {
+    const conflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile);
+    if (conflict == null) return null;
     return {
+      mode: 'write_conflict', archetype, role, activeLoadout: active,
+      executor: executorName, adapter: spec.adapter, model: spec.model,
+      source: resolved.source, nativeExecutor,
+      detail: conflict,
+      writeConflict: conflict,
+    };
+  };
+
+  if (resolved.executor.adapter === 'command') {
+    return refusal(resolved.executor, resolved.executorName) ?? {
       mode: 'command', archetype, role, activeLoadout: active,
       executor: resolved.executorName, adapter: 'command', model: resolved.executor.model,
       source: resolved.source, nativeExecutor,
@@ -282,7 +307,7 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     };
   }
   if (resolved.executor.fallbackCommand != null) {
-    return {
+    return refusal(resolved.executor, resolved.executorName) ?? {
       mode: 'command', archetype, role, activeLoadout: active,
       executor: resolved.executorName, adapter: 'host', model: resolved.executor.model,
       source: resolved.source, nativeExecutor,
@@ -350,6 +375,9 @@ For that ordinary task:
   verbatim. On a non-zero exit, report the error and do not perform the
   task yourself. The command executor runs outside this subagent's sandbox.
 - mode=restart_required: stop and relay the resolver's restart instruction.
+- mode=write_conflict: stop and relay the resolver's refusal verbatim. The
+  loadout's delivery cannot write, so never dispatch it and never substitute
+  yourself for the executor the loadout names.
 
 Never use ordinary \`fadeno dispatch\` for a locked engine request and never
 silently substitute a different model or executor.
@@ -389,6 +417,9 @@ For that ordinary task:
   task yourself.
 - mode=native or mode=restart_required: stop and relay the resolver's
   instruction; a host slot must run in a matching native Codex agent.
+- mode=write_conflict: stop and relay the resolver's refusal verbatim. The
+  loadout's delivery cannot write, so never dispatch it and never do the work
+  on this broker instead.
 - If the resolver errors, stop and report the error rather than doing the role
   work on this broker.
 
@@ -413,10 +444,13 @@ export interface SteeringApplyResult {
   loadout: string;
   results: EmitResult[];
   materialization: Record<string, {
-    kind: 'native' | 'command-broker';
+    /** `write-conflict` slots are refused: no agent file is written for them. */
+    kind: 'native' | 'command-broker' | 'write-conflict';
     adapter: ExecutorSpec['adapter'];
     executor: string;
     model: string | null;
+    /** The shared refusal, present only on a `write-conflict` slot. */
+    writeConflict?: string;
   }>;
   /** Host-only compatibility view; command-broker slots are omitted. */
   baseline: Record<string, string>;
@@ -493,6 +527,17 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
       };
       body = renderCodexNativeAgent(archetype, executorName, spec, cliPath);
     } else {
+      // Materializing a broker for a slot whose command cannot write would
+      // hand this archetype's work to a delivery that must refuse it. Skip the
+      // slot — no agent file, no half-truth — and let the rest materialize.
+      const conflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile);
+      if (conflict != null) {
+        materialization[archetype] = {
+          kind: 'write-conflict', adapter: 'command', executor: executorName, model: spec.model,
+          writeConflict: conflict,
+        };
+        continue;
+      }
       materialization[archetype] = {
         kind: 'command-broker', adapter: 'command', executor: executorName, model: spec.model,
       };

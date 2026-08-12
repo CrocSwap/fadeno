@@ -12,7 +12,7 @@ import { runSteeringApply, runSteeringResolve } from '../src/commands/steering.t
 import { runPrompt } from '../src/commands/prompt.ts';
 import { runToolComplete } from '../src/commands/tool-complete.ts';
 import { runVerify } from '../src/commands/verify.ts';
-import { read, tempRepo } from './helpers.ts';
+import { exists, read, tempRepo } from './helpers.ts';
 
 function seedHybridProfile(root: string): void {
   mkdirSync(join(root, '.fadeno'), { recursive: true });
@@ -262,6 +262,103 @@ test('steering apply materializes mixed host and command slots without clobberin
     /agent_type "worker"; expected "reviewer"/,
   );
   assert.deepEqual(agentPaths.map((path) => read(root, path)), beforeBadType);
+});
+
+/**
+ * `ro-cli` stands in for a headless CLI in a read-only permission mode, and
+ * `ro-host` for a native target whose declared command fallback is read-only.
+ */
+function seedWriteGuardProfile(root: string): void {
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    executors: {
+      'ro-cli': { adapter: 'command', command: ['claude', '-p'], model: 'opus', write_access: false },
+      'rw-cli': { adapter: 'command', command: ['codex', 'exec', '-'], model: 'gpt-5.6-sol', write_access: true },
+      'ro-host': {
+        adapter: 'host', model: 'opus', reasoning_effort: 'high', agent_type: 'worker',
+        fallback_command: ['claude', '-p'], write_access: false,
+      },
+      native: { adapter: 'host', model: 'gpt-5.6-luna', reasoning_effort: 'xhigh', agent_type: 'worker' },
+      reviewer: { adapter: 'host', model: 'gpt-5.6-terra', reasoning_effort: 'high', agent_type: 'reviewer' },
+      judge: { adapter: 'host', model: 'gpt-5.6-sol', reasoning_effort: 'medium', agent_type: 'judge' },
+    },
+    archetypes: { worker: { requires_write: true }, reviewer: { requires_write: false } },
+    loadouts: {
+      'ro-worker': { worker: 'ro-cli', reviewer: 'ro-cli', judge: 'judge' },
+      'ro-fallback': { worker: 'ro-host', reviewer: 'reviewer', judge: 'judge' },
+      'rw-worker': { worker: 'rw-cli', reviewer: 'ro-cli', judge: 'judge' },
+      native: { worker: 'native', reviewer: 'reviewer', judge: 'judge' },
+    },
+  }));
+}
+
+test('steering resolve refuses a command slot whose delivery cannot do the archetype\'s work', (t) => {
+  const root = tempRepo(t);
+  seedWriteGuardProfile(root);
+
+  const refused = runSteeringResolve({ repoRoot: root, archetype: 'worker', loadout: 'ro-worker', env: null });
+  assert.equal(refused.mode, 'write_conflict');
+  assert.equal(refused.executor, 'ro-cli');
+  assert.equal(refused.adapter, 'command');
+  assert.match(refused.writeConflict!, /archetype "worker" declares `requires_write: true`, but executor "ro-cli"/);
+  assert.match(refused.writeConflict!, /native in-session worker agent/);
+  // The human echo carries the refusal, not a "dispatch through …" invitation.
+  assert.equal(refused.detail, refused.writeConflict);
+
+  // A host slot's declared command fallback is a command delivery too.
+  const fallback = runSteeringResolve({ repoRoot: root, archetype: 'worker', loadout: 'ro-fallback', env: null });
+  assert.equal(fallback.mode, 'write_conflict');
+  assert.equal(fallback.executor, 'ro-host');
+  assert.equal(fallback.adapter, 'host');
+
+  // Native delivery of the same read-only target is the host's business.
+  const native = runSteeringResolve({
+    repoRoot: root, archetype: 'worker', nativeExecutor: 'ro-host', loadout: 'ro-fallback', env: null,
+  });
+  assert.equal(native.mode, 'native');
+  assert.equal(native.writeConflict, undefined);
+
+  // Clean command slots are untouched: a write-capable delivery, and an
+  // archetype that declares no write need.
+  const capable = runSteeringResolve({ repoRoot: root, archetype: 'worker', loadout: 'rw-worker', env: null });
+  assert.equal(capable.mode, 'command');
+  assert.equal(capable.executor, 'rw-cli');
+  assert.equal(capable.writeConflict, undefined);
+  const reader = runSteeringResolve({ repoRoot: root, archetype: 'reviewer', loadout: 'ro-worker', env: null });
+  assert.equal(reader.mode, 'command');
+  assert.equal(reader.executor, 'ro-cli');
+});
+
+test('steering apply refuses to materialize a broker for a conflicted slot; other slots proceed', (t) => {
+  const root = tempRepo(t);
+  seedWriteGuardProfile(root);
+
+  const applied = runSteeringApply({ repoRoot: root, loadout: 'ro-worker', target: 'codex' });
+  assert.equal(applied.materialization.worker?.kind, 'write-conflict');
+  assert.equal(applied.materialization.worker?.executor, 'ro-cli');
+  assert.match(
+    applied.materialization.worker!.writeConflict!,
+    /archetype "worker" declares `requires_write: true`, but executor "ro-cli"/,
+  );
+  // No broker file at all for the refused slot — nothing can route to it.
+  assert.equal(exists(root, '.codex/agents/worker.toml'), false);
+
+  // The read-only reviewer slot (same executor, no write need) still lands, as
+  // does the native judge slot.
+  assert.equal(applied.materialization.reviewer?.kind, 'command-broker');
+  assert.equal(applied.materialization.judge?.kind, 'native');
+  assert.ok(exists(root, '.codex/agents/reviewer.toml'));
+  assert.ok(exists(root, '.codex/agents/judge.toml'));
+  assert.deepEqual(
+    applied.results.map((item) => item.path.endsWith('worker.toml')),
+    [false, false],
+  );
+
+  // A write-capable worker slot materializes normally, and the materialized
+  // agents know to stop on a refusal rather than dispatch or substitute.
+  const capable = runSteeringApply({ repoRoot: root, loadout: 'rw-worker', target: 'codex', force: true });
+  assert.equal(capable.materialization.worker?.kind, 'command-broker');
+  assert.match(read(root, '.codex/agents/worker.toml'), /mode=write_conflict/);
 });
 
 test('tool-complete starts and attributes the exact next tool_call atomically', (t) => {
