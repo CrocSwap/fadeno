@@ -148,6 +148,19 @@ npm run validate:self  # validate committed templates, then local dogfood when p
 
 Runtime deps are only `ajv` + `yaml`; arg parsing and tests use Node built-ins.
 
+**Mid-flight escape hatch.** Editing anything under `templates/` makes the
+committed `plugin/` and `plugin-codex/` stale, so the no-drift tests fail until
+you rerun both plugin builds — which blocks running the suite while work is in
+progress. `FADENO_SKIP_DRIFT=1 npm test` runs the full suite with only those two
+committed-vs-fresh comparisons skipped (loudly, with a reason). It is for
+work-in-progress only: before integration, rebuild the plugins and run `npm test`
+with the variable unset, which must pass clean.
+
+`test/docs-claims.test.ts` is a registry of **docs-claims tripwires**: each entry
+pairs a stable token in a doc (field name, event name, flag, subcommand) with the
+source that implements it, and fails naming whichever side drifted. Adding one is
+a single literal in its table. Match tokens, never prose.
+
 ## Where to make a change
 
 | Task | Start at |

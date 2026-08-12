@@ -9,6 +9,13 @@ import { exists, read, tempRepo } from './helpers.ts';
 const REPO = join(import.meta.dirname, '..');
 const SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-setup'] as const;
 
+// Same escape hatch as test/plugin.test.ts: `FADENO_SKIP_DRIFT=1` skips only the
+// committed-vs-fresh comparison so a work-in-progress template edit doesn't block
+// the rest of the suite. Unset (or empty) → unchanged behavior.
+const SKIP_DRIFT: string | false = process.env.FADENO_SKIP_DRIFT
+  ? 'FADENO_SKIP_DRIFT set — drift unchecked, rebuild plugins and rerun before integration'
+  : false;
+
 function listFilesRel(dir: string, base = dir): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -89,7 +96,7 @@ test('codex plugin: carries setup, bundled CLI, and built-in definitions', (t) =
   assert.equal(execFileSync(binary, ['--version'], { encoding: 'utf8' }).trim(), expectedVersion);
 });
 
-test('the committed plugin-codex/ matches a fresh generation (no drift)', (t) => {
+test('the committed plugin-codex/ matches a fresh generation (no drift)', { skip: SKIP_DRIFT }, (t) => {
   const root = tempRepo(t);
   const { outDir } = runCodexPlugin({ cwd: root, outDir: join(root, 'plugin-codex') });
   const committedDir = join(REPO, 'plugin-codex');

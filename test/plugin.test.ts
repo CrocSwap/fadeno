@@ -6,6 +6,14 @@ import test from 'node:test';
 import { runPlugin } from '../src/commands/plugin.ts';
 import { exists, read, tempRepo } from './helpers.ts';
 
+// Escape hatch for parallel/work-in-progress edits: a template change makes the
+// committed plugin stale until `npm run build:plugin` reruns, which otherwise
+// blocks running the rest of the suite mid-flight. `FADENO_SKIP_DRIFT=1` skips
+// only the committed-vs-fresh comparisons. Unset (or empty) → unchanged behavior.
+const SKIP_DRIFT: string | false = process.env.FADENO_SKIP_DRIFT
+  ? 'FADENO_SKIP_DRIFT set — drift unchecked, rebuild plugins and rerun before integration'
+  : false;
+
 /** Every file under `dir`, as paths relative to it (recursive). */
 function listFilesRel(dir: string, base = dir): string[] {
   const out: string[] = [];
@@ -71,7 +79,7 @@ test('plugin generates manifest, namespaced skills, and subagents', (t) => {
   assert.ok(!exists(outDir, 'skills/runner/playbooks'));
 });
 
-test('the committed plugin/ matches a fresh generation (no drift)', (t) => {
+test('the committed plugin/ matches a fresh generation (no drift)', { skip: SKIP_DRIFT }, (t) => {
   const root = tempRepo(t);
   const { outDir } = runPlugin({ cwd: root, outDir: join(root, 'plugin') });
   const committedDir = join(import.meta.dirname, '..', 'plugin');
