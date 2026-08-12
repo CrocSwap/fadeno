@@ -186,11 +186,13 @@ definitions named `worker`, `reviewer`, and `judge`; `fadeno setup --codex`
 records the harness, and later `fadeno use <loadout>` automatically refreshes
 the user-scoped agents when needed.
 Use `fadeno steering apply <loadout> --codex --scope project` for a project
-override, then start a fresh Codex session. Each host slot becomes a native
-agent with that executor's model and effort; each command slot becomes a cheap
-broker that delegates through `fadeno dispatch`. Before each task the role resolves the active loadout: a
+override. Each host slot becomes a native agent with that executor's model and
+effort; each command slot becomes a cheap broker that delegates through
+`fadeno dispatch`. Before each task the role resolves the active loadout: a
 command executor switches immediately, a matching host executor runs natively,
-and a different host executor stops with `restart_required`. The Codex plugin
+and a different host executor uses `fallback_command` when declared. A fresh
+session makes changed host definitions native; it is required only when the
+selected host executor has no fallback. The Codex plugin
 bundles the CLI and built-in definitions; it does not overwrite unrelated user
 agents. Existing files remain protected unless `--force` is supplied.
 

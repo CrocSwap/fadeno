@@ -196,10 +196,13 @@ project overrides remain available with `fadeno steering apply
 materializes every loadout slot: host slots become session-native agents and
 command slots become cheap brokers. Each role checks the kernel before every
 task: a matching host slot runs locally, a command slot dispatches out-of-process
-immediately, and a different host slot returns `restart_required`. Host
-executors are never recursively sent through `fadeno dispatch`. Applying changed
-agent definitions requires a fresh Codex session; switching to command
-executors takes effect at the next role invocation.
+immediately, and a different host slot uses its declared `fallback_command`
+when present. Only a host executor without a fallback returns
+`restart_required`. Locked engine requests use `dispatch-fallback`, which
+authenticates the run snapshot and records command transport rather than native
+attestation. Applying changed agent definitions requires a fresh Codex session
+to make the new model native; fallback-capable switches take effect at the next
+role invocation without one.
 
 This ambient precedence applies to ordinary ad-hoc role invocations and to
 future engine requests before they are minted. Once `fadeno drive` records a

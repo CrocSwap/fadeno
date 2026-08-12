@@ -266,6 +266,7 @@ fadeno dispatch-start <run-id> <dispatch-id> --agent-id <native-id>
 fadeno dispatch-progress <run-id> <dispatch-id> --file <status.json> --source agent
 fadeno dispatch-complete <run-id> <dispatch-id> --output <temporary-file>
 fadeno dispatch-fail <run-id> <dispatch-id> --reason "blocked"
+fadeno dispatch-fallback <run-id> <dispatch-id> # exact snapshotted command fallback
 
 # Engine-delivered Codex steering resolves the immutable request envelope:
 fadeno steering resolve --archetype worker --native-executor luna \
@@ -285,6 +286,10 @@ When a role binds to a native host executor, `fadeno drive` plans all pending
 calls and returns `awaiting_host_dispatch` with stable request ids. The host
 starts each native agent and submits the receipts above; model, reasoning
 effort, and native agent identity are recorded as explicit host attestations.
+If that host executor declares `fallback_command` and the current Codex agent
+does not match, `dispatch-fallback` invokes the exact snapshotted argv and owns
+the receipts. The ledger labels this `command-fallback` and does not claim
+native host attestation.
 The immutable prompt names an ephemeral progress sidecar. Agents or harnesses
 update that JSON at meaningful checkpoints; the host records provenance-labelled
 observations with `dispatch-progress`. Progress is attested observability, never
@@ -352,13 +357,14 @@ With steering enabled by default, expensive role-shaped subagent work follows th
 resolver. `fadeno setup --codex` remembers the harness, so later `fadeno use
 <loadout>` calls automatically materialize each worker/reviewer/judge slot as
 either a native host agent (with that executor's model and effort) or a command
-broker (which delegates through `fadeno dispatch`). Start one fresh Codex
-session only when the command reports that native definitions changed; Codex
-loads custom-agent models at session start and cannot safely mutate them in an
-already-running session. Before each task, native
-agents resolve again: command slots switch immediately out-of-process, matching
-host slots execute natively, and a different host slot stops with
-`restart_required` instead of silently using the wrong model. Claude installs a
+broker (which delegates through `fadeno dispatch`). Built-in `luna`, `terra`,
+and `sol` host loadouts also declare exact `codex exec --model …` fallbacks.
+Start a fresh Codex session after definitions change only to make the new model
+session-native; fallback-capable switches work on the next invocation. Before
+each task, native agents resolve again: command slots switch immediately,
+matching host slots execute natively, a different fallback-capable host slot
+runs out-of-process, and only a host slot without a fallback reports
+`restart_required`. Claude installs a
 local `PreToolUse` rewrite that redirects role launches to bundled dispatch
 proxies. Explore/Plan-style scouting stays native. Existing files retain the
 normal non-destructive rule; `steering apply` needs `--force` to replace them.

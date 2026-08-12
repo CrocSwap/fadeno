@@ -329,9 +329,11 @@ automatically. `fadeno steering apply <loadout>
 then materializes every required slot into session-static role TOML: host slots
 become native agents using their configured model/effort, while command slots
 become cheap brokers that delegate through `fadeno dispatch`. Before each task,
-matching host executor → native, command executor → dispatch proxy, and a
-different host executor → restart required. Host adapters are never
-recursively sent through `fadeno dispatch`. On Claude, init emits a local
+matching host executor → native, command executor → dispatch proxy, a different
+host executor with `fallback_command` → authenticated out-of-process fallback,
+and a host executor without one → restart required. Locked engine fallbacks use
+`dispatch-fallback`, not ordinary `dispatch`, and record command transport
+without claiming native attestation. On Claude, init emits a local
 `PreToolUse` script under `.fadeno/local/` and non-destructively merges one
 `Agent` hook into `.claude/settings.local.json`. The hook first asks the CLI
 whether a loadout is active; only then does it map general-purpose/worker,

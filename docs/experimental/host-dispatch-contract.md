@@ -19,6 +19,15 @@ temporary output file and optional commit; failure accepts host text. Start is
 idempotent for the same native agent id, and terminal receipt submission is
 idempotent for the same output digest.
 
+A host executor may declare an exact `fallback_command` argv. When the current
+Codex role is materialized for another native executor, `dispatch-fallback`
+authenticates the request, prompt, and profile snapshot; invokes that argv; and
+writes the start plus terminal receipts. Those events carry
+`delivery_transport: command-fallback`, the argv digest, and
+`identity_evidence: command_receipt`; `host_attested` is false. The logical
+executor/model identity is unchanged, but the transport is never presented as
+native execution.
+
 Between start and terminal, the host may record any number of
 `host_dispatch_progress` observations with `dispatch-progress`. The immutable
 actor prompt names a workspace-relative JSON sidecar; agent, harness, or
