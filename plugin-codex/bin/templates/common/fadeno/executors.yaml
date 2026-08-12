@@ -87,6 +87,8 @@ archetypes:
   worker:
     requires_write: true
 
+# Filler idiom: a slot that is not the loadout's point takes `current-host`, so
+# one loadout stays correct on every harness instead of forking per host.
 loadouts:
   native:
     worker: current-host
@@ -114,8 +116,8 @@ loadouts:
     judge: claude-default
   grok-worker:
     worker: grok-default
-    reviewer: terra-medium
-    judge: sol-high
+    reviewer: current-host
+    judge: current-host
 
 default_loadout: native
 

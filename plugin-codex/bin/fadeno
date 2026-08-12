@@ -13939,7 +13939,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.8";
+  if (true) return "0.6.0-rc.10";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -14893,11 +14893,69 @@ function loadExecutorProfile(repoRoot, options = {}, harness) {
   }
 }
 var LOADOUT_LOCAL_FILE = (0, import_node_path6.join)(".fadeno", "local", "loadout");
-function readLocalLoadout(repoRoot) {
+function localLoadoutPinError(detail2) {
+  return new ExecutorProfileError(
+    `${LOADOUT_LOCAL_FILE} ${detail2} Fix: run \`fadeno loadout clear\` to drop the pin, then re-select with \`fadeno loadout use <name>\`.`
+  );
+}
+function readLocalLoadoutState(repoRoot) {
   const path = (0, import_node_path6.join)(repoRoot, LOADOUT_LOCAL_FILE);
-  if (!(0, import_node_fs6.existsSync)(path)) return null;
-  const name = ((0, import_node_fs6.readFileSync)(path, "utf8").split(/\r?\n/, 1)[0] ?? "").trim();
-  return name.length > 0 ? name : null;
+  if (!(0, import_node_fs6.existsSync)(path)) return { loadout: null, overrides: {} };
+  const text = (0, import_node_fs6.readFileSync)(path, "utf8");
+  if (!text.trim().startsWith("{")) {
+    const name2 = (text.split(/\r?\n/, 1)[0] ?? "").trim();
+    return { loadout: name2.length > 0 ? name2 : null, overrides: {} };
+  }
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch (err) {
+    throw localLoadoutPinError(`did not parse as JSON: ${err.message}.`);
+  }
+  if (!isMapping(doc)) {
+    throw localLoadoutPinError("is JSON, but not an object (`{loadout, overrides}`).");
+  }
+  if (doc.loadout != null && typeof doc.loadout !== "string") {
+    throw localLoadoutPinError(`has a non-string \`loadout\` (${JSON.stringify(doc.loadout)}).`);
+  }
+  const name = typeof doc.loadout === "string" ? doc.loadout.trim() : "";
+  const overrides = {};
+  if (doc.overrides != null) {
+    if (!isMapping(doc.overrides)) {
+      throw localLoadoutPinError("has an `overrides` that is not a mapping (archetype \u2192 executor).");
+    }
+    for (const [archetype, target] of Object.entries(doc.overrides)) {
+      if (!BARE_IDENTIFIER_RE.test(archetype)) {
+        throw localLoadoutPinError(
+          `has override key "${archetype}", which is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`
+        );
+      }
+      if (typeof target !== "string" || target.trim().length === 0) {
+        throw localLoadoutPinError(
+          `override "${archetype}" targets ${JSON.stringify(target)}, which is not an executor name.`
+        );
+      }
+      overrides[archetype] = target.trim();
+    }
+  }
+  return { loadout: name.length > 0 ? name : null, overrides };
+}
+function writeLocalLoadoutState(repoRoot, state) {
+  const keys = Object.keys(state.overrides).sort();
+  if (state.loadout == null) {
+    throw new ExecutorProfileError(
+      keys.length > 0 ? `Cannot pin override(s) ${keys.join(", ")} with no base loadout \u2014 session overrides decorate a base by name. Fix: select one with \`fadeno loadout use <name>\` first.` : `Cannot write ${LOADOUT_LOCAL_FILE} with no loadout \u2014 remove the pin file instead.`
+    );
+  }
+  const path = (0, import_node_path6.join)(repoRoot, LOADOUT_LOCAL_FILE);
+  (0, import_node_fs6.mkdirSync)((0, import_node_path6.dirname)(path), { recursive: true });
+  const sorted = {};
+  for (const archetype of keys) sorted[archetype] = state.overrides[archetype];
+  const body = keys.length === 0 ? `${state.loadout}
+` : `${JSON.stringify({ loadout: state.loadout, overrides: sorted })}
+`;
+  (0, import_node_fs6.writeFileSync)(path, body, "utf8");
+  return path;
 }
 var LOADOUT_SOURCE_LABEL = {
   flag: "--loadout",
@@ -14936,22 +14994,35 @@ function readUserLoadout(options = {}) {
   const name = ((0, import_node_fs6.readFileSync)(path, "utf8").split(/\r?\n/, 1)[0] ?? "").trim();
   return name.length > 0 ? name : null;
 }
+function applicableOverrides(state, active) {
+  if (active == null || state.loadout !== active.name) return {};
+  return state.overrides;
+}
 function roleResolutionEchoLabel(source, activeLoadoutName) {
   if (source === "loadout") return `loadout ${activeLoadoutName ?? "?"}`;
   if (source === "default") return 'fallback "*"';
   return source;
 }
-function resolveRole(role, archetype, profile, activeLoadout) {
+function resolveRole(role, archetype, profile, activeLoadout, overrides = {}) {
   const pick = (executorName, source) => ({
     executorName,
     executor: executorForArchetype(profile, executorName, archetype),
     source
   });
   const pinned = profile.bindings[role];
-  if (pinned != null) return pick(pinned, "binding");
+  if (typeof pinned === "string") return pick(pinned, "binding");
+  if (archetype != null && typeof overrides[archetype] === "string") {
+    const target = overrides[archetype];
+    if (!Object.hasOwn(profile.executors, target)) {
+      throw new ExecutorProfileError(
+        `Session override for archetype "${archetype}" targets "${target}", which is not a declared executor (${Object.keys(profile.executors).join(", ")}). Fix: re-dial with \`fadeno loadout set ${archetype} <executor>\`, or drop the override with \`fadeno loadout clear ${archetype}\`.`
+      );
+    }
+    return pick(target, "override");
+  }
   if (archetype != null && activeLoadout != null) {
     const slot = profile.loadouts[activeLoadout]?.[archetype];
-    if (slot != null) return pick(slot, "loadout");
+    if (typeof slot === "string") return pick(slot, "loadout");
   }
   const fallback = profile.bindings["*"];
   if (fallback != null) return pick(fallback, "default");
@@ -17020,6 +17091,7 @@ function consumePendingRelay(repoRoot, prompt, now) {
 var SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
 var ROW_RESOLUTION = {
   binding: "binding",
+  override: "override",
   loadout: "loadout",
   default: "fallback",
   flag: "executor-flag"
@@ -17055,6 +17127,7 @@ function runDispatch(opts) {
   let executorName;
   let spec;
   let active = null;
+  let overrides = {};
   let source;
   if (opts.executor != null && opts.executor.trim() !== "") {
     executorName = opts.executor.trim();
@@ -17078,21 +17151,24 @@ function runDispatch(opts) {
       );
     }
     try {
+      const pin = readLocalLoadoutState(repoRoot);
       active = resolveActiveLoadout({
         flagValue: opts.loadout ?? null,
         envValue: opts.env !== void 0 ? opts.env : process.env.FADENO_LOADOUT ?? null,
-        localFileValue: readLocalLoadout(repoRoot),
+        localFileValue: pin.loadout,
         userFileValue: readUserLoadout(opts.userPathOptions),
         profile
       });
-      const resolved = role != null ? resolveRole(role, archetype, profile, active?.name ?? null) : resolveRole(
+      overrides = applicableOverrides(pin, active);
+      const resolved = role != null ? resolveRole(role, archetype, profile, active?.name ?? null, overrides) : resolveRole(
         archetype,
         archetype,
         {
           ...profile,
           bindings: profile.bindings["*"] != null ? { "*": profile.bindings["*"] } : {}
         },
-        active?.name ?? null
+        active?.name ?? null,
+        overrides
       );
       executorName = resolved.executorName;
       spec = resolved.executor;
@@ -17164,6 +17240,10 @@ function runDispatch(opts) {
     role,
     resolution: ROW_RESOLUTION[source],
     loadout: active == null ? null : { name: active.name, source: active.source },
+    // The overlay that produced this binding, recorded only when it actually
+    // did: `loadout` alone would name the base and quietly misattribute the
+    // executor an override dialed on top of it. Absent on every other path.
+    ...source === "override" && archetype != null ? { override: { [archetype]: executorName } } : {},
     executor: executorName,
     ...spec.target != null ? { target: spec.target, provider: spec.provider ?? null } : {},
     model: spec.model,
@@ -19700,7 +19780,13 @@ function ensureProfileSnapshot(ctx) {
 }
 function resolveChain(ctx, role) {
   const archetype = role == null ? null : roleArchetype(ctx.playbook, role);
-  const resolved = resolveRole(role ?? "*", archetype, ctx.profile, ctx.activeLoadout?.name ?? null);
+  const resolved = resolveRole(
+    role ?? "*",
+    archetype,
+    ctx.profile,
+    ctx.activeLoadout?.name ?? null,
+    ctx.slotOverrides
+  );
   const source = role == null && resolved.source === "binding" ? "default" : resolved.source;
   return { executor: resolved.executorName, spec: resolved.executor, source };
 }
@@ -19764,12 +19850,14 @@ function recordResolutionSnapshot(ctx) {
       ctx.act(`${role} \u2192 (unresolved)`);
     }
   }
+  const slotOverrides = { ...ctx.slotOverrides };
   const payload = {
     loadout: ctx.activeLoadout == null ? null : { name: ctx.activeLoadout.name, source: ctx.activeLoadout.source },
+    ...Object.keys(slotOverrides).length > 0 ? { overrides: slotOverrides } : {},
     roles: entries
   };
   const prior = freshEvents(ctx.runDir).findLast((e) => e.type === "resolution_snapshot");
-  if (prior != null && JSON.stringify({ loadout: prior.extra.loadout ?? null, roles: prior.extra.roles ?? [] }) === JSON.stringify(payload)) {
+  if (prior != null && JSON.stringify(prior.extra.loadout ?? null) === JSON.stringify(payload.loadout) && JSON.stringify(prior.extra.overrides ?? {}) === JSON.stringify(slotOverrides) && JSON.stringify(prior.extra.roles ?? []) === JSON.stringify(entries)) {
     return;
   }
   appendEvent(ctx.runDir, { type: "resolution_snapshot", step: null, ...payload }, ctx.now);
@@ -20746,12 +20834,14 @@ function runDrive(opts) {
   } catch {
     requestedLoadout = null;
   }
+  let pin;
   try {
+    pin = readLocalLoadoutState(repoRoot);
     activeLoadout = resolveActiveLoadout({
       flagValue: opts.loadout ?? null,
       runValue: requestedLoadout,
       envValue: opts.env !== void 0 ? opts.env : process.env.FADENO_LOADOUT ?? null,
-      localFileValue: readLocalLoadout(repoRoot),
+      localFileValue: pin.loadout,
       userFileValue: readUserLoadout(opts.userPathOptions),
       profile
     });
@@ -20759,7 +20849,12 @@ function runDrive(opts) {
     if (err instanceof ExecutorProfileError) throw new DriveError(err.message);
     throw err;
   }
-  const ctx = { ...base, profile, activeLoadout };
+  const ctx = {
+    ...base,
+    profile,
+    activeLoadout,
+    slotOverrides: applicableOverrides(pin, activeLoadout)
+  };
   recoverInterruptedCommandDispatches(ctx);
   if (opts.loadout != null && opts.loadout !== requestedLoadout && requestedLoadout != null) {
     appendEvent(
@@ -21322,8 +21417,17 @@ function loadProfile(repoRoot, userPathOptions) {
     throw err;
   }
 }
+function readPin(repoRoot) {
+  try {
+    return readLocalLoadoutState(repoRoot);
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new LoadoutError(err.message);
+    throw err;
+  }
+}
 function activeFor(opts, repoRoot, profile) {
-  const localValue = readLocalLoadout(repoRoot);
+  const pin = readPin(repoRoot);
+  const localValue = pin.loadout;
   const userValue = readUserLoadout(opts.userPathOptions);
   const stalePin = localValue != null && !(localValue in profile.loadouts) ? localValue : null;
   const staleUserPin = userValue != null && !(userValue in profile.loadouts) ? userValue : null;
@@ -21335,7 +21439,7 @@ function activeFor(opts, repoRoot, profile) {
       userFileValue: staleUserPin == null ? userValue : null,
       profile
     });
-    return { active, stalePin };
+    return { active, stalePin, pin, overrides: applicableOverrides(pin, active) };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new LoadoutError(err.message);
     throw err;
@@ -21349,29 +21453,71 @@ function slotViews(profile, name) {
     return { archetype, executor, model: spec.model, adapter: spec.adapter };
   });
 }
+function effectiveRows(profile, name, overrides) {
+  const slots = profile.loadouts[name] ?? {};
+  const stale = [];
+  const live = {};
+  for (const archetype of Object.keys(overrides).sort()) {
+    const target = overrides[archetype];
+    if (Object.hasOwn(profile.executors, target)) live[archetype] = target;
+    else stale.push({ archetype, target });
+  }
+  const archetypes = [.../* @__PURE__ */ new Set([...Object.keys(slots), ...Object.keys(live)])].sort();
+  const rows = archetypes.map((archetype) => {
+    const baseExecutor = slots[archetype] ?? null;
+    const executor = live[archetype] ?? baseExecutor;
+    const spec = profile.executors[executor];
+    return {
+      archetype,
+      executor,
+      model: spec.model,
+      adapter: spec.adapter,
+      overridden: live[archetype] != null,
+      baseExecutor
+    };
+  });
+  return { rows, stale };
+}
 function runLoadoutShow(opts = {}) {
   const repoRoot = repoRootOf(opts);
   const profile = loadProfile(repoRoot, opts.userPathOptions);
-  const { active, stalePin } = activeFor(opts, repoRoot, profile);
+  const { active, stalePin, overrides } = activeFor(opts, repoRoot, profile);
+  const effective = active == null ? { rows: [], stale: [] } : effectiveRows(profile, active.name, overrides);
   return {
     active,
-    slots: active == null ? [] : slotViews(profile, active.name),
+    slots: effective.rows,
     available: Object.keys(profile.loadouts).sort(),
     defaultLoadout: profile.defaultLoadout,
-    stalePin
+    stalePin,
+    overrides,
+    staleOverrides: effective.stale
   };
 }
 function runLoadoutList(opts = {}) {
   const repoRoot = repoRootOf(opts);
   const profile = loadProfile(repoRoot, opts.userPathOptions);
-  const { active, stalePin } = activeFor(opts, repoRoot, profile);
-  const loadouts = Object.keys(profile.loadouts).sort().map((name) => ({
-    name,
-    slots: slotViews(profile, name),
-    isDefault: profile.defaultLoadout === name,
-    isActive: active?.name === name
-  }));
-  return { loadouts, active, defaultLoadout: profile.defaultLoadout, stalePin };
+  const { active, stalePin, overrides } = activeFor(opts, repoRoot, profile);
+  let staleOverrides = [];
+  const loadouts = Object.keys(profile.loadouts).sort().map((name) => {
+    const isActive = active?.name === name;
+    let slots;
+    if (isActive) {
+      const effective = effectiveRows(profile, name, overrides);
+      slots = effective.rows;
+      staleOverrides = effective.stale;
+    } else {
+      slots = slotViews(profile, name);
+    }
+    return { name, slots, isDefault: profile.defaultLoadout === name, isActive };
+  });
+  return {
+    loadouts,
+    active,
+    defaultLoadout: profile.defaultLoadout,
+    stalePin,
+    overrides,
+    staleOverrides
+  };
 }
 function runLoadoutUse(opts) {
   const repoRoot = repoRootOf(opts);
@@ -21384,24 +21530,68 @@ function runLoadoutUse(opts) {
       `"${name}" is not a declared loadout` + (declared.length > 0 ? ` (${declared.join(", ")}).` : " \u2014 the profile has no `loadouts`.")
     );
   }
-  const previous = readLocalLoadout(repoRoot);
-  const path = (0, import_node_path22.join)(repoRoot, LOADOUT_LOCAL_FILE);
-  (0, import_node_fs22.mkdirSync)((0, import_node_path22.dirname)(path), { recursive: true });
-  (0, import_node_fs22.writeFileSync)(path, `${name}
-`, "utf8");
-  return { name, path, previous };
+  const pin = readPin(repoRoot);
+  const path = writeLocalLoadoutState(repoRoot, { loadout: name, overrides: {} });
+  return { name, path, previous: pin.loadout, droppedOverrides: pin.overrides };
+}
+function runLoadoutSet(opts) {
+  const repoRoot = repoRootOf(opts);
+  const profile = loadProfile(repoRoot, opts.userPathOptions);
+  const archetype = opts.archetype.trim();
+  const target = opts.target.trim();
+  if (archetype.length === 0 || target.length === 0) {
+    throw new LoadoutError("Usage: fadeno loadout set <archetype> <executor>");
+  }
+  if (!BARE_IDENTIFIER_RE.test(archetype)) {
+    throw new LoadoutError(
+      `archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`
+    );
+  }
+  if (!Object.hasOwn(profile.executors, target)) {
+    throw new LoadoutError(
+      `"${target}" is not a declared executor (${Object.keys(profile.executors).sort().join(", ")}).`
+    );
+  }
+  const { active, pin } = activeFor(opts, repoRoot, profile);
+  if (active == null) {
+    throw new LoadoutError(
+      "No loadout is active, so a session override has nothing to decorate. Fix: select a base first with `fadeno loadout use <name>`."
+    );
+  }
+  const spec = profile.executors[target];
+  if (spec.adapter === "command") {
+    const conflict = explainWriteConflict({ executor: target, spec }, archetype, profile);
+    if (conflict != null) throw new LoadoutError(conflict);
+  }
+  const rebase = pin.loadout !== active.name;
+  const droppedOverrides = rebase ? pin.overrides : {};
+  const overrides = rebase ? {} : { ...pin.overrides };
+  const previous = overrides[archetype] ?? null;
+  overrides[archetype] = target;
+  const path = writeLocalLoadoutState(repoRoot, { loadout: active.name, overrides });
+  return {
+    archetype,
+    target,
+    loadout: active.name,
+    path,
+    previous,
+    overrides,
+    droppedOverrides,
+    droppedBase: Object.keys(droppedOverrides).length > 0 ? pin.loadout : null
+  };
 }
 function runLoadoutResolve(opts) {
   const repoRoot = repoRootOf(opts);
   const profile = loadProfile(repoRoot, opts.userPathOptions);
-  const { active } = activeFor(opts, repoRoot, profile);
+  const { active, overrides } = activeFor(opts, repoRoot, profile);
   if (active == null) throw new LoadoutError("No loadout is active.");
   try {
     const resolved = resolveRole(
       opts.archetype,
       opts.archetype,
       { ...profile, bindings: profile.bindings["*"] != null ? { "*": profile.bindings["*"] } : {} },
-      active.name
+      active.name,
+      overrides
     );
     return {
       archetype: opts.archetype,
@@ -21409,7 +21599,9 @@ function runLoadoutResolve(opts) {
       executor: resolved.executorName,
       model: resolved.executor.model,
       adapter: resolved.executor.adapter,
-      harness: profile.harness ?? "standalone"
+      harness: profile.harness ?? "standalone",
+      source: resolved.source,
+      override: resolved.source === "override"
     };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new LoadoutError(err.message);
@@ -21419,9 +21611,34 @@ function runLoadoutResolve(opts) {
 function runLoadoutClear(opts = {}) {
   const repoRoot = repoRootOf(opts);
   const path = (0, import_node_path22.join)(repoRoot, LOADOUT_LOCAL_FILE);
-  const removed = (0, import_node_fs22.existsSync)(path);
-  (0, import_node_fs22.rmSync)(path, { force: true });
-  return { removed, path };
+  const archetype = opts.archetype?.trim() ? opts.archetype.trim() : null;
+  if (archetype == null) {
+    const removed = (0, import_node_fs22.existsSync)(path);
+    (0, import_node_fs22.rmSync)(path, { force: true });
+    return { removed, path, archetype: null, cleared: null, loadout: null, overrides: {} };
+  }
+  const pin = readPin(repoRoot);
+  if (pin.loadout == null || !Object.hasOwn(pin.overrides, archetype)) {
+    return {
+      removed: false,
+      path,
+      archetype,
+      cleared: null,
+      loadout: pin.loadout,
+      overrides: pin.overrides
+    };
+  }
+  const cleared = pin.overrides[archetype];
+  const overrides = { ...pin.overrides };
+  delete overrides[archetype];
+  return {
+    removed: true,
+    path: writeLocalLoadoutState(repoRoot, { loadout: pin.loadout, overrides }),
+    archetype,
+    cleared,
+    loadout: pin.loadout,
+    overrides
+  };
 }
 
 // src/commands/new-run.ts
@@ -21551,14 +21768,17 @@ function computeResolution(repoRoot, playbookPath, flagValue, envRaw, userPathOp
     throw err;
   }
   let active;
+  let overrides;
   try {
+    const pin = readLocalLoadoutState(repoRoot);
     active = resolveActiveLoadout({
       flagValue,
       envValue: envRaw !== void 0 ? envRaw : process.env.FADENO_LOADOUT ?? null,
-      localFileValue: readLocalLoadout(repoRoot),
+      localFileValue: pin.loadout,
       userFileValue: readUserLoadout(userPathOptions),
       profile
     });
+    overrides = applicableOverrides(pin, active);
   } catch (err) {
     if (err instanceof ExecutorProfileError) return null;
     throw err;
@@ -21576,7 +21796,7 @@ function computeResolution(repoRoot, playbookPath, flagValue, envRaw, userPathOp
   for (const role of roleNames) {
     const archetype = roleArchetype(playbookDoc, role);
     try {
-      const resolved = resolveRole(role, archetype, profile, active?.name ?? null);
+      const resolved = resolveRole(role, archetype, profile, active?.name ?? null, overrides);
       const model = resolved.executor.model;
       roles.push({ role, archetype, executor: resolved.executorName, model, source: resolved.source, error: null });
       const label = roleResolutionEchoLabel(resolved.source, active?.name ?? null);
@@ -22917,10 +23137,10 @@ function checkExecutorBindings(run, events) {
       }
     }
   }
-  const recompute = (role, archetype, loadout) => {
+  const recompute = (role, archetype, loadout, overrides) => {
     if (profile == null) return null;
     try {
-      const resolved = resolveRole(role, archetype, profile, loadout);
+      const resolved = resolveRole(role, archetype, profile, loadout, overrides);
       return { executor: resolved.executorName, source: resolved.source };
     } catch {
       return null;
@@ -22929,6 +23149,7 @@ function checkExecutorBindings(run, events) {
   const overridesInForce = /* @__PURE__ */ new Map();
   const archetypeByRole = /* @__PURE__ */ new Map();
   let activeLoadout = null;
+  let slotOverrides = {};
   for (const event of events) {
     if (event.type === "executor_override") {
       const role = typeof event.extra.role === "string" ? event.extra.role : null;
@@ -22939,6 +23160,13 @@ function checkExecutorBindings(run, events) {
     if (event.type === "resolution_snapshot") {
       const loadout = event.extra.loadout;
       activeLoadout = loadout != null && typeof loadout === "object" && !Array.isArray(loadout) && typeof loadout.name === "string" ? loadout.name : null;
+      const recorded = event.extra.overrides;
+      slotOverrides = {};
+      if (recorded != null && typeof recorded === "object" && !Array.isArray(recorded)) {
+        for (const [archetype, target] of Object.entries(recorded)) {
+          if (typeof target === "string") slotOverrides[archetype] = target;
+        }
+      }
       const roles = Array.isArray(event.extra.roles) ? event.extra.roles : [];
       for (const row of roles) {
         if (row == null || typeof row !== "object" || Array.isArray(row)) continue;
@@ -22947,7 +23175,7 @@ function checkExecutorBindings(run, events) {
         const archetype = typeof rec.archetype === "string" ? rec.archetype : null;
         archetypeByRole.set(rec.role, archetype);
         if (rec.source === "override" || typeof rec.executor !== "string") continue;
-        const recomputed = recompute(rec.role, archetype, activeLoadout);
+        const recomputed = recompute(rec.role, archetype, activeLoadout, slotOverrides);
         if (recomputed == null) {
           problems.push(
             `resolution_snapshot: role "${rec.role}" records executor "${rec.executor}" but the chain resolves nothing`
@@ -22974,7 +23202,7 @@ function checkExecutorBindings(run, events) {
       problems.push(`${label}: executor "${used}" is not in the snapshotted profile`);
     }
     const key = actor ?? "*";
-    const expected = overridesInForce.get(key) ?? recompute(key, archetypeByRole.get(key) ?? null, activeLoadout)?.executor ?? null;
+    const expected = overridesInForce.get(key) ?? recompute(key, archetypeByRole.get(key) ?? null, activeLoadout, slotOverrides)?.executor ?? null;
     if (expected != null && used !== expected) {
       problems.push(`${label}: ${decision} "${used}" but the resolution in force was "${expected}"`);
     }
@@ -23461,7 +23689,10 @@ var COMMANDS = {
     {
       list: command({}),
       use: command({}, ["loadout"]),
-      clear: command({})
+      // `set <archetype> <executor>`; `clear` takes an optional archetype (bare
+      // `clear` still drops the whole pin).
+      set: command({}, ["archetype", "executor"]),
+      clear: command({}, ["archetype"])
     }
   ),
   steering: command(
@@ -23953,6 +24184,7 @@ function runLockedSteeringResolve(opts, archetype, role, nativeExecutor) {
     adapter: "host",
     model: request.model,
     source: "host-request",
+    override: false,
     nativeExecutor,
     detail: detail2
   };
@@ -23976,14 +24208,17 @@ function runSteeringResolve(opts) {
     );
   }
   let active;
+  let overrides;
   try {
+    const pin = readLocalLoadoutState(repoRoot);
     active = resolveActiveLoadout({
       flagValue: opts.loadout ?? null,
       envValue: opts.env !== void 0 ? opts.env : process.env.FADENO_LOADOUT ?? null,
-      localFileValue: readLocalLoadout(repoRoot),
+      localFileValue: pin.loadout,
       userFileValue: readUserLoadout(opts.userPathOptions),
       profile
     });
+    overrides = applicableOverrides(pin, active);
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
     throw err;
@@ -24003,17 +24238,19 @@ function runSteeringResolve(opts) {
       adapter: "host",
       model: nativeSpec.model,
       source: "native-baseline",
+      override: false,
       nativeExecutor,
       detail: `no loadout is active; execute natively as baseline ${nativeExecutor}`
     };
   }
   let resolved;
   try {
-    resolved = role != null ? resolveRole(role, archetype, profile, active.name) : resolveRole(
+    resolved = role != null ? resolveRole(role, archetype, profile, active.name, overrides) : resolveRole(
       archetype,
       archetype,
       { ...profile, bindings: profile.bindings["*"] != null ? { "*": profile.bindings["*"] } : {} },
-      active.name
+      active.name,
+      overrides
     );
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
@@ -24031,6 +24268,7 @@ function runSteeringResolve(opts) {
       adapter: spec.adapter,
       model: spec.model,
       source: resolved.source,
+      override: resolved.source === "override",
       nativeExecutor,
       detail: conflict,
       writeConflict: conflict
@@ -24046,6 +24284,7 @@ function runSteeringResolve(opts) {
       adapter: "command",
       model: resolved.executor.model,
       source: resolved.source,
+      override: resolved.source === "override",
       nativeExecutor,
       detail: `dispatch through command executor ${resolved.executorName}; effective immediately`
     };
@@ -24060,6 +24299,7 @@ function runSteeringResolve(opts) {
       adapter: "host",
       model: resolved.executor.model,
       source: resolved.source,
+      override: resolved.source === "override",
       nativeExecutor,
       detail: `host executor ${resolved.executorName} matches this session's native baseline`
     };
@@ -24074,6 +24314,7 @@ function runSteeringResolve(opts) {
       adapter: "host",
       model: resolved.executor.model,
       source: resolved.source,
+      override: resolved.source === "override",
       nativeExecutor,
       detail: `host executor ${resolved.executorName} differs from this session's native baseline ${nativeExecutor ?? "(none)"}; use its declared command fallback immediately`
     };
@@ -24087,6 +24328,7 @@ function runSteeringResolve(opts) {
     adapter: "host",
     model: resolved.executor.model,
     source: resolved.source,
+    override: resolved.source === "override",
     nativeExecutor,
     detail: `loadout ${active.name} requests host executor ${resolved.executorName}, but this session was materialized for ${nativeExecutor ?? "no native executor"}; apply the loadout and start a fresh Codex session`
   };
@@ -24546,9 +24788,6 @@ var import_node_fs32 = require("node:fs");
 var import_node_path31 = require("node:path");
 var UseError = class extends Error {
 };
-function projectPin(repoRoot) {
-  return (0, import_node_path31.join)(repoRoot, ".fadeno", "local", "loadout");
-}
 function runUse(opts) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const name = opts.name.trim();
@@ -24560,11 +24799,18 @@ function runUse(opts) {
   }
   const scope = opts.project ? "project" : "user";
   const paths = userPaths(opts.userPathOptions);
-  const path = scope === "project" ? projectPin(repoRoot) : paths.loadoutFile;
-  const previous = scope === "project" ? readLocalLoadout(repoRoot) : readUserLoadout(opts.userPathOptions);
-  (0, import_node_fs32.mkdirSync)((0, import_node_path31.join)(path, ".."), { recursive: true });
-  (0, import_node_fs32.writeFileSync)(path, `${name}
+  const pin = scope === "project" ? readLocalLoadoutState(repoRoot) : null;
+  const droppedOverrides = pin?.overrides ?? {};
+  const previous = scope === "project" ? pin.loadout : readUserLoadout(opts.userPathOptions);
+  let path;
+  if (scope === "project") {
+    path = writeLocalLoadoutState(repoRoot, { loadout: name, overrides: {} });
+  } else {
+    path = paths.loadoutFile;
+    (0, import_node_fs32.mkdirSync)((0, import_node_path31.join)(path, ".."), { recursive: true });
+    (0, import_node_fs32.writeFileSync)(path, `${name}
 `, "utf8");
+  }
   const slots = loaded.profile.loadouts[name];
   const external = Object.entries(slots).flatMap(([archetype, executor]) => {
     const spec = loaded.profile.executors[executor];
@@ -24592,6 +24838,12 @@ function runUse(opts) {
       allHostSlotsFallback ? "Codex native host slots were materialized automatically. Declared command fallbacks work now; restart only to make the new slots native." : "Codex native host slots were materialized automatically; a fresh Codex session is required for slots without a command fallback."
     );
   } else if (steering != null) notices.push("Codex native host slots are already materialized; no restart is needed.");
+  const droppedNames = Object.keys(droppedOverrides).sort();
+  if (droppedNames.length > 0) {
+    notices.push(
+      `dropped ${droppedNames.length} session override(s) pinned over "${previous ?? "?"}" (${droppedNames.map((archetype) => `${archetype}\u2192${droppedOverrides[archetype]}`).join(", ")}); re-dial with \`fadeno loadout set <archetype> <executor>\` if still wanted.`
+    );
+  }
   return {
     name,
     scope,
@@ -24600,7 +24852,8 @@ function runUse(opts) {
     steering,
     external,
     restartRequired: steeringChanged,
-    notices
+    notices,
+    droppedOverrides
   };
 }
 
@@ -24643,15 +24896,22 @@ function runStatus(opts = {}) {
     if (err instanceof ExecutorProfileError) throw new StatusError(err.message);
     throw err;
   }
-  const projectPin2 = readLocalLoadout(repoRoot);
+  let pin;
+  try {
+    pin = readLocalLoadoutState(repoRoot);
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new StatusError(err.message);
+    throw err;
+  }
+  const projectPin = pin.loadout;
   const userPin = readUserLoadout(opts.userPathOptions);
-  const staleProjectPin = projectPin2 != null && !(projectPin2 in loaded.profile.loadouts) ? projectPin2 : null;
+  const staleProjectPin = projectPin != null && !(projectPin in loaded.profile.loadouts) ? projectPin : null;
   const staleUserPin = userPin != null && !(userPin in loaded.profile.loadouts) ? userPin : null;
   let active;
   try {
     active = resolveActiveLoadout({
       envValue: opts.env !== void 0 ? opts.env : process.env.FADENO_LOADOUT ?? null,
-      localFileValue: staleProjectPin == null ? projectPin2 : null,
+      localFileValue: staleProjectPin == null ? projectPin : null,
       userFileValue: staleUserPin == null ? userPin : null,
       profile: loaded.profile
     });
@@ -24660,13 +24920,16 @@ function runStatus(opts = {}) {
   }
   const roles = [];
   const slots = active == null ? {} : loaded.profile.loadouts[active.name] ?? {};
+  const pinOverrides = applicableOverrides(pin, active);
   for (const archetype of ["worker", "reviewer", "judge"]) {
-    const fromLoadout = slots[archetype] != null;
-    const executor = slots[archetype] ?? loaded.profile.bindings["*"];
+    const override = Object.hasOwn(pinOverrides, archetype) ? pinOverrides[archetype] : null;
+    const overridden = override != null && Object.hasOwn(loaded.profile.executors, override);
+    const fromLoadout = !overridden && slots[archetype] != null;
+    const executor = overridden ? override : slots[archetype] ?? loaded.profile.bindings["*"];
     if (executor == null) continue;
     const spec = loaded.profile.executors[executor];
-    const source = fromLoadout ? loaded.provenance?.loadouts[active?.name ?? ""] ?? null : loaded.provenance?.bindings["*"] ?? null;
-    roles.push({ archetype, executor, adapter: spec.adapter, model: spec.model, source, command: spec.adapter === "command" ? spec.command : null });
+    const source = fromLoadout ? loaded.provenance?.loadouts[active?.name ?? ""] ?? null : overridden ? null : loaded.provenance?.bindings["*"] ?? null;
+    roles.push({ archetype, executor, adapter: spec.adapter, model: spec.model, source, command: spec.adapter === "command" ? spec.command : null, overridden });
   }
   const external = roles.filter((role) => role.adapter === "command");
   const installation = readInstallationManifest(opts.userPathOptions);
@@ -24681,6 +24944,7 @@ function runStatus(opts = {}) {
     activeLoadout: active,
     staleProjectPin,
     staleUserPin,
+    pinOverrides,
     roles,
     external,
     codexMaterialization: materialized,
@@ -25066,7 +25330,9 @@ Usage:
   fadeno validate [file] [--schema K]   Validate playbooks (schema + references + semantics)
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
-  fadeno loadout [list|resolve|use|clear] Show, resolve, pin, or clear the active loadout
+  fadeno loadout [list|resolve|use|set|clear] Show, resolve, pin, or clear the active loadout
+  fadeno loadout set <archetype> <target> Override one archetype on top of the active loadout
+  fadeno loadout clear [archetype]      Drop the whole pin, or one session override
   fadeno steering resolve|apply [...]   Resolve or materialize hybrid Codex steering
   fadeno dispatch [flags]               Resolve archetype \u2192 executor and invoke it once (ad hoc)
   fadeno dispatch-fallback <run> <id>   Deliver a locked host request by declared fallback
@@ -25161,6 +25427,7 @@ Examples:
   fadeno run 2026-05-30-1132-csv --event artifact_created --artifact artifacts/x.json --member architect_fable
   fadeno run 2026-05-30-1132-csv --step arbitrate --event human_decision --field branch=approve
   fadeno loadout use openai-primary  # advanced compatibility surface
+  fadeno loadout set worker luna-cli  # override one slot; loadout clear worker drops it
   fadeno steering apply codex-only --codex --force
   echo "Summarize the repo layout." | fadeno dispatch --archetype worker
   fadeno gate 2026-05-30-1132-csv no_blocking_issues --artifact artifacts/review-report.json
@@ -25480,8 +25747,19 @@ function printSlots(slots, indent) {
   const width = Math.max(0, ...slots.map((s) => s.archetype.length));
   for (const slot of slots) {
     const model = slot.model != null ? ` (${slot.model})` : "";
-    console.log(`${indent}${slot.archetype.padEnd(width)} \u2192 ${slot.executor}${model} [${slot.adapter}]`);
+    const override = slot.overridden === true ? `  OVERRIDE (base: ${slot.baseExecutor ?? "none"})` : "";
+    console.log(`${indent}${slot.archetype.padEnd(width)} \u2192 ${slot.executor}${model} [${slot.adapter}]${override}`);
   }
+}
+function printStaleOverrides(stale) {
+  for (const item of stale) {
+    console.error(
+      `warning: session override ${item.archetype}\u2192${item.target} names an executor that is no longer declared \u2014 run \`fadeno loadout set ${item.archetype} <executor>\` or \`fadeno loadout clear ${item.archetype}\`; the override is ignored below.`
+    );
+  }
+}
+function overrideSummary(overrides) {
+  return Object.keys(overrides).sort().map((archetype) => `${archetype}\u2192${overrides[archetype]}`).join(", ");
 }
 function printStalePin(stalePin) {
   if (stalePin == null) return;
@@ -25491,10 +25769,14 @@ function printStalePin(stalePin) {
 }
 function printLoadoutShow(result) {
   printStalePin(result.stalePin);
+  printStaleOverrides(result.staleOverrides);
   if (result.active == null) {
     console.log("no active loadout (no --loadout, FADENO_LOADOUT, .fadeno/local/loadout, or default_loadout)");
   } else {
-    console.log(`active loadout: ${result.active.name} (via ${LOADOUT_SOURCE_TEXT[result.active.source]})`);
+    const overrides = Object.keys(result.overrides).length;
+    console.log(
+      `active loadout: ${result.active.name} (via ${LOADOUT_SOURCE_TEXT[result.active.source]})` + (overrides > 0 ? ` +${overrides} session override(s)` : "")
+    );
     printSlots(result.slots, "  ");
   }
   if (result.available.length === 0) {
@@ -25507,6 +25789,7 @@ available: ${names.join(", ")}`);
 }
 function printLoadoutList(result) {
   printStalePin(result.stalePin);
+  printStaleOverrides(result.staleOverrides);
   if (result.loadouts.length === 0) {
     console.log("No loadouts declared (add a `loadouts:` mapping to .fadeno/executors.yaml).");
     return;
@@ -25515,6 +25798,8 @@ function printLoadoutList(result) {
     const notes = [];
     if (loadout.isActive && result.active != null) {
       notes.push(`active via ${LOADOUT_SOURCE_TEXT[result.active.source]}`);
+      const overrideCount = Object.keys(result.overrides).length;
+      if (overrideCount > 0) notes.push(`${overrideCount} session override(s)`);
     }
     if (loadout.isDefault) notes.push("default");
     const marker = loadout.isActive ? "*" : " ";
@@ -25722,8 +26007,11 @@ function main(argv) {
       console.log(`runtime: ${result.runtime.invocationSource}; managed ${result.runtime.managedVersion ?? "not installed"}${result.runtime.managedPath ? ` at ${result.runtime.managedPath}` : ""}${result.runtime.versionCurrent ? "" : " (version skew)"}`);
       console.log(`integrations: ${result.runtime.installedHarnesses.join(", ") || "none"}`);
       console.log(`definitions: ${result.definitions.playbooks.length} effective playbooks (project shadows bundled)`);
-      console.log(`active loadout: ${result.activeLoadout?.name ?? "none"}${result.activeLoadout ? ` [${result.activeLoadout.source}]` : ""}`);
-      for (const role of result.roles) console.log(`  ${role.archetype} \u2192 ${role.executor} (${role.adapter})${role.command ? ` ${role.command.join(" ")}` : ""}`);
+      const pinned = Object.keys(result.pinOverrides).length;
+      console.log(
+        `active loadout: ${result.activeLoadout?.name ?? "none"}${result.activeLoadout ? ` [${result.activeLoadout.source}]` : ""}` + (pinned > 0 ? ` (+${pinned} override: ${overrideSummary(result.pinOverrides)})` : "")
+      );
+      for (const role of result.roles) console.log(`  ${role.archetype} \u2192 ${role.executor} (${role.adapter})${role.command ? ` ${role.command.join(" ")}` : ""}${role.overridden ? " [override]" : ""}`);
       if (result.external.length > 0) console.log("external sandbox: selected command slots leave the current harness; evidence \u2192 .fadeno/dispatches.jsonl");
       if (result.staleProjectPin) console.log(`stale project pin: ${result.staleProjectPin}`);
       if (result.staleUserPin) console.log(`stale user pin: ${result.staleUserPin}`);
@@ -25832,6 +26120,9 @@ function main(argv) {
           model: result.model,
           native_executor: result.nativeExecutor,
           resolution: result.source,
+          // Additive provenance: `resolution` already spells "override", and
+          // this flag lets a renderer branch without enumerating sources.
+          override: result.override,
           run: values.run ?? null,
           dispatch_id: values["dispatch-id"] ?? null,
           detail: result.detail,
@@ -26072,7 +26363,9 @@ resolution${via}:`);
     case "loadout": {
       const sub = positionals[1];
       if (sub == null) {
-        printLoadoutShow(runLoadoutShow({ loadout: values.loadout }));
+        const result = runLoadoutShow({ loadout: values.loadout });
+        if (values.json) console.log(JSON.stringify(result, null, 2));
+        else printLoadoutShow(result);
         return 0;
       }
       switch (sub) {
@@ -26089,9 +26382,19 @@ resolution${via}:`);
           const name = positionals[2];
           if (!name) throw new Error("Usage: fadeno loadout use <name>");
           const result = runLoadoutUse({ name });
+          if (values.json) {
+            console.log(JSON.stringify(result, null, 2));
+            return 0;
+          }
           console.log(`active loadout pinned: ${result.name} \u2192 .fadeno/local/loadout`);
           if (result.previous != null && result.previous !== result.name) {
             console.log(`  (was ${result.previous})`);
+          }
+          const dropped = Object.keys(result.droppedOverrides).length;
+          if (dropped > 0) {
+            console.log(
+              `  dropped ${dropped} session override(s) (${overrideSummary(result.droppedOverrides)}); selecting a base drops the overlay \u2014 re-dial with \`fadeno loadout set <archetype> <executor>\`.`
+            );
           }
           const selected = runLoadoutShow({ loadout: result.name, env: null });
           const commandSlots = selected.slots.filter((slot) => slot.adapter === "command").length;
@@ -26106,15 +26409,53 @@ resolution${via}:`);
           }
           return 0;
         }
-        case "clear": {
-          const result = runLoadoutClear({});
+        case "set": {
+          const [, , archetype, target] = positionals;
+          if (!archetype || !target) throw new Error("Usage: fadeno loadout set <archetype> <executor>");
+          const result = runLoadoutSet({ archetype, target, loadout: values.loadout });
+          if (values.json) {
+            console.log(JSON.stringify(result, null, 2));
+            return 0;
+          }
           console.log(
-            result.removed ? "cleared .fadeno/local/loadout" : "no local loadout to clear (.fadeno/local/loadout absent)"
+            `session override set: ${result.archetype} \u2192 ${result.target} (over loadout ${result.loadout}) \u2192 .fadeno/local/loadout`
+          );
+          if (result.previous != null) console.log(`  (was ${result.previous})`);
+          if (result.droppedBase != null) {
+            console.log(
+              `  dropped ${Object.keys(result.droppedOverrides).length} override(s) pinned over "${result.droppedBase}" (${overrideSummary(result.droppedOverrides)}); overrides belong to one base.`
+            );
+          }
+          console.log(`  overrides now: ${overrideSummary(result.overrides)}`);
+          return 0;
+        }
+        case "clear": {
+          const archetype = positionals[2] ?? null;
+          const result = runLoadoutClear({ archetype });
+          if (values.json) {
+            console.log(JSON.stringify(result, null, 2));
+            return 0;
+          }
+          if (result.archetype == null) {
+            console.log(
+              result.removed ? "cleared .fadeno/local/loadout" : "no local loadout to clear (.fadeno/local/loadout absent)"
+            );
+            return 0;
+          }
+          if (!result.removed) {
+            console.log(`no session override for "${result.archetype}" to clear (.fadeno/local/loadout)`);
+            return 0;
+          }
+          const remaining = Object.keys(result.overrides).length;
+          console.log(
+            `cleared session override: ${result.archetype} (was ${result.cleared}); loadout ${result.loadout} keeps ${remaining} override(s)` + (remaining > 0 ? ` (${overrideSummary(result.overrides)})` : "")
           );
           return 0;
         }
         default:
-          throw new Error(`Unknown loadout subcommand "${sub}". Usage: fadeno loadout [list | use <name> | clear]`);
+          throw new Error(
+            `Unknown loadout subcommand "${sub}". Usage: fadeno loadout [list | resolve --archetype <a> | use <name> | set <archetype> <executor> | clear [archetype]]`
+          );
       }
     }
     case "dispatch": {

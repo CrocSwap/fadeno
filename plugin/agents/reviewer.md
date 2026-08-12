@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Reviewer role for Fadeno playbooks — reviews a change and emits a structured review report. Use when a Fadeno playbook delegates review work to a subagent. [fadeno 0.6.0-rc.8]
+description: Reviewer role for Fadeno playbooks — reviews a change and emits a structured review report. Use when a Fadeno playbook delegates review work to a subagent. [fadeno 0.6.0-rc.10]
 ---
 
 You are a **reviewer** in a Fadeno playbook run.

@@ -15,6 +15,34 @@ writers accept only 0.3.
 
 ### Added
 
+- **Session slot overrides** (phase 1 of
+  `docs/experimental/slots-and-archetypes.md`) — switch one archetype at a
+  time instead of authoring a loadout per combination:
+  `fadeno loadout set worker grok-default` dials a single slot over the
+  active loadout, `fadeno loadout clear worker` reverts it, and switching
+  the base loadout drops all overrides with a reported count. The pin file
+  stays a bare name until the first override, then becomes single-line JSON
+  (`{"loadout": …, "overrides": {…}}`); overrides apply by name match with
+  the pin's base, from any selection source. `fadeno loadout` — and the
+  active entry of `fadeno loadout list` — now print the
+  *effective* table with `OVERRIDE (base: …)` marks; `loadout set` runs the
+  archetype write-access check at dial time, refusing before any dispatch
+  burns tokens; `--json` was added across the loadout subcommands. The
+  resolution cascade gains the layer everywhere at once (binding → session
+  override → loadout slot → `"*"`), including `loadout resolve` — so the
+  Claude steering hook honors overrides with zero hook changes. Evidence is
+  additive on ledger format 0.1: dispatch rows record
+  `resolution: "override"` plus an `override` field, run
+  `resolution_snapshot` events record the applicable `overrides`, and
+  verification replays from the snapshot — never the live pin — so clearing
+  an override cannot fail a completed run's verify.
+
+- **`current-host` filler idiom in the starter catalog** — the `grok-worker`
+  starter loadout now binds only its point (`worker: grok-default`) and
+  fills reviewer/judge with the harness-relative `current-host`, so one
+  loadout is correct on every host instead of pinning another provider's
+  models into slots the loadout never cared about.
+
 - **Write-access enforcement at every command delivery** — the
   `write_access` / `requires_write` conflict is now refused wherever a command
   delivery can be chosen, through one shared helper (`explainWriteConflict`
@@ -211,6 +239,15 @@ writers accept only 0.3.
   repairs, executor failures, and `! waiting for human decision`.
 - **Driver skill** — engine-first: `fadeno drive` → `fadeno decide` → re-drive,
   with the manual `fadeno next` loop as the fallback for handed-back steps.
+
+### Fixed
+
+- **Prototype-name roles and archetypes resolve cleanly.** A role, archetype,
+  or binding named `constructor` or `toString` passes the bare-identifier
+  rule, but plain property lookups in `resolveRole` found the inherited
+  `Function` and crashed with a `TypeError` deep in `executorForArchetype`
+  instead of the actionable `ExecutorProfileError`. Lookups now test for own
+  string values (`typeof`/`Object.hasOwn`).
 
 ### Changed
 
