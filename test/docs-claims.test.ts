@@ -96,6 +96,11 @@ const CLAIMS: Claim[] = [
     doc: { files: [LOADOUTS], patterns: [/format: "0\.1"/, /\[legacy\]/] },
     src: { files: ['src/commands/dispatch.ts'], patterns: [/DISPATCHES_FORMAT = '0\.1'/] },
   },
+  {
+    id: 'session-slot-overrides',
+    doc: { files: [LOADOUTS], patterns: [/loadout set/, /OVERRIDE \(base:/, /resolution: "override"/] },
+    src: { files: ['src/lib/executors.ts'], patterns: [/applicableOverrides/, /'override'/] },
+  },
 ];
 
 /**

@@ -1,7 +1,7 @@
 # Slot ergonomics and the open archetype vocabulary
 
-**Status:** aligned design, not yet implemented; phases 1–4 below are
-independently shippable
+**Status:** phase 1 (session slot overrides) implemented — 0.6.0-rc.9;
+phases 2–4 aligned, not yet implemented, independently shippable
 **Decision date:** 2026-08-12
 **Relationship:** successor horizon to
 [`loadouts-and-dispatch.md`](loadouts-and-dispatch.md) (extends its catalog,
@@ -92,13 +92,15 @@ drops all overrides** — a stale `worker=grok` surviving a `use codex` is the
 surprising case; if the delta is still wanted, redial it.
 
 **Visibility:** `fadeno loadout` with no arguments prints the *effective*
-table, one row per archetype, overridden slots explicitly marked:
+table, one row per archetype, overridden slots explicitly marked (actual
+shipped output — the implementation kept the established header/row shape
+and appended the override marks):
 
 ```
-loadout: claude (repo pin)
-  worker    grok-default   OVERRIDE (base: claude-default)
-  reviewer  claude-default
-  judge     claude-default
+active loadout: claude (via .fadeno/local/loadout) +1 session override(s)
+  judge    → grok-default (grok) [command]  OVERRIDE (base: opus-x)
+  reviewer → opus-x (opus) [command]
+  worker   → opus-x (opus) [command]
 ```
 
 An invisible overlay is how a user silently burns the wrong subscription for
@@ -121,6 +123,23 @@ harness-relative target already kills the harness × loadout dimension of the
 explosion (`{worker: grok-default, reviewer: current-host, judge:
 current-host}` is one profile correct on every host); the starters should
 model that idiom instead of pinning concrete targets in every slot.
+
+**Shipped (0.6.0-rc.9).** Deviations from the sketch above, all deliberate:
+refusals exit 1 (the CLI has a single top-level error path; there is no
+exit-2 convention to join); the effective table appends `OVERRIDE (base: …)`
+to the established row shape rather than adopting the sketched two-column
+layout, so existing output contracts stay valid; `--json` was added across
+the loadout subcommands as new surface; `fadeno status` resolves its roles
+through the overlay and tags them `[override]`, but still enumerates only
+the canonical triad — an override binding a non-triad archetype is visible
+in `fadeno loadout` only. An override can bind an archetype the base
+loadout has no slot for (renders `(base: none)`), which is the seed of
+phase 2's fallback semantics. Evidence landed as specified: dispatch rows
+gain `resolution: "override"` plus an `override` field, run
+`resolution_snapshot` events gain `overrides`, and verification replays
+from the snapshot, never the live pin (a cleared override cannot fail a
+completed run's verify). Ledger format deliberately stays "0.1" — these
+are additive fields; the 0.2 bump still rides phases 2–4.
 
 ## Phase 2 — archetype schema pass
 

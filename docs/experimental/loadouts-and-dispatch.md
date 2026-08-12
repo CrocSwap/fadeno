@@ -184,9 +184,11 @@ dual-model review) are the legitimate use of per-role `bindings` pins.
 For each role, at dispatch time:
 
 1. explicit `bindings[role]` pin;
-2. active loadout's slot for the role's declared `archetype`;
-3. `bindings["*"]`;
-4. otherwise a hard, actionable error naming the role, its archetype, and
+2. session slot override for the role's declared `archetype`
+   (`fadeno loadout set <archetype> <target>`);
+3. active loadout's slot for the role's declared `archetype`;
+4. `bindings["*"]`;
+5. otherwise a hard, actionable error naming the role, its archetype, and
    what to add.
 
 The **active loadout** is resolved: explicit `--loadout` → run-persisted intent
@@ -199,6 +201,26 @@ The simple `fadeno use <name>` command writes user state; compatibility
 repos that commit `.fadeno/` should gitignore `.fadeno/local/` (scaffolding
 adds this). This is what makes a loadout switch session-scoped instead of a
 repo edit that dirties git for a quota condition that expires tomorrow.
+
+**Session slot overrides** (phase 1 of
+[`slots-and-archetypes.md`](slots-and-archetypes.md)) decorate the active
+loadout one archetype at a time: `fadeno loadout set worker grok-default`
+dials a single slot; `fadeno loadout clear worker` reverts it. The pin file
+carries them — a bare loadout name when no overrides exist (unchanged
+format), a single-line JSON object `{"loadout": …, "overrides": {…}}`
+otherwise — and overrides apply by **name match**: they belong to the base
+loadout named in the pin and fire whenever that loadout is active,
+regardless of which source selected it. Switching the base
+(`fadeno loadout use`, `fadeno use --project`) writes a bare name and drops
+all overrides, reporting the count. `loadout set` re-runs the archetype
+write-access check at dial time, so a worker override onto a read-only
+command route is refused before the first dispatch, with the kernel's own
+refusal message. `fadeno loadout` prints the *effective* table with
+overridden rows marked `OVERRIDE (base: …)`; evidence records the layer
+(`resolution: "override"` plus an `override` field on dispatch rows,
+`overrides` on run `resolution_snapshot` events — and verify replays from
+the snapshot, never the live pin, so clearing an override cannot fail a
+completed run's verification).
 
 **Resolution is computed at dispatch time, inside the CLI, never cached in
 config emitted elsewhere.** Any integration (plugin agents, hooks) stays dumb

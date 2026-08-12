@@ -166,19 +166,30 @@ identifier shape only, so the playbook stays harness- and provider-neutral.
 never cached anywhere else):
 
 1. explicit `bindings[role]` pin;
-2. the active loadout's slot for the role's declared `archetype`;
-3. `bindings["*"]`;
-4. otherwise a hard error naming the role, its archetype, and what to add.
+2. a session slot override for the role's declared `archetype`
+   (`fadeno loadout set`);
+3. the active loadout's slot for the role's declared `archetype`;
+4. `bindings["*"]`;
+5. otherwise a hard error naming the role, its archetype, and what to add.
 
 The **active loadout** resolves `--loadout` flag → `FADENO_LOADOUT` env →
 `.fadeno/local/loadout` → `default_loadout:` → none. Switch it per session:
 
 ```bash
 fadeno loadout use openai-primary   # writes .fadeno/local/loadout (git-ignored)
-fadeno loadout                      # active loadout, its source, its slot table
+fadeno loadout                      # active loadout, its source, its EFFECTIVE slot table
 fadeno loadout list                 # every declared loadout (* marks active)
 fadeno loadout clear                # remove the local pin
+fadeno loadout set worker grok-default   # override ONE slot on the active loadout
+fadeno loadout clear worker              # revert that one override
 ```
+
+A session override dials a single archetype without authoring a new loadout;
+the effective table marks overridden rows `OVERRIDE (base: …)`. Overrides
+belong to the base loadout named in the pin (name match) and are dropped —
+with a reported count — whenever the base is switched. `loadout set` runs
+the archetype write-access check at dial time, refusing a worker override
+onto a read-only command route before any dispatch burns tokens.
 
 `.fadeno/local/` is per-machine session state — `init` gitignores it — which is
 what makes a loadout switch session-scoped instead of a repo edit that dirties
@@ -187,7 +198,11 @@ next dispatch. Evidence: runs record a `resolution_snapshot` event in their
 ledger; ad-hoc dispatches append one row each to `.fadeno/dispatches.jsonl`
 (also gitignored by `init` — per-machine evidence like `.fadeno/local/`,
 auditable locally, never committed). Each row's `resolution` field records how
-the executor was chosen (`binding` | `loadout` | `fallback` | `executor-flag`).
+the executor was chosen (`binding` | `override` | `loadout` | `fallback` |
+`executor-flag`); rows bound through a session override also carry an
+`override` field naming the archetype and executor, and `resolution_snapshot`
+events record the applicable `overrides` — verification replays from the
+snapshot, never the live pin.
 
 Ad-hoc dispatch runs the same chain outside any playbook:
 `fadeno dispatch --archetype worker` with the prompt on stdin or via
