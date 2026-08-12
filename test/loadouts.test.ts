@@ -5,6 +5,7 @@ import test from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import {
   ExecutorProfileError,
+  explainWriteConflict,
   LOADOUT_LOCAL_FILE,
   parseExecutorProfile,
   readLocalLoadout,
@@ -56,7 +57,7 @@ test('v2 targets compile through the active harness route', () => {
   const claude = parseExecutorProfile(document, 'v2.yaml', 'claude');
   assert.deepEqual(codex.executors.opus, {
     adapter: 'command', command: ['claude', '-p', '--model', 'opus', '--permission-mode', 'plan'], model: 'opus',
-    resume: null, sessionIdPattern: null, target: 'opus', provider: 'anthropic',
+    resume: null, sessionIdPattern: null, writeAccess: null, target: 'opus', provider: 'anthropic',
   });
   const native = resolveRole('implementer', 'worker', claude, 'main');
   assert.equal(native.executor.adapter, 'host');
@@ -74,6 +75,151 @@ test('v2 reports a missing provider route for the active harness', () => {
     }), 'v2.yaml', 'codex'),
     /routes\.codex\.anthropic/,
   );
+});
+
+// --- route write capability + archetype requirements ---
+
+test('v2 routes declare the write capability of their command delivery', () => {
+  const document = stringifyYaml({
+    schema_version: 2,
+    targets: {
+      opus: { provider: 'anthropic', model: 'opus' },
+      luna: { provider: 'openai', model: 'gpt-5.6-luna' },
+    },
+    routes: {
+      codex: {
+        // The headless Claude fallback runs in the default permission mode.
+        anthropic: { command: ['claude', '-p', '--model', '{model}'], write_access: false },
+        openai: { command: ['codex', 'exec', '--sandbox', 'workspace-write', '-'], write_access: true },
+      },
+      claude: {
+        anthropic: { native: true, command: ['claude', '-p', '--model', '{model}'], write_access: false },
+        openai: { command: ['codex', 'exec', '-'] },
+      },
+    },
+    loadouts: { main: { worker: 'opus', reviewer: 'luna' } },
+  });
+
+  const codex = parseExecutorProfile(document, 'v2.yaml', 'codex');
+  assert.equal(codex.executors.opus!.writeAccess, false);
+  assert.equal(codex.executors.luna!.writeAccess, true);
+
+  const claude = parseExecutorProfile(document, 'v2.yaml', 'claude');
+  // On a native route the flag describes the fallback command, not the
+  // in-session agent — the host owns that agent's permissions.
+  assert.equal(claude.executors.opus!.adapter, 'host');
+  assert.equal(claude.executors.opus!.writeAccess, false);
+  // Undeclared stays undeclared: no constraint, full backward compatibility.
+  assert.equal(claude.executors.luna!.writeAccess, null);
+});
+
+test('route write_access must be boolean', () => {
+  assert.throws(
+    () => parseExecutorProfile(stringifyYaml({
+      schema_version: 2,
+      targets: { opus: { provider: 'anthropic', model: 'opus' } },
+      routes: { codex: { anthropic: { command: ['claude', '-p'], write_access: 'no' } } },
+      loadouts: { main: { worker: 'opus' } },
+    }), 'v2.yaml', 'codex'),
+    /route `routes\.codex\.anthropic\.write_access` must be boolean/,
+  );
+});
+
+test('a v1 executor may declare write_access; a non-boolean is rejected', () => {
+  const profile = parseDoc({
+    executors: { ro: { adapter: 'command', command: ['claude', '-p'], write_access: false } },
+    bindings: { '*': 'ro' },
+  });
+  assert.equal(profile.executors.ro!.writeAccess, false);
+  assert.equal(
+    parseDoc({ executors: EXECUTORS, bindings: { '*': 'luna-cli' } }).executors['luna-cli']!.writeAccess,
+    null,
+  );
+  assert.throws(
+    () => parseDoc({
+      executors: { ro: { adapter: 'command', command: ['claude', '-p'], write_access: 'no' } },
+      bindings: { '*': 'ro' },
+    }),
+    /executor "ro" has a non-boolean `write_access`/,
+  );
+});
+
+test('archetypes: requires_write parses; an absent block is an empty map', () => {
+  const profile = parseDoc({
+    executors: EXECUTORS,
+    loadouts: LOADOUTS,
+    archetypes: { worker: { requires_write: true }, reviewer: { requires_write: false } },
+  });
+  assert.deepEqual(profile.archetypes, {
+    worker: { requiresWrite: true },
+    reviewer: { requiresWrite: false },
+  });
+  assert.deepEqual(parseDoc({ executors: EXECUTORS, loadouts: LOADOUTS }).archetypes, {});
+});
+
+test('archetypes: strict validation names the offending path', () => {
+  assert.throws(
+    () => parseDoc({ executors: EXECUTORS, loadouts: LOADOUTS, archetypes: 'worker' }),
+    /`archetypes` is not a mapping \(archetype → requirements\)/,
+  );
+  assert.throws(
+    () => parseDoc({ executors: EXECUTORS, loadouts: LOADOUTS, archetypes: { worker: 'yes' } }),
+    /`archetypes\.worker` is not a mapping \(only `requires_write` is allowed\)/,
+  );
+  assert.throws(
+    () => parseDoc({
+      executors: EXECUTORS,
+      loadouts: LOADOUTS,
+      archetypes: { worker: { requires_write: true, requires_network: true } },
+    }),
+    (err: unknown) =>
+      err instanceof ExecutorProfileError &&
+      /`archetypes\.worker` has unknown key\(s\) requires_network; only `requires_write` is allowed/.test(err.message),
+  );
+  for (const policy of [{ requires_write: 'yes' }, {}]) {
+    assert.throws(
+      () => parseDoc({ executors: EXECUTORS, loadouts: LOADOUTS, archetypes: { worker: policy } }),
+      /`archetypes\.worker\.requires_write` must be boolean/,
+    );
+  }
+});
+
+test('explainWriteConflict: one refusal, spoken identically by every enforcement point', () => {
+  const profile = parseDoc({
+    executors: {
+      ro: { adapter: 'command', command: ['claude', '-p'], write_access: false },
+      rw: { adapter: 'command', command: ['codex', 'exec', '-'], write_access: true },
+      silent: { adapter: 'command', command: ['codex', 'exec', '-'] },
+      'ro-host': {
+        adapter: 'host', model: 'opus', reasoning_effort: 'high', agent_type: 'worker',
+        fallback_command: ['claude', '-p'], write_access: false,
+      },
+    },
+    archetypes: { worker: { requires_write: true }, reviewer: { requires_write: false } },
+    bindings: { '*': 'ro' },
+  });
+  const spec = (name: string) => profile.executors[name]!;
+
+  const conflict = explainWriteConflict({ executor: 'ro', spec: spec('ro') }, 'worker', profile);
+  assert.ok(conflict != null);
+  assert.match(conflict, /archetype "worker" declares `requires_write: true`, but executor "ro"/);
+  assert.match(conflict, /`write_access: false`/);
+  // Three ways out: rebind, re-permission the command, or stay in-session.
+  assert.match(conflict, /bind "worker" to a write-capable executor/);
+  assert.match(conflict, /permission mode/);
+  assert.match(conflict, /native in-session worker agent/);
+
+  // A host executor's `write_access` describes its command fallback, so the
+  // same refusal applies when a caller is about to deliver through it.
+  assert.equal(explainWriteConflict({ executor: 'ro-host', spec: spec('ro-host') }, 'worker', profile), conflict.replace('"ro"', '"ro-host"'));
+
+  // No conflict: a write-capable delivery, an archetype that claims no write
+  // need, an undeclared delivery, an undeclared archetype, no archetype at all.
+  assert.equal(explainWriteConflict({ executor: 'rw', spec: spec('rw') }, 'worker', profile), null);
+  assert.equal(explainWriteConflict({ executor: 'ro', spec: spec('ro') }, 'reviewer', profile), null);
+  assert.equal(explainWriteConflict({ executor: 'silent', spec: spec('silent') }, 'worker', profile), null);
+  assert.equal(explainWriteConflict({ executor: 'ro', spec: spec('ro') }, 'judge', profile), null);
+  assert.equal(explainWriteConflict({ executor: 'ro', spec: spec('ro') }, null, profile), null);
 });
 
 test('target catalogs require the explicit v2 schema boundary', () => {
@@ -205,6 +351,21 @@ test('serializeProfile round-trips loadouts and default_loadout byte-stably', ()
   assert.equal(serializeProfile(roundTrip), text);
 });
 
+test('serializeProfile round-trips archetypes and declared write_access', () => {
+  const profile = parseDoc({
+    executors: {
+      ...EXECUTORS,
+      'read-only': { adapter: 'command', command: ['claude', '-p'], model: 'opus', write_access: false },
+    },
+    loadouts: { main: { worker: 'read-only', reviewer: 'terra-host' } },
+    archetypes: { reviewer: { requires_write: false }, worker: { requires_write: true } },
+  });
+  const text = serializeProfile(profile);
+  const roundTrip = parseExecutorProfile(text, 'round-trip.yaml');
+  assert.deepEqual(roundTrip, profile);
+  assert.equal(serializeProfile(roundTrip), text);
+});
+
 // --- active-loadout resolution ---
 
 const LOADED = parseExecutorProfile(
@@ -258,7 +419,7 @@ test('active loadout: an unknown name is an error naming its source', () => {
   );
   // parseExecutorProfile validates default_loadout, but a hand-built profile
   // still gets the same guard with the source named.
-  const broken: ExecutorProfile = { executors: {}, bindings: {}, loadouts: {}, defaultLoadout: 'ghost' };
+  const broken: ExecutorProfile = { executors: {}, bindings: {}, archetypes: {}, loadouts: {}, defaultLoadout: 'ghost' };
   assert.throws(
     () => resolveActiveLoadout({ profile: broken }),
     /default_loadout names loadout "ghost", which is not declared — the profile has no `loadouts`/,

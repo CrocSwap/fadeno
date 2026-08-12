@@ -35,6 +35,13 @@ export interface CommandExecutorSpec {
    * (engine-minted id).
    */
   sessionIdPattern: string | null;
+  /**
+   * Whether this delivery's command can mutate the workspace. `null` =
+   * undeclared (no constraint). A headless CLI in a read-only permission mode
+   * is `false`: it can read and reason, but a `git commit`/Bash write ends in
+   * refusal, so a mutating archetype must not be dispatched onto it.
+   */
+  writeAccess: boolean | null;
   /** Neutral v2 target metadata; absent for legacy v1 executors. */
   target?: string;
   provider?: string;
@@ -55,6 +62,12 @@ export interface HostExecutorSpec {
    * explicit delivery fallback, never an executor/provider substitution.
    */
   fallbackCommand?: string[] | null;
+  /**
+   * Write capability of the **command delivery** (`fallbackCommand`), not of
+   * the native facility — the in-session agent's permissions are the host's
+   * business. `null` = undeclared.
+   */
+  writeAccess: boolean | null;
   /** Neutral v2 target metadata; absent for legacy v1 executors. */
   target?: string;
   provider?: string;
@@ -69,9 +82,20 @@ export function substituteSessionId(argv: string[], sessionId: string): string[]
   return argv.map((part) => part.split(SESSION_ID_PLACEHOLDER).join(sessionId));
 }
 
+/**
+ * What an archetype needs from whatever delivers it. Declared once per
+ * archetype, independent of which executor a loadout binds today.
+ */
+export interface ArchetypePolicy {
+  /** The archetype's work mutates the workspace (edits, commits). */
+  requiresWrite: boolean;
+}
+
 export interface ExecutorProfile {
   executors: Record<string, ExecutorSpec>;
   bindings: Record<string, string>;
+  /** Declared archetype requirements; empty when the profile declares none. */
+  archetypes: Record<string, ArchetypePolicy>;
   /**
    * Named archetype→executor tables — the switchable unit of the dispatch
    * kernel. Empty when the profile declares none.
@@ -142,6 +166,17 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
     );
   }
 
+  // Optional on any delivery: declares whether its command can mutate the
+  // workspace. Undeclared stays `null` so existing profiles keep their
+  // (unconstrained) behavior.
+  const readWriteAccess = (raw: Record<string, unknown>, label: string): boolean | null => {
+    if (raw.write_access === undefined) return null;
+    if (typeof raw.write_access !== 'boolean') {
+      throw new ExecutorProfileError(`${source}: ${label} has a non-boolean \`write_access\`.`);
+    }
+    return raw.write_access;
+  };
+
   const executors: Record<string, ExecutorSpec> = {};
   for (const [name, raw] of Object.entries(isMapping(doc.executors) ? doc.executors : {})) {
     if (!isMapping(raw)) {
@@ -189,6 +224,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
       const provider = typeof raw.provider === 'string' ? raw.provider : undefined;
       executors[name] = {
         adapter: 'host', model, reasoningEffort, agentType, fallbackCommand,
+        writeAccess: readWriteAccess(raw, `host executor "${name}"`),
         ...(target != null ? { target } : {}),
         ...(provider != null ? { provider } : {}),
       };
@@ -283,6 +319,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
       model: typeof raw.model === 'string' ? raw.model : null,
       resume,
       sessionIdPattern,
+      writeAccess: readWriteAccess(raw, `executor "${name}"`),
       ...(typeof raw.target === 'string' ? { target: raw.target } : {}),
       ...(typeof raw.provider === 'string' ? { provider: raw.provider } : {}),
     };
@@ -325,6 +362,12 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
       if (route.native !== undefined && typeof route.native !== 'boolean') {
         throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.native\` must be boolean.`);
       }
+      // Declares the write capability of this route's COMMAND delivery — for a
+      // native route that is its fallback command, never the in-session agent.
+      if (route.write_access !== undefined && typeof route.write_access !== 'boolean') {
+        throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.write_access\` must be boolean.`);
+      }
+      const writeAccess = route.write_access === undefined ? null : route.write_access as boolean;
       const rawCommand = route.command;
       if (rawCommand != null && (!Array.isArray(rawCommand) || rawCommand.length === 0 ||
         !rawCommand.every((part) => typeof part === 'string' && part.length > 0))) {
@@ -364,7 +407,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
         }
         executors[name] = {
           adapter: 'host', model, reasoningEffort: effort, agentType: '*', fallbackCommand: command,
-          target: name, provider,
+          writeAccess, target: name, provider,
         };
       } else {
         if (command == null) {
@@ -384,9 +427,41 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
         }
         executors[name] = {
           adapter: 'command', command, model, resume, sessionIdPattern: sessionIdPattern as string | null,
-          target: name, provider,
+          writeAccess, target: name, provider,
         };
       }
+    }
+  }
+
+  // What each archetype needs, independent of today's binding. Strict: the
+  // only declarable requirement is `requires_write`, so a typo is an error
+  // rather than a silently-dropped safety constraint.
+  const archetypes: Record<string, ArchetypePolicy> = {};
+  if (doc.archetypes != null) {
+    if (!isMapping(doc.archetypes)) {
+      throw new ExecutorProfileError(
+        `${source} \`archetypes\` is not a mapping (archetype → requirements).`,
+      );
+    }
+    for (const [name, rawPolicy] of Object.entries(doc.archetypes)) {
+      if (!isMapping(rawPolicy)) {
+        throw new ExecutorProfileError(
+          `${source}: \`archetypes.${name}\` is not a mapping (only \`requires_write\` is allowed).`,
+        );
+      }
+      const unknown = Object.keys(rawPolicy).filter((key) => key !== 'requires_write');
+      if (unknown.length > 0) {
+        throw new ExecutorProfileError(
+          `${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(', ')}; ` +
+            'only `requires_write` is allowed.',
+        );
+      }
+      if (typeof rawPolicy.requires_write !== 'boolean') {
+        throw new ExecutorProfileError(
+          `${source}: \`archetypes.${name}.requires_write\` must be boolean.`,
+        );
+      }
+      archetypes[name] = { requiresWrite: rawPolicy.requires_write };
     }
   }
 
@@ -457,7 +532,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
     }
   }
 
-  return { executors, bindings, loadouts, defaultLoadout, harness, schemaVersion: hasTargets ? 2 : 1 };
+  return { executors, bindings, archetypes, loadouts, defaultLoadout, harness, schemaVersion: hasTargets ? 2 : 1 };
 }
 
 /** Load the repo's executor profile, or explain how to create one. */
@@ -650,6 +725,41 @@ export function resolveRole(
   );
 }
 
+/** One delivery under consideration: the profile's name for it, plus its spec. */
+export interface DeliveryChoice {
+  executor: string;
+  spec: ExecutorSpec;
+}
+
+/**
+ * The single refusal for a mutating archetype about to be delivered through a
+ * command that cannot mutate the workspace — an expensive run that ends in "I
+ * can't write here". Every enforcement point (ad-hoc dispatch, the playbook
+ * engine, Codex steering) calls this so they refuse in identical words.
+ *
+ * Callers gate on a COMMAND delivery actually being in play: a native
+ * in-session agent's permissions are the host's business, and on a host
+ * executor `write_access` describes its declared command fallback. `null` =
+ * no conflict; undeclared on either side is no constraint.
+ */
+export function explainWriteConflict(
+  delivery: DeliveryChoice,
+  archetype: string | null,
+  profile: ExecutorProfile,
+): string | null {
+  if (archetype == null) return null;
+  if (profile.archetypes[archetype]?.requiresWrite !== true) return null;
+  if (delivery.spec.writeAccess !== false) return null;
+  return (
+    `archetype "${archetype}" declares \`requires_write: true\`, but executor "${delivery.executor}" ` +
+    'delivers through a command route declared `write_access: false` — it cannot mutate the ' +
+    'workspace, so the dispatch would burn a run and end in a refusal. ' +
+    `Fix: bind "${archetype}" to a write-capable executor, ` +
+    "raise the route command's permission mode (and declare `write_access: true`), " +
+    `or run this ${archetype}-shaped task with the native in-session ${archetype} agent.`
+  );
+}
+
 /** Bind a neutral native target to the archetype requested by this invocation. */
 export function executorForArchetype(
   profile: ExecutorProfile,
@@ -682,12 +792,22 @@ export function serializeProfile(profile: ExecutorProfile): string {
       : { adapter: spec.adapter, command: spec.command };
     if (spec.target != null) entry.target = spec.target;
     if (spec.provider != null) entry.provider = spec.provider;
+    // A snapshot that dropped a declared write capability would read as
+    // "undeclared" — i.e. unconstrained — on re-parse.
+    if (spec.writeAccess != null) entry.write_access = spec.writeAccess;
     if (spec.adapter === 'command' && spec.model != null) entry.model = spec.model;
     if (spec.adapter === 'command' && spec.resume != null) entry.resume = spec.resume;
     if (spec.adapter === 'command' && spec.sessionIdPattern != null) entry.session_id_pattern = spec.sessionIdPattern;
     sortedExecutors[name] = entry;
   }
   const out: Record<string, unknown> = { executors: sortedExecutors };
+  if (Object.keys(profile.archetypes).length > 0) {
+    const sortedArchetypes: Record<string, Record<string, unknown>> = {};
+    for (const name of Object.keys(profile.archetypes).sort()) {
+      sortedArchetypes[name] = { requires_write: profile.archetypes[name]!.requiresWrite };
+    }
+    out.archetypes = sortedArchetypes;
+  }
   if (Object.keys(profile.loadouts).length > 0) {
     const sortedLoadouts: Record<string, Record<string, string>> = {};
     for (const name of Object.keys(profile.loadouts).sort()) {

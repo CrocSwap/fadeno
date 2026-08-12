@@ -41,7 +41,7 @@ function parseLayer(path: string): Record<string, unknown> {
 }
 
 function mergeLayer(target: Record<string, unknown>, source: Record<string, unknown>, layer: ConfigLayer, provenance: ProfileProvenance): void {
-  for (const key of ['executors', 'targets', 'routes', 'loadouts', 'bindings']) {
+  for (const key of ['executors', 'targets', 'routes', 'archetypes', 'loadouts', 'bindings']) {
     const entries = mapping(source[key]);
     if (entries == null) continue;
     const current = mapping(target[key]) ?? {};
