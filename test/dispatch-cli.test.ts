@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
-import { DispatchCommandError, DISPATCHES_FILE, runDispatch } from '../src/commands/dispatch.ts';
+import { DispatchCommandError, DISPATCHES_FILE, PENDING_RELAYS_FILE, runDispatch } from '../src/commands/dispatch.ts';
 import { runDrive } from '../src/commands/drive.ts';
 import { runInit } from '../src/commands/init.ts';
 import { runLoadoutUse } from '../src/commands/loadout.ts';
@@ -11,7 +11,7 @@ import { runNewRun } from '../src/commands/new-run.ts';
 import { runVerify } from '../src/commands/verify.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
 import { readEvents, type RunEvent } from '../src/lib/run-ledger.ts';
-import { tempRepo } from './helpers.ts';
+import { read, tempRepo } from './helpers.ts';
 
 /**
  * `fadeno dispatch` (ad-hoc dispatch kernel) + run-path resolution integration.
@@ -83,24 +83,102 @@ test('dispatch: resolves the archetype via the active loadout, relays the report
   ]);
   assert.equal(result.evidencePath, DISPATCHES_FILE);
 
+  // Two rows per dispatch: the request row lands before the spawn (so a
+  // killed dispatch still leaves a trace), the completion row after.
   const rows = evidenceRows(root);
-  assert.equal(rows.length, 1);
-  const row = rows[0]!;
-  assert.equal(row.timestamp, now.toISOString());
-  assert.equal(row.archetype, 'worker');
-  assert.equal(row.role, null);
-  assert.deepEqual(row.loadout, { name: 'main', source: 'default' });
-  assert.equal(row.executor, 'echo-worker');
-  assert.equal(row.model, 'opus');
-  assert.equal(row.exit_code, 0);
-  assert.equal(typeof row.duration_ms, 'number');
-  assert.ok((row.duration_ms as number) >= 0);
-  assert.equal(row.prompt_sha256, sha256Hex('hello'));
-  assert.equal(row.output_sha256, sha256Hex('REPORT:hello'));
+  assert.equal(rows.length, 2);
+  const [requested, completed] = rows as [Record<string, unknown>, Record<string, unknown>];
+  assert.equal(requested.event, 'dispatch_requested');
+  assert.equal(completed.event, 'dispatch_completed');
+  assert.equal(typeof requested.dispatch_id, 'string');
+  assert.equal(requested.dispatch_id, completed.dispatch_id);
+  assert.equal(requested.dispatch_id, result.dispatchId);
+  // The request row carries full resolution identity but no outcome fields.
+  assert.equal(requested.executor, 'echo-worker');
+  assert.equal(requested.prompt_sha256, sha256Hex('hello'));
+  assert.ok(!('exit_code' in requested));
+  assert.ok(!('output_sha256' in requested));
+  assert.ok(!('duration_ms' in requested));
+  assert.equal(completed.timestamp, now.toISOString());
+  assert.equal(completed.archetype, 'worker');
+  assert.equal(completed.role, null);
+  assert.deepEqual(completed.loadout, { name: 'main', source: 'default' });
+  assert.equal(completed.executor, 'echo-worker');
+  assert.equal(completed.model, 'opus');
+  assert.equal(completed.exit_code, 0);
+  assert.equal(typeof completed.duration_ms, 'number');
+  assert.ok((completed.duration_ms as number) >= 0);
+  assert.equal(completed.prompt_sha256, sha256Hex('hello'));
+  assert.equal(completed.output_sha256, sha256Hex('REPORT:hello'));
 
-  // the log is append-only: a second dispatch adds a second row
+  // The kernel owns the stdin prompt snapshot: the recorded digest attests
+  // exactly the bytes it received, from a file it wrote itself.
+  assert.equal(completed.prompt_source, 'stdin');
+  assert.equal(result.promptSource, 'stdin');
+  assert.equal(completed.prompt_snapshot, result.promptSnapshot);
+  assert.match(result.promptSnapshot, /^\.fadeno\/local\/prompts\/worker-[0-9a-f]{8}\.md$/);
+  assert.equal(read(root, result.promptSnapshot), 'hello');
+  // No attestation flow in play → the field stays absent.
+  assert.ok(!('relay_attested' in completed));
+  assert.equal(result.relayAttested, null);
+
+  // the log is append-only: a second dispatch adds a second row pair
   runDispatch({ archetype: 'worker', prompt: 'again', repoRoot: root, env: null });
-  assert.equal(evidenceRows(root).length, 2);
+  assert.equal(evidenceRows(root).length, 4);
+});
+
+test('dispatch: relay attestation consumes a matching spawn-side stash', (t) => {
+  const root = seedProfile(t, {
+    executors: EXECUTORS,
+    loadouts: { main: { worker: 'echo-worker' } },
+    default_loadout: 'main',
+  });
+  const now = new Date('2026-08-12T12:00:00Z');
+  mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
+  writeFileSync(
+    join(root, PENDING_RELAYS_FILE),
+    `${[
+      // stale (2h old) — ignored and pruned
+      JSON.stringify({ timestamp: '2026-08-12T10:00:00Z', prompt_sha256: sha256Hex('old') }),
+      // fresh, matches the dispatched prompt
+      JSON.stringify({ timestamp: '2026-08-12T11:59:00Z', prompt_sha256: sha256Hex('hello') }),
+      // fresh, some other pending dispatch
+      JSON.stringify({ timestamp: '2026-08-12T11:59:30Z', prompt_sha256: sha256Hex('other') }),
+    ].join('\n')}\n`,
+  );
+
+  // The heredoc contract appends one trailing newline — still attests.
+  const attested = runDispatch({ archetype: 'worker', prompt: 'hello\n', repoRoot: root, env: null, now });
+  assert.equal(attested.relayAttested, true);
+  assert.equal(evidenceRows(root).at(-1)!.relay_attested, true);
+  // The matching entry is consumed; the concurrent pending one survives.
+  const remaining = readFileSync(join(root, PENDING_RELAYS_FILE), 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as { prompt_sha256: string });
+  assert.deepEqual(remaining.map((row) => row.prompt_sha256), [sha256Hex('other')]);
+
+  // A prompt matching no fresh entry while entries are pending = altered relay.
+  const mangled = runDispatch({ archetype: 'worker', prompt: 'ello\n', repoRoot: root, env: null, now });
+  assert.equal(mangled.relayAttested, false);
+  assert.equal(evidenceRows(root).at(-1)!.relay_attested, false);
+});
+
+test('dispatch: --prompt-file rows record the given file as the snapshot', (t) => {
+  const root = seedProfile(t, {
+    executors: EXECUTORS,
+    loadouts: { main: { worker: 'echo-worker' } },
+    default_loadout: 'main',
+  });
+  writeFileSync(join(root, 'task.md'), 'from-a-file');
+  const result = runDispatch({ archetype: 'worker', promptFile: 'task.md', cwd: root, repoRoot: root, env: null });
+  assert.equal(result.promptSource, 'file');
+  assert.equal(result.promptSnapshot, 'task.md');
+  const row = evidenceRows(root).at(-1)!;
+  assert.equal(row.prompt_source, 'file');
+  assert.equal(row.prompt_snapshot, 'task.md');
+  // No kernel copy for file prompts — the digest pins the content.
+  assert.equal(row.prompt_sha256, sha256Hex('from-a-file'));
 });
 
 test('dispatch: a --role binding pin wins; without --role a same-named binding is not consulted', (t) => {
@@ -169,7 +247,9 @@ test('dispatch: resolving to a host executor refuses with the host-dispatch poin
   });
   assert.throws(
     () => runDispatch({ archetype: 'reviewer', prompt: 'p', repoRoot: root, env: null }),
-    /resolved to host executor "terra-host".*declare fallback_command.*native host dispatch/,
+    // The refusal names the native in-session agent — an explicitly-invoked
+    // proxy under a native loadout should point back at the right tool.
+    /resolved to host executor "terra-host".*native in-session reviewer agent.*declare fallback_command/,
   );
 });
 

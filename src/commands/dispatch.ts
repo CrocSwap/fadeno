@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
@@ -39,6 +40,56 @@ export class DispatchCommandError extends Error {}
 
 /** Repo-relative append-only evidence log for ad-hoc dispatches. */
 export const DISPATCHES_FILE = join('.fadeno', 'dispatches.jsonl');
+
+/**
+ * Spawn-side relay attestations awaiting a matching dispatch — rows of
+ * `{timestamp, prompt_sha256}` stashed by the Claude steering hook when it
+ * routes a subtask to a dispatch proxy. Content-keyed, so concurrent
+ * dispatches match without ordering.
+ */
+export const PENDING_RELAYS_FILE = join('.fadeno', 'local', 'pending-relays.jsonl');
+
+const PENDING_RELAY_MAX_AGE_MS = 60 * 60 * 1000;
+
+/**
+ * Match the received prompt against spawn-side attestations. A hit consumes
+ * its entry and attests the proxy copied the prompt verbatim (modulo the one
+ * trailing newline a heredoc appends); fresh entries with no hit mean the
+ * relay altered the prompt (`false`); no fresh entries — non-hook flows —
+ * record nothing (`null`). Evidence-only: never blocks the dispatch.
+ */
+function consumePendingRelay(repoRoot: string, prompt: string, now: Date): boolean | null {
+  const path = join(repoRoot, PENDING_RELAYS_FILE);
+  if (!existsSync(path)) return null;
+  let rows: Array<{ timestamp?: unknown; prompt_sha256?: unknown }>;
+  try {
+    rows = readFileSync(path, 'utf8')
+      .split('\n')
+      .filter((line) => line.trim() !== '')
+      .map((line) => JSON.parse(line) as { timestamp?: unknown; prompt_sha256?: unknown });
+  } catch {
+    return null; // malformed stash — attest nothing rather than guess
+  }
+  const fresh = rows.filter((row) => {
+    const ts = typeof row.timestamp === 'string' ? Date.parse(row.timestamp) : NaN;
+    return (
+      Number.isFinite(ts) &&
+      now.getTime() - ts <= PENDING_RELAY_MAX_AGE_MS &&
+      typeof row.prompt_sha256 === 'string'
+    );
+  });
+  const digests = new Set([sha256Hex(prompt), sha256Hex(prompt.replace(/\n$/, ''))]);
+  const hit = fresh.findIndex((row) => digests.has(row.prompt_sha256 as string));
+  const remaining = hit === -1 ? fresh : fresh.filter((_, index) => index !== hit);
+  try {
+    if (remaining.length === 0) rmSync(path, { force: true });
+    else writeFileSync(path, `${remaining.map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8');
+  } catch {
+    // best-effort pruning; the verdict stands either way
+  }
+  if (hit !== -1) return true;
+  return fresh.length > 0 ? false : null;
+}
 
 const SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
 
@@ -86,6 +137,18 @@ export interface AdHocDispatchOptions {
 }
 
 export interface AdHocDispatchResult {
+  /** Correlates the dispatch_requested / dispatch_completed evidence rows. */
+  dispatchId: string;
+  /** Where the prompt bytes came from (`stdin` gets a kernel-written snapshot). */
+  promptSource: 'stdin' | 'file';
+  /** Repo-relative snapshot path (stdin) or the given prompt file's path. */
+  promptSnapshot: string;
+  /**
+   * Spawn-side relay verdict: `true` = the prompt matches a stashed
+   * attestation, `false` = attestations were pending but none matched,
+   * `null` = no attestation flow in play.
+   */
+  relayAttested: boolean | null;
   archetype: string | null;
   role: string | null;
   /** Active loadout at dispatch time (null when bypassed or none configured). */
@@ -102,7 +165,7 @@ export interface AdHocDispatchResult {
   durationMs: number;
   promptSha256: string;
   outputSha256: string;
-  /** Repo-relative path of the evidence log that received one row. */
+  /** Repo-relative path of the evidence log that received the row pair. */
   evidencePath: string;
   transport: 'command' | 'host-command-fallback';
 }
@@ -154,8 +217,10 @@ function loadProfileOrThrow(repoRoot: string, userPathOptions?: UserPathOptions)
  * One ad-hoc dispatch: resolve archetype → executor with the kernel chain
  * (per-role pin → active loadout slot → `"*"` default), invoke the command
  * adapter (or a host executor's explicit command fallback) with the prompt on
- * stdin, and append one evidence row to
- * `.fadeno/dispatches.jsonl`. `--executor` bypasses resolution for debugging.
+ * stdin, and append a `dispatch_requested` + `dispatch_completed` evidence row
+ * pair to `.fadeno/dispatches.jsonl` (the request row lands before the spawn
+ * so killed dispatches still leave a trace). `--executor` bypasses resolution
+ * for debugging.
  */
 export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const cwd = opts.cwd ?? process.cwd();
@@ -228,21 +293,27 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   if (spec.adapter === 'host' && spec.fallbackCommand == null) {
     throw new DispatchCommandError(
       `resolved to host executor "${executorName}"; ad-hoc dispatch invokes command adapters only — ` +
-        'declare fallback_command, bind a command executor, or run via native host dispatch.',
+        `run this ${archetype ?? role ?? 'role'}-shaped task with the native in-session ` +
+        `${archetype ?? 'role'} agent instead, declare fallback_command on the executor, or bind a ` +
+        'command executor.',
     );
   }
   const command = spec.adapter === 'command' ? spec.command : spec.fallbackCommand!;
   const transport = spec.adapter === 'command' ? 'command' : 'host-command-fallback';
 
   let prompt: string;
+  let promptSource: 'stdin' | 'file';
+  let promptPath: string | null = null;
   if (opts.promptFile != null && opts.promptFile !== '') {
-    const promptPath = resolve(cwd, opts.promptFile);
+    promptPath = resolve(cwd, opts.promptFile);
     if (!existsSync(promptPath)) {
       throw new DispatchCommandError(`--prompt-file ${opts.promptFile} does not exist.`);
     }
     prompt = readFileSync(promptPath, 'utf8');
+    promptSource = 'file';
   } else if (opts.prompt != null) {
     prompt = opts.prompt;
+    promptSource = 'stdin';
   } else {
     throw new DispatchCommandError('no prompt: pass --prompt-file <path> or pipe the prompt on stdin.');
   }
@@ -263,6 +334,63 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   opts.onEcho?.(echo);
   opts.onEcho?.(`external sandbox: ${executorName} (${command.join(' ')}) runs outside the current harness via ${transport}; evidence → ${DISPATCHES_FILE}`);
 
+  // Two-row evidence: a request row lands BEFORE the spawn so a dispatch
+  // killed mid-flight (harness timeout, SIGTERM) still leaves a trace —
+  // spawnSync blocks the event loop, so nothing written afterwards can be
+  // relied on to exist. The completion row shares the request's dispatch_id.
+  const dispatchId = randomUUID();
+
+  // The kernel owns the prompt snapshot for stdin dispatches: the single
+  // writer means the recorded digest attests exactly the bytes received, and
+  // the relay contract needs no separate file-writing step in the caller.
+  let promptSnapshot: string;
+  if (promptSource === 'stdin') {
+    const snapshotRel = join(
+      '.fadeno',
+      'local',
+      'prompts',
+      `${archetype ?? role ?? 'dispatch'}-${dispatchId.slice(0, 8)}.md`,
+    );
+    const snapshotAbs = join(repoRoot, snapshotRel);
+    mkdirSync(join(repoRoot, '.fadeno', 'local', 'prompts'), { recursive: true });
+    writeFileSync(snapshotAbs, prompt, 'utf8');
+    promptSnapshot = snapshotRel.split('\\').join('/');
+  } else {
+    const rel = relative(repoRoot, promptPath!).split('\\').join('/');
+    promptSnapshot = rel === '' || rel.startsWith('../') || isAbsolute(rel) ? promptPath! : rel;
+  }
+
+  const relayAttested = consumePendingRelay(repoRoot, prompt, opts.now ?? new Date());
+
+  const promptSha256 = sha256Hex(prompt);
+  const commandSha256 = sha256Hex(JSON.stringify(command));
+  const identity: Record<string, unknown> = {
+    dispatch_id: dispatchId,
+    archetype,
+    role,
+    resolution: ROW_RESOLUTION[source],
+    loadout: active == null ? null : { name: active.name, source: active.source },
+    executor: executorName,
+    ...(spec.target != null ? { target: spec.target, provider: spec.provider ?? null } : {}),
+    model: spec.model,
+    transport,
+    ...(spec.target != null ? { delivery_transport: transport } : {}),
+    prompt_source: promptSource,
+    prompt_snapshot: promptSnapshot,
+    prompt_sha256: promptSha256,
+    ...(relayAttested != null ? { relay_attested: relayAttested } : {}),
+    command,
+    command_sha256: commandSha256,
+  };
+  ensureFadenoIgnore(repoRoot);
+  mkdirSync(join(repoRoot, '.fadeno'), { recursive: true });
+  const evidenceFile = join(repoRoot, DISPATCHES_FILE);
+  appendFileSync(
+    evidenceFile,
+    `${JSON.stringify({ timestamp: (opts.now ?? new Date()).toISOString(), event: 'dispatch_requested', ...identity })}\n`,
+    'utf8',
+  );
+
   const started = Date.now();
   const [cmd, ...args] = command;
   const spawned = spawnSync(cmd!, args, {
@@ -274,34 +402,19 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const durationMs = Date.now() - started;
 
   const stdout = spawned.stdout ?? '';
-  const promptSha256 = sha256Hex(prompt);
   const outputSha256 = sha256Hex(stdout);
 
-  // Evidence first — a spawn failure is still a dispatch that happened.
   const row: Record<string, unknown> = {
     timestamp: (opts.now ?? new Date()).toISOString(),
-    archetype,
-    role,
-    resolution: ROW_RESOLUTION[source],
-    loadout: active == null ? null : { name: active.name, source: active.source },
-    executor: executorName,
-    ...(spec.target != null ? { target: spec.target, provider: spec.provider ?? null } : {}),
-    model: spec.model,
-    transport,
-    ...(spec.target != null ? { delivery_transport: transport } : {}),
+    event: 'dispatch_completed',
+    ...identity,
     exit_code: spawned.error != null ? null : spawned.status,
+    ...(spawned.signal != null ? { signal: spawned.signal } : {}),
     duration_ms: durationMs,
-    prompt_sha256: promptSha256,
     output_sha256: outputSha256,
   };
   if (spawned.error != null) row.error = spawned.error.message;
-  ensureFadenoIgnore(repoRoot);
-  mkdirSync(join(repoRoot, '.fadeno'), { recursive: true });
-  appendFileSync(
-    join(repoRoot, DISPATCHES_FILE),
-    `${JSON.stringify({ ...row, command, command_sha256: sha256Hex(JSON.stringify(command)) })}\n`,
-    'utf8',
-  );
+  appendFileSync(evidenceFile, `${JSON.stringify(row)}\n`, 'utf8');
 
   if (spawned.error != null) {
     throw new DispatchCommandError(
@@ -310,6 +423,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   }
 
   return {
+    dispatchId,
+    promptSource,
+    promptSnapshot,
+    relayAttested,
     archetype,
     role,
     loadout: active,

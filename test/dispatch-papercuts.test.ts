@@ -156,9 +156,18 @@ test('evidence: rows record the resolution path for all four ways of choosing an
   runDispatch({ archetype: 'judge', prompt: 'p', repoRoot: root, env: null });
   runDispatch({ executor: 'echo-worker', prompt: 'p', repoRoot: root, env: null });
 
+  // Each dispatch appends a request + completion pair; both rows carry the
+  // same resolution identity, so project onto the completion rows.
   const rows = evidenceRows(root);
+  assert.deepEqual(rows.map((r) => r.event), [
+    'dispatch_requested', 'dispatch_completed',
+    'dispatch_requested', 'dispatch_completed',
+    'dispatch_requested', 'dispatch_completed',
+    'dispatch_requested', 'dispatch_completed',
+  ]);
+  const completed = rows.filter((r) => r.event === 'dispatch_completed');
   assert.deepEqual(
-    rows.map((r) => [r.resolution, r.executor]),
+    completed.map((r) => [r.resolution, r.executor]),
     [
       ['binding', 'luna-worker'],
       ['loadout', 'echo-worker'],
@@ -168,9 +177,9 @@ test('evidence: rows record the resolution path for all four ways of choosing an
   );
   // Role-pin and fallback rows still record the *active* loadout — the
   // resolution field is what disambiguates who supplied the executor.
-  assert.deepEqual(rows[0]!.loadout, { name: 'main', source: 'default' });
-  assert.deepEqual(rows[2]!.loadout, { name: 'main', source: 'default' });
-  assert.equal(rows[3]!.loadout, null);
+  assert.deepEqual(completed[0]!.loadout, { name: 'main', source: 'default' });
+  assert.deepEqual(completed[2]!.loadout, { name: 'main', source: 'default' });
+  assert.equal(completed[3]!.loadout, null);
 });
 
 // --- 5. failure legibility ---------------------------------------------------
