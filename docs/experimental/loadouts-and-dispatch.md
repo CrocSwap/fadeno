@@ -35,38 +35,122 @@ client of it; ad-hoc subagent dispatch is the second.
 - **Archetype** — the functional class of an actor: `worker`, `reviewer`,
   `judge` are the seeded three (matching the plugin's existing role-subagent
   trichotomy). Open set; bare lowercase identifiers.
-- **Loadout** — a named mapping of archetype → executor. The switchable unit.
+- **Target** — the harness-neutral identity of an actor's inference: provider,
+  model, reasoning effort. No argv, no flags. This is what a loadout slot
+  names.
+- **Route** — how one harness delivers one provider: natively in-session, or
+  out-of-process as a command. The harness-specific half, kept out of the
+  loadout.
+- **Loadout** — a named mapping of archetype → target. The switchable unit.
   ("Loadout," not "profile" — `ExecutorProfile` already names the parsed
   `executors.yaml` document in `src/lib/executors.ts`.)
+- **Executor** — the resolved slot: a target compiled through the active
+  harness's route into one concrete delivery. Under the legacy v1 schema an
+  executor is written out by hand; under v2 it is computed. "Executor" below
+  means the resolved slot under either schema.
 - **Dispatch** — one resolution + invocation + evidence record, playbook-run
   or ad-hoc.
 
 ## Schema
 
-`.fadeno/executors.yaml` gains two optional top-level keys beside the existing
-`executors:` and `bindings:`:
+`.fadeno/executors.yaml` is the catalog. Schema v2 splits the executor into
+*what* and *how*: harness-neutral **targets** name the inference; per-harness
+**routes** say how the machine in front of the user reaches a provider; and
+**loadouts** map archetypes to targets. The split is what makes a loadout
+portable — "my worker is Luna" is a true statement in every harness, while the
+argv that delivers Luna is not.
 
 ```yaml
-executors:
-  opus-xhigh:        { adapter: command, command: [claude, -p, --model, opus, --effort, xhigh], model: opus }
-  luna-cli-xhigh:    { adapter: command, command: [codex, exec, -m, gpt-5.6-luna, -c, 'model_reasoning_effort="xhigh"', -s, workspace-write, "-"], model: gpt-5.6-luna }
-  terra-high:        { adapter: host, model: gpt-5.6-terra, reasoning_effort: high, agent_type: reviewer }
+schema_version: 2
 
-loadouts:
-  anthropic-primary: { worker: opus-xhigh,     reviewer: terra-high, judge: terra-high }
-  openai-primary:    { worker: luna-cli-xhigh, reviewer: terra-high, judge: terra-high }
+targets:                          # what runs: harness-neutral identity
+  current-host:   { provider: current-host, model: current-host, reasoning_effort: default }
+  luna-medium:    { provider: openai,       model: gpt-5.6-luna, reasoning_effort: medium }
+  claude-default: { provider: anthropic,    model: opus,         reasoning_effort: high }
 
-default_loadout: anthropic-primary   # optional
+routes:                           # how the active harness delivers each provider
+  claude:
+    current-host: { native: true }
+    anthropic:
+      native: true
+      command: [claude, -p, --model, "{model}"]     # headless fallback
+      write_access: false
+    openai:
+      command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
+      write_access: true
 
-bindings:                            # per-role pins; now optional if loadouts exist
-  opus_reviewer: opus-xhigh          # deliberately-multi-model playbooks pin here
-  "*": luna-cli-xhigh
+archetypes:                       # what an archetype needs from any delivery
+  worker: { requires_write: true }
+
+loadouts:                         # the switchable unit: archetype → target
+  native: { worker: current-host, reviewer: current-host, judge: current-host }
+  luna:   { worker: luna-medium,  reviewer: luna-medium,  judge: luna-medium }
+
+default_loadout: native           # optional
+
+bindings:                         # per-role pins; optional once loadouts exist
+  opus_reviewer: claude-default   # deliberately-multi-model playbooks pin here
+  "*": current-host
 ```
 
-Validation: every loadout slot must reference a declared executor; loadout
-names and archetype keys are bare identifiers (`[a-z][a-z0-9_-]*`);
-`default_loadout` must name a declared loadout. `bindings` may be omitted when
-`loadouts` is present (previously it was required).
+The shipped catalog at `templates/common/fadeno/executors.yaml` is the
+reference example — it carries this shape across all four harness route tables
+and is what `init` seeds. Read it rather than this excerpt when the two
+disagree.
+
+**Targets.** `provider` and `model` are required non-empty strings;
+`reasoning_effort` is optional and defaults to `default`. A target carries
+identity only — never argv, never permission flags. Target names are the names
+loadout slots and `bindings` reference, so under v2 "target name" and
+"executor name" are the same string.
+
+**Routes.** `routes:` is keyed by harness id — `codex`, `claude`, `grok`,
+`standalone` — and **only the active harness's sub-table is compiled**
+(`FADENO_HARNESS`, else the harness recorded by `fadeno setup`, else
+`standalone`). A v2 catalog with no `routes.<active-harness>` mapping is a hard
+error rather than a silent no-op. Inside that sub-table each entry is keyed by
+**provider**, with one refinement: an entry keyed by an exact *target* name
+wins over its provider entry — that is how one target gets a stricter sandbox
+or a read-only policy without pushing harness specifics up into the loadout.
+
+A route entry declares:
+
+- `native: true` — this harness delivers the provider in-session. Compiles to a
+  native slot whose agent identity is bound to the requesting archetype at
+  resolution time, so one route serves worker, reviewer, and judge.
+- `command: [...]` — argv for out-of-process delivery, prompt on stdin.
+  `{model}` and `{reasoning_effort}` are substituted from the target. On a
+  `native: true` route this is the *fallback* delivery, not the primary one; on
+  a non-native route it is required.
+- `resume: [...]` — session-resume argv, which must contain `{session_id}`.
+  Declaring it makes the route session-capable (one harness session per role
+  per run). Resumed context is attested, not recomputable — bias toward
+  memoryless routes.
+- `session_id_pattern:` — a regex with one capture group, matched against
+  stderr then stdout, for harnesses that mint the session id themselves.
+  Mutually exclusive with a `{session_id}` placeholder in `command` (the
+  engine-minted case). `resume` with no id source, or an id source with no
+  `resume`, is an error in both directions.
+- `write_access:` — whether *this route's command delivery* can mutate the
+  workspace. See *Write access* below; a `native: true` route's declaration
+  describes its fallback command, never the in-session agent.
+
+**Archetypes.** `archetypes:` is an optional top-level mapping whose values
+accept exactly one key, `requires_write: boolean`. Deliberately strict: an
+unknown key is an error, because the alternative is a typo that silently drops
+a safety constraint.
+
+**Loadouts and bindings.** Loadout names and archetype keys are bare
+identifiers (`[a-z][a-z0-9_-]*`); every loadout slot must name a declared
+target; `default_loadout` must name a declared loadout. `bindings` keys are
+role names plus the `"*"` wildcard and also name targets. At least one of
+`bindings:` / `loadouts:` must be non-empty — `bindings` alone was required
+before loadouts existed, and is now the optional half.
+
+**Layering.** The catalog resolves in layers — the bundled built-in, then the
+user file (`~/.config/fadeno/executors.yaml`), then the project
+`.fadeno/executors.yaml` — merged by key, so adding one target or overriding
+one route never means forking the shipped table.
 
 Playbook roles gain one optional field:
 
@@ -82,6 +166,18 @@ harness- and provider-neutral. Validator checks the identifier shape only.
 Template playbooks must not encode model names in role names
 (`luna_implementer` → `implementer`); genuinely multi-model playbooks (e.g.
 dual-model review) are the legitimate use of per-role `bindings` pins.
+
+> **Legacy schema (v1).** The original shape — a flat `executors:` map whose
+> entries each carry `adapter: command|host` and their own argv, with no
+> `targets:`/`routes:` — is still parsed unchanged, with `schema_version: 1` or
+> no `schema_version` at all, and may coexist with a v2 catalog in one
+> document. A v1 entry accepts `write_access:` with exactly the same meaning.
+> It is also the *internal* shape: v2 compiles each target through the active
+> harness's route into precisely that adapter form, tagged with its
+> `target:`/`provider:`, which is why `serializeProfile` — the canonical
+> run-dir snapshot — emits v1 for both schemas and a v2 catalog round-trips as
+> v1 executors plus its loadouts. Hand-write v1 only for a delivery the route
+> table cannot express; new catalogs should be v2.
 
 ## Resolution
 
@@ -109,6 +205,73 @@ config emitted elsewhere.** Any integration (plugin agents, hooks) stays dumb
 and calls `fadeno`; switching loadouts mid-session takes effect on the next
 dispatch with no config churn.
 
+## Write access
+
+Resolution answers *who* runs the task. It does not answer whether that
+delivery can change the workspace — a route's argv may hand the prompt to a
+harness that is forbidden to write. Two optional declarations make the question
+answerable before a turn is spent:
+
+```yaml
+routes:
+  claude:
+    anthropic:
+      native: true
+      command: [claude, -p, --model, "{model}"]   # headless fallback
+      write_access: false
+    xai:
+      command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --permission-mode, acceptEdits]
+      write_access: true
+
+archetypes:
+  worker: { requires_write: true }
+```
+
+`write_access` is a property of a **route entry** and describes that route's
+*command* delivery only — whether the harness it spawns can mutate the
+workspace. On a native route it therefore describes the fallback command, never
+the in-session agent, whose permissions are the host's business. (A v1
+`executors:` entry accepts the same key, with the same meaning.) `archetypes:`
+is an optional top-level mapping; its values accept exactly one key,
+`requires_write: boolean`.
+
+Ad-hoc dispatch refuses **before spawning** when the executing command route
+declares `write_access: false` and the archetype declares
+`requires_write: true`. Either side undeclared is no constraint at all, so
+every profile written before this field keeps dispatching exactly as it did.
+When it is declared, `write_access` lands in the evidence-row identity (so both
+the request and completion rows carry it), and a dispatch that proceeds on a
+`write_access: false` route gets a `[write_access: none]` tag in the resolution
+echo — a read-only delivery is visible when it is chosen, not inferred later
+from a report that changed nothing.
+
+The same conflict is refused at every point that can choose a command
+delivery, not just the ad-hoc kernel. `drive` checks before spawning a command
+dispatch for a role: the actor fails pre-spawn (`actor_failed` with
+`reason: "write_access_denied"` and `write_access: false` on the event) and
+the run pauses in `executor_failed` — no prompt assembled, no run burnt.
+`steering resolve` returns `mode: write_conflict` instead of presenting the
+slot as a clean command delivery, and `steering apply` declines to materialize
+a command broker for a conflicted slot while other slots proceed. All three
+speak through one helper — `explainWriteConflict(delivery, archetype,
+profile)` in `src/lib/executors.ts` — so the refusal text is identical
+everywhere. Exempt by design: native in-session deliveries (the host's
+permission fences are the host's business) and locked engine host requests
+delivered through `dispatch-fallback`, where refusing would strand an
+in-flight request mid-receipt.
+
+**Why this exists (dogfood, 2026-08-12).** A commit task resolved to the
+worker slot and was delivered through `routes.claude.anthropic`'s fallback
+`claude -p`, which runs headless in the default permission mode: there is no
+interactive approver in that process, so nothing can approve a git commit. It
+is an advisory-only delivery that was bound as a worker slot, and the kernel
+dispatched it because it read "the route has a `command`" as "the route is
+dispatchable." Being able to *deliver a prompt* is not being able to *do the
+work*. The same catalog already carried the distinction one line away — the
+grok route passes `--permission-mode acceptEdits` explicitly — but only inside
+argv, where no check can read it. `write_access` promotes that from a string
+nobody parses to a declaration the kernel can refuse on.
+
 ## CLI
 
 - `fadeno setup` / `fadeno use` / `fadeno status` / `fadeno doctor` — the
@@ -120,18 +283,24 @@ dispatch with no config churn.
 - `fadeno dispatch --archetype <a> [--role <name>] [--loadout <name>]
   [--executor <name>] [--prompt-file <path>]` — prompt from `--prompt-file`
   or stdin; resolves per the order above (`--executor` bypasses resolution
-  for debugging); invokes the executor; report to stdout; appends one
-  evidence row. Only `command` adapters are directly invokable — resolving
-  to a `host` executor outside a host-dispatch session is a clear error
-  ("bind a command executor for this archetype or run via host dispatch").
+  for debugging); invokes the executor; report to stdout; appends the evidence
+  row pair. Ad-hoc dispatch spawns commands, so what it can invoke is a
+  property of the *route*, not of the target: a command-delivered route runs
+  its argv, and a `native: true` route runs its fallback `command` when it
+  declares one. A natively-routed target with no fallback command is a clear
+  error that names the fix — run this archetype-shaped task with the native
+  in-session agent, declare a fallback command on the route, or bind the
+  archetype to a command-delivered target.
+- `fadeno dispatches [--tail <N>] [--json]` — read the evidence back; see
+  *Evidence*.
 
 **Resolution echo:** every run start (`new-run`/`drive`) and every dispatch
 prints where each actor landed, so a user burning a metered subscription
 never wonders which provider a run is spending:
 
 ```
-implementer → luna-cli-xhigh (gpt-5.6-luna) [loadout openai-primary]
-opus_reviewer → opus-xhigh (opus) [binding]
+implementer → luna-medium (gpt-5.6-luna) [loadout luna]
+opus_reviewer → claude-default (opus) [binding]
 ```
 
 ## Evidence
@@ -144,13 +313,49 @@ opus_reviewer → opus-xhigh (opus) [binding]
   during implementation: `new-run` never loads the executor profile, and
   snapshotting at drive time is the honest expression of "resolution is
   computed at dispatch time" — `new-run` still echoes a non-ledger preview.)
-- Ad-hoc dispatch: append-only `.fadeno/dispatches.jsonl`, one row per
-  dispatch: timestamp, archetype, role (if given), loadout + source,
-  executor, model, exit status, duration, prompt digest, output digest.
+- Ad-hoc dispatch: append-only `.fadeno/dispatches.jsonl`, a correlated row
+  pair per dispatch — `dispatch_requested` before the executor is invoked,
+  `dispatch_completed` after, sharing a `dispatch_id` — each carrying the
+  identity (timestamp, archetype, role if given, loadout + source, executor,
+  model, prompt digest), with exit status, duration, and output digest on the
+  completion row, so a dispatch killed mid-flight still leaves its request row.
   (Refined during dogfooding: each row also records `resolution` — how the
   executor was chosen: `binding` | `loadout` | `fallback` | `executor-flag`;
   and the file is per-machine evidence, gitignored by scaffolding — auditable
-  locally, never committed, mirroring the `.fadeno/local/` rationale.)
+  locally, never committed, mirroring the `.fadeno/local/` rationale.) Rows
+  are stamped `format: "0.1"`. The reader treats unversioned rows that carry
+  a recognized `event` as current, renders pre-two-row completion-only rows
+  as `[legacy]` entries instead of dropping them as unreadable, and counts
+  rows from a newer format major separately — old evidence ages into legacy,
+  it does not degrade into noise.
+- Native delivery: the steering hook appends a `native_delivery` row to the
+  same `.fadeno/dispatches.jsonl` whenever it steers a spawn to a native fadeno
+  role agent — timestamp, `event: "native_delivery"`, archetype, agent_type
+  (as requested, before the rewrite), loadout, executor, model,
+  model_override, `reasoning_effort: "inherited"`, `transport: "host-native"`,
+  prompt_sha256, prompt_snapshot (a verbatim copy of the spawn prompt at
+  `.fadeno/local/prompts/native-<sha8>.md`), and `hook_version` — which
+  generation of the hook wrote the row, per the lag caveat under *Host steering
+  integration*. A command dispatch gets two kernel
+  rows, a kernel-owned snapshot, and relay attestation; the kernel is never
+  invoked on the native path, so the hook is the only component that can
+  witness a native delivery at all. Writing it to
+  the same file makes `dispatches.jsonl` the single audit point across both
+  delivery routes — "which executor produced this" stops depending on which
+  route the loadout happened to take. Best-effort, like the relay stash: a
+  failed evidence write never changes a steering decision. Claude-specific for
+  now: only the Claude harness has a spawn hook, so native deliveries in other
+  harnesses stay unwitnessed until they grow an equivalent interception point.
+- Reading it back: `fadeno dispatches [--tail <N>] [--json]` renders the log
+  instead of leaving it to `jq`. It correlates each
+  `dispatch_requested`/`dispatch_completed` pair by `dispatch_id` into one row,
+  renders `native_delivery` rows beside them so both delivery routes read as
+  one history, and marks a request whose completion never arrived — "no
+  completion recorded (killed or in flight)" — rather than dropping the
+  dispatch that most wants explaining. Markers surface the identity that
+  changes what a row means: `relay_attested`, `[write_access: none]`,
+  `model_override`. `--tail <N>` defaults to 10; `--json` emits the correlated
+  rows for scripts.
 
 This makes Fadeno the only layer that sees cross-provider usage — the natural
 future home of per-provider burn reporting (a later `fadeno usage`; not in
@@ -172,7 +377,10 @@ archetype (`dispatch-worker`, `dispatch-reviewer`, `dispatch-judge`):
 - Behavior: ONE Bash call (tool `timeout` raised to 600000 ms — external
   executors routinely exceed the 2-minute default) that pipes the received
   task prompt **verbatim** to `fadeno dispatch --archetype <a>` as a quoted
-  heredoc on stdin, then relays the report verbatim. The kernel writes the
+  `<<'FADENO_PROMPT'` heredoc on stdin, then relays the report verbatim. The
+  delimiter is fixed and the quoting is load-bearing: the guard below
+  allowlists that exact shape, and quoting is what stops the shell from
+  expanding a prompt that happens to contain `$` or backticks. The kernel writes the
   prompt snapshot to `.fadeno/local/prompts/` and the evidence rows itself —
   a single writer, so the recorded digest attests exactly the bytes it
   received. The call is spelled with bare `fadeno` first so the
@@ -209,6 +417,31 @@ Steering ladder:
 4. **Strict mode** (deferred, opt-in): disable built-in agent types via
    `permissions.deny` / harness env flags so proxies are the only targets.
 
+**Hook generations are ambiguous from the inside.** A harness binds its hook
+*registrations* — which events run which scripts — at session start, like its
+agent and skill surface. Script *content* is looser: the registered command
+points into the plugin cache, and a live 2026-08-12 session begun under one rc
+was observed executing a later rc's script after a mid-session plugin update,
+no reload involved. So neither "my change is live" nor "my change can't be
+live yet" is safe to assume — refresh semantics belong to the harness and
+differ by what changed (registrations and surfaces lag until reload; script
+bodies may not). A rung that was just fixed and a rung that is genuinely
+broken look identical from inside the session that fixed it, which is how "the
+hook is ignoring my change" gets diagnosed as a bug for an hour. Hook-written
+evidence therefore carries `hook_version` — stamped `dev` in the committed
+template and the package version in every emitted copy — so a row identifies
+the generation that actually wrote it, and the question settles from evidence
+instead of by argument. (The rows that revealed the mid-session refresh were
+dated exactly this way: they existed, so the writer was at least the
+generation that introduced them; they lacked `hook_version`, so it predated
+the one that stamps.)
+The agent and skill surface has the same skew and the same answer: plugin
+generation appends `[fadeno <version>]` to every agent and skill description,
+so a live session's loaded surface can be checked for staleness against
+`claude plugin list` rather than assumed current. Kernel-written rows have no
+such gap — the CLI is re-executed per dispatch, so it is always the installed
+generation.
+
 **Relay attestation.** The one unverifiable step left is the proxy copying
 the prompt into its heredoc. The spawn-side steering hook closes it: whenever
 a subtask heads to a dispatch proxy (rewritten *or* explicitly targeted), it
@@ -221,6 +454,29 @@ match), `false` (fresh stashes pending but none matched — the relay altered
 the prompt), or omits the field (no hook flow in play). Evidence-only: it
 never blocks a dispatch.
 
+**Retyping fidelity.** The generalized rule behind the heredoc contract, the
+kernel-owned snapshot, and the attestation: *text that must arrive verbatim
+travels as bytes — a file or stdin — and is never retyped by a model.* Two
+live confirmations, both 2026-08-12: the haiku proxy dropped a prompt's first
+line while relaying it under an explicit verbatim instruction (the A/B above),
+and an opus worker, told to reproduce a commit message exactly, mutated an em
+dash into `--` while copying it. Byte fidelity through model transcription is
+unreliable at every capability tier — it is not a small-model defect that a
+larger model retires. Any hop where bytes matter therefore hands over a path or
+a stream, never a passage to re-emit; the single copy step the proxy still
+performs is the exception that the attestation exists to check.
+
+**Native delivery honors half an executor's identity.** In-session delivery can
+pin the *model* — the harness Agent tool takes a `model` parameter, and the
+rewrite hook sets it from the resolved slot — but it cannot pin reasoning
+effort: the Agent tool schema has no effort parameter. A target like
+`opus-xhigh` therefore delivers natively as opus at whatever effort the session
+inherited. An executor's identity is model + effort, so a native delivery
+satisfies one half of it and inherits the other. `native_delivery` rows record
+`reasoning_effort: "inherited"` rather than the declared effort, so the
+evidence never claims an effort the delivery had no way to set. Command
+delivery has no such gap: the route's argv carries the effort flag itself.
+
 Codex does not expose the same spawn-rewrite hook. Project `init` installs
 safe native broker agents by default; `--no-steering` selects the static legacy
 agents instead. `fadeno setup --codex` records the harness and materializes
@@ -228,12 +484,12 @@ user-scoped managed agents; later `fadeno use <loadout>` refreshes them
 automatically and requires a fresh session only when they changed. Explicit
 project overrides remain available with `fadeno steering apply
 <loadout> --codex --scope project`, which
-materializes every loadout slot: host slots become session-native agents and
-command slots become cheap brokers. Each role checks the kernel before every
-task: a matching host slot runs locally, a command slot dispatches out-of-process
-immediately, and a different host slot uses its declared `fallback_command`
-when present. Only a host executor without a fallback returns
-`restart_required`. Locked engine requests use `dispatch-fallback`, which
+materializes every loadout slot: natively-routed slots become session-native
+agents and command-routed slots become cheap brokers. Each role checks the
+kernel before every task: a matching native slot runs locally, a command-routed
+slot dispatches out-of-process immediately, and a different native slot uses
+its route's declared fallback command when present. Only a natively-routed slot
+with no fallback command returns `restart_required`. Locked engine requests use `dispatch-fallback`, which
 authenticates the run snapshot and records command transport rather than native
 attestation. Applying changed agent definitions requires a fresh Codex session
 to make the new model native; fallback-capable switches take effect at the next
@@ -257,6 +513,60 @@ host harness's permission fences. Enabling dispatch proxies is an explicit
 user opt-in with this stated plainly; the dispatch evidence row is the
 compensating audit trail.
 
+## Parallel dispatch fan-out
+
+The kernel makes one dispatch cheap, so the interesting failure mode is
+*several at once*. Two live fan-outs on 2026-08-12 ran multiple workers in
+parallel over this repo, and none of the damage came from the model work — all
+of it came from the contract between the workers. Four rules, each of them paid
+for.
+
+**Freeze the contract before the fan-out, not during it.** Every name a worker
+will write — event and field names, config keys, file paths, flag spellings,
+the exact text of a refusal — is fixed before any worker starts and repeated
+verbatim in every prompt that touches it. Workers cannot negotiate: they share
+no conversation, they finish in an arbitrary order, and a worker that coins a
+perfectly reasonable synonym produces work that reads correct in isolation and
+refuses to compose. Docs drift the same way and more quietly, which is why the
+frozen tokens go to the documentation worker verbatim too — and why a test that
+asserts those tokens still appear is worth more than another review pass, since
+it survives the run that created it.
+
+**Per-worker ownership manifests, with the mandatory-exception rule.** Each
+worker's prompt names the files it owns; siblings own the rest. A flat "stay in
+your lane" rule is wrong, though, and one of the live runs proved it: a feature
+landed complete inside its own manifest and was one line short of being wired
+into the merge layer that made it apply anywhere — and that line lived in a file
+another worker owned. Staying in the lane would have shipped something inert.
+The rule is therefore **edit-and-flag, never silently skip**: an edit outside
+your manifest that is *required for the change to be correct* is made, and
+named in the return value so the integrator sees it coming. The failure to
+design against is not two workers touching one file — that is a merge conflict,
+which is loud. It is a correct-looking change that does nothing.
+
+**Finish-order independence.** No worker may plan to reconcile its output
+against a sibling's landed work. Ordering is not guaranteed and not
+observable from inside a worker: the sibling may finish after you, fail, or be
+killed mid-flight leaving only a `dispatch_requested` row. A fan-out where this
+worked is a fan-out where it worked by luck, and the luck does not repeat when
+one worker takes three times as long. A worker that needs a sibling's artifact
+is given that artifact's *contract* instead (the frozen names above), and the
+reconciliation happens once, afterwards, by someone who can see both.
+
+**The integration phase is a phase, not a cleanup.** It owns exactly what the
+manifests deliberately excluded: cross-cutting files, generated-surface
+rebuilds (`npm run build:plugin`), the changelog, and the first run of the full
+suite. That last one matters because workers are mid-flight against a tree
+their siblings are still mutating, so suite-level guards that compare generated
+output to its source — the plugin no-drift check — fail for reasons no worker
+caused and can burn a worker's turn chasing them. `FADENO_SKIP_DRIFT=1` is the
+documented escape hatch for that window only; the integrator runs the suite
+without it, which is the run that counts.
+
+The starter playbook `parallel-workstreams` encodes this as a runnable
+workflow rather than as advice: contract freeze → fan-out under manifests →
+integration → full verification.
+
 ## Non-goals
 
 - **No auto-fallback.** Quota exhaustion pauses and offers explicit
@@ -264,10 +574,17 @@ compensating audit trail.
   choices). Silently swapping which model produced an artifact mid-run
   corrupts what the run's evidence means.
 - **No resident router, daemon, or scheduler** (next-protocol constraint).
-- **Loadout slots bind to executors, never bare model names** — effort and
-  permission flags are harness-specific; the executor stays the unit of swap.
+- **Loadout slots bind to declared targets, never bare model names** — a bare
+  model name states neither the effort it runs at nor how this harness reaches
+  it; effort belongs to the target and the harness-specific flags belong to the
+  route, so the target stays the unit of swap.
 - **No harness-config caching of resolution** — the CLI is the single
   resolver.
+- **No inferred or granted write access** — `write_access` is a declaration
+  about a route the user configured. Fadeno never appends permission flags to
+  an executor's argv and never infers the field from argv it did not write; an
+  undeclared route stays unconstrained, and the check refuses only the
+  mismatches it was told about.
 
 ## Sequencing
 

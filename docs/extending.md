@@ -131,6 +131,31 @@ A harness route normally keys by provider. A route keyed by the exact target
 name takes precedence, allowing a special sandbox or read-only command policy
 without making the loadout itself harness-specific.
 
+A route entry may also declare `write_access: <bool>` — whether that route's
+**command** delivery can mutate the workspace — beside an optional top-level
+`archetypes:` mapping whose values accept only `requires_write: <bool>`:
+
+```yaml
+routes:
+  claude:
+    anthropic: { native: true, command: [claude, -p, --model, "{model}"], write_access: false }
+
+archetypes:
+  worker: { requires_write: true }
+```
+
+`fadeno dispatch` then refuses *before spawning* when the resolved command
+route says `write_access: false` and the archetype says `requires_write: true`
+— e.g. a commit task routed to a headless `claude -p` that has no approver for
+a write. Either side undeclared imposes no constraint (existing profiles are
+unaffected). When declared, `write_access` joins the evidence-row identity, and
+a dispatch that proceeds on a read-only route echoes `[write_access: none]`.
+Enforcement is not kernel-only: `drive` refuses the same conflict before
+spawning (the run pauses in `executor_failed`), and `steering resolve`/`apply`
+surface `mode: write_conflict` and decline to materialize a broker for the
+conflicted slot — one shared helper keeps the refusal text identical.
+Rationale: `docs/experimental/loadouts-and-dispatch.md` → *Write access*.
+
 Every loadout slot must name a declared target; loadout names and archetype
 keys are bare lowercase identifiers (`[a-z][a-z0-9_-]*`); at least one of
 `bindings` / `loadouts` must be non-empty. Playbook roles opt into loadout
@@ -168,9 +193,26 @@ Ad-hoc dispatch runs the same chain outside any playbook:
 `fadeno dispatch --archetype worker` with the prompt on stdin or via
 `--prompt-file <path>`. `--role <name>` additionally enables per-role binding
 pins and evidence attribution (without it, step 1 above has nothing to match);
-`--executor <name>` bypasses resolution entirely (debugging). Only `command`
-adapters are directly invokable — resolving to a `host` executor is a clear
-error telling you to bind a command executor or run via host dispatch.
+`--executor <name>` bypasses resolution entirely (debugging). What it can
+invoke is a property of the resolved **route**, not of the target: a
+command-delivered route runs its argv, and a `native: true` route runs its
+fallback `command` when one is declared. A natively-routed target with no
+fallback command is a clear error naming the fix — run the task with the native
+in-session agent, declare a fallback command, or bind the archetype to a
+command-delivered target.
+
+`fadeno dispatches [--tail <N>] [--json]` reads `.fadeno/dispatches.jsonl`
+back. It correlates each `dispatch_requested`/`dispatch_completed` pair by
+`dispatch_id` into one row per dispatch and renders `native_delivery` rows
+beside them, so both delivery routes read as one history. A request row whose
+completion never arrived is kept and marked — "no completion recorded (killed
+or in flight)" — rather than dropped, since a dispatch that died mid-flight is
+the one most worth seeing. Rows carry the markers that change their meaning:
+`relay_attested`, `[write_access: none]`, and `model_override`. `--tail <N>`
+defaults to 10; `--json` emits the correlated rows for scripts. Rows are
+format-stamped (`format: "0.1"`); pre-format rows from before the two-row
+change render as `[legacy]` entries rather than being skipped, and rows from
+a newer format major get their own count in the summary.
 
 ### Cross-harness subagents (dispatch proxies and steering)
 
@@ -197,6 +239,19 @@ preserves the rest of the Agent input and leaves Explore/Plan and unrelated
 specialists native. Plugin users can combine the flag with `--data-only`; the
 hook then targets the plugin-scoped `fadeno:dispatch-*` agents.
 
+When it steers a spawn to a native role agent instead, the same hook appends a
+`native_delivery` row to `.fadeno/dispatches.jsonl` (archetype, agent_type,
+loadout, executor, model, model_override, `reasoning_effort: "inherited"`,
+`transport: "host-native"`, prompt_sha256, `hook_version`) plus a verbatim
+prompt snapshot at `.fadeno/local/prompts/native-<sha8>.md`, so the file audits
+both delivery routes. The kernel is not in the native path, so the hook is the
+only possible evidence writer there; the row is best-effort and never changes a
+steering decision. Caveat when editing the hook: native delivery can pin the executor's
+**model** (the Agent tool's `model` parameter) but not its reasoning effort —
+the Agent tool schema has no effort parameter, so `opus-xhigh` lands as opus at
+the session's inherited effort, which is why the row records `"inherited"`
+instead of the target's declared effort.
+
 The **proxy relay guard** (`dispatch-proxy-guard.mjs`, also shipped in the
 plugin's `hooks/hooks.json`) matches Bash and no-ops unless the hook input's
 `agent_type` is a dispatch proxy. Inside a proxy it allowlists exactly the
@@ -217,19 +272,32 @@ proxy. The kernel consumes a matching stash at dispatch time and marks the
 evidence row `relay_attested` (true / false / absent), turning the proxy's
 "verbatim" from an instruction into a checked claim.
 
+> **Hook generations are ambiguous from the inside.** A harness binds hook
+> *registrations* (like the agent and skill surface) at session start, but the
+> script body is read from the plugin cache and has been observed refreshing
+> mid-session after a plugin update — so never assume which generation of a
+> hook is running. Test hook changes in a fresh session; in a running one, a
+> just-fixed rung and a genuinely broken rung are indistinguishable without
+> evidence. Hook-written evidence therefore carries `hook_version`: `dev` in the
+> committed template under `templates/claude/hooks/`, and the package version
+> in every copy `build:plugin` and `init` emit — so a row identifies the
+> generation that wrote it, and "the fix doesn't work" separates from "the fix
+> isn't loaded yet" from the evidence alone. Preserve the stamp when editing a
+> hook that writes evidence.
+
 Codex has no equivalent spawn-rewrite hook, and project custom-agent model
 configuration is session-static. `fadeno init --codex` installs honest broker
 definitions named `worker`, `reviewer`, and `judge`; `fadeno setup --codex`
 records the harness, and later `fadeno use <loadout>` automatically refreshes
 the user-scoped agents when needed.
 Use `fadeno steering apply <loadout> --codex --scope project` for a project
-override. Each host slot becomes a native agent with that executor's model and
-effort; each command slot becomes a cheap broker that delegates through
-`fadeno dispatch`. Before each task the role resolves the active loadout: a
-command executor switches immediately, a matching host executor runs natively,
-and a different host executor uses `fallback_command` when declared. A fresh
-session makes changed host definitions native; it is required only when the
-selected host executor has no fallback. The Codex plugin
+override. Each natively-routed slot becomes a native agent with that target's
+model and effort; each command-routed slot becomes a cheap broker that
+delegates through `fadeno dispatch`. Before each task the role resolves the
+active loadout: a command-routed slot switches immediately, a matching native
+slot runs natively, and a different native slot uses its declared fallback
+command when present. A fresh session makes changed native definitions native;
+it is required only when the selected native slot has no fallback command. The Codex plugin
 bundles the CLI and built-in definitions; it does not overwrite unrelated user
 agents. Existing files remain protected unless `--force` is supplied.
 
@@ -270,10 +338,14 @@ Never edit files under `plugin/` directly — they're build output.
    architecture.md). Prefer explicit roles, typed artifacts, bounded loops, and
    structured gates.
 2. `npm run validate:self` (or validate a temp `init`) — must pass with no errors.
-3. **`templates/common/skills/fadeno-builder/SKILL.md`** — if it's a canonical
-   starter, mention it in the builder's "adapt a starter" list so the builder
-   offers it.
-4. `npm run build:plugin` + commit `plugin/`.
+3. **`templates/common/skills/fadeno-builder/SKILL.md`** — list it in the
+   builder's "adapt a starter" catalog. This is test-enforced: a guard in
+   `test/validate.test.ts` fails on any starter missing from the catalog.
+4. `npm run build:plugin` + `npm run build:plugin:codex` + commit `plugin/`.
+
+The test registries need no edits: completion, diagram, init, and validate
+coverage all derive from `starterPlaybooks()` in `test/helpers.ts`, which
+reads the playbooks directory itself.
 
 Starters ship to **all supported targets** (they're under `common/fadeno`) and
 are available from the bundled plugin runtime. `init` / `init --data-only` and

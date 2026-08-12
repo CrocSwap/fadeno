@@ -80,8 +80,9 @@ assert on return values and filesystem effects instead of scraping stdout.
 | `runPrompt` | prompt text + sha + record status + plan | Deterministic step-prompt assembler; records a snapshot + `prompt_assembled` by default. Pure resolution/rendering live in `lib/prompt-resolve.ts` + `lib/prompt.ts`. |
 | `runNext` | next-step JSON (`status`, `step`, `gate`, …) | Pure flow cursor over playbook + events; read-only. Logic in `lib/flow-cursor.ts`. |
 | `runLoadoutShow` / `…List` / `…Use` / `…Clear` | active loadout + slot tables | `use` pins `.fadeno/local/loadout`; `clear` removes it. Resolution logic in `lib/executors.ts`. |
-| `runDispatch` | executor report + evidence row | Ad-hoc archetype→executor dispatch; appends one row to `.fadeno/dispatches.jsonl`. Echo goes to stderr so stdout stays the executor's pure report. |
-| `runSteeringResolve` / `runSteeringApply` | hybrid mode / emitted Codex agents | Resolves native vs command vs restart-required per invocation; materializes per-slot native host agents or cheap command brokers. |
+| `runDispatch` | executor report + evidence row | Ad-hoc archetype→executor dispatch; appends a correlated `dispatch_requested`/`dispatch_completed` row pair to `.fadeno/dispatches.jsonl`. Refuses before spawning when the resolved command route declares `write_access: false` and the archetype declares `requires_write: true`. Echo goes to stderr so stdout stays the executor's pure report. |
+| `runDispatches` | correlated dispatch rows | Read-only projection of `.fadeno/dispatches.jsonl`: pairs `dispatch_requested`/`dispatch_completed` by `dispatch_id`, keeps `native_delivery` rows inline, and marks a request with no completion as killed-or-in-flight rather than dropping it. Pre-format legacy rows render as `[legacy]`; newer-format rows get a separate count. `--tail <N>` (default 10) / `--json`. |
+| `runSteeringResolve` / `runSteeringApply` | hybrid mode / emitted Codex agents | Resolves native vs command vs restart-required vs write-conflict per invocation; materializes per-slot native host agents or cheap command brokers, declining brokers for write-conflicted slots. |
 | `runToolComplete` | run update + artifact manifest | Validates a typed tool result before atomically starting the exact next `tool_call` and recording its result. |
 | `runPlugin` | `EmitResult[]` + `outDir` | Generates `plugin/` from templates. |
 | `runSetup` / `runUse` | user paths, probes, loadout state, restart notices | Safe native setup and user-scoped selection. |
@@ -261,8 +262,20 @@ Two loadout-era evidence surfaces sit beside the step lifecycle:
   supplied the executor), loadout + source, executor, model, exit code,
   duration, and prompt/output sha256 digests. The row is written even when the
   spawn itself fails — a failed dispatch is still a dispatch that happened.
-  Like `.fadeno/local/`, it is per-machine evidence — auditable locally, never
-  committed.
+  Declared `write_access` joins that identity, so a read-only delivery is
+  legible in the row rather than only in an empty-handed report. The Claude
+  steering hook appends `native_delivery` rows to the same file when it steers
+  a spawn to a native role agent (archetype, agent_type, loadout, executor,
+  model, model_override, `reasoning_effort: "inherited"`,
+  `transport: "host-native"`, prompt_sha256, prompt_snapshot,
+  `hook_version`) — the kernel never runs on the native path,
+  so the hook is the only writer that can witness it, and one file audits both
+  delivery routes. Like `.fadeno/local/`, it is per-machine evidence —
+  auditable locally, never committed. `hook_version` exists because hooks load
+  at session start and therefore lag one session behind an edit (`dev` in the
+  committed template, the package version in emitted copies), so a row's
+  writing generation is identifiable after the fact. `fadeno dispatches` is the
+  read-side projection of this file.
 
 `.fadeno/local/` is per-machine session state (the sticky loadout pin, proxy
 prompt relays) and is never committed — `init` appends `.fadeno/local/` (along
@@ -341,7 +354,12 @@ without claiming native attestation. On Claude, init emits a local
 `Agent` hook into `.claude/settings.local.json`. The hook first asks the CLI
 whether a loadout is active; only then does it map general-purpose/worker,
 reviewer, and judge launches to the corresponding dispatch proxy. Explore,
-Plan, and unrelated specialists stay native. Grok currently rejects the flag.
+Plan, and unrelated specialists stay native. A spawn it steers to a native role
+agent gets a best-effort `native_delivery` evidence row plus a prompt snapshot
+under `.fadeno/local/prompts/`; that path can pin the requested model but not
+reasoning effort (the Agent tool schema has no effort parameter), so the row
+records `reasoning_effort: "inherited"` rather than the target's declared
+effort. Grok currently rejects the flag.
 
 The Claude `claude-agents/` dir carries two kinds of subagents: the native role
 subagents (`worker`/`reviewer`/`judge`) and the **dispatch proxy agents**
