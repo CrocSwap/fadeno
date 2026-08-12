@@ -4,18 +4,23 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import {
+  applicableOverrides,
   ExecutorProfileError,
   explainWriteConflict,
   LOADOUT_LOCAL_FILE,
   parseExecutorProfile,
   readLocalLoadout,
+  readLocalLoadoutState,
   resolveActiveLoadout,
   resolveRole,
+  roleResolutionEchoLabel,
   serializeProfile,
+  writeLocalLoadoutState,
   type ExecutorProfile,
+  type LocalLoadoutState,
 } from '../src/lib/executors.ts';
 import { roleArchetype, semanticChecks } from '../src/lib/playbook-validate.ts';
-import { tempRepo } from './helpers.ts';
+import { exists, read, tempRepo } from './helpers.ts';
 
 const EXECUTORS = {
   'opus-xhigh': { adapter: 'command', command: ['claude', '-p', '--model', 'opus'], model: 'opus' },
@@ -436,6 +441,117 @@ test('readLocalLoadout reads .fadeno/local/loadout, trimmed; missing or blank �
   assert.equal(readLocalLoadout(root), null);
 });
 
+// --- pin format v2: base loadout + session overrides ---
+
+test('pin v2: bare and JSON forms round-trip through the state reader', (t) => {
+  const root = tempRepo(t);
+  assert.deepEqual(readLocalLoadoutState(root), { loadout: null, overrides: {} });
+
+  // No overlay: the file stays the bare name it has always been, and the
+  // writer creates `.fadeno/local/` itself.
+  const path = writeLocalLoadoutState(root, { loadout: 'openai-primary', overrides: {} });
+  assert.equal(path, join(root, LOADOUT_LOCAL_FILE));
+  assert.equal(read(root, LOADOUT_LOCAL_FILE), 'openai-primary\n');
+  assert.deepEqual(readLocalLoadoutState(root), { loadout: 'openai-primary', overrides: {} });
+
+  // With an overlay: one line of JSON, override keys sorted for stable bytes.
+  writeLocalLoadoutState(root, {
+    loadout: 'openai-primary',
+    overrides: { worker: 'opus-xhigh', reviewer: 'terra-host' },
+  });
+  assert.equal(
+    read(root, LOADOUT_LOCAL_FILE),
+    '{"loadout":"openai-primary","overrides":{"reviewer":"terra-host","worker":"opus-xhigh"}}\n',
+  );
+  assert.deepEqual(readLocalLoadoutState(root), {
+    loadout: 'openai-primary',
+    overrides: { reviewer: 'terra-host', worker: 'opus-xhigh' },
+  });
+});
+
+test('pin v2: bare and JSON pins stay readable by both readers', (t) => {
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
+  // A pre-override bare pin, through the new state reader.
+  writeFileSync(join(root, LOADOUT_LOCAL_FILE), 'openai-primary\n', 'utf8');
+  assert.deepEqual(readLocalLoadoutState(root), { loadout: 'openai-primary', overrides: {} });
+  // A v2 pin, through the name-only reader every existing call site uses.
+  writeFileSync(
+    join(root, LOADOUT_LOCAL_FILE),
+    '{"loadout":"anthropic-primary","overrides":{"worker":"luna-cli"}}\n',
+    'utf8',
+  );
+  assert.equal(readLocalLoadout(root), 'anthropic-primary');
+  // Only a leading `{` means JSON; anything else is a name, and a nonsense
+  // name is caught downstream by resolveActiveLoadout's stale-pin error.
+  writeFileSync(join(root, LOADOUT_LOCAL_FILE), '[]\n', 'utf8');
+  assert.deepEqual(readLocalLoadoutState(root), { loadout: '[]', overrides: {} });
+  // Blank is absent in both.
+  writeFileSync(join(root, LOADOUT_LOCAL_FILE), '  \n', 'utf8');
+  assert.deepEqual(readLocalLoadoutState(root), { loadout: null, overrides: {} });
+  assert.equal(readLocalLoadout(root), null);
+});
+
+test('pin v2: an unreadable pin names the file and the reset command', (t) => {
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
+  const rejects = (body: string, detail: RegExp) => {
+    writeFileSync(join(root, LOADOUT_LOCAL_FILE), body, 'utf8');
+    assert.throws(
+      () => readLocalLoadoutState(root),
+      (err: unknown) =>
+        err instanceof ExecutorProfileError &&
+        detail.test(err.message) &&
+        // Machine state the tool owns: never "go fix the file by hand".
+        err.message.includes(LOADOUT_LOCAL_FILE) &&
+        /fadeno loadout clear/.test(err.message),
+      body,
+    );
+  };
+  rejects('{"loadout":"openai-primary",\n', /did not parse as JSON/);
+  rejects('{"loadout":42}\n', /non-string `loadout`/);
+  rejects('{"loadout":"x","overrides":"worker"}\n', /`overrides` that is not a mapping/);
+  rejects(
+    '{"loadout":"x","overrides":{"Worker":"luna-cli"}}\n',
+    /override key "Worker", which is not a bare lowercase identifier/,
+  );
+  rejects('{"loadout":"x","overrides":{"worker":7}}\n', /override "worker" targets 7/);
+  rejects('{"loadout":"x","overrides":{"worker":"   "}}\n', /override "worker" targets "   "/);
+});
+
+test('pin v2: a null loadout is never writable', (t) => {
+  const root = tempRepo(t);
+  // An overlay with nothing to decorate…
+  assert.throws(
+    () => writeLocalLoadoutState(root, { loadout: null, overrides: { worker: 'luna-cli' } }),
+    /Cannot pin override\(s\) worker with no base loadout/,
+  );
+  // …and a bare "no loadout", which is a removal, not a write.
+  assert.throws(
+    () => writeLocalLoadoutState(root, { loadout: null, overrides: {} }),
+    new RegExp(`Cannot write ${LOADOUT_LOCAL_FILE.replaceAll('\\', '\\\\')} with no loadout`),
+  );
+  assert.equal(exists(root, LOADOUT_LOCAL_FILE), false);
+});
+
+test('applicableOverrides: an overlay belongs to its base loadout by name', () => {
+  const state: LocalLoadoutState = { loadout: 'openai-primary', overrides: { worker: 'opus-xhigh' } };
+  assert.deepEqual(applicableOverrides(state, { name: 'openai-primary', source: 'local' }), {
+    worker: 'opus-xhigh',
+  });
+  // Match is on the name, whatever source put that loadout in force.
+  assert.deepEqual(applicableOverrides(state, { name: 'openai-primary', source: 'flag' }), {
+    worker: 'opus-xhigh',
+  });
+  // A different loadout won: the overlay drops rather than re-binding it.
+  assert.deepEqual(applicableOverrides(state, { name: 'anthropic-primary', source: 'flag' }), {});
+  assert.deepEqual(applicableOverrides(state, null), {});
+  assert.deepEqual(
+    applicableOverrides({ loadout: null, overrides: {} }, { name: 'openai-primary', source: 'local' }),
+    {},
+  );
+});
+
 // --- role resolution ---
 
 test('role resolution: explicit bindings[role] pin wins over the loadout slot', () => {
@@ -491,6 +607,68 @@ test('role resolution: hard error names role, archetype, loadout, and the fix', 
     () => resolveRole('arbiter', 'judge', LOADED, null),
     /no active loadout.*activate a loadout that maps "judge"/s,
   );
+});
+
+test('role resolution: a session override outranks the slot, but not an explicit pin', () => {
+  const profile = parseDoc({
+    executors: EXECUTORS,
+    loadouts: LOADOUTS,
+    bindings: { implementer: 'opus-xhigh' },
+  });
+  // The overlay slots *under* an explicit bindings[role] pin.
+  const pinned = resolveRole('implementer', 'worker', profile, 'openai-primary', { worker: 'terra-host' });
+  assert.equal(pinned.executorName, 'opus-xhigh');
+  assert.equal(pinned.source, 'binding');
+  // …and *over* the base loadout's slot (which would be luna-cli).
+  const overridden = resolveRole('coder', 'worker', profile, 'openai-primary', { worker: 'terra-host' });
+  assert.equal(overridden.executorName, 'terra-host');
+  assert.equal(overridden.source, 'override');
+  assert.equal(roleResolutionEchoLabel(overridden.source, 'openai-primary'), 'override');
+});
+
+test('role resolution: an override binds an archetype the base loadout has no slot for', () => {
+  // Without the overlay this is the hard "no executor" error: no judge slot,
+  // no "*" default. The override is a binding, not a preference over one.
+  assert.throws(() => resolveRole('arbiter', 'judge', LOADED, 'openai-primary'), ExecutorProfileError);
+  const resolved = resolveRole('arbiter', 'judge', LOADED, 'openai-primary', { judge: 'terra-host' });
+  assert.equal(resolved.executorName, 'terra-host');
+  assert.equal(resolved.source, 'override');
+  // Neutral native targets still bind to the invocation's archetype.
+  assert.equal(resolved.executor.adapter, 'host');
+});
+
+test('role resolution: overrides are keyed by archetype, so a role without one skips them', () => {
+  const profile = parseDoc({ executors: EXECUTORS, loadouts: LOADOUTS, bindings: { '*': 'luna-cli' } });
+  const noArchetype = resolveRole('implementer', null, profile, 'openai-primary', { worker: 'opus-xhigh' });
+  assert.equal(noArchetype.executorName, 'luna-cli');
+  assert.equal(noArchetype.source, 'default');
+  // An overlay for some other archetype is inert.
+  assert.equal(resolveRole('arbiter', 'judge', profile, 'openai-primary', { worker: 'opus-xhigh' }).source, 'default');
+});
+
+test('role resolution: an override naming an undeclared executor is a hard error', () => {
+  assert.throws(
+    () => resolveRole('implementer', 'worker', LOADED, 'openai-primary', { worker: 'ghost' }),
+    (err: unknown) =>
+      err instanceof ExecutorProfileError &&
+      /Session override for archetype "worker" targets "ghost", which is not a declared executor \(opus-xhigh, luna-cli, terra-host\)/.test(err.message) &&
+      /fadeno loadout clear worker/.test(err.message),
+  );
+  // Including a target that only *looks* declared through the prototype.
+  assert.throws(
+    () => resolveRole('implementer', 'worker', LOADED, 'openai-primary', { worker: 'constructor' }),
+    /Session override for archetype "worker" targets "constructor", which is not a declared executor/,
+  );
+});
+
+test('role resolution: an empty or omitted overlay resolves exactly as before', () => {
+  const explicit = resolveRole('implementer', 'worker', LOADED, 'openai-primary', {});
+  assert.deepEqual(explicit, resolveRole('implementer', 'worker', LOADED, 'openai-primary'));
+  assert.equal(explicit.source, 'loadout');
+  // Inherited keys on a JSON-parsed overlay are not overrides.
+  const profile = parseDoc({ executors: EXECUTORS, loadouts: LOADOUTS, bindings: { '*': 'luna-cli' } });
+  const parsed = JSON.parse('{"worker":"opus-xhigh"}') as Record<string, string>;
+  assert.equal(resolveRole('critic', 'constructor', profile, 'openai-primary', parsed).source, 'default');
 });
 
 // --- playbook role archetype field ---

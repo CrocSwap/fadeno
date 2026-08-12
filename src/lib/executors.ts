@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { loadLayeredProfile, type ProfileProvenance } from './config-layers.ts';
 import { readUserHarness, userPaths, type UserPathOptions } from './user-paths.ts';
@@ -573,14 +573,123 @@ export function resolveBinding(
 export const LOADOUT_LOCAL_FILE = join('.fadeno', 'local', 'loadout');
 
 /**
+ * Everything the sticky pin carries: the base loadout name plus any session
+ * overrides layered on top of it. Overrides belong to their base **by name**;
+ * `applicableOverrides` is the only sanctioned way to decide whether they
+ * apply to the loadout that actually won resolution.
+ */
+export interface LocalLoadoutState {
+  /** Base loadout name; null when the file is absent or blank. */
+  loadout: string | null;
+  /** archetype → executor target; `{}` when the pin carries no overlay. */
+  overrides: Record<string, string>;
+}
+
+/**
+ * One repair for every way the pin can be unreadable: this file is state the
+ * tool itself owns, so the message names it and the command that resets it
+ * rather than asking the user to hand-edit machine state.
+ */
+function localLoadoutPinError(detail: string): ExecutorProfileError {
+  return new ExecutorProfileError(
+    `${LOADOUT_LOCAL_FILE} ${detail} Fix: run \`fadeno loadout clear\` to drop the pin, ` +
+      'then re-select with `fadeno loadout use <name>`.',
+  );
+}
+
+/**
+ * Read the sticky pin (format v2). A file whose trimmed content starts with
+ * `{` is the JSON form (base + overrides); anything else is the bare name the
+ * pin has always been, so pre-override files keep parsing untouched. Missing
+ * or blank file → `{loadout: null, overrides: {}}`.
+ *
+ * A JSON pin carrying overrides but no base is *inert*, not an error: the
+ * writer refuses to produce one, and the name-match rule can never apply it.
+ */
+export function readLocalLoadoutState(repoRoot: string): LocalLoadoutState {
+  const path = join(repoRoot, LOADOUT_LOCAL_FILE);
+  if (!existsSync(path)) return { loadout: null, overrides: {} };
+  const text = readFileSync(path, 'utf8');
+  if (!text.trim().startsWith('{')) {
+    const name = (text.split(/\r?\n/, 1)[0] ?? '').trim();
+    return { loadout: name.length > 0 ? name : null, overrides: {} };
+  }
+
+  let doc: unknown;
+  try {
+    doc = JSON.parse(text);
+  } catch (err) {
+    throw localLoadoutPinError(`did not parse as JSON: ${(err as Error).message}.`);
+  }
+  if (!isMapping(doc)) {
+    throw localLoadoutPinError('is JSON, but not an object (`{loadout, overrides}`).');
+  }
+  if (doc.loadout != null && typeof doc.loadout !== 'string') {
+    throw localLoadoutPinError(`has a non-string \`loadout\` (${JSON.stringify(doc.loadout)}).`);
+  }
+  const name = typeof doc.loadout === 'string' ? doc.loadout.trim() : '';
+
+  const overrides: Record<string, string> = {};
+  if (doc.overrides != null) {
+    if (!isMapping(doc.overrides)) {
+      throw localLoadoutPinError('has an `overrides` that is not a mapping (archetype → executor).');
+    }
+    for (const [archetype, target] of Object.entries(doc.overrides)) {
+      if (!BARE_IDENTIFIER_RE.test(archetype)) {
+        throw localLoadoutPinError(
+          `has override key "${archetype}", which is not a bare lowercase identifier ` +
+            `(${BARE_IDENTIFIER_RE.source}).`,
+        );
+      }
+      if (typeof target !== 'string' || target.trim().length === 0) {
+        throw localLoadoutPinError(
+          `override "${archetype}" targets ${JSON.stringify(target)}, which is not an executor name.`,
+        );
+      }
+      overrides[archetype] = target.trim();
+    }
+  }
+  return { loadout: name.length > 0 ? name : null, overrides };
+}
+
+/**
  * Read the sticky session loadout name from `.fadeno/local/loadout` (first
- * line, trimmed). Missing or blank file → null.
+ * line, trimmed). Missing or blank file → null. The base name of a v2 pin
+ * reads the same through here, so callers that only steer on the loadout name
+ * need no change.
  */
 export function readLocalLoadout(repoRoot: string): string | null {
+  return readLocalLoadoutState(repoRoot).loadout;
+}
+
+/**
+ * Write the sticky pin, returning the path written. A pin with no overrides
+ * stays the bare name it has always been — the JSON form appears only once
+ * there is an overlay to record, so a file read by eye changes shape only when
+ * its meaning does. Override keys are emitted sorted: same state, same bytes.
+ *
+ * A null loadout is never writable: with overrides it would be an overlay with
+ * nothing to decorate, and without them it is a removal (`rmSync`), not a write.
+ */
+export function writeLocalLoadoutState(repoRoot: string, state: LocalLoadoutState): string {
+  const keys = Object.keys(state.overrides).sort();
+  if (state.loadout == null) {
+    throw new ExecutorProfileError(
+      keys.length > 0
+        ? `Cannot pin override(s) ${keys.join(', ')} with no base loadout — session overrides ` +
+            'decorate a base by name. Fix: select one with `fadeno loadout use <name>` first.'
+        : `Cannot write ${LOADOUT_LOCAL_FILE} with no loadout — remove the pin file instead.`,
+    );
+  }
   const path = join(repoRoot, LOADOUT_LOCAL_FILE);
-  if (!existsSync(path)) return null;
-  const name = (readFileSync(path, 'utf8').split(/\r?\n/, 1)[0] ?? '').trim();
-  return name.length > 0 ? name : null;
+  mkdirSync(dirname(path), { recursive: true });
+  const sorted: Record<string, string> = {};
+  for (const archetype of keys) sorted[archetype] = state.overrides[archetype]!;
+  const body = keys.length === 0
+    ? `${state.loadout}\n`
+    : `${JSON.stringify({ loadout: state.loadout, overrides: sorted })}\n`;
+  writeFileSync(path, body, 'utf8');
+  return path;
 }
 
 /** Where the active loadout name came from, in precedence order. */
@@ -652,8 +761,24 @@ export function readUserLoadout(options: UserPathOptions = {}): string | null {
   return name.length > 0 ? name : null;
 }
 
+/**
+ * The pin's overrides, but only when they belong to the loadout actually in
+ * force. Overrides decorate a base loadout **by name**: a pin over "claude"
+ * says nothing about a run that resolved "codex" from a flag, so the overlay
+ * drops rather than silently re-binding somebody else's loadout. Applies for
+ * any active source (flag, run, env, local, user, default) that lands on the
+ * same name — the pin's own selection has no privileged status here.
+ */
+export function applicableOverrides(
+  state: LocalLoadoutState,
+  active: ActiveLoadout | null,
+): Record<string, string> {
+  if (active == null || state.loadout !== active.name) return {};
+  return state.overrides;
+}
+
 /** How a role landed on its executor, in resolution order. */
-export type RoleResolutionSource = 'binding' | 'loadout' | 'default';
+export type RoleResolutionSource = 'binding' | 'override' | 'loadout' | 'default';
 
 export interface RoleResolution {
   executorName: string;
@@ -665,6 +790,7 @@ export interface RoleResolution {
  * Display tag for a role-resolution source in echo lines. The `"*"`-wildcard
  * fallback renders as `fallback "*"` — never "default", which names the
  * `default_loadout` concept elsewhere (one word, two concepts otherwise).
+ * `binding` and `override` say themselves.
  * Display-only: recorded evidence keeps the raw `RoleResolutionSource` value.
  */
 export function roleResolutionEchoLabel(
@@ -677,26 +803,52 @@ export function roleResolutionEchoLabel(
 }
 
 /**
- * Dispatch-kernel role resolution: explicit `bindings[role]` pin → active
- * loadout's slot for the role's archetype → `bindings["*"]` → hard error.
- * Pure; resolution is computed at dispatch time and never cached in config.
+ * Dispatch-kernel role resolution: explicit `bindings[role]` pin → session
+ * override for the role's archetype → active loadout's slot for that archetype
+ * → `bindings["*"]` → hard error. `overrides` is the already-scoped overlay
+ * (see `applicableOverrides`); the default empty map is exactly the behavior
+ * every pre-override call site had. Pure; resolution is computed at dispatch
+ * time and never cached in config.
  */
 export function resolveRole(
   role: string,
   archetype: string | null,
   profile: ExecutorProfile,
   activeLoadout: string | null,
+  overrides: Record<string, string> = {},
 ): RoleResolution {
   const pick = (executorName: string, source: RoleResolutionSource): RoleResolution => ({
     executorName,
     executor: executorForArchetype(profile, executorName, archetype),
     source,
   });
+  // Every lookup here is `typeof === 'string'`, not `!= null`: role names and
+  // archetypes are bare identifiers, and bare identifiers include `constructor`
+  // and `toString` — inherited members of a plain map, which would otherwise
+  // resolve to a function and crash instead of erroring cleanly.
   const pinned = profile.bindings[role];
-  if (pinned != null) return pick(pinned, 'binding');
+  if (typeof pinned === 'string') return pick(pinned, 'binding');
+  // An overlay outranks the base loadout's slot and can bind an archetype the
+  // base has no slot for at all. A stale target is a hard stop: substituting a
+  // different executor for the one the user dialed is the failure this whole
+  // layer exists to avoid.
+  if (archetype != null && typeof overrides[archetype] === 'string') {
+    const target = overrides[archetype]!;
+    // `hasOwn`, not `in`: "constructor" is a plausible-looking pin value that
+    // `in` would call declared and then resolve to a function.
+    if (!Object.hasOwn(profile.executors, target)) {
+      throw new ExecutorProfileError(
+        `Session override for archetype "${archetype}" targets "${target}", which is not a ` +
+          `declared executor (${Object.keys(profile.executors).join(', ')}). ` +
+          `Fix: re-dial with \`fadeno loadout set ${archetype} <executor>\`, or drop the ` +
+          `override with \`fadeno loadout clear ${archetype}\`.`,
+      );
+    }
+    return pick(target, 'override');
+  }
   if (archetype != null && activeLoadout != null) {
     const slot = profile.loadouts[activeLoadout]?.[archetype];
-    if (slot != null) return pick(slot, 'loadout');
+    if (typeof slot === 'string') return pick(slot, 'loadout');
   }
   const fallback = profile.bindings['*'];
   if (fallback != null) return pick(fallback, 'default');
