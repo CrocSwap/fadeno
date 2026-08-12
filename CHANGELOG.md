@@ -15,6 +15,88 @@ writers accept only 0.3.
 
 ### Added
 
+- **Write-access enforcement at every command delivery** — the
+  `write_access` / `requires_write` conflict is now refused wherever a command
+  delivery can be chosen, through one shared helper (`explainWriteConflict`
+  in `src/lib/executors.ts`), so the refusal text is identical everywhere:
+  `fadeno dispatch` (as before); `drive`, where the actor now fails pre-spawn
+  with `reason: "write_access_denied"` and the run pauses in
+  `executor_failed` — no prompt assembled, no run burnt; and
+  `steering resolve`/`apply`, which return `mode: write_conflict` and decline
+  to materialize a command broker for the conflicted slot while other slots
+  proceed. Native in-session deliveries and locked engine host requests stay
+  exempt by design.
+
+- **Dispatch-ledger format versioning** — every row `fadeno dispatch` and the
+  steering hook write now carries `format: "0.1"`, and `fadeno dispatches`
+  reads in tiers: unversioned rows with a recognized `event` are current,
+  pre-two-row completion-only rows render as `[legacy]` entries instead of
+  counting as unreadable, and rows from a newer format major get their own
+  skip count. Old evidence ages into legacy instead of degrading into noise —
+  on the dogfood repo this turned "6 unreadable rows skipped" into six
+  readable `[legacy]` dispatches.
+
+- **`fadeno dispatches`** — the read side of `.fadeno/dispatches.jsonl`, which
+  until now was a file you reached for `jq` to answer questions about. It
+  correlates each `dispatch_requested`/`dispatch_completed` pair by
+  `dispatch_id` into one row per dispatch, renders hook-written
+  `native_delivery` rows inline so both delivery routes read as one history,
+  and keeps a request whose completion never arrived — marked "no completion
+  recorded (killed or in flight)" — because a dispatch that died mid-flight is
+  the one most worth seeing. Rows surface the markers that change their
+  meaning: `relay_attested`, `[write_access: none]`, and `model_override`.
+  `--tail <N>` defaults to 10; `--json` emits the correlated rows for scripts.
+
+- **`hook_version` on hook-written evidence** — `native_delivery` rows (and any
+  other row a hook writes) now record which generation of the hook wrote them:
+  `dev` in the committed template, the package version in every emitted copy.
+  Hook registrations bind at session start but script bodies have been
+  observed refreshing mid-session after a plugin update, so which generation
+  of a hook is running is never safe to assume — a just-fixed rung and a
+  genuinely broken rung are indistinguishable from the inside. The stamp makes
+  the writing generation forensically identifiable, so "the fix doesn't work"
+  separates from "the fix isn't loaded yet" from the evidence rather than by
+  argument.
+
+- **`parallel-workstreams` starter playbook** — the runnable encoding of the
+  parallel dispatch fan-out pattern: freeze the shared contract (names,
+  schemas, refusal texts) before any worker starts, fan out under per-worker
+  ownership manifests carrying the mandatory-exception rule (an edit outside
+  your manifest that is required for correctness is made *and* flagged, never
+  silently skipped), keep every worker finish-order independent, then run a
+  dedicated integration phase that owns cross-cutting files, the plugin
+  rebuild, the changelog, and the first full-suite run. Drawn from two live
+  fan-outs on 2026-08-12; rationale in
+  `docs/experimental/loadouts-and-dispatch.md` → *Parallel dispatch fan-out*.
+
+- **Route write-access policy** — a schema v2 route entry may declare
+  `write_access: <bool>` (whether that route's *command* delivery can mutate
+  the workspace), and `executors.yaml` may declare a top-level `archetypes:`
+  mapping whose values accept only `requires_write: <bool>`. `fadeno dispatch`
+  refuses **before spawning** when the resolved command route says
+  `write_access: false` and the archetype says `requires_write: true` — the
+  2026-08-12 dogfood case was a commit task delivered through a headless
+  `claude -p` fallback that has no approver for a write, dispatched only
+  because the kernel read "has a command" as "is dispatchable". Either side
+  undeclared imposes no constraint, so existing profiles are unaffected. When
+  declared, `write_access` joins the evidence-row identity and a proceeding
+  read-only dispatch echoes `[write_access: none]`. The starter catalog ships
+  the policy live: `archetypes: { worker: { requires_write: true } }`,
+  `write_access: true` on the sandboxed `codex exec` routes, `write_access:
+  false` on the headless `claude -p` routes (xai stays undeclared until
+  `grok build`'s headless permission posture is confirmed).
+
+- **Native-delivery evidence** — the Claude steering hook now appends a
+  `native_delivery` row to `.fadeno/dispatches.jsonl` (timestamp, archetype,
+  agent_type, loadout, executor, model, model_override, `reasoning_effort:
+  "inherited"`, `transport: "host-native"`, prompt_sha256, prompt_snapshot)
+  plus a verbatim prompt snapshot at
+  `.fadeno/local/prompts/native-<sha8>.md` whenever it steers a spawn to a
+  native role agent. Command dispatches get two-row kernel evidence,
+  snapshots, and relay attestation; the kernel is not in the native path, so
+  the hook is the only possible writer there. One file now audits both
+  delivery routes. Best-effort: it never changes a steering decision.
+
 - **Two-row ad-hoc dispatch evidence** — `fadeno dispatch` now appends a
   `dispatch_requested` row *before* invoking the executor and a correlated
   `dispatch_completed` row (shared `dispatch_id`) after, so a dispatch killed
@@ -132,6 +214,24 @@ writers accept only 0.3.
 
 ### Changed
 
+- **Starter-playbook registries derive from the filesystem.** The completion,
+  diagram, init, and validate coverage all consume a single
+  `starterPlaybooks()` helper that reads `templates/common/fadeno/playbooks/`,
+  and a new guard asserts every starter is listed in the builder skill's
+  catalog — shipping a starter is one file plus its catalog line, and a stray
+  file in the starters directory fails loudly instead of shipping silently.
+
+- **The suite gained a docs-claims tripwire and a drift escape hatch.** A test
+  now asserts that the identifiers the docs promise — `dispatch_requested`,
+  `dispatch_completed`, `native_delivery`, `write_access`, `requires_write`,
+  `relay_attested`, `FADENO_PROMPT`, `schema_version: 2` — still appear where
+  they are documented, so a rename that silently invalidates the prose fails
+  the build instead of being caught by a reader months later. Separately,
+  `FADENO_SKIP_DRIFT=1` skips the plugin no-drift check: parallel workstreams
+  run against a tree their siblings are still mutating, where that check fails
+  for reasons no one caused. It is an escape hatch for that window only —
+  integration runs the suite without it.
+
 - **Dispatch proxies run on `model: sonnet`** (was `haiku`) and their bodies
   are hardened: the whole relay is ONE Bash call — the task prompt piped to
   `fadeno dispatch` as a quoted heredoc on stdin — run with the tool
@@ -149,6 +249,30 @@ writers accept only 0.3.
 - **Host-executor refusal points home** — `fadeno dispatch` resolving to a
   host executor without a fallback now names the native in-session agent to
   use instead.
+
+### Documentation
+
+- **Schema v2 is now the primary form in the design spec.**
+  `docs/experimental/loadouts-and-dispatch.md` → *Schema* presented v1
+  `executors:` entries as the shape to write while the shipped catalog had been
+  v2 for two releases. It now specifies v2 fully — `targets:`, per-harness
+  `routes:` (`native` / `command` / `resume` / `session_id_pattern` /
+  `write_access`), `archetypes:`, `loadouts:`, `bindings:`, and the layering —
+  against `templates/common/fadeno/executors.yaml` as the reference example,
+  with v1 demoted to a compact "Legacy schema (v1)" note (still parsed, still
+  accepts `write_access`, and still the shape `serializeProfile` emits for the
+  run-dir snapshot under either schema). *Vocabulary* gains **target** and
+  **route**; sentences elsewhere that still spoke of `adapter:` fields as
+  user-facing syntax now speak in route-table terms.
+
+- **Native delivery honors half an executor's identity** — in-session delivery
+  can pin the requested **model** (the harness Agent tool's `model` parameter)
+  but not its reasoning effort: the Agent tool schema has no effort parameter,
+  so a target like `opus-xhigh` lands as opus at the session's inherited
+  effort. `native_delivery` rows record `reasoning_effort: "inherited"` rather
+  than the declared effort, so the evidence never claims an effort the
+  delivery could not set. Command delivery has no such gap — the route's argv
+  carries the effort flag.
 
 ## [0.5.0] — 2026-08-02
 

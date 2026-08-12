@@ -1,0 +1,227 @@
+# yaml-language-server: $schema=../schemas/playbook.schema.json
+kind: AgentPlaybook
+schema_version: "0.1"
+name: parallel-workstreams
+description: >
+  Freeze a shared contract and per-workstream ownership manifests before any
+  fan-out, run independent workstreams in parallel against that frozen contract,
+  then integrate, verify, and gate on a structured review of the integrated
+  result.
+when_to_use:
+  - one task splits cleanly into several file-disjoint workstreams
+  - the workstreams share names, schemas, or interface tokens that must not drift
+  - workers finish at different times and must not reconcile against each other
+  - a single integrator should own cross-cutting files and the full suite
+roles:
+  coordinator:
+    purpose: >
+      Freeze the shared contract — names, schemas, interface tokens — and one
+      ownership manifest per workstream BEFORE any fan-out, then own the final
+      summary. Manifests must be file-disjoint; every cross-cutting file belongs
+      to the integrator, not to a workstream.
+  workstream_1:
+    purpose: >
+      Implement workstream 1 against the frozen contract, touching only the
+      files in its ownership manifest. If an out-of-manifest edit is required
+      for correctness, make it AND flag it prominently for the integrator —
+      never skip it silently, never sprawl silently. Do not reconcile against
+      the other workstreams' in-flight work; report the conflict instead. Run
+      only the tests your files touch.
+    archetype: worker
+  workstream_2:
+    purpose: >
+      Implement workstream 2 against the frozen contract, touching only the
+      files in its ownership manifest. If an out-of-manifest edit is required
+      for correctness, make it AND flag it prominently for the integrator —
+      never skip it silently, never sprawl silently. Do not reconcile against
+      the other workstreams' in-flight work; report the conflict instead. Run
+      only the tests your files touch.
+    archetype: worker
+  workstream_3:
+    purpose: >
+      Implement workstream 3 against the frozen contract, touching only the
+      files in its ownership manifest. If an out-of-manifest edit is required
+      for correctness, make it AND flag it prominently for the integrator —
+      never skip it silently, never sprawl silently. Do not reconcile against
+      the other workstreams' in-flight work; report the conflict instead. Run
+      only the tests your files touch.
+    archetype: worker
+  integrator:
+    purpose: >
+      Reconcile every flagged out-of-manifest edit, own the cross-cutting files
+      no workstream owned, rebuild generated artifacts, and reconcile
+      documentation wording against the behavior that actually landed. The
+      integrator runs the full suite; the workstreams did not.
+    archetype: worker
+  integration_reviewer:
+    purpose: >
+      Review the integrated result against the frozen contract — contract drift,
+      unreconciled flags, cross-cutting gaps, stale generated artifacts — and
+      emit a structured review report.
+    archetype: reviewer
+
+flow:
+  # 1. Contract fixation. Nothing fans out until the contract and the manifests
+  #    are frozen: the Contract artifact is an input to every workstream, so
+  #    each worker prompt carries the same frozen text.
+  - id: fix_contract
+    kind: actor_call
+    actor: coordinator
+    output: Contract
+
+  # 2. Fan out. A map over the workstream roles: each member sees the frozen
+  #    Contract and works independently, so completion order does not matter.
+  #    Add or remove members here to change N.
+  - id: run_workstreams
+    kind: map
+    over:
+      - workstream_1
+      - workstream_2
+      - workstream_3
+    input:
+      - Contract
+    output: WorkstreamReport[]
+    # Untyped map output: each member needs an unambiguous file, so `fadeno
+    # prompt` can attribute reports per workstream ({actor} → member name).
+    output_path: artifacts/workstreams/{actor}.md
+
+  # 3. Integration. One actor reconciles the reports, owns the cross-cutting
+  #    files, and rebuilds anything generated.
+  - id: integrate
+    kind: reduce
+    actor: integrator
+    input:
+      - Contract
+      - WorkstreamReport[]
+    output: IntegrationResult
+
+  - id: full_suite
+    kind: tool_call
+    tool: test_runner
+    input:
+      - IntegrationResult
+    output: TestResult
+    next: suite_gate
+
+  - id: suite_gate
+    kind: gate
+    input:
+      - TestResult
+    condition: tests_pass
+    on_pass: review_integration
+    on_fail: suite_failed
+
+  # 4. Review gate. Judgment lives in the ReviewReport artifact; the gate is a
+  #    deterministic check on it.
+  - id: review_integration
+    kind: evaluator
+    actor: integration_reviewer
+    input:
+      - Contract
+      - IntegrationResult
+    output: ReviewReport
+
+  - id: review_gate
+    kind: gate
+    input:
+      - ReviewReport
+    condition: no_blocking_issues
+    on_pass: done
+    on_fail: rework
+
+  - id: rework
+    kind: loop
+    input:
+      - ReviewReport
+    body:
+      - rework_integration
+      - rereview_integration
+    max_iterations: 1
+    until: no_blocking_issues
+    on_success: done
+    on_exhausted: unresolved_review
+
+  # --- rework loop body (definitions only; the loop executes them in order) ---
+  - id: rework_integration
+    kind: actor_call
+    actor: integrator
+    input:
+      - Contract
+      - IntegrationResult
+      - ReviewReport
+    output: IntegrationResult
+
+  - id: rereview_integration
+    kind: evaluator
+    actor: integration_reviewer
+    input:
+      - Contract
+      - IntegrationResult
+    output: ReviewReport
+
+  - id: done
+    kind: actor_call
+    actor: coordinator
+    input:
+      - IntegrationResult
+      - ReviewReport
+      - TestResult
+    output: FinalSummary
+    terminal_status: completed
+
+  - id: suite_failed
+    kind: actor_call
+    actor: coordinator
+    input:
+      - IntegrationResult
+      - TestResult
+    output: FinalSummary
+    terminal_status: failed
+
+  - id: unresolved_review
+    kind: actor_call
+    actor: coordinator
+    input:
+      - IntegrationResult
+      - ReviewReport
+    output: FinalSummary
+    terminal_status: failed
+
+artifact_contracts:
+  Contract:
+    media_type: text/markdown
+    instructions: >
+      State the shared contract first — exact names, schemas, and interface
+      tokens every workstream must use verbatim — then one ownership manifest
+      per workstream listing the files it alone may edit. Manifests must be
+      file-disjoint; assign cross-cutting and generated files to the integrator.
+      Close with the reconciliation rules workers cannot decide for themselves.
+  WorkstreamReport:
+    media_type: text/markdown
+    instructions: >
+      Report, do not reconcile. List files changed, the decisions you made and
+      why, the touched-file tests you ran with their results, and a clearly
+      separated FLAGS section for the integrator: every out-of-manifest edit you
+      made, every contract ambiguity, and every suspected collision with another
+      workstream. An empty FLAGS section must say so explicitly.
+  IntegrationResult:
+    media_type: text/markdown
+    instructions: >
+      Record how each flagged item was resolved, which cross-cutting and
+      generated files you owned or rebuilt, the full-suite command and result,
+      and any documentation wording changed to match the behavior that landed.
+
+limits:
+  max_iterations: 1
+  max_actor_calls: 12
+
+policies:
+  max_revision_loops: 1
+  max_subagents: 6
+  # ADVISORY in instruction-only hosts. For real enforcement, wire these to
+  # pre-commit/CI (or Claude Code hooks). See .fadeno/enforcement.md.
+  require_user_approval_for:
+    - destructive_commands
+    - dependency_addition
+    - deploy
+    - external_send

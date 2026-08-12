@@ -61,6 +61,12 @@ outgoing edge. Terminal statuses are `completed`, `failed`, and `aborted`.
 | `artifact_op` | `op` | Operate on artifacts (read/transform/write). |
 | `subworkflow` | `playbook` | Run another playbook as one step. |
 
+One drivability trap the validator cannot see: a role-`map` whose collective
+output is not a typed judgment (`ReviewReport[]`/`TestResult`) must declare
+`output_path` (e.g. `artifacts/<step>/{actor}.md`) — `fadeno validate` passes
+without it, but `fadeno prompt`/`fadeno next` refuse to plan the members'
+output. The `parallel-workstreams` starter shows the shape.
+
 ## The gate discipline (do not skip this)
 
 ```yaml

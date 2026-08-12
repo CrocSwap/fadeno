@@ -1,8 +1,17 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+
+// Which generation of this hook wrote a given evidence row. Plugin hooks load
+// once at session start from a version-keyed cache, so a live session keeps
+// running the previous build's hook after an upgrade — evidence written across
+// that transition otherwise can't say which generation produced it. Both
+// emitters (`fadeno plugin` and `fadeno init --claude`) replace this literal
+// with the package version; the template keeps 'dev', so a row reading 'dev'
+// means the template was executed directly rather than an installed copy.
+const HOOK_VERSION = 'dev';
 
 function finish(value) {
   if (value != null) process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -45,6 +54,7 @@ function stashRelay() {
       join(dir, 'pending-relays.jsonl'),
       `${JSON.stringify({
         timestamp: new Date().toISOString(),
+        hook_version: HOOK_VERSION,
         prompt_sha256: createHash('sha256').update(prompt).digest('hex'),
       })}\n`,
     );
@@ -87,8 +97,54 @@ if (slot.adapter === 'host' && (typeof slot.model !== 'string' || slot.model ===
   finish(null); // The safe default inherits the caller's native model unchanged.
 }
 
+// Evidence for native delivery. Command delivery ends at `fadeno dispatch`,
+// where the kernel writes the request/completion row pair; native delivery
+// never reaches the kernel, so this hook is the only Fadeno code on that path
+// and therefore its evidence writer. One `native_delivery` row plus a
+// kernel-shaped prompt snapshot keeps both delivery modes auditable from the
+// same `.fadeno/dispatches.jsonl`.
+function recordNativeDelivery() {
+  const prompt = event.tool_input.prompt;
+  if (typeof prompt !== 'string' || prompt.length === 0) return;
+  if (!existsSync(join(cwd, '.fadeno'))) return; // not a Fadeno repo
+  try {
+    const promptSha256 = createHash('sha256').update(prompt).digest('hex');
+    const snapshotRel = `.fadeno/local/prompts/native-${promptSha256.slice(0, 8)}.md`;
+    mkdirSync(join(cwd, '.fadeno', 'local', 'prompts'), { recursive: true });
+    writeFileSync(join(cwd, snapshotRel), prompt, 'utf8');
+    appendFileSync(
+      join(cwd, '.fadeno', 'dispatches.jsonl'),
+      `${JSON.stringify({
+        // Evidence-row format version, duplicated as a literal from
+        // DISPATCHES_FORMAT in src/commands/dispatch.ts: this hook is a
+        // standalone script with no import path back into the CLI, and both
+        // writers must stamp the same version. Bump them together.
+        format: '0.1',
+        timestamp: new Date().toISOString(),
+        event: 'native_delivery',
+        hook_version: HOOK_VERSION,
+        archetype,
+        agent_type: requested,
+        loadout: typeof slot?.active?.name === 'string' ? slot.active.name : null,
+        executor: typeof slot?.executor === 'string' ? slot.executor : null,
+        model: typeof slot?.model === 'string' ? slot.model : null,
+        model_override: event.tool_input.model ?? null,
+        // Native delivery cannot pin reasoning effort: the harness Agent tool
+        // takes no effort parameter, so the spawn inherits the session's.
+        reasoning_effort: 'inherited',
+        transport: 'host-native',
+        prompt_sha256: promptSha256,
+        prompt_snapshot: snapshotRel,
+      })}\n`,
+    );
+  } catch {
+    // best-effort: evidence is a trace, never a gate on the spawn decision
+  }
+}
+
 const commandDelivery = slot.adapter === 'command';
 if (commandDelivery) stashRelay(); // rewritten-to-proxy spawns get attested too
+else recordNativeDelivery(); // no kernel downstream: record the delivery here
 const localAgent = join(
   cwd,
   '.claude',
