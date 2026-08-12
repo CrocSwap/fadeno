@@ -116,6 +116,7 @@ const COMMANDS: Record<string, CommandSpec> = {
       '--prompt-file': PATH,
     },
   ),
+  'dispatch-fallback': command({}, ['run', 'free']),
   'dispatch-start': command({ '--agent-id': { kind: 'free' }, '--workspace': PATH, '--branch': { kind: 'free' } }, ['run', 'free']),
   'dispatch-progress': command({ '--file': PATH, '--source': { kind: 'enum', values: ['agent', 'harness', 'director'] } }, ['run', 'free']),
   'dispatch-complete': command({ '--output': PATH, '--commit': { kind: 'free' } }, ['run', 'free']),

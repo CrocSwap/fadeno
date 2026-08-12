@@ -18,6 +18,60 @@ executors:
     model: current-host
     reasoning_effort: default
     agent_type: judge
+  luna-worker:
+    adapter: host
+    model: gpt-5.6-luna
+    reasoning_effort: medium
+    agent_type: worker
+    fallback_command: [codex, exec, --model, gpt-5.6-luna, --sandbox, workspace-write, -c, 'model_reasoning_effort="medium"', "-"]
+  luna-reviewer:
+    adapter: host
+    model: gpt-5.6-luna
+    reasoning_effort: medium
+    agent_type: reviewer
+    fallback_command: [codex, exec, --model, gpt-5.6-luna, --sandbox, workspace-write, -c, 'model_reasoning_effort="medium"', "-"]
+  luna-judge:
+    adapter: host
+    model: gpt-5.6-luna
+    reasoning_effort: medium
+    agent_type: judge
+    fallback_command: [codex, exec, --model, gpt-5.6-luna, --sandbox, workspace-write, -c, 'model_reasoning_effort="medium"', "-"]
+  terra-worker:
+    adapter: host
+    model: gpt-5.6-terra
+    reasoning_effort: medium
+    agent_type: worker
+    fallback_command: [codex, exec, --model, gpt-5.6-terra, --sandbox, workspace-write, -c, 'model_reasoning_effort="medium"', "-"]
+  terra-reviewer:
+    adapter: host
+    model: gpt-5.6-terra
+    reasoning_effort: medium
+    agent_type: reviewer
+    fallback_command: [codex, exec, --model, gpt-5.6-terra, --sandbox, workspace-write, -c, 'model_reasoning_effort="medium"', "-"]
+  terra-judge:
+    adapter: host
+    model: gpt-5.6-terra
+    reasoning_effort: medium
+    agent_type: judge
+    fallback_command: [codex, exec, --model, gpt-5.6-terra, --sandbox, workspace-write, -c, 'model_reasoning_effort="medium"', "-"]
+  sol-worker:
+    adapter: host
+    model: gpt-5.6-sol
+    reasoning_effort: high
+    agent_type: worker
+    fallback_command: [codex, exec, --model, gpt-5.6-sol, --sandbox, workspace-write, -c, 'model_reasoning_effort="high"', "-"]
+  sol-reviewer:
+    adapter: host
+    model: gpt-5.6-sol
+    reasoning_effort: high
+    agent_type: reviewer
+    fallback_command: [codex, exec, --model, gpt-5.6-sol, --sandbox, workspace-write, -c, 'model_reasoning_effort="high"', "-"]
+  sol-judge:
+    adapter: host
+    model: gpt-5.6-sol
+    reasoning_effort: high
+    agent_type: judge
+    fallback_command: [codex, exec, --model, gpt-5.6-sol, --sandbox, workspace-write, -c, 'model_reasoning_effort="high"', "-"]
   codex-cli:
     adapter: command
     command: [codex, exec, "-"]
@@ -36,6 +90,18 @@ loadouts:
     worker: native-worker
     reviewer: native-reviewer
     judge: native-judge
+  luna:
+    worker: luna-worker
+    reviewer: luna-reviewer
+    judge: luna-judge
+  terra:
+    worker: terra-worker
+    reviewer: terra-reviewer
+    judge: terra-judge
+  sol:
+    worker: sol-worker
+    reviewer: sol-reviewer
+    judge: sol-judge
   codex:
     worker: codex-cli
     reviewer: codex-cli

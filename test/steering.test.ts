@@ -35,7 +35,7 @@ test('Codex --with-steering installs loadout-aware role overrides', (t) => {
     assert.match(body, new RegExp(`fadeno dispatch --archetype ${archetype} --prompt-file`));
     assert.match(body, /ENTIRE task prompt.*verbatim/s);
     assert.match(body, /mode=restart_required/);
-    assert.match(body, /fadeno steering apply <loadout> --codex --force/);
+    assert.match(body, /fadeno dispatch-fallback <run-id> <dispatch-id>/);
     assert.match(body, /do not silently/);
   }
 });
@@ -179,5 +179,6 @@ test('bundled CLI parses --with-steering and carries its templates', (t) => {
   });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Materialize Codex steering with .*fadeno steering apply/);
-  assert.match(read(root, '.codex/agents/worker.toml'), /Unmaterialized Fadeno worker broker/i);
+  assert.match(read(root, '.codex/agents/worker.toml'), /Fadeno worker broker/i);
+  assert.match(read(root, '.codex/agents/worker.toml'), /fadeno dispatch-fallback <run-id> <dispatch-id>/);
 });

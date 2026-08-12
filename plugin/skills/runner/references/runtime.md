@@ -113,6 +113,12 @@ fadeno dispatch-complete <run> <dispatch-id> --output <temporary-file> [--commit
 fadeno dispatch-fail <run> <dispatch-id> --reason <text>
 ```
 
+If resolution returns `mode=command` for this immutable engine request, run
+`fadeno dispatch-fallback <run> <dispatch-id>` instead. It authenticates the
+snapshotted executor and prompt, invokes the executor's declared fallback, and
+owns both lifecycle receipts. Do not use ordinary `fadeno dispatch` for a
+locked request.
+
 The host delivery envelope is part of the routing contract. Prefix an engine
 assignment with `# Fadeno engine step assignment` and include the exact `run` and
 `dispatch_id` above. A Codex role agent resolves the immutable request before

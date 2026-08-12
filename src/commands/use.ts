@@ -70,7 +70,17 @@ export function runUse(opts: UseOptions): UseResult {
     : ['native loadout selected; no external sandbox crossing is active.'];
   if ((steering?.conflicts.length ?? 0) > 0) {
     notices.push(`Preserved ${steering!.conflicts.length} unmanaged Codex agent file(s); move them aside or use explicit \`steering apply --force\` to replace them.`);
-  } else if (steeringChanged) notices.push('Codex native host slots were materialized automatically; start one fresh Codex session to load them.');
+  } else if (steeringChanged) {
+    const allHostSlotsFallback = Object.values(slots).every((executor) => {
+      const spec = loaded.profile.executors[executor]!;
+      return spec.adapter !== 'host' || spec.fallbackCommand != null;
+    });
+    notices.push(
+      allHostSlotsFallback
+        ? 'Codex native host slots were materialized automatically. Declared command fallbacks work now; restart only to make the new slots native.'
+        : 'Codex native host slots were materialized automatically; a fresh Codex session is required for slots without a command fallback.',
+    );
+  }
   else if (steering != null) notices.push('Codex native host slots are already materialized; no restart is needed.');
   return {
     name,

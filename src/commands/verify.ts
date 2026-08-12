@@ -396,7 +396,7 @@ function isStringArray(value: unknown): value is string[] {
 
 function checkHostDispatchRequests(run: RunSummary, events: RunEvent[], mode: LedgerMode): Finding {
   const check = 'host-dispatch-requests';
-  if (!hostEvidencePresent(events)) return skip(check, 'no native host dispatches recorded');
+  if (!hostEvidencePresent(events)) return skip(check, 'no host dispatches recorded');
   if (mode !== 'current') {
     return { check, status: 'fail', detail: `schema ${run.schemaVersion ?? 'pre-0.3'} compatibility cannot ignore host-dispatch lifecycle evidence; recreate the run as ${RUN_LEDGER_SCHEMA_VERSION}` };
   }
@@ -426,7 +426,7 @@ function checkHostDispatchRequests(run: RunSummary, events: RunEvent[], mode: Le
 
 function checkHostDispatchLifecycle(run: RunSummary, events: RunEvent[], mode: LedgerMode): Finding {
   const check = 'host-dispatch-lifecycle';
-  if (!hostEvidencePresent(events)) return skip(check, 'no native host dispatches recorded');
+  if (!hostEvidencePresent(events)) return skip(check, 'no host dispatches recorded');
   if (mode !== 'current') return { check, status: 'fail', detail: 'host lifecycle evidence is not verifiable from a 0.2 compatibility ledger' };
   const records = hostRequestRecords(events);
   const problems: string[] = [];
@@ -514,12 +514,52 @@ function checkHostDispatchLifecycle(run: RunSummary, events: RunEvent[], mode: L
     if (terminals.length > 1) problems.push(`${id}: has conflicting/multiple terminal receipts`);
     const start = starts[0]!;
     const terminal = terminals[0];
+    const transport = start.extra.delivery_transport ?? 'native';
+    if (transport !== 'native' && transport !== 'command-fallback') {
+      problems.push(`${id}: start has unknown delivery_transport ${JSON.stringify(transport)}`);
+    }
+    if (transport === 'native') {
+      if (start.extra.host_attested !== true) problems.push(`${id}: native start is not host-attested`);
+      if (start.extra.identity_evidence !== 'requested_only') problems.push(`${id}: native start has invalid identity_evidence`);
+      if (start.extra.fallback_command !== undefined || start.extra.fallback_command_sha256 !== undefined) {
+        problems.push(`${id}: native start unexpectedly records a fallback command`);
+      }
+    } else if (transport === 'command-fallback') {
+      const command = start.extra.fallback_command;
+      if (!isStringArray(command) || command.length === 0 || command.some((part) => part.length === 0)) {
+        problems.push(`${id}: command fallback does not record a non-empty argv`);
+      } else {
+        const commandSha = sha256Hex(JSON.stringify(command));
+        if (start.extra.fallback_command_sha256 !== commandSha) problems.push(`${id}: fallback command digest does not match argv`);
+        if (profile != null) {
+          const executor = profile.executors[request.extra.executor as string];
+          if (executor == null || executor.adapter !== 'host' || JSON.stringify(executor.fallbackCommand ?? null) !== JSON.stringify(command)) {
+            problems.push(`${id}: fallback command does not match the snapshotted host executor`);
+          }
+        }
+      }
+      if (start.extra.host_attested !== false) problems.push(`${id}: command fallback is incorrectly marked host-attested`);
+      if (start.extra.identity_evidence !== 'command_receipt') problems.push(`${id}: command fallback lacks command receipt identity evidence`);
+      if (start.extra.attestation !== undefined) problems.push(`${id}: command fallback incorrectly records a native attestation object`);
+      if (start.extra.agent_id !== `command-fallback:${String(request.extra.executor)}`) {
+        problems.push(`${id}: command fallback agent_id does not identify its logical executor`);
+      }
+    }
     const requestIndex = events.indexOf(request);
     const startIndex = events.indexOf(start);
     const terminalIndex = terminal == null ? null : events.indexOf(terminal);
     if (startIndex <= requestIndex) problems.push(`${id}: actor_dispatched must follow host_dispatch_requested`);
     if (terminal != null && events.indexOf(terminal) <= startIndex) problems.push(`${id}: terminal receipt must follow actor_dispatched`);
     if (terminal != null && terminal.extra.agent_id !== start.extra.agent_id) problems.push(`${id}: terminal agent_id does not match start`);
+    if (terminal != null) {
+      for (const field of ['delivery_transport', 'fallback_command_sha256', 'host_attested', 'identity_evidence'] as const) {
+        const startValue = field === 'delivery_transport' ? transport : start.extra[field];
+        if (terminal.extra[field] !== startValue) problems.push(`${id}: terminal ${field} does not match start`);
+      }
+      if (JSON.stringify(terminal.extra.fallback_command ?? null) !== JSON.stringify(start.extra.fallback_command ?? null)) {
+        problems.push(`${id}: terminal fallback_command does not match start`);
+      }
+    }
     for (const field of ['step', 'actor', 'step_execution_id', 'actor_call_id', 'attempt', 'executor', 'adapter', 'model', 'reasoning_effort', 'agent_type', 'prompt_path', 'prompt_sha256', 'output_path'] as const) {
       const requestValue = field === 'step' ? request.step : request.extra[field];
       const startValue = field === 'step' ? start.step : field === 'actor' ? start.extra.actor : start.extra[field];
@@ -640,7 +680,7 @@ function checkHostDispatchLifecycle(run: RunSummary, events: RunEvent[], mode: L
 
 function checkHostDispatchArtifacts(run: RunSummary, events: RunEvent[], mode: LedgerMode): Finding {
   const check = 'host-dispatch-artifacts';
-  if (!hostEvidencePresent(events)) return skip(check, 'no native host dispatches recorded');
+  if (!hostEvidencePresent(events)) return skip(check, 'no host dispatches recorded');
   if (mode !== 'current') return { check, status: 'fail', detail: 'host output evidence is not verifiable from a 0.2 compatibility ledger' };
   const problems: string[] = [];
   for (const request of hostRequestRecords(events)) {
@@ -682,7 +722,10 @@ function checkHostDispatchArtifacts(run: RunSummary, events: RunEvent[], mode: L
 
 function checkNativeAttestation(run: RunSummary, events: RunEvent[], mode: LedgerMode): Finding {
   const check = 'native-attestation';
-  const starts = events.filter((event) => event.type === 'actor_dispatched' && event.extra.dispatch_id != null);
+  const starts = events.filter(
+    (event) => event.type === 'actor_dispatched' && event.extra.dispatch_id != null &&
+      (event.extra.delivery_transport ?? 'native') === 'native',
+  );
   if (starts.length === 0) return skip(check, 'no native model, effort, or agent identity evidence recorded');
   if (mode !== 'current') return { check, status: 'fail', detail: 'native attestation cannot be silently ignored in compatibility mode' };
   const requests = new Map(

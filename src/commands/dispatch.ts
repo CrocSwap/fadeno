@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import {
   BARE_IDENTIFIER_RE,
@@ -19,7 +20,9 @@ import {
 import {
   completeHostDispatch,
   failHostDispatch,
+  hostRequestProfile,
   progressHostDispatch,
+  readHostDispatchRequest,
   startHostDispatch,
   type DispatchCompleteOptions,
   type DispatchFailOptions,
@@ -101,6 +104,41 @@ export interface AdHocDispatchResult {
   outputSha256: string;
   /** Repo-relative path of the evidence log that received one row. */
   evidencePath: string;
+  transport: 'command' | 'host-command-fallback';
+}
+
+export interface DispatchFallbackOptions {
+  run: string;
+  dispatchId: string;
+  cwd?: string;
+  repoRoot?: string;
+  now?: Date;
+  onEcho?: (line: string) => void;
+}
+
+export interface DispatchFallbackResult {
+  dispatchId: string;
+  executor: string;
+  model: string;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  idempotent: boolean;
+}
+
+function lockedRunFile(runDir: string, value: string, label: string): string {
+  const runAbsolute = resolve(runDir);
+  const path = isAbsolute(value) ? resolve(value) : resolve(runAbsolute, value);
+  const rel = relative(runAbsolute, path).split('\\').join('/');
+  if (rel === '' || rel === '..' || rel.startsWith('../') || isAbsolute(rel)) {
+    throw new DispatchCommandError(`locked request ${label} escapes its run directory: ${value}.`);
+  }
+  if (!existsSync(path)) throw new DispatchCommandError(`locked request ${label} is missing: ${value}.`);
+  const realRel = relative(realpathSync(runAbsolute), realpathSync(path)).split('\\').join('/');
+  if (realRel === '..' || realRel.startsWith('../') || isAbsolute(realRel)) {
+    throw new DispatchCommandError(`locked request ${label} escapes its run directory through a symlink: ${value}.`);
+  }
+  return path;
 }
 
 function loadProfileOrThrow(repoRoot: string, userPathOptions?: UserPathOptions): ExecutorProfile {
@@ -115,7 +153,8 @@ function loadProfileOrThrow(repoRoot: string, userPathOptions?: UserPathOptions)
 /**
  * One ad-hoc dispatch: resolve archetype → executor with the kernel chain
  * (per-role pin → active loadout slot → `"*"` default), invoke the command
- * adapter with the prompt on stdin, and append one evidence row to
+ * adapter (or a host executor's explicit command fallback) with the prompt on
+ * stdin, and append one evidence row to
  * `.fadeno/dispatches.jsonl`. `--executor` bypasses resolution for debugging.
  */
 export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
@@ -186,12 +225,14 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     }
   }
 
-  if (spec.adapter !== 'command') {
+  if (spec.adapter === 'host' && spec.fallbackCommand == null) {
     throw new DispatchCommandError(
       `resolved to host executor "${executorName}"; ad-hoc dispatch invokes command adapters only — ` +
-        'bind a command executor for this archetype or run via host dispatch.',
+        'declare fallback_command, bind a command executor, or run via native host dispatch.',
     );
   }
+  const command = spec.adapter === 'command' ? spec.command : spec.fallbackCommand!;
+  const transport = spec.adapter === 'command' ? 'command' : 'host-command-fallback';
 
   let prompt: string;
   if (opts.promptFile != null && opts.promptFile !== '') {
@@ -220,10 +261,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     `${role ?? archetype ?? executorName} → ${executorName}` +
     `${spec.model != null ? ` (${spec.model})` : ''} [${sourceLabel}]`;
   opts.onEcho?.(echo);
-  opts.onEcho?.(`external sandbox: ${executorName} (${spec.command.join(' ')}) runs outside the current harness; evidence → ${DISPATCHES_FILE}`);
+  opts.onEcho?.(`external sandbox: ${executorName} (${command.join(' ')}) runs outside the current harness via ${transport}; evidence → ${DISPATCHES_FILE}`);
 
   const started = Date.now();
-  const [cmd, ...args] = spec.command;
+  const [cmd, ...args] = command;
   const spawned = spawnSync(cmd!, args, {
     input: prompt,
     encoding: 'utf8',
@@ -245,6 +286,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     loadout: active == null ? null : { name: active.name, source: active.source },
     executor: executorName,
     model: spec.model,
+    transport,
     exit_code: spawned.error != null ? null : spawned.status,
     duration_ms: durationMs,
     prompt_sha256: promptSha256,
@@ -255,7 +297,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   mkdirSync(join(repoRoot, '.fadeno'), { recursive: true });
   appendFileSync(
     join(repoRoot, DISPATCHES_FILE),
-    `${JSON.stringify({ ...row, command: spec.command, command_sha256: sha256Hex(JSON.stringify(spec.command)) })}\n`,
+    `${JSON.stringify({ ...row, command, command_sha256: sha256Hex(JSON.stringify(command)) })}\n`,
     'utf8',
   );
 
@@ -280,6 +322,114 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     promptSha256,
     outputSha256,
     evidencePath: DISPATCHES_FILE,
+    transport,
+  };
+}
+
+/** Deliver one immutable engine host request through its declared command fallback. */
+export function runDispatchFallback(opts: DispatchFallbackOptions): DispatchFallbackResult {
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const lookup = readHostDispatchRequest({ repoRoot, run: opts.run, dispatchId: opts.dispatchId });
+  const request = lookup.request;
+  const profile = hostRequestProfile(lookup);
+  const spec = profile.executors[request.executor];
+  if (spec == null || spec.adapter !== 'host') {
+    throw new DispatchCommandError(`locked request executor "${request.executor}" is not a host executor.`);
+  }
+  if (spec.fallbackCommand == null) {
+    throw new DispatchCommandError(`host executor "${request.executor}" has no fallback_command.`);
+  }
+  if (spec.model !== request.model || spec.reasoningEffort !== request.reasoningEffort || spec.agentType !== request.agentType) {
+    throw new DispatchCommandError(`locked request identity no longer matches executor "${request.executor}" in its profile snapshot.`);
+  }
+  if (lookup.terminal != null) {
+    if (
+      lookup.terminal.extra.delivery_transport !== 'command-fallback' ||
+      JSON.stringify(lookup.terminal.extra.fallback_command ?? null) !== JSON.stringify(spec.fallbackCommand)
+    ) {
+      throw new DispatchCommandError(`host dispatch "${request.dispatchId}" was not delivered through its declared command fallback.`);
+    }
+    if (lookup.terminal.type === 'actor_completed' && typeof lookup.terminal.extra.output === 'string') {
+      const output = lockedRunFile(lookup.runDir, lookup.terminal.extra.output, 'completed output');
+      const stdout = readFileSync(output, 'utf8');
+      if (lookup.terminal.extra.output_sha256 !== sha256Hex(stdout)) {
+        throw new DispatchCommandError('locked request completed output no longer matches its receipt digest.');
+      }
+      return {
+        dispatchId: request.dispatchId,
+        executor: request.executor,
+        model: request.model,
+        exitCode: 0,
+        stdout,
+        stderr: '',
+        idempotent: true,
+      };
+    }
+    return {
+      dispatchId: request.dispatchId,
+      executor: request.executor,
+      model: request.model,
+      exitCode: 1,
+      stdout: '',
+      stderr: String(lookup.terminal.extra.failure_reason ?? 'fallback dispatch already failed'),
+      idempotent: true,
+    };
+  }
+  const promptPath = lockedRunFile(lookup.runDir, request.promptPath, 'prompt');
+  const prompt = readFileSync(promptPath, 'utf8');
+  if (sha256Hex(prompt) !== request.promptSha256) {
+    throw new DispatchCommandError(`locked request prompt digest does not match ${request.promptPath}.`);
+  }
+  const command = spec.fallbackCommand;
+  opts.onEcho?.(`locked host fallback: ${request.executor} (${command.join(' ')})`);
+  startHostDispatch({
+    repoRoot,
+    run: request.run,
+    dispatchId: request.dispatchId,
+    agentId: `command-fallback:${request.executor}`,
+    transport: 'command-fallback',
+    command,
+    now: opts.now,
+  });
+  const [program, ...args] = command;
+  const spawned = spawnSync(program!, args, {
+    input: prompt,
+    encoding: 'utf8',
+    cwd: repoRoot,
+    maxBuffer: SPAWN_MAX_BUFFER,
+  });
+  const stdout = spawned.stdout ?? '';
+  const stderr = spawned.stderr ?? '';
+  if (spawned.error != null || spawned.status !== 0) {
+    const reason = spawned.error?.message ?? `fallback command exited ${spawned.status ?? 1}${stderr ? `: ${stderr.trim()}` : ''}`;
+    failHostDispatch({ repoRoot, run: request.run, dispatchId: request.dispatchId, reason, now: opts.now });
+    return {
+      dispatchId: request.dispatchId,
+      executor: request.executor,
+      model: request.model,
+      exitCode: spawned.status ?? 1,
+      stdout,
+      stderr,
+      idempotent: false,
+    };
+  }
+  const temporaryDir = mkdtempSync(join(tmpdir(), 'fadeno-fallback-'));
+  const temporaryOutput = join(temporaryDir, 'output');
+  try {
+    writeFileSync(temporaryOutput, stdout, 'utf8');
+    completeHostDispatch({ repoRoot, run: request.run, dispatchId: request.dispatchId, output: temporaryOutput, now: opts.now });
+  } finally {
+    rmSync(temporaryDir, { recursive: true, force: true });
+  }
+  return {
+    dispatchId: request.dispatchId,
+    executor: request.executor,
+    model: request.model,
+    exitCode: 0,
+    stdout,
+    stderr,
+    idempotent: false,
   };
 }
 

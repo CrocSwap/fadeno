@@ -19,7 +19,10 @@ import { tempRepo } from './helpers.ts';
 const EXECUTORS = {
   'opus-xhigh': { adapter: 'command', command: ['claude', '-p', '--model', 'opus'], model: 'opus' },
   'luna-cli': { adapter: 'command', command: ['codex', 'exec', '-'], model: 'gpt-5.6-luna' },
-  'terra-host': { adapter: 'host', model: 'gpt-5.6-terra', reasoning_effort: 'high', agent_type: 'reviewer' },
+  'terra-host': {
+    adapter: 'host', model: 'gpt-5.6-terra', reasoning_effort: 'high', agent_type: 'reviewer',
+    fallback_command: ['codex', 'exec', '--model', 'gpt-5.6-terra', '-'],
+  },
 };
 
 const LOADOUTS = {
@@ -39,6 +42,34 @@ test('loadouts: happy path parses without bindings', () => {
   assert.equal(profile.defaultLoadout, 'anthropic-primary');
   assert.deepEqual(profile.bindings, {});
   assert.equal(profile.executors['terra-host']!.adapter, 'host');
+  assert.deepEqual(
+    profile.executors['terra-host']!.adapter === 'host' ? profile.executors['terra-host']!.fallbackCommand : null,
+    ['codex', 'exec', '--model', 'gpt-5.6-terra', '-'],
+  );
+});
+
+test('host fallback_command must be a non-empty argv', () => {
+  for (const fallback of [[], ['codex', ''], 'codex exec']) {
+    assert.throws(
+      () => parseDoc({
+        executors: {
+          host: { adapter: 'host', model: 'gpt-5.6-sol', reasoning_effort: 'high', agent_type: 'worker', fallback_command: fallback },
+        },
+        bindings: { '*': 'host' },
+      }),
+      /fallback_command.*non-empty array of strings/,
+    );
+  }
+});
+
+test('command executors reject host-only fallback_command', () => {
+  assert.throws(
+    () => parseDoc({
+      executors: { command: { adapter: 'command', command: ['codex', 'exec', '-'], fallback_command: ['codex', 'exec', '-'] } },
+      bindings: { '*': 'command' },
+    }),
+    /rejects host-only.*fallback_command/,
+  );
 });
 
 test('loadouts: coexist with bindings; both are parsed', () => {

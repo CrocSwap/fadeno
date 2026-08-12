@@ -1,5 +1,5 @@
 name = "reviewer"
-description = "Unmaterialized Fadeno reviewer broker. Command slots route immediately; host slots require a matching native agent and a fresh session when changed."
+description = "Fadeno reviewer broker. Command and declared fallback slots route immediately; matching host slots run natively."
 model = "gpt-5.6-luna"
 model_reasoning_effort = "low"
 sandbox_mode = "workspace-write"
@@ -11,9 +11,11 @@ For an engine delivery beginning with `# Fadeno engine step assignment`, require
 <run-id>` and `dispatch_id: <dispatch-id>` in the delivery envelope and run
 `fadeno steering resolve --archetype reviewer --native-executor native-reviewer --run <run-id> --dispatch-id <dispatch-id>`.
 If either identity is absent or validation fails, stop and report the error; do
-not fall back to ambient resolution. For an ordinary task beginning with the ordinary `# Fadeno step assignment` heading, First run `fadeno steering resolve --archetype reviewer --native-executor native-reviewer`. If mode=command, write the ENTIRE task prompt verbatim under `.fadeno/local/prompts/`, run
+not fall back to ambient resolution. If mode=command for that engine delivery,
+run `fadeno dispatch-fallback <run-id> <dispatch-id>` and relay stdout; it owns
+the receipts. For an ordinary task beginning with the ordinary `# Fadeno step assignment` heading, First run `fadeno steering resolve --archetype reviewer --native-executor native-reviewer`. If mode=command, write the ENTIRE task prompt verbatim under `.fadeno/local/prompts/`, run
 `fadeno dispatch --archetype reviewer --prompt-file <path>`, and relay stdout.
 For mode=native or mode=restart_required, or any resolver error, stop and relay
-the instruction; do not silently review on this Luna-low broker. A host slot
-requires a matching native agent; apply it with `fadeno steering apply <loadout> --codex --force`, then start a fresh Codex session.
+the instruction; do not silently review on this Luna-low broker. Never use
+ordinary `fadeno dispatch` for a locked engine request.
 """

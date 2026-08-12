@@ -7,6 +7,7 @@ import {
   runDispatch,
   runDispatchComplete,
   runDispatchFail,
+  runDispatchFallback,
   runDispatchProgress,
   runDispatchStart,
 } from './commands/dispatch.ts';
@@ -73,6 +74,7 @@ Usage:
   fadeno loadout [list|use <n>|clear]   Show, list, pin, or clear the active loadout
   fadeno steering resolve|apply [...]   Resolve or materialize hybrid Codex steering
   fadeno dispatch [flags]               Resolve archetype → executor and invoke it once (ad hoc)
+  fadeno dispatch-fallback <run> <id>   Deliver a locked host request by declared fallback
   fadeno dispatch-start <run> <id>      Start a native host dispatch
   fadeno dispatch-progress <run> <id>   Record an attested progress observation
   fadeno dispatch-complete <run> <id>   Submit a native host result
@@ -757,7 +759,9 @@ function main(argv: string[]): number {
       const result = runUse({ name, project: values.project, target: target === 'codex' ? 'codex' : undefined });
       console.log(`active loadout selected: ${result.name} (${result.scope})`);
       for (const notice of result.notices) console.log(`  ${notice}`);
-      if (result.restartRequired) console.log('  restart required: start a fresh Codex session.');
+      if (result.restartRequired && !result.notices.some((notice) => notice.includes('fallbacks work now'))) {
+        console.log('  restart required: start a fresh Codex session.');
+      }
       return 0;
     }
     case 'status': {
@@ -899,7 +903,10 @@ function main(argv: string[]): number {
             `  ${archetype} → ${slot.kind === 'native' ? 'native host' : 'command broker'} ${slot.executor}`,
           );
         }
-        console.log(`  ${changed} agent definition(s) written; start a fresh Codex session to load them.`);
+        console.log(
+          `  ${changed} agent definition(s) written; declared fallbacks work immediately, ` +
+            'or start a fresh Codex session to make changed host slots native.',
+        );
         if (changed === 0) console.log('  Existing files were preserved; pass --force to replace them.');
         return 0;
       }
@@ -1144,7 +1151,8 @@ function main(argv: string[]): number {
           if (hostSlots > 0) {
             console.log(
               `  ${hostSlots} host slot(s) run natively only when the current session's materialized native executor matches; ` +
-                `otherwise run \`fadeno steering apply ${result.name} --codex --force\` and start a fresh Codex session.`,
+                'declared command fallbacks switch on the next invocation. ' +
+                `Run \`fadeno steering apply ${result.name} --codex --force\` and start a fresh Codex session only to make them native.`,
             );
           }
           return 0;
@@ -1182,6 +1190,19 @@ function main(argv: string[]): number {
         // only a bare exit code. stdout stays the executor's pure report.
         console.error(`dispatch: executor ${result.executor} exited ${result.exitCode}`);
       }
+      return result.exitCode;
+    }
+    case 'dispatch-fallback': {
+      const [, run, dispatchId] = positionals;
+      if (!run || !dispatchId) throw new Error('Usage: fadeno dispatch-fallback <run> <dispatch-id>');
+      const result = runDispatchFallback({
+        run,
+        dispatchId,
+        onEcho: (line) => console.error(line),
+      });
+      if (result.stdout.length > 0) process.stdout.write(result.stdout);
+      if (result.stderr.length > 0) process.stderr.write(result.stderr);
+      if (result.exitCode !== 0) console.error(`dispatch-fallback: executor ${result.executor} exited ${result.exitCode}`);
       return result.exitCode;
     }
     case 'dispatch-start': {

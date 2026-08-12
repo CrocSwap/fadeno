@@ -31,6 +31,10 @@ const EXECUTORS = {
   'luna-worker': { adapter: 'command', command: STDIN_ECHO('LUNA:'), model: 'gpt-5.6-luna' },
   'fail-7': { adapter: 'command', command: ['node', '-e', 'process.exit(7)'] },
   'terra-host': { adapter: 'host', model: 'gpt-5.6-terra', reasoning_effort: 'high', agent_type: 'reviewer' },
+  'terra-fallback': {
+    adapter: 'host', model: 'gpt-5.6-terra', reasoning_effort: 'high', agent_type: 'reviewer',
+    fallback_command: STDIN_ECHO('TERRA:'),
+  },
 };
 
 function seedProfile(t: TestContext, doc: Record<string, unknown>): string {
@@ -75,7 +79,7 @@ test('dispatch: resolves the archetype via the active loadout, relays the report
   assert.equal(result.echo, 'worker → echo-worker (opus) [loadout main]');
   assert.deepEqual(echoes, [
     result.echo,
-    "external sandbox: echo-worker (node -e let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('REPORT:'+d));) runs outside the current harness; evidence → .fadeno/dispatches.jsonl",
+    "external sandbox: echo-worker (node -e let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('REPORT:'+d));) runs outside the current harness via command; evidence → .fadeno/dispatches.jsonl",
   ]);
   assert.equal(result.evidencePath, DISPATCHES_FILE);
 
@@ -165,8 +169,23 @@ test('dispatch: resolving to a host executor refuses with the host-dispatch poin
   });
   assert.throws(
     () => runDispatch({ archetype: 'reviewer', prompt: 'p', repoRoot: root, env: null }),
-    /resolved to host executor "terra-host".*bind a command executor for this archetype or run via host dispatch/,
+    /resolved to host executor "terra-host".*declare fallback_command.*native host dispatch/,
   );
+});
+
+test('dispatch: a host executor uses its explicit command fallback with honest evidence', (t) => {
+  const root = seedProfile(t, {
+    executors: EXECUTORS,
+    loadouts: { main: { reviewer: 'terra-fallback' } },
+    default_loadout: 'main',
+  });
+  const result = runDispatch({ archetype: 'reviewer', prompt: 'review this', repoRoot: root, env: null });
+  assert.equal(result.stdout, 'TERRA:review this');
+  assert.equal(result.transport, 'host-command-fallback');
+  const row = evidenceRows(root).at(-1)!;
+  assert.equal(row.transport, 'host-command-fallback');
+  assert.deepEqual(row.command, STDIN_ECHO('TERRA:'));
+  assert.equal(row.command_sha256, sha256Hex(JSON.stringify(STDIN_ECHO('TERRA:'))));
 });
 
 test('dispatch: --executor bypasses resolution; unknown names are rejected', (t) => {
@@ -185,7 +204,7 @@ test('dispatch: --executor bypasses resolution; unknown names are rejected', (t)
 
   assert.throws(
     () => runDispatch({ executor: 'ghost', prompt: 'p', repoRoot: root, env: null }),
-    /--executor "ghost" is not a declared executor \(echo-worker, luna-worker, fail-7, terra-host\)/,
+    /--executor "ghost" is not a declared executor \(echo-worker, luna-worker, fail-7, terra-host, terra-fallback\)/,
   );
 });
 

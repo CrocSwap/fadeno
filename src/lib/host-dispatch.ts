@@ -6,6 +6,7 @@ import { runSchemaDirectories } from './definitions.ts';
 import { findRepoRoot } from './paths.ts';
 import { readEventsStrict, resolveRun, RUN_LEDGER_SCHEMA_VERSION, RunLedgerError, type RunEvent } from './run-ledger.ts';
 import { LedgerWriteError, LedgerWriter } from './run-ledger-write.ts';
+import { parseExecutorProfile, type ExecutorProfile } from './executors.ts';
 
 export class HostDispatchError extends Error {}
 
@@ -84,12 +85,49 @@ export interface HostDispatchRequestLookup {
   terminal: RunEvent | null;
 }
 
+/** Re-read and authenticate the immutable executor profile pinned to a run. */
+export function hostRequestProfile(lookup: HostDispatchRequestLookup): ExecutorProfile {
+  const snapshots = lookup.events.filter((event) => event.type === 'profile_snapshotted');
+  if (snapshots.length !== 1) {
+    throw new HostDispatchError(
+      `run "${lookup.runId}" must contain exactly one profile_snapshotted event; found ${snapshots.length}.`,
+    );
+  }
+  const snapshot = snapshots[0]!;
+  const profileRel = typeof snapshot.extra.profile === 'string' && snapshot.extra.profile.length > 0
+    ? snapshot.extra.profile
+    : 'profile.yaml';
+  const runAbsolute = resolve(lookup.runDir);
+  const profilePath = isAbsolute(profileRel) ? resolve(profileRel) : resolve(runAbsolute, profileRel);
+  const profileRelative = relative(runAbsolute, profilePath).split('\\').join('/');
+  if (profileRelative === '' || profileRelative === '..' || profileRelative.startsWith('../') || isAbsolute(profileRelative)) {
+    throw new HostDispatchError(`run "${lookup.runId}" profile snapshot escapes the run directory: ${profileRel}`);
+  }
+  if (!existsSync(profilePath)) throw new HostDispatchError(`run "${lookup.runId}" profile snapshot is missing: ${profileRel}`);
+  const profileRealRelative = relative(realpathSync(runAbsolute), realpathSync(profilePath)).split('\\').join('/');
+  if (profileRealRelative === '..' || profileRealRelative.startsWith('../') || isAbsolute(profileRealRelative)) {
+    throw new HostDispatchError(`run "${lookup.runId}" profile snapshot escapes the run directory through a symlink: ${profileRel}`);
+  }
+  const text = readFileSync(profilePath, 'utf8');
+  const digest = snapshot.extra.sha256;
+  if (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) {
+    throw new HostDispatchError(`run "${lookup.runId}" profile snapshot is missing or has an invalid sha256 digest.`);
+  }
+  if (digest !== sha256Hex(text)) {
+    throw new HostDispatchError(`run "${lookup.runId}" profile snapshot digest does not match its recorded sha256.`);
+  }
+  return parseExecutorProfile(text, `${profileRel} (run snapshot)`);
+}
+
 export interface DispatchStartOptions {
   run: string;
   dispatchId: string;
   agentId: string;
   workspace?: string;
   branch?: string;
+  transport?: 'native' | 'command-fallback';
+  /** Exact argv used only for command-fallback delivery evidence. */
+  command?: string[];
   repoRoot?: string;
   cwd?: string;
   now?: Date;
@@ -457,14 +495,46 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const { runDir, runId } = assertCurrentLedger(repoRoot, opts.run);
   if (!opts.agentId.trim()) throw new HostDispatchError('--agent-id must not be empty.');
+  const transport = opts.transport ?? 'native';
+  if (transport === 'command-fallback' && (opts.command == null || opts.command.length === 0)) {
+    throw new HostDispatchError('command-fallback dispatch-start requires the exact command argv.');
+  }
+  if (transport === 'native' && opts.command != null) {
+    throw new HostDispatchError('native dispatch-start must not include command argv.');
+  }
   const events = eventsFor(runDir);
-  const { request } = findRequest(runId, events, opts.dispatchId);
+  const { request, event: requestEvent } = findRequest(runId, events, opts.dispatchId);
+  if (transport === 'command-fallback') {
+    const profile = hostRequestProfile({
+      runId,
+      runDir,
+      events,
+      event: requestEvent,
+      request,
+      terminal: null,
+    });
+    const executor = profile.executors[request.executor];
+    if (
+      executor == null || executor.adapter !== 'host' ||
+      JSON.stringify(executor.fallbackCommand ?? null) !== JSON.stringify(opts.command ?? null) ||
+      executor.model !== request.model || executor.reasoningEffort !== request.reasoningEffort ||
+      executor.agentType !== request.agentType
+    ) {
+      throw new HostDispatchError(
+        `command-fallback delivery for "${opts.dispatchId}" does not match its snapshotted executor and identity.`,
+      );
+    }
+  }
   const starts = startsFor(events, opts.dispatchId);
   if (starts.length > 1) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" was started more than once.`);
   if (starts.length === 1) {
-    const prior = starts[0]!.extra.agent_id;
-    if (prior === opts.agentId) return { dispatchId: opts.dispatchId, state: 'started', idempotent: true, agentId: opts.agentId };
-    throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already started by a different native agent ID.`);
+    const prior = starts[0]!;
+    const priorTransport = prior.extra.delivery_transport ?? 'native';
+    const sameCommand = JSON.stringify(prior.extra.fallback_command ?? null) === JSON.stringify(opts.command ?? null);
+    if (prior.extra.agent_id === opts.agentId && priorTransport === transport && sameCommand) {
+      return { dispatchId: opts.dispatchId, state: 'started', idempotent: true, agentId: opts.agentId };
+    }
+    throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already started with different delivery evidence.`);
   }
   const terminals = terminalsFor(events, opts.dispatchId);
   if (terminals.length > 0) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already has a terminal receipt.`);
@@ -492,14 +562,21 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
       agent_id: opts.agentId,
       workspace: opts.workspace,
       branch: opts.branch,
-      host_attested: true,
-      identity_evidence: 'requested_only',
-      attestation: {
-        model: request.model,
-        reasoning_effort: request.reasoningEffort,
-        agent_type: request.agentType,
-        agent_id: opts.agentId,
-      },
+      delivery_transport: transport,
+      ...(opts.command != null ? {
+        fallback_command: opts.command,
+        fallback_command_sha256: sha256Hex(JSON.stringify(opts.command)),
+      } : {}),
+      host_attested: transport === 'native',
+      identity_evidence: transport === 'native' ? 'requested_only' : 'command_receipt',
+      ...(transport === 'native' ? {
+        attestation: {
+          model: request.model,
+          reasoning_effort: request.reasoningEffort,
+          agent_type: request.agentType,
+          agent_id: opts.agentId,
+        },
+      } : {}),
       node_instance_id: request.nodeInstanceId,
       parent_instance_id: request.parentInstanceId,
       map_member: request.mapMember,
@@ -509,6 +586,18 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
     opts.now,
   );
   return { dispatchId: opts.dispatchId, state: 'started', idempotent: false, agentId: opts.agentId };
+}
+
+function deliveryFields(start: RunEvent): Record<string, unknown> {
+  return {
+    delivery_transport: start.extra.delivery_transport ?? 'native',
+    ...(start.extra.fallback_command !== undefined ? { fallback_command: start.extra.fallback_command } : {}),
+    ...(start.extra.fallback_command_sha256 !== undefined
+      ? { fallback_command_sha256: start.extra.fallback_command_sha256 }
+      : {}),
+    host_attested: start.extra.host_attested === true,
+    identity_evidence: start.extra.identity_evidence,
+  };
 }
 
 /** Record one provenance-labelled, non-gating observation of a running host dispatch. */
@@ -525,6 +614,9 @@ export function progressHostDispatch(opts: DispatchProgressOptions): HostDispatc
   const starts = startsFor(events, opts.dispatchId);
   if (starts.length === 0) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" cannot report progress before dispatch-start.`);
   if (starts.length > 1) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" was started more than once.`);
+  if ((starts[0]!.extra.delivery_transport ?? 'native') !== 'native') {
+    throw new HostDispatchError(`host dispatch "${opts.dispatchId}" command fallback cannot accept native progress receipts.`);
+  }
   if (terminalsFor(events, opts.dispatchId).length > 0) {
     throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already has a terminal receipt.`);
   }
@@ -642,7 +734,7 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
         output_sha256: digest,
         output_valid: false,
         validation_errors: verdict.errors.slice(0, 5),
-        host_attested: true,
+        ...deliveryFields(starts[0]!),
         node_instance_id: request.nodeInstanceId,
         parent_instance_id: request.parentInstanceId,
         map_member: request.mapMember,
@@ -719,7 +811,7 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
       output_sha256: digest,
       output_valid: true,
       commit: opts.commit,
-      host_attested: true,
+      ...deliveryFields(starts[0]!),
       node_instance_id: request.nodeInstanceId,
       parent_instance_id: request.parentInstanceId,
       map_member: request.mapMember,
@@ -771,7 +863,7 @@ export function failHostDispatch(opts: DispatchFailOptions): HostDispatchReceipt
       agent_id: starts[0]!.extra.agent_id,
       reason: 'host_failed',
       failure_reason: opts.reason,
-      host_attested: true,
+      ...deliveryFields(starts[0]!),
       node_instance_id: request.nodeInstanceId,
       parent_instance_id: request.parentInstanceId,
       map_member: request.mapMember,

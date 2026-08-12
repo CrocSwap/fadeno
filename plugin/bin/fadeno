@@ -10968,49 +10968,49 @@ var require_fast_uri = __commonJS({
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
-    function resolveComponent(base, relative11, options, skipNormalization) {
+    function resolveComponent(base, relative12, options, skipNormalization) {
       const target = {};
       if (!skipNormalization) {
         base = parse(serialize(base, options), options);
-        relative11 = parse(serialize(relative11, options), options);
+        relative12 = parse(serialize(relative12, options), options);
       }
       options = options || {};
-      if (!options.tolerant && relative11.scheme) {
-        target.scheme = relative11.scheme;
-        target.userinfo = relative11.userinfo;
-        target.host = relative11.host;
-        target.port = relative11.port;
-        target.path = removeDotSegments(relative11.path || "");
-        target.query = relative11.query;
+      if (!options.tolerant && relative12.scheme) {
+        target.scheme = relative12.scheme;
+        target.userinfo = relative12.userinfo;
+        target.host = relative12.host;
+        target.port = relative12.port;
+        target.path = removeDotSegments(relative12.path || "");
+        target.query = relative12.query;
       } else {
-        if (relative11.userinfo !== void 0 || relative11.host !== void 0 || relative11.port !== void 0) {
-          target.userinfo = relative11.userinfo;
-          target.host = relative11.host;
-          target.port = relative11.port;
-          target.path = removeDotSegments(relative11.path || "");
-          target.query = relative11.query;
+        if (relative12.userinfo !== void 0 || relative12.host !== void 0 || relative12.port !== void 0) {
+          target.userinfo = relative12.userinfo;
+          target.host = relative12.host;
+          target.port = relative12.port;
+          target.path = removeDotSegments(relative12.path || "");
+          target.query = relative12.query;
         } else {
-          if (!relative11.path) {
+          if (!relative12.path) {
             target.path = base.path;
-            if (relative11.query !== void 0) {
-              target.query = relative11.query;
+            if (relative12.query !== void 0) {
+              target.query = relative12.query;
             } else {
               target.query = base.query;
             }
           } else {
-            if (relative11.path[0] === "/") {
-              target.path = removeDotSegments(relative11.path);
+            if (relative12.path[0] === "/") {
+              target.path = removeDotSegments(relative12.path);
             } else {
               if ((base.userinfo !== void 0 || base.host !== void 0 || base.port !== void 0) && !base.path) {
-                target.path = "/" + relative11.path;
+                target.path = "/" + relative12.path;
               } else if (!base.path) {
-                target.path = relative11.path;
+                target.path = relative12.path;
               } else {
-                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative11.path;
+                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative12.path;
               }
               target.path = removeDotSegments(target.path);
             }
-            target.query = relative11.query;
+            target.query = relative12.query;
           }
           target.userinfo = base.userinfo;
           target.host = base.host;
@@ -11018,7 +11018,7 @@ var require_fast_uri = __commonJS({
         }
         target.scheme = base.scheme;
       }
-      target.fragment = relative11.fragment;
+      target.fragment = relative12.fragment;
       return target;
     }
     function equal(uriA, uriB, options) {
@@ -14334,6 +14334,7 @@ function runDecide(opts) {
 // src/commands/dispatch.ts
 var import_node_child_process = require("node:child_process");
 var import_node_fs12 = require("node:fs");
+var import_node_os2 = require("node:os");
 var import_node_path12 = require("node:path");
 
 // src/lib/artifact-manifest.ts
@@ -14551,12 +14552,21 @@ function parseExecutorProfile(text, source) {
       if (typeof agentType !== "string" || agentType.length === 0) {
         throw new ExecutorProfileError(`${source}: host executor "${name}" needs a non-empty \`agent_type\`.`);
       }
-      executors[name] = { adapter: "host", model, reasoningEffort, agentType };
+      let fallbackCommand = null;
+      if (raw.fallback_command != null) {
+        if (!Array.isArray(raw.fallback_command) || raw.fallback_command.length === 0 || !raw.fallback_command.every((part) => typeof part === "string" && part.length > 0)) {
+          throw new ExecutorProfileError(
+            `${source}: host executor "${name}" needs \`fallback_command\` as a non-empty array of strings.`
+          );
+        }
+        fallbackCommand = raw.fallback_command;
+      }
+      executors[name] = { adapter: "host", model, reasoningEffort, agentType, fallbackCommand };
       continue;
     }
-    if (raw.reasoning_effort !== void 0 || raw.agent_type !== void 0) {
+    if (raw.reasoning_effort !== void 0 || raw.agent_type !== void 0 || raw.fallback_command !== void 0) {
       throw new ExecutorProfileError(
-        `${source}: command executor "${name}" rejects host-only field(s) \`reasoning_effort\`/\`agent_type\`.`
+        `${source}: command executor "${name}" rejects host-only field(s) \`reasoning_effort\`/\`agent_type\`/\`fallback_command\`.`
       );
     }
     const command2 = raw.command;
@@ -14792,7 +14802,8 @@ function serializeProfile(profile) {
       adapter: spec.adapter,
       model: spec.model,
       reasoning_effort: spec.reasoningEffort,
-      agent_type: spec.agentType
+      agent_type: spec.agentType,
+      ...spec.fallbackCommand != null ? { fallback_command: spec.fallbackCommand } : {}
     } : { adapter: spec.adapter, command: spec.command };
     if (spec.adapter === "command" && spec.model != null) entry.model = spec.model;
     if (spec.adapter === "command" && spec.resume != null) entry.resume = spec.resume;
@@ -16067,6 +16078,36 @@ function definitionSourceSummary(repoRoot) {
 // src/lib/host-dispatch.ts
 var HostDispatchError = class extends Error {
 };
+function hostRequestProfile(lookup) {
+  const snapshots = lookup.events.filter((event) => event.type === "profile_snapshotted");
+  if (snapshots.length !== 1) {
+    throw new HostDispatchError(
+      `run "${lookup.runId}" must contain exactly one profile_snapshotted event; found ${snapshots.length}.`
+    );
+  }
+  const snapshot = snapshots[0];
+  const profileRel = typeof snapshot.extra.profile === "string" && snapshot.extra.profile.length > 0 ? snapshot.extra.profile : "profile.yaml";
+  const runAbsolute = (0, import_node_path10.resolve)(lookup.runDir);
+  const profilePath = (0, import_node_path10.isAbsolute)(profileRel) ? (0, import_node_path10.resolve)(profileRel) : (0, import_node_path10.resolve)(runAbsolute, profileRel);
+  const profileRelative = (0, import_node_path10.relative)(runAbsolute, profilePath).split("\\").join("/");
+  if (profileRelative === "" || profileRelative === ".." || profileRelative.startsWith("../") || (0, import_node_path10.isAbsolute)(profileRelative)) {
+    throw new HostDispatchError(`run "${lookup.runId}" profile snapshot escapes the run directory: ${profileRel}`);
+  }
+  if (!(0, import_node_fs10.existsSync)(profilePath)) throw new HostDispatchError(`run "${lookup.runId}" profile snapshot is missing: ${profileRel}`);
+  const profileRealRelative = (0, import_node_path10.relative)((0, import_node_fs10.realpathSync)(runAbsolute), (0, import_node_fs10.realpathSync)(profilePath)).split("\\").join("/");
+  if (profileRealRelative === ".." || profileRealRelative.startsWith("../") || (0, import_node_path10.isAbsolute)(profileRealRelative)) {
+    throw new HostDispatchError(`run "${lookup.runId}" profile snapshot escapes the run directory through a symlink: ${profileRel}`);
+  }
+  const text = (0, import_node_fs10.readFileSync)(profilePath, "utf8");
+  const digest2 = snapshot.extra.sha256;
+  if (typeof digest2 !== "string" || !/^[0-9a-f]{64}$/.test(digest2)) {
+    throw new HostDispatchError(`run "${lookup.runId}" profile snapshot is missing or has an invalid sha256 digest.`);
+  }
+  if (digest2 !== sha256Hex(text)) {
+    throw new HostDispatchError(`run "${lookup.runId}" profile snapshot digest does not match its recorded sha256.`);
+  }
+  return parseExecutorProfile(text, `${profileRel} (run snapshot)`);
+}
 var PROGRESS_STATES = /* @__PURE__ */ new Set(["running", "waiting_input", "blocked", "idle"]);
 var PROGRESS_SOURCES = /* @__PURE__ */ new Set(["agent", "harness", "director"]);
 var MAX_PROGRESS_BYTES = 64 * 1024;
@@ -16343,14 +16384,41 @@ function startHostDispatch(opts) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const { runDir, runId } = assertCurrentLedger(repoRoot, opts.run);
   if (!opts.agentId.trim()) throw new HostDispatchError("--agent-id must not be empty.");
+  const transport = opts.transport ?? "native";
+  if (transport === "command-fallback" && (opts.command == null || opts.command.length === 0)) {
+    throw new HostDispatchError("command-fallback dispatch-start requires the exact command argv.");
+  }
+  if (transport === "native" && opts.command != null) {
+    throw new HostDispatchError("native dispatch-start must not include command argv.");
+  }
   const events = eventsFor(runDir);
-  const { request } = findRequest(runId, events, opts.dispatchId);
+  const { request, event: requestEvent } = findRequest(runId, events, opts.dispatchId);
+  if (transport === "command-fallback") {
+    const profile = hostRequestProfile({
+      runId,
+      runDir,
+      events,
+      event: requestEvent,
+      request,
+      terminal: null
+    });
+    const executor = profile.executors[request.executor];
+    if (executor == null || executor.adapter !== "host" || JSON.stringify(executor.fallbackCommand ?? null) !== JSON.stringify(opts.command ?? null) || executor.model !== request.model || executor.reasoningEffort !== request.reasoningEffort || executor.agentType !== request.agentType) {
+      throw new HostDispatchError(
+        `command-fallback delivery for "${opts.dispatchId}" does not match its snapshotted executor and identity.`
+      );
+    }
+  }
   const starts = startsFor(events, opts.dispatchId);
   if (starts.length > 1) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" was started more than once.`);
   if (starts.length === 1) {
-    const prior = starts[0].extra.agent_id;
-    if (prior === opts.agentId) return { dispatchId: opts.dispatchId, state: "started", idempotent: true, agentId: opts.agentId };
-    throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already started by a different native agent ID.`);
+    const prior = starts[0];
+    const priorTransport = prior.extra.delivery_transport ?? "native";
+    const sameCommand = JSON.stringify(prior.extra.fallback_command ?? null) === JSON.stringify(opts.command ?? null);
+    if (prior.extra.agent_id === opts.agentId && priorTransport === transport && sameCommand) {
+      return { dispatchId: opts.dispatchId, state: "started", idempotent: true, agentId: opts.agentId };
+    }
+    throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already started with different delivery evidence.`);
   }
   const terminals = terminalsFor(events, opts.dispatchId);
   if (terminals.length > 0) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already has a terminal receipt.`);
@@ -16378,14 +16446,21 @@ function startHostDispatch(opts) {
       agent_id: opts.agentId,
       workspace: opts.workspace,
       branch: opts.branch,
-      host_attested: true,
-      identity_evidence: "requested_only",
-      attestation: {
-        model: request.model,
-        reasoning_effort: request.reasoningEffort,
-        agent_type: request.agentType,
-        agent_id: opts.agentId
-      },
+      delivery_transport: transport,
+      ...opts.command != null ? {
+        fallback_command: opts.command,
+        fallback_command_sha256: sha256Hex(JSON.stringify(opts.command))
+      } : {},
+      host_attested: transport === "native",
+      identity_evidence: transport === "native" ? "requested_only" : "command_receipt",
+      ...transport === "native" ? {
+        attestation: {
+          model: request.model,
+          reasoning_effort: request.reasoningEffort,
+          agent_type: request.agentType,
+          agent_id: opts.agentId
+        }
+      } : {},
       node_instance_id: request.nodeInstanceId,
       parent_instance_id: request.parentInstanceId,
       map_member: request.mapMember,
@@ -16395,6 +16470,15 @@ function startHostDispatch(opts) {
     opts.now
   );
   return { dispatchId: opts.dispatchId, state: "started", idempotent: false, agentId: opts.agentId };
+}
+function deliveryFields(start) {
+  return {
+    delivery_transport: start.extra.delivery_transport ?? "native",
+    ...start.extra.fallback_command !== void 0 ? { fallback_command: start.extra.fallback_command } : {},
+    ...start.extra.fallback_command_sha256 !== void 0 ? { fallback_command_sha256: start.extra.fallback_command_sha256 } : {},
+    host_attested: start.extra.host_attested === true,
+    identity_evidence: start.extra.identity_evidence
+  };
 }
 function progressHostDispatch(opts) {
   const cwd = opts.cwd ?? process.cwd();
@@ -16409,6 +16493,9 @@ function progressHostDispatch(opts) {
   const starts = startsFor(events, opts.dispatchId);
   if (starts.length === 0) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" cannot report progress before dispatch-start.`);
   if (starts.length > 1) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" was started more than once.`);
+  if ((starts[0].extra.delivery_transport ?? "native") !== "native") {
+    throw new HostDispatchError(`host dispatch "${opts.dispatchId}" command fallback cannot accept native progress receipts.`);
+  }
   if (terminalsFor(events, opts.dispatchId).length > 0) {
     throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already has a terminal receipt.`);
   }
@@ -16524,7 +16611,7 @@ function completeHostDispatch(opts) {
         output_sha256: digest2,
         output_valid: false,
         validation_errors: verdict.errors.slice(0, 5),
-        host_attested: true,
+        ...deliveryFields(starts[0]),
         node_instance_id: request.nodeInstanceId,
         parent_instance_id: request.parentInstanceId,
         map_member: request.mapMember,
@@ -16600,7 +16687,7 @@ function completeHostDispatch(opts) {
       output_sha256: digest2,
       output_valid: true,
       commit: opts.commit,
-      host_attested: true,
+      ...deliveryFields(starts[0]),
       node_instance_id: request.nodeInstanceId,
       parent_instance_id: request.parentInstanceId,
       map_member: request.mapMember,
@@ -16651,7 +16738,7 @@ function failHostDispatch(opts) {
       agent_id: starts[0].extra.agent_id,
       reason: "host_failed",
       failure_reason: opts.reason,
-      host_attested: true,
+      ...deliveryFields(starts[0]),
       node_instance_id: request.nodeInstanceId,
       parent_instance_id: request.parentInstanceId,
       map_member: request.mapMember,
@@ -16710,6 +16797,20 @@ var ROW_RESOLUTION = {
   default: "fallback",
   flag: "executor-flag"
 };
+function lockedRunFile(runDir, value, label) {
+  const runAbsolute = (0, import_node_path12.resolve)(runDir);
+  const path = (0, import_node_path12.isAbsolute)(value) ? (0, import_node_path12.resolve)(value) : (0, import_node_path12.resolve)(runAbsolute, value);
+  const rel = (0, import_node_path12.relative)(runAbsolute, path).split("\\").join("/");
+  if (rel === "" || rel === ".." || rel.startsWith("../") || (0, import_node_path12.isAbsolute)(rel)) {
+    throw new DispatchCommandError(`locked request ${label} escapes its run directory: ${value}.`);
+  }
+  if (!(0, import_node_fs12.existsSync)(path)) throw new DispatchCommandError(`locked request ${label} is missing: ${value}.`);
+  const realRel = (0, import_node_path12.relative)((0, import_node_fs12.realpathSync)(runAbsolute), (0, import_node_fs12.realpathSync)(path)).split("\\").join("/");
+  if (realRel === ".." || realRel.startsWith("../") || (0, import_node_path12.isAbsolute)(realRel)) {
+    throw new DispatchCommandError(`locked request ${label} escapes its run directory through a symlink: ${value}.`);
+  }
+  return path;
+}
 function loadProfileOrThrow(repoRoot, userPathOptions) {
   try {
     return loadExecutorProfile(repoRoot, userPathOptions).profile;
@@ -16774,11 +16875,13 @@ function runDispatch(opts) {
       throw err;
     }
   }
-  if (spec.adapter !== "command") {
+  if (spec.adapter === "host" && spec.fallbackCommand == null) {
     throw new DispatchCommandError(
-      `resolved to host executor "${executorName}"; ad-hoc dispatch invokes command adapters only \u2014 bind a command executor for this archetype or run via host dispatch.`
+      `resolved to host executor "${executorName}"; ad-hoc dispatch invokes command adapters only \u2014 declare fallback_command, bind a command executor, or run via native host dispatch.`
     );
   }
+  const command2 = spec.adapter === "command" ? spec.command : spec.fallbackCommand;
+  const transport = spec.adapter === "command" ? "command" : "host-command-fallback";
   let prompt;
   if (opts.promptFile != null && opts.promptFile !== "") {
     const promptPath = (0, import_node_path12.resolve)(cwd, opts.promptFile);
@@ -16799,9 +16902,9 @@ function runDispatch(opts) {
   const sourceLabel = source === "flag" ? "--executor" : roleResolutionEchoLabel(source, active?.name ?? null);
   const echo = `${role ?? archetype ?? executorName} \u2192 ${executorName}${spec.model != null ? ` (${spec.model})` : ""} [${sourceLabel}]`;
   opts.onEcho?.(echo);
-  opts.onEcho?.(`external sandbox: ${executorName} (${spec.command.join(" ")}) runs outside the current harness; evidence \u2192 ${DISPATCHES_FILE}`);
+  opts.onEcho?.(`external sandbox: ${executorName} (${command2.join(" ")}) runs outside the current harness via ${transport}; evidence \u2192 ${DISPATCHES_FILE}`);
   const started = Date.now();
-  const [cmd, ...args] = spec.command;
+  const [cmd, ...args] = command2;
   const spawned = (0, import_node_child_process.spawnSync)(cmd, args, {
     input: prompt,
     encoding: "utf8",
@@ -16820,6 +16923,7 @@ function runDispatch(opts) {
     loadout: active == null ? null : { name: active.name, source: active.source },
     executor: executorName,
     model: spec.model,
+    transport,
     exit_code: spawned.error != null ? null : spawned.status,
     duration_ms: durationMs,
     prompt_sha256: promptSha256,
@@ -16830,7 +16934,7 @@ function runDispatch(opts) {
   (0, import_node_fs12.mkdirSync)((0, import_node_path12.join)(repoRoot, ".fadeno"), { recursive: true });
   (0, import_node_fs12.appendFileSync)(
     (0, import_node_path12.join)(repoRoot, DISPATCHES_FILE),
-    `${JSON.stringify({ ...row, command: spec.command, command_sha256: sha256Hex(JSON.stringify(spec.command)) })}
+    `${JSON.stringify({ ...row, command: command2, command_sha256: sha256Hex(JSON.stringify(command2)) })}
 `,
     "utf8"
   );
@@ -16853,7 +16957,110 @@ function runDispatch(opts) {
     durationMs,
     promptSha256,
     outputSha256,
-    evidencePath: DISPATCHES_FILE
+    evidencePath: DISPATCHES_FILE,
+    transport
+  };
+}
+function runDispatchFallback(opts) {
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const lookup = readHostDispatchRequest({ repoRoot, run: opts.run, dispatchId: opts.dispatchId });
+  const request = lookup.request;
+  const profile = hostRequestProfile(lookup);
+  const spec = profile.executors[request.executor];
+  if (spec == null || spec.adapter !== "host") {
+    throw new DispatchCommandError(`locked request executor "${request.executor}" is not a host executor.`);
+  }
+  if (spec.fallbackCommand == null) {
+    throw new DispatchCommandError(`host executor "${request.executor}" has no fallback_command.`);
+  }
+  if (spec.model !== request.model || spec.reasoningEffort !== request.reasoningEffort || spec.agentType !== request.agentType) {
+    throw new DispatchCommandError(`locked request identity no longer matches executor "${request.executor}" in its profile snapshot.`);
+  }
+  if (lookup.terminal != null) {
+    if (lookup.terminal.extra.delivery_transport !== "command-fallback" || JSON.stringify(lookup.terminal.extra.fallback_command ?? null) !== JSON.stringify(spec.fallbackCommand)) {
+      throw new DispatchCommandError(`host dispatch "${request.dispatchId}" was not delivered through its declared command fallback.`);
+    }
+    if (lookup.terminal.type === "actor_completed" && typeof lookup.terminal.extra.output === "string") {
+      const output = lockedRunFile(lookup.runDir, lookup.terminal.extra.output, "completed output");
+      const stdout2 = (0, import_node_fs12.readFileSync)(output, "utf8");
+      if (lookup.terminal.extra.output_sha256 !== sha256Hex(stdout2)) {
+        throw new DispatchCommandError("locked request completed output no longer matches its receipt digest.");
+      }
+      return {
+        dispatchId: request.dispatchId,
+        executor: request.executor,
+        model: request.model,
+        exitCode: 0,
+        stdout: stdout2,
+        stderr: "",
+        idempotent: true
+      };
+    }
+    return {
+      dispatchId: request.dispatchId,
+      executor: request.executor,
+      model: request.model,
+      exitCode: 1,
+      stdout: "",
+      stderr: String(lookup.terminal.extra.failure_reason ?? "fallback dispatch already failed"),
+      idempotent: true
+    };
+  }
+  const promptPath = lockedRunFile(lookup.runDir, request.promptPath, "prompt");
+  const prompt = (0, import_node_fs12.readFileSync)(promptPath, "utf8");
+  if (sha256Hex(prompt) !== request.promptSha256) {
+    throw new DispatchCommandError(`locked request prompt digest does not match ${request.promptPath}.`);
+  }
+  const command2 = spec.fallbackCommand;
+  opts.onEcho?.(`locked host fallback: ${request.executor} (${command2.join(" ")})`);
+  startHostDispatch({
+    repoRoot,
+    run: request.run,
+    dispatchId: request.dispatchId,
+    agentId: `command-fallback:${request.executor}`,
+    transport: "command-fallback",
+    command: command2,
+    now: opts.now
+  });
+  const [program, ...args] = command2;
+  const spawned = (0, import_node_child_process.spawnSync)(program, args, {
+    input: prompt,
+    encoding: "utf8",
+    cwd: repoRoot,
+    maxBuffer: SPAWN_MAX_BUFFER
+  });
+  const stdout = spawned.stdout ?? "";
+  const stderr = spawned.stderr ?? "";
+  if (spawned.error != null || spawned.status !== 0) {
+    const reason = spawned.error?.message ?? `fallback command exited ${spawned.status ?? 1}${stderr ? `: ${stderr.trim()}` : ""}`;
+    failHostDispatch({ repoRoot, run: request.run, dispatchId: request.dispatchId, reason, now: opts.now });
+    return {
+      dispatchId: request.dispatchId,
+      executor: request.executor,
+      model: request.model,
+      exitCode: spawned.status ?? 1,
+      stdout,
+      stderr,
+      idempotent: false
+    };
+  }
+  const temporaryDir = (0, import_node_fs12.mkdtempSync)((0, import_node_path12.join)((0, import_node_os2.tmpdir)(), "fadeno-fallback-"));
+  const temporaryOutput = (0, import_node_path12.join)(temporaryDir, "output");
+  try {
+    (0, import_node_fs12.writeFileSync)(temporaryOutput, stdout, "utf8");
+    completeHostDispatch({ repoRoot, run: request.run, dispatchId: request.dispatchId, output: temporaryOutput, now: opts.now });
+  } finally {
+    (0, import_node_fs12.rmSync)(temporaryDir, { recursive: true, force: true });
+  }
+  return {
+    dispatchId: request.dispatchId,
+    executor: request.executor,
+    model: request.model,
+    exitCode: 0,
+    stdout,
+    stderr,
+    idempotent: false
   };
 }
 function runDispatchStart(opts) {
@@ -21573,7 +21780,7 @@ function isStringArray(value) {
 }
 function checkHostDispatchRequests(run, events, mode) {
   const check = "host-dispatch-requests";
-  if (!hostEvidencePresent(events)) return skip(check, "no native host dispatches recorded");
+  if (!hostEvidencePresent(events)) return skip(check, "no host dispatches recorded");
   if (mode !== "current") {
     return { check, status: "fail", detail: `schema ${run.schemaVersion ?? "pre-0.3"} compatibility cannot ignore host-dispatch lifecycle evidence; recreate the run as ${RUN_LEDGER_SCHEMA_VERSION}` };
   }
@@ -21597,7 +21804,7 @@ function checkHostDispatchRequests(run, events, mode) {
 }
 function checkHostDispatchLifecycle(run, events, mode) {
   const check = "host-dispatch-lifecycle";
-  if (!hostEvidencePresent(events)) return skip(check, "no native host dispatches recorded");
+  if (!hostEvidencePresent(events)) return skip(check, "no host dispatches recorded");
   if (mode !== "current") return { check, status: "fail", detail: "host lifecycle evidence is not verifiable from a 0.2 compatibility ledger" };
   const records = hostRequestRecords(events);
   const problems = [];
@@ -21681,12 +21888,52 @@ function checkHostDispatchLifecycle(run, events, mode) {
     if (terminals.length > 1) problems.push(`${id}: has conflicting/multiple terminal receipts`);
     const start = starts[0];
     const terminal2 = terminals[0];
+    const transport = start.extra.delivery_transport ?? "native";
+    if (transport !== "native" && transport !== "command-fallback") {
+      problems.push(`${id}: start has unknown delivery_transport ${JSON.stringify(transport)}`);
+    }
+    if (transport === "native") {
+      if (start.extra.host_attested !== true) problems.push(`${id}: native start is not host-attested`);
+      if (start.extra.identity_evidence !== "requested_only") problems.push(`${id}: native start has invalid identity_evidence`);
+      if (start.extra.fallback_command !== void 0 || start.extra.fallback_command_sha256 !== void 0) {
+        problems.push(`${id}: native start unexpectedly records a fallback command`);
+      }
+    } else if (transport === "command-fallback") {
+      const command2 = start.extra.fallback_command;
+      if (!isStringArray(command2) || command2.length === 0 || command2.some((part) => part.length === 0)) {
+        problems.push(`${id}: command fallback does not record a non-empty argv`);
+      } else {
+        const commandSha = sha256Hex(JSON.stringify(command2));
+        if (start.extra.fallback_command_sha256 !== commandSha) problems.push(`${id}: fallback command digest does not match argv`);
+        if (profile != null) {
+          const executor = profile.executors[request.extra.executor];
+          if (executor == null || executor.adapter !== "host" || JSON.stringify(executor.fallbackCommand ?? null) !== JSON.stringify(command2)) {
+            problems.push(`${id}: fallback command does not match the snapshotted host executor`);
+          }
+        }
+      }
+      if (start.extra.host_attested !== false) problems.push(`${id}: command fallback is incorrectly marked host-attested`);
+      if (start.extra.identity_evidence !== "command_receipt") problems.push(`${id}: command fallback lacks command receipt identity evidence`);
+      if (start.extra.attestation !== void 0) problems.push(`${id}: command fallback incorrectly records a native attestation object`);
+      if (start.extra.agent_id !== `command-fallback:${String(request.extra.executor)}`) {
+        problems.push(`${id}: command fallback agent_id does not identify its logical executor`);
+      }
+    }
     const requestIndex = events.indexOf(request);
     const startIndex = events.indexOf(start);
     const terminalIndex = terminal2 == null ? null : events.indexOf(terminal2);
     if (startIndex <= requestIndex) problems.push(`${id}: actor_dispatched must follow host_dispatch_requested`);
     if (terminal2 != null && events.indexOf(terminal2) <= startIndex) problems.push(`${id}: terminal receipt must follow actor_dispatched`);
     if (terminal2 != null && terminal2.extra.agent_id !== start.extra.agent_id) problems.push(`${id}: terminal agent_id does not match start`);
+    if (terminal2 != null) {
+      for (const field of ["delivery_transport", "fallback_command_sha256", "host_attested", "identity_evidence"]) {
+        const startValue = field === "delivery_transport" ? transport : start.extra[field];
+        if (terminal2.extra[field] !== startValue) problems.push(`${id}: terminal ${field} does not match start`);
+      }
+      if (JSON.stringify(terminal2.extra.fallback_command ?? null) !== JSON.stringify(start.extra.fallback_command ?? null)) {
+        problems.push(`${id}: terminal fallback_command does not match start`);
+      }
+    }
     for (const field of ["step", "actor", "step_execution_id", "actor_call_id", "attempt", "executor", "adapter", "model", "reasoning_effort", "agent_type", "prompt_path", "prompt_sha256", "output_path"]) {
       const requestValue = field === "step" ? request.step : request.extra[field];
       const startValue = field === "step" ? start.step : field === "actor" ? start.extra.actor : start.extra[field];
@@ -21802,7 +22049,7 @@ function checkHostDispatchLifecycle(run, events, mode) {
 }
 function checkHostDispatchArtifacts(run, events, mode) {
   const check = "host-dispatch-artifacts";
-  if (!hostEvidencePresent(events)) return skip(check, "no native host dispatches recorded");
+  if (!hostEvidencePresent(events)) return skip(check, "no host dispatches recorded");
   if (mode !== "current") return { check, status: "fail", detail: "host output evidence is not verifiable from a 0.2 compatibility ledger" };
   const problems = [];
   for (const request of hostRequestRecords(events)) {
@@ -21843,7 +22090,9 @@ function checkHostDispatchArtifacts(run, events, mode) {
 }
 function checkNativeAttestation(run, events, mode) {
   const check = "native-attestation";
-  const starts = events.filter((event) => event.type === "actor_dispatched" && event.extra.dispatch_id != null);
+  const starts = events.filter(
+    (event) => event.type === "actor_dispatched" && event.extra.dispatch_id != null && (event.extra.delivery_transport ?? "native") === "native"
+  );
   if (starts.length === 0) return skip(check, "no native model, effort, or agent identity evidence recorded");
   if (mode !== "current") return { check, status: "fail", detail: "native attestation cannot be silently ignored in compatibility mode" };
   const requests = new Map(
@@ -22611,6 +22860,7 @@ var COMMANDS = {
       "--prompt-file": PATH
     }
   ),
+  "dispatch-fallback": command({}, ["run", "free"]),
   "dispatch-start": command({ "--agent-id": { kind: "free" }, "--workspace": PATH, "--branch": { kind: "free" } }, ["run", "free"]),
   "dispatch-progress": command({ "--file": PATH, "--source": { kind: "enum", values: ["agent", "harness", "director"] } }, ["run", "free"]),
   "dispatch-complete": command({ "--output": PATH, "--commit": { kind: "free" } }, ["run", "free"]),
@@ -22955,7 +23205,7 @@ function runCompletionCandidates(opts) {
 
 // src/commands/steering.ts
 var import_node_fs28 = require("node:fs");
-var import_node_os2 = require("node:os");
+var import_node_os3 = require("node:os");
 var import_node_path26 = require("node:path");
 var SteeringError = class extends Error {
 };
@@ -22995,6 +23245,10 @@ function snapshotProfileForRequest(lookup) {
     throw new SteeringError(`run "${lookup.runId}" profile snapshot escapes the run directory: ${profileRel}`);
   }
   if (!(0, import_node_fs28.existsSync)(profilePath)) throw new SteeringError(`run "${lookup.runId}" profile snapshot is missing: ${profileRel}`);
+  const profileRealRelative = (0, import_node_path26.relative)((0, import_node_fs28.realpathSync)(runAbsolute), (0, import_node_fs28.realpathSync)(profilePath)).split("\\").join("/");
+  if (profileRealRelative === ".." || profileRealRelative.startsWith("../") || (0, import_node_path26.isAbsolute)(profileRealRelative)) {
+    throw new SteeringError(`run "${lookup.runId}" profile snapshot escapes the run directory through a symlink: ${profileRel}`);
+  }
   const text = (0, import_node_fs28.readFileSync)(profilePath, "utf8");
   const digest2 = snapshot.extra.sha256;
   if (typeof digest2 !== "string" || !/^[0-9a-f]{64}$/.test(digest2)) {
@@ -23058,9 +23312,11 @@ function runLockedSteeringResolve(opts, archetype, role, nativeExecutor) {
       `host dispatch "${dispatchId}" request identity does not match executor "${request.executor}" in the run profile snapshot.`
     );
   }
-  const detail2 = nativeExecutor === request.executor ? `host request ${dispatchId} is locked to run-snapshotted executor ${request.executor}; execute natively` : `host request ${dispatchId} requires native executor ${request.executor}; this session is materialized for ${nativeExecutor ?? "no native executor"}, so start a matching Codex session`;
+  const matchesNative = nativeExecutor === request.executor;
+  const hasFallback = executor.fallbackCommand != null;
+  const detail2 = matchesNative ? `host request ${dispatchId} is locked to run-snapshotted executor ${request.executor}; execute natively` : hasFallback ? `host request ${dispatchId} is locked to ${request.executor}; deliver it through that executor's declared command fallback` : `host request ${dispatchId} requires native executor ${request.executor}; this session is materialized for ${nativeExecutor ?? "no native executor"}, so start a matching Codex session`;
   return {
-    mode: nativeExecutor === request.executor ? "native" : "restart_required",
+    mode: matchesNative ? "native" : hasFallback ? "command" : "restart_required",
     archetype,
     role,
     activeLoadout: null,
@@ -23162,6 +23418,20 @@ function runSteeringResolve(opts) {
       detail: `host executor ${resolved.executorName} matches this session's native baseline`
     };
   }
+  if (resolved.executor.fallbackCommand != null) {
+    return {
+      mode: "command",
+      archetype,
+      role,
+      activeLoadout: active,
+      executor: resolved.executorName,
+      adapter: "host",
+      model: resolved.executor.model,
+      source: resolved.source,
+      nativeExecutor,
+      detail: `host executor ${resolved.executorName} differs from this session's native baseline ${nativeExecutor ?? "(none)"}; use its declared command fallback immediately`
+    };
+  }
   return {
     mode: "restart_required",
     archetype,
@@ -23201,9 +23471,15 @@ and \`dispatch_id: <dispatch-id>\` in the delivery envelope. Run:
 \`${cli} steering resolve --archetype ${archetype} --native-executor ${executorName} --run <run-id> --dispatch-id <dispatch-id>\`
 If either identity is absent or validation fails, stop and report the resolver
 error; never fall back to the ordinary ambient preflight for an engine assignment.
+For that engine assignment only:
+- mode=native: ${behavior}
+- mode=command: run \`${cli} dispatch-fallback <run-id> <dispatch-id>\` and
+  relay stdout verbatim. That command owns the start and terminal receipts.
+- mode=restart_required: stop and relay the resolver's restart instruction.
+
 For an ordinary task beginning with the ordinary \`# Fadeno step assignment\` heading, run:
 \`${cli} steering resolve --archetype ${archetype} --native-executor ${executorName}\`
-
+For that ordinary task:
 - mode=native: ${behavior}
 - mode=command: write the ENTIRE task prompt you received verbatim to a unique
   file under .fadeno/local/prompts/, run
@@ -23212,8 +23488,8 @@ For an ordinary task beginning with the ordinary \`# Fadeno step assignment\` he
   task yourself. The command executor runs outside this subagent's sandbox.
 - mode=restart_required: stop and relay the resolver's restart instruction.
 
-Never call fadeno dispatch for a host executor and never silently substitute a
-different model or executor.
+Never use ordinary \`fadeno dispatch\` for a locked engine request and never
+silently substitute a different model or executor.
 """
 `;
 }
@@ -23234,9 +23510,14 @@ and \`dispatch_id: <dispatch-id>\` in the delivery envelope. Run:
 \`${cli} steering resolve --archetype ${archetype} --run <run-id> --dispatch-id <dispatch-id>\`
 If either identity is absent or validation fails, stop and report the resolver
 error; never fall back to the ordinary ambient preflight for an engine assignment.
+For that engine assignment only:
+- mode=command: run \`${cli} dispatch-fallback <run-id> <dispatch-id>\` and
+  relay stdout verbatim. That command owns the start and terminal receipts.
+- mode=native or mode=restart_required: stop and relay the resolver's instruction.
+
 For an ordinary task beginning with the ordinary \`# Fadeno step assignment\` heading, run:
 \`${cli} steering resolve --archetype ${archetype}\`
-
+For that ordinary task:
 - mode=command: write the ENTIRE task prompt you received verbatim to a unique
   file under .fadeno/local/prompts/, run
   \`${cli} dispatch --archetype ${archetype} --prompt-file <path>\`, and relay stdout verbatim.
@@ -23247,14 +23528,15 @@ For an ordinary task beginning with the ordinary \`# Fadeno step assignment\` he
 - If the resolver errors, stop and report the error rather than doing the role
   work on this broker.
 
-Never dispatch a host executor and never silently substitute a different model
-or executor. The command executor named by the resolver owns the work.
+Never use ordinary \`fadeno dispatch\` for a locked engine request and never
+silently substitute a different model or executor. The executor named by the
+resolver owns the work.
 """
 `;
 }
 function codexAgentDir(scope, repoRoot, userPathOptions) {
   if (scope === "project") return (0, import_node_path26.join)(repoRoot, ".codex", "agents");
-  const codexHome = userPathOptions?.env?.CODEX_HOME?.trim() || process.env.CODEX_HOME?.trim() || (0, import_node_path26.join)(userPathOptions?.home ?? (0, import_node_os2.homedir)(), ".codex");
+  const codexHome = userPathOptions?.env?.CODEX_HOME?.trim() || process.env.CODEX_HOME?.trim() || (0, import_node_path26.join)(userPathOptions?.home ?? (0, import_node_os3.homedir)(), ".codex");
   return (0, import_node_path26.join)(codexHome, "agents");
 }
 function managedAgentEmit(path, body, force, scope) {
@@ -23393,7 +23675,7 @@ function runToolComplete(opts) {
 // src/commands/setup.ts
 var import_node_child_process3 = require("node:child_process");
 var import_node_fs30 = require("node:fs");
-var import_node_os3 = require("node:os");
+var import_node_os4 = require("node:os");
 var import_node_path29 = require("node:path");
 var import_yaml16 = __toESM(require_dist(), 1);
 
@@ -23522,7 +23804,7 @@ function rememberHarness(paths, target, created) {
 function ensureClaudePermission(paths, options, notices) {
   if (!(0, import_node_fs30.existsSync)(paths.managedCli)) return null;
   const env = options?.env ?? process.env;
-  const settingsPath = (0, import_node_path29.join)(env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path29.join)(options?.home ?? (0, import_node_os3.homedir)(), ".claude"), "settings.json");
+  const settingsPath = (0, import_node_path29.join)(env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path29.join)(options?.home ?? (0, import_node_os4.homedir)(), ".claude"), "settings.json");
   const createdFile = !(0, import_node_fs30.existsSync)(settingsPath);
   let data = {};
   if (!createdFile) {
@@ -23675,8 +23957,15 @@ function runUse(opts) {
   const notices = external.length > 0 ? external.map((item) => `${item.archetype} leaves the current harness for ${item.executor} (${item.command.join(" ")}), under its own sandbox; evidence is written to .fadeno/dispatches.jsonl.`) : ["native loadout selected; no external sandbox crossing is active."];
   if ((steering?.conflicts.length ?? 0) > 0) {
     notices.push(`Preserved ${steering.conflicts.length} unmanaged Codex agent file(s); move them aside or use explicit \`steering apply --force\` to replace them.`);
-  } else if (steeringChanged) notices.push("Codex native host slots were materialized automatically; start one fresh Codex session to load them.");
-  else if (steering != null) notices.push("Codex native host slots are already materialized; no restart is needed.");
+  } else if (steeringChanged) {
+    const allHostSlotsFallback = Object.values(slots).every((executor) => {
+      const spec = loaded.profile.executors[executor];
+      return spec.adapter !== "host" || spec.fallbackCommand != null;
+    });
+    notices.push(
+      allHostSlotsFallback ? "Codex native host slots were materialized automatically. Declared command fallbacks work now; restart only to make the new slots native." : "Codex native host slots were materialized automatically; a fresh Codex session is required for slots without a command fallback."
+    );
+  } else if (steering != null) notices.push("Codex native host slots are already materialized; no restart is needed.");
   return {
     name,
     scope,
@@ -23691,7 +23980,7 @@ function runUse(opts) {
 
 // src/commands/status.ts
 var import_node_fs32 = require("node:fs");
-var import_node_os4 = require("node:os");
+var import_node_os5 = require("node:os");
 var import_node_path31 = require("node:path");
 var StatusError = class extends Error {
 };
@@ -23704,7 +23993,7 @@ function harnessOf(target, userPathOptions) {
 function materialization(loadout, profile, target, userPathOptions) {
   if (target !== "codex" || loadout == null) return null;
   const path = (0, import_node_path31.join)(
-    userPathOptions?.env?.CODEX_HOME?.trim() || process.env.CODEX_HOME?.trim() || (0, import_node_path31.join)(userPathOptions?.home ?? (0, import_node_os4.homedir)(), ".codex"),
+    userPathOptions?.env?.CODEX_HOME?.trim() || process.env.CODEX_HOME?.trim() || (0, import_node_path31.join)(userPathOptions?.home ?? (0, import_node_os5.homedir)(), ".codex"),
     "agents"
   );
   const slots = profile.loadouts[loadout] ?? {};
@@ -23993,14 +24282,14 @@ function runEvidencePromote(opts) {
 
 // src/commands/uninstall.ts
 var import_node_fs36 = require("node:fs");
-var import_node_os5 = require("node:os");
+var import_node_os6 = require("node:os");
 var import_node_path35 = require("node:path");
 var UninstallError = class extends Error {
 };
 function legacyManagedFiles(harness, opts) {
   if (harness !== "codex") return [];
   const env = opts?.env ?? process.env;
-  const home = opts?.home ?? (0, import_node_os5.homedir)();
+  const home = opts?.home ?? (0, import_node_os6.homedir)();
   const agentsDir = (0, import_node_path35.join)(env.CODEX_HOME?.trim() || (0, import_node_path35.join)(home, ".codex"), "agents");
   return ["worker", "reviewer", "judge"].map((role) => (0, import_node_path35.join)(agentsDir, `fadeno-${role}.toml`));
 }
@@ -24154,6 +24443,7 @@ Usage:
   fadeno loadout [list|use <n>|clear]   Show, list, pin, or clear the active loadout
   fadeno steering resolve|apply [...]   Resolve or materialize hybrid Codex steering
   fadeno dispatch [flags]               Resolve archetype \u2192 executor and invoke it once (ad hoc)
+  fadeno dispatch-fallback <run> <id>   Deliver a locked host request by declared fallback
   fadeno dispatch-start <run> <id>      Start a native host dispatch
   fadeno dispatch-progress <run> <id>   Record an attested progress observation
   fadeno dispatch-complete <run> <id>   Submit a native host result
@@ -24778,7 +25068,9 @@ function main(argv) {
       const result = runUse({ name, project: values.project, target: target === "codex" ? "codex" : void 0 });
       console.log(`active loadout selected: ${result.name} (${result.scope})`);
       for (const notice of result.notices) console.log(`  ${notice}`);
-      if (result.restartRequired) console.log("  restart required: start a fresh Codex session.");
+      if (result.restartRequired && !result.notices.some((notice) => notice.includes("fallbacks work now"))) {
+        console.log("  restart required: start a fresh Codex session.");
+      }
       return 0;
     }
     case "status": {
@@ -24920,7 +25212,9 @@ function main(argv) {
             `  ${archetype} \u2192 ${slot.kind === "native" ? "native host" : "command broker"} ${slot.executor}`
           );
         }
-        console.log(`  ${changed} agent definition(s) written; start a fresh Codex session to load them.`);
+        console.log(
+          `  ${changed} agent definition(s) written; declared fallbacks work immediately, or start a fresh Codex session to make changed host slots native.`
+        );
         if (changed === 0) console.log("  Existing files were preserved; pass --force to replace them.");
         return 0;
       }
@@ -25155,7 +25449,7 @@ resolution${via}:`);
           }
           if (hostSlots > 0) {
             console.log(
-              `  ${hostSlots} host slot(s) run natively only when the current session's materialized native executor matches; otherwise run \`fadeno steering apply ${result.name} --codex --force\` and start a fresh Codex session.`
+              `  ${hostSlots} host slot(s) run natively only when the current session's materialized native executor matches; declared command fallbacks switch on the next invocation. Run \`fadeno steering apply ${result.name} --codex --force\` and start a fresh Codex session only to make them native.`
             );
           }
           return 0;
@@ -25189,6 +25483,19 @@ resolution${via}:`);
       if (result.exitCode !== 0) {
         console.error(`dispatch: executor ${result.executor} exited ${result.exitCode}`);
       }
+      return result.exitCode;
+    }
+    case "dispatch-fallback": {
+      const [, run, dispatchId] = positionals;
+      if (!run || !dispatchId) throw new Error("Usage: fadeno dispatch-fallback <run> <dispatch-id>");
+      const result = runDispatchFallback({
+        run,
+        dispatchId,
+        onEcho: (line) => console.error(line)
+      });
+      if (result.stdout.length > 0) process.stdout.write(result.stdout);
+      if (result.stderr.length > 0) process.stderr.write(result.stderr);
+      if (result.exitCode !== 0) console.error(`dispatch-fallback: executor ${result.executor} exited ${result.exitCode}`);
       return result.exitCode;
     }
     case "dispatch-start": {

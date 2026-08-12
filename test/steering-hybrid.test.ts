@@ -7,17 +7,21 @@ import { runInit } from '../src/commands/init.ts';
 import { runDrive } from '../src/commands/drive.ts';
 import { runNewRun } from '../src/commands/new-run.ts';
 import { runNext } from '../src/commands/next.ts';
-import { runDispatchStart } from '../src/commands/dispatch.ts';
+import { runDispatchFallback, runDispatchStart } from '../src/commands/dispatch.ts';
 import { runSteeringApply, runSteeringResolve } from '../src/commands/steering.ts';
 import { runPrompt } from '../src/commands/prompt.ts';
 import { runToolComplete } from '../src/commands/tool-complete.ts';
+import { runVerify } from '../src/commands/verify.ts';
 import { read, tempRepo } from './helpers.ts';
 
 function seedHybridProfile(root: string): void {
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
     executors: {
-      luna: { adapter: 'host', model: 'gpt-5.6-luna', reasoning_effort: 'xhigh', agent_type: 'worker' },
+      luna: {
+        adapter: 'host', model: 'gpt-5.6-luna', reasoning_effort: 'xhigh', agent_type: 'worker',
+        fallback_command: ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('fallback:'+d))"],
+      },
       terra: { adapter: 'host', model: 'gpt-5.6-terra', reasoning_effort: 'high', agent_type: 'reviewer' },
       sol: { adapter: 'host', model: 'gpt-5.6-sol', reasoning_effort: 'medium', agent_type: 'judge' },
       opus: { adapter: 'command', command: ['claude', '-p', '--model', 'opus'], model: 'opus' },
@@ -43,8 +47,8 @@ test('hybrid steering resolves matching host locally, command slots live, and mi
   assert.equal(local.executor, 'luna');
 
   const brokerHost = runSteeringResolve({ repoRoot: root, archetype: 'worker', loadout: 'native', env: null });
-  assert.equal(brokerHost.mode, 'restart_required');
-  assert.match(brokerHost.detail, /no native executor/);
+  assert.equal(brokerHost.mode, 'command');
+  assert.match(brokerHost.detail, /declared command fallback/);
 
   const command = runSteeringResolve({ repoRoot: root, archetype: 'reviewer', nativeExecutor: 'terra', loadout: 'mixed', env: null });
   assert.equal(command.mode, 'command');
@@ -98,11 +102,11 @@ test('engine host steering is locked to the run request, not ambient loadouts', 
     run: created.runId,
     dispatchId: request.dispatchId,
   });
-  assert.equal(restart.mode, 'restart_required');
-  assert.match(restart.detail, /native executor luna/);
+  assert.equal(restart.mode, 'command');
+  assert.match(restart.detail, /declared command fallback/);
   const broker = runSteeringResolve({ repoRoot: root, archetype: 'worker', run: created.runId, dispatchId: request.dispatchId });
-  assert.equal(broker.mode, 'restart_required');
-  assert.match(broker.detail, /native executor luna/);
+  assert.equal(broker.mode, 'command');
+  assert.match(broker.detail, /declared command fallback/);
   assert.throws(
     () => runSteeringResolve({ repoRoot: root, archetype: 'reviewer', run: created.runId, dispatchId: request.dispatchId }),
     /agent_type "worker"/,
@@ -143,6 +147,69 @@ test('engine host steering is locked to the run request, not ambient loadouts', 
   );
 });
 
+test('engine host steering automatically completes a mismatched native slot through its locked fallback', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'codex', repoRoot: root, dataOnly: true });
+  seedHybridProfile(root);
+  writeFileSync(join(root, '.fadeno', 'playbooks', 'fallback.yaml'), stringifyYaml({
+    kind: 'AgentPlaybook',
+    schema_version: '0.1',
+    name: 'fallback',
+    description: 'Locked fallback fixture.',
+    roles: { worker: { purpose: 'Implement.', archetype: 'worker' } },
+    inputs: { Task: { media_type: 'text/markdown' } },
+    flow: [{ id: 'implement', kind: 'actor_call', actor: 'worker', input: ['Task'], output: 'Notes', terminal_status: 'completed' }],
+  }));
+  writeFileSync(join(root, 'task.md'), 'fallback task');
+  const created = runNewRun({ repoRoot: root, playbook: 'fallback', task: 'test automatic fallback', inputs: ['Task=task.md'] });
+  const paused = runDrive({ repoRoot: root, run: created.runId, loadout: 'native' });
+  assert.equal(paused.outcome, 'awaiting_host_dispatch');
+  const request = paused.requests[0]!;
+
+  const resolution = runSteeringResolve({
+    repoRoot: root,
+    archetype: 'worker',
+    nativeExecutor: 'other',
+    run: created.runId,
+    dispatchId: request.dispatchId,
+  });
+  assert.equal(resolution.mode, 'command');
+  const delivered = runDispatchFallback({ repoRoot: root, run: created.runId, dispatchId: request.dispatchId });
+  assert.equal(delivered.exitCode, 0);
+  assert.match(delivered.stdout, /^fallback:# Fadeno step assignment/);
+
+  const terminal = runDrive({ repoRoot: root, run: created.runId });
+  assert.equal(terminal.outcome, 'terminal');
+  assert.equal(terminal.status, 'completed');
+  assert.equal(runVerify({ repoRoot: root, run: created.runId }).ok, true);
+  const events = readFileSync(join(created.runDir, 'events.jsonl'), 'utf8')
+    .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+  const start = events.find((event) => event.type === 'actor_dispatched' && event.dispatch_id === request.dispatchId)!;
+  const completion = events.find((event) => event.type === 'actor_completed' && event.dispatch_id === request.dispatchId)!;
+  assert.equal(start.delivery_transport, 'command-fallback');
+  assert.equal(start.host_attested, false);
+  assert.equal(start.identity_evidence, 'command_receipt');
+  assert.deepEqual(completion.fallback_command, start.fallback_command);
+  assert.equal(completion.fallback_command_sha256, start.fallback_command_sha256);
+
+  const replay = runDispatchFallback({ repoRoot: root, run: created.runId, dispatchId: request.dispatchId });
+  assert.equal(replay.idempotent, true);
+  assert.equal(replay.stdout, delivered.stdout);
+
+  const eventsPath = join(created.runDir, 'events.jsonl');
+  const forged = readFileSync(eventsPath, 'utf8').trim().split('\n').map((line) => {
+    const event = JSON.parse(line) as Record<string, unknown>;
+    if (event.dispatch_id === request.dispatchId && Array.isArray(event.fallback_command)) {
+      event.fallback_command = ['forged-command'];
+    }
+    return JSON.stringify(event);
+  }).join('\n');
+  writeFileSync(eventsPath, `${forged}\n`);
+  const audit = runVerify({ repoRoot: root, run: created.runId });
+  assert.equal(audit.ok, false);
+  assert.equal(audit.findings.find((finding) => finding.check === 'host-dispatch-lifecycle')?.status, 'fail');
+});
+
 test('steering apply materializes mixed host and command slots without clobbering by default', (t) => {
   const root = tempRepo(t);
   seedHybridProfile(root);
@@ -160,6 +227,7 @@ test('steering apply materializes mixed host and command slots without clobberin
   assert.match(read(root, '.codex/agents/worker.toml'), /mode=command/);
   assert.match(read(root, '.codex/agents/worker.toml'), /mode=restart_required/);
   assert.match(read(root, '.codex/agents/worker.toml'), /fadeno steering resolve --archetype worker --native-executor luna/);
+  assert.match(read(root, '.codex/agents/worker.toml'), /fadeno dispatch-fallback <run-id> <dispatch-id>/);
 
   const second = runSteeringApply({ repoRoot: root, loadout: 'native', target: 'codex' });
   assert.ok(second.results.every((item) => item.status === 'skipped'));
@@ -175,6 +243,7 @@ test('steering apply materializes mixed host and command slots without clobberin
   assert.match(broker, /mode=command/);
   assert.match(broker, /mode=restart_required/);
   assert.match(broker, /relay stdout verbatim/);
+  assert.match(broker, /fadeno dispatch-fallback <run-id> <dispatch-id>/);
   assert.doesNotMatch(broker, /native baseline/);
 
   const allCommand = runSteeringApply({ repoRoot: root, loadout: 'all-command', target: 'codex', force: true });

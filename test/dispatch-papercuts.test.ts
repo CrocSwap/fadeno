@@ -9,6 +9,7 @@ import { runDrive } from '../src/commands/drive.ts';
 import { runInit } from '../src/commands/init.ts';
 import { runLoadoutList, runLoadoutShow } from '../src/commands/loadout.ts';
 import { runNewRun } from '../src/commands/new-run.ts';
+import { runSteeringResolve } from '../src/commands/steering.ts';
 import { runValidate } from '../src/commands/validate.ts';
 import { LOADOUT_LOCAL_FILE, parseExecutorProfile } from '../src/lib/executors.ts';
 import { read, tempRepo } from './helpers.ts';
@@ -78,11 +79,37 @@ test('scaffold: executors.yaml carries the built-in safe catalog', (t) => {
   assert.match(content, /^default_loadout: native$/m);
   assert.match(content, /^  native:$/m);
   assert.match(content, /^  codex:$/m);
+  assert.match(content, /^  luna:$/m);
+  assert.match(content, /^  terra:$/m);
+  assert.match(content, /^  sol:$/m);
 
   const asShipped = parseExecutorProfile(content, 'executors.yaml');
   assert.ok(asShipped.loadouts.native);
+  assert.equal(asShipped.loadouts.sol?.worker, 'sol-worker');
+  const sol = asShipped.executors['sol-worker'];
+  assert.equal(sol?.adapter, 'host');
+  assert.deepEqual(sol?.adapter === 'host' ? sol.fallbackCommand : null, [
+    'codex', 'exec', '--model', 'gpt-5.6-sol', '--sandbox', 'workspace-write',
+    '-c', 'model_reasoning_effort="high"', '-',
+  ]);
   assert.equal(asShipped.bindings['*'], 'native-worker');
   assert.ok(runValidate({ repoRoot: root }).ok);
+});
+
+test('built-in Codex model loadouts fall back immediately across native baselines', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'codex', repoRoot: root });
+  const result = runSteeringResolve({
+    repoRoot: root,
+    archetype: 'worker',
+    nativeExecutor: 'luna-worker',
+    loadout: 'sol',
+    env: null,
+  });
+  assert.equal(result.mode, 'command');
+  assert.equal(result.executor, 'sol-worker');
+  assert.equal(result.model, 'gpt-5.6-sol');
+  assert.match(result.detail, /declared command fallback/);
 });
 
 // --- 2. help text -----------------------------------------------------------

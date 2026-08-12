@@ -46,6 +46,12 @@ export interface HostExecutorSpec {
   reasoningEffort: string;
   /** Requested native agent type/identity class. */
   agentType: string;
+  /**
+   * Optional one-shot transport for this same requested model identity when
+   * the current host session has a different native baseline. This is an
+   * explicit delivery fallback, never an executor/provider substitution.
+   */
+  fallbackCommand?: string[] | null;
 }
 
 export type ExecutorSpec = CommandExecutorSpec | HostExecutorSpec;
@@ -136,12 +142,26 @@ export function parseExecutorProfile(text: string, source: string): ExecutorProf
       if (typeof agentType !== 'string' || agentType.length === 0) {
         throw new ExecutorProfileError(`${source}: host executor "${name}" needs a non-empty \`agent_type\`.`);
       }
-      executors[name] = { adapter: 'host', model, reasoningEffort, agentType };
+      let fallbackCommand: string[] | null = null;
+      if (raw.fallback_command != null) {
+        if (
+          !Array.isArray(raw.fallback_command) ||
+          raw.fallback_command.length === 0 ||
+          !raw.fallback_command.every((part) => typeof part === 'string' && part.length > 0)
+        ) {
+          throw new ExecutorProfileError(
+            `${source}: host executor "${name}" needs \`fallback_command\` as a non-empty array of strings.`,
+          );
+        }
+        fallbackCommand = raw.fallback_command as string[];
+      }
+      executors[name] = { adapter: 'host', model, reasoningEffort, agentType, fallbackCommand };
       continue;
     }
-    if (raw.reasoning_effort !== undefined || raw.agent_type !== undefined) {
+    if (raw.reasoning_effort !== undefined || raw.agent_type !== undefined || raw.fallback_command !== undefined) {
       throw new ExecutorProfileError(
-        `${source}: command executor "${name}" rejects host-only field(s) \`reasoning_effort\`/\`agent_type\`.`,
+        `${source}: command executor "${name}" rejects host-only field(s) ` +
+          '\`reasoning_effort\`/\`agent_type\`/\`fallback_command\`.',
       );
     }
     const command = raw.command;
@@ -506,6 +526,7 @@ export function serializeProfile(profile: ExecutorProfile): string {
           model: spec.model,
           reasoning_effort: spec.reasoningEffort,
           agent_type: spec.agentType,
+          ...(spec.fallbackCommand != null ? { fallback_command: spec.fallbackCommand } : {}),
         }
       : { adapter: spec.adapter, command: spec.command };
     if (spec.adapter === 'command' && spec.model != null) entry.model = spec.model;

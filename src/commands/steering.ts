@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
@@ -99,6 +99,10 @@ function snapshotProfileForRequest(lookup: HostDispatchRequestLookup): ExecutorP
     throw new SteeringError(`run "${lookup.runId}" profile snapshot escapes the run directory: ${profileRel}`);
   }
   if (!existsSync(profilePath)) throw new SteeringError(`run "${lookup.runId}" profile snapshot is missing: ${profileRel}`);
+  const profileRealRelative = relative(realpathSync(runAbsolute), realpathSync(profilePath)).split('\\').join('/');
+  if (profileRealRelative === '..' || profileRealRelative.startsWith('../') || isAbsolute(profileRealRelative)) {
+    throw new SteeringError(`run "${lookup.runId}" profile snapshot escapes the run directory through a symlink: ${profileRel}`);
+  }
   const text = readFileSync(profilePath, 'utf8');
   const digest = snapshot.extra.sha256;
   if (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) {
@@ -170,11 +174,15 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
       `host dispatch "${dispatchId}" request identity does not match executor "${request.executor}" in the run profile snapshot.`,
     );
   }
-  const detail = nativeExecutor === request.executor
+  const matchesNative = nativeExecutor === request.executor;
+  const hasFallback = executor.fallbackCommand != null;
+  const detail = matchesNative
     ? `host request ${dispatchId} is locked to run-snapshotted executor ${request.executor}; execute natively`
-    : `host request ${dispatchId} requires native executor ${request.executor}; this session is materialized for ${nativeExecutor ?? 'no native executor'}, so start a matching Codex session`;
+    : hasFallback
+      ? `host request ${dispatchId} is locked to ${request.executor}; deliver it through that executor's declared command fallback`
+      : `host request ${dispatchId} requires native executor ${request.executor}; this session is materialized for ${nativeExecutor ?? 'no native executor'}, so start a matching Codex session`;
   return {
-    mode: nativeExecutor === request.executor ? 'native' : 'restart_required',
+    mode: matchesNative ? 'native' : hasFallback ? 'command' : 'restart_required',
     archetype,
     role,
     activeLoadout: null,
@@ -272,6 +280,16 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
       detail: `host executor ${resolved.executorName} matches this session's native baseline`,
     };
   }
+  if (resolved.executor.fallbackCommand != null) {
+    return {
+      mode: 'command', archetype, role, activeLoadout: active,
+      executor: resolved.executorName, adapter: 'host', model: resolved.executor.model,
+      source: resolved.source, nativeExecutor,
+      detail:
+        `host executor ${resolved.executorName} differs from this session's native baseline ` +
+        `${nativeExecutor ?? '(none)'}; use its declared command fallback immediately`,
+    };
+  }
   return {
     mode: 'restart_required', archetype, role, activeLoadout: active,
     executor: resolved.executorName, adapter: 'host', model: resolved.executor.model,
@@ -315,9 +333,15 @@ and \`dispatch_id: <dispatch-id>\` in the delivery envelope. Run:
 \`${cli} steering resolve --archetype ${archetype} --native-executor ${executorName} --run <run-id> --dispatch-id <dispatch-id>\`
 If either identity is absent or validation fails, stop and report the resolver
 error; never fall back to the ordinary ambient preflight for an engine assignment.
+For that engine assignment only:
+- mode=native: ${behavior}
+- mode=command: run \`${cli} dispatch-fallback <run-id> <dispatch-id>\` and
+  relay stdout verbatim. That command owns the start and terminal receipts.
+- mode=restart_required: stop and relay the resolver's restart instruction.
+
 For an ordinary task beginning with the ordinary \`# Fadeno step assignment\` heading, run:
 \`${cli} steering resolve --archetype ${archetype} --native-executor ${executorName}\`
-
+For that ordinary task:
 - mode=native: ${behavior}
 - mode=command: write the ENTIRE task prompt you received verbatim to a unique
   file under .fadeno/local/prompts/, run
@@ -326,8 +350,8 @@ For an ordinary task beginning with the ordinary \`# Fadeno step assignment\` he
   task yourself. The command executor runs outside this subagent's sandbox.
 - mode=restart_required: stop and relay the resolver's restart instruction.
 
-Never call fadeno dispatch for a host executor and never silently substitute a
-different model or executor.
+Never use ordinary \`fadeno dispatch\` for a locked engine request and never
+silently substitute a different model or executor.
 """
 `;
 }
@@ -349,9 +373,14 @@ and \`dispatch_id: <dispatch-id>\` in the delivery envelope. Run:
 \`${cli} steering resolve --archetype ${archetype} --run <run-id> --dispatch-id <dispatch-id>\`
 If either identity is absent or validation fails, stop and report the resolver
 error; never fall back to the ordinary ambient preflight for an engine assignment.
+For that engine assignment only:
+- mode=command: run \`${cli} dispatch-fallback <run-id> <dispatch-id>\` and
+  relay stdout verbatim. That command owns the start and terminal receipts.
+- mode=native or mode=restart_required: stop and relay the resolver's instruction.
+
 For an ordinary task beginning with the ordinary \`# Fadeno step assignment\` heading, run:
 \`${cli} steering resolve --archetype ${archetype}\`
-
+For that ordinary task:
 - mode=command: write the ENTIRE task prompt you received verbatim to a unique
   file under .fadeno/local/prompts/, run
   \`${cli} dispatch --archetype ${archetype} --prompt-file <path>\`, and relay stdout verbatim.
@@ -362,8 +391,9 @@ For an ordinary task beginning with the ordinary \`# Fadeno step assignment\` he
 - If the resolver errors, stop and report the error rather than doing the role
   work on this broker.
 
-Never dispatch a host executor and never silently substitute a different model
-or executor. The command executor named by the resolver owns the work.
+Never use ordinary \`fadeno dispatch\` for a locked engine request and never
+silently substitute a different model or executor. The executor named by the
+resolver owns the work.
 """
 `;
 }
