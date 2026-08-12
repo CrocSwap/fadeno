@@ -2,9 +2,10 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
+  applicableOverrides,
   ExecutorProfileError,
   loadExecutorProfile,
-  readLocalLoadout,
+  readLocalLoadoutState,
   readUserLoadout,
   resolveActiveLoadout,
   type ActiveLoadout,
@@ -33,6 +34,8 @@ export interface StatusRole {
   model: string | null;
   source: 'builtin' | 'user' | 'project' | null;
   command: string[] | null;
+  /** A session override, not the loadout's slot, bound this archetype. */
+  overridden: boolean;
 }
 
 export interface StatusResult {
@@ -43,6 +46,13 @@ export interface StatusResult {
   activeLoadout: ActiveLoadout | null;
   staleProjectPin: string | null;
   staleUserPin: string | null;
+  /**
+   * Session overrides the project pin carries that apply to the active loadout
+   * (`{}` when the pin is bare or decorates a different base). The overlay is
+   * invisible everywhere else in a status line, and an invisible overlay is how
+   * a subscription burns for a week on the wrong executor.
+   */
+  pinOverrides: Record<string, string>;
   roles: StatusRole[];
   external: StatusRole[];
   codexMaterialization: { path: string; fresh: boolean; restartRequired: boolean } | null;
@@ -99,7 +109,14 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
     if (err instanceof ExecutorProfileError) throw new StatusError(err.message);
     throw err;
   }
-  const projectPin = readLocalLoadout(repoRoot);
+  let pin;
+  try {
+    pin = readLocalLoadoutState(repoRoot);
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new StatusError(err.message);
+    throw err;
+  }
+  const projectPin = pin.loadout;
   const userPin = readUserLoadout(opts.userPathOptions);
   const staleProjectPin = projectPin != null && !(projectPin in loaded.profile.loadouts) ? projectPin : null;
   const staleUserPin = userPin != null && !(userPin in loaded.profile.loadouts) ? userPin : null;
@@ -116,15 +133,25 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
   }
   const roles: StatusRole[] = [];
   const slots = active == null ? {} : loaded.profile.loadouts[active.name] ?? {};
+  // The overlay in force, by the kernel's name-match rule. A row that showed
+  // the base slot while dispatch used the override would be a lie in the one
+  // command whose whole job is reporting the effective configuration. An
+  // override naming an executor that has since left the profile is ignored
+  // here — dispatch refuses it loudly; status must still print.
+  const pinOverrides = applicableOverrides(pin, active);
   for (const archetype of ['worker', 'reviewer', 'judge']) {
-    const fromLoadout = slots[archetype] != null;
-    const executor = slots[archetype] ?? loaded.profile.bindings['*'];
+    const override = Object.hasOwn(pinOverrides, archetype) ? pinOverrides[archetype]! : null;
+    const overridden = override != null && Object.hasOwn(loaded.profile.executors, override);
+    const fromLoadout = !overridden && slots[archetype] != null;
+    const executor = overridden ? override : slots[archetype] ?? loaded.profile.bindings['*'];
     if (executor == null) continue;
     const spec = loaded.profile.executors[executor]!;
     const source = fromLoadout
       ? loaded.provenance?.loadouts[active?.name ?? ''] ?? null
-      : loaded.provenance?.bindings['*'] ?? null;
-    roles.push({ archetype, executor, adapter: spec.adapter, model: spec.model, source, command: spec.adapter === 'command' ? spec.command : null });
+      : overridden
+        ? null
+        : loaded.provenance?.bindings['*'] ?? null;
+    roles.push({ archetype, executor, adapter: spec.adapter, model: spec.model, source, command: spec.adapter === 'command' ? spec.command : null, overridden });
   }
   const external = roles.filter((role) => role.adapter === 'command');
   const installation = readInstallationManifest(opts.userPathOptions);
@@ -146,6 +173,7 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
     activeLoadout: active,
     staleProjectPin,
     staleUserPin,
+    pinOverrides,
     roles,
     external,
     codexMaterialization: materialized,

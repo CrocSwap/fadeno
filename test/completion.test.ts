@@ -21,7 +21,7 @@ test('completion script is sourceable Bash and covers commands/options', () => {
   assert.deepEqual(complete('/tmp', ['fadeno', '-']), ['--help', '--version', '-h', '-v']);
   assert.deepEqual(complete('/tmp', ['fadeno', '--']), ['--help', '--version']);
   assert.ok(complete('/tmp', ['fadeno', 'd']).includes('diagram'));
-  assert.deepEqual(complete('/tmp', ['fadeno', 'loadout', '']), ['clear', 'list', 'use']);
+  assert.deepEqual(complete('/tmp', ['fadeno', 'loadout', '']), ['clear', 'list', 'set', 'use']);
   assert.deepEqual(complete('/tmp', ['fadeno', 'steering', '']), ['apply', 'resolve']);
   assert.deepEqual(complete('/tmp', ['fadeno', 'validate', '--schema', '']), [
     'playbook',
@@ -65,6 +65,10 @@ test('completion discovers repo-local playbooks, runs, steps, profiles, and path
   assert.deepEqual(complete(root, ['fadeno', 'diagram', '']), [...starterPlaybooks(), 'zeta'].sort());
   assert.ok(complete(root, ['fadeno', 'show', '']).includes(runId));
   assert.ok(complete(root, ['fadeno', 'loadout', 'use', '']).includes('sample'));
+  // `set <archetype> <executor>`; `clear` completes the archetype it may drop.
+  assert.deepEqual(complete(root, ['fadeno', 'loadout', 'set', '']), ['reviewer', 'worker']);
+  assert.deepEqual(complete(root, ['fadeno', 'loadout', 'set', 'worker', '']), ['alpha', 'beta']);
+  assert.deepEqual(complete(root, ['fadeno', 'loadout', 'clear', '']), ['reviewer', 'worker']);
   assert.ok(complete(root, ['fadeno', 'steering', 'apply', '']).includes('sample'));
   assert.deepEqual(complete(root, ['fadeno', 'steering', 'resolve', '--native-executor', '']), ['alpha', 'beta']);
   assert.ok(complete(root, ['fadeno', 'steering', 'resolve', '--run', '']).includes(runId));

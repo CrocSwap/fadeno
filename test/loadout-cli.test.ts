@@ -45,10 +45,14 @@ test('loadout show: default loadout with its archetype table, available names, a
   const result = runLoadoutShow({ repoRoot: root, env: null });
 
   assert.deepEqual(result.active, { name: 'anthropic-primary', source: 'default' });
+  // The table is the effective one: with no overlay pinned, every row is the
+  // loadout's own slot (`baseExecutor` therefore equals `executor`).
   assert.deepEqual(result.slots, [
-    { archetype: 'reviewer', executor: 'terra-host', model: 'gpt-5.6-terra', adapter: 'host' },
-    { archetype: 'worker', executor: 'opus-cmd', model: 'opus', adapter: 'command' },
+    { archetype: 'reviewer', executor: 'terra-host', model: 'gpt-5.6-terra', adapter: 'host', overridden: false, baseExecutor: 'terra-host' },
+    { archetype: 'worker', executor: 'opus-cmd', model: 'opus', adapter: 'command', overridden: false, baseExecutor: 'opus-cmd' },
   ]);
+  assert.deepEqual(result.overrides, {});
+  assert.deepEqual(result.staleOverrides, []);
   assert.deepEqual(result.available, ['anthropic-primary', 'openai-primary']);
   assert.equal(result.defaultLoadout, 'anthropic-primary');
 });
@@ -85,6 +89,7 @@ test('loadout use/clear round-trip: writes and removes .fadeno/local/loadout ide
   const used = runLoadoutUse({ repoRoot: root, name: 'openai-primary' });
   assert.equal(used.name, 'openai-primary');
   assert.equal(used.previous, null);
+  assert.deepEqual(used.droppedOverrides, {});
   assert.equal(read(root, LOADOUT_LOCAL_FILE), 'openai-primary\n');
 
   const again = runLoadoutUse({ repoRoot: root, name: 'anthropic-primary' });
@@ -163,10 +168,18 @@ test('loadout list: marks the active and default loadouts with their slot tables
     ],
   );
   assert.deepEqual(result.active, { name: 'openai-primary', source: 'local' });
+  // The active entry always renders as the effective table (overlay applied),
+  // so its rows carry the override provenance even when nothing is dialed.
   const openai = result.loadouts.find((l) => l.name === 'openai-primary')!;
   assert.deepEqual(openai.slots, [
+    { archetype: 'reviewer', executor: 'terra-host', model: 'gpt-5.6-terra', adapter: 'host', overridden: false, baseExecutor: 'terra-host' },
+    { archetype: 'worker', executor: 'luna-cmd', model: 'gpt-5.6-luna', adapter: 'command', overridden: false, baseExecutor: 'luna-cmd' },
+  ]);
+  // Non-active entries stay plain declarations.
+  const anthropic = result.loadouts.find((l) => l.name === 'anthropic-primary')!;
+  assert.deepEqual(anthropic.slots, [
     { archetype: 'reviewer', executor: 'terra-host', model: 'gpt-5.6-terra', adapter: 'host' },
-    { archetype: 'worker', executor: 'luna-cmd', model: 'gpt-5.6-luna', adapter: 'command' },
+    { archetype: 'worker', executor: 'opus-cmd', model: 'opus', adapter: 'command' },
   ]);
 });
 

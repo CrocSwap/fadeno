@@ -1,7 +1,12 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runSteeringApply, type SteeringApplyResult } from './steering.ts';
-import { loadExecutorProfile, readLocalLoadout, readUserLoadout } from '../lib/executors.ts';
+import {
+  loadExecutorProfile,
+  readLocalLoadoutState,
+  readUserLoadout,
+  writeLocalLoadoutState,
+} from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { readUserHarness, userPaths, type UserPathOptions } from '../lib/user-paths.ts';
 
@@ -25,10 +30,11 @@ export interface UseResult {
   external: Array<{ archetype: string; executor: string; command: string[] }>;
   restartRequired: boolean;
   notices: string[];
-}
-
-function projectPin(repoRoot: string): string {
-  return join(repoRoot, '.fadeno', 'local', 'loadout');
+  /**
+   * Session overrides the project pin carried and this selection discarded.
+   * Always `{}` at user scope — only the project pin can hold an overlay.
+   */
+  droppedOverrides: Record<string, string>;
 }
 
 /** Select a loadout at user scope by default; `--project` is the safe override. */
@@ -43,10 +49,20 @@ export function runUse(opts: UseOptions): UseResult {
   }
   const scope = opts.project ? 'project' : 'user';
   const paths = userPaths(opts.userPathOptions);
-  const path = scope === 'project' ? projectPin(repoRoot) : paths.loadoutFile;
-  const previous = scope === 'project' ? readLocalLoadout(repoRoot) : readUserLoadout(opts.userPathOptions);
-  mkdirSync(join(path, '..'), { recursive: true });
-  writeFileSync(path, `${name}\n`, 'utf8');
+  // The project pin is the file session overrides decorate, so it is written
+  // through the kernel writer: selecting a base rewrites it as a bare name and
+  // any overlay dialed against the previous base goes with it.
+  const pin = scope === 'project' ? readLocalLoadoutState(repoRoot) : null;
+  const droppedOverrides = pin?.overrides ?? {};
+  const previous = scope === 'project' ? pin!.loadout : readUserLoadout(opts.userPathOptions);
+  let path: string;
+  if (scope === 'project') {
+    path = writeLocalLoadoutState(repoRoot, { loadout: name, overrides: {} });
+  } else {
+    path = paths.loadoutFile;
+    mkdirSync(join(path, '..'), { recursive: true });
+    writeFileSync(path, `${name}\n`, 'utf8');
+  }
 
   const slots = loaded.profile.loadouts[name]!;
   const external = Object.entries(slots).flatMap(([archetype, executor]) => {
@@ -82,6 +98,16 @@ export function runUse(opts: UseOptions): UseResult {
     );
   }
   else if (steering != null) notices.push('Codex native host slots are already materialized; no restart is needed.');
+  // A silently discarded overlay is how a user keeps paying for the executor
+  // they thought they had switched away from — say it, with the bindings named.
+  const droppedNames = Object.keys(droppedOverrides).sort();
+  if (droppedNames.length > 0) {
+    notices.push(
+      `dropped ${droppedNames.length} session override(s) pinned over "${previous ?? '?'}" ` +
+        `(${droppedNames.map((archetype) => `${archetype}→${droppedOverrides[archetype]}`).join(', ')}); ` +
+        're-dial with `fadeno loadout set <archetype> <executor>` if still wanted.',
+    );
+  }
   return {
     name,
     scope,
@@ -91,5 +117,6 @@ export function runUse(opts: UseOptions): UseResult {
     external,
     restartRequired: steeringChanged,
     notices,
+    droppedOverrides,
   };
 }

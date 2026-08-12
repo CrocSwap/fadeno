@@ -89,7 +89,10 @@ const COMMANDS: Record<string, CommandSpec> = {
     {
       list: command({}),
       use: command({}, ['loadout']),
-      clear: command({}),
+      // `set <archetype> <executor>`; `clear` takes an optional archetype (bare
+      // `clear` still drops the whole pin).
+      set: command({}, ['archetype', 'executor']),
+      clear: command({}, ['archetype']),
     },
   ),
   steering: command(

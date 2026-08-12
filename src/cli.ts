@@ -20,11 +20,14 @@ import {
   runLoadoutClear,
   runLoadoutList,
   runLoadoutResolve,
+  runLoadoutSet,
   runLoadoutShow,
   runLoadoutUse,
+  type LoadoutEffectiveRow,
   type LoadoutListResult,
   type LoadoutShowResult,
   type LoadoutSlotView,
+  type StaleOverrideView,
 } from './commands/loadout.ts';
 import { runNewRun } from './commands/new-run.ts';
 import { runCodexPlugin, runPlugin } from './commands/plugin.ts';
@@ -73,7 +76,9 @@ Usage:
   fadeno validate [file] [--schema K]   Validate playbooks (schema + references + semantics)
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
-  fadeno loadout [list|resolve|use|clear] Show, resolve, pin, or clear the active loadout
+  fadeno loadout [list|resolve|use|set|clear] Show, resolve, pin, or clear the active loadout
+  fadeno loadout set <archetype> <target> Override one archetype on top of the active loadout
+  fadeno loadout clear [archetype]      Drop the whole pin, or one session override
   fadeno steering resolve|apply [...]   Resolve or materialize hybrid Codex steering
   fadeno dispatch [flags]               Resolve archetype → executor and invoke it once (ad hoc)
   fadeno dispatch-fallback <run> <id>   Deliver a locked host request by declared fallback
@@ -168,6 +173,7 @@ Examples:
   fadeno run 2026-05-30-1132-csv --event artifact_created --artifact artifacts/x.json --member architect_fable
   fadeno run 2026-05-30-1132-csv --step arbitrate --event human_decision --field branch=approve
   fadeno loadout use openai-primary  # advanced compatibility surface
+  fadeno loadout set worker luna-cli  # override one slot; loadout clear worker drops it
   fadeno steering apply codex-only --codex --force
   echo "Summarize the repo layout." | fadeno dispatch --archetype worker
   fadeno gate 2026-05-30-1132-csv no_blocking_issues --artifact artifacts/review-report.json
@@ -525,12 +531,39 @@ const LOADOUT_SOURCE_TEXT: Record<string, string> = {
   default: 'default_loadout',
 };
 
-function printSlots(slots: LoadoutSlotView[], indent: string): void {
+/**
+ * Slot table for a declared loadout (`list`) or the effective table (`show`).
+ * An overridden row carries the mark and the slot it replaced — an overlay the
+ * user cannot see is one they keep paying for.
+ */
+function printSlots(slots: Array<LoadoutSlotView & Partial<LoadoutEffectiveRow>>, indent: string): void {
   const width = Math.max(0, ...slots.map((s) => s.archetype.length));
   for (const slot of slots) {
     const model = slot.model != null ? ` (${slot.model})` : '';
-    console.log(`${indent}${slot.archetype.padEnd(width)} → ${slot.executor}${model} [${slot.adapter}]`);
+    const override = slot.overridden === true
+      ? `  OVERRIDE (base: ${slot.baseExecutor ?? 'none'})`
+      : '';
+    console.log(`${indent}${slot.archetype.padEnd(width)} → ${slot.executor}${model} [${slot.adapter}]${override}`);
   }
+}
+
+/** Overrides pinned onto executors the profile no longer declares. */
+function printStaleOverrides(stale: StaleOverrideView[]): void {
+  for (const item of stale) {
+    console.error(
+      `warning: session override ${item.archetype}→${item.target} names an executor that is no longer ` +
+        `declared — run \`fadeno loadout set ${item.archetype} <executor>\` or ` +
+        `\`fadeno loadout clear ${item.archetype}\`; the override is ignored below.`,
+    );
+  }
+}
+
+/** Compact `archetype→executor` list for echo lines, in a stable order. */
+function overrideSummary(overrides: Record<string, string>): string {
+  return Object.keys(overrides)
+    .sort()
+    .map((archetype) => `${archetype}→${overrides[archetype]}`)
+    .join(', ');
 }
 
 function printStalePin(stalePin: string | null): void {
@@ -543,10 +576,15 @@ function printStalePin(stalePin: string | null): void {
 
 function printLoadoutShow(result: LoadoutShowResult): void {
   printStalePin(result.stalePin);
+  printStaleOverrides(result.staleOverrides);
   if (result.active == null) {
     console.log('no active loadout (no --loadout, FADENO_LOADOUT, .fadeno/local/loadout, or default_loadout)');
   } else {
-    console.log(`active loadout: ${result.active.name} (via ${LOADOUT_SOURCE_TEXT[result.active.source]})`);
+    const overrides = Object.keys(result.overrides).length;
+    console.log(
+      `active loadout: ${result.active.name} (via ${LOADOUT_SOURCE_TEXT[result.active.source]})` +
+        (overrides > 0 ? ` +${overrides} session override(s)` : ''),
+    );
     printSlots(result.slots, '  ');
   }
   if (result.available.length === 0) {
@@ -559,6 +597,7 @@ function printLoadoutShow(result: LoadoutShowResult): void {
 
 function printLoadoutList(result: LoadoutListResult): void {
   printStalePin(result.stalePin);
+  printStaleOverrides(result.staleOverrides);
   if (result.loadouts.length === 0) {
     console.log('No loadouts declared (add a `loadouts:` mapping to .fadeno/executors.yaml).');
     return;
@@ -567,6 +606,8 @@ function printLoadoutList(result: LoadoutListResult): void {
     const notes: string[] = [];
     if (loadout.isActive && result.active != null) {
       notes.push(`active via ${LOADOUT_SOURCE_TEXT[result.active.source]}`);
+      const overrideCount = Object.keys(result.overrides).length;
+      if (overrideCount > 0) notes.push(`${overrideCount} session override(s)`);
     }
     if (loadout.isDefault) notes.push('default');
     const marker = loadout.isActive ? '*' : ' ';
@@ -789,8 +830,14 @@ function main(argv: string[]): number {
       console.log(`runtime: ${result.runtime.invocationSource}; managed ${result.runtime.managedVersion ?? 'not installed'}${result.runtime.managedPath ? ` at ${result.runtime.managedPath}` : ''}${result.runtime.versionCurrent ? '' : ' (version skew)'}`);
       console.log(`integrations: ${result.runtime.installedHarnesses.join(', ') || 'none'}`);
       console.log(`definitions: ${result.definitions.playbooks.length} effective playbooks (project shadows bundled)`);
-      console.log(`active loadout: ${result.activeLoadout?.name ?? 'none'}${result.activeLoadout ? ` [${result.activeLoadout.source}]` : ''}`);
-      for (const role of result.roles) console.log(`  ${role.archetype} → ${role.executor} (${role.adapter})${role.command ? ` ${role.command.join(' ')}` : ''}`);
+      // The overlay rides on the same line as the pin it decorates: a session
+      // override the status line omits is one the user cannot know they are paying for.
+      const pinned = Object.keys(result.pinOverrides).length;
+      console.log(
+        `active loadout: ${result.activeLoadout?.name ?? 'none'}${result.activeLoadout ? ` [${result.activeLoadout.source}]` : ''}` +
+          (pinned > 0 ? ` (+${pinned} override: ${overrideSummary(result.pinOverrides)})` : ''),
+      );
+      for (const role of result.roles) console.log(`  ${role.archetype} → ${role.executor} (${role.adapter})${role.command ? ` ${role.command.join(' ')}` : ''}${role.overridden ? ' [override]' : ''}`);
       if (result.external.length > 0) console.log('external sandbox: selected command slots leave the current harness; evidence → .fadeno/dispatches.jsonl');
       if (result.staleProjectPin) console.log(`stale project pin: ${result.staleProjectPin}`);
       if (result.staleUserPin) console.log(`stale user pin: ${result.staleUserPin}`);
@@ -899,6 +946,9 @@ function main(argv: string[]): number {
           model: result.model,
           native_executor: result.nativeExecutor,
           resolution: result.source,
+          // Additive provenance: `resolution` already spells "override", and
+          // this flag lets a renderer branch without enumerating sources.
+          override: result.override,
           run: values.run ?? null,
           dispatch_id: values['dispatch-id'] ?? null,
           detail: result.detail,
@@ -1149,7 +1199,9 @@ function main(argv: string[]): number {
     case 'loadout': {
       const sub = positionals[1];
       if (sub == null) {
-        printLoadoutShow(runLoadoutShow({ loadout: values.loadout }));
+        const result = runLoadoutShow({ loadout: values.loadout });
+        if (values.json) console.log(JSON.stringify(result, null, 2));
+        else printLoadoutShow(result);
         return 0;
       }
       switch (sub) {
@@ -1166,9 +1218,20 @@ function main(argv: string[]): number {
           const name = positionals[2];
           if (!name) throw new Error('Usage: fadeno loadout use <name>');
           const result = runLoadoutUse({ name });
+          if (values.json) {
+            console.log(JSON.stringify(result, null, 2));
+            return 0;
+          }
           console.log(`active loadout pinned: ${result.name} → .fadeno/local/loadout`);
           if (result.previous != null && result.previous !== result.name) {
             console.log(`  (was ${result.previous})`);
+          }
+          const dropped = Object.keys(result.droppedOverrides).length;
+          if (dropped > 0) {
+            console.log(
+              `  dropped ${dropped} session override(s) (${overrideSummary(result.droppedOverrides)}); ` +
+                'selecting a base drops the overlay — re-dial with `fadeno loadout set <archetype> <executor>`.',
+            );
           }
           // Summarize the name just pinned, independent of FADENO_LOADOUT's
           // higher-precedence value in the current shell.
@@ -1187,17 +1250,60 @@ function main(argv: string[]): number {
           }
           return 0;
         }
-        case 'clear': {
-          const result = runLoadoutClear({});
+        case 'set': {
+          const [, , archetype, target] = positionals;
+          if (!archetype || !target) throw new Error('Usage: fadeno loadout set <archetype> <executor>');
+          const result = runLoadoutSet({ archetype, target, loadout: values.loadout });
+          if (values.json) {
+            console.log(JSON.stringify(result, null, 2));
+            return 0;
+          }
           console.log(
-            result.removed
-              ? 'cleared .fadeno/local/loadout'
-              : 'no local loadout to clear (.fadeno/local/loadout absent)',
+            `session override set: ${result.archetype} → ${result.target} ` +
+              `(over loadout ${result.loadout}) → .fadeno/local/loadout`,
+          );
+          if (result.previous != null) console.log(`  (was ${result.previous})`);
+          if (result.droppedBase != null) {
+            console.log(
+              `  dropped ${Object.keys(result.droppedOverrides).length} override(s) pinned over ` +
+                `"${result.droppedBase}" (${overrideSummary(result.droppedOverrides)}); overrides belong to one base.`,
+            );
+          }
+          console.log(`  overrides now: ${overrideSummary(result.overrides)}`);
+          return 0;
+        }
+        case 'clear': {
+          const archetype = positionals[2] ?? null;
+          const result = runLoadoutClear({ archetype });
+          if (values.json) {
+            console.log(JSON.stringify(result, null, 2));
+            return 0;
+          }
+          if (result.archetype == null) {
+            console.log(
+              result.removed
+                ? 'cleared .fadeno/local/loadout'
+                : 'no local loadout to clear (.fadeno/local/loadout absent)',
+            );
+            return 0;
+          }
+          if (!result.removed) {
+            console.log(`no session override for "${result.archetype}" to clear (.fadeno/local/loadout)`);
+            return 0;
+          }
+          const remaining = Object.keys(result.overrides).length;
+          console.log(
+            `cleared session override: ${result.archetype} (was ${result.cleared}); ` +
+              `loadout ${result.loadout} keeps ${remaining} override(s)` +
+              (remaining > 0 ? ` (${overrideSummary(result.overrides)})` : ''),
           );
           return 0;
         }
         default:
-          throw new Error(`Unknown loadout subcommand "${sub}". Usage: fadeno loadout [list | use <name> | clear]`);
+          throw new Error(
+            `Unknown loadout subcommand "${sub}". Usage: fadeno loadout ` +
+              '[list | resolve --archetype <a> | use <name> | set <archetype> <executor> | clear [archetype]]',
+          );
       }
     }
     case 'dispatch': {
