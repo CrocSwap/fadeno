@@ -1,14 +1,18 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { runInit } from '../src/commands/init.ts';
+import { stampHookVersion } from '../src/commands/plugin.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
+import { packageVersion } from '../src/lib/paths.ts';
 import { exists, read, tempRepo } from './helpers.ts';
 
 const ARCHETYPES = ['worker', 'reviewer', 'judge'] as const;
-const BIN = join(import.meta.dirname, '..', 'plugin', 'bin', 'fadeno');
+const REPO = join(import.meta.dirname, '..');
+const BIN = join(REPO, 'plugin', 'bin', 'fadeno');
+const STEERING_TEMPLATE = join(REPO, 'templates', 'claude', 'hooks', 'dispatch-steering.mjs');
 
 test('Codex native agents use the current custom-agent schema', (t) => {
   const root = tempRepo(t);
@@ -88,6 +92,29 @@ test('Claude --with-steering merges the local steering hooks without clobbering 
   runInit({ target: 'claude', repoRoot: root, withSteering: true });
   const second = JSON.parse(read(root, '.claude/settings.local.json')) as typeof first;
   assert.deepEqual(second, first);
+});
+
+test('init stamps the emitted steering hook with the package version', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: root, withSteering: true });
+
+  // The template is the un-stamped source: a row reading 'dev' can only have
+  // come from executing the template directly, never from an installed copy.
+  const template = readFileSync(STEERING_TEMPLATE, 'utf8');
+  assert.ok(
+    template.includes("const HOOK_VERSION = 'dev';"),
+    "the steering template must keep the literal 'dev' placeholder",
+  );
+
+  // The emitted copy is byte-identical to the template modulo that one stamp —
+  // the same anchored-replace discipline as the plugin surface stamp.
+  const emitted = read(root, '.fadeno/local/claude-dispatch-steering.mjs');
+  assert.ok(
+    emitted.includes(`const HOOK_VERSION = '${packageVersion()}';`),
+    'the init-emitted hook must carry the current package version',
+  );
+  assert.ok(!emitted.includes("HOOK_VERSION = 'dev'"));
+  assert.equal(emitted, stampHookVersion(template));
 });
 
 function writeFakeFadeno(root: string, output: string, exitCode = 0): string {
@@ -170,12 +197,18 @@ test('Claude steering stashes a relay attestation for proxy-bound spawns', (t) =
   const rows = read(root, '.fadeno/local/pending-relays.jsonl')
     .trim()
     .split('\n')
-    .map((line) => JSON.parse(line) as { timestamp: string; prompt_sha256: string });
+    .map((line) => JSON.parse(line) as { timestamp: string; hook_version: string; prompt_sha256: string });
   assert.deepEqual(
     rows.map((row) => row.prompt_sha256),
     [sha256Hex('Implement the change exactly.'), sha256Hex('Second prompt.')],
   );
   assert.ok(rows.every((row) => !Number.isNaN(Date.parse(row.timestamp))));
+  // Which hook generation stashed the attestation — the emitted copy is
+  // stamped, so these rows carry the package version, not 'dev'.
+  assert.deepEqual(
+    rows.map((row) => row.hook_version),
+    [packageVersion(), packageVersion()],
+  );
 
   // Host-native rewrites are not relays: nothing further stashed.
   const native = {
@@ -200,6 +233,156 @@ test('Claude steering selects a native target model without a command proxy', (t
   assert.equal(rewritten.hookSpecificOutput.updatedInput.subagent_type, 'reviewer');
   assert.equal(rewritten.hookSpecificOutput.updatedInput.model, 'opus');
   assert.equal(runClaudeSteering(root, event, '{"adapter":"host","model":"current-host"}'), '');
+});
+
+// A realistic `fadeno loadout resolve` payload for a native (host) slot.
+const NATIVE_SLOT = JSON.stringify({
+  archetype: 'reviewer',
+  active: { name: 'claude-native', source: 'local file' },
+  executor: 'claude-opus',
+  model: 'opus',
+  adapter: 'host',
+  harness: 'claude',
+});
+
+type EvidenceRow = Record<string, unknown> & { timestamp: string; prompt_snapshot: string };
+
+function evidenceRows(root: string): EvidenceRow[] {
+  return read(root, '.fadeno/dispatches.jsonl')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as EvidenceRow);
+}
+
+test('Claude steering writes the native_delivery evidence the kernel never sees', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: root, withSteering: true });
+  const prompt = 'Review the diff.\n\n  Keep every byte verbatim.\n';
+  const event = {
+    cwd: root,
+    tool_name: 'Agent',
+    tool_input: { prompt, description: 'Review', subagent_type: 'reviewer', model: 'sonnet' },
+  };
+  const decision = JSON.parse(runClaudeSteering(root, event, NATIVE_SLOT)) as {
+    hookSpecificOutput: { updatedInput: { subagent_type: string; model: string } };
+  };
+  assert.equal(decision.hookSpecificOutput.updatedInput.model, 'opus');
+
+  const rows = evidenceRows(root);
+  assert.equal(rows.length, 1);
+  const { timestamp, ...row } = rows[0]!;
+  assert.ok(!Number.isNaN(Date.parse(timestamp)));
+  const digest = sha256Hex(prompt);
+  assert.deepEqual(row, {
+    // Evidence-format version, stamped identically by both writers. The hook
+    // cannot import DISPATCHES_FORMAT (it runs as a standalone script), so the
+    // literal is duplicated there and pinned here — orthogonal to hook_version
+    // below, which stamps the *writer*, not the format it writes.
+    format: '0.1',
+    event: 'native_delivery',
+    // Hook generation that wrote the row: the session-start hook cache means a
+    // live session can be a build behind, so the row names its own writer.
+    hook_version: packageVersion(),
+    archetype: 'reviewer',
+    agent_type: 'reviewer',
+    loadout: 'claude-native',
+    executor: 'claude-opus',
+    model: 'opus',
+    model_override: 'sonnet',
+    // The harness Agent tool has no effort parameter: native spawns inherit.
+    reasoning_effort: 'inherited',
+    transport: 'host-native',
+    prompt_sha256: digest,
+    prompt_snapshot: `.fadeno/local/prompts/native-${digest.slice(0, 8)}.md`,
+  });
+  // The snapshot mirrors the kernel's: the exact bytes that were delivered.
+  assert.equal(read(root, row.prompt_snapshot), prompt);
+  // Native delivery is not a relay — nothing for the kernel to consume.
+  assert.ok(!exists(root, '.fadeno/local/pending-relays.jsonl'));
+
+  // Archetype comes from the hook's own mapping, not from the slot payload;
+  // an unpinned spawn records a null override.
+  const second = 'Implement it.';
+  runClaudeSteering(
+    root,
+    { ...event, tool_input: { prompt: second, description: 'x', subagent_type: 'general-purpose' } },
+    NATIVE_SLOT,
+  );
+  const latest = evidenceRows(root).at(-1)!;
+  assert.equal(latest.archetype, 'worker');
+  assert.equal(latest.agent_type, 'general-purpose');
+  assert.equal(latest.model_override, null);
+  assert.equal(read(root, latest.prompt_snapshot), second);
+});
+
+test('Claude steering leaves command-delivery evidence to the kernel', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: root, withSteering: true });
+  const event = {
+    cwd: root,
+    tool_name: 'Agent',
+    tool_input: { prompt: 'Implement the change.', description: 'x', subagent_type: 'general-purpose' },
+  };
+  runClaudeSteering(root, event, '{"adapter":"command","executor":"codex-worker","model":"gpt-5"}');
+  const explicit = {
+    ...event,
+    tool_input: { ...event.tool_input, subagent_type: 'fadeno:dispatch-worker' },
+  };
+  runClaudeSteering(root, explicit, '{"adapter":"command","executor":"codex-worker"}');
+
+  // Both rewritten and explicitly-targeted proxies are dispatched by the
+  // kernel, which owns their rows; the hook only stashes the relay digests.
+  assert.ok(!exists(root, '.fadeno/dispatches.jsonl'));
+  assert.ok(!exists(root, '.fadeno/local/prompts'));
+  assert.equal(read(root, '.fadeno/local/pending-relays.jsonl').trim().split('\n').length, 2);
+});
+
+test('Claude steering records no native evidence outside a Fadeno repo', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: root, withSteering: true });
+  const bare = tempRepo(t); // has no .fadeno/ at all
+  const decision = JSON.parse(
+    runClaudeSteering(
+      root,
+      {
+        cwd: bare,
+        tool_name: 'Agent',
+        tool_input: { prompt: 'Review it.', description: 'Review', subagent_type: 'reviewer' },
+      },
+      NATIVE_SLOT,
+    ),
+  ) as { hookSpecificOutput: { updatedInput: { subagent_type: string; model: string } } };
+
+  // Decision unchanged; evidence simply skipped.
+  assert.equal(decision.hookSpecificOutput.updatedInput.subagent_type, 'fadeno:reviewer');
+  assert.equal(decision.hookSpecificOutput.updatedInput.model, 'opus');
+  assert.ok(!exists(bare, '.fadeno'));
+  assert.ok(!exists(root, '.fadeno/dispatches.jsonl'));
+});
+
+test('Claude steering evidence failure never changes the steering decision', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: root, withSteering: true });
+  // Snapshot directory is occupied by a file: the recursive mkdir throws.
+  // (Portable stand-in for an unwritable evidence path — chmod-based denial is
+  // a no-op for a root-owned CI user.)
+  mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'local', 'prompts'), 'not a directory\n');
+
+  const decision = JSON.parse(
+    runClaudeSteering(
+      root,
+      {
+        cwd: root,
+        tool_name: 'Agent',
+        tool_input: { prompt: 'Review it.', description: 'Review', subagent_type: 'reviewer' },
+      },
+      NATIVE_SLOT,
+    ),
+  ) as { hookSpecificOutput: { updatedInput: { subagent_type: string; model: string } } };
+  assert.equal(decision.hookSpecificOutput.updatedInput.subagent_type, 'reviewer');
+  assert.equal(decision.hookSpecificOutput.updatedInput.model, 'opus');
+  assert.ok(!exists(root, '.fadeno/dispatches.jsonl'));
 });
 
 test('Claude steering is inactive without a loadout and uses plugin-scoped proxies in data-only flow', (t) => {

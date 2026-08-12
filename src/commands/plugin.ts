@@ -38,6 +38,21 @@ export function stampSurfaceVersion(md: string): string {
   return md.replace(/^(description:.*?)\s*$/m, `$1 [fadeno ${packageVersion()}]`);
 }
 
+/** The template's placeholder declaration — the anchor both emitters replace. */
+const HOOK_VERSION_DECL = "const HOOK_VERSION = 'dev';";
+
+/**
+ * Stamp an emitted hook copy with the package version, so every evidence row it
+ * writes names the generation that wrote it. Plugin hooks load once at session
+ * start from a version-keyed cache: a session keeps running the previous build's
+ * hook after an upgrade, and without the stamp there is no way to tell which
+ * generation produced a row written across that transition. The template keeps
+ * `'dev'`, so a `dev` row means the template ran directly.
+ */
+export function stampHookVersion(js: string): string {
+  return js.replace(HOOK_VERSION_DECL, `const HOOK_VERSION = '${packageVersion()}';`);
+}
+
 /**
  * Emit a Claude Code plugin (the "capability" layer) from the shared templates,
  * so the skills/subagents stay in sync with `fadeno init` rather than being a
@@ -115,7 +130,11 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
   const hookPath = join(outDir, 'hooks', 'dispatch-steering.mjs');
   results.push({
     path: hookPath,
-    status: emitFile(hookPath, readFileSync(join(tpl, 'claude', 'hooks', 'dispatch-steering.mjs'), 'utf8'), force),
+    status: emitFile(
+      hookPath,
+      stampHookVersion(readFileSync(join(tpl, 'claude', 'hooks', 'dispatch-steering.mjs'), 'utf8')),
+      force,
+    ),
   });
   const guardPath = join(outDir, 'hooks', 'dispatch-proxy-guard.mjs');
   results.push({

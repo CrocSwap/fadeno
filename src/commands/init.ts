@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { copyTree, emitBootstrap, emitFile, type EmitResult } from '../lib/fsutil.ts';
 import { findRepoRoot, templatesDir } from '../lib/paths.ts';
 import { FADENO_IGNORE_PATTERNS } from '../lib/source-control.ts';
+import { stampHookVersion } from './plugin.ts';
 
 export type Target = 'codex' | 'claude' | 'grok';
 
@@ -156,9 +157,10 @@ export function runInit(opts: InitOptions): InitResult {
   // custom-agent layer selected above, so no extra config mutation is needed.
   if (withSteering && opts.target === 'claude') {
     const steeringPath = join(repoRoot, CLAUDE_STEERING_SCRIPT);
-    const steeringBody = readFileSync(
-      join(tpl, 'claude', 'hooks', 'dispatch-steering.mjs'),
-      'utf8',
+    // Stamped like the plugin copy: the hook's evidence rows name the generation
+    // that wrote them, which a session-start hook cache otherwise hides.
+    const steeringBody = stampHookVersion(
+      readFileSync(join(tpl, 'claude', 'hooks', 'dispatch-steering.mjs'), 'utf8'),
     );
     results.push({ path: steeringPath, status: emitFile(steeringPath, steeringBody, force) });
     const guardPath = join(repoRoot, CLAUDE_GUARD_SCRIPT);

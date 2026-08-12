@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
-import { runPlugin, stampSurfaceVersion } from '../src/commands/plugin.ts';
+import { runPlugin, stampHookVersion, stampSurfaceVersion } from '../src/commands/plugin.ts';
 import { packageVersion } from '../src/lib/paths.ts';
 import { exists, read, tempRepo } from './helpers.ts';
 
@@ -100,6 +100,24 @@ test('plugin generation emits the dispatch proxies alongside the role subagents'
   assert.ok(exists(outDir, 'agents/worker.md'));
   assert.ok(exists(outDir, 'agents/reviewer.md'));
   assert.ok(exists(outDir, 'agents/judge.md'));
+});
+
+test('plugin generation stamps the steering hook with the package version', (t) => {
+  const root = tempRepo(t);
+  const { outDir } = runPlugin({ cwd: root, outDir: join(root, 'plugin') });
+  const template = readFileSync(
+    join(import.meta.dirname, '..', 'templates', 'claude', 'hooks', 'dispatch-steering.mjs'),
+    'utf8',
+  );
+  // The template keeps the placeholder; only emitted copies name a build. The
+  // hook is loaded once per session from a version-keyed cache, so its evidence
+  // rows are the only way to tell which generation a mid-upgrade row came from.
+  assert.ok(template.includes("const HOOK_VERSION = 'dev';"));
+  const emitted = read(outDir, 'hooks/dispatch-steering.mjs');
+  assert.ok(emitted.includes(`const HOOK_VERSION = '${packageVersion()}';`));
+  assert.ok(!emitted.includes("HOOK_VERSION = 'dev'"));
+  // Identical to the template modulo that deterministic stamp.
+  assert.equal(emitted, stampHookVersion(template));
 });
 
 test('plugin surface descriptions carry the version stamp', (t) => {
