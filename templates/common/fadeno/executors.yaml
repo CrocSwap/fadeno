@@ -42,7 +42,8 @@ routes:
       command: [claude, -p, --model, "{model}"]
       write_access: false
     xai:
-      command: [grok, build, "-"]
+      command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
+      write_access: true
   claude:
     current-host:
       native: true
@@ -54,13 +55,15 @@ routes:
       command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
       write_access: true
     xai:
-      command: [grok, build, "-"]
+      command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
+      write_access: true
   grok:
     current-host:
       native: true
     xai:
       native: true
-      command: [grok, build, "-"]
+      command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
+      write_access: true
     openai:
       command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
       write_access: true
@@ -77,12 +80,15 @@ routes:
       command: [claude, -p, --model, "{model}"]
       write_access: false
     xai:
-      command: [grok, build, "-"]
+      command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
+      write_access: true
 
 # Archetype write policy: worker-shaped dispatches mutate the workspace, so a
 # command route declared `write_access: false` is refused for them before any
-# tokens burn. Routes declaring nothing stay unconstrained (the xai routes are
-# undeclared until `grok build`'s headless permission posture is confirmed).
+# tokens burn. Routes declaring nothing stay unconstrained. The xai routes run
+# `--always-approve`: grok's one-shot mode stalls silently (exit 0, no tools)
+# under any narrower permission mode, because headless runs cannot answer
+# approval prompts — verified live 2026-08-12.
 archetypes:
   worker:
     requires_write: true
