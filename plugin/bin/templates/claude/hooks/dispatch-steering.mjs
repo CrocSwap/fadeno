@@ -85,7 +85,22 @@ const resolution = spawnSync(cli, ['loadout', 'resolve', '--archetype', archetyp
   encoding: 'utf8',
   timeout: 10_000,
 });
-if (resolution.status !== 0) finish(null);
+// A resolver error used to fall through to an unsteered native spawn —
+// substituting a different executor for a proxy-bound archetype. Deny
+// instead. Unreadable stdout (exit 0, not JSON) still fail-opens below.
+if (resolution.status !== 0) {
+  const stderr = (resolution.stderr ?? '').trim();
+  finish({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason:
+        stderr.length > 0
+          ? stderr
+          : 'fadeno loadout resolve failed; refusing an unsteered native spawn.',
+    },
+  });
+}
 let slot;
 try {
   slot = JSON.parse(resolution.stdout ?? '');

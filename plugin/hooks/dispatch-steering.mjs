@@ -11,7 +11,7 @@ import { join } from 'node:path';
 // emitters (`fadeno plugin` and `fadeno init --claude`) replace this literal
 // with the package version; the template keeps 'dev', so a row reading 'dev'
 // means the template was executed directly rather than an installed copy.
-const HOOK_VERSION = '0.6.0-rc.13';
+const HOOK_VERSION = '0.6.0-rc.14';
 
 function finish(value) {
   if (value != null) process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -85,7 +85,22 @@ const resolution = spawnSync(cli, ['loadout', 'resolve', '--archetype', archetyp
   encoding: 'utf8',
   timeout: 10_000,
 });
-if (resolution.status !== 0) finish(null);
+// A resolver error used to fall through to an unsteered native spawn —
+// substituting a different executor for a proxy-bound archetype. Deny
+// instead. Unreadable stdout (exit 0, not JSON) still fail-opens below.
+if (resolution.status !== 0) {
+  const stderr = (resolution.stderr ?? '').trim();
+  finish({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason:
+        stderr.length > 0
+          ? stderr
+          : 'fadeno loadout resolve failed; refusing an unsteered native spawn.',
+    },
+  });
+}
 let slot;
 try {
   slot = JSON.parse(resolution.stdout ?? '');

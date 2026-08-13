@@ -1,6 +1,6 @@
 {
   "name": "fadeno",
-  "version": "0.6.0-rc.13",
+  "version": "0.6.0-rc.14",
   "description": "Portable, repo-native playbook layer for AI coding agents (Codex, Claude Code, Grok Build).",
   "keywords": [
     "ai",

@@ -13939,7 +13939,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.13";
+  if (true) return "0.6.0-rc.14";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -14456,6 +14456,12 @@ function projectIsComplete(doc) {
   }
   return doc.default_loadout == null || typeof doc.default_loadout === "string" && loadouts != null && doc.default_loadout in loadouts;
 }
+function missingCanonArchetypes(builtinDoc, projectDoc) {
+  const builtin = builtinDoc != null ? mapping(builtinDoc.archetypes) : null;
+  if (builtin == null || projectDoc == null) return [];
+  const declared = mapping(projectDoc.archetypes) ?? {};
+  return Object.keys(builtin).filter((name) => !Object.hasOwn(declared, name)).sort();
+}
 function loadLayeredProfile(repoRoot, options = {}, harness) {
   const paths = userPaths(options);
   const layers = [
@@ -14468,7 +14474,8 @@ function loadLayeredProfile(repoRoot, options = {}, harness) {
   const parsedLayers = new Map(present.map((entry) => [entry.layer, parseLayer(entry.path)]));
   const project = present.find((entry) => entry.layer === "project");
   const projectDoc = project ? parsedLayers.get("project") ?? null : null;
-  const effective = projectDoc && projectIsComplete(projectDoc) ? [{ layer: "project", path: project.path }] : present;
+  const suppressLayering = Boolean(projectDoc && projectIsComplete(projectDoc));
+  const effective = suppressLayering ? [{ layer: "project", path: project.path }] : present;
   const document = {};
   const provenance = { executors: {}, loadouts: {}, bindings: {}, defaultLoadout: null };
   for (const entry of effective) mergeLayer(document, parsedLayers.get(entry.layer), entry.layer, provenance);
@@ -14485,7 +14492,8 @@ function loadLayeredProfile(repoRoot, options = {}, harness) {
     path: project?.path ?? present.find((entry) => entry.layer === "user")?.path ?? present[0].path,
     layers: effective.map((entry) => entry.layer),
     provenance,
-    paths
+    paths,
+    suppressedCanonArchetypes: suppressLayering ? missingCanonArchetypes(parsedLayers.get("builtin") ?? null, projectDoc) : []
   };
 }
 function stringifyObject(value) {
@@ -17418,16 +17426,25 @@ function lockedRunFile(runDir, value, label) {
 }
 function loadProfileOrThrow(repoRoot, userPathOptions) {
   try {
-    return loadExecutorProfile(repoRoot, userPathOptions).profile;
+    const layered = loadExecutorProfile(repoRoot, userPathOptions);
+    return { profile: layered.profile, layers: layered.layers ?? [] };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new DispatchCommandError(err.message);
     throw err;
   }
 }
+function workspaceFingerprint(repoRoot) {
+  const status = (0, import_node_child_process2.spawnSync)("git", ["-C", repoRoot, "status", "--porcelain"], { encoding: "utf8" });
+  if (status.error != null || status.status !== 0) return null;
+  const head = (0, import_node_child_process2.spawnSync)("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" });
+  if (head.error != null || head.status !== 0) return null;
+  return sha256Hex(`${status.stdout ?? ""}\0${head.stdout ?? ""}`);
+}
 function runDispatch(opts) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const profile = loadProfileOrThrow(repoRoot, opts.userPathOptions);
+  const layered = loadProfileOrThrow(repoRoot, opts.userPathOptions);
+  const profile = layered.profile;
   const archetype = opts.archetype?.trim() ? opts.archetype.trim() : null;
   const role = opts.role?.trim() ? opts.role.trim() : null;
   let executorName;
@@ -17463,7 +17480,10 @@ function runDispatch(opts) {
         flagValue: opts.loadout ?? null,
         envValue: opts.env !== void 0 ? opts.env : process.env.FADENO_LOADOUT ?? null,
         localFileValue: pin.loadout,
-        userFileValue: readUserLoadout(opts.userPathOptions),
+        // A self-contained project profile is authoritative; a user-scope dial
+        // naming a user-layer loadout must not reach into a repo whose profile
+        // never saw that layer.
+        userFileValue: layered.layers.includes("user") ? readUserLoadout(opts.userPathOptions) : null,
         profile
       });
       overrides = applicableOverrides(pin, active);
@@ -17532,6 +17552,14 @@ function runDispatch(opts) {
     const rel = (0, import_node_path12.relative)(repoRoot, promptPath).split("\\").join("/");
     promptSnapshot = rel === "" || rel.startsWith("../") || (0, import_node_path12.isAbsolute)(rel) ? promptPath : rel;
   }
+  const outputRel = (0, import_node_path12.join)(
+    ".fadeno",
+    "local",
+    "outputs",
+    `${archetype ?? role ?? "dispatch"}-${dispatchId.slice(0, 8)}.md`
+  );
+  const outputAbs = (0, import_node_path12.join)(repoRoot, outputRel);
+  const outputSnapshot = outputRel.split("\\").join("/");
   const relayAttested = consumePendingRelay(repoRoot, prompt, now);
   const promptSha256 = sha256Hex(prompt);
   const commandSha256 = sha256Hex(JSON.stringify(command2));
@@ -17607,6 +17635,7 @@ function runDispatch(opts) {
   if (constraintVerdict.verdict === "refused") {
     refuseDispatch(repoRoot, identity, "constraint_command", constraintVerdict.reason, now);
   }
+  identity.output_snapshot = outputSnapshot;
   if (providerConflict != null && providerConflict.level === "warn") {
     opts.onEcho?.(providerConflict.message);
     identity.provider_distinctness = "warned";
@@ -17627,17 +17656,27 @@ function runDispatch(opts) {
     event: "dispatch_requested",
     ...identity
   });
+  (0, import_node_fs12.mkdirSync)((0, import_node_path12.join)(repoRoot, ".fadeno", "local", "outputs"), { recursive: true });
+  const outputFd = (0, import_node_fs12.openSync)(outputAbs, "w");
+  const workspaceBefore = workspaceFingerprint(repoRoot);
   const started = Date.now();
   const [cmd, ...args] = command2;
-  const spawned = (0, import_node_child_process2.spawnSync)(cmd, args, {
-    input: prompt,
-    encoding: "utf8",
-    cwd: repoRoot,
-    maxBuffer: SPAWN_MAX_BUFFER
-  });
+  let spawned;
+  try {
+    spawned = (0, import_node_child_process2.spawnSync)(cmd, args, {
+      input: prompt,
+      encoding: "utf8",
+      cwd: repoRoot,
+      maxBuffer: SPAWN_MAX_BUFFER,
+      stdio: ["pipe", outputFd, "pipe"]
+    });
+  } finally {
+    (0, import_node_fs12.closeSync)(outputFd);
+  }
   const durationMs = Date.now() - started;
-  const stdout = spawned.stdout ?? "";
+  const stdout = (0, import_node_fs12.readFileSync)(outputAbs, "utf8");
   const outputSha256 = sha256Hex(stdout);
+  const workspaceAfter = workspaceFingerprint(repoRoot);
   const row = {
     format: DISPATCHES_FORMAT,
     timestamp: now.toISOString(),
@@ -17646,8 +17685,12 @@ function runDispatch(opts) {
     exit_code: spawned.error != null ? null : spawned.status,
     ...spawned.signal != null ? { signal: spawned.signal } : {},
     duration_ms: durationMs,
-    output_sha256: outputSha256
+    output_sha256: outputSha256,
+    output_bytes: Buffer.byteLength(stdout)
   };
+  if (workspaceBefore != null && workspaceAfter != null) {
+    row.workspace_changed = workspaceBefore !== workspaceAfter;
+  }
   if (spawned.error != null) row.error = spawned.error.message;
   appendEvidenceRow(repoRoot, row);
   if (spawned.error != null) {
@@ -17821,6 +17864,7 @@ var DEFAULT_TAIL = 10;
 var ERROR_EXCERPT = 80;
 var KNOWN_FORMAT_MAJOR = DISPATCHES_FORMAT.split(".")[0];
 var OUTCOME_KEYS = ["exit_code", "duration_ms", "output_sha256", "signal"];
+var OUTPUT_ID_PREFIX_MIN = 8;
 function str(value) {
   return typeof value === "string" && value !== "" ? value : null;
 }
@@ -17893,6 +17937,7 @@ function requestedEntry(row) {
     signal: null,
     durationMs: null,
     outputSha256: null,
+    workspaceChanged: null,
     error: null
   };
 }
@@ -17929,6 +17974,7 @@ function nativeEntry(row) {
     signal: null,
     durationMs: null,
     outputSha256: null,
+    workspaceChanged: null,
     error: null
   };
 }
@@ -17939,6 +17985,9 @@ function applyCompletion(entry, row) {
   entry.durationMs = num(row.duration_ms);
   entry.outputSha256 = str(row.output_sha256);
   entry.error = str(row.error);
+  if (typeof row.workspace_changed === "boolean") {
+    entry.workspaceChanged = row.workspace_changed;
+  }
   entry.relayAttested = entry.relayAttested ?? bool(row.relay_attested);
   entry.writeAccess = entry.writeAccess ?? bool(row.write_access);
   entry.model = entry.model ?? str(row.model);
@@ -17968,6 +18017,9 @@ function renderDispatchLine(entry) {
     } else if (entry.completed) {
       const code = `exit ${entry.exitCode ?? "?"}${entry.signal != null ? ` (${entry.signal})` : ""}`;
       parts.push(entry.durationMs != null ? `${code} in ${entry.durationMs}ms` : code);
+      if (entry.exitCode === 0 && entry.writeAccess === true && entry.workspaceChanged === false) {
+        parts.push("[no workspace change]");
+      }
     } else {
       parts.push("no completion recorded (killed or in flight)");
     }
@@ -18081,6 +18133,83 @@ function runDispatches(opts = {}) {
     lines: shown.map(renderDispatchLine),
     summary: summarize(shown.length, entries.length, skipped, skippedNewerFormat, true, path)
   };
+}
+function loadOutputRecords(absolute) {
+  const byId = /* @__PURE__ */ new Map();
+  let lastWithSnapshot = null;
+  if (!(0, import_node_fs13.existsSync)(absolute)) return { byId, lastWithSnapshot };
+  for (const line of (0, import_node_fs13.readFileSync)(absolute, "utf8").split("\n")) {
+    if (line.trim() === "") continue;
+    let row;
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      row = parsed;
+    } catch {
+      continue;
+    }
+    const event = str(row.event);
+    const dispatchId = str(row.dispatch_id);
+    if (dispatchId == null) continue;
+    if (event !== "dispatch_requested" && event !== "dispatch_completed") continue;
+    let rec = byId.get(dispatchId);
+    if (rec == null) {
+      rec = { dispatchId, snapshot: null, outputSha256: null, completed: false };
+      byId.set(dispatchId, rec);
+    }
+    const snapshot = str(row.output_snapshot);
+    if (snapshot != null) rec.snapshot = snapshot;
+    if (event === "dispatch_requested" && snapshot != null) lastWithSnapshot = dispatchId;
+    if (event === "dispatch_completed") {
+      rec.completed = true;
+      rec.outputSha256 = str(row.output_sha256);
+    }
+  }
+  return { byId, lastWithSnapshot };
+}
+function resolveOutputRecord(query, byId, lastWithSnapshot) {
+  if (query === "last") {
+    if (lastWithSnapshot == null) {
+      throw new DispatchesCommandError(
+        'unknown dispatch "last": no output_snapshot has been recorded.'
+      );
+    }
+    return byId.get(lastWithSnapshot);
+  }
+  const exact = byId.get(query);
+  if (exact != null) return exact;
+  if (query.length < OUTPUT_ID_PREFIX_MIN) {
+    throw new DispatchesCommandError(`unknown dispatch "${query}".`);
+  }
+  const hits = [...byId.values()].filter((rec) => rec.dispatchId.startsWith(query));
+  if (hits.length === 0) throw new DispatchesCommandError(`unknown dispatch "${query}".`);
+  if (hits.length > 1) {
+    throw new DispatchesCommandError(`ambiguous dispatch prefix "${query}".`);
+  }
+  return hits[0];
+}
+function runDispatchesOutput(opts) {
+  const query = opts.dispatchId.trim();
+  if (query === "") {
+    throw new DispatchesCommandError(
+      'dispatch id is required (full id, unique prefix of 8+ characters, or "last").'
+    );
+  }
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const { byId, lastWithSnapshot } = loadOutputRecords((0, import_node_path13.join)(repoRoot, DISPATCHES_FILE));
+  const rec = resolveOutputRecord(query, byId, lastWithSnapshot);
+  if (rec.snapshot == null) {
+    throw new DispatchesCommandError(`dispatch "${rec.dispatchId}" predates output_snapshot.`);
+  }
+  const snapshotRel = rec.snapshot.split("\\").join("/");
+  const snapshotAbs = (0, import_node_path13.isAbsolute)(snapshotRel) ? snapshotRel : (0, import_node_path13.join)(repoRoot, snapshotRel);
+  if (!(0, import_node_fs13.existsSync)(snapshotAbs)) {
+    throw new DispatchesCommandError(`output snapshot missing: ${snapshotRel}.`);
+  }
+  const bytes = (0, import_node_fs13.readFileSync)(snapshotAbs, "utf8");
+  const attested = !rec.completed ? "incomplete" : sha256Hex(bytes) === rec.outputSha256 ? "match" : "mismatch";
+  return { dispatchId: rec.dispatchId, path: snapshotRel, bytes, attested };
 }
 
 // src/commands/diagram.ts
@@ -21982,13 +22111,28 @@ function repoRootOf(opts) {
 function envValue(opts) {
   return opts.env !== void 0 ? opts.env : process.env.FADENO_LOADOUT ?? null;
 }
-function loadProfile(repoRoot, userPathOptions) {
+function loadLayered(repoRoot, userPathOptions) {
   try {
-    return loadExecutorProfile(repoRoot, userPathOptions).profile;
+    return loadLayeredProfile(repoRoot, userPathOptions, activeHarness(void 0, userPathOptions));
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new LoadoutError(err.message);
     throw err;
   }
+}
+function loadProfile(repoRoot, userPathOptions) {
+  return loadLayered(repoRoot, userPathOptions).profile;
+}
+function formatSuppressedCanonNote(archetypes) {
+  if (archetypes.length === 0) return null;
+  return `note: canon archetypes not declared by this catalog: <${archetypes.join(", ")}> (self-contained profile suppresses builtin layering; declare them in .fadeno/executors.yaml to adopt)`;
+}
+function canonSurfacing(layered) {
+  const suppressed_canon_archetypes = layered.suppressedCanonArchetypes;
+  return { suppressed_canon_archetypes, note: formatSuppressedCanonNote(suppressed_canon_archetypes) };
+}
+function userPinValue(layers, userPathOptions) {
+  if (!layers.includes("user")) return null;
+  return readUserLoadout(userPathOptions);
 }
 function readPin(repoRoot) {
   try {
@@ -21998,18 +22142,18 @@ function readPin(repoRoot) {
     throw err;
   }
 }
-function activeFor(opts, repoRoot, profile) {
+function activeFor(opts, repoRoot, profile, layers, strict = false) {
   const pin = readPin(repoRoot);
   const localValue = pin.loadout;
-  const userValue = readUserLoadout(opts.userPathOptions);
+  const userValue = userPinValue(layers, opts.userPathOptions);
   const stalePin = localValue != null && !(localValue in profile.loadouts) ? localValue : null;
   const staleUserPin = userValue != null && !(userValue in profile.loadouts) ? userValue : null;
   try {
     const active = resolveActiveLoadout({
       flagValue: opts.loadout ?? null,
       envValue: envValue(opts),
-      localFileValue: stalePin == null ? localValue : null,
-      userFileValue: staleUserPin == null ? userValue : null,
+      localFileValue: strict ? localValue : stalePin == null ? localValue : null,
+      userFileValue: strict ? userValue : staleUserPin == null ? userValue : null,
       profile
     });
     return { active, stalePin, pin, overrides: applicableOverrides(pin, active) };
@@ -22055,9 +22199,11 @@ function effectiveRows(profile, name, overrides) {
 }
 function runLoadoutShow(opts = {}) {
   const repoRoot = repoRootOf(opts);
-  const profile = loadProfile(repoRoot, opts.userPathOptions);
-  const { active, stalePin, overrides } = activeFor(opts, repoRoot, profile);
+  const layered = loadLayered(repoRoot, opts.userPathOptions);
+  const profile = layered.profile;
+  const { active, stalePin, overrides } = activeFor(opts, repoRoot, profile, layered.layers);
   const effective = active == null ? { rows: [], stale: [] } : effectiveRows(profile, active.name, overrides);
+  const canon = canonSurfacing(layered);
   return {
     active,
     slots: effective.rows,
@@ -22065,13 +22211,17 @@ function runLoadoutShow(opts = {}) {
     defaultLoadout: profile.defaultLoadout,
     stalePin,
     overrides,
-    staleOverrides: effective.stale
+    staleOverrides: effective.stale,
+    suppressed_canon_archetypes: canon.suppressed_canon_archetypes,
+    note: canon.note
   };
 }
 function runLoadoutList(opts = {}) {
   const repoRoot = repoRootOf(opts);
-  const profile = loadProfile(repoRoot, opts.userPathOptions);
-  const { active, stalePin, overrides } = activeFor(opts, repoRoot, profile);
+  const layered = loadLayered(repoRoot, opts.userPathOptions);
+  const profile = layered.profile;
+  const { active, stalePin, overrides } = activeFor(opts, repoRoot, profile, layered.layers);
+  const canon = canonSurfacing(layered);
   let staleOverrides = [];
   const loadouts = Object.keys(profile.loadouts).sort().map((name) => {
     const isActive = active?.name === name;
@@ -22083,7 +22233,13 @@ function runLoadoutList(opts = {}) {
     } else {
       slots = slotViews(profile, name);
     }
-    return { name, slots, isDefault: profile.defaultLoadout === name, isActive };
+    return {
+      name,
+      slots,
+      isDefault: profile.defaultLoadout === name,
+      isActive,
+      ...isActive && canon.note != null ? { note: canon.note } : {}
+    };
   });
   return {
     loadouts,
@@ -22091,7 +22247,8 @@ function runLoadoutList(opts = {}) {
     defaultLoadout: profile.defaultLoadout,
     stalePin,
     overrides,
-    staleOverrides
+    staleOverrides,
+    suppressed_canon_archetypes: canon.suppressed_canon_archetypes
   };
 }
 function runLoadoutUse(opts) {
@@ -22111,7 +22268,8 @@ function runLoadoutUse(opts) {
 }
 function runLoadoutSet(opts) {
   const repoRoot = repoRootOf(opts);
-  const profile = loadProfile(repoRoot, opts.userPathOptions);
+  const layered = loadLayered(repoRoot, opts.userPathOptions);
+  const profile = layered.profile;
   const archetype = opts.archetype.trim();
   const target = opts.target.trim();
   if (archetype.length === 0 || target.length === 0) {
@@ -22127,7 +22285,7 @@ function runLoadoutSet(opts) {
       `"${target}" is not a declared executor (${Object.keys(profile.executors).sort().join(", ")}).`
     );
   }
-  const { active, pin } = activeFor(opts, repoRoot, profile);
+  const { active, pin } = activeFor(opts, repoRoot, profile, layered.layers);
   if (active == null) {
     throw new LoadoutError(
       "No loadout is active, so a session override has nothing to decorate. Fix: select a base first with `fadeno loadout use <name>`."
@@ -22159,8 +22317,9 @@ function runLoadoutSet(opts) {
 }
 function runLoadoutResolve(opts) {
   const repoRoot = repoRootOf(opts);
-  const profile = loadProfile(repoRoot, opts.userPathOptions);
-  const { active, overrides } = activeFor(opts, repoRoot, profile);
+  const layered = loadLayered(repoRoot, opts.userPathOptions);
+  const profile = layered.profile;
+  const { active, overrides } = activeFor(opts, repoRoot, profile, layered.layers, true);
   if (active == null) throw new LoadoutError("No loadout is active.");
   try {
     const resolved = resolveRole(
@@ -22341,8 +22500,11 @@ function recordDeclaredInputs(runDir, repoRoot, declared, supplied, now) {
 }
 function computeResolution(repoRoot, playbookPath, flagValue, envRaw, userPathOptions) {
   let profile;
+  let layers;
   try {
-    profile = loadExecutorProfile(repoRoot, userPathOptions).profile;
+    const loaded = loadExecutorProfile(repoRoot, userPathOptions);
+    profile = loaded.profile;
+    layers = loaded.layers;
   } catch (err) {
     if (err instanceof ExecutorProfileError) return null;
     throw err;
@@ -22355,7 +22517,9 @@ function computeResolution(repoRoot, playbookPath, flagValue, envRaw, userPathOp
       flagValue,
       envValue: envRaw !== void 0 ? envRaw : process.env.FADENO_LOADOUT ?? null,
       localFileValue: pin.loadout,
-      userFileValue: readUserLoadout(userPathOptions),
+      // A user-scope dial only applies where the user layer was actually
+      // composed: a self-contained project profile is authoritative.
+      userFileValue: layers == null || layers.includes("user") ? readUserLoadout(userPathOptions) : null,
       profile
     });
     overrides = applicableOverrides(pin, active);
@@ -24741,7 +24905,7 @@ function rootOf(opts) {
 }
 function profileOf(repoRoot, userPathOptions) {
   try {
-    return loadExecutorProfile(repoRoot, userPathOptions, "codex").profile;
+    return loadExecutorProfile(repoRoot, userPathOptions, "codex");
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
     throw err;
@@ -24901,7 +25065,7 @@ function runSteeringResolve(opts) {
     throw new SteeringError("locked steering resolution requires both --run and --dispatch-id.");
   }
   if (hasRun && hasDispatchId) return runLockedSteeringResolve(opts, archetype, role, nativeExecutor);
-  const profile = profileOf(repoRoot, opts.userPathOptions);
+  const { profile, layers } = profileOf(repoRoot, opts.userPathOptions);
   const nativeSpec = nativeExecutor == null ? null : profile.executors[nativeExecutor];
   if (nativeExecutor != null && (nativeSpec == null || nativeSpec.adapter !== "host")) {
     throw new SteeringError(
@@ -24916,7 +25080,9 @@ function runSteeringResolve(opts) {
       flagValue: opts.loadout ?? null,
       envValue: opts.env !== void 0 ? opts.env : process.env.FADENO_LOADOUT ?? null,
       localFileValue: pin.loadout,
-      userFileValue: readUserLoadout(opts.userPathOptions),
+      // A user-scope dial only applies where the user layer was actually
+      // composed: a self-contained project profile is authoritative.
+      userFileValue: layers == null || layers.includes("user") ? readUserLoadout(opts.userPathOptions) : null,
       profile
     });
     overrides = applicableOverrides(pin, active);
@@ -25151,7 +25317,7 @@ function managedAgentEmit(path, body, force, scope) {
 }
 function runSteeringApply(opts) {
   const repoRoot = rootOf(opts);
-  const profile = profileOf(repoRoot, opts.userPathOptions);
+  const { profile } = profileOf(repoRoot, opts.userPathOptions);
   const loadout = opts.loadout.trim();
   const slots = profile.loadouts[loadout];
   if (slots == null) {
@@ -26051,6 +26217,7 @@ Usage:
   fadeno decide <run> <option> [flags]  Resolve a pending named human decision
   fadeno runs                           List run ledgers under .fadeno/runs/
   fadeno dispatches [--tail n] [--json] Show which executor ran what (.fadeno/dispatches.jsonl)
+  fadeno dispatches --output <id|last>  Print a dispatch's streamed output snapshot verbatim
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic claims (or --latest)
   fadeno plugin [dir] [--codex]         Generate a Claude Code (default) or Codex plugin
@@ -26100,6 +26267,7 @@ Options:
   --file <path>           (dispatch-progress) Agent/harness status JSON file
   --source <kind>         (dispatch-progress) agent | harness | director
   --output <path>         (dispatch-complete) Temporary output file
+  --output <id|last>      (dispatches) Recover a dispatch's output snapshot (killed relays included)
   --commit <sha>          (dispatch-complete) Optional commit provenance
   --reason <text>         (dispatch-fail) Host-attested failure reason
   --decision <id>         (decide) Target decision id (optional when exactly one is pending)
@@ -26482,6 +26650,7 @@ function printLoadoutShow(result) {
     );
     printSlots(result.slots, "  ");
   }
+  if (result.note != null) console.log(result.note);
   if (result.available.length === 0) {
     console.log("\nThe profile declares no loadouts (add a `loadouts:` mapping to .fadeno/executors.yaml).");
     return;
@@ -26508,6 +26677,7 @@ function printLoadoutList(result) {
     const marker = loadout.isActive ? "*" : " ";
     console.log(`${marker} ${loadout.name}${notes.length > 0 ? `  (${notes.join(", ")})` : ""}`);
     printSlots(loadout.slots, "    ");
+    if (loadout.note != null) console.log(`    ${loadout.note}`);
   }
 }
 function printDrive(result) {
@@ -27266,6 +27436,13 @@ resolution${via}:`);
       return 0;
     }
     case "dispatches": {
+      if (values.output != null) {
+        const result2 = runDispatchesOutput({ dispatchId: values.output });
+        process.stdout.write(result2.bytes);
+        const note = result2.attested === "match" ? "output attested: sha matches the completion row" : result2.attested === "mismatch" ? "WARNING: snapshot sha does not match the completion row (file changed after the dispatch?)" : "no completion row recorded: partial output of a killed or in-flight dispatch";
+        console.error(`[${result2.dispatchId}] ${result2.path} \u2014 ${note}`);
+        return 0;
+      }
       let tail;
       if (values.tail != null) {
         const n = Number(values.tail);

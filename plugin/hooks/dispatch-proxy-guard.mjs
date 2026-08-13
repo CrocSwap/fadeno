@@ -4,8 +4,11 @@
 // natively, but instruction-only constraint is advisory — a 2026-08-12
 // dogfood A/B observed a proxy silently performing its task with no dispatch
 // and no evidence row. This hook makes the contract mechanical: inside a
-// dispatch proxy, the only Bash allowed is the contract call itself, and the
-// dispatch invocation gets the long tool timeout the external executor needs.
+// dispatch proxy, the only Bash allowed is the contract call itself (and,
+// after a killed or timed-out dispatch, `fadeno dispatches --output last`
+// or a dispatch id — both CLI spellings — so the streamed snapshot can be
+// recovered), and the dispatch invocation gets the long tool timeout the
+// external executor needs.
 //
 // Scope: fires on every Bash PreToolUse, no-ops unless the hook input's
 // `agent_type` is one of the dispatch proxies. The heredoc BODY is the user's
@@ -87,6 +90,11 @@ const ALLOWED = [
   new RegExp(
     String.raw`^${CLI} dispatch --archetype ${archetype} --prompt-file ("\$${VAR}"|\$${VAR}|"?${PROMPT_FILE}"?)$`,
   ),
+  // Recovered executor output after a killed or timed-out dispatch. The
+  // kernel streams stdout to the snapshot as it arrives, so the bytes
+  // survive the kill. Both CLI spellings (`fadeno` and the plugin-root
+  // retry) are covered by `CLI`.
+  new RegExp(String.raw`^${CLI} dispatches --output (last|[0-9a-fA-F-]{8,36})$`),
   // LEGACY contract (older init-emitted proxy bodies still in the wild):
   // explicit prompt-file write before the dispatch.
   new RegExp(String.raw`^mkdir -p ${PROMPT_DIR}/?$`),

@@ -1,6 +1,6 @@
 ---
 name: dispatch-judge
-description: Dispatch proxy that routes evaluation and scoring subtasks — comparing candidate attempts, scoring artifacts against stated criteria, picking a winner — to the external executor bound to the judge archetype in the active Fadeno loadout. Use proactively. MUST BE USED for judge-shaped subtasks when a Fadeno loadout is active. [fadeno 0.6.0-rc.13]
+description: Dispatch proxy that routes evaluation and scoring subtasks — comparing candidate attempts, scoring artifacts against stated criteria, picking a winner — to the external executor bound to the judge archetype in the active Fadeno loadout. Use proactively. MUST BE USED for judge-shaped subtasks when a Fadeno loadout is active. [fadeno 0.6.0-rc.14]
 tools: Bash
 model: sonnet
 ---
@@ -47,7 +47,15 @@ Then:
    explicit non-goal; the user must see the failure and decide what happens
    next.
 
-4. Report only what the command's output actually shows. Never assert that
+4. If the dispatch call is killed or times out, run
+   `fadeno dispatches --output last` (same `$CLAUDE_PLUGIN_ROOT` retry rule
+   as step 2) and relay its stdout verbatim, stating plainly that the
+   dispatch was killed and this is the recovered partial (or complete)
+   output. The kernel streams executor output to a snapshot as it arrives,
+   so the bytes survive the kill. This recovery call is the only other Bash
+   permitted.
+
+5. Report only what the command's output actually shows. Never assert that
    evidence was logged or that anything happened behind the scenes — the
    kernel writes its own evidence rows.
 

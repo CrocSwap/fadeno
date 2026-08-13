@@ -15,6 +15,30 @@ writers accept only 0.3.
 
 ### Added
 
+- **Dispatch output survives the kill.** The kernel now streams executor
+  stdout to a snapshot at `.fadeno/local/outputs/` as it arrives (the same
+  single-writer idiom as prompt snapshots), so a relay killed by a harness
+  timeout no longer destroys the report: the request row names
+  `output_snapshot` before the spawn, the completion row adds
+  `output_bytes`, and `fadeno dispatches --output <id|last>` prints the
+  snapshot verbatim with an attestation verdict (`match` / `mismatch` /
+  `incomplete`). The dispatch proxy contract gains the matching recovery
+  step, allowlisted in the proxy guard. Completion rows also attest
+  `workspace_changed` (a git fingerprint before/after the spawn — evidence,
+  not judgment), and `fadeno dispatches` marks the exit-0 no-op signature
+  with `[no workspace change]`.
+- **Resolution is strict where it decides and graceful where it looks.**
+  `fadeno loadout resolve` now refuses a stale pin with the same error
+  `fadeno dispatch` raises instead of silently falling back to the default
+  loadout, and the steering hook denies a proxy-bound spawn on a resolver
+  error rather than quietly going native; inspection commands keep
+  surfacing `stalePin` without bricking. A user-scope dial now applies only
+  where the user layer was actually composed — a self-contained project
+  profile is authoritative, so someone's global pin no longer reaches into
+  unrelated repos. Self-contained catalogs that predate canon archetypes
+  get a note in the loadout views naming what they never declared
+  (`suppressedCanonArchetypes` in the JSON), leaving adoption an explicit
+  choice.
 - **Constraint tiers at the dispatch boundary** (phase 3 of
   `docs/experimental/slots-and-archetypes.md`) — policy the kernel can
   enforce, in two tiers. Tier 1 is declarative vocabulary:
