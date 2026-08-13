@@ -14,6 +14,7 @@ import { runUse } from '../src/commands/use.ts';
 import { runVendor } from '../src/commands/vendor.ts';
 import { runVerify } from '../src/commands/verify.ts';
 import { userPaths, type UserPathOptions } from '../src/lib/user-paths.ts';
+import { activeHarness, detectAmbientHarness, withoutHarnessIdentity } from '../src/lib/executors.ts';
 import { LedgerWriter } from '../src/lib/run-ledger-write.ts';
 import { readEvents } from '../src/lib/run-ledger.ts';
 import { runDrive } from '../src/commands/drive.ts';
@@ -270,46 +271,78 @@ test('doctor checks a repo-selected executable without executing it', (t) => {
   assert.ok(result.findings.some((item) => item.check === 'executor:repo-command' && item.severity === 'ok'));
 });
 
-test('doctor names the host a session is plainly running inside when no harness was recorded', (t) => {
+test('one memo cannot serve two harnesses, so the host in evidence wins', (t) => {
   const root = tempRepo(t);
   const base = isolatedUser(root);
-  const paths: UserPathOptions = { ...base, env: { ...base.env, CLAUDECODE: '1' } };
 
-  // The exact split that produced the bug: `fadeno use` pins a loadout and
-  // never records a harness, so resolution falls through to standalone.
-  runUse({ repoRoot: root, userPathOptions: paths, name: 'native' });
-  assert.equal(existsSync(userPaths(paths).harnessFile), false);
+  // Set up both, Codex last — the memo holds exactly one value and the last
+  // targeted setup wrote it. This is the dual-harness machine, not a mistake.
+  runSetup({ repoRoot: root, userPathOptions: base, target: 'claude', probeCommand: unavailable });
+  runSetup({ repoRoot: root, userPathOptions: base, target: 'codex', probeCommand: unavailable });
+  assert.equal(readFileSync(userPaths(base).harnessFile, 'utf8'), 'codex\n');
 
-  const result = runDoctor({ repoRoot: root, userPathOptions: paths });
-  const harness = result.findings.find((item) => item.check === 'harness');
-  assert.equal(harness?.severity, 'warning');
-  assert.match(harness?.detail ?? '', /CLAUDECODE says this session runs inside claude/);
-  assert.match(harness?.detail ?? '', /routes compile as standalone/);
-  assert.match(harness?.remediation ?? '', /fadeno setup --claude/);
-  assert.equal(result.ok, true, 'an unrecorded harness is a warning, never a failing exit status');
+  // A bare CLI inside Claude Code used to read that memo and compile the codex
+  // routes block, delivering an Anthropic host slot as a `claude -p` subprocess.
+  const inClaude: UserPathOptions = { ...base, env: { ...base.env, CLAUDECODE: '1' } };
+  assert.equal(activeHarness(undefined, inClaude), 'claude');
+  const claudeDoctor = runDoctor({ repoRoot: root, userPathOptions: inClaude });
+  const claudeFinding = claudeDoctor.findings.find((item) => item.check === 'harness');
+  assert.equal(claudeFinding?.severity, 'ok');
+  assert.match(claudeFinding?.detail ?? '', /claude, detected from the host/);
+
+  // The same memo, the same machine, the other host — no setup toggle between.
+  const inCodex: UserPathOptions = { ...base, env: { ...base.env, CODEX_THREAD_ID: 'thread-1' } };
+  assert.equal(activeHarness(undefined, inCodex), 'codex');
+
+  // Neither host present: the memo is the only answer left, and still valid.
+  assert.equal(activeHarness(undefined, base), 'codex');
 });
 
-test('doctor reports a recorded harness that contradicts the host it is running inside', (t) => {
+test('nested hosts abstain rather than guess, and an executor child sheds our identity', (t) => {
   const root = tempRepo(t);
   const base = isolatedUser(root);
-  const inClaude: UserPathOptions = { ...base, env: { ...base.env, CLAUDE_CODE_ENTRYPOINT: 'cli' } };
-  runSetup({ repoRoot: root, userPathOptions: inClaude, target: 'claude', probeCommand: unavailable });
-  assert.equal(readFileSync(userPaths(inClaude).harnessFile, 'utf8'), 'claude\n');
+  runSetup({ repoRoot: root, userPathOptions: base, target: 'claude', probeCommand: unavailable });
 
-  const matched = runDoctor({ repoRoot: root, userPathOptions: inClaude });
-  const agreed = matched.findings.find((item) => item.check === 'harness');
-  assert.equal(agreed?.severity, 'ok');
-  assert.match(agreed?.detail ?? '', /claude, matching the host/);
+  // A `codex exec` worker spawned from Claude Code inherits CLAUDECODE and adds
+  // CODEX_THREAD_ID. Ordering cannot break that tie — the reverse nesting is
+  // symmetric — so detection abstains and the memo decides, as it did before.
+  const nested: UserPathOptions = {
+    ...base,
+    env: { ...base.env, CLAUDECODE: '1', CODEX_THREAD_ID: 'thread-1' },
+  };
+  const detection = detectAmbientHarness(nested);
+  assert.equal(detection.harness, null);
+  assert.deepEqual(detection.evidence.map((item) => item.harness), ['claude', 'codex']);
+  assert.equal(activeHarness(undefined, nested), 'claude', 'falls back to the recorded memo');
 
-  // Same recorded memo, different host: the adapters compiled for a claude
-  // slot are not the ones a Codex session would deliver.
-  const inCodex: UserPathOptions = { ...base, env: { ...base.env, CODEX_THREAD_ID: 'thread-1' } };
-  const crossed = runDoctor({ repoRoot: root, userPathOptions: inCodex });
-  const mismatch = crossed.findings.find((item) => item.check === 'harness');
-  assert.equal(mismatch?.severity, 'warning');
-  assert.match(mismatch?.detail ?? '', /configured harness is claude, but CODEX_THREAD_ID says this session runs inside codex/);
-  assert.match(mismatch?.remediation ?? '', /fadeno setup --codex/);
-  assert.equal(crossed.ok, true);
+  const doctor = runDoctor({ repoRoot: root, userPathOptions: nested });
+  const finding = doctor.findings.find((item) => item.check === 'harness');
+  assert.equal(finding?.severity, 'warning');
+  assert.match(finding?.detail ?? '', /nested hosts both claim this session/);
+  assert.equal(doctor.ok, true);
+
+  // The real fix is at the spawn point: a child inherits no harness identity,
+  // so whatever it launches asserts its own instead of ours.
+  const shed = withoutHarnessIdentity({ ...nested.env, FADENO_HARNESS: 'claude', CODEX_HOME: '/keep' });
+  assert.equal(shed.CLAUDECODE, undefined);
+  assert.equal(shed.CODEX_THREAD_ID, undefined);
+  assert.equal(shed.FADENO_HARNESS, undefined);
+  assert.equal(shed.CODEX_HOME, '/keep', 'a config location is not a session claim');
+});
+
+test('an explicit FADENO_HARNESS still outranks the host in evidence, and doctor says so', (t) => {
+  const root = tempRepo(t);
+  const base = isolatedUser(root);
+  const forced: UserPathOptions = {
+    ...base,
+    env: { ...base.env, CLAUDECODE: '1', FADENO_HARNESS: 'codex' },
+  };
+  assert.equal(activeHarness(undefined, forced), 'codex');
+  const result = runDoctor({ repoRoot: root, userPathOptions: forced });
+  const harness = result.findings.find((item) => item.check === 'harness');
+  assert.equal(harness?.severity, 'warning');
+  assert.match(harness?.detail ?? '', /an explicit setting selected codex/);
+  assert.equal(result.ok, true);
 });
 
 test('doctor stays quiet about the harness when no host evidence is present', (t) => {
@@ -318,7 +351,7 @@ test('doctor stays quiet about the harness when no host evidence is present', (t
   const result = runDoctor({ repoRoot: root, userPathOptions: paths });
   const harness = result.findings.find((item) => item.check === 'harness');
   assert.equal(harness?.severity, 'ok');
-  assert.match(harness?.detail ?? '', /no ambient host evidence/);
+  assert.match(harness?.detail ?? '', /no host claims this session/);
   assert.equal(harness?.remediation, undefined);
 });
 

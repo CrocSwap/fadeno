@@ -24,6 +24,7 @@ import {
   resolveActiveLoadout,
   resolveRole,
   roleResolutionEchoLabel,
+  withoutHarnessIdentity,
   type ActiveLoadout,
   type ExecutorProfile,
   type ExecutorSpec,
@@ -694,6 +695,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       input: prompt,
       encoding: 'utf8',
       cwd: repoRoot,
+      // The child is a different session, usually a different host. Inheriting
+      // our harness identity would tell a `codex exec` worker it is inside
+      // Claude; it establishes its own.
+      env: withoutHarnessIdentity(process.env),
       maxBuffer: SPAWN_MAX_BUFFER,
       stdio: ['pipe', outputFd, 'pipe'],
     });

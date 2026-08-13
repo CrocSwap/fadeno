@@ -164,12 +164,25 @@ export interface ExecutorProfile {
  */
 export type HarnessId = 'codex' | 'claude' | 'grok' | 'standalone';
 
+/**
+ * Precedence: an explicit argument, then `FADENO_HARNESS`, then the host this
+ * process is demonstrably inside, then the memo written by the last targeted
+ * setup, then `standalone`.
+ *
+ * Ambient evidence outranks the memo because they answer different questions.
+ * The memo records *what was set up last*; routing is asking *what am I inside
+ * now*. Those agree only on a single-harness machine — set up both Claude and
+ * Codex and the memo is whichever `fadeno setup` ran most recently, so a bare
+ * `fadeno` in the other host compiles the wrong routes block and silently
+ * delivers a would-be in-session slot as a subprocess. The memo stays as the
+ * answer for contexts with no host at all (a plain terminal, CI, cron), which
+ * is the only question it can actually answer.
+ */
 export function activeHarness(explicit?: HarnessId, options: UserPathOptions = {}): HarnessId {
   if (explicit != null) return explicit;
   const raw = (options.env ?? process.env).FADENO_HARNESS?.trim();
-  return raw === 'codex' || raw === 'claude' || raw === 'grok' || raw === 'standalone'
-    ? raw
-    : readUserHarness(options) ?? 'standalone';
+  if (raw === 'codex' || raw === 'claude' || raw === 'grok' || raw === 'standalone') return raw;
+  return detectAmbientHarness(options).harness ?? readUserHarness(options) ?? 'standalone';
 }
 
 /**
@@ -187,30 +200,64 @@ const AMBIENT_HARNESS_MARKERS: ReadonlyArray<{ harness: FadenoHarness; variables
   { harness: 'codex', variables: ['CODEX_THREAD_ID', 'CODEX_SANDBOX', 'CODEX_PERMISSION_PROFILE'] },
 ];
 
-/** Which host this process appears to be running inside, and why we think so. */
+/** One host claiming this process, and the variable that carried the claim. */
 export interface AmbientHarness {
   harness: FadenoHarness;
-  /** The variable that carried the evidence, so a warning can cite it. */
   marker: string;
 }
 
+export interface AmbientHarnessDetection {
+  /**
+   * The single host this process is unambiguously inside — null when nothing
+   * claims it, and null when more than one does. Two claimants means nesting,
+   * where guessing would pick a transport by coin flip.
+   */
+  harness: FadenoHarness | null;
+  /** Every host with evidence present, in table order. */
+  evidence: AmbientHarness[];
+}
+
 /**
- * Evidence of the host we are *actually* inside, independent of what
- * `activeHarness` resolves.
+ * Which host this process is actually running inside.
  *
- * Routing must never consult this. `standalone` is a defensible answer to
- * "which host am I in" when nothing recorded one, and silently upgrading a
- * guess into compiled adapters would make the same loadout deliver a slot
- * differently depending on which process asked. `fadeno doctor` reports the
- * disagreement and names the one command that records it for real.
+ * A host exports its markers into everything it spawns, and children inherit
+ * them, so a `codex exec` launched from Claude Code carries `CLAUDECODE` *and*
+ * `CODEX_THREAD_ID` — verified, not assumed. Ordering cannot break that tie:
+ * the reverse nesting is symmetric. So two claimants resolves to null and
+ * `activeHarness` falls through to the memo, exactly as before detection
+ * existed. The nested case is instead fixed at the spawn point, where the
+ * parent knows what it is launching — see `withoutHarnessIdentity`.
  */
-export function detectAmbientHarness(options: UserPathOptions = {}): AmbientHarness | null {
+export function detectAmbientHarness(options: UserPathOptions = {}): AmbientHarnessDetection {
   const env = options.env ?? process.env;
+  const evidence: AmbientHarness[] = [];
   for (const entry of AMBIENT_HARNESS_MARKERS) {
     const marker = entry.variables.find((name) => (env[name] ?? '').trim() !== '');
-    if (marker != null) return { harness: entry.harness, marker };
+    if (marker != null) evidence.push({ harness: entry.harness, marker });
   }
-  return null;
+  return { harness: evidence.length === 1 ? evidence[0]!.harness : null, evidence };
+}
+
+/**
+ * Strip this process's harness identity from an environment handed to a child
+ * executor.
+ *
+ * A command executor is a different session and often a different host: the
+ * kernel running inside Claude Code spawns `codex exec` as a worker, and that
+ * child is genuinely inside Codex. Both `FADENO_HARNESS` and the hosts' own
+ * session markers inherit by default, so without this the child would be told
+ * it is inside Claude no matter what it launches — and would compile Anthropic
+ * targets as host slots it cannot deliver. Clearing them lets whatever the
+ * child actually runs assert its own identity, and leaves a non-harness
+ * executor (a plain script) with no claim at all.
+ */
+export function withoutHarnessIdentity(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const next: NodeJS.ProcessEnv = { ...env };
+  delete next.FADENO_HARNESS;
+  for (const entry of AMBIENT_HARNESS_MARKERS) {
+    for (const name of entry.variables) delete next[name];
+  }
+  return next;
 }
 
 export interface LoadedExecutorProfile {

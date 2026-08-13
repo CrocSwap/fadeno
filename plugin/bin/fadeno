@@ -13939,7 +13939,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.17";
+  if (true) return "0.6.0-rc.18";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -14512,7 +14512,8 @@ function substituteSessionId(argv, sessionId) {
 function activeHarness(explicit, options = {}) {
   if (explicit != null) return explicit;
   const raw = (options.env ?? process.env).FADENO_HARNESS?.trim();
-  return raw === "codex" || raw === "claude" || raw === "grok" || raw === "standalone" ? raw : readUserHarness(options) ?? "standalone";
+  if (raw === "codex" || raw === "claude" || raw === "grok" || raw === "standalone") return raw;
+  return detectAmbientHarness(options).harness ?? readUserHarness(options) ?? "standalone";
 }
 var AMBIENT_HARNESS_MARKERS = [
   { harness: "claude", variables: ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"] },
@@ -14520,11 +14521,20 @@ var AMBIENT_HARNESS_MARKERS = [
 ];
 function detectAmbientHarness(options = {}) {
   const env = options.env ?? process.env;
+  const evidence = [];
   for (const entry of AMBIENT_HARNESS_MARKERS) {
     const marker = entry.variables.find((name) => (env[name] ?? "").trim() !== "");
-    if (marker != null) return { harness: entry.harness, marker };
+    if (marker != null) evidence.push({ harness: entry.harness, marker });
   }
-  return null;
+  return { harness: evidence.length === 1 ? evidence[0].harness : null, evidence };
+}
+function withoutHarnessIdentity(env) {
+  const next = { ...env };
+  delete next.FADENO_HARNESS;
+  for (const entry of AMBIENT_HARNESS_MARKERS) {
+    for (const name of entry.variables) delete next[name];
+  }
+  return next;
 }
 var EXECUTORS_FILE = (0, import_node_path6.join)(".fadeno", "executors.yaml");
 function isMapping(value) {
@@ -17786,6 +17796,10 @@ function runDispatch(opts) {
       input: prompt,
       encoding: "utf8",
       cwd: repoRoot,
+      // The child is a different session, usually a different host. Inheriting
+      // our harness identity would tell a `codex exec` worker it is inside
+      // Claude; it establishes its own.
+      env: withoutHarnessIdentity(process.env),
       maxBuffer: SPAWN_MAX_BUFFER,
       stdio: ["pipe", outputFd, "pipe"]
     });
@@ -26708,23 +26722,24 @@ function runDoctor(opts = {}) {
     }
   }
   const ambient = detectAmbientHarness(opts.userPathOptions);
-  if (ambient == null) {
-    findings.push(finding("harness", "ok", `${status.harness ?? "standalone"}; no ambient host evidence to compare against`));
-  } else if (status.harness === ambient.harness) {
-    findings.push(finding("harness", "ok", `${ambient.harness}, matching the host this session is running inside`));
-  } else if (status.harness == null || status.harness === "standalone") {
+  if (ambient.evidence.length > 1) {
+    const names = ambient.evidence.map((item) => `${item.harness} (${item.marker})`).join(" and ");
     findings.push(finding(
       "harness",
       "warning",
-      `${ambient.marker} says this session runs inside ${ambient.harness}, but no harness is recorded so routes compile as standalone`,
-      `Run \`fadeno setup --${ambient.harness}\`; until then every ${ambient.harness}-host slot is delivered as a subprocess instead.`
+      `nested hosts both claim this session \u2014 ${names} \u2014 so detection abstained and ${status.harness ?? "standalone"} came from the recorded memo`,
+      "Set FADENO_HARNESS explicitly for this session; a spawned executor gets its own identity automatically."
     ));
+  } else if (ambient.harness == null) {
+    findings.push(finding("harness", "ok", `${status.harness ?? "standalone"}; no host claims this session, so the recorded memo decides`));
+  } else if (status.harness === ambient.harness) {
+    findings.push(finding("harness", "ok", `${ambient.harness}, detected from the host this session is running inside`));
   } else {
     findings.push(finding(
       "harness",
       "warning",
-      `configured harness is ${status.harness}, but ${ambient.marker} says this session runs inside ${ambient.harness}`,
-      `Run \`fadeno setup --${ambient.harness}\` if that is the host you meant; the two compile different adapters for the same slot.`
+      `${ambient.evidence[0].marker} says this session runs inside ${ambient.harness}, but an explicit setting selected ${status.harness}`,
+      `Drop the override to route as ${ambient.harness}; the two compile different adapters for the same slot.`
     ));
   }
   if (status.harness === "codex" && status.codexMaterialization?.restartRequired) {

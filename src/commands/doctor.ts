@@ -91,28 +91,30 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
       findings.push(finding(`executor:${role.executor}`, 'ok', 'executable is present on PATH (not executed)'));
     }
   }
-  // An unrecorded harness is not a cosmetic gap: routes are compiled per
-  // harness, and under `standalone` the host route does not exist at all, so
-  // a host slot silently becomes a subprocess. It also disarms every
-  // check below that keys on a specific harness, including `codex-agents`.
+  // Routes are compiled per harness, and a wrong answer here is not cosmetic:
+  // under the wrong block a host slot compiles to `adapter: command` and runs
+  // as a subprocess. Resolution prefers ambient evidence, so this check now
+  // reports the two cases resolution cannot settle on its own.
   const ambient = detectAmbientHarness(opts.userPathOptions);
-  if (ambient == null) {
-    findings.push(finding('harness', 'ok', `${status.harness ?? 'standalone'}; no ambient host evidence to compare against`));
-  } else if (status.harness === ambient.harness) {
-    findings.push(finding('harness', 'ok', `${ambient.harness}, matching the host this session is running inside`));
-  } else if (status.harness == null || status.harness === 'standalone') {
+  if (ambient.evidence.length > 1) {
+    const names = ambient.evidence.map((item) => `${item.harness} (${item.marker})`).join(' and ');
     findings.push(finding(
       'harness',
       'warning',
-      `${ambient.marker} says this session runs inside ${ambient.harness}, but no harness is recorded so routes compile as standalone`,
-      `Run \`fadeno setup --${ambient.harness}\`; until then every ${ambient.harness}-host slot is delivered as a subprocess instead.`,
+      `nested hosts both claim this session — ${names} — so detection abstained and ${status.harness ?? 'standalone'} came from the recorded memo`,
+      'Set FADENO_HARNESS explicitly for this session; a spawned executor gets its own identity automatically.',
     ));
+  } else if (ambient.harness == null) {
+    findings.push(finding('harness', 'ok', `${status.harness ?? 'standalone'}; no host claims this session, so the recorded memo decides`));
+  } else if (status.harness === ambient.harness) {
+    findings.push(finding('harness', 'ok', `${ambient.harness}, detected from the host this session is running inside`));
   } else {
+    // Only an explicit flag or FADENO_HARNESS can outrank detection now.
     findings.push(finding(
       'harness',
       'warning',
-      `configured harness is ${status.harness}, but ${ambient.marker} says this session runs inside ${ambient.harness}`,
-      `Run \`fadeno setup --${ambient.harness}\` if that is the host you meant; the two compile different adapters for the same slot.`,
+      `${ambient.evidence[0]!.marker} says this session runs inside ${ambient.harness}, but an explicit setting selected ${status.harness}`,
+      `Drop the override to route as ${ambient.harness}; the two compile different adapters for the same slot.`,
     ));
   }
   if (status.harness === 'codex' && status.codexMaterialization?.restartRequired) {

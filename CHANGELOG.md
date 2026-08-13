@@ -15,6 +15,34 @@ writers accept only 0.3.
 
 ### Added
 
+- **Both harnesses work at once; the host in evidence decides the routes.**
+  Almost everything about a harness was already per-harness and additive —
+  `installations.json` records Claude and Codex independently, Codex role
+  agents live in `~/.codex/agents/`, the Claude plugin in its own cache. One
+  thing was global and single-valued: the `harness` memo, overwritten by every
+  targeted setup. Resolution read that memo, so on a machine set up for both,
+  a bare `fadeno` compiled whichever harness `setup` had touched last — and
+  under the wrong block an Anthropic host slot is not merely unpreferred, it
+  has no host route at all, so an in-session subagent silently became a
+  `claude -p` subprocess. `activeHarness` now consults the host actually
+  exporting its markers into this process before falling back to the memo:
+  explicit argument → `FADENO_HARNESS` → detected host → memo → `standalone`.
+  Switching hosts is now just switching; no `setup` toggle in between. The
+  memo keeps answering the one question it can — which harness to assume when
+  no host claims the session at all (a plain terminal, CI, cron).
+
+  Nesting is handled at the spawn point rather than by guessing. A host
+  exports its markers into everything it launches and children inherit them,
+  so a `codex exec` worker started from Claude Code carries `CLAUDECODE` *and*
+  `CODEX_THREAD_ID`; ordering cannot break that tie because the reverse
+  nesting is symmetric. Two claimants therefore resolves to *no* detection and
+  falls through to the memo, exactly as before detection existed, with
+  `doctor` reporting the nesting. The kernel's executor spawn — which passed
+  no `env` at all and so leaked its own identity into every child — now clears
+  `FADENO_HARNESS` and the marker set, letting whatever the child launches
+  assert what it actually is. Config locations like `CODEX_HOME` are left
+  alone: they say where a host keeps settings, not that you are inside one.
+
 - **`doctor` notices a harness nobody recorded.** Routes are compiled per
   harness, and `activeHarness` answers `standalone` whenever no memo exists —
   a defensible answer to "which host am I in" that nothing ever revisited. Under
