@@ -154,6 +154,8 @@ export interface LoadedExecutorProfile {
   profile: ExecutorProfile;
   path: string;
   layers?: Array<'builtin' | 'user' | 'project'>;
+  /** See `LayeredProfile.selfContained` — the gate for user-scope dials. */
+  selfContained?: boolean;
   provenance?: ProfileProvenance;
 }
 
@@ -707,6 +709,7 @@ export function loadExecutorProfile(repoRoot: string, options: UserPathOptions =
       profile: loaded.profile,
       path: loaded.path,
       layers: loaded.layers,
+      selfContained: loaded.selfContained,
       provenance: loaded.provenance,
     };
   } catch (err) {
@@ -997,6 +1000,41 @@ export function resolveActiveLoadout(opts: {
     return { name, source: sourceKind };
   }
   return null;
+}
+
+/**
+ * The user-scoped sticky loadout, as it applies to one composed profile.
+ *
+ * A self-contained project catalog is authoritative — it replaced the builtin
+ * and user layers outright, so a user-scope dial must not reach into it. Every
+ * other shape (builtin alone, or builtin + user) resolves against a catalog the
+ * user layer participates in, and the pin applies. Callers pass the composed
+ * profile's `selfContained`; an absent value means the profile was not layered
+ * and the dial still applies.
+ *
+ * One helper, one rule: `status`/`doctor` report exactly what `dispatch`,
+ * `drive`, `new-run`, `steering`, and `loadout` will route to.
+ */
+export function applicableUserLoadout(
+  selfContained: boolean | undefined,
+  options: UserPathOptions = {},
+): string | null {
+  if (selfContained === true) return null;
+  return readUserLoadout(options);
+}
+
+/**
+ * Self-containment of the repo's *current* catalog, for callers that resolve
+ * against a snapshotted profile and so cannot read it off the composition. A
+ * catalog that fails to load has no self-contained project profile in force,
+ * so the user dial applies — the same answer the snapshot path would give.
+ */
+export function repoProfileSelfContained(repoRoot: string, options: UserPathOptions = {}): boolean {
+  try {
+    return loadExecutorProfile(repoRoot, options).selfContained === true;
+  } catch {
+    return false;
+  }
 }
 
 /** Read the user-scoped sticky loadout without creating state. */

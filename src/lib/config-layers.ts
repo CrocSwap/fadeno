@@ -21,6 +21,14 @@ export interface LayeredProfile {
   provenance: ProfileProvenance;
   paths: FadenoUserPaths;
   /**
+   * A complete project catalog took over and suppressed builtin/user layering.
+   * This — not `layers.includes('user')` — is what makes a user-scope dial
+   * inapplicable: `layers` only reports which catalogs exist on disk, so a repo
+   * with no project catalog at all (`['builtin']`) would read as "no user
+   * layer" and wrongly drop a pin that names a perfectly valid builtin loadout.
+   */
+  selfContained: boolean;
+  /**
    * Builtin `archetypes:` keys the project catalog omitted. Non-empty only
    * when a self-contained project profile suppressed layering.
    */
@@ -136,6 +144,7 @@ export function loadLayeredProfile(repoRoot: string, options: UserPathOptions = 
     layers: effective.map((entry) => entry.layer),
     provenance,
     paths,
+    selfContained: suppressLayering,
     suppressedCanonArchetypes: suppressLayering
       ? missingCanonArchetypes(parsedLayers.get('builtin') ?? null, projectDoc)
       : [],
