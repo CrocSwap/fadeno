@@ -319,6 +319,8 @@ test('dispatches: entries are structured data (what --json prints)', (t) => {
     promptSha256: 'a'.repeat(64),
     relayAttested: null,
     writeAccess: null,
+    refusal: null,
+    gateEligible: null,
     completed: true,
     exitCode: 0,
     signal: null,

@@ -399,19 +399,33 @@ test('dispatch: a write-needing archetype is refused on a delivery that cannot w
     loadouts: { main: { worker: 'ro-claude' } },
     default_loadout: 'main',
   });
+  let message = '';
   assert.throws(
     () => runDispatch({ archetype: 'worker', prompt: 'ship the fix', repoRoot: root, env: null }),
-    (err: unknown) =>
-      err instanceof DispatchCommandError &&
-      /archetype "worker" declares `requires_write: required`, but executor "ro-claude"/.test(err.message) &&
-      /`write_access: false`/.test(err.message) &&
-      // Three ways out: rebind, re-permission the command, or stay in-session.
-      /bind "worker" to a write-capable executor/.test(err.message) &&
-      /permission mode/.test(err.message) &&
-      /native in-session worker agent/.test(err.message),
+    (err: unknown) => {
+      if (
+        !(err instanceof DispatchCommandError) ||
+        !/archetype "worker" declares `requires_write: required`, but executor "ro-claude"/.test(err.message) ||
+        !/`write_access: false`/.test(err.message) ||
+        // Three ways out: rebind, re-permission the command, or stay in-session.
+        !/bind "worker" to a write-capable executor/.test(err.message) ||
+        !/permission mode/.test(err.message) ||
+        !/native in-session worker agent/.test(err.message)
+      ) {
+        return false;
+      }
+      message = err.message;
+      return true;
+    },
   );
-  // Refused before the spawn: no run burned, nothing recorded.
-  assert.deepEqual(evidenceRows(root), []);
+  // Refused before the spawn: no run burned. The refusal row IS the request-point evidence.
+  const rows = evidenceRows(root);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.event, 'dispatch_refused');
+  assert.equal(rows[0]!.format, DISPATCHES_FORMAT);
+  assert.equal(rows[0]!.executor, 'ro-claude');
+  assert.deepEqual(rows[0]!.refusal, { predicate: 'write_posture', message });
+  assert.ok(!rows.some((row) => row.event === 'dispatch_requested'));
 });
 
 test('dispatch: a write-capable delivery serves the same archetype and records write_access', (t) => {

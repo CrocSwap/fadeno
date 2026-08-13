@@ -543,7 +543,15 @@ function printSlots(slots: Array<LoadoutSlotView & Partial<LoadoutEffectiveRow>>
     const override = slot.overridden === true
       ? `  OVERRIDE (base: ${slot.baseExecutor ?? 'none'})`
       : '';
-    console.log(`${indent}${slot.archetype.padEnd(width)} → ${slot.executor}${model} [${slot.adapter}]${override}`);
+    // Non-eligible targets are marked in the same register as OVERRIDE: the
+    // table is where a dial-time surprise should become visible, not the
+    // first refused dispatch.
+    const eligibility = slot.eligibility === 'shadow_only'
+      ? '  SHADOW-ONLY (never gates)'
+      : slot.eligibility === 'forbidden'
+        ? '  FORBIDDEN (refused at dispatch)'
+        : '';
+    console.log(`${indent}${slot.archetype.padEnd(width)} → ${slot.executor}${model} [${slot.adapter}]${override}${eligibility}`);
   }
 }
 

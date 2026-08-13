@@ -5,9 +5,17 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import {
+  ConstraintError,
+  evaluateConstraint,
+  type ConstraintContext,
+} from '../lib/constraints.ts';
+import {
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
   applicableOverrides,
+  eligibilityFor,
+  explainEligibilityConflict,
+  explainProviderConflict,
   explainWriteConflict,
   loadExecutorProfile,
   readLocalLoadoutState,
@@ -18,7 +26,9 @@ import {
   type ActiveLoadout,
   type ExecutorProfile,
   type ExecutorSpec,
+  type InputProducer,
   type RoleResolutionSource,
+  type WritePosture,
 } from '../lib/executors.ts';
 import {
   completeHostDispatch,
@@ -108,6 +118,103 @@ function consumePendingRelay(repoRoot: string, prompt: string, now: Date): boole
 
 const SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
 
+/** Predicate name recorded on a `dispatch_refused` row. */
+export type DispatchRefusalPredicate =
+  | 'write_posture'
+  | 'eligibility'
+  | 'provider_distinctness'
+  | 'constraint_command';
+
+function producedByIds(opts: AdHocDispatchOptions): string[] {
+  if (opts.producedBy == null) return [];
+  return opts.producedBy.map((id) => id.trim()).filter((id) => id.length > 0);
+}
+
+/**
+ * Resolve `--produced-by` ids against completed rows. Missing, torn, or
+ * unreadable ids stay in the list as `provider: null` — never a flag error.
+ */
+function lookupInputProducers(repoRoot: string, ids: string[]): InputProducer[] {
+  if (ids.length === 0) return [];
+  const completed = new Map<string, { executor: string | null; provider: string | null }>();
+  const path = join(repoRoot, DISPATCHES_FILE);
+  if (existsSync(path)) {
+    try {
+      for (const line of readFileSync(path, 'utf8').split('\n')) {
+        if (line.trim() === '') continue;
+        let row: Record<string, unknown>;
+        try {
+          const parsed = JSON.parse(line) as unknown;
+          if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+          row = parsed as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        if (row.event !== 'dispatch_completed') continue;
+        const id = typeof row.dispatch_id === 'string' ? row.dispatch_id : null;
+        if (id == null) continue;
+        completed.set(id, {
+          executor: typeof row.executor === 'string' && row.executor !== '' ? row.executor : null,
+          provider: typeof row.provider === 'string' && row.provider !== '' ? row.provider : null,
+        });
+      }
+    } catch {
+      // unreadable log — every id stays unresolvable
+    }
+  }
+  return ids.map((dispatchId) => {
+    const found = completed.get(dispatchId);
+    return {
+      dispatchId,
+      executor: found?.executor ?? null,
+      provider: found?.provider ?? null,
+    };
+  });
+}
+
+function provenanceFields(producers: InputProducer[]): Array<{
+  dispatch_id: string | null;
+  executor: string | null;
+  provider: string | null;
+}> {
+  return producers.map((producer) => ({
+    dispatch_id: producer.dispatchId,
+    executor: producer.executor,
+    provider: producer.provider,
+  }));
+}
+
+function declaredWritePosture(
+  profile: ExecutorProfile,
+  archetype: string | null,
+): WritePosture | null {
+  if (archetype == null || !Object.hasOwn(profile.archetypes, archetype)) return null;
+  return profile.archetypes[archetype]!.requiresWrite;
+}
+
+function appendEvidenceRow(repoRoot: string, row: Record<string, unknown>): void {
+  ensureFadenoIgnore(repoRoot);
+  mkdirSync(join(repoRoot, '.fadeno'), { recursive: true });
+  appendFileSync(join(repoRoot, DISPATCHES_FILE), `${JSON.stringify(row)}\n`, 'utf8');
+}
+
+function refuseDispatch(
+  repoRoot: string,
+  identity: Record<string, unknown>,
+  predicate: DispatchRefusalPredicate,
+  message: string,
+  now: Date,
+): never {
+  appendEvidenceRow(repoRoot, {
+    format: DISPATCHES_FORMAT,
+    timestamp: now.toISOString(),
+    event: 'dispatch_refused',
+    ...identity,
+    refusal: { predicate, message },
+  });
+  throw new DispatchCommandError(message);
+}
+
 /** How the ad-hoc dispatch landed on its executor (`flag` = `--executor` bypass). */
 export type DispatchResolutionSource = RoleResolutionSource | 'flag';
 
@@ -138,6 +245,13 @@ export interface AdHocDispatchOptions {
   promptFile?: string | null;
   /** Prompt text — the CLI reads stdin into this when no `--prompt-file`. */
   prompt?: string | null;
+  /**
+   * Repeatable `--produced-by <dispatch-id>`: prior ad-hoc dispatches whose
+   * providers the distinctness predicate compares against. A missing or
+   * unreadable id becomes an unresolvable producer (`provider: null`); the
+   * predicate decides. Absent or empty means no inputs claimed.
+   */
+  producedBy?: readonly string[] | null;
   /**
    * `FADENO_LOADOUT` value; injectable for hermetic tests. `undefined` reads
    * the real environment; `null` means explicitly absent.
@@ -231,12 +345,14 @@ function loadProfileOrThrow(repoRoot: string, userPathOptions?: UserPathOptions)
 
 /**
  * One ad-hoc dispatch: resolve archetype → executor with the kernel chain
- * (per-role pin → active loadout slot → `"*"` default), invoke the command
- * adapter (or a host executor's explicit command fallback) with the prompt on
- * stdin, and append a `dispatch_requested` + `dispatch_completed` evidence row
- * pair to `.fadeno/dispatches.jsonl` (the request row lands before the spawn
- * so killed dispatches still leave a trace). `--executor` bypasses resolution
- * for debugging.
+ * (per-role pin → active loadout slot → `"*"` default), run the boundary
+ * predicates (write posture, eligibility, provider distinctness, constraint
+ * command), invoke the command adapter (or a host executor's explicit command
+ * fallback) with the prompt on stdin, and append a `dispatch_requested` +
+ * `dispatch_completed` evidence row pair to `.fadeno/dispatches.jsonl` (the
+ * request row lands before the spawn so killed dispatches still leave a
+ * trace). A boundary refusal writes one `dispatch_refused` row instead.
+ * `--executor` bypasses resolution for debugging.
  */
 export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const cwd = opts.cwd ?? process.cwd();
@@ -328,14 +444,6 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const command = spec.adapter === 'command' ? spec.command : spec.fallbackCommand!;
   const transport = spec.adapter === 'command' ? 'command' : 'host-command-fallback';
 
-  // Every dispatch that gets this far executes a command (`command` or
-  // `host-command-fallback`), so a mutating archetype delivered through a
-  // command that cannot mutate the workspace is a refusal waiting to happen:
-  // an expensive run that ends in "I can't write here". Catch it before the
-  // spawn. Undeclared on either side means no constraint.
-  const writeConflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile);
-  if (writeConflict != null) throw new DispatchCommandError(writeConflict);
-
   let prompt: string;
   let promptSource: 'stdin' | 'file';
   let promptPath: string | null = null;
@@ -353,7 +461,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     throw new DispatchCommandError('no prompt: pass --prompt-file <path> or pipe the prompt on stdin.');
   }
   if (prompt.trim().length === 0) {
-    // Refuse before invoking or recording: nothing was dispatched.
+    // Usage error, not a boundary refusal: nothing was dispatched.
     throw new DispatchCommandError(
       opts.promptFile != null && opts.promptFile !== ''
         ? `--prompt-file ${opts.promptFile} is empty — a dispatch needs a non-empty prompt.`
@@ -361,22 +469,14 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     );
   }
 
-  const sourceLabel =
-    source === 'flag' ? '--executor' : roleResolutionEchoLabel(source, active?.name ?? null);
-  const echo =
-    `${role ?? archetype ?? executorName} → ${executorName}` +
-    `${spec.model != null ? ` (${spec.model})` : ''} [${sourceLabel}]` +
-    // Proceeding onto a read-only delivery is legal (the archetype claims no
-    // write need) but worth saying out loud before the work starts.
-    (spec.writeAccess === false ? ' [write_access: none]' : '');
-  opts.onEcho?.(echo);
-  opts.onEcho?.(`external sandbox: ${executorName} (${command.join(' ')}) runs outside the current harness via ${transport}; evidence → ${DISPATCHES_FILE}`);
-
   // Two-row evidence: a request row lands BEFORE the spawn so a dispatch
   // killed mid-flight (harness timeout, SIGTERM) still leaves a trace —
   // spawnSync blocks the event loop, so nothing written afterwards can be
-  // relied on to exist. The completion row shares the request's dispatch_id.
+  // relied on to exist. A boundary refusal writes `dispatch_refused` instead
+  // of this pair, with the same identity. The completion row shares the
+  // request's dispatch_id.
   const dispatchId = randomUUID();
+  const now = opts.now ?? new Date();
 
   // The kernel owns the prompt snapshot for stdin dispatches: the single
   // writer means the recorded digest attests exactly the bytes received, and
@@ -398,10 +498,11 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     promptSnapshot = rel === '' || rel.startsWith('../') || isAbsolute(rel) ? promptPath! : rel;
   }
 
-  const relayAttested = consumePendingRelay(repoRoot, prompt, opts.now ?? new Date());
+  const relayAttested = consumePendingRelay(repoRoot, prompt, now);
 
   const promptSha256 = sha256Hex(prompt);
   const commandSha256 = sha256Hex(JSON.stringify(command));
+  const producers = lookupInputProducers(repoRoot, producedByIds(opts));
   const identity: Record<string, unknown> = {
     dispatch_id: dispatchId,
     archetype,
@@ -427,15 +528,87 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     ...(relayAttested != null ? { relay_attested: relayAttested } : {}),
     command,
     command_sha256: commandSha256,
+    ...(producers.length > 0 ? { input_provenance: provenanceFields(producers) } : {}),
   };
-  ensureFadenoIgnore(repoRoot);
-  mkdirSync(join(repoRoot, '.fadeno'), { recursive: true });
-  const evidenceFile = join(repoRoot, DISPATCHES_FILE);
-  appendFileSync(
-    evidenceFile,
-    `${JSON.stringify({ format: DISPATCHES_FORMAT, timestamp: (opts.now ?? new Date()).toISOString(), event: 'dispatch_requested', ...identity })}\n`,
-    'utf8',
+
+  // Boundary predicates, after write posture, before the spawn. Each hard
+  // refusal appends one `dispatch_refused` row (the request-point evidence)
+  // and throws; an advisory provider clash warns and continues.
+  const delivery = { executor: executorName, spec };
+  const writeConflict = explainWriteConflict(delivery, archetype, profile);
+  if (writeConflict != null) {
+    refuseDispatch(repoRoot, identity, 'write_posture', writeConflict, now);
+  }
+  const eligibilityConflict = explainEligibilityConflict(delivery, archetype);
+  if (eligibilityConflict != null) {
+    refuseDispatch(repoRoot, identity, 'eligibility', eligibilityConflict, now);
+  }
+  const providerConflict = explainProviderConflict(
+    archetype,
+    spec.provider ?? null,
+    producers,
+    profile,
   );
+  if (providerConflict != null && providerConflict.level === 'refuse') {
+    refuseDispatch(repoRoot, identity, 'provider_distinctness', providerConflict.message, now);
+  }
+
+  const constraintContext = {
+    archetype,
+    role,
+    executor: executorName,
+    target: spec.target ?? null,
+    provider: spec.provider ?? null,
+    model: spec.model,
+    transport: 'command',
+    write_access: spec.writeAccess,
+    write_posture: declaredWritePosture(profile, archetype),
+    active_loadout: active?.name ?? null,
+    overrides,
+    resolved_via: resolvedVia,
+    input_provenance: provenanceFields(producers),
+    harness: profile.harness ?? 'standalone',
+  } satisfies ConstraintContext;
+  let constraintVerdict;
+  try {
+    constraintVerdict = evaluateConstraint(profile, constraintContext, { cwd: repoRoot });
+  } catch (err) {
+    if (err instanceof ConstraintError) {
+      throw new DispatchCommandError(`constraint system error: ${err.message}`);
+    }
+    throw err;
+  }
+  if (constraintVerdict.verdict === 'refused') {
+    refuseDispatch(repoRoot, identity, 'constraint_command', constraintVerdict.reason, now);
+  }
+
+  // Proceeding-only stamps: requested+completed, omit-when-absent.
+  if (providerConflict != null && providerConflict.level === 'warn') {
+    opts.onEcho?.(providerConflict.message);
+    identity.provider_distinctness = 'warned';
+  }
+  if (eligibilityFor(spec, archetype) === 'shadow_only') {
+    identity.eligibility = 'shadow_only';
+    identity.gate_eligible = false;
+  }
+
+  const sourceLabel =
+    source === 'flag' ? '--executor' : roleResolutionEchoLabel(source, active?.name ?? null);
+  const echo =
+    `${role ?? archetype ?? executorName} → ${executorName}` +
+    `${spec.model != null ? ` (${spec.model})` : ''} [${sourceLabel}]` +
+    // Proceeding onto a read-only delivery is legal (the archetype claims no
+    // write need) but worth saying out loud before the work starts.
+    (spec.writeAccess === false ? ' [write_access: none]' : '');
+  opts.onEcho?.(echo);
+  opts.onEcho?.(`external sandbox: ${executorName} (${command.join(' ')}) runs outside the current harness via ${transport}; evidence → ${DISPATCHES_FILE}`);
+
+  appendEvidenceRow(repoRoot, {
+    format: DISPATCHES_FORMAT,
+    timestamp: now.toISOString(),
+    event: 'dispatch_requested',
+    ...identity,
+  });
 
   const started = Date.now();
   const [cmd, ...args] = command;
@@ -452,7 +625,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
 
   const row: Record<string, unknown> = {
     format: DISPATCHES_FORMAT,
-    timestamp: (opts.now ?? new Date()).toISOString(),
+    timestamp: now.toISOString(),
     event: 'dispatch_completed',
     ...identity,
     exit_code: spawned.error != null ? null : spawned.status,
@@ -461,7 +634,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     output_sha256: outputSha256,
   };
   if (spawned.error != null) row.error = spawned.error.message;
-  appendFileSync(evidenceFile, `${JSON.stringify(row)}\n`, 'utf8');
+  appendEvidenceRow(repoRoot, row);
 
   if (spawned.error != null) {
     throw new DispatchCommandError(

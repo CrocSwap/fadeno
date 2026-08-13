@@ -25,10 +25,11 @@ const KNOWN_FORMAT_MAJOR = DISPATCHES_FORMAT.split('.')[0]!;
 const OUTCOME_KEYS = ['exit_code', 'duration_ms', 'output_sha256', 'signal'];
 
 /**
- * One logical dispatch: either a correlated `dispatch_requested` /
- * `dispatch_completed` pair from the kernel (`kind: "command"`), or a single
- * `native_delivery` row from the Claude steering hook (`kind: "native"`),
- * which has no kernel downstream and therefore no completion row.
+ * One logical dispatch: a correlated `dispatch_requested` /
+ * `dispatch_completed` pair from the kernel (`kind: "command"`), a single
+ * `dispatch_refused` row (also `kind: "command"` — the refusal *is* the
+ * request-point evidence), or a single `native_delivery` row from the Claude
+ * steering hook (`kind: "native"`), which has no kernel downstream.
  */
 export interface DispatchEntry {
   kind: 'command' | 'native';
@@ -68,9 +69,18 @@ export interface DispatchEntry {
   relayAttested: boolean | null;
   writeAccess: boolean | null;
   /**
+   * Present on a `dispatch_refused` row. Null on every other kind.
+   */
+  refusal: { predicate: string; message: string } | null;
+  /**
+   * `false` when the row stamped `gate_eligible: false` (shadow_only).
+   * Null when the field is absent — absent is not a claim of eligible.
+   */
+  gateEligible: boolean | null;
+  /**
    * Whether an outcome was recorded. False on a command dispatch means the
    * process never reached its completion row — killed, or still in flight.
-   * Native deliveries record no outcome, so they are always false.
+   * Native deliveries and refusals record no outcome, so they are always false.
    */
   completed: boolean;
   exitCode: number | null;
@@ -168,6 +178,15 @@ function isLegacyCompletion(row: Record<string, unknown>): boolean {
   return OUTCOME_KEYS.some((key) => key in row);
 }
 
+function refusalOf(value: unknown): { predicate: string; message: string } | null {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const predicate = str(row.predicate);
+  const message = typeof row.message === 'string' ? row.message : null;
+  if (predicate == null || message == null) return null;
+  return { predicate, message };
+}
+
 function requestedEntry(row: Record<string, unknown>): DispatchEntry {
   const loadout = loadoutOf(row.loadout);
   return {
@@ -194,6 +213,8 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     promptSha256: str(row.prompt_sha256),
     relayAttested: bool(row.relay_attested),
     writeAccess: bool(row.write_access),
+    refusal: refusalOf(row.refusal),
+    gateEligible: row.gate_eligible === false ? false : null,
     completed: false,
     exitCode: null,
     signal: null,
@@ -229,6 +250,8 @@ function nativeEntry(row: Record<string, unknown>): DispatchEntry {
     promptSha256: str(row.prompt_sha256),
     relayAttested: null,
     writeAccess: null,
+    refusal: null,
+    gateEligible: null,
     completed: false,
     exitCode: null,
     signal: null,
@@ -252,6 +275,8 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
   entry.writeAccess = entry.writeAccess ?? bool(row.write_access);
   entry.model = entry.model ?? str(row.model);
   entry.executor = entry.executor ?? str(row.executor);
+  if (row.gate_eligible === false) entry.gateEligible = false;
+  if (entry.refusal == null) entry.refusal = refusalOf(row.refusal);
 }
 
 /**
@@ -297,7 +322,10 @@ export function renderDispatchLine(entry: DispatchEntry): string {
   if (entry.transport != null) parts.push(`via ${entry.transport}`);
 
   if (entry.kind === 'command') {
-    if (entry.completed) {
+    if (entry.refusal != null) {
+      parts.push(`[refused: ${entry.refusal.predicate}]`);
+      parts.push(entry.refusal.message);
+    } else if (entry.completed) {
       const code = `exit ${entry.exitCode ?? '?'}${entry.signal != null ? ` (${entry.signal})` : ''}`;
       parts.push(entry.durationMs != null ? `${code} in ${entry.durationMs}ms` : code);
     } else {
@@ -307,6 +335,7 @@ export function renderDispatchLine(entry: DispatchEntry): string {
 
   if (entry.relayAttested != null) parts.push(`[relay_attested: ${entry.relayAttested}]`);
   if (entry.writeAccess === false) parts.push('[write_access: none]');
+  if (entry.gateEligible === false) parts.push('[shadow-only]');
   if (entry.error != null) parts.push(`[error: ${excerpt(entry.error, ERROR_EXCERPT)}]`);
   if (entry.promptSnapshot != null) parts.push(entry.promptSnapshot);
   // Trailing, after the identity it qualifies: this row predates the versioned
@@ -343,8 +372,8 @@ function summarize(
 /**
  * Read `.fadeno/dispatches.jsonl` and answer "which executor actually ran
  * what?" — kernel `dispatch_requested`/`dispatch_completed` rows correlated by
- * `dispatch_id` into one logical entry each, plus the steering hook's
- * `native_delivery` rows. Order is append order (oldest → newest), never
+ * `dispatch_id` into one logical entry each, `dispatch_refused` rows as
+ * standalone command entries, plus the steering hook's `native_delivery` rows. Order is append order (oldest → newest), never
  * re-sorted by timestamp: a killed dispatch's request row is still where it
  * happened. A missing or empty log is a friendly answer, not an error, and
  * rows that cannot be read are counted rather than fatal — the log is
@@ -416,6 +445,10 @@ export function runDispatches(opts: DispatchesOptions = {}): DispatchesResult {
     }
     if (event === 'native_delivery') {
       entries.push(nativeEntry(row));
+      continue;
+    }
+    if (event === 'dispatch_refused') {
+      entries.push(requestedEntry(row));
       continue;
     }
     const dispatchId = str(row.dispatch_id);

@@ -4,6 +4,8 @@ import {
   applicableOverrides,
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
+  eligibilityFor,
+  explainEligibilityConflict,
   explainWriteConflict,
   loadExecutorProfile,
   LOADOUT_LOCAL_FILE,
@@ -13,6 +15,7 @@ import {
   resolveRole,
   writeLocalLoadoutState,
   type ActiveLoadout,
+  type EligibilityState,
   type ExecutorProfile,
   type LocalLoadoutState,
   type RoleResolutionSource,
@@ -41,6 +44,8 @@ export interface LoadoutEffectiveRow extends LoadoutSlotView {
   /** A session override, not the loadout's own slot, supplied `executor`. */
   overridden: boolean;
   baseExecutor: string | null;
+  /** Present when the resolved target is not fully eligible for this archetype. */
+  eligibility?: EligibilityState;
 }
 
 /** A pinned override whose target is no longer a declared executor. */
@@ -183,6 +188,7 @@ function effectiveRows(
     const baseExecutor = slots[archetype] ?? null;
     const executor = live[archetype] ?? baseExecutor!;
     const spec = profile.executors[executor]!;
+    const eligibility = eligibilityFor(spec, archetype);
     return {
       archetype,
       executor,
@@ -190,6 +196,7 @@ function effectiveRows(
       adapter: spec.adapter,
       overridden: live[archetype] != null,
       baseExecutor,
+      ...(eligibility !== 'eligible' ? { eligibility } : {}),
     };
   });
   return { rows, stale };
@@ -370,6 +377,8 @@ export function runLoadoutSet(
     const conflict = explainWriteConflict({ executor: target, spec }, archetype, profile);
     if (conflict != null) throw new LoadoutError(conflict);
   }
+  const eligibilityConflict = explainEligibilityConflict({ executor: target, spec }, archetype);
+  if (eligibilityConflict != null) throw new LoadoutError(eligibilityConflict);
 
   // Overrides belong to a base by name. A pin decorating some *other* loadout
   // cannot be merged into this one, so it is dropped — and reported, because a
@@ -418,6 +427,8 @@ export interface LoadoutResolveResult {
   override: boolean;
   /** Archetype whose binding fired when a fallback chain was walked. Absent on a direct bind. */
   resolved_via?: string;
+  /** Present when the resolved target is not fully eligible for this archetype. */
+  eligibility?: EligibilityState;
 }
 
 /** Structured, harness-relative slot resolution for host adapters and hooks. */
@@ -436,6 +447,7 @@ export function runLoadoutResolve(
       active.name,
       overrides,
     );
+    const eligibility = eligibilityFor(resolved.executor, opts.archetype);
     return {
       archetype: opts.archetype,
       active,
@@ -446,6 +458,7 @@ export function runLoadoutResolve(
       source: resolved.source,
       override: resolved.source === 'override',
       ...(resolved.resolvedVia != null ? { resolved_via: resolved.resolvedVia } : {}),
+      ...(eligibility !== 'eligible' ? { eligibility } : {}),
     };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new LoadoutError(err.message);
