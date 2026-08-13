@@ -331,7 +331,13 @@ test('dispatches: entries are structured data (what --json prints)', (t) => {
     signal: null,
     durationMs: 42,
     outputSha256: 'c'.repeat(64),
+    outputBytes: null,
     workspaceChanged: null,
+    shadow: false,
+    shadowSource: null,
+    primaryDispatchId: null,
+    diffSnapshot: null,
+    diffBytes: null,
     error: null,
   });
   assert.equal(payload.entries[1]!.kind, 'native');

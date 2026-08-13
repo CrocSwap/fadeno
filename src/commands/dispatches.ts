@@ -1,5 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { DISPATCHES_FILE, DISPATCHES_FORMAT } from './dispatch.ts';
@@ -95,6 +96,12 @@ export interface DispatchEntry {
    */
   workspaceChanged: boolean | null;
   error: string | null;
+  shadow: boolean;
+  primaryDispatchId: string | null;
+  shadowSource: string | null;
+  diffSnapshot: string | null;
+  diffBytes: number | null;
+  outputBytes: number | null;
 }
 
 export interface DispatchesOptions {
@@ -260,6 +267,12 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     outputSha256: null,
     workspaceChanged: null,
     error: null,
+    shadow: row.shadow === true,
+    primaryDispatchId: str(row.primary_dispatch_id),
+    shadowSource: str(row.shadow_source),
+    diffSnapshot: str(row.diff_snapshot),
+    diffBytes: num(row.diff_bytes),
+    outputBytes: num(row.output_bytes),
   };
 }
 
@@ -298,6 +311,12 @@ function nativeEntry(row: Record<string, unknown>): DispatchEntry {
     outputSha256: null,
     workspaceChanged: null,
     error: null,
+    shadow: false,
+    primaryDispatchId: null,
+    shadowSource: null,
+    diffSnapshot: null,
+    diffBytes: null,
+    outputBytes: null,
   };
 }
 
@@ -320,6 +339,16 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
   entry.executor = entry.executor ?? str(row.executor);
   if (row.gate_eligible === false) entry.gateEligible = false;
   if (entry.refusal == null) entry.refusal = refusalOf(row.refusal);
+  // Shadow and output fields may arrive on either row; completion wins where
+  // request was silent, mirroring the identity fallback above.
+  if (row.shadow === true) entry.shadow = true;
+  entry.primaryDispatchId = entry.primaryDispatchId ?? str(row.primary_dispatch_id);
+  entry.shadowSource = entry.shadowSource ?? str(row.shadow_source);
+  entry.diffSnapshot = entry.diffSnapshot ?? str(row.diff_snapshot);
+  const db = num(row.diff_bytes);
+  if (db != null) entry.diffBytes = db;
+  const ob = num(row.output_bytes);
+  if (ob != null) entry.outputBytes = ob;
 }
 
 /**
@@ -363,6 +392,10 @@ export function renderDispatchLine(entry: DispatchEntry): string {
     `${who} → ${entry.executor ?? '(unresolved)'}${model != null ? ` (${model})` : ''}`,
   );
   if (entry.transport != null) parts.push(`via ${entry.transport}`);
+  if (entry.shadow) {
+    const pid8 = entry.primaryDispatchId ? entry.primaryDispatchId.slice(0, 8) : '?';
+    parts.push(`[shadow of ${pid8}]`);
+  }
 
   if (entry.kind === 'command') {
     if (entry.refusal != null) {
@@ -377,7 +410,8 @@ export function renderDispatchLine(entry: DispatchEntry): string {
       if (
         entry.exitCode === 0 &&
         entry.writeAccess === true &&
-        entry.workspaceChanged === false
+        entry.workspaceChanged === false &&
+        !entry.shadow
       ) {
         parts.push('[no workspace change]');
       }
@@ -669,3 +703,356 @@ export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOu
       : 'mismatch';
   return { dispatchId: rec.dispatchId, path: snapshotRel, bytes, attested };
 }
+
+// ---------------------------------------------------------------------------
+// Comparisons (shadow pairs + ModelComparison artifacts)
+// ---------------------------------------------------------------------------
+
+export const COMPARISONS_DIR = join('.fadeno', 'comparisons');
+
+export interface DispatchComparisonPair {
+  primaryId: string | null;
+  shadowId: string | null;
+  primaryDispatchId: string | null;
+  archetype: string | null;
+  primary: {
+    dispatchId: string | null;
+    executor: string | null;
+    model: string | null;
+    exitCode: number | null;
+    outputBytes: number | null;
+    promptSha256: string | null;
+  };
+  shadow: {
+    dispatchId: string | null;
+    executor: string | null;
+    model: string | null;
+    exitCode: number | null;
+    outputBytes: number | null;
+    diffBytes: number | null;
+    diffSnapshot: string | null;
+    promptSha256: string | null;
+  };
+  promptShaMismatch: boolean;
+  orphan: boolean;
+}
+
+export interface ModelComparisonArtifact {
+  file: string;
+  baseline: string | null;
+  challenger: string | null;
+  verdict: string | null;
+  date: string | null;
+  dispatchIds: string[] | null;
+  valid: boolean;
+  error?: string;
+}
+
+export interface DispatchComparisonGroup {
+  challenger: string;
+  pairs: DispatchComparisonPair[];
+  comparisons: ModelComparisonArtifact[];
+  tally: {
+    pairs: number;
+    comparisons: number;
+    preferChallenger: number;
+    preferBaseline: number;
+    tieOrInconclusive: number;
+  };
+}
+
+export interface DispatchesComparisonsOptions {
+  cwd?: string;
+  repoRoot?: string;
+}
+
+export interface DispatchesComparisonsResult {
+  repoRoot: string;
+  path: string;
+  comparisonsDir: string;
+  totalPairs: number;
+  totalComparisons: number;
+  skippedComparisons: number;
+  skipped: number;
+  skippedNewerFormat: number;
+  groups: DispatchComparisonGroup[];
+  lines: string[];
+  summary: string;
+}
+
+function loadAllEntries(absolute: string): {
+  entries: DispatchEntry[];
+  skipped: number;
+  skippedNewerFormat: number;
+} {
+  const entries: DispatchEntry[] = [];
+  const byDispatchId = new Map<string, DispatchEntry>();
+  let skipped = 0;
+  let skippedNewerFormat = 0;
+  if (!existsSync(absolute)) return { entries, skipped, skippedNewerFormat };
+  for (const line of readFileSync(absolute, 'utf8').split('\n')) {
+    if (line.trim() === '') continue;
+    let row: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(line) as unknown;
+      if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+      row = parsed as Record<string, unknown>;
+    } catch {
+      skipped += 1;
+      continue;
+    }
+    const tier = formatTier(row.format);
+    if (tier === 'newer') {
+      skippedNewerFormat += 1;
+      continue;
+    }
+    const event = str(row.event);
+    if (tier === 'unversioned' && event == null && isLegacyCompletion(row)) {
+      entries.push(legacyEntry(row));
+      continue;
+    }
+    if (event === 'native_delivery') {
+      entries.push(nativeEntry(row));
+      continue;
+    }
+    if (event === 'dispatch_refused') {
+      entries.push(requestedEntry(row));
+      continue;
+    }
+    const dispatchId = str(row.dispatch_id);
+    if ((event === 'dispatch_requested' || event === 'dispatch_completed') && dispatchId == null) {
+      skipped += 1;
+      continue;
+    }
+    if (event === 'dispatch_requested') {
+      const entry = requestedEntry(row);
+      entries.push(entry);
+      byDispatchId.set(dispatchId!, entry);
+      continue;
+    }
+    if (event === 'dispatch_completed') {
+      const open = byDispatchId.get(dispatchId!);
+      if (open != null) {
+        applyCompletion(open, row);
+      } else {
+        const entry = requestedEntry(row);
+        applyCompletion(entry, row);
+        entries.push(entry);
+        byDispatchId.set(dispatchId!, entry);
+      }
+      continue;
+    }
+    skipped += 1;
+  }
+  return { entries, skipped, skippedNewerFormat };
+}
+
+function parseModelComparisonFile(repoRoot: string, relPath: string): ModelComparisonArtifact {
+  const abs = join(repoRoot, relPath);
+  let content: string;
+  try {
+    content = readFileSync(abs, 'utf8');
+  } catch {
+    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, valid: false, error: 'unreadable' };
+  }
+  const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n/);
+  if (!match) {
+    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, valid: false, error: 'missing frontmatter' };
+  }
+  const frontmatterText = match[1]!;
+  let data: Record<string, unknown>;
+  try {
+    const parsed = parseYaml(frontmatterText) as unknown;
+    if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+    data = parsed as Record<string, unknown>;
+  } catch {
+    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, valid: false, error: 'invalid yaml' };
+  }
+  const kind = str(data.kind);
+  const baseline = str(data.baseline);
+  const challenger = str(data.challenger);
+  const verdict = str(data.verdict);
+  const date = str(data.date);
+  const dispatchIdsRaw = data.dispatch_ids;
+  let dispatchIds: string[] | null = null;
+  if (Array.isArray(dispatchIdsRaw)) dispatchIds = dispatchIdsRaw.filter((v): v is string => typeof v === 'string' && v !== '');
+  const valid = kind === 'ModelComparison' && baseline != null && challenger != null && verdict != null && date != null;
+  const body = content.slice(match[0].length);
+  const hasCriteria = /^##\s+Criteria/m.test(body);
+  const hasConfounds = /^##\s+Confounds/m.test(body);
+  if (!hasCriteria || !hasConfounds) {
+    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: 'missing required sections' };
+  }
+  if (!valid) return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: 'invalid frontmatter' };
+  const allowedVerdicts = new Set(['prefer_baseline', 'prefer_challenger', 'tie', 'inconclusive']);
+  if (!allowedVerdicts.has(verdict!)) {
+    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: 'invalid verdict' };
+  }
+  return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: true };
+}
+
+function scanComparisons(repoRoot: string, dirRel: string): { artifacts: ModelComparisonArtifact[]; skipped: number } {
+  const abs = join(repoRoot, dirRel);
+  if (!existsSync(abs)) return { artifacts: [], skipped: 0 };
+  let files: string[];
+  try {
+    files = readdirSync(abs).filter((f) => f.endsWith('.md')).sort();
+  } catch {
+    return { artifacts: [], skipped: 0 };
+  }
+  const artifacts: ModelComparisonArtifact[] = [];
+  let skipped = 0;
+  for (const file of files) {
+    const rel = join(dirRel, file).split('\\').join('/');
+    const artifact = parseModelComparisonFile(repoRoot, rel);
+    if (!artifact.valid) skipped += 1;
+    artifacts.push(artifact);
+  }
+  return { artifacts, skipped };
+}
+
+function formatComparisonPair(pair: DispatchComparisonPair): string {
+  const primaryId8 = pair.primaryId ? pair.primaryId.slice(0, 8) : '?';
+  const shadowId8 = pair.shadowId ? pair.shadowId.slice(0, 8) : '?';
+  const arch = pair.archetype ?? '(none)';
+  const primaryInfo = `${pair.primary.executor ?? '(unresolved)'} (${pair.primary.model ?? '?'}) exit ${pair.primary.exitCode ?? '?'} output ${pair.primary.outputBytes ?? '?'} bytes`;
+  const shadowInfo = `${pair.shadow.executor ?? '(unresolved)'} (${pair.shadow.model ?? '?'}) exit ${pair.shadow.exitCode ?? '?'} output ${pair.shadow.outputBytes ?? '?'} bytes diff ${pair.shadow.diffBytes ?? '?'} bytes`;
+  const mismatch = pair.promptShaMismatch ? '  PROMPT SHA MISMATCH' : '';
+  const orphan = pair.orphan ? '  [orphan: primary missing]' : '';
+  return `${primaryId8} → ${shadowId8}  ${arch}  primary ${primaryInfo}  vs shadow ${shadowInfo}${mismatch}${orphan}`;
+}
+
+function formatComparisonArtifact(artifact: ModelComparisonArtifact): string {
+  const verdict = artifact.verdict ?? '?';
+  const baseline = artifact.baseline ?? '?';
+  const challenger = artifact.challenger ?? '?';
+  const date = artifact.date ?? '?';
+  if (!artifact.valid) return `${artifact.file}: invalid (${artifact.error ?? 'unknown'})`;
+  return `${artifact.file}: ${verdict} (baseline ${baseline} vs challenger ${challenger} on ${date})`;
+}
+
+export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}): DispatchesComparisonsResult {
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const path = DISPATCHES_FILE.split('\\').join('/');
+  const comparisonsDir = COMPARISONS_DIR.split('\\').join('/');
+  const absolute = join(repoRoot, DISPATCHES_FILE);
+  const { entries, skipped, skippedNewerFormat } = loadAllEntries(absolute);
+
+  const primaryById = new Map<string, DispatchEntry>();
+  for (const entry of entries) {
+    if (!entry.shadow && entry.dispatchId) primaryById.set(entry.dispatchId, entry);
+  }
+
+  const pairs: DispatchComparisonPair[] = [];
+  for (const entry of entries) {
+    if (!entry.shadow) continue;
+    const shadowId = entry.dispatchId;
+    const primaryId = entry.primaryDispatchId;
+    const primary = primaryId ? primaryById.get(primaryId) ?? null : null;
+    const orphan = primary == null;
+    const promptShaMismatch = !orphan && entry.promptSha256 != null && primary!.promptSha256 != null && entry.promptSha256 !== primary!.promptSha256;
+    pairs.push({
+      primaryId: primary?.dispatchId ?? primaryId,
+      shadowId,
+      primaryDispatchId: primaryId,
+      archetype: entry.archetype ?? primary?.archetype ?? null,
+      primary: {
+        dispatchId: primary?.dispatchId ?? primaryId,
+        executor: primary?.executor ?? null,
+        model: primary?.model ?? null,
+        exitCode: primary?.exitCode ?? null,
+        outputBytes: primary?.outputBytes ?? null,
+        promptSha256: primary?.promptSha256 ?? null,
+      },
+      shadow: {
+        dispatchId: shadowId,
+        executor: entry.executor,
+        model: entry.model,
+        exitCode: entry.exitCode,
+        outputBytes: entry.outputBytes,
+        diffBytes: entry.diffBytes,
+        diffSnapshot: entry.diffSnapshot,
+        promptSha256: entry.promptSha256,
+      },
+      promptShaMismatch: Boolean(promptShaMismatch),
+      orphan,
+    });
+  }
+
+  const { artifacts, skipped: skippedComparisons } = scanComparisons(repoRoot, comparisonsDir);
+
+  const challengers = new Set<string>();
+  for (const p of pairs) {
+    const name = p.shadow.executor ?? '(unknown)';
+    challengers.add(name);
+  }
+  for (const a of artifacts) {
+    if (a.challenger) challengers.add(a.challenger);
+  }
+
+  const sortedChallengers = [...challengers].sort();
+
+  const groups: DispatchComparisonGroup[] = [];
+  for (const challenger of sortedChallengers) {
+    const groupPairs = pairs.filter((p) => (p.shadow.executor ?? '(unknown)') === challenger);
+    const groupComparisons = artifacts.filter((a) => a.challenger === challenger);
+    const preferChallenger = groupComparisons.filter((a) => a.valid && a.verdict === 'prefer_challenger').length;
+    const preferBaseline = groupComparisons.filter((a) => a.valid && a.verdict === 'prefer_baseline').length;
+    const tieOrInconclusive = groupComparisons.filter((a) => a.valid && (a.verdict === 'tie' || a.verdict === 'inconclusive')).length;
+    groups.push({
+      challenger,
+      pairs: groupPairs,
+      comparisons: groupComparisons,
+      tally: {
+        pairs: groupPairs.length,
+        comparisons: groupComparisons.filter((a) => a.valid).length,
+        preferChallenger,
+        preferBaseline,
+        tieOrInconclusive,
+      },
+    });
+  }
+
+  const totalPairs = pairs.length;
+  const totalComparisons = artifacts.filter((a) => a.valid).length;
+
+  const lines: string[] = [];
+  if (totalPairs === 0 && totalComparisons === 0) {
+    lines.push(`No shadow pairs recorded in ${path}.`);
+    if (!existsSync(join(repoRoot, comparisonsDir))) {
+      lines.push(`No comparisons found in ${comparisonsDir} (missing).`);
+    } else if (artifacts.length === 0) {
+      lines.push(`No ModelComparison artifacts in ${comparisonsDir}.`);
+    }
+  } else {
+    for (const group of groups) {
+      lines.push(`challenger ${group.challenger}: ${group.tally.pairs} pairs, ${group.tally.comparisons} comparisons: ${group.tally.preferChallenger} prefer_challenger / ${group.tally.preferBaseline} prefer_baseline / ${group.tally.tieOrInconclusive} tie/inconclusive`);
+      for (const pair of group.pairs) {
+        lines.push(`  ${formatComparisonPair(pair)}`);
+      }
+      for (const comp of group.comparisons) {
+        lines.push(`  ${formatComparisonArtifact(comp)}`);
+      }
+    }
+  }
+
+  const summary = totalPairs === 0 && totalComparisons === 0
+    ? `No comparisons to show (${path})`
+    : `${totalPairs} shadow pair${totalPairs === 1 ? '' : 's'}, ${totalComparisons} comparison${totalComparisons === 1 ? '' : 's'} across ${groups.length} challenger${groups.length === 1 ? '' : 's'}`;
+
+  return {
+    repoRoot,
+    path,
+    comparisonsDir,
+    totalPairs,
+    totalComparisons,
+    skippedComparisons,
+    skipped,
+    skippedNewerFormat,
+    groups,
+    lines,
+    summary,
+  };
+}
+

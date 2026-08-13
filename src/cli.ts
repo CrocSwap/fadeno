@@ -11,16 +11,24 @@ import {
   runDispatchProgress,
   runDispatchStart,
 } from './commands/dispatch.ts';
-import { runDispatches, runDispatchesOutput, type DispatchesResult } from './commands/dispatches.ts';
+import {
+  runDispatches,
+  runDispatchesComparisons,
+  runDispatchesOutput,
+  type DispatchesResult,
+} from './commands/dispatches.ts';
 import { runDiagram } from './commands/diagram.ts';
 import { runDrive, type DriveResult } from './commands/drive.ts';
 import { runGate } from './commands/gate.ts';
 import { runInit, type Target } from './commands/init.ts';
 import {
+  formatShadowLine,
   runLoadoutClear,
+  runLoadoutClearShadow,
   runLoadoutList,
   runLoadoutResolve,
   runLoadoutSet,
+  runLoadoutShadow,
   runLoadoutShow,
   runLoadoutUse,
   type LoadoutEffectiveRow,
@@ -28,6 +36,7 @@ import {
   type LoadoutShowResult,
   type LoadoutSlotView,
   type StaleOverrideView,
+  type StaleShadowView,
 } from './commands/loadout.ts';
 import { runNewRun } from './commands/new-run.ts';
 import { runCodexPlugin, runPlugin } from './commands/plugin.ts';
@@ -79,8 +88,11 @@ Usage:
   fadeno loadout [list|resolve|use|set|clear] Show, resolve, pin, or clear the active loadout
   fadeno loadout set <archetype> <target> Override one archetype on top of the active loadout
   fadeno loadout clear [archetype]      Drop the whole pin, or one session override
+  fadeno loadout shadow <archetype> <executor> [--rate n]  Attach a shadow challenger to one slot
+  fadeno loadout clear-shadow [archetype]  Drop one shadow attachment, or all of them
   fadeno steering resolve|apply [...]   Resolve or materialize hybrid Codex steering
   fadeno dispatch [flags]               Resolve archetype → executor and invoke it once (ad hoc)
+                                        (--shadow <executor> duplicates it to a one-shot challenger)
   fadeno dispatch-fallback <run> <id>   Deliver a locked host request by declared fallback
   fadeno dispatch-start <run> <id>      Start a native host dispatch
   fadeno dispatch-progress <run> <id>   Record an attested progress observation
@@ -96,6 +108,7 @@ Usage:
   fadeno runs                           List run ledgers under .fadeno/runs/
   fadeno dispatches [--tail n] [--json] Show which executor ran what (.fadeno/dispatches.jsonl)
   fadeno dispatches --output <id|last>  Print a dispatch's streamed output snapshot verbatim
+  fadeno dispatches --comparisons       Paired primary/shadow scorecard per challenger
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic claims (or --latest)
   fadeno plugin [dir] [--codex]         Generate a Claude Code (default) or Codex plugin
@@ -554,6 +567,8 @@ function printSlots(slots: Array<LoadoutSlotView & Partial<LoadoutEffectiveRow>>
         ? '  FORBIDDEN (refused at dispatch)'
         : '';
     console.log(`${indent}${slot.archetype.padEnd(width)} → ${slot.executor}${model} [${slot.adapter}]${override}${eligibility}`);
+    // A shadow rides directly under its slot: session state, never a gate.
+    if (slot.shadow != null) console.log(formatShadowLine(slot.shadow, indent));
   }
 }
 
@@ -564,6 +579,17 @@ function printStaleOverrides(stale: StaleOverrideView[]): void {
       `warning: session override ${item.archetype}→${item.target} names an executor that is no longer ` +
         `declared — run \`fadeno loadout set ${item.archetype} <executor>\` or ` +
         `\`fadeno loadout clear ${item.archetype}\`; the override is ignored below.`,
+    );
+  }
+}
+
+/** Shadow attachments naming executors the profile no longer declares. */
+function printStaleShadows(stale: StaleShadowView[]): void {
+  for (const item of stale) {
+    console.error(
+      `warning: shadow attachment ${item.archetype}~${item.target} names an executor that is no longer ` +
+        `declared — run \`fadeno loadout shadow ${item.archetype} <executor>\` or ` +
+        `\`fadeno loadout clear-shadow ${item.archetype}\`; the attachment is ignored below.`,
     );
   }
 }
@@ -587,13 +613,16 @@ function printStalePin(stalePin: string | null): void {
 function printLoadoutShow(result: LoadoutShowResult): void {
   printStalePin(result.stalePin);
   printStaleOverrides(result.staleOverrides);
+  printStaleShadows(result.staleShadows);
   if (result.active == null) {
     console.log('no active loadout (no --loadout, FADENO_LOADOUT, .fadeno/local/loadout, or default_loadout)');
   } else {
     const overrides = Object.keys(result.overrides).length;
+    const shadows = Object.keys(result.shadow_attachments).length;
     console.log(
       `active loadout: ${result.active.name} (via ${LOADOUT_SOURCE_TEXT[result.active.source]})` +
-        (overrides > 0 ? ` +${overrides} session override(s)` : ''),
+        (overrides > 0 ? ` +${overrides} session override(s)` : '') +
+        (shadows > 0 ? ` +${shadows} shadow attachment(s)` : ''),
     );
     printSlots(result.slots, '  ');
   }
@@ -609,6 +638,7 @@ function printLoadoutShow(result: LoadoutShowResult): void {
 function printLoadoutList(result: LoadoutListResult): void {
   printStalePin(result.stalePin);
   printStaleOverrides(result.staleOverrides);
+  printStaleShadows(result.staleShadows);
   if (result.loadouts.length === 0) {
     console.log('No loadouts declared (add a `loadouts:` mapping to .fadeno/executors.yaml).');
     return;
@@ -619,6 +649,8 @@ function printLoadoutList(result: LoadoutListResult): void {
       notes.push(`active via ${LOADOUT_SOURCE_TEXT[result.active.source]}`);
       const overrideCount = Object.keys(result.overrides).length;
       if (overrideCount > 0) notes.push(`${overrideCount} session override(s)`);
+      const shadowCount = Object.keys(result.shadow_attachments).length;
+      if (shadowCount > 0) notes.push(`${shadowCount} shadow attachment(s)`);
     }
     if (loadout.isDefault) notes.push('default');
     const marker = loadout.isActive ? '*' : ' ';
@@ -761,6 +793,9 @@ function main(argv: string[]): number {
         'dispatch-id': { type: 'string' },
         'prompt-file': { type: 'string' },
         tail: { type: 'string' },
+        rate: { type: 'string' },
+        shadow: { type: 'string' },
+        comparisons: { type: 'boolean' },
         json: { type: 'boolean' },
         'agent-id': { type: 'string' },
         workspace: { type: 'string' },
@@ -1245,6 +1280,13 @@ function main(argv: string[]): number {
                 'selecting a base drops the overlay — re-dial with `fadeno loadout set <archetype> <executor>`.',
             );
           }
+          const droppedShadows = Object.keys(result.droppedShadows).length;
+          if (droppedShadows > 0) {
+            console.log(
+              `  dropped ${droppedShadows} shadow attachment(s); ` +
+                're-attach with `fadeno loadout shadow <archetype> <executor>`.',
+            );
+          }
           // Summarize the name just pinned, independent of FADENO_LOADOUT's
           // higher-precedence value in the current shell.
           const selected = runLoadoutShow({ loadout: result.name, env: null });
@@ -1311,10 +1353,65 @@ function main(argv: string[]): number {
           );
           return 0;
         }
+        case 'shadow': {
+          const [, , archetype, executor] = positionals;
+          if (!archetype || !executor) {
+            throw new Error('Usage: fadeno loadout shadow <archetype> <executor> [--rate <0..1>]');
+          }
+          const result = runLoadoutShadow({ archetype, executor, rate: values.rate, loadout: values.loadout });
+          if (values.json) {
+            console.log(JSON.stringify(result, null, 2));
+            return 0;
+          }
+          const rate = result.rate != null ? ` (rate ${result.rate})` : '';
+          console.log(
+            `shadow attached: ${result.archetype} ~ ${result.executor}${rate} ` +
+              `(over loadout ${result.loadout}) → .fadeno/local/loadout`,
+          );
+          if (result.previous != null) {
+            const prevRate = result.previous.rate != null ? ` rate ${result.previous.rate}` : '';
+            console.log(`  (was ${result.previous.executor}${prevRate})`);
+          }
+          if (result.droppedBase != null) {
+            const droppedCount =
+              Object.keys(result.droppedOverrides).length + Object.keys(result.droppedShadows).length;
+            console.log(
+              `  dropped ${droppedCount} session item(s) pinned over "${result.droppedBase}"; ` +
+                'overlays belong to one base.',
+            );
+          }
+          console.log(
+            '  each matching dispatch is duplicated to the shadow in an isolated worktree; it never gates.',
+          );
+          return 0;
+        }
+        case 'clear-shadow': {
+          const archetype = positionals[2] ?? null;
+          const result = runLoadoutClearShadow({ archetype });
+          if (values.json) {
+            console.log(JSON.stringify(result, null, 2));
+            return 0;
+          }
+          if (result.archetype == null) {
+            console.log(
+              result.removed
+                ? `cleared ${result.count} shadow attachment(s)`
+                : 'no shadow attachments to clear (.fadeno/local/loadout)',
+            );
+            return 0;
+          }
+          const remaining = Object.keys(result.shadows).length;
+          console.log(
+            `cleared shadow attachment: ${result.archetype} (was ${result.cleared!.executor}); ` +
+              `loadout ${result.loadout} keeps ${remaining} attachment(s)`,
+          );
+          return 0;
+        }
         default:
           throw new Error(
             `Unknown loadout subcommand "${sub}". Usage: fadeno loadout ` +
-              '[list | resolve --archetype <a> | use <name> | set <archetype> <executor> | clear [archetype]]',
+              '[list | resolve --archetype <a> | use <name> | set <archetype> <executor> | clear [archetype] | ' +
+              'shadow <archetype> <executor> [--rate <n>] | clear-shadow [archetype]]',
           );
       }
     }
@@ -1325,6 +1422,7 @@ function main(argv: string[]): number {
         role: values.role,
         loadout: values.loadout,
         executor: values.executor,
+        shadow: values.shadow,
         promptFile,
         // Prompt defaults to stdin; the echo goes to stderr so stdout stays
         // the executor's pure report.
@@ -1425,6 +1523,15 @@ function main(argv: string[]): number {
       return 0;
     }
     case 'dispatches': {
+      if (values.comparisons) {
+        const result = runDispatchesComparisons({});
+        if (values.json) {
+          console.log(JSON.stringify(result, null, 2));
+          return 0;
+        }
+        for (const line of result.lines) console.log(line);
+        return 0;
+      }
       if (values.output != null) {
         const result = runDispatchesOutput({ dispatchId: values.output });
         // stdout carries the snapshot bytes verbatim (relay-safe); the
