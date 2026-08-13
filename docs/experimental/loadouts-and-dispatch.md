@@ -32,9 +32,11 @@ client of it; ad-hoc subagent dispatch is the second.
 
 ## Vocabulary
 
-- **Archetype** — the functional class of an actor: `worker`, `reviewer`,
-  `judge` are the seeded three (matching the plugin's existing role-subagent
-  trichotomy). Open set; bare lowercase identifiers.
+- **Archetype** — the functional class of an actor. `worker`, `reviewer`,
+  and `judge` are the original three (matching the plugin's role-subagent
+  trichotomy); `generator` is the fourth canon — write-forbidden, no
+  dedicated surface, served through `fallback: worker`. Open set; bare
+  lowercase identifiers. See *Archetype policy*.
 - **Target** — the harness-neutral identity of an actor's inference: provider,
   model, reasoning effort. No argv, no flags. This is what a loadout slot
   names.
@@ -80,7 +82,8 @@ routes:                           # how the active harness delivers each provide
       write_access: true
 
 archetypes:                       # what an archetype needs from any delivery
-  worker: { requires_write: true }
+  worker:    { requires_write: required }
+  generator: { requires_write: forbidden, fallback: worker }
 
 loadouts:                         # the switchable unit: archetype → target
   native: { worker: current-host, reviewer: current-host, judge: current-host }
@@ -136,9 +139,12 @@ A route entry declares:
   describes its fallback command, never the in-session agent.
 
 **Archetypes.** `archetypes:` is an optional top-level mapping whose values
-accept exactly one key, `requires_write: boolean`. Deliberately strict: an
-unknown key is an error, because the alternative is a typo that silently drops
-a safety constraint.
+accept exactly two keys, `requires_write` and `fallback`. `requires_write` is
+`required` | `forbidden` | `none` (booleans alias: `true` → `required`,
+`false` → `none`); absent is `none`. `fallback` is a bare identifier naming
+another archetype whose *binding* is used when this one has no slot. Deliberately
+strict: an unknown key is an error, because the alternative is a typo that
+silently drops a safety constraint. See *Archetype policy*.
 
 **Loadouts and bindings.** Loadout names and archetype keys are bare
 identifiers (`[a-z][a-z0-9_-]*`); every loadout slot must name a declared
@@ -190,6 +196,11 @@ For each role, at dispatch time:
 4. `bindings["*"]`;
 5. otherwise a hard, actionable error naming the role, its archetype, and
    what to add.
+
+When the declared archetype has a `fallback`, steps 2–3 re-enter along that
+chain — override, then loadout slot, at each step — before falling through
+to `bindings["*"]`. The chain selects a binding only; a row bound this way
+carries `resolved_via`. See *Archetype policy*.
 
 The **active loadout** is resolved: explicit `--loadout` → run-persisted intent
 → `FADENO_LOADOUT` → `.fadeno/local/loadout` → user state
@@ -246,7 +257,7 @@ routes:
       write_access: true
 
 archetypes:
-  worker: { requires_write: true }
+  worker: { requires_write: required }
 ```
 
 `write_access` is a property of a **route entry** and describes that route's
@@ -254,12 +265,14 @@ archetypes:
 workspace. On a native route it therefore describes the fallback command, never
 the in-session agent, whose permissions are the host's business. (A v1
 `executors:` entry accepts the same key, with the same meaning.) `archetypes:`
-is an optional top-level mapping; its values accept exactly one key,
-`requires_write: boolean`.
+is an optional top-level mapping; its values accept `requires_write` (three
+postures; booleans alias) and `fallback`. See *Archetype policy*.
 
 Ad-hoc dispatch refuses **before spawning** when the executing command route
 declares `write_access: false` and the archetype declares
-`requires_write: true`. Either side undeclared is no constraint at all, so
+`requires_write: required` (boolean `true` still aliases). The inverse —
+`requires_write: forbidden` onto `write_access: true` — is the same helper,
+the same refusal moment. Either side undeclared is no constraint at all, so
 every profile written before this field keeps dispatching exactly as it did.
 When it is declared, `write_access` lands in the evidence-row identity (so both
 the request and completion rows carry it), and a dispatch that proceeds on a
@@ -293,6 +306,66 @@ work*. The same catalog already carried the distinction one line away — the
 grok route passes `--permission-mode acceptEdits` explicitly — but only inside
 argv, where no check can read it. `write_access` promotes that from a string
 nobody parses to a declaration the kernel can refuse on.
+
+## Archetype policy
+
+`archetypes:` is an optional top-level mapping. Each entry accepts exactly two
+keys — `requires_write` and `fallback` — and an unknown key is an error, so a
+typo cannot silently drop a safety constraint.
+
+**Write posture.** `requires_write` is three-valued: `required`, `forbidden`,
+or `none`. Booleans remain accepted as aliases (`true` → `required`,
+`false` → `none`) so catalogs written before the triad keep parsing.
+Absent `requires_write` is `none`. The posture is read from the *declared*
+archetype only; a fallback chain never imports another archetype's policy.
+
+**Enforcement is asymmetric.** On a command route, the kernel refuses the
+mismatches (`required` × `write_access: false`, `forbidden` ×
+`write_access: true`) at every point that can choose a command delivery:
+the dispatch boundary (`dispatch`, `drive`, `steering resolve`/`apply`) and
+at dial time (`fadeno loadout set`). On a native in-session delivery the
+posture is advisory only — it rides as a prompt instruction and as evidence
+on the `native_delivery` row — because the host owns the session's
+permissions. Either side undeclared is no constraint.
+
+**`generator` is the fourth canonical archetype**, and the only addition to
+the seeded triad. Canon is earned by a kernel-enforceable policy: generators
+do divergent, artifact-producing work that must not mutate the workspace
+(`requires_write: forbidden`), and they misroute today as worker-shaped
+cognition onto write-capable routes. The starter catalog ships:
+
+```yaml
+archetypes:
+  worker:
+    requires_write: required
+  generator:
+    requires_write: forbidden
+    fallback: worker
+```
+
+No loadout grows a `generator` slot — the fallback serves every existing
+loadout. There is no `fadeno:generator` native agent or dispatch proxy;
+native delivery walks the chain to the worker surface and carries the
+write-forbidden instruction in the prompt. Dedicated surfaces wait on
+traffic.
+
+**Fallback chains** select a *binding*, never a policy. Resolution walks the
+declared archetype, then its `fallback`, then that one's fallback, …; at
+each step it tries the session override, then the active loadout slot. An
+archetype without a slot therefore resolves through its fallback's binding.
+Chains among declared archetypes must be acyclic (validated at parse); an
+undeclared fallback name is a legal end-node (it may still hold a slot).
+Overrides beat fallbacks because the cascade re-enters per chain step —
+`fadeno loadout set generator grok-default` binds generator directly.
+Canonical archetypes may declare fallbacks (`generator` → `worker` above);
+the mechanism is uniform.
+
+**Evidence.** A row bound through a fallback chain carries `resolved_via`
+naming the chain archetype that bound (absent when the declared archetype
+bound directly). Rows that carry the new field are stamped `format: "0.2"` —
+additive, same major as `format: "0.1"`; old rows still read. Isolated-delivery
+preference (sandbox or worktree instead of refusal) is deferred to route
+operational policy.
 
 ## CLI
 
@@ -345,7 +418,10 @@ opus_reviewer → claude-default (opus) [binding]
   executor was chosen: `binding` | `loadout` | `fallback` | `executor-flag`;
   and the file is per-machine evidence, gitignored by scaffolding — auditable
   locally, never committed, mirroring the `.fadeno/local/` rationale.) Rows
-  are stamped `format: "0.1"`. The reader treats unversioned rows that carry
+  are stamped `format: "0.1"`. Newer rows are stamped `format: "0.2"` — same
+  major, additive fields (`resolved_via` on a fallback-chain bind, plus the
+  override field from session dials) — and old rows still read as current.
+  The reader treats unversioned rows that carry
   a recognized `event` as current, renders pre-two-row completion-only rows
   as `[legacy]` entries instead of dropping them as unreadable, and counts
   rows from a newer format major separately — old evidence ages into legacy,

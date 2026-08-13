@@ -1,7 +1,8 @@
 # Slot ergonomics and the open archetype vocabulary
 
-**Status:** phase 1 (session slot overrides) implemented — 0.6.0-rc.9;
-phases 2–4 aligned, not yet implemented, independently shippable
+**Status:** phases 1 (session slot overrides, 0.6.0-rc.9) and 2 (archetype
+schema pass, 0.6.0-rc.12) implemented; phases 3–4 aligned, not yet
+implemented, independently shippable
 **Decision date:** 2026-08-12
 **Relationship:** successor horizon to
 [`loadouts-and-dispatch.md`](loadouts-and-dispatch.md) (extends its catalog,
@@ -231,6 +232,22 @@ resolved_via: "reviewer"`), so audits show when a fallback fired.
 **Housekeeping folded in:** archetype keys and fallback references get
 identifier-validated (standing backlog item), and unknown-key strictness in
 `archetypes:` entries extends to the new fields.
+
+**Shipped (0.6.0-rc.12).** Deviations from the sketch above, all deliberate:
+`explainWriteConflict` refuses only — the isolated-delivery preference
+(sandbox/worktree instead of refusal) is deferred to route operational
+policy alongside phase 3; steering resolutions carry `resolved_via` always
+(null on a direct bind) while dispatch rows and `loadout resolve` omit the
+key entirely on direct binds, matching the additive `override`-field
+precedent; drive's `resolution_snapshot` role rows do not stamp
+`resolved_via` — an absent key is no claim, a present key must match the
+snapshot replay at verify; native delivery of a non-surface archetype
+hard-errors when its chain reaches no native surface (worker / reviewer /
+judge), naming the chain walked. The evidence format bumped to 0.2 —
+additive fields on the same major, so 0.1 rows read unchanged and the
+tiered reader needed no code change. `generator` shipped in the starter
+exactly as sketched: forbidden-write, `fallback: worker`, no dedicated
+surfaces.
 
 ## Phase 3 — constraint tiers at the dispatch boundary
 

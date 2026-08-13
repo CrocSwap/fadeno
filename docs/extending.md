@@ -133,7 +133,10 @@ without making the loadout itself harness-specific.
 
 A route entry may also declare `write_access: <bool>` — whether that route's
 **command** delivery can mutate the workspace — beside an optional top-level
-`archetypes:` mapping whose values accept only `requires_write: <bool>`:
+`archetypes:` mapping whose values accept `requires_write` and `fallback`.
+`requires_write` is `required` | `forbidden` | `none`; booleans alias
+(`true` → `required`, `false` → `none`). `fallback` names another archetype
+whose *binding* is used when this one has no slot (never its policy):
 
 ```yaml
 routes:
@@ -141,13 +144,16 @@ routes:
     anthropic: { native: true, command: [claude, -p, --model, "{model}"], write_access: false }
 
 archetypes:
-  worker: { requires_write: true }
+  worker: { requires_write: required }
+  generator: { requires_write: forbidden, fallback: worker }
 ```
 
 `fadeno dispatch` then refuses *before spawning* when the resolved command
-route says `write_access: false` and the archetype says `requires_write: true`
-— e.g. a commit task routed to a headless `claude -p` that has no approver for
-a write. Either side undeclared imposes no constraint (existing profiles are
+route says `write_access: false` and the archetype says `requires_write: required`
+(or boolean `true`) — and the inverse, `requires_write: forbidden` onto
+`write_access: true`. The same check fires at dial time (`fadeno loadout set`).
+The original case is a commit task routed to a headless `claude -p` that has no
+approver for a write. Either side undeclared imposes no constraint (existing profiles are
 unaffected). When declared, `write_access` joins the evidence-row identity, and
 a dispatch that proceeds on a read-only route echoes `[write_access: none]`.
 Enforcement is not kernel-only: `drive` refuses the same conflict before
@@ -171,6 +177,10 @@ never cached anywhere else):
 3. the active loadout's slot for the role's declared `archetype`;
 4. `bindings["*"]`;
 5. otherwise a hard error naming the role, its archetype, and what to add.
+
+When the declared archetype has a `fallback`, steps 2–3 re-enter along that
+chain (override, then loadout slot, at each step) before `bindings["*"]`.
+A row bound this way carries `resolved_via`.
 
 The **active loadout** resolves `--loadout` flag → `FADENO_LOADOUT` env →
 `.fadeno/local/loadout` → `default_loadout:` → none. Switch it per session:
@@ -200,7 +210,9 @@ ledger; ad-hoc dispatches append one row each to `.fadeno/dispatches.jsonl`
 auditable locally, never committed). Each row's `resolution` field records how
 the executor was chosen (`binding` | `override` | `loadout` | `fallback` |
 `executor-flag`); rows bound through a session override also carry an
-`override` field naming the archetype and executor, and `resolution_snapshot`
+`override` field naming the archetype and executor; rows bound through a
+fallback chain carry `resolved_via` naming the chain archetype that bound
+(absent when the declared archetype bound directly); and `resolution_snapshot`
 events record the applicable `overrides` — verification replays from the
 snapshot, never the live pin.
 

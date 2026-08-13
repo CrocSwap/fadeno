@@ -93,13 +93,18 @@ const CLAIMS: Claim[] = [
   },
   {
     id: 'dispatches-format',
-    doc: { files: [LOADOUTS], patterns: [/format: "0\.1"/, /\[legacy\]/] },
-    src: { files: ['src/commands/dispatch.ts'], patterns: [/DISPATCHES_FORMAT = '0\.1'/] },
+    doc: { files: [LOADOUTS], patterns: [/format: "0\.2"/, /\[legacy\]/] },
+    src: { files: ['src/commands/dispatch.ts'], patterns: [/DISPATCHES_FORMAT = '0\.2'/] },
   },
   {
     id: 'session-slot-overrides',
     doc: { files: [LOADOUTS], patterns: [/loadout set/, /OVERRIDE \(base:/, /resolution: "override"/] },
     src: { files: ['src/lib/executors.ts'], patterns: [/applicableOverrides/, /'override'/] },
+  },
+  {
+    id: 'archetype-fallback-chains',
+    doc: { files: [LOADOUTS], patterns: [/requires_write: forbidden/, /fallback/, /resolved_via/] },
+    src: { files: ['src/lib/executors.ts'], patterns: [/'forbidden'/, /resolvedVia/] },
   },
 ];
 
