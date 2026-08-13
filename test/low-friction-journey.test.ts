@@ -271,6 +271,46 @@ test('doctor checks a repo-selected executable without executing it', (t) => {
   assert.ok(result.findings.some((item) => item.check === 'executor:repo-command' && item.severity === 'ok'));
 });
 
+test('a loadout switched from a Claude session still refreshes the Codex agents', (t) => {
+  const root = tempRepo(t);
+  const base = isolatedUser(root);
+  runSetup({ repoRoot: root, userPathOptions: base, target: 'codex', probeCommand: unavailable });
+  runSetup({ repoRoot: root, userPathOptions: base, target: 'claude', probeCommand: unavailable });
+  // The memo names only the most recent setup; the manifest remembers both.
+  assert.equal(readFileSync(userPaths(base).harnessFile, 'utf8'), 'claude\n');
+
+  const worker = join(base.home!, '.codex', 'agents', 'fadeno-worker.toml');
+  assert.match(readFileSync(worker, 'utf8'), /--host-executor current-host/);
+
+  // Switching from inside Claude used to skip materialization entirely, leaving
+  // these files bound to the executor you just switched away from.
+  const inClaude: UserPathOptions = { ...base, env: { ...base.env, CLAUDECODE: '1' } };
+  const switched = runUse({ repoRoot: root, userPathOptions: inClaude, name: 'codex' });
+  assert.ok(switched.steering, 'Codex agents must be rewritten from whichever host you are in');
+  assert.doesNotMatch(readFileSync(worker, 'utf8'), /--host-executor current-host/);
+
+  // And doctor reports on them without Codex being the harness in front of you.
+  const report = runDoctor({ repoRoot: root, userPathOptions: inClaude });
+  assert.equal(report.findings.find((item) => item.check === 'harness')?.detail?.includes('claude'), true);
+  assert.ok(report.findings.some((item) => item.check === 'codex-agents'), 'codex-agents must still be checked');
+});
+
+test('an uninstalled Codex is not materialized for, and an explicit target still scopes', (t) => {
+  const root = tempRepo(t);
+  const base = isolatedUser(root);
+  runSetup({ repoRoot: root, userPathOptions: base, target: 'claude', probeCommand: unavailable });
+
+  // Claude only: nothing should appear under ~/.codex.
+  const claudeOnly = runUse({ repoRoot: root, userPathOptions: base, name: 'native' });
+  assert.equal(claudeOnly.steering, null);
+  assert.equal(existsSync(join(base.home!, '.codex', 'agents', 'fadeno-worker.toml')), false);
+
+  // An explicit --codex is the caller saying what they mean, and still writes.
+  const forced = runUse({ repoRoot: root, userPathOptions: base, name: 'native', target: 'codex' });
+  assert.ok(forced.steering);
+  assert.ok(existsSync(join(base.home!, '.codex', 'agents', 'fadeno-worker.toml')));
+});
+
 test('one memo cannot serve two harnesses, so the host in evidence wins', (t) => {
   const root = tempRepo(t);
   const base = isolatedUser(root);

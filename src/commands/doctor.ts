@@ -117,9 +117,17 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
       `Drop the override to route as ${ambient.harness}; the two compile different adapters for the same slot.`,
     ));
   }
-  if (status.harness === 'codex' && status.codexMaterialization?.restartRequired) {
-    findings.push(finding('codex-agents', 'warning', 'managed host agents are missing or stale', 'Run `fadeno setup --codex` and start a fresh Codex session.'));
-  } else if (status.harness === 'codex') {
+  // Keyed on Codex being *maintained*, not on it being the harness in front of
+  // you: the agents go stale precisely when you switch a loadout from the other
+  // host, which is exactly when an active-harness gate stops looking.
+  if (status.codexMaterialization?.restartRequired) {
+    findings.push(finding(
+      'codex-agents',
+      'warning',
+      `managed host agents are missing or stale in ${status.codexMaterialization.path}`,
+      'Run `fadeno setup --codex`, or `fadeno use <loadout>` to rewrite them; a fresh Codex session picks them up.',
+    ));
+  } else if (status.codexMaterialization != null) {
     findings.push(finding('codex-agents', 'ok', 'managed host-agent state is current'));
   }
   const gitignore = join(repoRoot, '.gitignore');

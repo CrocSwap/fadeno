@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { packageVersion } from './paths.ts';
-import { userPaths, type FadenoHarness, type FadenoUserPaths, type UserPathOptions } from './user-paths.ts';
+import { readUserHarness, userPaths, type FadenoHarness, type FadenoUserPaths, type UserPathOptions } from './user-paths.ts';
 
 export interface ManagedFile {
   path: string;
@@ -44,6 +44,27 @@ export function readInstallationManifest(options: UserPathOptions = {}): Install
     if (err instanceof InstallationError) throw err;
     throw new InstallationError(`could not parse installation manifest ${path}: ${(err as Error).message}`);
   }
+}
+
+/**
+ * Every harness this machine keeps state for — not the one it is running in.
+ *
+ * Session-static hosts (Codex materializes role agents as files) need their
+ * state refreshed whenever a loadout changes, whichever host you happen to be
+ * sitting in. Keying that off the single active harness meant switching a
+ * loadout from Claude left the Codex agents pointing at the previous
+ * executor, silently. The manifest already records each installation
+ * independently, so it is the honest source.
+ *
+ * The recorded memo is unioned in for machines set up before the manifest
+ * existed: this set is never smaller than the harness alone.
+ */
+export function maintainedHarnesses(options: UserPathOptions = {}): FadenoHarness[] {
+  const manifest = readInstallationManifest(options);
+  const names = new Set<FadenoHarness>(Object.keys(manifest.harnesses) as FadenoHarness[]);
+  const memo = readUserHarness(options);
+  if (memo != null) names.add(memo);
+  return [...names].sort();
 }
 
 export function writeInstallationManifest(paths: FadenoUserPaths, manifest: InstallationManifest): void {

@@ -15,7 +15,7 @@ import {
 import { definitionSourceSummary } from '../lib/definitions.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
 import { type UserPathOptions } from '../lib/user-paths.ts';
-import { readInstallationManifest } from '../lib/installations.ts';
+import { maintainedHarnesses, readInstallationManifest } from '../lib/installations.ts';
 
 export class StatusError extends Error {}
 
@@ -80,13 +80,23 @@ function harnessOf(target: StatusOptions['target'], userPathOptions?: UserPathOp
   return activeHarness(target ?? undefined, userPathOptions);
 }
 
+/**
+ * Codex agent freshness, judged whenever Codex is *maintained* — not only when
+ * it is the harness in front of you. Switching a loadout from a Claude session
+ * still leaves Codex TOMLs naming the previous executor.
+ *
+ * `profile` must be the catalog compiled for **codex**, not for the active
+ * harness. Which slots need a materialized agent is itself harness-dependent:
+ * an anthropic target is a host slot under claude and a command under codex,
+ * so asking the active profile would check the wrong set of archetypes.
+ */
 function materialization(
   loadout: string | null,
   profile: ExecutorProfile,
-  target: StatusResult['harness'],
+  codexMaintained: boolean,
   userPathOptions?: UserPathOptions,
 ): StatusResult['codexMaterialization'] {
-  if (target !== 'codex' || loadout == null) return null;
+  if (!codexMaintained || loadout == null) return null;
   const path = join(
     userPathOptions?.env?.CODEX_HOME?.trim() || process.env.CODEX_HOME?.trim() || join(userPathOptions?.home ?? homedir(), '.codex'),
     'agents',
@@ -167,7 +177,24 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
   const installation = readInstallationManifest(opts.userPathOptions);
   const invocationSource = process.env.FADENO_INVOCATION_SOURCE?.trim()
     || (installation.runtime != null && resolve(process.argv[1] ?? '') === resolve(installation.runtime.path) ? 'managed' : 'path');
-  const materialized = materialization(active?.name ?? null, loaded.profile, harness, opts.userPathOptions);
+  const codexMaintained = maintainedHarnesses(opts.userPathOptions).includes('codex');
+  // Recompiled for codex on purpose: see `materialization`. Reuse the already
+  // loaded profile when codex *is* the active harness, so the common path
+  // parses the catalog once.
+  let codexProfile: ExecutorProfile | null = null;
+  if (codexMaintained) {
+    try {
+      codexProfile = harness === 'codex' ? loaded.profile : loadExecutorProfile(repoRoot, opts.userPathOptions, 'codex').profile;
+    } catch {
+      // A catalog that will not compile for codex cannot have a stale agent
+      // judged against it; the active-harness load above already reported any
+      // fatal problem to the caller.
+      codexProfile = null;
+    }
+  }
+  const materialized = codexProfile == null
+    ? null
+    : materialization(active?.name ?? null, codexProfile, true, opts.userPathOptions);
   const next = staleProjectPin || staleUserPin
     ? 'clear or replace the stale loadout pin'
     : materialized?.restartRequired

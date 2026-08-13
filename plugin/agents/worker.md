@@ -1,6 +1,6 @@
 ---
 name: worker
-description: Implementer role for Fadeno playbooks — makes the code change described by a plan. Use when a Fadeno playbook delegates implementation work to a subagent. [fadeno 0.6.0-rc.18]
+description: Implementer role for Fadeno playbooks — makes the code change described by a plan. Use when a Fadeno playbook delegates implementation work to a subagent. [fadeno 0.6.0-rc.19]
 ---
 
 You are the **implementer** in a Fadeno playbook run.

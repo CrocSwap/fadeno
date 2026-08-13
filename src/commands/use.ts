@@ -2,13 +2,15 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runSteeringApply, type SteeringApplyResult } from './steering.ts';
 import {
+  activeHarness,
   loadExecutorProfile,
   readLocalLoadoutState,
   readUserLoadout,
   writeLocalLoadoutState,
 } from '../lib/executors.ts';
+import { maintainedHarnesses } from '../lib/installations.ts';
 import { findRepoRoot } from '../lib/paths.ts';
-import { readUserHarness, userPaths, type UserPathOptions } from '../lib/user-paths.ts';
+import { userPaths, type UserPathOptions } from '../lib/user-paths.ts';
 
 export class UseError extends Error {}
 
@@ -42,8 +44,9 @@ export function runUse(opts: UseOptions): UseResult {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const name = opts.name.trim();
   if (name.length === 0) throw new UseError('Usage: fadeno use <loadout>');
-  const target = opts.target ?? readUserHarness(opts.userPathOptions);
-  const loaded = loadExecutorProfile(repoRoot, opts.userPathOptions, target ?? 'standalone');
+  // Which harness's routes to describe: the one in front of you.
+  const target = opts.target ?? activeHarness(undefined, opts.userPathOptions);
+  const loaded = loadExecutorProfile(repoRoot, opts.userPathOptions, target);
   if (!(name in loaded.profile.loadouts)) {
     throw new UseError(`"${name}" is not a declared loadout (${Object.keys(loaded.profile.loadouts).sort().join(', ')}).`);
   }
@@ -69,7 +72,21 @@ export function runUse(opts: UseOptions): UseResult {
     const spec = loaded.profile.executors[executor]!;
     return spec.adapter === 'command' ? [{ archetype, executor, command: spec.command }] : [];
   });
-  const needsHostMaterialization = target === 'codex' && Object.values(slots).some((executor) => loaded.profile.executors[executor]?.adapter === 'host');
+  // Materialize by what this machine maintains, not by where you are sitting.
+  // Codex binds role agents to files at session start, so a loadout switched
+  // from a Claude session leaves them naming the previous executor until
+  // something rewrites them — and nothing else will. An explicit `--target`
+  // still scopes the write, since that is the caller saying what they mean.
+  const codexMaintained = opts.target != null
+    ? opts.target === 'codex'
+    : maintainedHarnesses(opts.userPathOptions).includes('codex');
+  // Host slots are harness-dependent, so ask the codex catalog which archetypes
+  // need an agent — the active profile would answer for the wrong harness.
+  const codexSlots = codexMaintained
+    ? (target === 'codex' ? loaded.profile : loadExecutorProfile(repoRoot, opts.userPathOptions, 'codex').profile)
+    : null;
+  const needsHostMaterialization = codexSlots != null &&
+    Object.values(slots).some((executor) => codexSlots.executors[executor]?.adapter === 'host');
   const steering = needsHostMaterialization
     ? runSteeringApply({
         repoRoot,

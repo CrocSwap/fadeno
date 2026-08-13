@@ -13939,7 +13939,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.18";
+  if (true) return "0.6.0-rc.19";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -26309,6 +26309,13 @@ function readInstallationManifest(options = {}) {
     throw new InstallationError(`could not parse installation manifest ${path}: ${err.message}`);
   }
 }
+function maintainedHarnesses(options = {}) {
+  const manifest = readInstallationManifest(options);
+  const names = new Set(Object.keys(manifest.harnesses));
+  const memo = readUserHarness(options);
+  if (memo != null) names.add(memo);
+  return [...names].sort();
+}
 function writeInstallationManifest(paths, manifest) {
   (0, import_node_fs30.mkdirSync)((0, import_node_path29.dirname)(paths.installationsFile), { recursive: true });
   (0, import_node_fs30.writeFileSync)(paths.installationsFile, `${JSON.stringify(manifest, null, 2)}
@@ -26495,8 +26502,8 @@ function runUse(opts) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const name = opts.name.trim();
   if (name.length === 0) throw new UseError("Usage: fadeno use <loadout>");
-  const target = opts.target ?? readUserHarness(opts.userPathOptions);
-  const loaded = loadExecutorProfile(repoRoot, opts.userPathOptions, target ?? "standalone");
+  const target = opts.target ?? activeHarness(void 0, opts.userPathOptions);
+  const loaded = loadExecutorProfile(repoRoot, opts.userPathOptions, target);
   if (!(name in loaded.profile.loadouts)) {
     throw new UseError(`"${name}" is not a declared loadout (${Object.keys(loaded.profile.loadouts).sort().join(", ")}).`);
   }
@@ -26519,7 +26526,9 @@ function runUse(opts) {
     const spec = loaded.profile.executors[executor];
     return spec.adapter === "command" ? [{ archetype, executor, command: spec.command }] : [];
   });
-  const needsHostMaterialization = target === "codex" && Object.values(slots).some((executor) => loaded.profile.executors[executor]?.adapter === "host");
+  const codexMaintained = opts.target != null ? opts.target === "codex" : maintainedHarnesses(opts.userPathOptions).includes("codex");
+  const codexSlots = codexMaintained ? target === "codex" ? loaded.profile : loadExecutorProfile(repoRoot, opts.userPathOptions, "codex").profile : null;
+  const needsHostMaterialization = codexSlots != null && Object.values(slots).some((executor) => codexSlots.executors[executor]?.adapter === "host");
   const steering = needsHostMaterialization ? runSteeringApply({
     repoRoot,
     loadout: name,
@@ -26569,8 +26578,8 @@ var StatusError = class extends Error {
 function harnessOf(target, userPathOptions) {
   return activeHarness(target ?? void 0, userPathOptions);
 }
-function materialization(loadout, profile, target, userPathOptions) {
-  if (target !== "codex" || loadout == null) return null;
+function materialization(loadout, profile, codexMaintained, userPathOptions) {
+  if (!codexMaintained || loadout == null) return null;
   const path = (0, import_node_path32.join)(
     userPathOptions?.env?.CODEX_HOME?.trim() || process.env.CODEX_HOME?.trim() || (0, import_node_path32.join)(userPathOptions?.home ?? (0, import_node_os5.homedir)(), ".codex"),
     "agents"
@@ -26634,7 +26643,16 @@ function runStatus(opts = {}) {
   const external = roles.filter((role) => role.adapter === "command");
   const installation = readInstallationManifest(opts.userPathOptions);
   const invocationSource = process.env.FADENO_INVOCATION_SOURCE?.trim() || (installation.runtime != null && (0, import_node_path32.resolve)(process.argv[1] ?? "") === (0, import_node_path32.resolve)(installation.runtime.path) ? "managed" : "path");
-  const materialized = materialization(active?.name ?? null, loaded.profile, harness, opts.userPathOptions);
+  const codexMaintained = maintainedHarnesses(opts.userPathOptions).includes("codex");
+  let codexProfile = null;
+  if (codexMaintained) {
+    try {
+      codexProfile = harness === "codex" ? loaded.profile : loadExecutorProfile(repoRoot, opts.userPathOptions, "codex").profile;
+    } catch {
+      codexProfile = null;
+    }
+  }
+  const materialized = codexProfile == null ? null : materialization(active?.name ?? null, codexProfile, true, opts.userPathOptions);
   const next = staleProjectPin || staleUserPin ? "clear or replace the stale loadout pin" : materialized?.restartRequired ? "run setup/use and start a fresh Codex session" : external.length > 0 ? "review the external sandbox boundary before driving" : null;
   return {
     repoRoot,
@@ -26742,9 +26760,14 @@ function runDoctor(opts = {}) {
       `Drop the override to route as ${ambient.harness}; the two compile different adapters for the same slot.`
     ));
   }
-  if (status.harness === "codex" && status.codexMaterialization?.restartRequired) {
-    findings.push(finding("codex-agents", "warning", "managed host agents are missing or stale", "Run `fadeno setup --codex` and start a fresh Codex session."));
-  } else if (status.harness === "codex") {
+  if (status.codexMaterialization?.restartRequired) {
+    findings.push(finding(
+      "codex-agents",
+      "warning",
+      `managed host agents are missing or stale in ${status.codexMaterialization.path}`,
+      "Run `fadeno setup --codex`, or `fadeno use <loadout>` to rewrite them; a fresh Codex session picks them up."
+    ));
+  } else if (status.codexMaterialization != null) {
     findings.push(finding("codex-agents", "ok", "managed host-agent state is current"));
   }
   const gitignore = (0, import_node_path33.join)(repoRoot, ".gitignore");

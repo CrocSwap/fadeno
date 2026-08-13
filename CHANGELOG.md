@@ -43,6 +43,22 @@ writers accept only 0.3.
   assert what it actually is. Config locations like `CODEX_HOME` are left
   alone: they say where a host keeps settings, not that you are inside one.
 
+  Harness *state* follows the same rule. Codex binds role agents to files at
+  session start, so a loadout switch has to rewrite them — and `fadeno use`
+  decided whether to by asking the same single-valued memo, which meant
+  switching a loadout from a Claude session left the Codex agents naming the
+  executor you had just switched away from, silently and with nothing else to
+  correct it. `doctor` could not report it either: its `codex-agents` check
+  and the freshness data behind it were both gated on Codex being the *active*
+  harness, so they stopped looking in exactly the case that breaks them.
+  Materialization and that check now key on the harnesses this machine
+  maintains — `installations.json` already recorded each independently, unioned
+  with the memo so no machine set up before the manifest loses behavior. An
+  explicit `--codex`/`--claude` on `use` still scopes the write. Freshness is
+  judged against the catalog compiled *for codex* rather than the active
+  harness, because which archetypes need an agent is itself harness-dependent:
+  an anthropic target is a host slot under Claude and a command under Codex.
+
 - **`doctor` notices a harness nobody recorded.** Routes are compiled per
   harness, and `activeHarness` answers `standalone` whenever no memo exists —
   a defensible answer to "which host am I in" that nothing ever revisited. Under
