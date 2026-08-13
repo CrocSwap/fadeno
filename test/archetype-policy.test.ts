@@ -38,8 +38,8 @@ test('archetypes: boolean aliases map to required/none', () => {
     loadouts: LOADOUTS,
     archetypes: { worker: { requires_write: true }, reviewer: { requires_write: false } },
   });
-  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null });
-  assert.deepEqual(profile.archetypes.reviewer, { requiresWrite: 'none', fallback: null });
+  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null });
+  assert.deepEqual(profile.archetypes.reviewer, { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null });
 });
 
 test('archetypes: the three string postures parse', () => {
@@ -85,7 +85,7 @@ test('archetypes: an empty policy is legal (all-default)', () => {
     loadouts: LOADOUTS,
     archetypes: { scout: {} },
   });
-  assert.deepEqual(profile.archetypes.scout, { requiresWrite: 'none', fallback: null });
+  assert.deepEqual(profile.archetypes.scout, { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null });
 });
 
 test('archetypes: unknown keys name the new allowed set', () => {
@@ -97,7 +97,7 @@ test('archetypes: unknown keys name the new allowed set', () => {
     }),
     (err: unknown) =>
       err instanceof ExecutorProfileError &&
-      /`archetypes\.worker` has unknown key\(s\) requires_network; only `requires_write` and `fallback` are allowed/
+      /`archetypes\.worker` has unknown key\(s\) requires_network; only `requires_write`, `fallback`, and `distinct_provider_from_inputs` are allowed/
         .test(err.message),
   );
 });
@@ -176,7 +176,7 @@ test('archetypes: fallback to an undeclared archetype is allowed', () => {
     loadouts: LOADOUTS,
     archetypes: { scout: { fallback: 'reviewer' } },
   });
-  assert.deepEqual(profile.archetypes.scout, { requiresWrite: 'none', fallback: 'reviewer' });
+  assert.deepEqual(profile.archetypes.scout, { requiresWrite: 'none', fallback: 'reviewer', distinctProviderFromInputs: null });
   assert.equal(profile.archetypes.reviewer, undefined);
 });
 
@@ -324,11 +324,11 @@ test('serializeProfile: canonical strings, omits none, emits fallback, round-tri
     },
   });
   assert.deepEqual(profile.archetypes, {
-    worker: { requiresWrite: 'required', fallback: null },
-    reviewer: { requiresWrite: 'none', fallback: null },
-    generator: { requiresWrite: 'forbidden', fallback: 'worker' },
-    scout: { requiresWrite: 'none', fallback: 'reviewer' },
-    extra: { requiresWrite: 'none', fallback: null },
+    worker: { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null },
+    reviewer: { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null },
+    generator: { requiresWrite: 'forbidden', fallback: 'worker', distinctProviderFromInputs: null },
+    scout: { requiresWrite: 'none', fallback: 'reviewer', distinctProviderFromInputs: null },
+    extra: { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null },
   });
 
   const text = serializeProfile(profile);

@@ -9,6 +9,9 @@ export class ExecutorProfileError extends Error {}
 /** Bare lowercase identifier: loadout names, archetype keys, role archetypes. */
 export const BARE_IDENTIFIER_RE = /^[a-z][a-z0-9_-]*$/;
 
+/** Per-target, per-archetype dispatch eligibility. Absent YAML is `eligible`. */
+export type EligibilityState = 'eligible' | 'shadow_only' | 'forbidden';
+
 /**
  * The minimal execution profile of the next protocol: named executors (each a
  * one-shot command adapter) plus direct role→executor bindings. No capability
@@ -42,6 +45,11 @@ export interface CommandExecutorSpec {
    * refusal, so a mutating archetype must not be dispatched onto it.
    */
   writeAccess: boolean | null;
+  /**
+   * Per-archetype eligibility of this delivery. Absent YAML is `{}`
+   * (every archetype `eligible`).
+   */
+  eligibility: Record<string, EligibilityState>;
   /** Neutral v2 target metadata; absent for legacy v1 executors. */
   target?: string;
   provider?: string;
@@ -68,6 +76,11 @@ export interface HostExecutorSpec {
    * business. `null` = undeclared.
    */
   writeAccess: boolean | null;
+  /**
+   * Per-archetype eligibility of this delivery. Absent YAML is `{}`
+   * (every archetype `eligible`).
+   */
+  eligibility: Record<string, EligibilityState>;
   /** Neutral v2 target metadata; absent for legacy v1 executors. */
   target?: string;
   provider?: string;
@@ -85,6 +98,9 @@ export function substituteSessionId(argv: string[], sessionId: string): string[]
 /** Write constraint an archetype imposes on whatever delivers it. */
 export type WritePosture = 'required' | 'forbidden' | 'none';
 
+/** Whether an archetype's delivery provider must differ from every input producer. */
+export type ProviderDistinctness = 'advisory' | 'required';
+
 /**
  * What an archetype needs from whatever delivers it. Declared once per
  * archetype, independent of which executor a loadout binds today.
@@ -95,6 +111,11 @@ export interface ArchetypePolicy {
   requiresWrite: WritePosture;
   /** Next archetype in the binding-fallback chain, or null. */
   fallback: string | null;
+  /**
+   * Whether this archetype's delivery provider must differ from every
+   * input producer's. Absent YAML is `null` (no check).
+   */
+  distinctProviderFromInputs: ProviderDistinctness | null;
 }
 
 export interface ExecutorProfile {
@@ -109,6 +130,11 @@ export interface ExecutorProfile {
   loadouts: Record<string, Record<string, string>>;
   /** Loadout used when no flag/env/local override selects one. */
   defaultLoadout: string | null;
+  /**
+   * Optional argv run at the dispatch boundary with the resolution
+   * context on stdin. Absent YAML is `null` (no command).
+   */
+  constraints: { command: string[] } | null;
   /** Harness used to compile neutral v2 targets into delivery adapters. */
   harness?: HarnessId;
   schemaVersion?: 1 | 2;
@@ -199,6 +225,31 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
     return raw.write_access;
   };
 
+  const readEligibility = (raw: Record<string, unknown>, label: string): Record<string, EligibilityState> => {
+    if (raw.eligibility === undefined) return {};
+    if (!isMapping(raw.eligibility)) {
+      throw new ExecutorProfileError(
+        `${source}: ${label} \`eligibility\` is not a mapping (archetype → eligibility state).`,
+      );
+    }
+    const out: Record<string, EligibilityState> = {};
+    for (const [key, value] of Object.entries(raw.eligibility)) {
+      if (!BARE_IDENTIFIER_RE.test(key)) {
+        throw new ExecutorProfileError(
+          `${source}: ${label} eligibility key "${key}" is not a bare lowercase identifier ` +
+            `(${BARE_IDENTIFIER_RE.source}).`,
+        );
+      }
+      if (value !== 'eligible' && value !== 'shadow_only' && value !== 'forbidden') {
+        throw new ExecutorProfileError(
+          `${source}: ${label} \`eligibility.${key}\` must be "eligible", "shadow_only", or "forbidden".`,
+        );
+      }
+      out[key] = value;
+    }
+    return out;
+  };
+
   const executors: Record<string, ExecutorSpec> = {};
   for (const [name, raw] of Object.entries(isMapping(doc.executors) ? doc.executors : {})) {
     if (!isMapping(raw)) {
@@ -247,6 +298,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
       executors[name] = {
         adapter: 'host', model, reasoningEffort, agentType, fallbackCommand,
         writeAccess: readWriteAccess(raw, `host executor "${name}"`),
+        eligibility: readEligibility(raw, `host executor "${name}"`),
         ...(target != null ? { target } : {}),
         ...(provider != null ? { provider } : {}),
       };
@@ -342,6 +394,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
       resume,
       sessionIdPattern,
       writeAccess: readWriteAccess(raw, `executor "${name}"`),
+      eligibility: readEligibility(raw, `executor "${name}"`),
       ...(typeof raw.target === 'string' ? { target: raw.target } : {}),
       ...(typeof raw.provider === 'string' ? { provider: raw.provider } : {}),
     };
@@ -390,6 +443,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
         throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.write_access\` must be boolean.`);
       }
       const writeAccess = route.write_access === undefined ? null : route.write_access as boolean;
+      const eligibility = readEligibility(rawTarget, `target "${name}"`);
       const rawCommand = route.command;
       if (rawCommand != null && (!Array.isArray(rawCommand) || rawCommand.length === 0 ||
         !rawCommand.every((part) => typeof part === 'string' && part.length > 0))) {
@@ -429,7 +483,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
         }
         executors[name] = {
           adapter: 'host', model, reasoningEffort: effort, agentType: '*', fallbackCommand: command,
-          writeAccess, target: name, provider,
+          writeAccess, target: name, provider, eligibility,
         };
       } else {
         if (command == null) {
@@ -449,17 +503,18 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
         }
         executors[name] = {
           adapter: 'command', command, model, resume, sessionIdPattern: sessionIdPattern as string | null,
-          writeAccess, target: name, provider,
+          writeAccess, target: name, provider, eligibility,
         };
       }
     }
   }
 
   // What each archetype needs, independent of today's binding. Strict: only
-  // `requires_write` and `fallback` are declarable, so a typo is an error
-  // rather than a silently-dropped safety constraint. Absent `requires_write`
-  // is `none`. Chains among declared archetypes must be acyclic; an
-  // undeclared fallback name is a chain end-node (it may still hold a slot).
+  // `requires_write`, `fallback`, and `distinct_provider_from_inputs` are
+  // declarable, so a typo is an error rather than a silently-dropped safety
+  // constraint. Absent `requires_write` is `none`. Chains among declared
+  // archetypes must be acyclic; an undeclared fallback name is a chain
+  // end-node (it may still hold a slot).
   const archetypes: Record<string, ArchetypePolicy> = {};
   if (doc.archetypes != null) {
     if (!isMapping(doc.archetypes)) {
@@ -476,16 +531,16 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
       }
       if (!isMapping(rawPolicy)) {
         throw new ExecutorProfileError(
-          `${source}: \`archetypes.${name}\` is not a mapping (only \`requires_write\` and \`fallback\` are allowed).`,
+          `${source}: \`archetypes.${name}\` is not a mapping (only \`requires_write\`, \`fallback\`, and \`distinct_provider_from_inputs\` are allowed).`,
         );
       }
       const unknown = Object.keys(rawPolicy).filter(
-        (key) => key !== 'requires_write' && key !== 'fallback',
+        (key) => key !== 'requires_write' && key !== 'fallback' && key !== 'distinct_provider_from_inputs',
       );
       if (unknown.length > 0) {
         throw new ExecutorProfileError(
           `${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(', ')}; ` +
-            'only `requires_write` and `fallback` are allowed.',
+            'only `requires_write`, `fallback`, and `distinct_provider_from_inputs` are allowed.',
         );
       }
       let requiresWrite: WritePosture = 'none';
@@ -517,7 +572,16 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
         }
         fallback = rawPolicy.fallback;
       }
-      archetypes[name] = { requiresWrite, fallback };
+      let distinctProviderFromInputs: ProviderDistinctness | null = null;
+      if (rawPolicy.distinct_provider_from_inputs !== undefined) {
+        if (rawPolicy.distinct_provider_from_inputs !== 'advisory' && rawPolicy.distinct_provider_from_inputs !== 'required') {
+          throw new ExecutorProfileError(
+            `${source}: \`archetypes.${name}.distinct_provider_from_inputs\` must be "advisory" or "required".`,
+          );
+        }
+        distinctProviderFromInputs = rawPolicy.distinct_provider_from_inputs;
+      }
+      archetypes[name] = { requiresWrite, fallback, distinctProviderFromInputs };
     }
     for (const start of Object.keys(archetypes)) {
       const path: string[] = [];
@@ -604,7 +668,35 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
     }
   }
 
-  return { executors, bindings, archetypes, loadouts, defaultLoadout, harness, schemaVersion: hasTargets ? 2 : 1 };
+  // Top-level escape hatch: a single argv. Only `command` is declarable, so a
+  // typo is an error rather than a silently-skipped check. Absent is `null`.
+  let constraints: { command: string[] } | null = null;
+  if (doc.constraints != null) {
+    if (!isMapping(doc.constraints)) {
+      throw new ExecutorProfileError(
+        `${source} \`constraints\` is not a mapping (only \`command\` is allowed).`,
+      );
+    }
+    const unknown = Object.keys(doc.constraints).filter((key) => key !== 'command');
+    if (unknown.length > 0) {
+      throw new ExecutorProfileError(
+        `${source}: \`constraints\` has unknown key(s) ${unknown.join(', ')}; only \`command\` is allowed.`,
+      );
+    }
+    const command = doc.constraints.command;
+    if (
+      !Array.isArray(command) ||
+      command.length === 0 ||
+      !command.every((part) => typeof part === 'string' && part.length > 0)
+    ) {
+      throw new ExecutorProfileError(
+        `${source}: \`constraints.command\` must be a non-empty array of non-empty strings.`,
+      );
+    }
+    constraints = { command: command as string[] };
+  }
+
+  return { executors, bindings, archetypes, loadouts, defaultLoadout, constraints, harness, schemaVersion: hasTargets ? 2 : 1 };
 }
 
 /** Load the repo's executor profile, or explain how to create one. */
@@ -1029,6 +1121,103 @@ export function explainWriteConflict(
   return null;
 }
 
+/**
+ * Effective eligibility of a delivery for an archetype. Absent map, absent
+ * key, or a null archetype is `eligible`. `hasOwn`-hardened: bare identifiers
+ * include `constructor` / `toString`.
+ */
+export function eligibilityFor(spec: ExecutorSpec, archetype: string | null): EligibilityState {
+  if (typeof archetype !== 'string') return 'eligible';
+  const map = spec.eligibility;
+  if (map == null || !Object.hasOwn(map, archetype)) return 'eligible';
+  const state = map[archetype];
+  return state === 'shadow_only' || state === 'forbidden' || state === 'eligible' ? state : 'eligible';
+}
+
+/**
+ * The single refusal when the catalog forbids this pairing. `shadow_only` is
+ * not a refusal — it stamps evidence later; it does not block dispatch.
+ */
+export function explainEligibilityConflict(
+  delivery: DeliveryChoice,
+  archetype: string | null,
+): string | null {
+  if (eligibilityFor(delivery.spec, archetype) !== 'forbidden') return null;
+  return (
+    `archetype "${archetype}" is marked \`eligibility: forbidden\` on executor "${delivery.executor}" — ` +
+    'the catalog forbids this pairing. ' +
+    'Fix: choose an eligible executor, dial a different target, or change the catalog\'s eligibility entry.'
+  );
+}
+
+/**
+ * One prior dispatch (or run-event attribution) whose provider the
+ * distinctness check compares against. `provider: null` is unresolvable
+ * provenance, not a missing input.
+ */
+export interface InputProducer {
+  /** Null when attribution came from run events rather than a dispatch id. */
+  dispatchId: string | null;
+  executor: string | null;
+  /** Null = unresolvable provenance. */
+  provider: string | null;
+}
+
+export type ProviderConflict = { level: 'refuse' | 'warn'; message: string };
+
+function producerRef(producer: InputProducer): string {
+  if (typeof producer.dispatchId === 'string') return `dispatch ${producer.dispatchId}`;
+  if (typeof producer.executor === 'string') return `executor "${producer.executor}"`;
+  return 'an input producer';
+}
+
+/**
+ * Provider-distinctness check against the **declared** archetype only — a
+ * fallback chain never imports another archetype's policy. Null policy or
+ * an empty producer list is no check. A known-equal provider is a clash;
+ * a null producer provider or a null target provider is unresolvable
+ * provenance (`required` refuses, `advisory` warns).
+ */
+export function explainProviderConflict(
+  archetype: string | null,
+  targetProvider: string | null,
+  producers: InputProducer[],
+  profile: ExecutorProfile,
+): ProviderConflict | null {
+  if (typeof archetype !== 'string' || !Object.hasOwn(profile.archetypes, archetype)) return null;
+  const policy = profile.archetypes[archetype]!.distinctProviderFromInputs;
+  if (policy !== 'advisory' && policy !== 'required') return null;
+  if (producers.length === 0) return null;
+
+  const level: ProviderConflict['level'] = policy === 'required' ? 'refuse' : 'warn';
+  const unresolvable = policy === 'required'
+    ? 'provenance is demanded but unresolvable'
+    : 'provider provenance is unresolvable';
+
+  for (const producer of producers) {
+    if (targetProvider == null || producer.provider == null) {
+      const detail = targetProvider == null
+        ? `the resolved target's provider is unknown — ${unresolvable}`
+        : `${producerRef(producer)} has no provider — ${unresolvable}`;
+      return {
+        level,
+        message:
+          `archetype "${archetype}" declares \`distinct_provider_from_inputs: ${policy}\`, but ${detail}.`,
+      };
+    }
+    if (producer.provider === targetProvider) {
+      return {
+        level,
+        message:
+          `archetype "${archetype}" declares \`distinct_provider_from_inputs: ${policy}\`, but ` +
+          `the resolved target's provider "${targetProvider}" matches ${producerRef(producer)} ` +
+          `(provider "${producer.provider}") — the dispatch would not be provider-distinct.`,
+      };
+    }
+  }
+  return null;
+}
+
 /** Bind a neutral native target to the archetype requested by this invocation. */
 export function executorForArchetype(
   profile: ExecutorProfile,
@@ -1064,6 +1253,14 @@ export function serializeProfile(profile: ExecutorProfile): string {
     // A snapshot that dropped a declared write capability would read as
     // "undeclared" — i.e. unconstrained — on re-parse.
     if (spec.writeAccess != null) entry.write_access = spec.writeAccess;
+    if (spec.eligibility != null && Object.keys(spec.eligibility).length > 0) {
+      const sortedEligibility: Record<string, EligibilityState> = {};
+      for (const key of Object.keys(spec.eligibility).sort()) {
+        if (typeof key !== 'string' || !Object.hasOwn(spec.eligibility, key)) continue;
+        sortedEligibility[key] = spec.eligibility[key]!;
+      }
+      entry.eligibility = sortedEligibility;
+    }
     if (spec.adapter === 'command' && spec.model != null) entry.model = spec.model;
     if (spec.adapter === 'command' && spec.resume != null) entry.resume = spec.resume;
     if (spec.adapter === 'command' && spec.sessionIdPattern != null) entry.session_id_pattern = spec.sessionIdPattern;
@@ -1077,6 +1274,9 @@ export function serializeProfile(profile: ExecutorProfile): string {
       const entry: Record<string, unknown> = {};
       if (policy.requiresWrite !== 'none') entry.requires_write = policy.requiresWrite;
       if (typeof policy.fallback === 'string') entry.fallback = policy.fallback;
+      if (policy.distinctProviderFromInputs != null) {
+        entry.distinct_provider_from_inputs = policy.distinctProviderFromInputs;
+      }
       sortedArchetypes[name] = entry;
     }
     out.archetypes = sortedArchetypes;
@@ -1099,5 +1299,6 @@ export function serializeProfile(profile: ExecutorProfile): string {
     }
     out.bindings = sortedBindings;
   }
+  if (profile.constraints != null) out.constraints = { command: profile.constraints.command };
   return stringifyYaml(out);
 }

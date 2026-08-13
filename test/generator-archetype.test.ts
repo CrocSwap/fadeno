@@ -43,8 +43,8 @@ function seedProfile(t: TestContext, doc: Record<string, unknown>): string {
 
 test('starter catalog: parses; generator is forbidden→worker, worker is required', () => {
   const profile = parseStarter();
-  assert.deepEqual(profile.archetypes.generator, { requiresWrite: 'forbidden', fallback: 'worker' });
-  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null });
+  assert.deepEqual(profile.archetypes.generator, { requiresWrite: 'forbidden', fallback: 'worker', distinctProviderFromInputs: null });
+  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null });
 });
 
 test('starter catalog: a generator-shaped role binds the worker slot via the fallback chain', () => {
@@ -143,6 +143,6 @@ test('archetypes: boolean aliases parse to required/none', () => {
     loadouts: { main: { worker: 'rw' } },
     archetypes: { worker: { requires_write: true }, reviewer: { requires_write: false } },
   });
-  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null });
-  assert.deepEqual(profile.archetypes.reviewer, { requiresWrite: 'none', fallback: null });
+  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null });
+  assert.deepEqual(profile.archetypes.reviewer, { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null });
 });

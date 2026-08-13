@@ -81,8 +81,8 @@ test('starter catalog archetypes: worker is required, generator is forbidden wit
     readFileSync(join(import.meta.dirname, '..', 'templates', 'common', 'fadeno', 'executors.yaml'), 'utf8'),
     'templates/common/fadeno/executors.yaml',
   );
-  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null });
-  assert.deepEqual(profile.archetypes.generator, { requiresWrite: 'forbidden', fallback: 'worker' });
+  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null });
+  assert.deepEqual(profile.archetypes.generator, { requiresWrite: 'forbidden', fallback: 'worker', distinctProviderFromInputs: null });
   for (const [name, slots] of Object.entries(profile.loadouts)) {
     assert.equal(
       slots.generator,

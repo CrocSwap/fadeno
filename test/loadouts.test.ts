@@ -63,6 +63,7 @@ test('v2 targets compile through the active harness route', () => {
   assert.deepEqual(codex.executors.opus, {
     adapter: 'command', command: ['claude', '-p', '--model', 'opus', '--permission-mode', 'plan'], model: 'opus',
     resume: null, sessionIdPattern: null, writeAccess: null, target: 'opus', provider: 'anthropic',
+    eligibility: {},
   });
   const native = resolveRole('implementer', 'worker', claude, 'main');
   assert.equal(native.executor.adapter, 'host');
@@ -156,8 +157,8 @@ test('archetypes: requires_write parses; an absent block is an empty map', () =>
     archetypes: { worker: { requires_write: true }, reviewer: { requires_write: false } },
   });
   assert.deepEqual(profile.archetypes, {
-    worker: { requiresWrite: 'required', fallback: null },
-    reviewer: { requiresWrite: 'none', fallback: null },
+    worker: { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null },
+    reviewer: { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null },
   });
   assert.deepEqual(parseDoc({ executors: EXECUTORS, loadouts: LOADOUTS }).archetypes, {});
 });
@@ -169,7 +170,7 @@ test('archetypes: strict validation names the offending path', () => {
   );
   assert.throws(
     () => parseDoc({ executors: EXECUTORS, loadouts: LOADOUTS, archetypes: { worker: 'yes' } }),
-    /`archetypes\.worker` is not a mapping \(only `requires_write` and `fallback` are allowed\)/,
+    /`archetypes\.worker` is not a mapping \(only `requires_write`, `fallback`, and `distinct_provider_from_inputs` are allowed\)/,
   );
   assert.throws(
     () => parseDoc({
@@ -179,7 +180,7 @@ test('archetypes: strict validation names the offending path', () => {
     }),
     (err: unknown) =>
       err instanceof ExecutorProfileError &&
-      /`archetypes\.worker` has unknown key\(s\) requires_network; only `requires_write` and `fallback` are allowed/.test(err.message),
+      /`archetypes\.worker` has unknown key\(s\) requires_network; only `requires_write`, `fallback`, and `distinct_provider_from_inputs` are allowed/.test(err.message),
   );
   assert.throws(
     () => parseDoc({
@@ -189,7 +190,7 @@ test('archetypes: strict validation names the offending path', () => {
   );
   assert.deepEqual(
     parseDoc({ executors: EXECUTORS, loadouts: LOADOUTS, archetypes: { worker: {} } }).archetypes.worker,
-    { requiresWrite: 'none', fallback: null },
+    { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null },
   );
 });
 
