@@ -300,7 +300,7 @@ test('steering resolve refuses a command slot whose delivery cannot do the arche
   assert.equal(refused.mode, 'write_conflict');
   assert.equal(refused.executor, 'ro-cli');
   assert.equal(refused.adapter, 'command');
-  assert.match(refused.writeConflict!, /archetype "worker" declares `requires_write: true`, but executor "ro-cli"/);
+  assert.match(refused.writeConflict!, /archetype "worker" declares `requires_write: required`, but executor "ro-cli"/);
   assert.match(refused.writeConflict!, /native in-session worker agent/);
   // The human echo carries the refusal, not a "dispatch through …" invitation.
   assert.equal(refused.detail, refused.writeConflict);
@@ -338,7 +338,7 @@ test('steering apply refuses to materialize a broker for a conflicted slot; othe
   assert.equal(applied.materialization.worker?.executor, 'ro-cli');
   assert.match(
     applied.materialization.worker!.writeConflict!,
-    /archetype "worker" declares `requires_write: true`, but executor "ro-cli"/,
+    /archetype "worker" declares `requires_write: required`, but executor "ro-cli"/,
   );
   // No broker file at all for the refused slot — nothing can route to it.
   assert.equal(exists(root, '.codex/agents/worker.toml'), false);

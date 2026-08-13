@@ -27,6 +27,18 @@ import { userPaths, type UserPathOptions } from '../lib/user-paths.ts';
 export class SteeringError extends Error {}
 
 /**
+ * Archetypes that have a native in-session agent surface today. A declared
+ * archetype that is not itself one of these is delivered natively through the
+ * first chain member that is.
+ */
+export const NATIVE_SURFACE_ARCHETYPES = ['worker', 'reviewer', 'judge'] as const;
+
+const NATIVE_SURFACE_SET: ReadonlySet<string> = new Set(NATIVE_SURFACE_ARCHETYPES);
+
+const FORBIDDEN_NATIVE_ADVISORY =
+  'This work is write-forbidden (requires_write: forbidden): produce artifacts in your reply only — do not edit, create, or commit workspace files.';
+
+/**
  * `write_conflict` is a command slot the resolver refuses to present as
  * runnable: the archetype declares `requires_write` and the delivery command
  * cannot mutate the workspace. Distinct from `restart_required` — a fresh
@@ -54,6 +66,15 @@ export interface SteeringResolution {
   detail: string;
   /** The shared refusal, present only on a `write_conflict` resolution. */
   writeConflict?: string;
+  /** Archetype whose binding fired when a fallback chain was walked; null on a direct bind. */
+  resolved_via: string | null;
+  /**
+   * Native agent surface that should deliver this work when the declared
+   * archetype is not itself one of `NATIVE_SURFACE_ARCHETYPES`.
+   */
+  surface_archetype?: string;
+  /** Advisory-only write-forbidden instruction for native delivery. */
+  advisory?: string;
 }
 
 interface CommonOptions {
@@ -83,6 +104,59 @@ function validateArchetype(archetype: string): string {
     );
   }
   return value;
+}
+
+/** Binding-chain successor. Undeclared names and non-string fallbacks are end-nodes. */
+function nextArchetypeFallback(profile: ExecutorProfile, name: string): string | null {
+  if (!Object.hasOwn(profile.archetypes, name)) return null;
+  const next = profile.archetypes[name]!.fallback;
+  return typeof next === 'string' ? next : null;
+}
+
+function fallbackChain(profile: ExecutorProfile, start: string): string[] {
+  const chain: string[] = [];
+  const seen = new Set<string>();
+  let current: string | null = start;
+  while (typeof current === 'string' && !seen.has(current)) {
+    chain.push(current);
+    seen.add(current);
+    current = nextArchetypeFallback(profile, current);
+  }
+  return chain;
+}
+
+type SteeringResolutionBase = Omit<SteeringResolution, 'resolved_via' | 'surface_archetype' | 'advisory'>;
+
+/**
+ * Attach chain evidence and native-delivery extras. A native slot whose
+ * declared archetype is not itself a native surface must land on one via the
+ * fallback chain — otherwise there is no agent to hand the work to.
+ */
+function decorateSteering(
+  base: SteeringResolutionBase,
+  profile: ExecutorProfile,
+  resolvedVia: string | null,
+): SteeringResolution {
+  const result: SteeringResolution = { ...base, resolved_via: resolvedVia };
+  if (result.mode !== 'native') return result;
+  if (!NATIVE_SURFACE_SET.has(result.archetype)) {
+    const chain = fallbackChain(profile, result.archetype);
+    const surface = chain.find((name) => NATIVE_SURFACE_SET.has(name));
+    if (surface == null) {
+      throw new SteeringError(
+        `archetype "${result.archetype}" has no native agent surface on its fallback chain (${chain.join(' → ')}); ` +
+          `deliver it through a command route, or declare a fallback to ${NATIVE_SURFACE_ARCHETYPES.join(', ')}.`,
+      );
+    }
+    result.surface_archetype = surface;
+  }
+  if (
+    Object.hasOwn(profile.archetypes, result.archetype) &&
+    profile.archetypes[result.archetype]!.requiresWrite === 'forbidden'
+  ) {
+    result.advisory = FORBIDDEN_NATIVE_ADVISORY;
+  }
+  return result;
 }
 
 export interface SteeringResolveOptions extends CommonOptions {
@@ -199,7 +273,7 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
     : hasFallback
       ? `host request ${dispatchId} is locked to ${request.executor}; deliver it through that executor's declared command fallback`
       : `host request ${dispatchId} requires native executor ${request.executor}; this session is materialized for ${nativeExecutor ?? 'no native executor'}, so start a matching Codex session`;
-  return {
+  return decorateSteering({
     mode: matchesNative ? 'native' : hasFallback ? 'command' : 'restart_required',
     archetype,
     role,
@@ -211,7 +285,7 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
     override: false,
     nativeExecutor,
     detail,
-  };
+  }, profile, null);
 }
 
 /**
@@ -266,11 +340,11 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
           'run `fadeno steering apply <loadout> --codex --force` and start a fresh Codex session.',
       );
     }
-    return {
+    return decorateSteering({
       mode: 'native', archetype, role, activeLoadout: null, executor: nativeExecutor,
       adapter: 'host', model: nativeSpec.model, source: 'native-baseline', override: false, nativeExecutor,
       detail: `no loadout is active; execute natively as baseline ${nativeExecutor}`,
-    };
+    }, profile, null);
   }
 
   let resolved;
@@ -293,52 +367,55 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
   // declared fallback) are checked against the archetype's write requirement:
   // a slot that would refuse the work is never presented as a clean command
   // slot. A native slot is exempt — the host owns its agent's permissions.
+  const finish = (base: SteeringResolutionBase): SteeringResolution =>
+    decorateSteering(base, profile, resolved.resolvedVia);
+
   const refusal = (spec: ExecutorSpec, executorName: string): SteeringResolution | null => {
     const conflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile);
     if (conflict == null) return null;
-    return {
+    return finish({
       mode: 'write_conflict', archetype, role, activeLoadout: active,
       executor: executorName, adapter: spec.adapter, model: spec.model,
       source: resolved.source, override: resolved.source === 'override', nativeExecutor,
       detail: conflict,
       writeConflict: conflict,
-    };
+    });
   };
 
   if (resolved.executor.adapter === 'command') {
-    return refusal(resolved.executor, resolved.executorName) ?? {
+    return refusal(resolved.executor, resolved.executorName) ?? finish({
       mode: 'command', archetype, role, activeLoadout: active,
       executor: resolved.executorName, adapter: 'command', model: resolved.executor.model,
       source: resolved.source, override: resolved.source === 'override', nativeExecutor,
       detail: `dispatch through command executor ${resolved.executorName}; effective immediately`,
-    };
+    });
   }
   if (nativeExecutor === resolved.executorName) {
-    return {
+    return finish({
       mode: 'native', archetype, role, activeLoadout: active,
       executor: resolved.executorName, adapter: 'host', model: resolved.executor.model,
       source: resolved.source, override: resolved.source === 'override', nativeExecutor,
       detail: `host executor ${resolved.executorName} matches this session's native baseline`,
-    };
+    });
   }
   if (resolved.executor.fallbackCommand != null) {
-    return refusal(resolved.executor, resolved.executorName) ?? {
+    return refusal(resolved.executor, resolved.executorName) ?? finish({
       mode: 'command', archetype, role, activeLoadout: active,
       executor: resolved.executorName, adapter: 'host', model: resolved.executor.model,
       source: resolved.source, override: resolved.source === 'override', nativeExecutor,
       detail:
         `host executor ${resolved.executorName} differs from this session's native baseline ` +
         `${nativeExecutor ?? '(none)'}; use its declared command fallback immediately`,
-    };
+    });
   }
-  return {
+  return finish({
     mode: 'restart_required', archetype, role, activeLoadout: active,
     executor: resolved.executorName, adapter: 'host', model: resolved.executor.model,
     source: resolved.source, override: resolved.source === 'override', nativeExecutor,
     detail:
       `loadout ${active.name} requests host executor ${resolved.executorName}, but this session was ` +
       `materialized for ${nativeExecutor ?? 'no native executor'}; apply the loadout and start a fresh Codex session`,
-  };
+  });
 }
 
 const ROLE_BEHAVIOR: Record<string, string> = {

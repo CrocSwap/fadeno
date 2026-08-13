@@ -278,7 +278,7 @@ test('Claude steering writes the native_delivery evidence the kernel never sees'
     // cannot import DISPATCHES_FORMAT (it runs as a standalone script), so the
     // literal is duplicated there and pinned here — orthogonal to hook_version
     // below, which stamps the *writer*, not the format it writes.
-    format: '0.1',
+    format: '0.2',
     event: 'native_delivery',
     // Hook generation that wrote the row: the session-start hook cache means a
     // live session can be a build behind, so the row names its own writer.
