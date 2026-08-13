@@ -57,10 +57,10 @@ function mergeLayer(target: Record<string, unknown>, source: Record<string, unkn
     }
     target[key] = current;
   }
-  for (const key of ['schema_version', 'default_loadout']) {
+  for (const key of ['schema_version', 'default_loadout', 'constraints']) {
     if (source[key] !== undefined) {
       target[key] = source[key];
-      provenance.defaultLoadout = layer;
+      if (key === 'default_loadout') provenance.defaultLoadout = layer;
     }
   }
 }
