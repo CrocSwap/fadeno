@@ -20,7 +20,7 @@ import {
   explainWriteConflict,
   loadExecutorProfile,
   readLocalLoadoutState,
-  readUserLoadout,
+  applicableUserLoadout,
   resolveActiveLoadout,
   resolveRole,
   roleResolutionEchoLabel,
@@ -344,10 +344,14 @@ function lockedRunFile(runDir: string, value: string, label: string): string {
 function loadProfileOrThrow(
   repoRoot: string,
   userPathOptions?: UserPathOptions,
-): { profile: ExecutorProfile; layers: Array<'builtin' | 'user' | 'project'> } {
+): { profile: ExecutorProfile; layers: Array<'builtin' | 'user' | 'project'>; selfContained: boolean } {
   try {
     const layered = loadExecutorProfile(repoRoot, userPathOptions);
-    return { profile: layered.profile, layers: layered.layers ?? [] };
+    return {
+      profile: layered.profile,
+      layers: layered.layers ?? [],
+      selfContained: layered.selfContained === true,
+    };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new DispatchCommandError(err.message);
     throw err;
@@ -431,9 +435,8 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       envValue: opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null,
       localFileValue: pin.loadout,
       // A self-contained project profile is authoritative; a user-scope dial
-      // naming a user-layer loadout must not reach into a repo whose profile
-      // never saw that layer.
-      userFileValue: layered.layers.includes('user') ? readUserLoadout(opts.userPathOptions) : null,
+      // must not reach into a catalog that displaced the user layer outright.
+      userFileValue: applicableUserLoadout(layered.selfContained, opts.userPathOptions),
       profile,
       });
       // Overrides decorate their base loadout by name: a `--loadout other` on

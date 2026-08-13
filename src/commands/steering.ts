@@ -10,7 +10,7 @@ import {
   loadExecutorProfile,
   parseExecutorProfile,
   readLocalLoadoutState,
-  readUserLoadout,
+  applicableUserLoadout,
   resolveActiveLoadout,
   resolveRole,
   type ActiveLoadout,
@@ -306,7 +306,7 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
   }
   if (hasRun && hasDispatchId) return runLockedSteeringResolve(opts, archetype, role, nativeExecutor);
 
-  const { profile, layers } = profileOf(repoRoot, opts.userPathOptions);
+  const { profile, selfContained } = profileOf(repoRoot, opts.userPathOptions);
   const nativeSpec = nativeExecutor == null ? null : profile.executors[nativeExecutor];
   if (nativeExecutor != null && (nativeSpec == null || nativeSpec.adapter !== 'host')) {
     throw new SteeringError(
@@ -325,10 +325,9 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
       flagValue: opts.loadout ?? null,
       envValue: opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null,
       localFileValue: pin.loadout,
-      // A user-scope dial only applies where the user layer was actually
-      // composed: a self-contained project profile is authoritative.
-      userFileValue:
-        layers == null || layers.includes('user') ? readUserLoadout(opts.userPathOptions) : null,
+      // A user-scope dial applies everywhere except under a self-contained
+      // project profile, which is authoritative.
+      userFileValue: applicableUserLoadout(selfContained, opts.userPathOptions),
       profile,
     });
     overrides = applicableOverrides(pin, active);

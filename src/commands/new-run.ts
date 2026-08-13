@@ -7,7 +7,7 @@ import {
   applicableOverrides,
   loadExecutorProfile,
   readLocalLoadoutState,
-  readUserLoadout,
+  applicableUserLoadout,
   resolveActiveLoadout,
   resolveRole,
   roleResolutionEchoLabel,
@@ -229,11 +229,11 @@ function computeResolution(
   userPathOptions?: UserPathOptions,
 ): NewRunResolution | null {
   let profile: ExecutorProfile;
-  let layers: Array<'builtin' | 'user' | 'project'> | undefined;
+  let selfContained: boolean | undefined;
   try {
     const loaded = loadExecutorProfile(repoRoot, userPathOptions);
     profile = loaded.profile;
-    layers = loaded.layers;
+    selfContained = loaded.selfContained;
   } catch (err) {
     if (err instanceof ExecutorProfileError) return null;
     throw err;
@@ -249,9 +249,9 @@ function computeResolution(
       flagValue,
       envValue: envRaw !== undefined ? envRaw : process.env.FADENO_LOADOUT ?? null,
       localFileValue: pin.loadout,
-      // A user-scope dial only applies where the user layer was actually
-      // composed: a self-contained project profile is authoritative.
-      userFileValue: layers == null || layers.includes('user') ? readUserLoadout(userPathOptions) : null,
+      // A user-scope dial applies everywhere except under a self-contained
+      // project profile, which is authoritative.
+      userFileValue: applicableUserLoadout(selfContained, userPathOptions),
       profile,
     });
     overrides = applicableOverrides(pin, active);

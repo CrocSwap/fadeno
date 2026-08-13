@@ -1,6 +1,6 @@
 import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { loadLayeredProfile, type ConfigLayer, type LayeredProfile } from '../lib/config-layers.ts';
+import { loadLayeredProfile, type LayeredProfile } from '../lib/config-layers.ts';
 import {
   activeHarness,
   applicableOverrides,
@@ -12,7 +12,7 @@ import {
   explainWriteConflict,
   LOADOUT_LOCAL_FILE,
   readLocalLoadoutState,
-  readUserLoadout,
+  applicableUserLoadout,
   resolveActiveLoadout,
   resolveRole,
   writeLocalLoadoutState,
@@ -142,12 +142,9 @@ function canonSurfacing(layered: LayeredProfile): {
   return { suppressed_canon_archetypes, note: formatSuppressedCanonNote(suppressed_canon_archetypes) };
 }
 
-/** User sticky pin, only when the composed profile actually included the user layer. */
-function userPinValue(layers: readonly ConfigLayer[], userPathOptions?: UserPathOptions): string | null {
-  // A self-contained project profile never composed the user layer; a
-  // user-scope pin must not reach into a catalog that never saw that layer.
-  if (!layers.includes('user')) return null;
-  return readUserLoadout(userPathOptions);
+/** User sticky pin, unless a self-contained project catalog displaced it. */
+function userPinValue(selfContained: boolean, userPathOptions?: UserPathOptions): string | null {
+  return applicableUserLoadout(selfContained, userPathOptions);
 }
 
 /** Read the sticky pin, restating a malformed-pin error as a command error. */
@@ -180,7 +177,7 @@ function activeFor(
   opts: LoadoutCommonOptions,
   repoRoot: string,
   profile: ExecutorProfile,
-  layers: readonly ConfigLayer[],
+  selfContained: boolean,
   strict = false,
 ): {
   active: ActiveLoadout | null;
@@ -192,7 +189,7 @@ function activeFor(
 } {
   const pin = readPin(repoRoot);
   const localValue = pin.loadout;
-  const userValue = userPinValue(layers, opts.userPathOptions);
+  const userValue = userPinValue(selfContained, opts.userPathOptions);
   const stalePin = localValue != null && !(localValue in profile.loadouts) ? localValue : null;
   const staleUserPin = userValue != null && !(userValue in profile.loadouts) ? userValue : null;
   try {
@@ -328,7 +325,7 @@ export function runLoadoutShow(opts: LoadoutCommonOptions = {}): LoadoutShowResu
   const repoRoot = repoRootOf(opts);
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
-  const { active, stalePin, overrides, shadows, shadow_attachments } = activeFor(opts, repoRoot, profile, layered.layers);
+  const { active, stalePin, overrides, shadows, shadow_attachments } = activeFor(opts, repoRoot, profile, layered.selfContained);
   const effective = active == null
     ? { rows: [], stale: [] as StaleOverrideView[], staleShadows: [] as StaleShadowView[] }
     : effectiveRows(profile, active.name, overrides, shadows);
@@ -382,7 +379,7 @@ export function runLoadoutList(opts: LoadoutCommonOptions = {}): LoadoutListResu
   const repoRoot = repoRootOf(opts);
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
-  const { active, stalePin, overrides, shadows, shadow_attachments } = activeFor(opts, repoRoot, profile, layered.layers);
+  const { active, stalePin, overrides, shadows, shadow_attachments } = activeFor(opts, repoRoot, profile, layered.selfContained);
   const canon = canonSurfacing(layered);
   let staleOverrides: StaleOverrideView[] = [];
   let staleShadows: StaleShadowView[] = [];
@@ -524,7 +521,7 @@ export function runLoadoutSet(
       `"${target}" is not a declared executor (${Object.keys(profile.executors).sort().join(', ')}).`,
     );
   }
-  const { active, pin } = activeFor(opts, repoRoot, profile, layered.layers);
+  const { active, pin } = activeFor(opts, repoRoot, profile, layered.selfContained);
   if (active == null) {
     throw new LoadoutError(
       'No loadout is active, so a session override has nothing to decorate. ' +
@@ -605,7 +602,7 @@ export function runLoadoutResolve(
   const repoRoot = repoRootOf(opts);
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
-  const { active, overrides } = activeFor(opts, repoRoot, profile, layered.layers, true);
+  const { active, overrides } = activeFor(opts, repoRoot, profile, layered.selfContained, true);
   if (active == null) throw new LoadoutError('No loadout is active.');
   try {
     const resolved = resolveRole(
@@ -749,7 +746,7 @@ export function runLoadoutShadow(
     const conflict = explainEligibilityConflict({ executor, spec }, archetype);
     throw new LoadoutError(conflict ?? `archetype "${archetype}" is forbidden on executor "${executor}".`);
   }
-  const { active, pin } = activeFor(opts, repoRoot, profile, layered.layers);
+  const { active, pin } = activeFor(opts, repoRoot, profile, layered.selfContained);
   if (active == null) {
     throw new LoadoutError(
       'No loadout is active, so a shadow attachment has nothing to decorate. ' +

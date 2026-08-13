@@ -6,7 +6,7 @@ import {
   ExecutorProfileError,
   loadExecutorProfile,
   readLocalLoadoutState,
-  readUserLoadout,
+  applicableUserLoadout,
   resolveActiveLoadout,
   type ActiveLoadout,
   type ExecutorProfile,
@@ -117,7 +117,9 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
     throw err;
   }
   const projectPin = pin.loadout;
-  const userPin = readUserLoadout(opts.userPathOptions);
+  // Same gate the routing commands apply, so status and doctor never name a
+  // loadout dispatch would decline to use.
+  const userPin = applicableUserLoadout(loaded.selfContained, opts.userPathOptions);
   const staleProjectPin = projectPin != null && !(projectPin in loaded.profile.loadouts) ? projectPin : null;
   const staleUserPin = userPin != null && !(userPin in loaded.profile.loadouts) ? userPin : null;
   let active: ActiveLoadout | null;

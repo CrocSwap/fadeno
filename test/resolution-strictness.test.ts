@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { LoadoutError, runLoadoutList, runLoadoutResolve, runLoadoutShow } from '../src/commands/loadout.ts';
+import { runStatus } from '../src/commands/status.ts';
 import { SteeringError, runSteeringResolve } from '../src/commands/steering.ts';
 import { loadLayeredProfile } from '../src/lib/config-layers.ts';
 import { ExecutorProfileError, LOADOUT_LOCAL_FILE, resolveActiveLoadout } from '../src/lib/executors.ts';
@@ -131,7 +132,12 @@ test('loadout resolve: ignores a user pin when the project profile is complete',
   assert.deepEqual(resolved.active, { name: 'main', source: 'default' });
 });
 
-test('loadout resolve: consults a user pin only when the user layer was composed', (t) => {
+test('loadout resolve: a user pin applies unless a self-contained project catalog displaced it', (t) => {
+  // The gate is self-containment, not `layers.includes('user')`. `layers` only
+  // reports which catalogs exist on disk, so keying on it silently dropped the
+  // pin in the common case — a repo with no project catalog at all — making
+  // `fadeno use` a no-op for routing everywhere but the one repo that happened
+  // to have ~/.config/fadeno/executors.yaml.
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   const paths = isolatedUser(root);
@@ -142,17 +148,68 @@ test('loadout resolve: consults a user pin only when the user layer was composed
     repoRoot: root, env: null, userPathOptions: paths, archetype: 'worker',
   });
   assert.deepEqual(composed.active, { name: 'luna', source: 'user' });
-  assert.ok(loadLayeredProfile(root, paths).layers.includes('user'));
+  assert.equal(loadLayeredProfile(root, paths).selfContained, false);
 
+  // No project catalog and no user catalog: layers === ['builtin'], but `luna`
+  // is a builtin loadout and the dial must still reach it.
   const noCatalog = tempRepo(t);
   mkdirSync(join(noCatalog, '.fadeno'), { recursive: true });
   const barePaths = isolatedUser(noCatalog);
   writeUserPin(barePaths, 'luna');
-  const ignored = runLoadoutResolve({
-    repoRoot: noCatalog, env: null, userPathOptions: barePaths, archetype: 'worker',
-  });
-  assert.deepEqual(ignored.active, { name: 'native', source: 'default' });
-  assert.equal(loadLayeredProfile(noCatalog, barePaths).layers.includes('user'), false);
+  const bare = loadLayeredProfile(noCatalog, barePaths);
+  assert.deepEqual(bare.layers, ['builtin']);
+  assert.equal(bare.selfContained, false);
+  assert.deepEqual(
+    runLoadoutResolve({
+      repoRoot: noCatalog, env: null, userPathOptions: barePaths, archetype: 'worker',
+    }).active,
+    { name: 'luna', source: 'user' },
+  );
+
+  // A complete project catalog is authoritative: it replaced the other layers,
+  // so the dial must not reach into it.
+  const selfContained = seedProject(t, COMPLETE_DOC);
+  writeUserPin(selfContained.paths, 'luna');
+  assert.equal(loadLayeredProfile(selfContained.root, selfContained.paths).selfContained, true);
+  assert.deepEqual(
+    runLoadoutResolve({
+      repoRoot: selfContained.root, env: null, userPathOptions: selfContained.paths, archetype: 'worker',
+    }).active,
+    { name: 'main', source: 'default' },
+  );
+});
+
+test('status/doctor report the loadout the routing commands will actually use', (t) => {
+  // status fed doctor a pin that dispatch declined to honor: the one lie the
+  // command whose whole job is reporting the effective configuration cannot
+  // tell. Both surfaces now share `applicableUserLoadout`.
+  const bare = tempRepo(t);
+  mkdirSync(join(bare, '.fadeno'), { recursive: true });
+  const barePaths = isolatedUser(bare);
+  writeUserPin(barePaths, 'luna');
+
+  const bareStatus = runStatus({ repoRoot: bare, env: null, userPathOptions: barePaths });
+  assert.deepEqual(bareStatus.activeLoadout, { name: 'luna', source: 'user' });
+  assert.deepEqual(
+    bareStatus.activeLoadout,
+    runLoadoutResolve({
+      repoRoot: bare, env: null, userPathOptions: barePaths, archetype: 'worker',
+    }).active,
+  );
+
+  const owned = seedProject(t, COMPLETE_DOC);
+  writeUserPin(owned.paths, 'luna');
+  const ownedStatus = runStatus({ repoRoot: owned.root, env: null, userPathOptions: owned.paths });
+  assert.deepEqual(ownedStatus.activeLoadout, { name: 'main', source: 'default' });
+  assert.deepEqual(
+    ownedStatus.activeLoadout,
+    runLoadoutResolve({
+      repoRoot: owned.root, env: null, userPathOptions: owned.paths, archetype: 'worker',
+    }).active,
+  );
+  // The pin belongs to a catalog this repo displaced, so it is inapplicable
+  // rather than stale: "clear the stale pin" would be wrong advice.
+  assert.equal(ownedStatus.staleUserPin, null);
 });
 
 test('loadout show/list: a stale local pin is surfaced, not thrown', (t) => {

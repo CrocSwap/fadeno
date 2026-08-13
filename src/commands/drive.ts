@@ -24,7 +24,8 @@ import {
   loadExecutorProfile,
   parseExecutorProfile,
   readLocalLoadoutState,
-  readUserLoadout,
+  applicableUserLoadout,
+  repoProfileSelfContained,
   resolveActiveLoadout,
   resolveRole,
   roleResolutionEchoLabel,
@@ -1915,7 +1916,12 @@ export function runDrive(opts: DriveOptions): DriveResult {
       runValue: requestedLoadout,
       envValue: opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null,
       localFileValue: pin.loadout,
-      userFileValue: readUserLoadout(opts.userPathOptions),
+      // The run resolves against a snapshotted profile, so self-containment is
+      // read from the repo's current catalog rather than the snapshot.
+      userFileValue: applicableUserLoadout(
+        repoProfileSelfContained(repoRoot, opts.userPathOptions),
+        opts.userPathOptions,
+      ),
       profile,
     });
   } catch (err) {
