@@ -54,7 +54,8 @@ writers accept only 0.3.
   Materialization and that check now key on the harnesses this machine
   maintains — `installations.json` already recorded each independently, unioned
   with the memo so no machine set up before the manifest loses behavior. An
-  explicit `--codex`/`--claude` on `use` still scopes the write. Freshness is
+  explicit `fadeno use --codex` still forces the write; there is deliberately
+  no flag that suppresses it, since skipping maintenance is the bug. Freshness is
   judged against the catalog compiled *for codex* rather than the active
   harness, because which archetypes need an agent is itself harness-dependent:
   an anthropic target is a host slot under Claude and a command under Codex.
