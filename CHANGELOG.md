@@ -242,6 +242,17 @@ writers accept only 0.3.
 
 ### Fixed
 
+- **The starter xai routes actually run.** `[grok, build, "-"]` targeted a
+  subcommand that does not exist — "Grok Build" is product branding; bare
+  `grok` is the interactive TUI, which would have parsed `build` as a
+  prompt. The routes now use grok's real one-shot mode
+  (`--prompt-file /dev/stdin`) with `--always-approve` and declare
+  `write_access: true`, resolving the long-open "xai headless write posture
+  unknown" item: verified live, grok's one-shot mode runs a full agentic
+  tool loop under `--always-approve`, and stalls silently — exit 0, one or
+  zero messages, no tools — under any narrower permission mode, because a
+  headless run cannot answer approval prompts.
+
 - **Prototype-name roles and archetypes resolve cleanly.** A role, archetype,
   or binding named `constructor` or `toString` passes the bare-identifier
   rule, but plain property lookups in `resolveRole` found the inherited
