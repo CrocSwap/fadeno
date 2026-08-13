@@ -89,9 +89,18 @@ routes:
 # `--always-approve`: grok's one-shot mode stalls silently (exit 0, no tools)
 # under any narrower permission mode, because headless runs cannot answer
 # approval prompts — verified live 2026-08-12.
+# `requires_write` is `required`, `forbidden`, or `none`; booleans alias
+# (`true` → `required`, `false` → `none`).
+# `generator` is divergent artifact-producing work that must not mutate the
+# workspace.
+# `fallback` is binding-only: an archetype without a slot resolves through its
+# fallback's binding, never its policy.
 archetypes:
   worker:
-    requires_write: true
+    requires_write: required
+  generator:
+    requires_write: forbidden
+    fallback: worker
 
 # Filler idiom: a slot that is not the loadout's point takes `current-host`, so
 # one loadout stays correct on every harness instead of forking per host.

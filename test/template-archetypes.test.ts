@@ -5,6 +5,7 @@ import test from 'node:test';
 import { parse as parseYaml } from 'yaml';
 import { runInit } from '../src/commands/init.ts';
 import { runValidate } from '../src/commands/validate.ts';
+import { parseExecutorProfile } from '../src/lib/executors.ts';
 import { tempRepo } from './helpers.ts';
 
 // Loadout dispatch resolves role → archetype → executor; the starter templates
@@ -73,6 +74,22 @@ test('starter-playbook archetypes are bare lowercase identifiers', (t) => {
     }
   }
   assert.ok(declared > 0, 'at least one starter role declares an archetype');
+});
+
+test('starter catalog archetypes: worker is required, generator is forbidden with worker fallback', () => {
+  const profile = parseExecutorProfile(
+    readFileSync(join(import.meta.dirname, '..', 'templates', 'common', 'fadeno', 'executors.yaml'), 'utf8'),
+    'templates/common/fadeno/executors.yaml',
+  );
+  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null });
+  assert.deepEqual(profile.archetypes.generator, { requiresWrite: 'forbidden', fallback: 'worker' });
+  for (const [name, slots] of Object.entries(profile.loadouts)) {
+    assert.equal(
+      slots.generator,
+      undefined,
+      `loadout ${JSON.stringify(name)} must not grow a generator slot; the fallback serves it`,
+    );
+  }
 });
 
 test('starter-playbook role names do not encode model names', (t) => {
