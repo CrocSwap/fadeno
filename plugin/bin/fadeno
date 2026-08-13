@@ -14493,6 +14493,7 @@ function loadLayeredProfile(repoRoot, options = {}, harness) {
     layers: effective.map((entry) => entry.layer),
     provenance,
     paths,
+    selfContained: suppressLayering,
     suppressedCanonArchetypes: suppressLayering ? missingCanonArchetypes(parsedLayers.get("builtin") ?? null, projectDoc) : []
   };
 }
@@ -15006,6 +15007,7 @@ function loadExecutorProfile(repoRoot, options = {}, harness) {
       profile: loaded.profile,
       path: loaded.path,
       layers: loaded.layers,
+      selfContained: loaded.selfContained,
       provenance: loaded.provenance
     };
   } catch (err) {
@@ -15182,6 +15184,17 @@ function resolveActiveLoadout(opts) {
     return { name, source: sourceKind };
   }
   return null;
+}
+function applicableUserLoadout(selfContained, options = {}) {
+  if (selfContained === true) return null;
+  return readUserLoadout(options);
+}
+function repoProfileSelfContained(repoRoot, options = {}) {
+  try {
+    return loadExecutorProfile(repoRoot, options).selfContained === true;
+  } catch {
+    return false;
+  }
 }
 function readUserLoadout(options = {}) {
   const path = userPaths(options).loadoutFile;
@@ -17505,7 +17518,11 @@ function lockedRunFile(runDir, value, label) {
 function loadProfileOrThrow(repoRoot, userPathOptions) {
   try {
     const layered = loadExecutorProfile(repoRoot, userPathOptions);
-    return { profile: layered.profile, layers: layered.layers ?? [] };
+    return {
+      profile: layered.profile,
+      layers: layered.layers ?? [],
+      selfContained: layered.selfContained === true
+    };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new DispatchCommandError(err.message);
     throw err;
@@ -17561,9 +17578,8 @@ function runDispatch(opts) {
         envValue: opts.env !== void 0 ? opts.env : process.env.FADENO_LOADOUT ?? null,
         localFileValue: pin.loadout,
         // A self-contained project profile is authoritative; a user-scope dial
-        // naming a user-layer loadout must not reach into a repo whose profile
-        // never saw that layer.
-        userFileValue: layered.layers.includes("user") ? readUserLoadout(opts.userPathOptions) : null,
+        // must not reach into a catalog that displaced the user layer outright.
+        userFileValue: applicableUserLoadout(layered.selfContained, opts.userPathOptions),
         profile
       });
       overrides = applicableOverrides(pin, active);
@@ -22142,7 +22158,12 @@ function runDrive(opts) {
       runValue: requestedLoadout,
       envValue: opts.env !== void 0 ? opts.env : process.env.FADENO_LOADOUT ?? null,
       localFileValue: pin.loadout,
-      userFileValue: readUserLoadout(opts.userPathOptions),
+      // The run resolves against a snapshotted profile, so self-containment is
+      // read from the repo's current catalog rather than the snapshot.
+      userFileValue: applicableUserLoadout(
+        repoProfileSelfContained(repoRoot, opts.userPathOptions),
+        opts.userPathOptions
+      ),
       profile
     });
   } catch (err) {
@@ -22730,9 +22751,8 @@ function canonSurfacing(layered) {
   const suppressed_canon_archetypes = layered.suppressedCanonArchetypes;
   return { suppressed_canon_archetypes, note: formatSuppressedCanonNote(suppressed_canon_archetypes) };
 }
-function userPinValue(layers, userPathOptions) {
-  if (!layers.includes("user")) return null;
-  return readUserLoadout(userPathOptions);
+function userPinValue(selfContained, userPathOptions) {
+  return applicableUserLoadout(selfContained, userPathOptions);
 }
 function readPin(repoRoot) {
   try {
@@ -22742,10 +22762,10 @@ function readPin(repoRoot) {
     throw err;
   }
 }
-function activeFor(opts, repoRoot, profile, layers, strict = false) {
+function activeFor(opts, repoRoot, profile, selfContained, strict = false) {
   const pin = readPin(repoRoot);
   const localValue = pin.loadout;
-  const userValue = userPinValue(layers, opts.userPathOptions);
+  const userValue = userPinValue(selfContained, opts.userPathOptions);
   const stalePin = localValue != null && !(localValue in profile.loadouts) ? localValue : null;
   const staleUserPin = userValue != null && !(userValue in profile.loadouts) ? userValue : null;
   try {
@@ -22829,7 +22849,7 @@ function runLoadoutShow(opts = {}) {
   const repoRoot = repoRootOf(opts);
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
-  const { active, stalePin, overrides, shadows, shadow_attachments } = activeFor(opts, repoRoot, profile, layered.layers);
+  const { active, stalePin, overrides, shadows, shadow_attachments } = activeFor(opts, repoRoot, profile, layered.selfContained);
   const effective = active == null ? { rows: [], stale: [], staleShadows: [] } : effectiveRows(profile, active.name, overrides, shadows);
   const canon = canonSurfacing(layered);
   const liveShadowAttachments = {};
@@ -22857,7 +22877,7 @@ function runLoadoutList(opts = {}) {
   const repoRoot = repoRootOf(opts);
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
-  const { active, stalePin, overrides, shadows, shadow_attachments } = activeFor(opts, repoRoot, profile, layered.layers);
+  const { active, stalePin, overrides, shadows, shadow_attachments } = activeFor(opts, repoRoot, profile, layered.selfContained);
   const canon = canonSurfacing(layered);
   let staleOverrides = [];
   let staleShadows = [];
@@ -22939,7 +22959,7 @@ function runLoadoutSet(opts) {
       `"${target}" is not a declared executor (${Object.keys(profile.executors).sort().join(", ")}).`
     );
   }
-  const { active, pin } = activeFor(opts, repoRoot, profile, layered.layers);
+  const { active, pin } = activeFor(opts, repoRoot, profile, layered.selfContained);
   if (active == null) {
     throw new LoadoutError(
       "No loadout is active, so a session override has nothing to decorate. Fix: select a base first with `fadeno loadout use <name>`."
@@ -22974,7 +22994,7 @@ function runLoadoutResolve(opts) {
   const repoRoot = repoRootOf(opts);
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
-  const { active, overrides } = activeFor(opts, repoRoot, profile, layered.layers, true);
+  const { active, overrides } = activeFor(opts, repoRoot, profile, layered.selfContained, true);
   if (active == null) throw new LoadoutError("No loadout is active.");
   try {
     const resolved = resolveRole(
@@ -23074,7 +23094,7 @@ function runLoadoutShadow(opts) {
     const conflict = explainEligibilityConflict({ executor, spec }, archetype);
     throw new LoadoutError(conflict ?? `archetype "${archetype}" is forbidden on executor "${executor}".`);
   }
-  const { active, pin } = activeFor(opts, repoRoot, profile, layered.layers);
+  const { active, pin } = activeFor(opts, repoRoot, profile, layered.selfContained);
   if (active == null) {
     throw new LoadoutError(
       "No loadout is active, so a shadow attachment has nothing to decorate. Fix: select a base first with `fadeno loadout use <name>`."
@@ -23278,11 +23298,11 @@ function recordDeclaredInputs(runDir, repoRoot, declared, supplied, now) {
 }
 function computeResolution(repoRoot, playbookPath, flagValue, envRaw, userPathOptions) {
   let profile;
-  let layers;
+  let selfContained;
   try {
     const loaded = loadExecutorProfile(repoRoot, userPathOptions);
     profile = loaded.profile;
-    layers = loaded.layers;
+    selfContained = loaded.selfContained;
   } catch (err) {
     if (err instanceof ExecutorProfileError) return null;
     throw err;
@@ -23295,9 +23315,9 @@ function computeResolution(repoRoot, playbookPath, flagValue, envRaw, userPathOp
       flagValue,
       envValue: envRaw !== void 0 ? envRaw : process.env.FADENO_LOADOUT ?? null,
       localFileValue: pin.loadout,
-      // A user-scope dial only applies where the user layer was actually
-      // composed: a self-contained project profile is authoritative.
-      userFileValue: layers == null || layers.includes("user") ? readUserLoadout(userPathOptions) : null,
+      // A user-scope dial applies everywhere except under a self-contained
+      // project profile, which is authoritative.
+      userFileValue: applicableUserLoadout(selfContained, userPathOptions),
       profile
     });
     overrides = applicableOverrides(pin, active);
@@ -25843,7 +25863,7 @@ function runSteeringResolve(opts) {
     throw new SteeringError("locked steering resolution requires both --run and --dispatch-id.");
   }
   if (hasRun && hasDispatchId) return runLockedSteeringResolve(opts, archetype, role, nativeExecutor);
-  const { profile, layers } = profileOf(repoRoot, opts.userPathOptions);
+  const { profile, selfContained } = profileOf(repoRoot, opts.userPathOptions);
   const nativeSpec = nativeExecutor == null ? null : profile.executors[nativeExecutor];
   if (nativeExecutor != null && (nativeSpec == null || nativeSpec.adapter !== "host")) {
     throw new SteeringError(
@@ -25858,9 +25878,9 @@ function runSteeringResolve(opts) {
       flagValue: opts.loadout ?? null,
       envValue: opts.env !== void 0 ? opts.env : process.env.FADENO_LOADOUT ?? null,
       localFileValue: pin.loadout,
-      // A user-scope dial only applies where the user layer was actually
-      // composed: a self-contained project profile is authoritative.
-      userFileValue: layers == null || layers.includes("user") ? readUserLoadout(opts.userPathOptions) : null,
+      // A user-scope dial applies everywhere except under a self-contained
+      // project profile, which is authoritative.
+      userFileValue: applicableUserLoadout(selfContained, opts.userPathOptions),
       profile
     });
     overrides = applicableOverrides(pin, active);
@@ -26550,7 +26570,7 @@ function runStatus(opts = {}) {
     throw err;
   }
   const projectPin = pin.loadout;
-  const userPin = readUserLoadout(opts.userPathOptions);
+  const userPin = applicableUserLoadout(loaded.selfContained, opts.userPathOptions);
   const staleProjectPin = projectPin != null && !(projectPin in loaded.profile.loadouts) ? projectPin : null;
   const staleUserPin = userPin != null && !(userPin in loaded.profile.loadouts) ? userPin : null;
   let active;
