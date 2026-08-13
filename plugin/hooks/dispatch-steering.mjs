@@ -11,7 +11,7 @@ import { join } from 'node:path';
 // emitters (`fadeno plugin` and `fadeno init --claude`) replace this literal
 // with the package version; the template keeps 'dev', so a row reading 'dev'
 // means the template was executed directly rather than an installed copy.
-const HOOK_VERSION = '0.6.0-rc.11';
+const HOOK_VERSION = '0.6.0-rc.12';
 
 function finish(value) {
   if (value != null) process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -119,7 +119,7 @@ function recordNativeDelivery() {
         // DISPATCHES_FORMAT in src/commands/dispatch.ts: this hook is a
         // standalone script with no import path back into the CLI, and both
         // writers must stamp the same version. Bump them together.
-        format: '0.1',
+        format: '0.2',
         timestamp: new Date().toISOString(),
         event: 'native_delivery',
         hook_version: HOOK_VERSION,

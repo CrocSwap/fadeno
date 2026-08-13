@@ -119,7 +119,7 @@ function recordNativeDelivery() {
         // DISPATCHES_FORMAT in src/commands/dispatch.ts: this hook is a
         // standalone script with no import path back into the CLI, and both
         // writers must stamp the same version. Bump them together.
-        format: '0.1',
+        format: '0.2',
         timestamp: new Date().toISOString(),
         event: 'native_delivery',
         hook_version: HOOK_VERSION,

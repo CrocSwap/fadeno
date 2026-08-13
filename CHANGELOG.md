@@ -15,6 +15,27 @@ writers accept only 0.3.
 
 ### Added
 
+- **Archetype schema pass** (phase 2 of
+  `docs/experimental/slots-and-archetypes.md`) — the archetype vocabulary
+  opens up while staying kernel-enforced. `requires_write` becomes
+  three-valued (`required` / `forbidden` / `none`; booleans alias for
+  compatibility), and `forbidden` refuses dispatch onto a command route
+  declared `write_access: true` the same way `required` refuses
+  `write_access: false` — at the dispatch boundary and at dial time. The
+  starter catalog gains the fourth canonical archetype, `generator`
+  (divergent artifact-producing work: `requires_write: forbidden`,
+  `fallback: worker`, no dedicated surfaces — every existing loadout serves
+  it with zero edits). Archetypes may declare `fallback` chains: bindings
+  only (a chain never imports another archetype's policy), acyclic at
+  parse, and overrides beat fallbacks because resolution re-enters the
+  override→slot cascade at each chain step. Rows bound through a chain
+  record `resolved_via`; steering walks the chain to the first native
+  surface (worker / reviewer / judge) and carries a write-forbidden
+  advisory on native delivery, where posture is advisory by construction.
+  Dispatch evidence format bumps to 0.2 (additive fields, same major — 0.1
+  rows still read). Archetype keys and fallback references are
+  identifier-validated.
+
 - **Session slot overrides** (phase 1 of
   `docs/experimental/slots-and-archetypes.md`) — switch one archetype at a
   time instead of authoring a loadout per combination:

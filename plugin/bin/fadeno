@@ -13939,7 +13939,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.11";
+  if (true) return "0.6.0-rc.12";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -14509,6 +14509,15 @@ var EXECUTORS_FILE = (0, import_node_path6.join)(".fadeno", "executors.yaml");
 function isMapping(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
+var WRITE_POSTURE_FORMS = 'true, false, "required", "forbidden", or "none"';
+function isWritePosture(value) {
+  return value === "required" || value === "forbidden" || value === "none";
+}
+function nextArchetypeFallback(archetypes, name) {
+  if (!Object.hasOwn(archetypes, name)) return null;
+  const next = archetypes[name].fallback;
+  return typeof next === "string" ? next : null;
+}
 function parseExecutorProfile(text, source, harness = "standalone") {
   let doc;
   try {
@@ -14798,23 +14807,69 @@ function parseExecutorProfile(text, source, harness = "standalone") {
       );
     }
     for (const [name, rawPolicy] of Object.entries(doc.archetypes)) {
+      if (!BARE_IDENTIFIER_RE.test(name)) {
+        throw new ExecutorProfileError(
+          `${source}: archetype name "${name}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`
+        );
+      }
       if (!isMapping(rawPolicy)) {
         throw new ExecutorProfileError(
-          `${source}: \`archetypes.${name}\` is not a mapping (only \`requires_write\` is allowed).`
+          `${source}: \`archetypes.${name}\` is not a mapping (only \`requires_write\` and \`fallback\` are allowed).`
         );
       }
-      const unknown = Object.keys(rawPolicy).filter((key) => key !== "requires_write");
+      const unknown = Object.keys(rawPolicy).filter(
+        (key) => key !== "requires_write" && key !== "fallback"
+      );
       if (unknown.length > 0) {
         throw new ExecutorProfileError(
-          `${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(", ")}; only \`requires_write\` is allowed.`
+          `${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(", ")}; only \`requires_write\` and \`fallback\` are allowed.`
         );
       }
-      if (typeof rawPolicy.requires_write !== "boolean") {
-        throw new ExecutorProfileError(
-          `${source}: \`archetypes.${name}.requires_write\` must be boolean.`
-        );
+      let requiresWrite = "none";
+      if (rawPolicy.requires_write !== void 0) {
+        if (rawPolicy.requires_write === true) {
+          requiresWrite = "required";
+        } else if (rawPolicy.requires_write === false) {
+          requiresWrite = "none";
+        } else if (isWritePosture(rawPolicy.requires_write)) {
+          requiresWrite = rawPolicy.requires_write;
+        } else {
+          throw new ExecutorProfileError(
+            `${source}: \`archetypes.${name}.requires_write\` must be ${WRITE_POSTURE_FORMS}.`
+          );
+        }
       }
-      archetypes[name] = { requiresWrite: rawPolicy.requires_write };
+      let fallback = null;
+      if (rawPolicy.fallback != null) {
+        if (typeof rawPolicy.fallback !== "string" || !BARE_IDENTIFIER_RE.test(rawPolicy.fallback)) {
+          throw new ExecutorProfileError(
+            `${source}: \`archetypes.${name}.fallback\` ${JSON.stringify(rawPolicy.fallback)} is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`
+          );
+        }
+        if (rawPolicy.fallback === name) {
+          throw new ExecutorProfileError(
+            `${source}: \`archetypes.${name}.fallback\` may not name its own archetype.`
+          );
+        }
+        fallback = rawPolicy.fallback;
+      }
+      archetypes[name] = { requiresWrite, fallback };
+    }
+    for (const start of Object.keys(archetypes)) {
+      const path = [];
+      const seen = /* @__PURE__ */ new Set();
+      let current = start;
+      while (typeof current === "string" && Object.hasOwn(archetypes, current)) {
+        if (seen.has(current)) {
+          const cycle = path.slice(path.indexOf(current)).concat(current);
+          throw new ExecutorProfileError(
+            `${source}: archetype fallback cycle: ${cycle.join(" \u2192 ")}.`
+          );
+        }
+        path.push(current);
+        seen.add(current);
+        current = nextArchetypeFallback(archetypes, current);
+      }
     }
   }
   const loadouts = {};
@@ -15004,30 +15059,46 @@ function roleResolutionEchoLabel(source, activeLoadoutName) {
   return source;
 }
 function resolveRole(role, archetype, profile, activeLoadout, overrides = {}) {
-  const pick = (executorName, source) => ({
+  const pick = (executorName, source, resolvedVia = null) => ({
     executorName,
     executor: executorForArchetype(profile, executorName, archetype),
-    source
+    source,
+    resolvedVia
   });
   const pinned = profile.bindings[role];
   if (typeof pinned === "string") return pick(pinned, "binding");
-  if (archetype != null && typeof overrides[archetype] === "string") {
-    const target = overrides[archetype];
-    if (!Object.hasOwn(profile.executors, target)) {
-      throw new ExecutorProfileError(
-        `Session override for archetype "${archetype}" targets "${target}", which is not a declared executor (${Object.keys(profile.executors).join(", ")}). Fix: re-dial with \`fadeno loadout set ${archetype} <executor>\`, or drop the override with \`fadeno loadout clear ${archetype}\`.`
-      );
+  const chain = [];
+  if (archetype != null) {
+    const seen = /* @__PURE__ */ new Set();
+    let current = archetype;
+    while (typeof current === "string" && !seen.has(current)) {
+      chain.push(current);
+      seen.add(current);
+      current = nextArchetypeFallback(profile.archetypes, current);
     }
-    return pick(target, "override");
+    for (const arch of chain) {
+      if (typeof overrides[arch] === "string") {
+        const target = overrides[arch];
+        if (!Object.hasOwn(profile.executors, target)) {
+          throw new ExecutorProfileError(
+            `Session override for archetype "${arch}" targets "${target}", which is not a declared executor (${Object.keys(profile.executors).join(", ")}). Fix: re-dial with \`fadeno loadout set ${arch} <executor>\`, or drop the override with \`fadeno loadout clear ${arch}\`.`
+          );
+        }
+        return pick(target, "override", arch !== archetype ? arch : null);
+      }
+      if (activeLoadout != null) {
+        const slot = profile.loadouts[activeLoadout]?.[arch];
+        if (typeof slot === "string") {
+          return pick(slot, "loadout", arch !== archetype ? arch : null);
+        }
+      }
+    }
   }
-  if (archetype != null && activeLoadout != null) {
-    const slot = profile.loadouts[activeLoadout]?.[archetype];
-    if (typeof slot === "string") return pick(slot, "loadout");
-  }
-  const fallback = profile.bindings["*"];
-  if (fallback != null) return pick(fallback, "default");
+  const starBinding = profile.bindings["*"];
+  if (typeof starBinding === "string") return pick(starBinding, "default");
   const archetypePart = archetype == null ? "no declared archetype" : `archetype "${archetype}"`;
-  const loadoutPart = activeLoadout == null ? "no active loadout" : archetype == null ? `active loadout "${activeLoadout}" cannot route a role without an archetype` : `active loadout "${activeLoadout}" has no "${archetype}" slot`;
+  const chainPart = chain.length > 1 ? `; chain ${chain.join(" \u2192 ")}` : "";
+  const loadoutPart = activeLoadout == null ? "no active loadout" : archetype == null ? `active loadout "${activeLoadout}" cannot route a role without an archetype` : chain.length > 1 ? `active loadout "${activeLoadout}" has no slot on chain ${chain.join(" \u2192 ")}` : `active loadout "${activeLoadout}" has no "${archetype}" slot`;
   const fixes = [];
   if (archetype == null) {
     fixes.push(`declare \`archetype:\` on role "${role}" in the playbook so a loadout can route it`);
@@ -15040,14 +15111,20 @@ function resolveRole(role, archetype, profile, activeLoadout, overrides = {}) {
   }
   fixes.push(`pin \`bindings.${role}\` to an executor`, 'add a "*" default binding');
   throw new ExecutorProfileError(
-    `No executor for role "${role}" (${archetypePart}; ${loadoutPart}; no "*" default binding). Fix: ${fixes.join(", or ")}.`
+    `No executor for role "${role}" (${archetypePart}${chainPart}; ${loadoutPart}; no "*" default binding). Fix: ${fixes.join(", or ")}.`
   );
 }
 function explainWriteConflict(delivery, archetype, profile) {
   if (archetype == null) return null;
-  if (profile.archetypes[archetype]?.requiresWrite !== true) return null;
-  if (delivery.spec.writeAccess !== false) return null;
-  return `archetype "${archetype}" declares \`requires_write: true\`, but executor "${delivery.executor}" delivers through a command route declared \`write_access: false\` \u2014 it cannot mutate the workspace, so the dispatch would burn a run and end in a refusal. Fix: bind "${archetype}" to a write-capable executor, raise the route command's permission mode (and declare \`write_access: true\`), or run this ${archetype}-shaped task with the native in-session ${archetype} agent.`;
+  if (!Object.hasOwn(profile.archetypes, archetype)) return null;
+  const posture = profile.archetypes[archetype].requiresWrite;
+  if (posture === "required" && delivery.spec.writeAccess === false) {
+    return `archetype "${archetype}" declares \`requires_write: required\`, but executor "${delivery.executor}" delivers through a command route declared \`write_access: false\` \u2014 it cannot mutate the workspace, so the dispatch would burn a run and end in a refusal. Fix: bind "${archetype}" to a write-capable executor, raise the route command's permission mode (and declare \`write_access: true\`), or run this ${archetype}-shaped task with the native in-session ${archetype} agent.`;
+  }
+  if (posture === "forbidden" && delivery.spec.writeAccess === true) {
+    return `archetype "${archetype}" declares \`requires_write: forbidden\`, but executor "${delivery.executor}" delivers through a command route declared \`write_access: true\` \u2014 the dispatch would hand a mutating toolchain to work that must not mutate the workspace. Fix: bind "${archetype}" to a read-only route, clear the session dial (\`fadeno loadout clear ${archetype}\`), or declare \`requires_write: none\`.`;
+  }
+  return null;
 }
 function executorForArchetype(profile, executorName, archetype) {
   const spec = profile.executors[executorName];
@@ -15077,7 +15154,11 @@ function serializeProfile(profile) {
   if (Object.keys(profile.archetypes).length > 0) {
     const sortedArchetypes = {};
     for (const name of Object.keys(profile.archetypes).sort()) {
-      sortedArchetypes[name] = { requires_write: profile.archetypes[name].requiresWrite };
+      const policy = profile.archetypes[name];
+      const entry = {};
+      if (policy.requiresWrite !== "none") entry.requires_write = policy.requiresWrite;
+      if (typeof policy.fallback === "string") entry.fallback = policy.fallback;
+      sortedArchetypes[name] = entry;
     }
     out.archetypes = sortedArchetypes;
   }
@@ -17060,7 +17141,7 @@ ${missing.join("\n")}
 var DispatchCommandError = class extends Error {
 };
 var DISPATCHES_FILE = (0, import_node_path12.join)(".fadeno", "dispatches.jsonl");
-var DISPATCHES_FORMAT = "0.1";
+var DISPATCHES_FORMAT = "0.2";
 var PENDING_RELAYS_FILE = (0, import_node_path12.join)(".fadeno", "local", "pending-relays.jsonl");
 var PENDING_RELAY_MAX_AGE_MS = 60 * 60 * 1e3;
 function consumePendingRelay(repoRoot, prompt, now) {
@@ -17129,6 +17210,7 @@ function runDispatch(opts) {
   let active = null;
   let overrides = {};
   let source;
+  let resolvedVia = null;
   if (opts.executor != null && opts.executor.trim() !== "") {
     executorName = opts.executor.trim();
     const found = profile.executors[executorName];
@@ -17173,6 +17255,7 @@ function runDispatch(opts) {
       executorName = resolved.executorName;
       spec = resolved.executor;
       source = resolved.source;
+      resolvedVia = resolved.resolvedVia;
     } catch (err) {
       if (err instanceof ExecutorProfileError) throw new DispatchCommandError(err.message);
       throw err;
@@ -17244,6 +17327,7 @@ function runDispatch(opts) {
     // did: `loadout` alone would name the base and quietly misattribute the
     // executor an override dialed on top of it. Absent on every other path.
     ...source === "override" && archetype != null ? { override: { [archetype]: executorName } } : {},
+    ...resolvedVia != null ? { resolved_via: resolvedVia } : {},
     executor: executorName,
     ...spec.target != null ? { target: spec.target, provider: spec.provider ?? null } : {},
     model: spec.model,
@@ -21601,7 +21685,8 @@ function runLoadoutResolve(opts) {
       adapter: resolved.executor.adapter,
       harness: profile.harness ?? "standalone",
       source: resolved.source,
-      override: resolved.source === "override"
+      override: resolved.source === "override",
+      ...resolved.resolvedVia != null ? { resolved_via: resolved.resolvedVia } : {}
     };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new LoadoutError(err.message);
@@ -23141,7 +23226,7 @@ function checkExecutorBindings(run, events) {
     if (profile == null) return null;
     try {
       const resolved = resolveRole(role, archetype, profile, loadout, overrides);
-      return { executor: resolved.executorName, source: resolved.source };
+      return { executor: resolved.executorName, source: resolved.source, resolvedVia: resolved.resolvedVia };
     } catch {
       return null;
     }
@@ -23180,10 +23265,20 @@ function checkExecutorBindings(run, events) {
           problems.push(
             `resolution_snapshot: role "${rec.role}" records executor "${rec.executor}" but the chain resolves nothing`
           );
-        } else if (recomputed.executor !== rec.executor || typeof rec.source === "string" && recomputed.source !== rec.source) {
-          problems.push(
-            `resolution_snapshot: role "${rec.role}" records "${rec.executor}" [${String(rec.source)}] but recomputes to "${recomputed.executor}" [${recomputed.source}]`
-          );
+        } else {
+          if (recomputed.executor !== rec.executor || typeof rec.source === "string" && recomputed.source !== rec.source) {
+            problems.push(
+              `resolution_snapshot: role "${rec.role}" records "${rec.executor}" [${String(rec.source)}] but recomputes to "${recomputed.executor}" [${recomputed.source}]`
+            );
+          }
+          if ("resolved_via" in rec) {
+            const recordedVia = typeof rec.resolved_via === "string" ? rec.resolved_via : null;
+            if (recordedVia !== recomputed.resolvedVia) {
+              problems.push(
+                `resolution_snapshot: role "${rec.role}" records resolved_via ${JSON.stringify(recordedVia)} but recomputes to ${JSON.stringify(recomputed.resolvedVia)}`
+              );
+            }
+          }
         }
       }
       continue;
@@ -24069,6 +24164,9 @@ var import_node_os3 = require("node:os");
 var import_node_path27 = require("node:path");
 var SteeringError = class extends Error {
 };
+var NATIVE_SURFACE_ARCHETYPES = ["worker", "reviewer", "judge"];
+var NATIVE_SURFACE_SET = new Set(NATIVE_SURFACE_ARCHETYPES);
+var FORBIDDEN_NATIVE_ADVISORY = "This work is write-forbidden (requires_write: forbidden): produce artifacts in your reply only \u2014 do not edit, create, or commit workspace files.";
 function rootOf(opts) {
   return opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
 }
@@ -24088,6 +24186,40 @@ function validateArchetype(archetype) {
     );
   }
   return value;
+}
+function nextArchetypeFallback2(profile, name) {
+  if (!Object.hasOwn(profile.archetypes, name)) return null;
+  const next = profile.archetypes[name].fallback;
+  return typeof next === "string" ? next : null;
+}
+function fallbackChain(profile, start) {
+  const chain = [];
+  const seen = /* @__PURE__ */ new Set();
+  let current = start;
+  while (typeof current === "string" && !seen.has(current)) {
+    chain.push(current);
+    seen.add(current);
+    current = nextArchetypeFallback2(profile, current);
+  }
+  return chain;
+}
+function decorateSteering(base, profile, resolvedVia) {
+  const result = { ...base, resolved_via: resolvedVia };
+  if (result.mode !== "native") return result;
+  if (!NATIVE_SURFACE_SET.has(result.archetype)) {
+    const chain = fallbackChain(profile, result.archetype);
+    const surface = chain.find((name) => NATIVE_SURFACE_SET.has(name));
+    if (surface == null) {
+      throw new SteeringError(
+        `archetype "${result.archetype}" has no native agent surface on its fallback chain (${chain.join(" \u2192 ")}); deliver it through a command route, or declare a fallback to ${NATIVE_SURFACE_ARCHETYPES.join(", ")}.`
+      );
+    }
+    result.surface_archetype = surface;
+  }
+  if (Object.hasOwn(profile.archetypes, result.archetype) && profile.archetypes[result.archetype].requiresWrite === "forbidden") {
+    result.advisory = FORBIDDEN_NATIVE_ADVISORY;
+  }
+  return result;
 }
 function snapshotProfileForRequest(lookup) {
   const snapshots = lookup.events.filter((event) => event.type === "profile_snapshotted");
@@ -24175,7 +24307,7 @@ function runLockedSteeringResolve(opts, archetype, role, nativeExecutor) {
   const matchesNative = nativeExecutor === request.executor;
   const hasFallback = executor.fallbackCommand != null;
   const detail2 = matchesNative ? `host request ${dispatchId} is locked to run-snapshotted executor ${request.executor}; execute natively` : hasFallback ? `host request ${dispatchId} is locked to ${request.executor}; deliver it through that executor's declared command fallback` : `host request ${dispatchId} requires native executor ${request.executor}; this session is materialized for ${nativeExecutor ?? "no native executor"}, so start a matching Codex session`;
-  return {
+  return decorateSteering({
     mode: matchesNative ? "native" : hasFallback ? "command" : "restart_required",
     archetype,
     role,
@@ -24187,7 +24319,7 @@ function runLockedSteeringResolve(opts, archetype, role, nativeExecutor) {
     override: false,
     nativeExecutor,
     detail: detail2
-  };
+  }, profile, null);
 }
 function runSteeringResolve(opts) {
   const repoRoot = rootOf(opts);
@@ -24229,7 +24361,7 @@ function runSteeringResolve(opts) {
         "no loadout is active and this Codex role agent has no native baseline; run `fadeno steering apply <loadout> --codex --force` and start a fresh Codex session."
       );
     }
-    return {
+    return decorateSteering({
       mode: "native",
       archetype,
       role,
@@ -24241,7 +24373,7 @@ function runSteeringResolve(opts) {
       override: false,
       nativeExecutor,
       detail: `no loadout is active; execute natively as baseline ${nativeExecutor}`
-    };
+    }, profile, null);
   }
   let resolved;
   try {
@@ -24256,10 +24388,11 @@ function runSteeringResolve(opts) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
     throw err;
   }
+  const finish = (base) => decorateSteering(base, profile, resolved.resolvedVia);
   const refusal = (spec, executorName) => {
     const conflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile);
     if (conflict == null) return null;
-    return {
+    return finish({
       mode: "write_conflict",
       archetype,
       role,
@@ -24272,10 +24405,10 @@ function runSteeringResolve(opts) {
       nativeExecutor,
       detail: conflict,
       writeConflict: conflict
-    };
+    });
   };
   if (resolved.executor.adapter === "command") {
-    return refusal(resolved.executor, resolved.executorName) ?? {
+    return refusal(resolved.executor, resolved.executorName) ?? finish({
       mode: "command",
       archetype,
       role,
@@ -24287,10 +24420,10 @@ function runSteeringResolve(opts) {
       override: resolved.source === "override",
       nativeExecutor,
       detail: `dispatch through command executor ${resolved.executorName}; effective immediately`
-    };
+    });
   }
   if (nativeExecutor === resolved.executorName) {
-    return {
+    return finish({
       mode: "native",
       archetype,
       role,
@@ -24302,10 +24435,10 @@ function runSteeringResolve(opts) {
       override: resolved.source === "override",
       nativeExecutor,
       detail: `host executor ${resolved.executorName} matches this session's native baseline`
-    };
+    });
   }
   if (resolved.executor.fallbackCommand != null) {
-    return refusal(resolved.executor, resolved.executorName) ?? {
+    return refusal(resolved.executor, resolved.executorName) ?? finish({
       mode: "command",
       archetype,
       role,
@@ -24317,9 +24450,9 @@ function runSteeringResolve(opts) {
       override: resolved.source === "override",
       nativeExecutor,
       detail: `host executor ${resolved.executorName} differs from this session's native baseline ${nativeExecutor ?? "(none)"}; use its declared command fallback immediately`
-    };
+    });
   }
-  return {
+  return finish({
     mode: "restart_required",
     archetype,
     role,
@@ -24331,7 +24464,7 @@ function runSteeringResolve(opts) {
     override: resolved.source === "override",
     nativeExecutor,
     detail: `loadout ${active.name} requests host executor ${resolved.executorName}, but this session was materialized for ${nativeExecutor ?? "no native executor"}; apply the loadout and start a fresh Codex session`
-  };
+  });
 }
 var ROLE_BEHAVIOR = {
   worker: "Implement the requested change, preserving unrelated work and validating the behavior you changed.",
