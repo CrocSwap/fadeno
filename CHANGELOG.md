@@ -326,6 +326,37 @@ writers accept only 0.3.
 
 ### Fixed
 
+- **A native slot stays native instead of nesting a subprocess.** The dispatch
+  proxy agents advertise themselves as MUST-BE-USED, so a director names
+  `fadeno:dispatch-judge` directly — and the Claude steering hook used to
+  short-circuit on that name, never asking which transport the loadout wanted.
+  Command delivery was locked in by the caller. On Claude that meant `claude
+  -p`: a subprocess of the harness already running, which loaded the same
+  plugin, re-read the prompt as director work, and re-dispatched one level
+  down until a headless permission denial ended it — exit 0, 97 seconds, a
+  failure report in place of a judgment. The hook now resolves a named proxy
+  like any other archetype spawn and pulls a host slot back to the native
+  agent (`current-host` still inherits the caller's model, pinning none on the
+  way out). The kernel carries the same rule as a backstop: on a harness that
+  materializes native slots in-session on demand, a host executor's
+  `fallback_command` is refused rather than spawned. That fallback keeps doing
+  exactly what it was written for — Codex materializes role agents once per
+  session, so a slot differing from that session's baseline still needs a
+  command.
+
+- **The starter xai worker has a real model id.** `grok-default` was bound to
+  `model: grok`, which the CLI rejects outright ("unknown model id"; `grok
+  models` lists grok-4.6 and grok-4.5), so every worker dispatch under it
+  exited 1 in about five seconds having done nothing. Now `grok-4.6`,
+  verified live against the CLI.
+
+- **`status` reports the harness that actually compiled the routes.** It
+  spelled harness resolution separately from `activeHarness`, reading
+  `process.env.FADENO_HARNESS` past an injected env and ignoring an explicit
+  `FADENO_HARNESS=standalone` — so the command whose whole job is reporting
+  the effective configuration could name a different harness than the one
+  whose routes it was reporting.
+
 - **The starter xai routes actually run.** `[grok, build, "-"]` targeted a
   subcommand that does not exist — "Grok Build" is product branding; bare
   `grok` is the interactive TUI, which would have parsed `build` as a

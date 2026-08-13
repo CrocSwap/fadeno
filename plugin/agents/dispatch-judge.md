@@ -1,6 +1,6 @@
 ---
 name: dispatch-judge
-description: Dispatch proxy that routes evaluation and scoring subtasks — comparing candidate attempts, scoring artifacts against stated criteria, picking a winner — to the external executor bound to the judge archetype in the active Fadeno loadout. Use proactively. MUST BE USED for judge-shaped subtasks when a Fadeno loadout is active. [fadeno 0.6.0-rc.15]
+description: Dispatch proxy that routes evaluation and scoring subtasks — comparing candidate attempts, scoring artifacts against stated criteria, picking a winner — to the external executor bound to the judge archetype in the active Fadeno loadout. Use proactively. MUST BE USED for judge-shaped subtasks when a Fadeno loadout is active. [fadeno 0.6.0-rc.16]
 tools: Bash
 model: sonnet
 ---
