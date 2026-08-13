@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
+import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { DISPATCHES_FILE, DISPATCHES_FORMAT } from './dispatch.ts';
 
@@ -87,6 +88,12 @@ export interface DispatchEntry {
   signal: string | null;
   durationMs: number | null;
   outputSha256: string | null;
+  /**
+   * Completion-row attestation that the workspace fingerprint changed across
+   * the spawn. Null when the field is absent — absent is not a claim of
+   * unchanged (no git, probe failed, or a row that predates the field).
+   */
+  workspaceChanged: boolean | null;
   error: string | null;
 }
 
@@ -119,6 +126,37 @@ export interface DispatchesResult {
   lines: string[];
   /** Footer for the rendered view, or the friendly message when empty. */
   summary: string;
+}
+
+/** Shortest unique prefix `runDispatchesOutput` will accept as a dispatch id. */
+const OUTPUT_ID_PREFIX_MIN = 8;
+
+export type DispatchOutputAttestation = 'match' | 'mismatch' | 'incomplete';
+
+export interface DispatchesOutputOptions {
+  /** Full `dispatch_id`, unique prefix of at least 8 characters, or `last`. */
+  dispatchId: string;
+  cwd?: string;
+  repoRoot?: string;
+  /**
+   * Accepted for CLI-wiring symmetry with other commands. Recovery reads only
+   * the repo-local evidence log and snapshot file; user-scope state is unused.
+   */
+  env?: string | null;
+}
+
+export interface DispatchesOutputResult {
+  dispatchId: string;
+  /** Repo-relative `output_snapshot` path recorded on the request row. */
+  path: string;
+  /** Current snapshot file content. */
+  bytes: string;
+  /**
+   * `match` / `mismatch` compare sha256(bytes) to the completion row's
+   * `output_sha256`. `incomplete` when no completion row exists — the
+   * killed-mid-flight case this reader exists for.
+   */
+  attested: DispatchOutputAttestation;
 }
 
 function str(value: unknown): string | null {
@@ -220,6 +258,7 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     signal: null,
     durationMs: null,
     outputSha256: null,
+    workspaceChanged: null,
     error: null,
   };
 }
@@ -257,6 +296,7 @@ function nativeEntry(row: Record<string, unknown>): DispatchEntry {
     signal: null,
     durationMs: null,
     outputSha256: null,
+    workspaceChanged: null,
     error: null,
   };
 }
@@ -269,6 +309,9 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
   entry.durationMs = num(row.duration_ms);
   entry.outputSha256 = str(row.output_sha256);
   entry.error = str(row.error);
+  if (typeof row.workspace_changed === 'boolean') {
+    entry.workspaceChanged = row.workspace_changed;
+  }
   // A completion row carries the full identity again; prefer it where the
   // request row was silent (older logs, partially written rows).
   entry.relayAttested = entry.relayAttested ?? bool(row.relay_attested);
@@ -328,6 +371,16 @@ export function renderDispatchLine(entry: DispatchEntry): string {
     } else if (entry.completed) {
       const code = `exit ${entry.exitCode ?? '?'}${entry.signal != null ? ` (${entry.signal})` : ''}`;
       parts.push(entry.durationMs != null ? `${code} in ${entry.durationMs}ms` : code);
+      // Exit-0 + write-capable + an explicit "nothing changed" attestation:
+      // the legible face of the exit-0 no-op. Rows that omit any of the
+      // three fields render unchanged — absent is not a claim.
+      if (
+        entry.exitCode === 0 &&
+        entry.writeAccess === true &&
+        entry.workspaceChanged === false
+      ) {
+        parts.push('[no workspace change]');
+      }
     } else {
       parts.push('no completion recorded (killed or in flight)');
     }
@@ -492,4 +545,127 @@ export function runDispatches(opts: DispatchesOptions = {}): DispatchesResult {
     lines: shown.map(renderDispatchLine),
     summary: summarize(shown.length, entries.length, skipped, skippedNewerFormat, true, path),
   };
+}
+
+interface OutputRecord {
+  dispatchId: string;
+  snapshot: string | null;
+  outputSha256: string | null;
+  completed: boolean;
+}
+
+/**
+ * Walk the evidence log for output-snapshot recovery. Unreadable lines are
+ * skipped (same as the list reader): a torn tail must not hide a recoverable
+ * snapshot. Format majors this list reader would set aside are still
+ * consulted — recovery is about the file, not the stamp.
+ */
+function loadOutputRecords(absolute: string): {
+  byId: Map<string, OutputRecord>;
+  lastWithSnapshot: string | null;
+} {
+  const byId = new Map<string, OutputRecord>();
+  let lastWithSnapshot: string | null = null;
+  if (!existsSync(absolute)) return { byId, lastWithSnapshot };
+
+  for (const line of readFileSync(absolute, 'utf8').split('\n')) {
+    if (line.trim() === '') continue;
+    let row: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(line) as unknown;
+      if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+      row = parsed as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const event = str(row.event);
+    const dispatchId = str(row.dispatch_id);
+    if (dispatchId == null) continue;
+    if (event !== 'dispatch_requested' && event !== 'dispatch_completed') continue;
+
+    let rec = byId.get(dispatchId);
+    if (rec == null) {
+      rec = { dispatchId, snapshot: null, outputSha256: null, completed: false };
+      byId.set(dispatchId, rec);
+    }
+    const snapshot = str(row.output_snapshot);
+    if (snapshot != null) rec.snapshot = snapshot;
+    if (event === 'dispatch_requested' && snapshot != null) lastWithSnapshot = dispatchId;
+    if (event === 'dispatch_completed') {
+      rec.completed = true;
+      rec.outputSha256 = str(row.output_sha256);
+    }
+  }
+  return { byId, lastWithSnapshot };
+}
+
+function resolveOutputRecord(
+  query: string,
+  byId: Map<string, OutputRecord>,
+  lastWithSnapshot: string | null,
+): OutputRecord {
+  if (query === 'last') {
+    if (lastWithSnapshot == null) {
+      throw new DispatchesCommandError(
+        'unknown dispatch "last": no output_snapshot has been recorded.',
+      );
+    }
+    return byId.get(lastWithSnapshot)!;
+  }
+
+  const exact = byId.get(query);
+  if (exact != null) return exact;
+
+  if (query.length < OUTPUT_ID_PREFIX_MIN) {
+    throw new DispatchesCommandError(`unknown dispatch "${query}".`);
+  }
+  const hits = [...byId.values()].filter((rec) => rec.dispatchId.startsWith(query));
+  if (hits.length === 0) throw new DispatchesCommandError(`unknown dispatch "${query}".`);
+  if (hits.length > 1) {
+    throw new DispatchesCommandError(`ambiguous dispatch prefix "${query}".`);
+  }
+  return hits[0]!;
+}
+
+/**
+ * Recover the streamed output snapshot for one command dispatch. `dispatchId`
+ * is a full `dispatch_id`, a unique prefix of at least 8 characters, or the
+ * keyword `last` (most recent `dispatch_requested` row that carries
+ * `output_snapshot`). The snapshot file's current bytes are the result; the
+ * attestation compares their digest to the completion row, or reports
+ * `incomplete` when that row never arrived.
+ *
+ * Not wired to a CLI flag here — the integrator adds
+ * `fadeno dispatches --output <id|last>` in `src/cli.ts` (stdout = bytes
+ * verbatim, stderr = one attestation note line).
+ */
+export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOutputResult {
+  const query = opts.dispatchId.trim();
+  if (query === '') {
+    throw new DispatchesCommandError(
+      'dispatch id is required (full id, unique prefix of 8+ characters, or "last").',
+    );
+  }
+
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const { byId, lastWithSnapshot } = loadOutputRecords(join(repoRoot, DISPATCHES_FILE));
+  const rec = resolveOutputRecord(query, byId, lastWithSnapshot);
+  if (rec.snapshot == null) {
+    throw new DispatchesCommandError(`dispatch "${rec.dispatchId}" predates output_snapshot.`);
+  }
+
+  const snapshotRel = rec.snapshot.split('\\').join('/');
+  const snapshotAbs = isAbsolute(snapshotRel) ? snapshotRel : join(repoRoot, snapshotRel);
+  if (!existsSync(snapshotAbs)) {
+    throw new DispatchesCommandError(`output snapshot missing: ${snapshotRel}.`);
+  }
+
+  const bytes = readFileSync(snapshotAbs, 'utf8');
+  const attested: DispatchOutputAttestation = !rec.completed
+    ? 'incomplete'
+    : sha256Hex(bytes) === rec.outputSha256
+      ? 'match'
+      : 'mismatch';
+  return { dispatchId: rec.dispatchId, path: snapshotRel, bytes, attested };
 }

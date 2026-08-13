@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
+import { sha256Hex } from '../src/lib/artifact-manifest.ts';
 import { DISPATCHES_FILE, DISPATCHES_FORMAT, runDispatch } from '../src/commands/dispatch.ts';
-import { DispatchesCommandError, runDispatches } from '../src/commands/dispatches.ts';
+import {
+  DispatchesCommandError,
+  runDispatches,
+  runDispatchesOutput,
+} from '../src/commands/dispatches.ts';
 import { tempRepo } from './helpers.ts';
 
 /**
@@ -326,6 +331,7 @@ test('dispatches: entries are structured data (what --json prints)', (t) => {
     signal: null,
     durationMs: 42,
     outputSha256: 'c'.repeat(64),
+    workspaceChanged: null,
     error: null,
   });
   assert.equal(payload.entries[1]!.kind, 'native');
@@ -539,4 +545,205 @@ test('dispatches: a completion that records a spawn error surfaces it', (t) => {
   assert.equal(result.entries[0]!.completed, true);
   assert.equal(result.entries[0]!.error, 'spawnSync missing-bin ENOENT');
   assert.match(result.lines[0]!, /exit \? \(SIGKILL\) in 7ms {2}\[error: spawnSync missing-bin ENOENT]/);
+});
+
+const OUTPUT_SNAP = '.fadeno/local/outputs/worker-aaaaaaaa.md';
+const OUTPUT_BODY = 'hello from the executor\n';
+const OUTPUT_DIGEST = sha256Hex(OUTPUT_BODY);
+
+function seedSnapshot(root: string, rel: string, content: string): void {
+  mkdirSync(join(root, dirname(rel)), { recursive: true });
+  writeFileSync(join(root, rel), content, 'utf8');
+}
+
+test('dispatches: [no workspace change] marks an exit-0 write-capable no-op', (t) => {
+  const root = seedLog(t, [
+    requested({ write_access: true, output_snapshot: OUTPUT_SNAP }),
+    completed({
+      write_access: true,
+      output_snapshot: OUTPUT_SNAP,
+      output_bytes: Buffer.byteLength(OUTPUT_BODY),
+      workspace_changed: false,
+    }),
+  ]);
+  const result = runDispatches({ repoRoot: root });
+  assert.equal(result.entries[0]!.workspaceChanged, false);
+  assert.equal(result.entries[0]!.writeAccess, true);
+  assert.match(result.lines[0]!, /exit 0 in 42ms {2}\[no workspace change]/);
+});
+
+test('dispatches: [no workspace change] stays off unless every frozen field agrees', (t) => {
+  const cases: Array<Record<string, unknown>> = [
+    { write_access: true, workspace_changed: true },
+    { write_access: true }, // field omitted: no claim
+    { write_access: false, workspace_changed: false },
+    { write_access: true, workspace_changed: false, exit_code: 1 },
+  ];
+  for (const over of cases) {
+    const root = seedLog(t, [
+      requested({ write_access: over.write_access }),
+      completed(over),
+    ]);
+    const line = runDispatches({ repoRoot: root }).lines[0]!;
+    assert.equal(line.includes('[no workspace change]'), false, line);
+  }
+});
+
+test('dispatches --output: happy path returns snapshot bytes and match attestation', (t) => {
+  const root = seedLog(t, [
+    requested({
+      dispatch_id: 'aaaaaaaa-1111-4000-8000-000000000001',
+      output_snapshot: OUTPUT_SNAP,
+    }),
+    completed({
+      dispatch_id: 'aaaaaaaa-1111-4000-8000-000000000001',
+      output_snapshot: OUTPUT_SNAP,
+      output_sha256: OUTPUT_DIGEST,
+      output_bytes: Buffer.byteLength(OUTPUT_BODY),
+    }),
+  ]);
+  seedSnapshot(root, OUTPUT_SNAP, OUTPUT_BODY);
+
+  const result = runDispatchesOutput({
+    repoRoot: root,
+    dispatchId: 'aaaaaaaa-1111-4000-8000-000000000001',
+  });
+  assert.equal(result.dispatchId, 'aaaaaaaa-1111-4000-8000-000000000001');
+  assert.equal(result.path, OUTPUT_SNAP);
+  assert.equal(result.bytes, OUTPUT_BODY);
+  assert.equal(result.attested, 'match');
+});
+
+test('dispatches --output: unique prefix and last resolve the recorded snapshot', (t) => {
+  const olderSnap = '.fadeno/local/outputs/worker-aaaaaaaa.md';
+  const newerSnap = '.fadeno/local/outputs/reviewer-bbbbbbbb.md';
+  const olderBody = 'older\n';
+  const newerBody = 'newer\n';
+  const root = seedLog(t, [
+    requested({
+      dispatch_id: 'aaaaaaaa-1111-4000-8000-000000000001',
+      output_snapshot: olderSnap,
+    }),
+    completed({
+      dispatch_id: 'aaaaaaaa-1111-4000-8000-000000000001',
+      output_snapshot: olderSnap,
+      output_sha256: sha256Hex(olderBody),
+    }),
+    requested({
+      dispatch_id: 'bbbbbbbb-2222-4000-8000-000000000002',
+      archetype: 'reviewer',
+      output_snapshot: newerSnap,
+    }),
+    completed({
+      dispatch_id: 'bbbbbbbb-2222-4000-8000-000000000002',
+      archetype: 'reviewer',
+      output_snapshot: newerSnap,
+      output_sha256: sha256Hex(newerBody),
+    }),
+  ]);
+  seedSnapshot(root, olderSnap, olderBody);
+  seedSnapshot(root, newerSnap, newerBody);
+
+  const byPrefix = runDispatchesOutput({ repoRoot: root, dispatchId: 'bbbbbbbb' });
+  assert.equal(byPrefix.dispatchId, 'bbbbbbbb-2222-4000-8000-000000000002');
+  assert.equal(byPrefix.bytes, newerBody);
+  assert.equal(byPrefix.attested, 'match');
+
+  const last = runDispatchesOutput({ repoRoot: root, dispatchId: 'last' });
+  assert.equal(last.dispatchId, 'bbbbbbbb-2222-4000-8000-000000000002');
+  assert.equal(last.path, newerSnap);
+  assert.equal(last.bytes, newerBody);
+});
+
+test('dispatches --output: incomplete when the completion row never arrived', (t) => {
+  const root = seedLog(t, [
+    requested({
+      dispatch_id: 'aaaaaaaa-1111-4000-8000-000000000001',
+      output_snapshot: OUTPUT_SNAP,
+    }),
+  ]);
+  seedSnapshot(root, OUTPUT_SNAP, OUTPUT_BODY);
+
+  const result = runDispatchesOutput({
+    repoRoot: root,
+    dispatchId: 'aaaaaaaa-1111-4000-8000-000000000001',
+  });
+  assert.equal(result.attested, 'incomplete');
+  assert.equal(result.bytes, OUTPUT_BODY);
+});
+
+test('dispatches --output: mismatch when the file no longer matches output_sha256', (t) => {
+  const root = seedLog(t, [
+    requested({
+      dispatch_id: 'aaaaaaaa-1111-4000-8000-000000000001',
+      output_snapshot: OUTPUT_SNAP,
+    }),
+    completed({
+      dispatch_id: 'aaaaaaaa-1111-4000-8000-000000000001',
+      output_snapshot: OUTPUT_SNAP,
+      output_sha256: OUTPUT_DIGEST,
+    }),
+  ]);
+  seedSnapshot(root, OUTPUT_SNAP, 'tampered bytes\n');
+
+  const result = runDispatchesOutput({
+    repoRoot: root,
+    dispatchId: 'aaaaaaaa-1111-4000-8000-000000000001',
+  });
+  assert.equal(result.attested, 'mismatch');
+  assert.equal(result.bytes, 'tampered bytes\n');
+});
+
+test('dispatches --output: errors for unknown, ambiguous, pre-snapshot, and missing-file', (t) => {
+  const root = seedLog(t, [
+    requested(),
+    completed(),
+    requested({
+      dispatch_id: 'cccccccc-1111-4000-8000-000000000001',
+      output_snapshot: OUTPUT_SNAP,
+    }),
+    completed({
+      dispatch_id: 'cccccccc-1111-4000-8000-000000000001',
+      output_snapshot: OUTPUT_SNAP,
+      output_sha256: OUTPUT_DIGEST,
+    }),
+    requested({
+      dispatch_id: 'cccccccc-2222-4000-8000-000000000002',
+      output_snapshot: '.fadeno/local/outputs/worker-cccccccc.md',
+    }),
+    completed({
+      dispatch_id: 'cccccccc-2222-4000-8000-000000000002',
+      output_snapshot: '.fadeno/local/outputs/worker-cccccccc.md',
+      output_sha256: OUTPUT_DIGEST,
+    }),
+    requested({
+      dispatch_id: 'dddddddd-3333-4000-8000-000000000003',
+      output_snapshot: '.fadeno/local/outputs/missing.md',
+    }),
+    completed({
+      dispatch_id: 'dddddddd-3333-4000-8000-000000000003',
+      output_snapshot: '.fadeno/local/outputs/missing.md',
+      output_sha256: OUTPUT_DIGEST,
+    }),
+  ]);
+  seedSnapshot(root, OUTPUT_SNAP, OUTPUT_BODY);
+
+  assert.throws(
+    () => runDispatchesOutput({ repoRoot: root, dispatchId: 'deadbeef' }),
+    (err: unknown) => err instanceof DispatchesCommandError && /unknown dispatch "deadbeef"/.test(err.message),
+  );
+  assert.throws(
+    () => runDispatchesOutput({ repoRoot: root, dispatchId: 'cccccccc' }),
+    (err: unknown) => err instanceof DispatchesCommandError && /ambiguous dispatch prefix "cccccccc"/.test(err.message),
+  );
+  assert.throws(
+    () => runDispatchesOutput({ repoRoot: root, dispatchId: 'd1' }),
+    (err: unknown) =>
+      err instanceof DispatchesCommandError && /dispatch "d1" predates output_snapshot/.test(err.message),
+  );
+  assert.throws(
+    () => runDispatchesOutput({ repoRoot: root, dispatchId: 'dddddddd' }),
+    (err: unknown) =>
+      err instanceof DispatchesCommandError && /output snapshot missing: \.fadeno\/local\/outputs\/missing\.md/.test(err.message),
+  );
 });

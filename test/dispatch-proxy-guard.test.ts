@@ -100,6 +100,20 @@ test('guard: a standalone retry dispatch with a literal prompt file is allowed',
   assert.deepEqual(decision!.hookSpecificOutput?.updatedInput, { timeout: 600000 });
 });
 
+test('guard: the recovery read of a killed dispatch output is allowed', () => {
+  // No dispatch statement → no timeout rewrite; the call passes through.
+  for (const recovery of [
+    'fadeno dispatches --output last',
+    'fadeno dispatches --output 3f9a1c2e',
+    '"$CLAUDE_PLUGIN_ROOT/bin/fadeno" dispatches --output 3f9a1c2e-77aa-4a10-9d1c-0a1b2c3d4e5f',
+  ]) {
+    assert.equal(runGuard(bashEvent('fadeno:dispatch-worker', recovery)), null, recovery);
+  }
+  // Recovery does not open the door to the list surface or other flags.
+  const listing = runGuard(bashEvent('fadeno:dispatch-worker', 'fadeno dispatches --tail 5'));
+  assert.equal(listing?.hookSpecificOutput?.permissionDecision, 'deny');
+});
+
 test('guard: freelancing is denied with an actionable reason', () => {
   for (const command of [
     'git status --porcelain=v1',

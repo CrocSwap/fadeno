@@ -11,7 +11,7 @@ import {
   runDispatchProgress,
   runDispatchStart,
 } from './commands/dispatch.ts';
-import { runDispatches, type DispatchesResult } from './commands/dispatches.ts';
+import { runDispatches, runDispatchesOutput, type DispatchesResult } from './commands/dispatches.ts';
 import { runDiagram } from './commands/diagram.ts';
 import { runDrive, type DriveResult } from './commands/drive.ts';
 import { runGate } from './commands/gate.ts';
@@ -95,6 +95,7 @@ Usage:
   fadeno decide <run> <option> [flags]  Resolve a pending named human decision
   fadeno runs                           List run ledgers under .fadeno/runs/
   fadeno dispatches [--tail n] [--json] Show which executor ran what (.fadeno/dispatches.jsonl)
+  fadeno dispatches --output <id|last>  Print a dispatch's streamed output snapshot verbatim
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic claims (or --latest)
   fadeno plugin [dir] [--codex]         Generate a Claude Code (default) or Codex plugin
@@ -144,6 +145,7 @@ Options:
   --file <path>           (dispatch-progress) Agent/harness status JSON file
   --source <kind>         (dispatch-progress) agent | harness | director
   --output <path>         (dispatch-complete) Temporary output file
+  --output <id|last>      (dispatches) Recover a dispatch's output snapshot (killed relays included)
   --commit <sha>          (dispatch-complete) Optional commit provenance
   --reason <text>         (dispatch-fail) Host-attested failure reason
   --decision <id>         (decide) Target decision id (optional when exactly one is pending)
@@ -595,6 +597,7 @@ function printLoadoutShow(result: LoadoutShowResult): void {
     );
     printSlots(result.slots, '  ');
   }
+  if (result.note != null) console.log(result.note);
   if (result.available.length === 0) {
     console.log('\nThe profile declares no loadouts (add a `loadouts:` mapping to .fadeno/executors.yaml).');
     return;
@@ -621,6 +624,7 @@ function printLoadoutList(result: LoadoutListResult): void {
     const marker = loadout.isActive ? '*' : ' ';
     console.log(`${marker} ${loadout.name}${notes.length > 0 ? `  (${notes.join(', ')})` : ''}`);
     printSlots(loadout.slots, '    ');
+    if (loadout.note != null) console.log(`    ${loadout.note}`);
   }
 }
 
@@ -1421,6 +1425,20 @@ function main(argv: string[]): number {
       return 0;
     }
     case 'dispatches': {
+      if (values.output != null) {
+        const result = runDispatchesOutput({ dispatchId: values.output });
+        // stdout carries the snapshot bytes verbatim (relay-safe); the
+        // attestation verdict goes to stderr so piping stays clean.
+        process.stdout.write(result.bytes);
+        const note =
+          result.attested === 'match'
+            ? 'output attested: sha matches the completion row'
+            : result.attested === 'mismatch'
+              ? 'WARNING: snapshot sha does not match the completion row (file changed after the dispatch?)'
+              : 'no completion row recorded: partial output of a killed or in-flight dispatch';
+        console.error(`[${result.dispatchId}] ${result.path} — ${note}`);
+        return 0;
+      }
       let tail: number | undefined;
       if (values.tail != null) {
         const n = Number(values.tail);
