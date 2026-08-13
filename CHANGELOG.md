@@ -391,6 +391,60 @@ writers accept only 0.3.
 
 ### Fixed
 
+- **A killed dispatch left its executor running.** The most serious of the
+  batch, and confirmed end to end before it was fixed: `fadeno dispatch` runs
+  its executor through `spawnSync`, which blocks Node's event loop for the
+  whole spawn, so a killed kernel runs no cleanup — and the harness that kills
+  it kills the kernel's pid, not its process group. Killing the kernel two
+  seconds into a dispatch left the executor delivering all twenty of its
+  files, still writing the inherited output snapshot, still consuming the
+  host. A 2026-08-13 dogfood hit exactly this at the 600s Bash timeout: the
+  orphan saturated the machine badly enough to invalidate an unrelated timing
+  gate, while the proxy reported the dispatch as failed — so trusting the
+  report would have re-dispatched the task and put two workers on the same
+  files.
+
+  The kernel now spawns a supervisor between itself and the executor. The
+  supervisor runs the executor in its own process group and watches for
+  re-parenting — when the kernel dies, the supervisor's `ppid` changes to the
+  local reaper, which is exact and immune to the pid reuse a liveness probe
+  would face across a ten-minute dispatch — then SIGTERMs the executor's whole
+  group, SIGKILLing after a grace period. The executor's own subprocesses go
+  with it, which is how a runaway saturates a host in the first place.
+
+  Supervision is invisible when nothing goes wrong: stdin, stdout, exit codes
+  and signals pass through unchanged, and a signal is re-raised rather than
+  translated so `killed by SIGTERM` and `exited 143` stay different facts. The
+  one thing it had to restore explicitly is the missing-executor case — the
+  supervisor always starts, so `spawnSync().error` no longer reports a bad
+  binary, and the supervisor marks that on stderr for the kernel to read back.
+  The supervisor ships as source to `node -e` rather than as a sibling file:
+  Fadeno runs from three artifacts (type-stripped source, built `dist/`, and a
+  single-file esbuild bundle) and a file that had to be located from all three
+  could go missing and break dispatch outright.
+
+- **`killed` was reported as `failed`.** The dispatch proxies were instructed
+  to "state plainly that the dispatch failed" when the call "exits non-zero or
+  is killed" — one clause covering two facts that are not the same. A kill
+  says nothing about the executor, which the fix above now stops but which had
+  already delivered its work in the dogfooded case. The proxies now treat a
+  kill as an UNKNOWN result, never a failure: report that the dispatch was
+  killed at the harness timeout, that this is the output recovered so far, and
+  that the work must be checked on disk before anyone re-dispatches — the last
+  part explicitly, because re-dispatching is what puts two workers on one
+  file.
+
+- **The resolver stated the slot but not the call.** `fadeno loadout resolve`
+  reported `adapter: "host"` and stopped there. The dogfood watched a director
+  read that, narrate it correctly, write a 26-line prompt, dispatch anyway,
+  and only then learn the call was impossible — four tool calls to discover
+  something the resolver already knew. The result now carries `delivery`:
+  whether the slot is dispatchable from this harness, the exact command when
+  it is, and an `action` sentence that always ends in a verb (`Do NOT
+  dispatch … spawn the in-session reviewer agent instead`). It shares the
+  kernel's own dispatchability predicate rather than restating it, so a hint
+  saying "dispatchable" can never precede a refusal.
+
 - **Three paths reported success while producing nothing.** A 2026-08-13
   dogfood in an unrelated repo found the same shape three times: a terminal
   state that reads as success next to artifacts that show nothing happened.

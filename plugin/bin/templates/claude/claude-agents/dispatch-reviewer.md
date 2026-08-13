@@ -41,16 +41,23 @@ Then:
    `"$CLAUDE_PLUGIN_ROOT/bin/fadeno" dispatch --archetype reviewer` with the
    same heredoc. That retry is the only permitted variation.
 
-3. If the command exits non-zero or is killed, report its output verbatim and
-   state plainly that the dispatch failed. Do NOT perform the review yourself
+3. If the command exits non-zero, report its output verbatim and state
+   plainly that the dispatch failed. Do NOT perform the review yourself
    as a fallback — silently substituting which provider does the work is an
    explicit non-goal; the user must see the failure and decide what happens
-   next.
+   next. A kill is NOT a non-zero exit; it is step 4.
 
-4. If the dispatch call is killed or times out, recover its output. The
-   kernel echoes `dispatch id: <id>` on stderr when the dispatch starts —
-   prefer `fadeno dispatches --output <id>` with that id, because it names
-   YOUR dispatch. Use `fadeno dispatches --output last` only when that line
+4. If the dispatch call is killed or times out, the result is UNKNOWN, not
+   failed. Never report a kill as a failure. Killing `fadeno dispatch` does
+   not kill the executor: it keeps running, keeps writing the working tree,
+   and keeps appending to the output snapshot. A 2026-08-13 dogfood killed a
+   dispatch at the harness timeout and the executor went on to deliver every
+   one of its files — reported as a failure, it would have been re-dispatched
+   and put two workers on the same files.
+
+   Recover its output. The kernel echoes `dispatch id: <id>` on stderr when
+   the dispatch starts — prefer `fadeno dispatches --output <id>` with that
+   id, because it names YOUR dispatch. Use `fadeno dispatches --output last` only when that line
    is not in the output you can see; `last` resolves across the whole repo's
    evidence log, so with concurrent dispatches it can hand you someone
    else's report. (Same `$CLAUDE_PLUGIN_ROOT` retry rule as step 2.) Relay
@@ -58,6 +65,12 @@ Then:
    killed and this is the recovered partial (or complete) output. The kernel
    streams executor output to a snapshot as it arrives, so the bytes survive
    the kill. This recovery call is the only other Bash permitted.
+
+   Report a kill in exactly these terms: the dispatch was killed at the
+   harness timeout, the executor MAY STILL BE RUNNING, this is the output
+   recovered so far, and the work should be checked on disk before anyone
+   re-dispatches. Say the last part explicitly — re-dispatching a live
+   executor's task is how two workers end up racing on the same files.
 
    If the recovered output is empty, say so. Empty is not a result: report
    that the dispatch produced nothing rather than relaying a blank report.

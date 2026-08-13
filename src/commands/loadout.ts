@@ -8,6 +8,7 @@ import {
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
   eligibilityFor,
+  dispatchability,
   explainEligibilityConflict,
   explainWriteConflict,
   LOADOUT_LOCAL_FILE,
@@ -19,6 +20,7 @@ import {
   type ActiveLoadout,
   type EligibilityState,
   type ExecutorProfile,
+  type ExecutorSpec,
   type LocalLoadoutState,
   type RoleResolutionSource,
   type ShadowAttachment,
@@ -593,6 +595,59 @@ export interface LoadoutResolveResult {
   resolved_via?: string;
   /** Present when the resolved target is not fully eligible for this archetype. */
   eligibility?: EligibilityState;
+  /**
+   * What to DO with this slot from this harness, as opposed to what it is.
+   * `adapter` is a fact about the executor; a director needs a fact about the
+   * call it is about to make, and the two are not the same sentence. Shares
+   * the kernel's own predicate, so `supported: true` here can never mean a
+   * refusal there.
+   */
+  delivery: {
+    /** Whether `fadeno dispatch` can deliver this slot from this harness. */
+    dispatchable: boolean;
+    /** The call to make. Null when nothing should be dispatched. */
+    dispatch_command: string | null;
+    /** One sentence naming the action to take. Always present. */
+    action: string;
+  };
+}
+
+/**
+ * Turn the kernel's dispatchability predicate into an instruction.
+ *
+ * The 2026-08-13 dogfood is the specification here: a director ran the
+ * resolver, read `adapter: "host"` back, narrated it correctly — "resolves to
+ * claude-default (opus, host adapter)" — then wrote a 26-line prompt and
+ * dispatched anyway, because nothing it had been told was phrased as a thing
+ * to do or not do. Every branch below ends in a verb.
+ */
+function deliveryGuidance(
+  archetype: string,
+  executorName: string,
+  spec: ExecutorSpec,
+  harness: string,
+): LoadoutResolveResult['delivery'] {
+  const deliverable = dispatchability(spec, harness);
+  if (deliverable.supported) {
+    return {
+      dispatchable: true,
+      dispatch_command: `fadeno dispatch --archetype ${archetype}`,
+      action:
+        `Dispatch it: \`fadeno dispatch --archetype ${archetype}\` with the task prompt on stdin. ` +
+        `Executor "${executorName}" runs outside this harness.`,
+    };
+  }
+  return {
+    dispatchable: false,
+    dispatch_command: null,
+    action:
+      deliverable.reason === 'host_in_session'
+        ? `Do NOT dispatch. Host executor "${executorName}" is delivered in-session by the ${harness} ` +
+          `harness — spawn the in-session ${archetype} agent instead. Dispatching would hand the task ` +
+          `to a subprocess of this same harness and be refused.`
+        : `Do NOT dispatch. Host executor "${executorName}" declares no fallback_command, so ad-hoc ` +
+          `dispatch has nothing to invoke — spawn the in-session ${archetype} agent instead.`,
+  };
 }
 
 /** Structured, harness-relative slot resolution for host adapters and hooks. */
@@ -613,17 +668,19 @@ export function runLoadoutResolve(
       overrides,
     );
     const eligibility = eligibilityFor(resolved.executor, opts.archetype);
+    const harness = profile.harness ?? 'standalone';
     return {
       archetype: opts.archetype,
       active,
       executor: resolved.executorName,
       model: resolved.executor.model,
       adapter: resolved.executor.adapter,
-      harness: profile.harness ?? 'standalone',
+      harness,
       source: resolved.source,
       override: resolved.source === 'override',
       ...(resolved.resolvedVia != null ? { resolved_via: resolved.resolvedVia } : {}),
       ...(eligibility !== 'eligible' ? { eligibility } : {}),
+      delivery: deliveryGuidance(opts.archetype, resolved.executorName, resolved.executor, harness),
     };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new LoadoutError(err.message);

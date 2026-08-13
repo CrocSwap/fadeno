@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
+import { DispatchCommandError, runDispatch } from '../src/commands/dispatch.ts';
 import {
   LoadoutError,
   runLoadoutClear,
@@ -343,12 +344,23 @@ test('loadout resolve: gains source/override without disturbing the fields hooks
     'harness',
     'source',
     'override',
+    'delivery',
   ]);
   assert.equal(base.executor, 'opus-cmd');
   assert.equal(base.model, 'opus');
   assert.equal(base.adapter, 'command');
   assert.equal(base.source, 'loadout');
   assert.equal(base.override, false);
+  // `adapter` states what the slot is; `delivery` states what to do with it
+  // from here. A director that reads only the former can narrate "host
+  // adapter" correctly and still dispatch into a refusal.
+  assert.deepEqual(base.delivery, {
+    dispatchable: true,
+    dispatch_command: 'fadeno dispatch --archetype worker',
+    action:
+      'Dispatch it: `fadeno dispatch --archetype worker` with the task prompt on stdin. ' +
+      'Executor "opus-cmd" runs outside this harness.',
+  });
 
   runLoadoutSet({ repoRoot: root, env: null, archetype: 'worker', target: 'luna-cmd' });
   const overridden = runLoadoutResolve({ repoRoot: root, env: null, archetype: 'worker' });
@@ -377,4 +389,55 @@ test('status: the pin line names its overrides, and the role table shows the eff
   const elsewhere = runStatus({ repoRoot: root, userPathOptions: paths, env: 'openai-primary' });
   assert.deepEqual(elsewhere.pinOverrides, {});
   assert.equal(elsewhere.roles.find((role) => role.archetype === 'worker')!.overridden, false);
+});
+
+/**
+ * The resolver's hint and the kernel's refusal share one predicate
+ * (`dispatchability`) on purpose. A hint that says "dispatchable" where the
+ * kernel refuses is worse than no hint: it sends a director confidently down
+ * a path that ends in a rejected call after the prompt is already written,
+ * which is exactly what the 2026-08-13 dogfood spent four tool calls on.
+ */
+test('loadout resolve: a host slot the kernel would refuse is reported as do-not-dispatch', (t) => {
+  const root = seedProfile(t, {
+    schema_version: 2,
+    targets: { 'in-session': { provider: 'current-host', model: 'current-host' } },
+    routes: { claude: { 'in-session': { host: true } } },
+    loadouts: { main: { reviewer: 'in-session' } },
+    default_loadout: 'main',
+  });
+  const user = { ...isolatedUser(root), env: { ...isolatedUser(root).env, FADENO_HARNESS: 'claude' } };
+
+  const resolved = runLoadoutResolve({
+    repoRoot: root,
+    env: null,
+    archetype: 'reviewer',
+    userPathOptions: user,
+  });
+  assert.equal(resolved.adapter, 'host');
+  assert.equal(resolved.harness, 'claude');
+  assert.equal(resolved.delivery.dispatchable, false);
+  assert.equal(resolved.delivery.dispatch_command, null);
+  // Every branch ends in a verb: reading `adapter: "host"` was never the
+  // problem, acting on it was.
+  assert.match(resolved.delivery.action, /^Do NOT dispatch\./);
+  assert.match(resolved.delivery.action, /spawn the in-session reviewer agent instead/);
+
+  // And the kernel really does refuse it — the hint is not a guess about the
+  // kernel, it is the kernel's own predicate asked one step earlier.
+  assert.throws(
+    () =>
+      runDispatch({
+        archetype: 'reviewer',
+        prompt: 'review it',
+        repoRoot: root,
+        env: null,
+        userPathOptions: user,
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof DispatchCommandError);
+      assert.match(err.message, /runs in-session/);
+      return true;
+    },
+  );
 });

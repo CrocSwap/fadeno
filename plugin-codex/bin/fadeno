@@ -13939,7 +13939,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.21";
+  if (true) return "0.6.0-rc.22";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -15318,6 +15318,13 @@ function eligibilityFor(spec, archetype) {
   if (map == null || !Object.hasOwn(map, archetype)) return "eligible";
   const state = map[archetype];
   return state === "shadow_only" || state === "forbidden" || state === "eligible" ? state : "eligible";
+}
+var ON_DEMAND_HOST_HARNESSES = /* @__PURE__ */ new Set(["claude"]);
+function dispatchability(spec, harness) {
+  if (spec.adapter !== "host") return { supported: true };
+  if (ON_DEMAND_HOST_HARNESSES.has(harness)) return { supported: false, reason: "host_in_session" };
+  if (spec.fallbackCommand == null) return { supported: false, reason: "host_without_fallback" };
+  return { supported: true };
 }
 function explainEligibilityConflict(delivery, archetype) {
   if (eligibilityFor(delivery.spec, archetype) !== "forbidden") return null;
@@ -17399,6 +17406,78 @@ function failHostDispatch(opts) {
   return { dispatchId: opts.dispatchId, state: "failed", idempotent: false, agentId: typeof starts[0].extra.agent_id === "string" ? starts[0].extra.agent_id : void 0 };
 }
 
+// src/lib/supervisor.ts
+var WATCH_INTERVAL_MS = 500;
+var KILL_GRACE_MS = 5e3;
+var SPAWN_FAILED_MARKER = "fadeno-supervisor: spawn-failed: ";
+function supervisedSpawnError(status, stderr) {
+  if (status !== 127 || stderr == null) return null;
+  const line = stderr.split("\n").find((entry) => entry.startsWith(SPAWN_FAILED_MARKER));
+  return line == null ? null : line.slice(SPAWN_FAILED_MARKER.length);
+}
+var SUPERVISOR_SOURCE = `
+const SPAWN_FAILED_MARKER = ${JSON.stringify(SPAWN_FAILED_MARKER)};
+const { spawn } = require('node:child_process');
+const [parentRaw, cmd, ...args] = process.argv.slice(1);
+const win = process.platform === 'win32';
+const child = spawn(cmd, args, { stdio: ['pipe', 'inherit', 'inherit'], detached: !win });
+let settled = false;
+
+// Prompt bytes: the kernel writes them to our stdin, we stream them down.
+process.stdin.on('error', () => {});
+child.stdin.on('error', () => {});
+process.stdin.pipe(child.stdin);
+
+function reap() {
+  if (settled) return;
+  try {
+    if (win) child.kill('SIGKILL');
+    else process.kill(-child.pid, 'SIGTERM');
+  } catch {}
+  const hard = setTimeout(() => {
+    try { if (!win) process.kill(-child.pid, 'SIGKILL'); } catch {}
+    process.exit(143);
+  }, ${KILL_GRACE_MS});
+  if (hard.unref) hard.unref();
+}
+
+// The kernel dying re-parents us. Checking that beats probing its pid, which
+// a reused pid could answer for.
+const startPpid = process.ppid;
+const watch = setInterval(() => {
+  if (process.ppid !== startPpid) { clearInterval(watch); reap(); }
+}, ${WATCH_INTERVAL_MS});
+
+// A signal we *can* catch: pass it on rather than leave the executor behind.
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, reap);
+
+child.on('error', (err) => {
+  settled = true;
+  clearInterval(watch);
+  // Marked so the kernel can tell "the executor binary is not there" from
+  // "the executor ran and exited 127" \u2014 supervision must not erase a
+  // distinction the caller could make before it existed.
+  process.stderr.write(SPAWN_FAILED_MARKER + String((err && err.message) || err) + '\\n');
+  process.exit(127);
+});
+child.on('exit', (code, signal) => {
+  settled = true;
+  clearInterval(watch);
+  if (signal) {
+    // Re-raise so the kernel's spawnSync reports \`signal\`, not an exit code:
+    // "killed by SIGTERM" and "exited 143" are different facts about the run.
+    process.removeAllListeners(signal);
+    try { process.kill(process.pid, signal); } catch { process.exit(1); }
+    setTimeout(() => process.exit(1), 100);
+  } else {
+    process.exit(code == null ? 0 : code);
+  }
+});
+`;
+function superviseArgv(command2) {
+  return ["-e", SUPERVISOR_SOURCE, "--", String(process.pid), ...command2];
+}
+
 // src/lib/source-control.ts
 var import_node_fs11 = require("node:fs");
 var import_node_path11 = require("node:path");
@@ -17480,7 +17559,6 @@ function consumePendingRelay(repoRoot, prompt, now) {
   return fresh.length > 0 ? false : null;
 }
 var SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
-var ON_DEMAND_HOST_HARNESSES = /* @__PURE__ */ new Set(["claude"]);
 function producedByIds(opts) {
   if (opts.producedBy == null) return [];
   return opts.producedBy.map((id) => id.trim()).filter((id) => id.length > 0);
@@ -17657,8 +17735,9 @@ function runDispatch(opts) {
     }
   }
   const harness = profile.harness ?? "standalone";
-  const hostOnDemand = ON_DEMAND_HOST_HARNESSES.has(harness);
-  if (spec.adapter === "host" && (hostOnDemand || spec.fallbackCommand == null)) {
+  const deliverable = dispatchability(spec, harness);
+  if (!deliverable.supported) {
+    const hostOnDemand = deliverable.reason === "host_in_session";
     const shape = archetype ?? role ?? "role";
     throw new DispatchCommandError(
       hostOnDemand ? `resolved to host executor "${executorName}", which the ${harness} harness runs in-session in this session; dispatching its fallback_command would hand the task to a subprocess of the same harness and re-enter this dispatch one level down. Run this ${shape}-shaped task with the in-session ${archetype ?? "role"} agent, or bind a command executor.` : `resolved to host executor "${executorName}"; ad-hoc dispatch invokes command adapters only \u2014 run this ${shape}-shaped task with the in-session ${archetype ?? "role"} agent instead, declare fallback_command on the executor, or bind a command executor.`
@@ -17814,10 +17893,9 @@ function runDispatch(opts) {
   const outputFd = (0, import_node_fs12.openSync)(outputAbs, "w");
   const workspaceBefore = workspaceFingerprint(repoRoot);
   const started = Date.now();
-  const [cmd, ...args] = command2;
   let spawned;
   try {
-    spawned = (0, import_node_child_process2.spawnSync)(cmd, args, {
+    spawned = (0, import_node_child_process2.spawnSync)(process.execPath, superviseArgv(command2), {
       input: prompt,
       encoding: "utf8",
       cwd: repoRoot,
@@ -17832,14 +17910,15 @@ function runDispatch(opts) {
     (0, import_node_fs12.closeSync)(outputFd);
   }
   const durationMs = Date.now() - started;
+  const spawnFailure = spawned.error?.message ?? supervisedSpawnError(spawned.status, spawned.stderr);
   const stdout = (0, import_node_fs12.readFileSync)(outputAbs, "utf8");
   const outputSha256 = sha256Hex(stdout);
   const workspaceAfter = workspaceFingerprint(repoRoot);
   const outputBytes = Buffer.byteLength(stdout);
   const outcome = deriveDispatchOutcome({
-    exitCode: spawned.error != null ? null : spawned.status,
+    exitCode: spawnFailure != null ? null : spawned.status,
     signal: spawned.signal,
-    error: spawned.error?.message ?? null,
+    error: spawnFailure,
     outputBytes
   });
   const row = {
@@ -17847,7 +17926,7 @@ function runDispatch(opts) {
     timestamp: now.toISOString(),
     event: "dispatch_completed",
     ...identity,
-    exit_code: spawned.error != null ? null : spawned.status,
+    exit_code: spawnFailure != null ? null : spawned.status,
     ...spawned.signal != null ? { signal: spawned.signal } : {},
     duration_ms: durationMs,
     output_sha256: outputSha256,
@@ -17859,7 +17938,7 @@ function runDispatch(opts) {
   if (workspaceBefore != null && workspaceAfter != null) {
     row.workspace_changed = workspaceBefore !== workspaceAfter;
   }
-  if (spawned.error != null) row.error = spawned.error.message;
+  if (spawnFailure != null) row.error = spawnFailure;
   appendEvidenceRow(repoRoot, row);
   try {
     const hasFlag = typeof opts.shadow === "string" && opts.shadow.trim().length > 0;
@@ -18109,9 +18188,9 @@ function runDispatch(opts) {
     }
   } catch {
   }
-  if (spawned.error != null) {
+  if (spawnFailure != null) {
     throw new DispatchCommandError(
-      `executor "${executorName}" failed to spawn: ${spawned.error.message}`
+      `executor "${executorName}" failed to spawn: ${spawnFailure}`
     );
   }
   return {
@@ -23089,6 +23168,21 @@ function runLoadoutSet(opts) {
     droppedBase: Object.keys(droppedOverrides).length > 0 ? pin.loadout : null
   };
 }
+function deliveryGuidance(archetype, executorName, spec, harness) {
+  const deliverable = dispatchability(spec, harness);
+  if (deliverable.supported) {
+    return {
+      dispatchable: true,
+      dispatch_command: `fadeno dispatch --archetype ${archetype}`,
+      action: `Dispatch it: \`fadeno dispatch --archetype ${archetype}\` with the task prompt on stdin. Executor "${executorName}" runs outside this harness.`
+    };
+  }
+  return {
+    dispatchable: false,
+    dispatch_command: null,
+    action: deliverable.reason === "host_in_session" ? `Do NOT dispatch. Host executor "${executorName}" is delivered in-session by the ${harness} harness \u2014 spawn the in-session ${archetype} agent instead. Dispatching would hand the task to a subprocess of this same harness and be refused.` : `Do NOT dispatch. Host executor "${executorName}" declares no fallback_command, so ad-hoc dispatch has nothing to invoke \u2014 spawn the in-session ${archetype} agent instead.`
+  };
+}
 function runLoadoutResolve(opts) {
   const repoRoot = repoRootOf(opts);
   const layered = loadLayered(repoRoot, opts.userPathOptions);
@@ -23104,17 +23198,19 @@ function runLoadoutResolve(opts) {
       overrides
     );
     const eligibility = eligibilityFor(resolved.executor, opts.archetype);
+    const harness = profile.harness ?? "standalone";
     return {
       archetype: opts.archetype,
       active,
       executor: resolved.executorName,
       model: resolved.executor.model,
       adapter: resolved.executor.adapter,
-      harness: profile.harness ?? "standalone",
+      harness,
       source: resolved.source,
       override: resolved.source === "override",
       ...resolved.resolvedVia != null ? { resolved_via: resolved.resolvedVia } : {},
-      ...eligibility !== "eligible" ? { eligibility } : {}
+      ...eligibility !== "eligible" ? { eligibility } : {},
+      delivery: deliveryGuidance(opts.archetype, resolved.executorName, resolved.executor, harness)
     };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new LoadoutError(err.message);

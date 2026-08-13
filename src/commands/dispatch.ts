@@ -21,6 +21,7 @@ import {
   loadExecutorProfile,
   readLocalLoadoutState,
   applicableUserLoadout,
+  dispatchability,
   resolveActiveLoadout,
   resolveRole,
   roleResolutionEchoLabel,
@@ -47,6 +48,7 @@ import {
   type HostDispatchProgressReceipt,
 } from '../lib/host-dispatch.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import { superviseArgv, supervisedSpawnError } from '../lib/supervisor.ts';
 import { ensureFadenoIgnore } from '../lib/source-control.ts';
 import type { UserPathOptions } from '../lib/user-paths.ts';
 
@@ -170,17 +172,6 @@ function consumePendingRelay(repoRoot: string, prompt: string, now: Date): boole
 }
 
 const SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
-
-/**
- * Harnesses that materialize any host slot in-session, on demand. There, a
- * host executor's `fallback_command` would hand the task to a subprocess of
- * the harness we are already inside — which loads the same bootstrap, the same
- * proxy agents, and the same steering, and re-dispatches one level down until
- * something denies it. The fallback exists for the session-static case (Codex
- * materializes its role agents once per session, so a slot that differs from
- * that session's baseline genuinely needs a command), not for this one.
- */
-const ON_DEMAND_HOST_HARNESSES: ReadonlySet<string> = new Set(['claude']);
 
 /** Predicate name recorded on a `dispatch_refused` row. */
 export type DispatchRefusalPredicate =
@@ -542,8 +533,9 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   }
 
   const harness = profile.harness ?? 'standalone';
-  const hostOnDemand = ON_DEMAND_HOST_HARNESSES.has(harness);
-  if (spec.adapter === 'host' && (hostOnDemand || spec.fallbackCommand == null)) {
+  const deliverable = dispatchability(spec, harness);
+  if (!deliverable.supported) {
+    const hostOnDemand = deliverable.reason === 'host_in_session';
     const shape = archetype ?? role ?? 'role';
     throw new DispatchCommandError(
       hostOnDemand
@@ -753,10 +745,12 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const outputFd = openSync(outputAbs, 'w');
   const workspaceBefore = workspaceFingerprint(repoRoot);
   const started = Date.now();
-  const [cmd, ...args] = command;
   let spawned: SpawnSyncReturns<string>;
   try {
-    spawned = spawnSync(cmd!, args, {
+    // Through the supervisor, never directly: `spawnSync` blocks the event
+    // loop, so a killed kernel runs no cleanup and leaves the executor writing
+    // the tree unattended. See src/lib/supervisor.ts.
+    spawned = spawnSync(process.execPath, superviseArgv(command), {
       input: prompt,
       encoding: 'utf8',
       cwd: repoRoot,
@@ -771,6 +765,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     closeSync(outputFd);
   }
   const durationMs = Date.now() - started;
+  // `spawnSync` now spawns the supervisor, which always starts, so its `error`
+  // no longer reports a missing executor. The supervisor reports that itself.
+  const spawnFailure =
+    spawned.error?.message ?? supervisedSpawnError(spawned.status, spawned.stderr);
 
   const stdout = readFileSync(outputAbs, 'utf8');
   const outputSha256 = sha256Hex(stdout);
@@ -778,9 +776,9 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
 
   const outputBytes = Buffer.byteLength(stdout);
   const outcome = deriveDispatchOutcome({
-    exitCode: spawned.error != null ? null : spawned.status,
+    exitCode: spawnFailure != null ? null : spawned.status,
     signal: spawned.signal,
-    error: spawned.error?.message ?? null,
+    error: spawnFailure,
     outputBytes,
   });
   const row: Record<string, unknown> = {
@@ -788,7 +786,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     timestamp: now.toISOString(),
     event: 'dispatch_completed',
     ...identity,
-    exit_code: spawned.error != null ? null : spawned.status,
+    exit_code: spawnFailure != null ? null : spawned.status,
     ...(spawned.signal != null ? { signal: spawned.signal } : {}),
     duration_ms: durationMs,
     output_sha256: outputSha256,
@@ -801,7 +799,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   if (workspaceBefore != null && workspaceAfter != null) {
     row.workspace_changed = workspaceBefore !== workspaceAfter;
   }
-  if (spawned.error != null) row.error = spawned.error.message;
+  if (spawnFailure != null) row.error = spawnFailure;
   appendEvidenceRow(repoRoot, row);
 
   // Shadow duplication — fires after primary completion, regardless of exit code. Not on refusal.
@@ -1061,9 +1059,9 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // Shadow failures must never affect primary result
   }
 
-  if (spawned.error != null) {
+  if (spawnFailure != null) {
     throw new DispatchCommandError(
-      `executor "${executorName}" failed to spawn: ${spawned.error.message}`,
+      `executor "${executorName}" failed to spawn: ${spawnFailure}`,
     );
   }
 

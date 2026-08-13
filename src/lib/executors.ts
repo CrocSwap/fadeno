@@ -1388,6 +1388,42 @@ export function eligibilityFor(spec: ExecutorSpec, archetype: string | null): El
 }
 
 /**
+ * Harnesses that materialize any host slot in-session, on demand. There, a
+ * host executor's `fallback_command` would hand the task to a subprocess of
+ * the harness we are already inside — which loads the same bootstrap, the same
+ * proxy agents, and the same steering, and re-dispatches one level down until
+ * something denies it. The fallback exists for the session-static case (Codex
+ * materializes its role agents once per session, so a slot that differs from
+ * that session's baseline genuinely needs a command), not for this one.
+ */
+export const ON_DEMAND_HOST_HARNESSES: ReadonlySet<string> = new Set(['claude']);
+
+/**
+ * Whether `fadeno dispatch` can deliver this slot from this harness at all.
+ *
+ * The kernel refuses a host slot that the current harness runs in-session, and
+ * a host slot with no `fallback_command` anywhere. Callers that want to *say
+ * so before the work is written* — `fadeno loadout resolve`, chiefly — share
+ * this predicate rather than restating it, because a hint that disagrees with
+ * the kernel is worse than no hint: it sends a director confidently down a
+ * path that ends in a refusal.
+ *
+ * A 2026-08-13 dogfood watched a director read `adapter: "host"` off the
+ * resolver, correctly narrate it, write a 26-line prompt anyway, and only then
+ * learn the dispatch was impossible. The adapter was a fact about the slot;
+ * what it needed was a fact about the call it was about to make.
+ */
+export function dispatchability(
+  spec: ExecutorSpec,
+  harness: string,
+): { supported: true } | { supported: false; reason: 'host_in_session' | 'host_without_fallback' } {
+  if (spec.adapter !== 'host') return { supported: true };
+  if (ON_DEMAND_HOST_HARNESSES.has(harness)) return { supported: false, reason: 'host_in_session' };
+  if (spec.fallbackCommand == null) return { supported: false, reason: 'host_without_fallback' };
+  return { supported: true };
+}
+
+/**
  * The single refusal when the catalog forbids this pairing. `shadow_only` is
  * not a refusal — it stamps evidence later; it does not block dispatch.
  */
