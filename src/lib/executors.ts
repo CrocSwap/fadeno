@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { loadLayeredProfile, type ProfileProvenance } from './config-layers.ts';
-import { readUserHarness, userPaths, type UserPathOptions } from './user-paths.ts';
+import { readUserHarness, userPaths, type FadenoHarness, type UserPathOptions } from './user-paths.ts';
 
 export class ExecutorProfileError extends Error {}
 
@@ -148,6 +148,47 @@ export function activeHarness(explicit?: HarnessId, options: UserPathOptions = {
   return raw === 'codex' || raw === 'claude' || raw === 'grok' || raw === 'standalone'
     ? raw
     : readUserHarness(options) ?? 'standalone';
+}
+
+/**
+ * Session-scoped variables each host exports into the commands it spawns
+ * (verified by observation, not documentation). Config locations like
+ * `CODEX_HOME` are deliberately excluded: they say where a host keeps its
+ * settings, not that we are running inside one.
+ *
+ * Only harnesses `fadeno setup` can record appear here. Grok Build exports
+ * markers of its own, but `SetupTarget` has no `--grok`, so detecting it would
+ * produce a warning with no remediation to offer.
+ */
+const AMBIENT_HARNESS_MARKERS: ReadonlyArray<{ harness: FadenoHarness; variables: readonly string[] }> = [
+  { harness: 'claude', variables: ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT'] },
+  { harness: 'codex', variables: ['CODEX_THREAD_ID', 'CODEX_SANDBOX', 'CODEX_PERMISSION_PROFILE'] },
+];
+
+/** Which host this process appears to be running inside, and why we think so. */
+export interface AmbientHarness {
+  harness: FadenoHarness;
+  /** The variable that carried the evidence, so a warning can cite it. */
+  marker: string;
+}
+
+/**
+ * Evidence of the host we are *actually* inside, independent of what
+ * `activeHarness` resolves.
+ *
+ * Routing must never consult this. `standalone` is a defensible answer to
+ * "which host am I in" when nothing recorded one, and silently upgrading a
+ * guess into compiled adapters would make the same loadout deliver a slot
+ * differently depending on which process asked. `fadeno doctor` reports the
+ * disagreement and names the one command that records it for real.
+ */
+export function detectAmbientHarness(options: UserPathOptions = {}): AmbientHarness | null {
+  const env = options.env ?? process.env;
+  for (const entry of AMBIENT_HARNESS_MARKERS) {
+    const marker = entry.variables.find((name) => (env[name] ?? '').trim() !== '');
+    if (marker != null) return { harness: entry.harness, marker };
+  }
+  return null;
 }
 
 export interface LoadedExecutorProfile {

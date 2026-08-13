@@ -1,6 +1,7 @@
 import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { delimiter, isAbsolute, join } from 'node:path';
 import { runStatus, type StatusOptions } from './status.ts';
+import { detectAmbientHarness } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { isFadenoPathIgnored } from '../lib/source-control.ts';
 
@@ -89,6 +90,30 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
     } else {
       findings.push(finding(`executor:${role.executor}`, 'ok', 'executable is present on PATH (not executed)'));
     }
+  }
+  // An unrecorded harness is not a cosmetic gap: routes are compiled per
+  // harness, and under `standalone` the native route does not exist at all, so
+  // a host-native slot silently becomes a subprocess. It also disarms every
+  // check below that keys on a specific harness, including `codex-agents`.
+  const ambient = detectAmbientHarness(opts.userPathOptions);
+  if (ambient == null) {
+    findings.push(finding('harness', 'ok', `${status.harness ?? 'standalone'}; no ambient host evidence to compare against`));
+  } else if (status.harness === ambient.harness) {
+    findings.push(finding('harness', 'ok', `${ambient.harness}, matching the host this session is running inside`));
+  } else if (status.harness == null || status.harness === 'standalone') {
+    findings.push(finding(
+      'harness',
+      'warning',
+      `${ambient.marker} says this session runs inside ${ambient.harness}, but no harness is recorded so routes compile as standalone`,
+      `Run \`fadeno setup --${ambient.harness}\`; until then every ${ambient.harness}-native slot is delivered as a subprocess instead.`,
+    ));
+  } else {
+    findings.push(finding(
+      'harness',
+      'warning',
+      `configured harness is ${status.harness}, but ${ambient.marker} says this session runs inside ${ambient.harness}`,
+      `Run \`fadeno setup --${ambient.harness}\` if that is the host you meant; the two compile different adapters for the same slot.`,
+    ));
   }
   if (status.harness === 'codex' && status.codexMaterialization?.restartRequired) {
     findings.push(finding('codex-agents', 'warning', 'managed native agents are missing or stale', 'Run `fadeno setup --codex` and start a fresh Codex session.'));

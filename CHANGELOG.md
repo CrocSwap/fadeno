@@ -15,6 +15,26 @@ writers accept only 0.3.
 
 ### Added
 
+- **`doctor` notices a harness nobody recorded.** Routes are compiled per
+  harness, and `activeHarness` answers `standalone` whenever no memo exists —
+  a defensible answer to "which host am I in" that nothing ever revisited. Under
+  `standalone` the native route does not merely lose preference, it does not
+  exist, so a host-native slot compiles to `adapter: command` and a subprocess
+  runs where an in-session agent was meant to. The gap is easy to reach: only a
+  *targeted* `fadeno setup --claude|--codex` writes the memo, while the loadout
+  pin beside it is written unconditionally and `fadeno use` never writes a
+  harness at all, so the two states that look like a pair arrive separately.
+  `doctor` now compares the resolved harness against session-scoped markers the
+  hosts themselves export (`CLAUDECODE`/`CLAUDE_CODE_ENTRYPOINT`,
+  `CODEX_THREAD_ID`/`CODEX_SANDBOX`/`CODEX_PERMISSION_PROFILE`) and warns in
+  both directions — nothing recorded, or a memo that contradicts the host —
+  citing the variable that carried the evidence and the one command that
+  records it. Detection is diagnostic only: routing never consults it, because
+  silently promoting a guess into compiled adapters is how one loadout starts
+  delivering a slot differently depending on which process asked. This also
+  restores `codex-agents`, which keys on `status.harness === 'codex'` and so
+  went quiet in exactly the case it was written for.
+
 - **Shadow dispatches: model tryouts at zero risk.** A slot can carry a
   shadow challenger (`fadeno loadout shadow worker grok-worker`, sampled
   with `--rate 0.2`, one-shot with `fadeno dispatch --shadow <executor>`):

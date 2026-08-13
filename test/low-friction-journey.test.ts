@@ -270,6 +270,58 @@ test('doctor checks a repo-selected executable without executing it', (t) => {
   assert.ok(result.findings.some((item) => item.check === 'executor:repo-command' && item.severity === 'ok'));
 });
 
+test('doctor names the host a session is plainly running inside when no harness was recorded', (t) => {
+  const root = tempRepo(t);
+  const base = isolatedUser(root);
+  const paths: UserPathOptions = { ...base, env: { ...base.env, CLAUDECODE: '1' } };
+
+  // The exact split that produced the bug: `fadeno use` pins a loadout and
+  // never records a harness, so resolution falls through to standalone.
+  runUse({ repoRoot: root, userPathOptions: paths, name: 'native' });
+  assert.equal(existsSync(userPaths(paths).harnessFile), false);
+
+  const result = runDoctor({ repoRoot: root, userPathOptions: paths });
+  const harness = result.findings.find((item) => item.check === 'harness');
+  assert.equal(harness?.severity, 'warning');
+  assert.match(harness?.detail ?? '', /CLAUDECODE says this session runs inside claude/);
+  assert.match(harness?.detail ?? '', /routes compile as standalone/);
+  assert.match(harness?.remediation ?? '', /fadeno setup --claude/);
+  assert.equal(result.ok, true, 'an unrecorded harness is a warning, never a failing exit status');
+});
+
+test('doctor reports a recorded harness that contradicts the host it is running inside', (t) => {
+  const root = tempRepo(t);
+  const base = isolatedUser(root);
+  const inClaude: UserPathOptions = { ...base, env: { ...base.env, CLAUDE_CODE_ENTRYPOINT: 'cli' } };
+  runSetup({ repoRoot: root, userPathOptions: inClaude, target: 'claude', probeCommand: unavailable });
+  assert.equal(readFileSync(userPaths(inClaude).harnessFile, 'utf8'), 'claude\n');
+
+  const matched = runDoctor({ repoRoot: root, userPathOptions: inClaude });
+  const agreed = matched.findings.find((item) => item.check === 'harness');
+  assert.equal(agreed?.severity, 'ok');
+  assert.match(agreed?.detail ?? '', /claude, matching the host/);
+
+  // Same recorded memo, different host: the adapters compiled for a claude
+  // slot are not the ones a Codex session would deliver.
+  const inCodex: UserPathOptions = { ...base, env: { ...base.env, CODEX_THREAD_ID: 'thread-1' } };
+  const crossed = runDoctor({ repoRoot: root, userPathOptions: inCodex });
+  const mismatch = crossed.findings.find((item) => item.check === 'harness');
+  assert.equal(mismatch?.severity, 'warning');
+  assert.match(mismatch?.detail ?? '', /configured harness is claude, but CODEX_THREAD_ID says this session runs inside codex/);
+  assert.match(mismatch?.remediation ?? '', /fadeno setup --codex/);
+  assert.equal(crossed.ok, true);
+});
+
+test('doctor stays quiet about the harness when no host evidence is present', (t) => {
+  const root = tempRepo(t);
+  const paths = isolatedUser(root);
+  const result = runDoctor({ repoRoot: root, userPathOptions: paths });
+  const harness = result.findings.find((item) => item.check === 'harness');
+  assert.equal(harness?.severity, 'ok');
+  assert.match(harness?.detail ?? '', /no ambient host evidence/);
+  assert.equal(harness?.remediation, undefined);
+});
+
 test('vendor respects --no-steering and makes explicitly vendored Codex brokers trackable', (t) => {
   const noSteeringRoot = tempRepo(t);
   runVendor({ repoRoot: noSteeringRoot, target: 'codex', withSteering: false });
