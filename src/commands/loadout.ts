@@ -416,6 +416,8 @@ export interface LoadoutResolveResult {
   source: RoleResolutionSource;
   /** Convenience for hook consumers: `source === 'override'`. */
   override: boolean;
+  /** Archetype whose binding fired when a fallback chain was walked. Absent on a direct bind. */
+  resolved_via?: string;
 }
 
 /** Structured, harness-relative slot resolution for host adapters and hooks. */
@@ -443,6 +445,7 @@ export function runLoadoutResolve(
       harness: profile.harness ?? 'standalone',
       source: resolved.source,
       override: resolved.source === 'override',
+      ...(resolved.resolvedVia != null ? { resolved_via: resolved.resolvedVia } : {}),
     };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new LoadoutError(err.message);

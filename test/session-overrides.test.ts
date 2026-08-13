@@ -127,7 +127,7 @@ test('dispatch: an override binds the archetype and both evidence rows say so', 
   for (const row of rows) {
     // Additive fields only: the overlay does not re-spell the log.
     assert.equal(row.format, DISPATCHES_FORMAT);
-    assert.equal(row.format, '0.1');
+    assert.equal(row.format, '0.2');
     assert.equal(row.resolution, 'override');
     assert.deepEqual(row.override, { worker: 'over-worker' });
     assert.deepEqual(row.loadout, { name: 'main', source: 'local' });

@@ -101,7 +101,7 @@ test('dispatch: resolves the archetype via the active loadout, relays the report
   // future reader guessing whether it is old or merely unfamiliar.
   assert.equal(requested.format, DISPATCHES_FORMAT);
   assert.equal(completed.format, DISPATCHES_FORMAT);
-  assert.equal(DISPATCHES_FORMAT, '0.1');
+  assert.equal(DISPATCHES_FORMAT, '0.2');
   assert.equal(typeof requested.dispatch_id, 'string');
   assert.equal(requested.dispatch_id, completed.dispatch_id);
   assert.equal(requested.dispatch_id, result.dispatchId);
@@ -403,7 +403,7 @@ test('dispatch: a write-needing archetype is refused on a delivery that cannot w
     () => runDispatch({ archetype: 'worker', prompt: 'ship the fix', repoRoot: root, env: null }),
     (err: unknown) =>
       err instanceof DispatchCommandError &&
-      /archetype "worker" declares `requires_write: true`, but executor "ro-claude"/.test(err.message) &&
+      /archetype "worker" declares `requires_write: required`, but executor "ro-claude"/.test(err.message) &&
       /`write_access: false`/.test(err.message) &&
       // Three ways out: rebind, re-permission the command, or stay in-session.
       /bind "worker" to a write-capable executor/.test(err.message) &&
@@ -472,7 +472,7 @@ test('dispatch: --executor keeps the guard when an archetype is still named', (t
   });
   assert.throws(
     () => runDispatch({ archetype: 'worker', executor: 'ro-claude', prompt: 'p', repoRoot: root, env: null }),
-    /archetype "worker" declares `requires_write: true`, but executor "ro-claude"/,
+    /archetype "worker" declares `requires_write: required`, but executor "ro-claude"/,
   );
   // No archetype named, no claim to check: the bypass still runs.
   assert.equal(

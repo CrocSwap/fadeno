@@ -968,11 +968,11 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
     archetype: string | null,
     loadout: string | null,
     overrides: Record<string, string>,
-  ): { executor: string; source: string } | null => {
+  ): { executor: string; source: string; resolvedVia: string | null } | null => {
     if (profile == null) return null;
     try {
       const resolved = resolveRole(role, archetype, profile, loadout, overrides);
-      return { executor: resolved.executorName, source: resolved.source };
+      return { executor: resolved.executorName, source: resolved.source, resolvedVia: resolved.resolvedVia };
     } catch {
       return null;
     }
@@ -1025,11 +1025,24 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
           problems.push(
             `resolution_snapshot: role "${rec.role}" records executor "${rec.executor}" but the chain resolves nothing`,
           );
-        } else if (recomputed.executor !== rec.executor || (typeof rec.source === 'string' && recomputed.source !== rec.source)) {
-          problems.push(
-            `resolution_snapshot: role "${rec.role}" records "${rec.executor}" [${String(rec.source)}] ` +
-              `but recomputes to "${recomputed.executor}" [${recomputed.source}]`,
-          );
+        } else {
+          if (recomputed.executor !== rec.executor || (typeof rec.source === 'string' && recomputed.source !== rec.source)) {
+            problems.push(
+              `resolution_snapshot: role "${rec.role}" records "${rec.executor}" [${String(rec.source)}] ` +
+                `but recomputes to "${recomputed.executor}" [${recomputed.source}]`,
+            );
+          }
+          // Absent key is not a claim (pre-0.2 snapshot rows). Present
+          // resolved_via — including explicit null — must match the recompute.
+          if ('resolved_via' in rec) {
+            const recordedVia = typeof rec.resolved_via === 'string' ? rec.resolved_via : null;
+            if (recordedVia !== recomputed.resolvedVia) {
+              problems.push(
+                `resolution_snapshot: role "${rec.role}" records resolved_via ${JSON.stringify(recordedVia)} ` +
+                  `but recomputes to ${JSON.stringify(recomputed.resolvedVia)}`,
+              );
+            }
+          }
         }
       }
       continue;

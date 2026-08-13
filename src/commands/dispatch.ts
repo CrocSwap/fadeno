@@ -54,7 +54,7 @@ export const DISPATCHES_FILE = join('.fadeno', 'dispatches.jsonl');
  * The Claude steering hook writes the same stamp as a literal — it runs as a
  * standalone script and cannot import this constant. Bump both together.
  */
-export const DISPATCHES_FORMAT = '0.1';
+export const DISPATCHES_FORMAT = '0.2';
 
 /**
  * Spawn-side relay attestations awaiting a matching dispatch — rows of
@@ -252,6 +252,8 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // The pin's overlay, already scoped to the loadout that won (name-match).
   let overrides: Record<string, string> = {};
   let source: DispatchResolutionSource;
+  // Present on the evidence row only when a fallback chain was walked.
+  let resolvedVia: string | null = null;
 
   if (opts.executor != null && opts.executor.trim() !== '') {
     executorName = opts.executor.trim();
@@ -308,6 +310,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       executorName = resolved.executorName;
       spec = resolved.executor;
       source = resolved.source;
+      resolvedVia = resolved.resolvedVia;
     } catch (err) {
       if (err instanceof ExecutorProfileError) throw new DispatchCommandError(err.message);
       throw err;
@@ -411,6 +414,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     ...(source === 'override' && archetype != null
       ? { override: { [archetype]: executorName } }
       : {}),
+    ...(resolvedVia != null ? { resolved_via: resolvedVia } : {}),
     executor: executorName,
     ...(spec.target != null ? { target: spec.target, provider: spec.provider ?? null } : {}),
     model: spec.model,
