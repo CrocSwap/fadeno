@@ -509,18 +509,23 @@ policy language.
 - `fadeno loadout list` / `fadeno loadout use <name>` / `fadeno loadout clear`
   — `use` writes `.fadeno/local/loadout`; `clear` removes it.
 - `fadeno dispatch --archetype <a> [--role <name>] [--loadout <name>]
-  [--executor <name>] [--prompt-file <path>]` — prompt from `--prompt-file`
+  [--executor <name>] [--prompt-file <path>] [--shadow <executor>]` — prompt from `--prompt-file`
   or stdin; resolves per the order above (`--executor` bypasses resolution
   for debugging); invokes the executor; report to stdout; appends the evidence
-  row pair. Ad-hoc dispatch spawns commands, so what it can invoke is a
+  row pair. `--shadow` fires a one-shot shadow duplication with the
+  byte-identical prompt, isolated in a worktree; also available as
+  `fadeno loadout shadow <archetype> <executor> [--rate <0..1>]` and
+  `fadeno loadout clear-shadow [archetype]`. Ad-hoc dispatch spawns commands, so what it can invoke is a
   property of the *route*, not of the target: a command-delivered route runs
   its argv, and a `native: true` route runs its fallback `command` when it
   declares one. A natively-routed target with no fallback command is a clear
   error that names the fix — run this archetype-shaped task with the native
   in-session agent, declare a fallback command on the route, or bind the
   archetype to a command-delivered target.
-- `fadeno dispatches [--tail <N>] [--json]` — read the evidence back; see
-  *Evidence*.
+- `fadeno dispatches [--tail <N>] [--json] [--comparisons]` — read the evidence back; see
+  *Evidence*. `--comparisons` groups shadow pairs by challenger, attests
+  prompt-sha pairing, and scans `.fadeno/comparisons/*.md` (`kind: ModelComparison`)
+  for verdict tallies.
 
 **Resolution echo:** every run start (`new-run`/`drive`) and every dispatch
 prints where each actor landed, so a user burning a metered subscription
@@ -591,13 +596,31 @@ opus_reviewer → claude-default (opus) [binding]
   completion recorded (killed or in flight)" — rather than dropping the
   dispatch that most wants explaining. Markers surface the identity that
   changes what a row means: `relay_attested`, `[write_access: none]`,
-  `model_override`, and `[no workspace change]` (exit 0 + `write_access:
-  true` + `workspace_changed: false`). `fadeno dispatches --output
-  <id|last>` recovers the streamed snapshot (`last` = most recent request
-  row carrying `output_snapshot`) and attests the file against the
-  completion row's `output_sha256` (`incomplete` when that row never
-  arrived). `--tail <N>` defaults to 10; `--json` emits the correlated
-  rows for scripts.
+  `model_override`, `[shadow of <primaryId8>]` (shadow rows, never candidates
+  for `[no workspace change]`), and `[no workspace change]` (exit 0 +
+  `write_access: true` + `workspace_changed: false`). Shadow rows carry
+  `shadow: true`, `primary_dispatch_id`, `shadow_source: "attachment" | "flag"`,
+  `gate_eligible: false`, `output_snapshot: ".fadeno/local/outputs/shadow-<shadowId8>.md"`,
+  `diff_snapshot: ".fadeno/local/outputs/shadow-<shadowId8>.diff"`,
+  `diff_bytes: <int>` (and omit `workspace_changed`; the diff is the change
+  record); `dispatch_refused` shadows add `predicate: shadow_isolation |
+  shadow_resolution`. `fadeno dispatches --output <id|last>` recovers the
+  streamed snapshot (`last` = most recent request row carrying
+  `output_snapshot`) and attests the file against the completion row's
+  `output_sha256` (`incomplete` when that row never arrived) — and the same
+  recovery works for shadow ids. `--tail <N>` defaults to 10; `--json` emits
+  the correlated rows for scripts, carrying `shadow`, `primary_dispatch_id`,
+  and `diff_bytes`. `fadeno dispatches --comparisons [--json]` renders paired
+  primary/shadow rows grouped by challenger executor (both id8s, archetype,
+  `primary executor (model) exit N, output B bytes` vs
+  `shadow executor (model) exit N, output B bytes, diff D bytes`, with
+  `PROMPT SHA MISMATCH` when the prompt digests disagree and `[orphan]` when
+  the primary row is missing), plus any `ModelComparison` artifacts under
+  `.fadeno/comparisons/*.md` (`kind: ModelComparison`, `baseline`, `challenger`,
+  `verdict: prefer_baseline | prefer_challenger | tie | inconclusive`, `date`,
+  `dispatch_ids` plus mandatory `## Criteria` and `## Confounds` sections) and
+  a per-challenger tally (`N pairs, M comparisons: X prefer_challenger / Y
+  prefer_baseline / Z tie/inconclusive`).
 
 This makes Fadeno the only layer that sees cross-provider usage — the natural
 future home of per-provider burn reporting (a later `fadeno usage`; not in

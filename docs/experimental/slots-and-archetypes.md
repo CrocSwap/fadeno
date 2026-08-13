@@ -1,8 +1,8 @@
 # Slot ergonomics and the open archetype vocabulary
 
-**Status:** phases 1 (session slot overrides, 0.6.0-rc.9), 2 (archetype
-schema pass, 0.6.0-rc.12), and 3 (constraint tiers, 0.6.0-rc.13)
-implemented; phase 4 aligned, not yet implemented
+**Status:** all four phases implemented — 1 (session slot overrides,
+0.6.0-rc.9), 2 (archetype schema pass, 0.6.0-rc.12), 3 (constraint tiers,
+0.6.0-rc.13), 4 (shadow dispatches + model tryouts, 0.6.0-rc.15)
 **Decision date:** 2026-08-12
 **Relationship:** successor horizon to
 [`loadouts-and-dispatch.md`](loadouts-and-dispatch.md) (extends its catalog,
@@ -391,6 +391,37 @@ promotion pipeline (calibrating → shadow-approved → gate-eligible):
 shadow (challenger, zero risk) → override (trial primary, instant revert) → loadout (preset)
 ```
 
+**Shipped (0.6.0-rc.15).** Decisions and deviations from the sketch above,
+all deliberate: open question 1 is decided for the initial scope — shadows
+fire on kernel-dispatched primaries only, never on native in-session
+deliveries (steering-hook-initiated duplication remains the open follow-up).
+The shadow fires after the primary's completion row is written and fires
+regardless of the primary's exit code — challenger-succeeds-where-primary-
+failed is precisely the signal a tryout wants; a refused primary fires no
+shadow. Every shadow-side refusal (eligibility `forbidden`, write posture,
+constraint command, unresolvable target or native-only route, worktree
+failure) lands as a `dispatch_refused` row carrying `shadow: true` +
+`primary_dispatch_id` and can never affect the primary's result — a
+constraint-system error that would bubble loudly on a primary is demoted to
+a shadow refusal row for the same reason. Isolation is a detached-HEAD git
+worktree under `.fadeno/local/shadow/`; the diff artifact (`add -A` +
+`diff --binary --cached`) rides the completion row as
+`diff_snapshot`/`diff_bytes`, which means a dirty primary workspace gives
+the pair different trees despite byte-identical prompts — a mandatory
+`ModelComparison` confound. Shadow rows reference the primary's
+`prompt_snapshot`/`prompt_sha256` (one snapshot, byte-identity by
+construction) and stamp `resolution: "shadow"`,
+`shadow_source: "attachment" | "flag"`, `gate_eligible: false`; the
+`--shadow` flag ignores `--rate`, and a not-fired sample leaves no trace.
+`loadout use` drops shadow attachments along with overrides (one overlay,
+one base) while `set`/`clear` preserve them. `fadeno status` does not render
+attachments yet — the loadout tables (show/list, stale-attachment warnings
+included) are the visibility surface. `ModelComparison` artifacts are
+committable files under `.fadeno/comparisons/` with frozen frontmatter;
+`fadeno dispatches --comparisons` renders ledger pairs plus artifact tallies
+per challenger, and the `model-tryout` starter ships the deliberate
+head-to-head. Ledger format stays 0.2 — every field is additive.
+
 ## Ledger format 0.2 (additive)
 
 Rides with whichever of phases 2–4 lands first; one bump, not three.
@@ -431,8 +462,9 @@ pairs distinctly.
    user's daily driver, which is often the native in-session worker — where
    the kernel never sees a dispatch. Options: steering-hook-initiated
    background dispatch of the shadow (hook already stashes the prompt and
-   sha); or accept kernel-dispatched-only scope initially. Decide during
-   phase 4.
+   sha); or accept kernel-dispatched-only scope initially. *Decided with
+   phase 4 (rc.15): kernel-dispatched-only initially; the hook-initiated
+   variant stays open.*
 2. **Provenance ergonomics for `distinct_provider_from_inputs`.** Artifact-
    path lookup in the ledger covers kernel-produced artifacts; artifacts
    produced natively are attributable only when the steering hook recorded

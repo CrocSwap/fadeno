@@ -119,6 +119,21 @@ const CLAIMS: Claim[] = [
     doc: { files: [EXTENDING], patterns: [/output_snapshot/, /output_bytes/, /workspace_changed/] },
     src: { files: ['src/commands/dispatch.ts'], patterns: [/output_snapshot/, /output_bytes/, /workspace_changed/] },
   },
+  {
+    id: 'shadow-evidence-fields',
+    doc: { files: [LOADOUTS, EXTENDING], patterns: [/shadow/, /primary_dispatch_id/, /diff_snapshot/, /shadow_source/] },
+    src: { files: ['src/commands/dispatches.ts', 'src/commands/dispatch.ts'], patterns: [/shadow/, /primary_dispatch_id/, /diff_snapshot/, /shadow_source/] },
+  },
+  {
+    id: 'shadow-comparisons-surface',
+    doc: { files: [LOADOUTS, EXTENDING], patterns: [/--comparisons/, /ModelComparison/] },
+    src: { files: ['src/commands/dispatches.ts'], patterns: [/runDispatchesComparisons/, /ModelComparison/] },
+  },
+  {
+    id: 'shadow-comparisons-tally',
+    doc: { files: [LOADOUTS, EXTENDING], patterns: [/prefer_challenger/, /prefer_baseline/] },
+    src: { files: ['src/commands/dispatches.ts'], patterns: [/preferChallenger/, /preferBaseline/] },
+  },
 ];
 
 /**

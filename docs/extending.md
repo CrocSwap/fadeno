@@ -276,19 +276,75 @@ or in flight)" — rather than dropped, since a dispatch that died mid-flight is
 the one most worth seeing. Rows carry the markers that change their meaning:
 `relay_attested`, `[write_access: none]`, `model_override`,
 `[shadow-only]` (`gate_eligible: false`), `[refused: <predicate>]`
-for `dispatch_refused` rows, and `[no workspace change]` when a completed
-entry has `exit_code === 0`, `write_access === true`, and
-`workspace_changed === false` (the legible face of an exit-0 no-op).
-`fadeno dispatches --output <id|last>` prints the snapshot bytes verbatim
-(`last` is the most recent request row that carries `output_snapshot`; `id`
-is a full `dispatch_id` or a unique prefix of at least 8 characters). The
-reader attests the file against the completion row's `output_sha256`
-(`incomplete` when the completion never arrived — the killed-mid-flight
-case). `--tail <N>`
-defaults to 10; `--json` emits the correlated rows for scripts. Rows are
-format-stamped (`format: "0.1"`); pre-format rows from before the two-row
-change render as `[legacy]` entries rather than being skipped, and rows from
-a newer format major get their own count in the summary.
+for `dispatch_refused` rows, `[shadow of <primaryId8>]` for shadow rows
+(which are never candidates for `[no workspace change]`), and
+`[no workspace change]` when a completed entry has `exit_code === 0`,
+`write_access === true`, and `workspace_changed === false` (the legible face
+of an exit-0 no-op). `fadeno dispatches --output <id|last>` prints the snapshot
+bytes verbatim (`last` is the most recent request row that carries
+`output_snapshot`; `id` is a full `dispatch_id` or a unique prefix of at least
+8 characters) — and the same recovery works for shadow ids, whose snapshots
+live at `.fadeno/local/outputs/shadow-<shadowId8>.md`. The reader attests the
+file against the completion row's `output_sha256` (`incomplete` when the
+completion never arrived — the killed-mid-flight case). `--tail <N>`
+defaults to 10; `--json` emits the correlated rows for scripts, carrying
+`shadow: boolean`, `primary_dispatch_id: string | null`, and
+`diff_bytes: number | null` for shadow entries. Rows are format-stamped
+(`format: "0.1"`); pre-format rows from before the two-row change render as
+`[legacy]` entries rather than being skipped, and rows from a newer format
+major get their own count in the summary.
+
+**Shadow attachments and the diff-as-artifact idiom.** A shadow is a
+zero-risk challenger sampled alongside the primary dispatch:
+
+```bash
+fadeno loadout shadow worker grok-default            # every worker dispatch
+fadeno loadout shadow worker grok-default --rate 0.2 # sampled trickle
+fadeno dispatch --archetype worker --shadow grok-default  # one-shot opt-in
+fadeno loadout clear-shadow worker                   # clear one
+fadeno loadout clear-shadow                          # clear all
+```
+
+The shadow runs with the **byte-identical prompt** (`prompt_snapshot` and
+`prompt_sha256` are the primary's) delivered isolated — a detached-HEAD
+worktree at `.fadeno/local/shadow/<shadowId8>` — so a write-shaped shadow
+yields a diff-as-artifact and never touches the workspace. Evidence fields:
+`shadow: true`, `primary_dispatch_id`, `shadow_source: "attachment" | "flag"`,
+`gate_eligible: false` (shadow rows are never gate-eligible, like
+`shadow_only`), `output_snapshot: ".fadeno/local/outputs/shadow-<shadowId8>.md"`,
+`diff_snapshot: ".fadeno/local/outputs/shadow-<shadowId8>.diff"`, and
+`diff_bytes: <int>` (0 = clean). Shadow completions omit `workspace_changed`;
+the diff is the change record. A `dispatch_refused` shadow carries
+`shadow: true` + `primary_dispatch_id` and predicate `shadow_isolation` or
+`shadow_resolution` (or the usual `eligibility`/`write_posture`/
+`constraint_command`).
+
+**Comparisons.** `fadeno dispatches --comparisons [--json]` scans the ledger,
+pairs every shadow row with its primary via `primary_dispatch_id`, groups pairs
+by challenger executor, and renders per pair: both id8s, archetype,
+`primary executor (model) exit N, output B bytes` vs
+`shadow executor (model) exit N, output B bytes, diff D bytes`, with a loud
+`PROMPT SHA MISMATCH` flag if the two request rows ever disagree, and an
+`[orphan]` mark when the primary row is missing. It then scans
+`.fadeno/comparisons/*.md` (`kind: ModelComparison`) and renders one verdict
+line per artifact under its challenger, plus a per-challenger tally
+(`N pairs, M comparisons: X prefer_challenger / Y prefer_baseline / Z
+tie/inconclusive`). Missing dir or no pairs is a friendly empty output, exit 0.
+
+**The adoption ladder:**
+
+```
+shadow (challenger, zero risk) → override (trial primary, instant revert) → loadout (preset)
+```
+
+**MANDATORY confound.** A shadow runs against a detached-HEAD worktree, so
+when the primary workspace was dirty the two saw **different trees despite
+byte-identical prompts**. Every `ModelComparison` must state which case it was
+in its `## Confounds` section (along with delivery transport, tool
+availability, effort pinning, and isolation differences). The `model-tryout`
+starter's judge prompt demands this, and the `judge-provider-differs`
+guidance: the judge's provider should differ from both candidates, or the
+conflict is recorded.
 
 ### Cross-harness subagents (dispatch proxies and steering)
 
