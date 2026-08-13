@@ -15,6 +15,7 @@ import {
   resolveRole,
   type ActiveLoadout,
   type ExecutorProfile,
+  type LoadedExecutorProfile,
   type ExecutorSpec,
   type RoleResolutionSource,
 } from '../lib/executors.ts';
@@ -87,9 +88,9 @@ function rootOf(opts: CommonOptions): string {
   return opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
 }
 
-function profileOf(repoRoot: string, userPathOptions?: UserPathOptions): ExecutorProfile {
+function profileOf(repoRoot: string, userPathOptions?: UserPathOptions): LoadedExecutorProfile {
   try {
-    return loadExecutorProfile(repoRoot, userPathOptions, 'codex').profile;
+    return loadExecutorProfile(repoRoot, userPathOptions, 'codex');
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
     throw err;
@@ -305,7 +306,7 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
   }
   if (hasRun && hasDispatchId) return runLockedSteeringResolve(opts, archetype, role, nativeExecutor);
 
-  const profile = profileOf(repoRoot, opts.userPathOptions);
+  const { profile, layers } = profileOf(repoRoot, opts.userPathOptions);
   const nativeSpec = nativeExecutor == null ? null : profile.executors[nativeExecutor];
   if (nativeExecutor != null && (nativeSpec == null || nativeSpec.adapter !== 'host')) {
     throw new SteeringError(
@@ -324,7 +325,10 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
       flagValue: opts.loadout ?? null,
       envValue: opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null,
       localFileValue: pin.loadout,
-      userFileValue: readUserLoadout(opts.userPathOptions),
+      // A user-scope dial only applies where the user layer was actually
+      // composed: a self-contained project profile is authoritative.
+      userFileValue:
+        layers == null || layers.includes('user') ? readUserLoadout(opts.userPathOptions) : null,
       profile,
     });
     overrides = applicableOverrides(pin, active);
@@ -578,7 +582,7 @@ function managedAgentEmit(path: string, body: string, force: boolean, scope: 'pr
 /** Materialize every required loadout slot into a session-static Codex role agent. */
 export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResult {
   const repoRoot = rootOf(opts);
-  const profile = profileOf(repoRoot, opts.userPathOptions);
+  const { profile } = profileOf(repoRoot, opts.userPathOptions);
   const loadout = opts.loadout.trim();
   const slots = profile.loadouts[loadout];
   if (slots == null) {

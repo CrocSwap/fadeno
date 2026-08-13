@@ -229,8 +229,11 @@ function computeResolution(
   userPathOptions?: UserPathOptions,
 ): NewRunResolution | null {
   let profile: ExecutorProfile;
+  let layers: Array<'builtin' | 'user' | 'project'> | undefined;
   try {
-    profile = loadExecutorProfile(repoRoot, userPathOptions).profile;
+    const loaded = loadExecutorProfile(repoRoot, userPathOptions);
+    profile = loaded.profile;
+    layers = loaded.layers;
   } catch (err) {
     if (err instanceof ExecutorProfileError) return null;
     throw err;
@@ -246,7 +249,9 @@ function computeResolution(
       flagValue,
       envValue: envRaw !== undefined ? envRaw : process.env.FADENO_LOADOUT ?? null,
       localFileValue: pin.loadout,
-      userFileValue: readUserLoadout(userPathOptions),
+      // A user-scope dial only applies where the user layer was actually
+      // composed: a self-contained project profile is authoritative.
+      userFileValue: layers == null || layers.includes('user') ? readUserLoadout(userPathOptions) : null,
       profile,
     });
     overrides = applicableOverrides(pin, active);

@@ -1,13 +1,14 @@
 import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { loadLayeredProfile, type ConfigLayer, type LayeredProfile } from '../lib/config-layers.ts';
 import {
+  activeHarness,
   applicableOverrides,
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
   eligibilityFor,
   explainEligibilityConflict,
   explainWriteConflict,
-  loadExecutorProfile,
   LOADOUT_LOCAL_FILE,
   readLocalLoadoutState,
   readUserLoadout,
@@ -64,6 +65,8 @@ export interface LoadoutInfo {
   slots: Array<LoadoutSlotView & Partial<LoadoutEffectiveRow>>;
   isDefault: boolean;
   isActive: boolean;
+  /** Present on the active entry when the catalog suppresses builtin archetypes. */
+  note?: string;
 }
 
 export interface LoadoutCommonOptions {
@@ -87,13 +90,45 @@ function envValue(opts: LoadoutCommonOptions): string | null {
   return opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null;
 }
 
-function loadProfile(repoRoot: string, userPathOptions?: UserPathOptions): ExecutorProfile {
+function loadLayered(repoRoot: string, userPathOptions?: UserPathOptions): LayeredProfile {
   try {
-    return loadExecutorProfile(repoRoot, userPathOptions).profile;
+    return loadLayeredProfile(repoRoot, userPathOptions, activeHarness(undefined, userPathOptions));
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new LoadoutError(err.message);
     throw err;
   }
+}
+
+function loadProfile(repoRoot: string, userPathOptions?: UserPathOptions): ExecutorProfile {
+  return loadLayered(repoRoot, userPathOptions).profile;
+}
+
+/**
+ * The exact note line appended to the no-arg effective view and the active
+ * `loadout list` entry when a self-contained catalog omitted builtin archetypes.
+ */
+export function formatSuppressedCanonNote(archetypes: readonly string[]): string | null {
+  if (archetypes.length === 0) return null;
+  return (
+    `note: canon archetypes not declared by this catalog: <${archetypes.join(', ')}> ` +
+    '(self-contained profile suppresses builtin layering; declare them in .fadeno/executors.yaml to adopt)'
+  );
+}
+
+function canonSurfacing(layered: LayeredProfile): {
+  suppressed_canon_archetypes: string[];
+  note: string | null;
+} {
+  const suppressed_canon_archetypes = layered.suppressedCanonArchetypes;
+  return { suppressed_canon_archetypes, note: formatSuppressedCanonNote(suppressed_canon_archetypes) };
+}
+
+/** User sticky pin, only when the composed profile actually included the user layer. */
+function userPinValue(layers: readonly ConfigLayer[], userPathOptions?: UserPathOptions): string | null {
+  // A self-contained project profile never composed the user layer; a
+  // user-scope pin must not reach into a catalog that never saw that layer.
+  if (!layers.includes('user')) return null;
+  return readUserLoadout(userPathOptions);
 }
 
 /** Read the sticky pin, restating a malformed-pin error as a command error. */
@@ -107,11 +142,16 @@ function readPin(repoRoot: string): LocalLoadoutState {
 }
 
 /**
- * Resolution for the inspection commands (show/list): a stale local pin —
+ * Active-loadout resolution shared by inspection and `loadout resolve`.
+ *
+ * Inspection (`strict: false`, show/list/set): a stale local pin —
  * `.fadeno/local/loadout` naming a since-removed loadout — must not brick the
  * very commands that let the user see what is declared. The pin is treated as
- * absent for resolution and surfaced as `stalePin`; flag/env problems (explicit
- * per-invocation inputs) stay hard errors, as does dispatch-time resolution.
+ * absent and surfaced as `stalePin`; flag/env problems (explicit
+ * per-invocation inputs) stay hard errors.
+ *
+ * Resolve (`strict: true`): let `resolveActiveLoadout` throw. Silent fallback
+ * to `default_loadout` would substitute a different executor than dispatch.
  *
  * `overrides` is the pin's overlay already scoped by the kernel's name-match
  * rule, so callers never have to decide for themselves whether an overlay
@@ -121,6 +161,8 @@ function activeFor(
   opts: LoadoutCommonOptions,
   repoRoot: string,
   profile: ExecutorProfile,
+  layers: readonly ConfigLayer[],
+  strict = false,
 ): {
   active: ActiveLoadout | null;
   stalePin: string | null;
@@ -129,15 +171,15 @@ function activeFor(
 } {
   const pin = readPin(repoRoot);
   const localValue = pin.loadout;
-  const userValue = readUserLoadout(opts.userPathOptions);
+  const userValue = userPinValue(layers, opts.userPathOptions);
   const stalePin = localValue != null && !(localValue in profile.loadouts) ? localValue : null;
   const staleUserPin = userValue != null && !(userValue in profile.loadouts) ? userValue : null;
   try {
     const active = resolveActiveLoadout({
       flagValue: opts.loadout ?? null,
       envValue: envValue(opts),
-      localFileValue: stalePin == null ? localValue : null,
-      userFileValue: staleUserPin == null ? userValue : null,
+      localFileValue: strict ? localValue : stalePin == null ? localValue : null,
+      userFileValue: strict ? userValue : staleUserPin == null ? userValue : null,
       profile,
     });
     return { active, stalePin, pin, overrides: applicableOverrides(pin, active) };
@@ -214,16 +256,22 @@ export interface LoadoutShowResult {
   overrides: Record<string, string>;
   /** Pinned overrides left out of the table because their target is undeclared. */
   staleOverrides: StaleOverrideView[];
+  /** Builtin archetypes the self-contained project catalog omitted. */
+  suppressed_canon_archetypes: string[];
+  /** Exact note line when `suppressed_canon_archetypes` is non-empty; otherwise null. */
+  note: string | null;
 }
 
 /** `fadeno loadout` — the active loadout, its source, and its effective table. */
 export function runLoadoutShow(opts: LoadoutCommonOptions = {}): LoadoutShowResult {
   const repoRoot = repoRootOf(opts);
-  const profile = loadProfile(repoRoot, opts.userPathOptions);
-  const { active, stalePin, overrides } = activeFor(opts, repoRoot, profile);
+  const layered = loadLayered(repoRoot, opts.userPathOptions);
+  const profile = layered.profile;
+  const { active, stalePin, overrides } = activeFor(opts, repoRoot, profile, layered.layers);
   const effective = active == null
     ? { rows: [], stale: [] as StaleOverrideView[] }
     : effectiveRows(profile, active.name, overrides);
+  const canon = canonSurfacing(layered);
   return {
     active,
     slots: effective.rows,
@@ -232,6 +280,8 @@ export function runLoadoutShow(opts: LoadoutCommonOptions = {}): LoadoutShowResu
     stalePin,
     overrides,
     staleOverrides: effective.stale,
+    suppressed_canon_archetypes: canon.suppressed_canon_archetypes,
+    note: canon.note,
   };
 }
 
@@ -245,13 +295,17 @@ export interface LoadoutListResult {
   overrides: Record<string, string>;
   /** Pinned overrides left out of the table because their target is undeclared. */
   staleOverrides: StaleOverrideView[];
+  /** Builtin archetypes the self-contained project catalog omitted. */
+  suppressed_canon_archetypes: string[];
 }
 
 /** `fadeno loadout list` — every declared loadout, marking active + default. */
 export function runLoadoutList(opts: LoadoutCommonOptions = {}): LoadoutListResult {
   const repoRoot = repoRootOf(opts);
-  const profile = loadProfile(repoRoot, opts.userPathOptions);
-  const { active, stalePin, overrides } = activeFor(opts, repoRoot, profile);
+  const layered = loadLayered(repoRoot, opts.userPathOptions);
+  const profile = layered.profile;
+  const { active, stalePin, overrides } = activeFor(opts, repoRoot, profile, layered.layers);
+  const canon = canonSurfacing(layered);
   let staleOverrides: StaleOverrideView[] = [];
   const loadouts = Object.keys(profile.loadouts)
     .sort()
@@ -268,7 +322,13 @@ export function runLoadoutList(opts: LoadoutCommonOptions = {}): LoadoutListResu
       } else {
         slots = slotViews(profile, name);
       }
-      return { name, slots, isDefault: profile.defaultLoadout === name, isActive };
+      return {
+        name,
+        slots,
+        isDefault: profile.defaultLoadout === name,
+        isActive,
+        ...(isActive && canon.note != null ? { note: canon.note } : {}),
+      };
     });
   return {
     loadouts,
@@ -277,6 +337,7 @@ export function runLoadoutList(opts: LoadoutCommonOptions = {}): LoadoutListResu
     stalePin,
     overrides,
     staleOverrides,
+    suppressed_canon_archetypes: canon.suppressed_canon_archetypes,
   };
 }
 
@@ -339,7 +400,8 @@ export function runLoadoutSet(
   opts: LoadoutCommonOptions & { archetype: string; target: string },
 ): LoadoutSetResult {
   const repoRoot = repoRootOf(opts);
-  const profile = loadProfile(repoRoot, opts.userPathOptions);
+  const layered = loadLayered(repoRoot, opts.userPathOptions);
+  const profile = layered.profile;
   const archetype = opts.archetype.trim();
   const target = opts.target.trim();
   if (archetype.length === 0 || target.length === 0) {
@@ -358,7 +420,7 @@ export function runLoadoutSet(
       `"${target}" is not a declared executor (${Object.keys(profile.executors).sort().join(', ')}).`,
     );
   }
-  const { active, pin } = activeFor(opts, repoRoot, profile);
+  const { active, pin } = activeFor(opts, repoRoot, profile, layered.layers);
   if (active == null) {
     throw new LoadoutError(
       'No loadout is active, so a session override has nothing to decorate. ' +
@@ -436,8 +498,9 @@ export function runLoadoutResolve(
   opts: LoadoutCommonOptions & { archetype: string },
 ): LoadoutResolveResult {
   const repoRoot = repoRootOf(opts);
-  const profile = loadProfile(repoRoot, opts.userPathOptions);
-  const { active, overrides } = activeFor(opts, repoRoot, profile);
+  const layered = loadLayered(repoRoot, opts.userPathOptions);
+  const profile = layered.profile;
+  const { active, overrides } = activeFor(opts, repoRoot, profile, layered.layers, true);
   if (active == null) throw new LoadoutError('No loadout is active.');
   try {
     const resolved = resolveRole(

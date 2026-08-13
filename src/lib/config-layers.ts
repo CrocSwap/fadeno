@@ -20,6 +20,11 @@ export interface LayeredProfile {
   layers: ConfigLayer[];
   provenance: ProfileProvenance;
   paths: FadenoUserPaths;
+  /**
+   * Builtin `archetypes:` keys the project catalog omitted. Non-empty only
+   * when a self-contained project profile suppressed layering.
+   */
+  suppressedCanonArchetypes: string[];
 }
 
 function mapping(value: unknown): Record<string, unknown> | null {
@@ -83,6 +88,17 @@ function projectIsComplete(doc: Record<string, unknown>): boolean {
   return doc.default_loadout == null || (typeof doc.default_loadout === 'string' && loadouts != null && doc.default_loadout in loadouts);
 }
 
+/** Builtin archetype keys absent from a self-contained project catalog. */
+function missingCanonArchetypes(
+  builtinDoc: Record<string, unknown> | null,
+  projectDoc: Record<string, unknown> | null,
+): string[] {
+  const builtin = builtinDoc != null ? mapping(builtinDoc.archetypes) : null;
+  if (builtin == null || projectDoc == null) return [];
+  const declared = mapping(projectDoc.archetypes) ?? {};
+  return Object.keys(builtin).filter((name) => !Object.hasOwn(declared, name)).sort();
+}
+
 /**
  * Compose bundled → user → project profiles. A self-contained legacy project
  * profile remains authoritative, preserving the pre-layering contract.
@@ -99,7 +115,8 @@ export function loadLayeredProfile(repoRoot: string, options: UserPathOptions = 
   const parsedLayers = new Map(present.map((entry) => [entry.layer, parseLayer(entry.path)]));
   const project = present.find((entry) => entry.layer === 'project');
   const projectDoc = project ? parsedLayers.get('project') ?? null : null;
-  const effective = projectDoc && projectIsComplete(projectDoc)
+  const suppressLayering = Boolean(projectDoc && projectIsComplete(projectDoc));
+  const effective = suppressLayering
     ? [{ layer: 'project' as ConfigLayer, path: project!.path }]
     : present;
   const document: Record<string, unknown> = {};
@@ -119,6 +136,9 @@ export function loadLayeredProfile(repoRoot: string, options: UserPathOptions = 
     layers: effective.map((entry) => entry.layer),
     provenance,
     paths,
+    suppressedCanonArchetypes: suppressLayering
+      ? missingCanonArchetypes(parsedLayers.get('builtin') ?? null, projectDoc)
+      : [],
   };
 }
 
