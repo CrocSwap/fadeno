@@ -1,6 +1,6 @@
 ---
 name: builder
-description: Create or modify Fadeno playbooks from natural-language workflow descriptions, show them back as a diagram, and hand off to the runner. Use ONLY when the user explicitly wants to create, modify, simplify, or review a playbook. Do NOT trigger merely because a task mentions a playbook. [fadeno 0.6.0-rc.14]
+description: Create or modify Fadeno playbooks from natural-language workflow descriptions, show them back as a diagram, and hand off to the runner. Use ONLY when the user explicitly wants to create, modify, simplify, or review a playbook. Do NOT trigger merely because a task mentions a playbook. [fadeno 0.6.0-rc.15]
 ---
 
 # Fadeno Builder
@@ -28,8 +28,9 @@ reliably than a sprawling graph.
      (gather → synthesize → fact-check → revise), `compositional-review`
      (independent mapped revision loops → final reduce), `parallel-workstreams`
      (freeze contract + ownership manifests → parallel workstreams → integrate →
-     verify → gate), or `pr-review` (review → merge →
-     gate → post behind a human gate); **or**
+     verify → gate), `pr-review` (review → merge →
+     gate → post behind a human gate), or `model-tryout` (same spec to two
+     candidates → judge comparison → ModelComparison); **or**
    - author a new playbook from their description.
    Match it to the closest pattern in `references/playbook-authoring.md`.
 3. **Recommend the simplest version first.** Add loops/fan-out only when the task

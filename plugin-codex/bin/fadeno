@@ -13939,7 +13939,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.14";
+  if (true) return "0.6.0-rc.15";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -15059,23 +15059,97 @@ function readLocalLoadoutState(repoRoot) {
       overrides[archetype] = target.trim();
     }
   }
-  return { loadout: name.length > 0 ? name : null, overrides };
+  const shadows = {};
+  if (doc.shadows != null) {
+    if (!isMapping(doc.shadows)) {
+      throw localLoadoutPinError("has a `shadows` that is not a mapping (archetype \u2192 shadow attachment).");
+    }
+    for (const [archetype, raw] of Object.entries(doc.shadows)) {
+      if (!BARE_IDENTIFIER_RE.test(archetype)) {
+        throw localLoadoutPinError(
+          `has shadow key "${archetype}", which is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`
+        );
+      }
+      if (!isMapping(raw)) {
+        throw localLoadoutPinError(`shadow "${archetype}" is not a mapping ({executor, rate?}).`);
+      }
+      const executor = raw.executor;
+      if (typeof executor !== "string" || executor.trim().length === 0) {
+        throw localLoadoutPinError(
+          `shadow "${archetype}" targets ${JSON.stringify(executor)}, which is not an executor name.`
+        );
+      }
+      let rate;
+      if (raw.rate !== void 0) {
+        if (typeof raw.rate !== "number" || !Number.isFinite(raw.rate) || raw.rate <= 0 || raw.rate > 1) {
+          throw localLoadoutPinError(
+            `shadow "${archetype}" has rate ${JSON.stringify(raw.rate)}, which is not a number in (0, 1].`
+          );
+        }
+        rate = raw.rate;
+      }
+      const unknown = Object.keys(raw).filter((k) => k !== "executor" && k !== "rate");
+      if (unknown.length > 0) {
+        throw localLoadoutPinError(
+          `shadow "${archetype}" has unknown key(s) ${unknown.join(", ")}; only \`executor\` and \`rate\` are allowed.`
+        );
+      }
+      shadows[archetype] = rate == null ? { executor: executor.trim() } : { executor: executor.trim(), rate };
+    }
+  }
+  const out = { loadout: name.length > 0 ? name : null, overrides };
+  if (Object.keys(shadows).length > 0) out.shadows = shadows;
+  return out;
 }
 function writeLocalLoadoutState(repoRoot, state) {
-  const keys = Object.keys(state.overrides).sort();
+  const overrideKeys = Object.keys(state.overrides).sort();
+  const shadowKeys = Object.keys(state.shadows ?? {}).sort();
   if (state.loadout == null) {
+    const hasContent = overrideKeys.length > 0 || shadowKeys.length > 0;
     throw new ExecutorProfileError(
-      keys.length > 0 ? `Cannot pin override(s) ${keys.join(", ")} with no base loadout \u2014 session overrides decorate a base by name. Fix: select one with \`fadeno loadout use <name>\` first.` : `Cannot write ${LOADOUT_LOCAL_FILE} with no loadout \u2014 remove the pin file instead.`
+      hasContent ? `Cannot pin ${[...overrideKeys.map((k) => `override ${k}`), ...shadowKeys.map((k) => `shadow ${k}`)].join(", ")} with no base loadout \u2014 session state decorates a base by name. Fix: select one with \`fadeno loadout use <name>\` first.` : `Cannot write ${LOADOUT_LOCAL_FILE} with no loadout \u2014 remove the pin file instead.`
     );
+  }
+  if (state.shadows != null) {
+    for (const [archetype, att] of Object.entries(state.shadows)) {
+      if (!BARE_IDENTIFIER_RE.test(archetype)) {
+        throw new ExecutorProfileError(`shadow key "${archetype}" is not a bare identifier.`);
+      }
+      if (typeof att.executor !== "string" || att.executor.trim().length === 0) {
+        throw new ExecutorProfileError(`shadow "${archetype}" has empty executor.`);
+      }
+      if (att.rate !== void 0 && (typeof att.rate !== "number" || !Number.isFinite(att.rate) || att.rate <= 0 || att.rate > 1)) {
+        throw new ExecutorProfileError(`shadow "${archetype}" has invalid rate ${String(att.rate)}.`);
+      }
+    }
   }
   const path = (0, import_node_path6.join)(repoRoot, LOADOUT_LOCAL_FILE);
   (0, import_node_fs6.mkdirSync)((0, import_node_path6.dirname)(path), { recursive: true });
-  const sorted = {};
-  for (const archetype of keys) sorted[archetype] = state.overrides[archetype];
-  const body = keys.length === 0 ? `${state.loadout}
-` : `${JSON.stringify({ loadout: state.loadout, overrides: sorted })}
-`;
-  (0, import_node_fs6.writeFileSync)(path, body, "utf8");
+  const hasOverrides = overrideKeys.length > 0;
+  const hasShadows = shadowKeys.length > 0;
+  if (!hasOverrides && !hasShadows) {
+    (0, import_node_fs6.writeFileSync)(path, `${state.loadout}
+`, "utf8");
+    return path;
+  }
+  const out = { loadout: state.loadout };
+  if (hasOverrides) {
+    const sorted = {};
+    for (const archetype of overrideKeys) sorted[archetype] = state.overrides[archetype];
+    out.overrides = sorted;
+  }
+  if (hasShadows) {
+    const sortedShadows = {};
+    for (const archetype of shadowKeys) {
+      const att = state.shadows[archetype];
+      sortedShadows[archetype] = att.rate == null ? { executor: att.executor } : { executor: att.executor, rate: att.rate };
+    }
+    out.shadows = sortedShadows;
+  }
+  const ordered = {};
+  for (const key of Object.keys(out).sort()) ordered[key] = out[key];
+  (0, import_node_fs6.writeFileSync)(path, `${JSON.stringify(ordered)}
+`, "utf8");
   return path;
 }
 var LOADOUT_SOURCE_LABEL = {
@@ -15118,6 +15192,10 @@ function readUserLoadout(options = {}) {
 function applicableOverrides(state, active) {
   if (active == null || state.loadout !== active.name) return {};
   return state.overrides;
+}
+function applicableShadows(state, active) {
+  if (active == null || state.loadout !== active.name) return {};
+  return state.shadows ?? {};
 }
 function roleResolutionEchoLabel(source, activeLoadoutName) {
   if (source === "loadout") return `loadout ${activeLoadoutName ?? "?"}`;
@@ -17451,6 +17529,7 @@ function runDispatch(opts) {
   let spec;
   let active = null;
   let overrides = {};
+  let pinState = null;
   let source;
   let resolvedVia = null;
   if (opts.executor != null && opts.executor.trim() !== "") {
@@ -17475,7 +17554,8 @@ function runDispatch(opts) {
       );
     }
     try {
-      const pin = readLocalLoadoutState(repoRoot);
+      pinState = readLocalLoadoutState(repoRoot);
+      const pin = pinState;
       active = resolveActiveLoadout({
         flagValue: opts.loadout ?? null,
         envValue: opts.env !== void 0 ? opts.env : process.env.FADENO_LOADOUT ?? null,
@@ -17693,6 +17773,246 @@ function runDispatch(opts) {
   }
   if (spawned.error != null) row.error = spawned.error.message;
   appendEvidenceRow(repoRoot, row);
+  try {
+    const hasFlag = typeof opts.shadow === "string" && opts.shadow.trim().length > 0;
+    let shadowExecutorNameInner = null;
+    let shadowSourceTag = null;
+    let attachmentRate;
+    if (hasFlag) {
+      shadowExecutorNameInner = opts.shadow.trim();
+      shadowSourceTag = "flag";
+    } else if (archetype != null) {
+      const effectivePin = pinState ?? readLocalLoadoutState(repoRoot);
+      const shadowsForLoadout = applicableShadows(effectivePin, active);
+      const att = shadowsForLoadout[archetype];
+      if (att != null) {
+        shadowExecutorNameInner = att.executor;
+        shadowSourceTag = "attachment";
+        attachmentRate = att.rate;
+      }
+    }
+    if (shadowExecutorNameInner != null && shadowSourceTag != null) {
+      if (shadowSourceTag === "attachment" && attachmentRate != null) {
+        const sampler = opts.shadowSampler ?? Math.random;
+        let roll;
+        try {
+          roll = sampler();
+        } catch {
+          roll = 0;
+        }
+        if (!(roll < attachmentRate)) {
+          shadowExecutorNameInner = null;
+          shadowSourceTag = null;
+        }
+      }
+    }
+    if (shadowExecutorNameInner != null && shadowSourceTag != null) {
+      const shadowNow = /* @__PURE__ */ new Date();
+      const shadowDispatchId = (0, import_node_crypto2.randomUUID)();
+      const shadowId8 = shadowDispatchId.slice(0, 8);
+      const shadowOutputRel = (0, import_node_path12.join)(".fadeno", "local", "outputs", `shadow-${shadowId8}.md`).split("\\").join("/");
+      const shadowOutputAbs = (0, import_node_path12.join)(repoRoot, shadowOutputRel);
+      const shadowDiffRel = (0, import_node_path12.join)(".fadeno", "local", "outputs", `shadow-${shadowId8}.diff`).split("\\").join("/");
+      const shadowDiffAbs = (0, import_node_path12.join)(repoRoot, shadowDiffRel);
+      const shadowWorktreeRel = (0, import_node_path12.join)(".fadeno", "local", "shadow", shadowId8).split("\\").join("/");
+      const shadowWorktreeAbs = (0, import_node_path12.join)(repoRoot, shadowWorktreeRel);
+      const writeShadowRefusal = (predicate, message, extra = {}) => {
+        const base = {
+          format: DISPATCHES_FORMAT,
+          timestamp: shadowNow.toISOString(),
+          event: "dispatch_refused",
+          dispatch_id: shadowDispatchId,
+          archetype,
+          role,
+          resolution: "shadow",
+          shadow: true,
+          primary_dispatch_id: dispatchId,
+          executor: shadowExecutorNameInner,
+          ...extra,
+          refusal: { predicate, message }
+        };
+        if (base.executor == null) delete base.executor;
+        appendEvidenceRow(repoRoot, base);
+        opts.onEcho?.(`shadow refused: ${message} [${predicate}]`);
+      };
+      const shadowSpec = profile.executors[shadowExecutorNameInner];
+      if (shadowSpec == null) {
+        writeShadowRefusal("shadow_resolution", `shadow target "${shadowExecutorNameInner}" is not a declared executor (${Object.keys(profile.executors).join(", ")}).`);
+      } else if (shadowSpec.adapter === "host") {
+        writeShadowRefusal("shadow_resolution", `shadow executor "${shadowExecutorNameInner}" is a host/native executor \u2014 the kernel cannot duplicate a dispatch natively.`, {
+          model: shadowSpec.model,
+          transport: "native"
+        });
+      } else {
+        const eligibilityState = eligibilityFor(shadowSpec, archetype);
+        if (eligibilityState === "forbidden") {
+          const msg = explainEligibilityConflict({ executor: shadowExecutorNameInner, spec: shadowSpec }, archetype) ?? `archetype "${archetype}" is forbidden on executor "${shadowExecutorNameInner}".`;
+          writeShadowRefusal("eligibility", msg, { model: shadowSpec.model, transport: "command" });
+        } else {
+          const writeConflict2 = explainWriteConflict({ executor: shadowExecutorNameInner, spec: shadowSpec }, archetype, profile);
+          if (writeConflict2 != null) {
+            writeShadowRefusal("write_posture", writeConflict2, { model: shadowSpec.model, transport: "command" });
+          } else {
+            const shadowConstraintContext = {
+              archetype,
+              role,
+              executor: shadowExecutorNameInner,
+              target: shadowSpec.target ?? null,
+              provider: shadowSpec.provider ?? null,
+              model: shadowSpec.model,
+              transport: "command",
+              write_access: shadowSpec.writeAccess,
+              write_posture: declaredWritePosture(profile, archetype),
+              active_loadout: active?.name ?? null,
+              overrides,
+              resolved_via: resolvedVia,
+              input_provenance: provenanceFields(lookupInputProducers(repoRoot, producedByIds(opts))),
+              harness: profile.harness ?? "standalone",
+              shadow: true
+            };
+            let shadowConstraintVerdict;
+            try {
+              shadowConstraintVerdict = evaluateConstraint(profile, shadowConstraintContext, { cwd: repoRoot });
+            } catch (err) {
+              if (err instanceof ConstraintError) {
+                writeShadowRefusal("shadow_resolution", `shadow constraint system error: ${err.message}`);
+                shadowConstraintVerdict = null;
+              } else {
+                throw err;
+              }
+            }
+            if (shadowConstraintVerdict != null && shadowConstraintVerdict.verdict === "refused") {
+              writeShadowRefusal("constraint_command", shadowConstraintVerdict.reason, { model: shadowSpec.model, transport: "command" });
+            } else if (shadowConstraintVerdict == null || shadowConstraintVerdict.verdict === "allowed") {
+              const verdictAllowed = shadowConstraintVerdict != null && shadowConstraintVerdict.verdict === "allowed";
+              if (verdictAllowed) {
+                try {
+                  (0, import_node_child_process2.spawnSync)("git", ["worktree", "prune"], { cwd: repoRoot, encoding: "utf8" });
+                } catch {
+                }
+                const addResult = (0, import_node_child_process2.spawnSync)("git", ["worktree", "add", "--detach", shadowWorktreeAbs, "HEAD"], { cwd: repoRoot, encoding: "utf8" });
+                if (addResult.error != null || addResult.status !== 0) {
+                  const reason = addResult.error?.message ?? (addResult.stderr != null ? String(addResult.stderr).trim() : "") ?? "worktree add failed";
+                  const msg = reason.length > 0 ? reason : "shadow worktree could not be created";
+                  writeShadowRefusal("shadow_isolation", msg);
+                } else {
+                  const shadowModel = shadowSpec.model != null ? ` (${shadowSpec.model})` : "";
+                  opts.onEcho?.(`shadow \u2192 ${shadowExecutorNameInner}${shadowModel} [command]`);
+                  const shadowCommand = shadowSpec.command;
+                  const shadowCommandSha = sha256Hex(JSON.stringify(shadowCommand));
+                  const shadowLoadoutField = active == null ? null : { name: active.name, source: active.source };
+                  const shadowIdentity = {
+                    dispatch_id: shadowDispatchId,
+                    archetype,
+                    role,
+                    resolution: "shadow",
+                    shadow: true,
+                    primary_dispatch_id: dispatchId,
+                    shadow_source: shadowSourceTag,
+                    gate_eligible: false,
+                    loadout: shadowLoadoutField,
+                    ...resolvedVia != null ? { resolved_via: resolvedVia } : {},
+                    executor: shadowExecutorNameInner,
+                    ...shadowSpec.target != null ? { target: shadowSpec.target, provider: shadowSpec.provider ?? null } : {},
+                    model: shadowSpec.model,
+                    transport: "command",
+                    ...shadowSpec.writeAccess != null ? { write_access: shadowSpec.writeAccess } : {},
+                    ...shadowSpec.target != null ? { delivery_transport: "command" } : {},
+                    prompt_source: promptSource,
+                    prompt_snapshot: promptSnapshot,
+                    prompt_sha256: promptSha256,
+                    command: shadowCommand,
+                    command_sha256: shadowCommandSha,
+                    output_snapshot: shadowOutputRel
+                  };
+                  if (eligibilityState === "shadow_only") {
+                    shadowIdentity.eligibility = "shadow_only";
+                  }
+                  appendEvidenceRow(repoRoot, {
+                    format: DISPATCHES_FORMAT,
+                    timestamp: shadowNow.toISOString(),
+                    event: "dispatch_requested",
+                    ...shadowIdentity
+                  });
+                  let promptBytes;
+                  try {
+                    const snapPath = (0, import_node_path12.isAbsolute)(promptSnapshot) ? promptSnapshot : (0, import_node_path12.join)(repoRoot, promptSnapshot);
+                    promptBytes = (0, import_node_fs12.readFileSync)(snapPath, "utf8");
+                  } catch {
+                    promptBytes = prompt;
+                  }
+                  (0, import_node_fs12.mkdirSync)((0, import_node_path12.join)(repoRoot, ".fadeno", "local", "outputs"), { recursive: true });
+                  const sfd = (0, import_node_fs12.openSync)(shadowOutputAbs, "w");
+                  const sStarted = Date.now();
+                  let sSpawned;
+                  try {
+                    const [scmd, ...sargs] = shadowCommand;
+                    sSpawned = (0, import_node_child_process2.spawnSync)(scmd, sargs, {
+                      input: promptBytes,
+                      encoding: "utf8",
+                      cwd: shadowWorktreeAbs,
+                      maxBuffer: SPAWN_MAX_BUFFER,
+                      stdio: ["pipe", sfd, "pipe"]
+                    });
+                  } finally {
+                    (0, import_node_fs12.closeSync)(sfd);
+                  }
+                  const sDuration = Date.now() - sStarted;
+                  let sStdout = "";
+                  try {
+                    sStdout = (0, import_node_fs12.readFileSync)(shadowOutputAbs, "utf8");
+                  } catch {
+                    sStdout = "";
+                  }
+                  const sOutputSha = sha256Hex(sStdout);
+                  let diffBytes = 0;
+                  let diffContent = "";
+                  try {
+                    (0, import_node_child_process2.spawnSync)("git", ["-C", shadowWorktreeAbs, "add", "-A"], { encoding: "utf8" });
+                    const diffRes = (0, import_node_child_process2.spawnSync)("git", ["-C", shadowWorktreeAbs, "diff", "--binary", "--cached"], { encoding: "utf8", maxBuffer: SPAWN_MAX_BUFFER });
+                    if (diffRes.error == null && diffRes.status === 0) {
+                      diffContent = diffRes.stdout ?? "";
+                    } else if (diffRes.stdout != null) {
+                      diffContent = String(diffRes.stdout);
+                    }
+                  } catch {
+                  }
+                  try {
+                    (0, import_node_fs12.mkdirSync)((0, import_node_path12.join)(repoRoot, ".fadeno", "local", "outputs"), { recursive: true });
+                    (0, import_node_fs12.writeFileSync)(shadowDiffAbs, diffContent, "utf8");
+                    diffBytes = Buffer.byteLength(diffContent);
+                  } catch {
+                    diffBytes = Buffer.byteLength(diffContent);
+                  }
+                  try {
+                    (0, import_node_child_process2.spawnSync)("git", ["worktree", "remove", "--force", shadowWorktreeAbs], { cwd: repoRoot, encoding: "utf8" });
+                  } catch {
+                  }
+                  const sRow = {
+                    format: DISPATCHES_FORMAT,
+                    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+                    event: "dispatch_completed",
+                    ...shadowIdentity,
+                    exit_code: sSpawned.error != null ? null : sSpawned.status,
+                    ...sSpawned.signal != null ? { signal: sSpawned.signal } : {},
+                    duration_ms: sDuration,
+                    output_sha256: sOutputSha,
+                    output_bytes: Buffer.byteLength(sStdout),
+                    diff_snapshot: shadowDiffRel,
+                    diff_bytes: diffBytes
+                  };
+                  if (sSpawned.error != null) sRow.error = sSpawned.error.message;
+                  appendEvidenceRow(repoRoot, sRow);
+                  opts.onEcho?.(`shadow diff: ${diffBytes} bytes \u2192 ${shadowDiffRel}`);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  } catch {
+  }
   if (spawned.error != null) {
     throw new DispatchCommandError(
       `executor "${executorName}" failed to spawn: ${spawned.error.message}`
@@ -17858,6 +18178,7 @@ function runDispatchProgress(opts) {
 // src/commands/dispatches.ts
 var import_node_fs13 = require("node:fs");
 var import_node_path13 = require("node:path");
+var import_yaml6 = __toESM(require_dist(), 1);
 var DispatchesCommandError = class extends Error {
 };
 var DEFAULT_TAIL = 10;
@@ -17938,7 +18259,13 @@ function requestedEntry(row) {
     durationMs: null,
     outputSha256: null,
     workspaceChanged: null,
-    error: null
+    error: null,
+    shadow: row.shadow === true,
+    primaryDispatchId: str(row.primary_dispatch_id),
+    shadowSource: str(row.shadow_source),
+    diffSnapshot: str(row.diff_snapshot),
+    diffBytes: num(row.diff_bytes),
+    outputBytes: num(row.output_bytes)
   };
 }
 function nativeEntry(row) {
@@ -17975,7 +18302,13 @@ function nativeEntry(row) {
     durationMs: null,
     outputSha256: null,
     workspaceChanged: null,
-    error: null
+    error: null,
+    shadow: false,
+    primaryDispatchId: null,
+    shadowSource: null,
+    diffSnapshot: null,
+    diffBytes: null,
+    outputBytes: null
   };
 }
 function applyCompletion(entry, row) {
@@ -17994,6 +18327,14 @@ function applyCompletion(entry, row) {
   entry.executor = entry.executor ?? str(row.executor);
   if (row.gate_eligible === false) entry.gateEligible = false;
   if (entry.refusal == null) entry.refusal = refusalOf(row.refusal);
+  if (row.shadow === true) entry.shadow = true;
+  entry.primaryDispatchId = entry.primaryDispatchId ?? str(row.primary_dispatch_id);
+  entry.shadowSource = entry.shadowSource ?? str(row.shadow_source);
+  entry.diffSnapshot = entry.diffSnapshot ?? str(row.diff_snapshot);
+  const db = num(row.diff_bytes);
+  if (db != null) entry.diffBytes = db;
+  const ob = num(row.output_bytes);
+  if (ob != null) entry.outputBytes = ob;
 }
 function legacyEntry(row) {
   const entry = requestedEntry(row);
@@ -18010,6 +18351,10 @@ function renderDispatchLine(entry) {
     `${who} \u2192 ${entry.executor ?? "(unresolved)"}${model != null ? ` (${model})` : ""}`
   );
   if (entry.transport != null) parts.push(`via ${entry.transport}`);
+  if (entry.shadow) {
+    const pid8 = entry.primaryDispatchId ? entry.primaryDispatchId.slice(0, 8) : "?";
+    parts.push(`[shadow of ${pid8}]`);
+  }
   if (entry.kind === "command") {
     if (entry.refusal != null) {
       parts.push(`[refused: ${entry.refusal.predicate}]`);
@@ -18017,7 +18362,7 @@ function renderDispatchLine(entry) {
     } else if (entry.completed) {
       const code = `exit ${entry.exitCode ?? "?"}${entry.signal != null ? ` (${entry.signal})` : ""}`;
       parts.push(entry.durationMs != null ? `${code} in ${entry.durationMs}ms` : code);
-      if (entry.exitCode === 0 && entry.writeAccess === true && entry.workspaceChanged === false) {
+      if (entry.exitCode === 0 && entry.writeAccess === true && entry.workspaceChanged === false && !entry.shadow) {
         parts.push("[no workspace change]");
       }
     } else {
@@ -18211,11 +18556,266 @@ function runDispatchesOutput(opts) {
   const attested = !rec.completed ? "incomplete" : sha256Hex(bytes) === rec.outputSha256 ? "match" : "mismatch";
   return { dispatchId: rec.dispatchId, path: snapshotRel, bytes, attested };
 }
+var COMPARISONS_DIR = (0, import_node_path13.join)(".fadeno", "comparisons");
+function loadAllEntries(absolute) {
+  const entries = [];
+  const byDispatchId = /* @__PURE__ */ new Map();
+  let skipped = 0;
+  let skippedNewerFormat = 0;
+  if (!(0, import_node_fs13.existsSync)(absolute)) return { entries, skipped, skippedNewerFormat };
+  for (const line of (0, import_node_fs13.readFileSync)(absolute, "utf8").split("\n")) {
+    if (line.trim() === "") continue;
+    let row;
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+      row = parsed;
+    } catch {
+      skipped += 1;
+      continue;
+    }
+    const tier = formatTier(row.format);
+    if (tier === "newer") {
+      skippedNewerFormat += 1;
+      continue;
+    }
+    const event = str(row.event);
+    if (tier === "unversioned" && event == null && isLegacyCompletion(row)) {
+      entries.push(legacyEntry(row));
+      continue;
+    }
+    if (event === "native_delivery") {
+      entries.push(nativeEntry(row));
+      continue;
+    }
+    if (event === "dispatch_refused") {
+      entries.push(requestedEntry(row));
+      continue;
+    }
+    const dispatchId = str(row.dispatch_id);
+    if ((event === "dispatch_requested" || event === "dispatch_completed") && dispatchId == null) {
+      skipped += 1;
+      continue;
+    }
+    if (event === "dispatch_requested") {
+      const entry = requestedEntry(row);
+      entries.push(entry);
+      byDispatchId.set(dispatchId, entry);
+      continue;
+    }
+    if (event === "dispatch_completed") {
+      const open = byDispatchId.get(dispatchId);
+      if (open != null) {
+        applyCompletion(open, row);
+      } else {
+        const entry = requestedEntry(row);
+        applyCompletion(entry, row);
+        entries.push(entry);
+        byDispatchId.set(dispatchId, entry);
+      }
+      continue;
+    }
+    skipped += 1;
+  }
+  return { entries, skipped, skippedNewerFormat };
+}
+function parseModelComparisonFile(repoRoot, relPath) {
+  const abs = (0, import_node_path13.join)(repoRoot, relPath);
+  let content;
+  try {
+    content = (0, import_node_fs13.readFileSync)(abs, "utf8");
+  } catch {
+    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, valid: false, error: "unreadable" };
+  }
+  const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n/);
+  if (!match) {
+    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, valid: false, error: "missing frontmatter" };
+  }
+  const frontmatterText = match[1];
+  let data;
+  try {
+    const parsed = (0, import_yaml6.parse)(frontmatterText);
+    if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+    data = parsed;
+  } catch {
+    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, valid: false, error: "invalid yaml" };
+  }
+  const kind = str(data.kind);
+  const baseline = str(data.baseline);
+  const challenger = str(data.challenger);
+  const verdict = str(data.verdict);
+  const date = str(data.date);
+  const dispatchIdsRaw = data.dispatch_ids;
+  let dispatchIds = null;
+  if (Array.isArray(dispatchIdsRaw)) dispatchIds = dispatchIdsRaw.filter((v) => typeof v === "string" && v !== "");
+  const valid = kind === "ModelComparison" && baseline != null && challenger != null && verdict != null && date != null;
+  const body = content.slice(match[0].length);
+  const hasCriteria = /^##\s+Criteria/m.test(body);
+  const hasConfounds = /^##\s+Confounds/m.test(body);
+  if (!hasCriteria || !hasConfounds) {
+    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: "missing required sections" };
+  }
+  if (!valid) return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: "invalid frontmatter" };
+  const allowedVerdicts = /* @__PURE__ */ new Set(["prefer_baseline", "prefer_challenger", "tie", "inconclusive"]);
+  if (!allowedVerdicts.has(verdict)) {
+    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: "invalid verdict" };
+  }
+  return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: true };
+}
+function scanComparisons(repoRoot, dirRel) {
+  const abs = (0, import_node_path13.join)(repoRoot, dirRel);
+  if (!(0, import_node_fs13.existsSync)(abs)) return { artifacts: [], skipped: 0 };
+  let files;
+  try {
+    files = (0, import_node_fs13.readdirSync)(abs).filter((f) => f.endsWith(".md")).sort();
+  } catch {
+    return { artifacts: [], skipped: 0 };
+  }
+  const artifacts = [];
+  let skipped = 0;
+  for (const file of files) {
+    const rel = (0, import_node_path13.join)(dirRel, file).split("\\").join("/");
+    const artifact = parseModelComparisonFile(repoRoot, rel);
+    if (!artifact.valid) skipped += 1;
+    artifacts.push(artifact);
+  }
+  return { artifacts, skipped };
+}
+function formatComparisonPair(pair) {
+  const primaryId8 = pair.primaryId ? pair.primaryId.slice(0, 8) : "?";
+  const shadowId8 = pair.shadowId ? pair.shadowId.slice(0, 8) : "?";
+  const arch = pair.archetype ?? "(none)";
+  const primaryInfo = `${pair.primary.executor ?? "(unresolved)"} (${pair.primary.model ?? "?"}) exit ${pair.primary.exitCode ?? "?"} output ${pair.primary.outputBytes ?? "?"} bytes`;
+  const shadowInfo = `${pair.shadow.executor ?? "(unresolved)"} (${pair.shadow.model ?? "?"}) exit ${pair.shadow.exitCode ?? "?"} output ${pair.shadow.outputBytes ?? "?"} bytes diff ${pair.shadow.diffBytes ?? "?"} bytes`;
+  const mismatch = pair.promptShaMismatch ? "  PROMPT SHA MISMATCH" : "";
+  const orphan = pair.orphan ? "  [orphan: primary missing]" : "";
+  return `${primaryId8} \u2192 ${shadowId8}  ${arch}  primary ${primaryInfo}  vs shadow ${shadowInfo}${mismatch}${orphan}`;
+}
+function formatComparisonArtifact(artifact) {
+  const verdict = artifact.verdict ?? "?";
+  const baseline = artifact.baseline ?? "?";
+  const challenger = artifact.challenger ?? "?";
+  const date = artifact.date ?? "?";
+  if (!artifact.valid) return `${artifact.file}: invalid (${artifact.error ?? "unknown"})`;
+  return `${artifact.file}: ${verdict} (baseline ${baseline} vs challenger ${challenger} on ${date})`;
+}
+function runDispatchesComparisons(opts = {}) {
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const path = DISPATCHES_FILE.split("\\").join("/");
+  const comparisonsDir = COMPARISONS_DIR.split("\\").join("/");
+  const absolute = (0, import_node_path13.join)(repoRoot, DISPATCHES_FILE);
+  const { entries, skipped, skippedNewerFormat } = loadAllEntries(absolute);
+  const primaryById = /* @__PURE__ */ new Map();
+  for (const entry of entries) {
+    if (!entry.shadow && entry.dispatchId) primaryById.set(entry.dispatchId, entry);
+  }
+  const pairs = [];
+  for (const entry of entries) {
+    if (!entry.shadow) continue;
+    const shadowId = entry.dispatchId;
+    const primaryId = entry.primaryDispatchId;
+    const primary = primaryId ? primaryById.get(primaryId) ?? null : null;
+    const orphan = primary == null;
+    const promptShaMismatch = !orphan && entry.promptSha256 != null && primary.promptSha256 != null && entry.promptSha256 !== primary.promptSha256;
+    pairs.push({
+      primaryId: primary?.dispatchId ?? primaryId,
+      shadowId,
+      primaryDispatchId: primaryId,
+      archetype: entry.archetype ?? primary?.archetype ?? null,
+      primary: {
+        dispatchId: primary?.dispatchId ?? primaryId,
+        executor: primary?.executor ?? null,
+        model: primary?.model ?? null,
+        exitCode: primary?.exitCode ?? null,
+        outputBytes: primary?.outputBytes ?? null,
+        promptSha256: primary?.promptSha256 ?? null
+      },
+      shadow: {
+        dispatchId: shadowId,
+        executor: entry.executor,
+        model: entry.model,
+        exitCode: entry.exitCode,
+        outputBytes: entry.outputBytes,
+        diffBytes: entry.diffBytes,
+        diffSnapshot: entry.diffSnapshot,
+        promptSha256: entry.promptSha256
+      },
+      promptShaMismatch: Boolean(promptShaMismatch),
+      orphan
+    });
+  }
+  const { artifacts, skipped: skippedComparisons } = scanComparisons(repoRoot, comparisonsDir);
+  const challengers = /* @__PURE__ */ new Set();
+  for (const p of pairs) {
+    const name = p.shadow.executor ?? "(unknown)";
+    challengers.add(name);
+  }
+  for (const a of artifacts) {
+    if (a.challenger) challengers.add(a.challenger);
+  }
+  const sortedChallengers = [...challengers].sort();
+  const groups = [];
+  for (const challenger of sortedChallengers) {
+    const groupPairs = pairs.filter((p) => (p.shadow.executor ?? "(unknown)") === challenger);
+    const groupComparisons = artifacts.filter((a) => a.challenger === challenger);
+    const preferChallenger = groupComparisons.filter((a) => a.valid && a.verdict === "prefer_challenger").length;
+    const preferBaseline = groupComparisons.filter((a) => a.valid && a.verdict === "prefer_baseline").length;
+    const tieOrInconclusive = groupComparisons.filter((a) => a.valid && (a.verdict === "tie" || a.verdict === "inconclusive")).length;
+    groups.push({
+      challenger,
+      pairs: groupPairs,
+      comparisons: groupComparisons,
+      tally: {
+        pairs: groupPairs.length,
+        comparisons: groupComparisons.filter((a) => a.valid).length,
+        preferChallenger,
+        preferBaseline,
+        tieOrInconclusive
+      }
+    });
+  }
+  const totalPairs = pairs.length;
+  const totalComparisons = artifacts.filter((a) => a.valid).length;
+  const lines = [];
+  if (totalPairs === 0 && totalComparisons === 0) {
+    lines.push(`No shadow pairs recorded in ${path}.`);
+    if (!(0, import_node_fs13.existsSync)((0, import_node_path13.join)(repoRoot, comparisonsDir))) {
+      lines.push(`No comparisons found in ${comparisonsDir} (missing).`);
+    } else if (artifacts.length === 0) {
+      lines.push(`No ModelComparison artifacts in ${comparisonsDir}.`);
+    }
+  } else {
+    for (const group of groups) {
+      lines.push(`challenger ${group.challenger}: ${group.tally.pairs} pairs, ${group.tally.comparisons} comparisons: ${group.tally.preferChallenger} prefer_challenger / ${group.tally.preferBaseline} prefer_baseline / ${group.tally.tieOrInconclusive} tie/inconclusive`);
+      for (const pair of group.pairs) {
+        lines.push(`  ${formatComparisonPair(pair)}`);
+      }
+      for (const comp of group.comparisons) {
+        lines.push(`  ${formatComparisonArtifact(comp)}`);
+      }
+    }
+  }
+  const summary = totalPairs === 0 && totalComparisons === 0 ? `No comparisons to show (${path})` : `${totalPairs} shadow pair${totalPairs === 1 ? "" : "s"}, ${totalComparisons} comparison${totalComparisons === 1 ? "" : "s"} across ${groups.length} challenger${groups.length === 1 ? "" : "s"}`;
+  return {
+    repoRoot,
+    path,
+    comparisonsDir,
+    totalPairs,
+    totalComparisons,
+    skippedComparisons,
+    skipped,
+    skippedNewerFormat,
+    groups,
+    lines,
+    summary
+  };
+}
 
 // src/commands/diagram.ts
 var import_node_fs14 = require("node:fs");
 var import_node_path14 = require("node:path");
-var import_yaml6 = __toESM(require_dist(), 1);
+var import_yaml7 = __toESM(require_dist(), 1);
 
 // src/lib/diagram.ts
 var KIND_LABEL = {
@@ -18505,7 +19105,7 @@ function runDiagram(opts) {
   const file = resolvePlaybookFile2(repoRoot, cwd, opts.playbook);
   let doc;
   try {
-    doc = (0, import_yaml6.parse)((0, import_node_fs14.readFileSync)(file, "utf8"));
+    doc = (0, import_yaml7.parse)((0, import_node_fs14.readFileSync)(file, "utf8"));
   } catch (err) {
     throw new DiagramError(`Could not parse ${file}: ${err.message}`);
   }
@@ -18520,7 +19120,7 @@ var import_node_child_process3 = require("node:child_process");
 var import_node_crypto4 = require("node:crypto");
 var import_node_fs18 = require("node:fs");
 var import_node_path18 = require("node:path");
-var import_yaml10 = __toESM(require_dist(), 1);
+var import_yaml11 = __toESM(require_dist(), 1);
 
 // src/lib/node-instance.ts
 var import_node_crypto3 = require("node:crypto");
@@ -19497,7 +20097,7 @@ function computeNext(playbook, events) {
 // src/commands/gate.ts
 var import_node_fs15 = require("node:fs");
 var import_node_path15 = require("node:path");
-var import_yaml7 = __toESM(require_dist(), 1);
+var import_yaml8 = __toESM(require_dist(), 1);
 var GateError = class extends Error {
 };
 var SUPPORTED_CONDITIONS = ["no_blocking_issues", "tests_pass"];
@@ -19549,7 +20149,7 @@ function resolveRunDir(repoRoot, cwd, run) {
 function appendGateEvent(writer, condition, artifact, pass, now) {
   let step = null;
   try {
-    const run = (0, import_yaml7.parse)((0, import_node_fs15.readFileSync)((0, import_node_path15.join)(writer.runDir, "run.yaml"), "utf8"));
+    const run = (0, import_yaml8.parse)((0, import_node_fs15.readFileSync)((0, import_node_path15.join)(writer.runDir, "run.yaml"), "utf8"));
     if (typeof run.current_step === "string") step = run.current_step;
   } catch {
   }
@@ -19618,7 +20218,7 @@ function runGate(opts) {
 // src/commands/prompt.ts
 var import_node_fs16 = require("node:fs");
 var import_node_path16 = require("node:path");
-var import_yaml8 = __toESM(require_dist(), 1);
+var import_yaml9 = __toESM(require_dist(), 1);
 
 // src/lib/prompt.ts
 function canonicalJson(value) {
@@ -19833,7 +20433,7 @@ function runPrompt(opts) {
   const playbookBytes = (0, import_node_fs16.readFileSync)(playbookPath);
   let playbook;
   try {
-    const parsed = (0, import_yaml8.parse)(playbookBytes.toString("utf8"));
+    const parsed = (0, import_yaml9.parse)(playbookBytes.toString("utf8"));
     if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("playbook is not a mapping");
     }
@@ -19981,7 +20581,7 @@ function runPrompt(opts) {
 // src/commands/run.ts
 var import_node_fs17 = require("node:fs");
 var import_node_path17 = require("node:path");
-var import_yaml9 = __toESM(require_dist(), 1);
+var import_yaml10 = __toESM(require_dist(), 1);
 var RunError = class extends Error {
 };
 var TERMINAL_STATUSES = /* @__PURE__ */ new Set(["completed", "failed", "aborted"]);
@@ -20051,7 +20651,7 @@ function runRun(opts) {
     if (err instanceof LedgerWriteError) throw new RunError(err.message);
     throw err;
   }
-  const run = (0, import_yaml9.parse)((0, import_node_fs17.readFileSync)(runYamlPath, "utf8"));
+  const run = (0, import_yaml10.parse)((0, import_node_fs17.readFileSync)(runYamlPath, "utf8"));
   const now = opts.now ?? /* @__PURE__ */ new Date();
   const iso = now.toISOString();
   const appendedEvents = [];
@@ -20165,7 +20765,7 @@ function runRun(opts) {
     }
   }
   (0, import_node_fs17.writeFileSync)(runYamlPath, `${RUN_YAML_MODELINE}
-${(0, import_yaml9.stringify)(run)}`, "utf8");
+${(0, import_yaml10.stringify)(run)}`, "utf8");
   return { runDir, appendedEvents, updatedFields, manifest };
 }
 
@@ -20184,7 +20784,7 @@ function loadValidatedPlaybook(runDir, repoRoot, name, schemas) {
   const playbookPath = locatePlaybook2(runDir, repoRoot, name);
   let playbook;
   try {
-    const parsed = (0, import_yaml10.parse)((0, import_node_fs18.readFileSync)(playbookPath, "utf8"));
+    const parsed = (0, import_yaml11.parse)((0, import_node_fs18.readFileSync)(playbookPath, "utf8"));
     if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("playbook is not a mapping");
     }
@@ -21529,7 +22129,7 @@ function runDrive(opts) {
   let activeLoadout;
   let requestedLoadout = null;
   try {
-    const runDoc = (0, import_yaml10.parse)((0, import_node_fs18.readFileSync)((0, import_node_path18.join)(run.dir, "run.yaml"), "utf8"));
+    const runDoc = (0, import_yaml11.parse)((0, import_node_fs18.readFileSync)((0, import_node_path18.join)(run.dir, "run.yaml"), "utf8"));
     requestedLoadout = typeof runDoc.requested_loadout === "string" ? runDoc.requested_loadout : null;
   } catch {
     requestedLoadout = null;
@@ -21605,7 +22205,7 @@ function runDrive(opts) {
         act(detail2);
         return finish("awaiting_host_dispatch", detail2, null, null, outstanding);
       }
-      const current = (0, import_yaml10.parse)((0, import_node_fs18.readFileSync)((0, import_node_path18.join)(ctx.runDir, "run.yaml"), "utf8"));
+      const current = (0, import_yaml11.parse)((0, import_node_fs18.readFileSync)((0, import_node_path18.join)(ctx.runDir, "run.yaml"), "utf8"));
       if (current.status === "running") {
         try {
           runRun({ run: ctx.runId, status, repoRoot: ctx.repoRoot, now: ctx.now });
@@ -22156,7 +22756,15 @@ function activeFor(opts, repoRoot, profile, layers, strict = false) {
       userFileValue: strict ? userValue : staleUserPin == null ? userValue : null,
       profile
     });
-    return { active, stalePin, pin, overrides: applicableOverrides(pin, active) };
+    const overrides = applicableOverrides(pin, active);
+    const shadows = applicableShadows(pin, active);
+    const shadow_attachments = {};
+    for (const [archetype, att] of Object.entries(shadows)) {
+      const spec = profile.executors[att.executor];
+      if (spec == null) continue;
+      shadow_attachments[archetype] = att.rate == null ? { executor: att.executor, model: spec.model } : { executor: att.executor, model: spec.model, rate: att.rate };
+    }
+    return { active, stalePin, pin, overrides, shadows, shadow_attachments };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new LoadoutError(err.message);
     throw err;
@@ -22170,7 +22778,7 @@ function slotViews(profile, name) {
     return { archetype, executor, model: spec.model, adapter: spec.adapter };
   });
 }
-function effectiveRows(profile, name, overrides) {
+function effectiveRows(profile, name, overrides, shadows = {}) {
   const slots = profile.loadouts[name] ?? {};
   const stale = [];
   const live = {};
@@ -22179,12 +22787,25 @@ function effectiveRows(profile, name, overrides) {
     if (Object.hasOwn(profile.executors, target)) live[archetype] = target;
     else stale.push({ archetype, target });
   }
+  const staleShadows = [];
+  const liveShadows = {};
+  for (const archetype of Object.keys(shadows).sort()) {
+    const att = shadows[archetype];
+    if (Object.hasOwn(profile.executors, att.executor)) liveShadows[archetype] = att;
+    else staleShadows.push({ archetype, target: att.executor });
+  }
   const archetypes = [.../* @__PURE__ */ new Set([...Object.keys(slots), ...Object.keys(live)])].sort();
   const rows = archetypes.map((archetype) => {
     const baseExecutor = slots[archetype] ?? null;
     const executor = live[archetype] ?? baseExecutor;
     const spec = profile.executors[executor];
     const eligibility = eligibilityFor(spec, archetype);
+    const att = liveShadows[archetype];
+    let shadow;
+    if (att != null) {
+      const shadowSpec = profile.executors[att.executor];
+      shadow = att.rate == null ? { executor: att.executor, model: shadowSpec.model, adapter: shadowSpec.adapter } : { executor: att.executor, model: shadowSpec.model, adapter: shadowSpec.adapter, rate: att.rate };
+    }
     return {
       archetype,
       executor,
@@ -22192,18 +22813,31 @@ function effectiveRows(profile, name, overrides) {
       adapter: spec.adapter,
       overridden: live[archetype] != null,
       baseExecutor,
-      ...eligibility !== "eligible" ? { eligibility } : {}
+      ...eligibility !== "eligible" ? { eligibility } : {},
+      ...shadow != null ? { shadow } : {}
     };
   });
-  return { rows, stale };
+  return { rows, stale, staleShadows };
+}
+function formatShadowLine(shadow, baseIndent) {
+  const model = shadow.model != null ? ` (${shadow.model})` : "";
+  const rate = shadow.rate != null ? ` rate ${shadow.rate}` : "";
+  const transport = shadow.adapter != null ? ` [${shadow.adapter}]` : "";
+  return `${baseIndent}  ~ shadow: ${shadow.executor}${model}${transport}${rate}`;
 }
 function runLoadoutShow(opts = {}) {
   const repoRoot = repoRootOf(opts);
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
-  const { active, stalePin, overrides } = activeFor(opts, repoRoot, profile, layered.layers);
-  const effective = active == null ? { rows: [], stale: [] } : effectiveRows(profile, active.name, overrides);
+  const { active, stalePin, overrides, shadows, shadow_attachments } = activeFor(opts, repoRoot, profile, layered.layers);
+  const effective = active == null ? { rows: [], stale: [], staleShadows: [] } : effectiveRows(profile, active.name, overrides, shadows);
   const canon = canonSurfacing(layered);
+  const liveShadowAttachments = {};
+  for (const [archetype, view] of Object.entries(shadow_attachments)) {
+    if (effective.staleShadows.some((s) => s.archetype === archetype)) continue;
+    const { executor, model, rate } = view;
+    liveShadowAttachments[archetype] = rate == null ? { executor, model } : { executor, model, rate };
+  }
   return {
     active,
     slots: effective.rows,
@@ -22212,6 +22846,9 @@ function runLoadoutShow(opts = {}) {
     stalePin,
     overrides,
     staleOverrides: effective.stale,
+    shadows,
+    shadow_attachments: liveShadowAttachments,
+    staleShadows: effective.staleShadows,
     suppressed_canon_archetypes: canon.suppressed_canon_archetypes,
     note: canon.note
   };
@@ -22220,16 +22857,24 @@ function runLoadoutList(opts = {}) {
   const repoRoot = repoRootOf(opts);
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
-  const { active, stalePin, overrides } = activeFor(opts, repoRoot, profile, layered.layers);
+  const { active, stalePin, overrides, shadows, shadow_attachments } = activeFor(opts, repoRoot, profile, layered.layers);
   const canon = canonSurfacing(layered);
   let staleOverrides = [];
+  let staleShadows = [];
+  let liveShadowAttachments = {};
   const loadouts = Object.keys(profile.loadouts).sort().map((name) => {
     const isActive = active?.name === name;
     let slots;
     if (isActive) {
-      const effective = effectiveRows(profile, name, overrides);
+      const effective = effectiveRows(profile, name, overrides, shadows);
       slots = effective.rows;
       staleOverrides = effective.stale;
+      staleShadows = effective.staleShadows;
+      for (const [archetype, view] of Object.entries(shadow_attachments)) {
+        if (staleShadows.some((s) => s.archetype === archetype)) continue;
+        const { executor, model, rate } = view;
+        liveShadowAttachments[archetype] = rate == null ? { executor, model } : { executor, model, rate };
+      }
     } else {
       slots = slotViews(profile, name);
     }
@@ -22248,6 +22893,9 @@ function runLoadoutList(opts = {}) {
     stalePin,
     overrides,
     staleOverrides,
+    shadows,
+    shadow_attachments: liveShadowAttachments,
+    staleShadows,
     suppressed_canon_archetypes: canon.suppressed_canon_archetypes
   };
 }
@@ -22263,8 +22911,14 @@ function runLoadoutUse(opts) {
     );
   }
   const pin = readPin(repoRoot);
-  const path = writeLocalLoadoutState(repoRoot, { loadout: name, overrides: {} });
-  return { name, path, previous: pin.loadout, droppedOverrides: pin.overrides };
+  const path = writeLocalLoadoutState(repoRoot, { loadout: name, overrides: {}, shadows: {} });
+  const droppedShadows = pin.shadows ?? {};
+  const dropped_shadow_attachments = {};
+  for (const [archetype, att] of Object.entries(droppedShadows)) {
+    const spec = profile.executors[att.executor];
+    dropped_shadow_attachments[archetype] = spec == null ? { executor: att.executor, model: null, ...att.rate != null ? { rate: att.rate } : {} } : att.rate == null ? { executor: att.executor, model: spec.model } : { executor: att.executor, model: spec.model, rate: att.rate };
+  }
+  return { name, path, previous: pin.loadout, droppedOverrides: pin.overrides, droppedShadows, dropped_shadow_attachments };
 }
 function runLoadoutSet(opts) {
   const repoRoot = repoRootOf(opts);
@@ -22301,9 +22955,10 @@ function runLoadoutSet(opts) {
   const rebase = pin.loadout !== active.name;
   const droppedOverrides = rebase ? pin.overrides : {};
   const overrides = rebase ? {} : { ...pin.overrides };
+  const shadows = rebase ? {} : { ...pin.shadows ?? {} };
   const previous = overrides[archetype] ?? null;
   overrides[archetype] = target;
-  const path = writeLocalLoadoutState(repoRoot, { loadout: active.name, overrides });
+  const path = writeLocalLoadoutState(repoRoot, { loadout: active.name, overrides, ...Object.keys(shadows).length > 0 ? { shadows } : {} });
   return {
     archetype,
     target,
@@ -22370,20 +23025,143 @@ function runLoadoutClear(opts = {}) {
   const cleared = pin.overrides[archetype];
   const overrides = { ...pin.overrides };
   delete overrides[archetype];
+  const shadows = pin.shadows ?? {};
+  const state = { loadout: pin.loadout, overrides, ...Object.keys(shadows).length > 0 ? { shadows } : {} };
   return {
     removed: true,
-    path: writeLocalLoadoutState(repoRoot, { loadout: pin.loadout, overrides }),
+    path: writeLocalLoadoutState(repoRoot, state),
     archetype,
     cleared,
     loadout: pin.loadout,
     overrides
   };
 }
+function runLoadoutShadow(opts) {
+  const repoRoot = repoRootOf(opts);
+  const layered = loadLayered(repoRoot, opts.userPathOptions);
+  const profile = layered.profile;
+  const archetype = opts.archetype.trim();
+  const executor = opts.executor.trim();
+  if (archetype.length === 0 || executor.length === 0) {
+    throw new LoadoutError("Usage: fadeno loadout shadow <archetype> <executor> [--rate <n>]");
+  }
+  if (!BARE_IDENTIFIER_RE.test(archetype)) {
+    throw new LoadoutError(
+      `archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`
+    );
+  }
+  if (!Object.hasOwn(profile.executors, executor)) {
+    throw new LoadoutError(
+      `"${executor}" is not a declared executor (${Object.keys(profile.executors).sort().join(", ")}).`
+    );
+  }
+  let rate;
+  if (opts.rate != null && opts.rate !== "") {
+    const raw = opts.rate;
+    const parsed = typeof raw === "string" ? Number(raw) : raw;
+    if (typeof parsed !== "number" || !Number.isFinite(parsed) || parsed <= 0 || parsed > 1) {
+      throw new LoadoutError(`rate ${JSON.stringify(raw)} is not a number in (0, 1].`);
+    }
+    rate = parsed;
+  }
+  const spec = profile.executors[executor];
+  if (spec.adapter === "command") {
+    const conflict = explainWriteConflict({ executor, spec }, archetype, profile);
+    if (conflict != null) throw new LoadoutError(conflict);
+  }
+  const eligibility = eligibilityFor(spec, archetype);
+  if (eligibility === "forbidden") {
+    const conflict = explainEligibilityConflict({ executor, spec }, archetype);
+    throw new LoadoutError(conflict ?? `archetype "${archetype}" is forbidden on executor "${executor}".`);
+  }
+  const { active, pin } = activeFor(opts, repoRoot, profile, layered.layers);
+  if (active == null) {
+    throw new LoadoutError(
+      "No loadout is active, so a shadow attachment has nothing to decorate. Fix: select a base first with `fadeno loadout use <name>`."
+    );
+  }
+  const rebase = pin.loadout !== active.name;
+  const droppedOverrides = rebase ? pin.overrides : {};
+  const droppedShadows = rebase ? pin.shadows ?? {} : {};
+  const overrides = rebase ? {} : { ...pin.overrides };
+  const shadows = rebase ? {} : { ...pin.shadows ?? {} };
+  const previous = shadows[archetype] ?? null;
+  shadows[archetype] = rate == null ? { executor } : { executor, rate };
+  const state = { loadout: active.name, overrides, shadows };
+  const path = writeLocalLoadoutState(repoRoot, state);
+  const shadow_attachments = {};
+  for (const [key, att] of Object.entries(shadows)) {
+    const s = profile.executors[att.executor];
+    shadow_attachments[key] = att.rate == null ? { executor: att.executor, model: s.model } : { executor: att.executor, model: s.model, rate: att.rate };
+  }
+  return {
+    archetype,
+    executor,
+    model: spec.model,
+    rate: rate ?? null,
+    loadout: active.name,
+    path,
+    previous,
+    shadows,
+    shadow_attachments,
+    droppedShadows,
+    droppedOverrides,
+    droppedBase: Object.keys({ ...droppedOverrides, ...droppedShadows }).length > 0 ? pin.loadout : null
+  };
+}
+function runLoadoutClearShadow(opts = {}) {
+  const repoRoot = repoRootOf(opts);
+  const pin = readPin(repoRoot);
+  const path = (0, import_node_path22.join)(repoRoot, LOADOUT_LOCAL_FILE);
+  const archetype = opts.archetype?.trim() ? opts.archetype.trim() : null;
+  if (archetype != null && !BARE_IDENTIFIER_RE.test(archetype)) {
+    throw new LoadoutError(
+      `archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`
+    );
+  }
+  if (archetype == null) {
+    const count = Object.keys(pin.shadows ?? {}).length;
+    if (count === 0) {
+      const shadows3 = {};
+      const shadow_attachments3 = {};
+      return { archetype: null, cleared: null, removed: false, count: 0, loadout: pin.loadout, shadows: shadows3, shadow_attachments: shadow_attachments3, path };
+    }
+    const overrides2 = pin.overrides;
+    const loadout2 = pin.loadout;
+    if (loadout2 == null) {
+      (0, import_node_fs22.rmSync)(path, { force: true });
+      return { archetype: null, cleared: null, removed: true, count, loadout: null, shadows: {}, shadow_attachments: {}, path };
+    }
+    const newPath2 = writeLocalLoadoutState(repoRoot, { loadout: loadout2, overrides: overrides2 });
+    const shadows2 = {};
+    const shadow_attachments2 = {};
+    return { archetype: null, cleared: null, removed: true, count, loadout: loadout2, shadows: shadows2, shadow_attachments: shadow_attachments2, path: newPath2 };
+  }
+  if (pin.loadout == null || pin.shadows == null || !Object.hasOwn(pin.shadows, archetype)) {
+    throw new LoadoutError(`no shadow attachment for "${archetype}" to clear (.fadeno/local/loadout)`);
+  }
+  const cleared = pin.shadows[archetype];
+  const shadows = { ...pin.shadows };
+  delete shadows[archetype];
+  const overrides = pin.overrides;
+  const loadout = pin.loadout;
+  const state = { loadout, overrides, ...Object.keys(shadows).length > 0 ? { shadows } : {} };
+  const newPath = writeLocalLoadoutState(repoRoot, state);
+  const layered = loadLayered(repoRoot, opts.userPathOptions);
+  const profile = layered.profile;
+  const shadow_attachments = {};
+  for (const [key, att] of Object.entries(shadows)) {
+    const s = profile.executors[att.executor];
+    if (s == null) continue;
+    shadow_attachments[key] = att.rate == null ? { executor: att.executor, model: s.model } : { executor: att.executor, model: s.model, rate: att.rate };
+  }
+  return { archetype, cleared, removed: true, count: 1, loadout, shadows, shadow_attachments, path: newPath };
+}
 
 // src/commands/new-run.ts
 var import_node_fs23 = require("node:fs");
 var import_node_path23 = require("node:path");
-var import_yaml11 = __toESM(require_dist(), 1);
+var import_yaml12 = __toESM(require_dist(), 1);
 var NewRunError = class extends Error {
 };
 function slugify(text, maxLen = 40) {
@@ -22398,7 +23176,7 @@ function slugify(text, maxLen = 40) {
   return slug || "run";
 }
 function readDeclaredInputs(playbookPath) {
-  const parsed = (0, import_yaml11.parse)((0, import_node_fs23.readFileSync)(playbookPath, "utf8"));
+  const parsed = (0, import_yaml12.parse)((0, import_node_fs23.readFileSync)(playbookPath, "utf8"));
   if (parsed?.inputs == null) return {};
   if (typeof parsed.inputs !== "object" || Array.isArray(parsed.inputs)) {
     throw new NewRunError("playbook inputs must be a mapping of logical name to media_type.");
@@ -22529,7 +23307,7 @@ function computeResolution(repoRoot, playbookPath, flagValue, envRaw, userPathOp
   }
   let playbookDoc;
   try {
-    playbookDoc = (0, import_yaml11.parse)((0, import_node_fs23.readFileSync)(playbookPath, "utf8"));
+    playbookDoc = (0, import_yaml12.parse)((0, import_node_fs23.readFileSync)(playbookPath, "utf8"));
   } catch {
     return null;
   }
@@ -22604,7 +23382,7 @@ function runNewRun(opts) {
     current_step: null
   };
   if (opts.loadout != null && opts.loadout.trim() !== "") runDocument.requested_loadout = opts.loadout.trim();
-  const runYaml = (0, import_yaml11.stringify)(runDocument);
+  const runYaml = (0, import_yaml12.stringify)(runDocument);
   const modeline = "# yaml-language-server: $schema=definitions/schemas/run.schema.json";
   (0, import_node_fs23.writeFileSync)((0, import_node_path23.join)(runDir, "run.yaml"), `${modeline}
 ${runYaml}`, "utf8");
@@ -22617,7 +23395,7 @@ ${runYaml}`, "utf8");
 
 // src/commands/next.ts
 var import_node_fs24 = require("node:fs");
-var import_yaml12 = __toESM(require_dist(), 1);
+var import_yaml13 = __toESM(require_dist(), 1);
 var NextError = class extends Error {
 };
 function locatePlaybook3(runDir, repoRoot, name) {
@@ -22668,7 +23446,7 @@ function runNext(opts) {
   const playbookPath = locatePlaybook3(run.dir, repoRoot, run.playbook);
   let playbook;
   try {
-    const parsed = (0, import_yaml12.parse)((0, import_node_fs24.readFileSync)(playbookPath, "utf8"));
+    const parsed = (0, import_yaml13.parse)((0, import_node_fs24.readFileSync)(playbookPath, "utf8"));
     if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("playbook is not a mapping");
     }
@@ -22707,7 +23485,7 @@ function runRuns(opts = {}) {
 
 // src/commands/show.ts
 var import_node_fs25 = require("node:fs");
-var import_yaml13 = __toESM(require_dist(), 1);
+var import_yaml14 = __toESM(require_dist(), 1);
 function runShow(opts) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
@@ -22724,7 +23502,7 @@ function workflowSteps(runDir, repoRoot, playbook) {
   const file = resolveRunPlaybookFile(runDir, repoRoot, playbook)?.path;
   if (file == null) return [];
   try {
-    const parsed = (0, import_yaml13.parse)((0, import_node_fs25.readFileSync)(file, "utf8"));
+    const parsed = (0, import_yaml14.parse)((0, import_node_fs25.readFileSync)(file, "utf8"));
     if (!Array.isArray(parsed?.flow)) return [];
     const raw = parsed.flow.filter(
       (step) => step != null && typeof step === "object" && !Array.isArray(step)
@@ -23140,7 +23918,7 @@ function runValidate(opts = {}) {
 // src/commands/verify.ts
 var import_node_fs27 = require("node:fs");
 var import_node_path25 = require("node:path");
-var import_yaml14 = __toESM(require_dist(), 1);
+var import_yaml15 = __toESM(require_dist(), 1);
 var VerifyError = class extends Error {
 };
 function resolveArtifact(runDir, rel) {
@@ -23149,7 +23927,7 @@ function resolveArtifact(runDir, rel) {
 function summaryFromDirectory(dir) {
   let doc;
   try {
-    doc = (0, import_yaml14.parse)((0, import_node_fs27.readFileSync)((0, import_node_path25.join)(dir, "run.yaml"), "utf8"));
+    doc = (0, import_yaml15.parse)((0, import_node_fs27.readFileSync)((0, import_node_path25.join)(dir, "run.yaml"), "utf8"));
   } catch (err) {
     throw new VerifyError(`evidence run.yaml did not parse: ${err.message}`);
   }
@@ -23241,7 +24019,7 @@ function runVerify(opts) {
   findings.push(
     legacy || compatibility ? skip("ledger-version", `${run.schemaVersion ?? "pre-0.3"} ledger read in explicit compatibility mode (--legacy)`) : { check: "ledger-version", status: "ok", detail: `schema_version ${RUN_LEDGER_SCHEMA_VERSION}` }
   );
-  const runDocument = (0, import_yaml14.parse)((0, import_node_fs27.readFileSync)((0, import_node_path25.join)(run.dir, "run.yaml"), "utf8"));
+  const runDocument = (0, import_yaml15.parse)((0, import_node_fs27.readFileSync)((0, import_node_path25.join)(run.dir, "run.yaml"), "utf8"));
   const snapshotRel = typeof runDocument.playbook_snapshot === "string" ? runDocument.playbook_snapshot : null;
   const expectedPlaybookSha = typeof runDocument.playbook_sha256 === "string" ? runDocument.playbook_sha256 : null;
   if (snapshotRel == null || expectedPlaybookSha == null) {
@@ -24123,7 +24901,7 @@ function checkRunSchema(run, schemas) {
   const check = "run-schema";
   let doc;
   try {
-    doc = (0, import_yaml14.parse)((0, import_node_fs27.readFileSync)((0, import_node_path25.join)(run.dir, "run.yaml"), "utf8"));
+    doc = (0, import_yaml15.parse)((0, import_node_fs27.readFileSync)((0, import_node_path25.join)(run.dir, "run.yaml"), "utf8"));
   } catch (err) {
     return { check, status: "fail", detail: `run.yaml did not parse: ${err.message}` };
   }
@@ -24476,7 +25254,7 @@ function checkHumanDecisions(events) {
 // src/commands/completion.ts
 var import_node_fs28 = require("node:fs");
 var import_node_path26 = require("node:path");
-var import_yaml15 = __toESM(require_dist(), 1);
+var import_yaml16 = __toESM(require_dist(), 1);
 var CompletionError = class extends Error {
 };
 var GLOBAL_OPTIONS = {
@@ -24737,7 +25515,7 @@ function readStepIds(repoRoot, runRef) {
   const file = playbookFile(repoRoot, run);
   if (file == null) return [];
   try {
-    const doc = (0, import_yaml15.parse)((0, import_node_fs28.readFileSync)(file, "utf8"));
+    const doc = (0, import_yaml16.parse)((0, import_node_fs28.readFileSync)(file, "utf8"));
     if (!Array.isArray(doc?.flow)) return [];
     const byId = /* @__PURE__ */ new Map();
     for (const raw of doc.flow) {
@@ -24768,7 +25546,7 @@ function readPlaybookRoles(repoRoot, runRef) {
   const file = playbookFile(repoRoot, run);
   if (file == null) return [];
   try {
-    const doc = (0, import_yaml15.parse)((0, import_node_fs28.readFileSync)(file, "utf8"));
+    const doc = (0, import_yaml16.parse)((0, import_node_fs28.readFileSync)(file, "utf8"));
     if (doc?.roles == null || typeof doc.roles !== "object" || Array.isArray(doc.roles)) return [];
     return Object.keys(doc.roles);
   } catch {
@@ -24781,7 +25559,7 @@ function readPlaybookInputs(repoRoot, runRef) {
   const file = playbookFile(repoRoot, run);
   if (file == null) return [];
   try {
-    const doc = (0, import_yaml15.parse)((0, import_node_fs28.readFileSync)(file, "utf8"));
+    const doc = (0, import_yaml16.parse)((0, import_node_fs28.readFileSync)(file, "utf8"));
     if (doc?.inputs == null || typeof doc.inputs !== "object" || Array.isArray(doc.inputs)) return [];
     return Object.keys(doc.inputs);
   } catch {
@@ -26201,8 +26979,11 @@ Usage:
   fadeno loadout [list|resolve|use|set|clear] Show, resolve, pin, or clear the active loadout
   fadeno loadout set <archetype> <target> Override one archetype on top of the active loadout
   fadeno loadout clear [archetype]      Drop the whole pin, or one session override
+  fadeno loadout shadow <archetype> <executor> [--rate n]  Attach a shadow challenger to one slot
+  fadeno loadout clear-shadow [archetype]  Drop one shadow attachment, or all of them
   fadeno steering resolve|apply [...]   Resolve or materialize hybrid Codex steering
   fadeno dispatch [flags]               Resolve archetype \u2192 executor and invoke it once (ad hoc)
+                                        (--shadow <executor> duplicates it to a one-shot challenger)
   fadeno dispatch-fallback <run> <id>   Deliver a locked host request by declared fallback
   fadeno dispatch-start <run> <id>      Start a native host dispatch
   fadeno dispatch-progress <run> <id>   Record an attested progress observation
@@ -26218,6 +26999,7 @@ Usage:
   fadeno runs                           List run ledgers under .fadeno/runs/
   fadeno dispatches [--tail n] [--json] Show which executor ran what (.fadeno/dispatches.jsonl)
   fadeno dispatches --output <id|last>  Print a dispatch's streamed output snapshot verbatim
+  fadeno dispatches --comparisons       Paired primary/shadow scorecard per challenger
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic claims (or --latest)
   fadeno plugin [dir] [--codex]         Generate a Claude Code (default) or Codex plugin
@@ -26620,12 +27402,20 @@ function printSlots(slots, indent) {
     const override = slot.overridden === true ? `  OVERRIDE (base: ${slot.baseExecutor ?? "none"})` : "";
     const eligibility = slot.eligibility === "shadow_only" ? "  SHADOW-ONLY (never gates)" : slot.eligibility === "forbidden" ? "  FORBIDDEN (refused at dispatch)" : "";
     console.log(`${indent}${slot.archetype.padEnd(width)} \u2192 ${slot.executor}${model} [${slot.adapter}]${override}${eligibility}`);
+    if (slot.shadow != null) console.log(formatShadowLine(slot.shadow, indent));
   }
 }
 function printStaleOverrides(stale) {
   for (const item of stale) {
     console.error(
       `warning: session override ${item.archetype}\u2192${item.target} names an executor that is no longer declared \u2014 run \`fadeno loadout set ${item.archetype} <executor>\` or \`fadeno loadout clear ${item.archetype}\`; the override is ignored below.`
+    );
+  }
+}
+function printStaleShadows(stale) {
+  for (const item of stale) {
+    console.error(
+      `warning: shadow attachment ${item.archetype}~${item.target} names an executor that is no longer declared \u2014 run \`fadeno loadout shadow ${item.archetype} <executor>\` or \`fadeno loadout clear-shadow ${item.archetype}\`; the attachment is ignored below.`
     );
   }
 }
@@ -26641,12 +27431,14 @@ function printStalePin(stalePin) {
 function printLoadoutShow(result) {
   printStalePin(result.stalePin);
   printStaleOverrides(result.staleOverrides);
+  printStaleShadows(result.staleShadows);
   if (result.active == null) {
     console.log("no active loadout (no --loadout, FADENO_LOADOUT, .fadeno/local/loadout, or default_loadout)");
   } else {
     const overrides = Object.keys(result.overrides).length;
+    const shadows = Object.keys(result.shadow_attachments).length;
     console.log(
-      `active loadout: ${result.active.name} (via ${LOADOUT_SOURCE_TEXT[result.active.source]})` + (overrides > 0 ? ` +${overrides} session override(s)` : "")
+      `active loadout: ${result.active.name} (via ${LOADOUT_SOURCE_TEXT[result.active.source]})` + (overrides > 0 ? ` +${overrides} session override(s)` : "") + (shadows > 0 ? ` +${shadows} shadow attachment(s)` : "")
     );
     printSlots(result.slots, "  ");
   }
@@ -26662,6 +27454,7 @@ available: ${names.join(", ")}`);
 function printLoadoutList(result) {
   printStalePin(result.stalePin);
   printStaleOverrides(result.staleOverrides);
+  printStaleShadows(result.staleShadows);
   if (result.loadouts.length === 0) {
     console.log("No loadouts declared (add a `loadouts:` mapping to .fadeno/executors.yaml).");
     return;
@@ -26672,6 +27465,8 @@ function printLoadoutList(result) {
       notes.push(`active via ${LOADOUT_SOURCE_TEXT[result.active.source]}`);
       const overrideCount = Object.keys(result.overrides).length;
       if (overrideCount > 0) notes.push(`${overrideCount} session override(s)`);
+      const shadowCount = Object.keys(result.shadow_attachments).length;
+      if (shadowCount > 0) notes.push(`${shadowCount} shadow attachment(s)`);
     }
     if (loadout.isDefault) notes.push("default");
     const marker = loadout.isActive ? "*" : " ";
@@ -26805,6 +27600,9 @@ function main(argv) {
         "dispatch-id": { type: "string" },
         "prompt-file": { type: "string" },
         tail: { type: "string" },
+        rate: { type: "string" },
+        shadow: { type: "string" },
+        comparisons: { type: "boolean" },
         json: { type: "boolean" },
         "agent-id": { type: "string" },
         workspace: { type: "string" },
@@ -27269,6 +28067,12 @@ resolution${via}:`);
               `  dropped ${dropped} session override(s) (${overrideSummary(result.droppedOverrides)}); selecting a base drops the overlay \u2014 re-dial with \`fadeno loadout set <archetype> <executor>\`.`
             );
           }
+          const droppedShadows = Object.keys(result.droppedShadows).length;
+          if (droppedShadows > 0) {
+            console.log(
+              `  dropped ${droppedShadows} shadow attachment(s); re-attach with \`fadeno loadout shadow <archetype> <executor>\`.`
+            );
+          }
           const selected = runLoadoutShow({ loadout: result.name, env: null });
           const commandSlots = selected.slots.filter((slot) => slot.adapter === "command").length;
           const hostSlots = selected.slots.filter((slot) => slot.adapter === "host").length;
@@ -27325,9 +28129,57 @@ resolution${via}:`);
           );
           return 0;
         }
+        case "shadow": {
+          const [, , archetype, executor] = positionals;
+          if (!archetype || !executor) {
+            throw new Error("Usage: fadeno loadout shadow <archetype> <executor> [--rate <0..1>]");
+          }
+          const result = runLoadoutShadow({ archetype, executor, rate: values.rate, loadout: values.loadout });
+          if (values.json) {
+            console.log(JSON.stringify(result, null, 2));
+            return 0;
+          }
+          const rate = result.rate != null ? ` (rate ${result.rate})` : "";
+          console.log(
+            `shadow attached: ${result.archetype} ~ ${result.executor}${rate} (over loadout ${result.loadout}) \u2192 .fadeno/local/loadout`
+          );
+          if (result.previous != null) {
+            const prevRate = result.previous.rate != null ? ` rate ${result.previous.rate}` : "";
+            console.log(`  (was ${result.previous.executor}${prevRate})`);
+          }
+          if (result.droppedBase != null) {
+            const droppedCount = Object.keys(result.droppedOverrides).length + Object.keys(result.droppedShadows).length;
+            console.log(
+              `  dropped ${droppedCount} session item(s) pinned over "${result.droppedBase}"; overlays belong to one base.`
+            );
+          }
+          console.log(
+            "  each matching dispatch is duplicated to the shadow in an isolated worktree; it never gates."
+          );
+          return 0;
+        }
+        case "clear-shadow": {
+          const archetype = positionals[2] ?? null;
+          const result = runLoadoutClearShadow({ archetype });
+          if (values.json) {
+            console.log(JSON.stringify(result, null, 2));
+            return 0;
+          }
+          if (result.archetype == null) {
+            console.log(
+              result.removed ? `cleared ${result.count} shadow attachment(s)` : "no shadow attachments to clear (.fadeno/local/loadout)"
+            );
+            return 0;
+          }
+          const remaining = Object.keys(result.shadows).length;
+          console.log(
+            `cleared shadow attachment: ${result.archetype} (was ${result.cleared.executor}); loadout ${result.loadout} keeps ${remaining} attachment(s)`
+          );
+          return 0;
+        }
         default:
           throw new Error(
-            `Unknown loadout subcommand "${sub}". Usage: fadeno loadout [list | resolve --archetype <a> | use <name> | set <archetype> <executor> | clear [archetype]]`
+            `Unknown loadout subcommand "${sub}". Usage: fadeno loadout [list | resolve --archetype <a> | use <name> | set <archetype> <executor> | clear [archetype] | shadow <archetype> <executor> [--rate <n>] | clear-shadow [archetype]]`
           );
       }
     }
@@ -27338,6 +28190,7 @@ resolution${via}:`);
         role: values.role,
         loadout: values.loadout,
         executor: values.executor,
+        shadow: values.shadow,
         promptFile,
         // Prompt defaults to stdin; the echo goes to stderr so stdout stays
         // the executor's pure report.
@@ -27436,6 +28289,15 @@ resolution${via}:`);
       return 0;
     }
     case "dispatches": {
+      if (values.comparisons) {
+        const result2 = runDispatchesComparisons({});
+        if (values.json) {
+          console.log(JSON.stringify(result2, null, 2));
+          return 0;
+        }
+        for (const line of result2.lines) console.log(line);
+        return 0;
+      }
       if (values.output != null) {
         const result2 = runDispatchesOutput({ dispatchId: values.output });
         process.stdout.write(result2.bytes);

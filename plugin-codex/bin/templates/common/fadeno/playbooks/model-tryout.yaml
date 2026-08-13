@@ -1,0 +1,100 @@
+# yaml-language-server: $schema=../schemas/playbook.schema.json
+kind: AgentPlaybook
+schema_version: "0.1"
+name: model-tryout
+description: >
+  Run the same work spec through two candidate executors and have a judge
+  compare the results, producing a ModelComparison artifact for the running
+  scorecard.
+when_to_use:
+  - comparing two models or executors on the same task
+  - head-to-head evaluation before promoting a challenger
+  - building a ModelComparison scorecard under .fadeno/comparisons/
+roles:
+  coordinator:
+    purpose: Frame the work spec and assemble the final summary.
+  candidate_a:
+    purpose: Execute the work spec as candidate A.
+    archetype: worker
+  candidate_b:
+    purpose: Execute the work spec as candidate B.
+    archetype: worker
+  comparison_judge:
+    purpose: Compare both candidate results and produce a ModelComparison judgment.
+    archetype: judge
+flow:
+  - id: prepare_spec
+    kind: actor_call
+    actor: coordinator
+    output: WorkSpec
+
+  - id: try_candidates
+    kind: map
+    over:
+      - candidate_a
+      - candidate_b
+    input:
+      - WorkSpec
+    output: CandidateResult[]
+    output_path: artifacts/candidates/{actor}.md
+
+  - id: compare
+    kind: evaluator
+    actor: comparison_judge
+    input:
+      - WorkSpec
+      - CandidateResult[]
+    output: ModelComparison
+    output_path: .fadeno/comparisons/model-tryout.md
+
+  - id: done
+    kind: actor_call
+    actor: coordinator
+    input:
+      - WorkSpec
+      - CandidateResult[]
+      - ModelComparison
+    output: FinalSummary
+    terminal_status: completed
+
+limits:
+  max_iterations: 2
+  max_actor_calls: 8
+
+policies:
+  max_subagents: 4
+  require_user_approval_for:
+    - external_send
+
+artifact_contracts:
+  WorkSpec:
+    media_type: text/markdown
+    instructions: >
+      A concise, self-contained task specification that both candidates will
+      execute verbatim. Include goal, constraints, inputs, and acceptance
+      criteria. This spec is the byte-identical prompt the comparison attests.
+  CandidateResult:
+    media_type: text/markdown
+    instructions: >
+      The candidate's result for the WorkSpec. Keep the work product complete
+      and self-contained so the judge can compare without additional context.
+  ModelComparison:
+    media_type: text/markdown
+    instructions: >
+      Write a ModelComparison artifact with YAML frontmatter (kind: ModelComparison,
+      baseline, challenger, verdict, date, dispatch_ids) and body sections
+      ## Criteria (correctness, scope discipline, instruction adherence, style fit
+      — per-criterion qualitative prose) and ## Confounds (MANDATORY — document
+      delivery transport, tool availability, effort pinning, and isolation
+      differences; the worktree-vs-dirty-workspace confound always belongs here
+      when a shadow ran against a detached-HEAD worktree while the primary saw a
+      dirty workspace, despite byte-identical prompts). Guidance: the judge's
+      provider should differ from both candidates; if it does not, record the
+      conflict explicitly in Confounds. Allowed verdict values: prefer_baseline,
+      prefer_challenger, tie, inconclusive. Example frontmatter:
+      kind: ModelComparison
+      baseline: <executor name>
+      challenger: <executor name>
+      verdict: prefer_baseline | prefer_challenger | tie | inconclusive
+      date: YYYY-MM-DD
+      dispatch_ids: [<id>, <id>]

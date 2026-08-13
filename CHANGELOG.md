@@ -15,6 +15,22 @@ writers accept only 0.3.
 
 ### Added
 
+- **Shadow dispatches: model tryouts at zero risk.** A slot can carry a
+  shadow challenger (`fadeno loadout shadow worker grok-worker`, sampled
+  with `--rate 0.2`, one-shot with `fadeno dispatch --shadow <executor>`):
+  the kernel duplicates each matching dispatch to the challenger with the
+  byte-identical prompt snapshot, delivered into a detached-HEAD git
+  worktree so a write-shaped shadow yields a diff artifact
+  (`diff_snapshot`/`diff_bytes`) and never touches the workspace. Shadow
+  rows stamp `shadow: true`, `primary_dispatch_id`, `shadow_source`, and
+  `gate_eligible: false` — they pair, they never gate, and no shadow-side
+  failure can affect the primary's result. `fadeno dispatches
+  --comparisons` renders the paired scorecard per challenger together with
+  `ModelComparison` artifacts (committable files under
+  `.fadeno/comparisons/` whose contract mandates a confounds section), and
+  the `model-tryout` starter playbook runs the deliberate head-to-head.
+  The adoption ladder is one command per rung: shadow → override → preset.
+  Ledger format stays 0.2; every new field is additive.
 - **Dispatch output survives the kill.** The kernel now streams executor
   stdout to a snapshot at `.fadeno/local/outputs/` as it arrives (the same
   single-writer idiom as prompt snapshots), so a relay killed by a harness
