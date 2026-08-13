@@ -255,6 +255,18 @@ fallback command is a clear error naming the fix — run the task with the nativ
 in-session agent, declare a fallback command, or bind the archetype to a
 command-delivered target.
 
+Every command dispatch streams the executor's stdout to an output snapshot at
+`.fadeno/local/outputs/<archetype|role|dispatch>-<dispatchId8>.md` (same
+naming idiom as the prompt snapshot). The repo-relative `output_snapshot`
+path is stamped on the `dispatch_requested` row *before* the spawn so a
+killed dispatch's partial bytes stay discoverable from the ledger; the
+completion row adds `output_bytes` (the snapshot file's byte length) and,
+when both a pre-spawn and post-spawn git fingerprint could be taken,
+`workspace_changed` (`true`/`false`). That last field is an attestation, not
+a judgment: concurrent writers in the same repo can flip it, and the field is
+omitted entirely when the fingerprint is unknowable (no git, or the probe
+failed).
+
 `fadeno dispatches [--tail <N>] [--json]` reads `.fadeno/dispatches.jsonl`
 back. It correlates each `dispatch_requested`/`dispatch_completed` pair by
 `dispatch_id` into one row per dispatch and renders `native_delivery` rows
@@ -263,8 +275,16 @@ completion never arrived is kept and marked — "no completion recorded (killed
 or in flight)" — rather than dropped, since a dispatch that died mid-flight is
 the one most worth seeing. Rows carry the markers that change their meaning:
 `relay_attested`, `[write_access: none]`, `model_override`,
-`[shadow-only]` (`gate_eligible: false`), and `[refused: <predicate>]`
-for `dispatch_refused` rows. `--tail <N>`
+`[shadow-only]` (`gate_eligible: false`), `[refused: <predicate>]`
+for `dispatch_refused` rows, and `[no workspace change]` when a completed
+entry has `exit_code === 0`, `write_access === true`, and
+`workspace_changed === false` (the legible face of an exit-0 no-op).
+`fadeno dispatches --output <id|last>` prints the snapshot bytes verbatim
+(`last` is the most recent request row that carries `output_snapshot`; `id`
+is a full `dispatch_id` or a unique prefix of at least 8 characters). The
+reader attests the file against the completion row's `output_sha256`
+(`incomplete` when the completion never arrived — the killed-mid-flight
+case). `--tail <N>`
 defaults to 10; `--json` emits the correlated rows for scripts. Rows are
 format-stamped (`format: "0.1"`); pre-format rows from before the two-row
 change render as `[legacy]` entries rather than being skipped, and rows from

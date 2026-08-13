@@ -114,6 +114,11 @@ const CLAIMS: Claim[] = [
       patterns: [/'shadow_only'/, /distinctProviderFromInputs/, /ConstraintError/],
     },
   },
+  {
+    id: 'dispatch-output-snapshot',
+    doc: { files: [EXTENDING], patterns: [/output_snapshot/, /output_bytes/, /workspace_changed/] },
+    src: { files: ['src/commands/dispatch.ts'], patterns: [/output_snapshot/, /output_bytes/, /workspace_changed/] },
+  },
 ];
 
 /**

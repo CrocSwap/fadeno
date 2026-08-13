@@ -237,6 +237,23 @@ overridden rows marked `OVERRIDE (base: …)`; evidence records the layer
 the snapshot, never the live pin, so clearing an override cannot fail a
 completed run's verification).
 
+**Stale pins: strict where it decides, graceful where it looks.** A pin
+naming an undeclared loadout is a hard, fix-naming error on every path that
+*decides* which executor runs — `fadeno dispatch` and `fadeno loadout
+resolve` raise the same message, and the Claude steering hook turns a
+resolver failure into a spawn denial rather than quietly proceeding native
+(silent substitution in either direction is the non-goal). Inspection
+commands (`loadout` show/list, `status`) surface the stale name as
+`stalePin` without bricking. The **user-scope pin has layer scope**: it is
+consulted only when the user config layer was actually composed into the
+effective profile — a self-contained project catalog is authoritative, so a
+global dial cannot reach into a repo whose profile never saw that layer
+(dispatch, loadout, the new-run preview, and Codex steering all scope it;
+the engine resolves against run snapshots, which do not yet record layer
+provenance — deferred). A self-contained catalog that predates canon
+archetypes gets a note in the loadout views naming what it never declared
+(`suppressedCanonArchetypes`), leaving adoption an explicit repo edit.
+
 **Resolution is computed at dispatch time, inside the CLI, never cached in
 config emitted elsewhere.** Any integration (plugin agents, hooks) stays dumb
 and calls `fadeno`; switching loadouts mid-session takes effect on the next
@@ -528,8 +545,14 @@ opus_reviewer → claude-default (opus) [binding]
   pair per dispatch — `dispatch_requested` before the executor is invoked,
   `dispatch_completed` after, sharing a `dispatch_id` — each carrying the
   identity (timestamp, archetype, role if given, loadout + source, executor,
-  model, prompt digest), with exit status, duration, and output digest on the
-  completion row, so a dispatch killed mid-flight still leaves its request row.
+  model, prompt digest, `output_snapshot`), with exit status, duration, output
+  digest, `output_bytes`, and `workspace_changed` on the completion row, so a
+  dispatch killed mid-flight still leaves its request row. `output_snapshot`
+  is the repo-relative streamed-stdout path, stamped on the request row
+  *before* the spawn so partial bytes stay discoverable; `output_bytes` is
+  the snapshot's byte length; `workspace_changed` is a git-fingerprint
+  attestation (omitted when unknowable) — concurrent writers make it
+  attestation, not judgment.
   (Refined during dogfooding: each row also records `resolution` — how the
   executor was chosen: `binding` | `loadout` | `fallback` | `executor-flag`;
   and the file is per-machine evidence, gitignored by scaffolding — auditable
@@ -568,7 +591,12 @@ opus_reviewer → claude-default (opus) [binding]
   completion recorded (killed or in flight)" — rather than dropping the
   dispatch that most wants explaining. Markers surface the identity that
   changes what a row means: `relay_attested`, `[write_access: none]`,
-  `model_override`. `--tail <N>` defaults to 10; `--json` emits the correlated
+  `model_override`, and `[no workspace change]` (exit 0 + `write_access:
+  true` + `workspace_changed: false`). `fadeno dispatches --output
+  <id|last>` recovers the streamed snapshot (`last` = most recent request
+  row carrying `output_snapshot`) and attests the file against the
+  completion row's `output_sha256` (`incomplete` when that row never
+  arrived). `--tail <N>` defaults to 10; `--json` emits the correlated
   rows for scripts.
 
 This makes Fadeno the only layer that sees cross-provider usage — the natural
