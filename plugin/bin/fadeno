@@ -13939,7 +13939,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.12";
+  if (true) return "0.6.0-rc.13";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -14332,7 +14332,7 @@ function runDecide(opts) {
 }
 
 // src/commands/dispatch.ts
-var import_node_child_process = require("node:child_process");
+var import_node_child_process2 = require("node:child_process");
 var import_node_crypto2 = require("node:crypto");
 var import_node_fs12 = require("node:fs");
 var import_node_os2 = require("node:os");
@@ -14433,10 +14433,10 @@ function mergeLayer(target, source, layer, provenance) {
     }
     target[key] = current;
   }
-  for (const key of ["schema_version", "default_loadout"]) {
+  for (const key of ["schema_version", "default_loadout", "constraints"]) {
     if (source[key] !== void 0) {
       target[key] = source[key];
-      provenance.defaultLoadout = layer;
+      if (key === "default_loadout") provenance.defaultLoadout = layer;
     }
   }
 }
@@ -14556,6 +14556,29 @@ function parseExecutorProfile(text, source, harness = "standalone") {
     }
     return raw.write_access;
   };
+  const readEligibility = (raw, label) => {
+    if (raw.eligibility === void 0) return {};
+    if (!isMapping(raw.eligibility)) {
+      throw new ExecutorProfileError(
+        `${source}: ${label} \`eligibility\` is not a mapping (archetype \u2192 eligibility state).`
+      );
+    }
+    const out = {};
+    for (const [key, value] of Object.entries(raw.eligibility)) {
+      if (!BARE_IDENTIFIER_RE.test(key)) {
+        throw new ExecutorProfileError(
+          `${source}: ${label} eligibility key "${key}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`
+        );
+      }
+      if (value !== "eligible" && value !== "shadow_only" && value !== "forbidden") {
+        throw new ExecutorProfileError(
+          `${source}: ${label} \`eligibility.${key}\` must be "eligible", "shadow_only", or "forbidden".`
+        );
+      }
+      out[key] = value;
+    }
+    return out;
+  };
   const executors = {};
   for (const [name, raw] of Object.entries(isMapping(doc.executors) ? doc.executors : {})) {
     if (!isMapping(raw)) {
@@ -14603,6 +14626,7 @@ function parseExecutorProfile(text, source, harness = "standalone") {
         agentType,
         fallbackCommand,
         writeAccess: readWriteAccess(raw, `host executor "${name}"`),
+        eligibility: readEligibility(raw, `host executor "${name}"`),
         ...target != null ? { target } : {},
         ...provider != null ? { provider } : {}
       };
@@ -14682,6 +14706,7 @@ function parseExecutorProfile(text, source, harness = "standalone") {
       resume,
       sessionIdPattern,
       writeAccess: readWriteAccess(raw, `executor "${name}"`),
+      eligibility: readEligibility(raw, `executor "${name}"`),
       ...typeof raw.target === "string" ? { target: raw.target } : {},
       ...typeof raw.provider === "string" ? { provider: raw.provider } : {}
     };
@@ -14723,6 +14748,7 @@ function parseExecutorProfile(text, source, harness = "standalone") {
         throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.write_access\` must be boolean.`);
       }
       const writeAccess = route.write_access === void 0 ? null : route.write_access;
+      const eligibility = readEligibility(rawTarget, `target "${name}"`);
       const rawCommand = route.command;
       if (rawCommand != null && (!Array.isArray(rawCommand) || rawCommand.length === 0 || !rawCommand.every((part) => typeof part === "string" && part.length > 0))) {
         throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.command\` must be a non-empty string array.`);
@@ -14768,7 +14794,8 @@ function parseExecutorProfile(text, source, harness = "standalone") {
           fallbackCommand: command2,
           writeAccess,
           target: name,
-          provider
+          provider,
+          eligibility
         };
       } else {
         if (command2 == null) {
@@ -14794,7 +14821,8 @@ function parseExecutorProfile(text, source, harness = "standalone") {
           sessionIdPattern,
           writeAccess,
           target: name,
-          provider
+          provider,
+          eligibility
         };
       }
     }
@@ -14814,15 +14842,15 @@ function parseExecutorProfile(text, source, harness = "standalone") {
       }
       if (!isMapping(rawPolicy)) {
         throw new ExecutorProfileError(
-          `${source}: \`archetypes.${name}\` is not a mapping (only \`requires_write\` and \`fallback\` are allowed).`
+          `${source}: \`archetypes.${name}\` is not a mapping (only \`requires_write\`, \`fallback\`, and \`distinct_provider_from_inputs\` are allowed).`
         );
       }
       const unknown = Object.keys(rawPolicy).filter(
-        (key) => key !== "requires_write" && key !== "fallback"
+        (key) => key !== "requires_write" && key !== "fallback" && key !== "distinct_provider_from_inputs"
       );
       if (unknown.length > 0) {
         throw new ExecutorProfileError(
-          `${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(", ")}; only \`requires_write\` and \`fallback\` are allowed.`
+          `${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(", ")}; only \`requires_write\`, \`fallback\`, and \`distinct_provider_from_inputs\` are allowed.`
         );
       }
       let requiresWrite = "none";
@@ -14853,7 +14881,16 @@ function parseExecutorProfile(text, source, harness = "standalone") {
         }
         fallback = rawPolicy.fallback;
       }
-      archetypes[name] = { requiresWrite, fallback };
+      let distinctProviderFromInputs = null;
+      if (rawPolicy.distinct_provider_from_inputs !== void 0) {
+        if (rawPolicy.distinct_provider_from_inputs !== "advisory" && rawPolicy.distinct_provider_from_inputs !== "required") {
+          throw new ExecutorProfileError(
+            `${source}: \`archetypes.${name}.distinct_provider_from_inputs\` must be "advisory" or "required".`
+          );
+        }
+        distinctProviderFromInputs = rawPolicy.distinct_provider_from_inputs;
+      }
+      archetypes[name] = { requiresWrite, fallback, distinctProviderFromInputs };
     }
     for (const start of Object.keys(archetypes)) {
       const path = [];
@@ -14931,7 +14968,28 @@ function parseExecutorProfile(text, source, harness = "standalone") {
       bindings[role] = target;
     }
   }
-  return { executors, bindings, archetypes, loadouts, defaultLoadout, harness, schemaVersion: hasTargets ? 2 : 1 };
+  let constraints = null;
+  if (doc.constraints != null) {
+    if (!isMapping(doc.constraints)) {
+      throw new ExecutorProfileError(
+        `${source} \`constraints\` is not a mapping (only \`command\` is allowed).`
+      );
+    }
+    const unknown = Object.keys(doc.constraints).filter((key) => key !== "command");
+    if (unknown.length > 0) {
+      throw new ExecutorProfileError(
+        `${source}: \`constraints\` has unknown key(s) ${unknown.join(", ")}; only \`command\` is allowed.`
+      );
+    }
+    const command2 = doc.constraints.command;
+    if (!Array.isArray(command2) || command2.length === 0 || !command2.every((part) => typeof part === "string" && part.length > 0)) {
+      throw new ExecutorProfileError(
+        `${source}: \`constraints.command\` must be a non-empty array of non-empty strings.`
+      );
+    }
+    constraints = { command: command2 };
+  }
+  return { executors, bindings, archetypes, loadouts, defaultLoadout, constraints, harness, schemaVersion: hasTargets ? 2 : 1 };
 }
 function loadExecutorProfile(repoRoot, options = {}, harness) {
   try {
@@ -15126,6 +15184,46 @@ function explainWriteConflict(delivery, archetype, profile) {
   }
   return null;
 }
+function eligibilityFor(spec, archetype) {
+  if (typeof archetype !== "string") return "eligible";
+  const map = spec.eligibility;
+  if (map == null || !Object.hasOwn(map, archetype)) return "eligible";
+  const state = map[archetype];
+  return state === "shadow_only" || state === "forbidden" || state === "eligible" ? state : "eligible";
+}
+function explainEligibilityConflict(delivery, archetype) {
+  if (eligibilityFor(delivery.spec, archetype) !== "forbidden") return null;
+  return `archetype "${archetype}" is marked \`eligibility: forbidden\` on executor "${delivery.executor}" \u2014 the catalog forbids this pairing. Fix: choose an eligible executor, dial a different target, or change the catalog's eligibility entry.`;
+}
+function producerRef(producer) {
+  if (typeof producer.dispatchId === "string") return `dispatch ${producer.dispatchId}`;
+  if (typeof producer.executor === "string") return `executor "${producer.executor}"`;
+  return "an input producer";
+}
+function explainProviderConflict(archetype, targetProvider, producers, profile) {
+  if (typeof archetype !== "string" || !Object.hasOwn(profile.archetypes, archetype)) return null;
+  const policy = profile.archetypes[archetype].distinctProviderFromInputs;
+  if (policy !== "advisory" && policy !== "required") return null;
+  if (producers.length === 0) return null;
+  const level = policy === "required" ? "refuse" : "warn";
+  const unresolvable = policy === "required" ? "provenance is demanded but unresolvable" : "provider provenance is unresolvable";
+  for (const producer of producers) {
+    if (targetProvider == null || producer.provider == null) {
+      const detail2 = targetProvider == null ? `the resolved target's provider is unknown \u2014 ${unresolvable}` : `${producerRef(producer)} has no provider \u2014 ${unresolvable}`;
+      return {
+        level,
+        message: `archetype "${archetype}" declares \`distinct_provider_from_inputs: ${policy}\`, but ${detail2}.`
+      };
+    }
+    if (producer.provider === targetProvider) {
+      return {
+        level,
+        message: `archetype "${archetype}" declares \`distinct_provider_from_inputs: ${policy}\`, but the resolved target's provider "${targetProvider}" matches ${producerRef(producer)} (provider "${producer.provider}") \u2014 the dispatch would not be provider-distinct.`
+      };
+    }
+  }
+  return null;
+}
 function executorForArchetype(profile, executorName, archetype) {
   const spec = profile.executors[executorName];
   if (spec.adapter !== "host" || spec.agentType !== "*" || archetype == null) return spec;
@@ -15145,6 +15243,14 @@ function serializeProfile(profile) {
     if (spec.target != null) entry.target = spec.target;
     if (spec.provider != null) entry.provider = spec.provider;
     if (spec.writeAccess != null) entry.write_access = spec.writeAccess;
+    if (spec.eligibility != null && Object.keys(spec.eligibility).length > 0) {
+      const sortedEligibility = {};
+      for (const key of Object.keys(spec.eligibility).sort()) {
+        if (typeof key !== "string" || !Object.hasOwn(spec.eligibility, key)) continue;
+        sortedEligibility[key] = spec.eligibility[key];
+      }
+      entry.eligibility = sortedEligibility;
+    }
     if (spec.adapter === "command" && spec.model != null) entry.model = spec.model;
     if (spec.adapter === "command" && spec.resume != null) entry.resume = spec.resume;
     if (spec.adapter === "command" && spec.sessionIdPattern != null) entry.session_id_pattern = spec.sessionIdPattern;
@@ -15158,6 +15264,9 @@ function serializeProfile(profile) {
       const entry = {};
       if (policy.requiresWrite !== "none") entry.requires_write = policy.requiresWrite;
       if (typeof policy.fallback === "string") entry.fallback = policy.fallback;
+      if (policy.distinctProviderFromInputs != null) {
+        entry.distinct_provider_from_inputs = policy.distinctProviderFromInputs;
+      }
       sortedArchetypes[name] = entry;
     }
     out.archetypes = sortedArchetypes;
@@ -15180,6 +15289,7 @@ function serializeProfile(profile) {
     }
     out.bindings = sortedBindings;
   }
+  if (profile.constraints != null) out.constraints = { command: profile.constraints.command };
   return (0, import_yaml4.stringify)(out);
 }
 
@@ -16359,6 +16469,54 @@ function resolveActiveArtifacts(events) {
   return { active, conflicts, immutabilityViolations };
 }
 
+// src/lib/constraints.ts
+var import_node_child_process = require("node:child_process");
+var ConstraintError = class extends Error {
+};
+var REFUSED_NO_STDERR = "constraint command refused the dispatch (no reason on stderr)";
+function commandLabel(command2) {
+  return JSON.stringify(command2);
+}
+function evaluateConstraint(profile, context, opts) {
+  if (profile.constraints == null) return { verdict: "allowed" };
+  const command2 = profile.constraints.command;
+  const bin = command2[0];
+  if (typeof bin !== "string" || bin.length === 0) {
+    throw new ConstraintError(`constraint command ${commandLabel(command2)} is missing or empty`);
+  }
+  const spawn = opts.spawn ?? import_node_child_process.spawnSync;
+  let result;
+  try {
+    result = spawn(bin, command2.slice(1), {
+      cwd: opts.cwd,
+      input: JSON.stringify(context),
+      encoding: "utf8"
+    });
+  } catch (err) {
+    throw new ConstraintError(
+      `constraint command ${commandLabel(command2)} failed to spawn: ${err.message}`
+    );
+  }
+  if (result.error != null) {
+    throw new ConstraintError(
+      `constraint command ${commandLabel(command2)} failed to spawn: ${result.error.message}`
+    );
+  }
+  if (result.signal != null) {
+    throw new ConstraintError(
+      `constraint command ${commandLabel(command2)} terminated by signal ${result.signal}`
+    );
+  }
+  if (result.status === 0) return { verdict: "allowed" };
+  if (result.status === 2) {
+    const stderr = result.stderr == null ? "" : String(result.stderr).trim();
+    return { verdict: "refused", reason: stderr.length > 0 ? stderr : REFUSED_NO_STDERR };
+  }
+  throw new ConstraintError(
+    `constraint command ${commandLabel(command2)} exited ${result.status ?? "?"}`
+  );
+}
+
 // src/lib/host-dispatch.ts
 var import_node_fs10 = require("node:fs");
 var import_node_path10 = require("node:path");
@@ -17170,6 +17328,73 @@ function consumePendingRelay(repoRoot, prompt, now) {
   return fresh.length > 0 ? false : null;
 }
 var SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
+function producedByIds(opts) {
+  if (opts.producedBy == null) return [];
+  return opts.producedBy.map((id) => id.trim()).filter((id) => id.length > 0);
+}
+function lookupInputProducers(repoRoot, ids) {
+  if (ids.length === 0) return [];
+  const completed = /* @__PURE__ */ new Map();
+  const path = (0, import_node_path12.join)(repoRoot, DISPATCHES_FILE);
+  if ((0, import_node_fs12.existsSync)(path)) {
+    try {
+      for (const line of (0, import_node_fs12.readFileSync)(path, "utf8").split("\n")) {
+        if (line.trim() === "") continue;
+        let row;
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+          row = parsed;
+        } catch {
+          continue;
+        }
+        if (row.event !== "dispatch_completed") continue;
+        const id = typeof row.dispatch_id === "string" ? row.dispatch_id : null;
+        if (id == null) continue;
+        completed.set(id, {
+          executor: typeof row.executor === "string" && row.executor !== "" ? row.executor : null,
+          provider: typeof row.provider === "string" && row.provider !== "" ? row.provider : null
+        });
+      }
+    } catch {
+    }
+  }
+  return ids.map((dispatchId) => {
+    const found = completed.get(dispatchId);
+    return {
+      dispatchId,
+      executor: found?.executor ?? null,
+      provider: found?.provider ?? null
+    };
+  });
+}
+function provenanceFields(producers) {
+  return producers.map((producer) => ({
+    dispatch_id: producer.dispatchId,
+    executor: producer.executor,
+    provider: producer.provider
+  }));
+}
+function declaredWritePosture(profile, archetype) {
+  if (archetype == null || !Object.hasOwn(profile.archetypes, archetype)) return null;
+  return profile.archetypes[archetype].requiresWrite;
+}
+function appendEvidenceRow(repoRoot, row) {
+  ensureFadenoIgnore(repoRoot);
+  (0, import_node_fs12.mkdirSync)((0, import_node_path12.join)(repoRoot, ".fadeno"), { recursive: true });
+  (0, import_node_fs12.appendFileSync)((0, import_node_path12.join)(repoRoot, DISPATCHES_FILE), `${JSON.stringify(row)}
+`, "utf8");
+}
+function refuseDispatch(repoRoot, identity, predicate, message, now) {
+  appendEvidenceRow(repoRoot, {
+    format: DISPATCHES_FORMAT,
+    timestamp: now.toISOString(),
+    event: "dispatch_refused",
+    ...identity,
+    refusal: { predicate, message }
+  });
+  throw new DispatchCommandError(message);
+}
 var ROW_RESOLUTION = {
   binding: "binding",
   override: "override",
@@ -17268,8 +17493,6 @@ function runDispatch(opts) {
   }
   const command2 = spec.adapter === "command" ? spec.command : spec.fallbackCommand;
   const transport = spec.adapter === "command" ? "command" : "host-command-fallback";
-  const writeConflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile);
-  if (writeConflict != null) throw new DispatchCommandError(writeConflict);
   let prompt;
   let promptSource;
   let promptPath = null;
@@ -17291,13 +17514,8 @@ function runDispatch(opts) {
       opts.promptFile != null && opts.promptFile !== "" ? `--prompt-file ${opts.promptFile} is empty \u2014 a dispatch needs a non-empty prompt.` : "empty prompt on stdin \u2014 pipe a non-empty prompt or pass --prompt-file <path>."
     );
   }
-  const sourceLabel = source === "flag" ? "--executor" : roleResolutionEchoLabel(source, active?.name ?? null);
-  const echo = `${role ?? archetype ?? executorName} \u2192 ${executorName}${spec.model != null ? ` (${spec.model})` : ""} [${sourceLabel}]` + // Proceeding onto a read-only delivery is legal (the archetype claims no
-  // write need) but worth saying out loud before the work starts.
-  (spec.writeAccess === false ? " [write_access: none]" : "");
-  opts.onEcho?.(echo);
-  opts.onEcho?.(`external sandbox: ${executorName} (${command2.join(" ")}) runs outside the current harness via ${transport}; evidence \u2192 ${DISPATCHES_FILE}`);
   const dispatchId = (0, import_node_crypto2.randomUUID)();
+  const now = opts.now ?? /* @__PURE__ */ new Date();
   let promptSnapshot;
   if (promptSource === "stdin") {
     const snapshotRel = (0, import_node_path12.join)(
@@ -17314,9 +17532,10 @@ function runDispatch(opts) {
     const rel = (0, import_node_path12.relative)(repoRoot, promptPath).split("\\").join("/");
     promptSnapshot = rel === "" || rel.startsWith("../") || (0, import_node_path12.isAbsolute)(rel) ? promptPath : rel;
   }
-  const relayAttested = consumePendingRelay(repoRoot, prompt, opts.now ?? /* @__PURE__ */ new Date());
+  const relayAttested = consumePendingRelay(repoRoot, prompt, now);
   const promptSha256 = sha256Hex(prompt);
   const commandSha256 = sha256Hex(JSON.stringify(command2));
+  const producers = lookupInputProducers(repoRoot, producedByIds(opts));
   const identity = {
     dispatch_id: dispatchId,
     archetype,
@@ -17339,20 +17558,78 @@ function runDispatch(opts) {
     prompt_sha256: promptSha256,
     ...relayAttested != null ? { relay_attested: relayAttested } : {},
     command: command2,
-    command_sha256: commandSha256
+    command_sha256: commandSha256,
+    ...producers.length > 0 ? { input_provenance: provenanceFields(producers) } : {}
   };
-  ensureFadenoIgnore(repoRoot);
-  (0, import_node_fs12.mkdirSync)((0, import_node_path12.join)(repoRoot, ".fadeno"), { recursive: true });
-  const evidenceFile = (0, import_node_path12.join)(repoRoot, DISPATCHES_FILE);
-  (0, import_node_fs12.appendFileSync)(
-    evidenceFile,
-    `${JSON.stringify({ format: DISPATCHES_FORMAT, timestamp: (opts.now ?? /* @__PURE__ */ new Date()).toISOString(), event: "dispatch_requested", ...identity })}
-`,
-    "utf8"
+  const delivery = { executor: executorName, spec };
+  const writeConflict = explainWriteConflict(delivery, archetype, profile);
+  if (writeConflict != null) {
+    refuseDispatch(repoRoot, identity, "write_posture", writeConflict, now);
+  }
+  const eligibilityConflict = explainEligibilityConflict(delivery, archetype);
+  if (eligibilityConflict != null) {
+    refuseDispatch(repoRoot, identity, "eligibility", eligibilityConflict, now);
+  }
+  const providerConflict = explainProviderConflict(
+    archetype,
+    spec.provider ?? null,
+    producers,
+    profile
   );
+  if (providerConflict != null && providerConflict.level === "refuse") {
+    refuseDispatch(repoRoot, identity, "provider_distinctness", providerConflict.message, now);
+  }
+  const constraintContext = {
+    archetype,
+    role,
+    executor: executorName,
+    target: spec.target ?? null,
+    provider: spec.provider ?? null,
+    model: spec.model,
+    transport: "command",
+    write_access: spec.writeAccess,
+    write_posture: declaredWritePosture(profile, archetype),
+    active_loadout: active?.name ?? null,
+    overrides,
+    resolved_via: resolvedVia,
+    input_provenance: provenanceFields(producers),
+    harness: profile.harness ?? "standalone"
+  };
+  let constraintVerdict;
+  try {
+    constraintVerdict = evaluateConstraint(profile, constraintContext, { cwd: repoRoot });
+  } catch (err) {
+    if (err instanceof ConstraintError) {
+      throw new DispatchCommandError(`constraint system error: ${err.message}`);
+    }
+    throw err;
+  }
+  if (constraintVerdict.verdict === "refused") {
+    refuseDispatch(repoRoot, identity, "constraint_command", constraintVerdict.reason, now);
+  }
+  if (providerConflict != null && providerConflict.level === "warn") {
+    opts.onEcho?.(providerConflict.message);
+    identity.provider_distinctness = "warned";
+  }
+  if (eligibilityFor(spec, archetype) === "shadow_only") {
+    identity.eligibility = "shadow_only";
+    identity.gate_eligible = false;
+  }
+  const sourceLabel = source === "flag" ? "--executor" : roleResolutionEchoLabel(source, active?.name ?? null);
+  const echo = `${role ?? archetype ?? executorName} \u2192 ${executorName}${spec.model != null ? ` (${spec.model})` : ""} [${sourceLabel}]` + // Proceeding onto a read-only delivery is legal (the archetype claims no
+  // write need) but worth saying out loud before the work starts.
+  (spec.writeAccess === false ? " [write_access: none]" : "");
+  opts.onEcho?.(echo);
+  opts.onEcho?.(`external sandbox: ${executorName} (${command2.join(" ")}) runs outside the current harness via ${transport}; evidence \u2192 ${DISPATCHES_FILE}`);
+  appendEvidenceRow(repoRoot, {
+    format: DISPATCHES_FORMAT,
+    timestamp: now.toISOString(),
+    event: "dispatch_requested",
+    ...identity
+  });
   const started = Date.now();
   const [cmd, ...args] = command2;
-  const spawned = (0, import_node_child_process.spawnSync)(cmd, args, {
+  const spawned = (0, import_node_child_process2.spawnSync)(cmd, args, {
     input: prompt,
     encoding: "utf8",
     cwd: repoRoot,
@@ -17363,7 +17640,7 @@ function runDispatch(opts) {
   const outputSha256 = sha256Hex(stdout);
   const row = {
     format: DISPATCHES_FORMAT,
-    timestamp: (opts.now ?? /* @__PURE__ */ new Date()).toISOString(),
+    timestamp: now.toISOString(),
     event: "dispatch_completed",
     ...identity,
     exit_code: spawned.error != null ? null : spawned.status,
@@ -17372,8 +17649,7 @@ function runDispatch(opts) {
     output_sha256: outputSha256
   };
   if (spawned.error != null) row.error = spawned.error.message;
-  (0, import_node_fs12.appendFileSync)(evidenceFile, `${JSON.stringify(row)}
-`, "utf8");
+  appendEvidenceRow(repoRoot, row);
   if (spawned.error != null) {
     throw new DispatchCommandError(
       `executor "${executorName}" failed to spawn: ${spawned.error.message}`
@@ -17464,7 +17740,7 @@ function runDispatchFallback(opts) {
     now: opts.now
   });
   const [program, ...args] = command2;
-  const spawned = (0, import_node_child_process.spawnSync)(program, args, {
+  const spawned = (0, import_node_child_process2.spawnSync)(program, args, {
     input: prompt,
     encoding: "utf8",
     cwd: repoRoot,
@@ -17576,6 +17852,14 @@ function isLegacyCompletion(row) {
   if (str(row.executor) == null && str(row.archetype) == null) return false;
   return OUTCOME_KEYS.some((key) => key in row);
 }
+function refusalOf(value) {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value;
+  const predicate = str(row.predicate);
+  const message = typeof row.message === "string" ? row.message : null;
+  if (predicate == null || message == null) return null;
+  return { predicate, message };
+}
 function requestedEntry(row) {
   const loadout = loadoutOf(row.loadout);
   return {
@@ -17602,6 +17886,8 @@ function requestedEntry(row) {
     promptSha256: str(row.prompt_sha256),
     relayAttested: bool(row.relay_attested),
     writeAccess: bool(row.write_access),
+    refusal: refusalOf(row.refusal),
+    gateEligible: row.gate_eligible === false ? false : null,
     completed: false,
     exitCode: null,
     signal: null,
@@ -17636,6 +17922,8 @@ function nativeEntry(row) {
     promptSha256: str(row.prompt_sha256),
     relayAttested: null,
     writeAccess: null,
+    refusal: null,
+    gateEligible: null,
     completed: false,
     exitCode: null,
     signal: null,
@@ -17655,6 +17943,8 @@ function applyCompletion(entry, row) {
   entry.writeAccess = entry.writeAccess ?? bool(row.write_access);
   entry.model = entry.model ?? str(row.model);
   entry.executor = entry.executor ?? str(row.executor);
+  if (row.gate_eligible === false) entry.gateEligible = false;
+  if (entry.refusal == null) entry.refusal = refusalOf(row.refusal);
 }
 function legacyEntry(row) {
   const entry = requestedEntry(row);
@@ -17672,7 +17962,10 @@ function renderDispatchLine(entry) {
   );
   if (entry.transport != null) parts.push(`via ${entry.transport}`);
   if (entry.kind === "command") {
-    if (entry.completed) {
+    if (entry.refusal != null) {
+      parts.push(`[refused: ${entry.refusal.predicate}]`);
+      parts.push(entry.refusal.message);
+    } else if (entry.completed) {
       const code = `exit ${entry.exitCode ?? "?"}${entry.signal != null ? ` (${entry.signal})` : ""}`;
       parts.push(entry.durationMs != null ? `${code} in ${entry.durationMs}ms` : code);
     } else {
@@ -17681,6 +17974,7 @@ function renderDispatchLine(entry) {
   }
   if (entry.relayAttested != null) parts.push(`[relay_attested: ${entry.relayAttested}]`);
   if (entry.writeAccess === false) parts.push("[write_access: none]");
+  if (entry.gateEligible === false) parts.push("[shadow-only]");
   if (entry.error != null) parts.push(`[error: ${excerpt(entry.error, ERROR_EXCERPT)}]`);
   if (entry.promptSnapshot != null) parts.push(entry.promptSnapshot);
   if (entry.legacy) parts.push("[legacy]");
@@ -17743,6 +18037,10 @@ function runDispatches(opts = {}) {
     }
     if (event === "native_delivery") {
       entries.push(nativeEntry(row));
+      continue;
+    }
+    if (event === "dispatch_refused") {
+      entries.push(requestedEntry(row));
       continue;
     }
     const dispatchId = str(row.dispatch_id);
@@ -18089,7 +18387,7 @@ function runDiagram(opts) {
 }
 
 // src/commands/drive.ts
-var import_node_child_process2 = require("node:child_process");
+var import_node_child_process3 = require("node:child_process");
 var import_node_crypto4 = require("node:crypto");
 var import_node_fs18 = require("node:fs");
 var import_node_path18 = require("node:path");
@@ -19987,6 +20285,80 @@ function priorAttempts(events, actorCallId) {
   }
   return { count, lastExecutor };
 }
+function declaredWritePosture2(profile, archetype) {
+  if (archetype == null || !Object.hasOwn(profile.archetypes, archetype)) return null;
+  return profile.archetypes[archetype].requiresWrite;
+}
+function playbookFlow(playbook) {
+  return Array.isArray(playbook.flow) ? playbook.flow : [];
+}
+function inputNamesOf(step) {
+  if (typeof step.input === "string") return [step.input];
+  if (Array.isArray(step.input)) return step.input.filter((item) => typeof item === "string");
+  return [];
+}
+function inputProducersFromRun(playbook, stepId, events, profile) {
+  const flow = playbookFlow(playbook);
+  const step = flow.find((candidate) => candidate.id === stepId);
+  if (step == null) return [];
+  const producers = [];
+  for (const inputName of inputNamesOf(step)) {
+    const base = baseArtifactName(inputName);
+    const producerIds = new Set(
+      flow.filter((candidate) => typeof candidate.output === "string" && baseArtifactName(candidate.output) === base).map((candidate) => candidate.id)
+    );
+    const created = events.filter(
+      (event) => event.type === "artifact_created" && event.step != null && producerIds.has(event.step) && typeof event.extra.artifact === "string"
+    );
+    if (created.length === 0) {
+      producers.push({ dispatchId: null, executor: null, provider: null });
+      continue;
+    }
+    const latestByPath = /* @__PURE__ */ new Map();
+    for (const event of created) {
+      latestByPath.set(event.extra.artifact, event);
+    }
+    for (const event of latestByPath.values()) {
+      const actorCallId = typeof event.extra.actor_call_id === "string" ? event.extra.actor_call_id : null;
+      if (actorCallId == null) {
+        producers.push({ dispatchId: null, executor: null, provider: null });
+        continue;
+      }
+      const attempt = event.extra.attempt;
+      const dispatched = events.filter(
+        (candidate) => candidate.type === "actor_dispatched" && candidate.extra.actor_call_id === actorCallId
+      );
+      const match = typeof attempt === "number" ? dispatched.find((candidate) => candidate.extra.attempt === attempt) ?? dispatched.at(-1) : dispatched.at(-1);
+      const executor = match != null && typeof match.extra.executor === "string" ? match.extra.executor : null;
+      if (executor == null || !Object.hasOwn(profile.executors, executor)) {
+        producers.push({ dispatchId: null, executor, provider: null });
+        continue;
+      }
+      producers.push({
+        dispatchId: null,
+        executor,
+        provider: profile.executors[executor].provider ?? null
+      });
+    }
+  }
+  return producers;
+}
+function resolvedViaFor(ctx, role) {
+  if (role != null && ctx.overrides.has(role)) return null;
+  if (role == null && ctx.overrides.has("*")) return null;
+  try {
+    const archetype = role == null ? null : roleArchetype(ctx.playbook, role);
+    return resolveRole(
+      role ?? "*",
+      archetype,
+      ctx.profile,
+      ctx.activeLoadout?.name ?? null,
+      ctx.slotOverrides
+    ).resolvedVia;
+  } catch {
+    return null;
+  }
+}
 function validateTyped(ctx, kind, text) {
   if (kind == null) return { ok: true, parsed: null };
   let parsed;
@@ -20020,7 +20392,7 @@ function latestSessionForRole(events, role, executor) {
   }
   return null;
 }
-function dispatchOnce(ctx, stepId, role, generation, inBody, outputRel, artifactType, ids, attempt, reason, repairErrors) {
+function dispatchOnce(ctx, stepId, role, generation, inBody, outputRel, artifactType, ids, attempt, reason, repairErrors, stamps = {}) {
   let promptRes;
   try {
     promptRes = runPrompt({
@@ -20080,6 +20452,8 @@ ${repairCore}`;
   if (session != null) dispatched.session = session;
   if (sessionId != null) dispatched.session_id = sessionId;
   dispatched.engine_pid = process.pid;
+  if (stamps.providerWarned === true) dispatched.provider_distinctness = "warned";
+  if (stamps.shadowOnly === true) dispatched.gate_eligible = false;
   if (repairCore != null) {
     dispatched.repair_appendix = session === "resumed" ? repairCore : `
 
@@ -20092,7 +20466,7 @@ ${repairCore}`;
   );
   ctx.act(`external sandbox: ${executor} (${argv.join(" ")}) runs outside the current harness; evidence is recorded in the run ledger`);
   const [cmd, ...args] = argv;
-  const spawned = (0, import_node_child_process2.spawnSync)(cmd, args, {
+  const spawned = (0, import_node_child_process3.spawnSync)(cmd, args, {
     input: stdin,
     encoding: "utf8",
     cwd: ctx.repoRoot,
@@ -20449,6 +20823,118 @@ function drivePromptable(ctx, comp) {
         detail: `${stepId}${role ? ` (${role})` : ""} was not dispatched: ${writeConflict}`
       };
     }
+    const delivery = { executor: binding.executor, spec: binding.spec };
+    const eligibilityConflict = explainEligibilityConflict(delivery, archetype);
+    if (eligibilityConflict != null) {
+      appendEvent(
+        ctx.runDir,
+        {
+          type: "actor_failed",
+          step: stepId,
+          actor: role,
+          step_execution_id: stepExecutionId,
+          actor_call_id: actorCallId,
+          attempt: priorAttempts(events, actorCallId).count + 1,
+          executor: binding.executor,
+          archetype,
+          reason: "eligibility_forbidden",
+          error: eligibilityConflict
+        },
+        ctx.now
+      );
+      ctx.act(`dispatch refused ${stepId}${role ? ` (${role})` : ""}: ${eligibilityConflict}`);
+      return {
+        kind: "eligibility_forbidden",
+        detail: `${stepId}${role ? ` (${role})` : ""} was not dispatched: ${eligibilityConflict}`
+      };
+    }
+    const producers = inputProducersFromRun(ctx.playbook, stepId, events, ctx.profile);
+    const providerConflict = explainProviderConflict(
+      archetype,
+      binding.spec.provider ?? null,
+      producers,
+      ctx.profile
+    );
+    if (providerConflict != null && providerConflict.level === "refuse") {
+      appendEvent(
+        ctx.runDir,
+        {
+          type: "actor_failed",
+          step: stepId,
+          actor: role,
+          step_execution_id: stepExecutionId,
+          actor_call_id: actorCallId,
+          attempt: priorAttempts(events, actorCallId).count + 1,
+          executor: binding.executor,
+          archetype,
+          reason: "provider_conflict",
+          error: providerConflict.message
+        },
+        ctx.now
+      );
+      ctx.act(`dispatch refused ${stepId}${role ? ` (${role})` : ""}: ${providerConflict.message}`);
+      return {
+        kind: "provider_conflict",
+        detail: `${stepId}${role ? ` (${role})` : ""} was not dispatched: ${providerConflict.message}`
+      };
+    }
+    const providerWarned = providerConflict != null && providerConflict.level === "warn";
+    if (providerWarned) {
+      ctx.act(`dispatch warning ${stepId}${role ? ` (${role})` : ""}: ${providerConflict.message}`);
+    }
+    const constraintContext = {
+      archetype,
+      role,
+      executor: binding.executor,
+      target: binding.spec.target ?? null,
+      provider: binding.spec.provider ?? null,
+      model: binding.spec.model,
+      transport: "command",
+      write_access: binding.spec.writeAccess,
+      write_posture: declaredWritePosture2(ctx.profile, archetype),
+      active_loadout: ctx.activeLoadout?.name ?? null,
+      overrides: ctx.slotOverrides,
+      resolved_via: resolvedViaFor(ctx, role),
+      input_provenance: producers.map((producer) => ({
+        dispatch_id: producer.dispatchId,
+        executor: producer.executor,
+        provider: producer.provider
+      })),
+      harness: ctx.profile.harness ?? "standalone"
+    };
+    let constraintVerdict;
+    try {
+      constraintVerdict = evaluateConstraint(ctx.profile, constraintContext, { cwd: ctx.repoRoot });
+    } catch (err) {
+      if (err instanceof ConstraintError) {
+        throw new DriveError(`constraint system error: ${err.message}`);
+      }
+      throw err;
+    }
+    if (constraintVerdict.verdict === "refused") {
+      appendEvent(
+        ctx.runDir,
+        {
+          type: "actor_failed",
+          step: stepId,
+          actor: role,
+          step_execution_id: stepExecutionId,
+          actor_call_id: actorCallId,
+          attempt: priorAttempts(events, actorCallId).count + 1,
+          executor: binding.executor,
+          archetype,
+          reason: "constraint_refused",
+          error: constraintVerdict.reason
+        },
+        ctx.now
+      );
+      ctx.act(`dispatch refused ${stepId}${role ? ` (${role})` : ""}: ${constraintVerdict.reason}`);
+      return {
+        kind: "constraint_refused",
+        detail: `${stepId}${role ? ` (${role})` : ""} was not dispatched: ${constraintVerdict.reason}`
+      };
+    }
+    const shadowOnly = eligibilityFor(binding.spec, archetype) === "shadow_only";
     let repairErrors = null;
     for (; ; ) {
       events = freshEvents(ctx.runDir);
@@ -20472,7 +20958,8 @@ function drivePromptable(ctx, comp) {
         ids,
         attempt,
         reason,
-        repairErrors
+        repairErrors,
+        { providerWarned, shadowOnly }
       );
       if (outcome.kind === "valid") break;
       if (outcome.kind === "invalid_output" && !ctx.repaired.has(actorCallId)) {
@@ -21036,7 +21523,9 @@ function runDrive(opts) {
           failure.requests
         );
       }
-      if (failure.kind === "write_conflict") return finish("executor_failed", failure.detail);
+      if (failure.kind === "write_conflict" || failure.kind === "eligibility_forbidden" || failure.kind === "provider_conflict" || failure.kind === "constraint_refused") {
+        return finish("executor_failed", failure.detail);
+      }
       if (failure.kind === "invalid_output") {
         return finish(
           "output_invalid",
@@ -21551,13 +22040,15 @@ function effectiveRows(profile, name, overrides) {
     const baseExecutor = slots[archetype] ?? null;
     const executor = live[archetype] ?? baseExecutor;
     const spec = profile.executors[executor];
+    const eligibility = eligibilityFor(spec, archetype);
     return {
       archetype,
       executor,
       model: spec.model,
       adapter: spec.adapter,
       overridden: live[archetype] != null,
-      baseExecutor
+      baseExecutor,
+      ...eligibility !== "eligible" ? { eligibility } : {}
     };
   });
   return { rows, stale };
@@ -21647,6 +22138,8 @@ function runLoadoutSet(opts) {
     const conflict = explainWriteConflict({ executor: target, spec }, archetype, profile);
     if (conflict != null) throw new LoadoutError(conflict);
   }
+  const eligibilityConflict = explainEligibilityConflict({ executor: target, spec }, archetype);
+  if (eligibilityConflict != null) throw new LoadoutError(eligibilityConflict);
   const rebase = pin.loadout !== active.name;
   const droppedOverrides = rebase ? pin.overrides : {};
   const overrides = rebase ? {} : { ...pin.overrides };
@@ -21677,6 +22170,7 @@ function runLoadoutResolve(opts) {
       active.name,
       overrides
     );
+    const eligibility = eligibilityFor(resolved.executor, opts.archetype);
     return {
       archetype: opts.archetype,
       active,
@@ -21686,7 +22180,8 @@ function runLoadoutResolve(opts) {
       harness: profile.harness ?? "standalone",
       source: resolved.source,
       override: resolved.source === "override",
-      ...resolved.resolvedVia != null ? { resolved_via: resolved.resolvedVia } : {}
+      ...resolved.resolvedVia != null ? { resolved_via: resolved.resolvedVia } : {},
+      ...eligibility !== "eligible" ? { eligibility } : {}
     };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new LoadoutError(err.message);
@@ -22635,6 +23130,7 @@ function runVerify(opts) {
   findings.push(checkHumanDecisions(events));
   findings.push(checkActorAttempts(run, events));
   findings.push(checkExecutorBindings(run, events));
+  findings.push(checkGateEligible(run, events));
   findings.push(checkNamedDecisions(events));
   findings.push(checkArtifactSupersede(events));
   findings.push(checkSessionContinuity(events));
@@ -23307,6 +23803,79 @@ function checkExecutorBindings(run, events) {
     check,
     status: "ok",
     detail: `${dispatches.length} dispatch(es) match the recomputed resolution chain${overridesInForce.size > 0 ? ` (+${overridesInForce.size} explicit override(s))` : ""}`
+  };
+}
+function checkGateEligible(run, events) {
+  const check = "gate-eligible";
+  const dispatches = events.filter(
+    (event) => event.type === "actor_dispatched" && typeof event.extra.dispatch_id !== "string"
+  );
+  if (dispatches.length === 0) return skip(check, "no command actor dispatches recorded");
+  const snapshots = events.filter((event) => event.type === "profile_snapshotted");
+  const problems = [];
+  if (snapshots.length === 0) {
+    return { check, status: "fail", detail: "dispatches recorded but no profile_snapshotted event" };
+  }
+  let profile = null;
+  const snap = snapshots[0];
+  const rel = typeof snap.extra.profile === "string" ? snap.extra.profile : "profile.yaml";
+  const sha = typeof snap.extra.sha256 === "string" ? snap.extra.sha256 : null;
+  const abs = (0, import_node_path25.join)(run.dir, rel);
+  if (!(0, import_node_fs27.existsSync)(abs)) {
+    return { check, status: "fail", detail: `${rel}: profile snapshot is missing` };
+  }
+  const text = (0, import_node_fs27.readFileSync)(abs, "utf8");
+  if (sha != null && sha256Hex(text) !== sha) {
+    return { check, status: "fail", detail: `${rel}: snapshot does not match its recorded sha256` };
+  }
+  try {
+    profile = parseExecutorProfile(text, rel);
+  } catch (err) {
+    return { check, status: "fail", detail: `${rel}: snapshot did not parse: ${err.message}` };
+  }
+  const archetypeByRole = /* @__PURE__ */ new Map();
+  for (const event of events) {
+    if (event.type !== "resolution_snapshot") continue;
+    const roles = Array.isArray(event.extra.roles) ? event.extra.roles : [];
+    for (const row of roles) {
+      if (row == null || typeof row !== "object" || Array.isArray(row)) continue;
+      const rec = row;
+      if (typeof rec.role !== "string") continue;
+      archetypeByRole.set(rec.role, typeof rec.archetype === "string" ? rec.archetype : null);
+    }
+  }
+  for (const event of dispatches) {
+    const actor = typeof event.extra.actor === "string" ? event.extra.actor : null;
+    const used = typeof event.extra.executor === "string" ? event.extra.executor : null;
+    const label = `${event.step ?? "?"}${actor ? ` (${actor})` : ""}`;
+    if (used == null) {
+      problems.push(`${label}: dispatch records no executor`);
+      continue;
+    }
+    if (!(used in profile.executors)) {
+      problems.push(`${label}: executor "${used}" is not in the snapshotted profile`);
+      continue;
+    }
+    const archetype = typeof event.extra.archetype === "string" ? event.extra.archetype : archetypeByRole.get(actor ?? "*") ?? null;
+    const state = eligibilityFor(profile.executors[used], archetype);
+    const stampedIneligible = event.extra.gate_eligible === false;
+    if (stampedIneligible) {
+      if (state !== "shadow_only") {
+        problems.push(
+          `${label}: records gate_eligible: false but snapshot eligibility is ${state}`
+        );
+      }
+    } else if (state === "shadow_only") {
+      problems.push(
+        `${label}: has no gate_eligible stamp but snapshot eligibility is shadow_only`
+      );
+    }
+  }
+  if (problems.length > 0) return { check, status: "fail", detail: problems.join("; ") };
+  return {
+    check,
+    status: "ok",
+    detail: `${dispatches.length} command dispatch(es) match snapshot eligibility`
   };
 }
 function checkNamedDecisions(events) {
@@ -24711,7 +25280,7 @@ function runToolComplete(opts) {
 }
 
 // src/commands/setup.ts
-var import_node_child_process3 = require("node:child_process");
+var import_node_child_process4 = require("node:child_process");
 var import_node_fs31 = require("node:fs");
 var import_node_os4 = require("node:os");
 var import_node_path30 = require("node:path");
@@ -24780,7 +25349,7 @@ var PROBES = [
   { name: "grok", command: "grok" }
 ];
 function probe(command2) {
-  const result = (0, import_node_child_process3.spawnSync)(command2, ["--version"], { encoding: "utf8", timeout: 1e4 });
+  const result = (0, import_node_child_process4.spawnSync)(command2, ["--version"], { encoding: "utf8", timeout: 1e4 });
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
   return {
     name: command2,
@@ -25881,7 +26450,8 @@ function printSlots(slots, indent) {
   for (const slot of slots) {
     const model = slot.model != null ? ` (${slot.model})` : "";
     const override = slot.overridden === true ? `  OVERRIDE (base: ${slot.baseExecutor ?? "none"})` : "";
-    console.log(`${indent}${slot.archetype.padEnd(width)} \u2192 ${slot.executor}${model} [${slot.adapter}]${override}`);
+    const eligibility = slot.eligibility === "shadow_only" ? "  SHADOW-ONLY (never gates)" : slot.eligibility === "forbidden" ? "  FORBIDDEN (refused at dispatch)" : "";
+    console.log(`${indent}${slot.archetype.padEnd(width)} \u2192 ${slot.executor}${model} [${slot.adapter}]${override}${eligibility}`);
   }
 }
 function printStaleOverrides(stale) {

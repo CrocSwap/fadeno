@@ -15,6 +15,29 @@ writers accept only 0.3.
 
 ### Added
 
+- **Constraint tiers at the dispatch boundary** (phase 3 of
+  `docs/experimental/slots-and-archetypes.md`) — policy the kernel can
+  enforce, in two tiers. Tier 1 is declarative vocabulary:
+  `distinct_provider_from_inputs: advisory | required` on archetypes,
+  enforced against input provenance (`fadeno dispatch --produced-by
+  <dispatch-id>` on the ad-hoc path; the run's own events on the engine
+  path) — `required` refuses provider clashes and unresolvable provenance,
+  `advisory` warns and records `provider_distinctness: "warned"`; and
+  per-target `eligibility: { <archetype>: eligible | shadow_only |
+  forbidden }` — `forbidden` refuses at dial time and dispatch time,
+  `shadow_only` dispatches but stamps rows `gate_eligible: false` (phase 4's
+  shadow flag; gate semantics unchanged in this phase), with both states
+  marked in the `fadeno loadout` tables. Tier 2 is the escape hatch:
+  top-level `constraints: { command: [...] }` invoked at the dispatch
+  boundary with the full resolution context on stdin — exit 0 allows, exit
+  2 refuses with stderr as the reason, anything else is a loud
+  constraint-system error, never an allow. Every boundary refusal
+  (write posture retrofitted too) now appends a `dispatch_refused` evidence
+  row naming predicate and message; `fadeno dispatches` renders refusals
+  and shadow rows distinctly; `fadeno verify` recomputes `gate_eligible`
+  stamps from the run snapshot. Profile layering now carries `constraints:`
+  across layers.
+
 - **Archetype schema pass** (phase 2 of
   `docs/experimental/slots-and-archetypes.md`) — the archetype vocabulary
   opens up while staying kernel-enforced. `requires_write` becomes
