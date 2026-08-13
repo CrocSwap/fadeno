@@ -1,8 +1,8 @@
 # Slot ergonomics and the open archetype vocabulary
 
-**Status:** phases 1 (session slot overrides, 0.6.0-rc.9) and 2 (archetype
-schema pass, 0.6.0-rc.12) implemented; phases 3–4 aligned, not yet
-implemented, independently shippable
+**Status:** phases 1 (session slot overrides, 0.6.0-rc.9), 2 (archetype
+schema pass, 0.6.0-rc.12), and 3 (constraint tiers, 0.6.0-rc.13)
+implemented; phase 4 aligned, not yet implemented
 **Decision date:** 2026-08-12
 **Relationship:** successor horizon to
 [`loadouts-and-dispatch.md`](loadouts-and-dispatch.md) (extends its catalog,
@@ -313,6 +313,24 @@ Refusals land in the ledger like any other.
 the doc for it must say so plainly; and instruction-only hosts cannot run
 it, so it inherits the advisory/enforced split. Tier 1 is preferred wherever
 it fits; tier 2 exists so Fadeno never needs a policy language.
+
+**Shipped (0.6.0-rc.13).** Deviations from the sketch above, all deliberate:
+a constraint-command exit other than 0/2 is a loud system error that writes
+NO evidence row — only genuine refusals (exit 2, and every tier-1 refusal
+including retrofitted write posture) append `dispatch_refused` rows with
+predicate + message; profile layering now carries `constraints:` across
+layers (found live: the merge previously dropped it, so project constraint
+commands never ran); the `gate_eligible` verify check treats an absent stamp
+as a claim of eligible (recomputable from the snapshot — deliberately
+stricter than `resolved_via`'s absent-is-no-claim); advisory
+provider-distinctness warnings ride the dispatch echo channel and the
+`provider_distinctness: "warned"` row field; the loadout tables mark
+non-eligible slots `SHADOW-ONLY (never gates)` / `FORBIDDEN (refused at
+dispatch)` in the OVERRIDE-mark register; the starter catalog ships NO
+predicate declarations (canon conservatism — the vocabulary lands in docs
+until a starter workflow needs it). Engine gate consumption of
+`gate_eligible: false` artifacts is unchanged, per the phase boundary —
+shadow semantics arrive with phase 4.
 
 ## Phase 4 — shadow dispatches and model tryouts
 

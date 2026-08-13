@@ -19,14 +19,14 @@ const REPO = join(import.meta.dirname, '..');
  * rewords freely and would make this test a nuisance.
  *
  * Adding a tripwire is one literal in the table below; read it as a table.
- * A side may carry several patterns (`patterns`), and a doc claim may live in
- * either of several files (`files`) — all patterns must match, in at least one
- * of the listed files.
+ * A side may carry several patterns (`patterns`) across several files
+ * (`files`): every listed file must exist, and every pattern must match in
+ * at least one of them (patterns may be split across files).
  */
 type Side = {
-  /** Files that may carry the claim; the side passes if ANY one matches all patterns. */
+  /** Files that may carry the claim; every listed file must exist. */
   files: string[];
-  /** Stable tokens that must appear. ALL must match. */
+  /** Stable tokens that must appear. ALL must match, each in at least one file. */
   patterns: RegExp[];
 };
 
@@ -106,6 +106,14 @@ const CLAIMS: Claim[] = [
     doc: { files: [LOADOUTS], patterns: [/requires_write: forbidden/, /fallback/, /resolved_via/] },
     src: { files: ['src/lib/executors.ts'], patterns: [/'forbidden'/, /resolvedVia/] },
   },
+  {
+    id: 'constraint-tiers',
+    doc: { files: [LOADOUTS], patterns: [/distinct_provider_from_inputs/, /shadow_only/, /constraints:/] },
+    src: {
+      files: ['src/lib/executors.ts', 'src/lib/constraints.ts'],
+      patterns: [/'shadow_only'/, /distinctProviderFromInputs/, /ConstraintError/],
+    },
+  },
 ];
 
 /**
@@ -117,22 +125,21 @@ function checkSide(id: string, which: 'doc' | 'src', side: Side): string | null 
     which === 'doc'
       ? 'the doc no longer documents it'
       : 'the source no longer implements it';
-  let bestMiss: { file: string; pattern: RegExp } | null = null;
+  const texts: Array<{ file: string; text: string }> = [];
 
   for (const file of side.files) {
-    let text: string;
     try {
-      text = readFileSync(join(REPO, file), 'utf8');
+      texts.push({ file, text: readFileSync(join(REPO, file), 'utf8') });
     } catch {
       return `[${id}] ${which} side drifted (${drifted}): ${file} is missing`;
     }
-    const miss = side.patterns.find((p) => !p.test(text));
-    if (!miss) return null; // this file carries every pattern → side holds
-    bestMiss ??= { file, pattern: miss };
   }
 
-  const where = side.files.length > 1 ? `none of ${side.files.join(', ')}` : bestMiss!.file;
-  return `[${id}] ${which} side drifted (${drifted}): ${where} does not match ${bestMiss!.pattern}`;
+  const miss = side.patterns.find((p) => !texts.some((entry) => p.test(entry.text)));
+  if (!miss) return null;
+
+  const where = side.files.length > 1 ? `none of ${side.files.join(', ')}` : side.files[0];
+  return `[${id}] ${which} side drifted (${drifted}): ${where} does not match ${miss}`;
 }
 
 test('documented claims still match the source that implements them', () => {

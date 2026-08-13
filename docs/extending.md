@@ -133,10 +133,13 @@ without making the loadout itself harness-specific.
 
 A route entry may also declare `write_access: <bool>` — whether that route's
 **command** delivery can mutate the workspace — beside an optional top-level
-`archetypes:` mapping whose values accept `requires_write` and `fallback`.
+`archetypes:` mapping whose values accept `requires_write`, `fallback`, and
+`distinct_provider_from_inputs`.
 `requires_write` is `required` | `forbidden` | `none`; booleans alias
 (`true` → `required`, `false` → `none`). `fallback` names another archetype
-whose *binding* is used when this one has no slot (never its policy):
+whose *binding* is used when this one has no slot (never its policy).
+`distinct_provider_from_inputs` is `advisory` | `required`; absent is no
+check:
 
 ```yaml
 routes:
@@ -146,12 +149,26 @@ routes:
 archetypes:
   worker: { requires_write: required }
   generator: { requires_write: forbidden, fallback: worker }
+  reviewer: { distinct_provider_from_inputs: advisory }
 ```
+
+A target (v2) or v1 executor may declare `eligibility:` — a mapping of
+archetype → `eligible` | `shadow_only` | `forbidden` (default `eligible`).
+`forbidden` refuses at dial time and dispatch time; `shadow_only` dispatches
+and stamps `gate_eligible: false`. Gate consumption is unchanged in this
+phase.
+
+Top-level `constraints.command` is an optional argv run at the dispatch
+boundary with the resolution context as JSON on stdin. Exit 0 allows; exit 2
+refuses (stderr is the reason); any other exit, spawn failure, or signal is
+a constraint-system error (loud, never an allow).
 
 `fadeno dispatch` then refuses *before spawning* when the resolved command
 route says `write_access: false` and the archetype says `requires_write: required`
 (or boolean `true`) — and the inverse, `requires_write: forbidden` onto
-`write_access: true`. The same check fires at dial time (`fadeno loadout set`).
+`write_access: true`. The same check fires at dial time (`fadeno loadout set`),
+which also refuses dialing an archetype onto a target whose eligibility for
+it is `forbidden`.
 The original case is a commit task routed to a headless `claude -p` that has no
 approver for a write. Either side undeclared imposes no constraint (existing profiles are
 unaffected). When declared, `write_access` joins the evidence-row identity, and
@@ -214,7 +231,17 @@ the executor was chosen (`binding` | `override` | `loadout` | `fallback` |
 fallback chain carry `resolved_via` naming the chain archetype that bound
 (absent when the declared archetype bound directly); and `resolution_snapshot`
 events record the applicable `overrides` — verification replays from the
-snapshot, never the live pin.
+snapshot, never the live pin. Constraint-tier evidence is additive on
+format `0.2`: ad-hoc boundary refusals append a `dispatch_refused` row
+with `refusal: { predicate, message }` (`write_posture` | `eligibility` |
+`provider_distinctness` | `constraint_command`); proceeding rows may carry
+`input_provenance`, `provider_distinctness: "warned"`, and
+`gate_eligible: false`. Engine command refusals are `actor_failed` with
+reason `eligibility_forbidden` | `provider_conflict` | `constraint_refused`;
+a `shadow_only` dispatch proceeds with `gate_eligible: false` on
+`actor_dispatched`. `fadeno verify` recomputes that stamp from the snapshot
+(absent = a claim of eligible); constraint-command outcomes are attested,
+not recomputed.
 
 Ad-hoc dispatch runs the same chain outside any playbook:
 `fadeno dispatch --archetype worker` with the prompt on stdin or via
@@ -235,7 +262,9 @@ beside them, so both delivery routes read as one history. A request row whose
 completion never arrived is kept and marked — "no completion recorded (killed
 or in flight)" — rather than dropped, since a dispatch that died mid-flight is
 the one most worth seeing. Rows carry the markers that change their meaning:
-`relay_attested`, `[write_access: none]`, and `model_override`. `--tail <N>`
+`relay_attested`, `[write_access: none]`, `model_override`,
+`[shadow-only]` (`gate_eligible: false`), and `[refused: <predicate>]`
+for `dispatch_refused` rows. `--tail <N>`
 defaults to 10; `--json` emits the correlated rows for scripts. Rows are
 format-stamped (`format: "0.1"`); pre-format rows from before the two-row
 change render as `[legacy]` entries rather than being skipped, and rows from

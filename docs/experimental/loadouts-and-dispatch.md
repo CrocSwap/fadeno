@@ -139,12 +139,16 @@ A route entry declares:
   describes its fallback command, never the in-session agent.
 
 **Archetypes.** `archetypes:` is an optional top-level mapping whose values
-accept exactly two keys, `requires_write` and `fallback`. `requires_write` is
+accept exactly three keys: `requires_write`, `fallback`, and
+`distinct_provider_from_inputs`. `requires_write` is
 `required` | `forbidden` | `none` (booleans alias: `true` → `required`,
 `false` → `none`); absent is `none`. `fallback` is a bare identifier naming
-another archetype whose *binding* is used when this one has no slot. Deliberately
+another archetype whose *binding* is used when this one has no slot.
+`distinct_provider_from_inputs` is `advisory` | `required`; absent is no
+check. Deliberately
 strict: an unknown key is an error, because the alternative is a typo that
-silently drops a safety constraint. See *Archetype policy*.
+silently drops a safety constraint. See *Archetype policy* and *Constraint
+tiers*.
 
 **Loadouts and bindings.** Loadout names and archetype keys are bare
 identifiers (`[a-z][a-z0-9_-]*`); every loadout slot must name a declared
@@ -309,9 +313,11 @@ nobody parses to a declaration the kernel can refuse on.
 
 ## Archetype policy
 
-`archetypes:` is an optional top-level mapping. Each entry accepts exactly two
-keys — `requires_write` and `fallback` — and an unknown key is an error, so a
-typo cannot silently drop a safety constraint.
+`archetypes:` is an optional top-level mapping. Each entry accepts exactly
+three keys — `requires_write`, `fallback`, and
+`distinct_provider_from_inputs` — and an unknown key is an error, so a
+typo cannot silently drop a safety constraint. Provider distinctness is
+a constraint-tier predicate; see *Constraint tiers*.
 
 **Write posture.** `requires_write` is three-valued: `required`, `forbidden`,
 or `none`. Booleans remain accepted as aliases (`true` → `required`,
@@ -366,6 +372,116 @@ bound directly). Rows that carry the new field are stamped `format: "0.2"` —
 additive, same major as `format: "0.1"`; old rows still read. Isolated-delivery
 preference (sandbox or worktree instead of refusal) is deferred to route
 operational policy.
+
+## Constraint tiers
+
+Three **tier-1** predicates sit at the dispatch boundary — the same
+chokepoint as write posture. Each is declared data, evaluated before a
+command is spawned, and recorded as evidence. Policy is always read from
+the **declared** archetype only; a fallback chain never imports another
+archetype's distinctness, eligibility, or write posture.
+
+**Write posture** (phase 2, listed because the others follow it) is
+`requires_write: required | forbidden | none` on the archetype, matched
+against the route's `write_access`. Enforced on command deliveries;
+advisory on native in-session deliveries. See *Write access*.
+
+**Provider distinctness** — the resolved target's provider must differ
+from every input producer's:
+
+```yaml
+archetypes:
+  reviewer:
+    distinct_provider_from_inputs: advisory   # or: required
+```
+
+`required` refuses a clash (and refuses when provenance is demanded but
+unresolvable). `advisory` warns, records, and proceeds. No declaration is
+no check. On the engine path, producers come from the run's own events
+(input `artifact_created` → that actor call's `actor_dispatched` →
+executor → provider on the **snapshot** profile, never the live catalog);
+an input with no in-run producer is unresolvable (`provider: null`).
+Ad-hoc dispatch takes explicit `--produced-by <dispatch-id>` instead.
+
+**Eligibility states** — per-target (or v1 executor), per-archetype:
+
+```yaml
+targets:
+  kimi-k3:
+    provider: moonshot
+    model: openrouter/moonshotai/kimi-k3
+    eligibility:
+      generator: eligible        # default; may be omitted
+      reviewer: shadow_only      # runs, evidence-tagged, never a refusal
+      judge: forbidden
+```
+
+`eligible | shadow_only | forbidden`, default `eligible`. `forbidden`
+refuses at dial time (`fadeno loadout set`) and at dispatch time.
+`shadow_only` permits the dispatch and stamps the row
+`gate_eligible: false`. **Gate consumption semantics do not change in
+phase 3** — a shadow-stamped artifact still feeds `no_blocking_issues`
+and the other evaluators exactly as an eligible one does. Non-gating is
+phase 4.
+
+**Advisory vs enforced.** `distinct_provider_from_inputs: advisory`
+warns; `required` refuses. Eligibility `forbidden` is always a refusal
+(command path); `shadow_only` is never a refusal. Instruction-only hosts
+cannot run these checks themselves — they inherit the same
+advisory/enforced split as write posture.
+
+**Evidence.** Format stays `0.2`; every field and the one new event are
+additive.
+
+- Ad-hoc boundary refusals append one `dispatch_refused` row (no
+  `dispatch_requested`) with
+  `refusal: { predicate, message }`. Predicates:
+  `write_posture` | `eligibility` | `provider_distinctness` |
+  `constraint_command`.
+- Proceeding ad-hoc rows may carry `input_provenance` (the
+  `--produced-by` list), `provider_distinctness: "warned"`, and
+  `eligibility: "shadow_only"` + `gate_eligible: false`.
+- Engine command refusals are `actor_failed` with reason
+  `eligibility_forbidden` | `provider_conflict` | `constraint_refused`
+  (outcome `executor_failed`; nothing spawned). An advisory clash stamps
+  `provider_distinctness: "warned"` on `actor_dispatched` and emits an
+  act() warning. A `shadow_only` dispatch proceeds with
+  `gate_eligible: false` on `actor_dispatched`.
+- `fadeno verify` recomputes `gate_eligible` from the snapshot:
+  stamped `false` must recompute as `shadow_only`; an unstamped row
+  must not (absent = a claim of eligible — stricter than `resolved_via`,
+  because the snapshot makes eligibility recomputable). Constraint-command
+  outcomes are **attested, not recomputed** — executable config is not
+  replayable policy.
+
+**Dial time.** `fadeno loadout set <archetype> <target>` refuses a
+`forbidden` pairing (after the write-posture check) with the kernel's
+own `explainEligibilityConflict` message. `shadow_only` dials. Effective
+tables and `loadout resolve` annotate a row's eligibility when it is not
+`eligible`.
+
+### Tier 2: constraint command
+
+For project-specific logic the vocabulary cannot express:
+
+```yaml
+constraints:
+  command: [node, .fadeno/constraints.mjs]
+```
+
+Invoked at the dispatch boundary with the resolution context as JSON on
+stdin (archetype, role, executor, target, provider, model, transport
+`command`, write access/posture, active loadout + overrides,
+`resolved_via`, input provenance, harness). Exit 0 allows; exit 2
+refuses (trimmed stderr is the reason, or a fixed fallback when stderr
+is empty); any other exit, spawn failure, or signal is a
+constraint-system error — loud (`DriveError` / `DispatchCommandError`),
+never an allow.
+
+Executable config is a heavier trust surface than data. Instruction-only
+hosts cannot run it, so it inherits the advisory/enforced split. Tier 1
+is preferred wherever it fits; tier 2 exists so Fadeno never needs a
+policy language.
 
 ## CLI
 
