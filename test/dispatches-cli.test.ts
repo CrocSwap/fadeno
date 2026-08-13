@@ -646,16 +646,22 @@ test('dispatches --output: unique prefix and last resolve the recorded snapshot'
       output_snapshot: olderSnap,
       output_sha256: sha256Hex(olderBody),
     }),
+    // Five minutes later, so these two ran in sequence rather than at once.
+    // `last` only resolves by recency when nothing overlapped the newest — two
+    // dispatches sharing an instant are refused, because recency cannot tell
+    // one finished dispatch from another.
     requested({
       dispatch_id: 'bbbbbbbb-2222-4000-8000-000000000002',
       archetype: 'reviewer',
       output_snapshot: newerSnap,
+      timestamp: '2026-08-12T12:05:00.000Z',
     }),
     completed({
       dispatch_id: 'bbbbbbbb-2222-4000-8000-000000000002',
       archetype: 'reviewer',
       output_snapshot: newerSnap,
       output_sha256: sha256Hex(newerBody),
+      timestamp: '2026-08-12T12:05:00.000Z',
     }),
   ]);
   seedSnapshot(root, olderSnap, olderBody);

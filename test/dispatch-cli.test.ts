@@ -103,7 +103,11 @@ test('dispatch: resolves the archetype via the active loadout, relays the report
     echoes[2],
     `dispatch id: ${dispatchId} — recover its output with \`fadeno dispatches --output ${dispatchId.slice(0, 8)}\``,
   );
-  assert.equal(echoes.length, 3);
+  // Untagged, so the kernel also says what this dispatch will cost the caller
+  // if the call is killed: the id above is the only handle, and it lives on a
+  // stream a timeout discards. Said at spawn, the one moment it is actionable.
+  assert.match(echoes[3] ?? '', /no --tag given/);
+  assert.equal(echoes.length, 4);
   assert.equal(result.outcome, 'ok');
   assert.equal(result.outputBytes, Buffer.byteLength('REPORT:hello'));
   assert.equal(result.evidencePath, DISPATCHES_FILE);

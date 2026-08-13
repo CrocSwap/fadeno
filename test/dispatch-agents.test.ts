@@ -65,8 +65,13 @@ test('dispatch proxy bodies relay the prompt file verbatim through fadeno dispat
     //    spelling as the documented not-on-PATH retry.
     assert.match(
       body,
-      new RegExp(`fadeno dispatch --archetype ${archetype} <<'FADENO_PROMPT'`),
+      new RegExp(`fadeno dispatch --archetype ${archetype} --tag ${archetype}-<slug> <<'FADENO_PROMPT'`),
     );
+    // The tag is the whole recovery story after a kill: the kernel's id echo
+    // rides a stderr stream the harness discards along with a timed-out call,
+    // so the only handle that survives is the one the proxy chose itself.
+    assert.match(body, new RegExp(`fadeno dispatches --output tag:${archetype}-<slug> --wait 120`));
+    assert.match(body, /the same tag you launched with|the tag you launched with/);
     assert.match(body, /CLAUDE_PLUGIN_ROOT/, 'proxies must document the bundled-CLI retry');
     // 3. Verbatim relay of the stdout report as the final response.
     assert.match(body, /stdout report \*\*verbatim\*\* as your final response/);

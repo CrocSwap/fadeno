@@ -798,6 +798,7 @@ function main(argv: string[]): number {
         'prompt-file': { type: 'string' },
         tail: { type: 'string' },
         rate: { type: 'string' },
+        tag: { type: 'string' },
         shadow: { type: 'string' },
         comparisons: { type: 'boolean' },
         wait: { type: 'string' },
@@ -1448,6 +1449,7 @@ function main(argv: string[]): number {
         role: values.role,
         loadout: values.loadout,
         executor: values.executor,
+        tag: values.tag,
         shadow: values.shadow,
         promptFile,
         // Prompt defaults to stdin; the echo goes to stderr so stdout stays
@@ -1580,7 +1582,18 @@ function main(argv: string[]): number {
           }
           waitMs = Math.round(seconds * 1000);
         }
-        const result = runDispatchesOutput({ dispatchId: values.output, waitMs });
+        // Two spellings on purpose. `--tag <handle>` is the natural one, but it
+        // cannot stand alone: `--output` takes a value, so `--output --tag x`
+        // would swallow the flag. `--output tag:<handle>` is the single-token
+        // form that always parses — and it is the one the proxy guard permits,
+        // because a caller recovering from a timeout should not also have to
+        // get flag ordering right.
+        const inline = values.output.startsWith('tag:') ? values.output.slice(4) : null;
+        const result = runDispatchesOutput({
+          dispatchId: inline != null ? '' : values.output,
+          tag: inline ?? values.tag,
+          waitMs,
+        });
         // stdout carries the snapshot bytes verbatim (relay-safe); the
         // attestation verdict goes to stderr so piping stays clean.
         process.stdout.write(result.bytes);
@@ -1596,12 +1609,16 @@ function main(argv: string[]): number {
                 : 'no completion row recorded YET: the executor may still be running, and the ' +
                   'kernel writes that row only when it exits. This is its output so far, not a ' +
                   'failure. Re-run with --wait <seconds> to wait for the real answer.';
-        // Say when `last` was a guess. Nothing was open, so this is the newest
-        // dispatch in the log rather than demonstrably the caller's own.
+        // Say how `last` landed. Recency now only survives when nothing
+        // overlapped this dispatch — concurrent-and-finished refuses outright —
+        // so the note reports that narrowed claim rather than a bare warning.
         const how =
           result.resolvedBy === 'recency'
-            ? ' [resolved by recency: no dispatch was open, so this is the newest in the log — name the id to be certain]'
-            : '';
+            ? ' [resolved by recency: nothing was open and nothing overlapped it, so this is the ' +
+              'only candidate — launch with `--tag <handle>` to name it outright]'
+            : result.resolvedBy === 'tag'
+              ? ' [resolved by tag]'
+              : '';
         console.error(`[${result.dispatchId}] ${result.path} — ${note}${how}`);
         return 0;
       }

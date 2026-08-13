@@ -154,6 +154,17 @@ export type DispatchOutputAttestation = 'match' | 'mismatch' | 'incomplete';
 export interface DispatchesOutputOptions {
   /** Full `dispatch_id`, unique prefix of at least 8 characters, or `last`. */
   dispatchId: string;
+  /**
+   * Caller-chosen handle passed to `fadeno dispatch --tag`; wins over
+   * `dispatchId` when set.
+   *
+   * The handle a caller can still name after losing everything the dispatch
+   * printed. A killed Bash call takes the kernel's stderr echo with it, which
+   * left `last` as the only recovery route and `last` cannot tell one finished
+   * dispatch from another — so a 2026-08-14 dogfood recovered a concurrent
+   * proxy's report. A tag is chosen before the spawn and survives the kill.
+   */
+  tag?: string | null;
   cwd?: string;
   repoRoot?: string;
   /**
@@ -641,6 +652,27 @@ interface OutputRecord {
   snapshot: string | null;
   outputSha256: string | null;
   completed: boolean;
+  /** Caller-chosen `--tag`, when this dispatch was launched with one. */
+  tag: string | null;
+  /** Epoch ms of the request row; the start of this dispatch's lifetime. */
+  requestedAt: number | null;
+  /**
+   * Epoch ms this dispatch actually ended; `null` while still open.
+   *
+   * Derived as `requestedAt + duration_ms` rather than read from the
+   * completion row's `timestamp`, because the kernel stamps both rows of a
+   * pair from the same clock reading — the completion row's timestamp is when
+   * the dispatch *started*. `duration_ms` is where the end time really lives.
+   */
+  completedAt: number | null;
+}
+
+/** Whether two dispatches were ever in flight at the same moment. */
+function overlaps(a: OutputRecord, b: OutputRecord): boolean {
+  const start = (rec: OutputRecord): number => rec.requestedAt ?? Number.NEGATIVE_INFINITY;
+  // An open dispatch has not ended, so it overlaps everything after it began.
+  const end = (rec: OutputRecord): number => rec.completedAt ?? Number.POSITIVE_INFINITY;
+  return start(a) < end(b) && start(b) < end(a);
 }
 
 /**
@@ -677,18 +709,40 @@ function loadOutputRecords(absolute: string): {
 
     let rec = byId.get(dispatchId);
     if (rec == null) {
-      rec = { dispatchId, snapshot: null, outputSha256: null, completed: false };
+      rec = {
+        dispatchId,
+        snapshot: null,
+        outputSha256: null,
+        completed: false,
+        tag: null,
+        requestedAt: null,
+        completedAt: null,
+      };
       byId.set(dispatchId, rec);
     }
     const snapshot = str(row.output_snapshot);
     if (snapshot != null) rec.snapshot = snapshot;
+    const tag = str(row.tag);
+    if (tag != null) rec.tag = tag;
+    const stamp = str(row.timestamp);
+    const at = stamp == null ? Number.NaN : Date.parse(stamp);
     if (event === 'dispatch_requested' && snapshot != null) {
       lastWithSnapshot = dispatchId;
       requestOrder.push(dispatchId);
+      if (!Number.isNaN(at)) rec.requestedAt = at;
     }
     if (event === 'dispatch_completed') {
       rec.completed = true;
       rec.outputSha256 = str(row.output_sha256);
+      const duration = typeof row.duration_ms === 'number' ? row.duration_ms : null;
+      // Prefer start + duration; fall back to the row's own stamp for legacy
+      // rows written before `duration_ms`, where it is the best available.
+      rec.completedAt =
+        rec.requestedAt != null && duration != null
+          ? rec.requestedAt + duration
+          : Number.isNaN(at)
+            ? null
+            : at;
     }
   }
   return { byId, lastWithSnapshot, requestOrder };
@@ -700,7 +754,41 @@ function loadOutputRecords(absolute: string): {
  * the caller is trying to recover. `recency` is the weaker fallback, a guess
  * about the whole repo's log, and is reported as such.
  */
-export type OutputResolution = 'id' | 'in-flight' | 'recency';
+export type OutputResolution = 'id' | 'tag' | 'in-flight' | 'recency';
+
+/** How a caller should name its own dispatch, once `last` has proved unsafe. */
+const NAME_YOURS =
+  'Name yours: `--tag <handle>` if you launched with one, otherwise the id the ' +
+  'kernel echoed as `dispatch id: <id>` at spawn.';
+
+/**
+ * Resolve a caller-chosen handle. A tag is not required to be unique — nothing
+ * stops two callers picking `retry` — so a reused one is refused rather than
+ * silently resolved to the newest, which is the failure this whole path exists
+ * to end.
+ */
+function resolveByTag(
+  tag: string,
+  byId: Map<string, OutputRecord>,
+  requestOrder: readonly string[],
+): { record: OutputRecord; resolvedBy: OutputResolution } {
+  const hits = requestOrder.map((id) => byId.get(id)!).filter((rec) => rec.tag === tag);
+  if (hits.length === 0) {
+    const known = [...new Set([...byId.values()].map((rec) => rec.tag).filter((t) => t != null))];
+    throw new DispatchesCommandError(
+      `no dispatch carries the tag "${tag}".` +
+        (known.length > 0 ? ` Tags in this log: ${known.join(', ')}.` : ' No dispatch in this log was launched with a tag.'),
+    );
+  }
+  if (hits.length > 1) {
+    throw new DispatchesCommandError(
+      `ambiguous tag "${tag}": ${hits.length} dispatches carry it ` +
+        `(${hits.map((rec) => rec.dispatchId.slice(0, 8)).join(', ')}). ` +
+        'Use a distinct tag per dispatch, or name the id.',
+    );
+  }
+  return { record: hits[0]!, resolvedBy: 'tag' };
+}
 
 function resolveOutputRecord(
   query: string,
@@ -725,10 +813,30 @@ function resolveOutputRecord(
       const candidates = open.map((id) => id.slice(0, 8)).join(', ');
       throw new DispatchesCommandError(
         `ambiguous dispatch "last": ${open.length} dispatches are still open (${candidates}). ` +
-          'Name yours — the kernel echoed `dispatch id: <id>` on stderr when it started.',
+          NAME_YOURS,
       );
     }
-    return { record: byId.get(lastWithSnapshot)!, resolvedBy: 'recency' };
+    // Nothing open, so every candidate has finished and "which one is mine?"
+    // can no longer be answered by state. Recency is only safe when this
+    // dispatch ran alone: a 2026-08-14 dogfood recovered a *concurrent* proxy's
+    // report here, because both had completed by the time either looked. The
+    // note that flagged it was in-band and the agent consumed it anyway — a
+    // wrong answer with a caveat is still a wrong answer. Refuse instead.
+    const newest = byId.get(lastWithSnapshot)!;
+    const concurrent = requestOrder
+      .filter((id) => id !== newest.dispatchId)
+      .map((id) => byId.get(id)!)
+      .filter((rec) => overlaps(rec, newest));
+    if (concurrent.length > 0) {
+      const describe = (rec: OutputRecord): string =>
+        rec.tag != null ? `${rec.dispatchId.slice(0, 8)} (tag: ${rec.tag})` : rec.dispatchId.slice(0, 8);
+      throw new DispatchesCommandError(
+        `ambiguous dispatch "last": ${concurrent.length + 1} dispatches ran concurrently and all ` +
+          `have finished (${[newest, ...concurrent].map(describe).join(', ')}), so the newest is ` +
+          `not necessarily yours. ${NAME_YOURS}`,
+      );
+    }
+    return { record: newest, resolvedBy: 'recency' };
   }
 
   const exact = byId.get(query);
@@ -758,10 +866,11 @@ function resolveOutputRecord(
  * verbatim, stderr = one attestation note line).
  */
 export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOutputResult {
+  const tag = opts.tag?.trim() ? opts.tag.trim() : null;
   const query = opts.dispatchId.trim();
-  if (query === '') {
+  if (tag == null && query === '') {
     throw new DispatchesCommandError(
-      'dispatch id is required (full id, unique prefix of 8+ characters, or "last").',
+      'dispatch id is required (full id, unique prefix of 8+ characters, "last", or --tag <handle>).',
     );
   }
 
@@ -769,7 +878,13 @@ export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOu
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const ledger = join(repoRoot, DISPATCHES_FILE);
   let { byId, lastWithSnapshot, requestOrder } = loadOutputRecords(ledger);
-  let { record: rec, resolvedBy } = resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
+  let rec: OutputRecord;
+  let resolvedBy: OutputResolution;
+  if (tag != null) {
+    ({ record: rec, resolvedBy } = resolveByTag(tag, byId, requestOrder));
+  } else {
+    ({ record: rec, resolvedBy } = resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder));
+  }
 
   // Re-read until the completion row lands. The kernel appends it when the
   // executor exits, which is routinely *after* the caller's own timeout: the

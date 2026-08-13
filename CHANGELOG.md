@@ -391,6 +391,37 @@ writers accept only 0.3.
 
 ### Fixed
 
+- **Timeout recovery returned another agent's report.** The first real exercise
+  of the rc.22 recovery path, on 2026-08-14: a proxy timed out, ran
+  `dispatches --output last`, and got a concurrent dispatch's output. Its own
+  work had completed fine — the failure was purely in retrieval. `last` prefers
+  an *open* dispatch, but both had finished by the time either looked, so it
+  fell through to bare recency and returned the newest row in the log. It did
+  flag the guess in-band, which is much better than silent, but an agent
+  consumed the note and relayed anyway: a wrong answer with a caveat is still a
+  wrong answer.
+
+  The obvious fix — echo the dispatch id at launch — was already shipped in
+  rc.22 and is what failed. The echo goes to stderr, and the caller who needs
+  it is by definition the one whose Bash call was killed, taking the stream
+  with it. So the handle has to be one the caller *chose*:
+  `fadeno dispatch --tag <handle>` records it on the dispatch's rows, and
+  `fadeno dispatches --output tag:<handle> --wait 120` recovers by it. A tag is
+  known before the spawn and survives losing every byte the dispatch printed.
+  The proxy agents now launch with a task-derived tag and recover with it, and
+  the guard permits both spellings. (`tag:<handle>` rather than
+  `--output --tag <handle>` because `--output` takes a value and would swallow
+  the flag — a caller recovering from a timeout should not also have to get
+  flag ordering right.)
+
+  `last` no longer guesses when it cannot know. It refuses whenever the newest
+  dispatch overlapped another in time — naming every candidate and its tag —
+  and resolves by recency only when the dispatch demonstrably ran alone. The
+  overlap is computed from `requested_at + duration_ms`, not from the
+  completion row's timestamp, because the kernel stamps both rows of a pair
+  from the same clock reading: a completion row's `timestamp` is when the
+  dispatch *started*.
+
 - **The evidence log could not say which Fadeno wrote it.** A 2026-08-13
   dogfood read twelve rows spanning a version bump and found exactly one
   version-shaped key across all of them — `hook_version`, which only the Claude

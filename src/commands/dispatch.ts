@@ -79,6 +79,28 @@ export const DISPATCHES_FORMAT = '0.2';
  * and the event name alone read as success. This is the field that says which
  * it was.
  */
+/**
+ * Shape a caller-chosen `--tag` must take: a short, shell-safe, greppable
+ * token. Constrained rather than free text because the tag travels through the
+ * dispatch-proxy guard's allowlist, and a pattern the guard can state exactly
+ * is one it cannot be talked past.
+ */
+export const DISPATCH_TAG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** Validate and normalize `--tag`; `null` when the caller supplied none. */
+export function normalizeDispatchTag(tag: string | null | undefined): string | null {
+  if (tag == null) return null;
+  const trimmed = tag.trim();
+  if (trimmed === '') return null;
+  if (!DISPATCH_TAG_RE.test(trimmed)) {
+    throw new DispatchCommandError(
+      `--tag "${trimmed}" is not a valid handle: use 1-64 characters of ` +
+        'letters, digits, dot, underscore or hyphen, starting with a letter or digit.',
+    );
+  }
+  return trimmed;
+}
+
 export type DispatchOutcome = 'ok' | 'failed' | 'empty';
 
 const DISPATCH_OUTCOMES: readonly string[] = ['ok', 'failed', 'empty'];
@@ -339,6 +361,17 @@ export interface AdHocDispatchOptions {
   now?: Date;
   /** Resolution echo callback — cli.ts prints it to stderr; the command never prints. */
   onEcho?: (line: string) => void;
+  /**
+   * Caller-chosen correlation handle, recorded on this dispatch's rows and
+   * resolvable with `fadeno dispatches --output --tag <tag>`.
+   *
+   * The kernel echoes its generated `dispatch_id` at spawn, but that echo goes
+   * to stderr, and a caller whose Bash call is killed at its own timeout — the
+   * exact caller who needs to recover — never receives it. A tag is known
+   * *before* the spawn because the caller wrote it, so recovery survives losing
+   * every byte the dispatch ever printed.
+   */
+  tag?: string | null;
   /** One-shot shadow target; integrator wires --shadow. */
   shadow?: string | null;
   /** Injectable random sampler for shadow rate (test seam). */
@@ -474,6 +507,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
 
   const archetype = opts.archetype?.trim() ? opts.archetype.trim() : null;
   const role = opts.role?.trim() ? opts.role.trim() : null;
+  const tag = normalizeDispatchTag(opts.tag);
 
   let executorName: string;
   let spec: ExecutorSpec;
@@ -643,6 +677,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const producers = lookupInputProducers(repoRoot, producedByIds(opts));
   const identity: Record<string, unknown> = {
     dispatch_id: dispatchId,
+    // Before archetype deliberately: a caller recovering its own dispatch reads
+    // this row by eye as often as by query, and the handle it chose is the
+    // first thing it is looking for.
+    ...(tag != null ? { tag } : {}),
     archetype,
     role,
     resolution: ROW_RESOLUTION[source],
@@ -746,9 +784,29 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // Name the dispatch before it runs. Recovery after a kill used to have only
   // `--output last` to go on, which is a guess about the whole repo's log
   // rather than a handle on this call: a 2026-08-13 dogfood ran two dispatches
-  // at once and one proxy recovered the other's report. A caller that has read
-  // this line never has to guess.
-  opts.onEcho?.(`dispatch id: ${dispatchId} — recover its output with \`fadeno dispatches --output ${dispatchId.slice(0, 8)}\``);
+  // at once and one proxy recovered the other's report.
+  //
+  // This line alone is not enough, and a later dogfood proved it: echoing early
+  // does not help a caller that is killed at its own timeout, because the
+  // harness discards the stream along with the call. Hence `--tag`, which the
+  // caller knows without reading anything. The echo stays for the callers that
+  // do see it, and names the tag when there is one so the two handles never
+  // have to be correlated after the fact.
+  // `tag:<handle>`, not `--tag <handle>`: `--output` takes a value, so the
+  // flag spelling would be swallowed as that value. Echoing a command that
+  // does not parse is worse than echoing none.
+  opts.onEcho?.(
+    `dispatch id: ${dispatchId}${tag != null ? ` (tag: ${tag})` : ''} — recover its output with ` +
+      `\`fadeno dispatches --output ${tag != null ? `tag:${tag}` : dispatchId.slice(0, 8)}\``,
+  );
+  if (tag == null) {
+    // Said at spawn, not at recovery: by the time recovery is needed, the
+    // caller can no longer act on it for this dispatch.
+    opts.onEcho?.(
+      'no --tag given: if this call is killed at a timeout you will lose this id. ' +
+        'Pass `--tag <handle>` to make the report recoverable without it.',
+    );
+  }
 
   appendEvidenceRow(repoRoot, {
     format: DISPATCHES_FORMAT,

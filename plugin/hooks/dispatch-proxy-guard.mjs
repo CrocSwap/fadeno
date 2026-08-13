@@ -45,10 +45,12 @@ function deny(reason) {
       permissionDecision: 'deny',
       permissionDecisionReason:
         `dispatch proxy contract: ${reason} The only Bash a dispatch proxy may run is the single ` +
-        `contract call: fadeno dispatch --archetype ${archetype} <<'FADENO_PROMPT' ` +
-        `...the verbatim task prompt... FADENO_PROMPT — the kernel snapshots the prompt and ` +
-        `writes the evidence rows itself. Do not inspect the repo or attempt the task; relay ` +
-        `the dispatch report verbatim instead.`,
+        `contract call: fadeno dispatch --archetype ${archetype} --tag ${archetype}-<slug> ` +
+        `<<'FADENO_PROMPT' ...the verbatim task prompt... FADENO_PROMPT — the kernel snapshots ` +
+        `the prompt and writes the evidence rows itself. Substitute <slug> with 2-4 hyphenated ` +
+        `words naming this task; the tag accepts only letters, digits, dot, underscore and ` +
+        `hyphen, so angle brackets left in place are refused here. Do not inspect the repo or ` +
+        `attempt the task; relay the dispatch report verbatim instead.`,
     },
   });
 }
@@ -82,10 +84,14 @@ const PROMPT_FILE = String.raw`${PROMPT_DIR}/[A-Za-z0-9._-]+`;
 // legacy conditional-expansion spelling.
 const CLI = String.raw`(fadeno|"\$CLAUDE_PLUGIN_ROOT/bin/fadeno"|"\$\{CLAUDE_PLUGIN_ROOT[^"]*\}fadeno")`;
 const HEREDOC_TAIL = String.raw` *<<-? *'FADENO_PROMPT'`;
+const TAG = String.raw`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`;
 const ALLOWED = [
   // PRIMARY contract: the prompt piped on stdin via quoted heredoc — the
-  // kernel snapshots it and writes the evidence rows itself.
-  new RegExp(String.raw`^${CLI} dispatch --archetype ${archetype}${HEREDOC_TAIL}$`),
+  // kernel snapshots it and writes the evidence rows itself. `--tag` is
+  // optional in the grammar but expected in practice: it is the only handle
+  // that survives this Bash call being killed at its timeout, which is exactly
+  // when recovery is needed.
+  new RegExp(String.raw`^${CLI} dispatch --archetype ${archetype}( --tag ${TAG})?${HEREDOC_TAIL}$`),
   // Retry of an already-written prompt file.
   new RegExp(
     String.raw`^${CLI} dispatch --archetype ${archetype} --prompt-file ("\$${VAR}"|\$${VAR}|"?${PROMPT_FILE}"?)$`,
@@ -99,8 +105,11 @@ const ALLOWED = [
   // that just timed out reads the ledger at the exact moment the completion
   // row is least likely to exist yet, and reading once is what turned two
   // successful dispatches into reported failures on 2026-08-13.
+  // `tag:<handle>` is the recovery spelling that always parses — `--output`
+  // takes a value, so `--output --tag x` would swallow the flag. A caller
+  // recovering from a timeout should not also have to get flag ordering right.
   new RegExp(
-    String.raw`^${CLI} dispatches --output (last|[0-9a-fA-F-]{8,36})( --wait( [0-9]+)?)?$`,
+    String.raw`^${CLI} dispatches --output (last|tag:${TAG}|[0-9a-fA-F-]{8,36})( --wait( [0-9]+)?)?$`,
   ),
   // LEGACY contract (older init-emitted proxy bodies still in the wild):
   // explicit prompt-file write before the dispatch.

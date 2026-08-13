@@ -106,12 +106,36 @@ test('guard: the recovery read of a killed dispatch output is allowed', () => {
     'fadeno dispatches --output last',
     'fadeno dispatches --output 3f9a1c2e',
     '"$CLAUDE_PLUGIN_ROOT/bin/fadeno" dispatches --output 3f9a1c2e-77aa-4a10-9d1c-0a1b2c3d4e5f',
+    // The handle spelling, which is the one the proxies are told to use: after
+    // a kill the id echo is gone, and the tag is what the proxy still knows.
+    'fadeno dispatches --output tag:worker-parse-retry-header --wait 120',
+    '"$CLAUDE_PLUGIN_ROOT/bin/fadeno" dispatches --output tag:worker-a.b_c-1',
   ]) {
     assert.equal(runGuard(bashEvent('fadeno:dispatch-worker', recovery)), null, recovery);
   }
   // Recovery does not open the door to the list surface or other flags.
   const listing = runGuard(bashEvent('fadeno:dispatch-worker', 'fadeno dispatches --tail 5'));
   assert.equal(listing?.hookSpecificOutput?.permissionDecision, 'deny');
+});
+
+test('guard: the tagged contract call is allowed and still gets the long timeout', () => {
+  const tagged = CONTRACT_CALL.replace(
+    '--archetype worker',
+    '--archetype worker --tag worker-survey-the-repo',
+  );
+  const decision = runGuard(bashEvent('fadeno:dispatch-worker', tagged));
+  assert.deepEqual(decision!.hookSpecificOutput?.updatedInput, { timeout: 600000 });
+});
+
+test('guard: an unsubstituted <slug> placeholder is denied, not passed through', () => {
+  // The proxy body shows `--tag worker-<slug>` as a template. Copied literally
+  // it is not a usable handle, and the kernel would reject it after the guard
+  // had already granted the call — better to say so here, where the message
+  // can name the substitution.
+  const literal = CONTRACT_CALL.replace('--archetype worker', '--archetype worker --tag worker-<slug>');
+  const decision = runGuard(bashEvent('fadeno:dispatch-worker', literal));
+  assert.equal(decision?.hookSpecificOutput?.permissionDecision, 'deny');
+  assert.match(decision!.hookSpecificOutput!.permissionDecisionReason!, /<slug>/);
 });
 
 test('guard: freelancing is denied with an actionable reason', () => {

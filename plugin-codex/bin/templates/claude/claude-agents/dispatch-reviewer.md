@@ -21,12 +21,19 @@ routinely exceed the 2-minute default, and a timeout kill destroys their
 work:
 
 ```bash
-fadeno dispatch --archetype reviewer <<'FADENO_PROMPT'
+fadeno dispatch --archetype reviewer --tag reviewer-<slug> <<'FADENO_PROMPT'
 ...the ENTIRE task prompt, exactly as received — verbatim, every line,
 starting at its very first line; headers, markers, and metadata lines
 included; no paraphrase, no truncation, nothing added...
 FADENO_PROMPT
 ```
+
+Replace `<slug>` with 2-4 hyphenated words naming THIS task
+(`reviewer-parse-retry-header`). The tag is your handle on this dispatch, and the
+only one that survives this Bash call being killed: you choose it before the
+call, whereas the kernel's `dispatch id` is echoed on stderr, which the harness
+discards along with a timed-out call. Make it specific to the task — a
+concurrent proxy that picks the same tag makes both unrecoverable.
 
 The quoted heredoc keeps the shell from expanding anything inside the
 prompt. The kernel snapshots the prompt to `.fadeno/local/prompts/` and
@@ -38,8 +45,9 @@ Then:
    not summarize, trim, reformat, or annotate it.
 
 2. If `fadeno` is not found (exit 127), retry the same call once spelled
-   `"$CLAUDE_PLUGIN_ROOT/bin/fadeno" dispatch --archetype reviewer` with the
-   same heredoc. That retry is the only permitted variation.
+   `"$CLAUDE_PLUGIN_ROOT/bin/fadeno" dispatch --archetype reviewer --tag reviewer-<slug>`
+   with the same tag and the same heredoc. That retry is the only permitted
+   variation.
 
 3. If the command exits non-zero, report its output verbatim and state
    plainly that the dispatch failed. Do NOT perform the review yourself
@@ -52,13 +60,21 @@ Then:
    true when the harness gives up: the executor may still be running, and the
    dispatch may already have succeeded without you seeing it.
 
-   Recover with `fadeno dispatches --output <id> --wait 120`, using the id the
-   kernel echoed as `dispatch id: <id>` on stderr when the dispatch started —
-   that id names YOUR dispatch. Fall back to `--output last --wait 120` only
-   if that line is not in the output you can see; `last` resolves across the
-   whole repo's evidence log and with concurrent dispatches can hand you
-   someone else's report. (Same `$CLAUDE_PLUGIN_ROOT` retry rule as step 2.)
-   This recovery call is the only other Bash permitted.
+   Recover with the tag you launched with — the same one, exactly:
+
+   ```bash
+   fadeno dispatches --output tag:reviewer-<slug> --wait 120
+   ```
+
+   The tag is why this works after a kill: you still know it, because you chose
+   it. Use `--output last --wait 120` ONLY if you launched without a tag, and
+   distrust what it returns — `last` resolves across the whole repo's evidence
+   log, and on 2026-08-14 it handed a proxy a concurrent dispatch's report,
+   which very nearly got relayed as its own. It now refuses outright when
+   dispatches overlapped, so an error from `last` is it protecting you, not a
+   failure to recover: re-run with your tag or the id. (Same
+   `$CLAUDE_PLUGIN_ROOT` retry rule as step 2.) This recovery call is the only
+   other Bash permitted.
 
    `--wait` is the point, not a detail. The kernel writes the completion row
    only when the executor exits, so a caller that just timed out is reading at

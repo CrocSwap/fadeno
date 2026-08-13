@@ -13939,7 +13939,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.23";
+  if (true) return "0.6.0-rc.24";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -17519,6 +17519,18 @@ var DispatchCommandError = class extends Error {
 };
 var DISPATCHES_FILE = (0, import_node_path12.join)(".fadeno", "dispatches.jsonl");
 var DISPATCHES_FORMAT = "0.2";
+var DISPATCH_TAG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+function normalizeDispatchTag(tag) {
+  if (tag == null) return null;
+  const trimmed = tag.trim();
+  if (trimmed === "") return null;
+  if (!DISPATCH_TAG_RE.test(trimmed)) {
+    throw new DispatchCommandError(
+      `--tag "${trimmed}" is not a valid handle: use 1-64 characters of letters, digits, dot, underscore or hyphen, starting with a letter or digit.`
+    );
+  }
+  return trimmed;
+}
 var DISPATCH_OUTCOMES = ["ok", "failed", "empty"];
 function deriveDispatchOutcome(row) {
   if (row.error != null || row.signal != null) return "failed";
@@ -17675,6 +17687,7 @@ function runDispatch(opts) {
   const profile = layered.profile;
   const archetype = opts.archetype?.trim() ? opts.archetype.trim() : null;
   const role = opts.role?.trim() ? opts.role.trim() : null;
+  const tag = normalizeDispatchTag(opts.tag);
   let executorName;
   let spec;
   let active = null;
@@ -17799,6 +17812,10 @@ function runDispatch(opts) {
   const producers = lookupInputProducers(repoRoot, producedByIds(opts));
   const identity = {
     dispatch_id: dispatchId,
+    // Before archetype deliberately: a caller recovering its own dispatch reads
+    // this row by eye as often as by query, and the handle it chose is the
+    // first thing it is looking for.
+    ...tag != null ? { tag } : {},
     archetype,
     role,
     resolution: ROW_RESOLUTION[source],
@@ -17883,7 +17900,14 @@ function runDispatch(opts) {
   (spec.writeAccess === false ? " [write_access: none]" : "");
   opts.onEcho?.(echo);
   opts.onEcho?.(`external sandbox: ${executorName} (${command2.join(" ")}) runs outside the current harness via ${transport}; evidence \u2192 ${DISPATCHES_FILE}`);
-  opts.onEcho?.(`dispatch id: ${dispatchId} \u2014 recover its output with \`fadeno dispatches --output ${dispatchId.slice(0, 8)}\``);
+  opts.onEcho?.(
+    `dispatch id: ${dispatchId}${tag != null ? ` (tag: ${tag})` : ""} \u2014 recover its output with \`fadeno dispatches --output ${tag != null ? `tag:${tag}` : dispatchId.slice(0, 8)}\``
+  );
+  if (tag == null) {
+    opts.onEcho?.(
+      "no --tag given: if this call is killed at a timeout you will lose this id. Pass `--tag <handle>` to make the report recoverable without it."
+    );
+  }
   appendEvidenceRow(repoRoot, {
     format: DISPATCHES_FORMAT,
     timestamp: now.toISOString(),
@@ -18666,6 +18690,11 @@ function runDispatches(opts = {}) {
     summary: summarize(shown.length, entries.length, skipped, skippedNewerFormat, true, path)
   };
 }
+function overlaps(a, b) {
+  const start = (rec) => rec.requestedAt ?? Number.NEGATIVE_INFINITY;
+  const end = (rec) => rec.completedAt ?? Number.POSITIVE_INFINITY;
+  return start(a) < end(b) && start(b) < end(a);
+}
 function loadOutputRecords(absolute) {
   const byId = /* @__PURE__ */ new Map();
   let lastWithSnapshot = null;
@@ -18687,21 +18716,52 @@ function loadOutputRecords(absolute) {
     if (event !== "dispatch_requested" && event !== "dispatch_completed") continue;
     let rec = byId.get(dispatchId);
     if (rec == null) {
-      rec = { dispatchId, snapshot: null, outputSha256: null, completed: false };
+      rec = {
+        dispatchId,
+        snapshot: null,
+        outputSha256: null,
+        completed: false,
+        tag: null,
+        requestedAt: null,
+        completedAt: null
+      };
       byId.set(dispatchId, rec);
     }
     const snapshot = str(row.output_snapshot);
     if (snapshot != null) rec.snapshot = snapshot;
+    const tag = str(row.tag);
+    if (tag != null) rec.tag = tag;
+    const stamp = str(row.timestamp);
+    const at = stamp == null ? Number.NaN : Date.parse(stamp);
     if (event === "dispatch_requested" && snapshot != null) {
       lastWithSnapshot = dispatchId;
       requestOrder.push(dispatchId);
+      if (!Number.isNaN(at)) rec.requestedAt = at;
     }
     if (event === "dispatch_completed") {
       rec.completed = true;
       rec.outputSha256 = str(row.output_sha256);
+      const duration = typeof row.duration_ms === "number" ? row.duration_ms : null;
+      rec.completedAt = rec.requestedAt != null && duration != null ? rec.requestedAt + duration : Number.isNaN(at) ? null : at;
     }
   }
   return { byId, lastWithSnapshot, requestOrder };
+}
+var NAME_YOURS = "Name yours: `--tag <handle>` if you launched with one, otherwise the id the kernel echoed as `dispatch id: <id>` at spawn.";
+function resolveByTag(tag, byId, requestOrder) {
+  const hits = requestOrder.map((id) => byId.get(id)).filter((rec) => rec.tag === tag);
+  if (hits.length === 0) {
+    const known = [...new Set([...byId.values()].map((rec) => rec.tag).filter((t) => t != null))];
+    throw new DispatchesCommandError(
+      `no dispatch carries the tag "${tag}".` + (known.length > 0 ? ` Tags in this log: ${known.join(", ")}.` : " No dispatch in this log was launched with a tag.")
+    );
+  }
+  if (hits.length > 1) {
+    throw new DispatchesCommandError(
+      `ambiguous tag "${tag}": ${hits.length} dispatches carry it (${hits.map((rec) => rec.dispatchId.slice(0, 8)).join(", ")}). Use a distinct tag per dispatch, or name the id.`
+    );
+  }
+  return { record: hits[0], resolvedBy: "tag" };
 }
 function resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder) {
   if (query === "last") {
@@ -18715,10 +18775,18 @@ function resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder) {
     if (open.length > 1) {
       const candidates = open.map((id) => id.slice(0, 8)).join(", ");
       throw new DispatchesCommandError(
-        `ambiguous dispatch "last": ${open.length} dispatches are still open (${candidates}). Name yours \u2014 the kernel echoed \`dispatch id: <id>\` on stderr when it started.`
+        `ambiguous dispatch "last": ${open.length} dispatches are still open (${candidates}). ` + NAME_YOURS
       );
     }
-    return { record: byId.get(lastWithSnapshot), resolvedBy: "recency" };
+    const newest = byId.get(lastWithSnapshot);
+    const concurrent = requestOrder.filter((id) => id !== newest.dispatchId).map((id) => byId.get(id)).filter((rec) => overlaps(rec, newest));
+    if (concurrent.length > 0) {
+      const describe = (rec) => rec.tag != null ? `${rec.dispatchId.slice(0, 8)} (tag: ${rec.tag})` : rec.dispatchId.slice(0, 8);
+      throw new DispatchesCommandError(
+        `ambiguous dispatch "last": ${concurrent.length + 1} dispatches ran concurrently and all have finished (${[newest, ...concurrent].map(describe).join(", ")}), so the newest is not necessarily yours. ${NAME_YOURS}`
+      );
+    }
+    return { record: newest, resolvedBy: "recency" };
   }
   const exact = byId.get(query);
   if (exact != null) return { record: exact, resolvedBy: "id" };
@@ -18733,17 +18801,24 @@ function resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder) {
   return { record: hits[0], resolvedBy: "id" };
 }
 function runDispatchesOutput(opts) {
+  const tag = opts.tag?.trim() ? opts.tag.trim() : null;
   const query = opts.dispatchId.trim();
-  if (query === "") {
+  if (tag == null && query === "") {
     throw new DispatchesCommandError(
-      'dispatch id is required (full id, unique prefix of 8+ characters, or "last").'
+      'dispatch id is required (full id, unique prefix of 8+ characters, "last", or --tag <handle>).'
     );
   }
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const ledger = (0, import_node_path13.join)(repoRoot, DISPATCHES_FILE);
   let { byId, lastWithSnapshot, requestOrder } = loadOutputRecords(ledger);
-  let { record: rec, resolvedBy } = resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
+  let rec;
+  let resolvedBy;
+  if (tag != null) {
+    ({ record: rec, resolvedBy } = resolveByTag(tag, byId, requestOrder));
+  } else {
+    ({ record: rec, resolvedBy } = resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder));
+  }
   const waitMs = opts.waitMs ?? 0;
   if (waitMs > 0 && !rec.completed) {
     const pollMs = opts.pollMs ?? 1e3;
@@ -27918,6 +27993,7 @@ function main(argv) {
         "prompt-file": { type: "string" },
         tail: { type: "string" },
         rate: { type: "string" },
+        tag: { type: "string" },
         shadow: { type: "string" },
         comparisons: { type: "boolean" },
         wait: { type: "string" },
@@ -28518,6 +28594,7 @@ resolution${via}:`);
         role: values.role,
         loadout: values.loadout,
         executor: values.executor,
+        tag: values.tag,
         shadow: values.shadow,
         promptFile,
         // Prompt defaults to stdin; the echo goes to stderr so stdout stays
@@ -28640,10 +28717,15 @@ resolution${via}:`);
           }
           waitMs = Math.round(seconds * 1e3);
         }
-        const result2 = runDispatchesOutput({ dispatchId: values.output, waitMs });
+        const inline = values.output.startsWith("tag:") ? values.output.slice(4) : null;
+        const result2 = runDispatchesOutput({
+          dispatchId: inline != null ? "" : values.output,
+          tag: inline ?? values.tag,
+          waitMs
+        });
         process.stdout.write(result2.bytes);
         const note = result2.attested === "match" ? "output attested: sha matches the completion row" : result2.attested === "mismatch" ? "WARNING: snapshot sha does not match the completion row (file changed after the dispatch?)" : waitMs > 0 ? `STILL RUNNING: no completion row after waiting ${Math.round(waitMs / 1e3)}s. The executor has not exited; this is its output so far. Not a failure \u2014 re-run this command to check again.` : "no completion row recorded YET: the executor may still be running, and the kernel writes that row only when it exits. This is its output so far, not a failure. Re-run with --wait <seconds> to wait for the real answer.";
-        const how = result2.resolvedBy === "recency" ? " [resolved by recency: no dispatch was open, so this is the newest in the log \u2014 name the id to be certain]" : "";
+        const how = result2.resolvedBy === "recency" ? " [resolved by recency: nothing was open and nothing overlapped it, so this is the only candidate \u2014 launch with `--tag <handle>` to name it outright]" : result2.resolvedBy === "tag" ? " [resolved by tag]" : "";
         console.error(`[${result2.dispatchId}] ${result2.path} \u2014 ${note}${how}`);
         return 0;
       }
