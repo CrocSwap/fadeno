@@ -736,6 +736,11 @@ export function resolveBinding(
 /** Repo-relative sticky session loadout file, written by `fadeno loadout use`. */
 export const LOADOUT_LOCAL_FILE = join('.fadeno', 'local', 'loadout');
 
+export interface ShadowAttachment {
+  executor: string;      // target name in profile.targets
+  rate?: number;         // (0, 1]; absent = fire on every dispatch
+}
+
 /**
  * Everything the sticky pin carries: the base loadout name plus any session
  * overrides layered on top of it. Overrides belong to their base **by name**;
@@ -747,6 +752,8 @@ export interface LocalLoadoutState {
   loadout: string | null;
   /** archetype → executor target; `{}` when the pin carries no overlay. */
   overrides: Record<string, string>;
+  /** archetype → shadow attachment; `{}` when none. */
+  shadows?: Record<string, ShadowAttachment>;
 }
 
 /**
@@ -813,7 +820,48 @@ export function readLocalLoadoutState(repoRoot: string): LocalLoadoutState {
       overrides[archetype] = target.trim();
     }
   }
-  return { loadout: name.length > 0 ? name : null, overrides };
+  const shadows: Record<string, ShadowAttachment> = {};
+  if (doc.shadows != null) {
+    if (!isMapping(doc.shadows)) {
+      throw localLoadoutPinError('has a `shadows` that is not a mapping (archetype → shadow attachment).');
+    }
+    for (const [archetype, raw] of Object.entries(doc.shadows)) {
+      if (!BARE_IDENTIFIER_RE.test(archetype)) {
+        throw localLoadoutPinError(
+          `has shadow key "${archetype}", which is not a bare lowercase identifier ` +
+            `(${BARE_IDENTIFIER_RE.source}).`,
+        );
+      }
+      if (!isMapping(raw)) {
+        throw localLoadoutPinError(`shadow "${archetype}" is not a mapping ({executor, rate?}).`);
+      }
+      const executor = raw.executor;
+      if (typeof executor !== 'string' || executor.trim().length === 0) {
+        throw localLoadoutPinError(
+          `shadow "${archetype}" targets ${JSON.stringify(executor)}, which is not an executor name.`,
+        );
+      }
+      let rate: number | undefined;
+      if (raw.rate !== undefined) {
+        if (typeof raw.rate !== 'number' || !Number.isFinite(raw.rate) || raw.rate <= 0 || raw.rate > 1) {
+          throw localLoadoutPinError(
+            `shadow "${archetype}" has rate ${JSON.stringify(raw.rate)}, which is not a number in (0, 1].`,
+          );
+        }
+        rate = raw.rate;
+      }
+      const unknown = Object.keys(raw).filter((k) => k !== 'executor' && k !== 'rate');
+      if (unknown.length > 0) {
+        throw localLoadoutPinError(
+          `shadow "${archetype}" has unknown key(s) ${unknown.join(', ')}; only \`executor\` and \`rate\` are allowed.`,
+        );
+      }
+      shadows[archetype] = rate == null ? { executor: executor.trim() } : { executor: executor.trim(), rate };
+    }
+  }
+  const out: LocalLoadoutState = { loadout: name.length > 0 ? name : null, overrides };
+  if (Object.keys(shadows).length > 0) out.shadows = shadows;
+  return out;
 }
 
 /**
@@ -836,23 +884,57 @@ export function readLocalLoadout(repoRoot: string): string | null {
  * nothing to decorate, and without them it is a removal (`rmSync`), not a write.
  */
 export function writeLocalLoadoutState(repoRoot: string, state: LocalLoadoutState): string {
-  const keys = Object.keys(state.overrides).sort();
+  const overrideKeys = Object.keys(state.overrides).sort();
+  const shadowKeys = Object.keys(state.shadows ?? {}).sort();
   if (state.loadout == null) {
+    const hasContent = overrideKeys.length > 0 || shadowKeys.length > 0;
     throw new ExecutorProfileError(
-      keys.length > 0
-        ? `Cannot pin override(s) ${keys.join(', ')} with no base loadout — session overrides ` +
-            'decorate a base by name. Fix: select one with `fadeno loadout use <name>` first.'
+      hasContent
+        ? `Cannot pin ${[...overrideKeys.map((k) => `override ${k}`), ...shadowKeys.map((k) => `shadow ${k}`)].join(', ')} with no base loadout — session state ` +
+            'decorates a base by name. Fix: select one with `fadeno loadout use <name>` first.'
         : `Cannot write ${LOADOUT_LOCAL_FILE} with no loadout — remove the pin file instead.`,
     );
   }
+  // Validate shadows on write (mirrors read validation)
+  if (state.shadows != null) {
+    for (const [archetype, att] of Object.entries(state.shadows)) {
+      if (!BARE_IDENTIFIER_RE.test(archetype)) {
+        throw new ExecutorProfileError(`shadow key "${archetype}" is not a bare identifier.`);
+      }
+      if (typeof att.executor !== 'string' || att.executor.trim().length === 0) {
+        throw new ExecutorProfileError(`shadow "${archetype}" has empty executor.`);
+      }
+      if (att.rate !== undefined && (typeof att.rate !== 'number' || !Number.isFinite(att.rate) || att.rate <= 0 || att.rate > 1)) {
+        throw new ExecutorProfileError(`shadow "${archetype}" has invalid rate ${String(att.rate)}.`);
+      }
+    }
+  }
   const path = join(repoRoot, LOADOUT_LOCAL_FILE);
   mkdirSync(dirname(path), { recursive: true });
-  const sorted: Record<string, string> = {};
-  for (const archetype of keys) sorted[archetype] = state.overrides[archetype]!;
-  const body = keys.length === 0
-    ? `${state.loadout}\n`
-    : `${JSON.stringify({ loadout: state.loadout, overrides: sorted })}\n`;
-  writeFileSync(path, body, 'utf8');
+  const hasOverrides = overrideKeys.length > 0;
+  const hasShadows = shadowKeys.length > 0;
+  if (!hasOverrides && !hasShadows) {
+    writeFileSync(path, `${state.loadout}\n`, 'utf8');
+    return path;
+  }
+  const out: Record<string, unknown> = { loadout: state.loadout };
+  if (hasOverrides) {
+    const sorted: Record<string, string> = {};
+    for (const archetype of overrideKeys) sorted[archetype] = state.overrides[archetype]!;
+    out.overrides = sorted;
+  }
+  if (hasShadows) {
+    const sortedShadows: Record<string, ShadowAttachment> = {};
+    for (const archetype of shadowKeys) {
+      const att = state.shadows![archetype]!;
+      sortedShadows[archetype] = att.rate == null ? { executor: att.executor } : { executor: att.executor, rate: att.rate };
+    }
+    out.shadows = sortedShadows;
+  }
+  // Sorted keys: loadout, overrides?, shadows? — produce deterministic bytes
+  const ordered: Record<string, unknown> = {};
+  for (const key of Object.keys(out).sort()) ordered[key] = out[key];
+  writeFileSync(path, `${JSON.stringify(ordered)}\n`, 'utf8');
   return path;
 }
 
@@ -939,6 +1021,14 @@ export function applicableOverrides(
 ): Record<string, string> {
   if (active == null || state.loadout !== active.name) return {};
   return state.overrides;
+}
+
+export function applicableShadows(
+  state: LocalLoadoutState,
+  active: ActiveLoadout | null,
+): Record<string, ShadowAttachment> {
+  if (active == null || state.loadout !== active.name) return {};
+  return state.shadows ?? {};
 }
 
 /** How a role landed on its executor, in resolution order. */

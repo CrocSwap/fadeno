@@ -27,6 +27,9 @@ export interface ConstraintContext {
     provider: string | null;
   }>;
   harness: string;
+  /** Present and true when this resolution is a shadow duplicate, so a
+   * project constraint can treat challengers differently from primaries. */
+  shadow?: boolean;
 }
 
 export type ConstraintVerdict =

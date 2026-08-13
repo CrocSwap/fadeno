@@ -529,7 +529,17 @@ test('pin v2: a null loadout is never writable', (t) => {
   // An overlay with nothing to decorate…
   assert.throws(
     () => writeLocalLoadoutState(root, { loadout: null, overrides: { worker: 'luna-cli' } }),
-    /Cannot pin override\(s\) worker with no base loadout/,
+    /Cannot pin override worker with no base loadout/,
+  );
+  // A shadow with nothing to decorate is refused in the same register.
+  assert.throws(
+    () =>
+      writeLocalLoadoutState(root, {
+        loadout: null,
+        overrides: {},
+        shadows: { worker: { executor: 'luna-cli' } },
+      }),
+    /Cannot pin shadow worker with no base loadout/,
   );
   // …and a bare "no loadout", which is a removal, not a write.
   assert.throws(

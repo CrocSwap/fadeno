@@ -13,6 +13,7 @@ import {
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
   applicableOverrides,
+  applicableShadows,
   eligibilityFor,
   explainEligibilityConflict,
   explainProviderConflict,
@@ -123,7 +124,9 @@ export type DispatchRefusalPredicate =
   | 'write_posture'
   | 'eligibility'
   | 'provider_distinctness'
-  | 'constraint_command';
+  | 'constraint_command'
+  | 'shadow_isolation'
+  | 'shadow_resolution';
 
 function producedByIds(opts: AdHocDispatchOptions): string[] {
   if (opts.producedBy == null) return [];
@@ -264,6 +267,10 @@ export interface AdHocDispatchOptions {
   now?: Date;
   /** Resolution echo callback — cli.ts prints it to stderr; the command never prints. */
   onEcho?: (line: string) => void;
+  /** One-shot shadow target; integrator wires --shadow. */
+  shadow?: string | null;
+  /** Injectable random sampler for shadow rate (test seam). */
+  shadowSampler?: () => number;
 }
 
 export interface AdHocDispatchResult {
@@ -389,6 +396,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   let active: ActiveLoadout | null = null;
   // The pin's overlay, already scoped to the loadout that won (name-match).
   let overrides: Record<string, string> = {};
+  let pinState: ReturnType<typeof readLocalLoadoutState> | null = null;
   let source: DispatchResolutionSource;
   // Present on the evidence row only when a fallback chain was walked.
   let resolvedVia: string | null = null;
@@ -416,7 +424,8 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       );
     }
     try {
-      const pin = readLocalLoadoutState(repoRoot);
+      pinState = readLocalLoadoutState(repoRoot);
+      const pin = pinState;
       active = resolveActiveLoadout({
         flagValue: opts.loadout ?? null,
       envValue: opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null,
@@ -692,6 +701,255 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   }
   if (spawned.error != null) row.error = spawned.error.message;
   appendEvidenceRow(repoRoot, row);
+
+  // Shadow duplication — fires after primary completion, regardless of exit code. Not on refusal.
+  try {
+    const hasFlag = typeof opts.shadow === 'string' && opts.shadow.trim().length > 0;
+    let shadowExecutorNameInner: string | null = null;
+    let shadowSourceTag: 'flag' | 'attachment' | null = null;
+    let attachmentRate: number | undefined;
+    if (hasFlag) {
+      shadowExecutorNameInner = opts.shadow!.trim();
+      shadowSourceTag = 'flag';
+    } else if (archetype != null) {
+      const effectivePin = pinState ?? readLocalLoadoutState(repoRoot);
+      const shadowsForLoadout = applicableShadows(effectivePin, active);
+      const att = shadowsForLoadout[archetype];
+      if (att != null) {
+        shadowExecutorNameInner = att.executor;
+        shadowSourceTag = 'attachment';
+        attachmentRate = att.rate;
+      }
+    }
+    if (shadowExecutorNameInner != null && shadowSourceTag != null) {
+      // Rate sampling for attachments; flag always fires.
+      if (shadowSourceTag === 'attachment' && attachmentRate != null) {
+        const sampler = opts.shadowSampler ?? Math.random;
+        let roll: number;
+        try { roll = sampler(); } catch { roll = 0; }
+        if (!(roll < attachmentRate)) {
+          shadowExecutorNameInner = null;
+          shadowSourceTag = null;
+        }
+      }
+    }
+    if (shadowExecutorNameInner != null && shadowSourceTag != null) {
+      const shadowNow = new Date();
+      const shadowDispatchId = randomUUID();
+      const shadowId8 = shadowDispatchId.slice(0, 8);
+      const shadowOutputRel = join('.fadeno', 'local', 'outputs', `shadow-${shadowId8}.md`).split('\\').join('/');
+      const shadowOutputAbs = join(repoRoot, shadowOutputRel);
+      const shadowDiffRel = join('.fadeno', 'local', 'outputs', `shadow-${shadowId8}.diff`).split('\\').join('/');
+      const shadowDiffAbs = join(repoRoot, shadowDiffRel);
+      const shadowWorktreeRel = join('.fadeno', 'local', 'shadow', shadowId8).split('\\').join('/');
+      const shadowWorktreeAbs = join(repoRoot, shadowWorktreeRel);
+
+      const writeShadowRefusal = (predicate: DispatchRefusalPredicate, message: string, extra: Record<string, unknown> = {}): void => {
+        const base: Record<string, unknown> = {
+          format: DISPATCHES_FORMAT,
+          timestamp: shadowNow.toISOString(),
+          event: 'dispatch_refused',
+          dispatch_id: shadowDispatchId,
+          archetype,
+          role,
+          resolution: 'shadow',
+          shadow: true,
+          primary_dispatch_id: dispatchId,
+          executor: shadowExecutorNameInner,
+          ...extra,
+          refusal: { predicate, message },
+        };
+        // Trim undefined extras but keep shape; leave minimal for unknown target case.
+        if (base.executor == null) delete base.executor;
+        appendEvidenceRow(repoRoot, base);
+        opts.onEcho?.(`shadow refused: ${message} [${predicate}]`);
+      };
+
+      // Resolve shadow executor
+      const shadowSpec = profile.executors[shadowExecutorNameInner];
+      if (shadowSpec == null) {
+        writeShadowRefusal('shadow_resolution', `shadow target "${shadowExecutorNameInner}" is not a declared executor (${Object.keys(profile.executors).join(', ')}).`);
+      } else if (shadowSpec.adapter === 'host') {
+        writeShadowRefusal('shadow_resolution', `shadow executor "${shadowExecutorNameInner}" is a host/native executor — the kernel cannot duplicate a dispatch natively.`, {
+          model: shadowSpec.model,
+          transport: 'native',
+        });
+      } else {
+        // Eligibility: forbidden refuses, shadow_only allowed
+        const eligibilityState = eligibilityFor(shadowSpec, archetype);
+        if (eligibilityState === 'forbidden') {
+          const msg = explainEligibilityConflict({ executor: shadowExecutorNameInner, spec: shadowSpec }, archetype) ?? `archetype "${archetype}" is forbidden on executor "${shadowExecutorNameInner}".`;
+          writeShadowRefusal('eligibility', msg, { model: shadowSpec.model, transport: 'command' });
+        } else {
+          const writeConflict = explainWriteConflict({ executor: shadowExecutorNameInner, spec: shadowSpec }, archetype, profile);
+          if (writeConflict != null) {
+            writeShadowRefusal('write_posture', writeConflict, { model: shadowSpec.model, transport: 'command' });
+          } else {
+            // Constraint check with shadow:true
+            const shadowConstraintContext = {
+              archetype,
+              role,
+              executor: shadowExecutorNameInner,
+              target: shadowSpec.target ?? null,
+              provider: shadowSpec.provider ?? null,
+              model: shadowSpec.model,
+              transport: 'command' as const,
+              write_access: shadowSpec.writeAccess,
+              write_posture: declaredWritePosture(profile, archetype),
+              active_loadout: active?.name ?? null,
+              overrides,
+              resolved_via: resolvedVia,
+              input_provenance: provenanceFields(lookupInputProducers(repoRoot, producedByIds(opts))),
+              harness: profile.harness ?? 'standalone',
+              shadow: true,
+            } satisfies ConstraintContext;
+            let shadowConstraintVerdict;
+            try {
+              shadowConstraintVerdict = evaluateConstraint(profile, shadowConstraintContext, { cwd: repoRoot });
+            } catch (err) {
+              if (err instanceof ConstraintError) {
+                // A primary lets a constraint SYSTEM error bubble loudly; a
+                // shadow must never take the primary's result down with it, so
+                // the same error lands as a shadow_resolution refusal row.
+                writeShadowRefusal('shadow_resolution', `shadow constraint system error: ${err.message}`);
+                shadowConstraintVerdict = null;
+              } else {
+                throw err;
+              }
+            }
+            if (shadowConstraintVerdict != null && shadowConstraintVerdict.verdict === 'refused') {
+              writeShadowRefusal('constraint_command', shadowConstraintVerdict.reason, { model: shadowSpec.model, transport: 'command' });
+            } else if (shadowConstraintVerdict == null || shadowConstraintVerdict.verdict === 'allowed') {
+              // Isolation + spawn only if not refused
+              // Only proceed if verdict allowed (null means we already wrote refusal)
+              const verdictAllowed = shadowConstraintVerdict != null && shadowConstraintVerdict.verdict === 'allowed';
+              if (verdictAllowed) {
+                // Best-effort prune
+                try { spawnSync('git', ['worktree', 'prune'], { cwd: repoRoot, encoding: 'utf8' }); } catch {}
+                const addResult = spawnSync('git', ['worktree', 'add', '--detach', shadowWorktreeAbs, 'HEAD'], { cwd: repoRoot, encoding: 'utf8' });
+                if (addResult.error != null || addResult.status !== 0) {
+                  const reason = addResult.error?.message ?? (addResult.stderr != null ? String(addResult.stderr).trim() : '') ?? 'worktree add failed';
+                  const msg = reason.length > 0 ? reason : 'shadow worktree could not be created';
+                  writeShadowRefusal('shadow_isolation', msg);
+                } else {
+                  // Echo fire line
+                  const shadowModel = shadowSpec.model != null ? ` (${shadowSpec.model})` : '';
+                  opts.onEcho?.(`shadow → ${shadowExecutorNameInner}${shadowModel} [command]`);
+                  // Build shadow request row identity (mirrors primary but shadow-specific)
+                  const shadowCommand = shadowSpec.command;
+                  const shadowCommandSha = sha256Hex(JSON.stringify(shadowCommand));
+                  const shadowLoadoutField = active == null ? null : { name: active.name, source: active.source };
+                  const shadowIdentity: Record<string, unknown> = {
+                    dispatch_id: shadowDispatchId,
+                    archetype,
+                    role,
+                    resolution: 'shadow',
+                    shadow: true,
+                    primary_dispatch_id: dispatchId,
+                    shadow_source: shadowSourceTag,
+                    gate_eligible: false,
+                    loadout: shadowLoadoutField,
+                    ...(resolvedVia != null ? { resolved_via: resolvedVia } : {}),
+                    executor: shadowExecutorNameInner,
+                    ...(shadowSpec.target != null ? { target: shadowSpec.target, provider: shadowSpec.provider ?? null } : {}),
+                    model: shadowSpec.model,
+                    transport: 'command',
+                    ...(shadowSpec.writeAccess != null ? { write_access: shadowSpec.writeAccess } : {}),
+                    ...(shadowSpec.target != null ? { delivery_transport: 'command' } : {}),
+                    prompt_source: promptSource,
+                    prompt_snapshot: promptSnapshot,
+                    prompt_sha256: promptSha256,
+                    command: shadowCommand,
+                    command_sha256: shadowCommandSha,
+                    output_snapshot: shadowOutputRel,
+                  };
+                  if (eligibilityState === 'shadow_only') {
+                    shadowIdentity.eligibility = 'shadow_only';
+                  }
+                  appendEvidenceRow(repoRoot, {
+                    format: DISPATCHES_FORMAT,
+                    timestamp: shadowNow.toISOString(),
+                    event: 'dispatch_requested',
+                    ...shadowIdentity,
+                  });
+
+                  // Spawn shadow with prompt bytes read from snapshot file
+                  let promptBytes: string;
+                  try {
+                    const snapPath = isAbsolute(promptSnapshot) ? promptSnapshot : join(repoRoot, promptSnapshot);
+                    promptBytes = readFileSync(snapPath, 'utf8');
+                  } catch {
+                    promptBytes = prompt;
+                  }
+                  mkdirSync(join(repoRoot, '.fadeno', 'local', 'outputs'), { recursive: true });
+                  const sfd = openSync(shadowOutputAbs, 'w');
+                  const sStarted = Date.now();
+                  let sSpawned: SpawnSyncReturns<string>;
+                  try {
+                    const [scmd, ...sargs] = shadowCommand;
+                    sSpawned = spawnSync(scmd!, sargs, {
+                      input: promptBytes,
+                      encoding: 'utf8',
+                      cwd: shadowWorktreeAbs,
+                      maxBuffer: SPAWN_MAX_BUFFER,
+                      stdio: ['pipe', sfd, 'pipe'],
+                    });
+                  } finally {
+                    closeSync(sfd);
+                  }
+                  const sDuration = Date.now() - sStarted;
+                  let sStdout = '';
+                  try { sStdout = readFileSync(shadowOutputAbs, 'utf8'); } catch { sStdout = ''; }
+                  const sOutputSha = sha256Hex(sStdout);
+                  // Diff capture after exit (any exit code)
+                  let diffBytes = 0;
+                  let diffContent = '';
+                  try {
+                    spawnSync('git', ['-C', shadowWorktreeAbs, 'add', '-A'], { encoding: 'utf8' });
+                    const diffRes = spawnSync('git', ['-C', shadowWorktreeAbs, 'diff', '--binary', '--cached'], { encoding: 'utf8', maxBuffer: SPAWN_MAX_BUFFER });
+                    if (diffRes.error == null && diffRes.status === 0) {
+                      diffContent = diffRes.stdout ?? '';
+                    } else if (diffRes.stdout != null) {
+                      diffContent = String(diffRes.stdout);
+                    }
+                  } catch {}
+                  try {
+                    mkdirSync(join(repoRoot, '.fadeno', 'local', 'outputs'), { recursive: true });
+                    writeFileSync(shadowDiffAbs, diffContent, 'utf8');
+                    diffBytes = Buffer.byteLength(diffContent);
+                  } catch {
+                    diffBytes = Buffer.byteLength(diffContent);
+                  }
+                  // Best-effort worktree remove
+                  try { spawnSync('git', ['worktree', 'remove', '--force', shadowWorktreeAbs], { cwd: repoRoot, encoding: 'utf8' }); } catch {}
+
+                  const sRow: Record<string, unknown> = {
+                    format: DISPATCHES_FORMAT,
+                    timestamp: new Date().toISOString(),
+                    event: 'dispatch_completed',
+                    ...shadowIdentity,
+                    exit_code: sSpawned!.error != null ? null : sSpawned!.status,
+                    ...(sSpawned!.signal != null ? { signal: sSpawned!.signal } : {}),
+                    duration_ms: sDuration,
+                    output_sha256: sOutputSha,
+                    output_bytes: Buffer.byteLength(sStdout),
+                    diff_snapshot: shadowDiffRel,
+                    diff_bytes: diffBytes,
+                  };
+                  if (sSpawned!.error != null) sRow.error = sSpawned!.error.message;
+                  // Shadow completions OMIT workspace_changed by construction
+                  appendEvidenceRow(repoRoot, sRow);
+                  opts.onEcho?.(`shadow diff: ${diffBytes} bytes → ${shadowDiffRel}`);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // Shadow failures must never affect primary result
+  }
 
   if (spawned.error != null) {
     throw new DispatchCommandError(
