@@ -92,10 +92,20 @@ test('dispatch: resolves the archetype via the active loadout, relays the report
   assert.equal(result.source, 'loadout');
   assert.deepEqual(result.loadout, { name: 'main', source: 'default' });
   assert.equal(result.echo, 'worker → echo-worker (opus) [loadout main]');
-  assert.deepEqual(echoes, [
+  assert.deepEqual(echoes.slice(0, 2), [
     result.echo,
     "external sandbox: echo-worker (node -e let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('REPORT:'+d));) runs outside the current harness via command; evidence → .fadeno/dispatches.jsonl",
   ]);
+  // The caller is told which dispatch is theirs before it runs, so recovery
+  // never has to fall back to guessing with `--output last`.
+  const dispatchId = result.dispatchId;
+  assert.equal(
+    echoes[2],
+    `dispatch id: ${dispatchId} — recover its output with \`fadeno dispatches --output ${dispatchId.slice(0, 8)}\``,
+  );
+  assert.equal(echoes.length, 3);
+  assert.equal(result.outcome, 'ok');
+  assert.equal(result.outputBytes, Buffer.byteLength('REPORT:hello'));
   assert.equal(result.evidencePath, DISPATCHES_FILE);
 
   // Two rows per dispatch: the request row lands before the spawn (so a

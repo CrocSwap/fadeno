@@ -879,7 +879,18 @@ function main(argv: string[]): number {
       console.log(`Fadeno ${result.version} · harness ${result.harness ?? 'unknown'}`);
       console.log(`runtime: ${result.runtime.invocationSource}; managed ${result.runtime.managedVersion ?? 'not installed'}${result.runtime.managedPath ? ` at ${result.runtime.managedPath}` : ''}${result.runtime.versionCurrent ? '' : ' (version skew)'}`);
       console.log(`integrations: ${result.runtime.installedHarnesses.join(', ') || 'none'}`);
-      console.log(`definitions: ${result.definitions.playbooks.length} effective playbooks (project shadows bundled)`);
+      {
+        // Count the split rather than restate the rule. "(project shadows
+        // bundled)" reads as a claim that shadowing happened, and said so on a
+        // repo with no `.fadeno/playbooks/` at all.
+        const total = result.definitions.playbooks.length;
+        const fromProject = result.definitions.projectPlaybooks;
+        const origin =
+          fromProject === 0
+            ? 'all bundled'
+            : `${fromProject} from .fadeno/playbooks, ${total - fromProject} bundled`;
+        console.log(`definitions: ${total} effective playbooks (${origin})`);
+      }
       // The overlay rides on the same line as the pin it decorates: a session
       // override the status line omits is one the user cannot know they are paying for.
       const pinned = Object.keys(result.pinOverrides).length;
@@ -891,7 +902,17 @@ function main(argv: string[]): number {
       if (result.external.length > 0) console.log('external sandbox: selected command slots leave the current harness; evidence → .fadeno/dispatches.jsonl');
       if (result.staleProjectPin) console.log(`stale project pin: ${result.staleProjectPin}`);
       if (result.staleUserPin) console.log(`stale user pin: ${result.staleUserPin}`);
-      if (result.codexMaterialization) console.log(`Codex managed agents: ${result.codexMaterialization.fresh ? 'current' : 'missing/stale'}${result.codexMaterialization.restartRequired ? ' (restart required)' : ''}`);
+      if (result.codexMaterialization) {
+        // Naming the state without naming the fix leaves the reader to guess
+        // which command re-materializes them.
+        const fix = result.codexMaterialization.fresh
+          ? ''
+          : `; run \`fadeno use ${result.activeLoadout?.name ?? '<loadout>'}\` to write them, then start a fresh Codex session`;
+        console.log(
+          `Codex managed agents: ${result.codexMaterialization.fresh ? 'current' : 'missing/stale'}` +
+            `${result.codexMaterialization.restartRequired ? ' (restart required)' : ''}${fix}`,
+        );
+      }
       if (result.next) console.log(`next: ${result.next}`);
       if (values.verbose) console.log(JSON.stringify({ repoRoot: result.repoRoot, paths: result.definitions, roles: result.roles }, null, 2));
       return 0;
@@ -1438,6 +1459,17 @@ function main(argv: string[]): number {
         // CLI-level diagnosis on stderr — a quiet executor otherwise leaves
         // only a bare exit code. stdout stays the executor's pure report.
         console.error(`dispatch: executor ${result.executor} exited ${result.exitCode}`);
+      } else if (result.outcome === 'empty') {
+        // Exit 0 and nothing written is not a success anyone can use: it is
+        // what an unusable model id, or a worker that stopped after
+        // backgrounding its real work, looks like from out here. Say so and
+        // fail, rather than hand the caller an empty report to relay.
+        console.error(
+          `dispatch: executor ${result.executor} exited 0 but produced no output — ` +
+            `nothing was relayed. Check the executor's own stderr above, and that ` +
+            `its model id resolves (fadeno loadout resolve --archetype <archetype>).`,
+        );
+        return 1;
       }
       return result.exitCode;
     }
@@ -1546,7 +1578,13 @@ function main(argv: string[]): number {
             : result.attested === 'mismatch'
               ? 'WARNING: snapshot sha does not match the completion row (file changed after the dispatch?)'
               : 'no completion row recorded: partial output of a killed or in-flight dispatch';
-        console.error(`[${result.dispatchId}] ${result.path} — ${note}`);
+        // Say when `last` was a guess. Nothing was open, so this is the newest
+        // dispatch in the log rather than demonstrably the caller's own.
+        const how =
+          result.resolvedBy === 'recency'
+            ? ' [resolved by recency: no dispatch was open, so this is the newest in the log — name the id to be certain]'
+            : '';
+        console.error(`[${result.dispatchId}] ${result.path} — ${note}${how}`);
         return 0;
       }
       let tail: number | undefined;

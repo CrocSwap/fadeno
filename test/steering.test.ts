@@ -152,7 +152,7 @@ test('Claude steering rewrites worker-shaped Agent input and preserves Explore',
     tool_input: {
       prompt: 'Implement the change exactly.',
       description: 'Implement change',
-      subagent_type: 'general-purpose',
+      subagent_type: 'worker',
       run_in_background: true,
       model: 'opus',
     },
@@ -177,13 +177,37 @@ test('Claude steering rewrites worker-shaped Agent input and preserves Explore',
   assert.equal(runClaudeSteering(root, explore, '{"adapter":"command"}'), '');
 });
 
+test('Claude steering leaves the general-purpose catch-all alone', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: root, withSteering: true });
+  // `general-purpose` is the harness's default subagent — what a director
+  // reaches for to run an analysis, a search, anything at all. It once mapped
+  // to the worker archetype, which turned every generic spawn in a Fadeno repo
+  // into an external dispatch; a 2026-08-13 dogfood then watched the proxy
+  // guard hold the relay contract against the analysis it was asked to do, so
+  // the work simply did not happen. Naming an archetype is opt-in.
+  const generic = {
+    cwd: root,
+    tool_name: 'Agent',
+    tool_input: {
+      prompt: 'Analyze metrics.py and explain why marketability falls as the margin grows.',
+      description: 'Analyze',
+      subagent_type: 'general-purpose',
+    },
+  };
+  assert.equal(runClaudeSteering(root, generic, '{"adapter":"command"}'), '');
+  // Unsteered means untouched: no relay attestation, no host_delivery row.
+  assert.equal(exists(root, '.fadeno/local/pending-relays.jsonl'), false);
+  assert.equal(exists(root, '.fadeno/dispatches.jsonl'), false);
+});
+
 test('Claude steering stashes a relay attestation for proxy-bound spawns', (t) => {
   const root = tempRepo(t);
   runInit({ target: 'claude', repoRoot: root, withSteering: true });
   const rewritten = {
     cwd: root,
     tool_name: 'Agent',
-    tool_input: { prompt: 'Implement the change exactly.', description: 'x', subagent_type: 'general-purpose' },
+    tool_input: { prompt: 'Implement the change exactly.', description: 'x', subagent_type: 'worker' },
   };
   runClaudeSteering(root, rewritten, '{"adapter":"command"}'); // rewrite → proxy: stash
 
@@ -345,12 +369,12 @@ test('Claude steering writes the host_delivery evidence the kernel never sees', 
   const second = 'Implement it.';
   runClaudeSteering(
     root,
-    { ...event, tool_input: { prompt: second, description: 'x', subagent_type: 'general-purpose' } },
+    { ...event, tool_input: { prompt: second, description: 'x', subagent_type: 'worker' } },
     NATIVE_SLOT,
   );
   const latest = evidenceRows(root).at(-1)!;
   assert.equal(latest.archetype, 'worker');
-  assert.equal(latest.agent_type, 'general-purpose');
+  assert.equal(latest.agent_type, 'worker');
   assert.equal(latest.model_override, null);
   assert.equal(read(root, latest.prompt_snapshot), second);
 });
@@ -361,7 +385,7 @@ test('Claude steering leaves command-delivery evidence to the kernel', (t) => {
   const event = {
     cwd: root,
     tool_name: 'Agent',
-    tool_input: { prompt: 'Implement the change.', description: 'x', subagent_type: 'general-purpose' },
+    tool_input: { prompt: 'Implement the change.', description: 'x', subagent_type: 'worker' },
   };
   runClaudeSteering(root, event, '{"adapter":"command","executor":"codex-worker","model":"gpt-5"}');
   const explicit = {

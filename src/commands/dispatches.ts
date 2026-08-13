@@ -3,7 +3,12 @@ import { isAbsolute, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { findRepoRoot } from '../lib/paths.ts';
-import { DISPATCHES_FILE, DISPATCHES_FORMAT } from './dispatch.ts';
+import {
+  DISPATCHES_FILE,
+  DISPATCHES_FORMAT,
+  normalizeDispatchOutcome,
+  type DispatchOutcome,
+} from './dispatch.ts';
 
 export class DispatchesCommandError extends Error {}
 
@@ -85,6 +90,12 @@ export interface DispatchEntry {
    * Host deliveries and refusals record no outcome, so they are always false.
    */
   completed: boolean;
+  /**
+   * What the completion row says the dispatch produced. Stated by the writer,
+   * derived from `exit_code`/`output_bytes` on rows written before the field,
+   * and null when the row carries too little to say either way.
+   */
+  outcome: DispatchOutcome | null;
   exitCode: number | null;
   signal: string | null;
   durationMs: number | null;
@@ -164,6 +175,12 @@ export interface DispatchesOutputResult {
    * killed-mid-flight case this reader exists for.
    */
   attested: DispatchOutputAttestation;
+  /**
+   * How the query landed on this record. `recency` means `last` fell back to
+   * "newest in the log" because nothing was open — a guess worth surfacing
+   * when concurrent dispatches share one evidence file.
+   */
+  resolvedBy: OutputResolution;
 }
 
 function str(value: unknown): string | null {
@@ -261,6 +278,7 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     refusal: refusalOf(row.refusal),
     gateEligible: row.gate_eligible === false ? false : null,
     completed: false,
+    outcome: null,
     exitCode: null,
     signal: null,
     durationMs: null,
@@ -305,6 +323,7 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     refusal: null,
     gateEligible: null,
     completed: false,
+    outcome: null,
     exitCode: null,
     signal: null,
     durationMs: null,
@@ -349,6 +368,9 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
   if (db != null) entry.diffBytes = db;
   const ob = num(row.output_bytes);
   if (ob != null) entry.outputBytes = ob;
+  // Last, so it classifies against the fields this row just folded in rather
+  // than the request row's blanks.
+  entry.outcome = normalizeDispatchOutcome(row.outcome, entry);
 }
 
 /**
@@ -402,6 +424,11 @@ export function renderDispatchLine(entry: DispatchEntry): string {
       parts.push(`[refused: ${entry.refusal.predicate}]`);
       parts.push(entry.refusal.message);
     } else if (entry.completed) {
+      // The outcome leads. `dispatch_completed` only means the spawn reached a
+      // terminal state, and a reader scanning exit codes at the end of a long
+      // line was the thing that let two zero-byte failures read as success.
+      if (entry.outcome === 'failed') parts.push('FAILED');
+      else if (entry.outcome === 'empty') parts.push('NO OUTPUT');
       const code = `exit ${entry.exitCode ?? '?'}${entry.signal != null ? ` (${entry.signal})` : ''}`;
       parts.push(entry.durationMs != null ? `${code} in ${entry.durationMs}ms` : code);
       // Exit-0 + write-capable + an explicit "nothing changed" attestation:
@@ -599,10 +626,13 @@ interface OutputRecord {
 function loadOutputRecords(absolute: string): {
   byId: Map<string, OutputRecord>;
   lastWithSnapshot: string | null;
+  /** Dispatch ids in the order their request rows appeared, snapshots only. */
+  requestOrder: string[];
 } {
   const byId = new Map<string, OutputRecord>();
   let lastWithSnapshot: string | null = null;
-  if (!existsSync(absolute)) return { byId, lastWithSnapshot };
+  const requestOrder: string[] = [];
+  if (!existsSync(absolute)) return { byId, lastWithSnapshot, requestOrder };
 
   for (const line of readFileSync(absolute, 'utf8').split('\n')) {
     if (line.trim() === '') continue;
@@ -626,31 +656,57 @@ function loadOutputRecords(absolute: string): {
     }
     const snapshot = str(row.output_snapshot);
     if (snapshot != null) rec.snapshot = snapshot;
-    if (event === 'dispatch_requested' && snapshot != null) lastWithSnapshot = dispatchId;
+    if (event === 'dispatch_requested' && snapshot != null) {
+      lastWithSnapshot = dispatchId;
+      requestOrder.push(dispatchId);
+    }
     if (event === 'dispatch_completed') {
       rec.completed = true;
       rec.outputSha256 = str(row.output_sha256);
     }
   }
-  return { byId, lastWithSnapshot };
+  return { byId, lastWithSnapshot, requestOrder };
 }
+
+/**
+ * How `last` picked its record. `in-flight` is the keyword's actual purpose —
+ * the one dispatch with no completion row is the killed or still-running one
+ * the caller is trying to recover. `recency` is the weaker fallback, a guess
+ * about the whole repo's log, and is reported as such.
+ */
+export type OutputResolution = 'id' | 'in-flight' | 'recency';
 
 function resolveOutputRecord(
   query: string,
   byId: Map<string, OutputRecord>,
   lastWithSnapshot: string | null,
-): OutputRecord {
+  requestOrder: readonly string[],
+): { record: OutputRecord; resolvedBy: OutputResolution } {
   if (query === 'last') {
     if (lastWithSnapshot == null) {
       throw new DispatchesCommandError(
         'unknown dispatch "last": no output_snapshot has been recorded.',
       );
     }
-    return byId.get(lastWithSnapshot)!;
+    // Recovery, not recency: prefer the dispatch that never reached its
+    // completion row. Concurrent dispatches made bare recency actively wrong —
+    // a 2026-08-13 dogfood had one proxy recover another proxy's report and
+    // very nearly relay it as its own — so when more than one is still open,
+    // refuse and make the caller name the id the kernel echoed at spawn.
+    const open = requestOrder.filter((id) => byId.get(id)?.completed === false);
+    if (open.length === 1) return { record: byId.get(open[0]!)!, resolvedBy: 'in-flight' };
+    if (open.length > 1) {
+      const candidates = open.map((id) => id.slice(0, 8)).join(', ');
+      throw new DispatchesCommandError(
+        `ambiguous dispatch "last": ${open.length} dispatches are still open (${candidates}). ` +
+          'Name yours — the kernel echoed `dispatch id: <id>` on stderr when it started.',
+      );
+    }
+    return { record: byId.get(lastWithSnapshot)!, resolvedBy: 'recency' };
   }
 
   const exact = byId.get(query);
-  if (exact != null) return exact;
+  if (exact != null) return { record: exact, resolvedBy: 'id' };
 
   if (query.length < OUTPUT_ID_PREFIX_MIN) {
     throw new DispatchesCommandError(`unknown dispatch "${query}".`);
@@ -660,7 +716,7 @@ function resolveOutputRecord(
   if (hits.length > 1) {
     throw new DispatchesCommandError(`ambiguous dispatch prefix "${query}".`);
   }
-  return hits[0]!;
+  return { record: hits[0]!, resolvedBy: 'id' };
 }
 
 /**
@@ -685,8 +741,8 @@ export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOu
 
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const { byId, lastWithSnapshot } = loadOutputRecords(join(repoRoot, DISPATCHES_FILE));
-  const rec = resolveOutputRecord(query, byId, lastWithSnapshot);
+  const { byId, lastWithSnapshot, requestOrder } = loadOutputRecords(join(repoRoot, DISPATCHES_FILE));
+  const { record: rec, resolvedBy } = resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
   if (rec.snapshot == null) {
     throw new DispatchesCommandError(`dispatch "${rec.dispatchId}" predates output_snapshot.`);
   }
@@ -703,7 +759,7 @@ export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOu
     : sha256Hex(bytes) === rec.outputSha256
       ? 'match'
       : 'mismatch';
-  return { dispatchId: rec.dispatchId, path: snapshotRel, bytes, attested };
+  return { dispatchId: rec.dispatchId, path: snapshotRel, bytes, attested, resolvedBy };
 }
 
 // ---------------------------------------------------------------------------

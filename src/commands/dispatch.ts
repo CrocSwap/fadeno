@@ -69,6 +69,57 @@ export const DISPATCHES_FILE = join('.fadeno', 'dispatches.jsonl');
 export const DISPATCHES_FORMAT = '0.2';
 
 /**
+ * What a finished command dispatch actually produced.
+ *
+ * `dispatch_completed` says the spawn reached a terminal state, never that the
+ * work happened. A 2026-08-13 dogfood recorded two dispatches as completed
+ * with `exit_code: 1` and `output_bytes: 0` — the sha256 of the empty string —
+ * and the event name alone read as success. This is the field that says which
+ * it was.
+ */
+export type DispatchOutcome = 'ok' | 'failed' | 'empty';
+
+const DISPATCH_OUTCOMES: readonly string[] = ['ok', 'failed', 'empty'];
+
+/**
+ * Classify a completion row from the facts it already carries.
+ *
+ * `failed` covers every way the spawn itself went wrong (spawn error, signal,
+ * nonzero exit). `empty` is the quieter failure — the executor exited 0 and
+ * wrote nothing, which is what an unusable model id, or a worker that stops
+ * after backgrounding its real work, looks like from here.
+ *
+ * Returns null when the row does not carry enough to classify: absent is not a
+ * claim, so a pre-0.6 row missing `output_bytes` renders exactly as it does
+ * today rather than being relabelled by a reader that arrived later.
+ */
+export function deriveDispatchOutcome(row: {
+  exitCode: number | null;
+  signal?: string | null;
+  error?: string | null;
+  outputBytes: number | null;
+}): DispatchOutcome | null {
+  if (row.error != null || row.signal != null) return 'failed';
+  if (row.exitCode == null) return null;
+  if (row.exitCode !== 0) return 'failed';
+  if (row.outputBytes == null) return null;
+  return row.outputBytes === 0 ? 'empty' : 'ok';
+}
+
+/**
+ * The outcome a completion row states, falling back to what its facts imply.
+ * Writers stamp `outcome`; every row written before the field derives to the
+ * same value, so readers need no era test.
+ */
+export function normalizeDispatchOutcome(
+  stated: unknown,
+  row: { exitCode: number | null; signal?: string | null; error?: string | null; outputBytes: number | null },
+): DispatchOutcome | null {
+  if (typeof stated === 'string' && DISPATCH_OUTCOMES.includes(stated)) return stated as DispatchOutcome;
+  return deriveDispatchOutcome(row);
+}
+
+/**
  * Spawn-side relay attestations awaiting a matching dispatch — rows of
  * `{timestamp, prompt_sha256}` stashed by the Claude steering hook when it
  * routes a subtask to a dispatch proxy. Content-keyed, so concurrent
@@ -314,6 +365,14 @@ export interface AdHocDispatchResult {
   durationMs: number;
   promptSha256: string;
   outputSha256: string;
+  /** Bytes the executor wrote to its output snapshot. */
+  outputBytes: number;
+  /**
+   * What the spawn produced, as stamped on the completion row. `empty` is the
+   * case a bare exit code cannot express: the executor succeeded and reported
+   * nothing, so the caller has a "success" with no work behind it.
+   */
+  outcome: DispatchOutcome | null;
   /** Repo-relative path of the evidence log that received the row pair. */
   evidencePath: string;
   transport: 'command' | 'host-command-fallback';
@@ -674,6 +733,12 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     (spec.writeAccess === false ? ' [write_access: none]' : '');
   opts.onEcho?.(echo);
   opts.onEcho?.(`external sandbox: ${executorName} (${command.join(' ')}) runs outside the current harness via ${transport}; evidence → ${DISPATCHES_FILE}`);
+  // Name the dispatch before it runs. Recovery after a kill used to have only
+  // `--output last` to go on, which is a guess about the whole repo's log
+  // rather than a handle on this call: a 2026-08-13 dogfood ran two dispatches
+  // at once and one proxy recovered the other's report. A caller that has read
+  // this line never has to guess.
+  opts.onEcho?.(`dispatch id: ${dispatchId} — recover its output with \`fadeno dispatches --output ${dispatchId.slice(0, 8)}\``);
 
   appendEvidenceRow(repoRoot, {
     format: DISPATCHES_FORMAT,
@@ -711,6 +776,13 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const outputSha256 = sha256Hex(stdout);
   const workspaceAfter = workspaceFingerprint(repoRoot);
 
+  const outputBytes = Buffer.byteLength(stdout);
+  const outcome = deriveDispatchOutcome({
+    exitCode: spawned.error != null ? null : spawned.status,
+    signal: spawned.signal,
+    error: spawned.error?.message ?? null,
+    outputBytes,
+  });
   const row: Record<string, unknown> = {
     format: DISPATCHES_FORMAT,
     timestamp: now.toISOString(),
@@ -720,7 +792,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     ...(spawned.signal != null ? { signal: spawned.signal } : {}),
     duration_ms: durationMs,
     output_sha256: outputSha256,
-    output_bytes: Buffer.byteLength(stdout),
+    output_bytes: outputBytes,
+    // Stated next to the event name so a row read on its own cannot pass as
+    // success on the strength of `dispatch_completed` alone.
+    ...(outcome != null ? { outcome } : {}),
   };
   // Concurrent writers make this attestation, not judgment.
   if (workspaceBefore != null && workspaceAfter != null) {
@@ -950,6 +1025,13 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
                   // Best-effort worktree remove
                   try { spawnSync('git', ['worktree', 'remove', '--force', shadowWorktreeAbs], { cwd: repoRoot, encoding: 'utf8' }); } catch {}
 
+                  const sOutputBytes = Buffer.byteLength(sStdout);
+                  const sOutcome = deriveDispatchOutcome({
+                    exitCode: sSpawned!.error != null ? null : sSpawned!.status,
+                    signal: sSpawned!.signal,
+                    error: sSpawned!.error?.message ?? null,
+                    outputBytes: sOutputBytes,
+                  });
                   const sRow: Record<string, unknown> = {
                     format: DISPATCHES_FORMAT,
                     timestamp: new Date().toISOString(),
@@ -959,7 +1041,8 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
                     ...(sSpawned!.signal != null ? { signal: sSpawned!.signal } : {}),
                     duration_ms: sDuration,
                     output_sha256: sOutputSha,
-                    output_bytes: Buffer.byteLength(sStdout),
+                    output_bytes: sOutputBytes,
+                    ...(sOutcome != null ? { outcome: sOutcome } : {}),
                     diff_snapshot: shadowDiffRel,
                     diff_bytes: diffBytes,
                   };
@@ -1002,6 +1085,8 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     durationMs,
     promptSha256,
     outputSha256,
+    outputBytes,
+    outcome,
     evidencePath: DISPATCHES_FILE,
     transport,
   };

@@ -391,6 +391,73 @@ writers accept only 0.3.
 
 ### Fixed
 
+- **Three paths reported success while producing nothing.** A 2026-08-13
+  dogfood in an unrelated repo found the same shape three times: a terminal
+  state that reads as success next to artifacts that show nothing happened.
+  Two worker dispatches logged `dispatch_completed` with `exit_code: 1` and
+  `output_bytes: 0` — the sha256 of the empty string — and the event name was
+  the only thing most readers looked at. `dispatch_completed` has always meant
+  "the spawn reached a terminal state", never "the work happened", and nothing
+  in the row said which.
+
+  Completion rows now carry an explicit `outcome`: `failed` for any spawn
+  error, signal, or nonzero exit; `empty` for the quieter case where the
+  executor exits 0 and writes nothing; `ok` otherwise. `fadeno dispatches`
+  leads the outcome — `FAILED` / `NO OUTPUT` before the exit code, not after a
+  line of identity — and `fadeno dispatch` now exits 1 on an empty report
+  rather than handing a proxy a blank to relay. Rows written before the field
+  derive the same verdict from the `exit_code` and `output_bytes` they already
+  carry, so the old evidence reclassifies itself; a row carrying too little to
+  say either way stays null, because absent is not a claim. No format bump —
+  the field is additive.
+
+  This also covers the silent model-id failure the same dogfood hit, where
+  `--model grok` against a catalog that now resolves `grok-4.6` produced a
+  zero-byte success twice before anyone noticed. Fadeno cannot pre-validate an
+  arbitrary executor's model ids, but it can refuse to call an empty result a
+  result.
+
+- **`--output last` crossed wires between concurrent dispatches.** `last`
+  resolved to the newest `dispatch_requested` row carrying a snapshot, across
+  the whole repo's evidence log — so with two dispatches in flight, a proxy
+  recovering after a kill could read back the *other* dispatch's report. The
+  same dogfood hit exactly that; the proxy flagged the mismatch rather than
+  passing the work off as its own, which is the behavior the relay contract is
+  for, but the retrieval channel had no notion of caller identity at all.
+
+  The kernel now echoes `dispatch id: <id>` on stderr before the spawn, so a
+  caller can always name its own dispatch, and the proxy agents are instructed
+  to prefer that id. `last` itself is now recovery-shaped rather than
+  recency-shaped: it resolves to the dispatch with no completion row — the
+  killed or in-flight one it exists for — and *refuses*, naming the
+  candidates, when more than one is open. Falling back to recency is still
+  allowed when nothing is open, and says so.
+
+- **The `general-purpose` catch-all was captured as a worker.** The Claude
+  steering hook mapped `general-purpose` onto the worker archetype, which
+  meant every generic subagent spawn in a Fadeno repo became an external
+  dispatch. The dogfood launched one for a direct analysis task and watched it
+  become a `dispatch-worker`, then watched the proxy guard correctly enforce
+  the relay contract on an agent that was never meant to be a proxy — "as a
+  dispatch proxy I'm not permitted to run the analysis myself" — held against
+  the very instructions it had been given. The analysis never happened.
+
+  Only agents that *name* an archetype are steered now: `worker`, `reviewer`,
+  `judge`, and the explicit `dispatch-*` proxies. `general-purpose` is the
+  harness's default subagent — what a director reaches for to run an analysis
+  or a search — and joins Explore, Plan, and unrelated specialists as
+  unsteered. Directors that want archetype routing already have two explicit
+  spellings; the catch-all is not a third.
+
+- **`status` claimed project playbooks that did not exist.** The definitions
+  line read `N effective playbooks (project shadows bundled)` — a statement of
+  the shadowing rule that reads as a claim shadowing occurred, printed
+  verbatim on repos with no `.fadeno/playbooks/` at all. It now counts the
+  split: `all bundled`, or `N from .fadeno/playbooks, M bundled`. The Codex
+  managed-agents line names its remedy (`fadeno use <loadout>`) instead of
+  reporting `missing/stale (restart required)` and leaving the reader to find
+  the command.
+
 - **A native slot stays native instead of nesting a subprocess.** The dispatch
   proxy agents advertise themselves as MUST-BE-USED, so a director names
   `fadeno:dispatch-judge` directly — and the Claude steering hook used to

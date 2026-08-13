@@ -291,7 +291,7 @@ test('Claude steering hook: resolver error denies a spawn that would have been r
   const event = {
     cwd: root,
     tool_name: 'Agent',
-    tool_input: { prompt: 'Implement it.', description: 'x', subagent_type: 'general-purpose' },
+    tool_input: { prompt: 'Implement it.', description: 'x', subagent_type: 'worker' },
   };
   const result = runSteeringHook(
     root,

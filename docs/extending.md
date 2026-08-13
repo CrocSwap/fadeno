@@ -364,11 +364,12 @@ never attempts the task itself as a fallback.
 `fadeno init --claude` installs two local `PreToolUse` hooks by default; use
 `--no-steering` to opt out. The **spawn-rewrite hook** calls the structured
 `fadeno loadout resolve --archetype …` surface with the Claude harness identity
-and rewrites command-delivered general-purpose/worker, reviewer, and judge
-`Agent` calls to proxies. Host targets are rewritten to the matching Fadeno
+and rewrites command-delivered worker, reviewer, and judge `Agent` calls to
+proxies — agents that name an archetype, never the `general-purpose`
+catch-all. Host targets are rewritten to the matching Fadeno
 role agent and requested model; the `current-host` default remains inert. It
-preserves the rest of the Agent input and leaves Explore/Plan and unrelated
-specialists unsteered. Plugin users can combine the flag with `--data-only`; the
+preserves the rest of the Agent input and leaves general-purpose, Explore/Plan,
+and unrelated specialists unsteered. Plugin users can combine the flag with `--data-only`; the
 hook then targets the plugin-scoped `fadeno:dispatch-*` agents.
 
 When it steers a spawn to a host role agent instead, the same hook appends a

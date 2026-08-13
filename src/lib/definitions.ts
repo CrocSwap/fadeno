@@ -92,11 +92,20 @@ export function definitionSourceSummary(repoRoot: string): {
   project: string;
   builtin: string;
   playbooks: string[];
+  /** How many effective names come from a file under `.fadeno/playbooks/`. */
+  projectPlaybooks: number;
 } {
+  const projectNames = new Set(
+    namesIn(join(projectRoot(repoRoot), 'playbooks'), /\.ya?ml$/i).map((file) =>
+      file.replace(/\.ya?ml$/i, ''),
+    ),
+  );
+  const playbooks = listDefinitionNames(repoRoot);
   return {
     project: projectRoot(repoRoot),
     builtin: builtinRoot(),
-    playbooks: listDefinitionNames(repoRoot),
+    playbooks,
+    projectPlaybooks: playbooks.filter((name) => projectNames.has(name)).length,
   };
 }
 

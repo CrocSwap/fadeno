@@ -352,9 +352,11 @@ and a host executor without one → restart required. Locked engine fallbacks us
 without claiming host attestation. On Claude, init emits a local
 `PreToolUse` script under `.fadeno/local/` and non-destructively merges one
 `Agent` hook into `.claude/settings.local.json`. The hook first asks the CLI
-whether a loadout is active; only then does it map general-purpose/worker,
-reviewer, and judge launches to the corresponding dispatch proxy. Explore,
-Plan, and unrelated specialists stay unsteered. A director that names
+whether a loadout is active; only then does it map worker, reviewer, and judge
+launches to the corresponding dispatch proxy. Only agents that name an
+archetype are steered: `general-purpose` is the harness's catch-all, so
+capturing it turned every generic spawn in a Fadeno repo into an external
+dispatch. It, Explore, Plan, and unrelated specialists stay unsteered. A director that names
 `dispatch-<archetype>` itself is resolved the same way rather than taken at its
 word: the transport belongs to the loadout, and a host slot is pulled back to
 the host agent instead of shelling out to a subprocess of this same harness —

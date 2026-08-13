@@ -335,6 +335,9 @@ test('dispatches: entries are structured data (what --json prints)', (t) => {
     refusal: null,
     gateEligible: null,
     completed: true,
+    // exit 0 with no `output_bytes` on the row: not enough to say `ok` or
+    // `empty`, and absent is not a claim.
+    outcome: null,
     exitCode: 0,
     signal: null,
     durationMs: 42,
@@ -760,4 +763,138 @@ test('dispatches --output: errors for unknown, ambiguous, pre-snapshot, and miss
     (err: unknown) =>
       err instanceof DispatchesCommandError && /output snapshot missing: \.fadeno\/local\/outputs\/missing\.md/.test(err.message),
   );
+});
+
+/**
+ * The exit-0-with-nothing cluster. A 2026-08-13 dogfood found three separate
+ * paths reporting success while producing nothing — two worker dispatches
+ * logged `dispatch_completed` with `exit_code: 1` and `output_bytes: 0` (the
+ * sha256 of the empty string), and the terminal state read as success. The
+ * event name says the spawn ended; `outcome` says what it produced.
+ */
+
+function dispatchWith(t: TestContext, command: string[]): string {
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(
+    join(root, '.fadeno', 'executors.yaml'),
+    stringifyYaml({
+      executors: { probe: { adapter: 'command', command, model: 'opus' } },
+      loadouts: { main: { worker: 'probe' } },
+      default_loadout: 'main',
+    }),
+  );
+  return root;
+}
+
+test('dispatches: a nonzero exit is stamped and rendered as FAILED, not completed', (t) => {
+  const root = dispatchWith(t, ['node', '-e', 'process.exit(1)']);
+  const dispatched = runDispatch({
+    archetype: 'worker',
+    prompt: 'hello',
+    repoRoot: root,
+    env: null,
+    now: new Date('2026-08-12T12:00:00Z'),
+  });
+  assert.equal(dispatched.exitCode, 1);
+  assert.equal(dispatched.outcome, 'failed');
+  assert.equal(dispatched.outputBytes, 0);
+
+  const result = runDispatches({ repoRoot: root });
+  const entry = result.entries[0]!;
+  assert.equal(entry.completed, true, 'the spawn did reach a terminal state');
+  assert.equal(entry.outcome, 'failed', 'and it failed — the two are different facts');
+  assert.match(result.lines[0]!, /FAILED {2}exit 1 in \d+ms/);
+});
+
+test('dispatches: exit 0 with no output is stamped `empty`, not success', (t) => {
+  // What an unusable model id looks like from here: the executor CLI rejects
+  // the id, exits 0 anyway, and writes nothing. The dogfood ran `--model grok`
+  // against a loadout that now resolves `grok-4.6`, and got a zero-byte
+  // "success" twice before anyone noticed.
+  const root = dispatchWith(t, ['node', '-e', '0']);
+  const dispatched = runDispatch({
+    archetype: 'worker',
+    prompt: 'hello',
+    repoRoot: root,
+    env: null,
+    now: new Date('2026-08-12T12:00:00Z'),
+  });
+  assert.equal(dispatched.exitCode, 0);
+  assert.equal(dispatched.outputBytes, 0);
+  assert.equal(dispatched.outcome, 'empty');
+
+  const result = runDispatches({ repoRoot: root });
+  assert.equal(result.entries[0]!.outcome, 'empty');
+  assert.match(result.lines[0]!, /NO OUTPUT {2}exit 0 in \d+ms/);
+});
+
+test('dispatches: rows written before `outcome` still classify from their own facts', (t) => {
+  const root = seedLog(t, [
+    requested({ dispatch_id: 'd9' }),
+    // No `outcome` key — the pre-0.6 shape. exit 1 is failure whoever wrote it.
+    completed({ dispatch_id: 'd9', exit_code: 1, output_bytes: 0 }),
+  ]);
+  const result = runDispatches({ repoRoot: root });
+  assert.equal(result.entries[0]!.outcome, 'failed');
+  assert.match(result.lines[0]!, /FAILED/);
+});
+
+test('dispatches --output last: prefers the open dispatch over a newer completed one', (t) => {
+  const mineSnap = '.fadeno/local/outputs/mine.out';
+  const theirsSnap = '.fadeno/local/outputs/theirs.out';
+  const root = seedLog(t, [
+    // Mine starts first and is killed — no completion row.
+    requested({ dispatch_id: 'aaaaaaaa-1111-4000-8000-000000000001', output_snapshot: mineSnap }),
+    // Theirs starts second and finishes. Bare recency would hand me this one.
+    requested({ dispatch_id: 'bbbbbbbb-2222-4000-8000-000000000002', output_snapshot: theirsSnap }),
+    completed({
+      dispatch_id: 'bbbbbbbb-2222-4000-8000-000000000002',
+      output_snapshot: theirsSnap,
+      output_sha256: sha256Hex('an unrelated code change'),
+    }),
+  ]);
+  seedSnapshot(root, mineSnap, 'my partial report');
+  seedSnapshot(root, theirsSnap, 'an unrelated code change');
+
+  const last = runDispatchesOutput({ repoRoot: root, dispatchId: 'last' });
+  assert.equal(last.dispatchId, 'aaaaaaaa-1111-4000-8000-000000000001');
+  assert.equal(last.bytes, 'my partial report');
+  assert.equal(last.resolvedBy, 'in-flight');
+  assert.equal(last.attested, 'incomplete');
+});
+
+test('dispatches --output last: refuses rather than guess between two open dispatches', (t) => {
+  const aSnap = '.fadeno/local/outputs/a.out';
+  const bSnap = '.fadeno/local/outputs/b.out';
+  const root = seedLog(t, [
+    requested({ dispatch_id: 'aaaaaaaa-1111-4000-8000-000000000001', output_snapshot: aSnap }),
+    requested({ dispatch_id: 'bbbbbbbb-2222-4000-8000-000000000002', output_snapshot: bSnap }),
+  ]);
+  seedSnapshot(root, aSnap, 'a');
+  seedSnapshot(root, bSnap, 'b');
+
+  assert.throws(
+    () => runDispatchesOutput({ repoRoot: root, dispatchId: 'last' }),
+    (err: unknown) => {
+      assert.ok(err instanceof DispatchesCommandError);
+      // Both candidates named, so the caller can pick without reading the log.
+      assert.match(err.message, /2 dispatches are still open \(aaaaaaaa, bbbbbbbb\)/);
+      assert.match(err.message, /dispatch id: <id>/);
+      return true;
+    },
+  );
+});
+
+test('dispatches --output: an explicit id reports that it resolved by id', (t) => {
+  const snap = '.fadeno/local/outputs/only.out';
+  const root = seedLog(t, [
+    requested({ dispatch_id: 'aaaaaaaa-1111-4000-8000-000000000001', output_snapshot: snap }),
+  ]);
+  seedSnapshot(root, snap, 'body');
+  const byId = runDispatchesOutput({
+    repoRoot: root,
+    dispatchId: 'aaaaaaaa-1111-4000-8000-000000000001',
+  });
+  assert.equal(byId.resolvedBy, 'id');
 });

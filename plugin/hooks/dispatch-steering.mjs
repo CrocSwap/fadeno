@@ -11,7 +11,7 @@ import { join } from 'node:path';
 // emitters (`fadeno plugin` and `fadeno init --claude`) replace this literal
 // with the package version; the template keeps 'dev', so a row reading 'dev'
 // means the template was executed directly rather than an installed copy.
-const HOOK_VERSION = '0.6.0-rc.20';
+const HOOK_VERSION = '0.6.0-rc.21';
 
 function finish(value) {
   if (value != null) process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -71,16 +71,23 @@ function stashRelay() {
 // in-session agent rather than shelling out to a subprocess of this same
 // harness, which re-enters this same steering one level down.
 const explicitProxy = /^dispatch-(worker|reviewer|judge)$/.test(bare);
+// Only agents that NAME an archetype are steered. `general-purpose` used to map
+// to `worker` and must not: it is the harness's catch-all, the default when a
+// director wants a subagent at all, so capturing it turned every generic spawn
+// in a Fadeno repo into an external dispatch. A 2026-08-13 dogfood launched
+// general-purpose for a direct analysis task, watched it become a
+// `dispatch-worker`, and then watched the proxy guard hold the relay contract
+// against the very instructions it was given — "as a dispatch proxy I'm not
+// permitted to run the analysis myself" — so the analysis never happened.
+// Directors that want archetype routing have two explicit spellings already
+// (`fadeno:<archetype>` and `dispatch-<archetype>`); the catch-all is not a
+// third, and reading it as one costs a task.
 const archetype = explicitProxy
   ? bare.slice('dispatch-'.length)
-  : bare === 'general-purpose' || bare === 'worker'
-    ? 'worker'
-    : bare === 'reviewer'
-      ? 'reviewer'
-      : bare === 'judge'
-        ? 'judge'
-        : null;
-if (archetype == null) finish(null); // Explore, Plan, and unrelated specialists stay unsteered.
+  : bare === 'worker' || bare === 'reviewer' || bare === 'judge'
+    ? bare
+    : null;
+if (archetype == null) finish(null); // general-purpose, Explore, Plan, and unrelated specialists stay unsteered.
 
 /**
  * Leave the spawn exactly as the director asked. A named proxy still lands on
