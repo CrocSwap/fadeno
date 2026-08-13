@@ -4,6 +4,7 @@ import { loadLayeredProfile, type ConfigLayer, type LayeredProfile } from '../li
 import {
   activeHarness,
   applicableOverrides,
+  applicableShadows,
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
   eligibilityFor,
@@ -20,6 +21,7 @@ import {
   type ExecutorProfile,
   type LocalLoadoutState,
   type RoleResolutionSource,
+  type ShadowAttachment,
 } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import type { UserPathOptions } from '../lib/user-paths.ts';
@@ -32,6 +34,21 @@ export interface LoadoutSlotView {
   executor: string;
   model: string | null;
   adapter: 'command' | 'host';
+}
+
+/** Archetype-keyed shadow attachment enriched for display/JSON. */
+export interface ShadowAttachmentView {
+  executor: string;
+  model: string | null;
+  rate?: number;
+  /** Delivery adapter for rendering; omitted from JSON when not needed. */
+  adapter?: 'command' | 'host';
+}
+
+/** A pinned shadow whose target is no longer a declared executor. */
+export interface StaleShadowView {
+  archetype: string;
+  target: string;
 }
 
 /**
@@ -47,6 +64,8 @@ export interface LoadoutEffectiveRow extends LoadoutSlotView {
   baseExecutor: string | null;
   /** Present when the resolved target is not fully eligible for this archetype. */
   eligibility?: EligibilityState;
+  /** Shadow attachment for this archetype when one is in force. */
+  shadow?: ShadowAttachmentView;
 }
 
 /** A pinned override whose target is no longer a declared executor. */
@@ -168,6 +187,8 @@ function activeFor(
   stalePin: string | null;
   pin: LocalLoadoutState;
   overrides: Record<string, string>;
+  shadows: Record<string, ShadowAttachment>;
+  shadow_attachments: Record<string, ShadowAttachmentView>;
 } {
   const pin = readPin(repoRoot);
   const localValue = pin.loadout;
@@ -182,7 +203,17 @@ function activeFor(
       userFileValue: strict ? userValue : staleUserPin == null ? userValue : null,
       profile,
     });
-    return { active, stalePin, pin, overrides: applicableOverrides(pin, active) };
+    const overrides = applicableOverrides(pin, active);
+    const shadows = applicableShadows(pin, active);
+    const shadow_attachments: Record<string, ShadowAttachmentView> = {};
+    for (const [archetype, att] of Object.entries(shadows)) {
+      const spec = profile.executors[att.executor];
+      if (spec == null) continue;
+      shadow_attachments[archetype] = att.rate == null
+        ? { executor: att.executor, model: spec.model }
+        : { executor: att.executor, model: spec.model, rate: att.rate };
+    }
+    return { active, stalePin, pin, overrides, shadows, shadow_attachments };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new LoadoutError(err.message);
     throw err;
@@ -214,7 +245,8 @@ function effectiveRows(
   profile: ExecutorProfile,
   name: string,
   overrides: Record<string, string>,
-): { rows: LoadoutEffectiveRow[]; stale: StaleOverrideView[] } {
+  shadows: Record<string, ShadowAttachment> = {},
+): { rows: LoadoutEffectiveRow[]; stale: StaleOverrideView[]; staleShadows: StaleShadowView[] } {
   const slots = profile.loadouts[name] ?? {};
   const stale: StaleOverrideView[] = [];
   const live: Record<string, string> = {};
@@ -225,12 +257,27 @@ function effectiveRows(
     if (Object.hasOwn(profile.executors, target)) live[archetype] = target;
     else stale.push({ archetype, target });
   }
+  const staleShadows: StaleShadowView[] = [];
+  const liveShadows: Record<string, ShadowAttachment> = {};
+  for (const archetype of Object.keys(shadows).sort()) {
+    const att = shadows[archetype]!;
+    if (Object.hasOwn(profile.executors, att.executor)) liveShadows[archetype] = att;
+    else staleShadows.push({ archetype, target: att.executor });
+  }
   const archetypes = [...new Set([...Object.keys(slots), ...Object.keys(live)])].sort();
   const rows = archetypes.map((archetype) => {
     const baseExecutor = slots[archetype] ?? null;
     const executor = live[archetype] ?? baseExecutor!;
     const spec = profile.executors[executor]!;
     const eligibility = eligibilityFor(spec, archetype);
+    const att = liveShadows[archetype];
+    let shadow: ShadowAttachmentView | undefined;
+    if (att != null) {
+      const shadowSpec = profile.executors[att.executor]!;
+      shadow = att.rate == null
+        ? { executor: att.executor, model: shadowSpec.model, adapter: shadowSpec.adapter }
+        : { executor: att.executor, model: shadowSpec.model, adapter: shadowSpec.adapter, rate: att.rate };
+    }
     return {
       archetype,
       executor,
@@ -239,9 +286,17 @@ function effectiveRows(
       overridden: live[archetype] != null,
       baseExecutor,
       ...(eligibility !== 'eligible' ? { eligibility } : {}),
+      ...(shadow != null ? { shadow } : {}),
     };
   });
-  return { rows, stale };
+  return { rows, stale, staleShadows };
+}
+
+export function formatShadowLine(shadow: ShadowAttachmentView, baseIndent: string): string {
+  const model = shadow.model != null ? ` (${shadow.model})` : '';
+  const rate = shadow.rate != null ? ` rate ${shadow.rate}` : '';
+  const transport = shadow.adapter != null ? ` [${shadow.adapter}]` : '';
+  return `${baseIndent}  ~ shadow: ${shadow.executor}${model}${transport}${rate}`;
 }
 
 export interface LoadoutShowResult {
@@ -256,6 +311,12 @@ export interface LoadoutShowResult {
   overrides: Record<string, string>;
   /** Pinned overrides left out of the table because their target is undeclared. */
   staleOverrides: StaleOverrideView[];
+  /** Session shadows in force for the active loadout; `{}` when none apply. */
+  shadows: Record<string, ShadowAttachment>;
+  /** Enriched shadow attachments for rendering/JSON (snake_case). */
+  shadow_attachments: Record<string, ShadowAttachmentView>;
+  /** Pinned shadows left out of the table because their target is undeclared. */
+  staleShadows: StaleShadowView[];
   /** Builtin archetypes the self-contained project catalog omitted. */
   suppressed_canon_archetypes: string[];
   /** Exact note line when `suppressed_canon_archetypes` is non-empty; otherwise null. */
@@ -267,11 +328,21 @@ export function runLoadoutShow(opts: LoadoutCommonOptions = {}): LoadoutShowResu
   const repoRoot = repoRootOf(opts);
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
-  const { active, stalePin, overrides } = activeFor(opts, repoRoot, profile, layered.layers);
+  const { active, stalePin, overrides, shadows, shadow_attachments } = activeFor(opts, repoRoot, profile, layered.layers);
   const effective = active == null
-    ? { rows: [], stale: [] as StaleOverrideView[] }
-    : effectiveRows(profile, active.name, overrides);
+    ? { rows: [], stale: [] as StaleOverrideView[], staleShadows: [] as StaleShadowView[] }
+    : effectiveRows(profile, active.name, overrides, shadows);
   const canon = canonSurfacing(layered);
+  // shadow_attachments filtered to live only (like staleShadows separate), but
+  // activeFor already scoped to applicable shadows and filtered to live via spec check;
+  // stale shadows are reported separately and not included in shadow_attachments.
+  const liveShadowAttachments: Record<string, ShadowAttachmentView> = {};
+  for (const [archetype, view] of Object.entries(shadow_attachments)) {
+    if (effective.staleShadows.some((s) => s.archetype === archetype)) continue;
+    // Strip adapter for JSON: spec says {executor, model, rate?}
+    const { executor, model, rate } = view;
+    liveShadowAttachments[archetype] = rate == null ? { executor, model } : { executor, model, rate };
+  }
   return {
     active,
     slots: effective.rows,
@@ -280,6 +351,9 @@ export function runLoadoutShow(opts: LoadoutCommonOptions = {}): LoadoutShowResu
     stalePin,
     overrides,
     staleOverrides: effective.stale,
+    shadows,
+    shadow_attachments: liveShadowAttachments,
+    staleShadows: effective.staleShadows,
     suppressed_canon_archetypes: canon.suppressed_canon_archetypes,
     note: canon.note,
   };
@@ -295,6 +369,10 @@ export interface LoadoutListResult {
   overrides: Record<string, string>;
   /** Pinned overrides left out of the table because their target is undeclared. */
   staleOverrides: StaleOverrideView[];
+  /** Session shadows in force for the active loadout; `{}` when none apply. */
+  shadows: Record<string, ShadowAttachment>;
+  shadow_attachments: Record<string, ShadowAttachmentView>;
+  staleShadows: StaleShadowView[];
   /** Builtin archetypes the self-contained project catalog omitted. */
   suppressed_canon_archetypes: string[];
 }
@@ -304,9 +382,13 @@ export function runLoadoutList(opts: LoadoutCommonOptions = {}): LoadoutListResu
   const repoRoot = repoRootOf(opts);
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
-  const { active, stalePin, overrides } = activeFor(opts, repoRoot, profile, layered.layers);
+  const { active, stalePin, overrides, shadows, shadow_attachments } = activeFor(opts, repoRoot, profile, layered.layers);
   const canon = canonSurfacing(layered);
   let staleOverrides: StaleOverrideView[] = [];
+  let staleShadows: StaleShadowView[] = [];
+  // live shadow_attachments for JSON, filtered to live after effectiveRows knows stale
+  // For list we need to know staleShadows from the active entry's effectiveRows.
+  let liveShadowAttachments: Record<string, ShadowAttachmentView> = {};
   const loadouts = Object.keys(profile.loadouts)
     .sort()
     .map((name) => {
@@ -316,9 +398,16 @@ export function runLoadoutList(opts: LoadoutCommonOptions = {}): LoadoutListResu
       // binding that actually runs.
       let slots: Array<LoadoutSlotView & Partial<LoadoutEffectiveRow>>;
       if (isActive) {
-        const effective = effectiveRows(profile, name, overrides);
+        const effective = effectiveRows(profile, name, overrides, shadows);
         slots = effective.rows;
         staleOverrides = effective.stale;
+        staleShadows = effective.staleShadows;
+        // Build live shadow_attachments sans stale
+        for (const [archetype, view] of Object.entries(shadow_attachments)) {
+          if (staleShadows.some((s) => s.archetype === archetype)) continue;
+          const { executor, model, rate } = view;
+          liveShadowAttachments[archetype] = rate == null ? { executor, model } : { executor, model, rate };
+        }
       } else {
         slots = slotViews(profile, name);
       }
@@ -337,6 +426,9 @@ export function runLoadoutList(opts: LoadoutCommonOptions = {}): LoadoutListResu
     stalePin,
     overrides,
     staleOverrides,
+    shadows,
+    shadow_attachments: liveShadowAttachments,
+    staleShadows,
     suppressed_canon_archetypes: canon.suppressed_canon_archetypes,
   };
 }
@@ -353,6 +445,10 @@ export interface LoadoutUseResult {
    * never dialed against.
    */
   droppedOverrides: Record<string, string>;
+  /** Session shadows the base switch discarded. */
+  droppedShadows: Record<string, ShadowAttachment>;
+  /** Enriched shadows for JSON/display. */
+  dropped_shadow_attachments: Record<string, ShadowAttachmentView>;
 }
 
 /** `fadeno loadout use <name>` — pin the session loadout in `.fadeno/local/loadout`. */
@@ -369,8 +465,16 @@ export function runLoadoutUse(opts: LoadoutCommonOptions & { name: string }): Lo
     );
   }
   const pin = readPin(repoRoot);
-  const path = writeLocalLoadoutState(repoRoot, { loadout: name, overrides: {} });
-  return { name, path, previous: pin.loadout, droppedOverrides: pin.overrides };
+  const path = writeLocalLoadoutState(repoRoot, { loadout: name, overrides: {}, shadows: {} });
+  const droppedShadows = pin.shadows ?? {};
+  const dropped_shadow_attachments: Record<string, ShadowAttachmentView> = {};
+  for (const [archetype, att] of Object.entries(droppedShadows)) {
+    const spec = profile.executors[att.executor];
+    dropped_shadow_attachments[archetype] = spec == null
+      ? { executor: att.executor, model: null, ...(att.rate != null ? { rate: att.rate } : {}) }
+      : att.rate == null ? { executor: att.executor, model: spec.model } : { executor: att.executor, model: spec.model, rate: att.rate };
+  }
+  return { name, path, previous: pin.loadout, droppedOverrides: pin.overrides, droppedShadows, dropped_shadow_attachments };
 }
 
 export interface LoadoutSetResult {
@@ -448,9 +552,10 @@ export function runLoadoutSet(
   const rebase = pin.loadout !== active.name;
   const droppedOverrides = rebase ? pin.overrides : {};
   const overrides: Record<string, string> = rebase ? {} : { ...pin.overrides };
+  const shadows: Record<string, ShadowAttachment> = rebase ? {} : { ...(pin.shadows ?? {}) };
   const previous = overrides[archetype] ?? null;
   overrides[archetype] = target;
-  const path = writeLocalLoadoutState(repoRoot, { loadout: active.name, overrides });
+  const path = writeLocalLoadoutState(repoRoot, { loadout: active.name, overrides, ...(Object.keys(shadows).length > 0 ? { shadows } : {}) });
   return {
     archetype,
     target,
@@ -561,12 +666,182 @@ export function runLoadoutClear(
   const cleared = pin.overrides[archetype]!;
   const overrides = { ...pin.overrides };
   delete overrides[archetype];
+  const shadows = pin.shadows ?? {};
+  const state: LocalLoadoutState = { loadout: pin.loadout, overrides, ...(Object.keys(shadows).length > 0 ? { shadows } : {}) };
   return {
     removed: true,
-    path: writeLocalLoadoutState(repoRoot, { loadout: pin.loadout, overrides }),
+    path: writeLocalLoadoutState(repoRoot, state),
     archetype,
     cleared,
     loadout: pin.loadout,
     overrides,
   };
+}
+
+export interface LoadoutShadowResult {
+  archetype: string;
+  executor: string;
+  model: string | null;
+  rate: number | null;
+  loadout: string;
+  path: string;
+  previous: ShadowAttachment | null;
+  shadows: Record<string, ShadowAttachment>;
+  shadow_attachments: Record<string, ShadowAttachmentView>;
+  droppedShadows: Record<string, ShadowAttachment>;
+  droppedOverrides: Record<string, string>;
+  droppedBase: string | null;
+}
+
+export interface LoadoutClearShadowResult {
+  archetype: string | null;
+  cleared: ShadowAttachment | null;
+  removed: boolean;
+  count: number;
+  loadout: string | null;
+  shadows: Record<string, ShadowAttachment>;
+  shadow_attachments: Record<string, ShadowAttachmentView>;
+  path: string;
+}
+
+/**
+ * `fadeno loadout shadow <archetype> <executor> [--rate <n>]` — attach a shadow
+ * executor for one archetype on top of the active loadout. Mirrors `set` validation
+ * and name-match rebase semantics.
+ */
+export function runLoadoutShadow(
+  opts: LoadoutCommonOptions & { archetype: string; executor: string; rate?: number | string | null },
+): LoadoutShadowResult {
+  const repoRoot = repoRootOf(opts);
+  const layered = loadLayered(repoRoot, opts.userPathOptions);
+  const profile = layered.profile;
+  const archetype = opts.archetype.trim();
+  const executor = opts.executor.trim();
+  if (archetype.length === 0 || executor.length === 0) {
+    throw new LoadoutError('Usage: fadeno loadout shadow <archetype> <executor> [--rate <n>]');
+  }
+  if (!BARE_IDENTIFIER_RE.test(archetype)) {
+    throw new LoadoutError(
+      `archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`,
+    );
+  }
+  if (!Object.hasOwn(profile.executors, executor)) {
+    throw new LoadoutError(
+      `"${executor}" is not a declared executor (${Object.keys(profile.executors).sort().join(', ')}).`,
+    );
+  }
+  let rate: number | undefined;
+  if (opts.rate != null && opts.rate !== '') {
+    const raw = opts.rate;
+    const parsed = typeof raw === 'string' ? Number(raw) : raw;
+    if (typeof parsed !== 'number' || !Number.isFinite(parsed) || parsed <= 0 || parsed > 1) {
+      throw new LoadoutError(`rate ${JSON.stringify(raw)} is not a number in (0, 1].`);
+    }
+    rate = parsed;
+  }
+  const spec = profile.executors[executor]!;
+  if (spec.adapter === 'command') {
+    const conflict = explainWriteConflict({ executor, spec }, archetype, profile);
+    if (conflict != null) throw new LoadoutError(conflict);
+  }
+  const eligibility = eligibilityFor(spec, archetype);
+  if (eligibility === 'forbidden') {
+    const conflict = explainEligibilityConflict({ executor, spec }, archetype);
+    throw new LoadoutError(conflict ?? `archetype "${archetype}" is forbidden on executor "${executor}".`);
+  }
+  const { active, pin } = activeFor(opts, repoRoot, profile, layered.layers);
+  if (active == null) {
+    throw new LoadoutError(
+      'No loadout is active, so a shadow attachment has nothing to decorate. ' +
+        'Fix: select a base first with `fadeno loadout use <name>`.',
+    );
+  }
+  const rebase = pin.loadout !== active.name;
+  const droppedOverrides = rebase ? pin.overrides : {};
+  const droppedShadows = rebase ? (pin.shadows ?? {}) : {};
+  const overrides: Record<string, string> = rebase ? {} : { ...pin.overrides };
+  const shadows: Record<string, ShadowAttachment> = rebase ? {} : { ...(pin.shadows ?? {}) };
+  const previous = shadows[archetype] ?? null;
+  shadows[archetype] = rate == null ? { executor } : { executor, rate };
+  const state: LocalLoadoutState = { loadout: active.name, overrides, shadows };
+  const path = writeLocalLoadoutState(repoRoot, state);
+  const shadow_attachments: Record<string, ShadowAttachmentView> = {};
+  for (const [key, att] of Object.entries(shadows)) {
+    const s = profile.executors[att.executor]!;
+    shadow_attachments[key] = att.rate == null ? { executor: att.executor, model: s.model } : { executor: att.executor, model: s.model, rate: att.rate };
+  }
+  return {
+    archetype,
+    executor,
+    model: spec.model,
+    rate: rate ?? null,
+    loadout: active.name,
+    path,
+    previous,
+    shadows,
+    shadow_attachments,
+    droppedShadows,
+    droppedOverrides,
+    droppedBase: Object.keys({ ...droppedOverrides, ...droppedShadows }).length > 0 ? pin.loadout : null,
+  };
+}
+
+/**
+ * `fadeno loadout clear-shadow [archetype]` — drop one or all shadow attachments.
+ * With archetype clears that attachment (error if none). Without clears all (count
+ * in result; clearing zero is a no-op success).
+ */
+export function runLoadoutClearShadow(
+  opts: LoadoutCommonOptions & { archetype?: string | null } = {},
+): LoadoutClearShadowResult {
+  const repoRoot = repoRootOf(opts);
+  const pin = readPin(repoRoot);
+  const path = join(repoRoot, LOADOUT_LOCAL_FILE);
+  const archetype = opts.archetype?.trim() ? opts.archetype.trim() : null;
+  if (archetype != null && !BARE_IDENTIFIER_RE.test(archetype)) {
+    throw new LoadoutError(
+      `archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`,
+    );
+  }
+  if (archetype == null) {
+    const count = Object.keys(pin.shadows ?? {}).length;
+    if (count === 0) {
+      const shadows: Record<string, ShadowAttachment> = {};
+      const shadow_attachments: Record<string, ShadowAttachmentView> = {};
+      return { archetype: null, cleared: null, removed: false, count: 0, loadout: pin.loadout, shadows, shadow_attachments, path };
+    }
+    const overrides = pin.overrides;
+    const loadout = pin.loadout;
+    // loadout must be non-null when shadows exist (kernel guarantees), but guard
+    if (loadout == null) {
+      rmSync(path, { force: true });
+      return { archetype: null, cleared: null, removed: true, count, loadout: null, shadows: {}, shadow_attachments: {}, path };
+    }
+    // Writing without a shadows key collapses the pin back to its bare-name
+    // or overrides-only form.
+    const newPath = writeLocalLoadoutState(repoRoot, { loadout, overrides });
+    const shadows: Record<string, ShadowAttachment> = {};
+    const shadow_attachments: Record<string, ShadowAttachmentView> = {};
+    return { archetype: null, cleared: null, removed: true, count, loadout, shadows, shadow_attachments, path: newPath };
+  }
+  // single archetype clear
+  if (pin.loadout == null || pin.shadows == null || !Object.hasOwn(pin.shadows, archetype)) {
+    throw new LoadoutError(`no shadow attachment for "${archetype}" to clear (.fadeno/local/loadout)`);
+  }
+  const cleared = pin.shadows[archetype]!;
+  const shadows: Record<string, ShadowAttachment> = { ...pin.shadows };
+  delete shadows[archetype];
+  const overrides = pin.overrides;
+  const loadout = pin.loadout!;
+  const state: LocalLoadoutState = { loadout, overrides, ...(Object.keys(shadows).length > 0 ? { shadows } : {}) };
+  const newPath = writeLocalLoadoutState(repoRoot, state);
+  const layered = loadLayered(repoRoot, opts.userPathOptions);
+  const profile = layered.profile;
+  const shadow_attachments: Record<string, ShadowAttachmentView> = {};
+  for (const [key, att] of Object.entries(shadows)) {
+    const s = profile.executors[att.executor];
+    if (s == null) continue;
+    shadow_attachments[key] = att.rate == null ? { executor: att.executor, model: s.model } : { executor: att.executor, model: s.model, rate: att.rate };
+  }
+  return { archetype, cleared, removed: true, count: 1, loadout, shadows, shadow_attachments, path: newPath };
 }
