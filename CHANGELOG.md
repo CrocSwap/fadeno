@@ -391,6 +391,42 @@ writers accept only 0.3.
 
 ### Fixed
 
+- **The evidence log could not say which Fadeno wrote it.** A 2026-08-13
+  dogfood read twelve rows spanning a version bump and found exactly one
+  version-shaped key across all of them — `hook_version`, which only the Claude
+  steering hook writes, and which is therefore absent on every row the kernel
+  writes. So the log's own provenance read as *mostly missing*, and the one
+  question worth asking of old evidence — "which build produced this?" — had no
+  answer. `fadeno_version` had existed in the binary the whole time; `evidence`
+  and `vendor` rows carried it and no dispatch row ever did.
+
+  Every dispatch row is now stamped, and stamped centrally in
+  `appendEvidenceRow` rather than at the six call sites, because a per-site
+  field is precisely how it came to be missing — a new row type cannot forget.
+  The value is the version of the binary that *ran*, so a proxy invoking
+  `$CLAUDE_PLUGIN_ROOT/bin/fadeno` records the plugin's build and a director
+  invoking a bare `fadeno` records the CLI's, making a mixed-build session
+  legible after the fact without a second field. The steering hook writes the
+  same key on its `host_delivery` rows, so one field spans the whole log.
+
+- **A session could not tell which Fadeno its subagents were.** The same
+  dogfood ran a registry announcing `[fadeno 0.6.0-rc.20]` against a CLI at
+  rc.22, with no rc.20 directory anywhere in the plugin cache, and reasoned
+  about behaviour from the stamp. Nothing was corrupt: the plugin surface ages
+  in two halves. Hooks and the bundled binary are re-read from disk on every
+  call, while subagent definitions are snapshotted into the harness at session
+  start and stay frozen for the session's life — and with a `directory:`
+  marketplace source the live surface is the working tree, so cache
+  directories exist only for versions someone explicitly installed. A stamp
+  naming a version with no directory is expected.
+
+  `fadeno doctor` reports this as `plugin-surface`: it names the plugin build
+  on disk and the running CLI, and warns when they differ. When they agree it
+  still says so and points at the half it cannot read — the registry is held
+  inside the harness — telling the caller to compare the `[fadeno …]` stamp in
+  their own agent list and restart if it differs. Behaviour questions are
+  settled from `fadeno_version` in the ledger, which records what actually ran.
+
 - **A timed-out proxy read the ledger once, too early, and called it failure.**
   The sharpest of the batch, because Fadeno's own data was correct throughout.
   A 2026-08-13 dogfood had two worker dispatches recorded as `exit_code: 0`

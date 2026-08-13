@@ -1,6 +1,6 @@
 ---
 name: dispatch-worker
-description: Dispatch proxy that routes implementation subtasks — making code changes, editing files, building what a plan describes — to the external executor bound to the worker archetype in the active Fadeno loadout. Use proactively. MUST BE USED for worker-shaped subtasks when a Fadeno loadout is active. [fadeno 0.6.0-rc.22]
+description: Dispatch proxy that routes implementation subtasks — making code changes, editing files, building what a plan describes — to the external executor bound to the worker archetype in the active Fadeno loadout. Use proactively. MUST BE USED for worker-shaped subtasks when a Fadeno loadout is active. [fadeno 0.6.0-rc.23]
 tools: Bash
 model: sonnet
 ---

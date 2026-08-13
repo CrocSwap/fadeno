@@ -344,6 +344,11 @@ test('Claude steering writes the host_delivery evidence the kernel never sees', 
     // below, which stamps the *writer*, not the format it writes.
     format: '0.2',
     event: 'host_delivery',
+    // The one key that answers "which Fadeno produced this row?" on every row
+    // in the log, kernel-written or hook-written. Before it existed the only
+    // version-shaped key was `hook_version`, which is absent on every kernel
+    // row — so the log's own provenance read as mostly missing.
+    fadeno_version: packageVersion(),
     // Hook generation that wrote the row: the session-start hook cache means a
     // live session can be a build behind, so the row names its own writer.
     hook_version: packageVersion(),

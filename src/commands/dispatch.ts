@@ -47,7 +47,7 @@ import {
   type HostDispatchReceipt,
   type HostDispatchProgressReceipt,
 } from '../lib/host-dispatch.ts';
-import { findRepoRoot } from '../lib/paths.ts';
+import { findRepoRoot, packageVersion } from '../lib/paths.ts';
 import { superviseArgv, supervisedSpawnError } from '../lib/supervisor.ts';
 import { ensureFadenoIgnore } from '../lib/source-control.ts';
 import type { UserPathOptions } from '../lib/user-paths.ts';
@@ -249,10 +249,28 @@ function declaredWritePosture(
   return profile.archetypes[archetype]!.requiresWrite;
 }
 
+/**
+ * Append one evidence row, stamped with the build that wrote it.
+ *
+ * `fadeno_version` is applied here rather than at the six call sites because a
+ * per-site field is exactly how it came to be missing: the string existed in
+ * the binary, `evidence` and `vendor` rows carried it, and no dispatch row ever
+ * did. A 2026-08-13 dogfood read twelve rows across a version bump and could
+ * not answer which Fadeno produced any of them — the only version-shaped key
+ * present was `hook_version`, which the Claude steering hook writes on its own
+ * rows and which is therefore absent (correctly, but confusingly) on every row
+ * the kernel writes. Stamping centrally means a new row type cannot forget.
+ *
+ * This is the version of the binary that *ran*, which is the question worth
+ * answering: a proxy invoking `$CLAUDE_PLUGIN_ROOT/bin/fadeno` records the
+ * plugin's build, and one invoking a bare `fadeno` records the CLI's, so the
+ * two are distinguishable in the log without a separate field.
+ */
 function appendEvidenceRow(repoRoot: string, row: Record<string, unknown>): void {
   ensureFadenoIgnore(repoRoot);
   mkdirSync(join(repoRoot, '.fadeno'), { recursive: true });
-  appendFileSync(join(repoRoot, DISPATCHES_FILE), `${JSON.stringify(row)}\n`, 'utf8');
+  const stamped = { ...row, fadeno_version: packageVersion() };
+  appendFileSync(join(repoRoot, DISPATCHES_FILE), `${JSON.stringify(stamped)}\n`, 'utf8');
 }
 
 function refuseDispatch(

@@ -11,7 +11,7 @@ import { join } from 'node:path';
 // emitters (`fadeno plugin` and `fadeno init --claude`) replace this literal
 // with the package version; the template keeps 'dev', so a row reading 'dev'
 // means the template was executed directly rather than an installed copy.
-const HOOK_VERSION = '0.6.0-rc.22';
+const HOOK_VERSION = '0.6.0-rc.23';
 
 function finish(value) {
   if (value != null) process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -165,6 +165,13 @@ function recordHostDelivery() {
         format: '0.2',
         timestamp: new Date().toISOString(),
         event: 'host_delivery',
+        // Same key the kernel stamps on every row it writes, so one field
+        // answers "which Fadeno produced this evidence?" across the whole log.
+        // For a hook-written row the hook *is* that Fadeno: both emitters
+        // replace HOOK_VERSION with the package version, so this records the
+        // plugin build the session actually loaded — which is the only thing
+        // that can confirm what a session's subagents really are.
+        fadeno_version: HOOK_VERSION,
         hook_version: HOOK_VERSION,
         archetype,
         agent_type: requested,
