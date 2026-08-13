@@ -137,7 +137,7 @@ test('loadout set: refuses a mutating archetype dialed onto a read-only command 
     () => runLoadoutSet({ repoRoot: root, env: null, archetype: 'worker', target: 'ro-cmd' }),
     (err: unknown) =>
       err instanceof LoadoutError &&
-      /archetype "worker" declares `requires_write: true`, but executor "ro-cmd" delivers through a command route declared `write_access: false`/.test(
+      /archetype "worker" declares `requires_write: required`, but executor "ro-cmd" delivers through a command route declared `write_access: false`/.test(
         err.message,
       ),
   );

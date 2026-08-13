@@ -425,7 +425,7 @@ test('engine: a write-needing role is refused before the spawn on a read-only de
   const refused = runDrive({ run: runId, repoRoot: root, env: null });
   assert.equal(refused.outcome, 'executor_failed');
   assert.match(refused.detail, /implement \(builder\) was not dispatched/);
-  assert.match(refused.detail, /archetype "worker" declares `requires_write: true`, but executor "ro-worker"/);
+  assert.match(refused.detail, /archetype "worker" declares `requires_write: required`, but executor "ro-worker"/);
   assert.match(refused.detail, /native in-session worker agent/);
 
   // Nothing was spawned, nothing was assembled, nothing was produced.
@@ -445,7 +445,7 @@ test('engine: a write-needing role is refused before the spawn on a read-only de
   assert.equal(failures[0]!.extra.archetype, 'worker');
   assert.equal(failures[0]!.extra.write_access, false);
   assert.equal(failures[0]!.extra.attempt, 1);
-  assert.match(String(failures[0]!.extra.error), /requires_write: true/);
+  assert.match(String(failures[0]!.extra.error), /requires_write: required/);
 
   // The run is paused, not terminal: re-driving repeats the refusal.
   assert.equal(runDrive({ run: runId, repoRoot: root, env: null }).outcome, 'executor_failed');

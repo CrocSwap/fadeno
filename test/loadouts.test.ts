@@ -156,8 +156,8 @@ test('archetypes: requires_write parses; an absent block is an empty map', () =>
     archetypes: { worker: { requires_write: true }, reviewer: { requires_write: false } },
   });
   assert.deepEqual(profile.archetypes, {
-    worker: { requiresWrite: true },
-    reviewer: { requiresWrite: false },
+    worker: { requiresWrite: 'required', fallback: null },
+    reviewer: { requiresWrite: 'none', fallback: null },
   });
   assert.deepEqual(parseDoc({ executors: EXECUTORS, loadouts: LOADOUTS }).archetypes, {});
 });
@@ -169,7 +169,7 @@ test('archetypes: strict validation names the offending path', () => {
   );
   assert.throws(
     () => parseDoc({ executors: EXECUTORS, loadouts: LOADOUTS, archetypes: { worker: 'yes' } }),
-    /`archetypes\.worker` is not a mapping \(only `requires_write` is allowed\)/,
+    /`archetypes\.worker` is not a mapping \(only `requires_write` and `fallback` are allowed\)/,
   );
   assert.throws(
     () => parseDoc({
@@ -179,14 +179,18 @@ test('archetypes: strict validation names the offending path', () => {
     }),
     (err: unknown) =>
       err instanceof ExecutorProfileError &&
-      /`archetypes\.worker` has unknown key\(s\) requires_network; only `requires_write` is allowed/.test(err.message),
+      /`archetypes\.worker` has unknown key\(s\) requires_network; only `requires_write` and `fallback` are allowed/.test(err.message),
   );
-  for (const policy of [{ requires_write: 'yes' }, {}]) {
-    assert.throws(
-      () => parseDoc({ executors: EXECUTORS, loadouts: LOADOUTS, archetypes: { worker: policy } }),
-      /`archetypes\.worker\.requires_write` must be boolean/,
-    );
-  }
+  assert.throws(
+    () => parseDoc({
+      executors: EXECUTORS, loadouts: LOADOUTS, archetypes: { worker: { requires_write: 'yes' } },
+    }),
+    /`archetypes\.worker\.requires_write` must be true, false, "required", "forbidden", or "none"/,
+  );
+  assert.deepEqual(
+    parseDoc({ executors: EXECUTORS, loadouts: LOADOUTS, archetypes: { worker: {} } }).archetypes.worker,
+    { requiresWrite: 'none', fallback: null },
+  );
 });
 
 test('explainWriteConflict: one refusal, spoken identically by every enforcement point', () => {
@@ -207,7 +211,7 @@ test('explainWriteConflict: one refusal, spoken identically by every enforcement
 
   const conflict = explainWriteConflict({ executor: 'ro', spec: spec('ro') }, 'worker', profile);
   assert.ok(conflict != null);
-  assert.match(conflict, /archetype "worker" declares `requires_write: true`, but executor "ro"/);
+  assert.match(conflict, /archetype "worker" declares `requires_write: required`, but executor "ro"/);
   assert.match(conflict, /`write_access: false`/);
   // Three ways out: rebind, re-permission the command, or stay in-session.
   assert.match(conflict, /bind "worker" to a write-capable executor/);
@@ -582,7 +586,7 @@ test('role resolution: falls through to the "*" default binding', () => {
   // No archetype at all.
   assert.deepEqual(
     { ...resolveRole('implementer', null, profile, 'openai-primary'), executor: undefined },
-    { executorName: 'opus-xhigh', source: 'default', executor: undefined },
+    { executorName: 'opus-xhigh', source: 'default', resolvedVia: null, executor: undefined },
   );
   // Archetype with no slot in the active loadout.
   assert.equal(resolveRole('arbiter', 'judge', profile, 'openai-primary').source, 'default');

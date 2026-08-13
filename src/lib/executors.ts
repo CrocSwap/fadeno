@@ -82,13 +82,19 @@ export function substituteSessionId(argv: string[], sessionId: string): string[]
   return argv.map((part) => part.split(SESSION_ID_PLACEHOLDER).join(sessionId));
 }
 
+/** Write constraint an archetype imposes on whatever delivers it. */
+export type WritePosture = 'required' | 'forbidden' | 'none';
+
 /**
  * What an archetype needs from whatever delivers it. Declared once per
  * archetype, independent of which executor a loadout binds today.
+ * `fallback` selects another archetype's *binding* only — never its policy.
  */
 export interface ArchetypePolicy {
-  /** The archetype's work mutates the workspace (edits, commits). */
-  requiresWrite: boolean;
+  /** The archetype's write constraint. Absent YAML is `'none'`. */
+  requiresWrite: WritePosture;
+  /** Next archetype in the binding-fallback chain, or null. */
+  fallback: string | null;
 }
 
 export interface ExecutorProfile {
@@ -130,6 +136,22 @@ export const EXECUTORS_FILE = join('.fadeno', 'executors.yaml');
 
 function isMapping(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+const WRITE_POSTURE_FORMS = 'true, false, "required", "forbidden", or "none"';
+
+function isWritePosture(value: unknown): value is WritePosture {
+  return value === 'required' || value === 'forbidden' || value === 'none';
+}
+
+/** Binding-chain successor. Undeclared names and non-string fallbacks are end-nodes. */
+function nextArchetypeFallback(
+  archetypes: Record<string, ArchetypePolicy>,
+  name: string,
+): string | null {
+  if (!Object.hasOwn(archetypes, name)) return null;
+  const next = archetypes[name]!.fallback;
+  return typeof next === 'string' ? next : null;
 }
 
 /** Parse + structurally validate an executor profile document. */
@@ -433,9 +455,11 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
     }
   }
 
-  // What each archetype needs, independent of today's binding. Strict: the
-  // only declarable requirement is `requires_write`, so a typo is an error
-  // rather than a silently-dropped safety constraint.
+  // What each archetype needs, independent of today's binding. Strict: only
+  // `requires_write` and `fallback` are declarable, so a typo is an error
+  // rather than a silently-dropped safety constraint. Absent `requires_write`
+  // is `none`. Chains among declared archetypes must be acyclic; an
+  // undeclared fallback name is a chain end-node (it may still hold a slot).
   const archetypes: Record<string, ArchetypePolicy> = {};
   if (doc.archetypes != null) {
     if (!isMapping(doc.archetypes)) {
@@ -444,24 +468,72 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
       );
     }
     for (const [name, rawPolicy] of Object.entries(doc.archetypes)) {
-      if (!isMapping(rawPolicy)) {
+      if (!BARE_IDENTIFIER_RE.test(name)) {
         throw new ExecutorProfileError(
-          `${source}: \`archetypes.${name}\` is not a mapping (only \`requires_write\` is allowed).`,
+          `${source}: archetype name "${name}" is not a bare lowercase identifier ` +
+            `(${BARE_IDENTIFIER_RE.source}).`,
         );
       }
-      const unknown = Object.keys(rawPolicy).filter((key) => key !== 'requires_write');
+      if (!isMapping(rawPolicy)) {
+        throw new ExecutorProfileError(
+          `${source}: \`archetypes.${name}\` is not a mapping (only \`requires_write\` and \`fallback\` are allowed).`,
+        );
+      }
+      const unknown = Object.keys(rawPolicy).filter(
+        (key) => key !== 'requires_write' && key !== 'fallback',
+      );
       if (unknown.length > 0) {
         throw new ExecutorProfileError(
           `${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(', ')}; ` +
-            'only `requires_write` is allowed.',
+            'only `requires_write` and `fallback` are allowed.',
         );
       }
-      if (typeof rawPolicy.requires_write !== 'boolean') {
-        throw new ExecutorProfileError(
-          `${source}: \`archetypes.${name}.requires_write\` must be boolean.`,
-        );
+      let requiresWrite: WritePosture = 'none';
+      if (rawPolicy.requires_write !== undefined) {
+        if (rawPolicy.requires_write === true) {
+          requiresWrite = 'required';
+        } else if (rawPolicy.requires_write === false) {
+          requiresWrite = 'none';
+        } else if (isWritePosture(rawPolicy.requires_write)) {
+          requiresWrite = rawPolicy.requires_write;
+        } else {
+          throw new ExecutorProfileError(
+            `${source}: \`archetypes.${name}.requires_write\` must be ${WRITE_POSTURE_FORMS}.`,
+          );
+        }
       }
-      archetypes[name] = { requiresWrite: rawPolicy.requires_write };
+      let fallback: string | null = null;
+      if (rawPolicy.fallback != null) {
+        if (typeof rawPolicy.fallback !== 'string' || !BARE_IDENTIFIER_RE.test(rawPolicy.fallback)) {
+          throw new ExecutorProfileError(
+            `${source}: \`archetypes.${name}.fallback\` ${JSON.stringify(rawPolicy.fallback)} ` +
+              `is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`,
+          );
+        }
+        if (rawPolicy.fallback === name) {
+          throw new ExecutorProfileError(
+            `${source}: \`archetypes.${name}.fallback\` may not name its own archetype.`,
+          );
+        }
+        fallback = rawPolicy.fallback;
+      }
+      archetypes[name] = { requiresWrite, fallback };
+    }
+    for (const start of Object.keys(archetypes)) {
+      const path: string[] = [];
+      const seen = new Set<string>();
+      let current: string | null = start;
+      while (typeof current === 'string' && Object.hasOwn(archetypes, current)) {
+        if (seen.has(current)) {
+          const cycle = path.slice(path.indexOf(current)).concat(current);
+          throw new ExecutorProfileError(
+            `${source}: archetype fallback cycle: ${cycle.join(' → ')}.`,
+          );
+        }
+        path.push(current);
+        seen.add(current);
+        current = nextArchetypeFallback(archetypes, current);
+      }
     }
   }
 
@@ -784,6 +856,8 @@ export interface RoleResolution {
   executorName: string;
   executor: ExecutorSpec;
   source: RoleResolutionSource;
+  /** Archetype whose binding fired when a fallback chain was walked; null when the declared archetype bound directly (and always null for 'binding'/'default' sources). */
+  resolvedVia: string | null;
 }
 
 /**
@@ -803,12 +877,14 @@ export function roleResolutionEchoLabel(
 }
 
 /**
- * Dispatch-kernel role resolution: explicit `bindings[role]` pin → session
- * override for the role's archetype → active loadout's slot for that archetype
- * → `bindings["*"]` → hard error. `overrides` is the already-scoped overlay
- * (see `applicableOverrides`); the default empty map is exactly the behavior
- * every pre-override call site had. Pure; resolution is computed at dispatch
- * time and never cached in config.
+ * Dispatch-kernel role resolution: explicit `bindings[role]` pin → per-archetype
+ * cascade along the fallback chain (session override, then active loadout slot)
+ * → `bindings["*"]` → hard error. The chain is the declared archetype, then
+ * its `fallback`, then that one's fallback, …; overrides beat fallbacks
+ * because the cascade re-enters at each step. `overrides` is the
+ * already-scoped overlay (see `applicableOverrides`); the default empty map
+ * is exactly the behavior every pre-override call site had. Pure; resolution
+ * is computed at dispatch time and never cached in config.
  */
 export function resolveRole(
   role: string,
@@ -817,48 +893,72 @@ export function resolveRole(
   activeLoadout: string | null,
   overrides: Record<string, string> = {},
 ): RoleResolution {
-  const pick = (executorName: string, source: RoleResolutionSource): RoleResolution => ({
+  const pick = (
+    executorName: string,
+    source: RoleResolutionSource,
+    resolvedVia: string | null = null,
+  ): RoleResolution => ({
     executorName,
     executor: executorForArchetype(profile, executorName, archetype),
     source,
+    resolvedVia,
   });
   // Every lookup here is `typeof === 'string'`, not `!= null`: role names and
   // archetypes are bare identifiers, and bare identifiers include `constructor`
   // and `toString` — inherited members of a plain map, which would otherwise
-  // resolve to a function and crash instead of erroring cleanly.
+  // resolve to a function and crash instead of erroring cleanly. The same
+  // idiom applies to fallback names walked off a policy (`fallback:
+  // constructor` must not read Object.prototype).
   const pinned = profile.bindings[role];
   if (typeof pinned === 'string') return pick(pinned, 'binding');
   // An overlay outranks the base loadout's slot and can bind an archetype the
   // base has no slot for at all. A stale target is a hard stop: substituting a
   // different executor for the one the user dialed is the failure this whole
   // layer exists to avoid.
-  if (archetype != null && typeof overrides[archetype] === 'string') {
-    const target = overrides[archetype]!;
-    // `hasOwn`, not `in`: "constructor" is a plausible-looking pin value that
-    // `in` would call declared and then resolve to a function.
-    if (!Object.hasOwn(profile.executors, target)) {
-      throw new ExecutorProfileError(
-        `Session override for archetype "${archetype}" targets "${target}", which is not a ` +
-          `declared executor (${Object.keys(profile.executors).join(', ')}). ` +
-          `Fix: re-dial with \`fadeno loadout set ${archetype} <executor>\`, or drop the ` +
-          `override with \`fadeno loadout clear ${archetype}\`.`,
-      );
+  const chain: string[] = [];
+  if (archetype != null) {
+    const seen = new Set<string>();
+    let current: string | null = archetype;
+    while (typeof current === 'string' && !seen.has(current)) {
+      chain.push(current);
+      seen.add(current);
+      current = nextArchetypeFallback(profile.archetypes, current);
     }
-    return pick(target, 'override');
+    for (const arch of chain) {
+      if (typeof overrides[arch] === 'string') {
+        const target = overrides[arch]!;
+        // `hasOwn`, not `in`: "constructor" is a plausible-looking pin value that
+        // `in` would call declared and then resolve to a function.
+        if (!Object.hasOwn(profile.executors, target)) {
+          throw new ExecutorProfileError(
+            `Session override for archetype "${arch}" targets "${target}", which is not a ` +
+              `declared executor (${Object.keys(profile.executors).join(', ')}). ` +
+              `Fix: re-dial with \`fadeno loadout set ${arch} <executor>\`, or drop the ` +
+              `override with \`fadeno loadout clear ${arch}\`.`,
+          );
+        }
+        return pick(target, 'override', arch !== archetype ? arch : null);
+      }
+      if (activeLoadout != null) {
+        const slot = profile.loadouts[activeLoadout]?.[arch];
+        if (typeof slot === 'string') {
+          return pick(slot, 'loadout', arch !== archetype ? arch : null);
+        }
+      }
+    }
   }
-  if (archetype != null && activeLoadout != null) {
-    const slot = profile.loadouts[activeLoadout]?.[archetype];
-    if (typeof slot === 'string') return pick(slot, 'loadout');
-  }
-  const fallback = profile.bindings['*'];
-  if (fallback != null) return pick(fallback, 'default');
+  const starBinding = profile.bindings['*'];
+  if (typeof starBinding === 'string') return pick(starBinding, 'default');
 
   const archetypePart = archetype == null ? 'no declared archetype' : `archetype "${archetype}"`;
+  const chainPart = chain.length > 1 ? `; chain ${chain.join(' → ')}` : '';
   const loadoutPart = activeLoadout == null
     ? 'no active loadout'
     : archetype == null
       ? `active loadout "${activeLoadout}" cannot route a role without an archetype`
-      : `active loadout "${activeLoadout}" has no "${archetype}" slot`;
+      : chain.length > 1
+        ? `active loadout "${activeLoadout}" has no slot on chain ${chain.join(' → ')}`
+        : `active loadout "${activeLoadout}" has no "${archetype}" slot`;
   const fixes: string[] = [];
   if (archetype == null) {
     fixes.push(`declare \`archetype:\` on role "${role}" in the playbook so a loadout can route it`);
@@ -872,7 +972,7 @@ export function resolveRole(
   }
   fixes.push(`pin \`bindings.${role}\` to an executor`, 'add a "*" default binding');
   throw new ExecutorProfileError(
-    `No executor for role "${role}" (${archetypePart}; ${loadoutPart}; no "*" default binding). ` +
+    `No executor for role "${role}" (${archetypePart}${chainPart}; ${loadoutPart}; no "*" default binding). ` +
       `Fix: ${fixes.join(', or ')}.`,
   );
 }
@@ -886,13 +986,17 @@ export interface DeliveryChoice {
 /**
  * The single refusal for a mutating archetype about to be delivered through a
  * command that cannot mutate the workspace — an expensive run that ends in "I
- * can't write here". Every enforcement point (ad-hoc dispatch, the playbook
- * engine, Codex steering) calls this so they refuse in identical words.
+ * can't write here" — and the inverse: a write-forbidden archetype about to
+ * be handed a mutating command route. Every enforcement point (ad-hoc
+ * dispatch, the playbook engine, Codex steering) calls this so they refuse
+ * in identical words.
  *
  * Callers gate on a COMMAND delivery actually being in play: a native
  * in-session agent's permissions are the host's business, and on a host
  * executor `write_access` describes its declared command fallback. `null` =
- * no conflict; undeclared on either side is no constraint.
+ * no conflict; undeclared on either side is no constraint. Write posture is
+ * read from the declared archetype only — a fallback chain never imports
+ * another archetype's policy.
  */
 export function explainWriteConflict(
   delivery: DeliveryChoice,
@@ -900,16 +1004,29 @@ export function explainWriteConflict(
   profile: ExecutorProfile,
 ): string | null {
   if (archetype == null) return null;
-  if (profile.archetypes[archetype]?.requiresWrite !== true) return null;
-  if (delivery.spec.writeAccess !== false) return null;
-  return (
-    `archetype "${archetype}" declares \`requires_write: true\`, but executor "${delivery.executor}" ` +
-    'delivers through a command route declared `write_access: false` — it cannot mutate the ' +
-    'workspace, so the dispatch would burn a run and end in a refusal. ' +
-    `Fix: bind "${archetype}" to a write-capable executor, ` +
-    "raise the route command's permission mode (and declare `write_access: true`), " +
-    `or run this ${archetype}-shaped task with the native in-session ${archetype} agent.`
-  );
+  if (!Object.hasOwn(profile.archetypes, archetype)) return null;
+  const posture = profile.archetypes[archetype]!.requiresWrite;
+  if (posture === 'required' && delivery.spec.writeAccess === false) {
+    return (
+      `archetype "${archetype}" declares \`requires_write: required\`, but executor "${delivery.executor}" ` +
+      'delivers through a command route declared `write_access: false` — it cannot mutate the ' +
+      'workspace, so the dispatch would burn a run and end in a refusal. ' +
+      `Fix: bind "${archetype}" to a write-capable executor, ` +
+      "raise the route command's permission mode (and declare `write_access: true`), " +
+      `or run this ${archetype}-shaped task with the native in-session ${archetype} agent.`
+    );
+  }
+  if (posture === 'forbidden' && delivery.spec.writeAccess === true) {
+    return (
+      `archetype "${archetype}" declares \`requires_write: forbidden\`, but executor "${delivery.executor}" ` +
+      'delivers through a command route declared `write_access: true` — the dispatch would hand a ' +
+      'mutating toolchain to work that must not mutate the workspace. ' +
+      `Fix: bind "${archetype}" to a read-only route, ` +
+      `clear the session dial (\`fadeno loadout clear ${archetype}\`), ` +
+      'or declare `requires_write: none`.'
+    );
+  }
+  return null;
 }
 
 /** Bind a neutral native target to the archetype requested by this invocation. */
@@ -956,7 +1073,11 @@ export function serializeProfile(profile: ExecutorProfile): string {
   if (Object.keys(profile.archetypes).length > 0) {
     const sortedArchetypes: Record<string, Record<string, unknown>> = {};
     for (const name of Object.keys(profile.archetypes).sort()) {
-      sortedArchetypes[name] = { requires_write: profile.archetypes[name]!.requiresWrite };
+      const policy = profile.archetypes[name]!;
+      const entry: Record<string, unknown> = {};
+      if (policy.requiresWrite !== 'none') entry.requires_write = policy.requiresWrite;
+      if (typeof policy.fallback === 'string') entry.fallback = policy.fallback;
+      sortedArchetypes[name] = entry;
     }
     out.archetypes = sortedArchetypes;
   }
