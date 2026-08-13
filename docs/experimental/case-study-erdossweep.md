@@ -259,7 +259,7 @@ input artifact,"* a constraint **between dispatches**, resolvable only at
 dispatch time against provenance data. The kernel already holds that data:
 evidence rows record executor and model per dispatch. A
 `distinct_provider_from` archetype/step policy checked at the same boundary
-where write-access refusal fires today would be the native form.
+where write-access refusal fires today would be the host form.
 critique.sh's grep-the-transcript-header guard is the shell-script ancestor
 of exactly that refusal pattern.
 

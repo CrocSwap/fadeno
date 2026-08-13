@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // PreToolUse guard for the dispatch proxy agents (tier-2 enforcement of the
 // relay contract). The proxies' instructions already forbid doing the task
-// natively, but instruction-only constraint is advisory — a 2026-08-12
+// in-session, but instruction-only constraint is advisory — a 2026-08-12
 // dogfood A/B observed a proxy silently performing its task with no dispatch
 // and no evidence row. This hook makes the contract mechanical: inside a
 // dispatch proxy, the only Bash allowed is the contract call itself (and,

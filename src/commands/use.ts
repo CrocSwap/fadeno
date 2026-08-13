@@ -69,8 +69,8 @@ export function runUse(opts: UseOptions): UseResult {
     const spec = loaded.profile.executors[executor]!;
     return spec.adapter === 'command' ? [{ archetype, executor, command: spec.command }] : [];
   });
-  const needsNativeMaterialization = target === 'codex' && Object.values(slots).some((executor) => loaded.profile.executors[executor]?.adapter === 'host');
-  const steering = needsNativeMaterialization
+  const needsHostMaterialization = target === 'codex' && Object.values(slots).some((executor) => loaded.profile.executors[executor]?.adapter === 'host');
+  const steering = needsHostMaterialization
     ? runSteeringApply({
         repoRoot,
         loadout: name,
@@ -93,11 +93,11 @@ export function runUse(opts: UseOptions): UseResult {
     });
     notices.push(
       allHostSlotsFallback
-        ? 'Codex native host slots were materialized automatically. Declared command fallbacks work now; restart only to make the new slots native.'
-        : 'Codex native host slots were materialized automatically; a fresh Codex session is required for slots without a command fallback.',
+        ? 'Codex host slots were materialized automatically. Declared command fallbacks work now; restart only to deliver the new slots in-session.'
+        : 'Codex host slots were materialized automatically; a fresh Codex session is required for slots without a command fallback.',
     );
   }
-  else if (steering != null) notices.push('Codex native host slots are already materialized; no restart is needed.');
+  else if (steering != null) notices.push('Codex host slots are already materialized; no restart is needed.');
   // A silently discarded overlay is how a user keeps paying for the executor
   // they thought they had switched away from — say it, with the bindings named.
   const droppedNames = Object.keys(droppedOverrides).sort();

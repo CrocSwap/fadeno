@@ -102,7 +102,7 @@ test('built-in Codex model loadouts fall back immediately across native baseline
   const result = runSteeringResolve({
     repoRoot: root,
     archetype: 'worker',
-    nativeExecutor: 'luna-medium',
+    hostExecutor: 'luna-medium',
     loadout: 'sol',
     env: null,
   });

@@ -241,9 +241,9 @@ test('steering: native delivery of a forbidden-posture archetype surfaces the ch
   }));
 
   const result = runSteeringResolve({
-    repoRoot: root, archetype: 'generator', nativeExecutor: 'host-worker', env: null,
+    repoRoot: root, archetype: 'generator', hostExecutor: 'host-worker', env: null,
   });
-  assert.equal(result.mode, 'native');
+  assert.equal(result.mode, 'host');
   assert.equal(result.executor, 'host-worker');
   assert.equal(result.resolved_via, 'worker');
   assert.equal(result.surface_archetype, 'worker');

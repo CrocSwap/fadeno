@@ -164,7 +164,7 @@ unchanged. `forbidden` refuses dispatch onto routes declaring
 today — and, better than refusal where the route supports it, prefers an
 isolated delivery (sandbox flag, worktree) when one is declared.
 
-*Honest caveat:* on native in-session deliveries the host holds the
+*Honest caveat:* on host in-session deliveries the host holds the
 session's write permissions, so `forbidden` is advisory there (prompt-level
 instruction, recorded in the `native_delivery` evidence row) — the same
 advisory/enforced split `enforcement.md` already documents for
@@ -186,10 +186,10 @@ archetypes:
 ```
 
 so every existing loadout serves generators with zero edits. Surface cost is
-deliberately deferred: no dedicated `fadeno:generator` native agent or
-dispatch proxy initially — native delivery resolves through the fallback
+deliberately deferred: no dedicated `fadeno:generator` host agent or
+dispatch proxy initially — host delivery resolves through the fallback
 chain to the worker surface with the write-forbidden instruction carried in
-the prompt (see native delivery, below). Dedicated surfaces come only if the
+the prompt (see host delivery, below). Dedicated surfaces come only if the
 archetype earns traffic.
 
 **Explicit non-additions:** `verifier` and `scout` (and `critic` as distinct
@@ -220,9 +220,9 @@ slot: follow the chain (`scout → reviewer`) until a slot binds; terminate at
 - **Canonical archetypes may declare fallbacks too** (generator → worker
   above); the mechanism is uniform.
 
-**Native delivery for open vocabulary:** the steering layer needs a concrete
+**Host delivery for open vocabulary:** the steering layer needs a concrete
 agent surface for in-session delivery. It walks the fallback chain to the
-first archetype with a native surface (worker/reviewer/judge today) and
+first archetype with a host surface (worker/reviewer/judge today) and
 records the walk. This is what makes arbitrary names *safe* rather than
 merely permitted.
 
@@ -241,8 +241,8 @@ policy alongside phase 3; steering resolutions carry `resolved_via` always
 key entirely on direct binds, matching the additive `override`-field
 precedent; drive's `resolution_snapshot` role rows do not stamp
 `resolved_via` — an absent key is no claim, a present key must match the
-snapshot replay at verify; native delivery of a non-surface archetype
-hard-errors when its chain reaches no native surface (worker / reviewer /
+snapshot replay at verify; host delivery of a non-surface archetype
+hard-errors when its chain reaches no host surface (worker / reviewer /
 judge), naming the chain walked. The evidence format bumped to 0.2 —
 additive fields on the same major, so 0.1 rows read unchanged and the
 tiered reader needed no code change. `generator` shipped in the starter
@@ -357,11 +357,11 @@ never touches the workspace. Shadow rows carry `shadow: true` and
 (shared flag with `shadow_only` eligibility). The primary's result is the
 only one the workflow consumes.
 
-*Honest caveat:* when the primary is delivered natively in-session, the
+*Honest caveat:* when the primary is delivered in-session, the
 kernel is not in the loop at spawn time; the steering hook can record the
 native side (it already writes `native_delivery` rows) but kernel-side
 duplication needs the dispatch path. Initial scope: shadows fire on
-kernel-dispatched primaries; the native-primary case is an open question
+kernel-dispatched primaries; the host-primary case is an open question
 below.
 
 **Comparison is an ordinary judge job.** A `ModelComparison` artifact
@@ -393,13 +393,13 @@ shadow (challenger, zero risk) → override (trial primary, instant revert) → 
 
 **Shipped (0.6.0-rc.15).** Decisions and deviations from the sketch above,
 all deliberate: open question 1 is decided for the initial scope — shadows
-fire on kernel-dispatched primaries only, never on native in-session
+fire on kernel-dispatched primaries only, never on host in-session
 deliveries (steering-hook-initiated duplication remains the open follow-up).
 The shadow fires after the primary's completion row is written and fires
 regardless of the primary's exit code — challenger-succeeds-where-primary-
 failed is precisely the signal a tryout wants; a refused primary fires no
 shadow. Every shadow-side refusal (eligibility `forbidden`, write posture,
-constraint command, unresolvable target or native-only route, worktree
+constraint command, unresolvable target or host-only route, worktree
 failure) lands as a `dispatch_refused` row carrying `shadow: true` +
 `primary_dispatch_id` and can never affect the primary's result — a
 constraint-system error that would bubble loudly on a primary is demoted to
@@ -458,8 +458,8 @@ pairs distinctly.
 
 ## Open questions
 
-1. **Shadow on native primaries.** The highest-value shadow target is the
-   user's daily driver, which is often the native in-session worker — where
+1. **Shadow on host primaries.** The highest-value shadow target is the
+   user's daily driver, which is often the host in-session worker — where
    the kernel never sees a dispatch. Options: steering-hook-initiated
    background dispatch of the shadow (hook already stashes the prompt and
    sha); or accept kernel-dispatched-only scope initially. *Decided with
@@ -467,7 +467,7 @@ pairs distinctly.
    variant stays open.*
 2. **Provenance ergonomics for `distinct_provider_from_inputs`.** Artifact-
    path lookup in the ledger covers kernel-produced artifacts; artifacts
-   produced natively are attributable only when the steering hook recorded
+   produced in-session are attributable only when the steering hook recorded
    them. How much attribution friction is acceptable before `required` mode
    is usable in anger?
 3. **Override persistence granularity.** Overrides currently share the repo

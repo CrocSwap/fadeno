@@ -14762,8 +14762,15 @@ function parseExecutorProfile(text, source, harness = "standalone") {
           `${source}: target "${name}" uses provider "${provider}", but neither \`routes.${harness}.${name}\` nor \`routes.${harness}.${provider}\` is declared.`
         );
       }
-      if (route.native !== void 0 && typeof route.native !== "boolean") {
-        throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.native\` must be boolean.`);
+      const rawHost = route.host !== void 0 ? route.host : route.native;
+      const hostField = route.host !== void 0 ? "host" : "native";
+      if (rawHost !== void 0 && typeof rawHost !== "boolean") {
+        throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.${hostField}\` must be boolean.`);
+      }
+      if (route.host !== void 0 && route.native !== void 0 && route.host !== route.native) {
+        throw new ExecutorProfileError(
+          `${source}: route \`routes.${harness}.${routeKey}\` sets both \`host\` and its legacy alias \`native\` to different values.`
+        );
       }
       if (route.write_access !== void 0 && typeof route.write_access !== "boolean") {
         throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.write_access\` must be boolean.`);
@@ -14801,10 +14808,10 @@ function parseExecutorProfile(text, source, harness = "standalone") {
           throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.session_id_pattern\` needs a capture group.`);
         }
       }
-      if (route.native === true) {
+      if (rawHost === true) {
         if (resume != null || sessionIdPattern != null) {
           throw new ExecutorProfileError(
-            `${source}: native route \`routes.${harness}.${routeKey}\` rejects command-session fields.`
+            `${source}: host route \`routes.${harness}.${routeKey}\` rejects command-session fields.`
           );
         }
         executors[name] = {
@@ -14821,7 +14828,7 @@ function parseExecutorProfile(text, source, harness = "standalone") {
       } else {
         if (command2 == null) {
           throw new ExecutorProfileError(
-            `${source}: route \`routes.${harness}.${routeKey}\` needs \`native: true\` or a non-empty \`command\`.`
+            `${source}: route \`routes.${harness}.${routeKey}\` needs \`host: true\` or a non-empty \`command\`.`
           );
         }
         const mintsId = command2.some((part) => part.includes(SESSION_ID_PLACEHOLDER));
@@ -15288,7 +15295,7 @@ function explainWriteConflict(delivery, archetype, profile) {
   if (!Object.hasOwn(profile.archetypes, archetype)) return null;
   const posture = profile.archetypes[archetype].requiresWrite;
   if (posture === "required" && delivery.spec.writeAccess === false) {
-    return `archetype "${archetype}" declares \`requires_write: required\`, but executor "${delivery.executor}" delivers through a command route declared \`write_access: false\` \u2014 it cannot mutate the workspace, so the dispatch would burn a run and end in a refusal. Fix: bind "${archetype}" to a write-capable executor, raise the route command's permission mode (and declare \`write_access: true\`), or run this ${archetype}-shaped task with the native in-session ${archetype} agent.`;
+    return `archetype "${archetype}" declares \`requires_write: required\`, but executor "${delivery.executor}" delivers through a command route declared \`write_access: false\` \u2014 it cannot mutate the workspace, so the dispatch would burn a run and end in a refusal. Fix: bind "${archetype}" to a write-capable executor, raise the route command's permission mode (and declare \`write_access: true\`), or run this ${archetype}-shaped task with the in-session ${archetype} agent.`;
   }
   if (posture === "forbidden" && delivery.spec.writeAccess === true) {
     return `archetype "${archetype}" declares \`requires_write: forbidden\`, but executor "${delivery.executor}" delivers through a command route declared \`write_access: true\` \u2014 the dispatch would hand a mutating toolchain to work that must not mutate the workspace. Fix: bind "${archetype}" to a read-only route, clear the session dial (\`fadeno loadout clear ${archetype}\`), or declare \`requires_write: none\`.`;
@@ -17439,7 +17446,7 @@ function consumePendingRelay(repoRoot, prompt, now) {
   return fresh.length > 0 ? false : null;
 }
 var SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
-var ON_DEMAND_NATIVE_HARNESSES = /* @__PURE__ */ new Set(["claude"]);
+var ON_DEMAND_HOST_HARNESSES = /* @__PURE__ */ new Set(["claude"]);
 function producedByIds(opts) {
   if (opts.producedBy == null) return [];
   return opts.producedBy.map((id) => id.trim()).filter((id) => id.length > 0);
@@ -17616,11 +17623,11 @@ function runDispatch(opts) {
     }
   }
   const harness = profile.harness ?? "standalone";
-  const nativeOnDemand = ON_DEMAND_NATIVE_HARNESSES.has(harness);
-  if (spec.adapter === "host" && (nativeOnDemand || spec.fallbackCommand == null)) {
+  const hostOnDemand = ON_DEMAND_HOST_HARNESSES.has(harness);
+  if (spec.adapter === "host" && (hostOnDemand || spec.fallbackCommand == null)) {
     const shape = archetype ?? role ?? "role";
     throw new DispatchCommandError(
-      nativeOnDemand ? `resolved to host executor "${executorName}", which the ${harness} harness runs natively in this session; dispatching its fallback_command would hand the task to a subprocess of the same harness and re-enter this dispatch one level down. Run this ${shape}-shaped task with the native in-session ${archetype ?? "role"} agent, or bind a command executor.` : `resolved to host executor "${executorName}"; ad-hoc dispatch invokes command adapters only \u2014 run this ${shape}-shaped task with the native in-session ${archetype ?? "role"} agent instead, declare fallback_command on the executor, or bind a command executor.`
+      hostOnDemand ? `resolved to host executor "${executorName}", which the ${harness} harness runs in-session in this session; dispatching its fallback_command would hand the task to a subprocess of the same harness and re-enter this dispatch one level down. Run this ${shape}-shaped task with the in-session ${archetype ?? "role"} agent, or bind a command executor.` : `resolved to host executor "${executorName}"; ad-hoc dispatch invokes command adapters only \u2014 run this ${shape}-shaped task with the in-session ${archetype ?? "role"} agent instead, declare fallback_command on the executor, or bind a command executor.`
     );
   }
   const command2 = spec.adapter === "command" ? spec.command : spec.fallbackCommand;
@@ -17871,7 +17878,7 @@ function runDispatch(opts) {
       if (shadowSpec == null) {
         writeShadowRefusal("shadow_resolution", `shadow target "${shadowExecutorNameInner}" is not a declared executor (${Object.keys(profile.executors).join(", ")}).`);
       } else if (shadowSpec.adapter === "host") {
-        writeShadowRefusal("shadow_resolution", `shadow executor "${shadowExecutorNameInner}" is a host/native executor \u2014 the kernel cannot duplicate a dispatch natively.`, {
+        writeShadowRefusal("shadow_resolution", `shadow executor "${shadowExecutorNameInner}" is a host executor \u2014 the kernel cannot duplicate a host dispatch.`, {
           model: shadowSpec.model,
           transport: "native"
         });
@@ -22110,7 +22117,7 @@ function driveComposite(ctx, maxTransitions, actions) {
     if (requests.length > 0) {
       return finish(
         "awaiting_host_dispatch",
-        `${requests.length} compositional host dispatch request(s) are awaiting native receipts.`,
+        `${requests.length} compositional host dispatch request(s) are awaiting host receipts.`,
         null,
         requests
       );
@@ -22280,7 +22287,7 @@ function runDrive(opts) {
     const failure = drivePromptable(ctx, comp);
     if (failure != null) {
       if (failure.kind === "awaiting_host_dispatch") {
-        const base2 = `${failure.requests.length} host dispatch request(s) are awaiting native receipts.`;
+        const base2 = `${failure.requests.length} host dispatch request(s) are awaiting host receipts.`;
         return finish(
           "awaiting_host_dispatch",
           failure.notes.length > 0 ? `${base2} ${failure.notes.join(" ")}` : base2,
@@ -25343,7 +25350,7 @@ var COMMANDS = {
     {
       resolve: command({
         "--archetype": { kind: "archetype" },
-        "--native-executor": { kind: "executor" },
+        "--host-executor": { kind: "executor" },
         "--role": { kind: "free" },
         "--loadout": LOADOUT,
         "--run": { kind: "run" },
@@ -25711,9 +25718,9 @@ var import_node_os3 = require("node:os");
 var import_node_path27 = require("node:path");
 var SteeringError = class extends Error {
 };
-var NATIVE_SURFACE_ARCHETYPES = ["worker", "reviewer", "judge"];
-var NATIVE_SURFACE_SET = new Set(NATIVE_SURFACE_ARCHETYPES);
-var FORBIDDEN_NATIVE_ADVISORY = "This work is write-forbidden (requires_write: forbidden): produce artifacts in your reply only \u2014 do not edit, create, or commit workspace files.";
+var HOST_SURFACE_ARCHETYPES = ["worker", "reviewer", "judge"];
+var HOST_SURFACE_SET = new Set(HOST_SURFACE_ARCHETYPES);
+var FORBIDDEN_HOST_ADVISORY = "This work is write-forbidden (requires_write: forbidden): produce artifacts in your reply only \u2014 do not edit, create, or commit workspace files.";
 function rootOf(opts) {
   return opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
 }
@@ -25752,19 +25759,19 @@ function fallbackChain(profile, start) {
 }
 function decorateSteering(base, profile, resolvedVia) {
   const result = { ...base, resolved_via: resolvedVia };
-  if (result.mode !== "native") return result;
-  if (!NATIVE_SURFACE_SET.has(result.archetype)) {
+  if (result.mode !== "host") return result;
+  if (!HOST_SURFACE_SET.has(result.archetype)) {
     const chain = fallbackChain(profile, result.archetype);
-    const surface = chain.find((name) => NATIVE_SURFACE_SET.has(name));
+    const surface = chain.find((name) => HOST_SURFACE_SET.has(name));
     if (surface == null) {
       throw new SteeringError(
-        `archetype "${result.archetype}" has no native agent surface on its fallback chain (${chain.join(" \u2192 ")}); deliver it through a command route, or declare a fallback to ${NATIVE_SURFACE_ARCHETYPES.join(", ")}.`
+        `archetype "${result.archetype}" has no host agent surface on its fallback chain (${chain.join(" \u2192 ")}); deliver it through a command route, or declare a fallback to ${HOST_SURFACE_ARCHETYPES.join(", ")}.`
       );
     }
     result.surface_archetype = surface;
   }
   if (Object.hasOwn(profile.archetypes, result.archetype) && profile.archetypes[result.archetype].requiresWrite === "forbidden") {
-    result.advisory = FORBIDDEN_NATIVE_ADVISORY;
+    result.advisory = FORBIDDEN_HOST_ADVISORY;
   }
   return result;
 }
@@ -25803,7 +25810,7 @@ function snapshotProfileForRequest(lookup) {
     throw err;
   }
 }
-function runLockedSteeringResolve(opts, archetype, role, nativeExecutor) {
+function runLockedSteeringResolve(opts, archetype, role, hostExecutor) {
   const run = opts.run?.trim() ?? "";
   const dispatchId = opts.dispatchId?.trim() ?? "";
   if (run === "" || dispatchId === "") {
@@ -25851,11 +25858,11 @@ function runLockedSteeringResolve(opts, archetype, role, nativeExecutor) {
       `host dispatch "${dispatchId}" request identity does not match executor "${request.executor}" in the run profile snapshot.`
     );
   }
-  const matchesNative = nativeExecutor === request.executor;
+  const matchesHost = hostExecutor === request.executor;
   const hasFallback = executor.fallbackCommand != null;
-  const detail2 = matchesNative ? `host request ${dispatchId} is locked to run-snapshotted executor ${request.executor}; execute natively` : hasFallback ? `host request ${dispatchId} is locked to ${request.executor}; deliver it through that executor's declared command fallback` : `host request ${dispatchId} requires native executor ${request.executor}; this session is materialized for ${nativeExecutor ?? "no native executor"}, so start a matching Codex session`;
+  const detail2 = matchesHost ? `host request ${dispatchId} is locked to run-snapshotted executor ${request.executor}; execute in-host` : hasFallback ? `host request ${dispatchId} is locked to ${request.executor}; deliver it through that executor's declared command fallback` : `host request ${dispatchId} requires host executor ${request.executor}; this session is materialized for ${hostExecutor ?? "no host executor"}, so start a matching Codex session`;
   return decorateSteering({
-    mode: matchesNative ? "native" : hasFallback ? "command" : "restart_required",
+    mode: matchesHost ? "host" : hasFallback ? "command" : "restart_required",
     archetype,
     role,
     activeLoadout: null,
@@ -25864,7 +25871,7 @@ function runLockedSteeringResolve(opts, archetype, role, nativeExecutor) {
     model: request.model,
     source: "host-request",
     override: false,
-    nativeExecutor,
+    hostExecutor,
     detail: detail2
   }, profile, null);
 }
@@ -25872,18 +25879,18 @@ function runSteeringResolve(opts) {
   const repoRoot = rootOf(opts);
   const archetype = validateArchetype(opts.archetype);
   const role = opts.role?.trim() ? opts.role.trim() : null;
-  const nativeExecutor = opts.nativeExecutor?.trim() ? opts.nativeExecutor.trim() : null;
+  const hostExecutor = opts.hostExecutor?.trim() ? opts.hostExecutor.trim() : null;
   const hasRun = opts.run != null;
   const hasDispatchId = opts.dispatchId != null;
   if (hasRun !== hasDispatchId || hasRun && (opts.run.trim() === "" || opts.dispatchId.trim() === "")) {
     throw new SteeringError("locked steering resolution requires both --run and --dispatch-id.");
   }
-  if (hasRun && hasDispatchId) return runLockedSteeringResolve(opts, archetype, role, nativeExecutor);
+  if (hasRun && hasDispatchId) return runLockedSteeringResolve(opts, archetype, role, hostExecutor);
   const { profile, selfContained } = profileOf(repoRoot, opts.userPathOptions);
-  const nativeSpec = nativeExecutor == null ? null : profile.executors[nativeExecutor];
-  if (nativeExecutor != null && (nativeSpec == null || nativeSpec.adapter !== "host")) {
+  const hostSpec = hostExecutor == null ? null : profile.executors[hostExecutor];
+  if (hostExecutor != null && (hostSpec == null || hostSpec.adapter !== "host")) {
     throw new SteeringError(
-      `native executor "${nativeExecutor}" is not a declared host executor; re-apply Codex steering from a host-backed baseline loadout.`
+      `host executor "${hostExecutor}" is not a declared host executor; re-apply Codex steering from a host-backed baseline loadout.`
     );
   }
   let active;
@@ -25905,23 +25912,23 @@ function runSteeringResolve(opts) {
     throw err;
   }
   if (active == null) {
-    if (nativeExecutor == null || nativeSpec == null) {
+    if (hostExecutor == null || hostSpec == null) {
       throw new SteeringError(
-        "no loadout is active and this Codex role agent has no native baseline; run `fadeno steering apply <loadout> --codex --force` and start a fresh Codex session."
+        "no loadout is active and this Codex role agent has no host baseline; run `fadeno steering apply <loadout> --codex --force` and start a fresh Codex session."
       );
     }
     return decorateSteering({
-      mode: "native",
+      mode: "host",
       archetype,
       role,
       activeLoadout: null,
-      executor: nativeExecutor,
+      executor: hostExecutor,
       adapter: "host",
-      model: nativeSpec.model,
-      source: "native-baseline",
+      model: hostSpec.model,
+      source: "host-baseline",
       override: false,
-      nativeExecutor,
-      detail: `no loadout is active; execute natively as baseline ${nativeExecutor}`
+      hostExecutor,
+      detail: `no loadout is active; execute in-host as baseline ${hostExecutor}`
     }, profile, null);
   }
   let resolved;
@@ -25951,7 +25958,7 @@ function runSteeringResolve(opts) {
       model: spec.model,
       source: resolved.source,
       override: resolved.source === "override",
-      nativeExecutor,
+      hostExecutor,
       detail: conflict,
       writeConflict: conflict
     });
@@ -25967,13 +25974,13 @@ function runSteeringResolve(opts) {
       model: resolved.executor.model,
       source: resolved.source,
       override: resolved.source === "override",
-      nativeExecutor,
+      hostExecutor,
       detail: `dispatch through command executor ${resolved.executorName}; effective immediately`
     });
   }
-  if (nativeExecutor === resolved.executorName) {
+  if (hostExecutor === resolved.executorName) {
     return finish({
-      mode: "native",
+      mode: "host",
       archetype,
       role,
       activeLoadout: active,
@@ -25982,8 +25989,8 @@ function runSteeringResolve(opts) {
       model: resolved.executor.model,
       source: resolved.source,
       override: resolved.source === "override",
-      nativeExecutor,
-      detail: `host executor ${resolved.executorName} matches this session's native baseline`
+      hostExecutor,
+      detail: `host executor ${resolved.executorName} matches this session's host baseline`
     });
   }
   if (resolved.executor.fallbackCommand != null) {
@@ -25997,8 +26004,8 @@ function runSteeringResolve(opts) {
       model: resolved.executor.model,
       source: resolved.source,
       override: resolved.source === "override",
-      nativeExecutor,
-      detail: `host executor ${resolved.executorName} differs from this session's native baseline ${nativeExecutor ?? "(none)"}; use its declared command fallback immediately`
+      hostExecutor,
+      detail: `host executor ${resolved.executorName} differs from this session's host baseline ${hostExecutor ?? "(none)"}; use its declared command fallback immediately`
     });
   }
   return finish({
@@ -26011,8 +26018,8 @@ function runSteeringResolve(opts) {
     model: resolved.executor.model,
     source: resolved.source,
     override: resolved.source === "override",
-    nativeExecutor,
-    detail: `loadout ${active.name} requests host executor ${resolved.executorName}, but this session was materialized for ${nativeExecutor ?? "no native executor"}; apply the loadout and start a fresh Codex session`
+    hostExecutor,
+    detail: `loadout ${active.name} requests host executor ${resolved.executorName}, but this session was materialized for ${hostExecutor ?? "no host executor"}; apply the loadout and start a fresh Codex session`
   });
 }
 var ROLE_BEHAVIOR = {
@@ -26023,11 +26030,11 @@ var ROLE_BEHAVIOR = {
 function tomlString(value) {
   return JSON.stringify(value);
 }
-function renderCodexNativeAgent(archetype, executorName, spec, cliPath) {
+function renderCodexHostAgent(archetype, executorName, spec, cliPath) {
   const behavior = ROLE_BEHAVIOR[archetype] ?? `Perform the ${archetype} role exactly as requested.`;
   const cli = /\s/.test(cliPath) ? JSON.stringify(cliPath) : cliPath;
   return `name = ${tomlString(archetype)}
-description = ${tomlString(`Fadeno hybrid ${archetype}: native on the session baseline, command-dispatched when the active loadout switches providers.`)}
+description = ${tomlString(`Fadeno hybrid ${archetype}: host-delivered on the session baseline, command-dispatched when the active loadout switches providers.`)}
 model = ${tomlString(spec.model)}
 model_reasoning_effort = ${tomlString(spec.reasoningEffort)}
 sandbox_mode = "workspace-write"
@@ -26038,19 +26045,19 @@ You are Fadeno's hybrid ${archetype}. Do not spawn subagents.
 Before every task, inspect whether the delivery begins with \`# Fadeno engine step assignment\`.
 For an engine assignment, the host coordinator must provide both \`run: <run-id>\`
 and \`dispatch_id: <dispatch-id>\` in the delivery envelope. Run:
-\`${cli} steering resolve --archetype ${archetype} --native-executor ${executorName} --run <run-id> --dispatch-id <dispatch-id>\`
+\`${cli} steering resolve --archetype ${archetype} --host-executor ${executorName} --run <run-id> --dispatch-id <dispatch-id>\`
 If either identity is absent or validation fails, stop and report the resolver
 error; never fall back to the ordinary ambient preflight for an engine assignment.
 For that engine assignment only:
-- mode=native: ${behavior}
+- mode=host: ${behavior}
 - mode=command: run \`${cli} dispatch-fallback <run-id> <dispatch-id>\` and
   relay stdout verbatim. That command owns the start and terminal receipts.
 - mode=restart_required: stop and relay the resolver's restart instruction.
 
 For an ordinary task beginning with the ordinary \`# Fadeno step assignment\` heading, run:
-\`${cli} steering resolve --archetype ${archetype} --native-executor ${executorName}\`
+\`${cli} steering resolve --archetype ${archetype} --host-executor ${executorName}\`
 For that ordinary task:
-- mode=native: ${behavior}
+- mode=host: ${behavior}
 - mode=command: write the ENTIRE task prompt you received verbatim to a unique
   file under .fadeno/local/prompts/, run
   \`${cli} dispatch --archetype ${archetype} --prompt-file <path>\`, and relay stdout
@@ -26069,7 +26076,7 @@ silently substitute a different model or executor.
 function renderCodexCommandBroker(archetype, cliPath) {
   const cli = /\s/.test(cliPath) ? JSON.stringify(cliPath) : cliPath;
   return `name = ${tomlString(archetype)}
-description = ${tomlString(`Fadeno command broker ${archetype}: delegates command slots through the active loadout and stops when a host slot needs native materialization.`)}
+description = ${tomlString(`Fadeno command broker ${archetype}: delegates command slots through the active loadout and stops when a host slot needs host materialization.`)}
 model = "gpt-5.6-luna"
 model_reasoning_effort = "low"
 sandbox_mode = "workspace-write"
@@ -26086,7 +26093,7 @@ error; never fall back to the ordinary ambient preflight for an engine assignmen
 For that engine assignment only:
 - mode=command: run \`${cli} dispatch-fallback <run-id> <dispatch-id>\` and
   relay stdout verbatim. That command owns the start and terminal receipts.
-- mode=native or mode=restart_required: stop and relay the resolver's instruction.
+- mode=host or mode=restart_required: stop and relay the resolver's instruction.
 
 For an ordinary task beginning with the ordinary \`# Fadeno step assignment\` heading, run:
 \`${cli} steering resolve --archetype ${archetype}\`
@@ -26096,8 +26103,8 @@ For that ordinary task:
   \`${cli} dispatch --archetype ${archetype} --prompt-file <path>\`, and relay stdout verbatim.
   On a non-zero exit, report the error and do not perform the
   task yourself.
-- mode=native or mode=restart_required: stop and relay the resolver's
-  instruction; a host slot must run in a matching native Codex agent.
+- mode=host or mode=restart_required: stop and relay the resolver's
+  instruction; a host slot must run in a matching host Codex agent.
 - mode=write_conflict: stop and relay the resolver's refusal verbatim. The
   loadout's delivery cannot write, so never dispatch it and never do the work
   on this broker instead.
@@ -26166,12 +26173,12 @@ function runSteeringApply(opts) {
       }
       baseline[archetype] = executorName;
       materialization2[archetype] = {
-        kind: "native",
+        kind: "host",
         adapter: "host",
         executor: executorName,
         model: spec.model
       };
-      body = renderCodexNativeAgent(archetype, executorName, spec, cliPath);
+      body = renderCodexHostAgent(archetype, executorName, spec, cliPath);
     } else {
       const conflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile);
       if (conflict != null) {
@@ -26498,8 +26505,8 @@ function runUse(opts) {
     const spec = loaded.profile.executors[executor];
     return spec.adapter === "command" ? [{ archetype, executor, command: spec.command }] : [];
   });
-  const needsNativeMaterialization = target === "codex" && Object.values(slots).some((executor) => loaded.profile.executors[executor]?.adapter === "host");
-  const steering = needsNativeMaterialization ? runSteeringApply({
+  const needsHostMaterialization = target === "codex" && Object.values(slots).some((executor) => loaded.profile.executors[executor]?.adapter === "host");
+  const steering = needsHostMaterialization ? runSteeringApply({
     repoRoot,
     loadout: name,
     target: "codex",
@@ -26517,9 +26524,9 @@ function runUse(opts) {
       return spec.adapter !== "host" || spec.fallbackCommand != null;
     });
     notices.push(
-      allHostSlotsFallback ? "Codex native host slots were materialized automatically. Declared command fallbacks work now; restart only to make the new slots native." : "Codex native host slots were materialized automatically; a fresh Codex session is required for slots without a command fallback."
+      allHostSlotsFallback ? "Codex host slots were materialized automatically. Declared command fallbacks work now; restart only to deliver the new slots in-session." : "Codex host slots were materialized automatically; a fresh Codex session is required for slots without a command fallback."
     );
-  } else if (steering != null) notices.push("Codex native host slots are already materialized; no restart is needed.");
+  } else if (steering != null) notices.push("Codex host slots are already materialized; no restart is needed.");
   const droppedNames = Object.keys(droppedOverrides).sort();
   if (droppedNames.length > 0) {
     notices.push(
@@ -26561,7 +26568,7 @@ function materialization(loadout, profile, target, userPathOptions) {
     const file = (0, import_node_path32.join)(path, `fadeno-${archetype}.toml`);
     if (!(0, import_node_fs33.existsSync)(file)) return false;
     const body = (0, import_node_fs33.readFileSync)(file, "utf8");
-    return body.startsWith("# fadeno:managed") && body.includes(`--native-executor ${executor}`);
+    return body.startsWith("# fadeno:managed") && body.includes(`--host-executor ${executor}`);
   });
   return { path, fresh, restartRequired: !fresh };
 }
@@ -26695,7 +26702,7 @@ function runDoctor(opts = {}) {
     const spec = role.adapter === "command" ? status.external.find((item) => item.archetype === role.archetype) : null;
     if (spec == null || spec.command == null) continue;
     if (!commandOnPath(spec.command[0])) {
-      findings.push(finding(`executor:${role.executor}`, "warning", `${role.command?.[0] ?? role.executor} is unavailable`, "Install the provider CLI or select native explicitly; Fadeno will not fall back automatically."));
+      findings.push(finding(`executor:${role.executor}`, "warning", `${role.command?.[0] ?? role.executor} is unavailable`, "Install the provider CLI or select a host executor explicitly; Fadeno will not fall back automatically."));
     } else {
       findings.push(finding(`executor:${role.executor}`, "ok", "executable is present on PATH (not executed)"));
     }
@@ -26710,7 +26717,7 @@ function runDoctor(opts = {}) {
       "harness",
       "warning",
       `${ambient.marker} says this session runs inside ${ambient.harness}, but no harness is recorded so routes compile as standalone`,
-      `Run \`fadeno setup --${ambient.harness}\`; until then every ${ambient.harness}-native slot is delivered as a subprocess instead.`
+      `Run \`fadeno setup --${ambient.harness}\`; until then every ${ambient.harness}-host slot is delivered as a subprocess instead.`
     ));
   } else {
     findings.push(finding(
@@ -26721,9 +26728,9 @@ function runDoctor(opts = {}) {
     ));
   }
   if (status.harness === "codex" && status.codexMaterialization?.restartRequired) {
-    findings.push(finding("codex-agents", "warning", "managed native agents are missing or stale", "Run `fadeno setup --codex` and start a fresh Codex session."));
+    findings.push(finding("codex-agents", "warning", "managed host agents are missing or stale", "Run `fadeno setup --codex` and start a fresh Codex session."));
   } else if (status.harness === "codex") {
-    findings.push(finding("codex-agents", "ok", "managed native-agent state is current"));
+    findings.push(finding("codex-agents", "ok", "managed host-agent state is current"));
   }
   const gitignore = (0, import_node_path33.join)(repoRoot, ".gitignore");
   const ignored = (0, import_node_fs34.existsSync)(gitignore) ? (0, import_node_fs34.readFileSync)(gitignore, "utf8") : "";
@@ -27038,10 +27045,10 @@ Usage:
   fadeno dispatch [flags]               Resolve archetype \u2192 executor and invoke it once (ad hoc)
                                         (--shadow <executor> duplicates it to a one-shot challenger)
   fadeno dispatch-fallback <run> <id>   Deliver a locked host request by declared fallback
-  fadeno dispatch-start <run> <id>      Start a native host dispatch
+  fadeno dispatch-start <run> <id>      Start a host dispatch
   fadeno dispatch-progress <run> <id>   Record an attested progress observation
-  fadeno dispatch-complete <run> <id>   Submit a native host result
-  fadeno dispatch-fail <run> <id>       Submit a native host failure
+  fadeno dispatch-complete <run> <id>   Submit a host result
+  fadeno dispatch-fail <run> <id>       Submit a host failure
   fadeno run <run> [flags]              Update a run ledger (run.yaml + events.jsonl)
   fadeno tool-complete <run> --output P Atomically record the next tool_call result
   fadeno gate <run> <condition>         Evaluate a gate condition from a structured artifact
@@ -27090,15 +27097,15 @@ Options:
   --archetype <a>         (dispatch) Archetype to resolve (required unless --executor)
   --role <name>           (dispatch) Role name: enables binding pins + evidence attribution
   --executor <name>       (dispatch) Bypass resolution and invoke a named executor (debugging)
-  --native-executor <n>   (steering resolve) Host executor materialized into this native role
+  --host-executor <n>     (steering resolve) Host executor materialized into this role
   --run <id>              (steering resolve) Immutable engine run identity for a delivered host request
   --dispatch-id <id>      (steering resolve) Immutable host dispatch identity paired with --run
   --prompt-file <path>    (dispatch) Read the prompt from a file instead of stdin
   --tail <n>              (dispatches) Logical entries to show, newest last (default 10)
   --json                  (dispatches) Emit structured entries on stdout for scripting
-  --agent-id <id>         (dispatch-start) Native host agent identity
-  --workspace <path>      (dispatch-start) Native workspace provenance
-  --branch <name>         (dispatch-start) Native branch provenance
+  --agent-id <id>         (dispatch-start) Host agent identity
+  --workspace <path>      (dispatch-start) Host workspace provenance
+  --branch <name>         (dispatch-start) Host branch provenance
   --file <path>           (dispatch-progress) Agent/harness status JSON file
   --source <kind>         (dispatch-progress) agent | harness | director
   --output <path>         (dispatch-complete) Temporary output file
@@ -27542,7 +27549,7 @@ function printDrive(result) {
       return 0;
     }
     case "awaiting_host_dispatch":
-      console.log(`awaiting ${result.requests.length} native host dispatch(es) for run ${result.run}`);
+      console.log(`awaiting ${result.requests.length} host dispatch(es) for run ${result.run}`);
       for (const request of result.requests) {
         console.log(`  ${request.dispatchId}  ${request.step}${request.actor ? ` (${request.actor})` : ""}  ${request.model}/${request.reasoningEffort}`);
         if (request.nodeInstanceId != null) console.log(`      instance: ${request.nodeInstanceId}`);
@@ -27648,6 +27655,9 @@ function main(argv) {
         archetype: { type: "string" },
         role: { type: "string" },
         executor: { type: "string" },
+        "host-executor": { type: "string" },
+        // Pre-0.6 spelling. Kept parseable so a Codex agent TOML materialized
+        // by an older setup keeps resolving until the next one rewrites it.
         "native-executor": { type: "string" },
         run: { type: "string" },
         "dispatch-id": { type: "string" },
@@ -27823,12 +27833,12 @@ function main(argv) {
       if (sub === "resolve") {
         if (!values.archetype) {
           throw new Error(
-            "Usage: fadeno steering resolve --archetype <name> [--native-executor <name>] [--role <name>] [--loadout <name>] [--run <id> --dispatch-id <id>]"
+            "Usage: fadeno steering resolve --archetype <name> [--host-executor <name>] [--role <name>] [--loadout <name>] [--run <id> --dispatch-id <id>]"
           );
         }
         const result = runSteeringResolve({
           archetype: values.archetype,
-          nativeExecutor: values["native-executor"],
+          hostExecutor: values["host-executor"] ?? values["native-executor"],
           role: values.role,
           loadout: values.loadout,
           run: values.run,
@@ -27842,7 +27852,7 @@ function main(argv) {
           executor: result.executor,
           adapter: result.adapter,
           model: result.model,
-          native_executor: result.nativeExecutor,
+          host_executor: result.hostExecutor,
           resolution: result.source,
           // Additive provenance: `resolution` already spells "override", and
           // this flag lets a renderer branch without enumerating sources.
@@ -27870,11 +27880,11 @@ function main(argv) {
             continue;
           }
           console.log(
-            `  ${archetype} \u2192 ${slot.kind === "native" ? "native host" : "command broker"} ${slot.executor}`
+            `  ${archetype} \u2192 ${slot.kind === "host" ? "host agent" : "command broker"} ${slot.executor}`
           );
         }
         console.log(
-          `  ${changed} agent definition(s) written; declared fallbacks work immediately, or start a fresh Codex session to make changed host slots native.`
+          `  ${changed} agent definition(s) written; declared fallbacks work immediately, or start a fresh Codex session to deliver changed host slots in-session.`
         );
         if (changed === 0) console.log("  Existing files were preserved; pass --force to replace them.");
         return 0;
@@ -28134,7 +28144,7 @@ resolution${via}:`);
           }
           if (hostSlots > 0) {
             console.log(
-              `  ${hostSlots} host slot(s) run natively only when the current session's materialized native executor matches; declared command fallbacks switch on the next invocation. Run \`fadeno steering apply ${result.name} --codex --force\` and start a fresh Codex session only to make them native.`
+              `  ${hostSlots} host slot(s) run in-session only when the current session's materialized host executor matches; declared command fallbacks switch on the next invocation. Run \`fadeno steering apply ${result.name} --codex --force\` and start a fresh Codex session only to deliver them in-session.`
             );
           }
           return 0;
@@ -28273,7 +28283,7 @@ resolution${via}:`);
     case "dispatch-start": {
       const [, run, dispatchId] = positionals;
       if (!run || !dispatchId || !values["agent-id"]) {
-        throw new Error("Usage: fadeno dispatch-start <run> <dispatch-id> --agent-id <native-id> [--workspace <path>] [--branch <branch>]");
+        throw new Error("Usage: fadeno dispatch-start <run> <dispatch-id> --agent-id <host-agent-id> [--workspace <path>] [--branch <branch>]");
       }
       const result = runDispatchStart({
         run,

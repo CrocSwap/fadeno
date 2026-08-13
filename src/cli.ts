@@ -94,10 +94,10 @@ Usage:
   fadeno dispatch [flags]               Resolve archetype → executor and invoke it once (ad hoc)
                                         (--shadow <executor> duplicates it to a one-shot challenger)
   fadeno dispatch-fallback <run> <id>   Deliver a locked host request by declared fallback
-  fadeno dispatch-start <run> <id>      Start a native host dispatch
+  fadeno dispatch-start <run> <id>      Start a host dispatch
   fadeno dispatch-progress <run> <id>   Record an attested progress observation
-  fadeno dispatch-complete <run> <id>   Submit a native host result
-  fadeno dispatch-fail <run> <id>       Submit a native host failure
+  fadeno dispatch-complete <run> <id>   Submit a host result
+  fadeno dispatch-fail <run> <id>       Submit a host failure
   fadeno run <run> [flags]              Update a run ledger (run.yaml + events.jsonl)
   fadeno tool-complete <run> --output P Atomically record the next tool_call result
   fadeno gate <run> <condition>         Evaluate a gate condition from a structured artifact
@@ -146,15 +146,15 @@ Options:
   --archetype <a>         (dispatch) Archetype to resolve (required unless --executor)
   --role <name>           (dispatch) Role name: enables binding pins + evidence attribution
   --executor <name>       (dispatch) Bypass resolution and invoke a named executor (debugging)
-  --native-executor <n>   (steering resolve) Host executor materialized into this native role
+  --host-executor <n>     (steering resolve) Host executor materialized into this role
   --run <id>              (steering resolve) Immutable engine run identity for a delivered host request
   --dispatch-id <id>      (steering resolve) Immutable host dispatch identity paired with --run
   --prompt-file <path>    (dispatch) Read the prompt from a file instead of stdin
   --tail <n>              (dispatches) Logical entries to show, newest last (default 10)
   --json                  (dispatches) Emit structured entries on stdout for scripting
-  --agent-id <id>         (dispatch-start) Native host agent identity
-  --workspace <path>      (dispatch-start) Native workspace provenance
-  --branch <name>         (dispatch-start) Native branch provenance
+  --agent-id <id>         (dispatch-start) Host agent identity
+  --workspace <path>      (dispatch-start) Host workspace provenance
+  --branch <name>         (dispatch-start) Host branch provenance
   --file <path>           (dispatch-progress) Agent/harness status JSON file
   --source <kind>         (dispatch-progress) agent | harness | director
   --output <path>         (dispatch-complete) Temporary output file
@@ -674,7 +674,7 @@ function printDrive(result: DriveResult): number {
       return 0;
     }
     case 'awaiting_host_dispatch':
-      console.log(`awaiting ${result.requests.length} native host dispatch(es) for run ${result.run}`);
+      console.log(`awaiting ${result.requests.length} host dispatch(es) for run ${result.run}`);
       for (const request of result.requests) {
         console.log(`  ${request.dispatchId}  ${request.step}${request.actor ? ` (${request.actor})` : ''}  ${request.model}/${request.reasoningEffort}`);
         if (request.nodeInstanceId != null) console.log(`      instance: ${request.nodeInstanceId}`);
@@ -788,6 +788,9 @@ function main(argv: string[]): number {
         archetype: { type: 'string' },
         role: { type: 'string' },
         executor: { type: 'string' },
+        'host-executor': { type: 'string' },
+        // Pre-0.6 spelling. Kept parseable so a Codex agent TOML materialized
+        // by an older setup keeps resolving until the next one rewrites it.
         'native-executor': { type: 'string' },
         run: { type: 'string' },
         'dispatch-id': { type: 'string' },
@@ -972,12 +975,12 @@ function main(argv: string[]): number {
       if (sub === 'resolve') {
         if (!values.archetype) {
           throw new Error(
-            'Usage: fadeno steering resolve --archetype <name> [--native-executor <name>] [--role <name>] [--loadout <name>] [--run <id> --dispatch-id <id>]',
+            'Usage: fadeno steering resolve --archetype <name> [--host-executor <name>] [--role <name>] [--loadout <name>] [--run <id> --dispatch-id <id>]',
           );
         }
         const result = runSteeringResolve({
           archetype: values.archetype,
-          nativeExecutor: values['native-executor'],
+          hostExecutor: values['host-executor'] ?? values['native-executor'],
           role: values.role,
           loadout: values.loadout,
           run: values.run,
@@ -991,7 +994,7 @@ function main(argv: string[]): number {
           executor: result.executor,
           adapter: result.adapter,
           model: result.model,
-          native_executor: result.nativeExecutor,
+          host_executor: result.hostExecutor,
           resolution: result.source,
           // Additive provenance: `resolution` already spells "override", and
           // this flag lets a renderer branch without enumerating sources.
@@ -1021,12 +1024,12 @@ function main(argv: string[]): number {
             continue;
           }
           console.log(
-            `  ${archetype} → ${slot.kind === 'native' ? 'native host' : 'command broker'} ${slot.executor}`,
+            `  ${archetype} → ${slot.kind === 'host' ? 'host agent' : 'command broker'} ${slot.executor}`,
           );
         }
         console.log(
           `  ${changed} agent definition(s) written; declared fallbacks work immediately, ` +
-            'or start a fresh Codex session to make changed host slots native.',
+            'or start a fresh Codex session to deliver changed host slots in-session.',
         );
         if (changed === 0) console.log('  Existing files were preserved; pass --force to replace them.');
         return 0;
@@ -1297,9 +1300,9 @@ function main(argv: string[]): number {
           }
           if (hostSlots > 0) {
             console.log(
-              `  ${hostSlots} host slot(s) run natively only when the current session's materialized native executor matches; ` +
+              `  ${hostSlots} host slot(s) run in-session only when the current session's materialized host executor matches; ` +
                 'declared command fallbacks switch on the next invocation. ' +
-                `Run \`fadeno steering apply ${result.name} --codex --force\` and start a fresh Codex session only to make them native.`,
+                `Run \`fadeno steering apply ${result.name} --codex --force\` and start a fresh Codex session only to deliver them in-session.`,
             );
           }
           return 0;
@@ -1454,7 +1457,7 @@ function main(argv: string[]): number {
     case 'dispatch-start': {
       const [, run, dispatchId] = positionals;
       if (!run || !dispatchId || !values['agent-id']) {
-        throw new Error('Usage: fadeno dispatch-start <run> <dispatch-id> --agent-id <native-id> [--workspace <path>] [--branch <branch>]');
+        throw new Error('Usage: fadeno dispatch-start <run> <dispatch-id> --agent-id <host-agent-id> [--workspace <path>] [--branch <branch>]');
       }
       const result = runDispatchStart({
         run,

@@ -94,7 +94,7 @@ npx fadeno init --grok
 section). Use `--force` to overwrite. Add `--with-hooks` to also scaffold the
 tier-2 [enforcement](#enforcement-advisory-vs-enforced) layer (a pre-commit
 guard + a CI workflow). Steering is installed by default for Codex and Claude.
-Use `--no-steering` for the legacy native-only project surface;
+Use `--no-steering` for the legacy unsteered project surface;
 `--with-steering` remains an accepted compatibility alias. Selecting a command
 loadout is still explicit and always announces the external sandbox boundary.
 
@@ -187,7 +187,7 @@ command.
 
 The Codex plugin carries the skills, invocation metadata, a self-contained
 `bin/fadeno`, and adjacent built-in definitions. `$fadeno-setup` installs the
-stable user runtime and user-scoped managed native agents; a fresh session is
+stable user runtime and user-scoped managed host agents; a fresh session is
 required after those agents change. Project overrides remain available through
 `fadeno vendor` or `fadeno steering apply ... --scope project`.
 
@@ -237,7 +237,7 @@ The runner will:
 1. pick the best playbook from the bundled-plus-project catalog (using each
    playbook's `when_to_use`; project names shadow bundled names),
 2. create a run directory under `.fadeno/runs/`,
-3. execute each step — delegating roles to native subagents when available, or
+3. execute each step — delegating roles to host subagents when available, or
    simulating them with separate passes otherwise (depth-1; a subagent never
    spawns its own subagents),
 4. apply gates from **structured judgment artifacts** (not vibes),
@@ -262,14 +262,14 @@ fadeno show <run-id-or-prefix>                  # logical-step projection (--eve
 fadeno verify <run-id>                          # recompute the ledger's checkable claims; exit 0/1 (--latest for newest)
 fadeno drive <run-id>                           # engine: advance until terminal or a human pause (uses .fadeno/executors.yaml)
 fadeno decide <run-id> <option>                 # resolve a paused human decision, then re-drive
-fadeno dispatch-start <run-id> <dispatch-id> --agent-id <native-id>
+fadeno dispatch-start <run-id> <dispatch-id> --agent-id <host-agent-id>
 fadeno dispatch-progress <run-id> <dispatch-id> --file <status.json> --source agent
 fadeno dispatch-complete <run-id> <dispatch-id> --output <temporary-file>
 fadeno dispatch-fail <run-id> <dispatch-id> --reason "blocked"
 fadeno dispatch-fallback <run-id> <dispatch-id> # exact snapshotted command fallback
 
 # Engine-delivered Codex steering resolves the immutable request envelope:
-fadeno steering resolve --archetype worker --native-executor luna \
+fadeno steering resolve --archetype worker --host-executor luna \
   --run <run-id> --dispatch-id <dispatch-id>
 
 fadeno prompt <run-id> <step> --actor <role> \
@@ -282,14 +282,14 @@ bytes — and records it as an immutable snapshot (`artifacts/prompts/…`) plus
 `prompt_assembled` manifest event, unless `--no-record`. A driver runs a role
 with `fadeno prompt <run> <step> --actor <role> | codex exec -`.
 
-When a role binds to a native host executor, `fadeno drive` plans all pending
+When a role binds to a host executor, `fadeno drive` plans all pending
 calls and returns `awaiting_host_dispatch` with stable request ids. The host
-starts each native agent and submits the receipts above; model, reasoning
-effort, and native agent identity are recorded as explicit host attestations.
+starts each host agent and submits the receipts above; model, reasoning
+effort, and host agent identity are recorded as explicit host attestations.
 If that host executor declares `fallback_command` and the current Codex agent
 does not match, `dispatch-fallback` invokes the exact snapshotted argv and owns
 the receipts. The ledger labels this `command-fallback` and does not claim
-native host attestation.
+host attestation.
 The immutable prompt names an ephemeral progress sidecar. Agents or harnesses
 update that JSON at meaningful checkpoints; the host records provenance-labelled
 observations with `dispatch-progress`. Progress is attested observability, never
@@ -303,7 +303,7 @@ literal member. A body may contain a bounded loop, and a loop body may contain a
 map. Each leaf has a canonical path such as
 `complete_items[member=item_3]/revision_cycle[generation=2]/review`, allowing
 members to advance independently while artifacts, progress, `show`, and
-verification remain aligned. The first executable slice supports native `host`
+verification remain aligned. The first executable slice supports `host`
 adapters and linear container bodies; dynamic maps, branchy bodies, and command
 adapter leaves remain follow-up scope.
 
@@ -327,7 +327,7 @@ worker / reviewer / judge right now,"* not a dozen per-role YAML edits.
 `.fadeno/executors.yaml` declares harness-neutral **targets** (provider, model,
 effort), harness-specific **routes** for delivering those targets, and
 **loadouts** that map archetypes to targets. The same loadout therefore remains
-portable: Claude may run an Anthropic target natively while Codex delivers that
+portable: Claude may run an Anthropic target in-session while Codex delivers that
 same target through `claude -p`.
 
 ```yaml
@@ -338,10 +338,10 @@ targets:
   sol-high: { provider: openai, model: gpt-5.6-sol, reasoning_effort: high }
 routes:
   codex:
-    openai: { native: true, command: [codex, exec, --model, "{model}", "-"] }
+    openai: { host: true, command: [codex, exec, --model, "{model}", "-"] }
     anthropic: { command: [claude, -p, --model, "{model}"] }
   claude:
-    anthropic: { native: true, command: [claude, -p, --model, "{model}"] }
+    anthropic: { host: true, command: [claude, -p, --model, "{model}"] }
     openai: { command: [codex, exec, --model, "{model}", "-"] }
 loadouts:
   anthropic-primary: { worker: opus-high, reviewer: opus-high, judge: opus-high }
@@ -357,7 +357,7 @@ targets or policy. Legacy v1 `executors` profiles remain supported.
 fadeno use openai-primary                  # user-scoped; remembers setup's harness
 fadeno loadout use openai-primary           # compatibility: project-local pin
 echo "task…" | fadeno dispatch --archetype worker   # ad-hoc: resolve → invoke → evidence row
-fadeno setup --codex                        # one-time user-scoped native integration
+fadeno setup --codex                        # one-time user-scoped host integration
 fadeno use codex-native                     # auto-materializes changed Codex role agents
 # or: npx fadeno init --claude --no-steering
 ```
@@ -373,18 +373,18 @@ auditable after the fact.
 With steering enabled by default, expensive role-shaped subagent work follows
 that same resolver. `fadeno setup --codex` remembers the harness, so later
 `fadeno use <loadout>` calls materialize each worker/reviewer/judge target as
-either a native host agent or a command broker according to the Codex route.
+either a host agent or a command broker according to the Codex route.
 The Claude hook performs the same resolution for Claude rather than relying on
-adapter labels stored in the loadout: native slots select the requested Claude
+adapter labels stored in the loadout: host slots select the requested Claude
 model, while command slots use dispatch proxies.
 Start a fresh Codex session after definitions change only to make the new model
-session-native; fallback-capable switches work on the next invocation. Before
-each task, native agents resolve again: command slots switch immediately,
-matching host slots execute natively, a different fallback-capable host slot
+session-resident; fallback-capable switches work on the next invocation. Before
+each task, host agents resolve again: command slots switch immediately,
+matching host slots execute in-session, a different fallback-capable host slot
 runs out-of-process, and only a host slot without a fallback reports
 `restart_required`. Claude installs a
 local `PreToolUse` rewrite that redirects role launches to bundled dispatch
-proxies. Explore/Plan-style scouting stays native. Existing files retain the
+proxies. Explore/Plan-style scouting stays unsteered. Existing files retain the
 normal non-destructive rule; `steering apply` needs `--force` to replace them.
 
 ### What `.fadeno/runs/` contains
@@ -587,7 +587,7 @@ categories map to concrete, detectable actions. Two ways to make that real:
   its artifact, attempt ordinals with allowed retry reasons, executor
   bindings against the run's snapshotted profile, human-decision integrity
   (declared options, at-most-once), supersede references, harness-session
-  continuity, and native host-dispatch lifecycle/request consistency — so a trace
+  continuity, and host-dispatch lifecycle/request consistency — so a trace
   can't claim what its evidence doesn't support. The "no valid trace, no
   merge" check; anything unrecomputable is reported as skipped, never
   silently treated as valid.

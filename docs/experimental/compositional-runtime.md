@@ -1,6 +1,6 @@
 # Compositional runtime boundary
 
-Status: **first native-host vertical slice shipped from dogfood evidence
+Status: **first host vertical slice shipped from dogfood evidence
 (2026-08-04)**.
 
 The five-item Luna/Terra dogfood exposed a structural limitation in the first
@@ -152,6 +152,6 @@ evidence in the existing 0.3 ledger envelope; events without them retain legacy
 semantics and are never reinterpreted as compositional instances.
 
 The shipped slice supports literal member lists, linear map/loop bodies,
-deterministic loop conditions, collection inputs to reducers, and native `host`
+deterministic loop conditions, collection inputs to reducers, and `host`
 executor leaves. Dynamic maps, branchy bodies, member-scoped human gates,
 replicate/subworkflow containers, and command-adapter leaves remain deferred.

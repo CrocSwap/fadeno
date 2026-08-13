@@ -1,4 +1,4 @@
-# Fadeno native subagent: reviewer.
+# Fadeno host subagent: reviewer.
 
 name = "reviewer"
 description = "Reviewer role for Fadeno playbooks: review a change and emit a structured review report."

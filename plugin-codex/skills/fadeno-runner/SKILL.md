@@ -15,7 +15,7 @@ after any required fresh-session boundary. When status reports a stable managed
 runtime, use that path for the rest of the session.
 
 Execute a Fadeno playbook as a bounded, inspectable workflow backed by files on
-disk. You are the director and sole Fadeno ledger writer: native workers return
+disk. You are the director and sole Fadeno ledger writer: host workers return
 only declared artifact bodies and receipts to you, and you materialize those
 bodies at canonical run paths; workers never invoke Fadeno ledger commands.
 
@@ -45,18 +45,18 @@ bodies at canonical run paths; workers never invoke Fadeno ledger commands.
    prompt with an envelope beginning `# Fadeno engine step assignment` and containing
    both `run: <run-id>` and `dispatch_id: <dispatch-id>`. The delivered Codex
    agent must resolve that pair before doing work; it must not fall back to an
-   ambient loadout. Start each request with the native facility, attach its
-   native agent id, and submit exactly one terminal receipt serially with
+   ambient loadout. Start each request with the host facility, attach its
+   host agent id, and submit exactly one terminal receipt serially with
    `dispatch-complete` or `dispatch-fail` before driving again. The immutable
    prompt names an ephemeral progress sidecar. Poll it without interrupting the
    agent and record meaningful changes with `fadeno dispatch-progress <run>
    <dispatch> --file <workspace>/<sidecar> --source agent`.
-9. If native subagents are available, delegate role-specific work to them — but
+9. If host subagents are available, delegate role-specific work to them — but
    **one level only**; do not assume a subagent can spawn its own subagents.
-10. If native subagents are unavailable, degrade loudly: use a declared command
+10. If host subagents are unavailable, degrade loudly: use a declared command
    executor or stop with the unavailable model/facility named. Never silently
-   substitute a requested native model.
-11. If native subagents are unavailable, simulate role separation with separate
+   substitute a requested host model.
+11. If host subagents are unavailable, simulate role separation with separate
    passes and save each pass as a distinct artifact.
 12. Save every major output under `artifacts/`.
 13. Apply gates using the **structured judgment artifact**, not vague prose: an
@@ -80,10 +80,10 @@ bodies at canonical run paths; workers never invoke Fadeno ledger commands.
 - Never skip a required gate silently. If you skip or override one, say so.
 - Never overwrite iteration artifacts; version them.
 - Do not treat `.fadeno/runs/` as source code.
-- Attach native agent ids to host starts. Treat model, effort, and agent type as
+- Attach host agent ids to host starts. Treat model, effort, and agent type as
   requested configuration unless the host supplies independently observed
   runtime identity; never describe an echoed request as verified.
-- Use original native agents for revision when possible; ask `fadeno show` and
+- Use original host agents for revision when possible; ask `fadeno show` and
   merge its workflow-aligned actor projection with host/Codex activity for
   status. Report pending/running/waiting/blocked/completed actors plus total
   runtime; never infer internal progress from idle/busy alone.

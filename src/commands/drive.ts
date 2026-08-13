@@ -123,7 +123,7 @@ export interface DriveResult {
   detail: string;
   actions: string[];
   transitions: number;
-  /** Durable native-host requests still awaiting start/terminal receipt. */
+  /** Durable host requests still awaiting start/terminal receipt. */
   requests: HostDispatchRequest[];
   /** Named alias for callers that prefer the protocol vocabulary. */
   unresolvedRequests: HostDispatchRequest[];
@@ -210,7 +210,7 @@ function freshEvents(runDir: string): RunEvent[] {
 /**
  * A hard-killed engine cannot append from a signal handler. On the next drive,
  * close every command-backed start that has no terminal event so the ledger
- * never remains permanently ambiguous. Native host starts carry dispatch_id
+ * never remains permanently ambiguous. Host starts carry dispatch_id
  * and are recovered through the host receipt protocol instead.
  */
 function recoverInterruptedCommandDispatches(ctx: EngineCtx): number {
@@ -1834,7 +1834,7 @@ function driveComposite(ctx: EngineCtx, maxTransitions: number, actions: string[
     if (requests.length > 0) {
       return finish(
         'awaiting_host_dispatch',
-        `${requests.length} compositional host dispatch request(s) are awaiting native receipts.`,
+        `${requests.length} compositional host dispatch request(s) are awaiting host receipts.`,
         null,
         requests,
       );
@@ -2051,7 +2051,7 @@ export function runDrive(opts: DriveOptions): DriveResult {
     const failure = drivePromptable(ctx, comp);
     if (failure != null) {
       if (failure.kind === 'awaiting_host_dispatch') {
-        const base = `${failure.requests.length} host dispatch request(s) are awaiting native receipts.`;
+        const base = `${failure.requests.length} host dispatch request(s) are awaiting host receipts.`;
         return finish(
           'awaiting_host_dispatch',
           failure.notes.length > 0 ? `${base} ${failure.notes.join(' ')}` : base,

@@ -307,10 +307,10 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
   // containment path and dispatch identities are derived from that full path.
   findings.push(checkNodeInstances(events));
 
-  // 24-27. Native host dispatches are a first-class lifecycle. A verifier must
+  // 24-27. Host dispatches are a first-class lifecycle. A verifier must
   // fail loudly on malformed host evidence, especially when reading an older
   // ledger explicitly, rather than treating those events as ordinary actor
-  // dispatches and silently dropping their native identity claims.
+  // dispatches and silently dropping their host identity claims.
   findings.push(checkHostDispatchRequests(run, events, mode));
   findings.push(checkHostDispatchLifecycle(run, events, mode));
   findings.push(checkHostDispatchArtifacts(run, events, mode));

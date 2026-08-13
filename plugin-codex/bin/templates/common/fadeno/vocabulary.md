@@ -11,7 +11,7 @@ truth for the vocabulary; this file explains what each term *means*.
 - **Playbook** — A reusable orchestration recipe for an agent workflow (a YAML
   file in `playbooks/`).
 - **Run** — One concrete execution of a playbook, recorded under `runs/`.
-- **Actor** — A role performed by a coding agent, a native subagent, or a
+- **Actor** — A role performed by a coding agent, a host subagent, or a
   simulated role-pass when subagents are unavailable.
 - **Artifact** — A durable output of a step (plan, patch, review, test result,
   summary, …), saved under a run's `artifacts/`.
@@ -30,7 +30,7 @@ truth for the vocabulary; this file explains what each term *means*.
 - **Host adapter** — How a playbook maps onto a specific environment (Codex,
   Claude Code, hook-enabled, compiled runtime).
 - **Progress observation** — A provenance-labelled, host-recorded snapshot of
-  what a native actor or harness reports between start and terminal. It is
+  what a host actor or harness reports between start and terminal. It is
   attested observability, not a judgment artifact, and can never control a gate.
 
 ## The most important design rule

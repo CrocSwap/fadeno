@@ -82,10 +82,10 @@ assert on return values and filesystem effects instead of scraping stdout.
 | `runLoadoutShow` / `…List` / `…Use` / `…Clear` | active loadout + slot tables | `use` pins `.fadeno/local/loadout`; `clear` removes it. Resolution logic in `lib/executors.ts`. |
 | `runDispatch` | executor report + evidence row | Ad-hoc archetype→executor dispatch; appends a correlated `dispatch_requested`/`dispatch_completed` row pair to `.fadeno/dispatches.jsonl`. Refuses before spawning when the resolved command route declares `write_access: false` and the archetype declares `requires_write: true`. Echo goes to stderr so stdout stays the executor's pure report. |
 | `runDispatches` | correlated dispatch rows | Read-only projection of `.fadeno/dispatches.jsonl`: pairs `dispatch_requested`/`dispatch_completed` by `dispatch_id`, keeps `native_delivery` rows inline, and marks a request with no completion as killed-or-in-flight rather than dropping it. Pre-format legacy rows render as `[legacy]`; newer-format rows get a separate count. `--tail <N>` (default 10) / `--json`. |
-| `runSteeringResolve` / `runSteeringApply` | hybrid mode / emitted Codex agents | Resolves native vs command vs restart-required vs write-conflict per invocation; materializes per-slot native host agents or cheap command brokers, declining brokers for write-conflicted slots. |
+| `runSteeringResolve` / `runSteeringApply` | hybrid mode / emitted Codex agents | Resolves host vs command vs restart-required vs write-conflict per invocation; materializes per-slot host agents or cheap command brokers, declining brokers for write-conflicted slots. |
 | `runToolComplete` | run update + artifact manifest | Validates a typed tool result before atomically starting the exact next `tool_call` and recording its result. |
 | `runPlugin` | `EmitResult[]` + `outDir` | Generates `plugin/` from templates. |
-| `runSetup` / `runUse` | user paths, probes, loadout state, restart notices | Safe native setup and user-scoped selection. |
+| `runSetup` / `runUse` | user paths, probes, loadout state, restart notices | Safe host-default setup and user-scoped selection. |
 | `runStatus` / `runDoctor` | effective routing / findings | Read-only diagnostics. |
 | `runVendor` / `runEvidencePromote` | lock / promoted receipt | Explicit committed project capability and evidence. |
 | `runUninstall` / `runClean` / `runUnvendor` | removed + preserved paths | Ownership-aware user removal, repo runtime cleanup, and digest-backed vendored removal. |
@@ -123,7 +123,7 @@ back to ordinary file completion when no specialized candidates apply.
 - **`prompt-resolve.ts` / `prompt.ts`** — pure step-prompt plan + render for `fadeno prompt`.
 - **`run-ledger.ts`** — list/resolve runs, parse events, list artifacts, and
   gate format-0.3 readers behind explicit 0.2 compatibility mode.
-- **`host-dispatch.ts`** — durable native-host request/start/terminal receipt
+- **`host-dispatch.ts`** — durable host request/start/terminal receipt
   protocol with immutable output placement and attempt evidence.
 - **Command dispatch recovery** — a normal signal produces `actor_failed`
   immediately; if the engine is hard-killed before it can append, the next
@@ -193,7 +193,7 @@ hosts, and the seam a future compiled runtime would read/write.
   artifacts/     # every durable step output (plans, patches, reports, …)
 ```
 
-Three commands drive its original lifecycle, and native host work adds three
+Three commands drive its original lifecycle, and host work adds three
 receipt commands:
 
 - **`new-run <playbook> "<task>"`** (`runNewRun`) creates the directory, writes
@@ -216,8 +216,8 @@ receipt commands:
   pre-commit hook, or a Claude Code `Stop` hook. See `enforcement.md`.
 - **`dispatch-start|dispatch-progress|dispatch-complete|dispatch-fail`** are
   host receipts. A
-  host executor request is durable before native work begins; receipts record
-  the requested model/effort/type, native agent id, provenance-labelled
+  host executor request is durable before host work begins; receipts record
+  the requested model/effort/type, host agent id, provenance-labelled
   non-gating progress, and terminal output/failure. Requested identity is
   internally checked but stays visibly unverified unless a future host supplies
   authoritative runtime metadata. `show` reloads the run's playbook so the projection
@@ -227,7 +227,7 @@ receipt commands:
 
   `steering resolve --run <run> --dispatch-id <id>` is the engine-delivery
   branch: it reads the unique immutable host request and run profile snapshot,
-  ignoring ambient loadout state. Native executor mismatch is a deterministic
+  ignoring ambient loadout state. Host executor mismatch is a deterministic
   restart requirement. Whole-trace verification accepts a historical failed
   host attempt only when the same actor call has a later higher-ordinal valid
   success; the final attempt must still succeed.
@@ -235,7 +235,7 @@ receipt commands:
 Compositional playbooks use `lib/composite-flow.ts` instead of the legacy
 single cursor. It computes a pure runnable frontier from events. Canonical paths
 from `lib/node-instance.ts` distinguish map members and loop generations; drive
-batches every ready native-host leaf, scopes its prompt/output, and recomputes
+batches every ready host leaf, scopes its prompt/output, and recomputes
 the frontier after receipts. Literal maps and linear bodies are the deliberate
 first boundary. `show` groups observed paths back under their declared graph,
 while `verify` recomputes path, parent, member, generation, and dispatch ids.
@@ -265,10 +265,10 @@ Two loadout-era evidence surfaces sit beside the step lifecycle:
   Declared `write_access` joins that identity, so a read-only delivery is
   legible in the row rather than only in an empty-handed report. The Claude
   steering hook appends `native_delivery` rows to the same file when it steers
-  a spawn to a native role agent (archetype, agent_type, loadout, executor,
+  a spawn to a host role agent (archetype, agent_type, loadout, executor,
   model, model_override, `reasoning_effort: "inherited"`,
   `transport: "host-native"`, prompt_sha256, prompt_snapshot,
-  `hook_version`) — the kernel never runs on the native path,
+  `hook_version`) — the kernel never runs on the host path,
   so the hook is the only writer that can witness it, and one file audits both
   delivery routes. Like `.fadeno/local/`, it is per-machine evidence —
   auditable locally, never committed. `hook_version` exists because hooks load
@@ -315,7 +315,7 @@ templates/
     skills/               # the three SKILL.md bodies + references (sigil-free)
     commands/             # /fadeno:* slash-command files (plugin)
     hooks/                # pre-commit, CI workflow, README (tier-2 scaffold)
-  codex/                  # Codex adapter: AGENTS.md, native + steering agent TOML, openai/*.yaml
+  codex/                  # Codex adapter: AGENTS.md, host + steering agent TOML, openai/*.yaml
   claude/                 # Claude adapter: CLAUDE.md, agents, enforcement + steering hooks
   grok/                   # Grok Build adapter: AGENTS.md, grok-agents/*.md
 ```
@@ -326,7 +326,7 @@ dir/policy), subagents, and the bootstrap file; optionally the hooks scaffold
 (`--with-hooks`); and on Claude, merge a `Bash(fadeno:*)` allow-rule into
 git-ignored `.claude/settings.local.json` (plugins can't grant themselves Bash
 permissions, so `init` is the seam for this). Grok receives the shared
-capabilities and native `.grok/agents` definitions without an automatic
+capabilities and host `.grok/agents` definitions without an automatic
 `.grok/config.toml` mutation or permission grant.
 
 Steering is enabled by default for Codex and Claude; `--no-steering` is the
@@ -343,33 +343,33 @@ recorded rule. Later `fadeno use <loadout>` calls refresh them
 automatically. `fadeno steering apply <loadout>
 --codex --scope project` remains the explicit project override and
 then materializes every required slot into session-static role TOML: host slots
-become native agents using their configured model/effort, while command slots
+become host agents using their configured model/effort, while command slots
 become cheap brokers that delegate through `fadeno dispatch`. Before each task,
-matching host executor → native, command executor → dispatch proxy, a different
+matching host executor → host, command executor → dispatch proxy, a different
 host executor with `fallback_command` → authenticated out-of-process fallback,
 and a host executor without one → restart required. Locked engine fallbacks use
 `dispatch-fallback`, not ordinary `dispatch`, and record command transport
-without claiming native attestation. On Claude, init emits a local
+without claiming host attestation. On Claude, init emits a local
 `PreToolUse` script under `.fadeno/local/` and non-destructively merges one
 `Agent` hook into `.claude/settings.local.json`. The hook first asks the CLI
 whether a loadout is active; only then does it map general-purpose/worker,
 reviewer, and judge launches to the corresponding dispatch proxy. Explore,
-Plan, and unrelated specialists stay native. A director that names
+Plan, and unrelated specialists stay unsteered. A director that names
 `dispatch-<archetype>` itself is resolved the same way rather than taken at its
 word: the transport belongs to the loadout, and a host slot is pulled back to
-the native agent instead of shelling out to a subprocess of this same harness —
+the host agent instead of shelling out to a subprocess of this same harness —
 which would load the same plugin, re-read the prompt as director work, and
-re-dispatch one level down. A spawn it steers to a native role
+re-dispatch one level down. A spawn it steers to a host role
 agent gets a best-effort `native_delivery` evidence row plus a prompt snapshot
 under `.fadeno/local/prompts/`; that path can pin the requested model but not
 reasoning effort (the Agent tool schema has no effort parameter), so the row
 records `reasoning_effort: "inherited"` rather than the target's declared
 effort. Grok currently rejects the flag.
 
-The Claude `claude-agents/` dir carries two kinds of subagents: the native role
+The Claude `claude-agents/` dir carries two kinds of subagents: the host role
 subagents (`worker`/`reviewer`/`judge`) and the **dispatch proxy agents**
 (`dispatch-worker`/`dispatch-reviewer`/`dispatch-judge`). Claude Code can't run
-non-Anthropic inference natively, so cross-harness subagents go out-of-process
+non-Anthropic inference in-session, so cross-harness subagents go out-of-process
 through these proxies. Each is `tools: Bash`, `model: sonnet` — the proxy does
 no thinking about the task: one Bash call (run with the tool's `timeout`
 raised to 600000 ms) pipes the received task prompt **verbatim** to

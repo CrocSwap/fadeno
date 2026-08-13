@@ -79,10 +79,10 @@ general scheduler, or orchestration platform.
 - Tier-2 enforcement scaffold via `--with-hooks` (pre-commit, CI workflow, Claude hook example).
 - Default loadout steering for Codex and Claude (with `--no-steering` opt-out):
   hybrid Codex custom agents plus `fadeno steering apply`, and a selective Claude `PreToolUse` rewrite. Codex
-  switches command slots live, executes matching host slots natively, invokes
+  switches command slots live, executes matching host slots in-session, invokes
   an explicit `fallback_command` for mismatched host slots, and reports
   `restart_required` only when no honest fallback exists;
-  Explore/Plan stays native. Grok steering remains unsupported.
+  Explore/Plan stays unsteered. Grok steering remains unsupported.
 - **Validated end-to-end in live Claude Code sessions** (through v0.1.2): bundled
   CLI on PATH, `Skill(fadeno:*)` model-invocation, `/fadeno:*` slash commands in
   the `/` menu, and `fadeno:*` role-subagent dispatch after `/reload-plugins`.
@@ -159,7 +159,7 @@ boundary is now recursive composition: `map`, `replicate`, and `loop` own child
 graphs, so `map(loop(...))` and `loop(map(...))` have distinct, executable
 semantics. `join` and `reduce` operate on child-instance results.
 
-The first vertical slice is **shipped for native host executors** rather than
+The first vertical slice is **shipped for host executors** rather than
 making the schema accept graphs the engine cannot drive:
 
 1. hierarchical `node_instance_id` and lexical artifact scope;
@@ -171,7 +171,7 @@ making the schema accept graphs the engine cannot drive:
 6. map-of-loop and loop-of-map acceptance fixtures.
 
 Current boundary: literal map members, linear container bodies, deterministic
-loop conditions, collection binding into reducers, and native `host` leaves.
+loop conditions, collection binding into reducers, and `host` leaves.
 Dynamic artifact-field maps, branchy child graphs, member-scoped human gates,
 replicate/subworkflow containers, and command-adapter leaves remain deferred.
 
@@ -187,7 +187,7 @@ projection as the default `fadeno show`, and an explicit `--legacy`
 compatibility mode for 0.2 and unversioned ledgers (writers refuse all older
 ledgers outright).
 
-**Native host dispatch is now implemented:** `adapter: host` profiles retain
+**Host dispatch is now implemented:** `adapter: host` profiles retain
 model, reasoning effort, and agent type in the run snapshot. `fadeno drive`
 batches all pending host calls and returns `awaiting_host_dispatch` with stable
 request ids. The host submits serial `dispatch-start`, `dispatch-complete`, or
@@ -242,7 +242,7 @@ The horizon-6 boundary has three of its four phases shipped:
    (required | forbidden | none), acyclic fallback chains that resolve
    bindings never policy, `resolved_via` provenance in evidence, the
    `generator` canon archetype, and a steering chain-walk to the nearest
-   native agent surface.
+   host agent surface.
 3. **Constraint tiers** — declarative predicates
    (`distinct_provider_from_inputs`, per-target `eligibility` including
    shadow_only / forbidden) plus a tier-2 `constraints.command` escape

@@ -42,19 +42,19 @@ test('hybrid steering resolves matching host locally, command slots live, and mi
   const root = tempRepo(t);
   seedHybridProfile(root);
 
-  const local = runSteeringResolve({ repoRoot: root, archetype: 'worker', nativeExecutor: 'luna', loadout: 'mixed', env: null });
-  assert.equal(local.mode, 'native');
+  const local = runSteeringResolve({ repoRoot: root, archetype: 'worker', hostExecutor: 'luna', loadout: 'mixed', env: null });
+  assert.equal(local.mode, 'host');
   assert.equal(local.executor, 'luna');
 
   const brokerHost = runSteeringResolve({ repoRoot: root, archetype: 'worker', loadout: 'native', env: null });
   assert.equal(brokerHost.mode, 'command');
   assert.match(brokerHost.detail, /declared command fallback/);
 
-  const command = runSteeringResolve({ repoRoot: root, archetype: 'reviewer', nativeExecutor: 'terra', loadout: 'mixed', env: null });
+  const command = runSteeringResolve({ repoRoot: root, archetype: 'reviewer', hostExecutor: 'terra', loadout: 'mixed', env: null });
   assert.equal(command.mode, 'command');
   assert.equal(command.executor, 'opus');
 
-  const restart = runSteeringResolve({ repoRoot: root, archetype: 'worker', nativeExecutor: 'luna', loadout: 'mismatch', env: null });
+  const restart = runSteeringResolve({ repoRoot: root, archetype: 'worker', hostExecutor: 'luna', loadout: 'mismatch', env: null });
   assert.equal(restart.mode, 'restart_required');
   assert.match(restart.detail, /fresh Codex session/);
 });
@@ -85,20 +85,20 @@ test('engine host steering is locked to the run request, not ambient loadouts', 
     repoRoot: root,
     archetype: 'worker',
     role: 'worker',
-    nativeExecutor: 'luna',
+    hostExecutor: 'luna',
     loadout: 'mismatch',
     env: 'mismatch',
     run: created.runId,
     dispatchId: request.dispatchId,
   });
-  assert.equal(locked.mode, 'native');
+  assert.equal(locked.mode, 'host');
   assert.equal(locked.executor, 'luna');
   assert.equal(locked.source, 'host-request');
 
   const restart = runSteeringResolve({
     repoRoot: root,
     archetype: 'worker',
-    nativeExecutor: 'other',
+    hostExecutor: 'other',
     run: created.runId,
     dispatchId: request.dispatchId,
   });
@@ -169,7 +169,7 @@ test('engine host steering automatically completes a mismatched native slot thro
   const resolution = runSteeringResolve({
     repoRoot: root,
     archetype: 'worker',
-    nativeExecutor: 'other',
+    hostExecutor: 'other',
     run: created.runId,
     dispatchId: request.dispatchId,
   });
@@ -217,7 +217,7 @@ test('steering apply materializes mixed host and command slots without clobberin
   const first = runSteeringApply({ repoRoot: root, loadout: 'native', target: 'codex' });
   assert.ok(first.results.every((item) => item.status === 'created'));
   assert.deepEqual(first.materialization.worker, {
-    kind: 'native', adapter: 'host', executor: 'luna', model: 'gpt-5.6-luna',
+    kind: 'host', adapter: 'host', executor: 'luna', model: 'gpt-5.6-luna',
   });
   assert.match(read(root, '.codex/agents/worker.toml'), /model = "gpt-5\.6-luna"/);
   assert.match(read(root, '.codex/agents/reviewer.toml'), /model = "gpt-5\.6-terra"/);
@@ -226,7 +226,7 @@ test('steering apply materializes mixed host and command slots without clobberin
   assert.match(read(root, '.codex/agents/worker.toml'), /# Fadeno step assignment/);
   assert.match(read(root, '.codex/agents/worker.toml'), /mode=command/);
   assert.match(read(root, '.codex/agents/worker.toml'), /mode=restart_required/);
-  assert.match(read(root, '.codex/agents/worker.toml'), /fadeno steering resolve --archetype worker --native-executor luna/);
+  assert.match(read(root, '.codex/agents/worker.toml'), /fadeno steering resolve --archetype worker --host-executor luna/);
   assert.match(read(root, '.codex/agents/worker.toml'), /fadeno dispatch-fallback <run-id> <dispatch-id>/);
 
   const second = runSteeringApply({ repoRoot: root, loadout: 'native', target: 'codex' });
@@ -239,7 +239,7 @@ test('steering apply materializes mixed host and command slots without clobberin
   assert.match(broker, /model = "gpt-5\.6-luna"/);
   assert.match(broker, /model_reasoning_effort = "low"/);
   assert.match(broker, /fadeno steering resolve --archetype reviewer/);
-  assert.doesNotMatch(broker, /--native-executor/);
+  assert.doesNotMatch(broker, /--host-executor/);
   assert.match(broker, /mode=command/);
   assert.match(broker, /mode=restart_required/);
   assert.match(broker, /relay stdout verbatim/);
@@ -301,7 +301,7 @@ test('steering resolve refuses a command slot whose delivery cannot do the arche
   assert.equal(refused.executor, 'ro-cli');
   assert.equal(refused.adapter, 'command');
   assert.match(refused.writeConflict!, /archetype "worker" declares `requires_write: required`, but executor "ro-cli"/);
-  assert.match(refused.writeConflict!, /native in-session worker agent/);
+  assert.match(refused.writeConflict!, /in-session worker agent/);
   // The human echo carries the refusal, not a "dispatch through …" invitation.
   assert.equal(refused.detail, refused.writeConflict);
 
@@ -313,9 +313,9 @@ test('steering resolve refuses a command slot whose delivery cannot do the arche
 
   // Native delivery of the same read-only target is the host's business.
   const native = runSteeringResolve({
-    repoRoot: root, archetype: 'worker', nativeExecutor: 'ro-host', loadout: 'ro-fallback', env: null,
+    repoRoot: root, archetype: 'worker', hostExecutor: 'ro-host', loadout: 'ro-fallback', env: null,
   });
-  assert.equal(native.mode, 'native');
+  assert.equal(native.mode, 'host');
   assert.equal(native.writeConflict, undefined);
 
   // Clean command slots are untouched: a write-capable delivery, and an
@@ -346,7 +346,7 @@ test('steering apply refuses to materialize a broker for a conflicted slot; othe
   // The read-only reviewer slot (same executor, no write need) still lands, as
   // does the native judge slot.
   assert.equal(applied.materialization.reviewer?.kind, 'command-broker');
-  assert.equal(applied.materialization.judge?.kind, 'native');
+  assert.equal(applied.materialization.judge?.kind, 'host');
   assert.ok(exists(root, '.codex/agents/reviewer.toml'));
   assert.ok(exists(root, '.codex/agents/judge.toml'));
   assert.deepEqual(

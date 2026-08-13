@@ -66,7 +66,7 @@ function stashRelay() {
 // A director that names `dispatch-<archetype>` itself has already chosen
 // command delivery — but that choice belongs to the loadout, not the caller,
 // and the proxy agents advertise themselves hard enough ("MUST BE USED") that
-// a well-behaved director walks straight past the native path. Resolve a named
+// a well-behaved director walks straight past the host path. Resolve a named
 // proxy like any other archetype spawn: a host slot rewrites back to the
 // in-session agent rather than shelling out to a subprocess of this same
 // harness, which re-enters this same steering one level down.
@@ -80,7 +80,7 @@ const archetype = explicitProxy
       : bare === 'judge'
         ? 'judge'
         : null;
-if (archetype == null) finish(null); // Explore, Plan, and unrelated specialists stay native.
+if (archetype == null) finish(null); // Explore, Plan, and unrelated specialists stay unsteered.
 
 /**
  * Leave the spawn exactly as the director asked. A named proxy still lands on
@@ -93,14 +93,14 @@ function passThrough() {
 }
 
 // Resolve through a structured CLI surface. The same neutral loadout can be
-// native in Claude and command-delivered in Codex (or vice versa).
+// host-delivered in Claude and command-delivered in Codex (or vice versa).
 const resolution = spawnSync(cli, ['loadout', 'resolve', '--archetype', archetype], {
   cwd,
   env: { ...process.env, FADENO_HARNESS: 'claude' },
   encoding: 'utf8',
   timeout: 10_000,
 });
-// A resolver error used to fall through to an unsteered native spawn —
+// A resolver error used to fall through to an unsteered host spawn —
 // substituting a different executor for a proxy-bound archetype. Deny
 // instead. Unreadable stdout (exit 0, not JSON) still fail-opens below.
 if (resolution.status !== 0) {
@@ -124,22 +124,22 @@ try {
 }
 if (slot?.adapter !== 'command' && slot?.adapter !== 'host') passThrough();
 const commandDelivery = slot.adapter === 'command';
-// A native slot with no model of its own inherits the caller's; `current-host`
+// A host slot with no model of its own inherits the caller's; `current-host`
 // is the explicit spelling of that.
 const inheritModel =
   !commandDelivery && (typeof slot.model !== 'string' || slot.model === 'current-host');
-// An unsteered spawn already lands on the caller's native model, so there is
+// An unsteered spawn already lands on the caller's host model, so there is
 // nothing to rewrite. A named proxy is not unsteered: leaving it alone would
 // ship the task to a subprocess the loadout never asked for.
 if (inheritModel && !explicitProxy) finish(null);
 
-// Evidence for native delivery. Command delivery ends at `fadeno dispatch`,
-// where the kernel writes the request/completion row pair; native delivery
+// Evidence for host delivery. Command delivery ends at `fadeno dispatch`,
+// where the kernel writes the request/completion row pair; host delivery
 // never reaches the kernel, so this hook is the only Fadeno code on that path
 // and therefore its evidence writer. One `native_delivery` row plus a
 // kernel-shaped prompt snapshot keeps both delivery modes auditable from the
 // same `.fadeno/dispatches.jsonl`.
-function recordNativeDelivery() {
+function recordHostDelivery() {
   const prompt = event.tool_input.prompt;
   if (typeof prompt !== 'string' || prompt.length === 0) return;
   if (!existsSync(join(cwd, '.fadeno'))) return; // not a Fadeno repo
@@ -165,7 +165,7 @@ function recordNativeDelivery() {
         executor: typeof slot?.executor === 'string' ? slot.executor : null,
         model: typeof slot?.model === 'string' ? slot.model : null,
         model_override: event.tool_input.model ?? null,
-        // Native delivery cannot pin reasoning effort: the harness Agent tool
+        // Host delivery cannot pin reasoning effort: the harness Agent tool
         // takes no effort parameter, so the spawn inherits the session's.
         reasoning_effort: 'inherited',
         transport: 'host-native',
@@ -179,7 +179,7 @@ function recordNativeDelivery() {
 }
 
 if (commandDelivery) stashRelay(); // rewritten-to-proxy spawns get attested too
-else recordNativeDelivery(); // no kernel downstream: record the delivery here
+else recordHostDelivery(); // no kernel downstream: record the delivery here
 const prefix = commandDelivery ? 'dispatch-' : '';
 const localAgent = join(cwd, '.claude', 'agents', `${prefix}${archetype}.md`);
 const target = existsSync(localAgent) ? `${prefix}${archetype}` : `fadeno:${prefix}${archetype}`;
@@ -194,7 +194,7 @@ finish({
       // defecting on the relay contract (did the task itself, dropped the
       // prompt's first line, asserted unwritten evidence); sonnet relayed
       // flawlessly, and a proxy turn is only a few relay tokens. An inheriting
-      // native slot names no model, so the caller's carries through untouched.
+      // host slot names no model, so the caller's carries through untouched.
       ...(commandDelivery ? { model: 'sonnet' } : inheritModel ? {} : { model: slot.model }),
     },
   },

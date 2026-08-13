@@ -1,4 +1,4 @@
-# Fadeno native subagent: worker (implementer role).
+# Fadeno host subagent: worker (implementer role).
 
 name = "worker"
 description = "Implementer role for Fadeno playbooks: make the code change described by a plan."

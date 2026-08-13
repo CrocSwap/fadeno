@@ -98,7 +98,10 @@ function materialization(
     const file = join(path, `fadeno-${archetype}.toml`);
     if (!existsSync(file)) return false;
     const body = readFileSync(file, 'utf8');
-    return body.startsWith('# fadeno:managed') && body.includes(`--native-executor ${executor}`);
+    // Only the current spelling counts as fresh. An agent still carrying
+    // `--native-executor` resolves correctly (the CLI accepts it), but reports
+    // stale so the next setup rewrites it instead of leaving both in the wild.
+    return body.startsWith('# fadeno:managed') && body.includes(`--host-executor ${executor}`);
   });
   return { path, fresh, restartRequired: !fresh };
 }

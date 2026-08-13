@@ -1,6 +1,6 @@
 # Loadouts and the dispatch kernel
 
-**Status:** layered catalog, safe-native defaults, user-scoped selection, and
+**Status:** layered catalog, safe host defaults, user-scoped selection, and
 explicit external dispatch implemented; strict mode remains deferred
 **Decision date:** 2026-08-09
 **Relationship:** extends the executor profile of
@@ -40,7 +40,7 @@ client of it; ad-hoc subagent dispatch is the second.
 - **Target** — the harness-neutral identity of an actor's inference: provider,
   model, reasoning effort. No argv, no flags. This is what a loadout slot
   names.
-- **Route** — how one harness delivers one provider: natively in-session, or
+- **Route** — how one harness delivers one provider: in-session, or
   out-of-process as a command. The harness-specific half, kept out of the
   loadout.
 - **Loadout** — a named mapping of archetype → target. The switchable unit.
@@ -72,9 +72,9 @@ targets:                          # what runs: harness-neutral identity
 
 routes:                           # how the active harness delivers each provider
   claude:
-    current-host: { native: true }
+    current-host: { host: true }
     anthropic:
-      native: true
+      host: true
       command: [claude, -p, --model, "{model}"]     # headless fallback
       write_access: false
     openai:
@@ -118,13 +118,13 @@ or a read-only policy without pushing harness specifics up into the loadout.
 
 A route entry declares:
 
-- `native: true` — this harness delivers the provider in-session. Compiles to a
-  native slot whose agent identity is bound to the requesting archetype at
+- `host: true` — this harness delivers the provider in-session (`native: true` is the pre-0.6 alias). Compiles to a
+  host slot whose agent identity is bound to the requesting archetype at
   resolution time, so one route serves worker, reviewer, and judge.
 - `command: [...]` — argv for out-of-process delivery, prompt on stdin.
   `{model}` and `{reasoning_effort}` are substituted from the target. On a
-  `native: true` route this is the *fallback* delivery, not the primary one; on
-  a non-native route it is required.
+  `host: true` route this is the *fallback* delivery, not the primary one; on
+  a non-host route it is required.
 - `resume: [...]` — session-resume argv, which must contain `{session_id}`.
   Declaring it makes the route session-capable (one harness session per role
   per run). Resumed context is attested, not recomputable — bias toward
@@ -135,7 +135,7 @@ A route entry declares:
   engine-minted case). `resume` with no id source, or an id source with no
   `resume`, is an error in both directions.
 - `write_access:` — whether *this route's command delivery* can mutate the
-  workspace. See *Write access* below; a `native: true` route's declaration
+  workspace. See *Write access* below; a `host: true` route's declaration
   describes its fallback command, never the in-session agent.
 
 **Archetypes.** `archetypes:` is an optional top-level mapping whose values
@@ -241,7 +241,7 @@ completed run's verification).
 naming an undeclared loadout is a hard, fix-naming error on every path that
 *decides* which executor runs — `fadeno dispatch` and `fadeno loadout
 resolve` raise the same message, and the Claude steering hook turns a
-resolver failure into a spawn denial rather than quietly proceeding native
+resolver failure into a spawn denial rather than quietly proceeding in-session
 (silent substitution in either direction is the non-goal). Inspection
 commands (`loadout` show/list, `status`) surface the stale name as
 `stalePin` without bricking. The **user-scope pin has layer scope**: it is
@@ -270,7 +270,7 @@ answerable before a turn is spent:
 routes:
   claude:
     anthropic:
-      native: true
+      host: true
       command: [claude, -p, --model, "{model}"]   # headless fallback
       write_access: false
     xai:
@@ -283,7 +283,7 @@ archetypes:
 
 `write_access` is a property of a **route entry** and describes that route's
 *command* delivery only — whether the harness it spawns can mutate the
-workspace. On a native route it therefore describes the fallback command, never
+workspace. On a host route it therefore describes the fallback command, never
 the in-session agent, whose permissions are the host's business. (A v1
 `executors:` entry accepts the same key, with the same meaning.) `archetypes:`
 is an optional top-level mapping; its values accept `requires_write` (three
@@ -311,7 +311,7 @@ slot as a clean command delivery, and `steering apply` declines to materialize
 a command broker for a conflicted slot while other slots proceed. All three
 speak through one helper — `explainWriteConflict(delivery, archetype,
 profile)` in `src/lib/executors.ts` — so the refusal text is identical
-everywhere. Exempt by design: native in-session deliveries (the host's
+everywhere. Exempt by design: host in-session deliveries (the host's
 permission fences are the host's business) and locked engine host requests
 delivered through `dispatch-fallback`, where refusing would strand an
 in-flight request mid-receipt.
@@ -346,7 +346,7 @@ archetype only; a fallback chain never imports another archetype's policy.
 mismatches (`required` × `write_access: false`, `forbidden` ×
 `write_access: true`) at every point that can choose a command delivery:
 the dispatch boundary (`dispatch`, `drive`, `steering resolve`/`apply`) and
-at dial time (`fadeno loadout set`). On a native in-session delivery the
+at dial time (`fadeno loadout set`). On a host in-session delivery the
 posture is advisory only — it rides as a prompt instruction and as evidence
 on the `native_delivery` row — because the host owns the session's
 permissions. Either side undeclared is no constraint.
@@ -367,8 +367,8 @@ archetypes:
 ```
 
 No loadout grows a `generator` slot — the fallback serves every existing
-loadout. There is no `fadeno:generator` native agent or dispatch proxy;
-native delivery walks the chain to the worker surface and carries the
+loadout. There is no `fadeno:generator` host agent or dispatch proxy;
+host delivery walks the chain to the worker surface and carries the
 write-forbidden instruction in the prompt. Dedicated surfaces wait on
 traffic.
 
@@ -401,7 +401,7 @@ archetype's distinctness, eligibility, or write posture.
 **Write posture** (phase 2, listed because the others follow it) is
 `requires_write: required | forbidden | none` on the archetype, matched
 against the route's `write_access`. Enforced on command deliveries;
-advisory on native in-session deliveries. See *Write access*.
+advisory on host in-session deliveries. See *Write access*.
 
 **Provider distinctness** — the resolved target's provider must differ
 from every input producer's:
@@ -517,9 +517,9 @@ policy language.
   `fadeno loadout shadow <archetype> <executor> [--rate <0..1>]` and
   `fadeno loadout clear-shadow [archetype]`. Ad-hoc dispatch spawns commands, so what it can invoke is a
   property of the *route*, not of the target: a command-delivered route runs
-  its argv, and a `native: true` route runs its fallback `command` when it
-  declares one. A natively-routed target with no fallback command is a clear
-  error that names the fix — run this archetype-shaped task with the native
+  its argv, and a `host: true` route runs its fallback `command` when it
+  declares one. A host-routed target with no fallback command is a clear
+  error that names the fix — run this archetype-shaped task with the
   in-session agent, declare a fallback command on the route, or bind the
   archetype to a command-delivered target.
 - `fadeno dispatches [--tail <N>] [--json] [--comparisons]` — read the evidence back; see
@@ -571,7 +571,7 @@ opus_reviewer → claude-default (opus) [binding]
   rows from a newer format major separately — old evidence ages into legacy,
   it does not degrade into noise.
 - Native delivery: the steering hook appends a `native_delivery` row to the
-  same `.fadeno/dispatches.jsonl` whenever it steers a spawn to a native fadeno
+  same `.fadeno/dispatches.jsonl` whenever it steers a spawn to a host fadeno
   role agent — timestamp, `event: "native_delivery"`, archetype, agent_type
   (as requested, before the rewrite), loadout, executor, model,
   model_override, `reasoning_effort: "inherited"`, `transport: "host-native"`,
@@ -580,13 +580,13 @@ opus_reviewer → claude-default (opus) [binding]
   generation of the hook wrote the row, per the lag caveat under *Host steering
   integration*. A command dispatch gets two kernel
   rows, a kernel-owned snapshot, and relay attestation; the kernel is never
-  invoked on the native path, so the hook is the only component that can
-  witness a native delivery at all. Writing it to
+  invoked on the host path, so the hook is the only component that can
+  witness a host delivery at all. Writing it to
   the same file makes `dispatches.jsonl` the single audit point across both
   delivery routes — "which executor produced this" stops depending on which
   route the loadout happened to take. Best-effort, like the relay stash: a
   failed evidence write never changes a steering decision. Claude-specific for
-  now: only the Claude harness has a spawn hook, so native deliveries in other
+  now: only the Claude harness has a spawn hook, so host deliveries in other
   harnesses stay unwitnessed until they grow an equivalent interception point.
 - Reading it back: `fadeno dispatches [--tail <N>] [--json]` renders the log
   instead of leaving it to `jq`. It correlates each
@@ -628,7 +628,7 @@ this boundary), which closes the loop on the subscription-cycling need.
 
 ## Host steering integration
 
-The harness will never run non-Anthropic inference natively (custom-agent
+The harness will never run non-Anthropic inference in-session (custom-agent
 `model:` accepts Claude models only), so cross-harness subagents go
 out-of-process: **dispatch proxy agents**, shipped in the plugin, one per
 archetype (`dispatch-worker`, `dispatch-reviewer`, `dispatch-judge`):
@@ -731,33 +731,33 @@ larger model retires. Any hop where bytes matter therefore hands over a path or
 a stream, never a passage to re-emit; the single copy step the proxy still
 performs is the exception that the attestation exists to check.
 
-**Native delivery honors half an executor's identity.** In-session delivery can
+**Host delivery honors half an executor’s identity.** In-session delivery can
 pin the *model* — the harness Agent tool takes a `model` parameter, and the
 rewrite hook sets it from the resolved slot — but it cannot pin reasoning
 effort: the Agent tool schema has no effort parameter. A target like
-`opus-xhigh` therefore delivers natively as opus at whatever effort the session
-inherited. An executor's identity is model + effort, so a native delivery
+`opus-xhigh` therefore delivers in-session as opus at whatever effort the session
+inherited. An executor's identity is model + effort, so a host delivery
 satisfies one half of it and inherits the other. `native_delivery` rows record
 `reasoning_effort: "inherited"` rather than the declared effort, so the
 evidence never claims an effort the delivery had no way to set. Command
 delivery has no such gap: the route's argv carries the effort flag itself.
 
 Codex does not expose the same spawn-rewrite hook. Project `init` installs
-safe native broker agents by default; `--no-steering` selects the static legacy
+safe host broker agents by default; `--no-steering` selects the static legacy
 agents instead. `fadeno setup --codex` records the harness and materializes
 user-scoped managed agents; later `fadeno use <loadout>` refreshes them
 automatically and requires a fresh session only when they changed. Explicit
 project overrides remain available with `fadeno steering apply
 <loadout> --codex --scope project`, which
-materializes every loadout slot: natively-routed slots become session-native
+materializes every loadout slot: host-routed slots become session-resident
 agents and command-routed slots become cheap brokers. Each role checks the
-kernel before every task: a matching native slot runs locally, a command-routed
-slot dispatches out-of-process immediately, and a different native slot uses
-its route's declared fallback command when present. Only a natively-routed slot
+kernel before every task: a matching host slot runs locally, a command-routed
+slot dispatches out-of-process immediately, and a different host slot uses
+its route's declared fallback command when present. Only a host-routed slot
 with no fallback command returns `restart_required`. Locked engine requests use `dispatch-fallback`, which
-authenticates the run snapshot and records command transport rather than native
+authenticates the run snapshot and records command transport rather than host
 attestation. Applying changed agent definitions requires a fresh Codex session
-to make the new model native; fallback-capable switches take effect at the next
+to make the new model resident; fallback-capable switches take effect at the next
 role invocation without one.
 
 This ambient precedence applies to ordinary ad-hoc role invocations and to
@@ -767,7 +767,7 @@ must resolve the run/dispatch pair against the run's profile snapshot, and the
 minted executor takes precedence over later environment, sticky-local, default,
 or live-profile changes.
 
-**What stays native:** Explore/Plan-style read-only scouting — cheap, tightly
+**What stays unsteered:** Explore/Plan-style read-only scouting — cheap, tightly
 integrated with the harness's codebase tools, and not where quota pressure
 lives. The rewrite hook must be selective (worker-shaped types only). The
 arbitrage win is expensive worker turns.

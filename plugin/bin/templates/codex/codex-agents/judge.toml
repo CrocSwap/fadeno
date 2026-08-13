@@ -1,4 +1,4 @@
-# Fadeno native subagent: judge (evaluator role).
+# Fadeno host subagent: judge (evaluator role).
 
 name = "judge"
 description = "Evaluator role for Fadeno playbooks: score competing attempts and emit a structured judgment."

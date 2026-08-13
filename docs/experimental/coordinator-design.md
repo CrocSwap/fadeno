@@ -148,7 +148,7 @@ Keep it dumb in v1; the point is *uniform CLI dispatch*, not smart routing.
 
 ## Relationship to `runner`
 
-`runner` is the in-session / native-subagent orchestrator (roles = subagents or
+`runner` is the in-session / host-subagent orchestrator (roles = subagents or
 degraded passes). `driver` is the cross-harness variant (pure host + driver
 subagent + uniform CLI roles). They share runtime.md. Whether `driver` eventually
 becomes the default entrypoint and `runner` folds into it is a later call — for

@@ -86,14 +86,14 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
     const spec = role.adapter === 'command' ? status.external.find((item) => item.archetype === role.archetype) : null;
     if (spec == null || spec.command == null) continue;
     if (!commandOnPath(spec.command[0]!)) {
-      findings.push(finding(`executor:${role.executor}`, 'warning', `${role.command?.[0] ?? role.executor} is unavailable`, 'Install the provider CLI or select native explicitly; Fadeno will not fall back automatically.'));
+      findings.push(finding(`executor:${role.executor}`, 'warning', `${role.command?.[0] ?? role.executor} is unavailable`, 'Install the provider CLI or select a host executor explicitly; Fadeno will not fall back automatically.'));
     } else {
       findings.push(finding(`executor:${role.executor}`, 'ok', 'executable is present on PATH (not executed)'));
     }
   }
   // An unrecorded harness is not a cosmetic gap: routes are compiled per
-  // harness, and under `standalone` the native route does not exist at all, so
-  // a host-native slot silently becomes a subprocess. It also disarms every
+  // harness, and under `standalone` the host route does not exist at all, so
+  // a host slot silently becomes a subprocess. It also disarms every
   // check below that keys on a specific harness, including `codex-agents`.
   const ambient = detectAmbientHarness(opts.userPathOptions);
   if (ambient == null) {
@@ -105,7 +105,7 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
       'harness',
       'warning',
       `${ambient.marker} says this session runs inside ${ambient.harness}, but no harness is recorded so routes compile as standalone`,
-      `Run \`fadeno setup --${ambient.harness}\`; until then every ${ambient.harness}-native slot is delivered as a subprocess instead.`,
+      `Run \`fadeno setup --${ambient.harness}\`; until then every ${ambient.harness}-host slot is delivered as a subprocess instead.`,
     ));
   } else {
     findings.push(finding(
@@ -116,9 +116,9 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
     ));
   }
   if (status.harness === 'codex' && status.codexMaterialization?.restartRequired) {
-    findings.push(finding('codex-agents', 'warning', 'managed native agents are missing or stale', 'Run `fadeno setup --codex` and start a fresh Codex session.'));
+    findings.push(finding('codex-agents', 'warning', 'managed host agents are missing or stale', 'Run `fadeno setup --codex` and start a fresh Codex session.'));
   } else if (status.harness === 'codex') {
-    findings.push(finding('codex-agents', 'ok', 'managed native-agent state is current'));
+    findings.push(finding('codex-agents', 'ok', 'managed host-agent state is current'));
   }
   const gitignore = join(repoRoot, '.gitignore');
   const ignored = existsSync(gitignore) ? readFileSync(gitignore, 'utf8') : '';

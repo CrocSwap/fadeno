@@ -271,9 +271,9 @@ test('dispatch: resolving to a host executor refuses with the host-dispatch poin
       archetype: 'reviewer', prompt: 'p', repoRoot: root, env: null,
       userPathOptions: onHarness('codex'),
     }),
-    // The refusal names the native in-session agent — an explicitly-invoked
+    // The refusal names the in-session agent — an explicitly-invoked
     // proxy under a native loadout should point back at the right tool.
-    /resolved to host executor "terra-host".*native in-session reviewer agent.*declare fallback_command/,
+    /resolved to host executor "terra-host".*in-session reviewer agent.*declare fallback_command/,
   );
 });
 
@@ -311,7 +311,7 @@ test('dispatch: an on-demand-native harness refuses a host fallback instead of n
       archetype: 'reviewer', prompt: 'review this', repoRoot: root, env: null,
       userPathOptions: onHarness('claude'),
     }),
-    /host executor "terra-fallback", which the claude harness runs natively.*re-enter this dispatch one level down/s,
+    /host executor "terra-fallback", which the claude harness runs in-session.*re-enter this dispatch one level down/s,
   );
   // Refused before the spawn: the executor never ran, and the row says why.
   const row = evidenceRows(root).at(-1);
@@ -448,7 +448,7 @@ test('dispatch: a write-needing archetype is refused on a delivery that cannot w
         // Three ways out: rebind, re-permission the command, or stay in-session.
         !/bind "worker" to a write-capable executor/.test(err.message) ||
         !/permission mode/.test(err.message) ||
-        !/native in-session worker agent/.test(err.message)
+        !/in-session worker agent/.test(err.message)
       ) {
         return false;
       }

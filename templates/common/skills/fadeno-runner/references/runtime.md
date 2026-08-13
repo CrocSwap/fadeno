@@ -100,14 +100,14 @@ not fabricate them. `verify` checks that attempt ordinals are contiguous per
 actor call and every redispatch carries an allowed reason (`schema_repair`,
 `executor_override`, `user_retry`).
 
-**Native host dispatches pause the engine durably.** A host executor profile
+**Host dispatches pause the engine durably.** A host executor profile
 uses `adapter: host` plus `model`, `reasoning_effort`, and `agent_type`. Drive
 records `host_dispatch_requested` for every pending member and returns
-`awaiting_host_dispatch`; the host then runs, starts, and receipts each native
+`awaiting_host_dispatch`; the host then runs, starts, and receipts each host
 agent serially:
 
 ```text
-fadeno dispatch-start <run> <dispatch-id> --agent-id <native-id>
+fadeno dispatch-start <run> <dispatch-id> --agent-id <host-agent-id>
 fadeno dispatch-progress <run> <dispatch-id> --file <status.json> [--source agent|harness|director]
 fadeno dispatch-complete <run> <dispatch-id> --output <temporary-file> [--commit <sha>]
 fadeno dispatch-fail <run> <dispatch-id> --reason <text>
@@ -125,7 +125,7 @@ assignment with `# Fadeno engine step assignment` and include the exact `run` an
 working:
 
 ```text
-fadeno steering resolve --archetype <archetype> [--native-executor <embedded-host>] \
+fadeno steering resolve --archetype <archetype> [--host-executor <embedded-host>] \
   --run <run-id> --dispatch-id <dispatch-id>
 ```
 
@@ -137,12 +137,12 @@ that begin with `# Fadeno step assignment`. A request minted by the
 engine keeps the executor and requested identity from its run snapshot even if
 loadout steering changes after minting.
 
-The start event records the native agent id and echoes the requested model,
+The start event records the host agent id and echoes the requested model,
 effort, and agent type with `identity_evidence: requested_only`. Those fields
 are internally checked against the snapshotted profile, but are not verified
 runtime identity unless the host later supplies an independent observation. A
 valid completion is copied to the planned immutable artifact path and gets a
-manifest; invalid bytes are retained under `artifacts/attempts/`. Native workers
+manifest; invalid bytes are retained under `artifacts/attempts/`. Host workers
 do not invoke Fadeno ledger commands — the host coordinator is the sole writer.
 
 Retries retain one `actor_call_id` and use strictly increasing attempt ordinals.
@@ -201,7 +201,7 @@ it is what makes the run inspectable, and the seam a future compiled runtime rea
 
 - **actor_call** — Have the named role do the work and return only the declared
   artifact body. The director materializes that body at the resolved path under
-  `artifacts/`; native host submissions use a temporary file with
+  `artifacts/`; host submissions use a temporary file with
   `dispatch-complete`.
 - **tool_call** — Invoke the named capability (e.g. `test_runner`, `diff_loader`),
   write its result to the planned artifact path, then atomically validate and
@@ -250,7 +250,7 @@ it is what makes the run inspectable, and the seam a future compiled runtime rea
 ## Managing roles & subagents
 
 Each **role** declared in a playbook (`coordinator`, `implementer`,
-`substance_reviewer`, …) maps to a subagent at run time — or, when native
+`substance_reviewer`, …) maps to a subagent at run time — or, when host
 subagents aren't available, to a separate role-pass.
 
 - **Defaults — nothing to manage to start.** Fadeno ships sensible role
@@ -270,8 +270,8 @@ subagents aren't available, to a separate role-pass.
   `.codex/agents/<name>.toml` (Codex). Repo-local definitions take precedence over
   the shipped defaults — the same capability/definition split as playbooks.
 - **Delegate one level only.** A subagent may **not** spawn its own subagents.
-  Runtime containers may nest without requiring native subagents to spawn other
-  native subagents: the director owns the frontier and dispatches each ready
+  Runtime containers may nest without requiring host subagents to spawn other
+  host subagents: the director owns the frontier and dispatches each ready
   leaf. This keeps playbooks safe under Codex `max_depth: 1`.
 - **Graceful degradation — but say so.** When the role subagents aren't
   available, perform the roles yourself in separate passes and save each as a
@@ -351,7 +351,7 @@ The **driver** skill (`fadeno-driver`) owns the loop: `next` → dispatch →
 validate-on-arrival → record (`fadeno run … --member` / `--field k=v`) → repeat.
 On `blocked_human_gate` it returns to the host; the host records
 `human_decision` with `--field branch=approve|reject` and re-dispatches resume.
-`runner` remains the in-session / native-subagent orchestrator; driver is the
+`runner` remains the in-session / host-subagent orchestrator; driver is the
 cross-harness CLI-dispatch variant. They share this runtime.
 
 ## Gates, honestly

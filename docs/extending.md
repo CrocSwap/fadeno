@@ -110,10 +110,10 @@ targets:
 
 routes:
   codex:
-    openai: { native: true, command: [codex, exec, --model, "{model}", "-"] }
+    openai: { host: true, command: [codex, exec, --model, "{model}", "-"] }
     anthropic: { command: [claude, -p, --model, "{model}"] }
   claude:
-    anthropic: { native: true, command: [claude, -p, --model, "{model}"] }
+    anthropic: { host: true, command: [claude, -p, --model, "{model}"] }
     openai: { command: [codex, exec, --model, "{model}", "-"] }
 
 loadouts:
@@ -144,7 +144,7 @@ check:
 ```yaml
 routes:
   claude:
-    anthropic: { native: true, command: [claude, -p, --model, "{model}"], write_access: false }
+    anthropic: { host: true, command: [claude, -p, --model, "{model}"], write_access: false }
 
 archetypes:
   worker: { requires_write: required }
@@ -249,9 +249,9 @@ Ad-hoc dispatch runs the same chain outside any playbook:
 pins and evidence attribution (without it, step 1 above has nothing to match);
 `--executor <name>` bypasses resolution entirely (debugging). What it can
 invoke is a property of the resolved **route**, not of the target: a
-command-delivered route runs its argv, and a `native: true` route runs its
-fallback `command` when one is declared. A natively-routed target with no
-fallback command is a clear error naming the fix — run the task with the native
+command-delivered route runs its argv, and a `host: true` route runs its
+fallback `command` when one is declared. A host-routed target with no
+fallback command is a clear error naming the fix — run the task with the
 in-session agent, declare a fallback command, or bind the archetype to a
 command-delivered target.
 
@@ -349,7 +349,7 @@ conflict is recorded.
 ### Cross-harness subagents (dispatch proxies and steering)
 
 `init --claude` and the plugin install three **dispatch proxy agents** beside
-the native role subagents: `dispatch-worker` / `dispatch-reviewer` /
+the host role subagents: `dispatch-worker` / `dispatch-reviewer` /
 `dispatch-judge` (source: `templates/claude/claude-agents/dispatch-*.md`).
 Each is a Bash-only `model: sonnet` agent whose single Bash call pipes the
 received task prompt verbatim to `fadeno dispatch --archetype <a>` as a
@@ -365,20 +365,20 @@ never attempts the task itself as a fallback.
 `--no-steering` to opt out. The **spawn-rewrite hook** calls the structured
 `fadeno loadout resolve --archetype …` surface with the Claude harness identity
 and rewrites command-delivered general-purpose/worker, reviewer, and judge
-`Agent` calls to proxies. Native targets are rewritten to the matching Fadeno
+`Agent` calls to proxies. Host targets are rewritten to the matching Fadeno
 role agent and requested model; the `current-host` default remains inert. It
 preserves the rest of the Agent input and leaves Explore/Plan and unrelated
-specialists native. Plugin users can combine the flag with `--data-only`; the
+specialists unsteered. Plugin users can combine the flag with `--data-only`; the
 hook then targets the plugin-scoped `fadeno:dispatch-*` agents.
 
-When it steers a spawn to a native role agent instead, the same hook appends a
+When it steers a spawn to a host role agent instead, the same hook appends a
 `native_delivery` row to `.fadeno/dispatches.jsonl` (archetype, agent_type,
 loadout, executor, model, model_override, `reasoning_effort: "inherited"`,
 `transport: "host-native"`, prompt_sha256, `hook_version`) plus a verbatim
 prompt snapshot at `.fadeno/local/prompts/native-<sha8>.md`, so the file audits
-both delivery routes. The kernel is not in the native path, so the hook is the
+both delivery routes. The kernel is not in the host path, so the hook is the
 only possible evidence writer there; the row is best-effort and never changes a
-steering decision. Caveat when editing the hook: native delivery can pin the executor's
+steering decision. Caveat when editing the hook: host delivery can pin the executor's
 **model** (the Agent tool's `model` parameter) but not its reasoning effort —
 the Agent tool schema has no effort parameter, so `opus-xhigh` lands as opus at
 the session's inherited effort, which is why the row records `"inherited"`
@@ -423,17 +423,17 @@ definitions named `worker`, `reviewer`, and `judge`; `fadeno setup --codex`
 records the harness, and later `fadeno use <loadout>` automatically refreshes
 the user-scoped agents when needed.
 Use `fadeno steering apply <loadout> --codex --scope project` for a project
-override. Each natively-routed slot becomes a native agent with that target's
+override. Each host-routed slot becomes a host agent with that target's
 model and effort; each command-routed slot becomes a cheap broker that
 delegates through `fadeno dispatch`. Before each task the role resolves the
-active loadout: a command-routed slot switches immediately, a matching native
-slot runs natively, and a different native slot uses its declared fallback
-command when present. A fresh session makes changed native definitions native;
-it is required only when the selected native slot has no fallback command. The Codex plugin
+active loadout: a command-routed slot switches immediately, a matching host
+slot runs in-session, and a different host slot uses its declared fallback
+command when present. A fresh session activates changed host definitions;
+it is required only when the selected host slot has no fallback command. The Codex plugin
 bundles the CLI and built-in definitions; it does not overwrite unrelated user
 agents. Existing files remain protected unless `--force` is supplied.
 
-What stays native: Explore/Plan-style read-only scouting — cheap, tightly
+What stays unsteered: Explore/Plan-style read-only scouting — cheap, tightly
 integrated with the harness's codebase tools, and not where quota pressure
 lives. The arbitrage win is expensive worker turns.
 
@@ -501,13 +501,13 @@ format.
 3. **`src/cli.ts`** — add the target to the `Target` type, the `SIGIL` map,
    `requireTarget`, the `parseArgs` options, and `HELP`.
 4. **README** + the current adapter note/table in `docs/kickoff-memo.md` — document
-   the new adapter row and distinguish native handles from namespaced plugin
+   the new adapter row and distinguish host handles from namespaced plugin
    commands where applicable.
 5. Tests in `test/init.test.ts` for the new tree, plus built-boundary assertions in
    `test/cli-integration.test.ts` and `test/plugin.test.ts` when bundled templates
    or CLI flags change.
 
-If the host lacks native subagents, that's fine — the runner skill already
+If the host lacks host subagents, that's fine — the runner skill already
 degrades to separate role-passes (and says so in the ledger).
 
 ---

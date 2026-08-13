@@ -427,7 +427,7 @@ test('engine: a write-needing role is refused before the spawn on a read-only de
   assert.equal(refused.outcome, 'executor_failed');
   assert.match(refused.detail, /implement \(builder\) was not dispatched/);
   assert.match(refused.detail, /archetype "worker" declares `requires_write: required`, but executor "ro-worker"/);
-  assert.match(refused.detail, /native in-session worker agent/);
+  assert.match(refused.detail, /in-session worker agent/);
 
   // Nothing was spawned, nothing was assembled, nothing was produced.
   assert.equal(existsSync(join(root, 'ran.tmp')), false);

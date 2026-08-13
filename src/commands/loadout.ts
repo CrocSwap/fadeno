@@ -532,9 +532,9 @@ export function runLoadoutSet(
   // Set-time policy check, in the dispatch kernel's own words: dialing a
   // mutating archetype onto a command route that cannot write is a refusal
   // waiting to happen, and the honest moment to say so is now — not after the
-  // first expensive dispatch. Native deliveries are exempt: the in-session
+  // first expensive dispatch. Host deliveries are exempt: the in-session
   // agent's permissions belong to the host, and on a host executor
-  // `write_access` describes its command fallback, not the native facility.
+  // `write_access` describes its command fallback, not the host facility.
   const spec = profile.executors[target]!;
   if (spec.adapter === 'command') {
     const conflict = explainWriteConflict({ executor: target, spec }, archetype, profile);

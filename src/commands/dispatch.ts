@@ -120,7 +120,7 @@ function consumePendingRelay(repoRoot: string, prompt: string, now: Date): boole
 const SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
 
 /**
- * Harnesses that materialize any native slot in-session, on demand. There, a
+ * Harnesses that materialize any host slot in-session, on demand. There, a
  * host executor's `fallback_command` would hand the task to a subprocess of
  * the harness we are already inside — which loads the same bootstrap, the same
  * proxy agents, and the same steering, and re-dispatches one level down until
@@ -128,7 +128,7 @@ const SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
  * materializes its role agents once per session, so a slot that differs from
  * that session's baseline genuinely needs a command), not for this one.
  */
-const ON_DEMAND_NATIVE_HARNESSES: ReadonlySet<string> = new Set(['claude']);
+const ON_DEMAND_HOST_HARNESSES: ReadonlySet<string> = new Set(['claude']);
 
 /** Predicate name recorded on a `dispatch_refused` row. */
 export type DispatchRefusalPredicate =
@@ -482,17 +482,17 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   }
 
   const harness = profile.harness ?? 'standalone';
-  const nativeOnDemand = ON_DEMAND_NATIVE_HARNESSES.has(harness);
-  if (spec.adapter === 'host' && (nativeOnDemand || spec.fallbackCommand == null)) {
+  const hostOnDemand = ON_DEMAND_HOST_HARNESSES.has(harness);
+  if (spec.adapter === 'host' && (hostOnDemand || spec.fallbackCommand == null)) {
     const shape = archetype ?? role ?? 'role';
     throw new DispatchCommandError(
-      nativeOnDemand
-        ? `resolved to host executor "${executorName}", which the ${harness} harness runs natively in ` +
+      hostOnDemand
+        ? `resolved to host executor "${executorName}", which the ${harness} harness runs in-session in ` +
           `this session; dispatching its fallback_command would hand the task to a subprocess of the ` +
           `same harness and re-enter this dispatch one level down. Run this ${shape}-shaped task with ` +
-          `the native in-session ${archetype ?? 'role'} agent, or bind a command executor.`
+          `the in-session ${archetype ?? 'role'} agent, or bind a command executor.`
         : `resolved to host executor "${executorName}"; ad-hoc dispatch invokes command adapters only — ` +
-          `run this ${shape}-shaped task with the native in-session ` +
+          `run this ${shape}-shaped task with the in-session ` +
           `${archetype ?? 'role'} agent instead, declare fallback_command on the executor, or bind a ` +
           'command executor.',
     );
@@ -792,7 +792,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       if (shadowSpec == null) {
         writeShadowRefusal('shadow_resolution', `shadow target "${shadowExecutorNameInner}" is not a declared executor (${Object.keys(profile.executors).join(', ')}).`);
       } else if (shadowSpec.adapter === 'host') {
-        writeShadowRefusal('shadow_resolution', `shadow executor "${shadowExecutorNameInner}" is a host/native executor — the kernel cannot duplicate a dispatch natively.`, {
+        writeShadowRefusal('shadow_resolution', `shadow executor "${shadowExecutorNameInner}" is a host executor — the kernel cannot duplicate a host dispatch.`, {
           model: shadowSpec.model,
           transport: 'native',
         });

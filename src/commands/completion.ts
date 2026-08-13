@@ -101,7 +101,7 @@ const COMMANDS: Record<string, CommandSpec> = {
     {
       resolve: command({
         '--archetype': { kind: 'archetype' },
-        '--native-executor': { kind: 'executor' },
+        '--host-executor': { kind: 'executor' },
         '--role': { kind: 'free' },
         '--loadout': LOADOUT,
         '--run': { kind: 'run' },

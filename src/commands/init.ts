@@ -14,7 +14,7 @@ export interface InitOptions {
   withHooks?: boolean;
   /** Compatibility alias for the default loadout-aware steering. */
   withSteering?: boolean;
-  /** Explicitly keep the legacy native-only project surface. */
+  /** Explicitly keep the legacy unsteered project surface. */
   noSteering?: boolean;
   /** Seed only the per-repo `.fadeno/` definitions; skip skills/subagents/bootstrap. */
   dataOnly?: boolean;
@@ -104,7 +104,7 @@ export function runInit(opts: InitOptions): InitResult {
     }
 
     // 3. Subagent definitions (provisional path/format — runner degrades when
-    //    native subagents are unavailable).
+    //    host subagents are unavailable).
     switch (opts.target) {
       case 'codex':
         copyTree(
@@ -152,7 +152,7 @@ export function runInit(opts: InitOptions): InitResult {
   // 5. Optional tier-2 enforcement scaffold (per-repo policy — allowed with --data-only).
   if (opts.withHooks) emitHooks(tpl, repoRoot, opts.target, force, results);
 
-  // 6. Optional host-native loadout steering. Claude's rewrite script and
+  // 6. Optional host loadout steering. Claude's rewrite script and
   // settings are local, git-ignored session machinery. Codex steering is the
   // custom-agent layer selected above, so no extra config mutation is needed.
   if (withSteering && opts.target === 'claude') {

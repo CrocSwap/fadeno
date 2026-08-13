@@ -1,5 +1,7 @@
-# Fadeno's harness-neutral executor catalog. Loadouts select model targets;
-# routes decide how the active harness delivers each provider (native or command).
+# Fadeno's harness-neutral executor catalog. Loadouts select model targets
+# (the who); routes decide how the active harness delivers each provider (the
+# how): `host: true` runs in the session you are already in, anything else
+# spawns a command. `native:` is the pre-0.6 name for `host:` and still loads.
 # User ~/.config/fadeno/executors.yaml and project .fadeno/executors.yaml may
 # extend or override these names.
 schema_version: 2
@@ -35,9 +37,9 @@ targets:
 routes:
   codex:
     current-host:
-      native: true
+      host: true
     openai:
-      native: true
+      host: true
       command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
       write_access: true
     anthropic:
@@ -48,9 +50,9 @@ routes:
       write_access: true
   claude:
     current-host:
-      native: true
+      host: true
     anthropic:
-      native: true
+      host: true
       command: [claude, -p, --model, "{model}"]
       write_access: false
     openai:
@@ -61,9 +63,9 @@ routes:
       write_access: true
   grok:
     current-host:
-      native: true
+      host: true
     xai:
-      native: true
+      host: true
       command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
       write_access: true
     openai:
@@ -74,7 +76,7 @@ routes:
       write_access: false
   standalone:
     current-host:
-      native: true
+      host: true
     openai:
       command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
       write_access: true
@@ -106,6 +108,11 @@ archetypes:
 
 # Filler idiom: a slot that is not the loadout's point takes `current-host`, so
 # one loadout stays correct on every harness instead of forking per host.
+#
+# `native` here names a loadout, not a transport: it is only host-delivered
+# because every slot below binds `current-host`. Override a slot with a
+# provider target and that slot is host-delivered only on that provider's own
+# harness — the loadout keeps the name either way.
 loadouts:
   native:
     worker: current-host

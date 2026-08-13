@@ -55,24 +55,24 @@ export interface CommandExecutorSpec {
   provider?: string;
 }
 
-/** A native host facility invoked outside the command adapter. */
+/** A host facility invoked outside the command adapter. */
 export interface HostExecutorSpec {
   adapter: 'host';
-  /** Requested native model identifier; not proof of the host's runtime model. */
+  /** Requested host model identifier; not proof of the host's runtime model. */
   model: string;
   /** Requested reasoning effort/profile. */
   reasoningEffort: string;
-  /** Requested native agent type/identity class. */
+  /** Requested host agent type/identity class. */
   agentType: string;
   /**
    * Optional one-shot transport for this same requested model identity when
-   * the current host session has a different native baseline. This is an
+   * the current host session has a different host baseline. This is an
    * explicit delivery fallback, never an executor/provider substitution.
    */
   fallbackCommand?: string[] | null;
   /**
    * Write capability of the **command delivery** (`fallbackCommand`), not of
-   * the native facility — the in-session agent's permissions are the host's
+   * the host facility — the in-session agent's permissions are the host's
    * business. `null` = undeclared.
    */
   writeAccess: boolean | null;
@@ -140,6 +140,28 @@ export interface ExecutorProfile {
   schemaVersion?: 1 | 2;
 }
 
+/**
+ * Two axes, deliberately different words.
+ *
+ * A **loadout** answers *who* fills each archetype slot (a model target). A
+ * **route** answers *how* the active harness delivers that target: `host: true`
+ * runs in the session already open, anything else spawns a command. Before 0.6
+ * both axes said "native", which read as one concept because the bundled
+ * `native` loadout binds `current-host` in every slot — so loadout-native and
+ * host-delivered always coincided. They come apart the moment a slot is
+ * overridden with a provider target, which is exactly when the harness axis
+ * starts deciding transport, under a loadout name suggesting it cannot.
+ *
+ * Live code, config, and CLI therefore spell the delivery axis `host`.
+ * `native` survives in four frozen places, none of them ambiguous in context:
+ *   1. the `native` loadout name (the other axis; renaming it breaks every pin);
+ *   2. ledger/trace vocabulary — `delivery_transport: "native"`, the
+ *      `native_delivery` event, and the `[native]` row rendering;
+ *   3. `ConstraintContext.transport`, a JSON contract handed to user-authored
+ *      constraint commands;
+ *   4. `routes.*.native`, the pre-0.6 alias still accepted below.
+ * Do not reintroduce it for anything else.
+ */
 export type HarnessId = 'codex' | 'claude' | 'grok' | 'standalone';
 
 export function activeHarness(explicit?: HarnessId, options: UserPathOptions = {}): HarnessId {
@@ -477,8 +499,20 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
             `\`routes.${harness}.${name}\` nor \`routes.${harness}.${provider}\` is declared.`,
         );
       }
-      if (route.native !== undefined && typeof route.native !== 'boolean') {
-        throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.native\` must be boolean.`);
+      // `host: true` is the canonical spelling; it compiles to `adapter: 'host'`
+      // and reads the same as the `current-host` executor it usually binds.
+      // `native: true` is the pre-0.6 name for the identical field, still
+      // accepted so an existing catalog keeps loading. Both may not disagree:
+      // silently preferring one would pick a transport the author didn't write.
+      const rawHost = route.host !== undefined ? route.host : route.native;
+      const hostField = route.host !== undefined ? 'host' : 'native';
+      if (rawHost !== undefined && typeof rawHost !== 'boolean') {
+        throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.${hostField}\` must be boolean.`);
+      }
+      if (route.host !== undefined && route.native !== undefined && route.host !== route.native) {
+        throw new ExecutorProfileError(
+          `${source}: route \`routes.${harness}.${routeKey}\` sets both \`host\` and its legacy alias \`native\` to different values.`,
+        );
       }
       // Declares the write capability of this route's COMMAND delivery — for a
       // native route that is its fallback command, never the in-session agent.
@@ -518,10 +552,10 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
           throw new ExecutorProfileError(`${source}: route \`routes.${harness}.${routeKey}.session_id_pattern\` needs a capture group.`);
         }
       }
-      if (route.native === true) {
+      if (rawHost === true) {
         if (resume != null || sessionIdPattern != null) {
           throw new ExecutorProfileError(
-            `${source}: native route \`routes.${harness}.${routeKey}\` rejects command-session fields.`,
+            `${source}: host route \`routes.${harness}.${routeKey}\` rejects command-session fields.`,
           );
         }
         executors[name] = {
@@ -531,7 +565,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
       } else {
         if (command == null) {
           throw new ExecutorProfileError(
-            `${source}: route \`routes.${harness}.${routeKey}\` needs \`native: true\` or a non-empty \`command\`.`,
+            `${source}: route \`routes.${harness}.${routeKey}\` needs \`host: true\` or a non-empty \`command\`.`,
           );
         }
         const mintsId = command.some((part) => part.includes(SESSION_ID_PLACEHOLDER));
@@ -1252,7 +1286,7 @@ export interface DeliveryChoice {
  * dispatch, the playbook engine, Codex steering) calls this so they refuse
  * in identical words.
  *
- * Callers gate on a COMMAND delivery actually being in play: a native
+ * Callers gate on a COMMAND delivery actually being in play: a host
  * in-session agent's permissions are the host's business, and on a host
  * executor `write_access` describes its declared command fallback. `null` =
  * no conflict; undeclared on either side is no constraint. Write posture is
@@ -1274,7 +1308,7 @@ export function explainWriteConflict(
       'workspace, so the dispatch would burn a run and end in a refusal. ' +
       `Fix: bind "${archetype}" to a write-capable executor, ` +
       "raise the route command's permission mode (and declare `write_access: true`), " +
-      `or run this ${archetype}-shaped task with the native in-session ${archetype} agent.`
+      `or run this ${archetype}-shaped task with the in-session ${archetype} agent.`
     );
   }
   if (posture === 'forbidden' && delivery.spec.writeAccess === true) {
@@ -1387,7 +1421,7 @@ export function explainProviderConflict(
   return null;
 }
 
-/** Bind a neutral native target to the archetype requested by this invocation. */
+/** Bind a neutral host target to the archetype requested by this invocation. */
 export function executorForArchetype(
   profile: ExecutorProfile,
   executorName: string,

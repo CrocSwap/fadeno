@@ -397,6 +397,31 @@ writers accept only 0.3.
 
 ### Changed
 
+- **The delivery axis is spelled `host`, not `native`.** "Native" was doing two
+  unrelated jobs: naming a *loadout* (which model target fills each slot) and
+  naming a *route's transport* (whether the active harness delivers in-session
+  or spawns a command). Worse, the transport already answered to a second word
+  — `native: true` compiled to `adapter: 'host'`, and the executor filling the
+  native loadout is `current-host`. The two senses coincide under the bundled
+  catalog, where the `native` loadout binds `current-host` in every slot, so
+  loadout-native and host-delivered always agreed; they come apart exactly when
+  a slot is overridden with a provider target, which is the one configuration
+  where the harness axis decides transport — under a loadout name implying it
+  cannot. Routes now take **`host: true`**; `SteeringMode` returns `host`;
+  `steering resolve` takes `--host-executor` and reports `host_executor`; and
+  the internal `native*` identifiers follow. `native: true` remains accepted as
+  a silent alias, so an existing catalog keeps loading (a route setting `host`
+  and `native` to *different* values is refused rather than resolved by
+  precedence — picking a winner would deliver a transport the author never
+  wrote). `--native-executor` still parses, so a Codex role agent materialized
+  by an older setup keeps resolving; it now reports stale so the next
+  `fadeno setup --codex` rewrites it. `native` is retained deliberately in four
+  frozen places, none ambiguous in context: the loadout name, the trace
+  vocabulary (`delivery_transport: "native"`, the `native_delivery` event, the
+  `[native]` row rendering), the `ConstraintContext.transport` JSON handed to
+  user-authored constraint commands, and the route alias above. No ledger
+  format change, so existing traces and their pinned digests still verify.
+
 - **Starter-playbook registries derive from the filesystem.** The completion,
   diagram, init, and validate coverage all consume a single
   `starterPlaybooks()` helper that reads `templates/common/fadeno/playbooks/`,

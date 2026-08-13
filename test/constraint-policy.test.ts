@@ -173,7 +173,7 @@ test('eligibility: v2 targets compile the map onto both native and command branc
     },
     routes: {
       standalone: { anthropic: { command: ['claude', '-p', '--model', '{model}'] } },
-      claude: { anthropic: { native: true, command: ['claude', '-p', '--model', '{model}'] } },
+      claude: { anthropic: { host: true, command: ['claude', '-p', '--model', '{model}'] } },
     },
     loadouts: { main: { worker: 'opus' } },
   });

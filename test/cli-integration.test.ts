@@ -124,7 +124,7 @@ test('bundled CLI reports mixed steering materialization and pinned-loadout guid
   const applied = cliSplit(root, ['steering', 'apply', 'mixed', '--codex', '--force']);
   assert.equal(applied.status, 0, applied.stderr);
   assert.match(applied.stdout, /Codex steering materialized: mixed/);
-  assert.match(applied.stdout, /worker → native host nativeWorker/);
+  assert.match(applied.stdout, /worker → host agent nativeWorker/);
   assert.match(applied.stdout, /reviewer → command broker command/);
   assert.match(applied.stdout, /start a fresh Codex session/);
 

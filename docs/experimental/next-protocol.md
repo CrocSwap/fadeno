@@ -109,8 +109,8 @@ They record only facts they can witness:
 - process/session exited successfully or unsuccessfully;
 - output passed or failed validation.
 
-One-shot CLI adapters and richer native adapters use the same minimum event
-shape. Richer native lifecycle data is optional extension evidence.
+One-shot CLI adapters and richer host adapters use the same minimum event
+shape. Richer host lifecycle data is optional extension evidence.
 
 An attempt is not a playbook loop iteration. Incrementing `attempt` never
 increments loop generation.
@@ -218,15 +218,15 @@ canonical name for each fact. In particular, emit `artifact_created`; accept
 `artifact_written` only through an explicit legacy reader until old fixtures are
 regenerated.
 
-### Native host dispatch (format 0.3)
+### Host dispatch (format 0.3)
 
 The host adapter is named `host`. When a host-bound actor call is planned,
 `fadeno drive` records `host_dispatch_requested` and returns
-`awaiting_host_dispatch` with a stable request id. The host owns native
+`awaiting_host_dispatch` with a stable request id. The host owns
 execution and submits receipts serially:
 
 ```text
-dispatch-start <run> <dispatch-id> --agent-id <native-id>
+dispatch-start <run> <dispatch-id> --agent-id <host-agent-id>
 dispatch-complete <run> <dispatch-id> --output <temporary-file> [--commit <sha>]
 dispatch-fail <run> <dispatch-id> --reason <text>
 ```
@@ -234,7 +234,7 @@ dispatch-fail <run> <dispatch-id> --reason <text>
 The coordinator delivers the immutable actor prompt in an envelope beginning
 `# Fadeno engine step assignment` with both `run: <run-id>` and
 `dispatch_id: <dispatch-id>`. The Codex steering preflight resolves the pair
-with `fadeno steering resolve --archetype <a> [--native-executor <embedded-host>]`
+with `fadeno steering resolve --archetype <a> [--host-executor <embedded-host>]`
 `--run <run-id> --dispatch-id <dispatch-id>`. This request-locked path reads
 the run's profile snapshot and rejects missing, terminal, duplicate, orphaned,
 or mismatched evidence. It never consults ambient loadout state or routes a
@@ -242,11 +242,11 @@ host request through the command broker. Ordinary ad-hoc steering retains
 ambient loadout precedence.
 
 The start receipt appends the existing `actor_dispatched` event and records the
-requested native model, reasoning effort, and agent type plus the supplied
+requested host model, reasoning effort, and agent type plus the supplied
 agent identity. These are `requested_only`, not independently observed. A valid
 completion is manifested at the planned immutable path; invalid bytes are
 preserved under `artifacts/attempts/`. Repeated drives reuse request ids, and
-repeated receipts are idempotent for the same native identity or output digest.
+repeated receipts are idempotent for the same host identity or output digest.
 The director is the only ledger writer during this MVP. Format 0.2 and
 unversioned ledgers are readable only through explicit compatibility mode, and
 verifiers fail rather than ignore host lifecycle evidence in those ledgers.
@@ -279,7 +279,7 @@ observations are attested, not recomputable, and are forbidden as gate inputs.
   unresolved, invalid, later-failed, and cross-actor attempts remain failures;
 - host prompt snapshots and successful output manifests match their digests;
 - completed runs have no unresolved host requests;
-- requested native model, effort, and agent type remain internally consistent
+- requested host model, effort, and agent type remain internally consistent
   with the profile and receipts; runtime identity is visibly skipped/unverified
   unless the host supplies independently observed metadata;
 - human decisions select declared options and resolve at most once;

@@ -328,7 +328,7 @@ function terminalsFor(events: RunEvent[], dispatchId: string): RunEvent[] {
 /**
  * Resolve a request by its run/dispatch identity without consulting any live
  * executor profile or ambient loadout. This is the read-only counterpart to
- * the receipt writers and is used by engine-delivered native agents.
+ * the receipt writers and is used by engine-delivered host agents.
  */
 export function readHostDispatchRequest(opts: {
   run: string;

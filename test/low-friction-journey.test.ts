@@ -332,7 +332,7 @@ test('vendor respects --no-steering and makes explicitly vendored Codex brokers 
   runVendor({ repoRoot: steeringRoot, target: 'codex', withSteering: true });
   assert.ok(exists(steeringRoot, '.codex/agents/worker.toml'));
   assert.match(read(steeringRoot, '.gitignore'), /!\.codex\/agents\/worker\.toml/);
-  assert.match(read(steeringRoot, '.codex/agents/worker.toml'), /--native-executor native-worker/);
+  assert.match(read(steeringRoot, '.codex/agents/worker.toml'), /--host-executor native-worker/);
 });
 
 test('evidence promotion refuses running traces and is idempotent for a verified terminal receipt', (t) => {

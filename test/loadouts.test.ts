@@ -53,7 +53,7 @@ test('v2 targets compile through the active harness route', () => {
         anthropic: { command: ['claude', '-p', '--model', '{model}'] },
         opus: { command: ['claude', '-p', '--model', '{model}', '--permission-mode', 'plan'] },
       },
-      claude: { anthropic: { native: true, command: ['claude', '-p', '--model', '{model}'] } },
+      claude: { anthropic: { host: true, command: ['claude', '-p', '--model', '{model}'] } },
     },
     loadouts: { main: { worker: 'opus' } },
     default_loadout: 'main',
@@ -71,12 +71,40 @@ test('v2 targets compile through the active harness route', () => {
   assert.equal(native.executor.provider, 'anthropic');
 });
 
+test('a pre-0.6 route spelling `native` compiles identically to `host`', () => {
+  const catalog = (deliveryField: 'host' | 'native') => stringifyYaml({
+    schema_version: 2,
+    targets: { opus: { provider: 'anthropic', model: 'opus' } },
+    routes: { claude: { anthropic: { [deliveryField]: true, command: ['claude', '-p'] } } },
+    loadouts: { main: { worker: 'opus' } },
+    default_loadout: 'main',
+  });
+  const renamed = parseExecutorProfile(catalog('host'), 'v2.yaml', 'claude');
+  const legacy = parseExecutorProfile(catalog('native'), 'legacy.yaml', 'claude');
+  assert.equal(legacy.executors.opus!.adapter, 'host');
+  assert.deepEqual(legacy.executors.opus, renamed.executors.opus);
+});
+
+test('a route setting `host` and its legacy alias to different values is refused', () => {
+  assert.throws(
+    () => parseExecutorProfile(stringifyYaml({
+      schema_version: 2,
+      targets: { opus: { provider: 'anthropic', model: 'opus' } },
+      routes: { claude: { anthropic: { host: true, native: false, command: ['claude', '-p'] } } },
+      loadouts: { main: { worker: 'opus' } },
+      default_loadout: 'main',
+    }), 'conflict.yaml', 'claude'),
+    // Picking a winner would silently choose a transport the author did not write.
+    /sets both `host` and its legacy alias `native` to different values/,
+  );
+});
+
 test('v2 reports a missing provider route for the active harness', () => {
   assert.throws(
     () => parseExecutorProfile(stringifyYaml({
       schema_version: 2,
       targets: { opus: { provider: 'anthropic', model: 'opus' } },
-      routes: { codex: { openai: { native: true } } },
+      routes: { codex: { openai: { host: true } } },
       loadouts: { main: { worker: 'opus' } },
     }), 'v2.yaml', 'codex'),
     /routes\.codex\.anthropic/,
@@ -99,7 +127,7 @@ test('v2 routes declare the write capability of their command delivery', () => {
         openai: { command: ['codex', 'exec', '--sandbox', 'workspace-write', '-'], write_access: true },
       },
       claude: {
-        anthropic: { native: true, command: ['claude', '-p', '--model', '{model}'], write_access: false },
+        anthropic: { host: true, command: ['claude', '-p', '--model', '{model}'], write_access: false },
         openai: { command: ['codex', 'exec', '-'] },
       },
     },
@@ -217,7 +245,7 @@ test('explainWriteConflict: one refusal, spoken identically by every enforcement
   // Three ways out: rebind, re-permission the command, or stay in-session.
   assert.match(conflict, /bind "worker" to a write-capable executor/);
   assert.match(conflict, /permission mode/);
-  assert.match(conflict, /native in-session worker agent/);
+  assert.match(conflict, /in-session worker agent/);
 
   // A host executor's `write_access` describes its command fallback, so the
   // same refusal applies when a caller is about to deliver through it.
@@ -236,7 +264,7 @@ test('target catalogs require the explicit v2 schema boundary', () => {
   assert.throws(
     () => parseExecutorProfile(stringifyYaml({
       targets: { opus: { provider: 'anthropic', model: 'opus' } },
-      routes: { codex: { anthropic: { native: true } } },
+      routes: { codex: { anthropic: { host: true } } },
       loadouts: { main: { worker: 'opus' } },
     }), 'unversioned.yaml', 'codex'),
     /schema_version: 2/,

@@ -1,6 +1,6 @@
 ---
 name: driver
-description: Drive a Fadeno run ledger end-to-end — engine-first via `fadeno drive`, with a manual `fadeno next` loop for steps the engine can't execute. Use when the host hands you a run id to drive or resume, or when coordinating multi-harness roles without native nested subagents. [fadeno 0.6.0-rc.16]
+description: Drive a Fadeno run ledger end-to-end — engine-first via `fadeno drive`, with a manual `fadeno next` loop for steps the engine can't execute. Use when the host hands you a run id to drive or resume, or when coordinating multi-harness roles without host nested subagents. [fadeno 0.6.0-rc.16]
 ---
 
 # Fadeno Driver
@@ -49,9 +49,9 @@ fadeno drive <run>
     fadeno drive <run> --bind <role>=<executor>     # recorded as evidence
   awaiting_host_dispatch:
     deliver each immutable prompt with an envelope beginning `# Fadeno engine step assignment`
-    and exact `run: <run>` plus `dispatch_id: <dispatch-id>` fields; the native
+    and exact `run: <run>` plus `dispatch_id: <dispatch-id>` fields; the host
     Codex agent resolves that pair before doing work
-    start each native agent and record dispatch-start
+    start each host agent and record dispatch-start
     poll the prompt-declared progress sidecar and record dispatch-progress
     submit dispatch-complete or dispatch-fail, then re-run drive
 ```
@@ -168,5 +168,5 @@ planned artifact path.
 - Ask the host (user) before destructive commands, dependency adds, deploys, or
   external sends (`require_user_approval_for`). On instruction-only hosts those
   asks are advisory — see `.fadeno/enforcement.md`.
-- `runner` is the in-session / native-subagent orchestrator; **you** are the
+- `runner` is the in-session / host-subagent orchestrator; **you** are the
   engine/CLI-dispatch variant. Same runtime.md; different dispatch surface.
