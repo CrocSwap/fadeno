@@ -1,6 +1,6 @@
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
@@ -334,13 +334,34 @@ function lockedRunFile(runDir: string, value: string, label: string): string {
   return path;
 }
 
-function loadProfileOrThrow(repoRoot: string, userPathOptions?: UserPathOptions): ExecutorProfile {
+function loadProfileOrThrow(
+  repoRoot: string,
+  userPathOptions?: UserPathOptions,
+): { profile: ExecutorProfile; layers: Array<'builtin' | 'user' | 'project'> } {
   try {
-    return loadExecutorProfile(repoRoot, userPathOptions).profile;
+    const layered = loadExecutorProfile(repoRoot, userPathOptions);
+    return { profile: layered.profile, layers: layered.layers ?? [] };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new DispatchCommandError(err.message);
     throw err;
   }
+}
+
+/**
+ * Workspace fingerprint for the exit-0 no-op attestation. Concurrent writers
+ * make this attestation, not judgment: another process can mutate the tree
+ * between the two probes (or during the spawn), so a true/false stamp is not
+ * a verdict that this executor caused the delta.
+ *
+ * Null when either probe exits nonzero or fails to spawn (no git, unborn
+ * HEAD, permission error) — the completion row then omits the field.
+ */
+function workspaceFingerprint(repoRoot: string): string | null {
+  const status = spawnSync('git', ['-C', repoRoot, 'status', '--porcelain'], { encoding: 'utf8' });
+  if (status.error != null || status.status !== 0) return null;
+  const head = spawnSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+  if (head.error != null || head.status !== 0) return null;
+  return sha256Hex(`${status.stdout ?? ''}\0${head.stdout ?? ''}`);
 }
 
 /**
@@ -357,7 +378,8 @@ function loadProfileOrThrow(repoRoot: string, userPathOptions?: UserPathOptions)
 export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const profile = loadProfileOrThrow(repoRoot, opts.userPathOptions);
+  const layered = loadProfileOrThrow(repoRoot, opts.userPathOptions);
+  const profile = layered.profile;
 
   const archetype = opts.archetype?.trim() ? opts.archetype.trim() : null;
   const role = opts.role?.trim() ? opts.role.trim() : null;
@@ -399,7 +421,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         flagValue: opts.loadout ?? null,
       envValue: opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null,
       localFileValue: pin.loadout,
-      userFileValue: readUserLoadout(opts.userPathOptions),
+      // A self-contained project profile is authoritative; a user-scope dial
+      // naming a user-layer loadout must not reach into a repo whose profile
+      // never saw that layer.
+      userFileValue: layered.layers.includes('user') ? readUserLoadout(opts.userPathOptions) : null,
       profile,
       });
       // Overrides decorate their base loadout by name: a `--loadout other` on
@@ -498,6 +523,18 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     promptSnapshot = rel === '' || rel.startsWith('../') || isAbsolute(rel) ? promptPath! : rel;
   }
 
+  // Streamed stdout snapshot: same naming idiom as the prompt snapshot. The
+  // path is recorded on the request row before the spawn so a killed
+  // dispatch's partial output is discoverable from the ledger.
+  const outputRel = join(
+    '.fadeno',
+    'local',
+    'outputs',
+    `${archetype ?? role ?? 'dispatch'}-${dispatchId.slice(0, 8)}.md`,
+  );
+  const outputAbs = join(repoRoot, outputRel);
+  const outputSnapshot = outputRel.split('\\').join('/');
+
   const relayAttested = consumePendingRelay(repoRoot, prompt, now);
 
   const promptSha256 = sha256Hex(prompt);
@@ -582,7 +619,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     refuseDispatch(repoRoot, identity, 'constraint_command', constraintVerdict.reason, now);
   }
 
-  // Proceeding-only stamps: requested+completed, omit-when-absent.
+  // Proceeding-only stamps: requested+completed, omit-when-absent. The
+  // output snapshot joins here, not the shared identity: a refusal never
+  // creates the file, so a dispatch_refused row must not name it.
+  identity.output_snapshot = outputSnapshot;
   if (providerConflict != null && providerConflict.level === 'warn') {
     opts.onEcho?.(providerConflict.message);
     identity.provider_distinctness = 'warned';
@@ -610,18 +650,30 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     ...identity,
   });
 
+  // stdout is the snapshot fd so bytes survive a mid-flight SIGTERM;
+  // encoding/maxBuffer then apply to stderr only. input still feeds stdin.
+  mkdirSync(join(repoRoot, '.fadeno', 'local', 'outputs'), { recursive: true });
+  const outputFd = openSync(outputAbs, 'w');
+  const workspaceBefore = workspaceFingerprint(repoRoot);
   const started = Date.now();
   const [cmd, ...args] = command;
-  const spawned = spawnSync(cmd!, args, {
-    input: prompt,
-    encoding: 'utf8',
-    cwd: repoRoot,
-    maxBuffer: SPAWN_MAX_BUFFER,
-  });
+  let spawned: SpawnSyncReturns<string>;
+  try {
+    spawned = spawnSync(cmd!, args, {
+      input: prompt,
+      encoding: 'utf8',
+      cwd: repoRoot,
+      maxBuffer: SPAWN_MAX_BUFFER,
+      stdio: ['pipe', outputFd, 'pipe'],
+    });
+  } finally {
+    closeSync(outputFd);
+  }
   const durationMs = Date.now() - started;
 
-  const stdout = spawned.stdout ?? '';
+  const stdout = readFileSync(outputAbs, 'utf8');
   const outputSha256 = sha256Hex(stdout);
+  const workspaceAfter = workspaceFingerprint(repoRoot);
 
   const row: Record<string, unknown> = {
     format: DISPATCHES_FORMAT,
@@ -632,7 +684,12 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     ...(spawned.signal != null ? { signal: spawned.signal } : {}),
     duration_ms: durationMs,
     output_sha256: outputSha256,
+    output_bytes: Buffer.byteLength(stdout),
   };
+  // Concurrent writers make this attestation, not judgment.
+  if (workspaceBefore != null && workspaceAfter != null) {
+    row.workspace_changed = workspaceBefore !== workspaceAfter;
+  }
   if (spawned.error != null) row.error = spawned.error.message;
   appendEvidenceRow(repoRoot, row);
 
