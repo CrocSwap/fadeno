@@ -17427,6 +17427,7 @@ function consumePendingRelay(repoRoot, prompt, now) {
   return fresh.length > 0 ? false : null;
 }
 var SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
+var ON_DEMAND_NATIVE_HARNESSES = /* @__PURE__ */ new Set(["claude"]);
 function producedByIds(opts) {
   if (opts.producedBy == null) return [];
   return opts.producedBy.map((id) => id.trim()).filter((id) => id.length > 0);
@@ -17602,9 +17603,12 @@ function runDispatch(opts) {
       throw err;
     }
   }
-  if (spec.adapter === "host" && spec.fallbackCommand == null) {
+  const harness = profile.harness ?? "standalone";
+  const nativeOnDemand = ON_DEMAND_NATIVE_HARNESSES.has(harness);
+  if (spec.adapter === "host" && (nativeOnDemand || spec.fallbackCommand == null)) {
+    const shape = archetype ?? role ?? "role";
     throw new DispatchCommandError(
-      `resolved to host executor "${executorName}"; ad-hoc dispatch invokes command adapters only \u2014 run this ${archetype ?? role ?? "role"}-shaped task with the native in-session ${archetype ?? "role"} agent instead, declare fallback_command on the executor, or bind a command executor.`
+      nativeOnDemand ? `resolved to host executor "${executorName}", which the ${harness} harness runs natively in this session; dispatching its fallback_command would hand the task to a subprocess of the same harness and re-enter this dispatch one level down. Run this ${shape}-shaped task with the native in-session ${archetype ?? "role"} agent, or bind a command executor.` : `resolved to host executor "${executorName}"; ad-hoc dispatch invokes command adapters only \u2014 run this ${shape}-shaped task with the native in-session ${archetype ?? "role"} agent instead, declare fallback_command on the executor, or bind a command executor.`
     );
   }
   const command2 = spec.adapter === "command" ? spec.command : spec.fallbackCommand;
@@ -26530,10 +26534,7 @@ var import_node_path32 = require("node:path");
 var StatusError = class extends Error {
 };
 function harnessOf(target, userPathOptions) {
-  if (target) return target;
-  const env = process.env.FADENO_HARNESS?.trim();
-  if (env === "codex" || env === "claude" || env === "grok") return env;
-  return readUserHarness(userPathOptions) ?? "standalone";
+  return activeHarness(target ?? void 0, userPathOptions);
 }
 function materialization(loadout, profile, target, userPathOptions) {
   if (target !== "codex" || loadout == null) return null;

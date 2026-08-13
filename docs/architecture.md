@@ -354,7 +354,12 @@ without claiming native attestation. On Claude, init emits a local
 `Agent` hook into `.claude/settings.local.json`. The hook first asks the CLI
 whether a loadout is active; only then does it map general-purpose/worker,
 reviewer, and judge launches to the corresponding dispatch proxy. Explore,
-Plan, and unrelated specialists stay native. A spawn it steers to a native role
+Plan, and unrelated specialists stay native. A director that names
+`dispatch-<archetype>` itself is resolved the same way rather than taken at its
+word: the transport belongs to the loadout, and a host slot is pulled back to
+the native agent instead of shelling out to a subprocess of this same harness —
+which would load the same plugin, re-read the prompt as director work, and
+re-dispatch one level down. A spawn it steers to a native role
 agent gets a best-effort `native_delivery` evidence row plus a prompt snapshot
 under `.fadeno/local/prompts/`; that path can pin the requested model but not
 reasoning effort (the Agent tool schema has no effort parameter), so the row

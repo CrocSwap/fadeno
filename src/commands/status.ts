@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
+  activeHarness,
   applicableOverrides,
   ExecutorProfileError,
   loadExecutorProfile,
@@ -13,7 +14,7 @@ import {
 } from '../lib/executors.ts';
 import { definitionSourceSummary } from '../lib/definitions.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
-import { readUserHarness, type UserPathOptions } from '../lib/user-paths.ts';
+import { type UserPathOptions } from '../lib/user-paths.ts';
 import { readInstallationManifest } from '../lib/installations.ts';
 
 export class StatusError extends Error {}
@@ -68,11 +69,15 @@ export interface StatusResult {
   };
 }
 
+/**
+ * The same resolution routing uses. Spelling it separately here read
+ * `process.env` past an injected env and ignored an explicit
+ * `FADENO_HARNESS=standalone` — so the command whose job is reporting the
+ * effective configuration could name a different harness than the one that
+ * compiled the routes it was reporting.
+ */
 function harnessOf(target: StatusOptions['target'], userPathOptions?: UserPathOptions): StatusResult['harness'] {
-  if (target) return target;
-  const env = process.env.FADENO_HARNESS?.trim();
-  if (env === 'codex' || env === 'claude' || env === 'grok') return env;
-  return readUserHarness(userPathOptions) ?? 'standalone';
+  return activeHarness(target ?? undefined, userPathOptions);
 }
 
 function materialization(

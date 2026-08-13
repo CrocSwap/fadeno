@@ -27,7 +27,9 @@ targets:
     reasoning_effort: high
   grok-default:
     provider: xai
-    model: grok
+    # `grok models` lists grok-4.6 (default) and grok-4.5; a bare "grok" is not
+    # a model id, and the CLI exits 1 before doing any work.
+    model: grok-4.6
     reasoning_effort: high
 
 routes:

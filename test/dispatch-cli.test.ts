@@ -17,6 +17,7 @@ import { runNewRun } from '../src/commands/new-run.ts';
 import { runVerify } from '../src/commands/verify.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
 import { readEvents, type RunEvent } from '../src/lib/run-ledger.ts';
+import type { UserPathOptions } from '../src/lib/user-paths.ts';
 import { read, tempRepo } from './helpers.ts';
 
 /**
@@ -42,6 +43,14 @@ const EXECUTORS = {
     fallback_command: STDIN_ECHO('TERRA:'),
   },
 };
+
+/**
+ * Pin the harness a resolution compiles against. Left unset, `activeHarness`
+ * falls through to the developer's own `~/.local/state/fadeno/harness`, and a
+ * host executor would flip between its command fallback and the native
+ * refusal depending on whose machine ran the suite.
+ */
+const onHarness = (harness: string): UserPathOptions => ({ env: { FADENO_HARNESS: harness } });
 
 function seedProfile(t: TestContext, doc: Record<string, unknown>): string {
   const root = tempRepo(t);
@@ -258,7 +267,10 @@ test('dispatch: resolving to a host executor refuses with the host-dispatch poin
     default_loadout: 'main',
   });
   assert.throws(
-    () => runDispatch({ archetype: 'reviewer', prompt: 'p', repoRoot: root, env: null }),
+    () => runDispatch({
+      archetype: 'reviewer', prompt: 'p', repoRoot: root, env: null,
+      userPathOptions: onHarness('codex'),
+    }),
     // The refusal names the native in-session agent — an explicitly-invoked
     // proxy under a native loadout should point back at the right tool.
     /resolved to host executor "terra-host".*native in-session reviewer agent.*declare fallback_command/,
@@ -271,13 +283,39 @@ test('dispatch: a host executor uses its explicit command fallback with honest e
     loadouts: { main: { reviewer: 'terra-fallback' } },
     default_loadout: 'main',
   });
-  const result = runDispatch({ archetype: 'reviewer', prompt: 'review this', repoRoot: root, env: null });
+  const result = runDispatch({
+    archetype: 'reviewer', prompt: 'review this', repoRoot: root, env: null,
+    // Codex materializes its role agents once per session, so a slot that
+    // differs from that session's baseline is exactly what the fallback is for.
+    userPathOptions: onHarness('codex'),
+  });
   assert.equal(result.stdout, 'TERRA:review this');
   assert.equal(result.transport, 'host-command-fallback');
   const row = evidenceRows(root).at(-1)!;
   assert.equal(row.transport, 'host-command-fallback');
   assert.deepEqual(row.command, STDIN_ECHO('TERRA:'));
   assert.equal(row.command_sha256, sha256Hex(JSON.stringify(STDIN_ECHO('TERRA:'))));
+});
+
+test('dispatch: an on-demand-native harness refuses a host fallback instead of nesting', (t) => {
+  // Claude materializes any native slot in-session, so `claude -p` here would
+  // be a subprocess of the harness we are already inside — one that loads the
+  // same plugin, re-reads the prompt as director work, and re-dispatches.
+  const root = seedProfile(t, {
+    executors: EXECUTORS,
+    loadouts: { main: { reviewer: 'terra-fallback' } },
+    default_loadout: 'main',
+  });
+  assert.throws(
+    () => runDispatch({
+      archetype: 'reviewer', prompt: 'review this', repoRoot: root, env: null,
+      userPathOptions: onHarness('claude'),
+    }),
+    /host executor "terra-fallback", which the claude harness runs natively.*re-enter this dispatch one level down/s,
+  );
+  // Refused before the spawn: the executor never ran, and the row says why.
+  const row = evidenceRows(root).at(-1);
+  assert.equal(row, undefined);
 });
 
 test('dispatch: --executor bypasses resolution; unknown names are rejected', (t) => {

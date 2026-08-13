@@ -191,8 +191,14 @@ test('Claude steering stashes a relay attestation for proxy-bound spawns', (t) =
     ...rewritten,
     tool_input: { ...rewritten.tool_input, prompt: 'Second prompt.', subagent_type: 'fadeno:dispatch-reviewer' },
   };
-  // Explicitly-targeted proxies are not rewritten but still get attested.
-  assert.equal(runClaudeSteering(root, explicit, '{"adapter":"command"}'), '');
+  // An explicitly-targeted proxy is resolved like any other archetype spawn.
+  // The slot is command-delivered here, so it stays on the proxy — and is
+  // attested — but the decision came from the loadout, not the caller.
+  const held = JSON.parse(runClaudeSteering(root, explicit, '{"adapter":"command"}')) as {
+    hookSpecificOutput: { updatedInput: { subagent_type: string; model: string } };
+  };
+  assert.equal(held.hookSpecificOutput.updatedInput.subagent_type, 'dispatch-reviewer');
+  assert.equal(held.hookSpecificOutput.updatedInput.model, 'sonnet');
 
   const rows = read(root, '.fadeno/local/pending-relays.jsonl')
     .trim()
@@ -233,6 +239,40 @@ test('Claude steering selects a native target model without a command proxy', (t
   assert.equal(rewritten.hookSpecificOutput.updatedInput.subagent_type, 'reviewer');
   assert.equal(rewritten.hookSpecificOutput.updatedInput.model, 'opus');
   assert.equal(runClaudeSteering(root, event, '{"adapter":"host","model":"current-host"}'), '');
+});
+
+test('Claude steering pulls an explicitly-named proxy back to a native slot', (t) => {
+  // The proxy agents advertise themselves as MUST-BE-USED, so a director names
+  // `fadeno:dispatch-judge` directly. That used to skip resolution outright and
+  // lock in command delivery: on Claude the proxy then shelled out to
+  // `claude -p`, which loaded this same plugin, re-read the prompt as director
+  // work, and re-dispatched one level down until a headless permission denial
+  // ended it. The caller does not get to pick the transport — the loadout does.
+  const root = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: root, withSteering: true });
+  const event = {
+    cwd: root,
+    tool_name: 'Agent',
+    tool_input: { prompt: 'Adjudicate the fork.', description: 'Judge', subagent_type: 'fadeno:dispatch-judge' },
+  };
+  const decision = JSON.parse(runClaudeSteering(root, event, '{"adapter":"host","model":"opus"}')) as {
+    hookSpecificOutput: { updatedInput: { subagent_type: string; model?: string } };
+  };
+  assert.equal(decision.hookSpecificOutput.updatedInput.subagent_type, 'judge');
+  assert.equal(decision.hookSpecificOutput.updatedInput.model, 'opus');
+
+  // Native delivery never reaches the kernel, so the hook owns its evidence —
+  // and a native slot is not a relay, so nothing is stashed for one.
+  assert.ok(read(root, '.fadeno/dispatches.jsonl').includes('"event":"native_delivery"'));
+  assert.equal(exists(root, '.fadeno/local/pending-relays.jsonl'), false);
+
+  // `current-host` is the explicit "inherit the caller's model" spelling: the
+  // proxy still has to be unwound, but no model is pinned on the way out.
+  const inherited = JSON.parse(
+    runClaudeSteering(root, event, '{"adapter":"host","model":"current-host"}'),
+  ) as { hookSpecificOutput: { updatedInput: { subagent_type: string; model?: string } } };
+  assert.equal(inherited.hookSpecificOutput.updatedInput.subagent_type, 'judge');
+  assert.equal(inherited.hookSpecificOutput.updatedInput.model, undefined);
 });
 
 // A realistic `fadeno loadout resolve` payload for a native (host) slot.
