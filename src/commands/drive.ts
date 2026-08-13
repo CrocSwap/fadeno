@@ -10,8 +10,16 @@ import {
   type CompositeAction,
 } from '../lib/composite-flow.ts';
 import {
+  ConstraintError,
+  evaluateConstraint,
+  type ConstraintContext,
+} from '../lib/constraints.ts';
+import {
   ExecutorProfileError,
   applicableOverrides,
+  eligibilityFor,
+  explainEligibilityConflict,
+  explainProviderConflict,
   explainWriteConflict,
   loadExecutorProfile,
   parseExecutorProfile,
@@ -26,8 +34,10 @@ import {
   type ActiveLoadout,
   type ExecutorProfile,
   type ExecutorSpec,
+  type InputProducer,
   type LocalLoadoutState,
   type RoleResolutionSource,
+  type WritePosture,
 } from '../lib/executors.ts';
 import { computeNext, FlowCursorError, type NextComputation } from '../lib/flow-cursor.ts';
 import { findRepoRoot } from '../lib/paths.ts';
@@ -466,7 +476,115 @@ type DispatchFailure =
   | { kind: 'spawn_failed'; detail: string }
   | { kind: 'exit_nonzero'; detail: string }
   | { kind: 'write_conflict'; detail: string }
+  | { kind: 'eligibility_forbidden'; detail: string }
+  | { kind: 'provider_conflict'; detail: string }
+  | { kind: 'constraint_refused'; detail: string }
   | { kind: 'invalid_output'; detail: string; errors: string[] };
+
+function declaredWritePosture(
+  profile: ExecutorProfile,
+  archetype: string | null,
+): WritePosture | null {
+  if (archetype == null || !Object.hasOwn(profile.archetypes, archetype)) return null;
+  return profile.archetypes[archetype]!.requiresWrite;
+}
+
+function playbookFlow(playbook: Playbook): PlaybookStep[] {
+  return Array.isArray(playbook.flow) ? (playbook.flow as PlaybookStep[]) : [];
+}
+
+function inputNamesOf(step: PlaybookStep): string[] {
+  if (typeof step.input === 'string') return [step.input];
+  if (Array.isArray(step.input)) return step.input.filter((item): item is string => typeof item === 'string');
+  return [];
+}
+
+/**
+ * Input producers for the provider-distinctness check, attributed from this
+ * run's own events — never the live catalog and never ad-hoc dispatch ids.
+ * Each logical input's artifact_created → that actor_call's actor_dispatched
+ * → executor → provider on the snapshotted profile. Missing in-run producer
+ * (declared playbook input, no actor_call, unknown executor) is unresolvable
+ * (`provider: null`). `dispatchId` stays null: attribution came from run events.
+ */
+function inputProducersFromRun(
+  playbook: Playbook,
+  stepId: string,
+  events: RunEvent[],
+  profile: ExecutorProfile,
+): InputProducer[] {
+  const flow = playbookFlow(playbook);
+  const step = flow.find((candidate) => candidate.id === stepId);
+  if (step == null) return [];
+  const producers: InputProducer[] = [];
+  for (const inputName of inputNamesOf(step)) {
+    const base = baseArtifactName(inputName);
+    const producerIds = new Set(
+      flow
+        .filter((candidate) => typeof candidate.output === 'string' && baseArtifactName(candidate.output) === base)
+        .map((candidate) => candidate.id as string),
+    );
+    const created = events.filter(
+      (event) =>
+        event.type === 'artifact_created' &&
+        event.step != null &&
+        producerIds.has(event.step) &&
+        typeof event.extra.artifact === 'string',
+    );
+    if (created.length === 0) {
+      producers.push({ dispatchId: null, executor: null, provider: null });
+      continue;
+    }
+    const latestByPath = new Map<string, RunEvent>();
+    for (const event of created) {
+      latestByPath.set(event.extra.artifact as string, event);
+    }
+    for (const event of latestByPath.values()) {
+      const actorCallId = typeof event.extra.actor_call_id === 'string' ? event.extra.actor_call_id : null;
+      if (actorCallId == null) {
+        producers.push({ dispatchId: null, executor: null, provider: null });
+        continue;
+      }
+      const attempt = event.extra.attempt;
+      const dispatched = events.filter(
+        (candidate) => candidate.type === 'actor_dispatched' && candidate.extra.actor_call_id === actorCallId,
+      );
+      const match =
+        typeof attempt === 'number'
+          ? dispatched.find((candidate) => candidate.extra.attempt === attempt) ?? dispatched.at(-1)
+          : dispatched.at(-1);
+      const executor =
+        match != null && typeof match.extra.executor === 'string' ? match.extra.executor : null;
+      if (executor == null || !Object.hasOwn(profile.executors, executor)) {
+        producers.push({ dispatchId: null, executor, provider: null });
+        continue;
+      }
+      producers.push({
+        dispatchId: null,
+        executor,
+        provider: profile.executors[executor]!.provider ?? null,
+      });
+    }
+  }
+  return producers;
+}
+
+function resolvedViaFor(ctx: EngineCtx, role: string | null): string | null {
+  if (role != null && ctx.overrides.has(role)) return null;
+  if (role == null && ctx.overrides.has('*')) return null;
+  try {
+    const archetype = role == null ? null : roleArchetype(ctx.playbook, role);
+    return resolveRole(
+      role ?? '*',
+      archetype,
+      ctx.profile,
+      ctx.activeLoadout?.name ?? null,
+      ctx.slotOverrides,
+    ).resolvedVia;
+  } catch {
+    return null;
+  }
+}
 
 type DispatchOutcome = { kind: 'valid' } | DispatchFailure;
 
@@ -539,6 +657,7 @@ function dispatchOnce(
   attempt: number,
   reason: string,
   repairErrors: string[] | null,
+  stamps: { providerWarned?: boolean; shadowOnly?: boolean } = {},
 ): DispatchOutcome {
   let promptRes;
   try {
@@ -612,6 +731,8 @@ function dispatchOnce(
   if (session != null) dispatched.session = session;
   if (sessionId != null) dispatched.session_id = sessionId;
   dispatched.engine_pid = process.pid;
+  if (stamps.providerWarned === true) dispatched.provider_distinctness = 'warned';
+  if (stamps.shadowOnly === true) dispatched.gate_eligible = false;
   if (repairCore != null) {
     dispatched.repair_appendix = session === 'resumed' ? repairCore : `\n\n---\n${repairCore}`;
   }
@@ -1094,6 +1215,126 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
       };
     }
 
+    // Same chokepoint, same refusal shape: forbidden eligibility, then
+    // provider distinctness, then the tier-2 constraint command. shadow_only
+    // is not a refusal — it stamps the dispatch. Host adapters stay exempt
+    // above, matching write-posture.
+    const delivery = { executor: binding.executor, spec: binding.spec };
+    const eligibilityConflict = explainEligibilityConflict(delivery, archetype);
+    if (eligibilityConflict != null) {
+      appendEvent(
+        ctx.runDir,
+        {
+          type: 'actor_failed',
+          step: stepId,
+          actor: role,
+          step_execution_id: stepExecutionId,
+          actor_call_id: actorCallId,
+          attempt: priorAttempts(events, actorCallId).count + 1,
+          executor: binding.executor,
+          archetype,
+          reason: 'eligibility_forbidden',
+          error: eligibilityConflict,
+        },
+        ctx.now,
+      );
+      ctx.act(`dispatch refused ${stepId}${role ? ` (${role})` : ''}: ${eligibilityConflict}`);
+      return {
+        kind: 'eligibility_forbidden',
+        detail: `${stepId}${role ? ` (${role})` : ''} was not dispatched: ${eligibilityConflict}`,
+      };
+    }
+
+    const producers = inputProducersFromRun(ctx.playbook, stepId, events, ctx.profile);
+    const providerConflict = explainProviderConflict(
+      archetype,
+      binding.spec.provider ?? null,
+      producers,
+      ctx.profile,
+    );
+    if (providerConflict != null && providerConflict.level === 'refuse') {
+      appendEvent(
+        ctx.runDir,
+        {
+          type: 'actor_failed',
+          step: stepId,
+          actor: role,
+          step_execution_id: stepExecutionId,
+          actor_call_id: actorCallId,
+          attempt: priorAttempts(events, actorCallId).count + 1,
+          executor: binding.executor,
+          archetype,
+          reason: 'provider_conflict',
+          error: providerConflict.message,
+        },
+        ctx.now,
+      );
+      ctx.act(`dispatch refused ${stepId}${role ? ` (${role})` : ''}: ${providerConflict.message}`);
+      return {
+        kind: 'provider_conflict',
+        detail: `${stepId}${role ? ` (${role})` : ''} was not dispatched: ${providerConflict.message}`,
+      };
+    }
+    const providerWarned = providerConflict != null && providerConflict.level === 'warn';
+    if (providerWarned) {
+      ctx.act(`dispatch warning ${stepId}${role ? ` (${role})` : ''}: ${providerConflict.message}`);
+    }
+
+    const constraintContext: ConstraintContext = {
+      archetype,
+      role,
+      executor: binding.executor,
+      target: binding.spec.target ?? null,
+      provider: binding.spec.provider ?? null,
+      model: binding.spec.model,
+      transport: 'command',
+      write_access: binding.spec.writeAccess,
+      write_posture: declaredWritePosture(ctx.profile, archetype),
+      active_loadout: ctx.activeLoadout?.name ?? null,
+      overrides: ctx.slotOverrides,
+      resolved_via: resolvedViaFor(ctx, role),
+      input_provenance: producers.map((producer) => ({
+        dispatch_id: producer.dispatchId,
+        executor: producer.executor,
+        provider: producer.provider,
+      })),
+      harness: ctx.profile.harness ?? 'standalone',
+    };
+    let constraintVerdict;
+    try {
+      constraintVerdict = evaluateConstraint(ctx.profile, constraintContext, { cwd: ctx.repoRoot });
+    } catch (err) {
+      if (err instanceof ConstraintError) {
+        throw new DriveError(`constraint system error: ${err.message}`);
+      }
+      throw err;
+    }
+    if (constraintVerdict.verdict === 'refused') {
+      appendEvent(
+        ctx.runDir,
+        {
+          type: 'actor_failed',
+          step: stepId,
+          actor: role,
+          step_execution_id: stepExecutionId,
+          actor_call_id: actorCallId,
+          attempt: priorAttempts(events, actorCallId).count + 1,
+          executor: binding.executor,
+          archetype,
+          reason: 'constraint_refused',
+          error: constraintVerdict.reason,
+        },
+        ctx.now,
+      );
+      ctx.act(`dispatch refused ${stepId}${role ? ` (${role})` : ''}: ${constraintVerdict.reason}`);
+      return {
+        kind: 'constraint_refused',
+        detail: `${stepId}${role ? ` (${role})` : ''} was not dispatched: ${constraintVerdict.reason}`,
+      };
+    }
+
+    const shadowOnly = eligibilityFor(binding.spec, archetype) === 'shadow_only';
+
     let repairErrors: string[] | null = null;
     for (;;) {
       events = freshEvents(ctx.runDir);
@@ -1119,6 +1360,7 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
         attempt,
         reason,
         repairErrors,
+        { providerWarned, shadowOnly },
       );
 
       if (outcome.kind === 'valid') break;
@@ -1814,7 +2056,14 @@ export function runDrive(opts: DriveOptions): DriveResult {
       }
       // A refused delivery is a failed dispatch like any other, but re-running
       // drive unchanged would refuse identically: the message carries the fixes.
-      if (failure.kind === 'write_conflict') return finish('executor_failed', failure.detail);
+      if (
+        failure.kind === 'write_conflict' ||
+        failure.kind === 'eligibility_forbidden' ||
+        failure.kind === 'provider_conflict' ||
+        failure.kind === 'constraint_refused'
+      ) {
+        return finish('executor_failed', failure.detail);
+      }
       if (failure.kind === 'invalid_output') {
         return finish(
           'output_invalid',

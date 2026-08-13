@@ -263,6 +263,7 @@ test('engine: decide resolves the pause; resume drives to terminal; verify passe
   assert.equal(verify.ok, true);
   assert.equal(finding(verify, 'actor-attempts').status, 'ok');
   assert.equal(finding(verify, 'executor-bindings').status, 'ok');
+  assert.equal(finding(verify, 'gate-eligible').status, 'ok');
   assert.equal(finding(verify, 'named-decisions').status, 'ok');
   assert.equal(finding(verify, 'artifact-supersede').status, 'skip');
 

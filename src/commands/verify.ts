@@ -2,7 +2,7 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { resolveActiveArtifacts, sha256Hex, type ActiveResolution } from '../lib/artifact-manifest.ts';
-import { parseExecutorProfile, resolveRole, type ExecutorProfile } from '../lib/executors.ts';
+import { eligibilityFor, parseExecutorProfile, resolveRole, type ExecutorProfile } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { schemaDirectories } from '../lib/definitions.ts';
 import {
@@ -285,25 +285,29 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
   //     resolution_snapshot; the snapshot itself matches its digest.
   findings.push(checkExecutorBindings(run, events));
 
-  // 19. named-decisions — resolutions reference a real request, select a
+  // 19. gate-eligible — an actor_dispatched `gate_eligible: false` stamp must
+  //     recompute as shadow_only from the snapshot; an unstamped row must not.
+  findings.push(checkGateEligible(run, events));
+
+  // 20. named-decisions — resolutions reference a real request, select a
   //     declared option, and resolve at most once (duplicates idempotent).
   findings.push(checkNamedDecisions(events));
 
-  // 20. artifact-supersede — supersessions reference recorded artifacts on
+  // 21. artifact-supersede — supersessions reference recorded artifacts on
   //     both sides; superseding nothing (or by nothing) is incoherent.
   findings.push(checkArtifactSupersede(events));
 
-  // 21. session-continuity — a resumed dispatch must reference a session id
+  // 22. session-continuity — a resumed dispatch must reference a session id
   //     previously recorded for the same role under the same executor. The
   //     resumed context itself is attested (never recomputable); this checks
   //     the reference chain around it.
   findings.push(checkSessionContinuity(events));
 
-  // 22. node-instances — compositional evidence is scoped to a canonical
+  // 23. node-instances — compositional evidence is scoped to a canonical
   // containment path and dispatch identities are derived from that full path.
   findings.push(checkNodeInstances(events));
 
-  // 23-26. Native host dispatches are a first-class lifecycle. A verifier must
+  // 24-27. Native host dispatches are a first-class lifecycle. A verifier must
   // fail loudly on malformed host evidence, especially when reading an older
   // ledger explicitly, rather than treating those events as ordinary actor
   // dispatches and silently dropping their native identity claims.
@@ -1082,6 +1086,106 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
     check,
     status: 'ok',
     detail: `${dispatches.length} dispatch(es) match the recomputed resolution chain${overridesInForce.size > 0 ? ` (+${overridesInForce.size} explicit override(s))` : ''}`,
+  };
+}
+
+/**
+ * Recompute `gate_eligible` from the snapshotted profile.
+ *
+ * An `actor_dispatched` row stamped `gate_eligible: false` must recompute as
+ * `shadow_only` for that archetype. A row that is *not* stamped must *not*
+ * recompute as `shadow_only`: absent is a claim of eligible. That is
+ * deliberately stricter than `resolved_via`'s absent-is-no-claim — eligibility
+ * lives on the snapshot itself and needs no cross-file provenance, so an
+ * unstamped row is asserting the default.
+ *
+ * Host start-receipts (`dispatch_id` present) are skipped: the engine's
+ * command-dispatch chokepoint is what stamps this field; native receipts are
+ * the host's.
+ *
+ * Constraint-command outcomes are attested, not recomputed here. The argv is
+ * executable config — not replayable policy — so verify cannot reconstruct
+ * a refuse/allow/error from the ledger plus snapshot.
+ */
+function checkGateEligible(run: RunSummary, events: RunEvent[]): Finding {
+  const check = 'gate-eligible';
+  const dispatches = events.filter(
+    (event) => event.type === 'actor_dispatched' && typeof event.extra.dispatch_id !== 'string',
+  );
+  if (dispatches.length === 0) return skip(check, 'no command actor dispatches recorded');
+
+  const snapshots = events.filter((event) => event.type === 'profile_snapshotted');
+  const problems: string[] = [];
+  if (snapshots.length === 0) {
+    return { check, status: 'fail', detail: 'dispatches recorded but no profile_snapshotted event' };
+  }
+
+  let profile: ExecutorProfile | null = null;
+  const snap = snapshots[0]!;
+  const rel = typeof snap.extra.profile === 'string' ? snap.extra.profile : 'profile.yaml';
+  const sha = typeof snap.extra.sha256 === 'string' ? snap.extra.sha256 : null;
+  const abs = join(run.dir, rel);
+  if (!existsSync(abs)) {
+    return { check, status: 'fail', detail: `${rel}: profile snapshot is missing` };
+  }
+  const text = readFileSync(abs, 'utf8');
+  if (sha != null && sha256Hex(text) !== sha) {
+    return { check, status: 'fail', detail: `${rel}: snapshot does not match its recorded sha256` };
+  }
+  try {
+    profile = parseExecutorProfile(text, rel);
+  } catch (err) {
+    return { check, status: 'fail', detail: `${rel}: snapshot did not parse: ${(err as Error).message}` };
+  }
+
+  const archetypeByRole = new Map<string, string | null>();
+  for (const event of events) {
+    if (event.type !== 'resolution_snapshot') continue;
+    const roles = Array.isArray(event.extra.roles) ? event.extra.roles : [];
+    for (const row of roles) {
+      if (row == null || typeof row !== 'object' || Array.isArray(row)) continue;
+      const rec = row as Record<string, unknown>;
+      if (typeof rec.role !== 'string') continue;
+      archetypeByRole.set(rec.role, typeof rec.archetype === 'string' ? rec.archetype : null);
+    }
+  }
+
+  for (const event of dispatches) {
+    const actor = typeof event.extra.actor === 'string' ? event.extra.actor : null;
+    const used = typeof event.extra.executor === 'string' ? event.extra.executor : null;
+    const label = `${event.step ?? '?'}${actor ? ` (${actor})` : ''}`;
+    if (used == null) {
+      problems.push(`${label}: dispatch records no executor`);
+      continue;
+    }
+    if (!(used in profile.executors)) {
+      problems.push(`${label}: executor "${used}" is not in the snapshotted profile`);
+      continue;
+    }
+    const archetype =
+      typeof event.extra.archetype === 'string'
+        ? event.extra.archetype
+        : archetypeByRole.get(actor ?? '*') ?? null;
+    const state = eligibilityFor(profile.executors[used]!, archetype);
+    const stampedIneligible = event.extra.gate_eligible === false;
+    if (stampedIneligible) {
+      if (state !== 'shadow_only') {
+        problems.push(
+          `${label}: records gate_eligible: false but snapshot eligibility is ${state}`,
+        );
+      }
+    } else if (state === 'shadow_only') {
+      problems.push(
+        `${label}: has no gate_eligible stamp but snapshot eligibility is shadow_only`,
+      );
+    }
+  }
+
+  if (problems.length > 0) return { check, status: 'fail', detail: problems.join('; ') };
+  return {
+    check,
+    status: 'ok',
+    detail: `${dispatches.length} command dispatch(es) match snapshot eligibility`,
   };
 }
 
