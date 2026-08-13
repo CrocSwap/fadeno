@@ -86,7 +86,7 @@ function legacyRow(over: Record<string, unknown> = {}): Record<string, unknown> 
     resolution: 'loadout',
     loadout: { name: 'grok-worker', source: 'local' },
     executor: 'grok-worker',
-    model: 'grok-4.5',
+    model: 'grok-4.6',
     exit_code: 0,
     duration_ms: 17444,
     prompt_sha256: 'e'.repeat(64),
@@ -361,7 +361,7 @@ test('dispatches: pre-dispatch_id rows read as [legacy] entries, not unreadable 
   assert.equal(result.skippedNewerFormat, 0);
   assert.equal(result.total, 3);
   assert.deepEqual(result.lines, [
-    '2026-08-10T22:23:15.949Z  [command]  worker → grok-worker (grok-4.5)  ' +
+    '2026-08-10T22:23:15.949Z  [command]  worker → grok-worker (grok-4.6)  ' +
       'exit 0 in 17444ms  [legacy]',
     // No archetype recorded → the existing `(none)` placeholder, not a guess.
     '2026-08-11T04:12:34.209Z  [command]  (none) → opus-high-readonly (opus)  ' +

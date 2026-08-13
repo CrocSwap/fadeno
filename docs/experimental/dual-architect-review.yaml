@@ -39,7 +39,7 @@ roles:
       builder-ready specs. (Fable, Claude Code)
   builder:
     purpose: >
-      Implement one spec each, fast, exactly as written. (Grok 4.5 in Grok
+      Implement one spec each, fast, exactly as written. (Grok 4.6 in Grok
       Build; sometimes Opus in Claude Code or GPT-5.6-Luna)
   final_reviewer:
     purpose: >
