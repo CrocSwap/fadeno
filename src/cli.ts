@@ -107,7 +107,7 @@ Usage:
   fadeno decide <run> <option> [flags]  Resolve a pending named human decision
   fadeno runs                           List run ledgers under .fadeno/runs/
   fadeno dispatches [--tail n] [--json] Show which executor ran what (.fadeno/dispatches.jsonl)
-  fadeno dispatches --output <id|last>  Print a dispatch's streamed output snapshot verbatim
+  fadeno dispatches --output <id|last> [--wait <s>]  Print a dispatch's output snapshot verbatim
   fadeno dispatches --comparisons       Paired primary/shadow scorecard per challenger
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic claims (or --latest)
@@ -159,6 +159,7 @@ Options:
   --source <kind>         (dispatch-progress) agent | harness | director
   --output <path>         (dispatch-complete) Temporary output file
   --output <id|last>      (dispatches) Recover a dispatch's output snapshot (killed relays included)
+  --wait [seconds]        (dispatches --output) Wait for the completion row before answering (default 120)
   --commit <sha>          (dispatch-complete) Optional commit provenance
   --reason <text>         (dispatch-fail) Host-attested failure reason
   --decision <id>         (decide) Target decision id (optional when exactly one is pending)
@@ -799,6 +800,7 @@ function main(argv: string[]): number {
         rate: { type: 'string' },
         shadow: { type: 'string' },
         comparisons: { type: 'boolean' },
+        wait: { type: 'string' },
         json: { type: 'boolean' },
         'agent-id': { type: 'string' },
         workspace: { type: 'string' },
@@ -1568,7 +1570,17 @@ function main(argv: string[]): number {
         return 0;
       }
       if (values.output != null) {
-        const result = runDispatchesOutput({ dispatchId: values.output });
+        // `--wait` in seconds: the number a caller reaches for after a
+        // ten-minute timeout is "another minute", not "60000".
+        let waitMs = 0;
+        if (values.wait != null) {
+          const seconds = values.wait === '' ? 120 : Number(values.wait);
+          if (!Number.isFinite(seconds) || seconds < 0) {
+            throw new Error(`Invalid --wait "${values.wait}". Use seconds (a non-negative number).`);
+          }
+          waitMs = Math.round(seconds * 1000);
+        }
+        const result = runDispatchesOutput({ dispatchId: values.output, waitMs });
         // stdout carries the snapshot bytes verbatim (relay-safe); the
         // attestation verdict goes to stderr so piping stays clean.
         process.stdout.write(result.bytes);
@@ -1577,7 +1589,13 @@ function main(argv: string[]): number {
             ? 'output attested: sha matches the completion row'
             : result.attested === 'mismatch'
               ? 'WARNING: snapshot sha does not match the completion row (file changed after the dispatch?)'
-              : 'no completion row recorded: partial output of a killed or in-flight dispatch';
+              : waitMs > 0
+                ? `STILL RUNNING: no completion row after waiting ${Math.round(waitMs / 1000)}s. ` +
+                  'The executor has not exited; this is its output so far. Not a failure — ' +
+                  're-run this command to check again.'
+                : 'no completion row recorded YET: the executor may still be running, and the ' +
+                  'kernel writes that row only when it exits. This is its output so far, not a ' +
+                  'failure. Re-run with --wait <seconds> to wait for the real answer.';
         // Say when `last` was a guess. Nothing was open, so this is the newest
         // dispatch in the log rather than demonstrably the caller's own.
         const how =

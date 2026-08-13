@@ -161,6 +161,22 @@ export interface DispatchesOutputOptions {
    * the repo-local evidence log and snapshot file; user-scope state is unused.
    */
   env?: string | null;
+  /**
+   * Wait up to this many milliseconds for the completion row to arrive before
+   * answering. Zero or absent reads once.
+   *
+   * A timed-out caller reads the ledger at the one moment the answer is least
+   * likely to be there: the harness gave up on the call, but the executor is
+   * still running and the kernel has not written its completion row yet. The
+   * 2026-08-13 dogfood proxies read exactly then, saw no completion, declared
+   * failure, and never looked again — while the kernel went on to record both
+   * dispatches as `exit_code: 0` with 5833 and 3743 bytes. The data was right
+   * the whole time; the read was early. Waiting is the difference between
+   * asking once and asking until there is an answer.
+   */
+  waitMs?: number;
+  /** Poll interval while waiting. Injectable so tests need no real delay. */
+  pollMs?: number;
 }
 
 export interface DispatchesOutputResult {
@@ -181,6 +197,16 @@ export interface DispatchesOutputResult {
    * when concurrent dispatches share one evidence file.
    */
   resolvedBy: OutputResolution;
+}
+
+/**
+ * Block the calling thread. Recovery is a synchronous command in a
+ * synchronous CLI; making the whole call stack async to wait for one file to
+ * gain a line is not a trade worth making.
+ */
+function sleepSync(ms: number): void {
+  if (ms <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function str(value: unknown): string | null {
@@ -741,8 +767,28 @@ export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOu
 
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const { byId, lastWithSnapshot, requestOrder } = loadOutputRecords(join(repoRoot, DISPATCHES_FILE));
-  const { record: rec, resolvedBy } = resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
+  const ledger = join(repoRoot, DISPATCHES_FILE);
+  let { byId, lastWithSnapshot, requestOrder } = loadOutputRecords(ledger);
+  let { record: rec, resolvedBy } = resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
+
+  // Re-read until the completion row lands. The kernel appends it when the
+  // executor exits, which is routinely *after* the caller's own timeout: the
+  // answer is not missing, it has not been written yet.
+  const waitMs = opts.waitMs ?? 0;
+  if (waitMs > 0 && !rec.completed) {
+    const pollMs = opts.pollMs ?? 1_000;
+    const deadline = Date.now() + waitMs;
+    // How the caller reached this dispatch is settled; only its state is not.
+    const settledId = rec.dispatchId;
+    while (!rec.completed && Date.now() < deadline) {
+      sleepSync(Math.min(pollMs, Math.max(0, deadline - Date.now())));
+      ({ byId, lastWithSnapshot, requestOrder } = loadOutputRecords(ledger));
+      // Re-resolve by the id already settled on: `last` must not drift onto a
+      // different dispatch that started while this one was being waited for.
+      rec = resolveOutputRecord(settledId, byId, lastWithSnapshot, requestOrder).record;
+    }
+  }
+
   if (rec.snapshot == null) {
     throw new DispatchesCommandError(`dispatch "${rec.dispatchId}" predates output_snapshot.`);
   }

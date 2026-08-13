@@ -18363,6 +18363,10 @@ var ERROR_EXCERPT = 80;
 var KNOWN_FORMAT_MAJOR = DISPATCHES_FORMAT.split(".")[0];
 var OUTCOME_KEYS = ["exit_code", "duration_ms", "output_sha256", "signal"];
 var OUTPUT_ID_PREFIX_MIN = 8;
+function sleepSync(ms) {
+  if (ms <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 function str(value) {
   return typeof value === "string" && value !== "" ? value : null;
 }
@@ -18736,8 +18740,20 @@ function runDispatchesOutput(opts) {
   }
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const { byId, lastWithSnapshot, requestOrder } = loadOutputRecords((0, import_node_path13.join)(repoRoot, DISPATCHES_FILE));
-  const { record: rec, resolvedBy } = resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
+  const ledger = (0, import_node_path13.join)(repoRoot, DISPATCHES_FILE);
+  let { byId, lastWithSnapshot, requestOrder } = loadOutputRecords(ledger);
+  let { record: rec, resolvedBy } = resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
+  const waitMs = opts.waitMs ?? 0;
+  if (waitMs > 0 && !rec.completed) {
+    const pollMs = opts.pollMs ?? 1e3;
+    const deadline = Date.now() + waitMs;
+    const settledId = rec.dispatchId;
+    while (!rec.completed && Date.now() < deadline) {
+      sleepSync(Math.min(pollMs, Math.max(0, deadline - Date.now())));
+      ({ byId, lastWithSnapshot, requestOrder } = loadOutputRecords(ledger));
+      rec = resolveOutputRecord(settledId, byId, lastWithSnapshot, requestOrder).record;
+    }
+  }
   if (rec.snapshot == null) {
     throw new DispatchesCommandError(`dispatch "${rec.dispatchId}" predates output_snapshot.`);
   }
@@ -27255,7 +27271,7 @@ Usage:
   fadeno decide <run> <option> [flags]  Resolve a pending named human decision
   fadeno runs                           List run ledgers under .fadeno/runs/
   fadeno dispatches [--tail n] [--json] Show which executor ran what (.fadeno/dispatches.jsonl)
-  fadeno dispatches --output <id|last>  Print a dispatch's streamed output snapshot verbatim
+  fadeno dispatches --output <id|last> [--wait <s>]  Print a dispatch's output snapshot verbatim
   fadeno dispatches --comparisons       Paired primary/shadow scorecard per challenger
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic claims (or --latest)
@@ -27307,6 +27323,7 @@ Options:
   --source <kind>         (dispatch-progress) agent | harness | director
   --output <path>         (dispatch-complete) Temporary output file
   --output <id|last>      (dispatches) Recover a dispatch's output snapshot (killed relays included)
+  --wait [seconds]        (dispatches --output) Wait for the completion row before answering (default 120)
   --commit <sha>          (dispatch-complete) Optional commit provenance
   --reason <text>         (dispatch-fail) Host-attested failure reason
   --decision <id>         (decide) Target decision id (optional when exactly one is pending)
@@ -27863,6 +27880,7 @@ function main(argv) {
         rate: { type: "string" },
         shadow: { type: "string" },
         comparisons: { type: "boolean" },
+        wait: { type: "string" },
         json: { type: "boolean" },
         "agent-id": { type: "string" },
         workspace: { type: "string" },
@@ -28574,9 +28592,17 @@ resolution${via}:`);
         return 0;
       }
       if (values.output != null) {
-        const result2 = runDispatchesOutput({ dispatchId: values.output });
+        let waitMs = 0;
+        if (values.wait != null) {
+          const seconds = values.wait === "" ? 120 : Number(values.wait);
+          if (!Number.isFinite(seconds) || seconds < 0) {
+            throw new Error(`Invalid --wait "${values.wait}". Use seconds (a non-negative number).`);
+          }
+          waitMs = Math.round(seconds * 1e3);
+        }
+        const result2 = runDispatchesOutput({ dispatchId: values.output, waitMs });
         process.stdout.write(result2.bytes);
-        const note = result2.attested === "match" ? "output attested: sha matches the completion row" : result2.attested === "mismatch" ? "WARNING: snapshot sha does not match the completion row (file changed after the dispatch?)" : "no completion row recorded: partial output of a killed or in-flight dispatch";
+        const note = result2.attested === "match" ? "output attested: sha matches the completion row" : result2.attested === "mismatch" ? "WARNING: snapshot sha does not match the completion row (file changed after the dispatch?)" : waitMs > 0 ? `STILL RUNNING: no completion row after waiting ${Math.round(waitMs / 1e3)}s. The executor has not exited; this is its output so far. Not a failure \u2014 re-run this command to check again.` : "no completion row recorded YET: the executor may still be running, and the kernel writes that row only when it exits. This is its output so far, not a failure. Re-run with --wait <seconds> to wait for the real answer.";
         const how = result2.resolvedBy === "recency" ? " [resolved by recency: no dispatch was open, so this is the newest in the log \u2014 name the id to be certain]" : "";
         console.error(`[${result2.dispatchId}] ${result2.path} \u2014 ${note}${how}`);
         return 0;

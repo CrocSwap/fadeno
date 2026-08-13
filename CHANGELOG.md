@@ -391,6 +391,26 @@ writers accept only 0.3.
 
 ### Fixed
 
+- **A timed-out proxy read the ledger once, too early, and called it failure.**
+  The sharpest of the batch, because Fadeno's own data was correct throughout.
+  A 2026-08-13 dogfood had two worker dispatches recorded as `exit_code: 0`
+  with 5833 and 3743 bytes — genuine, complete reports. The proxies had read
+  `dispatches --output` at the moment their Bash call timed out, which is the
+  one moment the completion row is least likely to exist yet: the kernel
+  writes it when the executor exits, and the executor was still running. They
+  saw no completion row, declared failure, and never looked again. The finding
+  is not "reports failure wrongly" but "has the right answer available and
+  does not look again."
+
+  `fadeno dispatches --output <id> --wait [seconds]` re-reads until the
+  completion row lands (default 120s), then answers with the real, attested
+  output. The wait re-resolves by the id it first settled on, so a dispatch
+  starting mid-wait cannot steal the answer from a `last` query. The
+  no-completion note stops reading like a verdict — "no completion row
+  recorded YET: the executor may still be running … not a failure" — and the
+  proxy guard permits the `--wait` spelling, since a contract that forbids the
+  correct call is not a contract worth keeping.
+
 - **A killed dispatch left its executor running.** The most serious of the
   batch, and confirmed end to end before it was fixed: `fadeno dispatch` runs
   its executor through `spawnSync`, which blocks Node's event loop for the

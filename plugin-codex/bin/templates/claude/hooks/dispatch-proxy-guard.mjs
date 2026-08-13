@@ -94,7 +94,14 @@ const ALLOWED = [
   // kernel streams stdout to the snapshot as it arrives, so the bytes
   // survive the kill. Both CLI spellings (`fadeno` and the plugin-root
   // retry) are covered by `CLI`.
-  new RegExp(String.raw`^${CLI} dispatches --output (last|[0-9a-fA-F-]{8,36})$`),
+  //
+  // `--wait` is permitted and is the form proxies should reach for: a caller
+  // that just timed out reads the ledger at the exact moment the completion
+  // row is least likely to exist yet, and reading once is what turned two
+  // successful dispatches into reported failures on 2026-08-13.
+  new RegExp(
+    String.raw`^${CLI} dispatches --output (last|[0-9a-fA-F-]{8,36})( --wait( [0-9]+)?)?$`,
+  ),
   // LEGACY contract (older init-emitted proxy bodies still in the wild):
   // explicit prompt-file write before the dispatch.
   new RegExp(String.raw`^mkdir -p ${PROMPT_DIR}/?$`),

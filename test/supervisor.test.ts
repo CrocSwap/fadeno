@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { runDispatch } from '../src/commands/dispatch.ts';
+import { runDispatchesOutput } from '../src/commands/dispatches.ts';
 import { SPAWN_FAILED_MARKER, superviseArgv, supervisedSpawnError } from '../src/lib/supervisor.ts';
 import { tempRepo } from './helpers.ts';
 
@@ -156,4 +157,58 @@ test('a dispatch that completes normally leaves no supervisor behind', (t) => {
   const completed = rows.find((row) => row.event === 'dispatch_completed');
   assert.ok(completed);
   assert.equal(typeof completed.duration_ms, 'number');
+});
+
+test('dispatches --output --wait: the completion row arriving late is still the answer', async (t) => {
+  // The dogfooded sequence, in miniature: the caller gives up, reads the
+  // ledger, and the completion row is not there *yet*. Reading once turned
+  // two successful dispatches into reported failures; waiting reads the
+  // answer that was always coming.
+  const root = seedExecutor(t, [
+    'node',
+    '-e',
+    "setTimeout(()=>process.stdout.write('the real report'),2500)",
+  ]);
+
+  const kernel = spawn(process.execPath, [join(REPO, 'src', 'cli.ts'), 'dispatch', '--archetype', 'worker'], {
+    cwd: root,
+    stdio: ['pipe', 'ignore', 'pipe'],
+  });
+  let stderr = '';
+  kernel.stderr.on('data', (chunk) => { stderr += String(chunk); });
+  kernel.stdin.end('prompt\n');
+
+  const idLine = /dispatch id: ([0-9a-f-]{36})/;
+  const deadline = Date.now() + 20_000;
+  while (!idLine.test(stderr) && Date.now() < deadline) await sleep(100);
+  const dispatchId = idLine.exec(stderr)?.[1];
+  assert.ok(dispatchId, 'the kernel must name the dispatch before it runs');
+
+  // Read now, the way a just-timed-out caller does: no completion row yet.
+  const early = runDispatchesOutput({ repoRoot: root, dispatchId });
+  assert.equal(early.attested, 'incomplete');
+  assert.equal(early.bytes, '', 'nothing written yet — and this is NOT a failure');
+
+  // Read again, waiting. Same dispatch, real answer.
+  const waited = runDispatchesOutput({ repoRoot: root, dispatchId, waitMs: 15_000, pollMs: 200 });
+  assert.equal(waited.dispatchId, dispatchId);
+  assert.equal(waited.attested, 'match');
+  assert.equal(waited.bytes, 'the real report');
+  await new Promise((resolve) => kernel.on('exit', resolve));
+});
+
+test('dispatches --output --wait: waiting never drifts onto another dispatch', (t) => {
+  // `last` resolves once; the wait loop re-reads by the id it settled on, so a
+  // dispatch that starts mid-wait cannot steal the answer.
+  const root = seedExecutor(t, ['node', '-e', "process.stdout.write('done')"]);
+  const first = runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, env: null });
+  const second = runDispatch({ archetype: 'worker', prompt: 'b', repoRoot: root, env: null });
+  const byId = runDispatchesOutput({
+    repoRoot: root,
+    dispatchId: first.dispatchId,
+    waitMs: 1_000,
+    pollMs: 100,
+  });
+  assert.equal(byId.dispatchId, first.dispatchId);
+  assert.notEqual(first.dispatchId, second.dispatchId);
 });
