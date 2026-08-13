@@ -442,6 +442,24 @@ writers accept only 0.3.
 
 ### Changed
 
+- **The rename reaches the trace vocabulary too.** The first pass stopped at
+  everything live and left the persisted names alone, on the belief that moving
+  them meant a ledger format bump and re-pinned digests. That was wrong:
+  digests cover artifact bytes and prompt bytes, never event field values, so
+  nothing recorded becomes invalid. Writers now emit `delivery_transport:
+  "host"`, the Claude hook writes a `host_delivery` row with `transport:
+  "host"`, `fadeno dispatches` renders `[host]`, `verify` reports a
+  `host-attestation` check, and hook prompt snapshots land at
+  `.fadeno/local/prompts/host-<sha8>.md`. Every reader accepts the pre-0.6
+  spelling — a `native_delivery` row still renders, and a ledger written with
+  `delivery_transport: "native"` still verifies clean, including the
+  start-vs-terminal receipt comparison, which normalizes both sides so a legacy
+  pair is not read as a mismatch. The ledger format stays 0.3: no field moved,
+  no digest changed, and an unrecognized transport is still reported rather
+  than coerced. `ConstraintContext.transport` deliberately keeps reporting
+  `native` — it is handed outward to user-authored constraint commands, the one
+  contract where a rename cannot be aliased, only silently broken.
+
 - **The delivery axis is spelled `host`, not `native`.** "Native" was doing two
   unrelated jobs: naming a *loadout* (which model target fills each slot) and
   naming a *route's transport* (whether the active harness delivers in-session

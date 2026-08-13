@@ -13939,7 +13939,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.19";
+  if (true) return "0.6.0-rc.20";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -16745,6 +16745,11 @@ function hostRequestProfile(lookup) {
   }
   return parseExecutorProfile(text, `${profileRel} (run snapshot)`);
 }
+function normalizeDeliveryTransport(value) {
+  if (value == null || value === "host" || value === "native") return "host";
+  if (value === "command-fallback") return "command-fallback";
+  return null;
+}
 var PROGRESS_STATES = /* @__PURE__ */ new Set(["running", "waiting_input", "blocked", "idle"]);
 var PROGRESS_SOURCES = /* @__PURE__ */ new Set(["agent", "harness", "director"]);
 var MAX_PROGRESS_BYTES = 64 * 1024;
@@ -17021,12 +17026,12 @@ function startHostDispatch(opts) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const { runDir, runId } = assertCurrentLedger(repoRoot, opts.run);
   if (!opts.agentId.trim()) throw new HostDispatchError("--agent-id must not be empty.");
-  const transport = opts.transport ?? "native";
+  const transport = opts.transport ?? "host";
   if (transport === "command-fallback" && (opts.command == null || opts.command.length === 0)) {
     throw new HostDispatchError("command-fallback dispatch-start requires the exact command argv.");
   }
-  if (transport === "native" && opts.command != null) {
-    throw new HostDispatchError("native dispatch-start must not include command argv.");
+  if (transport === "host" && opts.command != null) {
+    throw new HostDispatchError("host dispatch-start must not include command argv.");
   }
   const events = eventsFor(runDir);
   const { request, event: requestEvent } = findRequest(runId, events, opts.dispatchId);
@@ -17050,7 +17055,7 @@ function startHostDispatch(opts) {
   if (starts.length > 1) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" was started more than once.`);
   if (starts.length === 1) {
     const prior = starts[0];
-    const priorTransport = prior.extra.delivery_transport ?? "native";
+    const priorTransport = normalizeDeliveryTransport(prior.extra.delivery_transport);
     const sameCommand = JSON.stringify(prior.extra.fallback_command ?? null) === JSON.stringify(opts.command ?? null);
     if (prior.extra.agent_id === opts.agentId && priorTransport === transport && sameCommand) {
       return { dispatchId: opts.dispatchId, state: "started", idempotent: true, agentId: opts.agentId };
@@ -17088,9 +17093,9 @@ function startHostDispatch(opts) {
         fallback_command: opts.command,
         fallback_command_sha256: sha256Hex(JSON.stringify(opts.command))
       } : {},
-      host_attested: transport === "native",
-      identity_evidence: transport === "native" ? "requested_only" : "command_receipt",
-      ...transport === "native" ? {
+      host_attested: transport === "host",
+      identity_evidence: transport === "host" ? "requested_only" : "command_receipt",
+      ...transport === "host" ? {
         attestation: {
           model: request.model,
           reasoning_effort: request.reasoningEffort,
@@ -17110,7 +17115,7 @@ function startHostDispatch(opts) {
 }
 function deliveryFields(start) {
   return {
-    delivery_transport: start.extra.delivery_transport ?? "native",
+    delivery_transport: normalizeDeliveryTransport(start.extra.delivery_transport),
     ...start.extra.fallback_command !== void 0 ? { fallback_command: start.extra.fallback_command } : {},
     ...start.extra.fallback_command_sha256 !== void 0 ? { fallback_command_sha256: start.extra.fallback_command_sha256 } : {},
     host_attested: start.extra.host_attested === true,
@@ -17130,8 +17135,8 @@ function progressHostDispatch(opts) {
   const starts = startsFor(events, opts.dispatchId);
   if (starts.length === 0) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" cannot report progress before dispatch-start.`);
   if (starts.length > 1) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" was started more than once.`);
-  if ((starts[0].extra.delivery_transport ?? "native") !== "native") {
-    throw new HostDispatchError(`host dispatch "${opts.dispatchId}" command fallback cannot accept native progress receipts.`);
+  if (normalizeDeliveryTransport(starts[0].extra.delivery_transport) !== "host") {
+    throw new HostDispatchError(`host dispatch "${opts.dispatchId}" command fallback cannot accept host progress receipts.`);
   }
   if (terminalsFor(events, opts.dispatchId).length > 0) {
     throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already has a terminal receipt.`);
@@ -17894,7 +17899,7 @@ function runDispatch(opts) {
       } else if (shadowSpec.adapter === "host") {
         writeShadowRefusal("shadow_resolution", `shadow executor "${shadowExecutorNameInner}" is a host executor \u2014 the kernel cannot duplicate a host dispatch.`, {
           model: shadowSpec.model,
-          transport: "native"
+          transport: "host"
         });
       } else {
         const eligibilityState = eligibilityFor(shadowSpec, archetype);
@@ -18321,10 +18326,10 @@ function requestedEntry(row) {
     outputBytes: num(row.output_bytes)
   };
 }
-function nativeEntry(row) {
+function hostEntry(row) {
   const loadout = loadoutOf(row.loadout);
   return {
-    kind: "native",
+    kind: "host",
     format: str(row.format),
     legacy: false,
     timestamp: str(row.timestamp),
@@ -18485,8 +18490,8 @@ function runDispatches(opts = {}) {
       entries.push(legacyEntry(row));
       continue;
     }
-    if (event === "native_delivery") {
-      entries.push(nativeEntry(row));
+    if (event === "host_delivery" || event === "native_delivery") {
+      entries.push(hostEntry(row));
       continue;
     }
     if (event === "dispatch_refused") {
@@ -18637,8 +18642,8 @@ function loadAllEntries(absolute) {
       entries.push(legacyEntry(row));
       continue;
     }
-    if (event === "native_delivery") {
-      entries.push(nativeEntry(row));
+    if (event === "host_delivery" || event === "native_delivery") {
+      entries.push(hostEntry(row));
       continue;
     }
     if (event === "dispatch_refused") {
@@ -24137,7 +24142,7 @@ function runVerify(opts) {
   findings.push(checkHostDispatchRequests(run, events, mode));
   findings.push(checkHostDispatchLifecycle(run, events, mode));
   findings.push(checkHostDispatchArtifacts(run, events, mode));
-  findings.push(checkNativeAttestation(run, events, mode));
+  findings.push(checkHostAttestation(run, events, mode));
   const ok = !findings.some((f) => f.status === "fail");
   return { run, mode, findings, ok };
 }
@@ -24316,15 +24321,15 @@ function checkHostDispatchLifecycle(run, events, mode) {
     if (terminals.length > 1) problems.push(`${id}: has conflicting/multiple terminal receipts`);
     const start = starts[0];
     const terminal2 = terminals[0];
-    const transport = start.extra.delivery_transport ?? "native";
-    if (transport !== "native" && transport !== "command-fallback") {
-      problems.push(`${id}: start has unknown delivery_transport ${JSON.stringify(transport)}`);
+    const transport = normalizeDeliveryTransport(start.extra.delivery_transport);
+    if (transport == null) {
+      problems.push(`${id}: start has unknown delivery_transport ${JSON.stringify(start.extra.delivery_transport)}`);
     }
-    if (transport === "native") {
-      if (start.extra.host_attested !== true) problems.push(`${id}: native start is not host-attested`);
-      if (start.extra.identity_evidence !== "requested_only") problems.push(`${id}: native start has invalid identity_evidence`);
+    if (transport === "host") {
+      if (start.extra.host_attested !== true) problems.push(`${id}: host start is not host-attested`);
+      if (start.extra.identity_evidence !== "requested_only") problems.push(`${id}: host start has invalid identity_evidence`);
       if (start.extra.fallback_command !== void 0 || start.extra.fallback_command_sha256 !== void 0) {
-        problems.push(`${id}: native start unexpectedly records a fallback command`);
+        problems.push(`${id}: host start unexpectedly records a fallback command`);
       }
     } else if (transport === "command-fallback") {
       const command2 = start.extra.fallback_command;
@@ -24342,7 +24347,7 @@ function checkHostDispatchLifecycle(run, events, mode) {
       }
       if (start.extra.host_attested !== false) problems.push(`${id}: command fallback is incorrectly marked host-attested`);
       if (start.extra.identity_evidence !== "command_receipt") problems.push(`${id}: command fallback lacks command receipt identity evidence`);
-      if (start.extra.attestation !== void 0) problems.push(`${id}: command fallback incorrectly records a native attestation object`);
+      if (start.extra.attestation !== void 0) problems.push(`${id}: command fallback incorrectly records a host attestation object`);
       if (start.extra.agent_id !== `command-fallback:${String(request.extra.executor)}`) {
         problems.push(`${id}: command fallback agent_id does not identify its logical executor`);
       }
@@ -24356,7 +24361,8 @@ function checkHostDispatchLifecycle(run, events, mode) {
     if (terminal2 != null) {
       for (const field of ["delivery_transport", "fallback_command_sha256", "host_attested", "identity_evidence"]) {
         const startValue = field === "delivery_transport" ? transport : start.extra[field];
-        if (terminal2.extra[field] !== startValue) problems.push(`${id}: terminal ${field} does not match start`);
+        const terminalValue = field === "delivery_transport" ? normalizeDeliveryTransport(terminal2.extra.delivery_transport) : terminal2.extra[field];
+        if (terminalValue !== startValue) problems.push(`${id}: terminal ${field} does not match start`);
       }
       if (JSON.stringify(terminal2.extra.fallback_command ?? null) !== JSON.stringify(start.extra.fallback_command ?? null)) {
         problems.push(`${id}: terminal fallback_command does not match start`);
@@ -24516,13 +24522,13 @@ function checkHostDispatchArtifacts(run, events, mode) {
   if (problems.length > 0) return { check, status: "fail", detail: problems.join("; ") };
   return { check, status: "ok", detail: "host prompts, receipts, and output manifests match recorded digests" };
 }
-function checkNativeAttestation(run, events, mode) {
-  const check = "native-attestation";
+function checkHostAttestation(run, events, mode) {
+  const check = "host-attestation";
   const starts = events.filter(
-    (event) => event.type === "actor_dispatched" && event.extra.dispatch_id != null && (event.extra.delivery_transport ?? "native") === "native"
+    (event) => event.type === "actor_dispatched" && event.extra.dispatch_id != null && normalizeDeliveryTransport(event.extra.delivery_transport) === "host"
   );
-  if (starts.length === 0) return skip(check, "no native model, effort, or agent identity evidence recorded");
-  if (mode !== "current") return { check, status: "fail", detail: "native attestation cannot be silently ignored in compatibility mode" };
+  if (starts.length === 0) return skip(check, "no host model, effort, or agent identity evidence recorded");
+  if (mode !== "current") return { check, status: "fail", detail: "host attestation cannot be silently ignored in compatibility mode" };
   const requests = new Map(
     hostRequestRecords(events).map((request) => [request.id, request.event])
   );
@@ -24582,7 +24588,7 @@ function checkNativeAttestation(run, events, mode) {
   if (problems.length > 0) return { check, status: "fail", detail: problems.join("; ") };
   return skip(
     check,
-    `${requestedOnly} native dispatch(es) are internally consistent with requested model/effort/type, but the host supplied no independently observed runtime identity`
+    `${requestedOnly} host dispatch(es) are internally consistent with requested model/effort/type, but the host supplied no independently observed runtime identity`
   );
 }
 var ACTOR_EVENT_TYPES = /* @__PURE__ */ new Set(["actor_dispatched", "actor_completed", "actor_failed"]);

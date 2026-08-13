@@ -799,7 +799,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       } else if (shadowSpec.adapter === 'host') {
         writeShadowRefusal('shadow_resolution', `shadow executor "${shadowExecutorNameInner}" is a host executor — the kernel cannot duplicate a host dispatch.`, {
           model: shadowSpec.model,
-          transport: 'native',
+          transport: 'host',
         });
       } else {
         // Eligibility: forbidden refuses, shadow_only allowed

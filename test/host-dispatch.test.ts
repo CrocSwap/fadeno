@@ -376,7 +376,7 @@ test('host output placement and verification reject artifact symlink traversal',
   assert.match(result.findings.find((finding) => finding.check === 'host-dispatch-artifacts')!.detail, /run-local|escapes/);
 });
 
-test('native attestation values must match request, profile, and start receipt', (t) => {
+test('host attestation values must match request, profile, and start receipt', (t) => {
   const { root, runId, runDir, request } = seedPendingHostRun(t);
   runDispatchStart({ repoRoot: root, run: runId, dispatchId: request.dispatchId, agentId: 'native-agent-1' });
   const lines = readFileSync(join(runDir, 'events.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
@@ -384,14 +384,39 @@ test('native attestation values must match request, profile, and start receipt',
   (started.attestation as Record<string, unknown>).model = 'tampered-model';
   writeFileSync(join(runDir, 'events.jsonl'), `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`);
   const result = runVerify({ repoRoot: root, run: runId });
-  assert.equal(result.findings.find((finding) => finding.check === 'native-attestation')!.status, 'fail');
-  assert.match(result.findings.find((finding) => finding.check === 'native-attestation')!.detail, /does not match/);
+  assert.equal(result.findings.find((finding) => finding.check === 'host-attestation')!.status, 'fail');
+  assert.match(result.findings.find((finding) => finding.check === 'host-attestation')!.detail, /does not match/);
 });
 
-test('native identity remains explicitly unverified when the host only echoes the request', (t) => {
+test('a pre-0.6 ledger spelling delivery_transport "native" still verifies', (t) => {
+  const { root, runId, runDir, request } = seedPendingHostRun(t);
+  runDispatchStart({ repoRoot: root, run: runId, dispatchId: request.dispatchId, agentId: 'agent-1' });
+  const output = join(root, 'legacy.out');
+  writeFileSync(output, 'legacy transport output');
+  runDispatchComplete({ repoRoot: root, run: runId, dispatchId: request.dispatchId, output });
+
+  // Rewrite the receipts the way a pre-rename Fadeno recorded them. Nothing
+  // about the trace is otherwise different, and no digest covers this field.
+  const path = join(runDir, 'events.jsonl');
+  const lines = readFileSync(path, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+  let rewritten = 0;
+  for (const event of lines) {
+    if (event.delivery_transport === 'host') { event.delivery_transport = 'native'; rewritten += 1; }
+  }
+  assert.ok(rewritten >= 2, 'both the start and the terminal receipt carry the field');
+  writeFileSync(path, `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`);
+
+  const result = runVerify({ repoRoot: root, run: runId });
+  const attestation = result.findings.find((item) => item.check === 'host-attestation')!;
+  assert.notEqual(attestation.status, 'fail', 'the legacy spelling is the same transport');
+  const lifecycle = result.findings.find((item) => item.check === 'host-dispatch-lifecycle');
+  assert.notEqual(lifecycle?.status, 'fail');
+});
+
+test('host identity remains explicitly unverified when the host only echoes the request', (t) => {
   const { root, runId, request } = seedPendingHostRun(t);
   runDispatchStart({ repoRoot: root, run: runId, dispatchId: request.dispatchId, agentId: 'native-agent-1' });
-  const finding = runVerify({ repoRoot: root, run: runId }).findings.find((item) => item.check === 'native-attestation')!;
+  const finding = runVerify({ repoRoot: root, run: runId }).findings.find((item) => item.check === 'host-attestation')!;
   assert.equal(finding.status, 'skip');
   assert.match(finding.detail, /no independently observed runtime identity/);
 });

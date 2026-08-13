@@ -4,6 +4,7 @@ import { parse as parseYaml } from 'yaml';
 import { resolveActiveArtifacts, sha256Hex, type ActiveResolution } from '../lib/artifact-manifest.ts';
 import { eligibilityFor, parseExecutorProfile, resolveRole, type ExecutorProfile } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import { normalizeDeliveryTransport } from '../lib/host-dispatch.ts';
 import { schemaDirectories } from '../lib/definitions.ts';
 import {
   actorCallIdFor,
@@ -314,7 +315,7 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
   findings.push(checkHostDispatchRequests(run, events, mode));
   findings.push(checkHostDispatchLifecycle(run, events, mode));
   findings.push(checkHostDispatchArtifacts(run, events, mode));
-  findings.push(checkNativeAttestation(run, events, mode));
+  findings.push(checkHostAttestation(run, events, mode));
 
   const ok = !findings.some((f) => f.status === 'fail');
   return { run, mode, findings, ok };
@@ -518,15 +519,17 @@ function checkHostDispatchLifecycle(run: RunSummary, events: RunEvent[], mode: L
     if (terminals.length > 1) problems.push(`${id}: has conflicting/multiple terminal receipts`);
     const start = starts[0]!;
     const terminal = terminals[0];
-    const transport = start.extra.delivery_transport ?? 'native';
-    if (transport !== 'native' && transport !== 'command-fallback') {
-      problems.push(`${id}: start has unknown delivery_transport ${JSON.stringify(transport)}`);
+    // Legacy `native` normalizes to `host`; an unrecognized value stays null
+    // and is reported rather than silently treated as either transport.
+    const transport = normalizeDeliveryTransport(start.extra.delivery_transport);
+    if (transport == null) {
+      problems.push(`${id}: start has unknown delivery_transport ${JSON.stringify(start.extra.delivery_transport)}`);
     }
-    if (transport === 'native') {
-      if (start.extra.host_attested !== true) problems.push(`${id}: native start is not host-attested`);
-      if (start.extra.identity_evidence !== 'requested_only') problems.push(`${id}: native start has invalid identity_evidence`);
+    if (transport === 'host') {
+      if (start.extra.host_attested !== true) problems.push(`${id}: host start is not host-attested`);
+      if (start.extra.identity_evidence !== 'requested_only') problems.push(`${id}: host start has invalid identity_evidence`);
       if (start.extra.fallback_command !== undefined || start.extra.fallback_command_sha256 !== undefined) {
-        problems.push(`${id}: native start unexpectedly records a fallback command`);
+        problems.push(`${id}: host start unexpectedly records a fallback command`);
       }
     } else if (transport === 'command-fallback') {
       const command = start.extra.fallback_command;
@@ -544,7 +547,7 @@ function checkHostDispatchLifecycle(run: RunSummary, events: RunEvent[], mode: L
       }
       if (start.extra.host_attested !== false) problems.push(`${id}: command fallback is incorrectly marked host-attested`);
       if (start.extra.identity_evidence !== 'command_receipt') problems.push(`${id}: command fallback lacks command receipt identity evidence`);
-      if (start.extra.attestation !== undefined) problems.push(`${id}: command fallback incorrectly records a native attestation object`);
+      if (start.extra.attestation !== undefined) problems.push(`${id}: command fallback incorrectly records a host attestation object`);
       if (start.extra.agent_id !== `command-fallback:${String(request.extra.executor)}`) {
         problems.push(`${id}: command fallback agent_id does not identify its logical executor`);
       }
@@ -557,8 +560,13 @@ function checkHostDispatchLifecycle(run: RunSummary, events: RunEvent[], mode: L
     if (terminal != null && terminal.extra.agent_id !== start.extra.agent_id) problems.push(`${id}: terminal agent_id does not match start`);
     if (terminal != null) {
       for (const field of ['delivery_transport', 'fallback_command_sha256', 'host_attested', 'identity_evidence'] as const) {
+        // Both sides normalize: a legacy trace may spell the start `native`
+        // and the terminal the same, and neither is a mismatch.
         const startValue = field === 'delivery_transport' ? transport : start.extra[field];
-        if (terminal.extra[field] !== startValue) problems.push(`${id}: terminal ${field} does not match start`);
+        const terminalValue = field === 'delivery_transport'
+          ? normalizeDeliveryTransport(terminal.extra.delivery_transport)
+          : terminal.extra[field];
+        if (terminalValue !== startValue) problems.push(`${id}: terminal ${field} does not match start`);
       }
       if (JSON.stringify(terminal.extra.fallback_command ?? null) !== JSON.stringify(start.extra.fallback_command ?? null)) {
         problems.push(`${id}: terminal fallback_command does not match start`);
@@ -724,14 +732,14 @@ function checkHostDispatchArtifacts(run: RunSummary, events: RunEvent[], mode: L
   return { check, status: 'ok', detail: 'host prompts, receipts, and output manifests match recorded digests' };
 }
 
-function checkNativeAttestation(run: RunSummary, events: RunEvent[], mode: LedgerMode): Finding {
-  const check = 'native-attestation';
+function checkHostAttestation(run: RunSummary, events: RunEvent[], mode: LedgerMode): Finding {
+  const check = 'host-attestation';
   const starts = events.filter(
     (event) => event.type === 'actor_dispatched' && event.extra.dispatch_id != null &&
-      (event.extra.delivery_transport ?? 'native') === 'native',
+      normalizeDeliveryTransport(event.extra.delivery_transport) === 'host',
   );
-  if (starts.length === 0) return skip(check, 'no native model, effort, or agent identity evidence recorded');
-  if (mode !== 'current') return { check, status: 'fail', detail: 'native attestation cannot be silently ignored in compatibility mode' };
+  if (starts.length === 0) return skip(check, 'no host model, effort, or agent identity evidence recorded');
+  if (mode !== 'current') return { check, status: 'fail', detail: 'host attestation cannot be silently ignored in compatibility mode' };
   const requests = new Map(
     hostRequestRecords(events).map((request) => [request.id, request.event]),
   );
@@ -793,7 +801,7 @@ function checkNativeAttestation(run: RunSummary, events: RunEvent[], mode: Ledge
   if (problems.length > 0) return { check, status: 'fail', detail: problems.join('; ') };
   return skip(
     check,
-    `${requestedOnly} native dispatch(es) are internally consistent with requested model/effort/type, ` +
+    `${requestedOnly} host dispatch(es) are internally consistent with requested model/effort/type, ` +
       'but the host supplied no independently observed runtime identity',
   );
 }
@@ -1100,7 +1108,7 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
  * unstamped row is asserting the default.
  *
  * Host start-receipts (`dispatch_id` present) are skipped: the engine's
- * command-dispatch chokepoint is what stamps this field; native receipts are
+ * command-dispatch chokepoint is what stamps this field; host receipts are
  * the host's.
  *
  * Constraint-command outcomes are attested, not recomputed here. The argv is

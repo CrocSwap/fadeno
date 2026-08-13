@@ -348,7 +348,7 @@ mismatches (`required` × `write_access: false`, `forbidden` ×
 the dispatch boundary (`dispatch`, `drive`, `steering resolve`/`apply`) and
 at dial time (`fadeno loadout set`). On a host in-session delivery the
 posture is advisory only — it rides as a prompt instruction and as evidence
-on the `native_delivery` row — because the host owns the session's
+on the `host_delivery` row — because the host owns the session's
 permissions. Either side undeclared is no constraint.
 
 **`generator` is the fourth canonical archetype**, and the only addition to
@@ -570,13 +570,13 @@ opus_reviewer → claude-default (opus) [binding]
   as `[legacy]` entries instead of dropping them as unreadable, and counts
   rows from a newer format major separately — old evidence ages into legacy,
   it does not degrade into noise.
-- Native delivery: the steering hook appends a `native_delivery` row to the
+- Native delivery: the steering hook appends a `host_delivery` row to the
   same `.fadeno/dispatches.jsonl` whenever it steers a spawn to a host fadeno
-  role agent — timestamp, `event: "native_delivery"`, archetype, agent_type
+  role agent — timestamp, `event: "host_delivery"`, archetype, agent_type
   (as requested, before the rewrite), loadout, executor, model,
-  model_override, `reasoning_effort: "inherited"`, `transport: "host-native"`,
+  model_override, `reasoning_effort: "inherited"`, `transport: "host"`,
   prompt_sha256, prompt_snapshot (a verbatim copy of the spawn prompt at
-  `.fadeno/local/prompts/native-<sha8>.md`), and `hook_version` — which
+  `.fadeno/local/prompts/host-<sha8>.md`), and `hook_version` — which
   generation of the hook wrote the row, per the lag caveat under *Host steering
   integration*. A command dispatch gets two kernel
   rows, a kernel-owned snapshot, and relay attestation; the kernel is never
@@ -591,7 +591,7 @@ opus_reviewer → claude-default (opus) [binding]
 - Reading it back: `fadeno dispatches [--tail <N>] [--json]` renders the log
   instead of leaving it to `jq`. It correlates each
   `dispatch_requested`/`dispatch_completed` pair by `dispatch_id` into one row,
-  renders `native_delivery` rows beside them so both delivery routes read as
+  renders `host_delivery` rows beside them so both delivery routes read as
   one history, and marks a request whose completion never arrived — "no
   completion recorded (killed or in flight)" — rather than dropping the
   dispatch that most wants explaining. Markers surface the identity that
@@ -737,7 +737,7 @@ rewrite hook sets it from the resolved slot — but it cannot pin reasoning
 effort: the Agent tool schema has no effort parameter. A target like
 `opus-xhigh` therefore delivers in-session as opus at whatever effort the session
 inherited. An executor's identity is model + effort, so a host delivery
-satisfies one half of it and inherits the other. `native_delivery` rows record
+satisfies one half of it and inherits the other. `host_delivery` rows record
 `reasoning_effort: "inherited"` rather than the declared effort, so the
 evidence never claims an effort the delivery had no way to set. Command
 delivery has no such gap: the route's argv carries the effort flag itself.

@@ -21,7 +21,7 @@ import { tempRepo } from './helpers.ts';
  * The log is append-only across format generations, so the fixtures below span
  * three of them on purpose: pre-`dispatch_id` rows (no `format`, no `event`),
  * the unversioned two-row era (no `format`, correlated by `dispatch_id`), and
- * stamped rows. `requested`/`completed`/`native` deliberately carry no
+ * stamped rows. `requested`/`completed`/`hostRow` deliberately carry no
  * `format` — they *are* the unversioned-with-event tier, which must keep
  * reading exactly as it did before the stamp existed.
  */
@@ -60,10 +60,10 @@ function completed(over: Record<string, unknown> = {}): Record<string, unknown> 
   };
 }
 
-function native(over: Record<string, unknown> = {}): Record<string, unknown> {
+function hostRow(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     timestamp: '2026-08-12T12:02:00.000Z',
-    event: 'native_delivery',
+    event: 'host_delivery',
     archetype: 'worker',
     agent_type: 'general-purpose',
     loadout: 'claude-native',
@@ -71,9 +71,9 @@ function native(over: Record<string, unknown> = {}): Record<string, unknown> {
     model: 'opus',
     model_override: null,
     reasoning_effort: 'inherited',
-    transport: 'host-native',
+    transport: 'host',
     prompt_sha256: 'd'.repeat(64),
-    prompt_snapshot: '.fadeno/local/prompts/native-deadbeef.md',
+    prompt_snapshot: '.fadeno/local/prompts/host-deadbeef.md',
     ...over,
   };
 }
@@ -217,16 +217,24 @@ test('dispatches: a requested row with no completion is marked, not silently dro
   assert.equal(entry.writeAccess, false);
 });
 
-test('dispatches: native_delivery rows render one entry each, with model_override', (t) => {
+test('dispatches: a pre-0.6 native_delivery row still renders as a host entry', (t) => {
+  const root = seedLog(t, [hostRow({ event: 'native_delivery', transport: 'host-native' })]);
+  const result = runDispatches({ repoRoot: root });
+  assert.equal(result.entries.length, 1);
+  assert.equal(result.entries[0]!.kind, 'host', 'the old event name is the same row');
+  assert.equal(result.skipped, 0, 'a legacy row is not malformed');
+});
+
+test('dispatches: host_delivery rows render one entry each, with model_override', (t) => {
   const root = seedLog(t, [
-    native({ model_override: 'sonnet' }),
-    native({
+    hostRow({ model_override: 'sonnet' }),
+    hostRow({
       timestamp: '2026-08-12T12:03:00.000Z',
       archetype: 'reviewer',
       agent_type: 'reviewer',
       executor: 'codex-host',
       model: 'gpt-5.6-terra',
-      prompt_snapshot: '.fadeno/local/prompts/native-abcdef01.md',
+      prompt_snapshot: '.fadeno/local/prompts/host-abcdef01.md',
     }),
   ]);
   const result = runDispatches({ repoRoot: root });
@@ -235,18 +243,18 @@ test('dispatches: native_delivery rows render one entry each, with model_overrid
   assert.deepEqual(result.lines, [
     // The override is folded into the model as `bound → actual`; agent_type
     // takes the role slot when it says something the archetype does not.
-    '2026-08-12T12:02:00.000Z  [native]  worker/general-purpose → claude-host (opus → sonnet)  ' +
-      'via host-native  .fadeno/local/prompts/native-deadbeef.md',
-    '2026-08-12T12:03:00.000Z  [native]  reviewer → codex-host (gpt-5.6-terra)  ' +
-      'via host-native  .fadeno/local/prompts/native-abcdef01.md',
+    '2026-08-12T12:02:00.000Z  [host]  worker/general-purpose → claude-host (opus → sonnet)  ' +
+      'via host  .fadeno/local/prompts/host-deadbeef.md',
+    '2026-08-12T12:03:00.000Z  [host]  reviewer → codex-host (gpt-5.6-terra)  ' +
+      'via host  .fadeno/local/prompts/host-abcdef01.md',
   ]);
   const [override, plain] = result.entries;
-  assert.equal(override!.kind, 'native');
+  assert.equal(override!.kind, 'host');
   assert.equal(override!.dispatchId, null);
   assert.equal(override!.modelOverride, 'sonnet');
   assert.equal(override!.agentType, 'general-purpose');
   assert.equal(override!.loadout, 'claude-native'); // hook rows record a bare name
-  assert.equal(override!.completed, false); // native delivery records no outcome
+  assert.equal(override!.completed, false); // host delivery records no outcome
   assert.equal(plain!.modelOverride, null);
 });
 
@@ -281,7 +289,7 @@ test('dispatches: default shows the last 10 entries; --tail selects a different 
 });
 
 test('dispatches: entries are structured data (what --json prints)', (t) => {
-  const root = seedLog(t, [requested(), completed(), native({ model_override: 'sonnet' })]);
+  const root = seedLog(t, [requested(), completed(), hostRow({ model_override: 'sonnet' })]);
   const result = runDispatches({ repoRoot: root });
 
   const payload = JSON.parse(
@@ -340,7 +348,7 @@ test('dispatches: entries are structured data (what --json prints)', (t) => {
     diffBytes: null,
     error: null,
   });
-  assert.equal(payload.entries[1]!.kind, 'native');
+  assert.equal(payload.entries[1]!.kind, 'host');
   assert.equal(payload.entries[1]!.modelOverride, 'sonnet');
 });
 
@@ -467,7 +475,7 @@ test('dispatches: an unknown minor within the known major is read best-effort', 
 test('dispatches: a log spanning every format generation renders in append order', (t) => {
   const root = seedLog(t, [
     legacyRow(), // pre-dispatch_id: no format, no event
-    native(), // unversioned hook row
+    hostRow(), // unversioned hook row
     requested({ dispatch_id: 'd7', timestamp: '2026-08-12T12:05:00.000Z' }), // unversioned pair
     completed({ dispatch_id: 'd7', timestamp: '2026-08-12T12:05:01.000Z' }),
     { format: '3.0', timestamp: '2026-08-12T12:06:00.000Z', event: 'dispatch_requested', dispatch_id: 'd8' },
@@ -485,13 +493,13 @@ test('dispatches: a log spanning every format generation renders in append order
     result.entries.map((e) => [e.kind, e.format, e.legacy, e.dispatchId]),
     [
       ['command', null, true, null],
-      ['native', null, false, null],
+      ['host', null, false, null],
       ['command', null, false, 'd7'],
       ['command', DISPATCHES_FORMAT, false, 'd9'],
     ],
   );
   assert.equal(result.lines[0]!.endsWith('  [legacy]'), true);
-  assert.equal(result.lines.some((line) => line.includes('[legacy]') && line.includes('[native]')), false);
+  assert.equal(result.lines.some((line) => line.includes('[legacy]') && line.includes('[host]')), false);
   assert.equal(
     result.summary,
     '4 of 4 dispatches shown  (1 unreadable row skipped)  (1 row from a newer format skipped)',
@@ -524,13 +532,13 @@ test('dispatches: malformed rows are counted and skipped, never fatal', (t) => {
     completed(),
     { timestamp: '2026-08-12T12:04:00.000Z', event: 'something_else' }, // unknown kind
     requested({ dispatch_id: undefined, archetype: 'judge' }), // uncorrelatable
-    native(),
+    hostRow(),
   ]);
   const result = runDispatches({ repoRoot: root });
 
   assert.equal(result.skipped, 5);
   assert.equal(result.total, 2); // the valid pair + the native row
-  assert.deepEqual(result.entries.map((e) => e.kind), ['command', 'native']);
+  assert.deepEqual(result.entries.map((e) => e.kind), ['command', 'host']);
   assert.equal(result.entries[0]!.completed, true);
   assert.equal(result.summary, '2 of 2 dispatches shown  (5 unreadable rows skipped)');
 });

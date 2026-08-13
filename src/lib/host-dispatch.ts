@@ -119,13 +119,35 @@ export function hostRequestProfile(lookup: HostDispatchRequestLookup): ExecutorP
   return parseExecutorProfile(text, `${profileRel} (run snapshot)`);
 }
 
+/**
+ * How a host dispatch was delivered. `host` is the in-session agent; a
+ * `command-fallback` ran the executor's declared argv instead.
+ */
+export type DeliveryTransport = 'host' | 'command-fallback';
+
+/**
+ * Read a `delivery_transport` from a ledger, accepting the pre-0.6 spelling.
+ *
+ * Writers only ever emit `host`, but traces recorded before the rename carry
+ * `native` for the identical fact and must keep verifying untouched — the
+ * ledger format is unchanged, so nothing about them became invalid. Absent is
+ * `host` for the same reason it always was: it predates the field. Returns
+ * null for a value that is neither, so a corrupt trace still fails loudly
+ * instead of being coerced into a transport it never recorded.
+ */
+export function normalizeDeliveryTransport(value: unknown): DeliveryTransport | null {
+  if (value == null || value === 'host' || value === 'native') return 'host';
+  if (value === 'command-fallback') return 'command-fallback';
+  return null;
+}
+
 export interface DispatchStartOptions {
   run: string;
   dispatchId: string;
   agentId: string;
   workspace?: string;
   branch?: string;
-  transport?: 'native' | 'command-fallback';
+  transport?: DeliveryTransport;
   /** Exact argv used only for command-fallback delivery evidence. */
   command?: string[];
   repoRoot?: string;
@@ -495,12 +517,12 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const { runDir, runId } = assertCurrentLedger(repoRoot, opts.run);
   if (!opts.agentId.trim()) throw new HostDispatchError('--agent-id must not be empty.');
-  const transport = opts.transport ?? 'native';
+  const transport = opts.transport ?? 'host';
   if (transport === 'command-fallback' && (opts.command == null || opts.command.length === 0)) {
     throw new HostDispatchError('command-fallback dispatch-start requires the exact command argv.');
   }
-  if (transport === 'native' && opts.command != null) {
-    throw new HostDispatchError('native dispatch-start must not include command argv.');
+  if (transport === 'host' && opts.command != null) {
+    throw new HostDispatchError('host dispatch-start must not include command argv.');
   }
   const events = eventsFor(runDir);
   const { request, event: requestEvent } = findRequest(runId, events, opts.dispatchId);
@@ -529,7 +551,7 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
   if (starts.length > 1) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" was started more than once.`);
   if (starts.length === 1) {
     const prior = starts[0]!;
-    const priorTransport = prior.extra.delivery_transport ?? 'native';
+    const priorTransport = normalizeDeliveryTransport(prior.extra.delivery_transport);
     const sameCommand = JSON.stringify(prior.extra.fallback_command ?? null) === JSON.stringify(opts.command ?? null);
     if (prior.extra.agent_id === opts.agentId && priorTransport === transport && sameCommand) {
       return { dispatchId: opts.dispatchId, state: 'started', idempotent: true, agentId: opts.agentId };
@@ -567,9 +589,9 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
         fallback_command: opts.command,
         fallback_command_sha256: sha256Hex(JSON.stringify(opts.command)),
       } : {}),
-      host_attested: transport === 'native',
-      identity_evidence: transport === 'native' ? 'requested_only' : 'command_receipt',
-      ...(transport === 'native' ? {
+      host_attested: transport === 'host',
+      identity_evidence: transport === 'host' ? 'requested_only' : 'command_receipt',
+      ...(transport === 'host' ? {
         attestation: {
           model: request.model,
           reasoning_effort: request.reasoningEffort,
@@ -590,7 +612,7 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
 
 function deliveryFields(start: RunEvent): Record<string, unknown> {
   return {
-    delivery_transport: start.extra.delivery_transport ?? 'native',
+    delivery_transport: normalizeDeliveryTransport(start.extra.delivery_transport),
     ...(start.extra.fallback_command !== undefined ? { fallback_command: start.extra.fallback_command } : {}),
     ...(start.extra.fallback_command_sha256 !== undefined
       ? { fallback_command_sha256: start.extra.fallback_command_sha256 }
@@ -614,8 +636,8 @@ export function progressHostDispatch(opts: DispatchProgressOptions): HostDispatc
   const starts = startsFor(events, opts.dispatchId);
   if (starts.length === 0) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" cannot report progress before dispatch-start.`);
   if (starts.length > 1) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" was started more than once.`);
-  if ((starts[0]!.extra.delivery_transport ?? 'native') !== 'native') {
-    throw new HostDispatchError(`host dispatch "${opts.dispatchId}" command fallback cannot accept native progress receipts.`);
+  if (normalizeDeliveryTransport(starts[0]!.extra.delivery_transport) !== 'host') {
+    throw new HostDispatchError(`host dispatch "${opts.dispatchId}" command fallback cannot accept host progress receipts.`);
   }
   if (terminalsFor(events, opts.dispatchId).length > 0) {
     throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already has a terminal receipt.`);

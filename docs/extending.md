@@ -269,7 +269,7 @@ failed).
 
 `fadeno dispatches [--tail <N>] [--json]` reads `.fadeno/dispatches.jsonl`
 back. It correlates each `dispatch_requested`/`dispatch_completed` pair by
-`dispatch_id` into one row per dispatch and renders `native_delivery` rows
+`dispatch_id` into one row per dispatch and renders `host_delivery` rows
 beside them, so both delivery routes read as one history. A request row whose
 completion never arrived is kept and marked — "no completion recorded (killed
 or in flight)" — rather than dropped, since a dispatch that died mid-flight is
@@ -372,10 +372,10 @@ specialists unsteered. Plugin users can combine the flag with `--data-only`; the
 hook then targets the plugin-scoped `fadeno:dispatch-*` agents.
 
 When it steers a spawn to a host role agent instead, the same hook appends a
-`native_delivery` row to `.fadeno/dispatches.jsonl` (archetype, agent_type,
+`host_delivery` row to `.fadeno/dispatches.jsonl` (archetype, agent_type,
 loadout, executor, model, model_override, `reasoning_effort: "inherited"`,
-`transport: "host-native"`, prompt_sha256, `hook_version`) plus a verbatim
-prompt snapshot at `.fadeno/local/prompts/native-<sha8>.md`, so the file audits
+`transport: "host"`, prompt_sha256, `hook_version`) plus a verbatim
+prompt snapshot at `.fadeno/local/prompts/host-<sha8>.md`, so the file audits
 both delivery routes. The kernel is not in the host path, so the hook is the
 only possible evidence writer there; the row is best-effort and never changes a
 steering decision. Caveat when editing the hook: host delivery can pin the executor's

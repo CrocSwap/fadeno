@@ -263,7 +263,7 @@ test('Claude steering pulls an explicitly-named proxy back to a native slot', (t
 
   // Native delivery never reaches the kernel, so the hook owns its evidence —
   // and a native slot is not a relay, so nothing is stashed for one.
-  assert.ok(read(root, '.fadeno/dispatches.jsonl').includes('"event":"native_delivery"'));
+  assert.ok(read(root, '.fadeno/dispatches.jsonl').includes('"event":"host_delivery"'));
   assert.equal(exists(root, '.fadeno/local/pending-relays.jsonl'), false);
 
   // `current-host` is the explicit "inherit the caller's model" spelling: the
@@ -294,7 +294,7 @@ function evidenceRows(root: string): EvidenceRow[] {
     .map((line) => JSON.parse(line) as EvidenceRow);
 }
 
-test('Claude steering writes the native_delivery evidence the kernel never sees', (t) => {
+test('Claude steering writes the host_delivery evidence the kernel never sees', (t) => {
   const root = tempRepo(t);
   runInit({ target: 'claude', repoRoot: root, withSteering: true });
   const prompt = 'Review the diff.\n\n  Keep every byte verbatim.\n';
@@ -319,7 +319,7 @@ test('Claude steering writes the native_delivery evidence the kernel never sees'
     // literal is duplicated there and pinned here — orthogonal to hook_version
     // below, which stamps the *writer*, not the format it writes.
     format: '0.2',
-    event: 'native_delivery',
+    event: 'host_delivery',
     // Hook generation that wrote the row: the session-start hook cache means a
     // live session can be a build behind, so the row names its own writer.
     hook_version: packageVersion(),
@@ -331,9 +331,9 @@ test('Claude steering writes the native_delivery evidence the kernel never sees'
     model_override: 'sonnet',
     // The harness Agent tool has no effort parameter: native spawns inherit.
     reasoning_effort: 'inherited',
-    transport: 'host-native',
+    transport: 'host',
     prompt_sha256: digest,
-    prompt_snapshot: `.fadeno/local/prompts/native-${digest.slice(0, 8)}.md`,
+    prompt_snapshot: `.fadeno/local/prompts/host-${digest.slice(0, 8)}.md`,
   });
   // The snapshot mirrors the kernel's: the exact bytes that were delivered.
   assert.equal(read(root, row.prompt_snapshot), prompt);

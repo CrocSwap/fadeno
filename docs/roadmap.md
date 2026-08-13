@@ -179,7 +179,7 @@ replicate/subworkflow containers, and command-adapter leaves remain deferred.
 (`schema_version` in run.yaml + contiguous per-event `seq`), artifact
 manifests with sha256 digests and record-time typed-artifact validation on
 `artifact_created` (immutability guard included), host-dispatch lifecycle and
-native-attestation checks in `fadeno verify`,
+host-attestation checks in `fadeno verify`,
 (digests, seq, terminal coherence, active/superseded resolution,
 prompt-snapshot integrity, conflicting human decisions — unrecomputable
 evidence reported as skipped, never silently valid), a logical-step
@@ -228,8 +228,8 @@ Claude plugin ships **dispatch proxy agents** behind a three-rung steering
 ladder (description routing → `PreToolUse` spawn rewrite → a proxy Bash guard
 hook), relaying through a single-statement stdin contract. Evidence is a
 two-row `dispatches.jsonl` ledger (request + completion, format 0.2) with
-kernel-owned prompt snapshots, relay attestation, `native_delivery` rows for
-host-native spawns, a `hook_version` stamp, and a paired `fadeno dispatches`
+kernel-owned prompt snapshots, relay attestation, `host_delivery` rows for
+host spawns, a `hook_version` stamp, and a paired `fadeno dispatches`
 reader with tiered legacy handling. Command routes declare `write_access`,
 refused pre-spawn against archetype write postures.
 

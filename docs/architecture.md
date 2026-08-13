@@ -81,7 +81,7 @@ assert on return values and filesystem effects instead of scraping stdout.
 | `runNext` | next-step JSON (`status`, `step`, `gate`, …) | Pure flow cursor over playbook + events; read-only. Logic in `lib/flow-cursor.ts`. |
 | `runLoadoutShow` / `…List` / `…Use` / `…Clear` | active loadout + slot tables | `use` pins `.fadeno/local/loadout`; `clear` removes it. Resolution logic in `lib/executors.ts`. |
 | `runDispatch` | executor report + evidence row | Ad-hoc archetype→executor dispatch; appends a correlated `dispatch_requested`/`dispatch_completed` row pair to `.fadeno/dispatches.jsonl`. Refuses before spawning when the resolved command route declares `write_access: false` and the archetype declares `requires_write: true`. Echo goes to stderr so stdout stays the executor's pure report. |
-| `runDispatches` | correlated dispatch rows | Read-only projection of `.fadeno/dispatches.jsonl`: pairs `dispatch_requested`/`dispatch_completed` by `dispatch_id`, keeps `native_delivery` rows inline, and marks a request with no completion as killed-or-in-flight rather than dropping it. Pre-format legacy rows render as `[legacy]`; newer-format rows get a separate count. `--tail <N>` (default 10) / `--json`. |
+| `runDispatches` | correlated dispatch rows | Read-only projection of `.fadeno/dispatches.jsonl`: pairs `dispatch_requested`/`dispatch_completed` by `dispatch_id`, keeps `host_delivery` rows inline, and marks a request with no completion as killed-or-in-flight rather than dropping it. Pre-format legacy rows render as `[legacy]`; newer-format rows get a separate count. `--tail <N>` (default 10) / `--json`. |
 | `runSteeringResolve` / `runSteeringApply` | hybrid mode / emitted Codex agents | Resolves host vs command vs restart-required vs write-conflict per invocation; materializes per-slot host agents or cheap command brokers, declining brokers for write-conflicted slots. |
 | `runToolComplete` | run update + artifact manifest | Validates a typed tool result before atomically starting the exact next `tool_call` and recording its result. |
 | `runPlugin` | `EmitResult[]` + `outDir` | Generates `plugin/` from templates. |
@@ -264,10 +264,10 @@ Two loadout-era evidence surfaces sit beside the step lifecycle:
   spawn itself fails — a failed dispatch is still a dispatch that happened.
   Declared `write_access` joins that identity, so a read-only delivery is
   legible in the row rather than only in an empty-handed report. The Claude
-  steering hook appends `native_delivery` rows to the same file when it steers
+  steering hook appends `host_delivery` rows to the same file when it steers
   a spawn to a host role agent (archetype, agent_type, loadout, executor,
   model, model_override, `reasoning_effort: "inherited"`,
-  `transport: "host-native"`, prompt_sha256, prompt_snapshot,
+  `transport: "host"`, prompt_sha256, prompt_snapshot,
   `hook_version`) — the kernel never runs on the host path,
   so the hook is the only writer that can witness it, and one file audits both
   delivery routes. Like `.fadeno/local/`, it is per-machine evidence —
@@ -360,7 +360,7 @@ word: the transport belongs to the loadout, and a host slot is pulled back to
 the host agent instead of shelling out to a subprocess of this same harness —
 which would load the same plugin, re-read the prompt as director work, and
 re-dispatch one level down. A spawn it steers to a host role
-agent gets a best-effort `native_delivery` evidence row plus a prompt snapshot
+agent gets a best-effort `host_delivery` evidence row plus a prompt snapshot
 under `.fadeno/local/prompts/`; that path can pin the requested model but not
 reasoning effort (the Agent tool schema has no effort parameter), so the row
 records `reasoning_effort: "inherited"` rather than the target's declared

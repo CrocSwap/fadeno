@@ -11,7 +11,7 @@ import { join } from 'node:path';
 // emitters (`fadeno plugin` and `fadeno init --claude`) replace this literal
 // with the package version; the template keeps 'dev', so a row reading 'dev'
 // means the template was executed directly rather than an installed copy.
-const HOOK_VERSION = '0.6.0-rc.19';
+const HOOK_VERSION = '0.6.0-rc.20';
 
 function finish(value) {
   if (value != null) process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -136,7 +136,7 @@ if (inheritModel && !explicitProxy) finish(null);
 // Evidence for host delivery. Command delivery ends at `fadeno dispatch`,
 // where the kernel writes the request/completion row pair; host delivery
 // never reaches the kernel, so this hook is the only Fadeno code on that path
-// and therefore its evidence writer. One `native_delivery` row plus a
+// and therefore its evidence writer. One `host_delivery` row plus a
 // kernel-shaped prompt snapshot keeps both delivery modes auditable from the
 // same `.fadeno/dispatches.jsonl`.
 function recordHostDelivery() {
@@ -145,7 +145,7 @@ function recordHostDelivery() {
   if (!existsSync(join(cwd, '.fadeno'))) return; // not a Fadeno repo
   try {
     const promptSha256 = createHash('sha256').update(prompt).digest('hex');
-    const snapshotRel = `.fadeno/local/prompts/native-${promptSha256.slice(0, 8)}.md`;
+    const snapshotRel = `.fadeno/local/prompts/host-${promptSha256.slice(0, 8)}.md`;
     mkdirSync(join(cwd, '.fadeno', 'local', 'prompts'), { recursive: true });
     writeFileSync(join(cwd, snapshotRel), prompt, 'utf8');
     appendFileSync(
@@ -157,7 +157,7 @@ function recordHostDelivery() {
         // writers must stamp the same version. Bump them together.
         format: '0.2',
         timestamp: new Date().toISOString(),
-        event: 'native_delivery',
+        event: 'host_delivery',
         hook_version: HOOK_VERSION,
         archetype,
         agent_type: requested,
@@ -168,7 +168,7 @@ function recordHostDelivery() {
         // Host delivery cannot pin reasoning effort: the harness Agent tool
         // takes no effort parameter, so the spawn inherits the session's.
         reasoning_effort: 'inherited',
-        transport: 'host-native',
+        transport: 'host',
         prompt_sha256: promptSha256,
         prompt_snapshot: snapshotRel,
       })}\n`,

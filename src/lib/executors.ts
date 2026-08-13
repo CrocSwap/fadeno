@@ -152,14 +152,17 @@ export interface ExecutorProfile {
  * overridden with a provider target, which is exactly when the harness axis
  * starts deciding transport, under a loadout name suggesting it cannot.
  *
- * Live code, config, and CLI therefore spell the delivery axis `host`.
- * `native` survives in four frozen places, none of them ambiguous in context:
- *   1. the `native` loadout name (the other axis; renaming it breaks every pin);
- *   2. ledger/trace vocabulary — `delivery_transport: "native"`, the
- *      `native_delivery` event, and the `[native]` row rendering;
- *   3. `ConstraintContext.transport`, a JSON contract handed to user-authored
- *      constraint commands;
- *   4. `routes.*.native`, the pre-0.6 alias still accepted below.
+ * Everything Fadeno writes now spells the delivery axis `host` — config, CLI,
+ * ledger, and the dispatch log alike. `native` survives in exactly three
+ * places, and only one of them is a live concept:
+ *   1. the `native` loadout name — the *other* axis, and the reason this
+ *      comment exists; renaming it would break every pin in the wild;
+ *   2. read-side aliases for anything recorded before 0.6: `routes.*.native`,
+ *      `delivery_transport: "native"`, and the `native_delivery` row. Fadeno
+ *      accepts all three and emits none of them;
+ *   3. `ConstraintContext.transport`, which still reports `native` because it
+ *      is handed *outward* to user-authored constraint commands — the one
+ *      contract where a rename cannot be aliased, only silently broken.
  * Do not reintroduce it for anything else.
  */
 export type HarnessId = 'codex' | 'claude' | 'grok' | 'standalone';

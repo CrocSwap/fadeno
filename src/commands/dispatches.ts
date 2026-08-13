@@ -30,11 +30,11 @@ const OUTCOME_KEYS = ['exit_code', 'duration_ms', 'output_sha256', 'signal'];
  * One logical dispatch: a correlated `dispatch_requested` /
  * `dispatch_completed` pair from the kernel (`kind: "command"`), a single
  * `dispatch_refused` row (also `kind: "command"` — the refusal *is* the
- * request-point evidence), or a single `native_delivery` row from the Claude
- * steering hook (`kind: "native"`), which has no kernel downstream.
+ * request-point evidence), or a single `host_delivery` row from the Claude
+ * steering hook (`kind: "host"`), which has no kernel downstream.
  */
 export interface DispatchEntry {
-  kind: 'command' | 'native';
+  kind: 'command' | 'host';
   /**
    * The row's recorded evidence-format version, or null when it predates the
    * stamp (everything written before `DISPATCHES_FORMAT` existed).
@@ -47,19 +47,19 @@ export interface DispatchEntry {
   legacy: boolean;
   /** Verbatim recorded timestamp — for pairs, the request's (when it started). */
   timestamp: string | null;
-  /** Correlation id; always null for native deliveries (they have none). */
+  /** Correlation id; always null for host deliveries (they have none). */
   dispatchId: string | null;
   archetype: string | null;
   /** Command dispatches only: the `--role` this was attributed to. */
   role: string | null;
-  /** Native deliveries only: the subagent type the harness was about to spawn. */
+  /** Host deliveries only: the subagent type the harness was about to spawn. */
   agentType: string | null;
   resolution: string | null;
   loadout: string | null;
   loadoutSource: string | null;
   executor: string | null;
   model: string | null;
-  /** Native deliveries only: per-spawn model override, when the hook saw one. */
+  /** Host deliveries only: per-spawn model override, when the hook saw one. */
   modelOverride: string | null;
   reasoningEffort: string | null;
   target: string | null;
@@ -82,7 +82,7 @@ export interface DispatchEntry {
   /**
    * Whether an outcome was recorded. False on a command dispatch means the
    * process never reached its completion row — killed, or still in flight.
-   * Native deliveries and refusals record no outcome, so they are always false.
+   * Host deliveries and refusals record no outcome, so they are always false.
    */
   completed: boolean;
   exitCode: number | null;
@@ -276,10 +276,10 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
   };
 }
 
-function nativeEntry(row: Record<string, unknown>): DispatchEntry {
+function hostEntry(row: Record<string, unknown>): DispatchEntry {
   const loadout = loadoutOf(row.loadout);
   return {
-    kind: 'native',
+    kind: 'host',
     format: str(row.format),
     legacy: false,
     timestamp: str(row.timestamp),
@@ -373,13 +373,13 @@ function legacyEntry(row: Record<string, unknown>): DispatchEntry {
  * <ts>  [command]  worker/reviewer → executor (model)  via command  exit 0 in 12ms  [markers]  <prompt snapshot>
  * ```
  *
- * Native deliveries render `[native]`, fold any `model_override` into the
+ * Host deliveries render `[host]`, fold any `model_override` into the
  * model as `(model → override)`, and carry no outcome field.
  */
 export function renderDispatchLine(entry: DispatchEntry): string {
   const parts: string[] = [entry.timestamp ?? '?', `[${entry.kind}]`];
 
-  // Native rows have no `role`; their `agent_type` is the closest thing to
+  // Host rows have no `role`; their `agent_type` is the closest thing to
   // one (the subagent the harness was about to spawn), so it takes the slot
   // — unless it merely repeats the archetype.
   const roleSlot = entry.role ?? (entry.agentType !== entry.archetype ? entry.agentType : null);
@@ -460,7 +460,7 @@ function summarize(
  * Read `.fadeno/dispatches.jsonl` and answer "which executor actually ran
  * what?" — kernel `dispatch_requested`/`dispatch_completed` rows correlated by
  * `dispatch_id` into one logical entry each, `dispatch_refused` rows as
- * standalone command entries, plus the steering hook's `native_delivery` rows. Order is append order (oldest → newest), never
+ * standalone command entries, plus the steering hook's `host_delivery` rows. Order is append order (oldest → newest), never
  * re-sorted by timestamp: a killed dispatch's request row is still where it
  * happened. A missing or empty log is a friendly answer, not an error, and
  * rows that cannot be read are counted rather than fatal — the log is
@@ -530,8 +530,10 @@ export function runDispatches(opts: DispatchesOptions = {}): DispatchesResult {
       entries.push(legacyEntry(row));
       continue;
     }
-    if (event === 'native_delivery') {
-      entries.push(nativeEntry(row));
+    // `native_delivery` is the pre-0.6 name for the same row; a log written
+    // by an older hook still renders.
+    if (event === 'host_delivery' || event === 'native_delivery') {
+      entries.push(hostEntry(row));
       continue;
     }
     if (event === 'dispatch_refused') {
@@ -811,8 +813,8 @@ function loadAllEntries(absolute: string): {
       entries.push(legacyEntry(row));
       continue;
     }
-    if (event === 'native_delivery') {
-      entries.push(nativeEntry(row));
+    if (event === 'host_delivery' || event === 'native_delivery') {
+      entries.push(hostEntry(row));
       continue;
     }
     if (event === 'dispatch_refused') {

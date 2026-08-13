@@ -42,9 +42,9 @@ const CLAIMS: Claim[] = [
     src: { files: ['src/commands/dispatch.ts'], patterns: [/dispatch_requested/, /dispatch_completed/] },
   },
   {
-    id: 'native-delivery-row',
-    doc: { files: [LOADOUTS], patterns: [/native_delivery/] },
-    src: { files: ['templates/claude/hooks/dispatch-steering.mjs'], patterns: [/native_delivery/] },
+    id: 'host-delivery-row',
+    doc: { files: [LOADOUTS], patterns: [/host_delivery/] },
+    src: { files: ['templates/claude/hooks/dispatch-steering.mjs'], patterns: [/host_delivery/] },
   },
   {
     id: 'write-access-field',

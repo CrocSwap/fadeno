@@ -166,7 +166,7 @@ isolated delivery (sandbox flag, worktree) when one is declared.
 
 *Honest caveat:* on host in-session deliveries the host holds the
 session's write permissions, so `forbidden` is advisory there (prompt-level
-instruction, recorded in the `native_delivery` evidence row) — the same
+instruction, recorded in the `host_delivery` evidence row) — the same
 advisory/enforced split `enforcement.md` already documents for
 instruction-only hosts. On command routes it is real.
 
@@ -359,7 +359,7 @@ only one the workflow consumes.
 
 *Honest caveat:* when the primary is delivered in-session, the
 kernel is not in the loop at spawn time; the steering hook can record the
-native side (it already writes `native_delivery` rows) but kernel-side
+native side (it already writes `host_delivery` rows) but kernel-side
 duplication needs the dispatch path. Initial scope: shadows fire on
 kernel-dispatched primaries; the host-primary case is an open question
 below.
