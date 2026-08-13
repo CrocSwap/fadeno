@@ -5,7 +5,7 @@ chat.
 
 ## Design status and precedence
 
-Fadeno now has five intentionally different design horizons:
+Fadeno now has six intentionally different design horizons:
 
 1. [`kickoff-memo.md`](kickoff-memo.md) records the rationale and scope of the
    shipped v0 advisory protocol. It remains historical design context.
@@ -27,6 +27,12 @@ Fadeno now has five intentionally different design horizons:
    (`fadeno dispatch`) with the playbook engine as one client of the same
    resolver. It does not authorize auto-fallback across providers or a
    resident router.
+6. [`experimental/slots-and-archetypes.md`](experimental/slots-and-archetypes.md)
+   is the successor boundary for the dispatch kernel: the slot as the unit of
+   model policy (preset → session override → shadow attachment), archetype
+   policy earned by kernel enforceability, and constraint tiers at the single
+   dispatch chokepoint. It does not authorize a policy language or a
+   Fadeno-owned model roster.
 
 The next-protocol engine decision deliberately supersedes v0's "no runtime"
 constraint for forward work. It does not authorize a daemon, cloud service,
@@ -211,6 +217,46 @@ loud migration paths for user-authored playbooks; old ledgers may remain legacy
 output. Team-level provenance is anchored by committed evidence plus
 `fadeno verify` in CI; hash chaining remains a possible standalone mechanism,
 not current scope.
+
+## Dispatch kernel (in progress — loadouts + phases 1–3 shipped)
+
+The horizon-5 boundary is implemented and in daily dogfood: named
+archetype→executor **loadouts** in `.fadeno/executors.yaml`, resolution
+computed in the CLI at dispatch time, `fadeno dispatch` as the ad-hoc kernel
+client, and the playbook engine as another client of the same resolver. The
+Claude plugin ships **dispatch proxy agents** behind a three-rung steering
+ladder (description routing → `PreToolUse` spawn rewrite → a proxy Bash guard
+hook), relaying through a single-statement stdin contract. Evidence is a
+two-row `dispatches.jsonl` ledger (request + completion, format 0.2) with
+kernel-owned prompt snapshots, relay attestation, `native_delivery` rows for
+host-native spawns, a `hook_version` stamp, and a paired `fadeno dispatches`
+reader with tiered legacy handling. Command routes declare `write_access`,
+refused pre-spawn against archetype write postures.
+
+The horizon-6 boundary has three of its four phases shipped:
+
+1. **Session slot overrides** — dial one slot (`fadeno loadout set/clear`)
+   over the active loadout; cascade = role binding → override → slot →
+   `"*"`; verify replays from the run snapshot, never the live pin.
+2. **Archetype schema pass** — three-valued write postures
+   (required | forbidden | none), acyclic fallback chains that resolve
+   bindings never policy, `resolved_via` provenance in evidence, the
+   `generator` canon archetype, and a steering chain-walk to the nearest
+   native agent surface.
+3. **Constraint tiers** — declarative predicates
+   (`distinct_provider_from_inputs`, per-target `eligibility` including
+   shadow_only / forbidden) plus a tier-2 `constraints.command` escape
+   hatch; every boundary refusal writes a `dispatch_refused` row; verify
+   recomputes gate-eligibility from the snapshot.
+
+Remaining: **phase 4** — shadow slot attachments with sha-identical paired
+prompts, `--rate` sampling, `fadeno dispatches --comparisons`, and the
+model-tryout starter with its mandatory-confounds ModelComparison contract:
+the adoption ladder's shadow → override → preset entry point. Deliberately
+still backlog, not scope: route operational-policy fields (env, retry,
+concurrency, prompt-size ceilings), proxy relay timeout ergonomics, dispatch
+stdout snapshotting (a killed relay currently loses the report bytes), and
+canon distribution into complete legacy catalogs.
 
 ## Low-friction release boundary
 
