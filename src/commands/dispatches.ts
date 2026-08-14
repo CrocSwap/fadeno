@@ -6,9 +6,11 @@ import { findRepoRoot } from '../lib/paths.ts';
 import {
   DISPATCHES_FILE,
   DISPATCHES_FORMAT,
+  appendEvidenceRow,
   normalizeDispatchOutcome,
   type DispatchOutcome,
 } from './dispatch.ts';
+import { INFLIGHT_DIR, readInflightClaim } from '../lib/supervisor.ts';
 
 export class DispatchesCommandError extends Error {}
 
@@ -1278,3 +1280,120 @@ export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}
   };
 }
 
+
+/**
+ * Cancel a running dispatch.
+ *
+ * The gap this closes, reported 2026-08-14: a proxy correctly refuses to fold
+ * a mid-flight amendment into a live dispatch, because a second executor would
+ * race the first on the same files. But with no way to *stop* the first, a
+ * corrected instruction had no path at all — not amendable, not safely
+ * re-dispatchable, not abortable. Roughly half of dispatches outlive the
+ * caller's 600s window, so this is the common case rather than the corner.
+ *
+ * Delivering the amendment itself is not possible and is not attempted: every
+ * driver is a one-shot CLI that read its whole prompt from a stdin that has
+ * since closed. Cancel makes the honest path — abort, then re-dispatch with
+ * the corrected prompt — deterministic instead of a race.
+ *
+ * The kernel still writes the completion row: killing the supervisor unblocks
+ * its `spawnSync`, which reports the signal exactly as any other terminal
+ * state. The `dispatch_cancelled` row added here records who asked and when,
+ * and never stands in for that completion.
+ */
+/**
+ * Record that a cancellation was *requested*. Deliberately not a terminal
+ * event: the kernel still owns the completion row, and this row says only that
+ * a signal was sent — which is the one thing this process actually witnessed.
+ */
+function appendCancellationRow(repoRoot: string, fields: Record<string, unknown>, now: Date): void {
+  appendEvidenceRow(repoRoot, {
+    format: DISPATCHES_FORMAT,
+    timestamp: now.toISOString(),
+    event: 'dispatch_cancelled',
+    ...fields,
+  });
+}
+
+export interface DispatchesCancelOptions {
+  /** Full id or an 8+ character prefix; ignored when `tag` is given. */
+  dispatchId?: string;
+  tag?: string | null;
+  repoRoot?: string;
+  cwd?: string;
+  /** Test seam for the signal itself. */
+  kill?: (pid: number, signal: NodeJS.Signals) => void;
+  now?: Date;
+}
+
+export interface DispatchesCancelResult {
+  dispatchId: string;
+  tag: string | null;
+  /** Supervisor process signalled. */
+  pid: number;
+  resolvedBy: OutputResolution;
+}
+
+export function runDispatchesCancel(opts: DispatchesCancelOptions = {}): DispatchesCancelResult {
+  const tag = opts.tag?.trim() ? opts.tag.trim() : null;
+  const query = (opts.dispatchId ?? '').trim();
+  if (tag == null && query === '') {
+    throw new DispatchesCommandError(
+      'name what to cancel: a dispatch id, an 8+ character prefix, or tag:<handle>.',
+    );
+  }
+  const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
+  const { byId, lastWithSnapshot, requestOrder } = loadOutputRecords(join(repoRoot, DISPATCHES_FILE));
+  const { record, resolvedBy } =
+    tag != null
+      ? resolveByTag(tag, byId, requestOrder)
+      : resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
+
+  // A finished dispatch is refused rather than reported cancelled: "cancelled"
+  // would claim this call stopped work that had already stopped itself.
+  if (record.completed) {
+    throw new DispatchesCommandError(
+      `dispatch ${record.dispatchId.slice(0, 8)} has already completed — nothing to cancel. ` +
+        `Read what it produced with \`fadeno dispatches --output ${
+          record.tag != null ? `tag:${record.tag}` : record.dispatchId.slice(0, 8)
+        }\`.`,
+    );
+  }
+
+  const claimPath = join(repoRoot, ...INFLIGHT_DIR.split('/'), `${record.dispatchId}.json`);
+  const claim = readInflightClaim(claimPath, (path) => readFileSync(path, 'utf8'));
+  if (claim == null) {
+    // Open in the ledger but unclaimed on this machine: the kernel died
+    // without writing a completion row, or the dispatch belongs to another
+    // host. Either way there is no process here to signal, and saying
+    // "cancelled" would be a claim about work this call did not touch.
+    throw new DispatchesCommandError(
+      `dispatch ${record.dispatchId.slice(0, 8)} has no running executor on this machine ` +
+        '(no in-flight claim), yet its evidence shows no completion. Nothing was signalled. ' +
+        'Check the workspace before re-dispatching — an executor killed with its kernel can ' +
+        'have left work behind.',
+    );
+  }
+
+  const kill = opts.kill ?? ((pid, signal) => { process.kill(pid, signal); });
+  try {
+    // SIGTERM, never SIGKILL: the supervisor catches it and reaps the
+    // executor's whole process group, then escalates on its own schedule.
+    // SIGKILL here would leave exactly the orphan the supervisor exists for.
+    kill(claim.pid, 'SIGTERM');
+  } catch (err) {
+    throw new DispatchesCommandError(
+      `could not signal the executor for ${record.dispatchId.slice(0, 8)} (pid ${claim.pid}): ` +
+        `${(err as Error).message}`,
+    );
+  }
+
+  appendCancellationRow(repoRoot, {
+    dispatch_id: record.dispatchId,
+    ...(record.tag != null ? { tag: record.tag } : {}),
+    supervisor_pid: claim.pid,
+    ...(claim.startedAt != null ? { executor_started_at: claim.startedAt } : {}),
+  }, opts.now ?? new Date());
+
+  return { dispatchId: record.dispatchId, tag: record.tag, pid: claim.pid, resolvedBy };
+}

@@ -49,7 +49,7 @@ import {
   type HostDispatchProgressReceipt,
 } from '../lib/host-dispatch.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
-import { superviseArgv, supervisedSpawnError } from '../lib/supervisor.ts';
+import { INFLIGHT_DIR, superviseArgv, supervisedSpawnError } from '../lib/supervisor.ts';
 import { ensureFadenoIgnore } from '../lib/source-control.ts';
 import type { UserPathOptions } from '../lib/user-paths.ts';
 
@@ -289,7 +289,7 @@ function declaredWritePosture(
  * plugin's build, and one invoking a bare `fadeno` records the CLI's, so the
  * two are distinguishable in the log without a separate field.
  */
-function appendEvidenceRow(repoRoot: string, row: Record<string, unknown>): void {
+export function appendEvidenceRow(repoRoot: string, row: Record<string, unknown>): void {
   ensureFadenoIgnore(repoRoot);
   mkdirSync(join(repoRoot, '.fadeno'), { recursive: true });
   const stamped = { ...row, fadeno_version: packageVersion() };
@@ -819,6 +819,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // stdout is the snapshot fd so bytes survive a mid-flight SIGTERM;
   // encoding/maxBuffer then apply to stderr only. input still feeds stdin.
   mkdirSync(join(repoRoot, '.fadeno', 'local', 'outputs'), { recursive: true });
+  mkdirSync(join(repoRoot, ...INFLIGHT_DIR.split('/')), { recursive: true });
+  // The supervisor publishes the claim here; the kernel only says where. See
+  // `superviseArgv` — spawnSync yields a pid too late to be of any use.
+  const inflightAbs = join(repoRoot, ...INFLIGHT_DIR.split('/'), `${dispatchId}.json`);
   const outputFd = openSync(outputAbs, 'w');
   const workspaceBefore = workspaceFingerprint(repoRoot);
   const started = Date.now();
@@ -827,7 +831,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // Through the supervisor, never directly: `spawnSync` blocks the event
     // loop, so a killed kernel runs no cleanup and leaves the executor writing
     // the tree unattended. See src/lib/supervisor.ts.
-    spawned = spawnSync(process.execPath, superviseArgv(command), {
+    spawned = spawnSync(process.execPath, superviseArgv(command, inflightAbs), {
       input: prompt,
       encoding: 'utf8',
       cwd: repoRoot,
@@ -839,6 +843,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       stdio: ['pipe', outputFd, 'pipe'],
     });
   } finally {
+    // Belt and braces: the supervisor unlinks on exit, but a SIGKILLed
+    // supervisor runs no handler and a stale claim would make a finished
+    // dispatch look cancellable.
+    try { rmSync(inflightAbs, { force: true }); } catch { /* nothing to drop */ }
     closeSync(outputFd);
   }
   const durationMs = Date.now() - started;

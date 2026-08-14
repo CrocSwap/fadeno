@@ -64,6 +64,35 @@ writers accept only 0.3.
 
 ### Added
 
+- **`fadeno dispatches --cancel <id|tag:handle>`** — stop a running dispatch.
+
+  A 2026-08-14 dogfood named the gap: a proxy correctly declines to fold a
+  mid-flight amendment into a live dispatch, because a second executor would
+  race the first on the same files — but nothing could *stop* the first either.
+  A corrected instruction was therefore not applicable, not safely
+  re-dispatchable, and not abortable. With roughly half of dispatches
+  outliving the caller's 600s window, that is the ordinary case rather than the
+  corner.
+
+  Delivering the amendment to a running executor is impossible and is not
+  attempted: every driver is a one-shot CLI whose stdin closed when the prompt
+  was written. Cancel makes the honest path — abort, then re-dispatch with the
+  corrected prompt — deterministic instead of a race.
+
+  The supervisor publishes `{pid, started_at}` to
+  `.fadeno/local/inflight/<dispatchId>.json` and unlinks it on exit. It has to
+  be the supervisor: `spawnSync` hands the kernel a pid only once the spawn has
+  finished, so while an executor runs the supervisor is the only process that
+  knows its own pid. Cancel sends SIGTERM — never SIGKILL, which would leave
+  exactly the orphan the supervisor exists to prevent — and the existing reap
+  path takes the executor's whole process group.
+
+  It records a `dispatch_cancelled` row and stops there. The kernel still owns
+  the completion row, written when its spawn unblocks, normally with
+  `signal: "SIGTERM"`. Cancel refuses and writes nothing when the dispatch has
+  already completed, or when there is no claim on this machine — both would be
+  claims about work this call never touched.
+
 - **`fadeno targets [--json]`** — one row per declared target, dialed or not.
   `loadout list` answers "what runs for this archetype", so a target no loadout
   references appeared nowhere: the only ways to discover one were reading

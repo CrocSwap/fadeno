@@ -88,13 +88,21 @@ test('supervisedSpawnError reads only its own marker', () => {
 });
 
 test('superviseArgv wraps the command without changing it', () => {
-  const argv = superviseArgv(['codex', 'exec', '--model', 'gpt-5.6-terra']);
+  const argv = superviseArgv(['codex', 'exec', '--model', 'gpt-5.6-terra'], '/repo/.fadeno/local/inflight/x.json');
   assert.equal(argv[0], '-e');
   assert.equal(argv[2], '--');
   assert.equal(argv[3], String(process.pid), 'the kernel names itself as the parent to watch');
+  // Where the supervisor publishes its in-flight claim. The kernel cannot
+  // publish it: `spawnSync` yields a pid only once the spawn has finished, so
+  // the supervisor is the only process that knows its own pid while the
+  // executor is still running — and that claim is what cancel signals.
+  assert.equal(argv[4], '/repo/.fadeno/local/inflight/x.json');
   // The executor's own argv survives intact and last — the evidence row
   // records this command, and it must be the one that actually runs.
-  assert.deepEqual(argv.slice(4), ['codex', 'exec', '--model', 'gpt-5.6-terra']);
+  assert.deepEqual(argv.slice(5), ['codex', 'exec', '--model', 'gpt-5.6-terra']);
+  // Omitting the path stays valid: an empty slot means "publish nothing",
+  // which keeps every non-kernel caller of superviseArgv working unchanged.
+  assert.deepEqual(superviseArgv(['x']).slice(4), ['', 'x']);
 });
 
 test('killing the kernel reaps the executor instead of orphaning it', async (t) => {

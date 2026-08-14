@@ -384,6 +384,36 @@ the diff is the change record. A `dispatch_refused` shadow carries
 `shadow_resolution` (or the usual `eligibility`/`write_posture`/
 `constraint_command`).
 
+**Cancelling a running dispatch.** `fadeno dispatches --cancel tag:<handle>`
+(or an id / 8+ character prefix) sends SIGTERM to that dispatch's supervisor,
+which reaps the executor's whole process group:
+
+```bash
+fadeno dispatches --cancel tag:worker-parse-retry-header
+```
+
+This exists because a mid-flight correction otherwise had no path. A dispatch
+proxy is right to refuse folding an amendment into a live dispatch — a second
+executor would race the first on the same files — but until there was a way to
+*stop* the first, a corrected instruction could be neither applied, safely
+re-dispatched, nor aborted. The honest path is cancel, then re-dispatch with
+the corrected prompt; the in-flight work is lost, which is the truth of it,
+since the executor was working from instructions since withdrawn.
+
+Delivering the amendment to the running executor is not possible and is not
+attempted: every driver is a one-shot CLI that read its entire prompt from a
+stdin that has since closed.
+
+The supervisor publishes `{pid, started_at}` to
+`.fadeno/local/inflight/<dispatchId>.json` while it runs and unlinks it on
+exit — the kernel cannot publish this, because `spawnSync` yields a pid only
+once the spawn has already finished. Cancel appends a `dispatch_cancelled` row
+(`supervisor_pid`, `executor_started_at`) and stops there: the kernel still
+writes the completion row when its spawn unblocks, normally
+`signal: "SIGTERM"`. Cancel refuses — writing nothing — when the dispatch has
+already completed, or when no claim exists on this machine, because either
+would mean claiming to have stopped work this call never touched.
+
 **Comparisons.** `fadeno dispatches --comparisons [--json]` scans the ledger,
 pairs every shadow row with its primary via `primary_dispatch_id`, groups pairs
 by challenger executor, and renders per pair: both id8s, archetype,

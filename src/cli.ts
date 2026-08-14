@@ -13,6 +13,7 @@ import {
 } from './commands/dispatch.ts';
 import {
   runDispatches,
+  runDispatchesCancel,
   runDispatchesComparisons,
   runDispatchesOutput,
   type DispatchesResult,
@@ -109,6 +110,7 @@ Usage:
   fadeno decide <run> <option> [flags]  Resolve a pending named human decision
   fadeno runs                           List run ledgers under .fadeno/runs/
   fadeno dispatches [--tail n] [--json] Show which executor ran what (.fadeno/dispatches.jsonl)
+  fadeno dispatches --cancel <id|tag:h> Stop a running dispatch (SIGTERM to its executor group)
   fadeno dispatches --output <id|last> [--wait <s>]  Print a dispatch's output snapshot verbatim
   fadeno dispatches --comparisons       Paired primary/shadow scorecard per challenger
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
@@ -867,6 +869,7 @@ function main(argv: string[]): number {
         file: { type: 'string' },
         source: { type: 'string' },
         output: { type: 'string' },
+        cancel: { type: 'string' },
         commit: { type: 'string' },
         reason: { type: 'string' },
         decision: { type: 'string' },
@@ -1636,6 +1639,21 @@ function main(argv: string[]): number {
           return 0;
         }
         for (const line of result.lines) console.log(line);
+        return 0;
+      }
+      if (values.cancel != null) {
+        const inline = values.cancel.startsWith('tag:') ? values.cancel.slice(4) : null;
+        const result = runDispatchesCancel({
+          dispatchId: inline != null ? '' : values.cancel,
+          tag: inline ?? values.tag,
+        });
+        const how = result.resolvedBy === 'tag' ? ` (tag: ${result.tag})` : '';
+        console.log(`cancel signalled: ${result.dispatchId.slice(0, 8)}${how} — SIGTERM to supervisor ${result.pid}`);
+        // Say what was and was not settled. The executor's process group is
+        // being reaped now; the kernel writes the completion row when its
+        // spawn returns, and only the workspace can say how far the work got.
+        console.log('  the executor and its children are being reaped; the kernel records the completion row.');
+        console.log('  check the workspace before re-dispatching — a cancelled executor may have written already.');
         return 0;
       }
       if (values.output != null) {

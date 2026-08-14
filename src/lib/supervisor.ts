@@ -76,10 +76,25 @@ export function supervisedSpawnError(
 const SUPERVISOR_SOURCE = `
 const SPAWN_FAILED_MARKER = ${JSON.stringify(SPAWN_FAILED_MARKER)};
 const { spawn } = require('node:child_process');
-const [parentRaw, cmd, ...args] = process.argv.slice(1);
+const fs = require('node:fs');
+const [parentRaw, inflightPath, cmd, ...args] = process.argv.slice(1);
 const win = process.platform === 'win32';
 const child = spawn(cmd, args, { stdio: ['pipe', 'inherit', 'inherit'], detached: !win });
 let settled = false;
+
+// The in-flight claim. \`spawnSync\` hands the kernel a pid only once the spawn
+// has *finished*, so the kernel cannot publish this while the executor runs —
+// the supervisor is the only process that knows its own pid in time. Cancel
+// reads this file; its absence means there is nothing running to cancel.
+function dropClaim() {
+  try { if (inflightPath) fs.unlinkSync(inflightPath); } catch {}
+}
+try {
+  if (inflightPath) {
+    fs.writeFileSync(inflightPath, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }));
+  }
+} catch {}
+process.on('exit', dropClaim);
 
 // Prompt bytes: the kernel writes them to our stdin, we stream them down.
 process.stdin.on('error', () => {});
@@ -94,6 +109,7 @@ function reap() {
   } catch {}
   const hard = setTimeout(() => {
     try { if (!win) process.kill(-child.pid, 'SIGKILL'); } catch {}
+    dropClaim();
     process.exit(143);
   }, ${KILL_GRACE_MS});
   if (hard.unref) hard.unref();
@@ -140,6 +156,37 @@ child.on('exit', (code, signal) => {
  * the spawn, from the executor's argv — so supervision changes how the process
  * is run without changing what the log says was run.
  */
-export function superviseArgv(command: readonly string[]): string[] {
-  return ['-e', SUPERVISOR_SOURCE, '--', String(process.pid), ...command];
+export function superviseArgv(command: readonly string[], inflightPath = ''): string[] {
+  return ['-e', SUPERVISOR_SOURCE, '--', String(process.pid), inflightPath, ...command];
+}
+
+/**
+ * Repo-relative directory of in-flight claims, one file per open dispatch.
+ *
+ * Per-machine runtime state, so it lives under `.fadeno/local/` with the
+ * prompt and output snapshots: a pid means nothing on another host, and a
+ * claim left behind by a crash must never look like evidence.
+ */
+export const INFLIGHT_DIR = ['.fadeno', 'local', 'inflight'].join('/');
+
+/** What the supervisor publishes while its executor runs. */
+export interface InflightClaim {
+  pid: number;
+  startedAt: string | null;
+}
+
+/**
+ * Read a dispatch's in-flight claim. `null` covers every way there is nothing
+ * to signal — no file, unreadable file, no usable pid — because each of those
+ * means the same thing to a caller: do not claim to have stopped anything.
+ */
+export function readInflightClaim(path: string, read: (p: string) => string): InflightClaim | null {
+  let parsed: { pid?: unknown; started_at?: unknown };
+  try {
+    parsed = JSON.parse(read(path)) as { pid?: unknown; started_at?: unknown };
+  } catch {
+    return null;
+  }
+  if (typeof parsed.pid !== 'number' || !Number.isInteger(parsed.pid) || parsed.pid <= 0) return null;
+  return { pid: parsed.pid, startedAt: typeof parsed.started_at === 'string' ? parsed.started_at : null };
 }

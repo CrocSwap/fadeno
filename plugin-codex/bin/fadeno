@@ -17422,10 +17422,25 @@ function supervisedSpawnError(status, stderr) {
 var SUPERVISOR_SOURCE = `
 const SPAWN_FAILED_MARKER = ${JSON.stringify(SPAWN_FAILED_MARKER)};
 const { spawn } = require('node:child_process');
-const [parentRaw, cmd, ...args] = process.argv.slice(1);
+const fs = require('node:fs');
+const [parentRaw, inflightPath, cmd, ...args] = process.argv.slice(1);
 const win = process.platform === 'win32';
 const child = spawn(cmd, args, { stdio: ['pipe', 'inherit', 'inherit'], detached: !win });
 let settled = false;
+
+// The in-flight claim. \`spawnSync\` hands the kernel a pid only once the spawn
+// has *finished*, so the kernel cannot publish this while the executor runs \u2014
+// the supervisor is the only process that knows its own pid in time. Cancel
+// reads this file; its absence means there is nothing running to cancel.
+function dropClaim() {
+  try { if (inflightPath) fs.unlinkSync(inflightPath); } catch {}
+}
+try {
+  if (inflightPath) {
+    fs.writeFileSync(inflightPath, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }));
+  }
+} catch {}
+process.on('exit', dropClaim);
 
 // Prompt bytes: the kernel writes them to our stdin, we stream them down.
 process.stdin.on('error', () => {});
@@ -17440,6 +17455,7 @@ function reap() {
   } catch {}
   const hard = setTimeout(() => {
     try { if (!win) process.kill(-child.pid, 'SIGKILL'); } catch {}
+    dropClaim();
     process.exit(143);
   }, ${KILL_GRACE_MS});
   if (hard.unref) hard.unref();
@@ -17478,8 +17494,19 @@ child.on('exit', (code, signal) => {
   }
 });
 `;
-function superviseArgv(command2) {
-  return ["-e", SUPERVISOR_SOURCE, "--", String(process.pid), ...command2];
+function superviseArgv(command2, inflightPath = "") {
+  return ["-e", SUPERVISOR_SOURCE, "--", String(process.pid), inflightPath, ...command2];
+}
+var INFLIGHT_DIR = [".fadeno", "local", "inflight"].join("/");
+function readInflightClaim(path, read) {
+  let parsed;
+  try {
+    parsed = JSON.parse(read(path));
+  } catch {
+    return null;
+  }
+  if (typeof parsed.pid !== "number" || !Number.isInteger(parsed.pid) || parsed.pid <= 0) return null;
+  return { pid: parsed.pid, startedAt: typeof parsed.started_at === "string" ? parsed.started_at : null };
 }
 
 // src/lib/source-control.ts
@@ -17919,12 +17946,14 @@ function runDispatch(opts) {
     ...identity
   });
   (0, import_node_fs12.mkdirSync)((0, import_node_path12.join)(repoRoot, ".fadeno", "local", "outputs"), { recursive: true });
+  (0, import_node_fs12.mkdirSync)((0, import_node_path12.join)(repoRoot, ...INFLIGHT_DIR.split("/")), { recursive: true });
+  const inflightAbs = (0, import_node_path12.join)(repoRoot, ...INFLIGHT_DIR.split("/"), `${dispatchId}.json`);
   const outputFd = (0, import_node_fs12.openSync)(outputAbs, "w");
   const workspaceBefore = workspaceFingerprint(repoRoot);
   const started = Date.now();
   let spawned;
   try {
-    spawned = (0, import_node_child_process2.spawnSync)(process.execPath, superviseArgv(command2), {
+    spawned = (0, import_node_child_process2.spawnSync)(process.execPath, superviseArgv(command2, inflightAbs), {
       input: prompt,
       encoding: "utf8",
       cwd: repoRoot,
@@ -17936,6 +17965,10 @@ function runDispatch(opts) {
       stdio: ["pipe", outputFd, "pipe"]
     });
   } finally {
+    try {
+      (0, import_node_fs12.rmSync)(inflightAbs, { force: true });
+    } catch {
+    }
     (0, import_node_fs12.closeSync)(outputFd);
   }
   const durationMs = Date.now() - started;
@@ -19109,6 +19142,55 @@ function runDispatchesComparisons(opts = {}) {
     lines,
     summary
   };
+}
+function appendCancellationRow(repoRoot, fields, now) {
+  appendEvidenceRow(repoRoot, {
+    format: DISPATCHES_FORMAT,
+    timestamp: now.toISOString(),
+    event: "dispatch_cancelled",
+    ...fields
+  });
+}
+function runDispatchesCancel(opts = {}) {
+  const tag = opts.tag?.trim() ? opts.tag.trim() : null;
+  const query = (opts.dispatchId ?? "").trim();
+  if (tag == null && query === "") {
+    throw new DispatchesCommandError(
+      "name what to cancel: a dispatch id, an 8+ character prefix, or tag:<handle>."
+    );
+  }
+  const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
+  const { byId, lastWithSnapshot, requestOrder } = loadOutputRecords((0, import_node_path13.join)(repoRoot, DISPATCHES_FILE));
+  const { record: record2, resolvedBy } = tag != null ? resolveByTag(tag, byId, requestOrder) : resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
+  if (record2.completed) {
+    throw new DispatchesCommandError(
+      `dispatch ${record2.dispatchId.slice(0, 8)} has already completed \u2014 nothing to cancel. Read what it produced with \`fadeno dispatches --output ${record2.tag != null ? `tag:${record2.tag}` : record2.dispatchId.slice(0, 8)}\`.`
+    );
+  }
+  const claimPath = (0, import_node_path13.join)(repoRoot, ...INFLIGHT_DIR.split("/"), `${record2.dispatchId}.json`);
+  const claim = readInflightClaim(claimPath, (path) => (0, import_node_fs13.readFileSync)(path, "utf8"));
+  if (claim == null) {
+    throw new DispatchesCommandError(
+      `dispatch ${record2.dispatchId.slice(0, 8)} has no running executor on this machine (no in-flight claim), yet its evidence shows no completion. Nothing was signalled. Check the workspace before re-dispatching \u2014 an executor killed with its kernel can have left work behind.`
+    );
+  }
+  const kill = opts.kill ?? ((pid, signal) => {
+    process.kill(pid, signal);
+  });
+  try {
+    kill(claim.pid, "SIGTERM");
+  } catch (err) {
+    throw new DispatchesCommandError(
+      `could not signal the executor for ${record2.dispatchId.slice(0, 8)} (pid ${claim.pid}): ${err.message}`
+    );
+  }
+  appendCancellationRow(repoRoot, {
+    dispatch_id: record2.dispatchId,
+    ...record2.tag != null ? { tag: record2.tag } : {},
+    supervisor_pid: claim.pid,
+    ...claim.startedAt != null ? { executor_started_at: claim.startedAt } : {}
+  }, opts.now ?? /* @__PURE__ */ new Date());
+  return { dispatchId: record2.dispatchId, tag: record2.tag, pid: claim.pid, resolvedBy };
 }
 
 // src/commands/diagram.ts
@@ -25729,7 +25811,15 @@ var COMMANDS = {
   drive: command({ "--bind": { kind: "bind" }, "--max-transitions": { kind: "free" }, "--loadout": LOADOUT }, ["run"]),
   decide: command({ "--decision": { kind: "free" }, "--feedback": { kind: "free" } }, ["run", "free"]),
   runs: command({}),
-  dispatches: command({ "--tail": { kind: "free" }, "--json": NONE }),
+  dispatches: command({
+    "--tail": { kind: "free" },
+    "--json": NONE,
+    "--comparisons": NONE,
+    "--output": { kind: "free" },
+    "--wait": { kind: "free" },
+    "--tag": { kind: "free" },
+    "--cancel": { kind: "free" }
+  }),
   show: command({ "--legacy": NONE, "--events": NONE }, ["run"]),
   verify: command({ "--latest": NONE, "--allow-failed": NONE, "--legacy": NONE }, ["run"]),
   plugin: command({ "--codex": NONE, "--force": NONE }, ["path"]),
@@ -27448,6 +27538,7 @@ Usage:
   fadeno decide <run> <option> [flags]  Resolve a pending named human decision
   fadeno runs                           List run ledgers under .fadeno/runs/
   fadeno dispatches [--tail n] [--json] Show which executor ran what (.fadeno/dispatches.jsonl)
+  fadeno dispatches --cancel <id|tag:h> Stop a running dispatch (SIGTERM to its executor group)
   fadeno dispatches --output <id|last> [--wait <s>]  Print a dispatch's output snapshot verbatim
   fadeno dispatches --comparisons       Paired primary/shadow scorecard per challenger
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
@@ -28105,6 +28196,7 @@ function main(argv) {
         file: { type: "string" },
         source: { type: "string" },
         output: { type: "string" },
+        cancel: { type: "string" },
         commit: { type: "string" },
         reason: { type: "string" },
         decision: { type: "string" },
@@ -28816,6 +28908,18 @@ resolution${via}:`);
           return 0;
         }
         for (const line of result2.lines) console.log(line);
+        return 0;
+      }
+      if (values.cancel != null) {
+        const inline = values.cancel.startsWith("tag:") ? values.cancel.slice(4) : null;
+        const result2 = runDispatchesCancel({
+          dispatchId: inline != null ? "" : values.cancel,
+          tag: inline ?? values.tag
+        });
+        const how = result2.resolvedBy === "tag" ? ` (tag: ${result2.tag})` : "";
+        console.log(`cancel signalled: ${result2.dispatchId.slice(0, 8)}${how} \u2014 SIGTERM to supervisor ${result2.pid}`);
+        console.log("  the executor and its children are being reaped; the kernel records the completion row.");
+        console.log("  check the workspace before re-dispatching \u2014 a cancelled executor may have written already.");
         return 0;
       }
       if (values.output != null) {
