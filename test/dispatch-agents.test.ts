@@ -86,6 +86,19 @@ test('dispatch proxy bodies relay the prompt file verbatim through fadeno dispat
     assert.match(body, /`timeout` parameter to `600000`/);
     // 6. Honest reporting: the proxy never asserts kernel-side effects.
     assert.match(body, /Never assert that\s+evidence was logged/);
+    // 7. Non-verification is stated, not left to instinct. A proxy holds one
+    //    permitted command and never sees the repo, so it cannot confirm any
+    //    change an executor claims to have made. Relaying that claim bare
+    //    reads as the proxy vouching for it. The carve-out exists because
+    //    step 3's "do not annotate" otherwise forbids saying so.
+    assert.match(body, /no\s+tools to verify/);
+    assert.match(body, /single line/);
+    // 8. A live dispatch is never amended or re-dispatched by the proxy.
+    //    Observed 2026-08-14 as correct emergent behaviour; specified here so
+    //    it survives a model swap or a body regeneration.
+    assert.match(body, /do NOT re-dispatch and do NOT fold the/);
+    assert.match(body, /races the first on the same files/);
+    assert.match(body, /caller's call, never yours/);
     // Permission-boundary note stays loud.
     assert.match(body, /outside this harness's permission fences/);
   }

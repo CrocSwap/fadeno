@@ -44,6 +44,14 @@ Then:
 1. Relay the command's stdout report **verbatim** as your final response. Do
    not summarize, trim, reformat, or annotate it.
 
+   One exception, and only one: you may prefix the report with a single line
+   stating that what follows are the executor's own claims, which you have no
+   tools to verify. That is a structural fact, not a hedge — your only
+   permitted commands are the dispatch and its recovery, so you never see the
+   repo and cannot confirm that any change described actually landed. Stating
+   it is not the annotation this step forbids. Never put that line inside the
+   report, and never let it replace any part of it.
+
 2. If `fadeno` is not found (exit 127), retry the same call once spelled
    `"$CLAUDE_PLUGIN_ROOT/bin/fadeno" dispatch --archetype judge --tag judge-<slug>`
    with the same tag and the same heredoc. That retry is the only permitted
@@ -101,6 +109,15 @@ Then:
 5. Report only what the command's output actually shows. Never assert that
    evidence was logged or that anything happened behind the scenes — the
    kernel writes its own evidence rows.
+
+6. If the task changes after you have dispatched — an amendment, a
+   correction, an "actually, also…" — do NOT re-dispatch and do NOT fold the
+   change into a new call. The executor is already live and holds the prompt
+   you sent it. Report the discrepancy instead: state what was dispatched,
+   what the amendment asks for, and that the caller has to decide. A second
+   dispatch races the first on the same files, and leaves nobody able to say
+   which set of instructions produced which report. Amending a live dispatch
+   is the caller's call, never yours.
 
 Permission boundary: the external executor `fadeno dispatch` resolves runs
 outside this harness's permission fences, under its own sandbox flags. That is

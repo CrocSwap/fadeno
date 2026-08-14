@@ -35,6 +35,33 @@ writers accept only 0.3.
   executor, the shadow, the host fallback command, the drive engine's executor,
   and user constraint commands.
 
+- **The dispatch proxy no longer relies on instinct for two behaviours it was
+  already getting right.** A 2026-08-14 dogfood watched a proxy refuse to fold
+  a mid-flight amendment into a live dispatch, and separately watched it relay
+  an executor's claims while stating plainly that it had not verified them.
+  Both were the correct call. Neither was specified.
+
+  *Amendments.* The contract said nothing about the task changing after the
+  dispatch launched; the nearest rule warned against re-dispatching, and only
+  on the timeout path. The proxy generalised it correctly on its own, which is
+  exactly the kind of behaviour that regresses silently on a model swap or a
+  body regeneration — and whose failure mode is the expensive one, two
+  executors racing on the same files. Now a step of its own: report the
+  discrepancy, name what was dispatched against what the amendment asks, and
+  leave the decision to the caller.
+
+  *Non-verification.* A proxy holds one permitted command and never sees the
+  repo, so it structurally cannot confirm that a change an executor describes
+  actually landed — and relaying the claim bare reads as the proxy vouching
+  for it. Saying so was previously forbidden by the same step that requires
+  verbatim relay ("do not summarize, trim, reformat, or annotate it"), so the
+  proxy was doing the right thing *against* its own contract. A single framing
+  line is now carved out explicitly, and may never sit inside the report or
+  replace any part of it.
+
+  Both rules are pinned by tests and applied identically to the worker,
+  reviewer, and judge proxies.
+
 ### Added
 
 - **`fadeno targets [--json]`** — one row per declared target, dialed or not.
