@@ -15,6 +15,54 @@ writers accept only 0.3.
 
 ### Added
 
+- **Two new driver harnesses: Antigravity and OpenCode.** The starter catalog
+  gains a `google` target/route (Antigravity's `agy`) and an `openrouter` one
+  (OpenCode), reachable from all four host route tables. Both are *drivers* —
+  harnesses Fadeno spawns as subprocesses — so neither adds a `HarnessId`, a
+  `templates/` tree, an `init` flag, or a plugin: the whole change is catalog
+  plus docs. `fadeno loadout set worker gemini-default` (or
+  `opencode-default`) is enough to route worker-shaped work to either.
+
+  Both are verified live end to end through the kernel: prompt on stdin,
+  `outcome: ok`, report on stdout, correlated evidence pair — and for
+  Antigravity, a file actually written into the repo, which is the part that
+  matters below.
+
+  Antigravity is used instead of gemini-cli because that client is retired for
+  individuals and dies at auth with `IneligibleTierError`. Its route encodes
+  three findings, and **two of the three rejected spellings fail by exiting 0
+  having done nothing** — the silent-success shape this project keeps hunting:
+
+  - `agy -p` requires a value, and `agy -p -` does not read stdin. It takes the
+    literal `-` as the prompt and answers "How can I help you today?" with exit
+    0. Piping with no `-p` is the spelling that delivers the prompt.
+  - Without `--new-project`, agy has no active workspace and writes to
+    `~/.gemini/antigravity-cli/scratch/` while reporting "I have created the
+    file" and exiting 0 — the repo gets nothing. `--add-dir .` does not fix it;
+    only an absolute path does, which a static route cannot express.
+  - `--effort` accepts only `low|medium|high`, so passing `{reasoning_effort}`
+    would hard-fail every target left at the `default` effort. Antigravity
+    encodes effort in the model id (`gemini-3.1-pro-high`) instead.
+
+  OpenCode is multi-provider (`-m provider/model`), so its provider key is the
+  credential holder and the route prefixes it (`-m openrouter/{model}`) rather
+  than pushing an OpenCode-shaped id into the harness-neutral target.
+
+  All three Antigravity flags are pinned by tests, because each one is exactly
+  the kind of flag a later reader would delete as redundant.
+
+- **A glossary for hosts versus drivers** (`docs/architecture.md`). Fadeno
+  relates to a harness in exactly two ways and had a good word for only one of
+  them. A **host** is the harness Fadeno runs inside: typed as `HarnessId`,
+  needs a `templates/<host>/` adapter, selects which `routes:` sub-table
+  compiles. A **driver** is a harness Fadeno invokes as a subprocess: needs
+  nothing but argv, and appears only as a route's `command:`. The reliable test
+  is whether it needs a `templates/<x>/` tree. Also records three standing name
+  collisions — `grok` as both a `HarnessId` and a route binary, `adapter` as
+  both a host surface and a delivery mechanism, and `Target` (a host in
+  `init.ts`) versus `targets:` (a provider/model profile) — documented rather
+  than renamed because all three are load-bearing.
+
 - **Both harnesses work at once; the host in evidence decides the routes.**
   Almost everything about a harness was already per-harness and additive —
   `installations.json` records Claude and Codex independently, Codex role

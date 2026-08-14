@@ -46,6 +46,85 @@ resolved by `src/lib/user-paths.ts` with injectable XDG/Windows overrides.
 Setup does not synthesize a catalog from installed CLI probes: the bundled v2
 targets/routes are working defaults, and the user file is an optional override.
 
+## Glossary: harnesses, hosts, and drivers
+
+Fadeno relates to an agentic coding environment in exactly two ways, and the
+codebase names one of them much better than the other. This section fixes the
+vocabulary so the two can be said apart.
+
+**Harness** — an agentic coding environment: Codex, Claude Code, Grok Build.
+A harness is not a role; it takes one of the two roles below, and the same
+harness can take both.
+
+**Host** — the harness Fadeno is *running inside*. This is a typed axis:
+`HarnessId = 'codex' | 'claude' | 'grok' | 'standalone'`
+(`src/lib/executors.ts`), resolved by `activeHarness()` as `FADENO_HARNESS` →
+the harness recorded by `fadeno setup` → `standalone`. A host needs an
+**adapter** — a `templates/<host>/` tree emitted by `fadeno init --<host>` —
+because Fadeno has to install skills, subagents, bootstrap files, and hooks
+into it. The active host also selects which `routes:` sub-table compiles; a v2
+catalog with no `routes.<active host>` mapping is a hard error, not a
+silent no-op. `standalone` is the *no host* value: Fadeno invoked from a plain
+shell, with no adapter tree.
+
+**Driver** — a harness Fadeno *invokes as a subprocess* to do work. A driver
+needs nothing from Fadeno but argv: no `HarnessId`, no `templates/` tree, no
+plugin, no init step. It appears only as the `command:` of a route entry, so
+the schema never interprets it as a harness at all:
+
+```yaml
+routes:
+  claude:                                    # the HOST is Claude Code
+    xai:
+      command: [grok, --prompt-file, /dev/stdin, --model, "{model}"]
+```
+
+Grok is the driver there and Claude Code is the host. There is no Grok plugin
+in that session and none is needed. The reverse pairing is equally valid, and a
+harness can be both at once: on a `host: true` route the `command:` is the
+*fallback* delivery, so a Claude-hosted session can also drive `claude -p`
+out of process.
+
+The reliable test for which role you mean: **does it need a
+`templates/<x>/` tree?** Host yes, driver no.
+
+### The delivery axis (how a slot is filled)
+
+- **Host delivery** — `host: true` on a route (pre-0.6 alias `native: true`),
+  compiling to `adapter: 'host'`: an in-session subagent of the host, bound to
+  the requesting archetype at resolution time.
+- **Command delivery** — `adapter: 'command'`: argv with the prompt on stdin,
+  out of process. This is the only way a driver is ever reached.
+
+### The identity axis (who does the work)
+
+- **Target** — a harness-neutral provider/model/effort profile. Carries
+  identity only: never argv, never permission flags.
+- **Route** — how the *host* reaches a provider. Keyed by harness id, then by
+  provider, with an exact target-name key winning over its provider entry.
+- **Loadout** — an archetype → target map; **archetype** — a
+  `worker`/`reviewer`/`judge`-shaped slot.
+
+### Three name collisions to watch for
+
+These predate the host/driver split and are load-bearing in existing code, so
+they are documented rather than renamed:
+
+1. **`grok` names two things.** A `HarnessId` (host axis) and a binary inside a
+   command route (driver axis). Same token, opposite roles.
+2. **`adapter` names two things.** A host-side surface (`templates/grok/` is
+   "the Grok Build adapter") and a delivery mechanism
+   (`adapter: 'command' | 'host'`).
+3. **`Target` names two things.** `type Target = 'codex' | 'claude' | 'grok'`
+   in `src/commands/init.ts` is a *host*, while `targets:` in
+   `executors.yaml` is a provider/model profile. `extending.md` → *Add a
+   harness target* collides both within one section.
+
+Nothing in the schema branches on host-versus-driver today — a driver is
+indistinguishable from a raw model endpoint, because both are just argv. That
+is not an oversight: the driven side genuinely requires nothing from Fadeno,
+so it has never needed a schema slot.
+
 ## The CLI
 
 ### Dispatch and the view layer (`src/cli.ts`)

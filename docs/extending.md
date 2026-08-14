@@ -131,6 +131,46 @@ A harness route normally keys by provider. A route keyed by the exact target
 name takes precedence, allowing a special sandbox or read-only command policy
 without making the loadout itself harness-specific.
 
+### Add a driver
+
+A **driver** is a harness Fadeno spawns as a subprocess (see
+[`architecture.md`](architecture.md) → *Glossary*). Adding one is a
+catalog-only change — no `templates/` tree, no `init` flag, no `HarnessId`:
+declare a target for the provider, then add a `command:` route entry for that
+provider under **every** host table, since how a driver is invoked does not
+depend on which harness invokes it. The contract each driver must meet is the
+command-delivery contract: **prompt on stdin, report on stdout, chatter on
+stderr, non-zero exit on failure.** Verify that by hand before shipping the
+entry — a headless mode that stalls on an approval prompt exits 0 having done
+nothing, which is the failure this project keeps finding.
+
+Drivers shipped in the starter catalog:
+
+| Provider key | Driver | Headless spelling | Effort dial |
+|---|---|---|---|
+| `openai` | Codex | `codex exec … -` | `-c model_reasoning_effort=` |
+| `anthropic` | Claude Code | `claude -p` | — |
+| `xai` | Grok | `grok --prompt-file /dev/stdin --always-approve` | `--reasoning-effort` |
+| `google` | Antigravity (`agy`) | piped stdin, `--new-project --dangerously-skip-permissions` | in the model id |
+| `openrouter` | OpenCode | `opencode run --auto` | `--variant` |
+
+The gotchas the shipped entries encode, each found by probing rather than by
+reading docs:
+
+- **Antigravity** replaces gemini-cli, which is retired for individuals and
+  dies at auth with `IneligibleTierError`. Its two traps both exit 0 having
+  done nothing. `agy -p` requires a value and `agy -p -` does *not* read stdin
+  — it answers the literal `-` with "How can I help you today?"; piping with no
+  `-p` is what actually delivers the prompt. And without `--new-project` it has
+  no active workspace, so it writes to `~/.gemini/antigravity-cli/scratch/`,
+  reports "I have created the file", and leaves the repo untouched
+  (`--add-dir .` does not fix this; only an absolute path does, which a static
+  route cannot express). Its `--effort` accepts only `low|medium|high`, so
+  passing `{reasoning_effort}` would hard-fail any `default`-effort target;
+  effort lives in the model id instead (`gemini-3.1-pro-high`).
+- **OpenCode** is multi-provider — `-m` takes `provider/model` — so its provider
+  key is the credential holder and the route prefixes it: `-m openrouter/{model}`.
+
 A route entry may also declare `write_access: <bool>` — whether that route's
 **command** delivery can mutate the workspace — beside an optional top-level
 `archetypes:` mapping whose values accept `requires_write`, `fallback`, and
@@ -487,6 +527,12 @@ are available from the bundled plugin runtime. `init` / `init --data-only` and
 ---
 
 ## Add a harness target
+
+This section is about adding a **host** — a harness Fadeno runs *inside*. A
+harness Fadeno merely *drives* as a subprocess needs none of this; it is just
+the `command:` of a route entry. See
+[`architecture.md`](architecture.md) → *Glossary: harnesses, hosts, and drivers*,
+which also records the `Target`/`targets:` collision this section straddles.
 
 Adding a host (e.g. Cursor) is mostly **adapter work** — the skill *content* is a
 cross-harness standard and is reused unchanged. Define the four adapter surfaces

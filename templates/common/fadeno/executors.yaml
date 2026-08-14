@@ -33,6 +33,23 @@ targets:
     # a model id, and the CLI exits 1 before doing any work.
     model: grok-4.6
     reasoning_effort: high
+  gemini-default:
+    provider: google
+    # Delivered by Antigravity (`agy`), not the retired gemini-cli. `agy models`
+    # lists the set; effort is baked into the id (gemini-3.1-pro-high,
+    # gemini-3.7-flash-medium, …), which is why the route passes no effort flag
+    # and `reasoning_effort` below is advisory only. Swap the model here rather
+    # than editing the route.
+    model: gemini-3.1-pro-high
+    reasoning_effort: high
+  opencode-default:
+    provider: openrouter
+    # OpenCode is a multi-provider driver: it fronts whichever provider holds
+    # the credential, so the provider key is the credential holder (openrouter)
+    # and the model keeps that provider's own namespaced id. `opencode models`
+    # lists the installed set.
+    model: anthropic/claude-opus-4.8
+    reasoning_effort: high
 
 routes:
   codex:
@@ -48,6 +65,12 @@ routes:
     xai:
       command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
       write_access: true
+    google:
+      command: [agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text]
+      write_access: true
+    openrouter:
+      command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto]
+      write_access: true
   claude:
     current-host:
       host: true
@@ -60,6 +83,12 @@ routes:
       write_access: true
     xai:
       command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
+      write_access: true
+    google:
+      command: [agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text]
+      write_access: true
+    openrouter:
+      command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto]
       write_access: true
   grok:
     current-host:
@@ -74,6 +103,12 @@ routes:
     anthropic:
       command: [claude, -p, --model, "{model}"]
       write_access: false
+    google:
+      command: [agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text]
+      write_access: true
+    openrouter:
+      command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto]
+      write_access: true
   standalone:
     current-host:
       host: true
@@ -86,6 +121,49 @@ routes:
     xai:
       command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
       write_access: true
+    google:
+      command: [agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text]
+      write_access: true
+    openrouter:
+      command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto]
+      write_access: true
+
+# Driver routes (harnesses Fadeno spawns, never runs inside — see
+# docs/architecture.md → "Glossary: harnesses, hosts, and drivers"). They carry
+# the same argv under every host, because how a driver is invoked does not
+# depend on which harness is doing the invoking.
+#
+# google → Antigravity (`agy`). NOT gemini-cli: that client is retired for
+# individuals and dies at auth with "IneligibleTierError", pointing at
+# Antigravity as its replacement.
+#
+# Three things here are load-bearing, each verified live 2026-08-13, and each
+# of the two rejected spellings fails by exiting 0 having done nothing:
+#
+#   1. No `-p`. `agy -p` requires a value, and `agy -p -` does NOT read stdin —
+#      it takes "-" as the literal prompt and answers "How can I help you
+#      today?" with exit 0. Piping stdin with no `-p` is the spelling that
+#      actually delivers the prompt.
+#   2. `--new-project` binds the workspace to the current directory. Without
+#      it, agy has no active workspace and silently writes to
+#      ~/.gemini/antigravity-cli/scratch/ instead of the repo — reporting "I
+#      have created the file" and exiting 0 while the repo gets nothing.
+#      `--add-dir .` does NOT fix this (only an absolute path does, which a
+#      static route cannot express), so `--new-project` is the one spelling
+#      that works from argv alone.
+#   3. No effort flag. `--effort` only accepts low|medium|high, so passing
+#      {reasoning_effort} would hard-fail every target left at the `default`
+#      effort. Antigravity encodes effort in the model id instead.
+#
+# `--dangerously-skip-permissions` is the headless-approval case documented for
+# xai below. Verified end to end: prompt on stdin, exit 0, report on stdout,
+# and a file actually written into the repo.
+#
+# openrouter → opencode. `--variant` is OpenCode's reasoning-effort dial and
+# accepts `default` as well as high/max/minimal, so {reasoning_effort}
+# substitutes safely. `--auto` is its headless approval flag. Verified live
+# 2026-08-13 end to end: prompt on stdin, exit 0, report on stdout, banner on
+# stderr.
 
 # Archetype write policy: worker-shaped dispatches mutate the workspace, so a
 # command route declared `write_access: false` is refused for them before any
