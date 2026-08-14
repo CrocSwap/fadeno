@@ -263,6 +263,25 @@ export function withoutHarnessIdentity(env: NodeJS.ProcessEnv): NodeJS.ProcessEn
   return next;
 }
 
+/**
+ * Point `PWD` at the directory the child is actually being started in.
+ *
+ * `spawnSync({ cwd })` chdirs the child but leaves the inherited `PWD`
+ * untouched, and a shell always rewrites `PWD` when it cds — so a tool that
+ * resolves its project root from `$PWD` rather than `getcwd()` silently
+ * operates on the *parent's* directory. OpenCode does exactly this, verified
+ * 2026-08-14: a shadow spawned into its isolated worktree wrote into the real
+ * workspace instead, while the untouched worktree yielded `diff_bytes: 0`. The
+ * damage was to the tree shadow exists to protect, and the ledger recorded
+ * nothing — silent, which is the worst shape.
+ *
+ * Every spawn that sets `cwd` must pass this, because "does this executor
+ * trust PWD?" is not a property Fadeno can know per driver.
+ */
+export function atCwd(env: NodeJS.ProcessEnv, cwd: string): NodeJS.ProcessEnv {
+  return { ...env, PWD: cwd };
+}
+
 export interface LoadedExecutorProfile {
   profile: ExecutorProfile;
   path: string;

@@ -14536,6 +14536,9 @@ function withoutHarnessIdentity(env) {
   }
   return next;
 }
+function atCwd(env, cwd) {
+  return { ...env, PWD: cwd };
+}
 var EXECUTORS_FILE = (0, import_node_path6.join)(".fadeno", "executors.yaml");
 function isMapping(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -16624,6 +16627,7 @@ function evaluateConstraint(profile, context, opts) {
   try {
     result = spawn(bin, command2.slice(1), {
       cwd: opts.cwd,
+      env: atCwd(process.env, opts.cwd),
       input: JSON.stringify(context),
       encoding: "utf8"
     });
@@ -17927,7 +17931,7 @@ function runDispatch(opts) {
       // The child is a different session, usually a different host. Inheriting
       // our harness identity would tell a `codex exec` worker it is inside
       // Claude; it establishes its own.
-      env: withoutHarnessIdentity(process.env),
+      env: atCwd(withoutHarnessIdentity(process.env), repoRoot),
       maxBuffer: SPAWN_MAX_BUFFER,
       stdio: ["pipe", outputFd, "pipe"]
     });
@@ -18144,6 +18148,9 @@ function runDispatch(opts) {
                       input: promptBytes,
                       encoding: "utf8",
                       cwd: shadowWorktreeAbs,
+                      // Without this the shadow escapes its worktree and edits
+                      // the real workspace; see `atCwd`.
+                      env: atCwd(withoutHarnessIdentity(process.env), shadowWorktreeAbs),
                       maxBuffer: SPAWN_MAX_BUFFER,
                       stdio: ["pipe", sfd, "pipe"]
                     });
@@ -18314,6 +18321,7 @@ function runDispatchFallback(opts) {
     input: prompt,
     encoding: "utf8",
     cwd: repoRoot,
+    env: atCwd(process.env, repoRoot),
     maxBuffer: SPAWN_MAX_BUFFER
   });
   const stdout = spawned.stdout ?? "";
@@ -21490,6 +21498,7 @@ ${repairCore}`;
     input: stdin,
     encoding: "utf8",
     cwd: ctx.repoRoot,
+    env: atCwd(process.env, ctx.repoRoot),
     maxBuffer: SPAWN_MAX_BUFFER2
   });
   if (session === "fresh" && sessionId == null && spec.sessionIdPattern != null) {

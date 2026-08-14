@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { atCwd } from './executors.ts';
 import type { ExecutorProfile, WritePosture } from './executors.ts';
 
 /**
@@ -59,6 +60,7 @@ export function evaluateConstraint(
   try {
     result = spawn(bin, command.slice(1), {
       cwd: opts.cwd,
+      env: atCwd(process.env, opts.cwd),
       input: JSON.stringify(context),
       encoding: 'utf8',
     });

@@ -13,6 +13,28 @@ Native dispatch advances the run ledger to format 0.3; format 0.2 and
 unversioned traces remain explicitly readable through `--legacy`, while
 writers accept only 0.3.
 
+### Fixed
+
+- **A shadow could edit the workspace it exists to protect, and the ledger said
+  it hadn't.** `spawnSync({ cwd })` chdirs the child but leaves the inherited
+  `PWD` pointing at the parent's directory, and a shell always rewrites `PWD`
+  when it cds. A tool that resolves its project root from `$PWD` rather than
+  `getcwd()` therefore operated on the *main workspace* instead of the isolated
+  worktree it was launched in. OpenCode does exactly this: a shadow told to
+  append a line appended it to the real `README.md`, while the untouched
+  worktree yielded `diff_bytes: 0`. Both halves are bad — the write landed on
+  the tree shadow promises never to touch, and the evidence recorded a clean
+  run, so nothing surfaced it.
+
+  Fadeno's isolation was otherwise correct (`git worktree add --detach`,
+  `cwd` set, diff taken from the worktree), which is why this survived: an
+  instrumented probe spawned the same way reported the right `cwd` and wrote to
+  the right tree. Only executors that trust `PWD` escaped, and whether a given
+  driver does is not something Fadeno can know per driver — so `atCwd` now sets
+  `PWD` alongside `cwd` at every spawn site that sets one: the primary
+  executor, the shadow, the host fallback command, the drive engine's executor,
+  and user constraint commands.
+
 ### Added
 
 - **`fadeno targets [--json]`** — one row per declared target, dialed or not.

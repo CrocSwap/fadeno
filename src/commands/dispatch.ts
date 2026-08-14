@@ -26,6 +26,7 @@ import {
   resolveRole,
   roleResolutionEchoLabel,
   withoutHarnessIdentity,
+  atCwd,
   type ActiveLoadout,
   type ExecutorProfile,
   type ExecutorSpec,
@@ -833,7 +834,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       // The child is a different session, usually a different host. Inheriting
       // our harness identity would tell a `codex exec` worker it is inside
       // Claude; it establishes its own.
-      env: withoutHarnessIdentity(process.env),
+      env: atCwd(withoutHarnessIdentity(process.env), repoRoot),
       maxBuffer: SPAWN_MAX_BUFFER,
       stdio: ['pipe', outputFd, 'pipe'],
     });
@@ -1079,6 +1080,9 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
                       input: promptBytes,
                       encoding: 'utf8',
                       cwd: shadowWorktreeAbs,
+                      // Without this the shadow escapes its worktree and edits
+                      // the real workspace; see `atCwd`.
+                      env: atCwd(withoutHarnessIdentity(process.env), shadowWorktreeAbs),
                       maxBuffer: SPAWN_MAX_BUFFER,
                       stdio: ['pipe', sfd, 'pipe'],
                     });
@@ -1253,6 +1257,7 @@ export function runDispatchFallback(opts: DispatchFallbackOptions): DispatchFall
     input: prompt,
     encoding: 'utf8',
     cwd: repoRoot,
+    env: atCwd(process.env, repoRoot),
     maxBuffer: SPAWN_MAX_BUFFER,
   });
   const stdout = spawned.stdout ?? '';

@@ -39,6 +39,7 @@ import {
   type LocalLoadoutState,
   type RoleResolutionSource,
   type WritePosture,
+  atCwd,
 } from '../lib/executors.ts';
 import { computeNext, FlowCursorError, type NextComputation } from '../lib/flow-cursor.ts';
 import { findRepoRoot } from '../lib/paths.ts';
@@ -749,6 +750,7 @@ function dispatchOnce(
     input: stdin,
     encoding: 'utf8',
     cwd: ctx.repoRoot,
+    env: atCwd(process.env, ctx.repoRoot),
     maxBuffer: SPAWN_MAX_BUFFER,
   });
 
