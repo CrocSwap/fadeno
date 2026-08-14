@@ -15,6 +15,22 @@ writers accept only 0.3.
 
 ### Added
 
+- **`fadeno targets [--json]`** — one row per declared target, dialed or not.
+  `loadout list` answers "what runs for this archetype", so a target no loadout
+  references appeared nowhere: the only ways to discover one were reading
+  `executors.yaml` or misspelling a name and reading the candidate list off the
+  error. Both drivers added below ship with no loadout, which was about to make
+  that the normal case rather than the corner.
+
+  Each row names the **driver binary** it would spawn, and delivery is compiled
+  against the active host — so the same target reads `host` on its own harness
+  and `command (claude)` elsewhere, which is the host/driver distinction made
+  visible per row. `DIALED BY —` means reachable but bound to nothing.
+  `[fallback read-only]` on a host row is deliberately qualified: `write_access`
+  only ever describes a route's command delivery, so an unqualified "read-only"
+  there would claim something about the in-session agent that the field cannot
+  know.
+
 - **Two new driver harnesses: Antigravity and OpenCode.** The starter catalog
   gains a `google` target/route (Antigravity's `agy`) and an `openrouter` one
   (OpenCode), reachable from all four host route tables. Both are *drivers* —

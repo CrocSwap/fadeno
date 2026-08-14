@@ -23705,6 +23705,52 @@ ${runYaml}`, "utf8");
   return { runId, runDir, playbook, inputs: recordedInputs, resolution };
 }
 
+// src/commands/targets.ts
+var TargetsError = class extends Error {
+};
+function runTargets(opts = {}) {
+  const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
+  const harness = activeHarness(void 0, opts.userPathOptions);
+  let profile;
+  try {
+    profile = loadLayeredProfile(repoRoot, opts.userPathOptions, harness).profile;
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new TargetsError(err.message);
+    throw err;
+  }
+  const loadoutsFor = /* @__PURE__ */ new Map();
+  for (const [loadout, slots] of Object.entries(profile.loadouts)) {
+    for (const target of Object.values(slots)) {
+      if (!loadoutsFor.has(target)) loadoutsFor.set(target, /* @__PURE__ */ new Set());
+      loadoutsFor.get(target).add(loadout);
+    }
+  }
+  const bindingsFor = /* @__PURE__ */ new Map();
+  for (const [role, target] of Object.entries(profile.bindings)) {
+    if (!bindingsFor.has(target)) bindingsFor.set(target, /* @__PURE__ */ new Set());
+    bindingsFor.get(target).add(role);
+  }
+  const targets = Object.keys(profile.executors).sort().map((name) => {
+    const spec = profile.executors[name];
+    const restricted = {};
+    for (const [archetype, state] of Object.entries(spec.eligibility)) {
+      if (state !== "eligible") restricted[archetype] = state;
+    }
+    return {
+      name,
+      provider: spec.provider ?? null,
+      model: spec.model ?? null,
+      adapter: spec.adapter,
+      driver: spec.adapter === "command" ? spec.command[0] ?? null : null,
+      writeAccess: spec.writeAccess,
+      loadouts: [...loadoutsFor.get(name) ?? []].sort(),
+      bindings: [...bindingsFor.get(name) ?? []].sort(),
+      restricted
+    };
+  });
+  return { harness, targets };
+}
+
 // src/commands/next.ts
 var import_node_fs24 = require("node:fs");
 var import_yaml13 = __toESM(require_dist(), 1);
@@ -25583,6 +25629,7 @@ var COMMANDS = {
   setup: command({ "--codex": NONE, "--claude": NONE, "--non-interactive": NONE }),
   use: command({ "--project": NONE, "--codex": NONE }, ["loadout"]),
   status: command({ "--verbose": NONE }),
+  targets: command({ "--json": NONE }),
   doctor: command({ "--codex": NONE, "--claude": NONE }),
   vendor: command({ "--codex": NONE, "--claude": NONE, "--grok": NONE, "--with-hooks": NONE, "--force": NONE }),
   uninstall: command({ "--codex": NONE, "--claude": NONE, "--all": NONE, "--purge-user-data": NONE, "--force": NONE }),
@@ -27369,6 +27416,7 @@ Usage:
   fadeno validate [file] [--schema K]   Validate playbooks (schema + references + semantics)
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
+  fadeno targets [--json]               List every declared target: model slug, delivery, loadouts
   fadeno loadout [list|resolve|use|set|clear] Show, resolve, pin, or clear the active loadout
   fadeno loadout set <archetype> <target> Override one archetype on top of the active loadout
   fadeno loadout clear [archetype]      Drop the whole pin, or one session override
@@ -27845,6 +27893,45 @@ function printLoadoutShow(result) {
   console.log(`
 available: ${names.join(", ")}`);
 }
+function printTargets(result) {
+  if (result.targets.length === 0) {
+    console.log("No targets declared (add a `targets:` mapping to .fadeno/executors.yaml).");
+    return;
+  }
+  const rows = result.targets.map((target) => {
+    const delivery = target.adapter === "host" ? "host" : `command (${target.driver ?? "?"})`;
+    const notes = [];
+    if (target.writeAccess === false) notes.push(target.adapter === "host" ? "fallback read-only" : "read-only");
+    for (const [archetype, state] of Object.entries(target.restricted)) notes.push(`${archetype}: ${state}`);
+    const dials = [...target.loadouts, ...target.bindings.map((role) => `${role} (binding)`)];
+    const DIALS_SHOWN = 3;
+    const shown = dials.slice(0, DIALS_SHOWN).join(", ");
+    const dialText = dials.length === 0 ? "\u2014" : dials.length <= DIALS_SHOWN ? shown : `${shown}, +${dials.length - DIALS_SHOWN} more`;
+    return {
+      name: target.name,
+      provider: target.provider ?? "\u2014",
+      model: target.model ?? "\u2014",
+      delivery,
+      dials: dialText,
+      notes: notes.join("; ")
+    };
+  });
+  const width = (pick, header2) => Math.max(header2.length, ...rows.map((row) => pick(row).length));
+  const w = {
+    name: width((r) => r.name, "NAME"),
+    provider: width((r) => r.provider, "PROVIDER"),
+    model: width((r) => r.model, "MODEL"),
+    delivery: width((r) => r.delivery, "DELIVERY")
+  };
+  console.log(`harness ${result.harness} \u2014 delivery is resolved against this host`);
+  console.log(
+    `${"NAME".padEnd(w.name)}  ${"PROVIDER".padEnd(w.provider)}  ${"MODEL".padEnd(w.model)}  ${"DELIVERY".padEnd(w.delivery)}  DIALED BY`
+  );
+  for (const row of rows) {
+    const line = `${row.name.padEnd(w.name)}  ${row.provider.padEnd(w.provider)}  ${row.model.padEnd(w.model)}  ${row.delivery.padEnd(w.delivery)}  ${row.dials}`;
+    console.log(row.notes === "" ? line : `${line}  [${row.notes}]`);
+  }
+}
 function printLoadoutList(result) {
   printStalePin(result.stalePin);
   printStaleOverrides(result.staleOverrides);
@@ -28067,6 +28154,15 @@ function main(argv) {
       if (result.restartRequired && !result.notices.some((notice) => notice.includes("fallbacks work now"))) {
         console.log("  restart required: start a fresh Codex session.");
       }
+      return 0;
+    }
+    case "targets": {
+      const result = runTargets({});
+      if (values.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      printTargets(result);
       return 0;
     }
     case "status": {

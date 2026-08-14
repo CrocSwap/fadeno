@@ -39,6 +39,7 @@ import {
   type StaleShadowView,
 } from './commands/loadout.ts';
 import { runNewRun } from './commands/new-run.ts';
+import { runTargets, type TargetsResult } from './commands/targets.ts';
 import { runCodexPlugin, runPlugin } from './commands/plugin.ts';
 import { runNext } from './commands/next.ts';
 import { runPrompt } from './commands/prompt.ts';
@@ -85,6 +86,7 @@ Usage:
   fadeno validate [file] [--schema K]   Validate playbooks (schema + references + semantics)
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
+  fadeno targets [--json]               List every declared target: model slug, delivery, loadouts
   fadeno loadout [list|resolve|use|set|clear] Show, resolve, pin, or clear the active loadout
   fadeno loadout set <archetype> <target> Override one archetype on top of the active loadout
   fadeno loadout clear [archetype]      Drop the whole pin, or one session override
@@ -636,6 +638,62 @@ function printLoadoutShow(result: LoadoutShowResult): void {
   console.log(`\navailable: ${names.join(', ')}`);
 }
 
+function printTargets(result: TargetsResult): void {
+  if (result.targets.length === 0) {
+    console.log('No targets declared (add a `targets:` mapping to .fadeno/executors.yaml).');
+    return;
+  }
+  const rows = result.targets.map((target) => {
+    // Name the binary, not just "command": which driver a target spawns is the
+    // whole question this listing exists to answer.
+    const delivery = target.adapter === 'host' ? 'host' : `command (${target.driver ?? '?'})`;
+    const notes: string[] = [];
+    // `write_access` always describes the *command* delivery. On a host row
+    // that is the fallback command, never the in-session agent, so an
+    // unqualified "read-only" there would claim something about the host's
+    // own permissions that this field cannot know.
+    if (target.writeAccess === false) notes.push(target.adapter === 'host' ? 'fallback read-only' : 'read-only');
+    for (const [archetype, state] of Object.entries(target.restricted)) notes.push(`${archetype}: ${state}`);
+    // An em dash, not an empty cell: "reachable but bound to nothing" is a
+    // fact worth reading, and it is the state every new driver starts in.
+    const dials = [...target.loadouts, ...target.bindings.map((role) => `${role} (binding)`)];
+    // A catalog with per-role bindings puts a dozen names in this column and
+    // wraps the table into noise. Cap it, but never silently: the count of
+    // what is not shown is part of the row, and --json carries all of them.
+    const DIALS_SHOWN = 3;
+    const shown = dials.slice(0, DIALS_SHOWN).join(', ');
+    const dialText =
+      dials.length === 0 ? '—' : dials.length <= DIALS_SHOWN ? shown : `${shown}, +${dials.length - DIALS_SHOWN} more`;
+    return {
+      name: target.name,
+      provider: target.provider ?? '—',
+      model: target.model ?? '—',
+      delivery,
+      dials: dialText,
+      notes: notes.join('; '),
+    };
+  });
+  const width = (pick: (row: (typeof rows)[number]) => string, header: string): number =>
+    Math.max(header.length, ...rows.map((row) => pick(row).length));
+  const w = {
+    name: width((r) => r.name, 'NAME'),
+    provider: width((r) => r.provider, 'PROVIDER'),
+    model: width((r) => r.model, 'MODEL'),
+    delivery: width((r) => r.delivery, 'DELIVERY'),
+  };
+  console.log(`harness ${result.harness} — delivery is resolved against this host`);
+  console.log(
+    `${'NAME'.padEnd(w.name)}  ${'PROVIDER'.padEnd(w.provider)}  ${'MODEL'.padEnd(w.model)}  ` +
+      `${'DELIVERY'.padEnd(w.delivery)}  DIALED BY`,
+  );
+  for (const row of rows) {
+    const line =
+      `${row.name.padEnd(w.name)}  ${row.provider.padEnd(w.provider)}  ${row.model.padEnd(w.model)}  ` +
+      `${row.delivery.padEnd(w.delivery)}  ${row.dials}`;
+    console.log(row.notes === '' ? line : `${line}  [${row.notes}]`);
+  }
+}
+
 function printLoadoutList(result: LoadoutListResult): void {
   printStalePin(result.stalePin);
   printStaleOverrides(result.staleOverrides);
@@ -873,6 +931,15 @@ function main(argv: string[]): number {
       if (result.restartRequired && !result.notices.some((notice) => notice.includes('fallbacks work now'))) {
         console.log('  restart required: start a fresh Codex session.');
       }
+      return 0;
+    }
+    case 'targets': {
+      const result = runTargets({});
+      if (values.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      printTargets(result);
       return 0;
     }
     case 'status': {

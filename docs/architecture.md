@@ -166,6 +166,7 @@ assert on return values and filesystem effects instead of scraping stdout.
 | `runPlugin` | `EmitResult[]` + `outDir` | Generates `plugin/` from templates. |
 | `runSetup` / `runUse` | user paths, probes, loadout state, restart notices | Safe host-default setup and user-scoped selection. |
 | `runStatus` / `runDoctor` | effective routing / findings | Read-only diagnostics. |
+| `runTargets` | every declared target + its delivery | The catalog listing `loadout list` cannot give: one row per target whether or not a loadout dials it, with the driver binary named and delivery compiled against the active host. |
 | `runVendor` / `runEvidencePromote` | lock / promoted receipt | Explicit committed project capability and evidence. |
 | `runUninstall` / `runClean` / `runUnvendor` | removed + preserved paths | Ownership-aware user removal, repo runtime cleanup, and digest-backed vendored removal. |
 | `runCompletion` / `runCompletionCandidates` | Bash source + candidate strings | Emits the `fadeno completion bash` script and serves its read-only candidate protocol. |

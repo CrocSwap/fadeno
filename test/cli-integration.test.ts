@@ -231,3 +231,45 @@ test('built CLI prompt renders to stdout, errors cleanly, and emits stable JSON'
   assert.equal(parsed.actor, 'architect_fable');
   assert.equal(parsed.recorded, 'preview');
 });
+
+test('targets: the rendered table names undialed targets and never truncates silently', (t) => {
+  // The printer is where the "no silent caps" rule has to hold: a catalog with
+  // per-role bindings puts a dozen names in one column, and a bare truncation
+  // would read as "these are all of them".
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(
+    join(root, '.fadeno', 'executors.yaml'),
+    stringifyYaml({
+      schema_version: 2,
+      targets: {
+        dialed: { provider: 'google', model: 'gemini-3.1-pro-high' },
+        undialed: { provider: 'openrouter', model: 'anthropic/claude-opus-4.8' },
+      },
+      routes: {
+        claude: {
+          google: { command: ['agy', '--model', '{model}', '--new-project'], write_access: true },
+          openrouter: { command: ['opencode', 'run', '-m', 'openrouter/{model}'], write_access: true },
+        },
+      },
+      loadouts: { main: { worker: 'dialed' } },
+      default_loadout: 'main',
+      bindings: { r1: 'dialed', r2: 'dialed', r3: 'dialed', r4: 'dialed' },
+    }),
+  );
+
+  const { status, stdout } = cliSplit(root, ['targets'], { ...process.env, FADENO_HARNESS: 'claude' });
+  assert.equal(status, 0, stdout);
+  // The driver binary, not just "command".
+  assert.match(stdout, /undialed\s+openrouter\s+anthropic\/claude-opus-4\.8\s+command \(opencode\)/);
+  // Reachable but bound to nothing reads as a fact, not a blank.
+  assert.match(stdout, /command \(opencode\)\s+—/);
+  // five dials (one loadout + four bindings), three shown, remainder counted.
+  assert.match(stdout, /\+2 more/);
+
+  const json = cliSplit(root, ['targets', '--json'], { ...process.env, FADENO_HARNESS: 'claude' });
+  const parsed = JSON.parse(json.stdout) as { targets: Array<{ name: string; bindings: string[] }> };
+  const dialed = parsed.targets.find((entry) => entry.name === 'dialed');
+  // Whatever the table caps, --json still carries every one of them.
+  assert.deepEqual(dialed?.bindings, ['r1', 'r2', 'r3', 'r4']);
+});

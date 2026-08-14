@@ -131,6 +131,31 @@ A harness route normally keys by provider. A route keyed by the exact target
 name takes precedence, allowing a special sandbox or read-only command policy
 without making the loadout itself harness-specific.
 
+### See what is declared
+
+`fadeno targets` lists every declared target, dialed or not, with delivery
+compiled against the active host:
+
+```
+harness claude — delivery is resolved against this host
+NAME              PROVIDER      MODEL                      DELIVERY            DIALED BY
+claude-default    anthropic     opus                       host                claude  [fallback read-only]
+gemini-default    google        gemini-3.1-pro-high        command (agy)       —
+opencode-default  openrouter    anthropic/claude-opus-4.8  command (opencode)  —
+grok-default      xai           grok-4.6                   command (grok)      grok-worker
+```
+
+`loadout list` answers a different question — what runs for each archetype — so
+a target no loadout references does not appear there at all. Both shipped
+drivers are in that position deliberately. `DIALED BY —` means reachable but
+bound to nothing: dial it with `fadeno loadout set <archetype> <target>`.
+
+The `DELIVERY` column is the host/driver split per row. A target flips between
+`host` and `command (<binary>)` depending on which harness is active; a driver
+reads `command` under every host. `[fallback read-only]` on a host row is not a
+claim about the in-session agent — `write_access` only ever describes a route's
+command delivery.
+
 ### Add a driver
 
 A **driver** is a harness Fadeno spawns as a subprocess (see

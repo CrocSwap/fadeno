@@ -64,6 +64,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   setup: command({ '--codex': NONE, '--claude': NONE, '--non-interactive': NONE }),
   use: command({ '--project': NONE, '--codex': NONE }, ['loadout']),
   status: command({ '--verbose': NONE }),
+  targets: command({ '--json': NONE }),
   doctor: command({ '--codex': NONE, '--claude': NONE }),
   vendor: command({ '--codex': NONE, '--claude': NONE, '--grok': NONE, '--with-hooks': NONE, '--force': NONE }),
   uninstall: command({ '--codex': NONE, '--claude': NONE, '--all': NONE, '--purge-user-data': NONE, '--force': NONE }),
