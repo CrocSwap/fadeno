@@ -659,10 +659,13 @@ interface OutputRecord {
   /**
    * Epoch ms this dispatch actually ended; `null` while still open.
    *
-   * Derived as `requestedAt + duration_ms` rather than read from the
-   * completion row's `timestamp`, because the kernel stamps both rows of a
-   * pair from the same clock reading — the completion row's timestamp is when
-   * the dispatch *started*. `duration_ms` is where the end time really lives.
+   * Still derived as `requestedAt + duration_ms` rather than read from the
+   * completion row's `timestamp`, even though the kernel now stamps that row
+   * with the real end time. The log is append-only and long-lived: every row
+   * written before that fix carries the dispatch's *start* in both rows, so
+   * trusting the stamp would collapse those dispatches to zero length and stop
+   * detecting the overlaps this exists to catch. The two agree on new rows by
+   * construction; on old ones only the derivation is right.
    */
   completedAt: number | null;
 }

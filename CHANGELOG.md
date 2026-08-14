@@ -391,6 +391,26 @@ writers accept only 0.3.
 
 ### Fixed
 
+- **A completion row was stamped with the dispatch's start time.** Both rows of
+  a pair were written from the same clock reading, so `dispatch_completed`
+  carried `timestamp` = when the dispatch *began*. The one field a reader
+  reaches for to ask "when did this finish?" quietly answered a different
+  question, and a ten-minute dispatch looked instantaneous. Found while
+  computing dispatch overlap for the `last` refusal below, where reading the
+  stamp would have detected no concurrency at all.
+
+  The completion row now records the real end, derived as `now + duration_ms`
+  rather than read fresh off the wall clock, so `completed - requested ==
+  duration_ms` holds exactly and an injected clock still yields a deterministic
+  log. Shadow completions follow the same rule. A 2s dispatch that recorded
+  `0.000s` between its rows now records `2.349s`.
+
+  Readers keep deriving the end from `requested_at + duration_ms` instead of
+  trusting the stamp. The log is append-only: every row written before this
+  carries the start in both places, and trusting the stamp would collapse those
+  dispatches to zero length and stop detecting their overlaps. The two agree on
+  new rows by construction; on old ones only the derivation is right.
+
 - **Timeout recovery returned another agent's report.** The first real exercise
   of the rc.22 recovery path, on 2026-08-14: a proxy timed out, ran
   `dispatches --output last`, and got a concurrent dispatch's output. Its own

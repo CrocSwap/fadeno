@@ -857,9 +857,21 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     error: spawnFailure,
     outputBytes,
   });
+  // When this dispatch actually ended, not when it began.
+  //
+  // Both rows of a pair used to be stamped from the same clock reading, so a
+  // `dispatch_completed` row's `timestamp` was the dispatch's *start* — the one
+  // field a reader would reach for to answer "when did this finish?" answered a
+  // different question, silently, and a ten-minute dispatch looked instantaneous.
+  //
+  // Derived from `now` plus the measured duration rather than read fresh off
+  // the wall clock, so the pair stays internally consistent (`completed -
+  // requested == duration_ms`, exactly) and an injected clock still produces a
+  // deterministic log.
+  const completedAt = new Date(now.getTime() + durationMs);
   const row: Record<string, unknown> = {
     format: DISPATCHES_FORMAT,
-    timestamp: now.toISOString(),
+    timestamp: completedAt.toISOString(),
     event: 'dispatch_completed',
     ...identity,
     exit_code: spawnFailure != null ? null : spawned.status,
@@ -1108,7 +1120,11 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
                   });
                   const sRow: Record<string, unknown> = {
                     format: DISPATCHES_FORMAT,
-                    timestamp: new Date().toISOString(),
+                    // Same rule as the primary: start plus measured duration,
+                    // so `completed - requested == duration_ms` holds for
+                    // shadow pairs too rather than drifting by whatever the
+                    // wall clock read between the two writes.
+                    timestamp: new Date(shadowNow.getTime() + sDuration).toISOString(),
                     event: 'dispatch_completed',
                     ...shadowIdentity,
                     exit_code: sSpawned!.error != null ? null : sSpawned!.status,

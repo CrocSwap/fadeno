@@ -134,7 +134,19 @@ test('dispatch: resolves the archetype via the active loadout, relays the report
   assert.ok(!('exit_code' in requested));
   assert.ok(!('output_sha256' in requested));
   assert.ok(!('duration_ms' in requested));
-  assert.equal(completed.timestamp, now.toISOString());
+  // The completion row is stamped when the dispatch ENDED, not when it began.
+  // Both rows used to share one clock reading, which made the field a reader
+  // reaches for to ask "when did this finish?" quietly answer "when it
+  // started" — and a ten-minute dispatch look instantaneous.
+  assert.equal(requested.timestamp, now.toISOString());
+  assert.equal(
+    completed.timestamp,
+    new Date(now.getTime() + (completed.duration_ms as number)).toISOString(),
+  );
+  assert.ok(
+    Date.parse(completed.timestamp as string) >= Date.parse(requested.timestamp as string),
+    'a dispatch cannot finish before it starts',
+  );
   assert.equal(completed.archetype, 'worker');
   assert.equal(completed.role, null);
   assert.deepEqual(completed.loadout, { name: 'main', source: 'default' });

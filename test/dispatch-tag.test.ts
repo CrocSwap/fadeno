@@ -191,6 +191,65 @@ test('the spawn echo names the tag, and nags when there is none', (t) => {
   assert.ok(untagged.some((line) => line.includes('no --tag given')));
 });
 
+test('a slow dispatch records when it ended, and the pair agrees with its duration', (t) => {
+  // The stamp is the answer to "when did this finish?", so it has to move with
+  // the work. A 400ms dispatch that reports a zero-length lifetime is the bug.
+  const root = seedExecutor(t, ['node', '-e', "setTimeout(()=>process.stdout.write('slow'),400)"]);
+  const at = new Date('2026-08-14T09:00:00.000Z');
+  runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, env: null, now: at, tag: 'worker-slow' });
+
+  const [requested, completed] = readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as Record<string, unknown>) as [
+    Record<string, unknown>,
+    Record<string, unknown>,
+  ];
+  const start = Date.parse(requested.timestamp as string);
+  const end = Date.parse(completed.timestamp as string);
+  assert.equal(start, at.getTime(), 'the request row still stamps the start');
+  assert.ok(end > start, 'the completion row must not repeat the start');
+  assert.ok(end - start >= 400, `a 400ms executor produced a ${end - start}ms lifetime`);
+  // Internally consistent by construction, which is what lets a reader use
+  // either the stamp or the duration and get the same answer.
+  assert.equal(end - start, completed.duration_ms);
+});
+
+test('overlap detection still works on rows written before the stamp was fixed', (t) => {
+  // The log is append-only, so pre-fix rows — both stamped with the start —
+  // outlive the fix. Reading the stamp alone would collapse them to zero
+  // length and stop refusing the exact concurrency this was built to catch.
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  const legacy = (id: string, event: string, extra: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      format: '0.2',
+      // Both rows share the start, the way the kernel used to write them.
+      timestamp: '2026-08-14T12:00:00.000Z',
+      event,
+      dispatch_id: id,
+      archetype: 'worker',
+      output_snapshot: `.fadeno/local/outputs/${id}.md`,
+      ...extra,
+    });
+  writeFileSync(
+    join(root, '.fadeno', 'dispatches.jsonl'),
+    [
+      legacy('aaaaaaaa-1111-4000-8000-000000000001', 'dispatch_requested'),
+      legacy('bbbbbbbb-2222-4000-8000-000000000002', 'dispatch_requested'),
+      legacy('aaaaaaaa-1111-4000-8000-000000000001', 'dispatch_completed', { duration_ms: 9_000 }),
+      legacy('bbbbbbbb-2222-4000-8000-000000000002', 'dispatch_completed', { duration_ms: 9_000 }),
+    ].join('\n') + '\n',
+  );
+  mkdirSync(join(root, '.fadeno', 'local', 'outputs'), { recursive: true });
+  for (const id of ['aaaaaaaa-1111-4000-8000-000000000001', 'bbbbbbbb-2222-4000-8000-000000000002']) {
+    writeFileSync(join(root, '.fadeno', 'local', 'outputs', `${id}.md`), 'x');
+  }
+
+  const err = captureError(() => runDispatchesOutput({ repoRoot: root, dispatchId: 'last' }));
+  assert.match(err.message, /ran concurrently/);
+});
+
 test('waiting by tag settles on that dispatch and does not drift', (t) => {
   const root = seedExecutor(t, echoing('first'));
   runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, env: null, tag: 'worker-first' });

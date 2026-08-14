@@ -13939,7 +13939,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.24";
+  if (true) return "0.6.0-rc.25";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -17946,9 +17946,10 @@ function runDispatch(opts) {
     error: spawnFailure,
     outputBytes
   });
+  const completedAt = new Date(now.getTime() + durationMs);
   const row = {
     format: DISPATCHES_FORMAT,
-    timestamp: now.toISOString(),
+    timestamp: completedAt.toISOString(),
     event: "dispatch_completed",
     ...identity,
     exit_code: spawnFailure != null ? null : spawned.status,
@@ -18189,7 +18190,11 @@ function runDispatch(opts) {
                   });
                   const sRow = {
                     format: DISPATCHES_FORMAT,
-                    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+                    // Same rule as the primary: start plus measured duration,
+                    // so `completed - requested == duration_ms` holds for
+                    // shadow pairs too rather than drifting by whatever the
+                    // wall clock read between the two writes.
+                    timestamp: new Date(shadowNow.getTime() + sDuration).toISOString(),
                     event: "dispatch_completed",
                     ...shadowIdentity,
                     exit_code: sSpawned.error != null ? null : sSpawned.status,
