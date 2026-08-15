@@ -32,49 +32,49 @@ type Side = {
 
 type Claim = { id: string; doc: Side; src: Side };
 
-const LOADOUTS = 'docs/experimental/loadouts-and-dispatch.md';
+const DIALS = 'docs/experimental/dials-and-registry.md';
 const EXTENDING = 'docs/extending.md';
 
 const CLAIMS: Claim[] = [
   {
     id: 'two-row-evidence',
-    doc: { files: [LOADOUTS], patterns: [/dispatch_requested/, /dispatch_completed/] },
+    doc: { files: [DIALS], patterns: [/dispatch_requested/, /dispatch_completed/] },
     src: { files: ['src/commands/dispatch.ts'], patterns: [/dispatch_requested/, /dispatch_completed/] },
   },
   {
     id: 'host-delivery-row',
-    doc: { files: [LOADOUTS], patterns: [/host_delivery/] },
+    doc: { files: [DIALS], patterns: [/host_delivery/] },
     src: { files: ['templates/claude/hooks/dispatch-steering.mjs'], patterns: [/host_delivery/] },
   },
   {
     id: 'write-access-field',
-    doc: { files: [LOADOUTS, EXTENDING], patterns: [/write_access/] },
+    doc: { files: [DIALS, EXTENDING], patterns: [/write_access/] },
     src: { files: ['src/lib/executors.ts'], patterns: [/write_access/] },
   },
   {
     id: 'requires-write-field',
-    doc: { files: [LOADOUTS], patterns: [/requires_write/] },
+    doc: { files: [DIALS], patterns: [/requires_write/] },
     src: { files: ['src/lib/executors.ts'], patterns: [/requires_write/] },
   },
   {
     id: 'relay-attestation',
-    doc: { files: [LOADOUTS], patterns: [/relay_attested/] },
+    doc: { files: [DIALS], patterns: [/relay_attested/] },
     src: { files: ['src/commands/dispatch.ts'], patterns: [/relay_attested/] },
   },
   {
     id: 'stdin-relay-contract',
-    doc: { files: [LOADOUTS], patterns: [/FADENO_PROMPT/] },
+    doc: { files: [DIALS], patterns: [/FADENO_PROMPT/] },
     src: { files: ['templates/claude/claude-agents/dispatch-worker.md'], patterns: [/FADENO_PROMPT/] },
   },
   {
     id: 'surface-version-stamp',
-    doc: { files: [LOADOUTS, EXTENDING], patterns: [/\[fadeno /] },
+    doc: { files: [DIALS, EXTENDING], patterns: [/\[fadeno /] },
     src: { files: ['src/commands/plugin.ts'], patterns: [/stampSurfaceVersion/] },
   },
   {
-    id: 'schema-v2-catalog',
-    doc: { files: [LOADOUTS], patterns: [/schema_version: 2/] },
-    src: { files: ['templates/common/fadeno/executors.yaml'], patterns: [/schema_version: 2/] },
+    id: 'schema-v3-catalog',
+    doc: { files: [DIALS], patterns: [/schema_version: 3/] },
+    src: { files: ['src/lib/executors.ts'], patterns: [/schema_version: 3/, /schemaVersion/] },
   },
   {
     id: 'dispatches-command',
@@ -83,32 +83,32 @@ const CLAIMS: Claim[] = [
   },
   {
     id: 'hook-version-stamp',
-    doc: { files: [LOADOUTS], patterns: [/hook_version/] },
+    doc: { files: [DIALS], patterns: [/hook_version/] },
     src: { files: ['templates/claude/hooks/dispatch-steering.mjs'], patterns: [/HOOK_VERSION/] },
   },
   {
     id: 'write-conflict-enforcement',
-    doc: { files: [LOADOUTS], patterns: [/write_conflict/, /write_access_denied/] },
+    doc: { files: [DIALS], patterns: [/write_conflict/, /write_access_denied/] },
     src: { files: ['src/commands/steering.ts'], patterns: [/write_conflict/] },
   },
   {
     id: 'dispatches-format',
-    doc: { files: [LOADOUTS], patterns: [/format: "0\.2"/, /\[legacy\]/] },
-    src: { files: ['src/commands/dispatch.ts'], patterns: [/DISPATCHES_FORMAT = '0\.2'/] },
+    doc: { files: [DIALS], patterns: [/format: "1\.0"/, /\[legacy\]/] },
+    src: { files: ['src/commands/dispatch.ts'], patterns: [/DISPATCHES_FORMAT = '1\.0'/] },
   },
   {
-    id: 'session-slot-overrides',
-    doc: { files: [LOADOUTS], patterns: [/loadout set/, /OVERRIDE \(base:/, /resolution: "override"/] },
-    src: { files: ['src/lib/executors.ts'], patterns: [/applicableOverrides/, /'override'/] },
+    id: 'session-dials',
+    doc: { files: [DIALS], patterns: [/fadeno dial/, /session dial/] },
+    src: { files: ['src/commands/dial.ts'], patterns: [/resolveDialCascade/, /'session'/] },
   },
   {
     id: 'archetype-fallback-chains',
-    doc: { files: [LOADOUTS], patterns: [/requires_write: forbidden/, /fallback/, /resolved_via/] },
+    doc: { files: [DIALS], patterns: [/requires_write: forbidden/, /fallback/, /resolved_via/] },
     src: { files: ['src/lib/executors.ts'], patterns: [/'forbidden'/, /resolvedVia/] },
   },
   {
     id: 'constraint-tiers',
-    doc: { files: [LOADOUTS], patterns: [/distinct_provider_from_inputs/, /shadow_only/, /constraints:/] },
+    doc: { files: [DIALS], patterns: [/distinct_provider_from_inputs/, /shadow_only/, /constraints:/] },
     src: {
       files: ['src/lib/executors.ts', 'src/lib/constraints.ts'],
       patterns: [/'shadow_only'/, /distinctProviderFromInputs/, /ConstraintError/],
@@ -121,18 +121,53 @@ const CLAIMS: Claim[] = [
   },
   {
     id: 'shadow-evidence-fields',
-    doc: { files: [LOADOUTS, EXTENDING], patterns: [/shadow/, /primary_dispatch_id/, /diff_snapshot/, /shadow_source/] },
+    doc: { files: [DIALS, EXTENDING], patterns: [/shadow/, /primary_dispatch_id/, /diff_snapshot/, /shadow_source/] },
     src: { files: ['src/commands/dispatches.ts', 'src/commands/dispatch.ts'], patterns: [/shadow/, /primary_dispatch_id/, /diff_snapshot/, /shadow_source/] },
   },
   {
     id: 'shadow-comparisons-surface',
-    doc: { files: [LOADOUTS, EXTENDING], patterns: [/--comparisons/, /ModelComparison/] },
+    doc: { files: [DIALS, EXTENDING], patterns: [/--comparisons/, /ModelComparison/] },
     src: { files: ['src/commands/dispatches.ts'], patterns: [/runDispatchesComparisons/, /ModelComparison/] },
   },
   {
     id: 'shadow-comparisons-tally',
-    doc: { files: [LOADOUTS, EXTENDING], patterns: [/prefer_challenger/, /prefer_baseline/] },
+    doc: { files: [DIALS, EXTENDING], patterns: [/prefer_challenger/, /prefer_baseline/] },
     src: { files: ['src/commands/dispatches.ts'], patterns: [/preferChallenger/, /preferBaseline/] },
+  },
+  {
+    id: 'models-registry',
+    doc: { files: [DIALS], patterns: [/models:/, /unregistered_model_driver/] },
+    src: { files: ['src/lib/executors.ts'], patterns: [/models:/, /unregisteredModelDriver/] },
+  },
+  {
+    id: 'dial-grammar',
+    doc: { files: [DIALS], patterns: [/--via/] },
+    src: { files: ['src/cli.ts', 'src/commands/dial.ts'], patterns: [/--via/, /via/] },
+  },
+  {
+    id: 'dial-command',
+    doc: { files: [DIALS], patterns: [/fadeno dial/] },
+    src: { files: ['src/cli.ts'], patterns: [/fadeno dial/] },
+  },
+  {
+    id: 'snapshot-v3',
+    doc: { files: [DIALS], patterns: [/snapshot_version: 3/] },
+    src: { files: ['src/lib/executors.ts'], patterns: [/snapshot_version: 3/, /snapshot_version/] },
+  },
+  {
+    id: 'effort-encoding',
+    doc: { files: [DIALS], patterns: [/effort_encoding/] },
+    src: { files: ['src/lib/executors.ts'], patterns: [/effort_encoding/] },
+  },
+  {
+    id: 'models-command-probe',
+    doc: { files: [DIALS], patterns: [/models_command/] },
+    src: { files: ['src/lib/executors.ts'], patterns: [/models_command/] },
+  },
+  {
+    id: 'verification-cache',
+    doc: { files: [DIALS], patterns: [/model-verifications/] },
+    src: { files: ['src/lib/user-paths.ts'], patterns: [/modelVerificationsFile/, /model-verifications/] },
   },
 ];
 

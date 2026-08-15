@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
-import { parseExecutorProfile, type HarnessId } from '../src/lib/executors.ts';
+import { compileDialRef, parseDialRef, parseExecutorProfile, type HarnessId } from '../src/lib/executors.ts';
 import './helpers.ts';
 
 /**
@@ -11,15 +11,16 @@ import './helpers.ts';
  * **driver** is a harness Fadeno spawns as a subprocess; it needs nothing but
  * argv. The distinction is documented in architecture.md → "Glossary:
  * harnesses, hosts, and drivers", and these pin it for the two drivers added
- * 2026-08-13 (gemini-cli and OpenCode), which shipped with zero host-side
+ * 2026-08-13 (Antigravity and OpenCode), which shipped with zero host-side
  * surface precisely because a driver never earns one.
  */
 
 const CATALOG = join(import.meta.dirname, '..', 'templates', 'common', 'fadeno', 'executors.yaml');
 const HOSTS: HarnessId[] = ['codex', 'claude', 'grok', 'standalone'];
+// v3 registry models whose home provider route is driver-backed
 const DRIVERS = [
-  { target: 'gemini-default', provider: 'google', binary: 'agy' },
-  { target: 'opencode-default', provider: 'openrouter', binary: 'opencode' },
+  { model: 'gemini', provider: 'google', binary: 'agy', routeKey: 'google' },
+  { model: 'opencode-driver', provider: 'openrouter', binary: 'opencode', routeKey: 'openrouter' },
 ] as const;
 
 function catalogFor(harness: HarnessId) {
@@ -32,91 +33,104 @@ test('each driver is reachable as a command delivery from every host', () => {
   // one of them must deliver it out of process.
   for (const harness of HOSTS) {
     const profile = catalogFor(harness);
-    for (const { target, binary } of DRIVERS) {
-      const spec = profile.executors[target];
-      assert.ok(spec, `${harness}: driver target ${target} is missing`);
-      assert.equal(spec.adapter, 'command', `${harness}: ${target} must never be host-delivered`);
-      assert.equal(spec.command?.[0], binary, `${harness}: ${target} must invoke ${binary}`);
+    for (const { provider, binary, routeKey } of DRIVERS) {
+      if (provider === 'openrouter') {
+        // openrouter route is the multi-provider universal driver; check route table directly
+        const route = profile.routes[harness]?.[routeKey];
+        assert.ok(route, `${harness}: route ${routeKey} is missing`);
+        assert.ok(!route.host, `${harness}: ${routeKey} must never be host-delivered`);
+        assert.equal(route.command?.[0], binary, `${harness}: ${routeKey} must invoke ${binary}`);
+      } else {
+        // google/agy: compile via the registry model to exercise driver + effort_encoding
+        const ref = parseDialRef('gemini', 'test');
+        const compiled = compileDialRef(ref, profile);
+        assert.equal(compiled.spec.adapter, 'command', `${harness}: gemini must never be host-delivered`);
+        assert.equal(compiled.spec.command?.[0], binary, `${harness}: gemini must invoke ${binary}`);
+        assert.equal(compiled.provider, provider);
+        assert.equal(compiled.driver, binary);
+      }
     }
   }
 });
 
 test('a driver never becomes a host: no adapter tree and no route table of its own', () => {
-  // `templates/<x>/` is the reliable test for which role a harness has. Adding
-  // one of these dirs would silently promote a driver to a host without any of
-  // the init/plugin work that actually makes a host work.
   const trees = readdirSync(join(import.meta.dirname, '..', 'templates'));
   for (const { binary } of DRIVERS) {
     assert.ok(!trees.includes(binary), `templates/${binary}/ exists — that would make it a host, not a driver`);
   }
-  // A catalog compiles exactly one host's sub-table, so asking for a driver as
-  // the active harness is a hard error rather than an empty-but-valid profile.
+  // A catalog declares routes keyed by host, never by driver — a driver must not own a route table.
+  const profile = catalogFor('standalone');
   for (const { binary } of DRIVERS) {
-    assert.throws(
-      () => catalogFor(binary as HarnessId),
-      /routes/,
-      `routes.${binary} resolved; a driver must not own a route table`,
-    );
+    assert.ok(!(binary in profile.routes), `routes.${binary} exists — a driver must not own a route table`);
   }
 });
 
-test('driver targets keep the provider honest', () => {
+test('driver routes keep the provider honest', () => {
   const profile = catalogFor('standalone');
-  for (const { target, provider } of DRIVERS) {
-    assert.equal(profile.executors[target]?.provider, provider, `${target} declares the wrong provider`);
+  // gemini model entry declares google provider
+  assert.equal(profile.models['gemini']?.provider, 'google', 'gemini declares the wrong provider');
+  // openrouter route exists under every harness and is keyed by openrouter
+  for (const harness of HOSTS) {
+    const p = catalogFor(harness);
+    assert.ok(p.routes[harness]?.openrouter, `${harness}: openrouter route missing`);
+    assert.equal(p.routes[harness]?.openrouter?.driver, 'opencode');
   }
-  // OpenCode fronts whichever provider holds the credential, so its model keeps
-  // that provider's own namespaced id and the route prefixes the credential
-  // holder. Losing the prefix silently sends `-m anthropic/...` with no
-  // provider, which OpenCode rejects only at request time.
-  const opencode = profile.executors['opencode-default'];
-  assert.ok(
-    opencode?.command?.includes('openrouter/anthropic/claude-opus-4.8'),
-    `opencode model must resolve provider-namespaced, got ${JSON.stringify(opencode?.command)}`,
-  );
+  // OpenCode spellings: opus has an openrouter spelling via openCode
+  const opusEntry = profile.models['opus'];
+  assert.ok(opusEntry?.spellings?.opencode, 'opus must declare a spelling for opencode');
+  assert.equal(opusEntry.spellings.opencode, 'anthropic/claude-opus-4.8');
+  // Compile opus via opencode to verify spelling + provider-namespaced delivery
+  const viaOpencode = compileDialRef(parseDialRef({ model: 'opus', via: 'opencode' }, 'test'), profile);
+  assert.equal(viaOpencode.modelId, 'anthropic/claude-opus-4.8');
+  assert.equal(viaOpencode.driver, 'opencode');
 });
 
 test('the Antigravity route keeps the three flags that stop it exiting 0 having done nothing', () => {
-  // Every one of these failed *silently* when probed live on 2026-08-13:
-  //   `-p -`        → takes "-" as the prompt, never reads stdin, exit 0.
-  //   no workspace  → writes to ~/.gemini/antigravity-cli/scratch/, exit 0,
-  //                   reports "I have created the file", repo untouched.
-  //   `--effort`    → only low|medium|high, so a `default`-effort target
-  //                   hard-fails (loud, but needlessly).
   for (const harness of HOSTS) {
-    const command = catalogFor(harness).executors['gemini-default']?.command ?? [];
+    const route = catalogFor(harness).routes[harness]?.google;
+    const command = route?.command ?? [];
     assert.ok(!command.includes('-p'), `${harness}: agy -p does not read stdin; the prompt would be dropped`);
     assert.ok(
       command.includes('--new-project'),
       `${harness}: without --new-project agy writes outside the repo and still exits 0`,
     );
     assert.ok(!command.includes('--effort'), `${harness}: --effort rejects the "default" reasoning effort`);
+    // effort_encoding is model-suffix, not a flag
+    assert.equal(route?.effort_encoding, 'model-suffix', `${harness}: google route must declare effort_encoding model-suffix`);
+    // models_command probes verification
+    assert.ok(route?.models_command, `${harness}: google route must declare models_command`);
+  }
+});
+
+test('routes declare models_command for verification', () => {
+  for (const harness of HOSTS) {
+    const profile = catalogFor(harness);
+    for (const key of ['google', 'openrouter', 'xai'] as const) {
+      const route = profile.routes[harness]?.[key];
+      if (route) {
+        assert.ok(route.models_command, `${harness}: ${key} route must declare models_command`);
+        assert.ok(route.models_command!.every((p) => p.length > 0), `${harness}: ${key} models_command has empty part`);
+      }
+    }
   }
 });
 
 test('no route command carries an empty argv element', () => {
-  // gemini-cli documents `-p ''` for headless mode, which would need an empty
-  // element; the route schema rejects those because an empty element is far
-  // more often a YAML slip than an intent. The shipped spelling relies on
-  // piped stdin instead, and this keeps anyone from "fixing" it back.
   for (const harness of HOSTS) {
     const profile = catalogFor(harness);
-    for (const [name, spec] of Object.entries(profile.executors)) {
-      for (const part of spec.command ?? []) {
-        assert.notEqual(part, '', `${harness}: ${name} has an empty argv element`);
+    for (const [key, route] of Object.entries(profile.routes[harness] ?? {})) {
+      for (const part of route.command ?? []) {
+        assert.notEqual(part, '', `${harness}: routes.${key} has an empty argv element`);
       }
     }
   }
 });
 
 test('every driver route can take worker-shaped work', () => {
-  // `archetypes.worker` is `requires_write: required`, so a driver route that
-  // forgot `write_access: true` would be refused before spawning — a failure
-  // that only shows up on first real use.
   for (const harness of HOSTS) {
     const profile = catalogFor(harness);
-    for (const { target } of DRIVERS) {
-      assert.equal(profile.executors[target]?.writeAccess, true, `${harness}: ${target} cannot take worker work`);
+    for (const { routeKey } of DRIVERS) {
+      assert.equal(profile.routes[harness]?.[routeKey]?.write_access, true, `${harness}: ${routeKey} cannot take worker work`);
     }
   }
 });

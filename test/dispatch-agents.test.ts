@@ -48,7 +48,7 @@ test('dispatch proxy descriptions carry the archetype routing phrases', () => {
     assert.match(desc!, /use proactively/i);
     assert.match(
       desc!,
-      new RegExp(`MUST BE USED for ${archetype}-shaped subtasks when a Fadeno loadout is active`),
+      new RegExp(`MUST BE USED for ${archetype}-shaped subtasks when Fadeno dials are active`),
     );
   }
 });

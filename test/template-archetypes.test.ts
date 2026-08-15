@@ -83,13 +83,13 @@ test('starter catalog archetypes: worker is required, generator is forbidden wit
   );
   assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null });
   assert.deepEqual(profile.archetypes.generator, { requiresWrite: 'forbidden', fallback: 'worker', distinctProviderFromInputs: null });
-  for (const [name, slots] of Object.entries(profile.loadouts)) {
-    assert.equal(
-      slots.generator,
-      undefined,
-      `loadout ${JSON.stringify(name)} must not grow a generator slot; the fallback serves it`,
-    );
-  }
+  assert.deepEqual(profile.dials, {}, 'starter catalog ships no repo dials');
+  assert.equal((profile as unknown as Record<string, unknown>).loadouts, undefined, 'starter catalog has no legacy loadouts');
+  assert.equal((profile as unknown as Record<string, unknown>).defaultLoadout, undefined, 'starter catalog has no default_loadout');
+  assert.equal(profile.schemaVersion, 3, 'starter catalog is schema_version 3');
+  assert.ok(Object.keys(profile.models).length >= 6, 'starter catalog declares registry models');
+  // generator needs no explicit slot; the fallback serves it
+  assert.ok(!('generator' in profile.models), 'generator is an archetype, not a model');
 });
 
 test('starter-playbook role names do not encode model names', (t) => {

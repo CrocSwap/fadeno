@@ -20,7 +20,7 @@ Run the resolved executable with the current host identity:
 
 Explain that setup writes user-scoped configuration and may require a fresh host
 session for managed host agents. It probes provider CLIs with read-only version
-checks, keeps `native` selected unless the user explicitly chooses another
-loadout, and never silently falls back after an executor is selected. Use only
+checks, keeps the host-native base selected unless the user explicitly dials
+a model, and never silently falls back after an executor is selected. Use only
 the line matching the current host; never install another harness's integration.
 After setup, use the reported stable managed runtime for subsequent commands.
