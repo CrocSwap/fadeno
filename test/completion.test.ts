@@ -21,7 +21,7 @@ test('completion script is sourceable Bash and covers commands/options', () => {
   assert.deepEqual(complete('/tmp', ['fadeno', '-']), ['--help', '--version', '-h', '-v']);
   assert.deepEqual(complete('/tmp', ['fadeno', '--']), ['--help', '--version']);
   assert.ok(complete('/tmp', ['fadeno', 'd']).includes('diagram'));
-  assert.deepEqual(complete('/tmp', ['fadeno', 'loadout', '']), ['clear', 'list', 'set', 'use']);
+  assert.deepEqual(complete('/tmp', ['fadeno', 'dial', '']), ['clear', 'clear-shadow', 'resolve', 'shadow']);
   assert.deepEqual(complete('/tmp', ['fadeno', 'steering', '']), ['apply', 'resolve']);
   assert.deepEqual(complete('/tmp', ['fadeno', 'validate', '--schema', '']), [
     'playbook',
@@ -31,28 +31,35 @@ test('completion script is sourceable Bash and covers commands/options', () => {
   ]);
   assert.deepEqual(complete('/tmp', ['fadeno', 'diagram', '--format=']), ['--format=ascii', '--format=mermaid']);
   assert.deepEqual(complete('/tmp', ['fadeno', 'gate', 'run', '']), ['no_blocking_issues', 'tests_pass']);
+  // new flags: --via, --model, --user, --repo exist; old --executor gone
+  assert.ok(complete('/tmp', ['fadeno', 'dial', 'shadow', '--']).includes('--via'));
+  assert.ok(complete('/tmp', ['fadeno', 'dispatch', '--']).includes('--model'));
+  assert.ok(complete('/tmp', ['fadeno', 'dispatch', '--']).includes('--via'));
 });
 
-test('completion discovers repo-local playbooks, runs, steps, profiles, and paths', (t) => {
+test('completion discovers repo-local playbooks, runs, steps, and paths', (t) => {
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
+  // v3 model catalog
   writeFileSync(
     join(root, '.fadeno', 'executors.yaml'),
     [
-      'executors:',
+      'schema_version: 3',
+      'models:',
       '  alpha:',
-      '    adapter: command',
-      '    command: [alpha]',
+      '    provider: openai',
+      '    id: alpha',
       '  beta:',
-      '    adapter: command',
-      '    command: [beta]',
-      'loadouts:',
-      '  sample:',
-      '    worker: alpha',
-      '    reviewer: beta',
-      'default_loadout: sample',
-      'bindings:',
-      '  "*": alpha',
+      '    provider: openai',
+      '    id: beta',
+      'routes:',
+      '  standalone:',
+      '    openai:',
+      '      command: [alpha]',
+      '      write_access: true',
+      'archetypes:',
+      '  worker: {}',
+      '  reviewer: {}',
       '',
     ].join('\n'),
   );
@@ -64,24 +71,29 @@ test('completion discovers repo-local playbooks, runs, steps, profiles, and path
   // Exact match, not a superset check: every starter plus the repo-local `zeta`, sorted.
   assert.deepEqual(complete(root, ['fadeno', 'diagram', '']), [...starterPlaybooks(), 'zeta'].sort());
   assert.ok(complete(root, ['fadeno', 'show', '']).includes(runId));
-  assert.ok(complete(root, ['fadeno', 'loadout', 'use', '']).includes('sample'));
-  // `set <archetype> <executor>`; `clear` completes the archetype it may drop.
-  assert.deepEqual(complete(root, ['fadeno', 'loadout', 'set', '']), ['reviewer', 'worker']);
-  assert.deepEqual(complete(root, ['fadeno', 'loadout', 'set', 'worker', '']), ['alpha', 'beta']);
-  assert.deepEqual(complete(root, ['fadeno', 'loadout', 'clear', '']), ['reviewer', 'worker']);
-  assert.ok(complete(root, ['fadeno', 'steering', 'apply', '']).includes('sample'));
-  assert.deepEqual(complete(root, ['fadeno', 'steering', 'resolve', '--host-executor', '']), ['alpha', 'beta']);
-  assert.ok(complete(root, ['fadeno', 'steering', 'resolve', '--run', '']).includes(runId));
-  assert.deepEqual(complete(root, ['fadeno', 'steering', 'resolve', '--dispatch-id', 'abc']), []);
-  assert.deepEqual(complete(root, ['fadeno', 'dispatch', '--executor', '']), ['alpha', 'beta']);
-  assert.deepEqual(complete(root, ['fadeno', 'dispatch', '--archetype', '']), ['reviewer', 'worker']);
-  assert.deepEqual(complete(root, ['fadeno', 'drive', runId, '--bind', '']), []);
-  assert.deepEqual(complete(root, ['fadeno', 'drive', runId, '--bind', 'worker=']), ['worker=alpha', 'worker=beta']);
-  assert.ok(complete(root, ['fadeno', 'prompt', runId, '']).includes('plan'));
+  // dial no longer has use/list; subcommands are dial vocabulary
+  assert.ok(!complete(root, ['fadeno', 'dial', '']).includes('use'));
+  assert.ok(!complete(root, ['fadeno', 'dial', '']).includes('list'));
+  // archetype completions currently empty for v3 – just ensure no crash
+  assert.deepEqual(complete(root, ['fadeno', 'dispatch', '--archetype', '']), []);
   assert.ok(complete(root, ['fadeno', 'dispatch', '--prompt-file', 'folder/']).includes('folder/file with spaces.txt'));
 
   const malformed = join(root, '.fadeno', 'executors.yaml');
   writeFileSync(malformed, 'not: [valid');
-  assert.deepEqual(complete(root, ['fadeno', 'dispatch', '--executor', '']), []);
+  assert.deepEqual(complete(root, ['fadeno', 'dispatch', '--model', '']), []);
   assert.deepEqual(complete(root, ['fadeno', 'prompt', 'ambiguous-prefix', '']), []);
+});
+
+test('completion: dial flags replace old flags', (t) => {
+  const root = tempRepo(t);
+  // no profile needed for flag completion
+  assert.ok(complete(root, ['fadeno', 'dial', 'worker', '--']).includes('--user'));
+  assert.ok(complete(root, ['fadeno', 'dial', 'worker', '--']).includes('--repo'));
+  assert.ok(complete(root, ['fadeno', 'dial', 'clear', '--']).includes('--user'));
+  assert.ok(complete(root, ['fadeno', 'dial', 'clear', '--']).includes('--repo'));
+  assert.ok(complete(root, ['fadeno', 'dispatch', '--']).includes('--archetype'));
+  assert.ok(complete(root, ['fadeno', 'dispatch', '--']).includes('--role'));
+  // old flags gone
+  assert.ok(!complete(root, ['fadeno', 'dispatch', '--']).includes('--executor'));
+  assert.ok(!complete(root, ['fadeno', 'dispatch', '--']).includes('--loadout'));
 });

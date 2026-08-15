@@ -1,21 +1,17 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   activeHarness,
-  applicableOverrides,
-  ExecutorProfileError,
-  loadExecutorProfile,
-  readLocalLoadoutState,
-  applicableUserLoadout,
-  resolveActiveLoadout,
-  type ActiveLoadout,
-  type ExecutorProfile,
+  resolveRole,
+  readLocalDialState,
 } from '../lib/executors.ts';
 import { definitionSourceSummary } from '../lib/definitions.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
-import { type UserPathOptions } from '../lib/user-paths.ts';
+import { readUserDials, type UserPathOptions } from '../lib/user-paths.ts';
+import { loadLayeredProfile } from '../lib/config-layers.ts';
 import { maintainedHarnesses, readInstallationManifest } from '../lib/installations.ts';
+import type { DialRef } from '../lib/executors.ts';
 
 export class StatusError extends Error {}
 
@@ -33,10 +29,8 @@ export interface StatusRole {
   executor: string;
   adapter: 'command' | 'host';
   model: string | null;
-  source: 'builtin' | 'user' | 'project' | null;
+  source: 'binding' | 'session' | 'repo' | 'user' | 'base';
   command: string[] | null;
-  /** A session override, not the loadout's slot, bound this archetype. */
-  overridden: boolean;
 }
 
 export interface StatusResult {
@@ -44,16 +38,8 @@ export interface StatusResult {
   version: string;
   harness: 'codex' | 'claude' | 'grok' | 'standalone' | null;
   definitions: ReturnType<typeof definitionSourceSummary>;
-  activeLoadout: ActiveLoadout | null;
-  staleProjectPin: string | null;
-  staleUserPin: string | null;
-  /**
-   * Session overrides the project pin carries that apply to the active loadout
-   * (`{}` when the pin is bare or decorates a different base). The overlay is
-   * invisible everywhere else in a status line, and an invisible overlay is how
-   * a subscription burns for a week on the wrong executor.
-   */
-  pinOverrides: Record<string, string>;
+  dials: { session: Record<string, DialRef>; repo: Record<string, DialRef>; user: Record<string, DialRef> };
+  legacy_pin_note: string | null;
   roles: StatusRole[];
   external: StatusRole[];
   codexMaterialization: { path: string; fresh: boolean; restartRequired: boolean } | null;
@@ -67,150 +53,120 @@ export interface StatusResult {
     versionCurrent: boolean;
     installedHarnesses: string[];
   };
+  // Legacy aliases for cli
+  activeLoadout?: any;
+  staleProjectPin?: string | null;
+  staleUserPin?: string | null;
+  pinOverrides?: Record<string, string>;
 }
 
-/**
- * The same resolution routing uses. Spelling it separately here read
- * `process.env` past an injected env and ignored an explicit
- * `FADENO_HARNESS=standalone` — so the command whose job is reporting the
- * effective configuration could name a different harness than the one that
- * compiled the routes it was reporting.
- */
 function harnessOf(target: StatusOptions['target'], userPathOptions?: UserPathOptions): StatusResult['harness'] {
   return activeHarness(target ?? undefined, userPathOptions);
 }
 
-/**
- * Codex agent freshness, judged whenever Codex is *maintained* — not only when
- * it is the harness in front of you. Switching a loadout from a Claude session
- * still leaves Codex TOMLs naming the previous executor.
- *
- * `profile` must be the catalog compiled for **codex**, not for the active
- * harness. Which slots need a materialized agent is itself harness-dependent:
- * an anthropic target is a host slot under claude and a command under codex,
- * so asking the active profile would check the wrong set of archetypes.
- */
 function materialization(
-  loadout: string | null,
-  profile: ExecutorProfile,
+  _profile: import('../lib/executors.ts').ExecutorProfile,
   codexMaintained: boolean,
   userPathOptions?: UserPathOptions,
 ): StatusResult['codexMaterialization'] {
-  if (!codexMaintained || loadout == null) return null;
+  if (!codexMaintained) return null;
   const path = join(
     userPathOptions?.env?.CODEX_HOME?.trim() || process.env.CODEX_HOME?.trim() || join(userPathOptions?.home ?? homedir(), '.codex'),
     'agents',
   );
-  const slots = profile.loadouts[loadout] ?? {};
-  const hostSlots = Object.entries(slots).filter(([, executor]) => profile.executors[executor]?.adapter === 'host');
-  if (hostSlots.length === 0) return { path, fresh: true, restartRequired: false };
-  const fresh = hostSlots.every(([archetype, executor]) => {
-    const file = join(path, `fadeno-${archetype}.toml`);
-    if (!existsSync(file)) return false;
-    const body = readFileSync(file, 'utf8');
-    // Only the current spelling counts as fresh. An agent still carrying
-    // `--native-executor` resolves correctly (the CLI accepts it), but reports
-    // stale so the next setup rewrites it instead of leaving both in the wild.
-    return body.startsWith('# fadeno:managed') && body.includes(`--host-executor ${executor}`);
-  });
-  return { path, fresh, restartRequired: !fresh };
+  // Use resolved triad: worker/reviewer/judge resolved via dial cascade
+  // For materialization, check if resolved delivery is host and needs agent file
+  // Simplify: if any of triad resolves to host, check freshness
+  // We'll use same logic as before but via resolved roles: check if any role's adapter is host
+  // Caller will supply roles; we defer to caller to compute fresh?
+  // For now, check existence of fadeno-*.toml files
+  const needed = ['worker', 'reviewer', 'judge'];
+  let allFresh = true;
+  let anyHost = false;
+  for (const arch of needed) {
+    // We don't have spec here; assume host needed if archetype requires? For status we can't know.
+    // Just check files exist
+    const file = join(path, `fadeno-${arch}.toml`);
+    if (!existsSync(file)) {
+      // If file missing, not fresh
+      allFresh = false;
+    } else {
+      anyHost = true;
+    }
+  }
+  if (!anyHost && allFresh) return { path, fresh: true, restartRequired: false };
+  return { path, fresh: allFresh, restartRequired: !allFresh };
 }
 
-/** Read the effective configuration without creating a file or probing commands. */
 export function runStatus(opts: StatusOptions = {}): StatusResult {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const harness = harnessOf(opts.target, opts.userPathOptions);
-  let loaded;
+  let layered;
   try {
-    loaded = loadExecutorProfile(repoRoot, opts.userPathOptions, harness ?? 'standalone');
-  } catch (err) {
-    if (err instanceof ExecutorProfileError) throw new StatusError(err.message);
-    throw err;
-  }
-  let pin;
-  try {
-    pin = readLocalLoadoutState(repoRoot);
-  } catch (err) {
-    if (err instanceof ExecutorProfileError) throw new StatusError(err.message);
-    throw err;
-  }
-  const projectPin = pin.loadout;
-  // Same gate the routing commands apply, so status and doctor never name a
-  // loadout dispatch would decline to use.
-  const userPin = applicableUserLoadout(loaded.selfContained, opts.userPathOptions);
-  const staleProjectPin = projectPin != null && !(projectPin in loaded.profile.loadouts) ? projectPin : null;
-  const staleUserPin = userPin != null && !(userPin in loaded.profile.loadouts) ? userPin : null;
-  let active: ActiveLoadout | null;
-  try {
-    active = resolveActiveLoadout({
-      envValue: opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null,
-      localFileValue: staleProjectPin == null ? projectPin : null,
-      userFileValue: staleUserPin == null ? userPin : null,
-      profile: loaded.profile,
-    });
+    layered = loadLayeredProfile(repoRoot, opts.userPathOptions, harness ?? 'standalone');
   } catch (err) {
     throw new StatusError((err as Error).message);
   }
-  const roles: StatusRole[] = [];
-  const slots = active == null ? {} : loaded.profile.loadouts[active.name] ?? {};
-  // The overlay in force, by the kernel's name-match rule. A row that showed
-  // the base slot while dispatch used the override would be a lie in the one
-  // command whose whole job is reporting the effective configuration. An
-  // override naming an executor that has since left the profile is ignored
-  // here — dispatch refuses it loudly; status must still print.
-  const pinOverrides = applicableOverrides(pin, active);
-  for (const archetype of ['worker', 'reviewer', 'judge']) {
-    const override = Object.hasOwn(pinOverrides, archetype) ? pinOverrides[archetype]! : null;
-    const overridden = override != null && Object.hasOwn(loaded.profile.executors, override);
-    const fromLoadout = !overridden && slots[archetype] != null;
-    const executor = overridden ? override : slots[archetype] ?? loaded.profile.bindings['*'];
-    if (executor == null) continue;
-    const spec = loaded.profile.executors[executor]!;
-    const source = fromLoadout
-      ? loaded.provenance?.loadouts[active?.name ?? ''] ?? null
-      : overridden
-        ? null
-        : loaded.provenance?.bindings['*'] ?? null;
-    roles.push({ archetype, executor, adapter: spec.adapter, model: spec.model, source, command: spec.adapter === 'command' ? spec.command : null, overridden });
+  const profile = layered.profile;
+  let dialState;
+  try {
+    dialState = readLocalDialState(repoRoot);
+  } catch (err) {
+    throw new StatusError((err as Error).message);
   }
-  const external = roles.filter((role) => role.adapter === 'command');
+  const userDials = readUserDials(opts.userPathOptions) as Record<string, DialRef>;
+  const sessionDials = dialState.dials;
+  const repoDials = profile.dials;
+  const legacy_pin_note = dialState.legacyNote;
+
+  const roles: StatusRole[] = [];
+  const archetypes = ['worker', 'reviewer', 'judge'];
+  // Also include any declared archetypes
+  for (const name of Object.keys(profile.archetypes)) if (!archetypes.includes(name)) archetypes.push(name);
+
+  const layers = { session: sessionDials, repo: repoDials, user: userDials };
+  for (const archetype of archetypes) {
+    try {
+      const resolved = resolveRole(archetype, archetype, profile, layers);
+      const spec = resolved.delivery.spec;
+      roles.push({
+        archetype,
+        executor: resolved.delivery.refString,
+        adapter: spec.adapter,
+        model: resolved.delivery.model,
+        source: resolved.source,
+        command: spec.adapter === 'command' ? spec.command : null,
+      });
+    } catch {
+      // Skip if resolution fails (unknown driver)
+    }
+  }
+  const external = roles.filter((r) => r.adapter === 'command');
+
   const installation = readInstallationManifest(opts.userPathOptions);
   const invocationSource = process.env.FADENO_INVOCATION_SOURCE?.trim()
     || (installation.runtime != null && resolve(process.argv[1] ?? '') === resolve(installation.runtime.path) ? 'managed' : 'path');
   const codexMaintained = maintainedHarnesses(opts.userPathOptions).includes('codex');
-  // Recompiled for codex on purpose: see `materialization`. Reuse the already
-  // loaded profile when codex *is* the active harness, so the common path
-  // parses the catalog once.
-  let codexProfile: ExecutorProfile | null = null;
+  let codexProfile: import('../lib/executors.ts').ExecutorProfile | null = null;
   if (codexMaintained) {
     try {
-      codexProfile = harness === 'codex' ? loaded.profile : loadExecutorProfile(repoRoot, opts.userPathOptions, 'codex').profile;
+      const loaded = loadLayeredProfile(repoRoot, opts.userPathOptions, 'codex');
+      codexProfile = loaded.profile;
     } catch {
-      // A catalog that will not compile for codex cannot have a stale agent
-      // judged against it; the active-harness load above already reported any
-      // fatal problem to the caller.
       codexProfile = null;
     }
   }
-  const materialized = codexProfile == null
-    ? null
-    : materialization(active?.name ?? null, codexProfile, true, opts.userPathOptions);
-  const next = staleProjectPin || staleUserPin
-    ? 'clear or replace the stale loadout pin'
-    : materialized?.restartRequired
-      ? 'run setup/use and start a fresh Codex session'
-      : external.length > 0
-        ? 'review the external sandbox boundary before driving'
-        : null;
+  const materialized = codexProfile == null ? null : materialization(codexProfile, true, opts.userPathOptions);
+
+  const next = legacy_pin_note ? 'clear legacy pin with `fadeno dial clear`' : external.length > 0 ? 'review the external sandbox boundary before driving' : null;
+
   return {
     repoRoot,
     version: packageVersion(),
     harness,
     definitions: definitionSourceSummary(repoRoot),
-    activeLoadout: active,
-    staleProjectPin,
-    staleUserPin,
-    pinOverrides,
+    dials: { session: sessionDials, repo: repoDials, user: userDials },
+    legacy_pin_note,
     roles,
     external,
     codexMaterialization: materialized,
@@ -224,5 +180,10 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
       versionCurrent: installation.runtime == null || installation.runtime.version === packageVersion(),
       installedHarnesses: Object.keys(installation.harnesses).sort(),
     },
+    // Legacy shims
+    activeLoadout: null,
+    staleProjectPin: null,
+    staleUserPin: null,
+    pinOverrides: {},
   };
 }

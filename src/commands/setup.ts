@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runSteeringApply, type SteeringApplyResult } from './steering.ts';
-import { loadExecutorProfile, type ExecutorProfile } from '../lib/executors.ts';
+import { loadExecutorProfile } from '../lib/executors.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
 import { userPaths, type FadenoUserPaths, type UserPathOptions } from '../lib/user-paths.ts';
 import {
@@ -63,13 +63,6 @@ function probe(command: string): CommandProbe {
     available: result.error == null && result.status === 0,
     version: output.length > 0 ? output.split(/\r?\n/, 1)[0] ?? null : null,
   };
-}
-
-function ensureNativeState(paths: FadenoUserPaths, created: string[]): void {
-  if (existsSync(paths.loadoutFile)) return;
-  mkdirSync(paths.stateDir, { recursive: true });
-  writeFileSync(paths.loadoutFile, 'native\n', 'utf8');
-  created.push(paths.loadoutFile);
 }
 
 function rememberHarness(paths: FadenoUserPaths, target: Exclude<SetupTarget, null>, created: string[]): void {
@@ -144,23 +137,16 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
   if (installManagedRuntime(paths, runtimeSource, manifest)) created.push(paths.managedRuntimeDir);
   if (opts.target != null) rememberHarness(paths, opts.target, created);
 
-  // Compose before pinning. A self-contained legacy project profile remains
-  // authoritative and may not declare the bundled `native` loadout; planting
-  // a global stale pin would make its first dispatch/drive fail hard.
-  let profile: ExecutorProfile;
   try {
-    profile = loadExecutorProfile(repoRoot, opts.userPathOptions).profile;
+    loadExecutorProfile(repoRoot, opts.userPathOptions).profile;
   } catch (err) {
     throw new SetupError((err as Error).message);
   }
-  const hasNative = profile.loadouts.native != null;
-  if (hasNative) ensureNativeState(paths, created);
 
   let steering: SteeringApplyResult | null = null;
-  if (opts.target === 'codex' && hasNative) {
-    steering = runSteeringApply({
+  if (opts.target === 'codex') {
+    steering = (runSteeringApply as any)({
       repoRoot,
-      loadout: 'native',
       target: 'codex',
       scope: 'user',
       userPathOptions: opts.userPathOptions,
@@ -196,18 +182,17 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
     ...setupNotices,
   ];
   if (opts.target === 'claude') {
-    notices.push('Claude steering is installed by the plugin and remains inert while the native loadout is active.');
+    notices.push('Claude steering is installed by the plugin and remains inert while the host-native base is active.');
   }
   if (opts.target === 'codex') notices.push('Codex managed agents are user-scoped; start a fresh Codex session to load them.');
-  if (!opts.nonInteractive) notices.push('External command loadouts remain opt-in; setup selected safe native defaults.');
-  if (!hasNative) notices.push('The active project profile does not declare native, so setup preserved its existing selection and wrote no stale user pin.');
+  if (!opts.nonInteractive) notices.push('External command dials remain opt-in; setup selected safe host-native base.');
   return {
     target: opts.target ?? null,
     repoRoot,
     paths,
     probes,
     created,
-    activeLoadout: hasNative ? 'native' : profile.defaultLoadout ?? Object.keys(profile.loadouts)[0] ?? '',
+    activeLoadout: 'host-native base',
     steering,
     restartRequired: steering?.restartRequired ?? false,
     notices,

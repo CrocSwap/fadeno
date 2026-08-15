@@ -109,10 +109,20 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
       findings.push(finding(`path:${path}`, 'error', 'not writable', 'Choose a writable repository or state location.'));
     }
   }
-  if (status.activeLoadout == null) {
-    findings.push(finding('active-loadout', 'error', 'no active loadout resolves', 'Run `fadeno use native` or declare a default_loadout.'));
+  // New dials finding replaces active dial
+  const dials = (status as any).dials as { session: Record<string, unknown>; repo: Record<string, unknown>; user: Record<string, unknown> } | undefined;
+  const legacyNote = (status as any).legacy_pin_note as string | null | undefined;
+  if (dials) {
+    const sessionCount = Object.keys(dials.session).length;
+    const userCount = Object.keys(dials.user).length;
+    const repoCount = Object.keys(dials.repo).length;
+    const detail = `${sessionCount} session dial(s), ${userCount} user dial(s)${repoCount ? `, ${repoCount} repo pin(s)` : ''}`;
+    findings.push(finding('dials', 'ok', detail));
+    if (legacyNote) findings.push(finding('dials', 'warning', `legacy pin: ${legacyNote}`, 'Run `fadeno dial clear` then re-dial with `fadeno dial`'));
+  } else if ((status as any).activeLoadout == null) {
+    findings.push(finding('dials', 'error', 'no dials resolved', 'Run `fadeno dial <archetype> <model>`'));
   } else {
-    findings.push(finding('active-loadout', 'ok', `${status.activeLoadout.name} (${status.activeLoadout.source})`));
+    findings.push(finding('dials', 'ok', `${(status as any).activeLoadout.name} (${(status as any).activeLoadout.source})`));
   }
   for (const role of status.roles) {
     const spec = role.adapter === 'command' ? status.external.find((item) => item.archetype === role.archetype) : null;
@@ -150,14 +160,14 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
     ));
   }
   // Keyed on Codex being *maintained*, not on it being the harness in front of
-  // you: the agents go stale precisely when you switch a loadout from the other
+  // you: the agents go stale precisely when you switch a dial from the other
   // host, which is exactly when an active-harness gate stops looking.
   if (status.codexMaterialization?.restartRequired) {
     findings.push(finding(
       'codex-agents',
       'warning',
       `managed host agents are missing or stale in ${status.codexMaterialization.path}`,
-      'Run `fadeno setup --codex`, or `fadeno use <loadout>` to rewrite them; a fresh Codex session picks them up.',
+      'Run `fadeno setup --codex` to rewrite them; a fresh Codex session picks them up.',
     ));
   } else if (status.codexMaterialization != null) {
     findings.push(finding('codex-agents', 'ok', 'managed host-agent state is current'));

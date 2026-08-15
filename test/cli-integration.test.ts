@@ -105,35 +105,38 @@ test('committed bundled CLI supports Grok init and rejects mixed target flags', 
   assert.match(`${mixed.stdout}${mixed.stderr}`, /choose exactly one target/i);
 });
 
-test('bundled CLI reports mixed steering materialization and pinned-loadout guidance truthfully', (t) => {
+test('bundled CLI dial shows effective table and resolves via dials', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    executors: {
-      nativeWorker: { adapter: 'host', model: 'gpt-5.6-luna', reasoning_effort: 'xhigh', agent_type: 'worker' },
-      nativeReviewer: { adapter: 'host', model: 'gpt-5.6-terra', reasoning_effort: 'high', agent_type: 'reviewer' },
-      nativeJudge: { adapter: 'host', model: 'gpt-5.6-sol', reasoning_effort: 'medium', agent_type: 'judge' },
-      command: { adapter: 'command', command: ['node', '-e', '0'], model: 'opus' },
+    schema_version: 3,
+    models: {
+      sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' },
+      grok: { provider: 'xai', id: 'grok-4.6', effort: 'high' },
     },
-    loadouts: {
-      mixed: { worker: 'nativeWorker', reviewer: 'command', judge: 'nativeJudge' },
-      'command-only': { worker: 'command', reviewer: 'command', judge: 'command' },
+    routes: {
+      standalone: {
+        openai: { command: ['node', '-e', '0'], write_access: true },
+        xai: { command: ['node', '-e', '0'], write_access: true },
+        'current-host': { host: true },
+      },
+    },
+    archetypes: {
+      worker: { requires_write: 'required' },
+      reviewer: { requires_write: 'none' },
+      judge: { requires_write: 'none' },
     },
   }));
 
-  const applied = cliSplit(root, ['steering', 'apply', 'mixed', '--codex', '--force']);
-  assert.equal(applied.status, 0, applied.stderr);
-  assert.match(applied.stdout, /Codex steering materialized: mixed/);
-  assert.match(applied.stdout, /worker → host agent nativeWorker/);
-  assert.match(applied.stdout, /reviewer → command broker command/);
-  assert.match(applied.stdout, /start a fresh Codex session/);
+  const show = cliSplit(root, ['dial'], { ...process.env, FADENO_HARNESS: 'standalone' });
+  assert.equal(show.status, 0, show.stderr);
+  assert.match(show.stdout, /archetype/);
+  assert.match(show.stdout, /worker/);
 
-  const env = { ...process.env, FADENO_LOADOUT: 'command-only' };
-  const used = cliSplit(root, ['loadout', 'use', 'mixed'], env);
-  assert.equal(used.status, 0, used.stderr);
-  assert.match(used.stdout, /active loadout pinned: mixed/);
-  assert.match(used.stdout, /2 host slot\(s\)/);
-  assert.match(used.stdout, /1 command slot\(s\).*next role dispatch\/invocation; no restart is needed/);
+  const set = cliSplit(root, ['dial', 'worker', 'sol'], { ...process.env, FADENO_HARNESS: 'standalone' });
+  assert.equal(set.status, 0, set.stderr);
+  assert.match(set.stdout, /worker → sol/);
+  assert.match(set.stdout, /user default/);
 });
 
 test('committed bundled CLI emits Bash completion and preserves candidate flags after --', (t) => {
@@ -232,44 +235,22 @@ test('built CLI prompt renders to stdout, errors cleanly, and emits stable JSON'
   assert.equal(parsed.recorded, 'preview');
 });
 
-test('targets: the rendered table names undialed targets and never truncates silently', (t) => {
-  // The printer is where the "no silent caps" rule has to hold: a catalog with
-  // per-role bindings puts a dozen names in one column, and a bare truncation
-  // would read as "these are all of them".
+test('dial resolve hook emits stable keys for agent', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
-  writeFileSync(
-    join(root, '.fadeno', 'executors.yaml'),
-    stringifyYaml({
-      schema_version: 2,
-      targets: {
-        dialed: { provider: 'google', model: 'gemini-3.1-pro-high' },
-        undialed: { provider: 'openrouter', model: 'anthropic/claude-opus-4.8' },
-      },
-      routes: {
-        claude: {
-          google: { command: ['agy', '--model', '{model}', '--new-project'], write_access: true },
-          openrouter: { command: ['opencode', 'run', '-m', 'openrouter/{model}'], write_access: true },
-        },
-      },
-      loadouts: { main: { worker: 'dialed' } },
-      default_loadout: 'main',
-      bindings: { r1: 'dialed', r2: 'dialed', r3: 'dialed', r4: 'dialed' },
-    }),
-  );
-
-  const { status, stdout } = cliSplit(root, ['targets'], { ...process.env, FADENO_HARNESS: 'claude' });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    schema_version: 3,
+    models: { sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' } },
+    routes: { standalone: { openai: { command: ['node', '-e', '0'], write_access: true }, 'current-host': { host: true } } },
+    archetypes: { worker: {} },
+  }));
+  // Clear any prior user dial that may have leaked from previous test's global state
+  cliSplit(root, ['dial', 'clear', 'worker', '--user'], { ...process.env, FADENO_HARNESS: 'standalone' });
+  const { status, stdout } = cliSplit(root, ['dial', 'resolve', '--archetype', 'worker'], { ...process.env, FADENO_HARNESS: 'standalone' });
   assert.equal(status, 0, stdout);
-  // The driver binary, not just "command".
-  assert.match(stdout, /undialed\s+openrouter\s+anthropic\/claude-opus-4\.8\s+command \(opencode\)/);
-  // Reachable but bound to nothing reads as a fact, not a blank.
-  assert.match(stdout, /command \(opencode\)\s+—/);
-  // five dials (one loadout + four bindings), three shown, remainder counted.
-  assert.match(stdout, /\+2 more/);
-
-  const json = cliSplit(root, ['targets', '--json'], { ...process.env, FADENO_HARNESS: 'claude' });
-  const parsed = JSON.parse(json.stdout) as { targets: Array<{ name: string; bindings: string[] }> };
-  const dialed = parsed.targets.find((entry) => entry.name === 'dialed');
-  // Whatever the table caps, --json still carries every one of them.
-  assert.deepEqual(dialed?.bindings, ['r1', 'r2', 'r3', 'r4']);
+  const parsed = JSON.parse(stdout);
+  assert.ok('executor' in parsed);
+  assert.ok('model' in parsed);
+  assert.ok('adapter' in parsed);
+  assert.equal(parsed.model, 'current-host');
 });

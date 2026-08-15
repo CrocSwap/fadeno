@@ -25,7 +25,7 @@ type ValueKind =
   | 'run'
   | 'playbook'
   | 'step'
-  | 'loadout'
+  | 'dial'
   | 'executor'
   | 'archetype'
   | 'bind'
@@ -58,13 +58,10 @@ const command = (
 
 const NONE: OptionSpec = { kind: 'none' };
 const PATH: OptionSpec = { kind: 'path' };
-const LOADOUT: OptionSpec = { kind: 'loadout' };
 
 const COMMANDS: Record<string, CommandSpec> = {
   setup: command({ '--codex': NONE, '--claude': NONE, '--non-interactive': NONE }),
-  use: command({ '--project': NONE, '--codex': NONE }, ['loadout']),
   status: command({ '--verbose': NONE }),
-  targets: command({ '--json': NONE }),
   doctor: command({ '--codex': NONE, '--claude': NONE }),
   vendor: command({ '--codex': NONE, '--claude': NONE, '--grok': NONE, '--with-hooks': NONE, '--force': NONE }),
   uninstall: command({ '--codex': NONE, '--claude': NONE, '--all': NONE, '--purge-user-data': NONE, '--force': NONE }),
@@ -83,17 +80,15 @@ const COMMANDS: Record<string, CommandSpec> = {
   }),
   validate: command({ '--schema': { kind: 'enum', values: ['playbook', 'run', 'review-report', 'test-result'] } }, ['path']),
   diagram: command({ '--format': { kind: 'enum', values: ['ascii', 'mermaid'] } }, ['playbook']),
-  'new-run': command({ '--input': { kind: 'input' }, '--loadout': LOADOUT }, ['playbook', 'free']),
-  loadout: command(
-    { '--loadout': LOADOUT },
-    [],
+  'new-run': command({ '--input': { kind: 'input' } }, ['playbook', 'free']),
+  dial: command(
+    { '--via': { kind: 'free' }, '--user': NONE, '--repo': NONE, '--rate': { kind: 'free' }, '--archetype': { kind: 'archetype' }, '--json': NONE },
+    ['archetype', 'free'],
     {
-      list: command({}),
-      use: command({}, ['loadout']),
-      // `set <archetype> <executor>`; `clear` takes an optional archetype (bare
-      // `clear` still drops the whole pin).
-      set: command({}, ['archetype', 'executor']),
-      clear: command({}, ['archetype']),
+      clear: command({ '--user': NONE, '--repo': NONE }, ['archetype']),
+      shadow: command({ '--via': { kind: 'free' }, '--rate': { kind: 'free' } }, ['archetype', 'free']),
+      'clear-shadow': command({}, ['archetype']),
+      resolve: command({ '--archetype': { kind: 'archetype' } }, []),
     },
   ),
   steering: command(
@@ -102,21 +97,20 @@ const COMMANDS: Record<string, CommandSpec> = {
     {
       resolve: command({
         '--archetype': { kind: 'archetype' },
-        '--host-executor': { kind: 'executor' },
+        '--host-executor': { kind: 'free' },
         '--role': { kind: 'free' },
-        '--loadout': LOADOUT,
         '--run': { kind: 'run' },
         '--dispatch-id': { kind: 'free' },
       }),
-      apply: command({ '--codex': NONE, '--force': NONE, '--scope': { kind: 'enum', values: ['project', 'user'] } }, ['loadout']),
+      apply: command({ '--codex': NONE, '--force': NONE, '--scope': { kind: 'enum', values: ['project', 'user'] } }, ['dial']),
     },
   ),
   dispatch: command(
     {
-      '--loadout': LOADOUT,
       '--archetype': { kind: 'archetype' },
       '--role': { kind: 'free' },
-      '--executor': { kind: 'executor' },
+      '--model': { kind: 'free' },
+      '--via': { kind: 'free' },
       '--prompt-file': PATH,
     },
   ),
@@ -152,7 +146,7 @@ const COMMANDS: Record<string, CommandSpec> = {
     ['run', 'step'],
   ),
   next: command({ '--legacy': NONE }, ['run']),
-  drive: command({ '--bind': { kind: 'bind' }, '--max-transitions': { kind: 'free' }, '--loadout': LOADOUT }, ['run']),
+  drive: command({ '--bind': { kind: 'bind' }, '--max-transitions': { kind: 'free' } }, ['run']),
   decide: command({ '--decision': { kind: 'free' }, '--feedback': { kind: 'free' } }, ['run', 'free']),
   runs: command({}),
   dispatches: command({
@@ -325,13 +319,13 @@ function readProfile(repoRoot: string): ExecutorProfile | null {
   }
 }
 
-function profileValues(repoRoot: string, kind: 'loadout' | 'executor' | 'archetype'): string[] {
+function profileValues(repoRoot: string, kind: 'dial' | 'executor' | 'archetype'): string[] {
   const profile = readProfile(repoRoot);
   if (profile == null) return [];
-  if (kind === 'loadout') return Object.keys(profile.loadouts);
-  if (kind === 'executor') return Object.keys(profile.executors);
+  if (kind === 'dial') return Object.keys(profile.dials ?? {});
+  if (kind === 'executor') return Object.keys((profile as any).models ?? (profile as any).executors ?? {});
   const names = new Set<string>();
-  for (const slots of Object.values(profile.loadouts)) for (const name of Object.keys(slots)) names.add(name);
+    // pre-dials code path removed; dial has no slot expansion
   return [...names];
 }
 
@@ -435,7 +429,7 @@ function dynamicValues(
       return startsWith(safeRuns(repoRoot).map((run) => run.runId), prefix);
     case 'step':
       return startsWith(runRef == null ? [] : readStepIds(repoRoot, runRef), prefix);
-    case 'loadout':
+    case 'dial':
     case 'executor':
     case 'archetype':
       return startsWith(profileValues(repoRoot, kind), prefix);

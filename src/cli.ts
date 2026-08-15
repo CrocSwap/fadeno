@@ -24,23 +24,15 @@ import { runGate } from './commands/gate.ts';
 import { runInit, type Target } from './commands/init.ts';
 import {
   formatShadowLine,
-  runLoadoutClear,
-  runLoadoutClearShadow,
-  runLoadoutList,
-  runLoadoutResolve,
-  runLoadoutSet,
-  runLoadoutShadow,
-  runLoadoutShow,
-  runLoadoutUse,
-  type LoadoutEffectiveRow,
-  type LoadoutListResult,
-  type LoadoutShowResult,
-  type LoadoutSlotView,
-  type StaleOverrideView,
-  type StaleShadowView,
-} from './commands/loadout.ts';
+  runDialClear,
+  runDialClearShadow,
+  runDialResolve,
+  runDialSet,
+  runDialShadow,
+  runDialShow,
+  type DialShowResult,
+} from './commands/dial.ts';
 import { runNewRun } from './commands/new-run.ts';
-import { runTargets, type TargetsResult } from './commands/targets.ts';
 import { runCodexPlugin, runPlugin } from './commands/plugin.ts';
 import { runNext } from './commands/next.ts';
 import { runPrompt } from './commands/prompt.ts';
@@ -53,7 +45,6 @@ import { runCompletion, runCompletionCandidates } from './commands/completion.ts
 import { runSteeringApply, runSteeringResolve } from './commands/steering.ts';
 import { runToolComplete } from './commands/tool-complete.ts';
 import { runSetup } from './commands/setup.ts';
-import { runUse } from './commands/use.ts';
 import { runStatus } from './commands/status.ts';
 import { runDoctor } from './commands/doctor.ts';
 import { runVendor } from './commands/vendor.ts';
@@ -76,7 +67,6 @@ const HELP = `fadeno — the playbook layer for AI coding agents
 Usage:
   fadeno init --codex|--claude|--grok [opts]   Explicitly scaffold project-owned capability
   fadeno setup [--codex|--claude]              Install safe user-scoped integration
-  fadeno use <loadout> [--project]            Select the user (or project) default loadout
   fadeno status [--verbose]                   Show effective definitions, routing, and state
   fadeno doctor [--codex|--claude]            Run read-only diagnostics
   fadeno vendor --codex|--claude|--grok       Vendor capability and definitions into a project
@@ -87,12 +77,13 @@ Usage:
   fadeno validate [file] [--schema K]   Validate playbooks (schema + references + semantics)
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
-  fadeno targets [--json]               List every declared target: model slug, delivery, loadouts
-  fadeno loadout [list|resolve|use|set|clear] Show, resolve, pin, or clear the active loadout
-  fadeno loadout set <archetype> <target> Override one archetype on top of the active loadout
-  fadeno loadout clear [archetype]      Drop the whole pin, or one session override
-  fadeno loadout shadow <archetype> <executor> [--rate n]  Attach a shadow challenger to one slot
-  fadeno loadout clear-shadow [archetype]  Drop one shadow attachment, or all of them
+  fadeno dial                                  # effective table
+  fadeno dial <archetype>                      # one archetype's row (+shadow)
+  fadeno dial <archetype> <model>[@effort] [--via <driver>] [--user|--repo]   # set
+  fadeno dial clear [<archetype>] [--user|--repo]
+  fadeno dial shadow <archetype> <model>[@effort] [--via <driver>] [--rate <r>]
+  fadeno dial clear-shadow [<archetype>]
+  fadeno dial resolve --archetype <a>          # JSON, hook contract unchanged
   fadeno steering resolve|apply [...]   Resolve or materialize hybrid Codex steering
   fadeno dispatch [flags]               Resolve archetype → executor and invoke it once (ad hoc)
                                         (--shadow <executor> duplicates it to a one-shot challenger)
@@ -125,7 +116,6 @@ Options:
   --non-interactive       (setup) Accepted compatibility no-op; setup never prompts
   --all                   (uninstall) Remove every registered harness integration
   --purge-user-data       (uninstall) Also remove shared config/state/data; requires --force
-  --project               (use) Pin the loadout in this repository
   --scope <scope>         (steering apply) project (default) | user
   --data-only             (init) Seed only .fadeno/ definitions (capability via plugin)
   --force                 (init) Overwrite existing files / refresh the bootstrap section
@@ -146,10 +136,12 @@ Options:
   --bind <role=executor>  (drive) Session executor override for a role (repeatable; recorded)
   --max-transitions <n>   (drive) Engine transition cap per invocation (default 50)
   --input <Name=path>     (new-run) Supply a declared input (repeatable)
-  --loadout <name>        (loadout/dispatch/drive/new-run) Active-loadout override for this invocation
-  --archetype <a>         (dispatch) Archetype to resolve (required unless --executor)
+  --via <driver>          (dial/dispatch) Driver alias that delivers the model
+  --user                  (dial) Write/clear the user default
+  --repo                  (dial) Write/clear the repo pin (committed)
+  --archetype <a>         (dispatch) Archetype to resolve (required unless --model)
   --role <name>           (dispatch) Role name: enables binding pins + evidence attribution
-  --executor <name>       (dispatch) Bypass resolution and invoke a named executor (debugging)
+  --model <ref>           (dispatch) Bypass resolution and invoke a dial ref directly (debugging)
   --host-executor <n>     (steering resolve) Host executor materialized into this role
   --run <id>              (steering resolve) Immutable engine run identity for a delivered host request
   --dispatch-id <id>      (steering resolve) Immutable host dispatch identity paired with --run
@@ -176,14 +168,12 @@ Options:
   -v, --version           Show version
 
 Environment:
-  FADENO_LOADOUT          Active-loadout override for this shell
-                          (precedence: --loadout > run-persisted > FADENO_LOADOUT > .fadeno/local/loadout > user state > default_loadout)
+  FADENO_HARNESS          Select the harness for route compilation (codex|claude|standalone)
 Examples:
   fadeno validate
   fadeno new-run code-change-review "Add CSV export for reports"
   fadeno setup --codex
   fadeno status
-  fadeno use claude
   fadeno doctor --codex
   fadeno init --codex --with-hooks
   fadeno init --grok
@@ -192,9 +182,10 @@ Examples:
   fadeno run 2026-05-30-1132-csv --status completed
   fadeno run 2026-05-30-1132-csv --event artifact_created --artifact artifacts/x.json --member architect_fable
   fadeno run 2026-05-30-1132-csv --step arbitrate --event human_decision --field branch=approve
-  fadeno loadout use openai-primary  # advanced compatibility surface
-  fadeno loadout set worker luna-cli  # override one slot; loadout clear worker drops it
-  fadeno steering apply codex-only --codex --force
+  fadeno dial worker sol --user
+  fadeno dial worker sol@high --via opencode
+  fadeno dial clear worker --user
+  fadeno steering apply --codex --force
   echo "Summarize the repo layout." | fadeno dispatch --archetype worker
   fadeno gate 2026-05-30-1132-csv no_blocking_issues --artifact artifacts/review-report.json
   fadeno prompt 2026-05-30-1132-csv cross_review --actor architect_fable --no-record
@@ -542,183 +533,46 @@ function printShow(repoRoot: string, result: ShowResult, rawTimeline: boolean): 
   }
 }
 
-const LOADOUT_SOURCE_TEXT: Record<string, string> = {
-  flag: '--loadout',
-  run: 'run-persisted loadout',
-  env: 'FADENO_LOADOUT',
-  local: '.fadeno/local/loadout',
-  user: 'user state',
-  default: 'default_loadout',
+const DIAL_SOURCE_TEXT: Record<string, string> = {
+  binding: 'binding',
+  session: 'session dial',
+  repo: 'repo pin',
+  user: 'user dial',
+  base: 'base',
 };
 
-/**
- * Slot table for a declared loadout (`list`) or the effective table (`show`).
- * An overridden row carries the mark and the slot it replaced — an overlay the
- * user cannot see is one they keep paying for.
- */
-function printSlots(slots: Array<LoadoutSlotView & Partial<LoadoutEffectiveRow>>, indent: string): void {
-  const width = Math.max(0, ...slots.map((s) => s.archetype.length));
-  for (const slot of slots) {
-    const model = slot.model != null ? ` (${slot.model})` : '';
-    const override = slot.overridden === true
-      ? `  OVERRIDE (base: ${slot.baseExecutor ?? 'none'})`
-      : '';
-    // Non-eligible targets are marked in the same register as OVERRIDE: the
-    // table is where a dial-time surprise should become visible, not the
-    // first refused dispatch.
-    const eligibility = slot.eligibility === 'shadow_only'
-      ? '  SHADOW-ONLY (never gates)'
-      : slot.eligibility === 'forbidden'
-        ? '  FORBIDDEN (refused at dispatch)'
-        : '';
-    console.log(`${indent}${slot.archetype.padEnd(width)} → ${slot.executor}${model} [${slot.adapter}]${override}${eligibility}`);
-    // A shadow rides directly under its slot: session state, never a gate.
-    if (slot.shadow != null) console.log(formatShadowLine(slot.shadow, indent));
-  }
-}
-
-/** Overrides pinned onto executors the profile no longer declares. */
-function printStaleOverrides(stale: StaleOverrideView[]): void {
+function printStaleShadows(stale: Array<{ archetype: string; target: string }>): void {
   for (const item of stale) {
     console.error(
-      `warning: session override ${item.archetype}→${item.target} names an executor that is no longer ` +
-        `declared — run \`fadeno loadout set ${item.archetype} <executor>\` or ` +
-        `\`fadeno loadout clear ${item.archetype}\`; the override is ignored below.`,
+      `warning: shadow attachment ${item.archetype}~${item.target} names a model that is no longer resolvable — run \`fadeno dial shadow ${item.archetype} <model>\` or \`fadeno dial clear-shadow ${item.archetype}\`; the attachment is ignored below.`,
     );
   }
 }
 
-/** Shadow attachments naming executors the profile no longer declares. */
-function printStaleShadows(stale: StaleShadowView[]): void {
+function printStaleDials(stale: Array<{ archetype: string; target: string }>): void {
   for (const item of stale) {
-    console.error(
-      `warning: shadow attachment ${item.archetype}~${item.target} names an executor that is no longer ` +
-        `declared — run \`fadeno loadout shadow ${item.archetype} <executor>\` or ` +
-        `\`fadeno loadout clear-shadow ${item.archetype}\`; the attachment is ignored below.`,
-    );
+    console.error(`warning: dial ${item.archetype}→${item.target} is stale — re-dial with \`fadeno dial ${item.archetype} <model>\``);
   }
 }
 
-/** Compact `archetype→executor` list for echo lines, in a stable order. */
-function overrideSummary(overrides: Record<string, string>): string {
-  return Object.keys(overrides)
-    .sort()
-    .map((archetype) => `${archetype}→${overrides[archetype]}`)
-    .join(', ');
-}
-
-function printStalePin(stalePin: string | null): void {
-  if (stalePin == null) return;
-  console.error(
-    `warning: .fadeno/local/loadout pins "${stalePin}", which is no longer declared — ` +
-      'run `fadeno loadout clear` (or `fadeno loadout use <name>`); the pin is ignored below.',
-  );
-}
-
-function printLoadoutShow(result: LoadoutShowResult): void {
-  printStalePin(result.stalePin);
-  printStaleOverrides(result.staleOverrides);
-  printStaleShadows(result.staleShadows);
-  if (result.active == null) {
-    console.log('no active loadout (no --loadout, FADENO_LOADOUT, .fadeno/local/loadout, or default_loadout)');
-  } else {
-    const overrides = Object.keys(result.overrides).length;
-    const shadows = Object.keys(result.shadow_attachments).length;
-    console.log(
-      `active loadout: ${result.active.name} (via ${LOADOUT_SOURCE_TEXT[result.active.source]})` +
-        (overrides > 0 ? ` +${overrides} session override(s)` : '') +
-        (shadows > 0 ? ` +${shadows} shadow attachment(s)` : ''),
-    );
-    printSlots(result.slots, '  ');
+function printDialShow(result: DialShowResult): void {
+  if (result.legacy_pin_note) console.log(result.legacy_pin_note);
+  if (result.staleDials.length > 0) printStaleDials(result.staleDials);
+  if (result.staleShadows.length > 0) printStaleShadows(result.staleShadows);
+  // Header
+  const header = `${'archetype'.padEnd(12)}  ${'model'.padEnd(18)}  ${'effort'.padEnd(8)}  ${'delivery'.padEnd(22)}  source`;
+  console.log(header);
+  for (const row of result.rows) {
+    const arch = row.archetype.padEnd(12);
+    const model = row.modelDisplay.padEnd(18);
+    const effort = row.effort.padEnd(8);
+    const delivery = row.delivery.padEnd(22);
+    const elig = row.eligibility === 'shadow_only' ? '  SHADOW-ONLY (never gates)' : row.eligibility === 'forbidden' ? '  FORBIDDEN (refused at dispatch)' : '';
+    const via = row.resolvedVia ? ` (via ${row.resolvedVia})` : '';
+    console.log(`${arch}  ${model}  ${effort}  ${delivery}  ${DIAL_SOURCE_TEXT[row.source] ?? row.source}${via}${elig}`);
+    if (row.shadow) console.log(formatShadowLine(row.shadow, '  '));
   }
-  if (result.note != null) console.log(result.note);
-  if (result.available.length === 0) {
-    console.log('\nThe profile declares no loadouts (add a `loadouts:` mapping to .fadeno/executors.yaml).');
-    return;
-  }
-  const names = result.available.map((name) => (name === result.defaultLoadout ? `${name} (default)` : name));
-  console.log(`\navailable: ${names.join(', ')}`);
-}
-
-function printTargets(result: TargetsResult): void {
-  if (result.targets.length === 0) {
-    console.log('No targets declared (add a `targets:` mapping to .fadeno/executors.yaml).');
-    return;
-  }
-  const rows = result.targets.map((target) => {
-    // Name the binary, not just "command": which driver a target spawns is the
-    // whole question this listing exists to answer.
-    const delivery = target.adapter === 'host' ? 'host' : `command (${target.driver ?? '?'})`;
-    const notes: string[] = [];
-    // `write_access` always describes the *command* delivery. On a host row
-    // that is the fallback command, never the in-session agent, so an
-    // unqualified "read-only" there would claim something about the host's
-    // own permissions that this field cannot know.
-    if (target.writeAccess === false) notes.push(target.adapter === 'host' ? 'fallback read-only' : 'read-only');
-    for (const [archetype, state] of Object.entries(target.restricted)) notes.push(`${archetype}: ${state}`);
-    // An em dash, not an empty cell: "reachable but bound to nothing" is a
-    // fact worth reading, and it is the state every new driver starts in.
-    const dials = [...target.loadouts, ...target.bindings.map((role) => `${role} (binding)`)];
-    // A catalog with per-role bindings puts a dozen names in this column and
-    // wraps the table into noise. Cap it, but never silently: the count of
-    // what is not shown is part of the row, and --json carries all of them.
-    const DIALS_SHOWN = 3;
-    const shown = dials.slice(0, DIALS_SHOWN).join(', ');
-    const dialText =
-      dials.length === 0 ? '—' : dials.length <= DIALS_SHOWN ? shown : `${shown}, +${dials.length - DIALS_SHOWN} more`;
-    return {
-      name: target.name,
-      provider: target.provider ?? '—',
-      model: target.model ?? '—',
-      delivery,
-      dials: dialText,
-      notes: notes.join('; '),
-    };
-  });
-  const width = (pick: (row: (typeof rows)[number]) => string, header: string): number =>
-    Math.max(header.length, ...rows.map((row) => pick(row).length));
-  const w = {
-    name: width((r) => r.name, 'NAME'),
-    provider: width((r) => r.provider, 'PROVIDER'),
-    model: width((r) => r.model, 'MODEL'),
-    delivery: width((r) => r.delivery, 'DELIVERY'),
-  };
-  console.log(`harness ${result.harness} — delivery is resolved against this host`);
-  console.log(
-    `${'NAME'.padEnd(w.name)}  ${'PROVIDER'.padEnd(w.provider)}  ${'MODEL'.padEnd(w.model)}  ` +
-      `${'DELIVERY'.padEnd(w.delivery)}  DIALED BY`,
-  );
-  for (const row of rows) {
-    const line =
-      `${row.name.padEnd(w.name)}  ${row.provider.padEnd(w.provider)}  ${row.model.padEnd(w.model)}  ` +
-      `${row.delivery.padEnd(w.delivery)}  ${row.dials}`;
-    console.log(row.notes === '' ? line : `${line}  [${row.notes}]`);
-  }
-}
-
-function printLoadoutList(result: LoadoutListResult): void {
-  printStalePin(result.stalePin);
-  printStaleOverrides(result.staleOverrides);
-  printStaleShadows(result.staleShadows);
-  if (result.loadouts.length === 0) {
-    console.log('No loadouts declared (add a `loadouts:` mapping to .fadeno/executors.yaml).');
-    return;
-  }
-  for (const loadout of result.loadouts) {
-    const notes: string[] = [];
-    if (loadout.isActive && result.active != null) {
-      notes.push(`active via ${LOADOUT_SOURCE_TEXT[result.active.source]}`);
-      const overrideCount = Object.keys(result.overrides).length;
-      if (overrideCount > 0) notes.push(`${overrideCount} session override(s)`);
-      const shadowCount = Object.keys(result.shadow_attachments).length;
-      if (shadowCount > 0) notes.push(`${shadowCount} shadow attachment(s)`);
-    }
-    if (loadout.isDefault) notes.push('default');
-    const marker = loadout.isActive ? '*' : ' ';
-    console.log(`${marker} ${loadout.name}${notes.length > 0 ? `  (${notes.join(', ')})` : ''}`);
-    printSlots(loadout.slots, '    ');
-    if (loadout.note != null) console.log(`    ${loadout.note}`);
-  }
+  if (result.note) console.log(result.note);
 }
 
 function printDrive(result: DriveResult): number {
@@ -845,10 +699,12 @@ function main(argv: string[]): number {
         bind: { type: 'string', multiple: true },
         'max-transitions': { type: 'string' },
         input: { type: 'string', multiple: true },
-        loadout: { type: 'string' },
+        via: { type: 'string' },
+        user: { type: 'boolean' },
+        repo: { type: 'boolean' },
+        model: { type: 'string' },
         archetype: { type: 'string' },
         role: { type: 'string' },
-        executor: { type: 'string' },
         'host-executor': { type: 'string' },
         // Pre-0.6 spelling. Kept parseable so a Codex agent TOML materialized
         // by an older setup keeps resolving until the next one rewrites it.
@@ -923,71 +779,37 @@ function main(argv: string[]): number {
       if (result.restartRequired) console.log('  restart required: managed host integration changed.');
       return 0;
     }
-    case 'use': {
-      const name = positionals[1];
-      if (!name) throw new Error('Usage: fadeno use <loadout> [--project] [--codex]');
-      const target = optionalTarget(values);
-      if (target === 'grok') throw new Error('Grok does not support steering materialization; use an explicit loadout without --grok.');
-      const result = runUse({ name, project: values.project, target: target === 'codex' ? 'codex' : undefined });
-      console.log(`active loadout selected: ${result.name} (${result.scope})`);
-      for (const notice of result.notices) console.log(`  ${notice}`);
-      if (result.restartRequired && !result.notices.some((notice) => notice.includes('fallbacks work now'))) {
-        console.log('  restart required: start a fresh Codex session.');
-      }
-      return 0;
-    }
-    case 'targets': {
-      const result = runTargets({});
-      if (values.json) {
-        console.log(JSON.stringify(result, null, 2));
-        return 0;
-      }
-      printTargets(result);
-      return 0;
-    }
     case 'status': {
       const target = optionalTarget(values);
       if (target === 'grok') throw new Error('Use `fadeno status` without --grok; Grok steering is intentionally unsupported.');
-      const result = runStatus({ verbose: values.verbose, target: target ?? null });
-      console.log(`Fadeno ${result.version} · harness ${result.harness ?? 'unknown'}`);
-      console.log(`runtime: ${result.runtime.invocationSource}; managed ${result.runtime.managedVersion ?? 'not installed'}${result.runtime.managedPath ? ` at ${result.runtime.managedPath}` : ''}${result.runtime.versionCurrent ? '' : ' (version skew)'}`);
-      console.log(`integrations: ${result.runtime.installedHarnesses.join(', ') || 'none'}`);
+      const result = runStatus({ verbose: values.verbose, target: target ?? null } as any);
+      console.log(`Fadeno ${(result as any).version} · harness ${(result as any).harness ?? 'unknown'}`);
+      console.log(`runtime: ${(result as any).runtime.invocationSource}; managed ${(result as any).runtime.managedVersion ?? 'not installed'}${(result as any).runtime.managedPath ? ` at ${(result as any).runtime.managedPath}` : ''}${(result as any).runtime.versionCurrent ? '' : ' (version skew)'}`);
+      console.log(`integrations: ${(result as any).runtime.installedHarnesses.join(', ') || 'none'}`);
       {
-        // Count the split rather than restate the rule. "(project shadows
-        // bundled)" reads as a claim that shadowing happened, and said so on a
-        // repo with no `.fadeno/playbooks/` at all.
-        const total = result.definitions.playbooks.length;
-        const fromProject = result.definitions.projectPlaybooks;
-        const origin =
-          fromProject === 0
-            ? 'all bundled'
-            : `${fromProject} from .fadeno/playbooks, ${total - fromProject} bundled`;
+        const total = (result as any).definitions.playbooks.length;
+        const fromProject = (result as any).definitions.projectPlaybooks;
+        const origin = fromProject === 0 ? 'all bundled' : `${fromProject} from .fadeno/playbooks, ${total - fromProject} bundled`;
         console.log(`definitions: ${total} effective playbooks (${origin})`);
       }
-      // The overlay rides on the same line as the pin it decorates: a session
-      // override the status line omits is one the user cannot know they are paying for.
-      const pinned = Object.keys(result.pinOverrides).length;
-      console.log(
-        `active loadout: ${result.activeLoadout?.name ?? 'none'}${result.activeLoadout ? ` [${result.activeLoadout.source}]` : ''}` +
-          (pinned > 0 ? ` (+${pinned} override: ${overrideSummary(result.pinOverrides)})` : ''),
-      );
-      for (const role of result.roles) console.log(`  ${role.archetype} → ${role.executor} (${role.adapter})${role.command ? ` ${role.command.join(' ')}` : ''}${role.overridden ? ' [override]' : ''}`);
-      if (result.external.length > 0) console.log('external sandbox: selected command slots leave the current harness; evidence → .fadeno/dispatches.jsonl');
-      if (result.staleProjectPin) console.log(`stale project pin: ${result.staleProjectPin}`);
-      if (result.staleUserPin) console.log(`stale user pin: ${result.staleUserPin}`);
-      if (result.codexMaterialization) {
-        // Naming the state without naming the fix leaves the reader to guess
-        // which command re-materializes them.
-        const fix = result.codexMaterialization.fresh
-          ? ''
-          : `; run \`fadeno use ${result.activeLoadout?.name ?? '<loadout>'}\` to write them, then start a fresh Codex session`;
-        console.log(
-          `Codex managed agents: ${result.codexMaterialization.fresh ? 'current' : 'missing/stale'}` +
-            `${result.codexMaterialization.restartRequired ? ' (restart required)' : ''}${fix}`,
-        );
+      // New dial-based status: show per-role rows resolved through cascade
+      const r: any = result as any;
+      if (r.dials) {
+        const d = r.dials as { session: Record<string, unknown>; repo: Record<string, unknown>; user: Record<string, unknown> };
+        console.log(`dials: ${Object.keys(d.session).length} session, ${Object.keys(d.repo).length} repo, ${Object.keys(d.user).length} user`);
+        for (const role of r.roles ?? []) console.log(`  ${role.archetype} → ${role.executor} (${role.adapter}) [${role.source ?? 'base'}]`);
+      } else if (r.roles) {
+        for (const role of r.roles) console.log(`  ${role.archetype} → ${role.executor} (${role.adapter})`);
       }
-      if (result.next) console.log(`next: ${result.next}`);
-      if (values.verbose) console.log(JSON.stringify({ repoRoot: result.repoRoot, paths: result.definitions, roles: result.roles }, null, 2));
+      if ((result as any).staleProjectPin) console.log(`stale project pin: ${(result as any).staleProjectPin}`);
+      if ((result as any).staleUserPin) console.log(`stale user pin: ${(result as any).staleUserPin}`);
+      if ((result as any).codexMaterialization) {
+        const m = (result as any).codexMaterialization;
+        const fix = m.fresh ? '' : `; run \`fadeno setup --codex\` then start a fresh Codex session`;
+        console.log(`Codex managed agents: ${m.fresh ? 'current' : 'missing/stale'}${m.restartRequired ? ' (restart required)' : ''}${fix}`);
+      }
+      if ((result as any).next) console.log(`next: ${(result as any).next}`);
+      if (values.verbose) console.log(JSON.stringify({ repoRoot: (result as any).repoRoot, paths: (result as any).definitions, roles: (result as any).roles }, null, 2));
       return 0;
     }
     case 'doctor': {
@@ -1069,48 +891,48 @@ function main(argv: string[]): number {
       if (sub === 'resolve') {
         if (!values.archetype) {
           throw new Error(
-            'Usage: fadeno steering resolve --archetype <name> [--host-executor <name>] [--role <name>] [--loadout <name>] [--run <id> --dispatch-id <id>]',
+            'Usage: fadeno steering resolve --archetype <name> [--host-executor <name>] [--role <name>] [--run <id> --dispatch-id <id>]',
           );
         }
         const result = runSteeringResolve({
           archetype: values.archetype,
           hostExecutor: values['host-executor'] ?? values['native-executor'],
           role: values.role,
-          loadout: values.loadout,
           run: values.run,
           dispatchId: values['dispatch-id'],
-        });
+        } as any);
         console.log(JSON.stringify({
-          mode: result.mode,
-          archetype: result.archetype,
-          role: result.role,
-          loadout: result.activeLoadout,
-          executor: result.executor,
-          adapter: result.adapter,
-          model: result.model,
-          host_executor: result.hostExecutor,
-          resolution: result.source,
-          // Additive provenance: `resolution` already spells "override", and
-          // this flag lets a renderer branch without enumerating sources.
-          override: result.override,
+          mode: (result as any).mode,
+          archetype: (result as any).archetype,
+          role: (result as any).role,
+          executor: (result as any).executor,
+          adapter: (result as any).adapter,
+          model: (result as any).model,
+          effort: (result as any).effort ?? (result as any).model ? undefined : undefined,
+          driver: (result as any).driver,
+          host_executor: (result as any).hostExecutor,
+          resolution: (result as any).source,
+          resolved_via: (result as any).resolved_via ?? null,
           run: values.run ?? null,
           dispatch_id: values['dispatch-id'] ?? null,
-          detail: result.detail,
-          writeConflict: result.writeConflict ?? null,
+          detail: (result as any).detail,
+          writeConflict: (result as any).writeConflict ?? null,
         }, null, 2));
         // A refused slot is not runnable here, same as a restart: non-zero, so
         // a caller that only checks the exit code still stops.
         return result.mode === 'restart_required' || result.mode === 'write_conflict' ? 2 : 0;
       }
       if (sub === 'apply') {
-        const loadout = positionals[2];
-        if (!loadout || !values.codex || values.claude || values.grok) {
-          throw new Error('Usage: fadeno steering apply <loadout> --codex [--force]');
+        if (!values.codex || values.claude || values.grok) {
+          throw new Error('Usage: fadeno steering apply --codex [--force]');
+        }
+        if (positionals[2] != null) {
+          throw new Error('Usage: fadeno steering apply --codex [--force]');
         }
         if (values.scope && values.scope !== 'project' && values.scope !== 'user') throw new Error('Invalid --scope. Use project or user.');
-        const result = runSteeringApply({ loadout, target: 'codex', force: values.force, scope: values.scope as 'project' | 'user' | undefined });
+        const result = runSteeringApply({ target: 'codex', force: values.force, scope: values.scope as 'project' | 'user' | undefined });
         const changed = result.results.filter((item) => item.status !== 'skipped').length;
-        console.log(`Codex steering materialized: ${result.loadout}`);
+        console.log(`Codex steering materialized: ${result.scope}`);
         for (const archetype of ['worker', 'reviewer', 'judge']) {
           const slot = result.materialization[archetype]!;
           if (slot.kind === 'write-conflict') {
@@ -1155,21 +977,17 @@ function main(argv: string[]): number {
       if (!playbook || !task) {
         throw new Error('Usage: fadeno new-run <playbook> "<task description>"');
       }
-      const { runId, runDir, inputs, resolution } = runNewRun({
+      const { runId, runDir, inputs, resolution } = (runNewRun as any)({
         playbook,
         task,
         inputs: values.input,
-        loadout: values.loadout,
       });
       console.log(`Created run ${runId}`);
       console.log(`  ${runDir}`);
       if (inputs.length > 0) console.log(`  inputs: ${inputs.join(', ')}`);
-      if (resolution != null && resolution.echo.length > 0) {
-        const via = resolution.loadout != null
-          ? ` (loadout ${resolution.loadout.name} via ${LOADOUT_SOURCE_TEXT[resolution.loadout.source]})`
-          : '';
-        console.log(`\nresolution${via}:`);
-        for (const line of resolution.echo) console.log(`  ${line}`);
+      if (resolution != null && (resolution as any).echo?.length > 0) {
+        console.log(`\nresolution:`);
+        for (const line of (resolution as any).echo) console.log(`  ${line}`);
       }
       console.log('\nAdvance it with `fadeno run` as the playbook executes:');
       console.log(`  fadeno run ${runId} --step <step-id>`);
@@ -1331,201 +1149,149 @@ function main(argv: string[]): number {
         }
         maxTransitions = n;
       }
-      const result = runDrive({
+      const result = (runDrive as any)({
         run,
         bind: values.bind,
-        loadout: values.loadout,
         maxTransitions,
-        onAction: (line) => console.log(`  ${line}`),
+        onAction: (line: string) => console.log(`  ${line}`),
       });
       return printDrive(result);
     }
-    case 'loadout': {
+    case 'dial': {
+      const RESERVED = new Set(['clear', 'shadow', 'clear-shadow', 'resolve']);
       const sub = positionals[1];
       if (sub == null) {
-        const result = runLoadoutShow({ loadout: values.loadout });
+        const result = runDialShow({});
         if (values.json) console.log(JSON.stringify(result, null, 2));
-        else printLoadoutShow(result);
+        else printDialShow(result);
         return 0;
       }
-      switch (sub) {
-        case 'list':
-          printLoadoutList(runLoadoutList({ loadout: values.loadout }));
-          return 0;
-        case 'resolve': {
-          if (!values.archetype) throw new Error('Usage: fadeno loadout resolve --archetype <name>');
-          const result = runLoadoutResolve({ archetype: values.archetype, loadout: values.loadout });
+      if (sub === 'clear') {
+        if (positionals.length > 3) throw new Error('Usage: fadeno dial clear [<archetype>] [--user|--repo]');
+        const archetype = positionals[2] ?? null;
+        const result = runDialClear({ archetype, user: Boolean(values.user), repo: Boolean(values.repo) });
+        if (values.json) {
           console.log(JSON.stringify(result, null, 2));
           return 0;
         }
-        case 'use': {
-          const name = positionals[2];
-          if (!name) throw new Error('Usage: fadeno loadout use <name>');
-          const result = runLoadoutUse({ name });
-          if (values.json) {
-            console.log(JSON.stringify(result, null, 2));
-            return 0;
-          }
-          console.log(`active loadout pinned: ${result.name} → .fadeno/local/loadout`);
-          if (result.previous != null && result.previous !== result.name) {
-            console.log(`  (was ${result.previous})`);
-          }
-          const dropped = Object.keys(result.droppedOverrides).length;
-          if (dropped > 0) {
-            console.log(
-              `  dropped ${dropped} session override(s) (${overrideSummary(result.droppedOverrides)}); ` +
-                'selecting a base drops the overlay — re-dial with `fadeno loadout set <archetype> <executor>`.',
-            );
-          }
-          const droppedShadows = Object.keys(result.droppedShadows).length;
-          if (droppedShadows > 0) {
-            console.log(
-              `  dropped ${droppedShadows} shadow attachment(s); ` +
-                're-attach with `fadeno loadout shadow <archetype> <executor>`.',
-            );
-          }
-          // Summarize the name just pinned, independent of FADENO_LOADOUT's
-          // higher-precedence value in the current shell.
-          const selected = runLoadoutShow({ loadout: result.name, env: null });
-          const commandSlots = selected.slots.filter((slot) => slot.adapter === 'command').length;
-          const hostSlots = selected.slots.filter((slot) => slot.adapter === 'host').length;
-          if (commandSlots > 0) {
-            console.log(`  ${commandSlots} command slot(s) take effect on the next role dispatch/invocation; no restart is needed.`);
-          }
-          if (hostSlots > 0) {
-            console.log(
-              `  ${hostSlots} host slot(s) run in-session only when the current session's materialized host executor matches; ` +
-                'declared command fallbacks switch on the next invocation. ' +
-                `Run \`fadeno steering apply ${result.name} --codex --force\` and start a fresh Codex session only to deliver them in-session.`,
-            );
+        if (result.archetype == null) {
+          if (result.removed) console.log(`cleared ${result.count ?? 0} dial(s)`);
+          else console.log('no dials to clear');
+          return 0;
+        }
+        if (!result.removed) {
+          if (result.livesAt === 'user') {
+            console.log(`no session dial for ${result.archetype}; ${result.archetype} is set at user level — 'fadeno dial clear ${result.archetype} --user' to remove it`);
+          } else if (result.livesAt === 'repo') {
+            console.log(`no session dial for ${result.archetype}; ${result.archetype} is repo-pinned — 'fadeno dial clear ${result.archetype} --repo' to remove it`);
+          } else {
+            console.log(`no dial for ${result.archetype} at any layer — nothing to clear`);
           }
           return 0;
         }
-        case 'set': {
-          const [, , archetype, target] = positionals;
-          if (!archetype || !target) throw new Error('Usage: fadeno loadout set <archetype> <executor>');
-          const result = runLoadoutSet({ archetype, target, loadout: values.loadout });
-          if (values.json) {
-            console.log(JSON.stringify(result, null, 2));
-            return 0;
-          }
-          console.log(
-            `session override set: ${result.archetype} → ${result.target} ` +
-              `(over loadout ${result.loadout}) → .fadeno/local/loadout`,
-          );
-          if (result.previous != null) console.log(`  (was ${result.previous})`);
-          if (result.droppedBase != null) {
-            console.log(
-              `  dropped ${Object.keys(result.droppedOverrides).length} override(s) pinned over ` +
-                `"${result.droppedBase}" (${overrideSummary(result.droppedOverrides)}); overrides belong to one base.`,
-            );
-          }
-          console.log(`  overrides now: ${overrideSummary(result.overrides)}`);
-          return 0;
-        }
-        case 'clear': {
-          const archetype = positionals[2] ?? null;
-          const result = runLoadoutClear({ archetype });
-          if (values.json) {
-            console.log(JSON.stringify(result, null, 2));
-            return 0;
-          }
-          if (result.archetype == null) {
-            console.log(
-              result.removed
-                ? 'cleared .fadeno/local/loadout'
-                : 'no local loadout to clear (.fadeno/local/loadout absent)',
-            );
-            return 0;
-          }
-          if (!result.removed) {
-            console.log(`no session override for "${result.archetype}" to clear (.fadeno/local/loadout)`);
-            return 0;
-          }
-          const remaining = Object.keys(result.overrides).length;
-          console.log(
-            `cleared session override: ${result.archetype} (was ${result.cleared}); ` +
-              `loadout ${result.loadout} keeps ${remaining} override(s)` +
-              (remaining > 0 ? ` (${overrideSummary(result.overrides)})` : ''),
-          );
-          return 0;
-        }
-        case 'shadow': {
-          const [, , archetype, executor] = positionals;
-          if (!archetype || !executor) {
-            throw new Error('Usage: fadeno loadout shadow <archetype> <executor> [--rate <0..1>]');
-          }
-          const result = runLoadoutShadow({ archetype, executor, rate: values.rate, loadout: values.loadout });
-          if (values.json) {
-            console.log(JSON.stringify(result, null, 2));
-            return 0;
-          }
-          const rate = result.rate != null ? ` (rate ${result.rate})` : '';
-          console.log(
-            `shadow attached: ${result.archetype} ~ ${result.executor}${rate} ` +
-              `(over loadout ${result.loadout}) → .fadeno/local/loadout`,
-          );
-          if (result.previous != null) {
-            const prevRate = result.previous.rate != null ? ` rate ${result.previous.rate}` : '';
-            console.log(`  (was ${result.previous.executor}${prevRate})`);
-          }
-          if (result.droppedBase != null) {
-            const droppedCount =
-              Object.keys(result.droppedOverrides).length + Object.keys(result.droppedShadows).length;
-            console.log(
-              `  dropped ${droppedCount} session item(s) pinned over "${result.droppedBase}"; ` +
-                'overlays belong to one base.',
-            );
-          }
-          console.log(
-            '  each matching dispatch is duplicated to the shadow in an isolated worktree; it never gates.',
-          );
-          return 0;
-        }
-        case 'clear-shadow': {
-          const archetype = positionals[2] ?? null;
-          const result = runLoadoutClearShadow({ archetype });
-          if (values.json) {
-            console.log(JSON.stringify(result, null, 2));
-            return 0;
-          }
-          if (result.archetype == null) {
-            console.log(
-              result.removed
-                ? `cleared ${result.count} shadow attachment(s)`
-                : 'no shadow attachments to clear (.fadeno/local/loadout)',
-            );
-            return 0;
-          }
-          const remaining = Object.keys(result.shadows).length;
-          console.log(
-            `cleared shadow attachment: ${result.archetype} (was ${result.cleared!.executor}); ` +
-              `loadout ${result.loadout} keeps ${remaining} attachment(s)`,
-          );
-          return 0;
-        }
-        default:
-          throw new Error(
-            `Unknown loadout subcommand "${sub}". Usage: fadeno loadout ` +
-              '[list | resolve --archetype <a> | use <name> | set <archetype> <executor> | clear [archetype] | ' +
-              'shadow <archetype> <executor> [--rate <n>] | clear-shadow [archetype]]',
-          );
+        console.log(`cleared ${result.archetype} (${result.cleared})`);
+        return 0;
       }
+      if (sub === 'clear-shadow') {
+        if (positionals.length > 3) throw new Error('Usage: fadeno dial clear-shadow [<archetype>]');
+        const archetype = positionals[2] ?? null;
+        const result = runDialClearShadow({ archetype });
+        if (values.json) {
+          console.log(JSON.stringify(result, null, 2));
+          return 0;
+        }
+        if (result.archetype == null) {
+          console.log(result.removed ? `cleared ${result.count} shadow attachment(s)` : 'no shadow attachments to clear (.fadeno/local/dials)');
+          return 0;
+        }
+        console.log(`cleared shadow attachment: ${result.archetype} (was ${result.cleared!.model});`);
+        return 0;
+      }
+      if (sub === 'shadow') {
+        if (positionals.length < 4) throw new Error('Usage: fadeno dial shadow <archetype> <model>[@effort] [--via <driver>] [--rate <n>]');
+        if (positionals.length > 4) throw new Error('Usage: fadeno dial shadow <archetype> <model>[@effort] [--via <driver>] [--rate <n>]');
+        const [, , archetype, model] = positionals;
+        const result = runDialShadow({ archetype: archetype!, model: model!, via: values.via ?? null, rate: values.rate });
+        if (values.json) {
+          console.log(JSON.stringify(result, null, 2));
+          return 0;
+        }
+        for (const note of result.notes) console.log(note);
+        const rate = result.rate != null ? ` [rate ${result.rate}]` : '';
+        console.log(`shadow attached: ${result.archetype} ~ ${result.refString} via ${result.driver}${rate}`);
+        if (result.previous) console.log(`  (was ${result.previous.model}${result.previous.rate ? ` rate ${result.previous.rate}` : ''})`);
+        return 0;
+      }
+      if (sub === 'resolve') {
+        if (!values.archetype) throw new Error('Usage: fadeno dial resolve --archetype <name>');
+        if (positionals.length > 2) throw new Error('Usage: fadeno dial resolve --archetype <name>');
+        const result = runDialResolve({ archetype: values.archetype });
+        console.log(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      // Otherwise treat as archetype: either show single row or set
+      // Reject reserved words and 'set' for grammar sanity
+      if (RESERVED.has(sub) || sub === 'set') {
+        // This branch should be unreachable because RESERVED already handled, but 'set' still needs refusal
+        throw new Error(`archetype "${sub}" is a reserved word — rename the archetype`);
+      }
+      if (positionals.length === 2) {
+        // Single-archetype view
+        const archetype = sub;
+        const result = runDialShow({});
+        const row = result.rows.find((r) => r.archetype === archetype);
+        const shadow = result.shadow_attachments[archetype] ?? undefined;
+        // Filter to one row
+        const filtered = {
+          ...result,
+          rows: row ? [row] : [],
+          shadows: shadow ? { [archetype]: result.shadows[archetype]! } : {},
+          shadow_attachments: shadow ? { [archetype]: shadow } : {},
+          staleShadows: result.staleShadows.filter((s) => s.archetype === archetype),
+          staleDials: result.staleDials.filter((s) => s.archetype === archetype),
+          dials: {
+            session: Object.hasOwn(result.dials.session, archetype) ? { [archetype]: result.dials.session[archetype]! } : {},
+            repo: Object.hasOwn(result.dials.repo, archetype) ? { [archetype]: result.dials.repo[archetype]! } : {},
+            user: Object.hasOwn(result.dials.user, archetype) ? { [archetype]: result.dials.user[archetype]! } : {},
+          },
+        };
+        if (values.json) {
+          console.log(JSON.stringify(filtered, null, 2));
+          return 0;
+        }
+        // Reuse printer on filtered result
+        printDialShow(filtered as any);
+        return 0;
+      }
+      if (positionals.length === 3) {
+        const archetype = sub;
+        if (RESERVED.has(archetype) || archetype === 'set') {
+          throw new Error(`archetype "${archetype}" is a reserved word — rename the archetype`);
+        }
+        const model = positionals[2]!;
+        const result = runDialSet({ archetype, model, via: values.via ?? null, user: Boolean(values.user), repo: Boolean(values.repo) });
+        if (values.json) {
+          console.log(JSON.stringify(result, null, 2));
+          return 0;
+        }
+        console.log(result.narrative);
+        for (const note of result.notes) console.log(note);
+        return 0;
+      }
+      throw new Error('Usage: fadeno dial [<archetype> [<model>[@effort] [--via <driver>] [--user|--repo]] | clear [<archetype>] [--user|--repo] | shadow <archetype> <model>[@effort] [--via <driver>] [--rate <n>] | clear-shadow [<archetype>] | resolve --archetype <name>]');
     }
     case 'dispatch': {
       const promptFile = values['prompt-file'];
-      const result = runDispatch({
+      const result = (runDispatch as any)({
         archetype: values.archetype,
         role: values.role,
-        loadout: values.loadout,
-        executor: values.executor,
+        model: values.model ?? null,
+        via: values.via ?? null,
         tag: values.tag,
         shadow: values.shadow,
         promptFile,
-        // Prompt defaults to stdin; the echo goes to stderr so stdout stays
-        // the executor's pure report.
         prompt: promptFile == null ? readFileSync(0, 'utf8') : undefined,
-        onEcho: (line) => console.error(line),
+        onEcho: (line: string) => console.error(line),
       });
       if (result.stdout.length > 0) process.stdout.write(result.stdout);
       if (result.stderr.length > 0) process.stderr.write(result.stderr);
@@ -1541,7 +1307,7 @@ function main(argv: string[]): number {
         console.error(
           `dispatch: executor ${result.executor} exited 0 but produced no output — ` +
             `nothing was relayed. Check the executor's own stderr above, and that ` +
-            `its model id resolves (fadeno loadout resolve --archetype <archetype>).`,
+            `its model id resolves (fadeno dial resolve --archetype <archetype>).`,
         );
         return 1;
       }
