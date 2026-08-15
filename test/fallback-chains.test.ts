@@ -10,6 +10,7 @@ import { runInit } from '../src/commands/init.ts';
 import { runNewRun } from '../src/commands/new-run.ts';
 import { runSteeringResolve } from '../src/commands/steering.ts';
 import { runVerify } from '../src/commands/verify.ts';
+import { writeLocalDialState } from '../src/lib/executors.ts';
 import { readEvents, type RunEvent } from '../src/lib/run-ledger.ts';
 import { tempRepo } from './helpers.ts';
 
@@ -72,16 +73,25 @@ function finding(
   return found;
 }
 
+function harnessOpts(): { env: Record<string, string | undefined> } {
+  return { env: { FADENO_HARNESS: 'standalone', FADENO_CONFIG_HOME: process.env.FADENO_CONFIG_HOME, FADENO_STATE_HOME: process.env.FADENO_STATE_HOME, FADENO_DATA_HOME: process.env.FADENO_DATA_HOME } } as any;
+}
+
 function seedDispatchProfile(t: TestContext, extra: Record<string, unknown> = {}): string {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    executors: {
-      'echo-worker': { adapter: 'command', command: STDIN_ECHO('W:'), model: 'm-worker' },
+    schema_version: 3,
+    models: {
+      'w-model': { provider: 'dummy', id: 'w-model', effort: 'high' },
     },
-    loadouts: { main: { worker: 'echo-worker' } },
+    routes: {
+      standalone: {
+        dummy: { command: STDIN_ECHO('W:'), write_access: true },
+        'current-host': { host: true },
+      },
+    },
     archetypes: { scout: { fallback: 'worker' } },
-    default_loadout: 'main',
     ...extra,
   }));
   return root;
@@ -121,35 +131,38 @@ function completed(over: Record<string, unknown> = {}): Record<string, unknown> 
 
 test('dispatch: a fallback archetype resolves onto the worker slot and both rows record it', (t) => {
   const root = seedDispatchProfile(t);
-  const result = runDispatch({ archetype: 'scout', prompt: 'hello', repoRoot: root, env: null });
+  writeLocalDialState(root, { dials: { worker: { model: 'w-model' } }, shadows: {}, legacyNote: null });
+  const result = runDispatch({ archetype: 'scout', prompt: 'hello', repoRoot: root, userPathOptions: harnessOpts() as any });
   assert.equal(result.stdout, 'W:hello');
-  assert.equal(result.executor, 'echo-worker');
-  assert.equal(result.source, 'loadout');
-  assert.equal(DISPATCHES_FORMAT, '0.2');
+  assert.equal(result.executor, 'w-model');
+  assert.equal(result.source, 'session');
+  assert.equal(DISPATCHES_FORMAT, '1.0');
 
   const rows = evidenceRows(root);
   assert.equal(rows.length, 2);
   assert.equal(rows[0]!.event, 'dispatch_requested');
   assert.equal(rows[1]!.event, 'dispatch_completed');
   for (const row of rows) {
-    assert.equal(row.format, '0.2');
+    assert.equal(row.format, '1.0');
     assert.equal(row.format, DISPATCHES_FORMAT);
     assert.equal(row.archetype, 'scout');
     assert.equal(row.resolved_via, 'worker');
-    assert.equal(row.executor, 'echo-worker');
-    assert.equal(row.resolution, 'loadout');
+    assert.equal(row.executor, 'w-model');
+    assert.equal(row.resolution, 'session');
+    assert.deepEqual(row.dial, { model: 'w-model' });
   }
 });
 
 test('dispatch: a direct bind omits resolved_via entirely', (t) => {
   const root = seedDispatchProfile(t);
-  runDispatch({ archetype: 'worker', prompt: 'hi', repoRoot: root, env: null });
+  writeLocalDialState(root, { dials: { worker: { model: 'w-model' } }, shadows: {}, legacyNote: null });
+  runDispatch({ archetype: 'worker', prompt: 'hi', repoRoot: root, userPathOptions: harnessOpts() as any });
   const rows = evidenceRows(root);
   assert.equal(rows.length, 2);
   for (const row of rows) {
-    assert.equal(row.format, '0.2');
+    assert.equal(row.format, '1.0');
     assert.equal(row.archetype, 'worker');
-    assert.equal(row.executor, 'echo-worker');
+    assert.equal(row.executor, 'w-model');
     assert.ok(!('resolved_via' in row), 'direct resolution must omit the key, not stamp null');
   }
 });
@@ -181,13 +194,20 @@ test('verify: a chain-resolved run passes, and a tampered resolved_via fails', (
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
   writeFileSync(join(root, '.fadeno', 'playbooks', 'chain-e2e.yaml'), PLAYBOOK);
+  const dummyRoute = { dummy: { command: NOTES_CMD, write_access: true }, 'current-host': { host: true } };
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    executors: {
-      'echo-worker': { adapter: 'command', command: NOTES_CMD, model: 'm-worker' },
+    schema_version: 3,
+    models: {
+      'echo-worker': { provider: 'dummy', id: 'echo-worker', effort: 'high' },
     },
-    loadouts: { main: { worker: 'echo-worker' } },
-    archetypes: { scout: { fallback: 'worker' } },
-    default_loadout: 'main',
+    routes: {
+      standalone: { ...dummyRoute },
+      codex: { ...dummyRoute },
+      claude: { ...dummyRoute },
+      grok: { ...dummyRoute },
+    },
+    archetypes: { scout: { fallback: 'worker' }, worker: {} },
+    dials: { worker: 'echo-worker' },
   }));
 
   const created = runNewRun({ playbook: 'chain-e2e', task: 'Chain run', repoRoot: root, env: null });
@@ -230,14 +250,18 @@ test('steering: native delivery of a forbidden-posture archetype surfaces the ch
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    executors: {
-      'host-worker': {
-        adapter: 'host', model: 'opus', reasoning_effort: 'high', agent_type: 'worker',
-      },
+    schema_version: 3,
+    models: {
+      'host-worker': { provider: 'dummy', id: 'opus', effort: 'high' },
     },
-    loadouts: { main: { worker: 'host-worker' } },
-    archetypes: { generator: { requires_write: 'forbidden', fallback: 'worker' } },
-    default_loadout: 'main',
+    routes: {
+      standalone: { dummy: { host: true }, 'current-host': { host: true } },
+      codex: { dummy: { host: true }, 'current-host': { host: true } },
+      claude: { dummy: { host: true }, 'current-host': { host: true } },
+      grok: { dummy: { host: true }, 'current-host': { host: true } },
+    },
+    archetypes: { generator: { requires_write: 'forbidden', fallback: 'worker' }, worker: {} },
+    dials: { worker: 'host-worker' },
   }));
 
   const result = runSteeringResolve({
@@ -257,14 +281,18 @@ test('steering: forbidden × write_access:true refuses on the command route', (t
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    executors: {
-      'rw-cmd': {
-        adapter: 'command', command: ['node', '-e', '0'], model: 'm-rw', write_access: true,
-      },
+    schema_version: 3,
+    models: {
+      'rw-cmd': { provider: 'dummy', id: 'rw-cmd', effort: 'high' },
     },
-    loadouts: { main: { worker: 'rw-cmd' } },
-    archetypes: { generator: { requires_write: 'forbidden', fallback: 'worker' } },
-    default_loadout: 'main',
+    routes: {
+      standalone: { dummy: { command: ['node', '-e', '0'], write_access: true }, 'current-host': { host: true } },
+      codex: { dummy: { command: ['node', '-e', '0'], write_access: true }, 'current-host': { host: true } },
+      claude: { dummy: { command: ['node', '-e', '0'], write_access: true }, 'current-host': { host: true } },
+      grok: { dummy: { command: ['node', '-e', '0'], write_access: true }, 'current-host': { host: true } },
+    },
+    archetypes: { generator: { requires_write: 'forbidden', fallback: 'worker' }, worker: {} },
+    dials: { worker: 'rw-cmd' },
   }));
 
   const result = runSteeringResolve({ repoRoot: root, archetype: 'generator', env: null });

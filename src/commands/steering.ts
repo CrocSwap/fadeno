@@ -4,21 +4,23 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
-  applicableOverrides,
-  executorForArchetype,
+  compileDialRef,
   explainWriteConflict,
+  formatDialRef,
   loadExecutorProfile,
-  parseExecutorProfile,
-  readLocalLoadoutState,
-  applicableUserLoadout,
-  resolveActiveLoadout,
-  resolveRole,
-  type ActiveLoadout,
+  parseDialRef,
+  parseSnapshotDocument,
+  readLocalDialState,
+  resolveDialCascade,
+  type DialLayers,
+  type DialRef,
   type ExecutorProfile,
   type LoadedExecutorProfile,
   type ExecutorSpec,
   type RoleResolutionSource,
+  type SnapshotDocument,
 } from '../lib/executors.ts';
+import { readUserDials } from '../lib/user-paths.ts';
 import { emitFile, type EmitResult } from '../lib/fsutil.ts';
 import { HostDispatchError, readHostDispatchRequest, type HostDispatchRequestLookup } from '../lib/host-dispatch.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
@@ -51,18 +53,13 @@ export interface SteeringResolution {
   mode: SteeringMode;
   archetype: string;
   role: string | null;
-  activeLoadout: ActiveLoadout | null;
   executor: string;
   adapter: ExecutorSpec['adapter'];
   model: string | null;
-  source: RoleResolutionSource | 'host-baseline' | 'host-request';
-  /**
-   * Whether a session slot override — not the loadout's own slot — produced
-   * this binding. Redundant with `source === 'override'` by construction, and
-   * deliberately so: the steering hook and the Codex role agents branch on a
-   * flag they cannot mis-parse, without enumerating resolution sources.
-   */
-  override: boolean;
+  effort: string | null;
+  driver: string | null;
+  source: RoleResolutionSource | 'host-request';
+  dial: DialRef;
   hostExecutor: string | null;
   detail: string;
   /** The shared refusal, present only on a `write_conflict` resolution. */
@@ -108,13 +105,13 @@ function validateArchetype(archetype: string): string {
 }
 
 /** Binding-chain successor. Undeclared names and non-string fallbacks are end-nodes. */
-function nextArchetypeFallback(profile: ExecutorProfile, name: string): string | null {
+function nextArchetypeFallback(profile: ExecutorProfile | SnapshotDocument, name: string): string | null {
   if (!Object.hasOwn(profile.archetypes, name)) return null;
   const next = profile.archetypes[name]!.fallback;
   return typeof next === 'string' ? next : null;
 }
 
-function fallbackChain(profile: ExecutorProfile, start: string): string[] {
+function fallbackChain(profile: ExecutorProfile | SnapshotDocument, start: string): string[] {
   const chain: string[] = [];
   const seen = new Set<string>();
   let current: string | null = start;
@@ -135,7 +132,7 @@ type SteeringResolutionBase = Omit<SteeringResolution, 'resolved_via' | 'surface
  */
 function decorateSteering(
   base: SteeringResolutionBase,
-  profile: ExecutorProfile,
+  profile: ExecutorProfile | SnapshotDocument,
   resolvedVia: string | null,
 ): SteeringResolution {
   const result: SteeringResolution = { ...base, resolved_via: resolvedVia };
@@ -164,14 +161,12 @@ export interface SteeringResolveOptions extends CommonOptions {
   archetype: string;
   role?: string | null;
   hostExecutor?: string | null;
-  loadout?: string | null;
-  env?: string | null;
   /** Immutable engine delivery identity; must be supplied as a pair. */
   run?: string | null;
   dispatchId?: string | null;
 }
 
-function snapshotProfileForRequest(lookup: HostDispatchRequestLookup): ExecutorProfile {
+function snapshotProfileForRequest(lookup: HostDispatchRequestLookup): SnapshotDocument {
   const snapshots = lookup.events.filter((event) => event.type === 'profile_snapshotted');
   if (snapshots.length !== 1) {
     throw new SteeringError(
@@ -205,7 +200,7 @@ function snapshotProfileForRequest(lookup: HostDispatchRequestLookup): ExecutorP
     throw new SteeringError(`run "${lookup.runId}" profile snapshot digest does not match its recorded sha256.`);
   }
   try {
-    return parseExecutorProfile(text, `${profileRel} (run snapshot)`);
+    return parseSnapshotDocument(text, `${profileRel} (run snapshot)`);
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
     throw err;
@@ -274,16 +269,21 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
     : hasFallback
       ? `host request ${dispatchId} is locked to ${request.executor}; deliver it through that executor's declared command fallback`
       : `host request ${dispatchId} requires host executor ${request.executor}; this session is materialized for ${hostExecutor ?? 'no host executor'}, so start a matching Codex session`;
+  // For locked, dial is the executor ref itself
+  let dial: DialRef;
+  try { dial = parseDialRef(request.executor, 'locked'); } catch { dial = { model: request.executor }; }
+  const compiled = (() => { try { return compileDialRef(dial, profile as unknown as ExecutorProfile); } catch { return null; } })();
   return decorateSteering({
     mode: matchesHost ? 'host' : hasFallback ? 'command' : 'restart_required',
     archetype,
     role,
-    activeLoadout: null,
     executor: request.executor,
     adapter: 'host',
     model: request.model,
+    effort: request.reasoningEffort,
+    driver: (executor as any).driver ?? compiled?.driver ?? null,
     source: 'host-request',
-    override: false,
+    dial,
     hostExecutor,
     detail,
   }, profile, null);
@@ -306,119 +306,120 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
   }
   if (hasRun && hasDispatchId) return runLockedSteeringResolve(opts, archetype, role, hostExecutor);
 
-  const { profile, selfContained } = profileOf(repoRoot, opts.userPathOptions);
-  const hostSpec = hostExecutor == null ? null : profile.executors[hostExecutor];
+  const { profile } = profileOf(repoRoot, opts.userPathOptions);
+  let hostSpec: ExecutorSpec | null = null;
+  if (hostExecutor != null) {
+    let parsed: DialRef | null = null;
+    try { parsed = parseDialRef(hostExecutor, 'host'); } catch {}
+    if (parsed != null) {
+      try { hostSpec = compileDialRef(parsed, profile).spec; } catch {}
+    }
+    if (hostSpec == null && (profile as unknown as SnapshotDocument).executors != null) {
+      hostSpec = (profile as unknown as SnapshotDocument).executors[hostExecutor] ?? null;
+    }
+    if (hostSpec == null) {
+      try {
+        const fallback = (profile as unknown as Record<string, unknown>).executors as Record<string, ExecutorSpec> | undefined;
+        if (fallback != null && hostExecutor in fallback) hostSpec = fallback[hostExecutor]!;
+      } catch {}
+    }
+  }
   if (hostExecutor != null && (hostSpec == null || hostSpec.adapter !== 'host')) {
     throw new SteeringError(
       `host executor "${hostExecutor}" is not a declared host executor; ` +
-        're-apply Codex steering from a host-backed baseline loadout.',
+        're-apply Codex steering from a host-backed dial baseline.',
     );
   }
 
-  let active: ActiveLoadout | null;
-  // Overrides ride the same read as the pin's base name and apply only when
-  // that base is the loadout in force — a `--loadout other` resolves clean.
-  let overrides: Record<string, string>;
+  // Read dial layers (strict: malformed v3 pin throws)
+  let dialLayers: DialLayers;
+  let legacyNote: string | null = null;
+  let detailNote = '';
   try {
-    const pin = readLocalLoadoutState(repoRoot);
-    active = resolveActiveLoadout({
-      flagValue: opts.loadout ?? null,
-      envValue: opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null,
-      localFileValue: pin.loadout,
-      // A user-scope dial applies everywhere except under a self-contained
-      // project profile, which is authoritative.
-      userFileValue: applicableUserLoadout(selfContained, opts.userPathOptions),
-      profile,
-    });
-    overrides = applicableOverrides(pin, active);
+    const state = readLocalDialState(repoRoot);
+    legacyNote = state.legacyNote;
+    if (legacyNote != null) detailNote = ` ${legacyNote}`;
+    const userRaw = readUserDials(opts.userPathOptions ?? {});
+    const user: Record<string, DialRef> = {};
+    for (const [k, v] of Object.entries(userRaw)) user[k] = v as DialRef;
+    dialLayers = { session: state.dials, repo: { ...profile.dials } as Record<string, DialRef>, user };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
     throw err;
   }
 
-  if (active == null) {
-    if (hostExecutor == null || hostSpec == null) {
-      throw new SteeringError(
-        'no loadout is active and this Codex role agent has no host baseline; ' +
-          'run `fadeno steering apply <loadout> --codex --force` and start a fresh Codex session.',
-      );
-    }
-    return decorateSteering({
-      mode: 'host', archetype, role, activeLoadout: null, executor: hostExecutor,
-      adapter: 'host', model: hostSpec.model, source: 'host-baseline', override: false, hostExecutor,
-      detail: `no loadout is active; execute in-host as baseline ${hostExecutor}`,
-    }, profile, null);
-  }
-
-  let resolved;
+  // Resolve via dial cascade
+  let cascade: { ref: DialRef; source: RoleResolutionSource; resolvedVia: string | null };
   try {
-    resolved = role != null
-      ? resolveRole(role, archetype, profile, active.name, overrides)
-      : resolveRole(
-          archetype,
-          archetype,
-          { ...profile, bindings: profile.bindings['*'] != null ? { '*': profile.bindings['*'] } : {} },
-          active.name,
-          overrides,
-        );
+    cascade = resolveDialCascade(role ?? archetype, archetype, { bindings: profile.bindings, archetypes: profile.archetypes }, dialLayers);
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
     throw err;
   }
+  const refString = formatDialRef(cascade.ref);
+  let spec: ExecutorSpec | null = (profile as unknown as SnapshotDocument).executors?.[refString] ?? null;
+  let compiled: ReturnType<typeof compileDialRef> | null = null;
+  try { compiled = compileDialRef(cascade.ref, profile); } catch {}
+  if (spec == null && compiled != null) spec = compiled.spec;
+  if (spec == null) throw new SteeringError(`resolved dial "${refString}" has no compiled executor in profile`);
+  // Bind neutral host agentType
+  if (spec.adapter === 'host' && (spec as any).agentType === '*' && archetype != null) spec = { ...spec, agentType: archetype } as ExecutorSpec;
 
-  // Both command deliveries below (a command executor, and a host executor's
-  // declared fallback) are checked against the archetype's write requirement:
-  // a slot that would refuse the work is never presented as a clean command
-  // slot. A host slot is exempt — the host owns its agent's permissions.
-  const finish = (base: SteeringResolutionBase): SteeringResolution =>
-    decorateSteering(base, profile, resolved.resolvedVia);
+  const finish = (base: Omit<SteeringResolution, 'resolved_via' | 'surface_archetype' | 'advisory'>): SteeringResolution =>
+    decorateSteering(base as any, profile, cascade.resolvedVia);
 
   const refusal = (spec: ExecutorSpec, executorName: string): SteeringResolution | null => {
     const conflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile);
     if (conflict == null) return null;
     return finish({
-      mode: 'write_conflict', archetype, role, activeLoadout: active,
-      executor: executorName, adapter: spec.adapter, model: spec.model,
-      source: resolved.source, override: resolved.source === 'override', hostExecutor,
-      detail: conflict,
+      mode: 'write_conflict', archetype, role,
+      executor: executorName, adapter: spec.adapter, model: (spec as any).model ?? compiled?.model ?? null,
+      effort: compiled?.effort ?? (spec.adapter === 'host' ? (spec as any).reasoningEffort : null),
+      driver: (spec as any).driver ?? compiled?.driver ?? null,
+      source: cascade.source, dial: cascade.ref, hostExecutor,
+      detail: conflict + detailNote,
       writeConflict: conflict,
-    });
+    } as any);
   };
 
-  if (resolved.executor.adapter === 'command') {
-    return refusal(resolved.executor, resolved.executorName) ?? finish({
-      mode: 'command', archetype, role, activeLoadout: active,
-      executor: resolved.executorName, adapter: 'command', model: resolved.executor.model,
-      source: resolved.source, override: resolved.source === 'override', hostExecutor,
-      detail: `dispatch through command executor ${resolved.executorName}; effective immediately`,
-    });
+  if (spec.adapter === 'command') {
+    return refusal(spec, refString) ?? finish({
+      mode: 'command', archetype, role,
+      executor: refString, adapter: 'command', model: (spec as any).model ?? compiled?.model ?? null,
+      effort: compiled?.effort ?? null, driver: (spec as any).driver ?? compiled?.driver ?? null,
+      source: cascade.source, dial: cascade.ref, hostExecutor,
+      detail: `dispatch through command executor ${refString}; effective immediately${detailNote}`,
+    } as any);
   }
-  if (hostExecutor === resolved.executorName) {
+  // host adapter
+  if (cascade.source === 'base' || hostExecutor === refString) {
     return finish({
-      mode: 'host', archetype, role, activeLoadout: active,
-      executor: resolved.executorName, adapter: 'host', model: resolved.executor.model,
-      source: resolved.source, override: resolved.source === 'override', hostExecutor,
-      detail: `host executor ${resolved.executorName} matches this session's host baseline`,
-    });
+      mode: 'host', archetype, role,
+      executor: refString, adapter: 'host', model: (spec as any).model,
+      effort: (spec as any).reasoningEffort ?? compiled?.effort ?? null,
+      driver: (spec as any).driver ?? compiled?.driver ?? null,
+      source: cascade.source, dial: cascade.ref, hostExecutor,
+      detail: `host executor ${refString} matches this session's host baseline${detailNote}`,
+    } as any);
   }
-  if (resolved.executor.fallbackCommand != null) {
-    return refusal(resolved.executor, resolved.executorName) ?? finish({
-      mode: 'command', archetype, role, activeLoadout: active,
-      executor: resolved.executorName, adapter: 'host', model: resolved.executor.model,
-      source: resolved.source, override: resolved.source === 'override', hostExecutor,
-      detail:
-        `host executor ${resolved.executorName} differs from this session's host baseline ` +
-        `${hostExecutor ?? '(none)'}; use its declared command fallback immediately`,
-    });
+  if (spec.fallbackCommand != null) {
+    return refusal(spec, refString) ?? finish({
+      mode: 'command', archetype, role,
+      executor: refString, adapter: 'host', model: (spec as any).model,
+      effort: (spec as any).reasoningEffort ?? compiled?.effort ?? null,
+      driver: (spec as any).driver ?? compiled?.driver ?? null,
+      source: cascade.source, dial: cascade.ref, hostExecutor,
+      detail: `host executor ${refString} differs from this session's host baseline ${hostExecutor ?? '(none)'}; use its declared command fallback immediately${detailNote}`,
+    } as any);
   }
   return finish({
-    mode: 'restart_required', archetype, role, activeLoadout: active,
-    executor: resolved.executorName, adapter: 'host', model: resolved.executor.model,
-    source: resolved.source, override: resolved.source === 'override', hostExecutor,
-    detail:
-      `loadout ${active.name} requests host executor ${resolved.executorName}, but this session was ` +
-      `materialized for ${hostExecutor ?? 'no host executor'}; apply the loadout and start a fresh Codex session`,
-  });
+    mode: 'restart_required', archetype, role,
+    executor: refString, adapter: 'host', model: (spec as any).model,
+    effort: (spec as any).reasoningEffort ?? compiled?.effort ?? null,
+    driver: (spec as any).driver ?? compiled?.driver ?? null,
+    source: cascade.source, dial: cascade.ref, hostExecutor,
+    detail: `dial ${refString} requests host executor ${refString}, but this session was materialized for ${hostExecutor ?? 'no host executor'}; apply the dial and start a fresh session${detailNote}`,
+  } as any);
 }
 
 const ROLE_BEHAVIOR: Record<string, string> = {
@@ -526,7 +527,6 @@ resolver owns the work.
 }
 
 export interface SteeringApplyOptions extends CommonOptions {
-  loadout: string;
   target: 'codex';
   force?: boolean;
   /** Advanced override; normal setup/use materialize at user scope. */
@@ -536,7 +536,6 @@ export interface SteeringApplyOptions extends CommonOptions {
 }
 
 export interface SteeringApplyResult {
-  loadout: string;
   results: EmitResult[];
   materialization: Record<string, {
     /** `write-conflict` slots are refused: no agent file is written for them. */
@@ -578,16 +577,21 @@ function managedAgentEmit(path: string, body: string, force: boolean, scope: 'pr
   return 'created';
 }
 
-/** Materialize every required loadout slot into a session-static Codex role agent. */
+/** Materialize every archetype's resolved dial into a session-static Codex role agent. */
 export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResult {
   const repoRoot = rootOf(opts);
   const { profile } = profileOf(repoRoot, opts.userPathOptions);
-  const loadout = opts.loadout.trim();
-  const slots = profile.loadouts[loadout];
-  if (slots == null) {
-    throw new SteeringError(
-      `"${loadout}" is not a declared loadout (${Object.keys(profile.loadouts).sort().join(', ')}).`,
-    );
+  // Read live dial layers (ignore loadout if present)
+  let dialLayers: DialLayers;
+  try {
+    const state = readLocalDialState(repoRoot);
+    const userRaw = readUserDials(opts.userPathOptions ?? {});
+    const user: Record<string, DialRef> = {};
+    for (const [k, v] of Object.entries(userRaw)) user[k] = v as DialRef;
+    dialLayers = { session: state.dials, repo: { ...profile.dials } as Record<string, DialRef>, user };
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+    throw err;
   }
   const baseline: Record<string, string> = {};
   const materialization: SteeringApplyResult['materialization'] = {};
@@ -598,21 +602,31 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
   const managedCli = userPaths(opts.userPathOptions).managedCli;
   const cliPath = opts.cliPath ?? (scope === 'user' && existsSync(managedCli) ? managedCli : 'fadeno');
   for (const archetype of ['worker', 'reviewer', 'judge']) {
-    const executorName = slots[archetype];
-    const spec = executorName == null ? null : executorForArchetype(profile, executorName, archetype);
-    if (executorName == null || spec == null) {
-      throw new SteeringError(
-        `loadout "${loadout}" needs an executor in its "${archetype}" slot to materialize ` +
-          `a Codex role agent; found ${executorName ?? 'no slot'}.`,
-      );
+    let cascade: { ref: DialRef; source: RoleResolutionSource; resolvedVia: string | null };
+    try {
+      cascade = resolveDialCascade(archetype, archetype, { bindings: profile.bindings, archetypes: profile.archetypes }, dialLayers);
+    } catch (err) {
+      if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+      throw err;
     }
+    const executorName = formatDialRef(cascade.ref);
+    let spec: ExecutorSpec | null = (profile as unknown as SnapshotDocument).executors?.[executorName] ?? null;
+    try {
+      const compiled = compileDialRef(cascade.ref, profile);
+      if (spec == null) spec = compiled.spec;
+    } catch {}
+    if (spec == null) {
+      throw new SteeringError(`archetype "${archetype}" resolved to "${executorName}" but no executor exists in profile`);
+    }
+    // bind neutral host agentType
+    if (spec.adapter === 'host' && (spec as any).agentType === '*' ) spec = { ...spec, agentType: archetype } as ExecutorSpec;
     const filename = scope === 'user' ? `fadeno-${archetype}.toml` : `${archetype}.toml`;
     const path = join(agentDir, filename);
     let body: string;
     if (spec.adapter === 'host') {
       if (spec.agentType !== archetype) {
         throw new SteeringError(
-          `loadout "${loadout}" ${archetype} slot targets ${executorName} with agent_type ` +
+          `dial "${executorName}" for ${archetype} targets ${executorName} with agent_type ` +
             `"${spec.agentType}"; expected "${archetype}".`,
         );
       }
@@ -650,5 +664,5 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
     .filter((item) => !existsSync(item.path) || readFileSync(item.path, 'utf8') !== item.body)
     .map((item) => item.path);
   const restartRequired = results.some((item) => item.status === 'created' || item.status === 'overwritten');
-  return { loadout, results, materialization, baseline, restartRequired, conflicts, scope };
+  return { results, materialization, baseline, restartRequired, conflicts, scope };
 }

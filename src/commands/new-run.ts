@@ -4,17 +4,18 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { buildArtifactManifest, sha256Hex } from '../lib/artifact-manifest.ts';
 import {
   ExecutorProfileError,
-  applicableOverrides,
+  compileDialRef,
+  formatDialRef,
   loadExecutorProfile,
-  readLocalLoadoutState,
-  applicableUserLoadout,
-  resolveActiveLoadout,
-  resolveRole,
+  readLocalDialState,
+  resolveDialCascade,
   roleResolutionEchoLabel,
-  type ActiveLoadout,
+  type DialLayers,
+  type DialRef,
   type ExecutorProfile,
   type RoleResolutionSource,
 } from '../lib/executors.ts';
+import { readUserDials } from '../lib/user-paths.ts';
 import { resolveDefinition, resolvePlaybookFile } from '../lib/definitions.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { roleArchetype } from '../lib/playbook-validate.ts';
@@ -32,13 +33,6 @@ export interface NewRunOptions {
   inputs?: string[];
   /** Singular alias for argv-like callers. */
   input?: string[];
-  /** `--loadout` override for the resolution preview. */
-  loadout?: string;
-  /**
-   * `FADENO_LOADOUT` value; injectable for hermetic tests. `undefined` reads
-   * the real environment; `null` means explicitly absent.
-   */
-  env?: string | null;
   cwd?: string;
   repoRoot?: string;
   userPathOptions?: UserPathOptions;
@@ -57,10 +51,11 @@ export interface NewRunRoleResolution {
 }
 
 export interface NewRunResolution {
-  loadout: ActiveLoadout | null;
+  loadout: null;
   roles: NewRunRoleResolution[];
   /** Rendering-ready echo lines (`role → executor (model) [source]`). */
   echo: string[];
+  dialLayers?: DialLayers;
 }
 
 export interface NewRunResult {
@@ -224,37 +219,28 @@ function recordDeclaredInputs(
 function computeResolution(
   repoRoot: string,
   playbookPath: string,
-  flagValue: string | null,
-  envRaw: string | null | undefined,
   userPathOptions?: UserPathOptions,
 ): NewRunResolution | null {
   let profile: ExecutorProfile;
-  let selfContained: boolean | undefined;
   try {
     const loaded = loadExecutorProfile(repoRoot, userPathOptions);
     profile = loaded.profile;
-    selfContained = loaded.selfContained;
   } catch (err) {
     if (err instanceof ExecutorProfileError) return null;
     throw err;
   }
-  let active: ActiveLoadout | null;
-  // Name-matched overlay only: the preview shows what `fadeno drive` will
-  // resolve, and drive scopes overrides to the loadout that actually won. An
-  // unreadable pin stays best-effort here, like every other profile problem.
-  let overrides: Record<string, string>;
+  let dialLayers: DialLayers;
   try {
-    const pin = readLocalLoadoutState(repoRoot);
-    active = resolveActiveLoadout({
-      flagValue,
-      envValue: envRaw !== undefined ? envRaw : process.env.FADENO_LOADOUT ?? null,
-      localFileValue: pin.loadout,
-      // A user-scope dial applies everywhere except under a self-contained
-      // project profile, which is authoritative.
-      userFileValue: applicableUserLoadout(selfContained, userPathOptions),
-      profile,
-    });
-    overrides = applicableOverrides(pin, active);
+    const state = readLocalDialState(repoRoot);
+    const userRaw = readUserDials(userPathOptions ?? {});
+    const user: Record<string, DialRef> = {};
+    for (const [k, v] of Object.entries(userRaw)) user[k] = v as DialRef;
+    dialLayers = { session: state.dials, repo: { ...profile.dials } as Record<string, DialRef>, user };
+    // If repo dials are empty but live profile has them, prefer live (snapshot's dials not yet recorded)
+    try {
+      const live = loadExecutorProfile(repoRoot, userPathOptions).profile;
+      if (Object.keys(live.dials).length > 0) dialLayers.repo = { ...live.dials } as Record<string, DialRef>;
+    } catch {}
   } catch (err) {
     if (err instanceof ExecutorProfileError) return null;
     throw err;
@@ -279,18 +265,25 @@ function computeResolution(
   for (const role of roleNames) {
     const archetype = roleArchetype(playbookDoc, role);
     try {
-      const resolved = resolveRole(role, archetype, profile, active?.name ?? null, overrides);
-      const model = resolved.executor.model;
-      roles.push({ role, archetype, executor: resolved.executorName, model, source: resolved.source, error: null });
-      const label = roleResolutionEchoLabel(resolved.source, active?.name ?? null);
-      echo.push(`${role} → ${resolved.executorName}${model != null ? ` (${model})` : ''} [${label}]`);
+      const cascade = resolveDialCascade(role, archetype, { bindings: profile.bindings, archetypes: profile.archetypes }, dialLayers);
+      const refString = formatDialRef(cascade.ref);
+      let model: string | null = null;
+      try {
+        const compiled = compileDialRef(cascade.ref, profile);
+        model = compiled.model;
+      } catch {
+        model = null;
+      }
+      roles.push({ role, archetype, executor: refString, model, source: cascade.source, error: null });
+      const label = roleResolutionEchoLabel(cascade.source);
+      echo.push(`${role} → ${refString}${model != null ? ` (${model})` : ''} [${label}]`);
     } catch (err) {
       if (!(err instanceof ExecutorProfileError)) throw err;
       roles.push({ role, archetype, executor: null, model: null, source: null, error: err.message });
       echo.push(`${role} → (unresolved)`);
     }
   }
-  return { loadout: active, roles, echo };
+  return { loadout: null, roles, echo, dialLayers };
 }
 
 /**
@@ -354,9 +347,7 @@ export function runNewRun(opts: NewRunOptions): NewRunResult {
     artifacts_dir: 'artifacts',
     current_step: null,
   };
-  // Persist only an explicit creation-time selection. Ambient state remains
-  // ambient for old scripts; drive gives this intent precedence when present.
-  if (opts.loadout != null && opts.loadout.trim() !== '') runDocument.requested_loadout = opts.loadout.trim();
+  // No longer persists loadout selection; dial layers are ambient
   const runYaml = stringifyYaml(runDocument);
   const modeline = '# yaml-language-server: $schema=definitions/schemas/run.schema.json';
   writeFileSync(join(runDir, 'run.yaml'), `${modeline}\n${runYaml}`, 'utf8');
@@ -364,7 +355,7 @@ export function runNewRun(opts: NewRunOptions): NewRunResult {
   new LedgerWriter(runDir).append({ type: 'run_started', step: null }, now);
   writeFileSync(join(runDir, 'artifacts', '.gitkeep'), '', 'utf8');
   const recordedInputs = recordDeclaredInputs(runDir, repoRoot, declared, supplied, now);
-  const resolution = computeResolution(repoRoot, playbookPath, opts.loadout ?? null, opts.env, opts.userPathOptions);
+  const resolution = computeResolution(repoRoot, playbookPath, opts.userPathOptions);
 
   return { runId, runDir, playbook, inputs: recordedInputs, resolution };
 }

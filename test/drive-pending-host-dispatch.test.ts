@@ -39,19 +39,42 @@ flow:
 `;
 
 const EXECUTORS = {
-  executors: {
-    'luna-host': { adapter: 'host', model: 'gpt-5.6-luna', reasoning_effort: 'xhigh', agent_type: 'worker' },
-    'ok-worker': { adapter: 'command', command: ['node', '-e', "process.stdout.write('COMMAND NOTES')"] },
+  schema_version: 3,
+  models: {
+    'luna-host': { provider: 'luna_p', id: 'gpt-5.6-luna', effort: 'xhigh' },
+    'ok-worker': { provider: 'ok_p', id: 'ok-worker', effort: 'high' },
   },
-  loadouts: {
-    'host-primary': { worker: 'luna-host' },
-    'command-primary': { worker: 'ok-worker' },
+  routes: {
+    standalone: {
+      luna_p: { host: true },
+      ok_p: { command: ['node', '-e', "process.stdout.write('COMMAND NOTES')"], write_access: true },
+      'current-host': { host: true },
+    },
+    codex: {
+      luna_p: { host: true },
+      ok_p: { command: ['node', '-e', "process.stdout.write('COMMAND NOTES')"], write_access: true },
+      'current-host': { host: true },
+    },
+    claude: {
+      luna_p: { host: true },
+      ok_p: { command: ['node', '-e', "process.stdout.write('COMMAND NOTES')"], write_access: true },
+      'current-host': { host: true },
+    },
+    grok: {
+      luna_p: { host: true },
+      ok_p: { command: ['node', '-e', "process.stdout.write('COMMAND NOTES')"], write_access: true },
+      'current-host': { host: true },
+    },
   },
+  archetypes: { worker: {} },
+  dials: { worker: 'luna-host' },
 };
 
 function useLoadout(root: string, name: string): void {
+  // Dial world: map old loadout names to dial values
+  const dial = name === 'host-primary' ? 'luna-host' : 'ok-worker';
   mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
-  writeFileSync(join(root, '.fadeno', 'local', 'loadout'), `${name}\n`);
+  writeFileSync(join(root, '.fadeno', 'local', 'dials'), JSON.stringify({ dials: { worker: dial } }));
 }
 
 function runStatus(runDir: string): unknown {

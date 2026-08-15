@@ -35,7 +35,7 @@ test('Codex --with-steering installs loadout-aware role overrides', (t) => {
 
   for (const archetype of ARCHETYPES) {
     const body = read(root, `.codex/agents/${archetype}.toml`);
-    assert.match(body, /loadout-aware/i);
+    assert.match(body, /dial-aware/i);
     assert.match(body, new RegExp(`First run .*fadeno steering resolve --archetype ${archetype}`));
     assert.match(body, new RegExp(`fadeno dispatch --archetype ${archetype} --prompt-file`));
     assert.match(body, /ENTIRE task prompt.*verbatim/s);
@@ -342,7 +342,7 @@ test('Claude steering writes the host_delivery evidence the kernel never sees', 
     // cannot import DISPATCHES_FORMAT (it runs as a standalone script), so the
     // literal is duplicated there and pinned here — orthogonal to hook_version
     // below, which stamps the *writer*, not the format it writes.
-    format: '0.2',
+    format: '1.0',
     event: 'host_delivery',
     // The one key that answers "which Fadeno produced this row?" on every row
     // in the log, kernel-written or hook-written. Before it existed the only
@@ -354,10 +354,12 @@ test('Claude steering writes the host_delivery evidence the kernel never sees', 
     hook_version: packageVersion(),
     archetype: 'reviewer',
     agent_type: 'reviewer',
-    loadout: 'claude-native',
     executor: 'claude-opus',
     model: 'opus',
     model_override: 'sonnet',
+    dial_source: null,
+    driver: null,
+    effort: null,
     // The harness Agent tool has no effort parameter: native spawns inherit.
     reasoning_effort: 'inherited',
     transport: 'host',

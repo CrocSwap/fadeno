@@ -16,31 +16,33 @@ import {
 } from '../lib/constraints.ts';
 import {
   ExecutorProfileError,
-  applicableOverrides,
+  activeHarness,
+  formatDialRef,
+  parseDialRef,
+  parseSnapshotDocument,
   eligibilityFor,
   explainEligibilityConflict,
   explainProviderConflict,
   explainWriteConflict,
   loadExecutorProfile,
-  parseExecutorProfile,
-  readLocalLoadoutState,
-  applicableUserLoadout,
-  repoProfileSelfContained,
-  resolveActiveLoadout,
-  resolveRole,
+  readLocalDialState,
+  resolveDialCascade,
   roleResolutionEchoLabel,
-  serializeProfile,
+  serializeSnapshot,
   SESSION_ID_PLACEHOLDER,
   substituteSessionId,
-  type ActiveLoadout,
+  type DialLayers,
+  type DialRef,
   type ExecutorProfile,
   type ExecutorSpec,
+  type HarnessId,
   type InputProducer,
-  type LocalLoadoutState,
   type RoleResolutionSource,
+  type SnapshotDocument,
   type WritePosture,
   atCwd,
 } from '../lib/executors.ts';
+import { readUserDials } from '../lib/user-paths.ts';
 import { computeNext, FlowCursorError, type NextComputation } from '../lib/flow-cursor.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { resolveRunPlaybookFile, runSchemaDirectories } from '../lib/definitions.ts';
@@ -97,15 +99,8 @@ export interface DriveOptions {
   run: string;
   /** Hard cap on engine transitions per invocation (safety net over loop bounds). */
   maxTransitions?: number;
-  /** Session binding overrides, each `role=executor`. Recorded as events. */
+  /** Session binding overrides, each `role=dialRef`. Recorded as events. */
   bind?: string[];
-  /** `--loadout` override for this invocation (active-loadout resolution). */
-  loadout?: string;
-  /**
-   * `FADENO_LOADOUT` value; injectable for hermetic tests. `undefined` reads
-   * the real environment; `null` means explicitly absent.
-   */
-  env?: string | null;
   cwd?: string;
   repoRoot?: string;
   userPathOptions?: UserPathOptions;
@@ -139,19 +134,14 @@ interface EngineCtx {
   runDir: string;
   repoRoot: string;
   userPathOptions?: UserPathOptions;
+  harness: HarnessId;
   playbook: Playbook;
   task: string;
   schemas: SchemaSet;
-  profile: ExecutorProfile;
-  /** Active loadout for this invocation — resolved fresh at engine start. */
-  activeLoadout: ActiveLoadout | null;
-  /**
-   * Session slot overrides from the sticky pin (archetype → executor), already
-   * scoped to `activeLoadout` by name. Distinct from `overrides` below: these
-   * decorate the loadout's archetype slots, `--bind` pins a role outright.
-   */
-  slotOverrides: Record<string, string>;
-  /** Explicit `--bind` overrides: role key → executor name. */
+  profile: SnapshotDocument;
+  /** Dial layers in force for this invocation (recorded snapshot layers mid-run, live layers at invocation start). */
+  dialLayers: DialLayers;
+  /** Explicit `--bind` overrides: role key → refString (executor name). */
   overrides: Map<string, string>;
   /** Actor calls that already consumed their one bounded repair this invocation. */
   repaired: Set<string>;
@@ -253,9 +243,19 @@ function parseBinds(bind: string[] | undefined): Map<string, string> {
   for (const entry of bind ?? []) {
     const eq = entry.indexOf('=');
     if (eq <= 0 || eq === entry.length - 1) {
-      throw new DriveError(`Invalid --bind "${entry}"; expected role=executor.`);
+      throw new DriveError(`Invalid --bind "${entry}"; expected role=dialRef.`);
     }
-    out.set(entry.slice(0, eq).trim(), entry.slice(eq + 1).trim());
+    const role = entry.slice(0, eq).trim();
+    const raw = entry.slice(eq + 1).trim();
+    if (raw.length === 0) throw new DriveError(`Invalid --bind "${entry}"; expected role=dialRef.`);
+    let ref: DialRef;
+    try {
+      ref = parseDialRef(raw, `bind ${role}`);
+    } catch (err) {
+      if (err instanceof ExecutorProfileError) throw new DriveError(err.message);
+      throw err;
+    }
+    out.set(role, formatDialRef(ref));
   }
   return out;
 }
@@ -263,24 +263,56 @@ function parseBinds(bind: string[] | undefined): Map<string, string> {
 /** Snapshot the repo profile into the run dir on first engine contact; later
  *  invocations run against the snapshot (the run's truth), never a silently
  *  edited repo profile. */
-function ensureProfileSnapshot(ctx: Omit<EngineCtx, 'profile' | 'activeLoadout' | 'slotOverrides'>): ExecutorProfile {
+function readLiveDialLayers(repoRoot: string, userPathOptions: UserPathOptions | undefined, liveProfile: ExecutorProfile): DialLayers {
+  let session: Record<string, DialRef> = {};
+  try {
+    const state = readLocalDialState(repoRoot);
+    if (state.legacyNote != null) {
+      // surface once via act caller; store note for recordResolutionSnapshot to echo?
+      // We will surface in runDrive after reading.
+    }
+    session = state.dials;
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new DriveError(err.message);
+    throw err;
+  }
+  let user: Record<string, DialRef> = {};
+  try {
+    const raw = readUserDials(userPathOptions ?? {});
+    for (const [k, v] of Object.entries(raw)) {
+      // readUserDials returns DialRef-compatible already; parse to be safe
+      user[k] = v as DialRef;
+    }
+  } catch {}
+  const repo = { ...liveProfile.dials };
+  return { session, repo, user };
+}
+
+function ensureProfileSnapshot(
+  ctx: Omit<EngineCtx, 'profile' | 'dialLayers'>,
+  bindRefs: DialRef[],
+): SnapshotDocument {
   const snapshotPath = join(ctx.runDir, 'profile.yaml');
   if (existsSync(snapshotPath)) {
+    const text = readFileSync(snapshotPath, 'utf8');
     try {
-      return parseExecutorProfile(readFileSync(snapshotPath, 'utf8'), 'profile.yaml (run snapshot)');
+      return parseSnapshotDocument(text, 'profile.yaml (run snapshot)');
     } catch (err) {
       if (err instanceof ExecutorProfileError) throw new DriveError(err.message);
       throw err;
     }
   }
-  let profile: ExecutorProfile;
+  let liveProfile: ExecutorProfile;
   try {
-    profile = loadExecutorProfile(ctx.repoRoot, ctx.userPathOptions).profile;
+    liveProfile = loadExecutorProfile(ctx.repoRoot, ctx.userPathOptions, ctx.harness).profile;
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new DriveError(err.message);
     throw err;
   }
-  const text = serializeProfile(profile);
+  // Collect extra refs: every ref in live layers + bindings + --bind refs
+  const liveLayers = readLiveDialLayers(ctx.repoRoot, ctx.userPathOptions, liveProfile);
+  const extraRefs: DialRef[] = [...Object.values(liveLayers.session), ...Object.values(liveLayers.repo), ...Object.values(liveLayers.user), ...Object.values(liveProfile.bindings), ...bindRefs];
+  const text = serializeSnapshot(liveProfile, extraRefs);
   writeFileSync(snapshotPath, text, 'utf8');
   appendEvent(
     ctx.runDir,
@@ -294,31 +326,31 @@ function ensureProfileSnapshot(ctx: Omit<EngineCtx, 'profile' | 'activeLoadout' 
     ctx.now,
   );
   ctx.act('profile snapshotted → profile.yaml');
-  return profile;
+  try {
+    return parseSnapshotDocument(text, 'profile.yaml (run snapshot)');
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new DriveError(err.message);
+    throw err;
+  }
 }
 
-/**
- * Full dispatch-kernel resolution for one role: explicit `bindings[role]` pin
- * → session override for the role's archetype → active loadout's slot for that
- * archetype → `"*"` default. Computed at dispatch time against the run's
- * snapshotted profile; never cached in config. Throws `ExecutorProfileError`
- * when nothing serves.
- */
 function resolveChain(
   ctx: EngineCtx,
   role: string | null,
-): { executor: string; spec: ExecutorSpec; source: RoleResolutionSource } {
+): { executor: string; spec: ExecutorSpec; source: RoleResolutionSource; resolvedVia: string | null; ref: DialRef } {
   const archetype = role == null ? null : roleArchetype(ctx.playbook, role);
-  const resolved = resolveRole(
-    role ?? '*',
-    archetype,
-    ctx.profile,
-    ctx.activeLoadout?.name ?? null,
-    ctx.slotOverrides,
-  );
-  // The anonymous "*" key is by definition the default, not a per-role pin.
-  const source = role == null && resolved.source === 'binding' ? 'default' : resolved.source;
-  return { executor: resolved.executorName, spec: resolved.executor, source };
+  const cascade = resolveDialCascade(role ?? '*', archetype, { bindings: ctx.profile.bindings, archetypes: ctx.profile.archetypes }, ctx.dialLayers);
+  const refString = formatDialRef(cascade.ref);
+  const specRaw = ctx.profile.executors[refString];
+  if (specRaw == null) {
+    throw new ExecutorProfileError(`resolved dial "${refString}" has no executor in snapshot`);
+  }
+  let spec: ExecutorSpec = specRaw;
+  if (spec.adapter === 'host' && (spec as any).agentType === '*' && archetype != null) {
+    spec = { ...spec, agentType: archetype } as ExecutorSpec;
+  }
+  const source = role == null && cascade.source === 'binding' ? 'base' as RoleResolutionSource : cascade.source;
+  return { executor: refString, spec, source, resolvedVia: cascade.resolvedVia, ref: cascade.ref };
 }
 
 /** Validate overrides against the snapshot and record each as an event once. */
@@ -350,7 +382,14 @@ function recordOverrides(ctx: EngineCtx, binds: Map<string, string>): void {
 function effectiveBinding(ctx: EngineCtx, role: string | null): { executor: string; spec: ExecutorSpec } {
   const key = role ?? '*';
   const overridden = ctx.overrides.get(key);
-  if (overridden != null) return { executor: overridden, spec: ctx.profile.executors[overridden]! };
+  if (overridden != null) {
+    const spec0 = ctx.profile.executors[overridden];
+    if (spec0 == null) throw new DriveError(`--bind ${key}=${overridden}: not in snapshot`);
+    const archetype = key !== '*' ? roleArchetype(ctx.playbook, key) : null;
+    let spec: ExecutorSpec = spec0;
+    if (spec.adapter === 'host' && (spec as any).agentType === '*' && archetype != null) spec = { ...spec, agentType: archetype } as ExecutorSpec;
+    return { executor: overridden, spec };
+  }
   try {
     const { executor, spec } = resolveChain(ctx, role);
     return { executor, spec };
@@ -362,7 +401,7 @@ function effectiveBinding(ctx: EngineCtx, role: string | null): { executor: stri
 
 /**
  * Record where every declared role lands under this invocation's resolution
- * (active loadout + source, per-role executor/model/source), and echo it so a
+ * (dial layers + source, per-role resolved identity), and echo it so a
  * user burning a metered subscription sees which provider the run spends. The
  * ledger event is appended only when the resolution differs from the last
  * recorded snapshot; the echo prints every invocation.
@@ -380,16 +419,28 @@ function recordResolutionSnapshot(ctx: EngineCtx): void {
     const archetype = roleArchetype(ctx.playbook, role);
     const overridden = ctx.overrides.get(role);
     if (overridden != null) {
-      const spec = ctx.profile.executors[overridden]!;
-      entries.push({ role, archetype, executor: overridden, model: spec.model, source: 'override', ...(spec.target != null ? { target: spec.target, provider: spec.provider ?? null, delivery: spec.adapter } : {}) });
-      ctx.act(`${role} → ${overridden}${spec.model != null ? ` (${spec.model})` : ''} [override]`);
+      const specRaw = ctx.profile.executors[overridden];
+      const spec = specRaw as ExecutorSpec;
+      const model = (spec as any).model ?? (spec.adapter === 'host' ? (spec as any).model : null);
+      const effort = (spec as any).reasoningEffort ?? 'default';
+      const driver = (spec as any).driver ?? null;
+      const provider = (spec as any).provider ?? null;
+      const delivery = spec.adapter;
+      entries.push({ role, archetype, executor: overridden, model, effort, driver, provider, delivery, source: 'binding', resolved_via: null });
+      ctx.act(`${role} → ${overridden}${model != null ? ` (${model})` : ''} [binding]`);
       continue;
     }
     try {
-      const { executor, spec, source } = resolveChain(ctx, role);
-      const label = roleResolutionEchoLabel(source, ctx.activeLoadout?.name ?? null);
-      entries.push({ role, archetype, executor, model: spec.model, source, ...(spec.target != null ? { target: spec.target, provider: spec.provider ?? null, delivery: spec.adapter } : {}) });
-      ctx.act(`${role} → ${executor}${spec.model != null ? ` (${spec.model})` : ''} [${label}]`);
+      const { executor, spec, source, resolvedVia } = resolveChain(ctx, role);
+      const label = roleResolutionEchoLabel(source);
+      const model = (spec as any).model ?? (spec.adapter === 'host' ? (spec as any).model : null);
+      const effort = (spec as any).reasoningEffort ?? 'default';
+      const driver = (spec as any).driver ?? null;
+      const provider = (spec as any).provider ?? null;
+      const delivery = spec.adapter;
+      entries.push({ role, archetype, executor, model, effort, driver, provider: provider ?? null, delivery, source, resolved_via: resolvedVia });
+      const modelStr = model != null ? ` (${model})` : '';
+      ctx.act(`${role} → ${executor}${modelStr} [${label}]`);
     } catch (err) {
       if (!(err instanceof ExecutorProfileError)) throw err;
       entries.push({ role, archetype, executor: null, model: null, source: null, error: err.message });
@@ -397,23 +448,24 @@ function recordResolutionSnapshot(ctx: EngineCtx): void {
     }
   }
 
-  // The overlay in force at snapshot time, omitted entirely when empty so a
-  // run with no session overrides records exactly the event it always did —
-  // and so a later verify can tell "no overrides" from "overrides unrecorded".
-  const slotOverrides = { ...ctx.slotOverrides };
+  // Dials in force at snapshot time — always write `dials` key (empty object allowed) so discriminator is unambiguous.
+  const dialsPayload: Record<string, Record<string, string>> = {};
+  const toRefStringMap = (m: Record<string, DialRef>): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(m)) out[k] = formatDialRef(v);
+    return out;
+  };
+  if (Object.keys(ctx.dialLayers.session).length > 0) dialsPayload.session = toRefStringMap(ctx.dialLayers.session);
+  if (Object.keys(ctx.dialLayers.repo).length > 0) dialsPayload.repo = toRefStringMap(ctx.dialLayers.repo);
+  if (Object.keys(ctx.dialLayers.user).length > 0) dialsPayload.user = toRefStringMap(ctx.dialLayers.user);
   const payload = {
-    loadout:
-      ctx.activeLoadout == null
-        ? null
-        : { name: ctx.activeLoadout.name, source: ctx.activeLoadout.source },
-    ...(Object.keys(slotOverrides).length > 0 ? { overrides: slotOverrides } : {}),
+    dials: dialsPayload,
     roles: entries,
   };
   const prior = freshEvents(ctx.runDir).findLast((e) => e.type === 'resolution_snapshot');
   if (
     prior != null &&
-    JSON.stringify(prior.extra.loadout ?? null) === JSON.stringify(payload.loadout) &&
-    JSON.stringify(prior.extra.overrides ?? {}) === JSON.stringify(slotOverrides) &&
+    JSON.stringify(prior.extra.dials ?? {}) === JSON.stringify(payload.dials) &&
     JSON.stringify(prior.extra.roles ?? []) === JSON.stringify(entries)
   ) {
     return; // unchanged since last recorded — the ledger stays quiet
@@ -484,7 +536,7 @@ type DispatchFailure =
   | { kind: 'invalid_output'; detail: string; errors: string[] };
 
 function declaredWritePosture(
-  profile: ExecutorProfile,
+  profile: SnapshotDocument,
   archetype: string | null,
 ): WritePosture | null {
   if (archetype == null || !Object.hasOwn(profile.archetypes, archetype)) return null;
@@ -513,7 +565,7 @@ function inputProducersFromRun(
   playbook: Playbook,
   stepId: string,
   events: RunEvent[],
-  profile: ExecutorProfile,
+  profile: SnapshotDocument,
 ): InputProducer[] {
   const flow = playbookFlow(playbook);
   const step = flow.find((candidate) => candidate.id === stepId);
@@ -571,22 +623,7 @@ function inputProducersFromRun(
   return producers;
 }
 
-function resolvedViaFor(ctx: EngineCtx, role: string | null): string | null {
-  if (role != null && ctx.overrides.has(role)) return null;
-  if (role == null && ctx.overrides.has('*')) return null;
-  try {
-    const archetype = role == null ? null : roleArchetype(ctx.playbook, role);
-    return resolveRole(
-      role ?? '*',
-      archetype,
-      ctx.profile,
-      ctx.activeLoadout?.name ?? null,
-      ctx.slotOverrides,
-    ).resolvedVia;
-  } catch {
-    return null;
-  }
-}
+
 
 type DispatchOutcome = { kind: 'valid' } | DispatchFailure;
 
@@ -1191,7 +1228,7 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
     const writeConflict = explainWriteConflict(
       { executor: binding.executor, spec: binding.spec },
       archetype,
-      ctx.profile,
+      ctx.profile as unknown as ExecutorProfile,
     );
     if (writeConflict != null) {
       appendEvent(
@@ -1253,7 +1290,7 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
       archetype,
       binding.spec.provider ?? null,
       producers,
-      ctx.profile,
+      ctx.profile as unknown as ExecutorProfile,
     );
     if (providerConflict != null && providerConflict.level === 'refuse') {
       appendEvent(
@@ -1283,25 +1320,42 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
       ctx.act(`dispatch warning ${stepId}${role ? ` (${role})` : ''}: ${providerConflict.message}`);
     }
 
+    const chainInfo = (() => {
+      try { return resolveChain(ctx, role); } catch { return null; }
+    })();
+    const dialRef = ctx.overrides.get(role ?? '*') != null ? parseDialRef(ctx.overrides.get(role ?? '*')!, 'bind') : chainInfo?.ref ?? null;
+    const dialSource = ctx.overrides.get(role ?? '*') != null ? 'binding' : chainInfo?.source ?? null;
+    const toRefStr = (m: Record<string, DialRef>) => {
+      const o: Record<string, string> = {};
+      for (const [k,v] of Object.entries(m)) o[k]=formatDialRef(v);
+      return o;
+    };
+    const modelId = (binding.spec as any).model ?? null;
     const constraintContext: ConstraintContext = {
       archetype,
       role,
       executor: binding.executor,
-      target: binding.spec.target ?? null,
-      provider: binding.spec.provider ?? null,
-      model: binding.spec.model,
+      driver: (binding.spec as any).driver ?? null,
+      provider: (binding.spec as any).provider ?? null,
+      model: (binding.spec as any).model ?? null,
+      model_id: modelId,
       transport: 'command',
       write_access: binding.spec.writeAccess,
       write_posture: declaredWritePosture(ctx.profile, archetype),
-      active_loadout: ctx.activeLoadout?.name ?? null,
-      overrides: ctx.slotOverrides,
-      resolved_via: resolvedViaFor(ctx, role),
+      dial: dialRef,
+      dial_source: dialSource,
+      dials: {
+        session: toRefStr(ctx.dialLayers.session),
+        repo: toRefStr(ctx.dialLayers.repo),
+        user: toRefStr(ctx.dialLayers.user),
+      },
+      resolved_via: chainInfo?.resolvedVia ?? null,
       input_provenance: producers.map((producer) => ({
         dispatch_id: producer.dispatchId,
         executor: producer.executor,
         provider: producer.provider,
       })),
-      harness: ctx.profile.harness ?? 'standalone',
+      harness: ctx.harness,
     };
     let constraintVerdict;
     try {
@@ -1884,11 +1938,21 @@ export function runDrive(opts: DriveOptions): DriveResult {
   const schemas = new SchemaSet(schemaPaths.snapshot, schemaPaths.project, schemaPaths.builtin);
   const playbook = loadValidatedPlaybook(run.dir, repoRoot, run.playbook, schemas);
 
-  const base = {
+  // Resolve harness once — same value for profile loading, snapshot compilation, and constraint lookup.
+  // A resumed run keeps its recorded snapshot; only first-snapshot compilation uses this live harness.
+  const harness = activeHarness(undefined, opts.userPathOptions);
+  // Parse --bind refs early for snapshot extraRefs
+  const bindMapEarly = parseBinds(opts.bind);
+  const bindRefsForSnapshot: DialRef[] = [];
+  for (const v of bindMapEarly.values()) {
+    try { bindRefsForSnapshot.push(parseDialRef(v, 'bind')); } catch {}
+  }
+  const base: Omit<EngineCtx, 'profile' | 'dialLayers'> = {
     runId: run.runId,
     runDir: run.dir,
     repoRoot,
     userPathOptions: opts.userPathOptions,
+    harness,
     playbook,
     task: run.task ?? '',
     schemas,
@@ -1897,58 +1961,33 @@ export function runDrive(opts: DriveOptions): DriveResult {
     now: opts.now,
     act,
   };
-  const profile = ensureProfileSnapshot(base);
-  // Active loadout: --loadout flag → FADENO_LOADOUT → .fadeno/local/loadout →
-  // default_loadout, resolved fresh every invocation (dispatch time), against
-  // the run's snapshotted profile. An unknown name is a hard error naming its
-  // source — never a silent fallback.
-  let activeLoadout: ActiveLoadout | null;
-  let requestedLoadout: string | null = null;
+  const profile = ensureProfileSnapshot(base as Omit<EngineCtx, 'profile' | 'dialLayers'>, bindRefsForSnapshot);
+  let dialLayers: DialLayers;
   try {
-    const runDoc = parseYaml(readFileSync(join(run.dir, 'run.yaml'), 'utf8')) as Record<string, unknown>;
-    requestedLoadout = typeof runDoc.requested_loadout === 'string' ? runDoc.requested_loadout : null;
-  } catch {
-    requestedLoadout = null;
-  }
-  let pin: LocalLoadoutState;
-  try {
-    pin = readLocalLoadoutState(repoRoot);
-    activeLoadout = resolveActiveLoadout({
-      flagValue: opts.loadout ?? null,
-      runValue: requestedLoadout,
-      envValue: opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null,
-      localFileValue: pin.loadout,
-      // The run resolves against a snapshotted profile, so self-containment is
-      // read from the repo's current catalog rather than the snapshot.
-      userFileValue: applicableUserLoadout(
-        repoProfileSelfContained(repoRoot, opts.userPathOptions),
-        opts.userPathOptions,
-      ),
-      profile,
-    });
+    const state = readLocalDialState(repoRoot);
+    if (state.legacyNote != null) act(state.legacyNote);
+    const userRaw = readUserDials(opts.userPathOptions ?? {});
+    const user: Record<string, DialRef> = {};
+    for (const [k, v] of Object.entries(userRaw)) user[k] = v as DialRef;
+    let liveRepo: Record<string, DialRef> = {};
+    try {
+      const live = loadExecutorProfile(repoRoot, opts.userPathOptions, harness).profile;
+      liveRepo = { ...live.dials };
+    } catch {}
+    dialLayers = { session: state.dials, repo: liveRepo, user };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new DriveError(err.message);
     throw err;
   }
-  // Overrides belong to their base loadout by name, so a run that persisted a
-  // different loadout (or a `--loadout` flag on this invocation) sees none of
-  // this pin's overlay.
   const ctx: EngineCtx = {
     ...base,
     profile,
-    activeLoadout,
-    slotOverrides: applicableOverrides(pin, activeLoadout),
+    dialLayers,
   };
+  // Handle recorded dialLayers for in-flight comparison? Load last snapshot's dials to detect change note (not needed)
   recoverInterruptedCommandDispatches(ctx);
-  if (opts.loadout != null && opts.loadout !== requestedLoadout && requestedLoadout != null) {
-    appendEvent(
-      ctx.runDir,
-      { type: 'loadout_override', step: null, prior: requestedLoadout, loadout: opts.loadout, source: 'flag' },
-      ctx.now,
-    );
-    ctx.act(`loadout override: ${requestedLoadout} → ${opts.loadout}`);
-  }
-  recordOverrides(ctx, parseBinds(opts.bind));
+  // Bind overrides: validate and record
+  recordOverrides(ctx, bindMapEarly);
   recordResolutionSnapshot(ctx);
 
   const maxTransitions = opts.maxTransitions ?? MAX_TRANSITIONS_DEFAULT;

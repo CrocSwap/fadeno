@@ -13,6 +13,8 @@ import { tempRepo } from './helpers.ts';
 /**
  * Engine-side constraint tiers. Fixtures follow test/drive.test.ts: a real
  * playbook + `node -e` command executors, driven through `runDrive`.
+ * Migrated to v3 dial world: models+routes+dials, eligibility on model entries,
+ * archetype predicates.
  */
 
 const NOTES = "process.stdout.write('NOTES')";
@@ -171,30 +173,63 @@ function drive(root: string, runId: string) {
   return runDrive({ run: runId, repoRoot: root, env: null });
 }
 
+function dummyRoutes(command: string[]): Record<string, unknown> {
+  const route = { command, write_access: true };
+  const perHarness = { dummy: route, 'current-host': { host: true } as Record<string, unknown> };
+  return {
+    standalone: { ...perHarness },
+    codex: { ...perHarness },
+    claude: { ...perHarness },
+    grok: { ...perHarness },
+  };
+}
+
+function familyRoutes(): Record<string, unknown> {
+  const cmdArr = ['node', '-e', NOTES];
+  const perHarness = {
+    moonshot: { command: cmdArr, write_access: true },
+    openai: { command: cmdArr, write_access: true },
+    'current-host': { host: true },
+  };
+  return {
+    standalone: { ...perHarness },
+    codex: { ...perHarness },
+    claude: { ...perHarness },
+    grok: { ...perHarness },
+  };
+}
+
 function familyProfile(
   policy: 'advisory' | 'required',
   critic: 'family-a' | 'family-b',
 ): Record<string, unknown> {
   return {
-    executors: {
-      'family-a': { ...cmd(NOTES), provider: 'moonshot' },
-      'family-b': { ...cmd(NOTES), provider: 'openai' },
+    schema_version: 3,
+    models: {
+      'family-a': { provider: 'moonshot', id: 'family-a', effort: 'high' },
+      'family-b': { provider: 'openai', id: 'family-b', effort: 'high' },
     },
-    archetypes: { reviewer: { distinct_provider_from_inputs: policy } },
-    loadouts: { main: { worker: 'family-a', reviewer: critic } },
-    default_loadout: 'main',
+    routes: familyRoutes(),
+    archetypes: { reviewer: { distinct_provider_from_inputs: policy }, worker: {} },
+    dials: { worker: 'family-a', reviewer: critic },
   };
 }
 
 function eligibilityProfile(state: 'forbidden' | 'shadow_only' | 'eligible'): Record<string, unknown> {
+  const cmdArr = ['node', '-e', NOTES_AND_FLAG];
+  const routes = dummyRoutes(cmdArr);
+  const models: Record<string, unknown> = {
+    tagged: { provider: 'dummy', id: 'tagged', effort: 'high' } as Record<string, unknown>,
+  };
+  if (state !== 'eligible') {
+    (models.tagged as Record<string, unknown>).eligibility = { worker: state };
+  }
   return {
-    executors: {
-      tagged: {
-        ...cmd(NOTES_AND_FLAG),
-        eligibility: { worker: state },
-      },
-    },
-    bindings: { builder: 'tagged', '*': 'tagged' },
+    schema_version: 3,
+    models,
+    routes,
+    archetypes: { worker: {} },
+    bindings: { builder: 'tagged' },
   };
 }
 
@@ -344,9 +379,15 @@ function seedConstraint(
   t: TestContext,
   mode: 'allow' | 'refuse' | 'error',
 ): { root: string; runId: string } {
+  const constraintRoutes = dummyRoutes(['node', '-e', NOTES_AND_FLAG]);
   const { root, runId } = seed(t, 'one-step', ONE_STEP, {
-    executors: { worker: cmd(NOTES_AND_FLAG) },
-    bindings: { builder: 'worker', '*': 'worker' },
+    schema_version: 3,
+    models: {
+      worker: { provider: 'dummy', id: 'worker', effort: 'high' },
+    },
+    routes: constraintRoutes,
+    archetypes: { worker: {} },
+    bindings: { builder: 'worker' },
     constraints: { command: ['node', 'constraint-fixture.cjs'] },
   });
   writeFileSync(join(root, 'constraint-fixture.cjs'), CONSTRAINT_FIXTURE);

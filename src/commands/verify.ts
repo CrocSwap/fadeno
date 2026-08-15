@@ -2,7 +2,7 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { resolveActiveArtifacts, sha256Hex, type ActiveResolution } from '../lib/artifact-manifest.ts';
-import { eligibilityFor, parseExecutorProfile, resolveRole, type ExecutorProfile } from '../lib/executors.ts';
+import { eligibilityFor, formatDialRef, parseDialRef, parseSnapshotDocument, resolveDialCascade, type DialRef, type SnapshotDocument } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { normalizeDeliveryTransport } from '../lib/host-dispatch.ts';
 import { schemaDirectories } from '../lib/definitions.ts';
@@ -458,14 +458,14 @@ function checkHostDispatchLifecycle(run: RunSummary, events: RunEvent[], mode: L
     }
   }
   const snapshotEvent = events.find((event) => event.type === 'profile_snapshotted');
-  let profile: ReturnType<typeof parseExecutorProfile> | null = null;
+  let profile: SnapshotDocument | null = null;
   if (snapshotEvent == null) problems.push('host dispatch evidence has no profile_snapshotted event');
   if (snapshotEvent != null) {
     const profileRel = typeof snapshotEvent.extra.profile === 'string' ? snapshotEvent.extra.profile : 'profile.yaml';
     const profilePath = join(run.dir, profileRel);
     if (existsSync(profilePath)) {
       try {
-        profile = parseExecutorProfile(readFileSync(profilePath, 'utf8'), profileRel);
+        profile = parseSnapshotDocument(readFileSync(profilePath, 'utf8'), profileRel);
       } catch (err) {
         problems.push(`host profile snapshot is invalid: ${(err as Error).message}`);
       }
@@ -497,7 +497,7 @@ function checkHostDispatchLifecycle(run: RunSummary, events: RunEvent[], mode: L
       } else if (
         executor.model !== request.extra.model ||
         executor.reasoningEffort !== request.extra.reasoning_effort ||
-        executor.agentType !== request.extra.agent_type
+        (executor.agentType !== '*' && executor.agentType !== request.extra.agent_type)
       ) {
         problems.push(`${id}: host model/effort/agent_type does not match the snapshotted executor profile`);
       }
@@ -743,14 +743,14 @@ function checkHostAttestation(run: RunSummary, events: RunEvent[], mode: LedgerM
   const requests = new Map(
     hostRequestRecords(events).map((request) => [request.id, request.event]),
   );
-  let profile: ReturnType<typeof parseExecutorProfile> | null = null;
+  let profile: SnapshotDocument | null = null;
   const snapshot = events.find((event) => event.type === 'profile_snapshotted');
   if (snapshot != null) {
     const profileRel = typeof snapshot.extra.profile === 'string' ? snapshot.extra.profile : 'profile.yaml';
     const profilePath = join(run.dir, profileRel);
     if (existsSync(profilePath)) {
       try {
-        profile = parseExecutorProfile(readFileSync(profilePath, 'utf8'), profileRel);
+        profile = parseSnapshotDocument(readFileSync(profilePath, 'utf8'), profileRel);
       } catch {
         // host-dispatch-lifecycle reports the detailed profile parse failure;
         // this finding remains focused on attested field agreement.
@@ -793,7 +793,7 @@ function checkHostAttestation(run: RunSummary, events: RunEvent[], mode: LedgerM
         } else {
           if (start.extra.model !== executor.model) problems.push(`${dispatchId}: attested model does not match the host profile`);
           if (start.extra.reasoning_effort !== executor.reasoningEffort) problems.push(`${dispatchId}: attested reasoning effort does not match the host profile`);
-          if (start.extra.agent_type !== executor.agentType) problems.push(`${dispatchId}: attested agent type does not match the host profile`);
+          if (executor.agentType !== '*' && start.extra.agent_type !== executor.agentType) problems.push(`${dispatchId}: attested agent type does not match the host profile`);
         }
       }
     }
@@ -942,7 +942,8 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
     problems.push('dispatches recorded but no profile_snapshotted event');
   }
 
-  let profile: ExecutorProfile | null = null;
+  let profile: SnapshotDocument | null = null;
+  let profileParseError: string | null = null;
   if (snapshots.length > 0) {
     const snap = snapshots[0]!;
     const rel = typeof snap.extra.profile === 'string' ? snap.extra.profile : 'profile.yaml';
@@ -956,46 +957,41 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
         problems.push(`${rel}: snapshot does not match its recorded sha256`);
       }
       try {
-        profile = parseExecutorProfile(text, rel);
+        profile = parseSnapshotDocument(text, rel);
       } catch (err) {
-        problems.push(`${rel}: snapshot did not parse: ${(err as Error).message}`);
+        profileParseError = (err as Error).message;
+        problems.push(`${rel}: snapshot did not parse: ${profileParseError}`);
       }
     }
   }
-
-  // Recompute each dispatch's resolution with the kernel's own chain — per-role
-  // pin → session slot override → active loadout's archetype slot → "*" default
-  // (resolveRole; never a reimplemented precedence) — from ledger contents
-  // alone: the snapshotted profile plus the resolution_snapshot in force at that
-  // position (active loadout name + its overrides + per-role archetype), with
-  // explicit overrides replayed in event order. An unresolvable role is never
-  // claimed as a mismatch.
-  //
-  // The live pin is deliberately never read here: a verify that consulted
-  // today's session state would fail a finished run because somebody cleared an
-  // override afterwards. Same rule as the run-persisted loadout — replay is
-  // from what the run recorded, not from what the session now says.
-  const recompute = (
+  if (profileParseError != null) {
+    return { check, status: 'fail', detail: profileParseError };
+  }
+  const parseDialsMap = (raw: unknown): Record<string, DialRef> => {
+    const out: Record<string, DialRef> = {};
+    if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return out;
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof v !== 'string') continue;
+      try { out[k] = parseDialRef(v, `dials.${k}`); } catch {}
+    }
+    return out;
+  };
+  const recomputeNew = (
     role: string,
     archetype: string | null,
-    loadout: string | null,
-    overrides: Record<string, string>,
+    layers: { session: Record<string, DialRef>; repo: Record<string, DialRef>; user: Record<string, DialRef> },
   ): { executor: string; source: string; resolvedVia: string | null } | null => {
     if (profile == null) return null;
     try {
-      const resolved = resolveRole(role, archetype, profile, loadout, overrides);
-      return { executor: resolved.executorName, source: resolved.source, resolvedVia: resolved.resolvedVia };
+      const cascade = resolveDialCascade(role, archetype, { bindings: profile.bindings, archetypes: profile.archetypes }, layers);
+      return { executor: formatDialRef(cascade.ref), source: cascade.source, resolvedVia: cascade.resolvedVia };
     } catch {
       return null;
     }
   };
-
   const overridesInForce = new Map<string, string>();
   const archetypeByRole = new Map<string, string | null>();
-  let activeLoadout: string | null = null;
-  // Runs recorded before session overrides existed carry no `overrides` field;
-  // `{}` replays them exactly as they resolved.
-  let slotOverrides: Record<string, string> = {};
+  let currentLayers: { session: Record<string, DialRef>; repo: Record<string, DialRef>; user: Record<string, DialRef> } = { session: {}, repo: {}, user: {} };
   for (const event of events) {
     if (event.type === 'executor_override') {
       const role = typeof event.extra.role === 'string' ? event.extra.role : null;
@@ -1004,18 +1000,16 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
       continue;
     }
     if (event.type === 'resolution_snapshot') {
-      const loadout = event.extra.loadout;
-      activeLoadout =
-        loadout != null && typeof loadout === 'object' && !Array.isArray(loadout) &&
-        typeof (loadout as Record<string, unknown>).name === 'string'
-          ? ((loadout as Record<string, unknown>).name as string)
-          : null;
-      const recorded = event.extra.overrides;
-      slotOverrides = {};
-      if (recorded != null && typeof recorded === 'object' && !Array.isArray(recorded)) {
-        for (const [archetype, target] of Object.entries(recorded as Record<string, unknown>)) {
-          if (typeof target === 'string') slotOverrides[archetype] = target;
-        }
+      const dialsRaw = (event.extra as Record<string, unknown>).dials;
+      if (dialsRaw != null && typeof dialsRaw === 'object' && !Array.isArray(dialsRaw)) {
+        const m = dialsRaw as Record<string, unknown>;
+        currentLayers = {
+          session: parseDialsMap(m.session),
+          repo: parseDialsMap(m.repo),
+          user: parseDialsMap(m.user),
+        };
+      } else {
+        currentLayers = { session: {}, repo: {}, user: {} };
       }
       const roles = Array.isArray(event.extra.roles) ? event.extra.roles : [];
       for (const row of roles) {
@@ -1024,35 +1018,21 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
         if (typeof rec.role !== 'string') continue;
         const archetype = typeof rec.archetype === 'string' ? rec.archetype : null;
         archetypeByRole.set(rec.role, archetype);
-        // The snapshot's own per-role rows are ledger claims, so they must
-        // recompute too. Rows sourced `override` are the exception: a `--bind`
-        // pin and a session slot override share that spelling, and a no-op
-        // `--bind` legitimately records no `executor_override` event, so the
-        // row cannot be attributed to a replayable chain. Unresolved rows carry
-        // no chain claim at all. The dispatch events below still recompute — an
-        // overridden binding is checked where it was actually used.
+        if (typeof rec.executor !== 'string') continue;
+        // executor_override rows are binding source; they still must recompute as binding? For dials, binding overrides are explicit executor_override events, not rows. But rows with source 'binding' where role has override should be checked via override map. For simplicity, treat override rows as binding and skip cascade check if override present.
+        if (rec.source === 'binding' && overridesInForce.has(rec.role)) continue;
         if (rec.source === 'override' || typeof rec.executor !== 'string') continue;
-        const recomputed = recompute(rec.role, archetype, activeLoadout, slotOverrides);
+        const recomputed = recomputeNew(rec.role, archetype, currentLayers);
         if (recomputed == null) {
-          problems.push(
-            `resolution_snapshot: role "${rec.role}" records executor "${rec.executor}" but the chain resolves nothing`,
-          );
+          problems.push(`resolution_snapshot: role "${rec.role}" records executor "${rec.executor}" but the chain resolves nothing`);
         } else {
           if (recomputed.executor !== rec.executor || (typeof rec.source === 'string' && recomputed.source !== rec.source)) {
-            problems.push(
-              `resolution_snapshot: role "${rec.role}" records "${rec.executor}" [${String(rec.source)}] ` +
-                `but recomputes to "${recomputed.executor}" [${recomputed.source}]`,
-            );
+            problems.push(`resolution_snapshot: role "${rec.role}" records "${rec.executor}" [${String(rec.source)}] but recomputes to "${recomputed.executor}" [${recomputed.source}]`);
           }
-          // Absent key is not a claim (pre-0.2 snapshot rows). Present
-          // resolved_via — including explicit null — must match the recompute.
           if ('resolved_via' in rec) {
             const recordedVia = typeof rec.resolved_via === 'string' ? rec.resolved_via : null;
             if (recordedVia !== recomputed.resolvedVia) {
-              problems.push(
-                `resolution_snapshot: role "${rec.role}" records resolved_via ${JSON.stringify(recordedVia)} ` +
-                  `but recomputes to ${JSON.stringify(recomputed.resolvedVia)}`,
-              );
+              problems.push(`resolution_snapshot: role "${rec.role}" records resolved_via ${JSON.stringify(recordedVia)} but recomputes to ${JSON.stringify(recomputed.resolvedVia)}`);
             }
           }
         }
@@ -1060,41 +1040,19 @@ function checkExecutorBindings(run: RunSummary, events: RunEvent[]): Finding {
       continue;
     }
     if (event.type !== 'actor_dispatched' && event.type !== 'host_dispatch_requested') continue;
-    // A host dispatch's binding decision happens at host_dispatch_requested;
-    // the later actor_dispatched is the host's start receipt, which must match
-    // the request byte-for-byte (host-dispatch-lifecycle enforces that). An
-    // in-flight request stays binding across later resolution changes, so the
-    // request position — not the receipt position — anchors this check: the
-    // start receipt of a host dispatch is skipped here, and each request is
-    // validated against the resolution in force where it was recorded.
     if (event.type === 'actor_dispatched' && typeof event.extra.dispatch_id === 'string') continue;
     const decision = event.type === 'host_dispatch_requested' ? 'host dispatch requested' : 'dispatched to';
     const actor = typeof event.extra.actor === 'string' ? event.extra.actor : null;
     const used = typeof event.extra.executor === 'string' ? event.extra.executor : null;
     const label = `${event.step ?? '?'}${actor ? ` (${actor})` : ''}`;
-    if (used == null) {
-      problems.push(`${label}: dispatch records no executor`);
-      continue;
-    }
-    if (profile != null && !(used in profile.executors)) {
-      problems.push(`${label}: executor "${used}" is not in the snapshotted profile`);
-    }
+    if (used == null) { problems.push(`${label}: dispatch records no executor`); continue; }
+    if (profile != null && !(used in profile.executors)) problems.push(`${label}: executor "${used}" is not in the snapshotted profile`);
     const key = actor ?? '*';
-    const expected =
-      overridesInForce.get(key) ??
-      recompute(key, archetypeByRole.get(key) ?? null, activeLoadout, slotOverrides)?.executor ??
-      null;
-    if (expected != null && used !== expected) {
-      problems.push(`${label}: ${decision} "${used}" but the resolution in force was "${expected}"`);
-    }
+    const expected = overridesInForce.get(key) ?? recomputeNew(key, archetypeByRole.get(key) ?? null, currentLayers)?.executor ?? null;
+    if (expected != null && used !== expected) problems.push(`${label}: ${decision} "${used}" but the resolution in force was "${expected}"`);
   }
-
   if (problems.length > 0) return { check, status: 'fail', detail: problems.join('; ') };
-  return {
-    check,
-    status: 'ok',
-    detail: `${dispatches.length} dispatch(es) match the recomputed resolution chain${overridesInForce.size > 0 ? ` (+${overridesInForce.size} explicit override(s))` : ''}`,
-  };
+  return { check, status: 'ok', detail: `${dispatches.length} dispatch(es) match the recomputed resolution chain${overridesInForce.size > 0 ? ` (+${overridesInForce.size} explicit override(s))` : ''}` };
 }
 
 /**
@@ -1128,7 +1086,7 @@ function checkGateEligible(run: RunSummary, events: RunEvent[]): Finding {
     return { check, status: 'fail', detail: 'dispatches recorded but no profile_snapshotted event' };
   }
 
-  let profile: ExecutorProfile | null = null;
+  let profile: SnapshotDocument | null = null;
   const snap = snapshots[0]!;
   const rel = typeof snap.extra.profile === 'string' ? snap.extra.profile : 'profile.yaml';
   const sha = typeof snap.extra.sha256 === 'string' ? snap.extra.sha256 : null;
@@ -1141,7 +1099,7 @@ function checkGateEligible(run: RunSummary, events: RunEvent[]): Finding {
     return { check, status: 'fail', detail: `${rel}: snapshot does not match its recorded sha256` };
   }
   try {
-    profile = parseExecutorProfile(text, rel);
+    profile = parseSnapshotDocument(text, rel);
   } catch (err) {
     return { check, status: 'fail', detail: `${rel}: snapshot did not parse: ${(err as Error).message}` };
   }

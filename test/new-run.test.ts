@@ -93,5 +93,7 @@ test('new-run uses bundled playbooks without project initialization', (t) => {
   const root = tempRepo(t);
   const created = runNewRun({ repoRoot: root, playbook: 'code-change-review', task: 'x' });
   assert.ok(exists(root, join('.fadeno', 'runs', created.runId, 'run.yaml')));
-  assert.equal(created.resolution?.loadout?.name, 'native');
+  // Dials: no loadout, base is current-host; resolution.loadout is null after Wave D
+  assert.equal(created.resolution?.loadout, null);
+  assert.ok(created.resolution?.roles?.length ?? 0 > 0);
 });
