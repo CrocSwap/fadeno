@@ -5,7 +5,7 @@ chat.
 
 ## Design status and precedence
 
-Fadeno now has six intentionally different design horizons:
+Fadeno now has seven intentionally different design horizons:
 
 1. [`kickoff-memo.md`](kickoff-memo.md) records the rationale and scope of the
    shipped v0 advisory protocol. It remains historical design context.
@@ -33,6 +33,16 @@ Fadeno now has six intentionally different design horizons:
    policy earned by kernel enforceability, and constraint tiers at the single
    dispatch chokepoint. It does not authorize a policy language or a
    Fadeno-owned model roster.
+7. [`experimental/dials-and-registry.md`](experimental/dials-and-registry.md)
+   is the proposed successor for executor *selection*: named loadout presets
+   retire in favor of per-archetype dials on a layered cascade
+   (session > repo > user > host-native base), with a model registry that
+   makes bare model names resolve deterministically — model-first grammar
+   (`model[@effort]`, `--via <driver>`), driver-level quirk translation, and
+   dial-time backend verification for unregistered models. Everything
+   downstream of resolution (archetype policy, constraints, shadows,
+   evidence) carries forward unchanged. It does not reintroduce presets as a
+   resolution layer or authorize auto-fallback across providers.
 
 The next-protocol engine decision deliberately supersedes v0's "no runtime"
 constraint for forward work. It does not authorize a daemon, cloud service,
@@ -218,45 +228,58 @@ output. Team-level provenance is anchored by committed evidence plus
 `fadeno verify` in CI; hash chaining remains a possible standalone mechanism,
 not current scope.
 
-## Dispatch kernel (in progress — loadouts + phases 1–3 shipped)
+## Dispatch kernel (horizon 7 shipped — dials + model registry)
 
-The horizon-5 boundary is implemented and in daily dogfood: named
-archetype→executor **loadouts** in `.fadeno/executors.yaml`, resolution
-computed in the CLI at dispatch time, `fadeno dispatch` as the ad-hoc kernel
-client, and the playbook engine as another client of the same resolver. The
-Claude plugin ships **dispatch proxy agents** behind a three-rung steering
-ladder (description routing → `PreToolUse` spawn rewrite → a proxy Bash guard
-hook), relaying through a single-statement stdin contract. Evidence is a
-two-row `dispatches.jsonl` ledger (request + completion, format 0.2) with
-kernel-owned prompt snapshots, relay attestation, `host_delivery` rows for
-host spawns, a `hook_version` stamp, and a paired `fadeno dispatches`
-reader with tiered legacy handling. Command routes declare `write_access`,
-refused pre-spawn against archetype write postures.
+The dispatch kernel's full horizon is implemented and in daily dogfood.
 
-The horizon-6 boundary has three of its four phases shipped:
+- **Horizon-5 — loadouts era:** named archetype→executor loadouts have been
+  retired (now documented in `loadouts-and-dispatch.md` as history). The CLI
+  retains `fadeno loadout set` as the steering surface, but its meaning is
+  now per-archetype dials, not preset selection. `fadeno use`, `fadeno targets`,
+  `loadouts:`/`default_loadout:`/`targets:` in catalogs, `--loadout` /
+  `FADENO_LOADOUT`, and the `targets` concept are removed; v2 catalogs error
+  with a migration note pointing at `dials-and-registry.md`. The two-row
+  `dispatches.jsonl` ledger, prompt snapshots, relay attestation,
+  `host_delivery` rows, `hook_version` stamp, and the `fadeno dispatches`
+  reader all persist — only the identity fields on rows have been re-spelled
+  (`model`/`effort`/`driver`/`dial` instead of `target`/`loadout`).
 
-1. **Session slot overrides** — dial one slot (`fadeno loadout set/clear`)
-   over the active loadout; cascade = role binding → override → slot →
-   `"*"`; verify replays from the run snapshot, never the live pin.
-2. **Archetype schema pass** — three-valued write postures
-   (required | forbidden | none), acyclic fallback chains that resolve
-   bindings never policy, `resolved_via` provenance in evidence, the
-   `generator` canon archetype, and a steering chain-walk to the nearest
-   host agent surface.
-3. **Constraint tiers** — declarative predicates
-   (`distinct_provider_from_inputs`, per-target `eligibility` including
-   shadow_only / forbidden) plus a tier-2 `constraints.command` escape
-   hatch; every boundary refusal writes a `dispatch_refused` row; verify
-   recomputes gate-eligibility from the snapshot.
+- **Horizon-5/6 invariants still hold:** the Claude plugin's dispatch proxy
+  agents and three-rung steering ladder (description routing → `PreToolUse`
+  spawn rewrite → proxy Bash guard hook), the stdin-heredoc `FADENO_PROMPT`
+  contract, command routes' `write_access` refused against archetype write
+  postures, and the format-`1.0` ledger with tiered legacy handling for `0.2`
+  rows.
 
-Remaining: **phase 4** — shadow slot attachments with sha-identical paired
-prompts, `--rate` sampling, `fadeno dispatches --comparisons`, and the
-model-tryout starter with its mandatory-confounds ModelComparison contract:
-the adoption ladder's shadow → override → preset entry point. Deliberately
-still backlog, not scope: route operational-policy fields (env, retry,
-concurrency, prompt-size ceilings), proxy relay timeout ergonomics, dispatch
-stdout snapshotting (a killed relay currently loses the report bytes), and
-canon distribution into complete legacy catalogs.
+- **Horizon-6 — archetypes, constraints, shadows:** all four phases shipped
+  and carried forward:
+  1. **Archetype schema pass** — three-valued write postures
+     (required | forbidden | none), acyclic fallback chains that resolve
+     bindings never policy, `resolved_via` provenance, the `generator` canon
+     archetype, and a steering chain-walk to the nearest host agent surface.
+  2. **Constraint tiers** — declarative predicates
+     (`distinct_provider_from_inputs`, per-model `eligibility` including
+     `shadow_only` / `forbidden`) plus a tier-2 `constraints.command` escape
+     hatch; every boundary refusal writes a `dispatch_refused` row; verify
+     recomputes gate-eligibility from the snapshot.
+  3. **Shadow dispatches and model tryouts** — per-slot shadow attachments
+     with sha-identical paired prompts and `--rate` sampling, isolated
+     worktree delivery with diff-as-artifact, `fadeno dispatches
+     --comparisons`, and the model-tryout starter with its
+     mandatory-confounds ModelComparison contract.
+
+- **Horizon-7 — dials and the model registry (implemented, `experimental/dials-and-registry.md`; hardened post-0.6 with no compat):**
+  named loadout presets retire in favor of per-archetype dials on a layered
+  cascade (`binding → session → repo → user → base`) with a uniform model
+  registry (`provider` + `id` + standard `effort`, `spellings:` per driver),
+  driver display aliases (`openai→codex`, `anthropic→claude-cli`, `xai→grok`; `google→agy`, `openrouter→opencode` already), driver fields `driver:` / `models_command:` / `effort_encoding:` on routes,
+  `unregistered_model_driver` fall-through for unknown ids, and dial-time
+  backend verification (`models_command` probe, positives cached in
+  `model-verifications.json`, fail-open). Dispatch rows now carry
+  `model`/`model_id`/`effort`/`driver`/`dial`/`dial_source` and the effective
+  table is `fadeno dial` (no args, verb-first `dial <archetype> <model>`, `dial clear`, `dial shadow`). Post-0.6 hardening: pre-dials catalogs/snapshots are refused loudly (`schema_version 3` / `snapshot_version 3`; `verify` fails pre-dials ledgers with `snapshot_version 3` message), command renamed `fadeno dial` (verb-first), `--executor` removed, pin is `.fadeno/local/dials`, snapshot is `snapshot_version: 3` (replacing v1-shaped emission), and `ConstraintContext.transport` is `host` — while the dispatches reader still renders 0.x/legacy rows (`[legacy]`) as evidence history, not a compat surface. `fadeno models` remains a possible future inspection surface, not a promise — the effective table is the inspection surface today. Deliberately still backlog, not scope: route operational-policy fields (env, retry, concurrency, prompt-size ceilings),
+  hook-initiated shadows for host-native primaries, and canon distribution
+  into complete legacy catalogs.
 
 ## Low-friction release boundary
 

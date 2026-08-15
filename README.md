@@ -60,7 +60,7 @@ Fadeno is **harness-neutral**: the same playbooks run on Codex, Claude Code, and
 Requires Node.js ≥ 20.
 
 Installing the Codex or Claude plugin supplies skills, a private bundled CLI,
-schemas, starter playbooks, and a safe native loadout. On first setup that CLI
+schemas, starter playbooks, and a safe native base (current-host). On first setup that CLI
 copies itself to a stable user data path, records the harness integration, and
 materializes user-scoped agents where the host requires them. A repository does
 not need `.fadeno/` definitions to run a built-in playbook.
@@ -72,7 +72,7 @@ not need `.fadeno/` definitions to run a built-in playbook.
 | Terminal / CI / Grok | Install the npm package, then use `fadeno` or `npx fadeno` | Yes |
 
 `setup` is user-only: it does not write `.gitignore`, `.fadeno/`, or any other
-project file. Codex needs one fresh session after setup or a native-loadout
+project file. Codex needs one fresh session after setup or a native-base
 change because its custom-agent definitions are session-static. Claude plugin
 skills and commands become active after `/reload-plugins` or a restart.
 
@@ -96,7 +96,7 @@ tier-2 [enforcement](#enforcement-advisory-vs-enforced) layer (a pre-commit
 guard + a CI workflow). Steering is installed by default for Codex and Claude.
 Use `--no-steering` for the legacy unsteered project surface;
 `--with-steering` remains an accepted compatibility alias. Selecting a command
-loadout is still explicit and always announces the external sandbox boundary.
+driver is still explicit and always announces the external sandbox boundary.
 
 ### What gets created
 
@@ -319,63 +319,63 @@ from a structured judgment artifact on disk (same check the runner applies), so
 the identical condition can run in CI, a pre-commit/pre-push hook, or a Claude
 Code `Stop` hook. Exits non-zero when the gate fails.
 
-### Loadouts: switch who does the work
+### Dials: switch who does the work
 
 If you rotate metered subscriptions across providers — one model as the worker
 until that quota runs low, then another — the unit you think in is *"who is my
 worker / reviewer / judge right now,"* not a dozen per-role YAML edits.
-`.fadeno/executors.yaml` declares harness-neutral **targets** (provider, model,
-effort), harness-specific **routes** for delivering those targets, and
-**loadouts** that map archetypes to targets. The same loadout therefore remains
-portable: Claude may run an Anthropic target in-session while Codex delivers that
-same target through `claude -p`.
+`.fadeno/executors.yaml` declares a harness-neutral **model registry** (provider, id,
+effort), harness-specific **routes** for delivering those providers via a **driver**, and
+per-archetype **dials** that select the model. The same dial therefore remains
+portable: Claude may run an Anthropic model in-session while Codex delivers that
+same model through `claude -p`.
 
 ```yaml
-schema_version: 2
-targets:
-  opus-high: { provider: anthropic, model: opus, reasoning_effort: high }
-  terra-high: { provider: openai, model: gpt-5.6-terra, reasoning_effort: high }
-  sol-high: { provider: openai, model: gpt-5.6-sol, reasoning_effort: high }
+schema_version: 3
+models:
+  opus: { provider: anthropic, id: opus, effort: high }
+  sol: { provider: openai, id: gpt-5.6-sol, effort: high }
+  grok: { provider: xai, id: grok-4.6, effort: high }
 routes:
   codex:
-    openai: { host: true, command: [codex, exec, --model, "{model}", "-"] }
-    anthropic: { command: [claude, -p, --model, "{model}"] }
+    openai: { driver: codex, host: true, command: [codex, exec, --model, "{model}", "-"] }
+    anthropic: { driver: claude-cli, command: [claude, -p, --model, "{model}"] }
+    xai: { driver: grok, command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve] }
   claude:
-    anthropic: { host: true, command: [claude, -p, --model, "{model}"] }
-    openai: { command: [codex, exec, --model, "{model}", "-"] }
-loadouts:
-  anthropic-primary: { worker: opus-high, reviewer: opus-high, judge: opus-high }
-  openai-primary:    { worker: terra-high, reviewer: terra-high, judge: sol-high }
-default_loadout: anthropic-primary
+    anthropic: { driver: claude-cli, host: true, command: [claude, -p, --model, "{model}"] }
+    openai: { driver: codex, command: [codex, exec, --model, "{model}", "-"] }
+# per-repo pins (optional):
+dials:
+  judge: sol
 ```
 
 Put shared personal overrides in `~/.config/fadeno/executors.yaml`; use a
 project `.fadeno/executors.yaml` only when the repository truly needs different
-targets or policy. Legacy v1 `executors` profiles remain supported.
+models or policy.
 
 ```bash
-fadeno use openai-primary                  # user-scoped; remembers setup's harness
-fadeno loadout use openai-primary           # compatibility: project-local pin
+fadeno dial worker grok --user             # user default — applies across repos
+fadeno dial worker grok --repo             # repo pin — committed
+fadeno dial worker grok                    # adaptive: session when repo-pinned, else user
+fadeno dial clear worker                   # clear session dial
 echo "task…" | fadeno dispatch --archetype worker   # ad-hoc: resolve → invoke → evidence row
 fadeno setup --codex                        # one-time user-scoped host integration
-fadeno use codex-native                     # auto-materializes changed Codex role agents
 # or: npx fadeno init --claude --no-steering
 ```
 
-Roles resolve at dispatch time — explicit binding pin, else the active
-loadout's slot for the role's declared `archetype`, else the `"*"` default —
+Roles resolve at dispatch time through the dial cascade — explicit binding pin, else session dial, else repo pin, else user dial, else host-native base (`current-host`) —
 and every run start and dispatch echoes where each role landed
-(`implementer → luna-cli-xhigh (gpt-5.6-luna) [loadout openai-primary]`). Runs
+(`implementer → sol @ high via codex (command) [user dial]`). Runs
 record the resolution in their ledger and ad-hoc dispatches append to
 `.fadeno/dispatches.jsonl`, so which provider produced an artifact stays
 auditable after the fact.
 
 With steering enabled by default, expensive role-shaped subagent work follows
 that same resolver. `fadeno setup --codex` remembers the harness, so later
-`fadeno use <loadout>` calls materialize each worker/reviewer/judge target as
-either a host agent or a command broker according to the Codex route.
+`fadeno dial` switches materialize each worker/reviewer/judge slot as
+either a host agent or a command broker according to the resolved driver.
 The Claude hook performs the same resolution for Claude rather than relying on
-adapter labels stored in the loadout: host slots select the requested Claude
+stored labels: host slots select the requested Claude
 model, while command slots use dispatch proxies.
 Start a fresh Codex session after definitions change only to make the new model
 session-resident; fallback-capable switches work on the next invocation. Before
@@ -546,7 +546,7 @@ source <(fadeno completion bash)
 Add that line to `~/.bashrc` to enable it in future shells. Completion covers
 commands, their relevant flags, finite option values, paths, and (when the
 current directory is a Fadeno repository) playbook names, run ids, steps,
-loadouts, executors, and declared archetypes. It is a read-only best-effort
+dials, models, and declared archetypes. It is a read-only best-effort
 query: malformed or partially initialized repository data simply contributes
 no dynamic candidates, and ordinary Bash file completion remains available.
 

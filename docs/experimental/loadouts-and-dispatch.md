@@ -7,6 +7,13 @@ explicit external dispatch implemented; strict mode remains deferred
 [`next-protocol.md`](next-protocol.md); sibling of
 [`host-dispatch-contract.md`](host-dispatch-contract.md). Inherits the
 next-protocol constraint set: no daemon, no cloud service, no scheduler.
+**Successors:** [`slots-and-archetypes.md`](slots-and-archetypes.md) extends
+the catalog, resolution chain, and boundary enforcement;
+[`dials-and-registry.md`](dials-and-registry.md) (proposed 2026-08-15)
+supersedes the *selection* half described here — named loadouts,
+`default_loadout`, `loadout use` — with per-archetype dials and a model
+registry. The kernel, routes, and evidence contract in this document carry
+forward unchanged.
 
 ## Observed need (admission receipts)
 

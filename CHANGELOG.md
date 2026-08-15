@@ -6,6 +6,29 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed — dials replace named loadout presets (0.6.0, `docs/experimental/dials-and-registry.md`)
+
+- **Named loadouts retired; per-archetype dials via a layered cascade.** `loadouts:`,
+  `default_loadout:`, `targets:`, `--loadout` / `FADENO_LOADOUT`, `fadeno use`,
+  `fadeno targets`, and the `targets` concept are removed. Catalogs now carry
+  `schema_version: 3` with a uniform `models:` registry (`provider` + `id` +
+  standard `effort`, `spellings:` per driver) and `routes:` rows gain `driver:`,
+  `models_command:`, and `effort_encoding:`. The selection surface is
+  `fadeno dial <archetype> <model>[@effort] [--via <driver>] [--user|--repo]`
+  / `clear` / `shadow` / `clear-shadow` / `resolve` (verb-first; `fadeno loadout` removed) and the effective table `fadeno dial` (no args) with
+  `dial_source` / `resolved_via` per row. The cascade is
+  `binding → session dial → repo pin → user dial → base` (`base` = `current-host`,
+  now a built-in dialable model). Unregistered model ids route via
+  `unregistered_model_driver` (default `opencode`) with dial-time backend
+  verification (`models_command` probe, positives cached in
+  `$FADENO_STATE_HOME/model-verifications.json`, fail-open). Dispatch rows are
+  format `1.0` with re-spelled identity fields
+  (`model`/`model_id`/`effort`/`driver`/`dial`/`dial_source`); `0.2` rows
+  remain readable as `[legacy]`. Old pins (`.fadeno/local/loadout` with
+  `{loadout,…}`) are ignored with a one-line note ("pre-0.6 loadout pin
+  ignored — re-dial with `fadeno dial worker <model>`"); v2 catalogs error with a
+  migration note. **Breaking (post-0.6 hardening, no compat):** v3-only catalogs (`schema_version 3` required) and `snapshot_version: 3` snapshots — `fadeno verify` refuses pre-dials ledgers with `pre-dials run snapshot — this fadeno verifies snapshot_version 3 ledgers only; verify with fadeno <= 0.6.0-rc.27`; `fadeno dial` is verb-first and `--executor` is removed; pin is `.fadeno/local/dials`; driver aliases are `openai→codex`, `anthropic→claude-cli`, `xai→grok` (plus `google→agy`, `openrouter→opencode`); `ConstraintContext.transport` is now `host`. The dispatches reader still renders legacy rows as history.
+
 The engine slices of the next protocol (capabilities 1, 2, 4 + 5 of
 `docs/experimental/next-protocol.md`, plus the explicit supersede event and
 native host dispatch): Fadeno gains a small deterministic, repo-local engine.

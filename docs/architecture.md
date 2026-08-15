@@ -40,11 +40,15 @@ Executor configuration is layered by `src/lib/config-layers.ts`:
 bundled catalog → user executors.yaml → project .fadeno/executors.yaml
 ```
 
-Named targets, harness routes, legacy executors, loadouts, and bindings merge by key; scalar defaults use the
-highest declaring layer. A malformed present layer is an error. User paths are
-resolved by `src/lib/user-paths.ts` with injectable XDG/Windows overrides.
-Setup does not synthesize a catalog from installed CLI probes: the bundled v2
-targets/routes are working defaults, and the user file is an optional override.
+Registry models, harness routes, legacy executors, dials (`dials:`), and
+bindings merge by key; `unregistered_model_driver` uses the highest declaring
+layer. Pre-dials catalogs with legacy keys (`loadouts`/`targets`) are rejected at parse time. A malformed
+present layer is an error. User paths are resolved by `src/lib/user-paths.ts`
+with injectable XDG/Windows overrides, including `$FADENO_STATE_HOME/dials.json`
+(session dials) and `$FADENO_STATE_HOME/model-verifications.json` (dial-time
+verification cache). Setup does not synthesize a catalog from installed CLI
+probes: the bundled v3 model registry and routes are working defaults, and the
+user file is an optional override.
 
 ## Glossary: harnesses, hosts, and drivers
 
@@ -98,12 +102,17 @@ The reliable test for which role you mean: **does it need a
 
 ### The identity axis (who does the work)
 
-- **Target** — a harness-neutral provider/model/effort profile. Carries
-  identity only: never argv, never permission flags.
+- **Model** — a harness-neutral registry entry (`provider` + `id` + standard
+  `effort`, optional `spellings:` per driver). Carries identity only: never
+  argv, never permission flags. `current-host` is the built-in model for
+  host-native base delivery.
 - **Route** — how the *host* reaches a provider. Keyed by harness id, then by
-  provider, with an exact target-name key winning over its provider entry.
-- **Loadout** — an archetype → target map; **archetype** — a
-  `worker`/`reviewer`/`judge`-shaped slot.
+  provider, with `driver:` as the `--via` alias and `models_command:` /
+  `effort_encoding:` for dial-time behavior.
+- **Dial** — an archetype → model ref (`model[@effort] [--via <driver>]`);
+  **archetype** — a `worker`/`reviewer`/`judge`-shaped slot. Dials are layered
+  (`session` via `.fadeno/local/dials`, `repo` via `dials:` in the project
+  catalog, `user` via `$FADENO_STATE_HOME/dials.json`, `base` = `current-host`).
 
 ### Three name collisions to watch for
 
@@ -116,9 +125,11 @@ they are documented rather than renamed:
    "the Grok Build adapter") and a delivery mechanism
    (`adapter: 'command' | 'host'`).
 3. **`Target` names two things.** `type Target = 'codex' | 'claude' | 'grok'`
-   in `src/commands/init.ts` is a *host*, while `targets:` in
-   `executors.yaml` is a provider/model profile. `extending.md` → *Add a
-   harness target* collides both within one section.
+   in `src/commands/init.ts` is a *host*, while the legacy `targets:` key in
+   `executors.yaml` was a provider/model profile (now `models:`). `extending.md`
+   → *Add a harness target* collides both within one section — `harness`
+   is the live term; `target` survives only in that section title and in
+   legacy catalog lore.
 
 Nothing in the schema branches on host-versus-driver today — a driver is
 indistinguishable from a raw model endpoint, because both are just argv. That
@@ -158,15 +169,14 @@ assert on return values and filesystem effects instead of scraping stdout.
 | `runGate` | pass/fail + blocking titles | The advisory→enforced bridge. |
 | `runPrompt` | prompt text + sha + record status + plan | Deterministic step-prompt assembler; records a snapshot + `prompt_assembled` by default. Pure resolution/rendering live in `lib/prompt-resolve.ts` + `lib/prompt.ts`. |
 | `runNext` | next-step JSON (`status`, `step`, `gate`, …) | Pure flow cursor over playbook + events; read-only. Logic in `lib/flow-cursor.ts`. |
-| `runLoadoutShow` / `…List` / `…Use` / `…Clear` | active loadout + slot tables | `use` pins `.fadeno/local/loadout`; `clear` removes it. Resolution logic in `lib/executors.ts`. |
+| `runDialShow` / `…Set` / `…Clear` / `…Shadow` | effective dial table + layered dial state | `set`/`clear` pin `.fadeno/local/dials` (session) or `$FADENO_STATE_HOME/dials.json` (user) or `dials:` (repo); shadows are session-pinned. Resolution via `resolveDialCascade` + `compileDialRef` in `lib/executors.ts`. |
 | `runDispatch` | executor report + evidence row | Ad-hoc archetype→executor dispatch; appends a correlated `dispatch_requested`/`dispatch_completed` row pair to `.fadeno/dispatches.jsonl`. Refuses before spawning when the resolved command route declares `write_access: false` and the archetype declares `requires_write: true`. Echo goes to stderr so stdout stays the executor's pure report. |
 | `runDispatches` | correlated dispatch rows | Read-only projection of `.fadeno/dispatches.jsonl`: pairs `dispatch_requested`/`dispatch_completed` by `dispatch_id`, keeps `host_delivery` rows inline, and marks a request with no completion as killed-or-in-flight rather than dropping it. Pre-format legacy rows render as `[legacy]`; newer-format rows get a separate count. `--tail <N>` (default 10) / `--json`. |
 | `runSteeringResolve` / `runSteeringApply` | hybrid mode / emitted Codex agents | Resolves host vs command vs restart-required vs write-conflict per invocation; materializes per-slot host agents or cheap command brokers, declining brokers for write-conflicted slots. |
 | `runToolComplete` | run update + artifact manifest | Validates a typed tool result before atomically starting the exact next `tool_call` and recording its result. |
 | `runPlugin` | `EmitResult[]` + `outDir` | Generates `plugin/` from templates. |
-| `runSetup` / `runUse` | user paths, probes, loadout state, restart notices | Safe host-default setup and user-scoped selection. |
-| `runStatus` / `runDoctor` | effective routing / findings | Read-only diagnostics. |
-| `runTargets` | every declared target + its delivery | The catalog listing `loadout list` cannot give: one row per target whether or not a loadout dials it, with the driver binary named and delivery compiled against the active host. |
+| `runSetup` | user paths, probes, dial state, restart notices | Safe host-default setup and dial-backed steering; no longer seeds a user dial pin. |
+| `runStatus` / `runDoctor` | effective routing / findings | Read-only diagnostics (dial layers + per-role resolved rows). |
 | `runVendor` / `runEvidencePromote` | lock / promoted receipt | Explicit committed project capability and evidence. |
 | `runUninstall` / `runClean` / `runUnvendor` | removed + preserved paths | Ownership-aware user removal, repo runtime cleanup, and digest-backed vendored removal. |
 | `runCompletion` / `runCompletionCandidates` | Bash source + candidate strings | Emits the `fadeno completion bash` script and serves its read-only candidate protocol. |
@@ -209,18 +219,20 @@ back to ordinary file completion when no specialized candidates apply.
   immediately; if the engine is hard-killed before it can append, the next
   `fadeno drive` closes every dangling command start with a recovered
   `engine_interrupted` terminal receipt before retrying.
-- **`executors.ts`** — the executor profile (`.fadeno/executors.yaml`): neutral
-  provider/model **targets**, per-harness delivery **routes**, per-role
-  `bindings`, and named **loadouts** (archetype → target). At load time v2 is
-  compiled into the existing `command`/`host` execution shape; v1 executor
-  profiles remain supported. Two pure resolvers:
-  `resolveActiveLoadout` (`--loadout` flag → `FADENO_LOADOUT` env →
-  `.fadeno/local/loadout`, written by `fadeno loadout use` → `default_loadout:`
-  → none) and `resolveRole` (explicit `bindings[role]` pin → active loadout's
-  slot for the role's declared `archetype` → `bindings["*"]` → hard, actionable
-  error). Resolution is computed at dispatch time, inside the CLI, and never
+- **`executors.ts`** — the executor profile (`.fadeno/executors.yaml`): v3 registry
+  `models:` plus per-harness `routes:` (with `driver:`, `models_command:`,
+  `effort_encoding:`), layered **dials** (`session` → `repo` → `user` → `base`),
+  and per-role `bindings`; plus a `unregistered_model_driver` fall-through.
+  v1 executor profiles remain supported for ledger replay via
+  `resolveRoleLegacy`. Core helpers: `parseDialRef`/`formatDialRef`,
+  `compileDialRef` (registry → delivery), `resolveDialCascade` (pure cascade,
+  no registry touch, so verify replays from snapshot), `resolveRole` (cascade +
+  compile), `deliveryIsHost`, plus pin files (`LocalDialState`,
+  `readLocalDialState`/`writeLocalDialState`) and user dials +
+  `model-verifications.json` cache (`readUserDials`, `readVerifiedModels`,
+  etc.). Resolution is computed at dispatch time, inside the CLI, and never
   cached in config emitted elsewhere — integrations (plugin agents, hooks) stay
-  dumb and call `fadeno`, so a loadout switch takes effect on the next dispatch
+  dumb and call `fadeno`, so a dial switch takes effect on the next dispatch
   with no config churn.
 
 ## The validator (`src/lib/playbook-validate.ts`)
@@ -248,7 +260,7 @@ back to ordinary file completion when no specialized candidates apply.
    declared role *(error)*; declared-but-unused roles are *warnings*. `over`
    items count as roles only for the legacy leaf-map form; compositional map
    members are data identities. A role may declare an advisory `archetype:` —
-   its identity for the dispatch kernel's loadout routing, never routing config
+   its identity for the dispatch kernel's dial routing, never routing config
    in the playbook — and only its bare-lowercase-identifier shape is checked
    *(error)*; absence is fine.
 
@@ -307,7 +319,7 @@ receipt commands:
 
   `steering resolve --run <run> --dispatch-id <id>` is the engine-delivery
   branch: it reads the unique immutable host request and run profile snapshot,
-  ignoring ambient loadout state. Host executor mismatch is a deterministic
+  ignoring ambient dial state. Host executor mismatch is a deterministic
   restart requirement. Whole-trace verification accepts a historical failed
   host attempt only when the same actor call has a later higher-ordinal valid
   success; the final attempt must still succeed.
@@ -320,14 +332,14 @@ the frontier after receipts. Literal maps and linear bodies are the deliberate
 first boundary. `show` groups observed paths back under their declared graph,
 while `verify` recomputes path, parent, member, generation, and dispatch ids.
 
-Two loadout-era evidence surfaces sit beside the step lifecycle:
+Two evidence surfaces sit beside the step lifecycle:
 
 - **`resolution_snapshot`** — appended by `drive` at first engine contact
   (right after the repo profile is snapshotted into the run dir as
-  `profile.yaml`), recording the active loadout (name + source) and, per
-  declared role, its `(archetype, executor, model, resolution source)`. Later
+  `profile.yaml`), recording the effective dial table and, per
+  declared role, its `(archetype, executor, model, resolution source, dial_source)`. Later
   invocations re-append it **only when the resolution in force changed** (a
-  loadout switch, a `--bind` override); the echo prints on every invocation
+  dial switch, a `--bind` override); the echo prints on every invocation
   regardless, so the ledger stays quiet while the user still sees which
   provider the run is spending. `new-run` prints a best-effort preview of the
   same table but writes no ledger event — resolution is computed at dispatch
@@ -337,27 +349,25 @@ Two loadout-era evidence surfaces sit beside the step lifecycle:
 - **`.fadeno/dispatches.jsonl`** — the append-only evidence log for ad-hoc
   `fadeno dispatch`, which has no run dir: one JSON row per dispatch with
   timestamp, archetype, role, resolution path (`resolution`: `binding` |
-  `loadout` | `fallback` | `executor-flag` — how the executor was chosen; the
-  `loadout` field records which loadout was *active*, which may not be what
-  supplied the executor), loadout + source, executor, model, exit code,
+  `session` | `repo` | `user` | `base` | `fallback` | `executor-flag` — how the executor was chosen; `dial_source` records which dial layer won), executor, model, exit code,
   duration, and prompt/output sha256 digests. The row is written even when the
   spawn itself fails — a failed dispatch is still a dispatch that happened.
   Declared `write_access` joins that identity, so a read-only delivery is
   legible in the row rather than only in an empty-handed report. The Claude
   steering hook appends `host_delivery` rows to the same file when it steers
-  a spawn to a host role agent (archetype, agent_type, loadout, executor,
+  a spawn to a host role agent (archetype, agent_type, dial, executor,
   model, model_override, `reasoning_effort: "inherited"`,
   `transport: "host"`, prompt_sha256, prompt_snapshot,
   `hook_version`) — the kernel never runs on the host path,
   so the hook is the only writer that can witness it, and one file audits both
-  delivery routes. Like `.fadeno/local/`, it is per-machine evidence —
+  delivery routes. Like `.fadeno/local/dials`, it is per-machine evidence —
   auditable locally, never committed. `hook_version` exists because hooks load
   at session start and therefore lag one session behind an edit (`dev` in the
   committed template, the package version in emitted copies), so a row's
   writing generation is identifiable after the fact. `fadeno dispatches` is the
   read-side projection of this file.
 
-`.fadeno/local/` is per-machine session state (the sticky loadout pin, proxy
+`.fadeno/local/` is per-machine session state (sticky dials at `.fadeno/local/dials`, proxy
 prompt relays) and is never committed — `init` appends `.fadeno/local/` (along
 with `.fadeno/progress/` and `.fadeno/dispatches.jsonl`) to the repo's
 `.gitignore`.
@@ -419,9 +429,8 @@ ownership in the user state directory. Managed agents point at that stable
 runtime, never at a versioned plugin cache path. Setup is strictly user-scoped
 and does not modify the current repository. For Claude it also merges one exact
 stable-runtime Bash allow rule into user settings; uninstall removes only that
-recorded rule. Later `fadeno use <loadout>` calls refresh them
-automatically. `fadeno steering apply <loadout>
---codex --scope project` remains the explicit project override and
+recorded rule. Later `fadeno dial` switches refresh managed agents
+automatically where needed. `fadeno steering apply --codex --scope project` remains the explicit project override and
 then materializes every required slot into session-static role TOML: host slots
 become host agents using their configured model/effort, while command slots
 become cheap brokers that delegate through `fadeno dispatch`. Before each task,
@@ -432,13 +441,13 @@ and a host executor without one → restart required. Locked engine fallbacks us
 without claiming host attestation. On Claude, init emits a local
 `PreToolUse` script under `.fadeno/local/` and non-destructively merges one
 `Agent` hook into `.claude/settings.local.json`. The hook first asks the CLI
-whether a loadout is active; only then does it map worker, reviewer, and judge
+whether any dial is active; only then does it map worker, reviewer, and judge
 launches to the corresponding dispatch proxy. Only agents that name an
 archetype are steered: `general-purpose` is the harness's catch-all, so
 capturing it turned every generic spawn in a Fadeno repo into an external
 dispatch. It, Explore, Plan, and unrelated specialists stay unsteered. A director that names
 `dispatch-<archetype>` itself is resolved the same way rather than taken at its
-word: the transport belongs to the loadout, and a host slot is pulled back to
+word: the transport belongs to the dial, and a host slot is pulled back to
 the host agent instead of shelling out to a subprocess of this same harness —
 which would load the same plugin, re-read the prompt as director work, and
 re-dispatch one level down. A spawn it steers to a host role
@@ -470,7 +479,7 @@ Resolution stays in
 the CLI. The
 permission boundary stays loud: the external executor a proxy dispatches runs
 *outside* the harness's permission fences, under its own sandbox flags — a
-deliberate user choice made by binding that executor in a loadout, with the
+deliberate user choice made by binding that executor via a dial, with the
 dispatch evidence row as the audit trail.
 
 Two non-obvious template rules:
@@ -583,7 +592,7 @@ Footguns that cost time and aren't obvious from the final code:
 - **No CLI spawning.** Tests import and call `runInit` / `runValidate` / … directly
   with `cwd`/`repoRoot`/`now` injected — fast and hermetic.
 - **Coverage** (hundreds of cases): `init` (Codex, Claude, and Grok targets;
-  hooks, loadout steering, force/idempotency),
+  hooks, dial steering, force/idempotency),
   schema + reference + semantic validation, run-ledger lifecycle + gate, diagram
   rendering, and plugin generation + the no-drift/binary guards.
 

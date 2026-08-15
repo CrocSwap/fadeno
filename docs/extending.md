@@ -35,7 +35,7 @@ errors, idempotency, and stale pins before adding convenience output.
 
 Definition and executor changes use the effective layers rather than creating a
 second resolver. Built-in files are immutable plugin assets; project files
-shadow them by logical name, and user executor/loadout entries merge by key.
+shadow them by logical name, and user executor/dial entries merge by key.
 
 ---
 
@@ -94,19 +94,20 @@ be able to evaluate the condition from the artifact **without re-asking a model*
 
 ---
 
-## Bind roles to executors (profiles + loadouts)
+## Bind roles to executors (models, routes, dials)
 
 `fadeno drive` and `fadeno dispatch` resolve every actor through
-`.fadeno/executors.yaml` (parsed by `src/lib/executors.ts`). Version 2 separates
-model choice from delivery: **targets** are harness-neutral provider/model
-profiles, **routes** say how each harness reaches a provider, and **loadouts**
-map archetypes to targets:
+`.fadeno/executors.yaml` (parsed by `src/lib/executors.ts`). Version 3 separates
+model identity from delivery: **models** are a uniform registry (model + effort
+as separate dimensions, `spellings:` per driver), **routes** say how each
+harness reaches a provider, and **dials** select the model per archetype:
 
 ```yaml
-schema_version: 2
-targets:
-  opus-high: { provider: anthropic, model: opus, reasoning_effort: high }
-  luna-high: { provider: openai, model: gpt-5.6-luna, reasoning_effort: high }
+schema_version: 3
+models:
+  sol:   { provider: openai, id: gpt-5.6-sol, effort: high }
+  opus:  { provider: anthropic, id: opus, effort: high, spellings: { opencode: anthropic/claude-opus-4.8 } }
+  gemini: { provider: google, id: gemini-3.1-pro, effort: high }
 
 routes:
   codex:
@@ -116,58 +117,73 @@ routes:
     anthropic: { host: true, command: [claude, -p, --model, "{model}"] }
     openai: { command: [codex, exec, --model, "{model}", "-"] }
 
-loadouts:
-  anthropic-primary: { worker: opus-high, reviewer: opus-high }
-  openai-primary:    { worker: luna-high, reviewer: opus-high }
+dials:                        # repo pins — project layer only, per-archetype
+  judge: sol                  # this repo always judges with sol; worker/reviewer defer to user dials
 
-default_loadout: anthropic-primary   # optional
+bindings:                     # explicit role pins; win before any dial
+  opus_reviewer: opus         # deliberately-multi-model playbooks pin here
 
-bindings:                            # per-role pins; optional when loadouts exist
-  opus_reviewer: opus-high           # deliberately-multi-model playbooks pin here
-  "*": opus-high
+unregistered_model_driver: opencode   # fall-through for unknown model ids
 ```
 
-A harness route normally keys by provider. A route keyed by the exact target
-name takes precedence, allowing a special sandbox or read-only command policy
-without making the loadout itself harness-specific.
+A model name resolves to `provider → route → driver → command` via the
+registry; `--via <driver>` overrides the home driver using `spellings:` for id
+translation, and `effort_encoding: model-suffix` on driver routes (e.g. `agy`)
+delivers `model@effort` as a suffixed id rather than a flag.
 
 ### See what is declared
 
-`fadeno targets` lists every declared target, dialed or not, with delivery
-compiled against the active host:
+`fadeno dial` (no args) prints the effective dial table — the complete
+per-archetype resolution, not a preset:
 
 ```
-harness claude — delivery is resolved against this host
-NAME              PROVIDER      MODEL                      DELIVERY            DIALED BY
-claude-default    anthropic     opus                       host                claude  [fallback read-only]
-gemini-default    google        gemini-3.1-pro-high        command (agy)       —
-opencode-default  openrouter    anthropic/claude-opus-4.8  command (opencode)  —
-grok-default      xai           grok-4.6                   command (grok)      grok-worker
+archetype  model          effort    delivery               source
+worker     grok-4.6       high      grok (command)         user dial
+reviewer   current-host   inherit   in-session (host)      base
+judge      sol @ xhigh    xhigh     codex exec (command)   session dial
+generator  → worker       —         grok (via fallback)    base
+  ~ shadow: kimi-k3 via opencode [rate 0.25]
 ```
 
-`loadout list` answers a different question — what runs for each archetype — so
-a target no loadout references does not appear there at all. Both shipped
-drivers are in that position deliberately. `DIALED BY —` means reachable but
-bound to nothing: dial it with `fadeno loadout set <archetype> <target>`.
+`model` is the registry key or verbatim unregistered id; ` @ effort` appears
+only when dialed off the registry standard. `source` names the cascade layer
+that won (`binding | session dial | repo pin | user dial | base`). The
+`DELIVERY` column is the host/driver split per row; `write_access` only ever
+describes a route's command delivery.
 
-The `DELIVERY` column is the host/driver split per row. A target flips between
-`host` and `command (<binary>)` depending on which harness is active; a driver
-reads `command` under every host. `[fallback read-only]` on a host row is not a
-claim about the in-session agent — `write_access` only ever describes a route's
-command delivery.
+### Add a model
 
-### Add a driver
+Declare it under `models:` with `provider` (the route key / credential family),
+`id` (the provider's model id; defaults to the model name), `effort` (its
+standard effort; defaults to `default`), optional `spellings: {driver: id}`,
+and optional per-archetype `eligibility: { archetype: eligible | shadow_only | forbidden }`.
+A `models:` entry is harness-neutral — no `routes` key per model — so adding
+one needs no harness table. To test an unregistered model immediately, dial it
+directly (`fadeno dial worker kimi-k3`) — it routes via
+`unregistered_model_driver` with the id passed verbatim.
+
+### Add a driver route
+
+Add a route entry for the provider under **every** host table, since how a
+driver is invoked does not depend on which harness invokes it. Each row may
+declare `driver:` (the `--via` alias; defaults to the provider key),
+`models_command: [driver, models]` for dial-time verification, and
+`effort_encoding: model-suffix | flag` (the Antigravity quirk as a one-line
+driver declaration).
+
+### Add a driver (reuses the route recipe above)
 
 A **driver** is a harness Fadeno spawns as a subprocess (see
 [`architecture.md`](architecture.md) → *Glossary*). Adding one is a
 catalog-only change — no `templates/` tree, no `init` flag, no `HarnessId`:
-declare a target for the provider, then add a `command:` route entry for that
-provider under **every** host table, since how a driver is invoked does not
-depend on which harness invokes it. The contract each driver must meet is the
-command-delivery contract: **prompt on stdin, report on stdout, chatter on
-stderr, non-zero exit on failure.** Verify that by hand before shipping the
-entry — a headless mode that stalls on an approval prompt exits 0 having done
-nothing, which is the failure this project keeps finding.
+declare a model under `models:` for the provider, then add a `command:` route
+entry for that provider under **every** host table (as described in *Add a
+driver route*), since how a driver is invoked does not depend on which harness
+invokes it. The contract each driver must meet is the command-delivery
+contract: **prompt on stdin, report on stdout, chatter on stderr, non-zero
+exit on failure.** Verify that by hand before shipping the entry — a headless
+mode that stalls on an approval prompt exits 0 having done nothing, which is
+the failure this project keeps finding.
 
 Drivers shipped in the starter catalog:
 
@@ -217,7 +233,7 @@ archetypes:
   reviewer: { distinct_provider_from_inputs: advisory }
 ```
 
-A target (v2) or v1 executor may declare `eligibility:` — a mapping of
+A model (or v1 executor) may declare `eligibility:` — a mapping of
 archetype → `eligible` | `shadow_only` | `forbidden` (default `eligible`).
 `forbidden` refuses at dial time and dispatch time; `shadow_only` dispatches
 and stamps `gate_eligible: false`. Gate consumption is unchanged in this
@@ -231,8 +247,8 @@ a constraint-system error (loud, never an allow).
 `fadeno dispatch` then refuses *before spawning* when the resolved command
 route says `write_access: false` and the archetype says `requires_write: required`
 (or boolean `true`) — and the inverse, `requires_write: forbidden` onto
-`write_access: true`. The same check fires at dial time (`fadeno loadout set`),
-which also refuses dialing an archetype onto a target whose eligibility for
+`write_access: true`. The same check fires at dial time (`fadeno dial <archetype> <model>`),
+which also refuses dialing an archetype onto a model whose eligibility for
 it is `forbidden`.
 The original case is a commit task routed to a headless `claude -p` that has no
 approver for a write. Either side undeclared imposes no constraint (existing profiles are
@@ -244,60 +260,58 @@ surface `mode: write_conflict` and decline to materialize a broker for the
 conflicted slot — one shared helper keeps the refusal text identical.
 Rationale: `docs/experimental/loadouts-and-dispatch.md` → *Write access*.
 
-Every loadout slot must name a declared target; loadout names and archetype
-keys are bare lowercase identifiers (`[a-z][a-z0-9_-]*`); at least one of
-`bindings` / `loadouts` must be non-empty. Playbook roles opt into loadout
-routing with one advisory field — `archetype: worker` — validated for
-identifier shape only, so the playbook stays harness- and provider-neutral.
+Every model name and dial ref must use bare lowercase identifiers
+(`[a-z][a-z0-9_-]*` for archetype/dial keys; model ids may contain slashes for
+unregistered namespaces). Playbook roles opt into dial routing with one
+advisory field — `archetype: worker` — validated for identifier shape only, so
+the playbook stays harness- and provider-neutral.
 
-**Resolution order** (per role, computed at dispatch time inside the CLI,
-never cached anywhere else):
+**Resolution order** — the dial cascade (per role, computed at dispatch time
+inside the CLI, never cached anywhere else):
 
 1. explicit `bindings[role]` pin;
-2. a session slot override for the role's declared `archetype`
-   (`fadeno loadout set`);
-3. the active loadout's slot for the role's declared `archetype`;
-4. `bindings["*"]`;
-5. otherwise a hard error naming the role, its archetype, and what to add.
+2. session dial for the role's declared `archetype`
+   (`fadeno dial <archetype> <model>[@effort] [--via <driver>]`);
+3. repo pin for the archetype (`dials:` in `.fadeno/executors.yaml`);
+4. user dial for the archetype (`$FADENO_STATE_HOME/dials.json`);
+5. host-native base (`current-host`, `inherited` effort).
 
-When the declared archetype has a `fallback`, steps 2–3 re-enter along that
-chain (override, then loadout slot, at each step) before `bindings["*"]`.
-A row bound this way carries `resolved_via`.
+When the declared archetype has a `fallback`, steps 2–4 re-enter along that
+chain (session → repo → user, at each step) before the base terminal. A row
+bound this way carries `resolved_via`.
 
-The **active loadout** resolves `--loadout` flag → `FADENO_LOADOUT` env →
-`.fadeno/local/loadout` → `default_loadout:` → none. Switch it per session:
+Switch a dial per archetype (no preset to author):
 
 ```bash
-fadeno loadout use openai-primary   # writes .fadeno/local/loadout (git-ignored)
-fadeno loadout                      # active loadout, its source, its EFFECTIVE slot table
-fadeno loadout list                 # every declared loadout (* marks active)
-fadeno loadout clear                # remove the local pin
-fadeno loadout set worker grok-default   # override ONE slot on the active loadout
-fadeno loadout clear worker              # revert that one override
+fadeno dial worker grok --user           # user default — applies across repos
+fadeno dial worker grok --repo           # repo pin — committed in .fadeno/executors.yaml
+fadeno dial worker grok                  # adaptive: session when repo-pinned, else user
+fadeno dial clear worker                 # clears session; --user/--repo for those layers
+fadeno dial                              # effective table with dial_source per row
+fadeno dial shadow worker grok --rate 0.25  # shadow attachment (session only)
 ```
 
-A session override dials a single archetype without authoring a new loadout;
-the effective table marks overridden rows `OVERRIDE (base: …)`. Overrides
-belong to the base loadout named in the pin (name match) and are dropped —
-with a reported count — whenever the base is switched. `loadout set` runs
-the archetype write-access check at dial time, refusing a worker override
-onto a read-only command route before any dispatch burns tokens.
+An adaptive `set` with no scope flag writes the session layer when a repo pin
+exists (a user write would be silently shadowed) and narrates which layer it
+wrote; `clear` never deletes downward without `--user`/`--repo`. `fadeno
+dial <archetype> <model>` runs the archetype write-access check at dial time, refusing a
+worker dial onto a read-only command route before any dispatch burns tokens.
 
-`.fadeno/local/` is per-machine session state — `init` gitignores it — which is
-what makes a loadout switch session-scoped instead of a repo edit that dirties
-git for a quota condition that expires tomorrow. The switch takes effect on the
-next dispatch. Evidence: runs record a `resolution_snapshot` event in their
-ledger; ad-hoc dispatches append one row each to `.fadeno/dispatches.jsonl`
-(also gitignored by `init` — per-machine evidence like `.fadeno/local/`,
-auditable locally, never committed). Each row's `resolution` field records how
-the executor was chosen (`binding` | `override` | `loadout` | `fallback` |
-`executor-flag`); rows bound through a session override also carry an
-`override` field naming the archetype and executor; rows bound through a
-fallback chain carry `resolved_via` naming the chain archetype that bound
-(absent when the declared archetype bound directly); and `resolution_snapshot`
-events record the applicable `overrides` — verification replays from the
-snapshot, never the live pin. Constraint-tier evidence is additive on
-format `0.2`: ad-hoc boundary refusals append a `dispatch_refused` row
+`.fadeno/local/` (session dials + shadows) is per-machine session state — `init`
+gitignores it — which is what makes a dial switch session-scoped instead of a
+repo edit that dirties git for a quota condition that expires tomorrow. The
+switch takes effect on the next dispatch. Evidence: runs record a
+`resolution_snapshot` event in their ledger (the full dial table with
+`dial_source` per row); ad-hoc dispatches append one row each to
+`.fadeno/dispatches.jsonl` (also gitignored by `init` — per-machine evidence
+like `.fadeno/local/`, auditable locally, never committed). Each row's
+`resolution` field records how the executor was chosen
+(`binding | session | repo | user | base | model-flag | shadow`); the `dial`
+field carries the DialRef as dialed; `resolved_via` names the fallback chain
+archetype that bound (absent when the declared archetype bound directly);
+and `resolution_snapshot` events record the dial layers — verification replays
+from the snapshot, never the live pin. Constraint-tier evidence is additive on
+format `1.0`: ad-hoc boundary refusals append a `dispatch_refused` row
 with `refusal: { predicate, message }` (`write_posture` | `eligibility` |
 `provider_distinctness` | `constraint_command`); proceeding rows may carry
 `input_provenance`, `provider_distinctness: "warned"`, and
@@ -312,13 +326,13 @@ Ad-hoc dispatch runs the same chain outside any playbook:
 `fadeno dispatch --archetype worker` with the prompt on stdin or via
 `--prompt-file <path>`. `--role <name>` additionally enables per-role binding
 pins and evidence attribution (without it, step 1 above has nothing to match);
-`--executor <name>` bypasses resolution entirely (debugging). What it can
-invoke is a property of the resolved **route**, not of the target: a
-command-delivered route runs its argv, and a `host: true` route runs its
-fallback `command` when one is declared. A host-routed target with no
-fallback command is a clear error naming the fix — run the task with the
-in-session agent, declare a fallback command, or bind the archetype to a
-command-delivered target.
+`--model <model>[@effort] [--via <driver>]` bypasses resolution entirely
+(debugging). What it can invoke is a property of the resolved **route**, not
+of the model: a command-delivered route runs its argv, and a `host: true`
+route runs its fallback `command` when one is declared. A host-routed model
+with no fallback command is a clear error naming the fix — run the task with
+the in-session agent, declare a fallback command, or dial the archetype to a
+command-delivered model.
 
 Every command dispatch streams the executor's stdout to an output snapshot at
 `.fadeno/local/outputs/<archetype|role|dispatch>-<dispatchId8>.md` (same
@@ -354,20 +368,19 @@ file against the completion row's `output_sha256` (`incomplete` when the
 completion never arrived — the killed-mid-flight case). `--tail <N>`
 defaults to 10; `--json` emits the correlated rows for scripts, carrying
 `shadow: boolean`, `primary_dispatch_id: string | null`, and
-`diff_bytes: number | null` for shadow entries. Rows are format-stamped
-(`format: "0.1"`); pre-format rows from before the two-row change render as
-`[legacy]` entries rather than being skipped, and rows from a newer format
-major get their own count in the summary.
+`diff_bytes: number | null` for shadow entries. Rows are format-stamped (`format: "1.0"`); pre-format rows from before the bump
+render as `[legacy]` entries rather than being skipped, and rows from a newer
+format major get their own count in the summary.
 
 **Shadow attachments and the diff-as-artifact idiom.** A shadow is a
 zero-risk challenger sampled alongside the primary dispatch:
 
 ```bash
-fadeno loadout shadow worker grok-default            # every worker dispatch
-fadeno loadout shadow worker grok-default --rate 0.2 # sampled trickle
-fadeno dispatch --archetype worker --shadow grok-default  # one-shot opt-in
-fadeno loadout clear-shadow worker                   # clear one
-fadeno loadout clear-shadow                          # clear all
+fadeno dial shadow worker grok            # every worker dispatch
+fadeno dial shadow worker grok --rate 0.2 # sampled trickle
+fadeno dispatch --archetype worker --shadow grok  # one-shot opt-in
+fadeno dial clear-shadow worker                   # clear one
+fadeno dial clear-shadow                          # clear all
 ```
 
 The shadow runs with the **byte-identical prompt** (`prompt_snapshot` and
@@ -429,7 +442,7 @@ tie/inconclusive`). Missing dir or no pairs is a friendly empty output, exit 0.
 **The adoption ladder:**
 
 ```
-shadow (challenger, zero risk) → override (trial primary, instant revert) → loadout (preset)
+shadow (challenger, zero risk) → override (trial primary, instant revert) → dial (pin)
 ```
 
 **MANDATORY confound.** A shadow runs against a detached-HEAD worktree, so
@@ -450,7 +463,7 @@ Each is a Bash-only `model: sonnet` agent whose single Bash call pipes the
 received task prompt verbatim to `fadeno dispatch --archetype <a>` as a
 quoted heredoc on stdin and relays the report verbatim — so a Claude Code
 session can route worker/reviewer/judge-shaped subtasks to whatever executor
-the active loadout binds, including a non-Anthropic one. The kernel snapshots
+the active dial binds, including a non-Anthropic one. The kernel snapshots
 the prompt under `.fadeno/local/prompts/` and writes the evidence rows; the
 bare `fadeno` spelling keeps the call inside the `Bash(fadeno:*)` rule init
 pre-approves. On a non-zero exit the proxy reports the failure plainly and
@@ -458,7 +471,7 @@ never attempts the task itself as a fallback.
 
 `fadeno init --claude` installs two local `PreToolUse` hooks by default; use
 `--no-steering` to opt out. The **spawn-rewrite hook** calls the structured
-`fadeno loadout resolve --archetype …` surface with the Claude harness identity
+`fadeno dial resolve --archetype …` surface with the Claude harness identity
 and rewrites command-delivered worker, reviewer, and judge `Agent` calls to
 proxies — agents that name an archetype, never the `general-purpose`
 catch-all. Host targets are rewritten to the matching Fadeno
@@ -469,7 +482,7 @@ hook then targets the plugin-scoped `fadeno:dispatch-*` agents.
 
 When it steers a spawn to a host role agent instead, the same hook appends a
 `host_delivery` row to `.fadeno/dispatches.jsonl` (archetype, agent_type,
-loadout, executor, model, model_override, `reasoning_effort: "inherited"`,
+dial, executor, model, model_override, `reasoning_effort: "inherited"`,
 `transport: "host"`, prompt_sha256, `hook_version`) plus a verbatim
 prompt snapshot at `.fadeno/local/prompts/host-<sha8>.md`, so the file audits
 both delivery routes. The kernel is not in the host path, so the hook is the
@@ -516,13 +529,13 @@ evidence row `relay_attested` (true / false / absent), turning the proxy's
 Codex has no equivalent spawn-rewrite hook, and project custom-agent model
 configuration is session-static. `fadeno init --codex` installs honest broker
 definitions named `worker`, `reviewer`, and `judge`; `fadeno setup --codex`
-records the harness, and later `fadeno use <loadout>` automatically refreshes
+records the harness, and later `fadeno dial` switches automatically refresh
 the user-scoped agents when needed.
-Use `fadeno steering apply <loadout> --codex --scope project` for a project
-override. Each host-routed slot becomes a host agent with that target's
+Use `fadeno steering apply --codex --scope project` for a project
+override. Each host-routed slot becomes a host agent with that slot's
 model and effort; each command-routed slot becomes a cheap broker that
 delegates through `fadeno dispatch`. Before each task the role resolves the
-active loadout: a command-routed slot switches immediately, a matching host
+active dials: a command-routed slot switches immediately, a matching host
 slot runs in-session, and a different host slot uses its declared fallback
 command when present. A fresh session activates changed host definitions;
 it is required only when the selected host slot has no fallback command. The Codex plugin
@@ -535,8 +548,7 @@ lives. The arbitrage win is expensive worker turns.
 
 > **Permission boundary:** the external executor a proxy dispatches runs
 > *outside* the host harness's permission fences, under its own sandbox flags
-> (e.g. `codex exec -s workspace-write`). Binding that executor in your
-> loadout is the explicit opt-in; the `.fadeno/dispatches.jsonl` evidence row
+> (e.g. `codex exec -s workspace-write`). Binding that executor via a dial is the explicit opt-in; the `.fadeno/dispatches.jsonl` evidence row
 > is the compensating audit trail.
 
 ---

@@ -10,6 +10,10 @@ resolution chain, and dispatch-boundary enforcement); grounded in
 [`case-study-erdossweep.md`](case-study-erdossweep.md) (gap list) and in
 dogfood receipts from the 0.6.0-rc cycle. Inherits the standing constraint
 set: no daemon, no cloud service, no scheduler; evidence over trust.
+**Successor:** [`dials-and-registry.md`](dials-and-registry.md) (proposed
+2026-08-15) keeps this document's slot-as-the-unit principle and everything
+downstream of resolution, and retires the one layer it preserved: the named
+loadout preset. Read it before extending the selection surface.
 
 ## Observed need (admission receipts)
 
