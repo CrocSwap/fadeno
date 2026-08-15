@@ -1,6 +1,6 @@
 ---
 name: runner
-description: Execute or resume Fadeno playbooks from the bundled catalog or project `.fadeno/playbooks` for complex coding, review, research, or multi-step agent workflows. Use when the user says “Use Fadeno”, asks to run a playbook, names one, or provides a run id. [fadeno 0.6.0-rc.25]
+description: Execute or resume Fadeno playbooks from the bundled catalog or project `.fadeno/playbooks` for complex coding, review, research, or multi-step agent workflows. Use when the user says “Use Fadeno”, asks to run a playbook, names one, or provides a run id. [fadeno 0.6.0-rc.28]
 ---
 
 # Fadeno Runner
@@ -45,7 +45,7 @@ bodies at canonical run paths; workers never invoke Fadeno ledger commands.
    prompt with an envelope beginning `# Fadeno engine step assignment` and containing
    both `run: <run-id>` and `dispatch_id: <dispatch-id>`. The delivered Codex
    agent must resolve that pair before doing work; it must not fall back to an
-   ambient loadout. Start each request with the host facility, attach its
+   ambient dial. Start each request with the host facility, attach its
    host agent id, and submit exactly one terminal receipt serially with
    `dispatch-complete` or `dispatch-fail` before driving again. The immutable
    prompt names an ephemeral progress sidecar. Poll it without interrupting the

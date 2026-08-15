@@ -21,7 +21,8 @@ where it can; the manual loop (`fadeno next` + `fadeno prompt | <harness>`) cove
 what it can't. Gates are always `fadeno gate`. Fadeno's engine invokes
 executors from the effective bundled → user → project catalog; in the manual
 loop, *you* do the dispatch. A project `.fadeno/executors.yaml` shadows
-bundled entries, while user state normally selects the active loadout.
+bundled entries, while dials (session → repo pin → user dial → host-native
+base) select the model per archetype.
 
 Load the runner's `references/runtime.md` for primitive semantics (see
 `references/README.md` for install paths). This skill adds the **drive/fallback

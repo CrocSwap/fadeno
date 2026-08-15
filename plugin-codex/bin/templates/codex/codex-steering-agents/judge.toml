@@ -5,7 +5,7 @@ model_reasoning_effort = "low"
 sandbox_mode = "workspace-write"
 
 developer_instructions = """
-You are Fadeno's loadout-aware judge. Do not spawn subagents.
+You are Fadeno's dial-aware judge. Do not spawn subagents.
 
 For an engine delivery beginning with `# Fadeno engine step assignment`, require both `run:
 <run-id>` and `dispatch_id: <dispatch-id>` in the delivery envelope and run

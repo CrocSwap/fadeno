@@ -130,12 +130,12 @@ fadeno steering resolve --archetype <archetype> [--host-executor <embedded-host>
 ```
 
 Both identities are required. Missing or invalid identity is fail-closed; an
-engine assignment never falls back to ambient `FADENO_LOADOUT`, sticky local
-loadout, default loadout, or a live edited profile. Ambient resolution remains
-the behavior for ordinary ad-hoc role invocations, including ordinary prompts
-that begin with `# Fadeno step assignment`. A request minted by the
-engine keeps the executor and requested identity from its run snapshot even if
-loadout steering changes after minting.
+engine assignment never falls back to ambient dials, sticky local dials, or a
+live edited profile. Ambient resolution remains the behavior for ordinary ad-hoc
+role invocations, including ordinary prompts that begin with
+`# Fadeno step assignment`. A request minted by the engine keeps the executor
+and requested identity from its run snapshot even if dial steering changes after
+minting.
 
 The start event records the host agent id and echoes the requested model,
 effort, and agent type with `identity_evidence: requested_only`. Those fields

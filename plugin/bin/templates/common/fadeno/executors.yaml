@@ -1,132 +1,162 @@
-# Fadeno's harness-neutral executor catalog. Loadouts select model targets
-# (the who); routes decide how the active harness delivers each provider (the
-# how): `host: true` runs in the session you are already in, anything else
-# spawns a command. `native:` is the pre-0.6 name for `host:` and still loads.
-# User ~/.config/fadeno/executors.yaml and project .fadeno/executors.yaml may
-# extend or override these names.
-schema_version: 2
+# Fadeno's model registry and harness-neutral dispatch routes. Models are
+# addressable by bare name (the who); routes decide how the active harness
+# delivers each provider (the how): `host: true` runs in the session you are
+# already in, anything else spawns a command. User
+# ~/.config/fadeno/executors.yaml and project .fadeno/executors.yaml may
+# extend or override these names under the same layering rules.
+#
+# Dials select the model per archetype: `fadeno dial worker grok`,
+# `fadeno dial judge sol@xhigh --via opencode`, `fadeno dial clear worker`.
+# A bare model name resolves at its registry-standard effort via its home driver.
+# A repo can pin archetypes it has opinions about:
+#
+#   dials:
+#     judge: sol
+#
+# The cascade is: binding → session dial → repo pin → user dial → host-native
+# base (current-host). There are no named presets.
+schema_version: 3
 
-targets:
-  current-host:
-    provider: current-host
-    model: current-host
-    reasoning_effort: default
-  luna-medium:
+models:
+  luna:
     provider: openai
-    model: gpt-5.6-luna
-    reasoning_effort: medium
-  terra-medium:
+    id: gpt-5.6-luna
+    effort: medium
+  terra:
     provider: openai
-    model: gpt-5.6-terra
-    reasoning_effort: medium
-  sol-high:
+    id: gpt-5.6-terra
+    effort: medium
+  sol:
     provider: openai
-    model: gpt-5.6-sol
-    reasoning_effort: high
-  claude-default:
+    id: gpt-5.6-sol
+    effort: high
+  opus:
     provider: anthropic
-    model: opus
-    reasoning_effort: high
-  grok-default:
+    id: opus
+    effort: high
+    spellings:
+      opencode: anthropic/claude-opus-4.8
+  grok:
     provider: xai
-    # `grok models` lists grok-4.6 (default) and grok-4.5; a bare "grok" is not
-    # a model id, and the CLI exits 1 before doing any work.
-    model: grok-4.6
-    reasoning_effort: high
-  gemini-default:
+    id: grok-4.6
+    effort: high
+  gemini:
     provider: google
-    # Delivered by Antigravity (`agy`), not the retired gemini-cli. `agy models`
-    # lists the set; effort is baked into the id (gemini-3.1-pro-high,
-    # gemini-3.7-flash-medium, …), which is why the route passes no effort flag
-    # and `reasoning_effort` below is advisory only. Swap the model here rather
-    # than editing the route.
-    model: gemini-3.1-pro-high
-    reasoning_effort: high
-  opencode-default:
-    provider: openrouter
-    # OpenCode is a multi-provider driver: it fronts whichever provider holds
-    # the credential, so the provider key is the credential holder (openrouter)
-    # and the model keeps that provider's own namespaced id. `opencode models`
-    # lists the installed set.
-    model: anthropic/claude-opus-4.8
-    reasoning_effort: high
+    id: gemini-3.1-pro
+    effort: high
 
 routes:
   codex:
     current-host:
       host: true
     openai:
+      driver: codex
       host: true
       command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
       write_access: true
     anthropic:
+      driver: claude-cli
       command: [claude, -p, --model, "{model}"]
       write_access: false
     xai:
+      driver: grok
       command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
       write_access: true
+      models_command: [grok, models]
     google:
+      driver: agy
       command: [agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text]
       write_access: true
+      models_command: [agy, models]
+      effort_encoding: model-suffix
     openrouter:
+      driver: opencode
       command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto]
       write_access: true
+      models_command: [opencode, models]
   claude:
     current-host:
       host: true
     anthropic:
+      driver: claude-cli
       host: true
       command: [claude, -p, --model, "{model}"]
       write_access: false
     openai:
+      driver: codex
       command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
       write_access: true
     xai:
+      driver: grok
       command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
       write_access: true
+      models_command: [grok, models]
     google:
+      driver: agy
       command: [agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text]
       write_access: true
+      models_command: [agy, models]
+      effort_encoding: model-suffix
     openrouter:
+      driver: opencode
       command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto]
       write_access: true
+      models_command: [opencode, models]
   grok:
     current-host:
       host: true
     xai:
+      driver: grok
       host: true
       command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
       write_access: true
+      models_command: [grok, models]
     openai:
+      driver: codex
       command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
       write_access: true
     anthropic:
+      driver: claude-cli
       command: [claude, -p, --model, "{model}"]
       write_access: false
     google:
+      driver: agy
       command: [agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text]
       write_access: true
+      models_command: [agy, models]
+      effort_encoding: model-suffix
     openrouter:
+      driver: opencode
       command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto]
       write_access: true
+      models_command: [opencode, models]
   standalone:
     current-host:
       host: true
     openai:
+      driver: codex
       command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
       write_access: true
     anthropic:
+      driver: claude-cli
       command: [claude, -p, --model, "{model}"]
       write_access: false
     xai:
+      driver: grok
       command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
       write_access: true
+      models_command: [grok, models]
     google:
+      driver: agy
       command: [agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text]
       write_access: true
+      models_command: [agy, models]
+      effort_encoding: model-suffix
     openrouter:
+      driver: opencode
       command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto]
       write_access: true
+      models_command: [opencode, models]
 
 # Driver routes (harnesses Fadeno spawns, never runs inside — see
 # docs/architecture.md → "Glossary: harnesses, hosts, and drivers"). They carry
@@ -175,7 +205,7 @@ routes:
 # (`true` → `required`, `false` → `none`).
 # `generator` is divergent artifact-producing work that must not mutate the
 # workspace.
-# `fallback` is binding-only: an archetype without a slot resolves through its
+# `fallback` is binding-only: an archetype without a dial resolves through its
 # fallback's binding, never its policy.
 archetypes:
   worker:
@@ -184,46 +214,4 @@ archetypes:
     requires_write: forbidden
     fallback: worker
 
-# Filler idiom: a slot that is not the loadout's point takes `current-host`, so
-# one loadout stays correct on every harness instead of forking per host.
-#
-# `native` here names a loadout, not a transport: it is only host-delivered
-# because every slot below binds `current-host`. Override a slot with a
-# provider target and that slot is host-delivered only on that provider's own
-# harness — the loadout keeps the name either way.
-loadouts:
-  native:
-    worker: current-host
-    reviewer: current-host
-    judge: current-host
-  luna:
-    worker: luna-medium
-    reviewer: luna-medium
-    judge: luna-medium
-  terra:
-    worker: terra-medium
-    reviewer: terra-medium
-    judge: terra-medium
-  sol:
-    worker: sol-high
-    reviewer: sol-high
-    judge: sol-high
-  codex:
-    worker: terra-medium
-    reviewer: terra-medium
-    judge: sol-high
-  claude:
-    worker: claude-default
-    reviewer: claude-default
-    judge: claude-default
-  grok-worker:
-    worker: grok-default
-    reviewer: current-host
-    judge: current-host
-
-default_loadout: native
-
-# Direct bindings remain available for repo-native compatibility. Loadout
-# slots win for archetyped roles; an explicit role binding still wins first.
-bindings:
-  "*": current-host
+unregistered_model_driver: opencode

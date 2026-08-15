@@ -1,6 +1,6 @@
 ---
 name: driver
-description: Drive a Fadeno run ledger end-to-end — engine-first via `fadeno drive`, with a manual `fadeno next` loop for steps the engine can't execute. Use when the host hands you a run id to drive or resume, or when coordinating multi-harness roles without host nested subagents. [fadeno 0.6.0-rc.25]
+description: Drive a Fadeno run ledger end-to-end — engine-first via `fadeno drive`, with a manual `fadeno next` loop for steps the engine can't execute. Use when the host hands you a run id to drive or resume, or when coordinating multi-harness roles without host nested subagents. [fadeno 0.6.0-rc.28]
 ---
 
 # Fadeno Driver
@@ -21,7 +21,8 @@ where it can; the manual loop (`fadeno next` + `fadeno prompt | <harness>`) cove
 what it can't. Gates are always `fadeno gate`. Fadeno's engine invokes
 executors from the effective bundled → user → project catalog; in the manual
 loop, *you* do the dispatch. A project `.fadeno/executors.yaml` shadows
-bundled entries, while user state normally selects the active loadout.
+bundled entries, while dials (session → repo pin → user dial → host-native
+base) select the model per archetype.
 
 Load the runner's `references/runtime.md` for primitive semantics (see
 `references/README.md` for install paths). This skill adds the **drive/fallback

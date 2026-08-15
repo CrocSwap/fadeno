@@ -99,9 +99,9 @@ function passThrough() {
   finish(null);
 }
 
-// Resolve through a structured CLI surface. The same neutral loadout can be
+// Resolve through a structured CLI surface. The same neutral dial can be
 // host-delivered in Claude and command-delivered in Codex (or vice versa).
-const resolution = spawnSync(cli, ['loadout', 'resolve', '--archetype', archetype], {
+const resolution = spawnSync(cli, ['dial', 'resolve', '--archetype', archetype], {
   cwd,
   env: { ...process.env, FADENO_HARNESS: 'claude' },
   encoding: 'utf8',
@@ -119,7 +119,7 @@ if (resolution.status !== 0) {
       permissionDecisionReason:
         stderr.length > 0
           ? stderr
-          : 'fadeno loadout resolve failed; refusing a spawn no loadout slot steered.',
+          : 'fadeno dial resolve failed; refusing a spawn no dial slot steered.',
     },
   });
 }
@@ -162,7 +162,7 @@ function recordHostDelivery() {
         // DISPATCHES_FORMAT in src/commands/dispatch.ts: this hook is a
         // standalone script with no import path back into the CLI, and both
         // writers must stamp the same version. Bump them together.
-        format: '0.2',
+        format: '1.0',
         timestamp: new Date().toISOString(),
         event: 'host_delivery',
         // Same key the kernel stamps on every row it writes, so one field
@@ -175,7 +175,6 @@ function recordHostDelivery() {
         hook_version: HOOK_VERSION,
         archetype,
         agent_type: requested,
-        loadout: typeof slot?.active?.name === 'string' ? slot.active.name : null,
         executor: typeof slot?.executor === 'string' ? slot.executor : null,
         model: typeof slot?.model === 'string' ? slot.model : null,
         model_override: event.tool_input.model ?? null,
@@ -183,6 +182,9 @@ function recordHostDelivery() {
         // takes no effort parameter, so the spawn inherits the session's.
         reasoning_effort: 'inherited',
         transport: 'host',
+        dial_source: typeof slot?.source === 'string' ? slot.source : slot?.dial_source ?? null,
+        driver: typeof slot?.driver === 'string' ? slot.driver : null,
+        effort: typeof slot?.effort === 'string' ? slot.effort : null,
         prompt_sha256: promptSha256,
         prompt_snapshot: snapshotRel,
       })}\n`,
