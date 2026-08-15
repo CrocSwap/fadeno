@@ -8,10 +8,7 @@ import { userPaths, type FadenoUserPaths, type UserPathOptions } from './user-pa
 export type ConfigLayer = 'builtin' | 'user' | 'project';
 
 export interface ProfileProvenance {
-  executors: Record<string, ConfigLayer>;
-  loadouts: Record<string, ConfigLayer>;
   bindings: Record<string, ConfigLayer>;
-  defaultLoadout: ConfigLayer | null;
 }
 
 export interface LayeredProfile {
@@ -54,46 +51,37 @@ function parseLayer(path: string): Record<string, unknown> {
 }
 
 function mergeLayer(target: Record<string, unknown>, source: Record<string, unknown>, layer: ConfigLayer, provenance: ProfileProvenance): void {
-  for (const key of ['executors', 'targets', 'routes', 'archetypes', 'loadouts', 'bindings']) {
+  // Disallow dials in non-project layers
+  if (layer !== 'project' && mapping(source.dials) != null && Object.keys(mapping(source.dials)!).length > 0) {
+    throw new ExecutorProfileError('repo pins live in the project catalog; user dials are state — use `fadeno loadout set <archetype> <model> --user`');
+  }
+  for (const key of ['routes', 'archetypes', 'bindings', 'models', 'dials']) {
     const entries = mapping(source[key]);
     if (entries == null) continue;
     const current = mapping(target[key]) ?? {};
     for (const [name, value] of Object.entries(entries)) {
-      if ((key === 'loadouts' || key === 'routes') && mapping(value) != null && mapping(current[name]) != null) {
+      if ((key === 'routes' || key === 'models') && mapping(value) != null && mapping(current[name]) != null) {
         current[name] = { ...(current[name] as Record<string, unknown>), ...(value as Record<string, unknown>) };
       } else {
         current[name] = value;
       }
-      if (key === 'executors') provenance.executors[name] = layer;
-      if (key === 'loadouts') provenance.loadouts[name] = layer;
       if (key === 'bindings') provenance.bindings[name] = layer;
     }
     target[key] = current;
   }
-  for (const key of ['schema_version', 'default_loadout', 'constraints']) {
+  for (const key of ['schema_version', 'constraints', 'unregistered_model_driver']) {
     if (source[key] !== undefined) {
       target[key] = source[key];
-      if (key === 'default_loadout') provenance.defaultLoadout = layer;
     }
   }
 }
 
 function projectIsComplete(doc: Record<string, unknown>): boolean {
-  const catalog = mapping(doc.targets) ?? mapping(doc.executors);
-  if (catalog == null || Object.keys(catalog).length === 0) return false;
-  const bindings = mapping(doc.bindings);
-  const loadouts = mapping(doc.loadouts);
-  if ((bindings == null || Object.keys(bindings).length === 0) &&
-      (loadouts == null || Object.keys(loadouts).length === 0)) return false;
-  const declared = new Set(Object.keys(catalog));
-  if (bindings && Object.values(bindings).some((target) => typeof target !== 'string' || !declared.has(target))) return false;
-  if (loadouts) {
-    for (const slots of Object.values(loadouts)) {
-      const map = mapping(slots);
-      if (map && Object.values(map).some((target) => typeof target !== 'string' || !declared.has(target))) return false;
-    }
-  }
-  return doc.default_loadout == null || (typeof doc.default_loadout === 'string' && loadouts != null && doc.default_loadout in loadouts);
+  const models = mapping(doc.models);
+  const routes = mapping(doc.routes);
+  if (models == null || Object.keys(models).length === 0) return false;
+  if (routes == null || Object.keys(routes).length === 0) return false;
+  return true;
 }
 
 /** Builtin archetype keys absent from a self-contained project catalog. */
@@ -128,15 +116,8 @@ export function loadLayeredProfile(repoRoot: string, options: UserPathOptions = 
     ? [{ layer: 'project' as ConfigLayer, path: project!.path }]
     : present;
   const document: Record<string, unknown> = {};
-  const provenance: ProfileProvenance = { executors: {}, loadouts: {}, bindings: {}, defaultLoadout: null };
+  const provenance: ProfileProvenance = { bindings: {} };
   for (const entry of effective) mergeLayer(document, parsedLayers.get(entry.layer)!, entry.layer, provenance);
-  if (existsSync(paths.configFile)) {
-    const userConfig = parseLayer(paths.configFile);
-    if (userConfig.default_loadout !== undefined && provenance.defaultLoadout !== 'project') {
-      document.default_loadout = userConfig.default_loadout;
-      provenance.defaultLoadout = 'user';
-    }
-  }
   const text = stringifyObject(document);
   return {
     profile: parseExecutorProfile(text, effective.map((entry) => entry.layer).join(' + '), harness),

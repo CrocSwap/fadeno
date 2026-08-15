@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
 
@@ -18,11 +18,12 @@ export interface FadenoUserPaths {
   dataDir: string;
   executorsFile: string;
   configFile: string;
-  loadoutFile: string;
   harnessFile: string;
   installationsFile: string;
   managedRuntimeDir: string;
   managedCli: string;
+  dialsFile: string;
+  modelVerificationsFile: string;
 }
 
 /**
@@ -56,11 +57,12 @@ export function userPaths(options: UserPathOptions = {}): FadenoUserPaths {
     dataDir,
     executorsFile: join(configDir, 'executors.yaml'),
     configFile: join(configDir, 'config.yaml'),
-    loadoutFile: join(stateDir, 'loadout'),
     harnessFile: join(stateDir, 'harness'),
     installationsFile: join(stateDir, 'installations.json'),
     managedRuntimeDir,
     managedCli: join(managedRuntimeDir, windows ? 'fadeno.cmd' : 'fadeno'),
+    dialsFile: join(stateDir, 'dials.json'),
+    modelVerificationsFile: join(stateDir, 'model-verifications.json'),
   };
 }
 
@@ -75,4 +77,120 @@ export function readUserHarness(options: UserPathOptions = {}): FadenoHarness | 
   } catch {
     return null;
   }
+}
+
+// --- dials file ---
+
+export function readUserDials(options: UserPathOptions = {}): Record<string, { model: string; effort?: string; via?: string }> {
+  const path = userPaths(options).dialsFile;
+  if (!existsSync(path)) return {};
+  const text = readFileSync(path, 'utf8').trim();
+  if (text.length === 0) return {};
+  let doc: unknown;
+  try { doc = JSON.parse(text); } catch { return {}; }
+  if (doc == null || typeof doc !== 'object' || Array.isArray(doc)) return {};
+  const out: Record<string, { model: string; effort?: string; via?: string }> = {};
+  for (const [k, v] of Object.entries(doc as Record<string, unknown>)) {
+    if (typeof v === 'string') {
+      const trimmed = v.trim();
+      if (trimmed.length === 0) continue;
+      let via: string | undefined;
+      let core = trimmed;
+      const viaIdx = trimmed.indexOf(' via ');
+      if (viaIdx >= 0) {
+        core = trimmed.slice(0, viaIdx).trim();
+        via = trimmed.slice(viaIdx + 5).trim();
+      }
+      const atIdx = core.indexOf('@');
+      if (atIdx >= 0) {
+        const model = core.slice(0, atIdx).trim();
+        const effort = core.slice(atIdx + 1).trim();
+        out[k] = via ? { model, effort, via } : { model, effort };
+      } else {
+        out[k] = via ? { model: core, via } : { model: core };
+      }
+    } else if (v != null && typeof v === 'object' && !Array.isArray(v)) {
+      const map = v as Record<string, unknown>;
+      const model = typeof map.model === 'string' ? map.model.trim() : '';
+      if (model.length === 0) continue;
+      const entry: { model: string; effort?: string; via?: string } = { model };
+      if (typeof map.effort === 'string' && map.effort.trim().length > 0) entry.effort = map.effort.trim();
+      if (typeof map.via === 'string' && map.via.trim().length > 0) entry.via = map.via.trim();
+      out[k] = entry;
+    }
+  }
+  return out;
+}
+
+export function writeUserDials(options: UserPathOptions, dials: Record<string, { model: string; effort?: string; via?: string }>): string {
+  const path = userPaths(options).dialsFile;
+  const keys = Object.keys(dials).sort();
+  if (keys.length === 0) {
+    if (existsSync(path)) unlinkSync(path);
+    return path;
+  }
+  mkdirSync(join(path, '..'), { recursive: true });
+  const sorted: Record<string, unknown> = {};
+  for (const k of keys) {
+    const ref = dials[k]!;
+    let str = ref.model;
+    if (ref.effort) str += `@${ref.effort}`;
+    if (ref.via) str += ` via ${ref.via}`;
+    sorted[k] = str;
+  }
+  const ordered: Record<string, unknown> = {};
+  for (const k of Object.keys(sorted).sort()) ordered[k] = sorted[k];
+  writeFileSync(path, `${JSON.stringify(ordered)}\n`, 'utf8');
+  return path;
+}
+
+// --- verification cache ---
+
+export interface ModelVerification {
+  driver: string;
+  model: string;
+  verified_at: string;
+}
+
+export function readVerifiedModels(options: UserPathOptions = {}): ModelVerification[] {
+  const path = userPaths(options).modelVerificationsFile;
+  if (!existsSync(path)) return [];
+  const text = readFileSync(path, 'utf8').trim();
+  if (text.length === 0) return [];
+  try {
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) return [];
+    const out: ModelVerification[] = [];
+    for (const entry of parsed) {
+      if (entry == null || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      const map = entry as Record<string, unknown>;
+      if (typeof map.driver !== 'string' || typeof map.model !== 'string' || typeof map.verified_at !== 'string') continue;
+      out.push({ driver: map.driver, model: map.model, verified_at: map.verified_at });
+    }
+    out.sort((a, b) => {
+      if (a.driver !== b.driver) return a.driver.localeCompare(b.driver);
+      return a.model.localeCompare(b.model);
+    });
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+export function isModelVerified(options: UserPathOptions, driver: string, model: string): boolean {
+  const list = readVerifiedModels(options);
+  return list.some((e) => e.driver === driver && e.model === model);
+}
+
+export function recordVerifiedModel(options: UserPathOptions, entry: ModelVerification): void {
+  const path = userPaths(options).modelVerificationsFile;
+  const existing = readVerifiedModels(options);
+  if (existing.some((e) => e.driver === entry.driver && e.model === entry.model)) return;
+  const next = [...existing, entry];
+  next.sort((a, b) => {
+    if (a.driver !== b.driver) return a.driver.localeCompare(b.driver);
+    return a.model.localeCompare(b.model);
+  });
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(next)}\n`, 'utf8');
 }
