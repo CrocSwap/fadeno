@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { atCwd } from './executors.ts';
-import type { ExecutorProfile, WritePosture } from './executors.ts';
+import type { ExecutorProfile, SnapshotDocument, WritePosture } from './executors.ts';
 
 /**
  * Tier-2 constraint command: a profile-declared argv run at the dispatch
@@ -13,14 +13,20 @@ export interface ConstraintContext {
   archetype: string | null;
   role: string | null;
   executor: string;
-  target: string | null;
+  driver: string | null;
   provider: string | null;
   model: string | null;
-  transport: 'command' | 'native';
+  model_id: string | null;
+  transport: 'command' | 'host';
   write_access: boolean | null;
   write_posture: WritePosture | null;
-  active_loadout: string | null;
-  overrides: Record<string, string>;
+  dial: { model: string; effort?: string; via?: string } | null;
+  dial_source: string | null;
+  dials: {
+    session: Record<string, string>;
+    repo: Record<string, string>;
+    user: Record<string, string>;
+  };
   resolved_via: string | null;
   input_provenance: Array<{
     dispatch_id: string | null;
@@ -44,7 +50,7 @@ function commandLabel(command: string[]): string {
 }
 
 export function evaluateConstraint(
-  profile: ExecutorProfile,
+  profile: ExecutorProfile | SnapshotDocument,
   context: ConstraintContext,
   opts: { cwd: string; spawn?: typeof spawnSync },
 ): ConstraintVerdict {

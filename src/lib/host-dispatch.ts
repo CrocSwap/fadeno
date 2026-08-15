@@ -6,7 +6,7 @@ import { runSchemaDirectories } from './definitions.ts';
 import { findRepoRoot } from './paths.ts';
 import { readEventsStrict, resolveRun, RUN_LEDGER_SCHEMA_VERSION, RunLedgerError, type RunEvent } from './run-ledger.ts';
 import { LedgerWriteError, LedgerWriter } from './run-ledger-write.ts';
-import { parseExecutorProfile, type ExecutorProfile } from './executors.ts';
+import { parseSnapshotDocument, type SnapshotDocument } from './executors.ts';
 
 export class HostDispatchError extends Error {}
 
@@ -86,7 +86,7 @@ export interface HostDispatchRequestLookup {
 }
 
 /** Re-read and authenticate the immutable executor profile pinned to a run. */
-export function hostRequestProfile(lookup: HostDispatchRequestLookup): ExecutorProfile {
+export function hostRequestProfile(lookup: HostDispatchRequestLookup): SnapshotDocument {
   const snapshots = lookup.events.filter((event) => event.type === 'profile_snapshotted');
   if (snapshots.length !== 1) {
     throw new HostDispatchError(
@@ -116,7 +116,7 @@ export function hostRequestProfile(lookup: HostDispatchRequestLookup): ExecutorP
   if (digest !== sha256Hex(text)) {
     throw new HostDispatchError(`run "${lookup.runId}" profile snapshot digest does not match its recorded sha256.`);
   }
-  return parseExecutorProfile(text, `${profileRel} (run snapshot)`);
+  return parseSnapshotDocument(text, `${profileRel} (run snapshot)`);
 }
 
 /**
@@ -540,7 +540,7 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
       executor == null || executor.adapter !== 'host' ||
       JSON.stringify(executor.fallbackCommand ?? null) !== JSON.stringify(opts.command ?? null) ||
       executor.model !== request.model || executor.reasoningEffort !== request.reasoningEffort ||
-      executor.agentType !== request.agentType
+      (executor.agentType !== '*' && executor.agentType !== request.agentType)
     ) {
       throw new HostDispatchError(
         `command-fallback delivery for "${opts.dispatchId}" does not match its snapshotted executor and identity.`,

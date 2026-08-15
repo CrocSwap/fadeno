@@ -20,15 +20,26 @@ import { tempRepo } from './helpers.ts';
 
 const REPO = join(import.meta.dirname, '..');
 
+const HARNESS = 'standalone';
+const harnessOpts = { env: { FADENO_HARNESS: HARNESS } } as const;
+
 function seedExecutor(t: TestContext, command: string[]): string {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(
     join(root, '.fadeno', 'executors.yaml'),
     stringifyYaml({
-      executors: { probe: { adapter: 'command', command, model: 'opus' } },
-      loadouts: { main: { worker: 'probe' } },
-      default_loadout: 'main',
+      schema_version: 3,
+      models: {
+        probe: { provider: 'openai', id: 'probe', effort: 'default' },
+      },
+      routes: {
+        standalone: { openai: { command, write_access: true } },
+        codex: { openai: { command, write_access: true } },
+        claude: { openai: { command, write_access: true } },
+      },
+      archetypes: { worker: {} },
+      dials: { worker: 'probe' },
     }),
   );
   return root;
@@ -44,7 +55,7 @@ test('supervision is invisible: stdin, stdout, and exit code pass through unchan
     '-e',
     "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('GOT:'+d))",
   ]);
-  const result = runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, env: null });
+  const result = runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, userPathOptions: harnessOpts });
   // The prompt reached the executor through the supervisor's stdin relay, and
   // its stdout landed in the snapshot exactly as a direct spawn would.
   assert.equal(result.stdout, 'GOT:hello');
@@ -54,7 +65,7 @@ test('supervision is invisible: stdin, stdout, and exit code pass through unchan
 
 test('supervision preserves a nonzero exit code verbatim', (t) => {
   const root = seedExecutor(t, ['node', '-e', 'process.exit(42)']);
-  const result = runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, env: null });
+  const result = runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, userPathOptions: harnessOpts });
   assert.equal(result.exitCode, 42, 'the executor code, not the supervisor’s');
   assert.equal(result.outcome, 'failed');
 });
@@ -65,7 +76,7 @@ test('supervision still distinguishes a missing executor from one that exits 127
   // into "the executor exited 127".
   const missing = seedExecutor(t, ['fadeno-no-such-binary-xyz']);
   assert.throws(
-    () => runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: missing, env: null }),
+    () => runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: missing, userPathOptions: harnessOpts }),
     (err: unknown) => {
       assert.ok(err instanceof Error);
       assert.match(err.message, /executor "probe" failed to spawn/);
@@ -74,7 +85,7 @@ test('supervision still distinguishes a missing executor from one that exits 127
   );
 
   const genuine = seedExecutor(t, ['node', '-e', 'process.exit(127)']);
-  const result = runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: genuine, env: null });
+  const result = runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: genuine, userPathOptions: harnessOpts });
   assert.equal(result.exitCode, 127, 'a real 127 is an exit code, not a spawn failure');
 });
 
@@ -118,6 +129,7 @@ test('killing the kernel reaps the executor instead of orphaning it', async (t) 
   const kernel = spawn(process.execPath, [join(REPO, 'src', 'cli.ts'), 'dispatch', '--archetype', 'worker'], {
     cwd: root,
     stdio: ['pipe', 'ignore', 'ignore'],
+    env: { ...process.env, FADENO_HARNESS: HARNESS },
   });
   kernel.stdin.end('prompt\n');
 
@@ -154,7 +166,7 @@ test('the supervisor relays a signal as a signal, not as an exit code', () => {
 
 test('a dispatch that completes normally leaves no supervisor behind', (t) => {
   const root = seedExecutor(t, ['node', '-e', "process.stdout.write('done')"]);
-  const result = runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, env: null });
+  const result = runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, userPathOptions: harnessOpts });
   assert.equal(result.stdout, 'done');
   // The completion row is written only after the supervisor exits, so a
   // recorded duration is itself the evidence that nothing is still running.
@@ -181,6 +193,7 @@ test('dispatches --output --wait: the completion row arriving late is still the 
   const kernel = spawn(process.execPath, [join(REPO, 'src', 'cli.ts'), 'dispatch', '--archetype', 'worker'], {
     cwd: root,
     stdio: ['pipe', 'ignore', 'pipe'],
+    env: { ...process.env, FADENO_HARNESS: HARNESS },
   });
   let stderr = '';
   kernel.stderr.on('data', (chunk) => { stderr += String(chunk); });
@@ -209,8 +222,8 @@ test('dispatches --output --wait: waiting never drifts onto another dispatch', (
   // `last` resolves once; the wait loop re-reads by the id it settled on, so a
   // dispatch that starts mid-wait cannot steal the answer.
   const root = seedExecutor(t, ['node', '-e', "process.stdout.write('done')"]);
-  const first = runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, env: null });
-  const second = runDispatch({ archetype: 'worker', prompt: 'b', repoRoot: root, env: null });
+  const first = runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, userPathOptions: harnessOpts });
+  const second = runDispatch({ archetype: 'worker', prompt: 'b', repoRoot: root, userPathOptions: harnessOpts });
   const byId = runDispatchesOutput({
     repoRoot: root,
     dispatchId: first.dispatchId,

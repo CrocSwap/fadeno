@@ -5,149 +5,96 @@ import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { DispatchCommandError, runDispatch } from '../src/commands/dispatch.ts';
 import { DispatchesCommandError, runDispatchesOutput } from '../src/commands/dispatches.ts';
+import type { UserPathOptions } from '../src/lib/user-paths.ts';
 import { tempRepo } from './helpers.ts';
 
-/** `assert.throws` returns nothing, and these tests assert on the message. */
-function captureError(fn: () => unknown): Error {
-  try {
-    fn();
-  } catch (err) {
-    assert.ok(err instanceof Error);
-    return err;
-  }
-  return assert.fail('expected a throw');
-}
+const onHarness = (harness: string): UserPathOptions => ({ env: { FADENO_HARNESS: harness } });
 
-/**
- * Caller-chosen recovery handles.
- *
- * The kernel echoes a `dispatch id` at spawn, but that echo goes to stderr and
- * a Bash call killed at its own timeout takes the stream with it — so the one
- * caller who needs the id is the one guaranteed not to receive it. That left
- * `--output last`, which cannot distinguish one finished dispatch from
- * another: a 2026-08-14 dogfood recovered a concurrent proxy's report and very
- * nearly relayed it as its own. A tag is known before the spawn because the
- * caller chose it, so it survives losing every byte the dispatch printed.
- */
-
-function seedExecutor(t: TestContext, command: string[]): string {
+function seedV3(t: TestContext, cmd: string[]): string {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
-  writeFileSync(
-    join(root, '.fadeno', 'executors.yaml'),
-    stringifyYaml({
-      executors: { probe: { adapter: 'command', command, model: 'opus' } },
-      loadouts: { main: { worker: 'probe', reviewer: 'probe' } },
-      default_loadout: 'main',
-    }),
-  );
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    schema_version: 3,
+    models: { probe: { provider: 'openai', id: 'probe' } },
+    routes: { standalone: { openai: { command: cmd } }, codex: { openai: { command: cmd } } },
+    archetypes: { worker: {}, reviewer: {} },
+    dials: { worker: 'probe', reviewer: 'probe' },
+  }));
   return root;
 }
-
-/** An executor whose report names itself, so a mix-up is visible in the bytes. */
-function echoing(text: string): string[] {
-  return ['node', '-e', `process.stdout.write(${JSON.stringify(text)})`];
+function echoing(text: string): string[] { return ['node', '-e', `process.stdout.write(${JSON.stringify(text)})`]; }
+function captureError(fn: () => unknown): Error {
+  try { fn(); } catch (err) { assert.ok(err instanceof Error); return err as Error; }
+  return assert.fail('expected throw');
 }
 
-test('a tag recovers the caller’s own dispatch with no id in hand', (t) => {
-  const root = seedExecutor(t, echoing('mine'));
-  runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, env: null, tag: 'worker-parse-header' });
-
-  // The caller names only what it chose — never having seen the kernel's echo.
-  const recovered = runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'worker-parse-header' });
-  assert.equal(recovered.bytes, 'mine');
-  assert.equal(recovered.attested, 'match');
-  assert.equal(recovered.resolvedBy, 'tag');
+test('a tag recovers caller own dispatch with no id in hand', (t) => {
+  const root = seedV3(t, echoing('mine'));
+  runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, tag: 'worker-parse-header', userPathOptions: onHarness('standalone') });
+  const rec = runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'worker-parse-header' });
+  assert.equal(rec.bytes, 'mine');
+  assert.equal(rec.attested, 'match');
+  assert.equal(rec.resolvedBy, 'tag');
 });
 
-test('the tag lands on the evidence rows so the log is greppable by handle', (t) => {
-  const root = seedExecutor(t, echoing('x'));
-  runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, env: null, tag: 'worker-abc' });
-  const rows = readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8')
-    .trim()
-    .split('\n')
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-  assert.deepEqual(rows.map((row) => row.tag), ['worker-abc', 'worker-abc']);
+test('tag lands on evidence rows', (t) => {
+  const root = seedV3(t, echoing('x'));
+  runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, tag: 'worker-abc', userPathOptions: onHarness('standalone') });
+  const rows = readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
+  assert.deepEqual(rows.map((r) => r.tag), ['worker-abc', 'worker-abc']);
 });
 
 test('an untagged dispatch stays untagged rather than carrying a null', (t) => {
-  // Absent is not a claim: a row from a caller that chose no handle should not
-  // look like a row whose handle failed to record.
-  const root = seedExecutor(t, echoing('x'));
-  runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, env: null });
-  const first = JSON.parse(
-    readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8').trim().split('\n')[0]!,
-  ) as Record<string, unknown>;
+  const root = seedV3(t, echoing('x'));
+  runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, userPathOptions: onHarness('standalone') });
+  const first = JSON.parse(readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8').trim().split('\n')[0]!) as Record<string, unknown>;
   assert.ok(!('tag' in first));
 });
 
 test('the exact failure: two concurrent dispatches, both finished, and `last` refuses', (t) => {
-  // The dogfooded shape. Both proxies time out, both executors finish, and the
-  // ledger holds two completed dispatches with nothing open. `last` used to
-  // hand back whichever was newest — which is the other agent's report half
-  // the time. It now refuses, and names the candidates.
-  // Both launched at the same instant and each takes a measurable moment, so
-  // their lifetimes genuinely overlap — two proxies dispatching at once, which
-  // is how the real one happened. The clock is injected; the durations are real.
-  const root = seedExecutor(t, ['node', '-e', "setTimeout(()=>process.stdout.write('report'),150)"]);
+  const root = seedV3(t, ['node', '-e', "setTimeout(()=>process.stdout.write('report'),150)"]);
   const together = new Date('2026-08-14T12:00:00.000Z');
-  runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, env: null, tag: 'worker-a', now: together });
-  runDispatch({ archetype: 'reviewer', prompt: 'b', repoRoot: root, env: null, tag: 'reviewer-b', now: together });
-
+  runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, tag: 'worker-a', now: together, userPathOptions: onHarness('standalone') });
+  runDispatch({ archetype: 'reviewer', prompt: 'b', repoRoot: root, tag: 'reviewer-b', now: together, userPathOptions: onHarness('standalone') });
   const err = captureError(() => runDispatchesOutput({ repoRoot: root, dispatchId: 'last' }));
   assert.ok(err instanceof DispatchesCommandError);
   assert.match(err.message, /ambiguous dispatch "last"/);
   assert.match(err.message, /ran concurrently/);
-  // The refusal has to be actionable, so it names both handles.
   assert.match(err.message, /worker-a/);
   assert.match(err.message, /reviewer-b/);
-
-  // And each caller still recovers its own, which is the point of refusing.
   assert.equal(runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'worker-a' }).bytes, 'report');
   assert.equal(runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'reviewer-b' }).bytes, 'report');
 });
 
 test('`last` still answers when the dispatch genuinely ran alone', (t) => {
-  // The refusal must not swallow the common case: one dispatch, no ambiguity,
-  // recency is simply correct.
-  const root = seedExecutor(t, echoing('only one'));
-  runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, env: null });
+  const root = seedV3(t, echoing('only one'));
+  runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, userPathOptions: onHarness('standalone') });
   const result = runDispatchesOutput({ repoRoot: root, dispatchId: 'last' });
   assert.equal(result.bytes, 'only one');
   assert.equal(result.resolvedBy, 'recency');
 });
 
 test('`last` answers across dispatches that never overlapped', (t) => {
-  // Sequential dispatches in a long-lived repo are not ambiguous — the earlier
-  // one had finished before the later one began, so nobody is waiting on it.
-  const root = seedExecutor(t, echoing('second'));
-  runDispatch({
-    archetype: 'worker', prompt: 'a', repoRoot: root, env: null,
-    now: new Date('2026-08-14T10:00:00.000Z'),
-  });
-  runDispatch({
-    archetype: 'worker', prompt: 'b', repoRoot: root, env: null,
-    now: new Date('2026-08-14T18:00:00.000Z'),
-  });
+  const root = seedV3(t, echoing('second'));
+  runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, now: new Date('2026-08-14T10:00:00.000Z'), userPathOptions: onHarness('standalone') });
+  runDispatch({ archetype: 'worker', prompt: 'b', repoRoot: root, now: new Date('2026-08-14T18:00:00.000Z'), userPathOptions: onHarness('standalone') });
   const result = runDispatchesOutput({ repoRoot: root, dispatchId: 'last' });
   assert.equal(result.resolvedBy, 'recency');
   assert.equal(result.bytes, 'second');
 });
 
 test('a reused tag is refused rather than resolved to the newest', (t) => {
-  // Nothing stops two callers picking the same handle. Silently answering with
-  // the newest would rebuild the exact bug this replaced.
-  const root = seedExecutor(t, echoing('x'));
-  runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, env: null, tag: 'same' });
-  runDispatch({ archetype: 'worker', prompt: 'b', repoRoot: root, env: null, tag: 'same' });
+  const root = seedV3(t, echoing('x'));
+  runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, tag: 'same', userPathOptions: onHarness('standalone') });
+  runDispatch({ archetype: 'worker', prompt: 'b', repoRoot: root, tag: 'same', userPathOptions: onHarness('standalone') });
   const err = captureError(() => runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'same' }));
   assert.ok(err instanceof DispatchesCommandError);
   assert.match(err.message, /ambiguous tag "same": 2 dispatches carry it/);
 });
 
 test('an unknown tag says which tags the log does hold', (t) => {
-  const root = seedExecutor(t, echoing('x'));
-  runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, env: null, tag: 'worker-real' });
+  const root = seedV3(t, echoing('x'));
+  runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, tag: 'worker-real', userPathOptions: onHarness('standalone') });
   const err = captureError(() => runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'worker-typo' }));
   assert.ok(err instanceof DispatchesCommandError);
   assert.match(err.message, /no dispatch carries the tag "worker-typo"/);
@@ -155,108 +102,63 @@ test('an unknown tag says which tags the log does hold', (t) => {
 });
 
 test('a malformed tag is refused at the kernel, before anything is spawned', (t) => {
-  const root = seedExecutor(t, echoing('x'));
+  const root = seedV3(t, echoing('x'));
   for (const bad of ['worker-<slug>', 'has space', '-leading', 'a'.repeat(65)]) {
-    assert.throws(
-      () => runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, env: null, tag: bad }),
-      DispatchCommandError,
-      `"${bad}" should not be a usable handle`,
-    );
+    assert.throws(() => runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, tag: bad, userPathOptions: onHarness('standalone') }), DispatchCommandError, `"${bad}" should not be usable`);
   }
-  // No spawn happened, so no evidence row claims one did.
   assert.throws(() => readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8'));
 });
 
 test('the spawn echo names the tag, and nags when there is none', (t) => {
-  const root = seedExecutor(t, echoing('x'));
+  const root = seedV3(t, echoing('x'));
   const tagged: string[] = [];
-  runDispatch({
-    archetype: 'worker', prompt: 'x', repoRoot: root, env: null, tag: 'worker-t',
-    onEcho: (line) => tagged.push(line),
-  });
+  runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, tag: 'worker-t', onEcho: (line) => tagged.push(line), userPathOptions: onHarness('standalone') });
   const named = tagged.find((line) => line.startsWith('dispatch id:'));
   assert.match(named ?? '', /\(tag: worker-t\)/);
-  // The echoed recovery command must be one that actually parses: `--output`
-  // takes a value, so `--output --tag worker-t` would swallow the flag.
   assert.match(named ?? '', /--output tag:worker-t/);
   assert.doesNotMatch(named ?? '', /--output --tag/);
   assert.ok(!tagged.some((line) => line.includes('no --tag given')));
-
   const untagged: string[] = [];
-  runDispatch({
-    archetype: 'worker', prompt: 'x', repoRoot: root, env: null,
-    onEcho: (line) => untagged.push(line),
-  });
-  // Warned at spawn, which is the only moment the caller can still act on it.
+  runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, onEcho: (line) => untagged.push(line), userPathOptions: onHarness('standalone') });
   assert.ok(untagged.some((line) => line.includes('no --tag given')));
 });
 
 test('a slow dispatch records when it ended, and the pair agrees with its duration', (t) => {
-  // The stamp is the answer to "when did this finish?", so it has to move with
-  // the work. A 400ms dispatch that reports a zero-length lifetime is the bug.
-  const root = seedExecutor(t, ['node', '-e', "setTimeout(()=>process.stdout.write('slow'),400)"]);
+  const root = seedV3(t, ['node', '-e', "setTimeout(()=>process.stdout.write('slow'),400)"]);
   const at = new Date('2026-08-14T09:00:00.000Z');
-  runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, env: null, now: at, tag: 'worker-slow' });
-
-  const [requested, completed] = readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8')
-    .trim()
-    .split('\n')
-    .map((line) => JSON.parse(line) as Record<string, unknown>) as [
-    Record<string, unknown>,
-    Record<string, unknown>,
-  ];
+  runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, now: at, tag: 'worker-slow', userPathOptions: onHarness('standalone') });
+  const [requested, completed] = readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>) as [Record<string, unknown>, Record<string, unknown>];
   const start = Date.parse(requested.timestamp as string);
   const end = Date.parse(completed.timestamp as string);
-  assert.equal(start, at.getTime(), 'the request row still stamps the start');
-  assert.ok(end > start, 'the completion row must not repeat the start');
-  assert.ok(end - start >= 400, `a 400ms executor produced a ${end - start}ms lifetime`);
-  // Internally consistent by construction, which is what lets a reader use
-  // either the stamp or the duration and get the same answer.
+  assert.equal(start, at.getTime());
+  assert.ok(end > start);
+  assert.ok(end - start >= 400, `400ms executor produced ${end-start}ms lifetime`);
   assert.equal(end - start, completed.duration_ms);
 });
 
 test('overlap detection still works on rows written before the stamp was fixed', (t) => {
-  // The log is append-only, so pre-fix rows — both stamped with the start —
-  // outlive the fix. Reading the stamp alone would collapse them to zero
-  // length and stop refusing the exact concurrency this was built to catch.
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
-  const legacy = (id: string, event: string, extra: Record<string, unknown> = {}): string =>
-    JSON.stringify({
-      format: '0.2',
-      // Both rows share the start, the way the kernel used to write them.
-      timestamp: '2026-08-14T12:00:00.000Z',
-      event,
-      dispatch_id: id,
-      archetype: 'worker',
-      output_snapshot: `.fadeno/local/outputs/${id}.md`,
-      ...extra,
-    });
-  writeFileSync(
-    join(root, '.fadeno', 'dispatches.jsonl'),
-    [
-      legacy('aaaaaaaa-1111-4000-8000-000000000001', 'dispatch_requested'),
-      legacy('bbbbbbbb-2222-4000-8000-000000000002', 'dispatch_requested'),
-      legacy('aaaaaaaa-1111-4000-8000-000000000001', 'dispatch_completed', { duration_ms: 9_000 }),
-      legacy('bbbbbbbb-2222-4000-8000-000000000002', 'dispatch_completed', { duration_ms: 9_000 }),
-    ].join('\n') + '\n',
-  );
+  const legacy = (id: string, event: string, extra: Record<string, unknown> = {}): string => JSON.stringify({ format: '1.0', timestamp: '2026-08-14T12:00:00.000Z', event, dispatch_id: id, archetype: 'worker', output_snapshot: `.fadeno/local/outputs/${id}.md`, ...extra });
+  writeFileSync(join(root, '.fadeno', 'dispatches.jsonl'), [
+    legacy('aaaaaaaa-1111-4000-8000-000000000001', 'dispatch_requested'),
+    legacy('bbbbbbbb-2222-4000-8000-000000000002', 'dispatch_requested'),
+    legacy('aaaaaaaa-1111-4000-8000-000000000001', 'dispatch_completed', { duration_ms: 9000, output_sha256: 'a'.repeat(64), output_bytes: 1 }),
+    legacy('bbbbbbbb-2222-4000-8000-000000000002', 'dispatch_completed', { duration_ms: 9000, output_sha256: 'a'.repeat(64), output_bytes: 1 }),
+  ].join('\n') + '\n');
   mkdirSync(join(root, '.fadeno', 'local', 'outputs'), { recursive: true });
   for (const id of ['aaaaaaaa-1111-4000-8000-000000000001', 'bbbbbbbb-2222-4000-8000-000000000002']) {
     writeFileSync(join(root, '.fadeno', 'local', 'outputs', `${id}.md`), 'x');
   }
-
   const err = captureError(() => runDispatchesOutput({ repoRoot: root, dispatchId: 'last' }));
   assert.match(err.message, /ran concurrently/);
 });
 
 test('waiting by tag settles on that dispatch and does not drift', (t) => {
-  const root = seedExecutor(t, echoing('first'));
-  runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, env: null, tag: 'worker-first' });
-  runDispatch({ archetype: 'worker', prompt: 'b', repoRoot: root, env: null, tag: 'worker-second' });
-  const result = runDispatchesOutput({
-    repoRoot: root, dispatchId: '', tag: 'worker-first', waitMs: 1_000, pollMs: 100,
-  });
+  const root = seedV3(t, echoing('first'));
+  runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, tag: 'worker-first', userPathOptions: onHarness('standalone') });
+  runDispatch({ archetype: 'worker', prompt: 'b', repoRoot: root, tag: 'worker-second', userPathOptions: onHarness('standalone') });
+  const result = runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'worker-first', waitMs: 1000, pollMs: 100 });
   assert.equal(result.bytes, 'first');
   assert.equal(result.resolvedBy, 'tag');
 });

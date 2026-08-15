@@ -46,19 +46,36 @@ test('a shadow sees PWD inside its worktree, not the workspace it must not touch
   writeFileSync(
     join(root, '.fadeno', 'executors.yaml'),
     stringifyYaml({
-      schema_version: 2,
-      targets: { noop: { provider: 'noop', model: 'noop' }, probe: { provider: 'probe', model: 'probe' } },
+      schema_version: 3,
+      models: {
+        noop: { provider: 'noop', id: 'noop' },
+        probe: { provider: 'probe', id: 'probe' },
+      },
       routes: {
         claude: {
-          ['noop']: { command: ['node', '-e', "process.stdout.write('primary')"], write_access: true },
+          noop: { command: ['node', '-e', "process.stdout.write('primary')"], write_access: true },
+          probe: {
+            command: ['node', '-e', 'process.stdout.write(JSON.stringify({pwd:process.env.PWD,cwd:process.cwd()}))'],
+            write_access: true,
+          },
+        },
+        standalone: {
+          noop: { command: ['node', '-e', "process.stdout.write('primary')"], write_access: true },
+          probe: {
+            command: ['node', '-e', 'process.stdout.write(JSON.stringify({pwd:process.env.PWD,cwd:process.cwd()}))'],
+            write_access: true,
+          },
+        },
+        codex: {
+          noop: { command: ['node', '-e', "process.stdout.write('primary')"], write_access: true },
           probe: {
             command: ['node', '-e', 'process.stdout.write(JSON.stringify({pwd:process.env.PWD,cwd:process.cwd()}))'],
             write_access: true,
           },
         },
       },
-      loadouts: { main: { worker: 'noop' } },
-      default_loadout: 'main',
+      archetypes: { worker: {} },
+      dials: { worker: 'noop' },
     }),
   );
 
@@ -66,7 +83,6 @@ test('a shadow sees PWD inside its worktree, not the workspace it must not touch
     archetype: 'worker',
     prompt: 'x',
     repoRoot: root,
-    env: null,
     shadow: 'probe',
     userPathOptions: { env: { FADENO_HARNESS: 'claude' } },
   });

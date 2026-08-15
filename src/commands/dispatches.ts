@@ -42,33 +42,23 @@ const OUTCOME_KEYS = ['exit_code', 'duration_ms', 'output_sha256', 'signal'];
  */
 export interface DispatchEntry {
   kind: 'command' | 'host';
-  /**
-   * The row's recorded evidence-format version, or null when it predates the
-   * stamp (everything written before `DISPATCHES_FORMAT` existed).
-   */
   format: string | null;
-  /**
-   * True for a pre-`dispatch_id` row: one completion-shaped row per dispatch,
-   * no correlation id, read best-effort from whatever identity it recorded.
-   */
   legacy: boolean;
-  /** Verbatim recorded timestamp — for pairs, the request's (when it started). */
   timestamp: string | null;
-  /** Correlation id; always null for host deliveries (they have none). */
   dispatchId: string | null;
   archetype: string | null;
-  /** Command dispatches only: the `--role` this was attributed to. */
   role: string | null;
-  /** Host deliveries only: the subagent type the harness was about to spawn. */
   agentType: string | null;
   resolution: string | null;
+  dial: { model: string; effort?: string; via?: string } | null;
   loadout: string | null;
   loadoutSource: string | null;
   executor: string | null;
   model: string | null;
-  /** Host deliveries only: per-spawn model override, when the hook saw one. */
   modelOverride: string | null;
+  modelId: string | null;
   reasoningEffort: string | null;
+  driver: string | null;
   target: string | null;
   provider: string | null;
   transport: string | null;
@@ -251,19 +241,19 @@ function excerpt(text: string, max: number): string {
 
 /**
  * Which reader tier a row's `format` stamp puts it in.
- *
- * - `unversioned` — no stamp: written before the format was versioned. Read on
- *   its recorded shape, which is what the tiers below sort out.
- * - `known` — same major as `DISPATCHES_FORMAT`. Unknown *minors* land here on
- *   purpose: within a major, a bump only adds fields, so best-effort reading
- *   of a newer minor is correct rather than reckless.
- * - `newer` — a different major. That is a format this reader was not written
- *   against, so the row is set aside and counted, never reinterpreted.
  */
-function formatTier(value: unknown): 'unversioned' | 'known' | 'newer' {
+function formatTier(value: unknown): 'unversioned' | 'known' | 'older' | 'newer' {
   const format = str(value);
   if (format == null) return 'unversioned';
-  return format.split('.')[0] === KNOWN_FORMAT_MAJOR ? 'known' : 'newer';
+  const majorStr = format.split('.')[0];
+  const known = parseInt(KNOWN_FORMAT_MAJOR, 10);
+  const maj = parseInt(majorStr ?? '', 10);
+  if (!Number.isFinite(maj) || !Number.isFinite(known)) {
+    return majorStr === KNOWN_FORMAT_MAJOR ? 'known' : 'newer';
+  }
+  if (maj === known) return 'known';
+  if (maj > known) return 'newer';
+  return 'older';
 }
 
 /**
@@ -288,6 +278,19 @@ function refusalOf(value: unknown): { predicate: string; message: string } | nul
   return { predicate, message };
 }
 
+function dialOf(value: unknown): { model: string; effort?: string; via?: string } | null {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const model = str(row.model);
+  if (model == null) return null;
+  const out: { model: string; effort?: string; via?: string } = { model };
+  const eff = str(row.effort);
+  if (eff != null) out.effort = eff;
+  const via = str(row.via);
+  if (via != null) out.via = via;
+  return out;
+}
+
 function requestedEntry(row: Record<string, unknown>): DispatchEntry {
   const loadout = loadoutOf(row.loadout);
   return {
@@ -300,12 +303,15 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     role: str(row.role),
     agentType: null,
     resolution: str(row.resolution),
+    dial: dialOf(row.dial),
     loadout: loadout.name,
     loadoutSource: loadout.source,
     executor: str(row.executor),
     model: str(row.model),
     modelOverride: null,
+    modelId: str(row.model_id),
     reasoningEffort: str(row.reasoning_effort),
+    driver: str(row.driver),
     target: str(row.target),
     provider: str(row.provider),
     transport: str(row.transport),
@@ -345,12 +351,15 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     role: null,
     agentType: str(row.agent_type),
     resolution: null,
+    dial: dialOf(row.dial),
     loadout: loadout.name,
     loadoutSource: loadout.source,
     executor: str(row.executor),
     model: str(row.model),
     modelOverride: str(row.model_override),
+    modelId: str(row.model_id),
     reasoningEffort: str(row.reasoning_effort),
+    driver: str(row.driver),
     target: null,
     provider: null,
     transport: str(row.transport),
@@ -389,11 +398,13 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
   if (typeof row.workspace_changed === 'boolean') {
     entry.workspaceChanged = row.workspace_changed;
   }
-  // A completion row carries the full identity again; prefer it where the
-  // request row was silent (older logs, partially written rows).
   entry.relayAttested = entry.relayAttested ?? bool(row.relay_attested);
   entry.writeAccess = entry.writeAccess ?? bool(row.write_access);
   entry.model = entry.model ?? str(row.model);
+  entry.modelId = entry.modelId ?? str(row.model_id);
+  entry.driver = entry.driver ?? str(row.driver);
+  entry.reasoningEffort = entry.reasoningEffort ?? str(row.reasoning_effort);
+  entry.dial = entry.dial ?? dialOf(row.dial);
   entry.executor = entry.executor ?? str(row.executor);
   if (row.gate_eligible === false) entry.gateEligible = false;
   if (entry.refusal == null) entry.refusal = refusalOf(row.refusal);
@@ -439,10 +450,6 @@ function legacyEntry(row: Record<string, unknown>): DispatchEntry {
  */
 export function renderDispatchLine(entry: DispatchEntry): string {
   const parts: string[] = [entry.timestamp ?? '?', `[${entry.kind}]`];
-
-  // Host rows have no `role`; their `agent_type` is the closest thing to
-  // one (the subagent the harness was about to spawn), so it takes the slot
-  // — unless it merely repeats the archetype.
   const roleSlot = entry.role ?? (entry.agentType !== entry.archetype ? entry.agentType : null);
   const who = `${entry.archetype ?? '(none)'}${roleSlot != null ? `/${roleSlot}` : ''}`;
   const model =
@@ -452,11 +459,16 @@ export function renderDispatchLine(entry: DispatchEntry): string {
   parts.push(
     `${who} → ${entry.executor ?? '(unresolved)'}${model != null ? ` (${model})` : ''}`,
   );
-  if (entry.transport != null) parts.push(`via ${entry.transport}`);
+  const via = entry.driver ?? entry.transport;
+  if (via != null) parts.push(`via ${via}`);
   if (entry.shadow) {
     const pid8 = entry.primaryDispatchId ? entry.primaryDispatchId.slice(0, 8) : '?';
     parts.push(`[shadow of ${pid8}]`);
   }
+  // Resolution provenance marks for session/repo/user (base/binding silent)
+  if (entry.resolution === 'session') parts.push('[session dial]');
+  else if (entry.resolution === 'repo') parts.push('[repo pin]');
+  else if (entry.resolution === 'user') parts.push('[user dial]');
 
   if (entry.kind === 'command') {
     if (entry.refusal != null) {
@@ -491,10 +503,8 @@ export function renderDispatchLine(entry: DispatchEntry): string {
   if (entry.gateEligible === false) parts.push('[shadow-only]');
   if (entry.error != null) parts.push(`[error: ${excerpt(entry.error, ERROR_EXCERPT)}]`);
   if (entry.promptSnapshot != null) parts.push(entry.promptSnapshot);
-  // Trailing, after the identity it qualifies: this row predates the versioned
-  // two-row format, so anything reading `?` above is a field that writer never
-  // recorded — not a field this one lost.
   if (entry.legacy) parts.push('[legacy]');
+  if (entry.format != null && formatTier(entry.format) === 'older') parts.push(`[format ${entry.format}]`);
   return parts.join('  ');
 }
 

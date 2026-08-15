@@ -12,28 +12,28 @@ import {
 import {
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
-  applicableOverrides,
-  applicableShadows,
   eligibilityFor,
   explainEligibilityConflict,
   explainProviderConflict,
   explainWriteConflict,
   loadExecutorProfile,
-  readLocalLoadoutState,
-  applicableUserLoadout,
+  readLocalDialState,
   dispatchability,
-  resolveActiveLoadout,
   resolveRole,
+  compileDialRef,
+  parseDialRef,
+  formatDialRef,
   roleResolutionEchoLabel,
   withoutHarnessIdentity,
   atCwd,
-  type ActiveLoadout,
   type ExecutorProfile,
-  type ExecutorSpec,
+  type CompiledDelivery,
   type InputProducer,
+  type DialRef,
   type RoleResolutionSource,
   type WritePosture,
 } from '../lib/executors.ts';
+import { readUserDials } from '../lib/user-paths.ts';
 import {
   completeHostDispatch,
   failHostDispatch,
@@ -69,7 +69,7 @@ export const DISPATCHES_FILE = join('.fadeno', 'dispatches.jsonl');
  * The Claude steering hook writes the same stamp as a literal — it runs as a
  * standalone script and cannot import this constant. Bump both together.
  */
-export const DISPATCHES_FORMAT = '0.2';
+export const DISPATCHES_FORMAT = '1.0';
 
 /**
  * What a finished command dispatch actually produced.
@@ -313,32 +313,30 @@ function refuseDispatch(
   throw new DispatchCommandError(message);
 }
 
-/** How the ad-hoc dispatch landed on its executor (`flag` = `--executor` bypass). */
-export type DispatchResolutionSource = RoleResolutionSource | 'flag';
+/** How the ad-hoc dispatch landed on its executor (`flag` = `--model` bypass). */
+export type DispatchResolutionSource = RoleResolutionSource | 'model-flag';
 
 /**
- * Evidence-row spelling of the resolution path. A row's `loadout` records
- * which loadout was *active*; `resolution` records whether it actually
- * supplied the executor — a `binding` pin or `"*"` fallback row would
- * otherwise be indistinguishable from a loadout-slot hit.
+ * Evidence-row spelling of the resolution path.
  */
 const ROW_RESOLUTION: Record<DispatchResolutionSource, string> = {
   binding: 'binding',
-  override: 'override',
-  loadout: 'loadout',
-  default: 'fallback',
-  flag: 'executor-flag',
+  session: 'session',
+  repo: 'repo',
+  user: 'user',
+  base: 'base',
+  'model-flag': 'model-flag',
 };
 
 export interface AdHocDispatchOptions {
-  /** Archetype to resolve; required unless `executor` bypasses resolution. */
+  /** Archetype to resolve; required unless `model` bypasses resolution. */
   archetype?: string | null;
   /** Optional role: enables per-role binding pins and evidence attribution. */
   role?: string | null;
-  /** `--loadout` override for this invocation. */
-  loadout?: string | null;
-  /** Bypass resolution and invoke this declared executor (debugging). */
-  executor?: string | null;
+  /** Bypass resolution and invoke this dial ref directly (debugging). */
+  model?: string | null;
+  /** Driver override for --model bypass. */
+  via?: string | null;
   /** Prompt file path (relative paths resolve against `cwd`); wins over `prompt`. */
   promptFile?: string | null;
   /** Prompt text — the CLI reads stdin into this when no `--prompt-file`. */
@@ -394,10 +392,13 @@ export interface AdHocDispatchResult {
   relayAttested: boolean | null;
   archetype: string | null;
   role: string | null;
-  /** Active loadout at dispatch time (null when bypassed or none configured). */
-  loadout: ActiveLoadout | null;
+  dial: DialRef;
+  dialSource: DispatchResolutionSource;
   executor: string;
   model: string | null;
+  modelId: string | null;
+  driver: string | null;
+  reasoningEffort: string | null;
   source: DispatchResolutionSource;
   /** The resolution echo line (`<role-or-archetype> → <executor> (<model>) [<source>]`). */
   echo: string;
@@ -498,7 +499,7 @@ function workspaceFingerprint(repoRoot: string): string | null {
  * `dispatch_completed` evidence row pair to `.fadeno/dispatches.jsonl` (the
  * request row lands before the spawn so killed dispatches still leave a
  * trace). A boundary refusal writes one `dispatch_refused` row instead.
- * `--executor` bypasses resolution for debugging.
+ * `--model` bypasses resolution for debugging.
  */
 export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const cwd = opts.cwd ?? process.cwd();
@@ -510,31 +511,53 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const role = opts.role?.trim() ? opts.role.trim() : null;
   const tag = normalizeDispatchTag(opts.tag);
 
-  let executorName: string;
-  let spec: ExecutorSpec;
-  let active: ActiveLoadout | null = null;
-  // The pin's overlay, already scoped to the loadout that won (name-match).
-  let overrides: Record<string, string> = {};
-  let pinState: ReturnType<typeof readLocalLoadoutState> | null = null;
+  let delivery: CompiledDelivery;
   let source: DispatchResolutionSource;
-  // Present on the evidence row only when a fallback chain was walked.
   let resolvedVia: string | null = null;
+  let dial: DialRef;
+  // layer maps for constraint context + legacyNote handling
+  let sessionDials: Record<string, DialRef> = {};
+  let repoDials: Record<string, DialRef> = {};
+  let userDials: Record<string, DialRef> = {};
+  let legacyNote: string | null = null;
 
-  if (opts.executor != null && opts.executor.trim() !== '') {
-    executorName = opts.executor.trim();
-    const found = profile.executors[executorName];
-    if (found == null) {
-      throw new DispatchCommandError(
-        `--executor "${executorName}" is not a declared executor ` +
-          `(${Object.keys(profile.executors).join(', ')}).`,
-      );
+  const bypassModelRaw = opts.model?.trim() ? opts.model.trim() : null;
+  const viaOverride = opts.via?.trim() ? opts.via.trim() : null;
+
+  if (bypassModelRaw != null && bypassModelRaw !== '') {
+    // --model <ref> (+ --via) direct compile
+    let ref: DialRef;
+    try {
+      ref = parseDialRef(bypassModelRaw, '--model');
+      if (viaOverride != null) ref.via = viaOverride;
+    } catch (err) {
+      if (err instanceof ExecutorProfileError) throw new DispatchCommandError(err.message);
+      throw err;
     }
-    spec = found;
-    source = 'flag';
+    try {
+      delivery = compileDialRef(ref, profile);
+    } catch (err) {
+      if (err instanceof ExecutorProfileError) throw new DispatchCommandError(err.message);
+      throw err;
+    }
+    dial = ref;
+    source = 'model-flag';
+    // also populate layer maps for evidence/context? For model-flag, dials still reflect current layers
+    try {
+      const localState = readLocalDialState(repoRoot);
+      legacyNote = localState.legacyNote;
+      if (legacyNote) opts.onEcho?.(legacyNote);
+      sessionDials = localState.dials;
+      repoDials = profile.dials;
+      userDials = readUserDials(opts.userPathOptions ?? {}) as Record<string, DialRef>;
+    } catch (err) {
+      if (err instanceof ExecutorProfileError) throw new DispatchCommandError(err.message);
+      throw err;
+    }
   } else {
     if (archetype == null) {
       throw new DispatchCommandError(
-        'fadeno dispatch needs --archetype <a> (or --executor <name> to bypass resolution).',
+        'fadeno dispatch needs --archetype <a> (or --model <ref> to bypass resolution).',
       );
     }
     if (!BARE_IDENTIFIER_RE.test(archetype)) {
@@ -543,42 +566,18 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       );
     }
     try {
-      pinState = readLocalLoadoutState(repoRoot);
-      const pin = pinState;
-      active = resolveActiveLoadout({
-        flagValue: opts.loadout ?? null,
-      envValue: opts.env !== undefined ? opts.env : process.env.FADENO_LOADOUT ?? null,
-      localFileValue: pin.loadout,
-      // A self-contained project profile is authoritative; a user-scope dial
-      // must not reach into a catalog that displaced the user layer outright.
-      userFileValue: applicableUserLoadout(layered.selfContained, opts.userPathOptions),
-      profile,
-      });
-      // Overrides decorate their base loadout by name: a `--loadout other` on
-      // this invocation drops the overlay rather than re-binding somebody
-      // else's loadout.
-      overrides = applicableOverrides(pin, active);
-      // Per-role binding pins apply only when --role names one. Without a role
-      // the chain is loadout slot → "*" → error, so resolveRole runs against a
-      // bindings view holding only the "*" default — kernel precedence reused,
-      // with no per-role pin to hit (an archetype can never be named "*").
-      const resolved =
-        role != null
-          ? resolveRole(role, archetype, profile, active?.name ?? null, overrides)
-          : resolveRole(
-              archetype,
-              archetype,
-              {
-                ...profile,
-                bindings: profile.bindings['*'] != null ? { '*': profile.bindings['*'] } : {},
-              },
-              active?.name ?? null,
-              overrides,
-            );
-      executorName = resolved.executorName;
-      spec = resolved.executor;
+      const localState = readLocalDialState(repoRoot);
+      legacyNote = localState.legacyNote;
+      if (legacyNote) opts.onEcho?.(legacyNote);
+      sessionDials = localState.dials;
+      repoDials = profile.dials;
+      userDials = readUserDials(opts.userPathOptions ?? {}) as Record<string, DialRef>;
+      const layers = { session: sessionDials, repo: repoDials, user: userDials };
+      const resolved = resolveRole(role ?? archetype, archetype, profile, layers);
+      delivery = resolved.delivery;
       source = resolved.source;
       resolvedVia = resolved.resolvedVia;
+      dial = resolved.delivery.ref;
     } catch (err) {
       if (err instanceof ExecutorProfileError) throw new DispatchCommandError(err.message);
       throw err;
@@ -586,6 +585,8 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   }
 
   const harness = profile.harness ?? 'standalone';
+  const spec = delivery.spec;
+  const executorName = delivery.refString;
   const deliverable = dispatchability(spec, harness);
   if (!deliverable.supported) {
     const hostOnDemand = deliverable.reason === 'host_in_session';
@@ -604,6 +605,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   }
   const command = spec.adapter === 'command' ? spec.command : spec.fallbackCommand!;
   const transport = spec.adapter === 'command' ? 'command' : 'host-command-fallback';
+  const deliveryTransport = spec.adapter === 'command' ? 'command' : 'host-command-fallback';
 
   let prompt: string;
   let promptSource: 'stdin' | 'file';
@@ -676,29 +678,26 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const promptSha256 = sha256Hex(prompt);
   const commandSha256 = sha256Hex(JSON.stringify(command));
   const producers = lookupInputProducers(repoRoot, producedByIds(opts));
+  const dialField: Record<string, unknown> = { model: dial.model };
+  if (dial.effort != null) dialField.effort = dial.effort;
+  if (dial.via != null) dialField.via = dial.via;
   const identity: Record<string, unknown> = {
     dispatch_id: dispatchId,
-    // Before archetype deliberately: a caller recovering its own dispatch reads
-    // this row by eye as often as by query, and the handle it chose is the
-    // first thing it is looking for.
     ...(tag != null ? { tag } : {}),
     archetype,
     role,
     resolution: ROW_RESOLUTION[source],
-    loadout: active == null ? null : { name: active.name, source: active.source },
-    // The overlay that produced this binding, recorded only when it actually
-    // did: `loadout` alone would name the base and quietly misattribute the
-    // executor an override dialed on top of it. Absent on every other path.
-    ...(source === 'override' && archetype != null
-      ? { override: { [archetype]: executorName } }
-      : {}),
+    dial: dialField,
     ...(resolvedVia != null ? { resolved_via: resolvedVia } : {}),
     executor: executorName,
-    ...(spec.target != null ? { target: spec.target, provider: spec.provider ?? null } : {}),
-    model: spec.model,
+    model: delivery.model,
+    model_id: delivery.modelId,
+    reasoning_effort: delivery.effort,
+    driver: delivery.driver,
+    ...(delivery.provider != null ? { provider: delivery.provider } : {}),
     transport,
     ...(spec.writeAccess != null ? { write_access: spec.writeAccess } : {}),
-    ...(spec.target != null ? { delivery_transport: transport } : {}),
+    delivery_transport: deliveryTransport,
     prompt_source: promptSource,
     prompt_snapshot: promptSnapshot,
     prompt_sha256: promptSha256,
@@ -711,18 +710,18 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // Boundary predicates, after write posture, before the spawn. Each hard
   // refusal appends one `dispatch_refused` row (the request-point evidence)
   // and throws; an advisory provider clash warns and continues.
-  const delivery = { executor: executorName, spec };
-  const writeConflict = explainWriteConflict(delivery, archetype, profile);
+  const deliveryChoice = { executor: executorName, spec };
+  const writeConflict = explainWriteConflict(deliveryChoice, archetype, profile);
   if (writeConflict != null) {
     refuseDispatch(repoRoot, identity, 'write_posture', writeConflict, now);
   }
-  const eligibilityConflict = explainEligibilityConflict(delivery, archetype);
+  const eligibilityConflict = explainEligibilityConflict(deliveryChoice, archetype);
   if (eligibilityConflict != null) {
     refuseDispatch(repoRoot, identity, 'eligibility', eligibilityConflict, now);
   }
   const providerConflict = explainProviderConflict(
     archetype,
-    spec.provider ?? null,
+    delivery.provider ?? null,
     producers,
     profile,
   );
@@ -730,18 +729,28 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     refuseDispatch(repoRoot, identity, 'provider_distinctness', providerConflict.message, now);
   }
 
+  // Build dials maps as refString for constraint context
+  const sessionMap: Record<string, string> = {};
+  for (const [k, v] of Object.entries(sessionDials)) sessionMap[k] = formatDialRef(v);
+  const repoMap: Record<string, string> = {};
+  for (const [k, v] of Object.entries(repoDials)) repoMap[k] = formatDialRef(v);
+  const userMap: Record<string, string> = {};
+  for (const [k, v] of Object.entries(userDials)) userMap[k] = formatDialRef(v);
+
   const constraintContext = {
     archetype,
     role,
     executor: executorName,
-    target: spec.target ?? null,
-    provider: spec.provider ?? null,
-    model: spec.model,
-    transport: 'command',
+    driver: delivery.driver,
+    provider: delivery.provider ?? null,
+    model: delivery.model,
+    model_id: delivery.modelId,
+    transport: 'command' as const,
     write_access: spec.writeAccess,
     write_posture: declaredWritePosture(profile, archetype),
-    active_loadout: active?.name ?? null,
-    overrides,
+    dial: dialField as unknown as DialRef,
+    dial_source: ROW_RESOLUTION[source],
+    dials: { session: sessionMap, repo: repoMap, user: userMap },
     resolved_via: resolvedVia,
     input_provenance: provenanceFields(producers),
     harness: profile.harness ?? 'standalone',
@@ -773,12 +782,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   }
 
   const sourceLabel =
-    source === 'flag' ? '--executor' : roleResolutionEchoLabel(source, active?.name ?? null);
+    source === 'model-flag' ? '--model' : roleResolutionEchoLabel(source as RoleResolutionSource);
   const echo =
     `${role ?? archetype ?? executorName} → ${executorName}` +
-    `${spec.model != null ? ` (${spec.model})` : ''} [${sourceLabel}]` +
-    // Proceeding onto a read-only delivery is legal (the archetype claims no
-    // write need) but worth saying out loud before the work starts.
+    `${delivery.model != null ? ` (${delivery.model})` : ''} [${sourceLabel}]` +
     (spec.writeAccess === false ? ' [write_access: none]' : '');
   opts.onEcho?.(echo);
   opts.onEcho?.(`external sandbox: ${executorName} (${command.join(' ')}) runs outside the current harness via ${transport}; evidence → ${DISPATCHES_FILE}`);
@@ -902,18 +909,28 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // Shadow duplication — fires after primary completion, regardless of exit code. Not on refusal.
   try {
     const hasFlag = typeof opts.shadow === 'string' && opts.shadow.trim().length > 0;
+    let shadowDial: DialRef | null = null;
     let shadowExecutorNameInner: string | null = null;
     let shadowSourceTag: 'flag' | 'attachment' | null = null;
     let attachmentRate: number | undefined;
     if (hasFlag) {
-      shadowExecutorNameInner = opts.shadow!.trim();
-      shadowSourceTag = 'flag';
+      try {
+        const parsed = parseDialRef(opts.shadow!.trim(), '--shadow');
+        shadowDial = parsed;
+        shadowExecutorNameInner = formatDialRef(parsed);
+        shadowSourceTag = 'flag';
+      } catch {
+        // parse error becomes shadow_resolution refusal below via unknown? We'll treat as invalid dial
+        shadowDial = null;
+        shadowExecutorNameInner = opts.shadow!.trim();
+        shadowSourceTag = 'flag';
+      }
     } else if (archetype != null) {
-      const effectivePin = pinState ?? readLocalLoadoutState(repoRoot);
-      const shadowsForLoadout = applicableShadows(effectivePin, active);
-      const att = shadowsForLoadout[archetype];
+      const localStateForShadow = readLocalDialState(repoRoot);
+      const att = localStateForShadow.shadows[archetype];
       if (att != null) {
-        shadowExecutorNameInner = att.executor;
+        shadowDial = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.via ? { via: att.via } : {}) };
+        shadowExecutorNameInner = formatDialRef(shadowDial);
         shadowSourceTag = 'attachment';
         attachmentRate = att.rate;
       }
@@ -962,39 +979,66 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         opts.onEcho?.(`shadow refused: ${message} [${predicate}]`);
       };
 
-      // Resolve shadow executor
-      const shadowSpec = profile.executors[shadowExecutorNameInner];
-      if (shadowSpec == null) {
-        writeShadowRefusal('shadow_resolution', `shadow target "${shadowExecutorNameInner}" is not a declared executor (${Object.keys(profile.executors).join(', ')}).`);
-      } else if (shadowSpec.adapter === 'host') {
+      // Resolve shadow delivery via compile
+      let shadowDelivery: CompiledDelivery | null = null;
+      if (shadowDial != null) {
+        try {
+          shadowDelivery = compileDialRef(shadowDial, profile);
+        } catch (err) {
+          const msg = err instanceof ExecutorProfileError ? err.message : String(err);
+          writeShadowRefusal('shadow_resolution', msg);
+          shadowDelivery = null;
+        }
+      } else {
+        writeShadowRefusal('shadow_resolution', `shadow target "${shadowExecutorNameInner}" is not a valid dial ref.`);
+      }
+      // handle case where compile succeeded but shadowDelivery is host
+      if (shadowDelivery != null && shadowDelivery.spec.adapter === 'host') {
         writeShadowRefusal('shadow_resolution', `shadow executor "${shadowExecutorNameInner}" is a host executor — the kernel cannot duplicate a host dispatch.`, {
-          model: shadowSpec.model,
+          model: shadowDelivery.model,
+          model_id: shadowDelivery.modelId,
+          driver: shadowDelivery.driver,
+          reasoning_effort: shadowDelivery.effort,
           transport: 'host',
         });
-      } else {
+        shadowDelivery = null;
+      }
+      if (shadowDelivery != null) {
+        const shadowSpec = shadowDelivery.spec;
+        const shadowRefString = shadowDelivery.refString;
         // Eligibility: forbidden refuses, shadow_only allowed
         const eligibilityState = eligibilityFor(shadowSpec, archetype);
         if (eligibilityState === 'forbidden') {
-          const msg = explainEligibilityConflict({ executor: shadowExecutorNameInner, spec: shadowSpec }, archetype) ?? `archetype "${archetype}" is forbidden on executor "${shadowExecutorNameInner}".`;
-          writeShadowRefusal('eligibility', msg, { model: shadowSpec.model, transport: 'command' });
+          const msg = explainEligibilityConflict({ executor: shadowRefString, spec: shadowSpec }, archetype) ?? `archetype "${archetype}" is forbidden on executor "${shadowRefString}".`;
+          writeShadowRefusal('eligibility', msg, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effort, transport: 'command' });
         } else {
-          const writeConflict = explainWriteConflict({ executor: shadowExecutorNameInner, spec: shadowSpec }, archetype, profile);
+          const writeConflict = explainWriteConflict({ executor: shadowRefString, spec: shadowSpec }, archetype, profile);
           if (writeConflict != null) {
-            writeShadowRefusal('write_posture', writeConflict, { model: shadowSpec.model, transport: 'command' });
+            writeShadowRefusal('write_posture', writeConflict, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effort, transport: 'command' });
           } else {
             // Constraint check with shadow:true
+            // Build dials maps for shadow constraint
+            const sSessionMap: Record<string, string> = {};
+            for (const [k, v] of Object.entries(sessionDials)) sSessionMap[k] = formatDialRef(v);
+            const sRepoMap: Record<string, string> = {};
+            for (const [k, v] of Object.entries(repoDials)) sRepoMap[k] = formatDialRef(v);
+            const sUserMap: Record<string, string> = {};
+            for (const [k, v] of Object.entries(userDials)) sUserMap[k] = formatDialRef(v);
+            const sDialField = shadowDial ? { model: shadowDial.model, ...(shadowDial.effort ? { effort: shadowDial.effort } : {}), ...(shadowDial.via ? { via: shadowDial.via } : {}) } : null;
             const shadowConstraintContext = {
               archetype,
               role,
-              executor: shadowExecutorNameInner,
-              target: shadowSpec.target ?? null,
-              provider: shadowSpec.provider ?? null,
-              model: shadowSpec.model,
+              executor: shadowRefString,
+              driver: shadowDelivery.driver,
+              provider: shadowDelivery.provider ?? null,
+              model: shadowDelivery.model,
+              model_id: shadowDelivery.modelId,
               transport: 'command' as const,
               write_access: shadowSpec.writeAccess,
               write_posture: declaredWritePosture(profile, archetype),
-              active_loadout: active?.name ?? null,
-              overrides,
+              dial: sDialField as DialRef,
+              dial_source: 'shadow',
+              dials: { session: sSessionMap, repo: sRepoMap, user: sUserMap },
               resolved_via: resolvedVia,
               input_provenance: provenanceFields(lookupInputProducers(repoRoot, producedByIds(opts))),
               harness: profile.harness ?? 'standalone',
@@ -1015,7 +1059,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
               }
             }
             if (shadowConstraintVerdict != null && shadowConstraintVerdict.verdict === 'refused') {
-              writeShadowRefusal('constraint_command', shadowConstraintVerdict.reason, { model: shadowSpec.model, transport: 'command' });
+              writeShadowRefusal('constraint_command', shadowConstraintVerdict.reason, { model: shadowDelivery!.model, model_id: shadowDelivery!.modelId, driver: shadowDelivery!.driver, reasoning_effort: shadowDelivery!.effort, transport: 'command' });
             } else if (shadowConstraintVerdict == null || shadowConstraintVerdict.verdict === 'allowed') {
               // Isolation + spawn only if not refused
               // Only proceed if verdict allowed (null means we already wrote refusal)
@@ -1030,12 +1074,15 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
                   writeShadowRefusal('shadow_isolation', msg);
                 } else {
                   // Echo fire line
-                  const shadowModel = shadowSpec.model != null ? ` (${shadowSpec.model})` : '';
+                  const sModel = shadowDelivery!.model;
+                  const shadowModel = sModel != null ? ` (${sModel})` : '';
                   opts.onEcho?.(`shadow → ${shadowExecutorNameInner}${shadowModel} [command]`);
                   // Build shadow request row identity (mirrors primary but shadow-specific)
-                  const shadowCommand = shadowSpec.command;
+                  const shadowCommand = (shadowDelivery!.spec as { command: string[] }).command;
                   const shadowCommandSha = sha256Hex(JSON.stringify(shadowCommand));
-                  const shadowLoadoutField = active == null ? null : { name: active.name, source: active.source };
+                  const shadowDialField: Record<string, unknown> = { model: shadowDial!.model };
+                  if (shadowDial!.effort != null) shadowDialField.effort = shadowDial!.effort;
+                  if (shadowDial!.via != null) shadowDialField.via = shadowDial!.via;
                   const shadowIdentity: Record<string, unknown> = {
                     dispatch_id: shadowDispatchId,
                     archetype,
@@ -1045,14 +1092,17 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
                     primary_dispatch_id: dispatchId,
                     shadow_source: shadowSourceTag,
                     gate_eligible: false,
-                    loadout: shadowLoadoutField,
+                    dial: shadowDialField,
                     ...(resolvedVia != null ? { resolved_via: resolvedVia } : {}),
-                    executor: shadowExecutorNameInner,
-                    ...(shadowSpec.target != null ? { target: shadowSpec.target, provider: shadowSpec.provider ?? null } : {}),
-                    model: shadowSpec.model,
+                    executor: shadowExecutorNameInner!,
+                    model: shadowDelivery!.model,
+                    model_id: shadowDelivery!.modelId,
+                    reasoning_effort: shadowDelivery!.effort,
+                    driver: shadowDelivery!.driver,
+                    ...(shadowDelivery!.provider != null ? { provider: shadowDelivery!.provider } : {}),
                     transport: 'command',
-                    ...(shadowSpec.writeAccess != null ? { write_access: shadowSpec.writeAccess } : {}),
-                    ...(shadowSpec.target != null ? { delivery_transport: 'command' } : {}),
+                    ...(shadowDelivery!.spec.writeAccess != null ? { write_access: shadowDelivery!.spec.writeAccess } : {}),
+                    delivery_transport: 'command',
                     prompt_source: promptSource,
                     prompt_snapshot: promptSnapshot,
                     prompt_sha256: promptSha256,
@@ -1176,9 +1226,13 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     relayAttested,
     archetype,
     role,
-    loadout: active,
+    dial,
+    dialSource: source,
     executor: executorName,
-    model: spec.model,
+    model: delivery.model,
+    modelId: delivery.modelId,
+    driver: delivery.driver,
+    reasoningEffort: delivery.effort,
     source,
     echo,
     exitCode: spawned.status ?? 1,
@@ -1208,7 +1262,7 @@ export function runDispatchFallback(opts: DispatchFallbackOptions): DispatchFall
   if (spec.fallbackCommand == null) {
     throw new DispatchCommandError(`host executor "${request.executor}" has no fallback_command.`);
   }
-  if (spec.model !== request.model || spec.reasoningEffort !== request.reasoningEffort || spec.agentType !== request.agentType) {
+  if (spec.model !== request.model || spec.reasoningEffort !== request.reasoningEffort || (spec.agentType !== '*' && spec.agentType !== request.agentType)) {
     throw new DispatchCommandError(`locked request identity no longer matches executor "${request.executor}" in its profile snapshot.`);
   }
   if (lookup.terminal != null) {

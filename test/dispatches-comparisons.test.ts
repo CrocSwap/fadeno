@@ -8,11 +8,7 @@ import { tempRepo } from './helpers.ts';
 
 function seedLog(root: string, rows: Array<Record<string, unknown> | string>): void {
   mkdirSync(join(root, '.fadeno'), { recursive: true });
-  writeFileSync(
-    join(root, DISPATCHES_FILE),
-    `${rows.map((r) => (typeof r === 'string' ? r : JSON.stringify(r))).join('\n')}\n`,
-    'utf8',
-  );
+  writeFileSync(join(root, DISPATCHES_FILE), `${rows.map((r) => (typeof r === 'string' ? r : JSON.stringify(r))).join('\n')}\n`, 'utf8');
 }
 
 function requested(over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -23,10 +19,14 @@ function requested(over: Record<string, unknown> = {}): Record<string, unknown> 
     dispatch_id: 'primary-11111111-1111-1111-1111-111111111111',
     archetype: 'worker',
     role: null,
-    resolution: 'loadout',
-    loadout: { name: 'main', source: 'default' },
+    resolution: 'repo',
+    dial: { model: 'echo-worker' },
     executor: 'echo-worker',
-    model: 'opus',
+    model: 'echo-worker',
+    model_id: 'echo-worker',
+    reasoning_effort: 'default',
+    driver: 'openai',
+    provider: 'openai',
     transport: 'command',
     prompt_source: 'stdin',
     prompt_snapshot: '.fadeno/local/prompts/worker-aaaaaaaa.md',
@@ -61,9 +61,12 @@ function shadowRequested(primaryId: string, over: Record<string, unknown> = {}):
     shadow: true,
     primary_dispatch_id: primaryId,
     shadow_source: 'flag',
-    loadout: { name: 'main', source: 'default' },
+    dial: { model: 'grok-worker' },
     executor: 'grok-worker',
     model: 'grok-4',
+    model_id: 'grok-4',
+    driver: 'openai',
+    provider: 'openai',
     transport: 'command',
     prompt_source: 'stdin',
     prompt_snapshot: '.fadeno/local/prompts/worker-aaaaaaaa.md',
@@ -85,7 +88,6 @@ function shadowCompleted(primaryId: string, over: Record<string, unknown> = {}):
     output_bytes: 99,
     diff_snapshot: '.fadeno/local/outputs/shadow-22222222.diff',
     diff_bytes: 45,
-    // shadow completions omit workspace_changed by construction
     ...over,
   };
 }
@@ -101,10 +103,8 @@ test('dispatches: shadow rows render with [shadow of <primaryId8>] and json fiel
     shadowRequested(PRIMARY_ID, { dispatch_id: SHADOW_ID, prompt_sha256: 'a'.repeat(64) }),
     shadowCompleted(PRIMARY_ID, { dispatch_id: SHADOW_ID, prompt_sha256: 'a'.repeat(64), output_bytes: 99, diff_bytes: 45, write_access: true, workspace_changed: false }),
   ]);
-
   const result = runDispatches({ repoRoot: root });
   assert.equal(result.total, 2);
-  // primary entry should NOT be shadow, shadow entry should be
   const primary = result.entries.find((e) => e.dispatchId === PRIMARY_ID)!;
   const shadow = result.entries.find((e) => e.dispatchId === SHADOW_ID)!;
   assert.equal(primary.shadow, false);
@@ -114,14 +114,9 @@ test('dispatches: shadow rows render with [shadow of <primaryId8>] and json fiel
   assert.equal(shadow.diffBytes, 45);
   assert.equal(shadow.diffSnapshot, '.fadeno/local/outputs/shadow-22222222.diff');
   assert.equal(shadow.gateEligible, false);
-
-  // line marks
   const shadowLine = result.lines.find((l) => l.includes('[shadow of'))!;
   assert.match(shadowLine, /\[shadow of primary-/);
-  // shadow rows never get [no workspace change] even though exit 0 + write_access true + workspace_changed false would otherwise trigger it
   assert.doesNotMatch(shadowLine, /\[no workspace change\]/);
-
-  // primary does get the mark when conditions hold
   const primaryLine = result.lines.find((l) => !l.includes('[shadow of'))!;
   assert.match(primaryLine, /\[no workspace change\]/);
 });
@@ -144,6 +139,9 @@ test('dispatches --json: shadow entries carry shadow, primaryDispatchId, diffByt
   assert.equal(primaryJson.shadow, false);
   assert.equal(primaryJson.primaryDispatchId, null);
   assert.equal(primaryJson.diffBytes, null);
+  // also check diffBytes null vs 0 discrimination via lines
+  const diffLine = result.lines.find(l=>l.includes('[shadow of'))!;
+  assert.ok(diffLine);
 });
 
 test('dispatches comparisons: pairs by challenger, prompt sha mismatch flag, orphan marked', (t) => {
@@ -151,54 +149,42 @@ test('dispatches comparisons: pairs by challenger, prompt sha mismatch flag, orp
   const otherShadowId = 'shadow-33333333-3333-3333-3333-333333333333';
   const orphanShadowId = 'shadow-44444444-4444-4444-4444-444444444444';
   seedLog(root, [
-    requested({ dispatch_id: PRIMARY_ID, prompt_sha256: 'a'.repeat(64), executor: 'base-worker', model: 'opus' }),
-    completed({ dispatch_id: PRIMARY_ID, prompt_sha256: 'a'.repeat(64), executor: 'base-worker', model: 'opus', output_bytes: 100, exit_code: 0 }),
-    // matching shadow (same sha)
-    shadowRequested(PRIMARY_ID, { dispatch_id: SHADOW_ID, prompt_sha256: 'a'.repeat(64), executor: 'challenger-x', model: 'grok' }),
-    shadowCompleted(PRIMARY_ID, { dispatch_id: SHADOW_ID, prompt_sha256: 'a'.repeat(64), executor: 'challenger-x', model: 'grok', output_bytes: 90, diff_bytes: 10, exit_code: 0 }),
-    // mismatched sha
-    shadowRequested(PRIMARY_ID, { dispatch_id: otherShadowId, prompt_sha256: 'b'.repeat(64), executor: 'challenger-x', model: 'grok' }),
-    shadowCompleted(PRIMARY_ID, { dispatch_id: otherShadowId, prompt_sha256: 'b'.repeat(64), executor: 'challenger-x', model: 'grok', output_bytes: 80, diff_bytes: 5, exit_code: 1 }),
-    // orphan (primary missing)
-    shadowRequested('missing-primary-99999999-9999-9999-9999-999999999999', { dispatch_id: orphanShadowId, executor: 'lonely-challenger', model: 'kimi' }),
-    shadowCompleted('missing-primary-99999999-9999-9999-9999-999999999999', { dispatch_id: orphanShadowId, executor: 'lonely-challenger', model: 'kimi', output_bytes: 70, diff_bytes: 0 }),
+    requested({ dispatch_id: PRIMARY_ID, prompt_sha256: 'a'.repeat(64), executor: 'base-worker', model: 'base-worker', model_id: 'base-worker' }),
+    completed({ dispatch_id: PRIMARY_ID, prompt_sha256: 'a'.repeat(64), executor: 'base-worker', model: 'base-worker', output_bytes: 100, exit_code: 0 }),
+    shadowRequested(PRIMARY_ID, { dispatch_id: SHADOW_ID, prompt_sha256: 'a'.repeat(64), executor: 'challenger-x', model: 'challenger-x' }),
+    shadowCompleted(PRIMARY_ID, { dispatch_id: SHADOW_ID, prompt_sha256: 'a'.repeat(64), executor: 'challenger-x', model: 'challenger-x', output_bytes: 90, diff_bytes: 10, exit_code: 0 }),
+    shadowRequested(PRIMARY_ID, { dispatch_id: otherShadowId, prompt_sha256: 'b'.repeat(64), executor: 'challenger-x', model: 'challenger-x' }),
+    shadowCompleted(PRIMARY_ID, { dispatch_id: otherShadowId, prompt_sha256: 'b'.repeat(64), executor: 'challenger-x', model: 'challenger-x', output_bytes: 80, diff_bytes: 5, exit_code: 1 }),
+    shadowRequested('missing-primary-99999999-9999-9999-9999-999999999999', { dispatch_id: orphanShadowId, executor: 'lonely-challenger', model: 'lonely-challenger' }),
+    shadowCompleted('missing-primary-99999999-9999-9999-9999-999999999999', { dispatch_id: orphanShadowId, executor: 'lonely-challenger', model: 'lonely-challenger', output_bytes: 70, diff_bytes: 0 }),
   ]);
-
   const comps = runDispatchesComparisons({ repoRoot: root });
   assert.equal(comps.totalPairs, 3);
-  // grouped by challenger
   const challengerX = comps.groups.find((g) => g.challenger === 'challenger-x')!;
   assert.equal(challengerX.pairs.length, 2);
-  // one of those has mismatch
   const mismatched = challengerX.pairs.find((p) => p.shadowId === otherShadowId)!;
   assert.equal(mismatched.promptShaMismatch, true);
   const matched = challengerX.pairs.find((p) => p.shadowId === SHADOW_ID)!;
   assert.equal(matched.promptShaMismatch, false);
-  // orphan group
   const lonely = comps.groups.find((g) => g.challenger === 'lonely-challenger')!;
   assert.equal(lonely.pairs.length, 1);
   assert.equal(lonely.pairs[0]!.orphan, true);
-  // lines contain flags
   const lines = comps.lines.join('\n');
   assert.match(lines, /PROMPT SHA MISMATCH/);
   assert.match(lines, /\[orphan: primary missing\]/);
-  // summary mentions pairs
   assert.match(comps.summary, /3 shadow pairs/);
 });
 
 test('dispatches comparisons: ModelComparison artifact frontmatter parse + tally', (t) => {
   const root = tempRepo(t);
   seedLog(root, [
-    requested({ dispatch_id: PRIMARY_ID, executor: 'base-worker', model: 'opus', prompt_sha256: 'a'.repeat(64) }),
-    completed({ dispatch_id: PRIMARY_ID, executor: 'base-worker', model: 'opus', prompt_sha256: 'a'.repeat(64), output_bytes: 10 }),
-    shadowRequested(PRIMARY_ID, { dispatch_id: SHADOW_ID, executor: 'challenger-x', model: 'grok', prompt_sha256: 'a'.repeat(64) }),
-    shadowCompleted(PRIMARY_ID, { dispatch_id: SHADOW_ID, executor: 'challenger-x', model: 'grok', prompt_sha256: 'a'.repeat(64), output_bytes: 9, diff_bytes: 2 }),
+    requested({ dispatch_id: PRIMARY_ID, executor: 'base-worker', model: 'base-worker', prompt_sha256: 'a'.repeat(64) }),
+    completed({ dispatch_id: PRIMARY_ID, executor: 'base-worker', model: 'base-worker', prompt_sha256: 'a'.repeat(64), output_bytes: 10 }),
+    shadowRequested(PRIMARY_ID, { dispatch_id: SHADOW_ID, executor: 'challenger-x', model: 'challenger-x', prompt_sha256: 'a'.repeat(64) }),
+    shadowCompleted(PRIMARY_ID, { dispatch_id: SHADOW_ID, executor: 'challenger-x', model: 'challenger-x', prompt_sha256: 'a'.repeat(64), output_bytes: 9, diff_bytes: 2 }),
   ]);
-  // write comparisons
   mkdirSync(join(root, '.fadeno', 'comparisons'), { recursive: true });
-  writeFileSync(
-    join(root, '.fadeno', 'comparisons', 'run-01.md'),
-    `---
+  writeFileSync(join(root, '.fadeno', 'comparisons', 'run-01.md'), `---
 kind: ModelComparison
 baseline: base-worker
 challenger: challenger-x
@@ -217,12 +203,8 @@ delivery transport: command vs command
 tool availability: same
 effort pinning: same
 isolation: detached-HEAD worktree vs dirty workspace — dirty case
-`,
-    'utf8',
-  );
-  writeFileSync(
-    join(root, '.fadeno', 'comparisons', 'run-02.md'),
-    `---
+`, 'utf8');
+  writeFileSync(join(root, '.fadeno', 'comparisons', 'run-02.md'), `---
 kind: ModelComparison
 baseline: base-worker
 challenger: challenger-x
@@ -237,12 +219,8 @@ delivery transport: same
 tool availability: same
 effort pinning: same
 isolation: clean worktree
-`,
-    'utf8',
-  );
-  writeFileSync(
-    join(root, '.fadeno', 'comparisons', 'run-03.md'),
-    `---
+`, 'utf8');
+  writeFileSync(join(root, '.fadeno', 'comparisons', 'run-03.md'), `---
 kind: ModelComparison
 baseline: base-worker
 challenger: challenger-x
@@ -254,10 +232,7 @@ tie
 
 ## Confounds
 confounds here
-`,
-    'utf8',
-  );
-
+`, 'utf8');
   const comps = runDispatchesComparisons({ repoRoot: root });
   assert.equal(comps.totalComparisons, 3);
   const group = comps.groups.find((g) => g.challenger === 'challenger-x')!;
@@ -270,20 +245,17 @@ confounds here
   assert.match(lines, /prefer_challenger/);
   assert.match(lines, /prefer_baseline/);
   assert.match(lines, /1 prefer_challenger \/ 1 prefer_baseline \/ 1 tie\/inconclusive/);
-  // json groups mirror same
   const json = JSON.parse(JSON.stringify(comps)) as typeof comps;
   assert.equal(json.groups[0]!.tally.preferChallenger, 1);
 });
 
 test('dispatches comparisons: empty states friendly output', (t) => {
   const root = tempRepo(t);
-  // no log, no comparisons dir
   const comps = runDispatchesComparisons({ repoRoot: root });
   assert.equal(comps.totalPairs, 0);
   assert.equal(comps.totalComparisons, 0);
   assert.match(comps.lines.join('\n'), /No shadow pairs recorded/);
   assert.match(comps.summary, /No comparisons to show/);
-  // also empty when dir exists but no pairs
   mkdirSync(join(root, '.fadeno', 'comparisons'), { recursive: true });
   const comps2 = runDispatchesComparisons({ repoRoot: root });
   assert.equal(comps2.totalPairs, 0);
@@ -294,12 +266,27 @@ test('dispatches comparisons: missing primary renders orphan not dropped (json)'
   const root = tempRepo(t);
   const orphanId = 'shadow-55555555-5555-5555-5555-555555555555';
   seedLog(root, [
-    shadowRequested('no-such-primary-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', { dispatch_id: orphanId, executor: 'orphan-challenger', model: 'm1', prompt_sha256: 'a'.repeat(64) }),
-    shadowCompleted('no-such-primary-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', { dispatch_id: orphanId, executor: 'orphan-challenger', model: 'm1', prompt_sha256: 'a'.repeat(64), output_bytes: 11, diff_bytes: 3 }),
+    shadowRequested('no-such-primary-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', { dispatch_id: orphanId, executor: 'orphan-challenger', model: 'orphan-challenger', prompt_sha256: 'a'.repeat(64) }),
+    shadowCompleted('no-such-primary-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', { dispatch_id: orphanId, executor: 'orphan-challenger', model: 'orphan-challenger', prompt_sha256: 'a'.repeat(64), output_bytes: 11, diff_bytes: 3 }),
   ]);
   const comps = runDispatchesComparisons({ repoRoot: root });
   assert.equal(comps.totalPairs, 1);
   assert.equal(comps.groups[0]!.pairs[0]!.orphan, true);
   const payload = JSON.parse(JSON.stringify(comps)) as typeof comps;
   assert.equal(payload.groups[0]!.pairs[0]!.orphan, true);
+});
+
+test('dispatches: shadow rows discrimination via --json shadow fields (diffBytes 0 vs null)', (t) => {
+  const root = tempRepo(t);
+  seedLog(root, [
+    requested({ dispatch_id: PRIMARY_ID }),
+    completed({ dispatch_id: PRIMARY_ID, output_bytes: 10 }),
+    shadowRequested(PRIMARY_ID, { dispatch_id: SHADOW_ID }),
+    shadowCompleted(PRIMARY_ID, { dispatch_id: SHADOW_ID, diff_bytes: 0, output_bytes: 5 }),
+  ]);
+  const result = runDispatches({ repoRoot: root });
+  const shadow = result.entries.find(e=>e.dispatchId===SHADOW_ID)!;
+  const primary = result.entries.find(e=>e.dispatchId===PRIMARY_ID)!;
+  assert.equal(shadow.diffBytes, 0);
+  assert.equal(primary.diffBytes, null);
 });
