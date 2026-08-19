@@ -323,6 +323,13 @@ permission fences are the host's business) and locked engine host requests
 delivered through `dispatch-fallback`, where refusing would strand an
 in-flight request mid-receipt.
 
+An explicit dial may carry `force_write_posture: true`, written by
+`fadeno dial … --force` only after printing the exact mismatch as a prominent
+warning. That marker suppresses this one predicate for the directly dialed
+archetype at later delivery boundaries; it does not weaken eligibility or
+other constraints and does not flow through an archetype fallback. The normal
+refusal text mentions the flag while saying that it is not suggested.
+
 **Why this exists (dogfood, 2026-08-12).** A commit task resolved to the
 worker slot and was delivered through `routes.claude.anthropic`'s fallback
 `claude -p`, which runs headless in the default permission mode: there is no
@@ -522,7 +529,14 @@ policy language.
   row pair. `--shadow` fires a one-shot shadow duplication with the
   byte-identical prompt, isolated in a worktree; also available as
   `fadeno loadout shadow <archetype> <executor> [--rate <0..1>]` and
-  `fadeno loadout clear-shadow [archetype]`. Ad-hoc dispatch spawns commands, so what it can invoke is a
+  `fadeno loadout clear-shadow [archetype]`. The shadow runs *concurrently*
+  with the primary — resolved, worktree-cut from HEAD, and spawned before the
+  primary starts, collected after it finishes — so dispatch latency is
+  max(primary, shadow) rather than their sum, both sides start from the same
+  committed state (a primary that commits cannot contaminate the comparison),
+  and each side's `duration_ms` is its own supervisor-measured runtime:
+  time-to-complete is itself comparison evidence. A shadow still never fires
+  on a primary refusal and can never affect the primary's result. Ad-hoc dispatch spawns commands, so what it can invoke is a
   property of the *route*, not of the target: a command-delivered route runs
   its argv, and a `host: true` route runs its fallback `command` when it
   declares one. A host-routed target with no fallback command is a clear
@@ -615,12 +629,16 @@ opus_reviewer → claude-default (opus) [binding]
   streamed snapshot (`last` = most recent request row carrying
   `output_snapshot`) and attests the file against the completion row's
   `output_sha256` (`incomplete` when that row never arrived) — and the same
-  recovery works for shadow ids. `--tail <N>` defaults to 10; `--json` emits
+  recovery works for shadow ids, though a shadow is never a candidate for
+  `last` and never counts toward its open/concurrent refusals: the caller
+  launched the primary, the kernel launched the shadow, and a shadow overlaps
+  its own primary by design. `--tail <N>` defaults to 10; `--json` emits
   the correlated rows for scripts, carrying `shadow`, `primary_dispatch_id`,
   and `diff_bytes`. `fadeno dispatches --comparisons [--json]` renders paired
   primary/shadow rows grouped by challenger executor (both id8s, archetype,
-  `primary executor (model) exit N, output B bytes` vs
-  `shadow executor (model) exit N, output B bytes, diff D bytes`, with
+  `primary executor (model) exit N in <duration>, output B bytes` vs
+  `shadow executor (model) exit N in <duration>, output B bytes, diff D bytes`
+  — the durations are each side's own runtime, part of the scorecard — with
   `PROMPT SHA MISMATCH` when the prompt digests disagree and `[orphan]` when
   the primary row is missing), plus any `ModelComparison` artifacts under
   `.fadeno/comparisons/*.md` (`kind: ModelComparison`, `baseline`, `challenger`,
@@ -836,7 +854,8 @@ documented escape hatch for that window only; the integrator runs the suite
 without it, which is the run that counts.
 
 The starter playbook `parallel-workstreams` encodes this as a runnable
-workflow rather than as advice: contract freeze → fan-out under manifests →
+workflow rather than as advice: contract freeze → `accept_contract` human gate
+→ bounded `revise_contract` regeneration → `reaccept_contract` → fan-out under manifests →
 integration → full verification.
 
 ## Non-goals

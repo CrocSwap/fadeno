@@ -100,6 +100,14 @@ Add only the identities needed to disambiguate actual runs:
 - `attempt` — positive ordinal carried on dispatch/output events;
 - `attempt_reason` — `initial`, `schema_repair`, `executor_override`, or
   `user_retry`.
+- `output_extraction` — when present, deterministic normalization (`bom_trimmed`,
+  `fenced`, `embedded`) that precedes `schema_repair`; `raw_output`,
+  `raw_output_bytes`, `raw_output_sha256`, and `envelope_candidates` preserve the
+  raw evidence and prove the normalized output is a contiguous substring of the
+  raw bytes. A unique schema-invalid candidate may supply its Ajv errors to the
+  existing repair appendix, but raw bytes and rejected-attempt evidence remain
+  intact. Whole JSON that parses but fails schema remains a semantic failure and
+  goes to the existing model repair.
 
 `Attempt` is not a first-class lifecycle object in this protocol. Adapters do
 not need to pretend they can observe `dispatching → running → validating`.
@@ -241,6 +249,11 @@ or mismatched evidence. It never consults ambient loadout state or routes a
 host request through the command broker. Ordinary ad-hoc steering retains
 ambient loadout precedence.
 
+A snapshotted `agent_type: "*"` is an immutable wildcard, not a literal agent
+name. It is used when the playbook role has no declared archetype and may be
+specialized by locked steering to the concrete archetype receiving that host
+request. A concrete snapshotted agent type still requires an exact match.
+
 The start receipt appends the existing `actor_dispatched` event and records the
 requested host model, reasoning effort, and agent type plus the supplied
 agent identity. These are `requested_only`, not independently observed. A valid
@@ -251,6 +264,16 @@ The director is the only ledger writer during this MVP. Format 0.2 and
 unversioned ledgers are readable only through explicit compatibility mode, and
 verifiers fail rather than ignore host lifecycle evidence in those ledgers.
 
+### Command dispatch lifetime
+
+Every command-backed engine attempt runs below the same process-group
+supervisor used by ad-hoc dispatch. The `actor_dispatched` row names a
+machine-local in-flight claim. If the engine process disappears, the
+supervisor terminates the executor's whole process group. A subsequent drive
+must not record `engine_interrupted` or begin a retry while that claim still
+belongs to a live supervisor; only a settled or provably dead supervisor may
+be recovered into a terminal interruption receipt.
+
 Live cross-harness dogfood exposed a separate observability boundary: start and
 terminal receipts do not reveal what an external session is doing. The
 additive `host_dispatch_progress` event records provenance-labelled
@@ -259,8 +282,35 @@ name an ephemeral JSON sidecar, and `fadeno show` projects its latest phase,
 current action, blockers, and runtime onto the original workflow graph. These
 observations are attested, not recomputable, and are forbidden as gate inputs.
 
+### Deterministic tool execution (Priority 7 frozen contract)
+
+`tool_call` steps name a logical capability (`tool: tests`), never shell. The
+layered `executors.yaml` `tools:` registry binds each name to a static `command`
+argv array with optional positive `timeout_ms`. Interpolation and shell are
+rejected (`{`, `}`, `$`, backtick and empty args all fail validation). Only
+ready `tool_call` steps whose declared artifact schema is `test-result` are
+automated; `Diff`, `PostResult` and other typed outputs remain manual via
+`fadeno tool-complete`.
+
+`fadeno tool-run <run> [--tool <name>] [--timeout <seconds>]` is the
+deterministic helper and the engine's inline path (`fadeno drive` runs the same
+code). It acquires the shared writer lease, mints a durable `tool-${run}-${id}-a<attempt>`
+supervisor claim (exactly one attempt wins via atomic `link`), executes the
+registered argv without a shell under the process-group supervisor (stripped
+harness identity, bounded 32 MiB output, positive timeout or CLI override),
+synthesizes a schema-valid `TestResult` (exit 0 → `passed`, nonzero → `failed`,
+spawn/timeout/signal → `error` with `exit_code: null`), truncates `summary` to
+4000 bytes and `details` to 32 KiB, writes the result atomically to the step's
+versioned `artifacts/test-result.json` (or `artifacts/attempts/<id>-a<N>.json`
+for infrastructure failures), and records `tool_dispatched` / `tool_completed`
+or `tool_failed` plus `artifact_created` with `command_sha256` provenance. `--tool`
+is a race guard that must equal the ready step; there is no `--command` escape
+hatch.
+
 `fadeno verify` must check at least:
 
+- when a `TestResult` artifact is present, `status` coheres with `exit_code` (null → `error`, 0 → `passed`, otherwise `failed`) and `command_sha256` matches the snapshotted `tools:` binding (legacy ledgers skip both);
+- when `output_extraction` is present, raw bytes hash to `raw_output_sha256`, the normalized output is a raw substring, and replay of `extractSchemaEnvelope` with the declared schema reproduces the same kind and payload digest;
 - recognized document and event schema versions;
 - parseable event stream and monotonic sequence numbers;
 - unique runtime identifiers and valid parent relationships;
@@ -358,6 +408,11 @@ There is no established user base justifying permanent ledger compatibility.
   five-item Luna/Terra dogfood evidence recorded on 2026-08-04.
 - Cloud service, daemon, remote scheduler, or provider integrations
 - Cryptographic signatures or hash chaining
+- Parallel shared-writer lanes, auto-merge, playbook `workspace:` taxonomy,
+  quorum/`any` completion, speculative races, and sibling cancellation remain
+  out of scope; see the bounded wave deferral in
+  [`compositional-runtime.md`](compositional-runtime.md) (`--parallel` classic-only,
+  command-adapter leaves deferred over session-leakage and frontier ambiguity)
 
 These remain North Star hypotheses. Dogfood receipts plus verifier checks can
 promote them later.

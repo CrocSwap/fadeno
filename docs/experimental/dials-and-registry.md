@@ -88,11 +88,15 @@ Four frictions, all from daily dogfood of the shipped loadout system:
   `role binding → session dial → repo pin → user dial → host-native base`.
   A repo pins only the archetypes it has opinions about (a research repo
   pins its worker model) and defers to the user's dials for the rest.
-- **Adaptive set, explicit clear, always narrate the layer.** A plain `set`
-  writes the highest layer where it will actually take effect; every
-  `set`/`clear` echoes the layer it wrote. Nothing is ever written into a
-  shadowed layer silently, and nothing is ever *removed* from a layer the
-  user didn't name.
+- **Active-layer set, inferring clear, always narrate the layer.** A plain `set`
+  updates the highest existing dial layer, creating a user default only when
+  no dial exists; a plain
+  `clear` removes the session dial, or — when there is no session dial and
+  no repo pin — the user default, since that is the only dial it can mean
+  (revised 2026-08-16; see "Scope semantics" below). Every `set`/`clear`
+  echoes the layer it touched. Nothing is ever written into a shadowed
+  layer silently, and committed repo pins are only ever removed with an
+  explicit `--repo`.
 - **Harness quirks live in drivers, never in the registry.** The registry
   stays uniform (model + effort as separate dimensions, always); a driver
   that encodes effort in the model id declares a translation, applied at
@@ -152,8 +156,10 @@ routes:
   codex:
     openrouter:
       driver: opencode          # alias --via selects by; default: provider key
-      command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto]
-      write_access: true
+      command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --agent, fadeno-readonly, --auto]
+      write_access: false
+      write_variant:
+        command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto]
       models_command: [opencode, models]
     google:
       driver: agy
@@ -202,8 +208,8 @@ base and is accepted-but-ignored with a deprecation note.
 
 ```
 fadeno dial                                   # effective table
-fadeno dial <archetype> <model>[@effort] [--via <driver>] [--user|--repo]
-fadeno dial clear <archetype> [--user|--repo]
+fadeno dial <archetype> <model>[@effort] [--via <driver>] [--session|--user|--repo] [--force]
+fadeno dial clear <archetype> [--session|--user|--repo]
 fadeno dial shadow <archetype> <model>[@effort] [--via <driver>] [--rate <r>]
 fadeno dial clear-shadow [<archetype>]
 fadeno dial resolve --archetype <a>          # JSON, hook contract
@@ -216,34 +222,38 @@ registry's `spellings` supplying the id translation. `--via` is honest
 about being an escape hatch: OpenCode is the one universal adapter today;
 the other drivers only run their own models.
 
-**Set-time refusals** keep the existing pattern (write posture, eligibility
-`forbidden`) and gain one: `@effort` on a host-native delivery is refused at
-dial time — the host controls its own effort, and the Agent-spawn surface
-has no effort parameter, so the dial would be a lie. Native deliveries
-record effort `inherited` in evidence, as `native_delivery` rows do today.
+**Set-time refusals** cover write posture and eligibility `forbidden` before
+any dial state changes. A write-posture refusal names `--force` as a
+discouraged escape hatch. When used, Fadeno stores the dial in explicit form
+with `force_write_posture: true`, prints a prominent warning explaining the
+exact mismatch, and honors that override at dispatch/drive/steering time.
+The override is scoped to the directly dialed archetype: fallback resolution
+does not inherit it. `--force` bypasses only write posture; eligibility and
+all other constraints still apply normally.
 
 `current-host` stays dialable like any model, and this is load-bearing: a
 user-level `worker → grok` with a session-level `worker → current-host`
 means "native in this repo, grok everywhere else" — expressible only if
 native is a dial value, not merely the base.
 
-### Scope semantics: adaptive set, explicit clear
+### Scope semantics: active-layer set, explicit scope
 
 Cascade: **session > repo > user > base.** A plain `set` (no scope flag)
 writes:
 
-| State of `<archetype>` | Plain `set` writes | Why |
+| Highest existing dial for `<archetype>` | Plain `set` writes | Why |
 |---|---|---|
-| no repo pin | **user** level | the default flow is subscription rotation, which is global |
-| repo pin exists | **session** level | a user-level write would be silently shadowed — the "I set it and nothing happened" trap |
+| session dial | **session** level | update the effective checkout-local choice |
+| repo pin | **repo** level | update the effective shared project choice |
+| user dial | **user** level | update the effective cross-repo default |
+| no dial | **user** level | the default creation flow is global subscription rotation |
 
 Every `set` echoes the layer it wrote, in both cases:
 
 ```
 worker → grok-4.6 @ high via grok  [user default — applies across your repos]
-worker → grok-4.6 @ high via grok  [this repo only, sticky until cleared —
-  worker is repo-pinned to sol here; --user sets your global default,
-  which this repo will keep overriding]
+worker → grok-4.6 @ high via grok  [session dial — this checkout only,
+  sticky until cleared]
 ```
 
 The narration is the load-bearing part: adaptive defaults are fine exactly
@@ -251,20 +261,35 @@ as long as the tool says what it did. Note the honest wording — the session
 layer is the gitignored repo-local pin, **sticky until cleared**, not tied
 to a shell session; the notice must not oversell its temporariness.
 
-`--repo` writes the committed per-archetype repo pin (project catalog).
+`--session` writes the gitignored checkout-local override. `--repo` writes the
+committed per-archetype repo pin (project catalog).
 Granularity is per-archetype by design: a repo pins its judge and defers to
 the user's worker rotation if it has no worker opinion.
 
-**`clear` is never adaptive downward.** `clear worker` clears the session
-dial if one exists; otherwise it reports where the dial lives and stops:
+**`clear` follows the dial when the layer is unambiguous** (revised
+2026-08-16; the original "never adaptive downward" rule proved to be pure
+friction in the common case). `clear worker` clears the session dial if one
+exists. With no session dial and no repo pin, the user default is the only
+dial the command can possibly mean — it is cleared, with the inference
+narrated:
 
 ```
-no session dial for worker; worker is set at user level —
-  `fadeno dial clear worker --user` to remove it
+cleared worker (opus) [user default — the only layer holding a dial]
 ```
 
-Set-adaptivity prevents silent no-ops; clear-adaptivity would delete state
-the user may not know exists.
+A **repo pin blocks the inference**: pins are committed config, removed only
+with an explicit `--repo`, so `clear worker` in a repo that pins worker
+reports the pin and stops (and leaves any user dial beneath it untouched):
+
+```
+no session dial for worker; worker is repo-pinned —
+  `fadeno dial clear worker --repo` to remove it
+  (repo pins are committed config, never cleared implicitly)
+```
+
+The original worry — clear-adaptivity deleting state the user doesn't know
+exists — is answered by the narration naming the layer it cleared, and by
+the repo-pin exception keeping committed state explicit.
 
 **Supersedes the blanket user-layer suppression rule** (the rc.14
 "self-contained project profile ignores the user pin" behavior): repo pins
@@ -279,18 +304,27 @@ The no-arg command prints the whole truth — with no preset layer, the table
 *is* the effective dial state:
 
 ```
-archetype  model          effort    delivery               source
-worker     grok-4.6       high      grok (command)         user dial
-reviewer   current-host   inherit   in-session (native)    base
-judge      sol @ xhigh    xhigh     codex exec (command)   session dial
-generator  → worker       —         grok (via fallback)    base
+archetype  model          effort    harness        source
+judge      sol @ xhigh    xhigh     codex          session dial
+reviewer   current-host   high      current-host   base
+generator  current-host   default   current-host   base
+worker     grok-4.6       high      grok           user dial
   ~ shadow: worker ~ kimi-k3 via opencode [rate 0.25]
 ```
 
-One row per archetype in the composed vocabulary, `source` naming the
-cascade layer that won, fallback chains rendered inline, shadow attachments
+One row per archetype in the canon power order (director, judge, reviewer,
+generator, worker; extras alphabetical after — revised 2026-08-16, when
+generator also lost its worker fallback and became a standalone archetype
+defaulting to the host-native base), `source` naming the cascade layer that
+won, custom fallback chains rendered inline, shadow attachments
 below their slot. This permanently retires the "declared slots hiding the
 dialed override" class of papercut: there are no declared slots.
+
+The table is deliberately reference-frame neutral: `luna` says `codex`
+whether the caller is Codex, Claude, Grok, or the standalone CLI. The caller's
+route later decides whether Codex is reached as a host agent or through
+`codex exec`; that adapter is structured resolution/dispatch data, not part of
+the model's displayed harness identity.
 
 ## Unregistered models: fall-through with verification
 
@@ -368,6 +402,88 @@ eligibility via `constraints:` — all re-spelled onto the `model`/`driver`
 row fields but semantically identical, including the `shadow_only` →
 `gate_eligible: false` stamp.
 
+**Write variants** (decided 2026-08-16, completing the who/how split): a
+route declared `write_access: false` may declare a `write_variant:` — an
+alternative argv that CAN write (e.g. headless claude with `--permission-mode
+acceptEdits`). A `requires_write: required` archetype resolving onto that
+route gets the variant automatically; every other posture gets the base. So
+`fadeno dial worker opus` just works while reviewer/judge dials of the same
+model stay physically read-only — one model name, capability picked by the
+archetype's declared policy, never by a capability-suffixed spelling
+(`opus-write` lived for one day and died for exactly this reason). The
+escalation is authorized in the catalog (the same place that declared
+`requires_write`), not implied by the dial. Selection is
+`applyWritePosture`, applied at every delivery boundary (dispatch, drive,
+steering, dial show/resolve); the compiled variant rides the executor spec
+into the run snapshot, so replays posture identically; evidence rows carry
+`write_variant: true` and the reader marks `[write variant]`. A variant
+without its own `resume` does not advertise session resumption (the base
+resume argv carries the base permission mode). Declaring `write_variant` on
+a route that is not `write_access: false` is a parse error — a variant
+exists to escalate a read-only delivery, nothing else — as are a variant
+argv identical to the base and a variant whose session fields would violate
+the `resume ⟺ id source` invariant after posturing; the snapshot parser
+re-asserts the same invariants at the replay trust boundary.
+
+The starter catalog applies that shape to every command lane with a verified
+read boundary: Claude (permission mode), Codex and Grok (OS sandbox), Muse
+(write and shell tools disabled), and OpenCode (a project deny-policy agent
+emitted by `init`). Live 2026-08-16 probes required each base to read a marker,
+attempt a write, leave no file, and still return a report; each write variant
+then had to create the file. Antigravity is the explicit exception: `--mode
+plan --sandbox` denied the write but exited 0 with no report, so its route stays
+write-only rather than overstating coverage.
+
+**Effort belongs to the who, never the lane** (revised 2026-08-16; the
+"host delivery inherits effort" story is retired). A model's effort is its
+registry standard or the dial's `@effort` pin — a property of the who.
+Delivery lanes differ only in the *mechanism* that applies the request:
+command lanes inject it into the argv (`{reasoning_effort}` substitution or
+`effort_encoding: model-suffix`); codex host slots pin it as
+`model_reasoning_effort` in the materialized TOML; claude host slots pin it
+as `effort:` frontmatter in materialized local subagents
+(`fadeno steering apply --claude` writes `.claude/agents/<archetype>.md`
+with `model:` + `effort:` from the current dials — Claude subagent
+frontmatter supports per-agent effort natively). Nothing "inherits": an
+in-session luna worker runs at luna's xhigh while a sol session stays at
+medium. Consequences: `@effort` dials on host deliveries are no longer
+refused — the pin travels on the request, with a note that materialized
+surfaces apply it — and the dial table / steering resolve show the real
+effort instead of `inherit`. Materialization is explicit: re-run
+`steering apply` after re-dialing (command slots need no file — the
+dispatch proxies carry them — and a managed local agent left over from a
+host era is removed so the hook never targets a stale identity).
+
+**The director archetype** (2026-08-16) is the who/how split applied to
+orchestration: an expensive host session hands a whole side task — planning
+included — to the model dialed as `director`, which coordinates
+workers/reviewers itself through the fadeno CLI. Three declared pieces make
+it safe: `requires_write: required` (it mutates run ledgers), a `brief:`
+field on the archetype naming a template composed ahead of every ad-hoc
+dispatch (`.fadeno/briefs/<name>.md`, else the builtin; evidence records
+`brief`, the digest attests the composed bytes, `--no-brief` opts out) — how
+the spawned model learns its standing orders — and **route-level
+`eligibility:`** (merged with model eligibility, strictest wins), the
+structural spelling of "this lane cannot host a director": routes without
+fadeno capability (grok/agy/opencode, plan mode, claude lanes whose write
+variant lacks the `Bash(fadeno:*)` grant) declare
+`eligibility: { director: forbidden }`, which binds unregistered models
+falling through those lanes too. The block is catalog truth, not runtime
+plugin sniffing.
+
+Variants are **command-delivery only**: a `host: true` route refuses the key
+at parse. In-session delivery carries the host's own permissions, and the
+locked fallback lane (`fadeno dispatch-fallback`) replays the snapshotted
+base argv byte-for-byte under the attestation equality checks — so no host
+lane can honor a variant, and advertising one there would claim a capability
+nothing delivers (the first review of this feature caught exactly that).
+Consequence, stated honestly: the claude-harness fallback wart — a locked
+worker request delivered through headless `claude -p` with no approver, the
+2026-08-12 dogfood failure — remains open on that lane. Closing it means
+wiring posture through the locked-request attestation contract
+(host-dispatch and verify both key on the base argv), which is future work,
+not a side effect of this feature.
+
 ## Worked flows (the receipts this design was wargamed against)
 
 1. **Subscription rotation** (the wedge): `fadeno dial worker grok
@@ -412,9 +528,17 @@ row fields but semantically identical, including the `shadow_only` →
 2. **User-level shadows.** The rotation persona would plausibly want a
    challenger shadowing their worker *across* repos. Session-scoped
    attachments ship first; a `--user` shadow scope is additive later.
-3. **A `fadeno models` inspection command** (registry + verification cache +
-   per-driver spellings). Possibly day one, possibly never — the effective
-   table may be enough.
+3. **A `fadeno models` inspection command — DECIDED, built (2026-08-16).**
+   `fadeno models` renders the frame-neutral registry (home harness per row,
+   probe-cache state in structured output, and the unregistered-fallthrough
+   rule in the footer); `fadeno models <name>` adds alternate `--via`
+   harnesses, spellings, and eligibility;
+   `fadeno models --driver <alias>` shells the route's `models_command` for
+   the live backend listing with registered spellings marked. Dogfooding it
+   immediately surfaced a probe wrinkle: opencode lists namespaced ids
+   (`openrouter/<vendor>/<model>`) while the route template prepends that
+   namespace in argv, so bare spellings never exact-match its listing —
+   membership matching vs. command-template namespaces is an open follow-up.
 4. **Verification-cache hygiene.** Positives are cached indefinitely; is a
    `fadeno doctor` check ("cached model no longer listed by driver") worth
    it, or is dispatch-time failure loud enough?

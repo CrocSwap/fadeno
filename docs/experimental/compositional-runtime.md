@@ -155,3 +155,16 @@ The shipped slice supports literal member lists, linear map/loop bodies,
 deterministic loop conditions, collection inputs to reducers, and `host`
 executor leaves. Dynamic maps, branchy bodies, member-scoped human gates,
 replicate/subworkflow containers, and command-adapter leaves remain deferred.
+
+> **Deferral note — `fadeno drive --parallel` and command-adapter leaves.**
+> The bounded wave scheduler (`fadeno drive --parallel 1–16`, default 1) is
+> implemented for the classic map path only, where actor delivery is
+> command-based and the supervisor/status-file/lease pattern is the existing
+> boundary. It reuses `src/lib/supervisor.ts` and `LedgerWriter` without
+> weakening orphan/process-group protection. Extending the same wave primitive
+> to compositional command leaves is explicitly deferred in this slice because
+> composite map members share one role identity, so `latestSessionForRole`
+> would leak one member's session into a sibling, and the compositional
+> frontier would need disambiguation for command leaves vs host leaves. The
+> flag is accepted but inert on compositional playbooks; see
+> `docs/experimental/next-protocol.md` for the forward boundary.

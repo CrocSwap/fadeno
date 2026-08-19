@@ -137,19 +137,20 @@ delivers `model@effort` as a suffixed id rather than a flag.
 per-archetype resolution, not a preset:
 
 ```
-archetype  model          effort    delivery               source
-worker     grok-4.6       high      grok (command)         user dial
-reviewer   current-host   inherit   in-session (host)      base
-judge      sol @ xhigh    xhigh     codex exec (command)   session dial
-generator  → worker       —         grok (via fallback)    base
+archetype  model          effort    harness        source
+worker     grok-4.6       high      grok           user dial
+reviewer   current-host   inherit   current-host   base
+judge      sol @ xhigh    xhigh     codex          session dial
+generator  → worker       —         grok           base (via worker)
   ~ shadow: kimi-k3 via opencode [rate 0.25]
 ```
 
 `model` is the registry key or verbatim unregistered id; ` @ effort` appears
 only when dialed off the registry standard. `source` names the cascade layer
 that won (`binding | session dial | repo pin | user dial | base`). The
-`DELIVERY` column is the host/driver split per row; `write_access` only ever
-describes a route's command delivery.
+`HARNESS` is the model's frame-neutral home driver. Whether the active caller
+reaches it through a host agent or a command route is resolved later;
+`write_access` only ever describes the command delivery.
 
 ### Add a model
 
@@ -187,13 +188,14 @@ the failure this project keeps finding.
 
 Drivers shipped in the starter catalog:
 
-| Provider key | Driver | Headless spelling | Effort dial |
-|---|---|---|---|
-| `openai` | Codex | `codex exec … -` | `-c model_reasoning_effort=` |
-| `anthropic` | Claude Code | `claude -p` | — |
-| `xai` | Grok | `grok --prompt-file /dev/stdin --always-approve` | `--reasoning-effort` |
-| `google` | Antigravity (`agy`) | piped stdin, `--new-project --dangerously-skip-permissions` | in the model id |
-| `openrouter` | OpenCode | `opencode run --auto` | `--variant` |
+| Provider key | Driver | Read base | Write variant | Effort dial |
+|---|---|---|---|---|
+| `openai` | Codex | `--sandbox read-only` | `--sandbox workspace-write` | `-c model_reasoning_effort=` |
+| `anthropic` | Claude Code | `claude -p` | `--permission-mode acceptEdits` | — |
+| `xai` | Grok | `--sandbox read-only --always-approve` | `--always-approve` | `--reasoning-effort` |
+| `google` | Antigravity (`agy`) | unavailable | `--new-project --dangerously-skip-permissions` | in the model id |
+| `openrouter` | OpenCode | `--agent fadeno-readonly --auto` | `--auto` | `--variant` |
+| `muse` | Muse Code | `--disable-write --disable-shell` | write/shell enabled | `--reasoning-effort` |
 
 The gotchas the shipped entries encode, each found by probing rather than by
 reading docs:
@@ -209,8 +211,15 @@ reading docs:
   route cannot express). Its `--effort` accepts only `low|medium|high`, so
   passing `{reasoning_effort}` would hard-fail any `default`-effort target;
   effort lives in the model id instead (`gemini-3.1-pro-high`).
+- **Antigravity read-only remains unavailable:** a live
+  `--mode plan --sandbox` probe denied mutation but exited 0 without the
+  requested report after the denied tool call. A route must satisfy both
+  confinement and the command-delivery contract, so it remains write-only.
 - **OpenCode** is multi-provider — `-m` takes `provider/model` — so its provider
   key is the credential holder and the route prefixes it: `-m openrouter/{model}`.
+  Its CLI has no argv-only sandbox; `init` emits
+  `.opencode/agents/fadeno-readonly.md`, and the base route selects that
+  explicit deny-policy agent.
 
 A route entry may also declare `write_access: <bool>` — whether that route's
 **command** delivery can mutate the workspace — beside an optional top-level
@@ -249,7 +258,12 @@ route says `write_access: false` and the archetype says `requires_write: require
 (or boolean `true`) — and the inverse, `requires_write: forbidden` onto
 `write_access: true`. The same check fires at dial time (`fadeno dial <archetype> <model>`),
 which also refuses dialing an archetype onto a model whose eligibility for
-it is `forbidden`.
+it is `forbidden`. The write-posture error advertises `--force` as a
+deliberately discouraged escape hatch. `fadeno dial <archetype> <model>
+--force` persists `force_write_posture: true` on that direct dial, emits a
+prominent warning, and lets dispatch/drive/steering honor the mismatch. It
+does not bypass eligibility, provider, or external constraint checks, and a
+fallback archetype never inherits another archetype's forced posture.
 The original case is a commit task routed to a headless `claude -p` that has no
 approver for a write. Either side undeclared imposes no constraint (existing profiles are
 unaffected). When declared, `write_access` joins the evidence-row identity, and
@@ -259,6 +273,34 @@ spawning (the run pauses in `executor_failed`), and `steering resolve`/`apply`
 surface `mode: write_conflict` and decline to materialize a broker for the
 conflicted slot — one shared helper keeps the refusal text identical.
 Rationale: `docs/experimental/loadouts-and-dispatch.md` → *Write access*.
+
+### Add a tool binding
+
+A **tool** is a logical capability a `tool_call` step names. The registry is strict: add it under top-level `tools:` in `.fadeno/executors.yaml` (parsed by `src/lib/executors.ts`, layered via `src/lib/config-layers.ts`, snapshotted into `profile.yaml` for the run).
+
+```yaml
+schema_version: 3
+tools:
+  test_runner:
+    command: [npm, test]          # static argv — no shell, no interpolation, no placeholders
+    timeout_ms: 300000            # optional positive integer ms
+  lint:
+    command: [npm, run, lint]
+    timeout: 60                   # seconds — use one of timeout / timeout_ms, not both
+```
+
+Rules enforced identically at catalog and snapshot parse boundaries:
+
+- tool name is a bare lowercase identifier (`[a-z][a-z0-9_-]*`);
+- `command` is a non-empty array of non-empty, non-whitespace strings;
+- no interpolation/placeholders: rejects `{`, `}`, `$`, `` ` ``, newline, or null;
+- unknown keys rejected (`command`, `timeout`, `timeout_ms` only);
+- `timeout` / `timeout_ms` is a positive integer (`timeout` in seconds, `timeout_ms` in ms); `timeout: 0` is invalid there — use `--timeout 0` on the CLI to disable a registry deadline for one invocation;
+- exactly one of `timeout` / `timeout_ms` when present.
+
+Layering follows existing profile precedence: `builtin` → `user` → `project`; a self-contained project catalog (`models:` + `routes:`) suppresses builtin/user. `tools:` merges by key like `bindings:`/`models:`.
+
+`fadeno tool-run <run> [--tool <name>] [--timeout <seconds>]` then executes the ready `tool_call` only when its `tool` is registered and its artifact schema is `test-result`; `--tool` is a race guard. `Diff`/`PostResult` stay manual via `fadeno tool-complete <run> --output <path>` (which shares the same generation-scoped claim/lease discipline, so one attempt wins). `fadeno drive` auto-executes registered `test-result` tools inline and otherwise returns `needs_decision`.
 
 Every model name and dial ref must use bare lowercase identifiers
 (`[a-z][a-z0-9_-]*` for archetype/dial keys; model ids may contain slashes for
@@ -285,15 +327,17 @@ Switch a dial per archetype (no preset to author):
 ```bash
 fadeno dial worker grok --user           # user default — applies across repos
 fadeno dial worker grok --repo           # repo pin — committed in .fadeno/executors.yaml
-fadeno dial worker grok                  # adaptive: session when repo-pinned, else user
-fadeno dial clear worker                 # clears session; --user/--repo for those layers
+fadeno dial worker grok --session        # local override — this checkout only
+fadeno dial worker grok                  # updates session → repo → user; creates user if none
+fadeno dial clear worker --session       # explicit checkout-local clear
 fadeno dial                              # effective table with dial_source per row
 fadeno dial shadow worker grok --rate 0.25  # shadow attachment (session only)
 ```
 
-An adaptive `set` with no scope flag writes the session layer when a repo pin
-exists (a user write would be silently shadowed) and narrates which layer it
-wrote; `clear` never deletes downward without `--user`/`--repo`. `fadeno
+An adaptive `set` with no scope flag updates the highest existing dial layer
+(session, then repo, then user), so it never writes a shadowed lower layer; if
+no dial exists it creates the user default. `--session`, `--repo`, and `--user`
+select a layer explicitly. `fadeno
 dial <archetype> <model>` runs the archetype write-access check at dial time, refusing a
 worker dial onto a read-only command route before any dispatch burns tokens.
 
@@ -426,6 +470,40 @@ writes the completion row when its spawn unblocks, normally
 `signal: "SIGTERM"`. Cancel refuses — writing nothing — when the dispatch has
 already completed, or when no claim exists on this machine, because either
 would mean claiming to have stopped work this call never touched.
+
+**Isolated host workspaces.** `fadeno dispatch-prepare <run> <dispatch-id> --isolate` is the opt-in isolated-host primitive: it validates `run` and `dispatch-id` against `HOST_WORKSPACE_SEGMENT_RE`, guards against traversal/symlink escape, serializes with `.fadeno/local/.host-workspace.lock`, creates an idempotent detached worktree at `.fadeno/local/host-worktrees/<run>/<dispatch-id>` from `HEAD`, and atomically records `workspace_mode: isolated` state at `.fadeno/local/host-workspaces/<run>/<dispatch-id>.json` (`workspace`, `base_commit`, `prepared_at`, plus `diff_snapshot`/`diff_bytes`/`finalized_at` after collection). After preparation, `dispatch-prompt` includes `workspace_mode: isolated` and the absolute workspace path (prompt bytes and digest unchanged); `dispatch-start` stamps `workspace_mode: isolated`/`workspace`/`base_commit` on `actor_dispatched` and bypasses the shared writer lease (read-only routes also bypass); `dispatch-complete`/`dispatch-fail` collect a binary staged diff to `.fadeno/local/outputs/host-isolated-<run>-<dispatch-id>.diff` before the terminal receipt (proving the worktree is the registered linked worktree before any `git add`/`diff` or removal), stamping `workspace_mode: isolated` plus `workspace`/`base_commit` and `diff_snapshot`/`diff_bytes` only when a diff was actually collected from the proven worktree. `dispatch-fail` degrades to a terminal receipt without diff keys whenever evidence is absent, unverifiable, or unrecoverable — including a missing or malformed machine-local state file — while a collection failure with the state present still refuses, preserving the worktree for retry; `dispatch-complete` may recover and collect from a verified ledger-named worktree when the state vanished but still refuses success when evidence cannot be collected. The worktree is removed only after the receipt is durable and only when proven registered (failures and degraded paths preserve the worktree for manual recovery; idempotent terminals reuse the receipt and retry cleanup only when verified; nothing auto-merges). `fadeno show` projects `workspaceMode`/`workspace`/`baseCommit`/`diffSnapshot`/`diffBytes` on `HostRequestView` (ledger-first, prepared-but-not-started degrades to isolated via machine-local state, missing state → shared/null, never throws) and prints isolated facts as non-gating observability; `verify` checks only ledger consistency and never requires machine-local state. See `src/lib/host-workspace.ts`, `src/commands/dispatch-prepare.ts`, `src/lib/host-dispatch.ts`.
+
+**Cancelling a running engine attempt.** `fadeno cancel <run>` (or a unique run
+prefix) targets the single live engine command claim for that run
+(`engine-<runId>-<actorCallId>-a<attempt>.json`), signals the supervisor with
+SIGTERM, or the negative executor process group when the supervisor is proven
+dead (`ESRCH`), and never writes the run ledger. The active engine remains the
+sole ledger writer and records the terminal `actor_failed` receipt. Cancel
+refuses with a clear error when there are zero or multiple live claims rather
+than guessing, preserves the workspace lease and inflight claim until
+child-group termination is proven (`close`), and is safe against adversarial
+process-group races. See `src/commands/cancel.ts`.
+
+**Executor deadlines and idle observability.** Every command route in the
+built-in catalog declares `timeout_ms: 1200000` (20 minutes); host routes may
+not declare it. Arbitrary user catalogs may omit it (no deadline). The
+supervisor owns the deadline: it sends SIGTERM to the executor process group
+at `deadline_at = started_at + timeout_ms` and escalates to SIGKILL after the
+5-second grace. Lease and claim release still waits for `close`, so a timeout
+is not proven until the group is gone. CLI overrides: `--timeout <seconds>` on
+`fadeno drive` and `fadeno dispatch` overrides the snapshotted route value; `0`
+disables the deadline. Internal name is `timeoutMs`. Engine timeout receipts
+are distinct: `actor_failed.reason = "executor_timeout"` with `timeout_ms` and
+`deadline_at`, and ad-hoc `dispatch_completed.outcome = "timeout"` with the same
+facts — process exit/signal facts remain present. Status-file timeout facts
+(`timed_out`, `timeout_ms`, `deadline_at`) outrank the supervisor's exit
+signal when classifying a receipt; wall-time is never inferred. Idle output
+warnings are purely observational: `OUTPUT_IDLE_WARNING_MS = 300000` (5 minutes);
+`HarnessObservedProcessView.outputIdleWarning` becomes true when a process is
+alive and has emitted no output for five minutes (since start or since
+`last_output_at`). CLI rendering is prominent but non-gating:
+`WARNING: no output observed for <duration> (non-gating)` — idle never signals,
+gates, or alters deadlines.
 
 **Comparisons.** `fadeno dispatches --comparisons [--json]` scans the ledger,
 pairs every shadow row with its primary via `primary_dispatch_id`, groups pairs

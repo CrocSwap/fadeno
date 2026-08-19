@@ -54,7 +54,7 @@ general scheduler, or orchestration platform.
   `unvendor`, `evidence promote`, plus
   `init --codex|--claude|--grok [--with-hooks] [--with-steering|--no-steering] [--data-only] [--force]`,
   `validate [file] [--schema]`, `diagram [--format ascii|mermaid]`, `new-run`,
-  `run`, `tool-complete`, `gate`, `prompt`, `next`, `drive`, `loadout`,
+  `run`, `tool-run`, `tool-complete`, `gate`, `prompt`, `next`, `drive`, `loadout`,
   `steering`, `dispatch*`, `completion`, `runs`, `show`, `verify`, `plugin`.
 - Tri-target scaffolding from one template core (Codex, Claude Code, and Grok Build),
   non-destructive. Grok's native adapter emits `.grok/skills`, `.grok/agents`,
@@ -64,7 +64,8 @@ general scheduler, or orchestration platform.
   `judge` role subagents) from the same templates; repo root carries a
   `.claude-plugin/marketplace.json`, so the repo is directly installable
   (`/plugin install fadeno@fadeno`). The plugin carries the CLI and immutable
-  built-in definitions. `init --data-only` seeds only per-repo definitions;
+  built-in definitions. `init --data-only` seeds per-repo definitions plus
+  driver policy (not host capability);
   `vendor` deliberately emits the complete project capability and definition
   surface plus a lock. The plugin is
   **self-contained**: `npm run build:bin` bundles the CLI (deps inlined) into
@@ -83,7 +84,7 @@ general scheduler, or orchestration platform.
 - `$schema` editor modelines in generated YAML (playbooks + run ledgers).
 - Repo-local runtime and run ledger (`run.yaml` / `events.jsonl` / `artifacts/`) with CLI helpers (`run`,
   `prompt`, `next`, `runs` list, `show` timeline, and whole-trace `verify`) and
-  deterministic gate evaluators (`no_blocking_issues`, `tests_pass`) — the
+  deterministic gate evaluators (`all_reviews_approved`, `no_blocking_issues`, `tests_pass`) — the
   advisory→enforced bridge. The driver skill composes these helpers into the
   current model-mediated execution procedure.
 - Tier-2 enforcement scaffold via `--with-hooks` (pre-commit, CI workflow, Claude hook example).
@@ -103,7 +104,7 @@ general scheduler, or orchestration platform.
   `router`, `replicate`, `join`, `artifact_op`, `subworkflow`. Documented contracts, not
   demonstrated behavior.
 - `require_user_approval_for` is advisory in tier-1 hosts (the model is *asked*).
-- Conditions other than `no_blocking_issues` and `tests_pass` remain
+- Conditions other than `all_reviews_approved`, `no_blocking_issues`, and `tests_pass` remain
   agent-interpreted unless and until a deterministic evaluator ships.
 - Skill *sufficiency* (kickoff memo acceptance #8–#9) is model-mediated — needs live-session
   evaluation, not unit tests.
@@ -152,14 +153,15 @@ harness-assigned via `session_id_pattern`), marks every dispatch and
 resulting artifact `session: fresh|resumed` + id, and sends a resumed schema
 repair as only the repair message. Resumed context is **attested, not
 recomputable** — the honest trade for cross-step memory; bias memoryless.
-`fadeno verify` grew from 16 to **26 checks**: attempt-ordinal contiguity +
+`fadeno verify` grew from 16 to **29 checks**: attempt-ordinal contiguity +
 reasons, binding-matches-snapshot-or-override, named-decision
-validity/at-most-once, supersede reference integrity, and session-continuity
-(a resumed id must exist earlier, same role, same executor). `fadeno show`
-surfaces actor calls, attempts, schema repairs, resumed sessions, and
-`! waiting for human decision`. Engine-executable today: actor_call/evaluator/reduce/role-maps
-(with collective assembly), deterministic gates, loops, human gates; tool_call
-and the undemonstrated primitives still hand back to the driver.
+validity/at-most-once, supersede reference integrity, session-continuity
+(a resumed id must exist earlier, same role, same executor), plus
+`tool-result-coherence`, `tool-command-digest`, and `tool-lifecycle`. `fadeno show`
+surfaces actor calls, attempts, schema repairs, resumed sessions,
+`! waiting for human decision`, and harness-observed tool claims. Engine-executable today: actor_call/evaluator/reduce/role-maps
+(with collective assembly), deterministic gates, loops, human gates, and
+`tool_call` for `test-result` via `fadeno tool-run` / `fadeno drive` (registered tools only; `Diff`/`PostResult` remain manual via `tool-complete`); the undemonstrated primitives still hand back to the driver.
 
 ### Accepted next slice: compositional containers
 

@@ -143,7 +143,8 @@ and `AGENTS.md`; it does not create `.grok/config.toml` or change Claude setting
 install Fadeno once as a plugin for every project. Each plugin carries the
 bundled CLI and immutable built-in definitions, so starter playbooks work
 without a project data seed. Use
-`init --data-only` when you want only project-owned definitions. `vendor` is the
+`init --data-only` when you want project-owned definitions plus the read-only
+OpenCode driver policy (host capability still comes from the plugin). `vendor` is the
 deliberate full-capability path (skills, bootstrap, agents, definitions, and a
 lock); do not use it merely to make plugin built-ins available.
 
@@ -156,7 +157,7 @@ codex plugin add fadeno@fadeno
 /plugin marketplace add <owner>/fadeno      # or a local path for testing
 /plugin install fadeno@fadeno               # provides /fadeno:runner and /fadeno:builder
 
-# built-in playbooks work immediately; optional definitions-only customization:
+# built-in playbooks work immediately; optional project-data customization:
 npx fadeno init --claude --data-only
 ```
 
@@ -253,7 +254,7 @@ fadeno new-run code-change-review "Review the supplied specs" \
   --input Agent1Spec=specs/agent-1.md --input Agent3Spec=specs/agent-3.md
 fadeno run <run-id> --step implement            # set current_step + log step_started
 fadeno run <run-id> --status completed           # finalize: status + ended_at + run_completed
-fadeno gate <run-id> no_blocking_issues \
+fadeno gate <run-id> all_reviews_approved \
   --artifact artifacts/review-report.json       # exit 0/1; --report is deprecated
 fadeno gate <run-id> tests_pass \
   --artifact artifacts/test-result.json         # status passed + exit_code 0
@@ -261,10 +262,15 @@ fadeno runs                                     # list run ledgers (newest first
 fadeno show <run-id-or-prefix>                  # logical-step projection (--events for the raw timeline)
 fadeno verify <run-id>                          # recompute the ledger's checkable claims; exit 0/1 (--latest for newest)
 fadeno drive <run-id>                           # engine: advance until terminal or a human pause (uses .fadeno/executors.yaml)
+fadeno drive <run-id> --timeout 300             # override hard deadline (seconds; 0 disables 20-min default)
+fadeno cancel <run-id>                          # cancel the active engine attempt (SIGTERM to its executor group)
 fadeno decide <run-id> <option>                 # resolve a paused human decision, then re-drive
+fadeno dispatch-prepare <run-id> <dispatch-id> --isolate  # opt-in isolated worktree: .fadeno/local/host-worktrees/<run>/<dispatch-id> (workspace_mode: isolated)
 fadeno dispatch-start <run-id> <dispatch-id> --agent-id <host-agent-id>
+fadeno dispatch-prompt <run-id> <dispatch-id> # exact immutable engine assignment envelope (isolated header includes workspace_mode: isolated when prepared)
 fadeno dispatch-progress <run-id> <dispatch-id> --file <status.json> --source agent
 fadeno dispatch-complete <run-id> <dispatch-id> --output <temporary-file>
+fadeno dispatch-complete <run-id> <dispatch-id> --output - < result.json
 fadeno dispatch-fail <run-id> <dispatch-id> --reason "blocked"
 fadeno dispatch-fallback <run-id> <dispatch-id> # exact snapshotted command fallback
 
@@ -293,7 +299,9 @@ host attestation.
 The immutable prompt names an ephemeral progress sidecar. Agents or harnesses
 update that JSON at meaningful checkpoints; the host records provenance-labelled
 observations with `dispatch-progress`. Progress is attested observability, never
-a gate input.
+a gate input. `dispatch-prompt` emits the complete immutable host assignment
+without manual envelope reconstruction, and `dispatch-complete --output -`
+atomically validates and places stdin bytes through the same path as a file.
 An earlier failed host attempt is accepted in a completed trace only when a
 higher-ordinal successful retry for the same actor call is recorded; final or
 unresolved failures remain verification failures.
@@ -313,6 +321,18 @@ map member appears as
 pending, running, waiting, blocked, completed, or failed, with actor/step
 elapsed time and total run time. When progress exists, the view includes its
 phase and current action; it never infers internal state from busy/idle alone.
+Machine-local command facts are shown separately as harness-observed,
+non-gating state: process group and child PIDs, liveness, heartbeat/output age,
+byte counts, and terminal exit or signal where available. Command routes default
+to a 20-minute hard deadline (`timeout_ms: 1200000`); override per invocation
+with `fadeno drive --timeout <seconds>` or `fadeno dispatch --timeout <seconds>`
+(`0` disables). A supervised timeout is recorded as `actor_failed.reason =
+"executor_timeout"` (engine) or `dispatch_completed.outcome = "timeout"`
+(ad-hoc) with `timeout_ms`/`deadline_at` and outranks the exit signal. `fadeno
+cancel <run>` safely stops the active engine attempt (`SIGTERM` to its executor
+group, preserving lease/claim until `close`). `fadeno show` surfaces a prominent
+but non-gating `WARNING: no output observed for <duration> (non-gating)` after
+five minutes (`OUTPUT_IDLE_WARNING_MS`).
 
 `fadeno gate` is the **advisory→enforced bridge**: it computes a gate condition
 from a structured judgment artifact on disk (same check the runner applies), so
@@ -356,9 +376,11 @@ models or policy.
 ```bash
 fadeno dial worker grok --user             # user default — applies across repos
 fadeno dial worker grok --repo             # repo pin — committed
-fadeno dial worker grok                    # adaptive: session when repo-pinned, else user
-fadeno dial clear worker                   # clear session dial
+fadeno dial worker grok --session          # local override — this checkout only
+fadeno dial worker grok                    # update active dial; create user default if none
+fadeno dial clear worker --session         # explicitly clear the local override
 echo "task…" | fadeno dispatch --archetype worker   # ad-hoc: resolve → invoke → evidence row
+echo "task…" | fadeno dispatch --archetype worker --isolate # detached worktree + binary diff, no merge
 fadeno setup --codex                        # one-time user-scoped host integration
 # or: npx fadeno init --claude --no-steering
 ```
@@ -369,6 +391,20 @@ and every run start and dispatch echoes where each role landed
 record the resolution in their ledger and ad-hoc dispatches append to
 `.fadeno/dispatches.jsonl`, so which provider produced an artifact stays
 auditable after the fact.
+
+Write-capable command and host deliveries take one repo-wide machine-local
+writer lease. A retry cannot start while the prior writer or its durable host
+receipt is still active, including across separate runs. Explicitly read-only
+routes bypass it. `dispatch --isolate` also bypasses the shared-worktree lease
+because it runs from committed `HEAD` in a detached worktree and returns a
+binary diff artifact without merging it. Write-capable host map members are
+serialized even within one run; logical fan-out does not permit concurrent
+mutation of the shared worktree. PID-less host reservations do not silently
+expire when optional progress observations are quiet. Contention is reported as
+```
+shared workspace is already held by <kind> "<id>" (supervisor_pid <pid>, started <iso>); holder "<requester>" must wait or retry. Inspect it with `fadeno show <run>`; recover an abandoned host dispatch with dispatch-fail/dispatch-complete. Only after verifying no writer remains, remove .fadeno/local/workspace-lease.json as a last resort.
+```
+For isolated host deliveries, `dispatch-fail` degrades to a terminal receipt without diff keys whenever the isolated evidence is absent, unverifiable, or unrecoverable — including a missing or malformed machine-local state file — and records `diff_snapshot`/`diff_bytes` only when a diff was actually collected from the proven registered worktree. A collection failure while the machine-local state is present still refuses, preserving the worktree for retry. `dispatch-complete` may recover and collect from a verified ledger-named worktree when the state file vanished, but still refuses success when evidence cannot be collected. Neither command stages or removes a directory it has not proven to be this dispatch's registered worktree, and nothing is ever auto-merged. `fadeno doctor` reports lease state as a `workspace-lease` finding and never acquires or deletes. `dispatch --isolate` conflicts with `--shadow` and never auto-merges. Bounded opt-in diagnostics (`--diagnostics` or `FADENO_DIAGNOSTICS=1`) persist at most 32 KiB / 500 lines per stream with head+tail sampling and a single marker `…[fadeno diagnostics truncated: <stdout|stderr> exceeded 32 KiB / 500 lines]…`, stored machine-local under `.fadeno/local/outputs/diagnostics/` (`dispatch-<id>.log` or `<run>-<actorCallId>-a<attempt>.log`), never ledger-committed, never gating.
 
 With steering enabled by default, expensive role-shaped subagent work follows
 that same resolver. `fadeno setup --codex` remembers the harness, so later
@@ -425,7 +461,7 @@ runs a short loop:
 > **describe the flow** (or pick a starter to adapt) → builder **writes the YAML**
 > → shows it back as a **diagram** + summary → you **approve** → it **hands off to
 > the runner**. Built-in playbooks work without a project seed; use
-> `init --data-only` for project-owned definition copies, or `vendor` only when
+> `init --data-only` for project-owned definitions and driver policy, or `vendor` only when
 > you deliberately want the complete capability surface committed.
 
 You can render any playbook's flow yourself:
@@ -441,13 +477,13 @@ fadeno diagram code-change-review --format mermaid   # graph for GitHub/docs
 └──────────────────────┬─────────────────────┘
                        ▼
 ┌─ review_gate ─────────────────────── gate ─┐
-│ no_blocking_issues                         │
+│ all_reviews_approved                       │
 │ ✓ pass ▶ test                              │
 │ ✗ fail ▶ revise                            │
 └────────────────────────────────────────────┘
                        ⋮
 ┌─ revise ──────────────────────────── loop ─┐
-│ max 1 · until no_blocking_issues           │
+│ max 2 · until all_reviews_approved         │
 │ body: implement_revision ▶ review_revision │
 │ ✓ success ▶ test                           │
 │ ⤓ exhausted ▶ unresolved_review            │
@@ -481,7 +517,7 @@ or a runtime later).
   kind: gate
   input:
     - ReviewReport[]
-  condition: no_blocking_issues     # = zero issues with severity "blocking"
+  condition: all_reviews_approved     # = every verdict is approve and zero blocking issues
   on_pass: test
   on_fail: revise
 
@@ -489,9 +525,9 @@ or a runtime later).
   kind: loop
   input:
     - ReviewReport[]
-  max_iterations: 1                 # loops are always bounded
+  max_iterations: 2                 # loops are always bounded
   body: [implement_revision, review_revision]
-  until: no_blocking_issues
+  until: all_reviews_approved
   on_success: test
   on_exhausted: unresolved_review
 

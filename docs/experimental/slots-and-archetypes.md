@@ -238,9 +238,11 @@ identifier-validated (standing backlog item), and unknown-key strictness in
 `archetypes:` entries extends to the new fields.
 
 **Shipped (0.6.0-rc.12).** Deviations from the sketch above, all deliberate:
-`explainWriteConflict` refuses only — the isolated-delivery preference
-(sandbox/worktree instead of refusal) is deferred to route operational
-policy alongside phase 3; steering resolutions carry `resolved_via` always
+`explainWriteConflict` refuses by default; a dial explicitly set with
+`--force` may persist a direct-archetype-only override after a prominent
+warning. The isolated-delivery preference (sandbox/worktree instead of
+refusal) is deferred to route operational policy alongside phase 3;
+steering resolutions carry `resolved_via` always
 (null on a direct bind) while dispatch rows and `loadout resolve` omit the
 key entirely on direct binds, matching the additive `override`-field
 precedent; drive's `resolution_snapshot` role rows do not stamp
@@ -399,10 +401,13 @@ shadow (challenger, zero risk) → override (trial primary, instant revert) → 
 all deliberate: open question 1 is decided for the initial scope — shadows
 fire on kernel-dispatched primaries only, never on host in-session
 deliveries (steering-hook-initiated duplication remains the open follow-up).
-The shadow fires after the primary's completion row is written and fires
-regardless of the primary's exit code — challenger-succeeds-where-primary-
-failed is precisely the signal a tryout wants; a refused primary fires no
-shadow. Every shadow-side refusal (eligibility `forbidden`, write posture,
+The shadow runs concurrently with the primary (since the parallel-shadow
+revision: resolved, worktree-cut, and spawned before the primary starts,
+collected after its completion row is written — latency is max(primary,
+shadow), not their sum, and each side's `duration_ms` is its own
+supervisor-measured runtime) and fires regardless of the primary's exit
+code — challenger-succeeds-where-primary-failed is precisely the signal a
+tryout wants; a refused primary fires no shadow. Every shadow-side refusal (eligibility `forbidden`, write posture,
 constraint command, unresolvable target or host-only route, worktree
 failure) lands as a `dispatch_refused` row carrying `shadow: true` +
 `primary_dispatch_id` and can never affect the primary's result — a

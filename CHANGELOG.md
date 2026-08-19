@@ -6,6 +6,36 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — repo-wide writer leasing, harness heartbeat, isolated delivery, and reference-frame-neutral current-host (0.6.0-rc.33)
+
+- **Repo-wide writer lease (`.fadeno/local/workspace-lease.json`).** Machine-local, never ledger evidence, `workspace_mode` is `shared` or `isolated`. A live `shared` writer blocks every other shared write-capable `fadeno dispatch`, `fadeno drive`, and host dispatch, including peers in the same run (read-only and `isolated` deliveries bypass). Logical host fan-out is serialized until each writer records its terminal receipt; legacy multi-holder records remain readable and require exact-member release. The record carries `supervisor_pid`, `executor_pid`, `process_group_id`, `started_at`, `heartbeat_at`, `last_output_at`, `stdout_bytes`, `stderr_bytes`, and `workspace_mode`. Stale leases with a dead supervisor pid are reclaimable; PID-less host reservations remain conservatively live until `dispatch-complete` or `dispatch-fail`, so optional progress observations never weaken exclusivity. If the run ledger itself cannot record a terminal recovery, the documented last-resort escape hatch is `rm .fadeno/local/workspace-lease.json` after verifying no writer remains.
+
+- **`fadeno dispatch --isolate` (opt-in detached worktree delivery).** Executes in a worktree cut from `HEAD` before the primary runs (`git worktree add --detach .fadeno/local/isolated/<id>`), preserves a binary-safe diff artifact at `.fadeno/local/outputs/isolated-<id>.diff` (`diff_snapshot`/`diff_bytes` in evidence, does not merge automatically, `workspace_changed` omitted), and bypasses the shared-writer lease because it cannot mutate the shared worktree. Conflicts with `--shadow` (refused).
+
+- **`fadeno dispatch-prompt <run> <dispatch-id>` (canonical envelope).** Emits the exact `# Fadeno engine step assignment` envelope with immutable `run`/`dispatch_id` and the recorded prompt bytes, sha256-authenticated with traversal/symlink guards. Replaces manual envelope reconstruction in the driver skill; `README.md` now sells it as the canonical path.
+
+- **Engine-first `fadeno new-run` guidance.** Output now recommends `fadeno drive <run>` first (`Advance it with fadeno drive first (engine):`) with the literal `first`, then the manual `fadeno next`/`fadeno run` fallback. Same ordering is documented in `src/cli.ts` help.
+
+- **`fadeno dispatch-complete --output -` (stdin host completion).** Reads artifact bytes from stdin (`readFileSync(0)`, binary-safe, test seam `stdinBytes`) and uses the same validation, atomic `artifacts/attempts` vs `outputPath` placement, manifest, and receipt path as a temporary file.
+
+- **Structured wildcard specialization (`requested_agent_type` / `delivered_archetype`).** Locked steering (`--run --dispatch-id`) for `agent_type: "*"` now reports `requested_agent_type: "*"` and `delivered_archetype: <concrete>` (the concrete archetype being delivered) without upgrading `identity_evidence` beyond `requested_only`. Because the host agent is already assigned, that wildcard claim may specialize to a declared compatible archetype such as `director` without requiring a second materialized host-agent surface; concrete requests retain the ordinary surface check. `fadeno steering resolve --json`, the committed plugin bundle, and `src/commands/steering.ts` carry the behavior; host start receipts remain `requested_only`.
+
+- **`fadeno show` harness-observed process facts.** `fadeno show` now labels machine-local process facts as `harness-observed` and semantic progress as `agent|harness|director-attested`, both `gating: non-gating` (never controls gates). `src/lib/supervisor.ts` is the sole atomic claim writer after startup: it heartbeats `heartbeat_at`, forwards exact output buffers, and updates byte/activity counters. `src/commands/show.ts` projects the repo-wide lease (including every member of a legacy record), per-dispatch inflight claims, and terminal supervisor status.
+
+- **`fadeno cancel <run>` — safe engine-attempt cancellation.** Targets the single correlated live engine command claim for the resolved run (`engine-<runId>-<actorCallId>-a<attempt>.json`), sends `SIGTERM` to the supervisor PID, or the negative executor process-group ID when the supervisor is proven dead (`ESRCH`), or the executor PID as final fallback. Never writes the run ledger — the active engine remains the sole ledger writer and records the terminal `actor_failed` receipt. Refuses with a clear `CancelError` when there are zero or multiple live correlated claims rather than guessing. Preserves the workspace lease and inflight claim until child-group termination is proven (`close`), never at signal-send time. Returns `{run, actorCallId, attempt, supervisorPid, processGroupId, signalledPid, resolvedBy: "supervisor" | "process_group" | "executor"}`. CLI rendering reports `resolved_by` and the reaped group. See `src/commands/cancel.ts`, `src/cli.ts` `COMMAND_HELP['cancel']`.
+
+- **Supervisor-owned executor hard deadlines with TERM→KILL escalation.** Route YAML key `timeout_ms` (positive integer milliseconds, absent by default) is parsed at both catalog and snapshot trust boundaries and rejected on `host: true` routes. The committed built-in command routes set `timeout_ms: 1200000` (20 minutes). The supervisor owns the deadline: at `deadline_at = started_at + timeout_ms` it sends `SIGTERM` to the executor process group and escalates to `SIGKILL` after the existing 5-second grace (`KILL_GRACE_MS`). Lease and claim release still waits for `close`, so cancellation and timeout are similarly proven only after the group is gone. CLI override `--timeout <seconds>` on `fadeno drive` and `fadeno dispatch` (internal `timeoutMs`) overrides the snapshotted route value; `0` disables the route deadline; empty or non-integer values are rejected. New status fields `timed_out: boolean`, `timeout_ms: number | null`, `deadline_at: string | null` are always reported; `readSupervisorStatus` coerces missing/invalid to `false`/`null`.
+
+- **Distinct timeout receipts.** `actor_failed.reason = "executor_timeout"` with `timeout_ms` and `deadline_at` (plus preserved `signal`/`exit_code` facts) is distinct from `engine_interrupted`, `exit_nonzero`, and ordinary signals. Ad-hoc evidence `dispatch_completed.outcome = "timeout"` carries the same `timeout_ms`/`deadline_at`. Status-file timeout facts (`timed_out`) outrank the supervisor process exit signal when classifying a receipt; wall-time is never inferred. Re-running drive may retry with `user_retry`.
+
+- **Non-gating idle-output warnings in `fadeno show`.** `OUTPUT_IDLE_WARNING_MS = 300000` (five minutes). `HarnessObservedProcessView.outputIdleWarning` becomes true when a process is `alive` and has emitted no output for five minutes (since start when `last_output_at` is null, else since `last_output_at`). `src/cli.ts` renders `WARNING: no output observed for <duration> (non-gating)` per harness-observed fact (`outputAgeMs ?? runtimeMs`). Idle warnings never signal, gate, or alter deadlines — output silence alone never terminates work.
+
+- **Adversarial process-group and ledger-verification coverage.** New and extended tests verify supervisor `SIGTERM`→`SIGKILL` escalation, lease/claim preserved until `close`, process-group `kill(-pgid)` determinism, wall-time not inferred for timeout, and output-silence-never-kills. See `test/supervisor-timeout.test.ts`, `test/cancel.test.ts`, `test/show-timeout-observability.test.ts`, and the new `test/cancel-timeout-integration.test.ts`.
+
+- **Reference-frame-neutral `current-host` locked steering.** An immutable host request with `executor: current-host` and `agent_type: "*"` is already assigned to a concrete host agent; `fadeno steering resolve --archetype <concrete> --run <run> --dispatch-id <id>` now resolves `mode: host` even when the caller has no `--host-executor` marker. Reports `requested_agent_type: "*"`, `delivered_archetype`, and `identity_evidence: requested_only` (never upgraded), retains declared-archetype/`eligibilityFor === 'forbidden'`/`explainWriteConflict`/`requested_identity`/terminal-receipt checks via `decorateSteering(..., requestedAgentType === '*')`. Exports `NEUTRAL_HOST_EXECUTOR = 'current-host'` and `isReferenceFrameNeutralHostRequest(request, spec)` (true iff `request.executor === 'current-host' && request.agentType === '*' && spec.adapter === 'host' && spec.agentType === '*' && spec.model === 'current-host'`), mode line `matchesHost || neutral ? 'host' : hasFallback ? 'command' : 'restart_required'`, new detail string `host request <id> is locked to the reference-frame-neutral executor current-host; execute in-host` only on `!matchesHost && neutral`. Concrete host executors (`luna`/`opus`…) and concrete `agent_type` values remain strict.
+
+- **Opt-in isolated host workspace (`fadeno dispatch-prepare --isolate`).** Pre-spawn for a pending nonterminal host request that has not started: creates an idempotent detached worktree from `HEAD` at `.fadeno/local/host-worktrees/<run>/<dispatch-id>` (guarded against traversal/symlink escape), atomically records `workspace_mode: isolated` state at `.fadeno/local/host-workspaces/<run>/<dispatch-id>.json` (`schema_version: 1.0`, `run`, `dispatch_id`, `workspace` repo-relative, `base_commit` 40-hex, `prepared_at` ISO, plus `diff_snapshot`/`diff_bytes`/`finalized_at` after collection), serialized by `.fadeno/local/.host-workspace.lock` (`WORKSPACE_LEASE_LOCK_STALE_MS`). `dispatch-prompt` then includes `workspace_mode: isolated` plus absolute workspace path and instruction `All repository reads and writes for this assignment must occur in the workspace above; do not read or modify the shared checkout.` (prompt bytes and `prompt_sha256` unchanged, header not hashed, not ledger-written). `dispatch-start` discovers prepared state, stamps `workspace_mode: isolated`/`workspace`/`base_commit` on `actor_dispatched`, enforces `--workspace` match and rejects `command-fallback` with prepared isolated workspace, bypasses shared writer lease (read-only `writeAccess === false` also bypasses), and checks idempotent re-start `workspace_mode` equality; `dispatch-complete`/`dispatch-fail` collect a binary staged diff (`git add -A` → `git diff --binary --cached`) atomically at `.fadeno/local/outputs/host-isolated-<run>-<dispatch-id>.diff` before the terminal receipt, stamp `workspace_mode`/`workspace`/`base_commit` plus `diff_snapshot`/`diff_bytes` only when a diff was actually collected from the proven registered worktree, proving the worktree is the registered linked worktree before any `git add`/`diff` or removal. The worktree is removed only after durable append and only when proven registered (idempotent terminals reuse receipt and retry cleanup only when verified). `dispatch-fail` degrades to a terminal receipt without diff keys whenever the isolated evidence is absent, unverifiable, or unrecoverable — including a missing or malformed machine-local state file — and records `diff_snapshot`/`diff_bytes` only when a diff was actually collected from the proven registered worktree; a collection failure while the machine-local state is present still refuses, preserving the worktree for retry; `dispatch-complete` may recover and collect from a verified ledger-named worktree when the state file vanished, but still refuses success when evidence cannot be collected. Neither command stages or removes a directory it has not proven to be this dispatch's registered worktree, and nothing is ever auto-merged. `HostRequestView` on `fadeno show` projects ledger-first `workspaceMode`/`workspace`/`baseCommit`/`diffSnapshot`/`diffBytes` (prepared-but-not-started degrades to isolated via machine-local read, missing state → `shared`/null, never throws, non-gating); `verify` never requires machine-local state.
+
 ### Changed — dials replace named loadout presets (0.6.0, `docs/experimental/dials-and-registry.md`)
 
 - **Named loadouts retired; per-archetype dials via a layered cascade.** `loadouts:`,
@@ -29,6 +59,126 @@ All notable changes to Fadeno are documented here. The format follows
   ignored — re-dial with `fadeno dial worker <model>`"); v2 catalogs error with a
   migration note. **Breaking (post-0.6 hardening, no compat):** v3-only catalogs (`schema_version 3` required) and `snapshot_version: 3` snapshots — `fadeno verify` refuses pre-dials ledgers with `pre-dials run snapshot — this fadeno verifies snapshot_version 3 ledgers only; verify with fadeno <= 0.6.0-rc.27`; `fadeno dial` is verb-first and `--executor` is removed; pin is `.fadeno/local/dials`; driver aliases are `openai→codex`, `anthropic→claude-cli`, `xai→grok` (plus `google→agy`, `openrouter→opencode`); `ConstraintContext.transport` is now `host`. The dispatches reader still renders legacy rows as history.
 
+- **Deterministic `tool_call` execution (`fadeno tool-run` + shared core).** Strict `tools:` registry in `.fadeno/executors.yaml` (static argv, `timeout`/`timeout_ms`, layered and snapshotted), `fadeno tool-run <run> [--tool <name>] [--timeout <seconds>]` as a thin `tool-exec` adapter (registered `test-result` only; `Diff`/`PostResult` remain manual via `tool-complete`), `fadeno drive` auto-executes registered tools inline. Core in `src/lib/tool-exec.ts`: `readdirSync` live-claim scan (ESM `require` fixed, narrow `ENOENT` vs hard error), post-claim ledger re-read to close stale-attempt sequential double-execution, **exclusive attempt ownership from pre-spawn admission to terminal receipt** — a pid-less pre-spawn lease reservation (like the engine and host paths, so a kernel that dies before the supervisor publishes executor/group identity cannot fail the record open), an `owner_pid` on the in-flight claim, and a supervisor that hands claim *and* lease back to a live polling owner at child close instead of dropping them before synthesis, placement and attribution (it still releases both itself the moment that owner is gone); recovery leaves any live attempt entirely alone, so locked admission is the single authority that refuses one; placement + validation + `artifact_created` + `tool_completed` run in one re-entrant run-lock critical section, and a terminal receipt that already exists parks its attempt's evidence instead of writing a second one; generation-scoped `step_started` after the claim and lease refusals and before `tool_dispatched` (corrupt ledger aborts, never defaults `attempt 1`), `tool_dispatched` appended by the canonical `LedgerWriter` (legacy-ledger gate kept, admission still one atomic check-then-append), exclusive `linkSync` placement (never clobbering `rename`) preserving winner bytes when a manual attribution races the helper, `toolGenerationFromStep` and deliberation comments removed, final-object validation (validated bytes == placed bytes, `details_path` either attested via `artifact_created` or not exposed), and crash-safe attribution preserving an already-`artifact_created` file when `tool_completed` fails. Shared audited recovery `recoverInterruptedToolDispatchesShared` for both `drive` and helper (engine + tool holders, `workspace_lease_recovered`/`reclaim_denied` auditing). `fadeno show` and `fadeno cancel` now include `tool-*` claims with run-scoped visibility and `ESRCH` process-group cancellation. CLI `--timeout` overrides registry, `--timeout 0` disables, bounded `summary` (4000 B) / `details` (32 KiB) / `SPAWN_MAX_BUFFER` (32 MiB) / `stderr` tail (400 B) truncation preserving observed `exit 0`/`failed`/`error` semantics. New `tool-result-coherence`, `tool-command-digest`, and `tool-lifecycle` verify checks; binding-mismatch test reaches binding comparison (not just snapshot-digest). Docs: `roadmap` shipped CLI/executable primitives, `architecture` command/library table, `extending` tool-binding recipe, `CHANGELOG`, and `docs-claims` tripwires for `tool-run`, `tools:`, tool lifecycle events, and verify check names. Tests are hermetic with real `TestContext` cleanup.
+
+- **`run.yaml` is published atomically, and opening a generation is a locked decision.** Every writer reads `run.yaml` to gate on `schema_version`, so rewriting it in place was observable mid-truncation: a concurrent helper could read the empty prefix and refuse a current ledger as `is a legacy ledger (run.yaml has no schema_version)`, or parse it as null and die setting `current_step`. `writeRunDocument` (`src/lib/run-ledger-write.ts`) now serializes to a sibling temp file and places it by `rename`, so every reader sees the whole previous document or the whole next one; `fadeno new-run` and `fadeno run` share it, and the modeline lives in one place. `withRunLock` is re-entrant within a process (everything under it is synchronous, so a nested acquisition is the same call stack), which lets `ensureStepStarted` make the scope decision *and* append inside the same critical section admission uses — two helpers racing one generation now produce exactly one `step_started`, not two shifted invocation numbers.
+
+- **Route write variants: capability picked by archetype policy, not model
+  spelling.** A route declared `write_access: false` may declare
+  `write_variant: { command: [...], resume?: [...] }` — an alternative argv
+  that can write (e.g. headless claude with `--permission-mode acceptEdits`).
+  A `requires_write: required` archetype resolving onto the route gets the
+  variant automatically at every delivery boundary (dispatch, drive,
+  steering, dial show/resolve); every other posture gets the read-only base.
+  `fadeno dial worker opus` now works against a read-only anthropic route
+  with a declared variant, while reviewer/judge dials of the same model stay
+  physically read-only. The compiled variant travels in the run snapshot
+  (replays posture identically), evidence rows gain `write_variant: true`,
+  and the reader marks `[write variant]`. Command-delivery only: `host: true`
+  routes refuse the key at parse (in-session permissions are the host's; the
+  locked fallback lane replays the snapshotted base argv). Also parse errors:
+  `write_variant` on a route that is not `write_access: false`, a variant argv
+  identical to the base, and variant session fields that would violate the
+  `resume ⟺ id source` invariant after posturing. New `director` archetype
+  (canon starter catalog, `requires_write: required`): high-level
+  planning/orchestration handed to a usually-cheaper model that coordinates
+  workers/reviewers itself via the fadeno CLI. Its claude lane is the new
+  `anthropic-exec` route (`--via claude-exec`, declared in every harness
+  family): a command delivery for claude models whose write variant grants
+  `--permission-mode acceptEdits` plus a scoped `--allowedTools
+  "Bash(fadeno:*)"` — can edit and run fadeno, nothing wider. Under the
+  claude harness this is also the first command lane for claude models at
+  all (the plain route is in-session), so an expensive host session can
+  dispatch a whole side task to a cheaper headless claude:
+  `fadeno dial director opus --via claude-exec`. New `fadeno models`
+  inspection surface (closes design open question 3): the registry table
+  under the active harness with per-row delivery, `+write`/`+fadeno` lane
+  marks, and the dial-time probe cache as a `verified` column;
+  `fadeno models <name>` adds `--via` lanes, spellings, and eligibility;
+  `fadeno models --driver <alias>` runs the route's `models_command` for a
+  live backend listing with registered spellings marked. Director packaging:
+  archetypes may declare `brief: <name>` — a template
+  (`.fadeno/briefs/<name>.md`, falling back to the builtin) composed ahead of
+  every ad-hoc dispatch of that archetype, recorded as `brief` in evidence
+  with the digest attesting the composed bytes (`--no-brief` opts out); the
+  starter director declares `brief: director`, whose builtin template
+  teaches the spawned model to coordinate through fadeno instead of doing
+  the work itself. Routes gained per-archetype `eligibility:` (merged with
+  model eligibility, strictest wins) — the structural spelling of "this lane
+  cannot host a director": grok/agy/opencode routes, plan routes, and the
+  non-fadeno-granted claude lanes declare `eligibility: { director:
+  forbidden }`, which also binds unregistered models falling through them. A
+  new `fadeno:dispatch-director` proxy agent hands a whole side task to the
+  dialed director, and the Claude steering hook routes `director`-named
+  spawns like the triad. Effort is the model's property everywhere ("host
+  delivery inherits effort" retired): `@effort` dials on host deliveries are
+  no longer refused (the pin travels on the request, with a note), the dial
+  table and steering resolve show the real effort instead of
+  `inherit`/`inherited`, and `fadeno steering apply --claude` materializes
+  host-dialed slots as local Claude subagents
+  (`.claude/agents/<archetype>.md` with `model:` + `effort:` frontmatter) so
+  an in-session model runs at its own effort rather than the session's —
+  the symmetric of the codex TOML materialization, with managed-file
+  markers, stale-slot removal, and unmanaged files preserved. Starter
+  registry retuned: luna/terra/opus/sonnet/grok to xhigh standard, gemini →
+  `gemini-3.7-flash` @ xhigh, and `muse` registered (routeless builtin — the
+  name resolves everywhere, delivers only where a catalog declares its
+  route). Muse Code is now a first-class driver (`muse-code`, all harness
+  families, verified live): Muse reads prompts only from a regular file
+  (/dev/stdin, bare stdin, and `-` all refused), so routes gained a
+  `{prompt_file}` argv placeholder — substituted at spawn with the kernel's
+  attested prompt-snapshot path (dispatch primary + shadow, drive actors,
+  and the locked host fallback), so the digest attests exactly the bytes the
+  executor reads; evidence records the substituted argv. Also fixed: a
+  briefed `--prompt-file` dispatch now snapshots the composed bytes it
+  actually sends, not the caller's original file. Archetype listings
+  (`fadeno dial` table, status roles) follow the canon power order —
+  director, judge, reviewer, generator, worker — with non-canon archetypes
+  alphabetical after. Generator is a standalone archetype: its `fallback:
+  worker` is gone, so undialed it resolves to the host-native base like any
+  other (the fallback mechanism itself remains for custom archetypes). Plain
+  `fadeno dial clear` (no archetype) now wipes ALL session and user dials —
+  narrated per layer — leaving committed repo pins standing with a pointer
+  to `clear <archetype> --repo`. Multi-archetype set: `fadeno dial` accepts
+  several archetypes for one model — space, `+`, or `,` separated
+  (`dial judge reviewer sol`, `dial worker+generator muse`,
+  `dial worker,reviewer grok`) — validated atomically: one refused archetype
+  refuses the whole command and nothing is written. Per-subcommand
+  help: `fadeno <command> --help` now prints focused usage for the major
+  commands. `fadeno dial clear <archetype>` now follows the dial when the
+  layer is unambiguous: with no session dial and no repo pin it clears the
+  user default (narrated `[user default — the only layer holding a dial]`)
+  instead of demanding a retype with `--user`; a repo pin still blocks the
+  inference (committed config, explicit `--repo` only).
+
+- **Shadows run concurrently with their primary.** The challenger is now
+  resolved, rate-rolled, worktree-cut, and spawned *before* the primary runs,
+  and collected after the primary's completion row is written — previously the
+  entire shadow flow ran only after the primary finished, purely as an
+  artifact of the kernel's synchronous spawn chain. Three consequences, all
+  deliberate: dispatch latency with a live shadow is max(primary, shadow)
+  instead of their sum; the worktree is cut from HEAD before the primary can
+  move it, so both sides start from identical committed state (a primary that
+  commits can no longer contaminate the comparison); and each side's
+  `duration_ms` is its own runtime — measured by its supervisor at exit, never
+  by when the blocked kernel got around to collecting — so time-to-complete is
+  itself comparison evidence, and `fadeno dispatches --comparisons` now prints
+  it per side (`exit 0 in 183ms … vs … exit 0 in 1.3s`). Mechanically, the
+  shadow runs under its own supervisor (same reaping guarantees as the
+  primary; a killed kernel orphans neither side) with a new third supervisor
+  argv slot naming a status file the supervisor writes atomically at exit
+  (`exit_code`/`signal`/`spawn_failed`/`duration_ms`) — the kernel's event
+  loop never turns while either side runs, so the exit report must be a file
+  it can poll for, with a zombie-aware liveness probe so a reportless
+  supervisor death cannot hang the kernel. The prompt reaches the shadow as an
+  fd on the attested snapshot (the kernel can pump no stdin while blocked in
+  the primary's spawn), and the shadow now publishes an in-flight claim, so a
+  long-running challenger is cancellable by its own id. Ledger order becomes
+  request-before-spawn on both sides — `pReq, sReq, pComp, sComp` — and
+  `completed − requested == duration_ms` still holds per side. Unchanged: a
+  refused primary fires no shadow, a shadow failure can never affect the
+  primary's result, and shadow refusal rows keep their predicates.
+
 The engine slices of the next protocol (capabilities 1, 2, 4 + 5 of
 `docs/experimental/next-protocol.md`, plus the explicit supersede event and
 native host dispatch): Fadeno gains a small deterministic, repo-local engine.
@@ -36,7 +186,66 @@ Native dispatch advances the run ledger to format 0.3; format 0.2 and
 unversioned traces remain explicitly readable through `--legacy`, while
 writers accept only 0.3.
 
+### Added — bounded command-member waves (`fadeno drive --parallel`)
+
+- **`fadeno drive --parallel <n>` (1–16, default 1).** Classic `map` steps with
+  command-delivered actor calls now run eligible members concurrently within one
+  ready wave: read-only deliveries (`writeAccess === false`) may run up to the
+  cap, shared write-capable deliveries are serialized at most one live member
+  via the existing repo-wide workspace lease (a foreign live lease still hard-
+  refuses). Admission, dispatch, and receipt are deterministic: dispatch rows in
+  canonical member order, per-member artifact/completion or failure receipts in
+  canonical member order independent of wall-clock, with actual supervisor
+  `duration_ms`/`ended_at` preserved as evidence and `actor_failed` reason
+  `supervisor_lost` when a supervisor dies without a status report. The drive
+  process remains the sole lifecycle-row author (`LedgerWriter` per-run mkdir
+  lock) and `begin`/`collect` are split across `src/lib/supervisor.ts`
+  (`superviseArgv`, `sleepSync`, `supervisorCanStillReport` hoisted and reused).
+  `dispatchOnce` stays as the serial `begin+collect` wrapper so `--parallel 1`
+  is bit-identical except for output arriving via snapshot file. The output-size
+  boundary is enforced at collection by `statSync(...).size > 32 MiB` before any
+  whole-file read; a runaway executor is recorded as `output_too_large` rather
+  than an empty-output repair, a snapshot that cannot be stat'ed or read is
+  recorded as `output_unreadable`, and an over-cap stderr snapshot is read only
+  as its trailing `stderr_tail` bytes so runaway stderr cannot exhaust the
+  drive process. Mixed host/command maps interleave durable host
+  requests and command receipts in canonical order; unresolved host requests
+  still block terminal state. Compositional command leaves remain an explicit
+  documented deferral (shared-role `latestSessionForRole` leakage and frontier
+  ambiguity, see `docs/experimental/compositional-runtime.md`). `fadeno cancel
+  --actor-call <id>` disambiguates when multiple command claims are live.
+
 ### Fixed
+
+- **Exceptional primary failures no longer leak shadow worktrees.** Concurrent
+  shadow collection is attempted exactly once from the primary lifecycle's
+  `finally`, and detached-worktree removal is itself guaranteed by the shadow
+  collector's `finally`. A failure while persisting the primary or shadow
+  completion receipt can no longer leave `.fadeno/local/shadow/<id>` on disk
+  or registered with Git.
+
+- **Lease-lock staleness is consistent across process boundaries.** The
+  embedded executor supervisor and the in-process workspace-lease helper now
+  share the same 120-second stale-lock threshold instead of pruning at 30 and
+  120 seconds respectively.
+
+- **Host handoff completion is ledger-aware.** Bash completion now suggests
+  only nonterminal host dispatch IDs from the preceding run for
+  `dispatch-prompt`, `dispatch-start`, `dispatch-progress`,
+  `dispatch-complete`, `dispatch-fail`, and `dispatch-fallback`; completion
+  for `dispatch-complete --output` also offers `-` for stdin.
+
+- **`dispatches --output last` could hand a caller the challenger's report.**
+  Shadow request rows carry `output_snapshot` like any other, so after a
+  shadowed dispatch the newest snapshot-bearing request row *was* the shadow —
+  `last` resolved to it and returned the challenger's output as if it were the
+  caller's own. Latent under the sequential design (nothing exercised it);
+  under concurrent shadows it would have flipped to the opposite failure,
+  refusing every shadowed dispatch as "ran concurrently". Shadow records are
+  now excluded from `last` candidacy, the open-dispatch set, and the
+  concurrency refusal — the caller launched the primary, the kernel launched
+  the shadow, and a shadow overlaps its own primary by design. Explicit
+  recovery and cancel by shadow id still work.
 
 - **A shadow could edit the workspace it exists to protect, and the ledger said
   it hadn't.** `spawnSync({ cwd })` chdirs the child but leaves the inherited

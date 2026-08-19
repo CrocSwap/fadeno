@@ -106,6 +106,9 @@ The reliable test for which role you mean: **does it need a
   `effort`, optional `spellings:` per driver). Carries identity only: never
   argv, never permission flags. `current-host` is the built-in model for
   host-native base delivery.
+- **Displayed harness** — the model's stable home driver (`luna → codex`),
+  shown identically from every caller reference frame. The active route's
+  `host | command` adapter remains separate structured resolution data.
 - **Route** — how the *host* reaches a provider. Keyed by harness id, then by
   provider, with `driver:` as the `--via` alias and `models_command:` /
   `effort_encoding:` for dial-time behavior.
@@ -169,11 +172,13 @@ assert on return values and filesystem effects instead of scraping stdout.
 | `runGate` | pass/fail + blocking titles | The advisory→enforced bridge. |
 | `runPrompt` | prompt text + sha + record status + plan | Deterministic step-prompt assembler; records a snapshot + `prompt_assembled` by default. Pure resolution/rendering live in `lib/prompt-resolve.ts` + `lib/prompt.ts`. |
 | `runNext` | next-step JSON (`status`, `step`, `gate`, …) | Pure flow cursor over playbook + events; read-only. Logic in `lib/flow-cursor.ts`. |
-| `runDialShow` / `…Set` / `…Clear` / `…Shadow` | effective dial table + layered dial state | `set`/`clear` pin `.fadeno/local/dials` (session) or `$FADENO_STATE_HOME/dials.json` (user) or `dials:` (repo); shadows are session-pinned. Resolution via `resolveDialCascade` + `compileDialRef` in `lib/executors.ts`. |
+| `runDialShow` / `…Set` / `…Clear` / `…Shadow` | effective dial table + layered dial state | `set`/`clear` pin `.fadeno/local/dials` (session) or `$FADENO_STATE_HOME/dials.json` (user) or `dials:` (repo); `--force` persists a warned, direct-archetype-only write-posture override; shadows are session-pinned. Resolution via `resolveDialCascade` + `compileDialRef` in `lib/executors.ts`. |
 | `runDispatch` | executor report + evidence row | Ad-hoc archetype→executor dispatch; appends a correlated `dispatch_requested`/`dispatch_completed` row pair to `.fadeno/dispatches.jsonl`. Refuses before spawning when the resolved command route declares `write_access: false` and the archetype declares `requires_write: true`. Echo goes to stderr so stdout stays the executor's pure report. |
 | `runDispatches` | correlated dispatch rows | Read-only projection of `.fadeno/dispatches.jsonl`: pairs `dispatch_requested`/`dispatch_completed` by `dispatch_id`, keeps `host_delivery` rows inline, and marks a request with no completion as killed-or-in-flight rather than dropping it. Pre-format legacy rows render as `[legacy]`; newer-format rows get a separate count. `--tail <N>` (default 10) / `--json`. |
 | `runSteeringResolve` / `runSteeringApply` | hybrid mode / emitted Codex agents | Resolves host vs command vs restart-required vs write-conflict per invocation; materializes per-slot host agents or cheap command brokers, declining brokers for write-conflicted slots. |
-| `runToolComplete` | run update + artifact manifest | Validates a typed tool result before atomically starting the exact next `tool_call` and recording its result. |
+| `runToolRun` | `ToolRunResult` + `artifact` | Executes a registered `tool_call` (`test-result` only) deterministically: strict registry, supervisor/process-group, writer lease, bounded TestResult synthesis, exclusive placement, and `tool_dispatched`/`tool_completed`/`tool_failed` lifecycle. Thin adapter over `lib/tool-exec.ts`. |
+| `runToolComplete` | run update + artifact manifest | Validates a typed tool result before atomically starting the exact next `tool_call` and recording its result. Shares claim/lease/concurrency discipline with `tool-run` (generation-scoped, one attempt wins). |
+| `runCancel` | `CancelResult` | SIGTERM to the live supervisor/process-group for `engine-*` or `tool-*` claims (run-scoped, `ESRCH`-checked before retry). |
 | `runPlugin` | `EmitResult[]` + `outDir` | Generates `plugin/` from templates. |
 | `runSetup` | user paths, probes, dial state, restart notices | Safe host-default setup and dial-backed steering; no longer seeds a user dial pin. |
 | `runStatus` / `runDoctor` | effective routing / findings | Read-only diagnostics (dial layers + per-role resolved rows). |
@@ -214,15 +219,43 @@ back to ordinary file completion when no specialized candidates apply.
 - **`run-ledger.ts`** — list/resolve runs, parse events, list artifacts, and
   gate format-0.3 readers behind explicit 0.2 compatibility mode.
 - **`host-dispatch.ts`** — durable host request/start/terminal receipt
-  protocol with immutable output placement and attempt evidence.
-- **Command dispatch recovery** — a normal signal produces `actor_failed`
-  immediately; if the engine is hard-killed before it can append, the next
-  `fadeno drive` closes every dangling command start with a recovered
-  `engine_interrupted` terminal receipt before retrying.
+  protocol with immutable output placement and attempt evidence. Write-capable
+  host work holds a PID-less, full-identity workspace lease until its terminal
+  receipt; completion accepts either a file or binary stdin and places output
+  with a same-directory atomic rename. Opt-in isolated host delivery uses `fadeno dispatch-prepare <run> <dispatch-id> --isolate` to create a detached worktree at `.fadeno/local/host-worktrees/<run>/<dispatch-id>` (workspace_mode: isolated, state at `.fadeno/local/host-workspaces/<run>/<dispatch-id>.json`), guarded against traversal/symlink escape and serialized by `.fadeno/local/.host-workspace.lock`; `dispatch-prompt` then includes `workspace_mode: isolated` and the absolute workspace path, and `dispatch-start` stamps `workspace_mode: isolated`/`workspace`/`base_commit` on `actor_dispatched`. `dispatch-complete`/`dispatch-fail` collect a binary staged diff at `.fadeno/local/outputs/host-isolated-<run>-<dispatch-id>.diff` without auto-merge, stamping `workspace_mode: isolated` plus `workspace`/`base_commit` and `diff_snapshot`/`diff_bytes` only when a diff was actually collected from the proven registered worktree; `dispatch-fail` degrades to a terminal receipt without diff keys whenever evidence is absent, unverifiable, or unrecoverable (including a missing or malformed machine-local state file) while a collection failure with the state present still refuses, preserving the worktree for retry; `dispatch-complete` may recover and collect from a verified ledger-named worktree when the state vanished but still refuses success when evidence cannot be collected. Neither command stages or removes a directory it has not proven to be this dispatch's registered worktree, and nothing is ever auto-merged. `fadeno show` surfaces workspace_mode as non-gating observability; `verify` never requires machine-local state.
+- **`host-workspace.ts`** — idempotent detached-worktree primitive for opt-in isolated host delivery: `HOST_WORKTREES_DIR` is `.fadeno/local/host-worktrees`, `HOST_WORKSPACES_DIR` is `.fadeno/local/host-workspaces`, `HOST_ISOLATED_DIFF_DIR` is `.fadeno/local/outputs`, lock `.fadeno/local/.host-workspace.lock`, state schema `1.0` with `workspace_mode: isolated`, traversal/symlink-safe paths, atomic tmp+rename writes, and delegation to `workspace-lease` for binary diff collection.
+- **`workspace-lease.ts`** — the machine-local, repo-wide single-writer lease
+  plus detached-worktree isolation for `dispatch --isolate`. Command supervisors release a full-holder
+  lease only after the executor process group closes; host leases remain
+  conservative until complete/fail. Isolated host delivery via `fadeno dispatch-prepare --isolate` also returns a binary diff
+  and never merges automatically. A shared writer blocks with
+  ```
+  shared workspace is already held by <kind> "<id>" (supervisor_pid <pid>, started <iso>); holder "<requester>" must wait or retry. Inspect it with `fadeno show <run>`; recover an abandoned host dispatch with dispatch-fail/dispatch-complete. Only after verifying no writer remains, remove .fadeno/local/workspace-lease.json as a last resort.
+  ``` Multi-holder fan-out enumerates `holders: "<id1>", "<id2>"`. Doctor reports the same state as a `workspace-lease` finding (stale vs live, lock staleness at 120s) and never acquires or deletes. `--isolate` bypasses the lease; `--diagnostics` (or `FADENO_DIAGNOSTICS=1`) is opt-in only, bounded to 32 KiB / 500 lines per stream with head+tail sampling and a single truncation marker `…[fadeno diagnostics truncated: <stdout|stderr> exceeded 32 KiB / 500 lines]…`, stored machine-local under `.fadeno/local/outputs/diagnostics/` as `dispatch-<id>.log` (ad-hoc) or `<run>-<actorCallId>-a<attempt>.log` (engine), never ledger-committed, never gating.
+- **Command dispatch supervision and recovery** — both ad-hoc dispatches and
+  engine command attempts run below a supervisor that owns the executor's
+  process group. The supervisor forwards exact output bytes while publishing
+  independent heartbeat, output activity, PID/process-group, and terminal
+  status facts (`supervisor_pid`, `executor_pid`, `process_group_id`,
+  `started_at`, `heartbeat_at`, `last_output_at`, `stdout_bytes`,
+  `stderr_bytes`, plus `timed_out`/`timeout_ms`/`deadline_at` when a deadline
+  is in force). Before supervisor startup, the engine atomically publishes an
+  exclusive correlated claim; a machine-local in-flight claim then lets another
+  `fadeno drive` distinguish any still-running attempt from a dead engine,
+  independent of write posture. Recovery refuses to
+  record `engine_interrupted` or retry while the supervisor is alive, then
+  closes the dangling start only after no live claim remains. A supervisor-owned
+  hard deadline sends SIGTERM to the executor group at `deadline_at` and
+  escalates to SIGKILL after 5s; lease and claim release still waits for
+  `close`, so cancellation and timeout are similarly proven only after the
+  group is gone. Idle output is never a termination signal — `show`
+  surfaces `WARNING: no output observed for <duration> (non-gating)` after
+  five minutes via `OUTPUT_IDLE_WARNING_MS` and `HarnessObservedProcessView.outputIdleWarning`.
+- **`tool-exec.ts`** — deterministic `tool_call` execution core: strict `tools:` registry parsing (static argv, timeout), `tool_dispatched` → supervisor spawn (shared writer lease, `readdirSync` live-claim scan with `ESRCH` group reclaim) → bounded `TestResult` synthesis → exclusive `linkSync` placement (never clobbering) → `artifact_created` + `tool_completed`/`tool_failed` lifecycle (one attempt wins, `tool-generation` scoped, crash-safe attribution preserving already-attributed bytes). Used by both `fadeno tool-run` and `fadeno drive`; recovery via shared `recoverInterruptedToolDispatchesShared`.
 - **`executors.ts`** — the executor profile (`.fadeno/executors.yaml`): v3 registry
   `models:` plus per-harness `routes:` (with `driver:`, `models_command:`,
   `effort_encoding:`), layered **dials** (`session` → `repo` → `user` → `base`),
-  and per-role `bindings`; plus a `unregistered_model_driver` fall-through.
+  per-role `bindings`, and **`tools:`** (`tool` → `{command: string[], timeout?, timeout_ms?}` static argv, no shell/interpolation, positive timeout; layered like other catalog keys; snapshotted into `profile.yaml`); plus a `unregistered_model_driver` fall-through.
   v1 executor profiles remain supported for ledger replay via
   `resolveRoleLegacy`. Core helpers: `parseDialRef`/`formatDialRef`,
   `compileDialRef` (registry → delivery), `resolveDialCascade` (pure cascade,
@@ -302,20 +335,24 @@ receipt commands:
   `current_step`.
 - **`gate <id> <condition> --artifact <path>`** (`runGate`) validates a named
   artifact against the condition's schema, evaluates it deterministically, logs a
-  `gate_evaluated` event, and **exits 0/1**. v0 supports `no_blocking_issues` and
+  `gate_evaluated` event, and **exits 0/1**. v0 supports `all_reviews_approved`, `no_blocking_issues`, and
   `tests_pass`; `--report` remains a deprecated alias. This is the
   **advisory→enforced bridge**: the same check the runner applies can run in CI, a
   pre-commit hook, or a Claude Code `Stop` hook. See `enforcement.md`.
-- **`dispatch-start|dispatch-progress|dispatch-complete|dispatch-fail`** are
+- **`dispatch-prompt|dispatch-start|dispatch-progress|dispatch-complete|dispatch-fail`** are
   host receipts. A
   host executor request is durable before host work begins; receipts record
   the requested model/effort/type, host agent id, provenance-labelled
   non-gating progress, and terminal output/failure. Requested identity is
   internally checked but stays visibly unverified unless a future host supplies
-  authoritative runtime metadata. `show` reloads the run's playbook so the projection
+  authoritative runtime metadata. `dispatch-prompt` emits the immutable engine
+  assignment envelope and recorded prompt bytes without host-side
+  reconstruction. `show` reloads the run's playbook so the projection
   retains graph order and pending actors, then overlays lifecycle/progress
-  events and derives actor/step/total runtime. The director is the only ledger
-  writer during this MVP.
+  events and derives actor/step/total runtime. It labels semantic progress as
+  agent/harness/director-attested and presents machine-local process facts in a
+  distinct harness-observed, non-gating section. The director is the only
+  ledger writer during this MVP.
 
   `steering resolve --run <run> --dispatch-id <id>` is the engine-delivery
   branch: it reads the unique immutable host request and run profile snapshot,
@@ -330,7 +367,7 @@ from `lib/node-instance.ts` distinguish map members and loop generations; drive
 batches every ready host leaf, scopes its prompt/output, and recomputes
 the frontier after receipts. Literal maps and linear bodies are the deliberate
 first boundary. `show` groups observed paths back under their declared graph,
-while `verify` recomputes path, parent, member, generation, and dispatch ids.
+while `verify` recomputes path, parent, member, generation, and dispatch ids. For deterministic `tool_call` steps, `verify` also recomputes `tool-result-coherence`, `tool-command-digest`, and `tool-lifecycle` (one terminal per `tool_dispatched`, digest vs snapshotted `tools:` binding).
 
 Two evidence surfaces sit beside the step lifecycle:
 
@@ -402,6 +439,7 @@ Everything `init` emits and everything the plugin bundles comes from `templates/
 templates/
   common/                 # identical across targets
     fadeno/               # → .fadeno/ : vocabulary, playbooks, schemas, enforcement
+    opencode-agents/      # → .opencode/agents : read-only driver policy
     skills/               # the three SKILL.md bodies + references (sigil-free)
     commands/             # /fadeno:* slash-command files (plugin)
     hooks/                # pre-commit, CI workflow, README (tier-2 scaffold)
@@ -411,7 +449,8 @@ templates/
 ```
 
 `runInit` (`src/commands/init.ts`) composes these: always copy `common/fadeno` →
-`.fadeno/`; unless `--data-only`, also install skills (shared body + per-target
+`.fadeno/` and the OpenCode driver policy → `.opencode/agents/`; unless
+`--data-only`, also install skills (shared body + per-target
 dir/policy), subagents, and the bootstrap file; optionally the hooks scaffold
 (`--with-hooks`); and on Claude, merge a `Bash(fadeno:*)` allow-rule into
 git-ignored `.claude/settings.local.json` (plugins can't grant themselves Bash
@@ -500,7 +539,8 @@ The build adds a standalone CLI plus immutable built-in definitions under
 `plugin/bin/`; every skill also gets an executable private launcher under
 `scripts/fadeno.cjs`, so plugin operation does not depend on shell `PATH`. Plugin
 users can run starter playbooks without project init.
-`init --data-only` is the definitions-only project seam. `vendor` deliberately
+`init --data-only` is the project-data seam (definitions plus driver policy,
+without host capability). `vendor` deliberately
 emits the full project capability surface plus definitions and a lock.
 
 `npm run build:plugin` runs `fadeno plugin ./plugin --force` **and**
