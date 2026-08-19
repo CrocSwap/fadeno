@@ -16,7 +16,7 @@ export interface InitOptions {
   withSteering?: boolean;
   /** Explicitly keep the legacy unsteered project surface. */
   noSteering?: boolean;
-  /** Seed only the per-repo `.fadeno/` definitions; skip skills/subagents/bootstrap. */
+  /** Seed per-repo definitions + driver policy; skip host skills/subagents/bootstrap. */
   dataOnly?: boolean;
   /** Working directory used to locate the repo root. Defaults to process.cwd(). */
   cwd?: string;
@@ -54,6 +54,16 @@ export function runInit(opts: InitOptions): InitResult {
   // 1. Shared `.fadeno/` tree (vocabulary, playbooks, schemas, runs, enforcement).
   //    This is the per-repo "definitions" layer — always written.
   copyTree(join(tpl, 'common', 'fadeno'), join(repoRoot, '.fadeno'), force, results);
+  // OpenCode's CLI has no argv-only read-only switch. Its route selects this
+  // project agent, whose explicit deny rules remove edit, shell, and subagent
+  // escape hatches while keeping inspection tools. This is route policy, so it
+  // ships in data-only/plugin setups alongside the executor catalog.
+  copyTree(
+    join(tpl, 'common', 'opencode-agents'),
+    join(repoRoot, '.opencode', 'agents'),
+    force,
+    results,
+  );
   // `.fadeno/local/` is per-machine session state (sticky loadout, prompt
   // relays) and `.fadeno/dispatches.jsonl` is per-machine dispatch evidence
   // (auditable locally, never committed) — scaffolding adds the ignore entries.
@@ -65,7 +75,7 @@ export function runInit(opts: InitOptions): InitResult {
 
   // Steps 2–4 install the "capability" layer (skills, subagents, bootstrap).
   // --data-only skips them: a plugin user gets capability from the plugin, so
-  // init only needs to seed the definitions above.
+  // init only needs to seed the project data and driver policy above.
   if (!opts.dataOnly) {
     // 2. Skills — shared bodies, per-target install dir and invocation policy.
     let skillsBase: string;

@@ -78,6 +78,13 @@ export interface DownstreamNote {
   condition: string;
 }
 
+export interface RejectionContext {
+  gateStep: string;
+  decisionId: string | null;
+  resolvedBy: string | null;
+  feedback: string | null;
+}
+
 export interface ResolutionPlan {
   kind: string;
   actor: string | null;
@@ -91,6 +98,7 @@ export interface ResolutionPlan {
   otherMembers: string[];
   loopOwner: string | null;
   purpose: string | null;
+  rejection: RejectionContext | null;
 }
 
 const ARTIFACT_EVENT_TYPES = new Set(['artifact_created']);
@@ -169,13 +177,17 @@ function withGeneration(path: string, iteration: number): string {
 
 /**
  * Inverse of `withGeneration`: parse a `.v<G>` marker out of a path. A path
- * with no marker is generation 1 (the pre-loop original).
+ * with no marker is generation 1 (the pre-loop original). The trailing group
+ * spans *every* remaining suffix, so a derived sidecar of a versioned artifact
+ * (`test-result.v2.details.txt`) reports generation 2 with logical path
+ * `test-result.details.txt` — not generation 1, which would collide with the
+ * pre-loop original in any generation-scoped predicate.
  */
 export function parseGeneration(path: string): { logicalPath: string; generation: number } {
   const slash = path.lastIndexOf('/');
   const dir = path.slice(0, slash + 1);
   const base = path.slice(slash + 1);
-  const match = base.match(/^(.*)\.v(\d+)(\.[^.]*)?$/);
+  const match = base.match(/^(.*)\.v(\d+)((?:\.[^.]*)*)$/);
   if (!match) return { logicalPath: path, generation: 1 };
   return { logicalPath: `${dir}${match[1]}${match[3] ?? ''}`, generation: Number(match[2]) };
 }
@@ -264,7 +276,9 @@ function resolveInput(
       continue;
     }
     const producer = candidate.producer === '(declared input)' ? undefined : findStep(flow, candidate.producer);
-    if (producer && producer.output_path != null) {
+    const attributesByMember =
+      producer != null && producer.output_path != null && asStringArray(producer.over).length > 0;
+    if (attributesByMember) {
       // Producer attributes by member, yet this path matched none: it is the
       // assembled aggregate (e.g. cross-review.json alongside the member files).
       if (!aggregate || candidate.index > aggregate.index) aggregate = candidate;
@@ -428,6 +442,7 @@ export function resolveStepPlan(playbook: Playbook, events: RunEvent[], sel: Sel
   const output = planOutput(playbook, step, sel.step, kind, isMap, actor, iteration, isBody);
   const downstream = resolveDownstream(flow, output.collectiveType);
   const purpose = resolvePurpose(playbook, actor);
+  const rejection = resolveRejectionContext(flow, events, sel.step, inputCutoff);
 
   return {
     kind,
@@ -442,6 +457,7 @@ export function resolveStepPlan(playbook: Playbook, events: RunEvent[], sel: Sel
     otherMembers,
     loopOwner,
     purpose,
+    rejection,
   };
 }
 
@@ -661,4 +677,43 @@ function resolvePurpose(playbook: Playbook, actor: string | null): string | null
   if (!role || typeof role !== 'object') return null;
   const purpose = (role as Record<string, unknown>).purpose;
   return typeof purpose === 'string' ? purpose : null;
+}
+
+function resolveRejectionContext(
+  flow: PlaybookStep[],
+  events: RunEvent[],
+  stepId: string,
+  inputCutoff: number,
+): RejectionContext | null {
+  const rejectingGates = flow.filter(
+    (step) => step.kind === 'human_gate' && typeof step.id === 'string' && step.on_reject === stepId,
+  );
+  if (rejectingGates.length === 0) return null;
+  const gateIds = new Set(rejectingGates.map((s) => s.id as string));
+  for (let i = inputCutoff - 1; i >= 0; i -= 1) {
+    const event = events[i]!;
+    if (event.type === 'decision_resolved' && typeof event.step === 'string' && gateIds.has(event.step)) {
+      const option = typeof event.extra.option === 'string' ? event.extra.option : null;
+      if (option !== 'reject') continue;
+      return {
+        gateStep: event.step,
+        decisionId: typeof event.extra.decision_id === 'string' ? event.extra.decision_id : null,
+        resolvedBy: typeof event.extra.resolved_by === 'string' ? event.extra.resolved_by : null,
+        feedback: typeof event.extra.feedback === 'string' ? event.extra.feedback : null,
+      };
+    }
+    if (event.type === 'human_decision' && typeof event.step === 'string' && gateIds.has(event.step)) {
+      const decision = event.extra.decision;
+      const branch = typeof event.extra.branch === 'string' ? event.extra.branch : null;
+      const isReject = decision === 'reject' || branch === 'reject' || branch === 'on_reject';
+      if (!isReject) continue;
+      return {
+        gateStep: event.step,
+        decisionId: typeof event.extra.decision_id === 'string' ? event.extra.decision_id : null,
+        resolvedBy: typeof event.extra.resolved_by === 'string' ? event.extra.resolved_by : null,
+        feedback: typeof event.extra.feedback === 'string' ? event.extra.feedback : null,
+      };
+    }
+  }
+  return null;
 }

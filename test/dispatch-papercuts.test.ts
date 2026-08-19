@@ -102,11 +102,13 @@ test('scaffold: executors.yaml carries the built-in v3 catalog', (t) => {
 test('built-in catalog: worker resolves to base (current-host) with no dials', (t) => {
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
-  // steering resolve for worker with no dials → base host
+  // steering resolve for worker with no dials → base host. User state is
+  // isolated: "no dials" must mean this fixture, not the developer's real
+  // user layer (a real `worker` user dial would flip source to `user`).
   const result = runSteeringResolve({
     repoRoot: root,
     archetype: 'worker',
-    userPathOptions: harnessOpts,
+    userPathOptions: { home: join(root, 'home'), env: { FADENO_STATE_HOME: join(root, 'user-state'), FADENO_HARNESS: HARNESS } },
   });
   // In standalone, current-host host without fallback is unsupported for dispatch
   // but steering should still resolve mode; for codex host materialization is host.

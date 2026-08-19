@@ -126,11 +126,39 @@ test('no route command carries an empty argv element', () => {
   }
 });
 
-test('every driver route can take worker-shaped work', () => {
+test('driver routes expose every write posture they can honestly deliver', () => {
   for (const harness of HOSTS) {
     const profile = catalogFor(harness);
-    for (const { routeKey } of DRIVERS) {
-      assert.equal(profile.routes[harness]?.[routeKey]?.write_access, true, `${harness}: ${routeKey} cannot take worker work`);
+    const agy = profile.routes[harness]?.google;
+    assert.equal(agy?.write_access, true, `${harness}: Antigravity must retain its verified write lane`);
+    assert.equal(agy?.write_variant ?? null, null, `${harness}: Antigravity must not claim an unverified read base`);
+
+    const opencode = profile.routes[harness]?.openrouter;
+    assert.equal(opencode?.write_access, false, `${harness}: OpenCode base must be read-only`);
+    assert.ok(opencode?.write_variant, `${harness}: OpenCode must retain a worker-capable write variant`);
+    assert.ok(opencode?.command?.includes('fadeno-readonly'), `${harness}: OpenCode base must select Fadeno's deny-policy agent`);
+    assert.ok(!opencode?.write_variant?.command.includes('fadeno-readonly'), `${harness}: OpenCode write variant must drop the deny-policy agent`);
+  }
+});
+
+test('every non-host command route except Antigravity has a read base and write variant', () => {
+  for (const harness of HOSTS) {
+    const profile = catalogFor(harness);
+    for (const [routeKey, route] of Object.entries(profile.routes[harness] ?? {})) {
+      if (route.host || routeKey === 'current-host' || routeKey === 'google') continue;
+      assert.equal(route.write_access, false, `${harness}: ${routeKey} base is not read-only`);
+      assert.ok(route.write_variant, `${harness}: ${routeKey} has no write variant`);
     }
+  }
+});
+
+test('verified read bases carry the driver-specific physical restriction', () => {
+  for (const harness of HOSTS) {
+    const routes = catalogFor(harness).routes[harness] ?? {};
+    if (!routes.openai?.host) assert.ok(routes.openai?.command?.includes('read-only'), `${harness}: Codex lacks read-only sandbox`);
+    if (!routes.xai?.host) assert.ok(routes.xai?.command?.includes('read-only'), `${harness}: Grok lacks read-only sandbox`);
+    assert.ok(routes.openrouter?.command?.includes('fadeno-readonly'), `${harness}: OpenCode lacks read-only agent`);
+    assert.ok(routes.muse?.command?.includes('--disable-write'), `${harness}: Muse write tool remains enabled`);
+    assert.ok(routes.muse?.command?.includes('--disable-shell'), `${harness}: Muse shell escape remains enabled`);
   }
 });

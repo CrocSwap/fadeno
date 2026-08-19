@@ -21,11 +21,11 @@ models:
   luna:
     provider: openai
     id: gpt-5.6-luna
-    effort: medium
+    effort: xhigh
   terra:
     provider: openai
     id: gpt-5.6-terra
-    effort: medium
+    effort: xhigh
   sol:
     provider: openai
     id: gpt-5.6-sol
@@ -33,17 +33,29 @@ models:
   opus:
     provider: anthropic
     id: opus
-    effort: high
+    effort: xhigh
     spellings:
       opencode: anthropic/claude-opus-4.8
+  fable:
+    provider: anthropic
+    id: fable
+    effort: high
+  sonnet:
+    provider: anthropic
+    id: sonnet
+    effort: xhigh
   grok:
     provider: xai
     id: grok-4.6
-    effort: high
+    effort: xhigh
   gemini:
     provider: google
-    id: gemini-3.1-pro
-    effort: high
+    id: gemini-3.7-flash
+    effort: xhigh
+  muse:
+    provider: muse
+    id: muse-spark-1.2-contributor
+    effort: xhigh
 
 routes:
   codex:
@@ -57,23 +69,52 @@ routes:
     anthropic:
       driver: claude-cli
       command: [claude, -p, --model, "{model}"]
+      timeout_ms: 1200000
       write_access: false
+      write_variant:
+        command: [claude, -p, --model, "{model}", --permission-mode, acceptEdits]
+      eligibility: { director: forbidden }
+    anthropic-exec:
+      driver: claude-exec
+      command: [claude, -p, --model, "{model}"]
+      timeout_ms: 1200000
+      write_access: false
+      write_variant:
+        command: [claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, "Bash(fadeno:*)"]
     xai:
       driver: grok
-      command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
-      write_access: true
+      command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --sandbox, read-only, --always-approve]
+      timeout_ms: 1200000
+      write_access: false
+      write_variant:
+        command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
       models_command: [grok, models]
+      eligibility: { director: forbidden }
     google:
       driver: agy
       command: [agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text]
+      timeout_ms: 1200000
       write_access: true
       models_command: [agy, models]
       effort_encoding: model-suffix
+      eligibility: { director: forbidden }
     openrouter:
       driver: opencode
-      command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto]
-      write_access: true
+      command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --agent, fadeno-readonly, --auto]
+      timeout_ms: 1200000
+      write_access: false
+      write_variant:
+        command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto]
       models_command: [opencode, models]
+      eligibility: { director: forbidden }
+    muse:
+      driver: muse-code
+      command: [muse, exec, --provider, meta, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --prompt-file, "{prompt_file}", --workspace, ".", --trust-workspace, --disable-approval, --disable-write, --disable-shell, --user-input-auto-resolve, --no-session-log]
+      timeout_ms: 1200000
+      write_access: false
+      write_variant:
+        command: [muse, exec, --provider, meta, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --prompt-file, "{prompt_file}", --workspace, ".", --trust-workspace, --disable-approval, --user-input-auto-resolve, --no-session-log]
+      eligibility: { director: forbidden }
   claude:
     current-host:
       host: true
@@ -82,26 +123,65 @@ routes:
       host: true
       command: [claude, -p, --model, "{model}"]
       write_access: false
+      # No write_variant here: this route is host: true, and variants are
+      # command-delivery only — in-session permissions are the host's, and the
+      # locked fallback lane replays the snapshotted base argv byte-for-byte.
+      eligibility: { director: forbidden }
+    # The command lane for claude models under the claude harness: `--via
+    # claude-exec` spawns a fresh headless claude instead of delivering
+    # in-session. This is how an expensive host session hands a whole side
+    # task — planning included — to a cheaper claude (`fadeno dial director
+    # opus --via claude-exec`): the write variant can edit AND run the fadeno
+    # command family (scoped Bash grant, nothing wider), so a dispatched
+    # director can coordinate workers/reviewers itself.
+    anthropic-exec:
+      driver: claude-exec
+      command: [claude, -p, --model, "{model}"]
+      timeout_ms: 1200000
+      write_access: false
+      write_variant:
+        command: [claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, "Bash(fadeno:*)"]
     openai:
       driver: codex
-      command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
-      write_access: true
+      command: [codex, exec, --model, "{model}", --sandbox, read-only, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
+      timeout_ms: 1200000
+      write_access: false
+      write_variant:
+        command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
     xai:
       driver: grok
-      command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
-      write_access: true
+      command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --sandbox, read-only, --always-approve]
+      timeout_ms: 1200000
+      write_access: false
+      write_variant:
+        command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
       models_command: [grok, models]
+      eligibility: { director: forbidden }
     google:
       driver: agy
       command: [agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text]
+      timeout_ms: 1200000
       write_access: true
       models_command: [agy, models]
       effort_encoding: model-suffix
+      eligibility: { director: forbidden }
     openrouter:
       driver: opencode
-      command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto]
-      write_access: true
+      command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --agent, fadeno-readonly, --auto]
+      timeout_ms: 1200000
+      write_access: false
+      write_variant:
+        command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto]
       models_command: [opencode, models]
+      eligibility: { director: forbidden }
+    muse:
+      driver: muse-code
+      command: [muse, exec, --provider, meta, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --prompt-file, "{prompt_file}", --workspace, ".", --trust-workspace, --disable-approval, --disable-write, --disable-shell, --user-input-auto-resolve, --no-session-log]
+      timeout_ms: 1200000
+      write_access: false
+      write_variant:
+        command: [muse, exec, --provider, meta, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --prompt-file, "{prompt_file}", --workspace, ".", --trust-workspace, --disable-approval, --user-input-auto-resolve, --no-session-log]
+      eligibility: { director: forbidden }
   grok:
     current-host:
       host: true
@@ -111,52 +191,113 @@ routes:
       command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
       write_access: true
       models_command: [grok, models]
+      eligibility: { director: forbidden }
     openai:
       driver: codex
-      command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
-      write_access: true
+      command: [codex, exec, --model, "{model}", --sandbox, read-only, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
+      timeout_ms: 1200000
+      write_access: false
+      write_variant:
+        command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
     anthropic:
       driver: claude-cli
       command: [claude, -p, --model, "{model}"]
+      timeout_ms: 1200000
       write_access: false
+      write_variant:
+        command: [claude, -p, --model, "{model}", --permission-mode, acceptEdits]
+      eligibility: { director: forbidden }
+    anthropic-exec:
+      driver: claude-exec
+      command: [claude, -p, --model, "{model}"]
+      timeout_ms: 1200000
+      write_access: false
+      write_variant:
+        command: [claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, "Bash(fadeno:*)"]
     google:
       driver: agy
       command: [agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text]
+      timeout_ms: 1200000
       write_access: true
       models_command: [agy, models]
       effort_encoding: model-suffix
+      eligibility: { director: forbidden }
     openrouter:
       driver: opencode
-      command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto]
-      write_access: true
+      command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --agent, fadeno-readonly, --auto]
+      timeout_ms: 1200000
+      write_access: false
+      write_variant:
+        command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto]
       models_command: [opencode, models]
+      eligibility: { director: forbidden }
+    muse:
+      driver: muse-code
+      command: [muse, exec, --provider, meta, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --prompt-file, "{prompt_file}", --workspace, ".", --trust-workspace, --disable-approval, --disable-write, --disable-shell, --user-input-auto-resolve, --no-session-log]
+      timeout_ms: 1200000
+      write_access: false
+      write_variant:
+        command: [muse, exec, --provider, meta, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --prompt-file, "{prompt_file}", --workspace, ".", --trust-workspace, --disable-approval, --user-input-auto-resolve, --no-session-log]
+      eligibility: { director: forbidden }
   standalone:
     current-host:
       host: true
     openai:
       driver: codex
-      command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
-      write_access: true
+      command: [codex, exec, --model, "{model}", --sandbox, read-only, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
+      timeout_ms: 1200000
+      write_access: false
+      write_variant:
+        command: [codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-"]
     anthropic:
       driver: claude-cli
       command: [claude, -p, --model, "{model}"]
+      timeout_ms: 1200000
       write_access: false
+      write_variant:
+        command: [claude, -p, --model, "{model}", --permission-mode, acceptEdits]
+      eligibility: { director: forbidden }
+    anthropic-exec:
+      driver: claude-exec
+      command: [claude, -p, --model, "{model}"]
+      timeout_ms: 1200000
+      write_access: false
+      write_variant:
+        command: [claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, "Bash(fadeno:*)"]
     xai:
       driver: grok
-      command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
-      write_access: true
+      command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --sandbox, read-only, --always-approve]
+      timeout_ms: 1200000
+      write_access: false
+      write_variant:
+        command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
       models_command: [grok, models]
+      eligibility: { director: forbidden }
     google:
       driver: agy
       command: [agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text]
+      timeout_ms: 1200000
       write_access: true
       models_command: [agy, models]
       effort_encoding: model-suffix
+      eligibility: { director: forbidden }
     openrouter:
       driver: opencode
-      command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto]
-      write_access: true
+      command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --agent, fadeno-readonly, --auto]
+      timeout_ms: 1200000
+      write_access: false
+      write_variant:
+        command: [opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto]
       models_command: [opencode, models]
+      eligibility: { director: forbidden }
+    muse:
+      driver: muse-code
+      command: [muse, exec, --provider, meta, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --prompt-file, "{prompt_file}", --workspace, ".", --trust-workspace, --disable-approval, --disable-write, --disable-shell, --user-input-auto-resolve, --no-session-log]
+      timeout_ms: 1200000
+      write_access: false
+      write_variant:
+        command: [muse, exec, --provider, meta, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --prompt-file, "{prompt_file}", --workspace, ".", --trust-workspace, --disable-approval, --user-input-auto-resolve, --no-session-log]
+      eligibility: { director: forbidden }
 
 # Driver routes (harnesses Fadeno spawns, never runs inside — see
 # docs/architecture.md → "Glossary: harnesses, hosts, and drivers"). They carry
@@ -188,30 +329,102 @@ routes:
 # `--dangerously-skip-permissions` is the headless-approval case documented for
 # xai below. Verified end to end: prompt on stdin, exit 0, report on stdout,
 # and a file actually written into the repo.
+# A 2026-08-16 read probe of `--mode plan --sandbox` blocked mutation, but the
+# denied tool made headless agy exit 0 with no report. That violates the driver
+# contract, so Antigravity honestly remains write-only until its headless
+# permission surface can both deny the write and return the requested report.
+#
+# muse → Muse Code (`muse exec`). Verified live 2026-08-16; three spellings
+# REJECTED before this one: `--prompt-file /dev/stdin` ("not a regular
+# file"), bare stdin ("missing prompt"), and `--prompt-file -` (literal
+# filename) — Muse Code reads prompts only from a regular file, so the route
+# uses the {prompt_file} placeholder: the kernel substitutes its attested
+# prompt snapshot's absolute path at spawn (digest attests exactly what the
+# executor reads). `--workspace .` verified to root tools at the spawn cwd
+# (banner: "workspace root: . (explicit)"); a write landed in-place.
+# `--reasoning-effort` accepts none|minimal|low|medium|high|xhigh|ultra —
+# NOT `default`, so an unregistered model forced through `--via muse-code`
+# fails loudly at the CLI. `--trust-workspace --disable-approval
+# --user-input-auto-resolve` is the headless-approval trio (finer-grained
+# than `--yolo`: the OS sandbox stays on). Stdout is the report; banners go
+# to stderr. No models listing subcommand — no dial-time probe. Engine
+# repair re-asks travel on stdin, which file-reading drivers ignore — a
+# muse-dialed actor re-runs its recorded prompt instead (known limitation).
+# The base additionally uses `--disable-write --disable-shell`; a live probe
+# read the workspace, physically denied the write tool, and returned a report.
+# The write variant drops only those two denies.
 #
 # openrouter → opencode. `--variant` is OpenCode's reasoning-effort dial and
 # accepts `default` as well as high/max/minimal, so {reasoning_effort}
-# substitutes safely. `--auto` is its headless approval flag. Verified live
-# 2026-08-13 end to end: prompt on stdin, exit 0, report on stdout, banner on
-# stderr.
+# substitutes safely. `--auto` is its headless approval flag. The read base
+# selects the project `fadeno-readonly` agent emitted by init; its explicit
+# deny rules remove edit, shell, and subagent escape hatches. The write variant
+# drops that agent selection. Both lanes were verified live 2026-08-16.
 
 # Archetype write policy: worker-shaped dispatches mutate the workspace, so a
 # command route declared `write_access: false` is refused for them before any
-# tokens burn. Routes declaring nothing stay unconstrained. The xai routes run
-# `--always-approve`: grok's one-shot mode stalls silently (exit 0, no tools)
-# under any narrower permission mode, because headless runs cannot answer
-# approval prompts — verified live 2026-08-12.
+# tokens burn. A route may declare a `write_variant` — an alternative argv that
+# CAN write (here: acceptEdits) — and a write-requiring archetype resolving
+# onto that route gets the variant automatically: `fadeno dial worker opus`
+# just works, while reviewer/judge dials of the same model stay physically
+# read-only. The dial names the who; this declared policy picks the how.
+# Routes declaring nothing stay unconstrained. Grok keeps `--always-approve`
+# in both lanes so headless tools run, while its base adds the independent,
+# kernel-enforced `--sandbox read-only`; live probes read the repo and denied
+# writes in the base, then wrote through the variant (2026-08-16).
 # `requires_write` is `required`, `forbidden`, or `none`; booleans alias
 # (`true` → `required`, `false` → `none`).
 # `generator` is divergent artifact-producing work that must not mutate the
-# workspace.
-# `fallback` is binding-only: an archetype without a dial resolves through its
-# fallback's binding, never its policy.
+# workspace. It is its own archetype: undialed it resolves to the host-native
+# base (current-host) like any other, never through another archetype's dial.
+# (`fallback` remains available for custom archetypes: binding-only — an
+# archetype without a dial resolves through its fallback's binding, never its
+# policy.)
+# `director` is high-level planning/orchestration delegated to a (usually
+# cheaper) model: it decomposes a side task and coordinates workers/reviewers
+# itself, via the fadeno CLI. It mutates run ledgers and dispatch evidence, so
+# it requires write; dial it onto a command delivery whose write variant can
+# run fadeno (claude models: `--via claude-exec`; codex/grok/agy/opencode
+# routes already run shell-capable).
 archetypes:
   worker:
     requires_write: required
+  director:
+    requires_write: required
+    # Composed ahead of every director dispatch (briefs/director.md): teaches
+    # the spawned model to coordinate through fadeno instead of doing the
+    # work itself. Routes without fadeno capability declare
+    # `eligibility: { director: forbidden }` — the block is structural, so it
+    # also covers unregistered models falling through to those lanes.
+    brief: director
   generator:
     requires_write: forbidden
-    fallback: worker
 
 unregistered_model_driver: opencode
+
+# Deterministic tool registry for `tool_call` steps (Priority 7 frozen contract).
+# `tool:` in a playbook is a logical capability name, never shell. Each name
+# must be bound here as a static argv array with optional positive timeout.
+# No shell is inserted: argv runs directly. An entry may explicitly name a shell
+# such as [sh, -c, "…"] — that is the operator's explicit choice, not Fadeno's.
+# No interpolation (`{`, `}`, `$`, backtick are rejected — this is a literal
+# argv, not a template). Only ready `tool_call` steps whose output schema is
+# `test-result` are automated via `fadeno tool-run`; Diff and other typed
+# outputs remain manual via `fadeno tool-complete`.
+#
+# Layering follows the same precedence as executors: project
+# `.fadeno/executors.yaml` overrides user `~/.config/fadeno/executors.yaml`
+# which overrides this shipped default, except a self-contained project catalog
+# with its own `models:` + `routes:` suppresses the builtin and user layers
+# entirely (see src/lib/config-layers.ts:projectIsComplete). Snapshotted per
+# run into `profile.yaml`; verification recomputes command_sha256 against that
+# snapshot.
+tools:
+  # Example (matches starter playbooks — `tool: test_runner`):
+  # test_runner:
+  #   command: [npm, test]
+  #   timeout_ms: 300000
+  # # or timeout in seconds:
+  # # test_runner:
+  # #   command: [npm, test]
+  # #   timeout: 300

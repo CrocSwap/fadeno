@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { parse as parseYaml } from 'yaml';
 import {
   buildArtifactManifest,
   ManifestError,
@@ -10,13 +10,12 @@ import { findRepoRoot } from '../lib/paths.ts';
 import { runSchemaDirectories } from '../lib/definitions.ts';
 import { SchemaSet } from '../lib/playbook-validate.ts';
 import { readEvents } from '../lib/run-ledger.ts';
-import { LedgerWriteError, LedgerWriter } from '../lib/run-ledger-write.ts';
+import { LedgerWriteError, LedgerWriter, writeRunDocument } from '../lib/run-ledger-write.ts';
 
 export class RunError extends Error {}
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'aborted']);
 const VALID_STATUSES = new Set(['running', ...TERMINAL_STATUSES]);
-const RUN_YAML_MODELINE = '# yaml-language-server: $schema=definitions/schemas/run.schema.json';
 
 export interface RunOptions {
   /** Run id (under .fadeno/runs) or a path to a run directory / run.yaml. */
@@ -272,6 +271,6 @@ export function runRun(opts: RunOptions): RunResult {
     }
   }
 
-  writeFileSync(runYamlPath, `${RUN_YAML_MODELINE}\n${stringifyYaml(run)}`, 'utf8');
+  writeRunDocument(runDir, run);
   return { runDir, appendedEvents, updatedFields, manifest };
 }

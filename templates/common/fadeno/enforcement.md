@@ -23,12 +23,12 @@ detectable actions.
 ## Example: gate condition as a deterministic check
 
 A reviewer writes `artifacts/review-report.json` conforming to
-`review-report.schema.json`. The gate `no_blocking_issues` is then *computable*,
+`review-report.schema.json`. The gate `all_reviews_approved` is then *computable*,
 not a re-prompt. The CLI validates the artifact before evaluating it:
 
 ```bash
-# exit 0 = pass (no blocking issues), exit 1 = fail
-fadeno gate <run-id> no_blocking_issues \
+# exit 0 = pass (all approved, no blocking issues), exit 1 = fail
+fadeno gate <run-id> all_reviews_approved \
   --artifact artifacts/review-report.json
 ```
 

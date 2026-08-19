@@ -30,6 +30,10 @@ export interface NextLoopInfo {
   in_body: boolean;
   iteration: number | null;
   max: number | null;
+  /** The loop step that owns this body step, so a driver can scope its own
+   *  `loop_iteration_started`/`step_started` bookkeeping without re-deriving it
+   *  from the playbook. Null for outer steps. */
+  owner: string | null;
 }
 
 export interface NextStepInfo {
@@ -40,6 +44,7 @@ export interface NextStepInfo {
   outputs: string[] | null;
   collective: string | null;
   artifact_type: string | null;
+  tool: string | null;
   loop: NextLoopInfo;
 }
 
@@ -488,6 +493,33 @@ function describeStep(
       outputs = [planned.path];
       artifact_type = planned.schemaKind;
     }
+  } else if (kind === 'tool_call') {
+    const toolName = typeof step.tool === 'string' ? step.tool : null;
+    const planned = tryPlanOutput(ctx.playbook, step, stepId, 'tool_call', false, null, iteration, isBody);
+    if (planned != null) {
+      outputs = [planned.path];
+      artifact_type = planned.schemaKind;
+    } else {
+      const collectiveType = typeof step.output === 'string' ? step.output : '';
+      artifact_type = schemaKindFor(baseArtifactName(collectiveType));
+    }
+    const tool = toolName;
+    return {
+      id: stepId,
+      kind,
+      promptable,
+      actors,
+      outputs,
+      collective,
+      artifact_type,
+      tool,
+      loop: {
+        in_body: isBody,
+        iteration,
+        max,
+        owner,
+      },
+    };
   } else if (typeof step.actor === 'string') {
     actors = [step.actor];
   }
@@ -497,6 +529,8 @@ function describeStep(
     artifact_type = schemaKindFor(baseArtifactName(collectiveType));
   }
 
+  const tool = typeof step.tool === 'string' ? step.tool : null;
+
   return {
     id: stepId,
     kind,
@@ -505,10 +539,12 @@ function describeStep(
     outputs,
     collective,
     artifact_type,
+    tool,
     loop: {
       in_body: isBody,
       iteration,
       max,
+      owner,
     },
   };
 }
@@ -555,9 +591,21 @@ function adviceFor(info: NextStepInfo, gate: NextGateInfo | null): string {
     return 'pause and return to the host; do not auto-approve.';
   }
   if (kind === 'tool_call') {
+    const output = info.outputs?.[0] ?? '<artifact-path>';
+    const tool = info.tool ? ` ${info.tool}` : '';
+    // Canonical advice delegates to tryPlanOutput for the path; registered test-result tools use automation.
+    if (info.artifact_type === 'test-result') {
+      return (
+        `tool step "${info.id}" produces test-result at ${output}. ` +
+        `If tool${tool} is registered in executors.yaml, run \`fadeno tool-run <run> [--tool${tool}] [--timeout <seconds>]\` to execute and synthesize the artifact; ` +
+        `otherwise, or for any non-test-result output, write the artifact manually and attribute with \`fadeno tool-complete <run> --output ${output}\`. ` +
+        `Then re-call \`fadeno next\`.`
+      );
+    }
     return (
-      'invoke the named tool capability, save its structured result, then atomically attribute it with ' +
-      '`fadeno tool-complete <run> --output <artifact-path>` before re-calling `fadeno next`.'
+      `tool step "${info.id}" produces ${info.artifact_type ?? 'unknown'} at ${output}; ` +
+      `write the artifact manually and attribute with \`fadeno tool-complete <run> --output ${output}\`. ` +
+      `Automated execution via \`fadeno tool-run\` only supports test-result. Then re-call \`fadeno next\`.`
     );
   }
   return `handle kind \`${kind}\` per runtime.md; record the outcome; then re-call \`fadeno next\`.`;

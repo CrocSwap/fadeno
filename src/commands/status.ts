@@ -3,14 +3,16 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   activeHarness,
+  applyWritePosture,
+  archetypeDisplaySort,
   resolveRole,
   readLocalDialState,
 } from '../lib/executors.ts';
 import { definitionSourceSummary } from '../lib/definitions.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
-import { readUserDials, type UserPathOptions } from '../lib/user-paths.ts';
+import { readUserDials, type UserPathOptions, userPaths } from '../lib/user-paths.ts';
 import { loadLayeredProfile } from '../lib/config-layers.ts';
-import { maintainedHarnesses, readInstallationManifest } from '../lib/installations.ts';
+import { maintainedHarnesses, readInstallationManifest, compareFadenoVersions, readRuntimeVersionAt } from '../lib/installations.ts';
 import type { DialRef } from '../lib/executors.ts';
 
 export class StatusError extends Error {}
@@ -52,6 +54,12 @@ export interface StatusResult {
     managedPath: string | null;
     versionCurrent: boolean;
     installedHarnesses: string[];
+    // New fields
+    skew: 'managed-older' | 'managed-newer' | 'divergent' | null;
+    preferredCli: string;
+    preferredReason: string | null;
+    observedVersion: string | null;
+    observedSource: 'observed' | 'assumed' | null;
   };
   // Legacy aliases for cli
   activeLoadout?: any;
@@ -74,21 +82,12 @@ function materialization(
     userPathOptions?.env?.CODEX_HOME?.trim() || process.env.CODEX_HOME?.trim() || join(userPathOptions?.home ?? homedir(), '.codex'),
     'agents',
   );
-  // Use resolved triad: worker/reviewer/judge resolved via dial cascade
-  // For materialization, check if resolved delivery is host and needs agent file
-  // Simplify: if any of triad resolves to host, check freshness
-  // We'll use same logic as before but via resolved roles: check if any role's adapter is host
-  // Caller will supply roles; we defer to caller to compute fresh?
-  // For now, check existence of fadeno-*.toml files
   const needed = ['worker', 'reviewer', 'judge'];
   let allFresh = true;
   let anyHost = false;
   for (const arch of needed) {
-    // We don't have spec here; assume host needed if archetype requires? For status we can't know.
-    // Just check files exist
     const file = join(path, `fadeno-${arch}.toml`);
     if (!existsSync(file)) {
-      // If file missing, not fresh
       allFresh = false;
     } else {
       anyHost = true;
@@ -120,15 +119,13 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
   const legacy_pin_note = dialState.legacyNote;
 
   const roles: StatusRole[] = [];
-  const archetypes = ['worker', 'reviewer', 'judge'];
-  // Also include any declared archetypes
-  for (const name of Object.keys(profile.archetypes)) if (!archetypes.includes(name)) archetypes.push(name);
+  const archetypes = archetypeDisplaySort(new Set(['worker', 'reviewer', 'judge', ...Object.keys(profile.archetypes)]));
 
   const layers = { session: sessionDials, repo: repoDials, user: userDials };
   for (const archetype of archetypes) {
     try {
       const resolved = resolveRole(archetype, archetype, profile, layers);
-      const spec = resolved.delivery.spec;
+      const spec = applyWritePosture(resolved.delivery.spec, archetype, profile.archetypes).spec;
       roles.push({
         archetype,
         executor: resolved.delivery.refString,
@@ -144,6 +141,7 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
   const external = roles.filter((r) => r.adapter === 'command');
 
   const installation = readInstallationManifest(opts.userPathOptions);
+  const upaths = userPaths(opts.userPathOptions);
   const invocationSource = process.env.FADENO_INVOCATION_SOURCE?.trim()
     || (installation.runtime != null && resolve(process.argv[1] ?? '') === resolve(installation.runtime.path) ? 'managed' : 'path');
   const codexMaintained = maintainedHarnesses(opts.userPathOptions).includes('codex');
@@ -160,9 +158,61 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
 
   const next = legacy_pin_note ? 'clear legacy pin with `fadeno dial clear`' : external.length > 0 ? 'review the external sandbox boundary before driving' : null;
 
+  const invokingVersion = packageVersion();
+  let observedVersion: string | null = null;
+  let observedSource: 'observed' | 'assumed' | null = null;
+  try {
+    if (existsSync(upaths.managedRuntimeDir)) {
+      const obs = readRuntimeVersionAt(upaths.managedRuntimeDir);
+      if (obs.version != null) {
+        observedVersion = obs.version;
+        observedSource = obs.source;
+      }
+    }
+  } catch {}
+  const managedVersion = observedVersion ?? installation.runtime?.version ?? null;
+  // If observed missing but manifest has version, observedSource is assumed
+  if (observedVersion == null && installation.runtime?.version != null) {
+    observedSource = installation.runtime.version_source ?? 'assumed';
+  }
+  const versionCurrent = installation.runtime == null || installation.runtime.version === invokingVersion;
+
+  let skew: StatusResult['runtime']['skew'] = null;
+  if (managedVersion != null && invokingVersion != null) {
+    const cmp = compareFadenoVersions(managedVersion, invokingVersion);
+    if (cmp === 1) skew = 'managed-newer';
+    else if (cmp === -1) skew = 'managed-older';
+    else if (cmp === 0) skew = null;
+    else skew = 'divergent';
+  } else if (managedVersion == null) {
+    skew = null;
+  } else {
+    skew = 'divergent';
+  }
+
+  let preferredCli: string;
+  let preferredReason: string | null = null;
+  const invokingPath = resolve(process.argv[1] ?? 'fadeno');
+  if (managedVersion != null && managedVersion === invokingVersion && installation.runtime?.path) {
+    preferredCli = installation.runtime.path;
+  } else {
+    preferredCli = invokingPath;
+    if (installation.runtime == null) {
+      preferredReason = `managed runtime not installed; using invoking CLI`;
+    } else if (skew === 'managed-older') {
+      preferredReason = `managed runtime ${managedVersion} is older than this CLI ${invokingVersion}; refreshes at next plugin-launched command, or run fadeno setup --from <bin-dir>`;
+    } else if (skew === 'managed-newer') {
+      preferredReason = `managed runtime ${managedVersion} is newer than this CLI ${invokingVersion}; update this CLI via your package manager — do not rerun setup from this older CLI`;
+    } else if (skew === 'divergent') {
+      preferredReason = `versions diverge (managed ${managedVersion} vs invoking ${invokingVersion}); using invoking CLI`;
+    } else {
+      preferredReason = `managed version differs; using invoking CLI`;
+    }
+  }
+
   return {
     repoRoot,
-    version: packageVersion(),
+    version: invokingVersion,
     harness,
     definitions: definitionSourceSummary(repoRoot),
     dials: { session: sessionDials, repo: repoDials, user: userDials },
@@ -175,12 +225,16 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
     next,
     runtime: {
       invocationSource,
-      managedVersion: installation.runtime?.version ?? null,
+      managedVersion,
       managedPath: installation.runtime?.path ?? null,
-      versionCurrent: installation.runtime == null || installation.runtime.version === packageVersion(),
+      versionCurrent,
       installedHarnesses: Object.keys(installation.harnesses).sort(),
+      skew,
+      preferredCli,
+      preferredReason,
+      observedVersion,
+      observedSource,
     },
-    // Legacy shims
     activeLoadout: null,
     staleProjectPin: null,
     staleUserPin: null,

@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, type Dirent } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { loadExecutorProfile, type ExecutorProfile } from '../lib/executors.ts';
-import { listRuns, type RunSummary } from '../lib/run-ledger.ts';
+import { listRuns, readEvents, type RunSummary } from '../lib/run-ledger.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { listDefinitionNames, resolvePlaybookFile } from '../lib/definitions.ts';
 
@@ -22,7 +22,9 @@ type ValueKind =
   | 'none'
   | 'enum'
   | 'path'
+  | 'path-or-stdin'
   | 'run'
+  | 'dispatch-id'
   | 'playbook'
   | 'step'
   | 'dial'
@@ -81,11 +83,12 @@ const COMMANDS: Record<string, CommandSpec> = {
   validate: command({ '--schema': { kind: 'enum', values: ['playbook', 'run', 'review-report', 'test-result'] } }, ['path']),
   diagram: command({ '--format': { kind: 'enum', values: ['ascii', 'mermaid'] } }, ['playbook']),
   'new-run': command({ '--input': { kind: 'input' } }, ['playbook', 'free']),
+  models: command({ '--driver': { kind: 'free' }, '--json': NONE }, ['executor']),
   dial: command(
-    { '--via': { kind: 'free' }, '--user': NONE, '--repo': NONE, '--rate': { kind: 'free' }, '--archetype': { kind: 'archetype' }, '--json': NONE },
+    { '--via': { kind: 'free' }, '--session': NONE, '--user': NONE, '--repo': NONE, '--force': NONE, '--rate': { kind: 'free' }, '--archetype': { kind: 'archetype' }, '--json': NONE },
     ['archetype', 'free'],
     {
-      clear: command({ '--user': NONE, '--repo': NONE }, ['archetype']),
+      clear: command({ '--session': NONE, '--user': NONE, '--repo': NONE }, ['archetype']),
       shadow: command({ '--via': { kind: 'free' }, '--rate': { kind: 'free' } }, ['archetype', 'free']),
       'clear-shadow': command({}, ['archetype']),
       resolve: command({ '--archetype': { kind: 'archetype' } }, []),
@@ -112,13 +115,21 @@ const COMMANDS: Record<string, CommandSpec> = {
       '--model': { kind: 'free' },
       '--via': { kind: 'free' },
       '--prompt-file': PATH,
+      '--tag': { kind: 'free' },
+      '--shadow': { kind: 'free' },
+      '--timeout': { kind: 'free' },
+      '--isolate': NONE,
+      '--no-brief': NONE,
+      '--diagnostics': NONE,
     },
   ),
-  'dispatch-fallback': command({}, ['run', 'free']),
-  'dispatch-start': command({ '--agent-id': { kind: 'free' }, '--workspace': PATH, '--branch': { kind: 'free' } }, ['run', 'free']),
-  'dispatch-progress': command({ '--file': PATH, '--source': { kind: 'enum', values: ['agent', 'harness', 'director'] } }, ['run', 'free']),
-  'dispatch-complete': command({ '--output': PATH, '--commit': { kind: 'free' } }, ['run', 'free']),
-  'dispatch-fail': command({ '--reason': { kind: 'free' } }, ['run', 'free']),
+  'dispatch-prepare': command({ '--isolate': NONE }, ['run', 'dispatch-id']),
+  'dispatch-prompt': command({}, ['run', 'dispatch-id']),
+  'dispatch-fallback': command({}, ['run', 'dispatch-id']),
+  'dispatch-start': command({ '--agent-id': { kind: 'free' }, '--workspace': PATH, '--branch': { kind: 'free' } }, ['run', 'dispatch-id']),
+  'dispatch-progress': command({ '--file': PATH, '--source': { kind: 'enum', values: ['agent', 'harness', 'director'] } }, ['run', 'dispatch-id']),
+  'dispatch-complete': command({ '--output': { kind: 'path-or-stdin' }, '--commit': { kind: 'free' } }, ['run', 'dispatch-id']),
+  'dispatch-fail': command({ '--reason': { kind: 'free' } }, ['run', 'dispatch-id']),
   run: command(
     {
       '--step': { kind: 'step' },
@@ -130,6 +141,7 @@ const COMMANDS: Record<string, CommandSpec> = {
     },
     ['run'],
   ),
+  'tool-run': command({ '--tool': { kind: 'free' }, '--timeout': { kind: 'free' } }, ['run']),
   'tool-complete': command({ '--output': PATH }, ['run']),
   gate: command(
     { '--artifact': PATH, '--report': PATH },
@@ -146,7 +158,8 @@ const COMMANDS: Record<string, CommandSpec> = {
     ['run', 'step'],
   ),
   next: command({ '--legacy': NONE }, ['run']),
-  drive: command({ '--bind': { kind: 'bind' }, '--max-transitions': { kind: 'free' } }, ['run']),
+  drive: command({ '--bind': { kind: 'bind' }, '--max-transitions': { kind: 'free' }, '--parallel': { kind: 'free' }, '--timeout': { kind: 'free' }, '--diagnostics': NONE }, ['run']),
+  cancel: command({ '--actor-call': { kind: 'free' } }, ['run']),
   decide: command({ '--decision': { kind: 'free' }, '--feedback': { kind: 'free' } }, ['run', 'free']),
   runs: command({}),
   dispatches: command({
@@ -169,7 +182,7 @@ const COMMANDS: Record<string, CommandSpec> = {
 // `CommandSpec` is deliberately small, but gate conditions are useful values
 // just like enum options. Keeping this separate avoids a second parser while
 // retaining the static type of ordinary positional kinds.
-const GATE_CONDITIONS = ['no_blocking_issues', 'tests_pass'];
+const GATE_CONDITIONS = ['all_reviews_approved', 'no_blocking_issues', 'tests_pass'];
 
 /** Render a sourceable Bash completion definition. */
 export function runCompletion(): string {
@@ -372,6 +385,29 @@ function readStepIds(repoRoot: string, runRef: string): string[] {
   }
 }
 
+/** Nonterminal host requests in the selected run, suitable for host handoff commands. */
+function readPendingDispatchIds(repoRoot: string, runRef: string): string[] {
+  const run = resolveRun(safeRuns(repoRoot), runRef);
+  if (run == null) return [];
+  try {
+    const events = readEvents(run.dir).events;
+    const terminal = new Set(
+      events
+        .filter((event) => event.type === 'actor_completed' || event.type === 'actor_failed')
+        .map((event) => event.extra.dispatch_id)
+        .filter((value): value is string => typeof value === 'string'),
+    );
+    return uniqueSorted(
+      events
+        .filter((event) => event.type === 'host_dispatch_requested')
+        .map((event) => event.extra.dispatch_id)
+        .filter((value): value is string => typeof value === 'string' && !terminal.has(value)),
+    );
+  } catch {
+    return [];
+  }
+}
+
 function readPlaybookRoles(repoRoot: string, runRef: string): string[] {
   const run = resolveRun(safeRuns(repoRoot), runRef);
   if (run == null) return [];
@@ -423,10 +459,14 @@ function dynamicValues(
       return startsWith(values, prefix);
     case 'path':
       return pathCandidates(prefix, cwd);
+    case 'path-or-stdin':
+      return startsWith([...pathCandidates(prefix, cwd), '-'], prefix);
     case 'playbook':
       return startsWith(readPlaybookNames(repoRoot), prefix);
     case 'run':
       return startsWith(safeRuns(repoRoot).map((run) => run.runId), prefix);
+    case 'dispatch-id':
+      return startsWith(runRef == null ? [] : readPendingDispatchIds(repoRoot, runRef), prefix);
     case 'step':
       return startsWith(runRef == null ? [] : readStepIds(repoRoot, runRef), prefix);
     case 'dial':

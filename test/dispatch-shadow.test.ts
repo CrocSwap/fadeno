@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { DISPATCHES_FILE, runDispatch } from '../src/commands/dispatch.ts';
+import { runDispatchesOutput } from '../src/commands/dispatches.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
 import { readLocalDialState, writeLocalDialState } from '../src/lib/executors.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
@@ -79,9 +80,15 @@ test('shadow attachment fires and writes paired rows with identical prompt_sha25
   const result = runDispatch({ archetype: 'worker', prompt: 'hello shadow', repoRoot: root, onEcho: (l) => echoes.push(l), userPathOptions: onHarness('standalone') });
   const rows = evidenceRows(root);
   assert.equal(rows.length, 4);
-  const [pReq, pComp, sReq, sComp] = rows;
+  // Concurrent shadows write their request row before the primary spawns —
+  // the request-before-spawn doctrine applies to challengers too — so the
+  // ledger reads pReq, sReq, pComp, sComp.
+  const [pReq, sReq, pComp, sComp] = rows;
   assert.ok(!('shadow' in pReq));
   assert.ok(!('shadow' in pComp));
+  assert.equal(pReq.event, 'dispatch_requested');
+  assert.equal(pComp.event, 'dispatch_completed');
+  assert.equal(pComp.dispatch_id, pReq.dispatch_id);
   assert.equal(sReq.event, 'dispatch_requested');
   assert.equal(sReq.resolution, 'shadow');
   assert.equal(sReq.shadow, true);
@@ -96,8 +103,16 @@ test('shadow attachment fires and writes paired rows with identical prompt_sha25
   assert.equal(sComp.output_snapshot, sReq.output_snapshot);
   assert.equal(sComp.event, 'dispatch_completed');
   assert.equal(sComp.shadow, true);
+  assert.equal(sComp.dispatch_id, sReq.dispatch_id);
   assert.ok(typeof sComp.diff_snapshot === 'string');
   assert.equal(typeof sComp.diff_bytes, 'number');
+  // Each side records its own runtime — time-to-complete is comparison
+  // evidence — and completed − requested === duration_ms holds per side.
+  assert.equal(typeof sComp.duration_ms, 'number');
+  assert.equal(
+    Date.parse(sComp.timestamp as string) - Date.parse(sReq.timestamp as string),
+    sComp.duration_ms,
+  );
   assert.ok(!('workspace_changed' in sComp));
   assert.ok(echoes.some((l) => l.startsWith('shadow → luna-worker')));
   assert.ok(echoes.some((l) => l.startsWith('shadow diff:')));
@@ -112,7 +127,7 @@ test('--shadow flag fires without attachment', (t) => {
   const result = runDispatch({ archetype: 'worker', prompt: 'flag test', repoRoot: root, shadow: 'luna-worker', userPathOptions: onHarness('standalone') });
   const rows = evidenceRows(root);
   assert.equal(rows.length, 4);
-  const sReq = rows[2]!;
+  const sReq = rows.find((r) => r.shadow === true && r.event === 'dispatch_requested')!;
   assert.equal(sReq.shadow_source, 'flag');
   assert.deepEqual(sReq.dial, { model: 'luna-worker' });
   assert.equal(result.stdout, 'REPORT:flag test');
@@ -170,7 +185,9 @@ test('shadow refusal: forbidden eligibility writes dispatch_refused with shadow 
   assert.equal(result.stdout, 'REPORT:should refuse shadow');
   const rows = evidenceRows(root);
   assert.equal(rows.length, 3);
-  const refusal = rows[2]!;
+  // A refused shadow is known before the primary runs, so its row sits
+  // between the primary pair.
+  const refusal = rows.find((r) => r.event === 'dispatch_refused')!;
   assert.equal(refusal.event, 'dispatch_refused');
   assert.equal(refusal.shadow, true);
   assert.equal(typeof refusal.primary_dispatch_id, 'string');
@@ -187,8 +204,8 @@ test('shadow refusal: forbidden eligibility writes dispatch_refused with shadow 
   runDispatch({ archetype: 'worker', prompt: 'shadow only allowed', repoRoot: root2, userPathOptions: onHarness('standalone') });
   const rows2 = evidenceRows(root2);
   assert.equal(rows2.length, 4);
-  assert.equal(rows2[2]!.shadow, true);
-  assert.equal(rows2[2]!.eligibility, 'shadow_only');
+  const sReq2 = rows2.find((r) => r.shadow === true && r.event === 'dispatch_requested')!;
+  assert.equal(sReq2.eligibility, 'shadow_only');
 });
 
 test('shadow refusal: shadow_isolation in non-git dir', (t) => {
@@ -200,8 +217,7 @@ test('shadow refusal: shadow_isolation in non-git dir', (t) => {
   assert.equal(result.stdout, 'REPORT:no git');
   const rows = evidenceRows(root);
   assert.equal(rows.length, 3);
-  const refusal = rows[2]!;
-  assert.equal(refusal.event, 'dispatch_refused');
+  const refusal = rows.find((r) => r.event === 'dispatch_refused')!;
   assert.equal(refusal.shadow, true);
   assert.equal((refusal.refusal as Record<string, unknown>).predicate, 'shadow_isolation');
   assert.ok(echoes.some((l) => l.includes('shadow refused')));
@@ -248,14 +264,14 @@ test('shadow diff artifact contains change a writing fake executor made in workt
   writeLocalDialState(root2, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'write-worker' } }, legacyNote: null });
   runDispatch({ archetype: 'worker', prompt: 'write diff', repoRoot: root2, userPathOptions: onHarness('standalone') });
   const rows = evidenceRows(root2);
-  const sComp = rows[3]! as Record<string, unknown>;
+  const sComp = rows.find((r) => r.shadow === true && r.event === 'dispatch_completed')! as Record<string, unknown>;
   assert.equal(sComp.shadow, true);
   const diffRel = sComp.diff_snapshot as string;
   assert.ok(diffRel);
   const diffContent = read(root2, diffRel);
   assert.ok(diffContent.includes('shadowed.txt'), `diff should mention shadowed.txt, got: ${diffContent.slice(0, 200)}`);
   assert.ok(!existsSync(join(root2, 'shadowed.txt')), 'primary workspace must not contain shadow file');
-  const sReq = rows[2]! as Record<string, unknown>;
+  const sReq = rows.find((r) => r.shadow === true && r.event === 'dispatch_requested')! as Record<string, unknown>;
   const outRel = sReq.output_snapshot as string;
   assert.ok(existsSync(join(root2, outRel)));
   assert.equal(read(root2, outRel), 'SHADOW_OUT');
@@ -273,8 +289,12 @@ test('primary rows byte-stable when a shadow fires', (t) => {
 
   const rowsShadow = evidenceRows(rootShadow);
   const rowsNo = evidenceRows(rootNoShadow);
-  const primaryShadow = rowsShadow.slice(0, 2);
-  const primaryNo = rowsNo.slice(0, 2);
+  // Shadow rows interleave (pReq, sReq, pComp, sComp), so select the primary
+  // pair by identity rather than position.
+  const primaryShadow = rowsShadow.filter((r) => r.shadow !== true);
+  const primaryNo = rowsNo.filter((r) => r.shadow !== true);
+  assert.equal(primaryShadow.length, 2);
+  assert.equal(primaryNo.length, 2);
   for (let i = 0; i < 2; i++) {
     const a = { ...primaryShadow[i] } as Record<string, unknown>;
     const b = { ...primaryNo[i] } as Record<string, unknown>;
@@ -313,6 +333,152 @@ test('shadow identity re-spell: dial/model/model_id/driver/reasoning_effort', (t
   assert.equal(sReq.reasoning_effort, 'high');
   assert.ok(!('loadout' in sReq));
   assert.ok(!('target' in sReq));
+});
+
+function seedTwoProviders(t: import('node:test').TestContext, primaryCmd: string[], shadowCmd: string[]): string {
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    schema_version: 3,
+    models: {
+      'primary-worker': { provider: 'openai', id: 'primary-worker' },
+      'shadow-worker': { provider: 'openai2', id: 'shadow-worker' },
+    },
+    routes: {
+      standalone: {
+        openai: { command: primaryCmd, write_access: true },
+        openai2: { command: shadowCmd, write_access: true },
+      },
+      codex: {
+        openai: { command: primaryCmd, write_access: true },
+        openai2: { command: shadowCmd, write_access: true },
+      },
+    },
+    archetypes: { worker: {} },
+    dials: { worker: 'primary-worker' },
+  }));
+  return root;
+}
+
+test('shadow runs concurrently with the primary, not after it', (t) => {
+  // The primary refuses to finish until it has seen a file only the shadow
+  // writes. Under the old sequential design (shadow spawned after primary
+  // completion) this deadlocks into the primary's 15s timeout; concurrency is
+  // the only way SAW_FLAG can happen.
+  const root = tempRepo(t);
+  const flag = join(root, 'flag-from-shadow.txt');
+  const primary = ['node', '-e', `const f=require('fs');const p=${JSON.stringify(flag)};const t0=Date.now();(function w(){if(f.existsSync(p)){process.stdout.write('SAW_FLAG');process.exit(0)}if(Date.now()-t0>15000){process.stdout.write('NO_FLAG');process.exit(3)}setTimeout(w,50)})();`];
+  const shadow = ['node', '-e', `require('fs').writeFileSync(${JSON.stringify(flag)},'x');process.stdout.write('FLAGGED');`];
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    schema_version: 3,
+    models: {
+      'primary-worker': { provider: 'openai', id: 'primary-worker' },
+      'shadow-worker': { provider: 'openai2', id: 'shadow-worker' },
+    },
+    routes: {
+      standalone: {
+        openai: { command: primary, write_access: true },
+        openai2: { command: shadow, write_access: true },
+      },
+      codex: {
+        openai: { command: primary, write_access: true },
+        openai2: { command: shadow, write_access: true },
+      },
+    },
+    archetypes: { worker: {} },
+    dials: { worker: 'primary-worker' },
+  }));
+  initGit(root);
+  writeLocalDialState(root, { dials: {}, shadows: { worker: { model: 'shadow-worker' } }, legacyNote: null });
+  const result = runDispatch({ archetype: 'worker', prompt: 'race', repoRoot: root, userPathOptions: onHarness('standalone') });
+  assert.equal(result.stdout, 'SAW_FLAG', 'the primary must observe the concurrently-running shadow');
+  assert.equal(result.exitCode, 0);
+  const sComp = evidenceRows(root).find((r) => r.shadow === true && r.event === 'dispatch_completed')!;
+  assert.equal(readFileSync(join(root, sComp.output_snapshot as string), 'utf8'), 'FLAGGED');
+});
+
+test('shadow duration_ms is its own runtime, not when the kernel collected it', (t) => {
+  // Primary sleeps 3s; shadow returns immediately. The kernel only collects
+  // the shadow after the primary's spawnSync returns, so a kernel-clocked
+  // duration would read ~3s. The supervisor measures it instead.
+  const root = seedTwoProviders(
+    t,
+    ['node', '-e', "setTimeout(()=>process.stdout.write('SLOW'),3000)"],
+    ['node', '-e', "process.stdout.write('FAST')"],
+  );
+  initGit(root);
+  writeLocalDialState(root, { dials: {}, shadows: { worker: { model: 'shadow-worker' } }, legacyNote: null });
+  runDispatch({ archetype: 'worker', prompt: 'timing', repoRoot: root, userPathOptions: onHarness('standalone') });
+  const rows = evidenceRows(root);
+  const pComp = rows.find((r) => r.shadow !== true && r.event === 'dispatch_completed')!;
+  const sComp = rows.find((r) => r.shadow === true && r.event === 'dispatch_completed')!;
+  assert.ok((pComp.duration_ms as number) >= 2800, `primary ran ~3s, recorded ${pComp.duration_ms}ms`);
+  assert.ok(
+    (sComp.duration_ms as number) < 2000,
+    `shadow finished in well under a second but recorded ${sComp.duration_ms}ms — collection time leaked into its runtime`,
+  );
+});
+
+test('shadow worktree is cut from HEAD before the primary can move it', (t) => {
+  // The primary commits; the shadow reports the HEAD of its own worktree.
+  // Cut before the primary spawns, both sides start from the same state and
+  // a committing primary cannot contaminate the comparison.
+  const gitEnv = "{...process.env,GIT_AUTHOR_NAME:'t',GIT_AUTHOR_EMAIL:'t@invalid',GIT_COMMITTER_NAME:'t',GIT_COMMITTER_EMAIL:'t@invalid',GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1'}";
+  const root = seedTwoProviders(
+    t,
+    ['node', '-e', `const{execSync}=require('child_process');execSync('git commit --allow-empty -m moved -q',{env:${gitEnv}});process.stdout.write('COMMITTED');`],
+    ['node', '-e', "const{execSync}=require('child_process');process.stdout.write(execSync('git rev-parse HEAD').toString().trim());"],
+  );
+  initGit(root);
+  const headBefore = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim();
+  writeLocalDialState(root, { dials: {}, shadows: { worker: { model: 'shadow-worker' } }, legacyNote: null });
+  const result = runDispatch({ archetype: 'worker', prompt: 'head', repoRoot: root, userPathOptions: onHarness('standalone') });
+  assert.equal(result.stdout, 'COMMITTED');
+  const headAfter = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim();
+  assert.notEqual(headAfter, headBefore, 'the primary must actually have moved HEAD');
+  const sComp = evidenceRows(root).find((r) => r.shadow === true && r.event === 'dispatch_completed')!;
+  const shadowHead = readFileSync(join(root, sComp.output_snapshot as string), 'utf8').trim();
+  assert.equal(shadowHead, headBefore, 'the shadow must start from pre-primary HEAD');
+});
+
+test('shadow worktree is removed when primary completion persistence throws', (t) => {
+  // Both request rows exist before the primary starts. Turning the ledger path
+  // into a directory from the primary forces its completion append to throw,
+  // after the concurrent shadow and its detached worktree already exist.
+  const primary = ['node', '-e', "const f=require('fs');f.rmSync('.fadeno/dispatches.jsonl');f.mkdirSync('.fadeno/dispatches.jsonl');process.stdout.write('BROKE_LEDGER');"];
+  const shadow = ['node', '-e', "process.stdout.write('SHADOW_DONE')"];
+  const root = seedTwoProviders(t, primary, shadow);
+  initGit(root);
+  writeLocalDialState(root, { dials: {}, shadows: { worker: { model: 'shadow-worker' } }, legacyNote: null });
+
+  assert.throws(
+    () => runDispatch({ archetype: 'worker', prompt: 'cleanup', repoRoot: root, userPathOptions: onHarness('standalone') }),
+  );
+
+  const shadowRoot = join(root, '.fadeno', 'local', 'shadow');
+  assert.deepEqual(existsSync(shadowRoot) ? readdirSync(shadowRoot) : [], []);
+  const worktrees = spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: root, encoding: 'utf8' });
+  assert.equal(worktrees.status, 0);
+  assert.doesNotMatch(worktrees.stdout, /\.fadeno[/\\]local[/\\]shadow/);
+});
+
+test('dispatches --output last never resolves to a shadow', (t) => {
+  // The shadow's request row is the newest one carrying an output_snapshot,
+  // and its lifetime overlaps the primary's by construction. Neither fact may
+  // hand `last` the challenger's report or refuse it as "concurrent" — the
+  // caller launched the primary; the kernel launched the shadow.
+  const root = seedV3(t);
+  initGit(root);
+  writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'luna-worker' } }, legacyNote: null });
+  const result = runDispatch({ archetype: 'worker', prompt: 'mine', repoRoot: root, userPathOptions: onHarness('standalone') });
+  const last = runDispatchesOutput({ repoRoot: root, dispatchId: 'last' });
+  assert.equal(last.dispatchId, result.dispatchId);
+  assert.equal(last.bytes, 'REPORT:mine');
+  // Explicit id recovery still reaches the shadow's snapshot.
+  const sReq = evidenceRows(root).find((r) => r.shadow === true && r.event === 'dispatch_requested')!;
+  const shadowOut = runDispatchesOutput({ repoRoot: root, dispatchId: sReq.dispatch_id as string });
+  assert.equal(shadowOut.dispatchId, sReq.dispatch_id);
 });
 
 test('constraint-boundary shadow_only: assert rows.length ===2 + event names', (t) => {

@@ -165,7 +165,8 @@ test('engine host steering is locked to the run request, not ambient dials', (t)
   assert.doesNotMatch(ordinary.prompt, /^# Fadeno engine step assignment/);
 
   const eventsPath = join(created.runDir, 'events.jsonl');
-  const withoutDigest = readFileSync(eventsPath, 'utf8').trim().split('\n').map((line) => {
+  const originalEvents = readFileSync(eventsPath, 'utf8');
+  const withoutDigest = originalEvents.trim().split('\n').map((line) => {
     const event = JSON.parse(line) as Record<string, unknown>;
     if (event.type === 'profile_snapshotted') delete event.sha256;
     return JSON.stringify(event);
@@ -175,6 +176,7 @@ test('engine host steering is locked to the run request, not ambient dials', (t)
     () => runSteeringResolve({ repoRoot: root, archetype: 'worker', run: created.runId, dispatchId: request.dispatchId }),
     /sha256 digest/,
   );
+  writeFileSync(eventsPath, originalEvents);
 
   runDispatchStart({ repoRoot: root, run: created.runId, dispatchId: request.dispatchId, agentId: 'native-duplicate-fixture' });
   const withDuplicateStart = readFileSync(eventsPath, 'utf8').trim().split('\n');
@@ -189,6 +191,32 @@ test('engine host steering is locked to the run request, not ambient dials', (t)
     () => runSteeringResolve({ repoRoot: root, archetype: 'worker', run: created.runId, dispatchId: request.dispatchId }),
     /started more than once/,
   );
+});
+
+test('locked steering specializes a wildcard host request to the delivered archetype', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'codex', repoRoot: root, dataOnly: true });
+  const created = runNewRun({ repoRoot: root, playbook: 'code-change-review', task: 'plan a safe change' });
+  const driven = runDrive({ repoRoot: root, run: created.runId });
+  assert.equal(driven.outcome, 'awaiting_host_dispatch');
+  const request = driven.requests[0]!;
+  assert.equal(request.actor, 'coordinator');
+  assert.equal(request.agentType, '*');
+
+  const resolution = runSteeringResolve({
+    repoRoot: root,
+    archetype: 'director',
+    run: created.runId,
+    dispatchId: request.dispatchId,
+  });
+  assert.equal(resolution.archetype, 'director');
+  assert.equal(resolution.executor, 'current-host');
+  assert.equal(resolution.source, 'host-request');
+  assert.equal(resolution.mode, 'host');
+  assert.equal(resolution.requested_agent_type, '*');
+  assert.equal(resolution.delivered_archetype, 'director');
+  assert.equal(resolution.identity_evidence, 'requested_only');
+  assert.match(resolution.detail, /reference-frame-neutral executor current-host/);
 });
 
 test('engine host steering automatically completes a mismatched native slot through its locked fallback', (t) => {

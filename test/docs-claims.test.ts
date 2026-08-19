@@ -160,6 +160,16 @@ const CLAIMS: Claim[] = [
     src: { files: ['src/lib/executors.ts'], patterns: [/effort_encoding/] },
   },
   {
+    id: 'models-command-surface',
+    doc: { files: [DIALS], patterns: [/fadeno models/] },
+    src: { files: ['src/cli.ts'], patterns: [/fadeno models/] },
+  },
+  {
+    id: 'write-variant',
+    doc: { files: [DIALS], patterns: [/write_variant/, /applyWritePosture/] },
+    src: { files: ['src/lib/executors.ts'], patterns: [/write_variant/, /applyWritePosture/] },
+  },
+  {
     id: 'models-command-probe',
     doc: { files: [DIALS], patterns: [/models_command/] },
     src: { files: ['src/lib/executors.ts'], patterns: [/models_command/] },
@@ -168,6 +178,111 @@ const CLAIMS: Claim[] = [
     id: 'verification-cache',
     doc: { files: [DIALS], patterns: [/model-verifications/] },
     src: { files: ['src/lib/user-paths.ts'], patterns: [/modelVerificationsFile/, /model-verifications/] },
+  },
+  {
+    id: 'engine-cancel-command',
+    doc: { files: [EXTENDING, 'README.md'], patterns: [/fadeno cancel/] },
+    src: { files: ['src/commands/cancel.ts', 'src/cli.ts'], patterns: [/runCancel/] },
+  },
+  {
+    id: 'executor-timeout-route',
+    doc: { files: [EXTENDING, 'docs/architecture.md'], patterns: [/timeout_ms: 1200000/] },
+    src: { files: ['src/lib/executors.ts', 'src/lib/supervisor.ts'], patterns: [/timeout_ms/] },
+  },
+  {
+    id: 'executor-timeout-receipt',
+    doc: { files: [EXTENDING], patterns: [/executor_timeout/] },
+    src: { files: ['src/commands/drive.ts', 'src/commands/dispatch.ts'], patterns: [/executor_timeout/] },
+  },
+  {
+    id: 'timeout-cli-override',
+    doc: { files: [EXTENDING, 'README.md'], patterns: [/--timeout <seconds>/] },
+    src: { files: ['src/cli.ts'], patterns: [/--timeout/] },
+  },
+  {
+    id: 'idle-output-warning',
+    doc: { files: [EXTENDING, 'docs/architecture.md'], patterns: [/OUTPUT_IDLE_WARNING_MS/] },
+    src: { files: ['src/commands/show.ts', 'src/cli.ts'], patterns: [/OUTPUT_IDLE_WARNING_MS/] },
+  },
+  {
+    id: 'neutral-current-host',
+    doc: { files: ['README.md', 'docs/architecture.md'], patterns: [/current-host/] },
+    src: { files: ['src/commands/steering.ts'], patterns: [/current-host/, /requested_only/] },
+  },
+  {
+    id: 'isolated-host-workspace',
+    doc: { files: ['README.md', 'docs/architecture.md'], patterns: [/fadeno dispatch-prepare/, /--isolate/, /workspace_mode: isolated/] },
+    src: { files: ['src/commands/dispatch-prepare.ts', 'src/lib/host-workspace.ts'], patterns: [/dispatch-prepare/, /workspace_mode/, /host-worktrees/] },
+  },
+  {
+    id: 'approval-gate-condition',
+    doc: { files: ['docs/architecture.md', 'docs/roadmap.md'], patterns: [/all_reviews_approved/] },
+    src: { files: ['src/commands/gate.ts'], patterns: [/all_reviews_approved/, /verdict/] },
+  },
+  {
+    id: 'contract-acceptance-gate',
+    doc: { files: ['docs/experimental/loadouts-and-dispatch.md'], patterns: [/accept_contract/] },
+    src: { files: ['templates/common/fadeno/playbooks/parallel-workstreams.yaml'], patterns: [/accept_contract/, /reaccept_contract/] },
+  },
+  {
+    id: 'schema-envelope-extraction',
+    doc: { files: ['docs/experimental/next-protocol.md'], patterns: [/output_extraction/] },
+    src: { files: ['src/lib/schema-envelope.ts'], patterns: [/extractSchemaEnvelope/, /EnvelopeKind/] },
+  },
+  {
+    id: 'envelope-raw-evidence',
+    doc: { files: ['docs/experimental/next-protocol.md'], patterns: [/raw_output_sha256/] },
+    src: { files: ['src/commands/drive.ts', 'src/lib/host-dispatch.ts'], patterns: [/raw_output_sha256/] },
+  },
+  {
+    id: 'drive-parallel-flag',
+    doc: { files: ['docs/experimental/compositional-runtime.md', 'CHANGELOG.md'], patterns: [/--parallel/] },
+    src: { files: ['src/commands/drive.ts', 'src/cli.ts'], patterns: [/--parallel/, /DRIVE_PARALLEL/] },
+  },
+  {
+    id: 'drive-parallel-agent-surface',
+    doc: { files: ['templates/common/skills/fadeno-runner/references/runtime.md', 'templates/common/skills/fadeno-driver/SKILL.md'], patterns: [/--parallel/] },
+    src: { files: ['src/commands/drive.ts', 'src/cli.ts'], patterns: [/--parallel/, /DRIVE_PARALLEL/] },
+  },
+  {
+    id: 'wave-supervisor-lost',
+    doc: { files: ['CHANGELOG.md'], patterns: [/supervisor_lost/] },
+    src: { files: ['src/commands/drive.ts'], patterns: [/supervisor_lost/] },
+  },
+  {
+    id: 'wave-duration-evidence',
+    doc: { files: ['CHANGELOG.md'], patterns: [/duration_ms/] },
+    src: { files: ['src/commands/drive.ts'], patterns: [/duration_ms/] },
+  },
+  {
+    id: 'wave-output-unreadable',
+    doc: { files: ['CHANGELOG.md'], patterns: [/output_unreadable/] },
+    src: { files: ['src/commands/drive.ts'], patterns: [/output_unreadable/] },
+  },
+  {
+    id: 'wave-output-too-large',
+    doc: { files: ['CHANGELOG.md'], patterns: [/output_too_large/] },
+    src: { files: ['src/commands/drive.ts'], patterns: [/output_too_large/] },
+  },
+  {
+    id: 'tool-run-command',
+    doc: { files: ['docs/roadmap.md', 'docs/architecture.md', 'docs/extending.md'], patterns: [/fadeno tool-run/] },
+    src: { files: ['src/cli.ts', 'src/commands/tool-run.ts'], patterns: [/tool-run/, /runToolRun/] },
+  },
+  {
+    id: 'tools-registry',
+    doc: { files: ['docs/architecture.md', 'docs/extending.md'], patterns: [/tools:/] },
+    src: { files: ['src/lib/executors.ts'], patterns: [/tools:/] },
+  },
+  {
+    id: 'tool-lifecycle-events',
+    doc: { files: ['docs/architecture.md'], patterns: [/tool_dispatched/, /tool_completed/, /tool_failed/] },
+    src: { files: ['src/lib/tool-exec.ts'], patterns: [/tool_dispatched/, /tool_completed/, /tool_failed/] },
+  },
+  {
+    id: 'verify-tool-checks',
+    doc: { files: ['docs/roadmap.md', 'docs/architecture.md'], patterns: [/tool-result-coherence/, /tool-command-digest/, /tool-lifecycle/] },
+    src: { files: ['src/commands/verify.ts'], patterns: [/tool-result-coherence/, /tool-command-digest/, /tool-lifecycle/] },
   },
 ];
 

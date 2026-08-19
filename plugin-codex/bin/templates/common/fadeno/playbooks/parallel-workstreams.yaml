@@ -18,7 +18,9 @@ roles:
       Freeze the shared contract — names, schemas, interface tokens — and one
       ownership manifest per workstream BEFORE any fan-out, then own the final
       summary. Manifests must be file-disjoint; every cross-cutting file belongs
-      to the integrator, not to a workstream.
+      to the integrator, not to a workstream. On rejection, produce one complete
+      replacement contract addressing the recorded feedback — never a diff or patch
+      against generation 1; the highest generation is authoritative.
   workstream_1:
     purpose: >
       Implement workstream 1 against the frozen contract, touching only the
@@ -68,6 +70,32 @@ flow:
     kind: actor_call
     actor: coordinator
     output: Contract
+
+  - id: accept_contract
+    kind: human_gate
+    input: [Contract]
+    prompt: >
+      Review the frozen contract and ownership manifests. Approve to fan out the
+      workstreams, or reject with feedback to request one regeneration.
+    on_approve: run_workstreams
+    on_reject: revise_contract
+
+  - id: revise_contract
+    kind: actor_call
+    actor: coordinator
+    input: [Contract]
+    output: Contract
+    output_path: artifacts/contract.v2.md
+    next: reaccept_contract
+
+  - id: reaccept_contract
+    kind: human_gate
+    input: [Contract]
+    prompt: >
+      Review the regenerated contract. This is the final acceptance decision —
+      rejecting it ends the run without starting any workstream.
+    on_approve: run_workstreams
+    on_reject: contract_rejected
 
   # 2. Fan out. A map over the workstream roles: each member sees the frozen
   #    Contract and works independently, so completion order does not matter.
@@ -125,7 +153,7 @@ flow:
     kind: gate
     input:
       - ReviewReport
-    condition: no_blocking_issues
+    condition: all_reviews_approved
     on_pass: done
     on_fail: rework
 
@@ -136,8 +164,8 @@ flow:
     body:
       - rework_integration
       - rereview_integration
-    max_iterations: 1
-    until: no_blocking_issues
+    max_iterations: 2
+    until: all_reviews_approved
     on_success: done
     on_exhausted: unresolved_review
 
@@ -187,6 +215,13 @@ flow:
     output: FinalSummary
     terminal_status: failed
 
+  - id: contract_rejected
+    kind: actor_call
+    actor: coordinator
+    input: [Contract]
+    output: FinalSummary
+    terminal_status: failed
+
 artifact_contracts:
   Contract:
     media_type: text/markdown
@@ -195,7 +230,9 @@ artifact_contracts:
       tokens every workstream must use verbatim — then one ownership manifest
       per workstream listing the files it alone may edit. Manifests must be
       file-disjoint; assign cross-cutting and generated files to the integrator.
-      Close with the reconciliation rules workers cannot decide for themselves.
+      Each generation is a complete, self-contained replacement and the highest
+      generation is authoritative; close with the reconciliation rules workers
+      cannot decide for themselves.
   WorkstreamReport:
     media_type: text/markdown
     instructions: >
@@ -212,11 +249,11 @@ artifact_contracts:
       and any documentation wording changed to match the behavior that landed.
 
 limits:
-  max_iterations: 1
-  max_actor_calls: 12
+  max_iterations: 2
+  max_actor_calls: 14
 
 policies:
-  max_revision_loops: 1
+  max_revision_loops: 2
   max_subagents: 6
   # ADVISORY in instruction-only hosts. For real enforcement, wire these to
   # pre-commit/CI (or Claude Code hooks). See .fadeno/enforcement.md.

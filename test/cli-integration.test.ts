@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
@@ -8,6 +8,8 @@ import { runInit } from '../src/commands/init.ts';
 import { runNewRun } from '../src/commands/new-run.ts';
 import { runPrompt } from '../src/commands/prompt.ts';
 import { tempRepo } from './helpers.ts';
+import { userPaths } from '../src/lib/user-paths.ts';
+import { syncManagedRuntime, readInstallationManifest } from '../src/lib/installations.ts';
 
 const BIN = join(import.meta.dirname, '..', 'plugin', 'bin', 'fadeno');
 
@@ -103,6 +105,34 @@ test('committed bundled CLI supports Grok init and rejects mixed target flags', 
   const mixed = cliSplit(root, ['init', '--grok', '--codex']);
   assert.equal(mixed.status, 1);
   assert.match(`${mixed.stdout}${mixed.stderr}`, /choose exactly one target/i);
+});
+
+test('bundled CLI serves focused per-command help and falls back globally', (t) => {
+  const root = tempRepo(t);
+
+  const dial = cliSplit(root, ['dial', '--help']);
+  assert.equal(dial.status, 0, dial.stderr);
+  assert.match(dial.stdout, /per-archetype model selection/);
+  assert.match(dial.stdout, /binding → session dial → repo pin → user dial/);
+  assert.doesNotMatch(dial.stdout, /fadeno new-run <playbook>/);
+
+  // Help is answered before the command body runs: dispatch must not wait on stdin.
+  const dispatch = cliSplit(root, ['dispatch', '--help']);
+  assert.equal(dispatch.status, 0, dispatch.stderr);
+  assert.match(dispatch.stdout, /--prompt-file/);
+  assert.match(dispatch.stdout, /dispatches --output tag:/);
+
+  const verify = cliSplit(root, ['verify', '--help']);
+  assert.equal(verify.status, 0);
+  assert.match(verify.stdout, /--allow-failed/);
+
+  // Later positionals keep the command's help; unknown commands fall back to global.
+  const midArgs = cliSplit(root, ['dial', 'worker', '--help']);
+  assert.equal(midArgs.status, 0);
+  assert.match(midArgs.stdout, /per-archetype model selection/);
+  const unknown = cliSplit(root, ['no-such-command', '--help']);
+  assert.equal(unknown.status, 0);
+  assert.match(unknown.stdout, /fadeno — the playbook layer for AI coding agents/);
 });
 
 test('bundled CLI dial shows effective table and resolves via dials', (t) => {
@@ -253,4 +283,108 @@ test('dial resolve hook emits stable keys for agent', (t) => {
   assert.ok('model' in parsed);
   assert.ok('adapter' in parsed);
   assert.equal(parsed.model, 'current-host');
+});
+
+test('built CLI gate all_reviews_approved failure names reviewer and verdict for zero-blocking request_changes', (t) => {
+  const root = tempRepo(t);
+  const runId = fresh(root);
+  const reportPath = join(root, '.fadeno', 'runs', runId, 'artifacts', 'review-report.json');
+  // zero-blocking request_changes must pass legacy but fail approval gate
+  writeFileSync(reportPath, JSON.stringify({ reviewer: 'alice', summary: 'needs work', issues: [{ severity: 'minor', title: 'nit' }], verdict: 'request_changes' }));
+  const result = cliSplit(root, ['gate', runId, 'all_reviews_approved']);
+  assert.equal(result.status, 1, 'gate should fail for request_changes');
+  const combined = `${result.stdout}${result.stderr}`;
+  assert.match(combined, /FAIL\s+all_reviews_approved/);
+  assert.match(combined, /alice/);
+  assert.match(combined, /request_changes/);
+  // Should not be empty blocking-title list; must show reviewer verdict line
+  assert.match(combined, /-\s*alice:\s*request_changes/);
+  const legacy = cliSplit(root, ['gate', runId, 'no_blocking_issues']);
+  assert.equal(legacy.status, 0, 'legacy no_blocking_issues should pass for zero-blocking');
+});
+
+test('CLI preflight refreshes older runtime without changing stdout/exit, never installs fresh, never downgrades, and skips unknown commands', (t) => {
+  const runWithEnv = (repoRoot: string, args: string[], extraEnv: Record<string, string>) => {
+    const env = { ...process.env, ...extraEnv };
+    try {
+      const stdout = execFileSync(BIN, args, { cwd: repoRoot, env, encoding: 'utf8', stdio: 'pipe' });
+      return { status: 0, stdout, stderr: '' };
+    } catch (e: any) {
+      return { status: e.status ?? 1, stdout: e.stdout ?? '', stderr: e.stderr ?? '' };
+    }
+  };
+  // Setup isolated homes
+  const root = tempRepo(t);
+  const homes = {
+    FADENO_CONFIG_HOME: join(root, 'user-config'),
+    FADENO_STATE_HOME: join(root, 'user-state'),
+    FADENO_DATA_HOME: join(root, 'user-data'),
+  };
+  const pathsOpts = { home: join(root, 'home'), env: homes };
+  const up = userPaths(pathsOpts);
+  const makeSource = (name, version, content) => {
+    const dir = join(root, name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'fadeno'), content);
+    chmodSync(join(dir, 'fadeno'), 0o755);
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fadeno-runtime', type: 'commonjs', version }, null, 2));
+    mkdirSync(join(dir, 'templates'), { recursive: true });
+    writeFileSync(join(dir, 'templates', 'x'), 'x');
+    return dir;
+  };
+  // First install older
+  const older = makeSource('older-preflight-cli', '0.6.0-rc.32', 'old-bytes-cli');
+  let manifest = readInstallationManifest(pathsOpts);
+  syncManagedRuntime(up, older, manifest, { allowInstall: true, trustSource: true });
+  manifest = readInstallationManifest(pathsOpts);
+  // Refresh test: newer bundled should refresh on operational command
+  const newer = makeSource('newer-preflight-cli', '0.6.0-rc.33', 'new-bytes-cli');
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  // operational command: `fadeno runs` should list no runs, exit 0, and preserve stdout
+  const beforeRuns = runWithEnv(root, ['runs'], { ...homes, FADENO_BUNDLED_RUNTIME: newer });
+  assert.equal(beforeRuns.status, 0);
+  assert.match(beforeRuns.stdout, /No runs yet/);
+  // After, runtime should be newer
+  assert.equal(readFileSync(up.managedCli, 'utf8'), 'new-bytes-cli');
+  // Check stdout preserved: direct run without preflight (via status which is excluded) should have same stdout?
+  // For stdout preservation, compare that `runs` stdout is exactly same as without bundled env but with same repo
+  const withoutBundled = runWithEnv(root, ['runs'], homes);
+  assert.equal(withoutBundled.stdout, beforeRuns.stdout, 'preflight must not alter command stdout');
+  // Never downgrades: set bundled to older, run operational, should stay newer
+  const resultDowngrade = runWithEnv(root, ['runs'], { ...homes, FADENO_BUNDLED_RUNTIME: older });
+  assert.equal(resultDowngrade.status, 0);
+  const afterDowngradeManifest = readInstallationManifest(pathsOpts);
+  assert.equal(afterDowngradeManifest.runtime?.version, '0.6.0-rc.33', 'preflight must never downgrade version');
+  assert.notEqual(readFileSync(up.managedCli, 'utf8'), 'old-bytes-cli', 'preflight must not downgrade to older bytes');
+  // Never installs fresh: new isolated homes with no prior runtime
+  const freshRoot = tempRepo(t);
+  mkdirSync(join(freshRoot, '.fadeno'), { recursive: true });
+  const freshHomes = {
+    FADENO_CONFIG_HOME: join(freshRoot, 'user-config2'),
+    FADENO_STATE_HOME: join(freshRoot, 'user-state2'),
+    FADENO_DATA_HOME: join(freshRoot, 'user-data2'),
+    FADENO_BUNDLED_RUNTIME: newer,
+  };
+  const freshUp = userPaths({ home: join(freshRoot, 'home2'), env: freshHomes });
+  const freshResult = runWithEnv(freshRoot, ['runs'], freshHomes);
+  assert.equal(freshResult.status, 0);
+  assert.ok(!existsSync(freshUp.managedCli), 'preflight must never create first install on fresh machine');
+  // Unknown command should not trigger refresh: install older again in freshRoot2
+  const root2 = tempRepo(t);
+  const homes2 = {
+    FADENO_CONFIG_HOME: join(root2, 'user-config'),
+    FADENO_STATE_HOME: join(root2, 'user-state'),
+    FADENO_DATA_HOME: join(root2, 'user-data'),
+  };
+  const up2 = userPaths({ home: join(root2, 'home'), env: homes2 });
+  const older2 = makeSource('older2-cli-unknown', '0.6.0-rc.32', 'old2');
+  let man2 = readInstallationManifest({ home: join(root2, 'home'), env: homes2 });
+  syncManagedRuntime(up2, older2, man2, { allowInstall: true, trustSource: true });
+  const newer2 = makeSource('newer2-cli-unknown', '0.6.0-rc.33', 'new2');
+  mkdirSync(join(root2, '.fadeno'), { recursive: true });
+  const unknown = runWithEnv(root2, ['halp'], { ...homes2, FADENO_BUNDLED_RUNTIME: newer2 });
+  // halp should fail (unknown command) and not refresh
+  assert.notEqual(unknown.status, 0);
+  assert.equal(readFileSync(up2.managedCli, 'utf8'), 'old2', 'unknown typo command must not trigger preflight refresh');
+  assert.ok(!unknown.stderr.includes('refreshed') && !unknown.stdout.includes('refreshed'), 'unknown command should not emit refresh message');
 });

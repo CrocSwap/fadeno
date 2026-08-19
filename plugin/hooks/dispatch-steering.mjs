@@ -11,7 +11,7 @@ import { join } from 'node:path';
 // emitters (`fadeno plugin` and `fadeno init --claude`) replace this literal
 // with the package version; the template keeps 'dev', so a row reading 'dev'
 // means the template was executed directly rather than an installed copy.
-const HOOK_VERSION = '0.6.0-rc.28';
+const HOOK_VERSION = '0.6.0-rc.33';
 
 function finish(value) {
   if (value != null) process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -70,7 +70,7 @@ function stashRelay() {
 // proxy like any other archetype spawn: a host slot rewrites back to the
 // in-session agent rather than shelling out to a subprocess of this same
 // harness, which re-enters this same steering one level down.
-const explicitProxy = /^dispatch-(worker|reviewer|judge)$/.test(bare);
+const explicitProxy = /^dispatch-(worker|reviewer|judge|director)$/.test(bare);
 // Only agents that NAME an archetype are steered. `general-purpose` used to map
 // to `worker` and must not: it is the harness's catch-all, the default when a
 // director wants a subagent at all, so capturing it turned every generic spawn
@@ -84,7 +84,7 @@ const explicitProxy = /^dispatch-(worker|reviewer|judge)$/.test(bare);
 // third, and reading it as one costs a task.
 const archetype = explicitProxy
   ? bare.slice('dispatch-'.length)
-  : bare === 'worker' || bare === 'reviewer' || bare === 'judge'
+  : bare === 'worker' || bare === 'reviewer' || bare === 'judge' || bare === 'director'
     ? bare
     : null;
 if (archetype == null) finish(null); // general-purpose, Explore, Plan, and unrelated specialists stay unsteered.

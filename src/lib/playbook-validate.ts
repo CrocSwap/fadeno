@@ -53,6 +53,7 @@ function isContainer(step: Step): boolean {
 
 /** Condition registry shared conceptually with the gate command. */
 const CONDITION_ARTIFACTS: Record<string, string[]> = {
+  all_reviews_approved: ['ReviewReport'],
   no_blocking_issues: ['ReviewReport'],
   tests_pass: ['TestResult'],
 };

@@ -1,6 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path';
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { parse as parseYaml } from 'yaml';
 import { buildArtifactManifest, sha256Hex } from '../lib/artifact-manifest.ts';
 import {
   ExecutorProfileError,
@@ -20,7 +20,7 @@ import { resolveDefinition, resolvePlaybookFile } from '../lib/definitions.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { roleArchetype } from '../lib/playbook-validate.ts';
 import { RUN_LEDGER_SCHEMA_VERSION } from '../lib/run-ledger.ts';
-import { LedgerWriter } from '../lib/run-ledger-write.ts';
+import { LedgerWriter, writeRunDocument } from '../lib/run-ledger-write.ts';
 import { ensureFadenoIgnore } from '../lib/source-control.ts';
 import type { UserPathOptions } from '../lib/user-paths.ts';
 
@@ -348,9 +348,7 @@ export function runNewRun(opts: NewRunOptions): NewRunResult {
     current_step: null,
   };
   // No longer persists loadout selection; dial layers are ambient
-  const runYaml = stringifyYaml(runDocument);
-  const modeline = '# yaml-language-server: $schema=definitions/schemas/run.schema.json';
-  writeFileSync(join(runDir, 'run.yaml'), `${modeline}\n${runYaml}`, 'utf8');
+  writeRunDocument(runDir, runDocument);
 
   new LedgerWriter(runDir).append({ type: 'run_started', step: null }, now);
   writeFileSync(join(runDir, 'artifacts', '.gitkeep'), '', 'utf8');

@@ -1,6 +1,6 @@
-import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
@@ -13,8 +13,10 @@ import {
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
   eligibilityFor,
+  substitutePromptFile,
   explainEligibilityConflict,
   explainProviderConflict,
+  applyWritePosture,
   explainWriteConflict,
   loadExecutorProfile,
   readLocalDialState,
@@ -23,6 +25,7 @@ import {
   compileDialRef,
   parseDialRef,
   formatDialRef,
+  forcesWritePosture,
   roleResolutionEchoLabel,
   withoutHarnessIdentity,
   atCwd,
@@ -48,10 +51,30 @@ import {
   type HostDispatchReceipt,
   type HostDispatchProgressReceipt,
 } from '../lib/host-dispatch.ts';
-import { findRepoRoot, packageVersion } from '../lib/paths.ts';
-import { INFLIGHT_DIR, superviseArgv, supervisedSpawnError } from '../lib/supervisor.ts';
+import { findRepoRoot, packageVersion, templatesDir } from '../lib/paths.ts';
+import { INFLIGHT_DIR, readSupervisorStatus, sleepSync, superviseArgv, supervisedSpawnError, supervisorCanStillReport } from '../lib/supervisor.ts';
+import {
+  WORKSPACE_LEASE_FILE,
+  WORKSPACE_LEASE_LOCK,
+  acquireWorkspaceLease,
+  isWorkspaceLeaseAlive,
+  readWorkspaceLease,
+  releaseWorkspaceLease,
+  withIsolatedWorktree,
+  WorkspaceLeaseError,
+  type LeaseHolder,
+  type WorkspaceLeaseRecord,
+  type WorkspaceMode,
+} from '../lib/workspace-lease.ts';
 import { ensureFadenoIgnore } from '../lib/source-control.ts';
 import type { UserPathOptions } from '../lib/user-paths.ts';
+import {
+  DIAGNOSTICS_MAX_BYTES,
+  DIAGNOSTICS_MAX_LINES,
+  diagnosticsTruncationMarker,
+  truncateDiagnostics,
+  isDiagnosticsEnabled,
+} from '../lib/diagnostics.ts';
 
 export class DispatchCommandError extends Error {}
 
@@ -102,9 +125,9 @@ export function normalizeDispatchTag(tag: string | null | undefined): string | n
   return trimmed;
 }
 
-export type DispatchOutcome = 'ok' | 'failed' | 'empty';
+export type DispatchOutcome = 'ok' | 'failed' | 'empty' | 'timeout';
 
-const DISPATCH_OUTCOMES: readonly string[] = ['ok', 'failed', 'empty'];
+const DISPATCH_OUTCOMES: readonly string[] = ['ok', 'failed', 'empty', 'timeout'];
 
 /**
  * Classify a completion row from the facts it already carries.
@@ -123,7 +146,9 @@ export function deriveDispatchOutcome(row: {
   signal?: string | null;
   error?: string | null;
   outputBytes: number | null;
+  timedOut?: boolean | null;
 }): DispatchOutcome | null {
+  if (row.timedOut === true) return 'timeout';
   if (row.error != null || row.signal != null) return 'failed';
   if (row.exitCode == null) return null;
   if (row.exitCode !== 0) return 'failed';
@@ -138,7 +163,7 @@ export function deriveDispatchOutcome(row: {
  */
 export function normalizeDispatchOutcome(
   stated: unknown,
-  row: { exitCode: number | null; signal?: string | null; error?: string | null; outputBytes: number | null },
+  row: { exitCode: number | null; signal?: string | null; error?: string | null; outputBytes: number | null; timedOut?: boolean | null },
 ): DispatchOutcome | null {
   if (typeof stated === 'string' && DISPATCH_OUTCOMES.includes(stated)) return stated as DispatchOutcome;
   return deriveDispatchOutcome(row);
@@ -196,6 +221,14 @@ function consumePendingRelay(repoRoot: string, prompt: string, now: Date): boole
 
 const SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
 
+export {
+  DIAGNOSTICS_MAX_BYTES,
+  DIAGNOSTICS_MAX_LINES,
+  diagnosticsTruncationMarker,
+  truncateDiagnostics,
+  isDiagnosticsEnabled,
+};
+
 /** Predicate name recorded on a `dispatch_refused` row. */
 export type DispatchRefusalPredicate =
   | 'write_posture'
@@ -203,7 +236,8 @@ export type DispatchRefusalPredicate =
   | 'provider_distinctness'
   | 'constraint_command'
   | 'shadow_isolation'
-  | 'shadow_resolution';
+  | 'shadow_resolution'
+  | 'workspace_lease';
 
 function producedByIds(opts: AdHocDispatchOptions): string[] {
   if (opts.producedBy == null) return [];
@@ -341,6 +375,8 @@ export interface AdHocDispatchOptions {
   promptFile?: string | null;
   /** Prompt text — the CLI reads stdin into this when no `--prompt-file`. */
   prompt?: string | null;
+  /** Skip the archetype's declared brief preamble (composed by default). */
+  noBrief?: boolean;
   /**
    * Repeatable `--produced-by <dispatch-id>`: prior ad-hoc dispatches whose
    * providers the distinctness predicate compares against. A missing or
@@ -373,6 +409,12 @@ export interface AdHocDispatchOptions {
   tag?: string | null;
   /** One-shot shadow target; integrator wires --shadow. */
   shadow?: string | null;
+  /** Isolated worktree delivery: opt-in via --isolate, bypasses shared-writer lease. */
+  isolate?: boolean;
+  /** Hard executor deadline in milliseconds; 0 disables, null/undefined uses the route default. */
+  timeoutMs?: number | null;
+  /** Bounded opt-in process output diagnostics (per-stream 32 KiB / 500 lines). */
+  diagnostics?: boolean;
   /** Injectable random sampler for shadow rate (test seam). */
   shadowSampler?: () => number;
 }
@@ -482,6 +524,34 @@ function loadProfileOrThrow(
  * Null when either probe exits nonzero or fails to spawn (no git, unborn
  * HEAD, permission error) — the completion row then omits the field.
  */
+/**
+ * A shadow spawned ahead of the primary, to be collected after it. The child
+ * runs under its own supervisor with an fd-only stdio wiring, so it makes
+ * progress while the kernel is blocked inside the primary's `spawnSync`;
+ * `statusAbs` is where that supervisor reports the exit the kernel could not
+ * watch for.
+ */
+interface PendingShadow {
+  dispatchId: string;
+  /** Request-row clock reading; the completion row derives from it. */
+  startedAt: Date;
+  /** Kernel-side ms fallback when the supervisor's report has no duration. */
+  startedMs: number;
+  identity: Record<string, unknown>;
+  child: ChildProcess;
+  statusAbs: string;
+  inflightAbs: string;
+  outputRel: string;
+  outputAbs: string;
+  diffRel: string;
+  diffAbs: string;
+  worktreeAbs: string;
+}
+
+/** How often shadow collection re-checks for the supervisor's exit report. */
+const SHADOW_POLL_MS = 50;
+const SHADOW_LIVENESS_EVERY = 20;
+
 function workspaceFingerprint(repoRoot: string): string | null {
   const status = spawnSync('git', ['-C', repoRoot, 'status', '--porcelain'], { encoding: 'utf8' });
   if (status.error != null || status.status !== 0) return null;
@@ -585,7 +655,13 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   }
 
   const harness = profile.harness ?? 'standalone';
-  const spec = delivery.spec;
+  // Write-posture delivery selection: a write-requiring archetype resolving
+  // onto a read-only route that declares a write variant gets the variant
+  // argv. The catalog authorized this when it declared both; the dial only
+  // named the model.
+  const postured = applyWritePosture(delivery.spec, archetype, profile.archetypes);
+  const spec = postured.spec;
+  const usedWriteVariant = postured.usedWriteVariant;
   const executorName = delivery.refString;
   const deliverable = dispatchability(spec, harness);
   if (!deliverable.supported) {
@@ -603,9 +679,15 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
           'command executor.',
     );
   }
-  const command = spec.adapter === 'command' ? spec.command : spec.fallbackCommand!;
+  let command = spec.adapter === 'command' ? spec.command : spec.fallbackCommand!;
   const transport = spec.adapter === 'command' ? 'command' : 'host-command-fallback';
   const deliveryTransport = spec.adapter === 'command' ? 'command' : 'host-command-fallback';
+
+  if (opts.isolate && opts.shadow != null && String(opts.shadow).trim() !== '') {
+    throw new DispatchCommandError('--isolate conflicts with --shadow: both use worktrees — run one or the other.');
+  }
+  const workspaceMode: WorkspaceMode = opts.isolate ? 'isolated' : 'shared';
+  const needsLease = workspaceMode === 'shared' && spec.writeAccess !== false;
 
   let prompt: string;
   let promptSource: 'stdin' | 'file';
@@ -632,6 +714,33 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     );
   }
 
+  // Archetype brief: a catalog-declared preamble composed in front of the
+  // task (how a director learns to coordinate through fadeno). The composed
+  // prompt is what gets snapshotted and digest-attested — evidence records
+  // exactly what was sent, brief included.
+  const briefName = archetype != null && Object.hasOwn(profile.archetypes, archetype)
+    ? profile.archetypes[archetype]!.brief
+    : null;
+  let briefApplied: string | null = null;
+  if (briefName != null && opts.noBrief !== true) {
+    const candidates = [
+      join(repoRoot, '.fadeno', 'briefs', `${briefName}.md`),
+      join(templatesDir(), 'common', 'fadeno', 'briefs', `${briefName}.md`),
+    ];
+    const briefPath = candidates.find((p) => existsSync(p));
+    if (briefPath == null) {
+      throw new DispatchCommandError(
+        `archetype "${archetype}" declares brief "${briefName}" but no template exists at ` +
+          `${candidates.map((p) => relative(repoRoot, p) || p).join(' or ')} — ` +
+          'add the file, remove the `brief:` declaration, or pass --no-brief.',
+      );
+    }
+    const briefText = readFileSync(briefPath, 'utf8');
+    prompt = `${briefText.trimEnd()}\n\n${prompt}`;
+    briefApplied = briefName;
+    opts.onEcho?.(`brief: ${briefName} (${relative(repoRoot, briefPath) || briefPath}) composed ahead of the task`);
+  }
+
   // Two-row evidence: a request row lands BEFORE the spawn so a dispatch
   // killed mid-flight (harness timeout, SIGTERM) still leaves a trace —
   // spawnSync blocks the event loop, so nothing written afterwards can be
@@ -641,11 +750,11 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const dispatchId = randomUUID();
   const now = opts.now ?? new Date();
 
-  // The kernel owns the prompt snapshot for stdin dispatches: the single
-  // writer means the recorded digest attests exactly the bytes received, and
-  // the relay contract needs no separate file-writing step in the caller.
+  // The kernel owns the prompt snapshot for stdin dispatches — and for any
+  // dispatch where a brief was composed: the snapshot must hold the bytes
+  // actually SENT, and a brief makes those differ from the caller's file.
   let promptSnapshot: string;
-  if (promptSource === 'stdin') {
+  if (promptSource === 'stdin' || briefApplied != null) {
     const snapshotRel = join(
       '.fadeno',
       'local',
@@ -660,6 +769,13 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     const rel = relative(repoRoot, promptPath!).split('\\').join('/');
     promptSnapshot = rel === '' || rel.startsWith('../') || isAbsolute(rel) ? promptPath! : rel;
   }
+
+  // File-reading drivers: `{prompt_file}` in the route argv becomes the
+  // snapshot's absolute path — the digest attests exactly what the executor
+  // reads. Substituted before the identity row so evidence records the argv
+  // that actually spawns.
+  const promptFileAbs = isAbsolute(promptSnapshot) ? promptSnapshot : join(repoRoot, promptSnapshot);
+  command = substitutePromptFile(command, promptFileAbs);
 
   // Streamed stdout snapshot: same naming idiom as the prompt snapshot. The
   // path is recorded on the request row before the spawn so a killed
@@ -681,6 +797,8 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const dialField: Record<string, unknown> = { model: dial.model };
   if (dial.effort != null) dialField.effort = dial.effort;
   if (dial.via != null) dialField.via = dial.via;
+  const writePostureForced = forcesWritePosture(dial, resolvedVia);
+  if (writePostureForced) dialField.force_write_posture = true;
   const identity: Record<string, unknown> = {
     dispatch_id: dispatchId,
     ...(tag != null ? { tag } : {}),
@@ -696,7 +814,11 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     driver: delivery.driver,
     ...(delivery.provider != null ? { provider: delivery.provider } : {}),
     transport,
+    workspace_mode: workspaceMode,
     ...(spec.writeAccess != null ? { write_access: spec.writeAccess } : {}),
+    ...(usedWriteVariant ? { write_variant: true } : {}),
+    ...(writePostureForced ? { write_posture_forced: true } : {}),
+    ...(briefApplied != null ? { brief: briefApplied } : {}),
     delivery_transport: deliveryTransport,
     prompt_source: promptSource,
     prompt_snapshot: promptSnapshot,
@@ -712,8 +834,13 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // and throws; an advisory provider clash warns and continues.
   const deliveryChoice = { executor: executorName, spec };
   const writeConflict = explainWriteConflict(deliveryChoice, archetype, profile);
-  if (writeConflict != null) {
+  if (writeConflict != null && !writePostureForced) {
     refuseDispatch(repoRoot, identity, 'write_posture', writeConflict, now);
+  }
+  if (writeConflict != null && writePostureForced) {
+    opts.onEcho?.(
+      `WARNING: FORCED WRITE-POSTURE MISMATCH — dispatch is proceeding because this dial was set with --force. ${writeConflict}`,
+    );
   }
   const eligibilityConflict = explainEligibilityConflict(deliveryChoice, archetype);
   if (eligibilityConflict != null) {
@@ -747,6 +874,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     model_id: delivery.modelId,
     transport: 'command' as const,
     write_access: spec.writeAccess,
+    ...(usedWriteVariant ? { write_variant: true } : {}),
     write_posture: declaredWritePosture(profile, archetype),
     dial: dialField as unknown as DialRef,
     dial_source: ROW_RESOLUTION[source],
@@ -786,6 +914,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const echo =
     `${role ?? archetype ?? executorName} → ${executorName}` +
     `${delivery.model != null ? ` (${delivery.model})` : ''} [${sourceLabel}]` +
+    (usedWriteVariant ? ' [write variant]' : '') +
     (spec.writeAccess === false ? ' [write_access: none]' : '');
   opts.onEcho?.(echo);
   opts.onEcho?.(`external sandbox: ${executorName} (${command.join(' ')}) runs outside the current harness via ${transport}; evidence → ${DISPATCHES_FILE}`);
@@ -816,45 +945,594 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     );
   }
 
-  appendEvidenceRow(repoRoot, {
-    format: DISPATCHES_FORMAT,
-    timestamp: now.toISOString(),
-    event: 'dispatch_requested',
-    ...identity,
-  });
+  // Resolve effective timeout: one CLI override applies to every lane; without
+  // one, each lane uses its own snapshotted route default.
+  const timeoutFor = (laneSpec: CompiledDelivery['spec']): number | null => {
+    if (opts.timeoutMs === 0) return null;
+    if (typeof opts.timeoutMs === 'number' && Number.isInteger(opts.timeoutMs) && opts.timeoutMs > 0) {
+      return opts.timeoutMs;
+    }
+    if (
+      laneSpec.adapter === 'command' &&
+      typeof laneSpec.timeoutMs === 'number' &&
+      Number.isInteger(laneSpec.timeoutMs) &&
+      laneSpec.timeoutMs > 0
+    ) {
+      return laneSpec.timeoutMs;
+    }
+    return null;
+  };
+  const effectiveTimeoutMs = timeoutFor(spec);
+
+  const leaseHolder: LeaseHolder | null = needsLease
+    ? { id: `ad-hoc:${dispatchId}`, kind: 'ad-hoc', dispatchId }
+    : null;
+  let dispatchLeaseExistingBefore: WorkspaceLeaseRecord | null = null;
+  let dispatchLeaseAliveBefore = false;
+  if (leaseHolder != null) {
+    try {
+      dispatchLeaseExistingBefore = readWorkspaceLease(repoRoot);
+    } catch {
+      dispatchLeaseExistingBefore = null;
+    }
+    dispatchLeaseAliveBefore = dispatchLeaseExistingBefore != null ? isWorkspaceLeaseAlive(dispatchLeaseExistingBefore) : false;
+  }
+  if (leaseHolder != null) {
+    try {
+      acquireWorkspaceLease({
+        repoRoot,
+        workspaceMode,
+        holder: leaseHolder,
+        // Durable pre-spawn reservation. The supervisor owns release after
+        // its executor process group has actually closed; the blocked kernel
+        // cannot safely stand in for that liveness fact.
+        supervisorPid: null,
+        executorPid: null,
+        processGroupId: null,
+        startedAt: now,
+        heartbeatAt: now,
+        stdoutBytes: 0,
+        stderrBytes: 0,
+        now,
+      });
+      // Audited reclaim: dead supervisor pid was reclaimed atomically inside the lock (contract 1.3).
+      if (dispatchLeaseExistingBefore != null && !dispatchLeaseAliveBefore && dispatchLeaseExistingBefore.supervisor_pid != null) {
+        try {
+          appendEvidenceRow(repoRoot, {
+            format: DISPATCHES_FORMAT,
+            timestamp: now.toISOString(),
+            event: 'workspace_lease_recovered',
+            recovered_holder: leaseHolder,
+            previous_holder: dispatchLeaseExistingBefore.holder,
+            supervisor_pid: dispatchLeaseExistingBefore.supervisor_pid,
+            reason: 'dead_supervisor',
+            recovered_at: now.toISOString(),
+            by: leaseHolder.id,
+            dispatch_id: dispatchId,
+          });
+        } catch {}
+      }
+    } catch (err) {
+      if (err instanceof WorkspaceLeaseError) {
+        // Audited denial when refusing to reclaim an abandoned host reservation (pid-less, conservatively live).
+        if (dispatchLeaseExistingBefore != null && dispatchLeaseAliveBefore && dispatchLeaseExistingBefore.supervisor_pid == null) {
+          try {
+            appendEvidenceRow(repoRoot, {
+              format: DISPATCHES_FORMAT,
+              timestamp: now.toISOString(),
+              event: 'workspace_lease_reclaim_denied',
+              recovered_holder: null,
+              previous_holder: dispatchLeaseExistingBefore.holder,
+              supervisor_pid: dispatchLeaseExistingBefore.supervisor_pid,
+              reason: 'abandoned_host',
+              recovered_at: now.toISOString(),
+              by: leaseHolder.id,
+              dispatch_id: dispatchId,
+            });
+          } catch {}
+        }
+        refuseDispatch(repoRoot, identity, 'workspace_lease', err.message, now);
+      }
+      throw err;
+    }
+  }
+
+  try {
+    appendEvidenceRow(repoRoot, {
+      format: DISPATCHES_FORMAT,
+      timestamp: now.toISOString(),
+      event: 'dispatch_requested',
+      ...identity,
+    });
+  } catch (error) {
+    if (leaseHolder != null) {
+      try { releaseWorkspaceLease({ repoRoot, holder: leaseHolder }); } catch {}
+    }
+    throw error;
+  }
+
+  // ---- Shadow duplication ---------------------------------------------------
+  // Concurrent with the primary, not after it: the challenger is resolved,
+  // isolated, and spawned BEFORE the primary runs, then collected once the
+  // primary's completion row is down. Three properties fall out:
+  //   - latency is max(primary, shadow) instead of their sum;
+  //   - the worktree is cut from HEAD before the primary can move it, so both
+  //     sides start from the same state (a primary that commits can no longer
+  //     contaminate the comparison);
+  //   - each side's `duration_ms` is its own supervisor-measured runtime, so
+  //     time-to-complete is itself comparison evidence.
+  // Still never on a primary refusal (those throw above, before this point),
+  // and still unable to affect the primary's result: every failure in here
+  // lands as a shadow refusal row or is swallowed.
+  const startShadow = (): PendingShadow | null => {
+    const hasFlag = typeof opts.shadow === 'string' && opts.shadow.trim().length > 0;
+    let shadowDial: DialRef | null = null;
+    let shadowExecutorNameInner: string | null = null;
+    let shadowSourceTag: 'flag' | 'attachment' | null = null;
+    let attachmentRate: number | undefined;
+    if (hasFlag) {
+      try {
+        const parsed = parseDialRef(opts.shadow!.trim(), '--shadow');
+        shadowDial = parsed;
+        shadowExecutorNameInner = formatDialRef(parsed);
+        shadowSourceTag = 'flag';
+      } catch {
+        // A malformed ref still names a shadow attempt; it becomes a
+        // shadow_resolution refusal row below.
+        shadowDial = null;
+        shadowExecutorNameInner = opts.shadow!.trim();
+        shadowSourceTag = 'flag';
+      }
+    } else if (archetype != null) {
+      const localStateForShadow = readLocalDialState(repoRoot);
+      const att = localStateForShadow.shadows[archetype];
+      if (att != null) {
+        shadowDial = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.via ? { via: att.via } : {}) };
+        shadowExecutorNameInner = formatDialRef(shadowDial);
+        shadowSourceTag = 'attachment';
+        attachmentRate = att.rate;
+      }
+    }
+    if (shadowExecutorNameInner == null || shadowSourceTag == null) return null;
+    // Rate sampling for attachments; the flag always fires. Rolled before the
+    // primary spawns — nothing about the primary's run can influence it.
+    if (shadowSourceTag === 'attachment' && attachmentRate != null) {
+      const sampler = opts.shadowSampler ?? Math.random;
+      let roll: number;
+      try { roll = sampler(); } catch { roll = 0; }
+      if (!(roll < attachmentRate)) return null;
+    }
+
+    const shadowNow = new Date();
+    const shadowDispatchId = randomUUID();
+    const shadowId8 = shadowDispatchId.slice(0, 8);
+    const shadowOutputRel = join('.fadeno', 'local', 'outputs', `shadow-${shadowId8}.md`).split('\\').join('/');
+    const shadowOutputAbs = join(repoRoot, shadowOutputRel);
+    const shadowDiffRel = join('.fadeno', 'local', 'outputs', `shadow-${shadowId8}.diff`).split('\\').join('/');
+    const shadowDiffAbs = join(repoRoot, shadowDiffRel);
+    const shadowWorktreeRel = join('.fadeno', 'local', 'shadow', shadowId8).split('\\').join('/');
+    const shadowWorktreeAbs = join(repoRoot, shadowWorktreeRel);
+
+    const writeShadowRefusal = (predicate: DispatchRefusalPredicate, message: string, extra: Record<string, unknown> = {}): void => {
+      const base: Record<string, unknown> = {
+        format: DISPATCHES_FORMAT,
+        timestamp: shadowNow.toISOString(),
+        event: 'dispatch_refused',
+        dispatch_id: shadowDispatchId,
+        archetype,
+        role,
+        resolution: 'shadow',
+        shadow: true,
+        primary_dispatch_id: dispatchId,
+        executor: shadowExecutorNameInner,
+        ...extra,
+        refusal: { predicate, message },
+      };
+      // Trim undefined extras but keep shape; leave minimal for unknown target case.
+      if (base.executor == null) delete base.executor;
+      appendEvidenceRow(repoRoot, base);
+      opts.onEcho?.(`shadow refused: ${message} [${predicate}]`);
+    };
+
+    // Resolve shadow delivery via compile
+    let shadowDelivery: CompiledDelivery;
+    if (shadowDial != null) {
+      try {
+        shadowDelivery = compileDialRef(shadowDial, profile);
+      } catch (err) {
+        const msg = err instanceof ExecutorProfileError ? err.message : String(err);
+        writeShadowRefusal('shadow_resolution', msg);
+        return null;
+      }
+    } else {
+      writeShadowRefusal('shadow_resolution', `shadow target "${shadowExecutorNameInner}" is not a valid dial ref.`);
+      return null;
+    }
+    if (shadowDelivery.spec.adapter === 'host') {
+      writeShadowRefusal('shadow_resolution', `shadow executor "${shadowExecutorNameInner}" is a host executor — the kernel cannot duplicate a host dispatch.`, {
+        model: shadowDelivery.model,
+        model_id: shadowDelivery.modelId,
+        driver: shadowDelivery.driver,
+        reasoning_effort: shadowDelivery.effort,
+        transport: 'host',
+      });
+      return null;
+    }
+    // Shadows duplicate the primary's shape, so a write-requiring
+    // archetype's challenger gets the same posture selection.
+    const shadowPostured = applyWritePosture(shadowDelivery.spec, archetype, profile.archetypes);
+    const shadowSpec = shadowPostured.spec;
+    const shadowUsedWriteVariant = shadowPostured.usedWriteVariant;
+    const shadowRefString = shadowDelivery.refString;
+    // Eligibility: forbidden refuses, shadow_only allowed
+    const eligibilityState = eligibilityFor(shadowSpec, archetype);
+    if (eligibilityState === 'forbidden') {
+      const msg = explainEligibilityConflict({ executor: shadowRefString, spec: shadowSpec }, archetype) ?? `archetype "${archetype}" is forbidden on executor "${shadowRefString}".`;
+      writeShadowRefusal('eligibility', msg, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effort, transport: 'command' });
+      return null;
+    }
+    const shadowWriteConflict = explainWriteConflict({ executor: shadowRefString, spec: shadowSpec }, archetype, profile);
+    if (shadowWriteConflict != null) {
+      writeShadowRefusal('write_posture', shadowWriteConflict, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effort, transport: 'command' });
+      return null;
+    }
+    // Constraint check with shadow:true
+    const sSessionMap: Record<string, string> = {};
+    for (const [k, v] of Object.entries(sessionDials)) sSessionMap[k] = formatDialRef(v);
+    const sRepoMap: Record<string, string> = {};
+    for (const [k, v] of Object.entries(repoDials)) sRepoMap[k] = formatDialRef(v);
+    const sUserMap: Record<string, string> = {};
+    for (const [k, v] of Object.entries(userDials)) sUserMap[k] = formatDialRef(v);
+    const sDialField = { model: shadowDial.model, ...(shadowDial.effort ? { effort: shadowDial.effort } : {}), ...(shadowDial.via ? { via: shadowDial.via } : {}) };
+    const shadowConstraintContext = {
+      archetype,
+      role,
+      executor: shadowRefString,
+      driver: shadowDelivery.driver,
+      provider: shadowDelivery.provider ?? null,
+      model: shadowDelivery.model,
+      model_id: shadowDelivery.modelId,
+      transport: 'command' as const,
+      write_access: shadowSpec.writeAccess,
+      ...(shadowUsedWriteVariant ? { write_variant: true } : {}),
+      write_posture: declaredWritePosture(profile, archetype),
+      dial: sDialField as DialRef,
+      dial_source: 'shadow',
+      dials: { session: sSessionMap, repo: sRepoMap, user: sUserMap },
+      resolved_via: resolvedVia,
+      input_provenance: provenanceFields(producers),
+      harness: profile.harness ?? 'standalone',
+      shadow: true,
+    } satisfies ConstraintContext;
+    let shadowConstraintVerdict;
+    try {
+      shadowConstraintVerdict = evaluateConstraint(profile, shadowConstraintContext, { cwd: repoRoot });
+    } catch (err) {
+      if (err instanceof ConstraintError) {
+        // A primary lets a constraint SYSTEM error bubble loudly; a shadow
+        // must never take the primary's result down with it, so the same
+        // error lands as a shadow_resolution refusal row.
+        writeShadowRefusal('shadow_resolution', `shadow constraint system error: ${err.message}`);
+        return null;
+      }
+      throw err;
+    }
+    if (shadowConstraintVerdict.verdict === 'refused') {
+      writeShadowRefusal('constraint_command', shadowConstraintVerdict.reason, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effort, transport: 'command' });
+      return null;
+    }
+
+    // Isolation. Cut from HEAD before the primary spawns: both sides start
+    // from the same committed state, whatever the primary goes on to do.
+    try { spawnSync('git', ['worktree', 'prune'], { cwd: repoRoot, encoding: 'utf8' }); } catch {}
+    const addResult = spawnSync('git', ['worktree', 'add', '--detach', shadowWorktreeAbs, 'HEAD'], { cwd: repoRoot, encoding: 'utf8' });
+    if (addResult.error != null || addResult.status !== 0) {
+      const reason = addResult.error?.message ?? (addResult.stderr != null ? String(addResult.stderr).trim() : '') ?? 'worktree add failed';
+      writeShadowRefusal('shadow_isolation', reason.length > 0 ? reason : 'shadow worktree could not be created');
+      return null;
+    }
+
+    // Echo fire line
+    const sModel = shadowDelivery.model;
+    const shadowModelSuffix = sModel != null ? ` (${sModel})` : '';
+    opts.onEcho?.(`shadow → ${shadowExecutorNameInner}${shadowModelSuffix} [command, concurrent with primary]`);
+    // Build shadow request row identity (mirrors primary but shadow-specific)
+    // The snapshot lives in the main repo; the worktree child reads it by
+    // absolute path.
+    const shadowCommand = substitutePromptFile((shadowSpec as { command: string[] }).command, promptFileAbs);
+    const shadowCommandSha = sha256Hex(JSON.stringify(shadowCommand));
+    const shadowDialField: Record<string, unknown> = { model: shadowDial.model };
+    if (shadowDial.effort != null) shadowDialField.effort = shadowDial.effort;
+    if (shadowDial.via != null) shadowDialField.via = shadowDial.via;
+    const shadowIdentity: Record<string, unknown> = {
+      dispatch_id: shadowDispatchId,
+      archetype,
+      role,
+      resolution: 'shadow',
+      shadow: true,
+      primary_dispatch_id: dispatchId,
+      shadow_source: shadowSourceTag,
+      gate_eligible: false,
+      dial: shadowDialField,
+      ...(resolvedVia != null ? { resolved_via: resolvedVia } : {}),
+      executor: shadowExecutorNameInner,
+      model: shadowDelivery.model,
+      model_id: shadowDelivery.modelId,
+      reasoning_effort: shadowDelivery.effort,
+      driver: shadowDelivery.driver,
+      ...(shadowDelivery.provider != null ? { provider: shadowDelivery.provider } : {}),
+      transport: 'command',
+      ...(shadowSpec.writeAccess != null ? { write_access: shadowSpec.writeAccess } : {}),
+      ...(shadowUsedWriteVariant ? { write_variant: true } : {}),
+      delivery_transport: 'command',
+      prompt_source: promptSource,
+      prompt_snapshot: promptSnapshot,
+      prompt_sha256: promptSha256,
+      command: shadowCommand,
+      command_sha256: shadowCommandSha,
+      output_snapshot: shadowOutputRel,
+    };
+    if (eligibilityState === 'shadow_only') {
+      shadowIdentity.eligibility = 'shadow_only';
+    }
+    appendEvidenceRow(repoRoot, {
+      format: DISPATCHES_FORMAT,
+      timestamp: shadowNow.toISOString(),
+      event: 'dispatch_requested',
+      ...shadowIdentity,
+    });
+
+    // The prompt reaches the child as an fd on the attested snapshot, not as
+    // kernel-pumped stdin bytes: the kernel is about to block inside the
+    // primary's spawnSync, where it can pump nothing.
+    let promptFd: number;
+    try {
+      promptFd = openSync(promptFileAbs, 'r');
+    } catch {
+      const fallbackAbs = join(repoRoot, '.fadeno', 'local', 'prompts', `shadow-${shadowId8}.md`);
+      mkdirSync(join(repoRoot, '.fadeno', 'local', 'prompts'), { recursive: true });
+      writeFileSync(fallbackAbs, prompt, 'utf8');
+      promptFd = openSync(fallbackAbs, 'r');
+    }
+    mkdirSync(join(repoRoot, '.fadeno', 'local', 'outputs'), { recursive: true });
+    mkdirSync(join(repoRoot, ...INFLIGHT_DIR.split('/')), { recursive: true });
+    const shadowInflightAbs = join(repoRoot, ...INFLIGHT_DIR.split('/'), `${shadowDispatchId}.json`);
+    const statusAbs = join(repoRoot, ...INFLIGHT_DIR.split('/'), `${shadowDispatchId}.status.json`);
+    const sfd = openSync(shadowOutputAbs, 'w');
+    const startedMs = Date.now();
+    let child: ChildProcess;
+    try {
+      // Its own supervisor, for the same reason as the primary — a killed
+      // kernel must not orphan it — plus the exit report that concurrent
+      // collection depends on. The claim file makes a long-running shadow
+      // cancellable by its own id.
+      child = spawn(process.execPath, superviseArgv(shadowCommand, shadowInflightAbs, statusAbs, undefined, timeoutFor(shadowSpec)), {
+        cwd: shadowWorktreeAbs,
+        // Without this the shadow escapes its worktree and edits the real
+        // workspace; see `atCwd`.
+        env: atCwd(withoutHarnessIdentity(process.env), shadowWorktreeAbs),
+        stdio: [promptFd, sfd, 'ignore'],
+      });
+    } finally {
+      // The child holds its own copies once spawned.
+      closeSync(promptFd);
+      closeSync(sfd);
+    }
+    child.unref();
+    return {
+      dispatchId: shadowDispatchId,
+      startedAt: shadowNow,
+      startedMs,
+      identity: shadowIdentity,
+      child,
+      statusAbs,
+      inflightAbs: shadowInflightAbs,
+      outputRel: shadowOutputRel,
+      outputAbs: shadowOutputAbs,
+      diffRel: shadowDiffRel,
+      diffAbs: shadowDiffAbs,
+      worktreeAbs: shadowWorktreeAbs,
+    };
+  };
+
+  const collectShadow = (pending: PendingShadow): void => {
+    try {
+    // Wait out the challenger. Its supervisor reports through a file because
+    // this process was blocked inside the primary's spawnSync while the
+    // shadow ran — no event loop turned to deliver an exit event, and none
+    // turns here either: the wait is a synchronous poll, with a liveness
+    // probe so a supervisor that died reportless cannot hang the kernel.
+    let polls = 0;
+    while (!existsSync(pending.statusAbs)) {
+      polls += 1;
+      if (polls % SHADOW_LIVENESS_EVERY === 0 && pending.child.pid != null && !supervisorCanStillReport(pending.child.pid)) break;
+      sleepSync(SHADOW_POLL_MS);
+    }
+    // Read after the loop unconditionally: the report may have landed between
+    // the last existence check and a failed liveness probe.
+    const status = readSupervisorStatus(pending.statusAbs, (p) => readFileSync(p, 'utf8'));
+    try { rmSync(pending.statusAbs, { force: true }); } catch { /* nothing to drop */ }
+    // Belt and braces, as for the primary: the supervisor unlinks its own
+    // claim, but a SIGKILLed one runs no handler.
+    try { rmSync(pending.inflightAbs, { force: true }); } catch { /* nothing to drop */ }
+
+    const spawnFailedMsg = status == null
+      ? 'shadow supervisor ended without an exit report'
+      : status.spawnFailed;
+    const sExitCode = spawnFailedMsg != null ? null : status!.exitCode;
+    const sSignal = status?.signal ?? null;
+    // The supervisor's own measurement, never "when the kernel looked": a
+    // shadow that finished mid-primary is collected long after it ended.
+    const sDuration = status?.durationMs ?? (Date.now() - pending.startedMs);
+
+    let sStdout = '';
+    try { sStdout = readFileSync(pending.outputAbs, 'utf8'); } catch { sStdout = ''; }
+    const sOutputSha = sha256Hex(sStdout);
+    // Diff capture after exit (any exit code)
+    let diffBytes = 0;
+    let diffContent = '';
+    try {
+      spawnSync('git', ['-C', pending.worktreeAbs, 'add', '-A'], { encoding: 'utf8' });
+      const diffRes = spawnSync('git', ['-C', pending.worktreeAbs, 'diff', '--binary', '--cached'], { encoding: 'utf8', maxBuffer: SPAWN_MAX_BUFFER });
+      if (diffRes.error == null && diffRes.status === 0) {
+        diffContent = diffRes.stdout ?? '';
+      } else if (diffRes.stdout != null) {
+        diffContent = String(diffRes.stdout);
+      }
+    } catch {}
+    try {
+      mkdirSync(join(repoRoot, '.fadeno', 'local', 'outputs'), { recursive: true });
+      writeFileSync(pending.diffAbs, diffContent, 'utf8');
+      diffBytes = Buffer.byteLength(diffContent);
+    } catch {
+      diffBytes = Buffer.byteLength(diffContent);
+    }
+    const sOutputBytes = Buffer.byteLength(sStdout);
+    const sIsTimeout = status?.timedOut === true;
+    const sOutcome = deriveDispatchOutcome({
+      exitCode: sExitCode,
+      signal: sSignal as NodeJS.Signals | null,
+      error: spawnFailedMsg,
+      outputBytes: sOutputBytes,
+      timedOut: sIsTimeout ? true : null,
+    });
+    const sRow: Record<string, unknown> = {
+      format: DISPATCHES_FORMAT,
+      // Same rule as the primary: start plus measured duration, so
+      // `completed - requested == duration_ms` holds for shadow pairs too
+      // rather than drifting by whatever the wall clock read between the two
+      // writes.
+      timestamp: new Date(pending.startedAt.getTime() + sDuration).toISOString(),
+      event: 'dispatch_completed',
+      ...pending.identity,
+      exit_code: sExitCode,
+      ...(sSignal != null ? { signal: sSignal } : {}),
+      duration_ms: sDuration,
+      output_sha256: sOutputSha,
+      output_bytes: sOutputBytes,
+      ...(sOutcome != null ? { outcome: sOutcome } : {}),
+      ...(sIsTimeout && status?.timeoutMs != null ? { timeout_ms: status.timeoutMs } : {}),
+      ...(sIsTimeout && status?.deadlineAt != null ? { deadline_at: status.deadlineAt } : {}),
+      diff_snapshot: pending.diffRel,
+      diff_bytes: diffBytes,
+    };
+    if (spawnFailedMsg != null) sRow.error = spawnFailedMsg;
+    // Shadow completions OMIT workspace_changed by construction
+    appendEvidenceRow(repoRoot, sRow);
+    opts.onEcho?.(`shadow diff: ${diffBytes} bytes → ${pending.diffRel}`);
+    } finally {
+      // Collection is also the ownership boundary for the detached worktree.
+      // Keep cleanup in a finally: primary receipt failures and shadow evidence
+      // failures must not strand a registered worktree on disk.
+      try {
+        const removed = spawnSync('git', ['worktree', 'remove', '--force', pending.worktreeAbs], { cwd: repoRoot, encoding: 'utf8' });
+        if (removed.error != null || removed.status !== 0) rmSync(pending.worktreeAbs, { recursive: true, force: true });
+      } catch {
+        try { rmSync(pending.worktreeAbs, { recursive: true, force: true }); } catch {}
+      }
+    }
+  };
+
+  let pendingShadow: PendingShadow | null = null;
+  try {
+    pendingShadow = startShadow();
+  } catch {
+    // Shadow failures must never affect primary result
+  }
+  let shadowCollectionAttempted = false;
+  const finishPendingShadow = (): void => {
+    if (pendingShadow == null || shadowCollectionAttempted) return;
+    shadowCollectionAttempted = true;
+    try {
+      collectShadow(pendingShadow);
+    } catch {
+      // Shadow failures must never affect primary result. collectShadow's
+      // finally still removes its detached worktree.
+    }
+  };
+
+  try {
+
+  // Isolated worktree handoff metadata. The full create/action/diff/remove
+  // lifecycle is owned by withIsolatedWorktree below, including action errors.
+  let isolatedDiffRel: string | null = null;
+  let isolatedDiffBytes: number | null = null;
 
   // stdout is the snapshot fd so bytes survive a mid-flight SIGTERM;
   // encoding/maxBuffer then apply to stderr only. input still feeds stdin.
-  mkdirSync(join(repoRoot, '.fadeno', 'local', 'outputs'), { recursive: true });
-  mkdirSync(join(repoRoot, ...INFLIGHT_DIR.split('/')), { recursive: true });
   // The supervisor publishes the claim here; the kernel only says where. See
   // `superviseArgv` — spawnSync yields a pid too late to be of any use.
   const inflightAbs = join(repoRoot, ...INFLIGHT_DIR.split('/'), `${dispatchId}.json`);
-  const outputFd = openSync(outputAbs, 'w');
-  const workspaceBefore = workspaceFingerprint(repoRoot);
+  const statusAbs = inflightAbs.replace(/\.json$/, '.status.json');
+  const workspaceBefore = workspaceMode === 'isolated' ? null : workspaceFingerprint(repoRoot);
   const started = Date.now();
   let spawned: SpawnSyncReturns<string>;
+  let outputFd: number | null = null;
+  let supervisorAttempted = false;
+  let supervisorTerminalObserved = false;
   try {
+    mkdirSync(join(repoRoot, '.fadeno', 'local', 'outputs'), { recursive: true });
+    mkdirSync(join(repoRoot, ...INFLIGHT_DIR.split('/')), { recursive: true });
+    outputFd = openSync(outputAbs, 'w');
+    const leaseRelease = leaseHolder == null ? undefined : {
+      leasePath: join(repoRoot, WORKSPACE_LEASE_FILE),
+      lockPath: join(repoRoot, WORKSPACE_LEASE_LOCK),
+      holder: leaseHolder,
+    };
+    const invoke = (spawnCwd: string): SpawnSyncReturns<string> => {
+      supervisorAttempted = true;
+      const result = spawnSync(
+        process.execPath,
+        superviseArgv(command, inflightAbs, statusAbs, leaseRelease, effectiveTimeoutMs),
+        {
+        input: prompt,
+        encoding: 'utf8',
+        cwd: spawnCwd,
+        // The child is a different session, usually a different host. Inheriting
+        // our harness identity would tell a `codex exec` worker it is inside
+        // Claude; it establishes its own.
+        env: atCwd(withoutHarnessIdentity(process.env), spawnCwd),
+        maxBuffer: SPAWN_MAX_BUFFER,
+        stdio: ['pipe', outputFd, 'pipe'],
+        },
+      );
+      supervisorTerminalObserved = result.error != null || readSupervisorStatus(statusAbs, (path) => readFileSync(path, 'utf8')) != null;
+      return result;
+    };
     // Through the supervisor, never directly: `spawnSync` blocks the event
     // loop, so a killed kernel runs no cleanup and leaves the executor writing
     // the tree unattended. See src/lib/supervisor.ts.
-    spawned = spawnSync(process.execPath, superviseArgv(command, inflightAbs), {
-      input: prompt,
-      encoding: 'utf8',
-      cwd: repoRoot,
-      // The child is a different session, usually a different host. Inheriting
-      // our harness identity would tell a `codex exec` worker it is inside
-      // Claude; it establishes its own.
-      env: atCwd(withoutHarnessIdentity(process.env), repoRoot),
-      maxBuffer: SPAWN_MAX_BUFFER,
-      stdio: ['pipe', outputFd, 'pipe'],
-    });
+    if (workspaceMode === 'isolated') {
+      const id8 = dispatchId.slice(0, 8);
+      const diffRel = join('.fadeno', 'local', 'outputs', `isolated-${id8}.diff`).split('\\').join('/');
+      const isolated = withIsolatedWorktree({
+        repoRoot,
+        worktreePath: join(repoRoot, '.fadeno', 'local', 'isolated', id8),
+        diffRel,
+        diffAbs: join(repoRoot, diffRel),
+        onEcho: opts.onEcho,
+      }, invoke);
+      spawned = isolated.result;
+      isolatedDiffRel = isolated.diff.diffRel;
+      isolatedDiffBytes = isolated.diff.diffBytes;
+      opts.onEcho?.(`isolated diff: ${isolated.diff.diffBytes} bytes → ${isolated.diff.diffRel}`);
+    } else {
+      spawned = invoke(repoRoot);
+    }
+  } catch (error) {
+    if (error instanceof WorkspaceLeaseError) throw new DispatchCommandError(error.message);
+    throw error;
   } finally {
-    // Belt and braces: the supervisor unlinks on exit, but a SIGKILLed
-    // supervisor runs no handler and a stale claim would make a finished
-    // dispatch look cancellable.
-    try { rmSync(inflightAbs, { force: true }); } catch { /* nothing to drop */ }
-    closeSync(outputFd);
+    if (outputFd != null) closeSync(outputFd);
+    // A terminal status is proof the supervisor observed child close. With no
+    // status (notably SIGKILL/OOM), preserve both claim and lease: the detached
+    // executor may still be mutating the workspace and remains cancellable.
+    if (!supervisorAttempted || supervisorTerminalObserved) {
+      try { rmSync(inflightAbs, { force: true }); } catch { /* nothing to drop */ }
+      if (leaseHolder != null) {
+        try { releaseWorkspaceLease({ repoRoot, holder: leaseHolder }); } catch {}
+      }
+    }
   }
   const durationMs = Date.now() - started;
   // `spawnSync` now spawns the supervisor, which always starts, so its `error`
@@ -863,16 +1541,54 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     spawned.error?.message ?? supervisedSpawnError(spawned.status, spawned.stderr);
 
   const stdout = readFileSync(outputAbs, 'utf8');
+  const stderr = spawned.stderr ?? '';
   const outputSha256 = sha256Hex(stdout);
-  const workspaceAfter = workspaceFingerprint(repoRoot);
+  const workspaceAfter = workspaceMode === 'isolated' ? null : workspaceFingerprint(repoRoot);
 
   const outputBytes = Buffer.byteLength(stdout);
+  // Status-file timeout facts outrank the supervisor process exit signal when classifying a receipt.
+  const supervisorStatus = readSupervisorStatus(statusAbs, (path) => {
+    try { return readFileSync(path, 'utf8'); } catch { return '{}'; }
+  });
+  const isTimeout = supervisorStatus?.timedOut === true;
   const outcome = deriveDispatchOutcome({
     exitCode: spawnFailure != null ? null : spawned.status,
     signal: spawned.signal,
     error: spawnFailure,
     outputBytes,
+    timedOut: isTimeout ? true : null,
   });
+
+  // Bounded opt-in diagnostics: machine-local only, never ledger-persisted
+  // beyond the evidence row's byte counters. Written atomically under
+  // .fadeno/local/outputs/diagnostics/dispatch-<id>.log when enabled via
+  // --diagnostics or FADENO_DIAGNOSTICS=1. Bounded to 32 KiB / 500 lines per
+  // stream with head+tail sampling and a single truncation marker. Never gates.
+  let diagnosticsRel: string | null = null;
+  let diagnosticsBytes: number | null = null;
+  const diagnosticsEnabled = isDiagnosticsEnabled({ diagnostics: opts.diagnostics });
+  if (diagnosticsEnabled) {
+    try {
+      const truncatedStdout = truncateDiagnostics(stdout, 'stdout');
+      const truncatedStderr = truncateDiagnostics(stderr, 'stderr');
+      const content = `# diagnostics for dispatch ${dispatchId}\n# stdout_bytes=${outputBytes} stderr_bytes=${Buffer.byteLength(stderr, 'utf8')}\n--- stdout ---\n${truncatedStdout}\n--- stderr ---\n${truncatedStderr}\n`;
+      const diagRel = join('.fadeno', 'local', 'outputs', 'diagnostics', `dispatch-${dispatchId}.log`).split('\\').join('/');
+      const diagAbs = join(repoRoot, diagRel);
+      mkdirSync(join(repoRoot, '.fadeno', 'local', 'outputs', 'diagnostics'), { recursive: true });
+      const tmp = `${diagAbs}.tmp-${process.pid}-${randomUUID()}`;
+      writeFileSync(tmp, content, 'utf8');
+      try {
+        renameSync(tmp, diagAbs);
+        diagnosticsRel = diagRel;
+        diagnosticsBytes = Buffer.byteLength(content, 'utf8');
+      } catch {
+        try { rmSync(tmp, { force: true }); } catch {}
+      }
+      opts.onEcho?.(`diagnostics: ${diagnosticsBytes ?? 0} bytes → ${diagRel}`);
+    } catch {
+      // diagnostics never gates control flow
+    }
+  }
   // When this dispatch actually ended, not when it began.
   //
   // Both rows of a pair used to be stamped from the same clock reading, so a
@@ -898,320 +1614,33 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // Stated next to the event name so a row read on its own cannot pass as
     // success on the strength of `dispatch_completed` alone.
     ...(outcome != null ? { outcome } : {}),
+    ...(isTimeout && supervisorStatus?.timeoutMs != null ? { timeout_ms: supervisorStatus.timeoutMs } : {}),
+    ...(isTimeout && supervisorStatus?.deadlineAt != null ? { deadline_at: supervisorStatus.deadlineAt } : {}),
   };
   // Concurrent writers make this attestation, not judgment.
   if (workspaceBefore != null && workspaceAfter != null) {
     row.workspace_changed = workspaceBefore !== workspaceAfter;
   }
+  if (workspaceMode === 'isolated' && isolatedDiffRel != null && isolatedDiffBytes != null) {
+    row.diff_snapshot = isolatedDiffRel;
+    row.diff_bytes = isolatedDiffBytes;
+  }
+  // Isolated deliveries omit workspace_changed by construction (contract 1.2)
+  if (workspaceMode === 'isolated') {
+    delete (row as Record<string, unknown>).workspace_changed;
+  }
+  if (diagnosticsRel != null && diagnosticsBytes != null) {
+    row.diagnostics_snapshot = diagnosticsRel;
+    row.diagnostics_bytes = diagnosticsBytes;
+  }
   if (spawnFailure != null) row.error = spawnFailure;
   appendEvidenceRow(repoRoot, row);
 
-  // Shadow duplication — fires after primary completion, regardless of exit code. Not on refusal.
-  try {
-    const hasFlag = typeof opts.shadow === 'string' && opts.shadow.trim().length > 0;
-    let shadowDial: DialRef | null = null;
-    let shadowExecutorNameInner: string | null = null;
-    let shadowSourceTag: 'flag' | 'attachment' | null = null;
-    let attachmentRate: number | undefined;
-    if (hasFlag) {
-      try {
-        const parsed = parseDialRef(opts.shadow!.trim(), '--shadow');
-        shadowDial = parsed;
-        shadowExecutorNameInner = formatDialRef(parsed);
-        shadowSourceTag = 'flag';
-      } catch {
-        // parse error becomes shadow_resolution refusal below via unknown? We'll treat as invalid dial
-        shadowDial = null;
-        shadowExecutorNameInner = opts.shadow!.trim();
-        shadowSourceTag = 'flag';
-      }
-    } else if (archetype != null) {
-      const localStateForShadow = readLocalDialState(repoRoot);
-      const att = localStateForShadow.shadows[archetype];
-      if (att != null) {
-        shadowDial = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.via ? { via: att.via } : {}) };
-        shadowExecutorNameInner = formatDialRef(shadowDial);
-        shadowSourceTag = 'attachment';
-        attachmentRate = att.rate;
-      }
-    }
-    if (shadowExecutorNameInner != null && shadowSourceTag != null) {
-      // Rate sampling for attachments; flag always fires.
-      if (shadowSourceTag === 'attachment' && attachmentRate != null) {
-        const sampler = opts.shadowSampler ?? Math.random;
-        let roll: number;
-        try { roll = sampler(); } catch { roll = 0; }
-        if (!(roll < attachmentRate)) {
-          shadowExecutorNameInner = null;
-          shadowSourceTag = null;
-        }
-      }
-    }
-    if (shadowExecutorNameInner != null && shadowSourceTag != null) {
-      const shadowNow = new Date();
-      const shadowDispatchId = randomUUID();
-      const shadowId8 = shadowDispatchId.slice(0, 8);
-      const shadowOutputRel = join('.fadeno', 'local', 'outputs', `shadow-${shadowId8}.md`).split('\\').join('/');
-      const shadowOutputAbs = join(repoRoot, shadowOutputRel);
-      const shadowDiffRel = join('.fadeno', 'local', 'outputs', `shadow-${shadowId8}.diff`).split('\\').join('/');
-      const shadowDiffAbs = join(repoRoot, shadowDiffRel);
-      const shadowWorktreeRel = join('.fadeno', 'local', 'shadow', shadowId8).split('\\').join('/');
-      const shadowWorktreeAbs = join(repoRoot, shadowWorktreeRel);
-
-      const writeShadowRefusal = (predicate: DispatchRefusalPredicate, message: string, extra: Record<string, unknown> = {}): void => {
-        const base: Record<string, unknown> = {
-          format: DISPATCHES_FORMAT,
-          timestamp: shadowNow.toISOString(),
-          event: 'dispatch_refused',
-          dispatch_id: shadowDispatchId,
-          archetype,
-          role,
-          resolution: 'shadow',
-          shadow: true,
-          primary_dispatch_id: dispatchId,
-          executor: shadowExecutorNameInner,
-          ...extra,
-          refusal: { predicate, message },
-        };
-        // Trim undefined extras but keep shape; leave minimal for unknown target case.
-        if (base.executor == null) delete base.executor;
-        appendEvidenceRow(repoRoot, base);
-        opts.onEcho?.(`shadow refused: ${message} [${predicate}]`);
-      };
-
-      // Resolve shadow delivery via compile
-      let shadowDelivery: CompiledDelivery | null = null;
-      if (shadowDial != null) {
-        try {
-          shadowDelivery = compileDialRef(shadowDial, profile);
-        } catch (err) {
-          const msg = err instanceof ExecutorProfileError ? err.message : String(err);
-          writeShadowRefusal('shadow_resolution', msg);
-          shadowDelivery = null;
-        }
-      } else {
-        writeShadowRefusal('shadow_resolution', `shadow target "${shadowExecutorNameInner}" is not a valid dial ref.`);
-      }
-      // handle case where compile succeeded but shadowDelivery is host
-      if (shadowDelivery != null && shadowDelivery.spec.adapter === 'host') {
-        writeShadowRefusal('shadow_resolution', `shadow executor "${shadowExecutorNameInner}" is a host executor — the kernel cannot duplicate a host dispatch.`, {
-          model: shadowDelivery.model,
-          model_id: shadowDelivery.modelId,
-          driver: shadowDelivery.driver,
-          reasoning_effort: shadowDelivery.effort,
-          transport: 'host',
-        });
-        shadowDelivery = null;
-      }
-      if (shadowDelivery != null) {
-        const shadowSpec = shadowDelivery.spec;
-        const shadowRefString = shadowDelivery.refString;
-        // Eligibility: forbidden refuses, shadow_only allowed
-        const eligibilityState = eligibilityFor(shadowSpec, archetype);
-        if (eligibilityState === 'forbidden') {
-          const msg = explainEligibilityConflict({ executor: shadowRefString, spec: shadowSpec }, archetype) ?? `archetype "${archetype}" is forbidden on executor "${shadowRefString}".`;
-          writeShadowRefusal('eligibility', msg, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effort, transport: 'command' });
-        } else {
-          const writeConflict = explainWriteConflict({ executor: shadowRefString, spec: shadowSpec }, archetype, profile);
-          if (writeConflict != null) {
-            writeShadowRefusal('write_posture', writeConflict, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effort, transport: 'command' });
-          } else {
-            // Constraint check with shadow:true
-            // Build dials maps for shadow constraint
-            const sSessionMap: Record<string, string> = {};
-            for (const [k, v] of Object.entries(sessionDials)) sSessionMap[k] = formatDialRef(v);
-            const sRepoMap: Record<string, string> = {};
-            for (const [k, v] of Object.entries(repoDials)) sRepoMap[k] = formatDialRef(v);
-            const sUserMap: Record<string, string> = {};
-            for (const [k, v] of Object.entries(userDials)) sUserMap[k] = formatDialRef(v);
-            const sDialField = shadowDial ? { model: shadowDial.model, ...(shadowDial.effort ? { effort: shadowDial.effort } : {}), ...(shadowDial.via ? { via: shadowDial.via } : {}) } : null;
-            const shadowConstraintContext = {
-              archetype,
-              role,
-              executor: shadowRefString,
-              driver: shadowDelivery.driver,
-              provider: shadowDelivery.provider ?? null,
-              model: shadowDelivery.model,
-              model_id: shadowDelivery.modelId,
-              transport: 'command' as const,
-              write_access: shadowSpec.writeAccess,
-              write_posture: declaredWritePosture(profile, archetype),
-              dial: sDialField as DialRef,
-              dial_source: 'shadow',
-              dials: { session: sSessionMap, repo: sRepoMap, user: sUserMap },
-              resolved_via: resolvedVia,
-              input_provenance: provenanceFields(lookupInputProducers(repoRoot, producedByIds(opts))),
-              harness: profile.harness ?? 'standalone',
-              shadow: true,
-            } satisfies ConstraintContext;
-            let shadowConstraintVerdict;
-            try {
-              shadowConstraintVerdict = evaluateConstraint(profile, shadowConstraintContext, { cwd: repoRoot });
-            } catch (err) {
-              if (err instanceof ConstraintError) {
-                // A primary lets a constraint SYSTEM error bubble loudly; a
-                // shadow must never take the primary's result down with it, so
-                // the same error lands as a shadow_resolution refusal row.
-                writeShadowRefusal('shadow_resolution', `shadow constraint system error: ${err.message}`);
-                shadowConstraintVerdict = null;
-              } else {
-                throw err;
-              }
-            }
-            if (shadowConstraintVerdict != null && shadowConstraintVerdict.verdict === 'refused') {
-              writeShadowRefusal('constraint_command', shadowConstraintVerdict.reason, { model: shadowDelivery!.model, model_id: shadowDelivery!.modelId, driver: shadowDelivery!.driver, reasoning_effort: shadowDelivery!.effort, transport: 'command' });
-            } else if (shadowConstraintVerdict == null || shadowConstraintVerdict.verdict === 'allowed') {
-              // Isolation + spawn only if not refused
-              // Only proceed if verdict allowed (null means we already wrote refusal)
-              const verdictAllowed = shadowConstraintVerdict != null && shadowConstraintVerdict.verdict === 'allowed';
-              if (verdictAllowed) {
-                // Best-effort prune
-                try { spawnSync('git', ['worktree', 'prune'], { cwd: repoRoot, encoding: 'utf8' }); } catch {}
-                const addResult = spawnSync('git', ['worktree', 'add', '--detach', shadowWorktreeAbs, 'HEAD'], { cwd: repoRoot, encoding: 'utf8' });
-                if (addResult.error != null || addResult.status !== 0) {
-                  const reason = addResult.error?.message ?? (addResult.stderr != null ? String(addResult.stderr).trim() : '') ?? 'worktree add failed';
-                  const msg = reason.length > 0 ? reason : 'shadow worktree could not be created';
-                  writeShadowRefusal('shadow_isolation', msg);
-                } else {
-                  // Echo fire line
-                  const sModel = shadowDelivery!.model;
-                  const shadowModel = sModel != null ? ` (${sModel})` : '';
-                  opts.onEcho?.(`shadow → ${shadowExecutorNameInner}${shadowModel} [command]`);
-                  // Build shadow request row identity (mirrors primary but shadow-specific)
-                  const shadowCommand = (shadowDelivery!.spec as { command: string[] }).command;
-                  const shadowCommandSha = sha256Hex(JSON.stringify(shadowCommand));
-                  const shadowDialField: Record<string, unknown> = { model: shadowDial!.model };
-                  if (shadowDial!.effort != null) shadowDialField.effort = shadowDial!.effort;
-                  if (shadowDial!.via != null) shadowDialField.via = shadowDial!.via;
-                  const shadowIdentity: Record<string, unknown> = {
-                    dispatch_id: shadowDispatchId,
-                    archetype,
-                    role,
-                    resolution: 'shadow',
-                    shadow: true,
-                    primary_dispatch_id: dispatchId,
-                    shadow_source: shadowSourceTag,
-                    gate_eligible: false,
-                    dial: shadowDialField,
-                    ...(resolvedVia != null ? { resolved_via: resolvedVia } : {}),
-                    executor: shadowExecutorNameInner!,
-                    model: shadowDelivery!.model,
-                    model_id: shadowDelivery!.modelId,
-                    reasoning_effort: shadowDelivery!.effort,
-                    driver: shadowDelivery!.driver,
-                    ...(shadowDelivery!.provider != null ? { provider: shadowDelivery!.provider } : {}),
-                    transport: 'command',
-                    ...(shadowDelivery!.spec.writeAccess != null ? { write_access: shadowDelivery!.spec.writeAccess } : {}),
-                    delivery_transport: 'command',
-                    prompt_source: promptSource,
-                    prompt_snapshot: promptSnapshot,
-                    prompt_sha256: promptSha256,
-                    command: shadowCommand,
-                    command_sha256: shadowCommandSha,
-                    output_snapshot: shadowOutputRel,
-                  };
-                  if (eligibilityState === 'shadow_only') {
-                    shadowIdentity.eligibility = 'shadow_only';
-                  }
-                  appendEvidenceRow(repoRoot, {
-                    format: DISPATCHES_FORMAT,
-                    timestamp: shadowNow.toISOString(),
-                    event: 'dispatch_requested',
-                    ...shadowIdentity,
-                  });
-
-                  // Spawn shadow with prompt bytes read from snapshot file
-                  let promptBytes: string;
-                  try {
-                    const snapPath = isAbsolute(promptSnapshot) ? promptSnapshot : join(repoRoot, promptSnapshot);
-                    promptBytes = readFileSync(snapPath, 'utf8');
-                  } catch {
-                    promptBytes = prompt;
-                  }
-                  mkdirSync(join(repoRoot, '.fadeno', 'local', 'outputs'), { recursive: true });
-                  const sfd = openSync(shadowOutputAbs, 'w');
-                  const sStarted = Date.now();
-                  let sSpawned: SpawnSyncReturns<string>;
-                  try {
-                    const [scmd, ...sargs] = shadowCommand;
-                    sSpawned = spawnSync(scmd!, sargs, {
-                      input: promptBytes,
-                      encoding: 'utf8',
-                      cwd: shadowWorktreeAbs,
-                      // Without this the shadow escapes its worktree and edits
-                      // the real workspace; see `atCwd`.
-                      env: atCwd(withoutHarnessIdentity(process.env), shadowWorktreeAbs),
-                      maxBuffer: SPAWN_MAX_BUFFER,
-                      stdio: ['pipe', sfd, 'pipe'],
-                    });
-                  } finally {
-                    closeSync(sfd);
-                  }
-                  const sDuration = Date.now() - sStarted;
-                  let sStdout = '';
-                  try { sStdout = readFileSync(shadowOutputAbs, 'utf8'); } catch { sStdout = ''; }
-                  const sOutputSha = sha256Hex(sStdout);
-                  // Diff capture after exit (any exit code)
-                  let diffBytes = 0;
-                  let diffContent = '';
-                  try {
-                    spawnSync('git', ['-C', shadowWorktreeAbs, 'add', '-A'], { encoding: 'utf8' });
-                    const diffRes = spawnSync('git', ['-C', shadowWorktreeAbs, 'diff', '--binary', '--cached'], { encoding: 'utf8', maxBuffer: SPAWN_MAX_BUFFER });
-                    if (diffRes.error == null && diffRes.status === 0) {
-                      diffContent = diffRes.stdout ?? '';
-                    } else if (diffRes.stdout != null) {
-                      diffContent = String(diffRes.stdout);
-                    }
-                  } catch {}
-                  try {
-                    mkdirSync(join(repoRoot, '.fadeno', 'local', 'outputs'), { recursive: true });
-                    writeFileSync(shadowDiffAbs, diffContent, 'utf8');
-                    diffBytes = Buffer.byteLength(diffContent);
-                  } catch {
-                    diffBytes = Buffer.byteLength(diffContent);
-                  }
-                  // Best-effort worktree remove
-                  try { spawnSync('git', ['worktree', 'remove', '--force', shadowWorktreeAbs], { cwd: repoRoot, encoding: 'utf8' }); } catch {}
-
-                  const sOutputBytes = Buffer.byteLength(sStdout);
-                  const sOutcome = deriveDispatchOutcome({
-                    exitCode: sSpawned!.error != null ? null : sSpawned!.status,
-                    signal: sSpawned!.signal,
-                    error: sSpawned!.error?.message ?? null,
-                    outputBytes: sOutputBytes,
-                  });
-                  const sRow: Record<string, unknown> = {
-                    format: DISPATCHES_FORMAT,
-                    // Same rule as the primary: start plus measured duration,
-                    // so `completed - requested == duration_ms` holds for
-                    // shadow pairs too rather than drifting by whatever the
-                    // wall clock read between the two writes.
-                    timestamp: new Date(shadowNow.getTime() + sDuration).toISOString(),
-                    event: 'dispatch_completed',
-                    ...shadowIdentity,
-                    exit_code: sSpawned!.error != null ? null : sSpawned!.status,
-                    ...(sSpawned!.signal != null ? { signal: sSpawned!.signal } : {}),
-                    duration_ms: sDuration,
-                    output_sha256: sOutputSha,
-                    output_bytes: sOutputBytes,
-                    ...(sOutcome != null ? { outcome: sOutcome } : {}),
-                    diff_snapshot: shadowDiffRel,
-                    diff_bytes: diffBytes,
-                  };
-                  if (sSpawned!.error != null) sRow.error = sSpawned!.error.message;
-                  // Shadow completions OMIT workspace_changed by construction
-                  appendEvidenceRow(repoRoot, sRow);
-                  opts.onEcho?.(`shadow diff: ${diffBytes} bytes → ${shadowDiffRel}`);
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  } catch {
-    // Shadow failures must never affect primary result
-  }
+  // Collect the concurrent shadow only now, after the primary's completion
+  // row is down: row order stays primary-request, shadow-request,
+  // primary-completed, shadow-completed, and a shadow that outlives the
+  // primary is waited out here.
+  finishPendingShadow();
 
   if (spawnFailure != null) {
     throw new DispatchCommandError(
@@ -1246,6 +1675,12 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     evidencePath: DISPATCHES_FILE,
     transport,
   };
+  } finally {
+    // The primary can throw after the challenger has started (for example,
+    // while persisting its completion receipt). Always reap and collect the
+    // shadow once so its worktree cannot leak on that exceptional path.
+    finishPendingShadow();
+  }
 }
 
 /** Deliver one immutable engine host request through its declared command fallback. */
@@ -1303,7 +1738,7 @@ export function runDispatchFallback(opts: DispatchFallbackOptions): DispatchFall
   if (sha256Hex(prompt) !== request.promptSha256) {
     throw new DispatchCommandError(`locked request prompt digest does not match ${request.promptPath}.`);
   }
-  const command = spec.fallbackCommand;
+  const command = substitutePromptFile(spec.fallbackCommand, promptPath);
   opts.onEcho?.(`locked host fallback: ${request.executor} (${command.join(' ')})`);
   startHostDispatch({
     repoRoot,
@@ -1314,18 +1749,36 @@ export function runDispatchFallback(opts: DispatchFallbackOptions): DispatchFall
     command,
     now: opts.now,
   });
-  const [program, ...args] = command;
-  const spawned = spawnSync(program!, args, {
-    input: prompt,
-    encoding: 'utf8',
-    cwd: repoRoot,
-    env: atCwd(process.env, repoRoot),
-    maxBuffer: SPAWN_MAX_BUFFER,
-  });
+  const fallbackClaimAbs = join(
+    repoRoot,
+    ...INFLIGHT_DIR.split('/'),
+    `fallback-${lookup.runId}-${request.dispatchId}.json`,
+  );
+  mkdirSync(join(repoRoot, ...INFLIGHT_DIR.split('/')), { recursive: true });
+  const spawned = (() => {
+    try {
+      // A command fallback has the same orphan risk as every other command
+      // delivery. Its host-dispatch lease is intentionally NOT handed to the
+      // supervisor: that durable reservation remains held until the terminal
+      // complete/fail receipt below, per the host protocol.
+      return spawnSync(process.execPath, superviseArgv(command, fallbackClaimAbs), {
+        input: prompt,
+        encoding: 'utf8',
+        cwd: repoRoot,
+        env: atCwd(withoutHarnessIdentity(process.env), repoRoot),
+        maxBuffer: SPAWN_MAX_BUFFER,
+      });
+    } finally {
+      rmSync(fallbackClaimAbs, { force: true });
+    }
+  })();
   const stdout = spawned.stdout ?? '';
   const stderr = spawned.stderr ?? '';
-  if (spawned.error != null || spawned.status !== 0) {
-    const reason = spawned.error?.message ?? `fallback command exited ${spawned.status ?? 1}${stderr ? `: ${stderr.trim()}` : ''}`;
+  const fallbackSpawnFailure = spawned.error?.message ?? supervisedSpawnError(spawned.status, stderr);
+  if (fallbackSpawnFailure != null || spawned.status !== 0 || spawned.signal != null) {
+    const reason = fallbackSpawnFailure ?? (spawned.signal != null
+      ? `fallback command was terminated by ${spawned.signal}`
+      : `fallback command exited ${spawned.status ?? 1}${stderr ? `: ${stderr.trim()}` : ''}`);
     failHostDispatch({ repoRoot, run: request.run, dispatchId: request.dispatchId, reason, now: opts.now });
     return {
       dispatchId: request.dispatchId,

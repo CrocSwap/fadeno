@@ -97,3 +97,22 @@ test('new-run uses bundled playbooks without project initialization', (t) => {
   assert.equal(created.resolution?.loadout, null);
   assert.ok(created.resolution?.roles?.length ?? 0 > 0);
 });
+
+test('engine-compatible new-run output recommends fadeno drive first', (t) => {
+  // The CLI's new-run guidance must recommend `fadeno drive <run>` as the primary next step,
+  // preserving the engine-first handoff contract.
+  const cliText = readFileSync(join(import.meta.dirname, '..', 'src', 'cli.ts'), 'utf8');
+  // Find the new-run case's guidance block
+  const start = cliText.indexOf("case 'new-run':");
+  assert.ok(start >= 0, 'new-run case must exist');
+  const snippet = cliText.slice(start, start + 2000);
+  assert.match(snippet, /fadeno drive/);
+  // Engine-first must appear before any manual `fadeno run` fallback
+  const driveIdx = snippet.indexOf('fadeno drive');
+  const manualIdx = snippet.indexOf('fadeno next');
+  assert.ok(driveIdx >= 0, 'must recommend fadeno drive');
+  assert.ok(manualIdx >= 0, 'manual fallback should still be mentioned');
+  assert.ok(driveIdx < manualIdx, 'fadeno drive must be recommended first, before manual fadeno next/run');
+  // The guidance line should contain "first" to make ordering explicit
+  assert.match(snippet, /fadeno drive.*first/);
+});

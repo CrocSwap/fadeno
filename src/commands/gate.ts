@@ -8,7 +8,7 @@ import { LedgerWriteError, LedgerWriter } from '../lib/run-ledger-write.ts';
 
 export class GateError extends Error {}
 
-export const SUPPORTED_CONDITIONS = ['no_blocking_issues', 'tests_pass'] as const;
+export const SUPPORTED_CONDITIONS = ['all_reviews_approved', 'no_blocking_issues', 'tests_pass'] as const;
 export type GateCondition = (typeof SUPPORTED_CONDITIONS)[number];
 
 export interface GateEvaluation {
@@ -32,11 +32,39 @@ interface TestResultDocument {
   exit_code: number | null;
 }
 
-function reviewReports(document: unknown): Array<{ issues: ReviewIssue[] }> {
-  return (Array.isArray(document) ? document : [document]) as Array<{ issues: ReviewIssue[] }>;
+function reviewReports(document: unknown): Array<{ reviewer: string; verdict: string; issues: ReviewIssue[] }> {
+  return (Array.isArray(document) ? document : [document]) as Array<{ reviewer: string; verdict: string; issues: ReviewIssue[] }>;
 }
 
 export const CONDITION_REGISTRY: Record<GateCondition, ConditionDefinition> = {
+  all_reviews_approved: {
+    acceptedArtifacts: ['ReviewReport', 'ReviewReport[]'],
+    schema: 'review-report',
+    evaluate(document): GateEvaluation {
+      const blockingTitles: string[] = [];
+      const nonApproving: Array<{ reviewer: string; verdict: string }> = [];
+      let total = 0;
+      for (const report of reviewReports(document)) {
+        total += 1;
+        if (report.verdict !== 'approve') {
+          nonApproving.push({ reviewer: report.reviewer, verdict: report.verdict });
+        }
+        for (const issue of report.issues) {
+          if (issue.severity === 'blocking') blockingTitles.push(issue.title);
+        }
+      }
+      return {
+        pass: nonApproving.length === 0 && blockingTitles.length === 0,
+        details: {
+          total,
+          approvedCount: total - nonApproving.length,
+          nonApproving,
+          blockingCount: blockingTitles.length,
+          blockingTitles,
+        },
+      };
+    },
+  },
   no_blocking_issues: {
     acceptedArtifacts: ['ReviewReport', 'ReviewReport[]'],
     schema: 'review-report',
@@ -68,6 +96,7 @@ export const CONDITION_REGISTRY: Record<GateCondition, ConditionDefinition> = {
 };
 
 const DEFAULT_ARTIFACTS: Record<GateCondition, string> = {
+  all_reviews_approved: join('artifacts', 'review-report.json'),
   no_blocking_issues: join('artifacts', 'review-report.json'),
   tests_pass: join('artifacts', 'test-result.json'),
 };

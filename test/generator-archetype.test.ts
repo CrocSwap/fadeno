@@ -40,13 +40,13 @@ function seedProfile(t: TestContext, doc: Record<string, unknown>): string {
   return root;
 }
 
-test('starter catalog: parses; generator is forbidden→worker, worker is required', () => {
+test('starter catalog: parses; generator stands alone (no fallback), worker is required', () => {
   const profile = parseStarter();
-  assert.deepEqual(profile.archetypes.generator, { requiresWrite: 'forbidden', fallback: 'worker', distinctProviderFromInputs: null });
-  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null });
+  assert.deepEqual(profile.archetypes.generator, { requiresWrite: 'forbidden', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null, brief: null });
 });
 
-test('starter catalog: a generator-shaped role binds the worker slot via the fallback chain', () => {
+test('starter catalog: an undialed generator resolves to the host-native base, never through worker', () => {
   const profile = parseStarter();
   const baseLayers = { session: {}, repo: {}, user: {} };
   const native = resolveRole('prover', 'generator', profile, baseLayers as any);
@@ -54,12 +54,17 @@ test('starter catalog: a generator-shaped role binds the worker slot via the fal
   assert.equal(native.source, 'base');
   assert.equal(native.resolvedVia, null);
 
-  // Dial worker to luna via repo pin -> generator falls back to worker's luna
+  // A worker dial no longer leaks into generator: it stays on base.
   const lunaLayers = { session: {}, repo: { worker: { model: 'luna' } }, user: {} };
-  const luna = resolveRole('prover', 'generator', profile, lunaLayers as any);
-  assert.equal(luna.delivery.model, 'luna');
-  assert.equal(luna.source, 'repo');
-  assert.equal(luna.resolvedVia, 'worker');
+  const stillBase = resolveRole('prover', 'generator', profile, lunaLayers as any);
+  assert.equal(stillBase.delivery.model, 'current-host');
+  assert.equal(stillBase.source, 'base');
+  assert.equal(stillBase.resolvedVia, null);
+
+  // Its own dial works like any archetype's.
+  const own = resolveRole('prover', 'generator', profile, { session: {}, repo: {}, user: { generator: { model: 'luna' } } } as any);
+  assert.equal(own.delivery.model, 'luna');
+  assert.equal(own.source, 'user');
 });
 
 test('explainWriteConflict: generator is refused on a write-capable command route', () => {
@@ -138,9 +143,24 @@ test('loadout set: refuses dialing generator onto a write-capable command execut
     (err: unknown) =>
       err instanceof DialError &&
       /archetype "generator" declares `requires_write: forbidden`, but executor "rw-model"/.test((err as Error).message) &&
-      /`write_access: true`/.test((err as Error).message),
+      /`write_access: true`/.test((err as Error).message) &&
+      /--force/.test((err as Error).message) &&
+      /not suggested/.test((err as Error).message),
   );
   assert.equal(existsSync(join(root, DIALS_LOCAL_FILE)), false);
+
+  const forced = runDialSet({
+    repoRoot: root,
+    archetype: 'generator',
+    model: 'rw-model',
+    userPathOptions: harnessOpts,
+    repo: true,
+    force: true,
+  });
+  assert.equal(forced.dial.force_write_posture, true);
+  assert.match(forced.notes.join('\n'), /WARNING: FORCED WRITE-POSTURE MISMATCH/);
+  assert.match(forced.notes.join('\n'), /persisted with this dial/);
+  assert.match(readFileSync(join(root, '.fadeno', 'executors.yaml'), 'utf8'), /force_write_posture: true/);
 });
 
 test('repo-declared scout with fallback: reviewer resolves via the reviewer slot through dial cascade', () => {
@@ -199,6 +219,6 @@ test('archetypes: boolean aliases parse to required/none', () => {
     routes: { standalone: { openai: { command: ['node', '-e', "process.stdout.write('x')"], write_access: true } } },
     archetypes: { worker: { requires_write: true }, reviewer: { requires_write: false } },
   });
-  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null });
-  assert.deepEqual(profile.archetypes.reviewer, { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null });
+  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.reviewer, { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null, brief: null });
 });

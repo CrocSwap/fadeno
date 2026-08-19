@@ -14,6 +14,4 @@ playbook directs. Emit a **structured judgment artifact** conforming to
   `title`, and optional `detail`/`location`
 - `verdict` (`approve` | `request_changes` | `comment`)
 
-Do not decide control flow. The gate computes `no_blocking_issues` from your
-report (zero issues with `severity: blocking`). Mark something `blocking` only
-when it genuinely must be fixed before proceeding. Keep fan-out depth-1.
+Do not decide control flow. The gate computes `all_reviews_approved` from your report — it passes only when `verdict` is `approve` and no issue is `blocking` (legacy `no_blocking_issues` reads only `blocking` issues). Mark something `blocking` only when it genuinely must be fixed before proceeding. Keep fan-out depth-1.

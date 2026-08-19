@@ -67,6 +67,7 @@ export interface DispatchEntry {
   promptSha256: string | null;
   relayAttested: boolean | null;
   writeAccess: boolean | null;
+  writeVariant: boolean | null;
   /**
    * Present on a `dispatch_refused` row. Null on every other kind.
    */
@@ -105,6 +106,8 @@ export interface DispatchEntry {
   diffSnapshot: string | null;
   diffBytes: number | null;
   outputBytes: number | null;
+  diagnosticsSnapshot: string | null;
+  diagnosticsBytes: number | null;
 }
 
 export interface DispatchesOptions {
@@ -320,6 +323,7 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     promptSha256: str(row.prompt_sha256),
     relayAttested: bool(row.relay_attested),
     writeAccess: bool(row.write_access),
+    writeVariant: bool(row.write_variant),
     refusal: refusalOf(row.refusal),
     gateEligible: row.gate_eligible === false ? false : null,
     completed: false,
@@ -336,6 +340,8 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     diffSnapshot: str(row.diff_snapshot),
     diffBytes: num(row.diff_bytes),
     outputBytes: num(row.output_bytes),
+    diagnosticsSnapshot: str(row.diagnostics_snapshot),
+    diagnosticsBytes: num(row.diagnostics_bytes),
   };
 }
 
@@ -368,6 +374,7 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     promptSha256: str(row.prompt_sha256),
     relayAttested: null,
     writeAccess: null,
+    writeVariant: null,
     refusal: null,
     gateEligible: null,
     completed: false,
@@ -384,6 +391,8 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     diffSnapshot: null,
     diffBytes: null,
     outputBytes: null,
+    diagnosticsSnapshot: null,
+    diagnosticsBytes: null,
   };
 }
 
@@ -400,6 +409,7 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
   }
   entry.relayAttested = entry.relayAttested ?? bool(row.relay_attested);
   entry.writeAccess = entry.writeAccess ?? bool(row.write_access);
+  entry.writeVariant = entry.writeVariant ?? bool(row.write_variant);
   entry.model = entry.model ?? str(row.model);
   entry.modelId = entry.modelId ?? str(row.model_id);
   entry.driver = entry.driver ?? str(row.driver);
@@ -418,6 +428,9 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
   if (db != null) entry.diffBytes = db;
   const ob = num(row.output_bytes);
   if (ob != null) entry.outputBytes = ob;
+  entry.diagnosticsSnapshot = entry.diagnosticsSnapshot ?? str(row.diagnostics_snapshot);
+  const diagb = num(row.diagnostics_bytes);
+  if (diagb != null) entry.diagnosticsBytes = diagb;
   // Last, so it classifies against the fields this row just folded in rather
   // than the request row's blanks.
   entry.outcome = normalizeDispatchOutcome(row.outcome, entry);
@@ -499,6 +512,7 @@ export function renderDispatchLine(entry: DispatchEntry): string {
   }
 
   if (entry.relayAttested != null) parts.push(`[relay_attested: ${entry.relayAttested}]`);
+  if (entry.writeVariant === true) parts.push('[write variant]');
   if (entry.writeAccess === false) parts.push('[write_access: none]');
   if (entry.gateEligible === false) parts.push('[shadow-only]');
   if (entry.error != null) parts.push(`[error: ${excerpt(entry.error, ERROR_EXCERPT)}]`);
@@ -664,6 +678,14 @@ interface OutputRecord {
   snapshot: string | null;
   outputSha256: string | null;
   completed: boolean;
+  /**
+   * Whether this is a shadow duplication. Shadows stay recoverable and
+   * cancellable by explicit id, but are never candidates for `last`: the
+   * caller asking "which dispatch was mine?" launched the primary — the
+   * kernel launched the shadow. They are also excluded from the concurrency
+   * refusals, because a shadow overlaps its own primary by design.
+   */
+  shadow: boolean;
   /** Caller-chosen `--tag`, when this dispatch was launched with one. */
   tag: string | null;
   /** Epoch ms of the request row; the start of this dispatch's lifetime. */
@@ -699,7 +721,10 @@ function overlaps(a: OutputRecord, b: OutputRecord): boolean {
 function loadOutputRecords(absolute: string): {
   byId: Map<string, OutputRecord>;
   lastWithSnapshot: string | null;
-  /** Dispatch ids in the order their request rows appeared, snapshots only. */
+  /**
+   * Dispatch ids in the order their request rows appeared — snapshots only,
+   * primaries only (see `OutputRecord.shadow`).
+   */
   requestOrder: string[];
 } {
   const byId = new Map<string, OutputRecord>();
@@ -729,12 +754,14 @@ function loadOutputRecords(absolute: string): {
         snapshot: null,
         outputSha256: null,
         completed: false,
+        shadow: false,
         tag: null,
         requestedAt: null,
         completedAt: null,
       };
       byId.set(dispatchId, rec);
     }
+    if (row.shadow === true) rec.shadow = true;
     const snapshot = str(row.output_snapshot);
     if (snapshot != null) rec.snapshot = snapshot;
     const tag = str(row.tag);
@@ -742,8 +769,10 @@ function loadOutputRecords(absolute: string): {
     const stamp = str(row.timestamp);
     const at = stamp == null ? Number.NaN : Date.parse(stamp);
     if (event === 'dispatch_requested' && snapshot != null) {
-      lastWithSnapshot = dispatchId;
-      requestOrder.push(dispatchId);
+      if (row.shadow !== true) {
+        lastWithSnapshot = dispatchId;
+        requestOrder.push(dispatchId);
+      }
       if (!Number.isNaN(at)) rec.requestedAt = at;
     }
     if (event === 'dispatch_completed') {
@@ -955,6 +984,7 @@ export interface DispatchComparisonPair {
     model: string | null;
     exitCode: number | null;
     outputBytes: number | null;
+    durationMs: number | null;
     promptSha256: string | null;
   };
   shadow: {
@@ -963,6 +993,7 @@ export interface DispatchComparisonPair {
     model: string | null;
     exitCode: number | null;
     outputBytes: number | null;
+    durationMs: number | null;
     diffBytes: number | null;
     diffSnapshot: string | null;
     promptSha256: string | null;
@@ -1145,12 +1176,26 @@ function scanComparisons(repoRoot: string, dirRel: string): { artifacts: ModelCo
   return { artifacts, skipped };
 }
 
+/**
+ * Runtime for the comparison scorecard. Time-to-complete is itself a point of
+ * comparison between baseline and challenger, so it reads as a human quantity
+ * (`42.3s`, `5m12s`) rather than the raw ms the rows carry.
+ */
+function formatComparisonDuration(ms: number | null): string {
+  if (ms == null) return '?';
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.round((ms % 60_000) / 1000);
+  return `${minutes}m${String(seconds).padStart(2, '0')}s`;
+}
+
 function formatComparisonPair(pair: DispatchComparisonPair): string {
   const primaryId8 = pair.primaryId ? pair.primaryId.slice(0, 8) : '?';
   const shadowId8 = pair.shadowId ? pair.shadowId.slice(0, 8) : '?';
   const arch = pair.archetype ?? '(none)';
-  const primaryInfo = `${pair.primary.executor ?? '(unresolved)'} (${pair.primary.model ?? '?'}) exit ${pair.primary.exitCode ?? '?'} output ${pair.primary.outputBytes ?? '?'} bytes`;
-  const shadowInfo = `${pair.shadow.executor ?? '(unresolved)'} (${pair.shadow.model ?? '?'}) exit ${pair.shadow.exitCode ?? '?'} output ${pair.shadow.outputBytes ?? '?'} bytes diff ${pair.shadow.diffBytes ?? '?'} bytes`;
+  const primaryInfo = `${pair.primary.executor ?? '(unresolved)'} (${pair.primary.model ?? '?'}) exit ${pair.primary.exitCode ?? '?'} in ${formatComparisonDuration(pair.primary.durationMs)} output ${pair.primary.outputBytes ?? '?'} bytes`;
+  const shadowInfo = `${pair.shadow.executor ?? '(unresolved)'} (${pair.shadow.model ?? '?'}) exit ${pair.shadow.exitCode ?? '?'} in ${formatComparisonDuration(pair.shadow.durationMs)} output ${pair.shadow.outputBytes ?? '?'} bytes diff ${pair.shadow.diffBytes ?? '?'} bytes`;
   const mismatch = pair.promptShaMismatch ? '  PROMPT SHA MISMATCH' : '';
   const orphan = pair.orphan ? '  [orphan: primary missing]' : '';
   return `${primaryId8} → ${shadowId8}  ${arch}  primary ${primaryInfo}  vs shadow ${shadowInfo}${mismatch}${orphan}`;
@@ -1197,6 +1242,7 @@ export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}
         model: primary?.model ?? null,
         exitCode: primary?.exitCode ?? null,
         outputBytes: primary?.outputBytes ?? null,
+        durationMs: primary?.durationMs ?? null,
         promptSha256: primary?.promptSha256 ?? null,
       },
       shadow: {
@@ -1205,6 +1251,7 @@ export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}
         model: entry.model,
         exitCode: entry.exitCode,
         outputBytes: entry.outputBytes,
+        durationMs: entry.durationMs,
         diffBytes: entry.diffBytes,
         diffSnapshot: entry.diffSnapshot,
         promptSha256: entry.promptSha256,
@@ -1333,6 +1380,8 @@ export interface DispatchesCancelOptions {
   cwd?: string;
   /** Test seam for the signal itself. */
   kill?: (pid: number, signal: NodeJS.Signals) => void;
+  /** Test seam for supervisor/executor process liveness. */
+  probe?: (pid: number, signal: 0) => void;
   now?: Date;
 }
 
@@ -1359,9 +1408,13 @@ export function runDispatchesCancel(opts: DispatchesCancelOptions = {}): Dispatc
       ? resolveByTag(tag, byId, requestOrder)
       : resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
 
-  // A finished dispatch is refused rather than reported cancelled: "cancelled"
-  // would claim this call stopped work that had already stopped itself.
-  if (record.completed) {
+  const claimPath = join(repoRoot, ...INFLIGHT_DIR.split('/'), `${record.dispatchId}.json`);
+  const claim = readInflightClaim(claimPath, (path) => readFileSync(path, 'utf8'));
+  // A normal terminal dispatch has no claim and is not cancellable. A
+  // reportless/SIGKILLed supervisor is different: the kernel may have written
+  // a failed completion row while deliberately preserving the claim because
+  // its detached executor group is still alive.
+  if (record.completed && claim == null) {
     throw new DispatchesCommandError(
       `dispatch ${record.dispatchId.slice(0, 8)} has already completed — nothing to cancel. ` +
         `Read what it produced with \`fadeno dispatches --output ${
@@ -1369,9 +1422,6 @@ export function runDispatchesCancel(opts: DispatchesCancelOptions = {}): Dispatc
         }\`.`,
     );
   }
-
-  const claimPath = join(repoRoot, ...INFLIGHT_DIR.split('/'), `${record.dispatchId}.json`);
-  const claim = readInflightClaim(claimPath, (path) => readFileSync(path, 'utf8'));
   if (claim == null) {
     // Open in the ledger but unclaimed on this machine: the kernel died
     // without writing a completion row, or the dispatch belongs to another
@@ -1386,14 +1436,36 @@ export function runDispatchesCancel(opts: DispatchesCancelOptions = {}): Dispatc
   }
 
   const kill = opts.kill ?? ((pid, signal) => { process.kill(pid, signal); });
+  const probe = opts.probe ?? ((pid: number, signal: 0) => { process.kill(pid, signal); });
+  const alive = (pid: number): boolean => {
+    try { probe(pid, 0); return true; }
+    catch (err) { return (err as NodeJS.ErrnoException).code !== 'ESRCH'; }
+  };
+  const supervisorPid = claim.supervisorPid ?? claim.pid;
+  // Preserve the simple injected-kill test seam unless it also supplies a
+  // liveness probe. Production probes the supervisor first, then falls back to
+  // the detached executor group left by a SIGKILLed supervisor.
+  const targetPid = (opts.kill != null && opts.probe == null) || alive(supervisorPid)
+    ? supervisorPid
+    : claim.processGroupId != null && alive(-claim.processGroupId)
+      ? -claim.processGroupId
+      : claim.executorPid != null && alive(claim.executorPid)
+        ? claim.executorPid
+        : null;
+  if (targetPid == null) {
+    throw new DispatchesCommandError(
+      `dispatch ${record.dispatchId.slice(0, 8)} has a stale in-flight claim but no live supervisor or executor group. ` +
+        'Nothing was signalled; retrying may first require stale-state recovery.',
+    );
+  }
   try {
     // SIGTERM, never SIGKILL: the supervisor catches it and reaps the
     // executor's whole process group, then escalates on its own schedule.
     // SIGKILL here would leave exactly the orphan the supervisor exists for.
-    kill(claim.pid, 'SIGTERM');
+    kill(targetPid, 'SIGTERM');
   } catch (err) {
     throw new DispatchesCommandError(
-      `could not signal the executor for ${record.dispatchId.slice(0, 8)} (pid ${claim.pid}): ` +
+      `could not signal the executor for ${record.dispatchId.slice(0, 8)} (pid ${targetPid}): ` +
         `${(err as Error).message}`,
     );
   }
@@ -1401,9 +1473,10 @@ export function runDispatchesCancel(opts: DispatchesCancelOptions = {}): Dispatc
   appendCancellationRow(repoRoot, {
     dispatch_id: record.dispatchId,
     ...(record.tag != null ? { tag: record.tag } : {}),
-    supervisor_pid: claim.pid,
+    supervisor_pid: supervisorPid,
+    ...(targetPid < 0 ? { process_group_id: -targetPid } : {}),
     ...(claim.startedAt != null ? { executor_started_at: claim.startedAt } : {}),
   }, opts.now ?? new Date());
 
-  return { dispatchId: record.dispatchId, tag: record.tag, pid: claim.pid, resolvedBy };
+  return { dispatchId: record.dispatchId, tag: record.tag, pid: targetPid, resolvedBy };
 }

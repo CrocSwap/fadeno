@@ -29,8 +29,8 @@ test('archetypes: boolean aliases map to required/none', () => {
     routes: { standalone: { openai: { command: ['codex'] } } },
     archetypes: { worker: { requires_write: true }, reviewer: { requires_write: false } },
   });
-  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null });
-  assert.deepEqual(profile.archetypes.reviewer, { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null });
+  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.reviewer, { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null, brief: null });
 });
 
 test('archetypes: the three string postures parse', () => {
@@ -79,7 +79,7 @@ test('archetypes: an empty policy is legal (all-default)', () => {
     routes: { standalone: { openai: { command: ['codex'] } } },
     archetypes: { scout: {} },
   });
-  assert.deepEqual(profile.archetypes.scout, { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null });
+  assert.deepEqual(profile.archetypes.scout, { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null, brief: null });
 });
 
 test('archetypes: unknown keys name the new allowed set', () => {
@@ -92,7 +92,7 @@ test('archetypes: unknown keys name the new allowed set', () => {
     }),
     (err: unknown) =>
       err instanceof ExecutorProfileError &&
-      /`archetypes\.worker` has unknown key\(s\) requires_network; only `requires_write`, `fallback`, and `distinct_provider_from_inputs` are allowed/
+      /`archetypes\.worker` has unknown key\(s\) requires_network; only `requires_write`, `fallback`, `distinct_provider_from_inputs`, and `brief` are allowed/
         .test(err.message),
   );
 });
@@ -177,7 +177,7 @@ test('archetypes: fallback to an undeclared archetype is allowed', () => {
     routes: { standalone: { openai: { command: ['codex'] } } },
     archetypes: { scout: { fallback: 'reviewer' } },
   });
-  assert.deepEqual(profile.archetypes.scout, { requiresWrite: 'none', fallback: 'reviewer', distinctProviderFromInputs: null });
+  assert.deepEqual(profile.archetypes.scout, { requiresWrite: 'none', fallback: 'reviewer', distinctProviderFromInputs: null, brief: null });
   assert.equal(profile.archetypes.reviewer, undefined);
 });
 
@@ -215,7 +215,7 @@ test('explainWriteConflict: forbidden×write refuses; required×no-write still r
   assert.match(forbidden, /`write_access: true`/);
   assert.match(forbidden, /mutating toolchain/);
   assert.match(forbidden, /read-only route/);
-  assert.match(forbidden, /fadeno loadout clear generator/);
+  assert.match(forbidden, /fadeno dial clear generator/);
   assert.match(forbidden, /`requires_write: none`/);
 
   assert.equal(explainWriteConflict({ executor: 'ro', spec: roSpec }, 'reviewer', roProfile), null);
@@ -243,11 +243,11 @@ test('serializeSnapshot: canonical strings, omits none, emits fallback, round-tr
     },
   });
   assert.deepEqual(profile.archetypes, {
-    worker: { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null },
-    reviewer: { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null },
-    generator: { requiresWrite: 'forbidden', fallback: 'worker', distinctProviderFromInputs: null },
-    scout: { requiresWrite: 'none', fallback: 'reviewer', distinctProviderFromInputs: null },
-    extra: { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null },
+    worker: { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null, brief: null },
+    reviewer: { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null, brief: null },
+    generator: { requiresWrite: 'forbidden', fallback: 'worker', distinctProviderFromInputs: null, brief: null },
+    scout: { requiresWrite: 'none', fallback: 'reviewer', distinctProviderFromInputs: null, brief: null },
+    extra: { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null, brief: null },
   });
 
   const text = serializeSnapshot(profile);

@@ -21,7 +21,7 @@ async function buildRuntime(binDir) {
     logOverride: { 'empty-import-meta': 'silent' },
   });
   chmodSync(join(binDir, 'fadeno'), 0o755);
-  writeFileSync(join(binDir, 'package.json'), '{\n  "type": "commonjs"\n}\n');
+  writeFileSync(join(binDir, 'package.json'), JSON.stringify({ name: 'fadeno-runtime', type: 'commonjs', version }, null, 2) + '\n');
   rmSync(join(binDir, 'templates'), { recursive: true, force: true });
   cpSync(join(repoRoot, 'templates'), join(binDir, 'templates'), { recursive: true });
 }

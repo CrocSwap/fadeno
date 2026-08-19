@@ -14,6 +14,8 @@ const SHARED_FILES = [
   '.fadeno/schemas/run.schema.json',
   '.fadeno/schemas/review-report.schema.json',
   '.fadeno/schemas/test-result.schema.json',
+  // Route policy used when OpenCode is spawned as a read-only driver.
+  '.opencode/agents/fadeno-readonly.md',
 ];
 
 test('init --codex creates the Codex target tree', (t) => {
@@ -241,7 +243,7 @@ test('--with-hooks on Claude adds a settings example', (t) => {
   assert.ok(exists(root, '.fadeno/hooks/claude-settings.example.json'));
 });
 
-test('--data-only seeds .fadeno definitions but no capability layer', (t) => {
+test('--data-only seeds definitions and driver policy but no host capability layer', (t) => {
   const root = tempRepo(t);
   const { results } = runInit({ target: 'claude', repoRoot: root, dataOnly: true });
 
@@ -249,18 +251,21 @@ test('--data-only seeds .fadeno definitions but no capability layer', (t) => {
   assert.ok(exists(root, '.fadeno/schemas/playbook.schema.json'));
   assert.ok(exists(root, '.fadeno/playbooks/code-change-review.yaml'));
   assert.ok(exists(root, '.fadeno/vocabulary.md'));
+  assert.ok(exists(root, '.opencode/agents/fadeno-readonly.md'));
 
   // capability layer skipped (comes from the plugin)
   assert.ok(!exists(root, '.claude/skills/fadeno-runner/SKILL.md'));
   assert.ok(!exists(root, '.claude/agents/worker.md'));
   assert.ok(!exists(root, 'CLAUDE.md'));
 
-  // every emitted path is either a .fadeno/ definition or the local CLI
-  // allow-list (no skills/subagents/bootstrap — those come from the plugin)
+  // every emitted path is either a .fadeno/ definition, driver route policy,
+  // or the local CLI allow-list (no host skills/subagents/bootstrap — those
+  // come from the plugin)
   assert.ok(
     results.every(
       (r) =>
         r.path.includes('.fadeno') ||
+        r.path.includes('.opencode') ||
         r.path.endsWith('settings.local.json') ||
         r.path.endsWith('.gitignore'),
     ),

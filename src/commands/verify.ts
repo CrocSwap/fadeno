@@ -27,6 +27,7 @@ import {
   type RunSummary,
 } from '../lib/run-ledger.ts';
 import { CONDITION_REGISTRY, SUPPORTED_CONDITIONS, type GateCondition } from './gate.ts';
+import { extractSchemaEnvelope } from '../lib/schema-envelope.ts';
 
 export class VerifyError extends Error {}
 
@@ -316,6 +317,12 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
   findings.push(checkHostDispatchLifecycle(run, events, mode));
   findings.push(checkHostDispatchArtifacts(run, events, mode));
   findings.push(checkHostAttestation(run, events, mode));
+
+  findings.push(checkEnvelopeExtraction(run, schemas, events));
+
+  findings.push(checkToolResults(run, events, mode));
+  findings.push(checkToolCommandDigest(run, events, mode));
+  findings.push(checkToolLifecycle(run, events, mode));
 
   const ok = !findings.some((f) => f.status === 'fail');
   return { run, mode, findings, ok };
@@ -806,6 +813,123 @@ function checkHostAttestation(run: RunSummary, events: RunEvent[], mode: LedgerM
   );
 }
 
+function checkEnvelopeExtraction(run: RunSummary, schemas: SchemaSet, events: RunEvent[]): Finding {
+  const check = 'envelope-extraction';
+  const allowedKinds = new Set(['bom_trimmed', 'fenced', 'embedded']);
+  const problems: string[] = [];
+  let count = 0;
+  for (const event of events) {
+    if (event.type !== 'actor_completed') continue;
+    const extraction = event.extra.output_extraction;
+    const rawRel = event.extra.raw_output;
+    const rawSha = event.extra.raw_output_sha256;
+    const rawBytes = event.extra.raw_output_bytes;
+    const outputValid = event.extra.output_valid;
+    const hasExtraction = extraction != null;
+
+    if (hasExtraction) {
+      count += 1;
+      if (outputValid !== true) {
+        problems.push(`${event.step ?? '(no step)'}: output_extraction present but output_valid is not true`);
+        continue;
+      }
+      if (typeof extraction !== 'string' || !allowedKinds.has(extraction)) {
+        problems.push(`${event.step ?? '(no step)'}: unknown output_extraction kind ${JSON.stringify(extraction)}`);
+        continue;
+      }
+      if (typeof rawRel !== 'string' || typeof rawSha !== 'string') {
+        problems.push(`${event.step ?? '(no step)'}: output_extraction without raw_output/raw_output_sha256`);
+        continue;
+      }
+      const rawAbs = resolveArtifact(run.dir, rawRel);
+      if (!existsSync(rawAbs)) {
+        problems.push(`${rawRel}: raw output file is missing`);
+        continue;
+      }
+      const rawBytesActual = readFileSync(rawAbs);
+      const rawDigest = sha256Hex(rawBytesActual);
+      if (rawDigest !== rawSha) {
+        problems.push(`${rawRel}: raw output sha256 mismatch (recorded ${rawSha}, actual ${rawDigest})`);
+        continue;
+      }
+      if (typeof rawBytes !== 'number' || !Number.isInteger(rawBytes) || rawBytes < 0) {
+        problems.push(`${rawRel}: raw_output_bytes must be a non-negative integer (recorded ${JSON.stringify(rawBytes)})`);
+      } else if (rawBytesActual.length !== rawBytes) {
+        problems.push(`${rawRel}: raw_output_bytes ${rawBytes} does not match actual ${rawBytesActual.length}`);
+      }
+      const envelopeCandidates = event.extra.envelope_candidates;
+      if (typeof envelopeCandidates !== 'number' || !Number.isInteger(envelopeCandidates) || envelopeCandidates < 1) {
+        problems.push(`${event.step ?? '(no step)'}: envelope_candidates must be a positive integer (recorded ${JSON.stringify(envelopeCandidates)})`);
+      }
+      const outputRel = typeof event.extra.output === 'string' ? event.extra.output : null;
+      if (outputRel == null) {
+        problems.push(`${event.step ?? '(no step)'}: output_extraction without output path`);
+        continue;
+      }
+      const outputAbs = resolveArtifact(run.dir, outputRel);
+      if (!existsSync(outputAbs)) {
+        problems.push(`${outputRel}: normalized output is missing`);
+        continue;
+      }
+      const outputText = readFileSync(outputAbs, 'utf8');
+      const rawText = rawBytesActual.toString('utf8');
+      if (!rawText.includes(outputText)) {
+        problems.push(`${outputRel}: normalized output is not a contiguous substring of raw output`);
+        continue;
+      }
+      const manifest = events.find(
+        (e) => e.type === 'artifact_created' && typeof e.extra.artifact === 'string' && e.extra.artifact === outputRel,
+      );
+      let schemaKind: SchemaKind | null = null;
+      if (manifest) {
+        const validation = (manifest.extra as Record<string, unknown>).validation as Record<string, unknown> | null | undefined;
+        if (validation && typeof validation.schema === 'string') {
+          schemaKind = validation.schema as SchemaKind;
+        }
+      }
+      if (schemaKind == null) {
+        const dispatchId = typeof event.extra.dispatch_id === 'string' ? event.extra.dispatch_id : null;
+        if (dispatchId) {
+          const req = events.find((e) => e.type === 'host_dispatch_requested' && e.extra.dispatch_id === dispatchId);
+          if (req && typeof req.extra.artifact_type === 'string') {
+            schemaKind = req.extra.artifact_type as SchemaKind;
+          }
+        }
+      }
+      if (schemaKind == null) {
+        problems.push(`${outputRel}: cannot resolve schema for extraction replay`);
+        continue;
+      }
+      try {
+        const validate = schemas.get(schemaKind);
+        const replay = extractSchemaEnvelope(rawText, validate);
+        if (!replay.ok) {
+          problems.push(`${outputRel}: replay of extraction failed (${replay.reason})`);
+          continue;
+        }
+        if (replay.extraction.kind !== extraction) {
+          problems.push(`${outputRel}: replay kind ${replay.extraction.kind} does not match recorded ${extraction}`);
+          continue;
+        }
+        const recordedCandidates = event.extra.envelope_candidates;
+        if (typeof recordedCandidates === 'number' && replay.extraction.candidates !== recordedCandidates) {
+          problems.push(`${outputRel}: replay candidates ${replay.extraction.candidates} does not match recorded ${recordedCandidates}`);
+        }
+        const replayDigest = sha256Hex(replay.extraction.payload);
+        const actualDigest = sha256Hex(outputText);
+        if (replayDigest !== actualDigest) {
+          problems.push(`${outputRel}: replay payload digest ${replayDigest} does not match output ${actualDigest}`);
+        }
+      } catch (err) {
+        problems.push(`${outputRel}: replay schema ${schemaKind} unavailable: ${(err as Error).message}`);
+      }
+    }
+  }
+  if (count === 0) return skip(check, 'no envelope extractions recorded');
+  if (problems.length > 0) return { check, status: 'fail', detail: problems.join('; ') };
+  return { check, status: 'ok', detail: `${count} extraction(s) verified` };
+}
+
 const ACTOR_EVENT_TYPES = new Set(['actor_dispatched', 'actor_completed', 'actor_failed']);
 
 function checkSessionContinuity(events: RunEvent[]): Finding {
@@ -904,6 +1028,27 @@ function checkActorAttempts(run: RunSummary, events: RunEvent[]): Finding {
             `(${[...ATTEMPT_REASONS_RETRY].join(', ')})`,
         );
       }
+    }
+  }
+
+  // Waves interleave lifecycles, but every engine command receipt must still trace
+  // to its own dispatch row: an actor_completed (no host dispatch_id) whose
+  // (actor_call_id, attempt) was never dispatched earlier in the ledger is forged.
+  // Failure receipts are exempt: preflight refusals fail without a dispatch row.
+  const dispatchedSeen = new Set<string>();
+  for (const event of events) {
+    if (event.type === 'actor_dispatched') {
+      if (typeof event.extra.actor_call_id === 'string' && typeof event.extra.attempt === 'number') {
+        dispatchedSeen.add(`${event.extra.actor_call_id}#${event.extra.attempt}`);
+      }
+      continue;
+    }
+    if (event.type !== 'actor_completed' || event.extra.dispatch_id != null) continue;
+    const callId = typeof event.extra.actor_call_id === 'string' ? event.extra.actor_call_id : null;
+    const attempt = typeof event.extra.attempt === 'number' ? event.extra.attempt : null;
+    if (callId == null || attempt == null) continue;
+    if (!dispatchedSeen.has(`${callId}#${attempt}`)) {
+      problems.push(`${callId}: attempt ${attempt} completed without a preceding dispatch row`);
     }
   }
 
@@ -1601,6 +1746,180 @@ function checkGateCoherence(lastResultByCondition: Map<GateCondition, string>): 
   }
   const detail = incoherent.map(([cond, result]) => `${cond}=${result}`).join(', ');
   return { check, status: 'fail', detail: `completed run with non-passing latest gate: ${detail}` };
+}
+
+function checkToolResults(run: RunSummary, events: RunEvent[], mode: LedgerMode): Finding {
+  const check = 'tool-result-coherence';
+  if (mode !== 'current') return skip(check, 'no tool coherence check on legacy ledger');
+  // Only measured receipts linked to tool_completed provenance are checked; legacy/manual skip
+  const completed = events.filter((e) => e.type === 'tool_completed');
+  const measuredOutputs = new Set(completed.map((e) => typeof e.extra.output === 'string' ? e.extra.output as string : ''));
+  // Also build map from dispatched to completed to determine measured
+  const problems: string[] = [];
+  // One TestResult is one inspected result. Both the `artifact_created` and
+  // the `tool_completed` that name the same file are checked (each carries its
+  // own status/exit fields to disagree with), but counting per event would
+  // report "2 measured TestResult(s)" for a single tool run.
+  const inspectedPaths = new Set<string>();
+  for (const event of events) {
+    if (event.type !== 'tool_completed' && event.type !== 'artifact_created') continue;
+    const artifactRel = typeof event.extra.artifact === 'string'
+      ? event.extra.artifact as string
+      : typeof event.extra.output === 'string'
+        ? event.extra.output as string
+        : null;
+    if (artifactRel == null) continue;
+    // Only inspect if this artifact is linked to a measured tool_completed
+    const isMeasured = measuredOutputs.has(artifactRel) || (typeof event.extra.tool_call_id === 'string' && typeof event.extra.attempt === 'number' && completed.some((c) => c.extra.tool_call_id === event.extra.tool_call_id && c.extra.attempt === event.extra.attempt));
+    if (!isMeasured) continue;
+    const abs = resolveArtifact(run.dir, artifactRel);
+    if (!isInsideRun(run.dir, artifactRel) || !existsSync(abs)) continue;
+    let payload: any;
+    try { payload = JSON.parse(readFileSync(abs, 'utf8')); } catch { continue; }
+    if (payload == null || typeof payload !== 'object') continue;
+    if (!('status' in payload) || !('exit_code' in payload)) continue;
+    inspectedPaths.add(artifactRel);
+    const status = payload.status;
+    const exitCode = payload.exit_code;
+    let expected: string;
+    if (exitCode === null) expected = 'error';
+    else if (exitCode === 0) expected = 'passed';
+    else if (typeof exitCode === 'number') expected = 'failed';
+    else {
+      problems.push(`${artifactRel}: exit_code is not number|null`);
+      continue;
+    }
+    if (status !== expected) {
+      problems.push(`${artifactRel}: status "${status}" does not match exit_code ${JSON.stringify(exitCode)} (expected "${expected}")`);
+    }
+    const eventStatus = (event.extra as any).status;
+    if (typeof eventStatus === 'string' && eventStatus !== status) {
+      problems.push(`${artifactRel}: payload status "${status}" != event status "${eventStatus}"`);
+    }
+    const eventExit = (event.extra as any).exit_code;
+    if (eventExit !== undefined && eventExit !== exitCode) {
+      problems.push(`${artifactRel}: payload exit_code ${JSON.stringify(exitCode)} != event exit_code ${JSON.stringify(eventExit)}`);
+    }
+  }
+  if (inspectedPaths.size === 0) return skip(check, 'no measured test-result tool artifacts to recompute (legacy/manual receipts skip)');
+  return problems.length === 0
+    ? { check, status: 'ok', detail: `${inspectedPaths.size} measured TestResult(s) have status/exit coherence` }
+    : { check, status: 'fail', detail: problems.join('; ') };
+}
+
+function checkToolCommandDigest(run: RunSummary, events: RunEvent[], mode: LedgerMode): Finding {
+  const check = 'tool-command-digest';
+  if (mode !== 'current') return skip(check, 'no tool digest check on legacy ledger');
+  const completed = events.filter((e) => e.type === 'tool_completed');
+  const measuredDispatches = events.filter((e) => e.type === 'tool_dispatched' && completed.some((c) => c.extra.tool_call_id === e.extra.tool_call_id && c.extra.attempt === e.extra.attempt));
+  const hasMeasured = measuredDispatches.length > 0;
+  if (!hasMeasured) return skip(check, 'no measured tool dispatches recorded (legacy/manual receipts skip)');
+  // Load profile snapshot — it must be present, attested, and valid for measured
+  // dispatches. An absent snapshot *event* is a failure too: without it the
+  // snapshot's own digest is unattested and the binding check has nothing to
+  // anchor to.
+  let profile: SnapshotDocument | null = null;
+  const snapshotEvent = events.find((e) => e.type === 'profile_snapshotted');
+  if (snapshotEvent == null) {
+    return { check, status: 'fail', detail: 'measured tool dispatches recorded but no profile_snapshotted event attests the binding snapshot' };
+  }
+  const profileRel = typeof snapshotEvent.extra.profile === 'string' ? snapshotEvent.extra.profile as string : 'profile.yaml';
+  const profilePath = join(run.dir, profileRel);
+  if (!existsSync(profilePath)) {
+    return { check, status: 'fail', detail: `profile snapshot missing for measured dispatch: ${profileRel}` };
+  }
+  try {
+    profile = parseSnapshotDocument(readFileSync(profilePath, 'utf8'), profileRel);
+  } catch (err) {
+    return { check, status: 'fail', detail: `profile snapshot invalid: ${(err as Error).message}` };
+  }
+  // Verify snapshot sha256 matches recorded event
+  if (typeof snapshotEvent.extra.sha256 === 'string') {
+    const actual = sha256Hex(readFileSync(profilePath, 'utf8'));
+    if (actual !== snapshotEvent.extra.sha256) {
+      return { check, status: 'fail', detail: `profile snapshot digest mismatch: recorded ${(snapshotEvent.extra.sha256 as string).slice(0,12)}… != actual ${actual.slice(0,12)}…` };
+    }
+  }
+  const problems: string[] = [];
+  let checked = 0;
+  for (const event of measuredDispatches) {
+    const tool = event.extra.tool as string | undefined;
+    const recordedDigest = event.extra.command_sha256 as string | undefined;
+    if (typeof tool !== 'string' || typeof recordedDigest !== 'string') continue;
+    const spec = (profile as SnapshotDocument).tools[tool];
+    if (spec == null) {
+      problems.push(`tool "${tool}" dispatched but not in snapshot tools`);
+      continue;
+    }
+    const expected = sha256Hex(JSON.stringify(spec.command));
+    if (recordedDigest !== expected) {
+      problems.push(`${tool}: digest ${recordedDigest.slice(0, 12)}… != snapshot binding ${expected.slice(0, 12)}…`);
+    } else {
+      checked += 1;
+    }
+    const recordedCommand = event.extra.command as unknown;
+    if (Array.isArray(recordedCommand)) {
+      const argvStr = JSON.stringify(recordedCommand);
+      if (argvStr !== JSON.stringify(spec.command)) {
+        problems.push(`${tool}: recorded argv differs from snapshot`);
+      }
+    }
+  }
+  if (checked === 0 && problems.length === 0) return skip(check, 'no registered tool bindings to verify');
+  return problems.length === 0
+    ? { check, status: 'ok', detail: `${checked} measured tool dispatch(es) match snapshotted bindings` }
+    : { check, status: 'fail', detail: problems.join('; ') };
+}
+
+function checkToolLifecycle(run: RunSummary, events: RunEvent[], mode: LedgerMode): Finding {
+  const check = 'tool-lifecycle';
+  if (mode !== 'current') return skip(check, 'no tool lifecycle check on legacy ledger');
+  const dispatched = events.filter((e) => e.type === 'tool_dispatched');
+  if (dispatched.length === 0) return skip(check, 'no tool dispatches recorded');
+  const problems: string[] = [];
+  const terminals = events.filter((e) => e.type === 'tool_completed' || e.type === 'tool_failed');
+  const byKey = (e: RunEvent) => `${e.extra.tool_call_id}:${e.extra.attempt}`;
+  const dispatchedKeys = new Set(dispatched.map(byKey));
+  const terminalKeys = new Map<string, number>();
+  for (const t of terminals) {
+    const k = byKey(t);
+    terminalKeys.set(k, (terminalKeys.get(k) ?? 0) + 1);
+  }
+  for (const d of dispatched) {
+    const k = byKey(d);
+    const count = terminalKeys.get(k) ?? 0;
+    if (count === 0) problems.push(`dispatch ${k} has no terminal receipt`);
+    else if (count > 1) problems.push(`dispatch ${k} has ${count} terminal receipts (expected exactly one)`);
+  }
+  for (const [k] of terminalKeys) {
+    if (!dispatchedKeys.has(k)) problems.push(`terminal ${k} has no matching dispatch`);
+  }
+  // Evidence a terminal receipt names carries its digest on the receipt: the
+  // parked attempt result and the bounded details sidecar never get an
+  // `artifact_created` of their own (only the planned TestResult may complete
+  // the step), so this is where they are held to their recorded bytes.
+  let attested = 0;
+  for (const terminal of terminals) {
+    for (const [pathKey, shaKey] of [['output', 'output_sha256'], ['details_path', 'details_sha256']] as const) {
+      const rel = typeof terminal.extra[pathKey] === 'string' ? terminal.extra[pathKey] as string : null;
+      const sha = typeof terminal.extra[shaKey] === 'string' ? terminal.extra[shaKey] as string : null;
+      if (rel == null || sha == null) continue;
+      const key = `${terminal.extra.tool_call_id}:${terminal.extra.attempt}`;
+      if (!isInsideRun(run.dir, rel)) {
+        problems.push(`${key}: ${pathKey} ${rel} escapes the run directory`);
+        continue;
+      }
+      const abs = resolveArtifact(run.dir, rel);
+      if (!existsSync(abs)) problems.push(`${key}: ${pathKey} ${rel} is missing`);
+      else if (sha256Hex(readFileSync(abs)) !== sha) problems.push(`${key}: ${rel} no longer matches its recorded ${shaKey}`);
+      else attested += 1;
+    }
+  }
+  const detail = `${dispatched.length} tool dispatch(es) each have exactly one terminal receipt` +
+    (attested > 0 ? `; ${attested} recorded evidence digest(s) match disk` : '');
+  return problems.length === 0
+    ? { check, status: 'ok', detail }
+    : { check, status: 'fail', detail: problems.join('; ') };
 }
 
 function checkHumanDecisions(events: RunEvent[]): Finding {

@@ -158,6 +158,10 @@ test('happy path: a completed run with a recomputable passing gate verifies clea
       'host-dispatch-lifecycle',
       'host-dispatch-artifacts',
       'host-attestation',
+      'envelope-extraction',
+      'tool-result-coherence',
+      'tool-command-digest',
+      'tool-lifecycle',
     ],
   );
   assert.ok(result.findings.every((f) => f.status !== 'fail'));
@@ -603,4 +607,68 @@ test('a run written by new-run/run/gate verifies clean end-to-end', (t) => {
   assert.equal(finding(result, 'events-seq').detail, 'seq contiguous 1..5');
   assert.equal(finding(result, 'artifact-manifests').detail, '1 manifest(s), all fields present');
   assert.equal(finding(result, 'artifact-validation').detail, '1 typed artifact(s) revalidated');
+});
+
+test('gate-all_reviews_approved verifies and mismatch against zero-blocking request_changes fails', (t) => {
+  const root = seedRepo(t);
+  const id = '2026-07-10-2212-all-approved';
+  const approveReport = JSON.stringify({ reviewer: 'r', summary: 's', issues: [], verdict: 'approve' });
+  writeRun(root, id, baseRun(id));
+  writeEvents(root, id, [
+    runStarted(1),
+    artifactEvent(root, id, 'artifacts/review-report.json', approveReport, 2, REVIEW_VALIDATION),
+    gateEvent('all_reviews_approved', 'artifacts/review-report.json', 'pass', 3),
+    runCompleted(4),
+  ]);
+  const ok = runVerify({ repoRoot: root, run: id });
+  const gateOk = finding(ok, 'gate-all_reviews_approved');
+  assert.equal(gateOk.status, 'ok', `expected ok, got ${gateOk.detail}`);
+  assert.match(gateOk.detail, /recorded pass, recomputed pass/);
+  assert.equal(ok.ok, true);
+
+  // Mismatch: recorded pass but actual report would fail all_reviews_approved (zero-blocking request_changes)
+  const id2 = '2026-07-10-2212-all-approved-mismatch';
+  writeRun(root, id2, baseRun(id2));
+  const requestChangesReport = JSON.stringify({ reviewer: 'alice', summary: 'needs work', issues: [{ severity: 'minor', title: 'nit' }], verdict: 'request_changes' });
+  writeEvents(root, id2, [
+    runStarted(1),
+    artifactEvent(root, id2, 'artifacts/review-report.json', requestChangesReport, 2, REVIEW_VALIDATION),
+    gateEvent('all_reviews_approved', 'artifacts/review-report.json', 'pass', 3),
+    runCompleted(4),
+  ]);
+  const mismatch = runVerify({ repoRoot: root, run: id2 });
+  const gateFail = finding(mismatch, 'gate-all_reviews_approved');
+  assert.equal(gateFail.status, 'fail', 'mismatch recorded pass vs recomputed fail must fail');
+  assert.match(gateFail.detail, /recorded pass, recomputed fail/);
+  assert.equal(mismatch.ok, false);
+
+  // Correct fail must verify as ok (recorded fail equals recomputed fail)
+  const id3 = '2026-07-10-2212-all-approved-correct-fail';
+  writeRun(root, id3, baseRun(id3, { status: 'failed' }));
+  writeEvents(root, id3, [
+    runStarted(1),
+    artifactEvent(root, id3, 'artifacts/review-report.json', requestChangesReport, 2, REVIEW_VALIDATION),
+    gateEvent('all_reviews_approved', 'artifacts/review-report.json', 'fail', 3),
+    runFailed(4),
+  ]);
+  const correctFail = runVerify({ repoRoot: root, run: id3, allowFailed: true });
+  const gateFailOk = finding(correctFail, 'gate-all_reviews_approved');
+  assert.equal(gateFailOk.status, 'ok');
+  assert.match(gateFailOk.detail, /recorded fail, recomputed fail/);
+
+  // Array case: one approve, one request_changes -> recomputed fail, so recorded pass mismatched
+  const id4 = '2026-07-10-2212-all-approved-array-mismatch';
+  writeRun(root, id4, baseRun(id4));
+  const arrayReport = JSON.stringify([
+    { reviewer: 'a', summary: 's', issues: [], verdict: 'approve' },
+    { reviewer: 'b', summary: 's', issues: [], verdict: 'request_changes' },
+  ]);
+  writeEvents(root, id4, [
+    runStarted(1),
+    artifactEvent(root, id4, 'artifacts/review-report.json', arrayReport, 2, REVIEW_VALIDATION),
+    gateEvent('all_reviews_approved', 'artifacts/review-report.json', 'pass', 3),
+    runCompleted(4),
+  ]);
+  const arrayMismatch = runVerify({ repoRoot: root, run: id4 });
+  assert.equal(finding(arrayMismatch, 'gate-all_reviews_approved').status, 'fail');
 });

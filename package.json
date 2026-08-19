@@ -1,6 +1,6 @@
 {
   "name": "fadeno",
-  "version": "0.6.0-rc.28",
+  "version": "0.6.0-rc.33",
   "description": "Portable, repo-native playbook layer for AI coding agents (Codex, Claude Code, Grok Build).",
   "keywords": [
     "ai",
@@ -34,6 +34,8 @@
     "prepare": "npm run build",
     "dev": "node src/cli.ts",
     "test": "node --test \"test/**/*.test.ts\"",
+    "focus": "node --test",
+    "probe": "node",
     "eval:summary": "node evals/scripts/summarize-results.mjs --results-dir evals/results --valid-only",
     "validate:self": "node scripts/validate-self.mjs",
     "prepublishOnly": "npm run build"

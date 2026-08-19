@@ -117,12 +117,14 @@ test('the committed plugin ships a self-contained CJS binary + templates', () =>
   // Pinned to CommonJS so the extensionless bundle runs under a type:module ancestor.
   const pkg = JSON.parse(readFileSync(join(binDir, 'package.json'), 'utf8'));
   assert.equal(pkg.type, 'commonjs');
-  // The bundle bakes in the version (esbuild --define); executing it must report
-  // the current package.json version — catches a forgotten `npm run build:bin`
-  // after a bump (the marketplace cache is version-keyed, so a stale bin ships).
+  assert.equal(pkg.name, 'fadeno-runtime', 'plugin/bin/package.json must carry runtime name marker');
   const version = JSON.parse(
     readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8'),
   ).version;
+  assert.equal(pkg.version, version, 'plugin/bin/package.json version must match package.json without executing binary');
+  // The bundle bakes in the version (esbuild --define); executing it must report
+  // the current package.json version — catches a forgotten `npm run build:bin`
+  // after a bump (the marketplace cache is version-keyed, so a stale bin ships).
   const reported = execFileSync(bin, ['--version'], { encoding: 'utf8' }).trim();
   assert.equal(reported, version, 'plugin/bin/fadeno is stale — run `npm run build:bin`');
   // Templates travel with the binary so `fadeno init` works with no node_modules.

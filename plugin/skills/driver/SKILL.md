@@ -1,6 +1,6 @@
 ---
 name: driver
-description: Drive a Fadeno run ledger end-to-end — engine-first via `fadeno drive`, with a manual `fadeno next` loop for steps the engine can't execute. Use when the host hands you a run id to drive or resume, or when coordinating multi-harness roles without host nested subagents. [fadeno 0.6.0-rc.28]
+description: Drive a Fadeno run ledger end-to-end — engine-first via `fadeno drive`, with a manual `fadeno next` loop for steps the engine can't execute. Use when the host hands you a run id to drive or resume, or when coordinating multi-harness roles without host nested subagents. [fadeno 0.6.0-rc.33]
 ---
 
 # Fadeno Driver
@@ -10,7 +10,7 @@ that plugin-bundled launcher for every command written below as `fadeno`
 (invoke it with `node` on Windows).
 Otherwise use `fadeno` from `PATH`. Never prefer an unrelated global CLI over
 the plugin launcher. Before driving, call `<cli> status`; if the current
-harness is not installed, invoke the setup skill first.
+harness is not installed, invoke the setup skill first. Use the path status prints on the `use:` line for the rest of the session. Skills and subagents are loaded at host session start; a fresh session is required to refresh them — no setup or refresh will update the current session.
 
 You own a **run ledger** and advance it mechanically. The host harness stays pure:
 it picks a playbook, gathers inputs, creates the run (`fadeno new-run`), and
@@ -49,13 +49,17 @@ fadeno drive <run>
     report honestly; the user may re-run drive (retry) or substitute:
     fadeno drive <run> --bind <role>=<executor>     # recorded as evidence
   awaiting_host_dispatch:
-    deliver each immutable prompt with an envelope beginning `# Fadeno engine step assignment`
-    and exact `run: <run>` plus `dispatch_id: <dispatch-id>` fields; the host
-    Codex agent resolves that pair before doing work
-    start each host agent and record dispatch-start
+    for each host request, optionally prepare an isolated worktree first: `fadeno dispatch-prepare <run> <dispatch-id> --isolate` (creates `.fadeno/local/host-worktrees/<run>/<dispatch-id>` from HEAD, workspace_mode: isolated, idempotent, traversal/symlink-safe, serialized by `.host-workspace.lock`; without it, delivery is workspace_mode: shared)
+    emit each assignment with `fadeno dispatch-prompt <run> <dispatch-id>` — it writes the exact `# Fadeno engine step assignment` envelope (immutable `run` + `dispatch_id` plus the recorded prompt bytes) without manual reconstruction; when prepared, the envelope includes `workspace_mode: isolated` plus the absolute workspace path and `All repository reads and writes for this assignment must occur in the workspace above; do not read or modify the shared checkout.` (prompt bytes and digest unchanged)
+    start each host agent with `fadeno dispatch-start <run> <dispatch-id> --agent-id <id>` — when prepared it stamps `workspace_mode: isolated`/`workspace`/`base_commit` and bypasses the shared writer lease; otherwise `workspace_mode: shared` with existing exclusive leasing byte-for-byte unchanged (read-only `writeAccess === false` bypasses in either mode); `--workspace` must match or be omitted, and `command-fallback` with a prepared isolated workspace is refused
     poll the prompt-declared progress sidecar and record dispatch-progress
-    submit dispatch-complete or dispatch-fail, then re-run drive
+    submit dispatch-complete or dispatch-fail (for isolated, a binary staged diff is collected to `.fadeno/local/outputs/host-isolated-<run>-<dispatch-id>.diff` before the terminal receipt, stamping `workspace_mode`/`workspace`/`base_commit`/`diff_snapshot`/`diff_bytes`; worktree removed only after durable receipt, failures preserve it for retry, idempotent terminals reuse receipt; nothing auto-merges), then re-run drive
 ```
+
+Independent command-delivered `map` members need not serialize: `fadeno drive
+<run> --parallel <n>` (1-16, default 1) runs eligible members concurrently
+within one ready wave. Read-only members overlap; shared writers stay
+serialized by the workspace lease; receipts keep canonical member order.
 
 For compositional maps, one drive result may contain ready leaves from different
 members or loop generations. Dispatch every returned request and preserve its
@@ -103,9 +107,12 @@ loop:
             --field result=pass|fail \
             --artifact <N.gate.artifact>
       else:
-        for tool_call: invoke the tool, write its output, then run
+        for tool_call (output is test-result and tool is registered in executors.yaml tools): run
+          fadeno tool-run <run> [--tool <name>] [--timeout <seconds>]
+          # synthesizes TestResult (passed/failed/error), validates, and attributes atomically via the shared execution core (same code as drive)
+        for other tool_call (Diff/PostResult or unregistered): invoke the tool manually, write its output, then run
           fadeno tool-complete <run> --output <artifact-path>
-          # typed output is validated atomically before step/artifact events append
+          # typed output is validated atomically before step/artifact events append; manual and automated are mutually exclusive per generation
         handle join / … per runtime.md; record; continue
 ```
 
@@ -160,6 +167,32 @@ planned artifact path.
   `fadeno run <run> --step <step> --event human_decision --field branch=approve`)
   then re-dispatches this skill with the same run id. The cursor sees the
   decision and advances.
+
+## Executor deadlines and cancellation
+
+- **Hard deadlines.** Every command route in the committed catalog defaults to
+  `timeout_ms: 1200000` (20 minutes). The supervisor owns the deadline: at
+  `deadline_at = started_at + timeout_ms` it sends `SIGTERM` to the executor
+  process group and escalates to `SIGKILL` after 5 s. Lease and claim release
+  still waits for `close`, so a timeout is not proven until the group is gone.
+  Override per invocation with `fadeno drive <run> --timeout <seconds>` or
+  `fadeno dispatch --archetype <a> --timeout <seconds>`; `0` disables the route
+  deadline. A timed-out attempt records `actor_failed.reason = "executor_timeout"`
+  with `timeout_ms`/`deadline_at` (engine) or `dispatch_completed.outcome =
+  "timeout"` (ad-hoc) and outranks the exit signal. If you hit the 20-minute wall
+  on a legitimately long step, re-dispatch with `--timeout 0` or a larger value
+  rather than retrying into the same wall.
+
+- **Safe cancellation.** `fadeno cancel <run>` (or a unique run prefix) targets the
+  single live engine command claim for that run, sends `SIGTERM` to its supervisor
+  or negative process-group ID, never writes the ledger, and preserves the lease
+  and claim until group termination is proven. The engine records the terminal
+  receipt. The analogue for ad-hoc work is `fadeno dispatches --cancel <id|tag>`.
+
+- **Idle output is not a deadline.** `fadeno show` may surface
+  `WARNING: no output observed for <duration> (non-gating)` after five minutes
+  (`OUTPUT_IDLE_WARNING_MS`). This is purely observational — it never signals,
+  gates, or alters deadlines.
 
 ## Rules
 

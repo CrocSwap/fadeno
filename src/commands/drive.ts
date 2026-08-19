@@ -1,6 +1,6 @@
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, extname, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
@@ -18,18 +18,23 @@ import {
   ExecutorProfileError,
   activeHarness,
   formatDialRef,
+  forcesWritePosture,
   parseDialRef,
   parseSnapshotDocument,
   eligibilityFor,
   explainEligibilityConflict,
   explainProviderConflict,
+  applyWritePosture,
   explainWriteConflict,
   loadExecutorProfile,
   readLocalDialState,
   resolveDialCascade,
+  serializeDialRef,
   roleResolutionEchoLabel,
   serializeSnapshot,
+  PROMPT_FILE_PLACEHOLDER,
   SESSION_ID_PLACEHOLDER,
+  substitutePromptFile,
   substituteSessionId,
   type DialLayers,
   type DialRef,
@@ -41,6 +46,7 @@ import {
   type SnapshotDocument,
   type WritePosture,
   atCwd,
+  withoutHarnessIdentity,
 } from '../lib/executors.ts';
 import { readUserDials } from '../lib/user-paths.ts';
 import { computeNext, FlowCursorError, type NextComputation } from '../lib/flow-cursor.ts';
@@ -53,7 +59,8 @@ import {
   stepExecutionIdFor,
 } from '../lib/node-instance.ts';
 import { roleArchetype, SchemaSet, schemaErrorMessages, validateFile, type SchemaKind } from '../lib/playbook-validate.ts';
-import { baseArtifactName, schemaKindFor, type Playbook, type PlaybookStep } from '../lib/prompt-resolve.ts';
+import { extractSchemaEnvelope, type EnvelopeExtraction } from '../lib/schema-envelope.ts';
+import { baseArtifactName, parseGeneration, schemaKindFor, type Playbook, type PlaybookStep } from '../lib/prompt-resolve.ts';
 import {
   readEventsStrict,
   resolveRun,
@@ -62,11 +69,42 @@ import {
   type RunEvent,
 } from '../lib/run-ledger.ts';
 import { LedgerWriteError, LedgerWriter } from '../lib/run-ledger-write.ts';
+import {
+  INFLIGHT_DIR,
+  inflightClaimIsAlive,
+  readInflightClaim,
+  readSupervisorStatus,
+  sleepSync,
+  superviseArgv,
+  supervisedSpawnError,
+  supervisorCanStillReport,
+} from '../lib/supervisor.ts';
+import {
+  WORKSPACE_LEASE_FILE,
+  WORKSPACE_LEASE_LOCK,
+  acquireWorkspaceLease,
+  isWorkspaceLeaseAlive,
+  readEffectiveLease,
+  readWorkspaceLease,
+  releaseWorkspaceLease,
+  WorkspaceLeaseError,
+  type LeaseHolder,
+  type WorkspaceLeaseRecord,
+} from '../lib/workspace-lease.ts';
 import { CONDITION_REGISTRY, GateError, runGate, SUPPORTED_CONDITIONS, type GateCondition } from './gate.ts';
 import { requestHostDispatch, type HostDispatchRequest } from '../lib/host-dispatch.ts';
 import { PromptError, runPrompt } from './prompt.ts';
 import { RunError, runRun } from './run.ts';
 import type { UserPathOptions } from '../lib/user-paths.ts';
+import {
+  DIAGNOSTICS_MAX_BYTES,
+  DIAGNOSTICS_MAX_LINES,
+  diagnosticsTruncationMarker,
+  truncateDiagnostics,
+  isDiagnosticsEnabled,
+} from '../lib/diagnostics.ts';
+import { isToolEligible, executeToolCore, ToolExecError, recoverInterruptedToolDispatchesShared } from '../lib/tool-exec.ts';
+import { bodyOwnerOf, countIterationStarts, scopeStartIndex, stepStartedInScope } from '../lib/run-scope.ts';
 
 export class DriveError extends Error {}
 
@@ -101,6 +139,12 @@ export interface DriveOptions {
   maxTransitions?: number;
   /** Session binding overrides, each `role=dialRef`. Recorded as events. */
   bind?: string[];
+  /** Hard executor deadline in milliseconds; 0 disables, null/undefined uses the route default. */
+  timeoutMs?: number | null;
+  /** Bounded opt-in process output diagnostics (per-stream 32 KiB / 500 lines). */
+  diagnostics?: boolean;
+  /** Max concurrent command deliveries within one ready wave (1–16, default 1). */
+  parallel?: number;
   cwd?: string;
   repoRoot?: string;
   userPathOptions?: UserPathOptions;
@@ -128,6 +172,19 @@ export interface DriveResult {
 const MAX_TRANSITIONS_DEFAULT = 50;
 const SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
 const STDERR_TAIL = 400;
+export const DRIVE_PARALLEL_DEFAULT = 1;
+export const DRIVE_PARALLEL_MIN = 1;
+export const DRIVE_PARALLEL_MAX = 16;
+const POLL_MS = 50;
+const LIVENESS_EVERY = 20;
+
+export {
+  DIAGNOSTICS_MAX_BYTES,
+  DIAGNOSTICS_MAX_LINES,
+  diagnosticsTruncationMarker,
+  truncateDiagnostics,
+  isDiagnosticsEnabled,
+};
 
 interface EngineCtx {
   runId: string;
@@ -145,6 +202,9 @@ interface EngineCtx {
   overrides: Map<string, string>;
   /** Actor calls that already consumed their one bounded repair this invocation. */
   repaired: Set<string>;
+  diagnostics?: boolean;
+  timeoutMs?: number | null;
+  parallel: number;
   now?: Date;
   act: (line: string) => void;
 }
@@ -198,6 +258,26 @@ function freshEvents(runDir: string): RunEvent[] {
   }
 }
 
+function appendLeaseRecoveryAudit(
+  ctx: EngineCtx,
+  kind: 'workspace_lease_recovered' | 'workspace_lease_reclaim_denied',
+  previous: WorkspaceLeaseRecord,
+  newHolder: LeaseHolder | null,
+  byHolder: LeaseHolder,
+  reason: 'dead_supervisor' | 'abandoned_host' | 'active_writer' | 'abandoned_engine',
+): void {
+  appendEvent(ctx.runDir, {
+    type: kind,
+    step: null,
+    recovered_holder: newHolder,
+    previous_holder: previous.holder,
+    supervisor_pid: previous.supervisor_pid,
+    reason,
+    recovered_at: (ctx.now ?? new Date()).toISOString(),
+    by: byHolder.id,
+  }, ctx.now);
+}
+
 /**
  * A hard-killed engine cannot append from a signal handler. On the next drive,
  * close every command-backed start that has no terminal event so the ledger
@@ -218,6 +298,96 @@ function recoverInterruptedCommandDispatches(ctx: EngineCtx): number {
     event.extra.dispatch_id == null &&
     !terminal.has(event.extra.actor_call_id),
   );
+  for (const event of dangling) {
+    const claimRel = event.extra.supervisor_claim;
+    if (typeof claimRel === 'string') {
+      const expectedPrefix = `${INFLIGHT_DIR}/`;
+      if (!claimRel.startsWith(expectedPrefix) || claimRel.split('/').includes('..')) {
+        throw new DriveError(
+          `interrupted command attempt ${event.extra.actor_call_id} has an unsafe supervisor claim path; refusing recovery.`,
+        );
+      }
+      const claimAbs = join(ctx.repoRoot, ...claimRel.split('/'));
+      if (existsSync(claimAbs)) {
+        const claim = readInflightClaim(claimAbs, (path) => readFileSync(path, 'utf8'));
+        if (claim == null) {
+          throw new DriveError(
+            `interrupted command attempt ${event.extra.actor_call_id} has an unreadable in-flight claim at ${claimRel}; ` +
+              'refusing retry until the claim is inspected or removed.',
+          );
+        }
+        if (inflightClaimIsAlive(claim)) {
+          throw new DriveError(
+            `command attempt ${event.extra.actor_call_id} still has a live supervisor (pid ${claim.pid}); ` +
+              'refusing to record interruption or start a concurrent retry. Wait for it to terminate, then re-run drive.',
+          );
+        }
+        // A dead supervisor cannot remove a stale claim. Once its pid is
+        // proven absent, dropping the machine-local file is safe.
+        rmSync(claimAbs, { force: true });
+      }
+    }
+  }
+  // Repo-wide lease also interlocks recovery after supervisor checks: a live
+  // lease held by another holder means another writer is active. Check after
+  // supervisor liveness so the more specific supervisor message is preserved.
+  // A dangling attempt's own lease must not block its recovery: the engine
+  // holder id is `engine:<runId>:<actorCallId>:a<attempt>` and is durable
+  // (supervisor_pid null) until the supervisor releases it after executor
+  // close. If the drive and supervisor were both SIGKILLed, that lease
+  // survives and would otherwise make the run unrecoverable.
+  if (dangling.length > 0) {
+    const effectiveLease = readEffectiveLease(ctx.repoRoot);
+    if (effectiveLease != null) {
+      const danglingIds = new Set(
+        dangling.map((event) => `engine:${ctx.runId}:${String(event.extra.actor_call_id)}:a${String(event.extra.attempt)}`),
+      );
+      if (!danglingIds.has(effectiveLease.holder.id)) {
+        const byHolder: LeaseHolder = { id: `engine:${ctx.runId}:recovery`, kind: 'engine', runId: ctx.runId };
+        try {
+          appendLeaseRecoveryAudit(
+            ctx,
+            'workspace_lease_reclaim_denied',
+            effectiveLease,
+            null,
+            byHolder,
+            'active_writer',
+          );
+        } catch {}
+        const holdersSuffix = (() => {
+          const holders = (effectiveLease.holders?.length ?? 1) > 1 ? effectiveLease.holders! : [effectiveLease.holder];
+          if (holders.length <= 1) return '';
+          return ` holders: ${holders.map((h) => `"${h.id}"`).join(', ')}`;
+        })();
+        throw new DriveError(
+          `shared workspace is already held by ${effectiveLease.holder.kind} "${effectiveLease.holder.id}"${holdersSuffix} ` +
+            `(supervisor_pid ${effectiveLease.supervisor_pid ?? 'unknown'}, started ${effectiveLease.started_at}); ` +
+            `holder "${ctx.runId}" must wait or retry. Inspect it with \`fadeno show ${effectiveLease.holder.runId ?? '<run>'}\`; ` +
+            'recover an abandoned host dispatch with dispatch-fail/dispatch-complete. Only after verifying no writer remains, ' +
+            `remove ${WORKSPACE_LEASE_FILE} as a last resort.`,
+        );
+      }
+      if (effectiveLease.supervisor_pid != null || effectiveLease.executor_pid != null || effectiveLease.process_group_id != null) {
+        throw new DriveError(
+          `command attempt still has a live executor identity in ${WORKSPACE_LEASE_FILE}; ` +
+            'refusing to reclaim its lease while the supervisor or detached executor group may still be running.',
+        );
+      }
+      // Reclaim the dangling attempt's own lease so recovery can proceed — audited per contract 1.3/3.4.
+      const previous = effectiveLease;
+      const byHolder: LeaseHolder = { id: `engine:${ctx.runId}:recovery`, kind: 'engine', runId: ctx.runId };
+      const reason = previous.holder.kind === 'host-dispatch' ? 'abandoned_host' as const : 'abandoned_engine' as const;
+      try {
+        const released = releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: effectiveLease.holder });
+        if (released) {
+          try {
+            appendLeaseRecoveryAudit(ctx, 'workspace_lease_recovered', previous, null, byHolder, reason);
+            ctx.act(`recovered workspace lease for "${previous.holder.id}" (${reason})`);
+          } catch {}
+        }
+      } catch {}
+    }
+  }
   for (const event of dangling) {
     appendEvent(ctx.runDir, {
       type: 'actor_failed',
@@ -337,7 +507,7 @@ function ensureProfileSnapshot(
 function resolveChain(
   ctx: EngineCtx,
   role: string | null,
-): { executor: string; spec: ExecutorSpec; source: RoleResolutionSource; resolvedVia: string | null; ref: DialRef } {
+): { executor: string; spec: ExecutorSpec; source: RoleResolutionSource; resolvedVia: string | null; ref: DialRef; usedWriteVariant: boolean; writePostureForced: boolean } {
   const archetype = role == null ? null : roleArchetype(ctx.playbook, role);
   const cascade = resolveDialCascade(role ?? '*', archetype, { bindings: ctx.profile.bindings, archetypes: ctx.profile.archetypes }, ctx.dialLayers);
   const refString = formatDialRef(cascade.ref);
@@ -349,8 +519,18 @@ function resolveChain(
   if (spec.adapter === 'host' && (spec as any).agentType === '*' && archetype != null) {
     spec = { ...spec, agentType: archetype } as ExecutorSpec;
   }
+  const postured = applyWritePosture(spec, archetype, ctx.profile.archetypes);
+  spec = postured.spec;
   const source = role == null && cascade.source === 'binding' ? 'base' as RoleResolutionSource : cascade.source;
-  return { executor: refString, spec, source, resolvedVia: cascade.resolvedVia, ref: cascade.ref };
+  return {
+    executor: refString,
+    spec,
+    source,
+    resolvedVia: cascade.resolvedVia,
+    ref: cascade.ref,
+    usedWriteVariant: postured.usedWriteVariant,
+    writePostureForced: forcesWritePosture(cascade.ref, cascade.resolvedVia),
+  };
 }
 
 /** Validate overrides against the snapshot and record each as an event once. */
@@ -379,7 +559,7 @@ function recordOverrides(ctx: EngineCtx, binds: Map<string, string>): void {
   }
 }
 
-function effectiveBinding(ctx: EngineCtx, role: string | null): { executor: string; spec: ExecutorSpec } {
+function effectiveBinding(ctx: EngineCtx, role: string | null): { executor: string; spec: ExecutorSpec; usedWriteVariant: boolean; writePostureForced: boolean } {
   const key = role ?? '*';
   const overridden = ctx.overrides.get(key);
   if (overridden != null) {
@@ -388,15 +568,28 @@ function effectiveBinding(ctx: EngineCtx, role: string | null): { executor: stri
     const archetype = key !== '*' ? roleArchetype(ctx.playbook, key) : null;
     let spec: ExecutorSpec = spec0;
     if (spec.adapter === 'host' && (spec as any).agentType === '*' && archetype != null) spec = { ...spec, agentType: archetype } as ExecutorSpec;
-    return { executor: overridden, spec };
+    const postured = applyWritePosture(spec, archetype, ctx.profile.archetypes);
+    return { executor: overridden, spec: postured.spec, usedWriteVariant: postured.usedWriteVariant, writePostureForced: false };
   }
   try {
-    const { executor, spec } = resolveChain(ctx, role);
-    return { executor, spec };
+    const { executor, spec, usedWriteVariant, writePostureForced } = resolveChain(ctx, role);
+    return { executor, spec, usedWriteVariant, writePostureForced };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new DriveError(err.message);
     throw err;
   }
+}
+
+function effectiveTimeoutMs(ctx: EngineCtx, spec: ExecutorSpec): number | null {
+  if (ctx.timeoutMs !== undefined && ctx.timeoutMs !== null) {
+    if (ctx.timeoutMs === 0) return null;
+    if (typeof ctx.timeoutMs === 'number' && Number.isInteger(ctx.timeoutMs) && ctx.timeoutMs > 0) return ctx.timeoutMs;
+    return null;
+  }
+  if (spec.adapter === 'command' && typeof (spec as any).timeoutMs === 'number' && Number.isInteger((spec as any).timeoutMs) && (spec as any).timeoutMs > 0) {
+    return (spec as any).timeoutMs as number;
+  }
+  return null;
 }
 
 /**
@@ -431,16 +624,32 @@ function recordResolutionSnapshot(ctx: EngineCtx): void {
       continue;
     }
     try {
-      const { executor, spec, source, resolvedVia } = resolveChain(ctx, role);
+      const { executor, spec, source, resolvedVia, usedWriteVariant, writePostureForced } = resolveChain(ctx, role);
       const label = roleResolutionEchoLabel(source);
       const model = (spec as any).model ?? (spec.adapter === 'host' ? (spec as any).model : null);
       const effort = (spec as any).reasoningEffort ?? 'default';
       const driver = (spec as any).driver ?? null;
       const provider = (spec as any).provider ?? null;
       const delivery = spec.adapter;
-      entries.push({ role, archetype, executor, model, effort, driver, provider: provider ?? null, delivery, source, resolved_via: resolvedVia });
+      entries.push({
+        role,
+        archetype,
+        executor,
+        model,
+        effort,
+        driver,
+        provider: provider ?? null,
+        delivery,
+        source,
+        resolved_via: resolvedVia,
+        ...(usedWriteVariant ? { write_variant: true } : {}),
+        ...(writePostureForced ? { write_posture_forced: true } : {}),
+      });
       const modelStr = model != null ? ` (${model})` : '';
-      ctx.act(`${role} → ${executor}${modelStr} [${label}]`);
+      ctx.act(
+        `${role} → ${executor}${modelStr} [${label}]${usedWriteVariant ? ' [write variant]' : ''}` +
+        `${writePostureForced ? ' [FORCED write posture]' : ''}`,
+      );
     } catch (err) {
       if (!(err instanceof ExecutorProfileError)) throw err;
       entries.push({ role, archetype, executor: null, model: null, source: null, error: err.message });
@@ -449,15 +658,15 @@ function recordResolutionSnapshot(ctx: EngineCtx): void {
   }
 
   // Dials in force at snapshot time — always write `dials` key (empty object allowed) so discriminator is unambiguous.
-  const dialsPayload: Record<string, Record<string, string>> = {};
-  const toRefStringMap = (m: Record<string, DialRef>): Record<string, string> => {
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(m)) out[k] = formatDialRef(v);
+  const dialsPayload: Record<string, Record<string, unknown>> = {};
+  const toRefValueMap = (m: Record<string, DialRef>): Record<string, unknown> => {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(m)) out[k] = serializeDialRef(v);
     return out;
   };
-  if (Object.keys(ctx.dialLayers.session).length > 0) dialsPayload.session = toRefStringMap(ctx.dialLayers.session);
-  if (Object.keys(ctx.dialLayers.repo).length > 0) dialsPayload.repo = toRefStringMap(ctx.dialLayers.repo);
-  if (Object.keys(ctx.dialLayers.user).length > 0) dialsPayload.user = toRefStringMap(ctx.dialLayers.user);
+  if (Object.keys(ctx.dialLayers.session).length > 0) dialsPayload.session = toRefValueMap(ctx.dialLayers.session);
+  if (Object.keys(ctx.dialLayers.repo).length > 0) dialsPayload.repo = toRefValueMap(ctx.dialLayers.repo);
+  if (Object.keys(ctx.dialLayers.user).length > 0) dialsPayload.user = toRefValueMap(ctx.dialLayers.user);
   const payload = {
     dials: dialsPayload,
     roles: entries,
@@ -473,38 +682,6 @@ function recordResolutionSnapshot(ctx: EngineCtx): void {
   appendEvent(ctx.runDir, { type: 'resolution_snapshot', step: null, ...payload }, ctx.now);
 }
 
-function bodyOwnerOf(playbook: Playbook, stepId: string): string | null {
-  const flow = Array.isArray(playbook.flow) ? (playbook.flow as PlaybookStep[]) : [];
-  for (const step of flow) {
-    if (step.kind !== 'loop' || !Array.isArray(step.body)) continue;
-    if ((step.body as unknown[]).includes(stepId) && typeof step.id === 'string') return step.id;
-  }
-  return null;
-}
-
-function countIterationStarts(events: RunEvent[], loopId: string): number {
-  return events.filter((e) => e.type === 'loop_iteration_started' && e.step === loopId).length;
-}
-
-/** Index just past the Gth iteration start of `loopId`, or 0 for outer scope. */
-function scopeStartIndex(events: RunEvent[], loopId: string | null, generation: number): number {
-  if (loopId == null) return 0;
-  let seen = 0;
-  for (let i = 0; i < events.length; i += 1) {
-    if (events[i]!.type === 'loop_iteration_started' && events[i]!.step === loopId) {
-      seen += 1;
-      if (seen === generation) return i;
-    }
-  }
-  return 0;
-}
-
-function stepStartedInScope(events: RunEvent[], stepId: string, from: number): boolean {
-  for (let i = from; i < events.length; i += 1) {
-    if (events[i]!.type === 'step_started' && events[i]!.step === stepId) return true;
-  }
-  return false;
-}
 
 function artifactRecorded(events: RunEvent[], path: string): boolean {
   return events.some((e) => e.type === 'artifact_created' && e.extra.artifact === path);
@@ -635,12 +812,25 @@ function validateTyped(
   ctx: EngineCtx,
   kind: string | null,
   text: string,
-): { ok: true; parsed: unknown } | { ok: false; errors: string[] } {
+): { ok: true; parsed: unknown; extraction?: EnvelopeExtraction } | { ok: false; errors: string[] } {
   if (kind == null) return { ok: true, parsed: null };
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch (err) {
+    const schemaKind = kind as SchemaKind;
+    if (ctx.schemas.has(schemaKind)) {
+      const validate = ctx.schemas.get(schemaKind);
+      const result = extractSchemaEnvelope(text, validate);
+      if (result.ok) {
+        return { ok: true, parsed: result.parsed, extraction: result.extraction };
+      }
+      if (result.reason === 'schema_invalid' && result.errors && result.errors.length > 0) {
+        const prefixed = result.errors.slice(0, 5).map((e) => `envelope candidate failed schema: ${e}`);
+        return { ok: false, errors: prefixed };
+      }
+      return { ok: false, errors: [`output is not valid JSON: ${(err as Error).message}`] };
+    }
     return { ok: false, errors: [`output is not valid JSON: ${(err as Error).message}`] };
   }
   const schemaKind = kind as SchemaKind;
@@ -678,13 +868,58 @@ function latestSessionForRole(events: RunEvent[], role: string | null, executor:
   return null;
 }
 
+/** Data for one executor invocation; behavior is described on begin/collect below. */
+interface PendingAttempt {
+  stepId: string;
+  role: string | null;
+  generation: number;
+  inBody: boolean;
+  outputRel: string;
+  artifactType: string | null;
+  ids: { stepExecutionId: string; actorCallId: string };
+  attempt: number;
+  reason: string;
+  repairErrors: string[] | null;
+  stamps: { providerWarned?: boolean; shadowOnly?: boolean };
+  promptRes: { prompt: string; promptPath: string | null; sha256: string };
+  argv: string[];
+  stdin: string;
+  session: 'fresh' | 'resumed' | null;
+  sessionId: string | null;
+  executor: string;
+  spec: import('../lib/executors.ts').ExecutorSpec;
+  usedWriteVariant: boolean;
+  leaseHolder: LeaseHolder | null;
+  claimRel: string;
+  claimAbs: string;
+  statusAbs: string;
+  outputSnapshotAbs: string;
+  stderrSnapshotAbs: string;
+  promptSnapshotAbs: string | null;
+  startedMs: number;
+  startedAt: Date;
+  workspaceMode: 'shared';
+  effectiveTimeout: number | null;
+  diagnosticsRel: string | null;
+  diagnosticsBytes: number | null;
+  child: import('node:child_process').ChildProcess | null;
+}
+
+function parseParallelOption(value: unknown): number {
+  if (value == null) return DRIVE_PARALLEL_DEFAULT;
+  const n = typeof value === 'number' ? value : Number(String(value).trim());
+  if (!Number.isInteger(n) || n < DRIVE_PARALLEL_MIN || n > DRIVE_PARALLEL_MAX) {
+    throw new DriveError(`Invalid --parallel "${String(value)}". Use an integer ${DRIVE_PARALLEL_MIN}–${DRIVE_PARALLEL_MAX} (default ${DRIVE_PARALLEL_DEFAULT}).`);
+  }
+  return n;
+}
+
 /**
- * One executor invocation for one actor call: assemble (or reuse) the prompt
- * snapshot, dispatch the bound command, validate the output, and record only
- * facts the adapter can witness — started/failed to start, exit status, and
- * whether the output passed validation.
+ * Begin phase: assemble prompt, publish inflight claim, acquire lease (if needed),
+ * append actor_dispatched, and spawn the supervisor async. Caller must collect.
+ * Owns the claim and lease until collect.
  */
-function dispatchOnce(
+function beginCommandAttempt(
   ctx: EngineCtx,
   stepId: string,
   role: string | null,
@@ -697,7 +932,7 @@ function dispatchOnce(
   reason: string,
   repairErrors: string[] | null,
   stamps: { providerWarned?: boolean; shadowOnly?: boolean } = {},
-): DispatchOutcome {
+): PendingAttempt {
   let promptRes;
   try {
     promptRes = runPrompt({
@@ -714,15 +949,12 @@ function dispatchOnce(
     throw err;
   }
 
-  const { executor, spec } = effectiveBinding(ctx, role);
+  const { executor, spec, usedWriteVariant } = effectiveBinding(ctx, role);
   if (spec.adapter !== 'command') {
     throw new DriveError(`host executor "${executor}" must be handled by the host dispatch protocol.`);
   }
   const repairCore = repairErrors != null ? repairMessage(repairErrors) : null;
 
-  // Session state — only for executors that declare `resume`. One session per
-  // role per run; the mode and id are recorded on every dispatch so verify can
-  // check continuity, and resumed context is visibly attested, not recomputed.
   let session: 'fresh' | 'resumed' | null = null;
   let sessionId: string | null = null;
   let argv = spec.command;
@@ -740,11 +972,13 @@ function dispatchOnce(
       }
     }
   }
+  if (argv.some((part) => part.includes(PROMPT_FILE_PLACEHOLDER))) {
+    if (promptRes.promptPath == null) {
+      throw new DriveError(`executor "${executor}" needs ${PROMPT_FILE_PLACEHOLDER} but this step recorded no prompt artifact.`);
+    }
+    argv = substitutePromptFile(argv, join(ctx.runDir, promptRes.promptPath));
+  }
 
-  // A resumed session already holds the assembled prompt and its own failed
-  // output, so a repair re-ask sends only the repair message; every other
-  // dispatch sends the full deterministic prompt. `repair_appendix` records
-  // exactly what was sent beyond the snapshotted prompt.
   const stdin =
     repairCore == null
       ? promptRes.prompt
@@ -767,6 +1001,66 @@ function dispatchOnce(
     prompt_path: promptRes.promptPath,
     prompt_sha256: promptRes.sha256,
   };
+  const claimRel = `${INFLIGHT_DIR}/engine-${ctx.runId}-${ids.actorCallId}-a${attempt}.json`;
+  const claimAbs = join(ctx.repoRoot, ...claimRel.split('/'));
+  const statusAbs = claimAbs.replace(/\.json$/, '.status.json');
+  mkdirSync(join(ctx.repoRoot, ...INFLIGHT_DIR.split('/')), { recursive: true });
+  if (existsSync(claimAbs)) {
+    const existingClaim = readInflightClaim(claimAbs, (path) => readFileSync(path, 'utf8'));
+    if (existingClaim == null) {
+      throw new DriveError(
+        `interrupted command attempt ${ids.actorCallId} has an unreadable in-flight claim at ${claimRel}; ` +
+          'refusing retry until the claim is inspected or removed.',
+      );
+    }
+    if (inflightClaimIsAlive(existingClaim)) {
+      throw new DriveError(
+        `command attempt ${ids.actorCallId} still has a live supervisor (pid ${existingClaim.pid}); ` +
+          'refusing to record interruption or start a concurrent retry. Wait for it to terminate, then re-run drive.',
+      );
+    }
+    rmSync(claimAbs, { force: true });
+  }
+  {
+    const nowIso = (ctx.now ?? new Date()).toISOString();
+    const initialClaim = {
+      pid: process.pid,
+      supervisor_pid: process.pid,
+      executor_pid: null,
+      process_group_id: null,
+      started_at: nowIso,
+      heartbeat_at: nowIso,
+      last_output_at: null,
+      stdout_bytes: 0,
+      stderr_bytes: 0,
+    };
+    const tmp = `${claimAbs}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      writeFileSync(tmp, JSON.stringify(initialClaim), { flag: 'wx' });
+      linkSync(tmp, claimAbs);
+    } catch (error) {
+      rmSync(tmp, { force: true });
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        const competing = readInflightClaim(claimAbs, (path) => readFileSync(path, 'utf8'));
+        if (competing == null) {
+          throw new DriveError(
+            `command attempt ${ids.actorCallId} has a concurrently published unreadable in-flight claim at ${claimRel}; ` +
+              'refusing retry until the claim is inspected or removed.',
+          );
+        }
+        throw new DriveError(
+          `command attempt ${ids.actorCallId} already has a concurrently published supervisor claim (pid ${competing.pid}); ` +
+            'refusing to start a duplicate attempt. Wait for it to terminate, then re-run drive.',
+        );
+      }
+      throw new DriveError(`failed to publish inflight claim for ${ids.actorCallId}.`);
+    } finally {
+      rmSync(tmp, { force: true });
+    }
+  }
+  dispatched.supervisor_claim = claimRel;
+  if (spec.writeAccess != null) dispatched.write_access = spec.writeAccess;
+  if (usedWriteVariant) dispatched.write_variant = true;
   if (session != null) dispatched.session = session;
   if (sessionId != null) dispatched.session_id = sessionId;
   dispatched.engine_pid = process.pid;
@@ -775,29 +1069,302 @@ function dispatchOnce(
   if (repairCore != null) {
     dispatched.repair_appendix = session === 'resumed' ? repairCore : `\n\n---\n${repairCore}`;
   }
-  appendEvent(ctx.runDir, dispatched, ctx.now);
-  ctx.act(
-    `dispatch ${stepId}${role ? ` (${role})` : ''} attempt ${attempt} [${reason}]` +
-      ` → ${executor}${session != null ? ` (${session} session)` : ''}`,
-  );
-  ctx.act(`external sandbox: ${executor} (${argv.join(' ')}) runs outside the current harness; evidence is recorded in the run ledger`);
-
-  const [cmd, ...args] = argv;
-  const spawned = spawnSync(cmd!, args, {
-    input: stdin,
-    encoding: 'utf8',
-    cwd: ctx.repoRoot,
-    env: atCwd(process.env, ctx.repoRoot),
-    maxBuffer: SPAWN_MAX_BUFFER,
-  });
-
-  // Harness-assigned ids (fresh call, pattern mode) are learned post-spawn and
-  // recorded on the completion event instead of the dispatch.
-  if (session === 'fresh' && sessionId == null && spec.sessionIdPattern != null) {
-    const pattern = new RegExp(spec.sessionIdPattern);
-    const match = pattern.exec(spawned.stderr ?? '') ?? pattern.exec(spawned.stdout ?? '');
-    sessionId = match?.[1] ?? null;
+  const workspaceMode = 'shared' as const;
+  const needsLease = spec.writeAccess !== false;
+  const leaseHolder: LeaseHolder | null = needsLease
+    ? {
+        id: `engine:${ctx.runId}:${ids.actorCallId}:a${attempt}`,
+        kind: 'engine',
+        runId: ctx.runId,
+        dispatchId: `${ids.actorCallId}:a${attempt}`,
+      }
+    : null;
+  const withdrawClaim = (): void => { try { rmSync(claimAbs, { force: true }); } catch {} };
+  if (needsLease) {
+    const existingBefore = (() => {
+      try { return readWorkspaceLease(ctx.repoRoot); } catch { return null; }
+    })();
+    const aliveBefore = existingBefore == null ? false : isWorkspaceLeaseAlive(existingBefore);
+    try {
+      acquireWorkspaceLease({
+        repoRoot: ctx.repoRoot,
+        workspaceMode,
+        holder: leaseHolder!,
+        supervisorPid: null,
+        executorPid: null,
+        processGroupId: null,
+        startedAt: ctx.now,
+        heartbeatAt: ctx.now,
+        stdoutBytes: 0,
+        stderrBytes: 0,
+        now: ctx.now,
+      });
+      (dispatched as Record<string, unknown>).workspace_mode = workspaceMode;
+      if (existingBefore != null && !aliveBefore && existingBefore.supervisor_pid != null) {
+        try {
+          appendLeaseRecoveryAudit(ctx, 'workspace_lease_recovered', existingBefore, leaseHolder!, leaseHolder!, 'dead_supervisor');
+          ctx.act(`recovered stale workspace lease for "${existingBefore.holder.id}" (dead supervisor_pid ${existingBefore.supervisor_pid})`);
+        } catch {}
+      }
+    } catch (err) {
+      if (err instanceof WorkspaceLeaseError) {
+        if (existingBefore != null && aliveBefore && existingBefore.supervisor_pid == null) {
+          try {
+            appendLeaseRecoveryAudit(ctx, 'workspace_lease_reclaim_denied', existingBefore, null, leaseHolder!, 'abandoned_host');
+          } catch {}
+        }
+        withdrawClaim();
+        throw new DriveError(err.message);
+      }
+      withdrawClaim();
+      throw err;
+    }
+  } else {
+    (dispatched as Record<string, unknown>).workspace_mode = workspaceMode;
   }
+
+  try {
+    appendEvent(ctx.runDir, dispatched, ctx.now);
+    ctx.act(
+      `dispatch ${stepId}${role ? ` (${role})` : ''} attempt ${attempt} [${reason}]` +
+        ` → ${executor}${session != null ? ` (${session} session)` : ''}`,
+    );
+    ctx.act(`external sandbox: ${executor} (${argv.join(' ')}) runs outside the current harness; evidence is recorded in the run ledger`);
+  } catch (error) {
+    if (leaseHolder != null) {
+      try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+    }
+    withdrawClaim();
+    throw error;
+  }
+
+  const effectiveTimeout = effectiveTimeoutMs(ctx, spec);
+  // Prepare snapshot files for async supervisor collection.
+  const outputSnapshotAbs = join(ctx.repoRoot, '.fadeno', 'local', 'outputs', `${ctx.runId}-${ids.actorCallId}-a${attempt}.out`);
+  const stderrSnapshotAbs = join(ctx.repoRoot, '.fadeno', 'local', 'outputs', `${ctx.runId}-${ids.actorCallId}-a${attempt}.err`);
+  mkdirSync(join(ctx.repoRoot, '.fadeno', 'local', 'outputs'), { recursive: true });
+  // Ensure any prior snapshot is removed.
+  try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
+  try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
+  // Prompt fd: for the attested prompt, fd the recorded artifact; for repair/resumed, compose into a local prompt file.
+  let promptSnapshotAbs: string | null = null;
+  let promptFdPath: string;
+  if (repairCore == null && !argv.some((p) => p.includes(PROMPT_FILE_PLACEHOLDER))) {
+    // Simple case: prompt is the recorded artifact; if no placeholder, stdin file is the prompt snapshot.
+    // We still need a file containing stdin for the supervisor to fd. For non-repair, stdin == promptRes.prompt, which equals the snapshot file content.
+    // Use the snapshot file directly when it exists.
+    if (promptRes.promptPath != null) {
+      promptFdPath = join(ctx.runDir, promptRes.promptPath);
+      promptSnapshotAbs = promptFdPath;
+    } else {
+      const tmpPrompt = join(ctx.repoRoot, '.fadeno', 'local', 'prompts', `${ctx.runId}-${ids.actorCallId}-a${attempt}.md`);
+      mkdirSync(join(ctx.repoRoot, '.fadeno', 'local', 'prompts'), { recursive: true });
+      writeFileSync(tmpPrompt, stdin, 'utf8');
+      promptFdPath = tmpPrompt;
+      promptSnapshotAbs = tmpPrompt;
+    }
+  } else if (repairCore != null || session === 'resumed') {
+    const tmpPrompt = join(ctx.repoRoot, '.fadeno', 'local', 'prompts', `${ctx.runId}-${ids.actorCallId}-a${attempt}.md`);
+    mkdirSync(join(ctx.repoRoot, '.fadeno', 'local', 'prompts'), { recursive: true });
+    writeFileSync(tmpPrompt, stdin, 'utf8');
+    promptFdPath = tmpPrompt;
+    promptSnapshotAbs = tmpPrompt;
+  } else {
+    // PROMPT_FILE_PLACEHOLDER case: the argv already points at the snapshot file, but stdin is still piped (ignored). Use prompt file anyway.
+    if (promptRes.promptPath != null) {
+      promptFdPath = join(ctx.runDir, promptRes.promptPath);
+      promptSnapshotAbs = promptFdPath;
+    } else {
+      const tmpPrompt = join(ctx.repoRoot, '.fadeno', 'local', 'prompts', `${ctx.runId}-${ids.actorCallId}-a${attempt}.md`);
+      mkdirSync(join(ctx.repoRoot, '.fadeno', 'local', 'prompts'), { recursive: true });
+      writeFileSync(tmpPrompt, stdin, 'utf8');
+      promptFdPath = tmpPrompt;
+      promptSnapshotAbs = tmpPrompt;
+    }
+  }
+
+  const leaseRelease = leaseHolder == null ? undefined : {
+    leasePath: join(ctx.repoRoot, WORKSPACE_LEASE_FILE),
+    lockPath: join(ctx.repoRoot, WORKSPACE_LEASE_LOCK),
+    holder: leaseHolder,
+  };
+  let promptFd: number | null = null;
+  let outFd: number | null = null;
+  let errFd: number | null = null;
+  let child: import('node:child_process').ChildProcess | null = null;
+  try {
+    promptFd = openSync(promptFdPath, 'r');
+    outFd = openSync(outputSnapshotAbs, 'w');
+    errFd = openSync(stderrSnapshotAbs, 'w');
+    child = spawn(process.execPath, superviseArgv(argv, claimAbs, statusAbs, leaseRelease, effectiveTimeout), {
+      stdio: [promptFd, outFd, errFd],
+      cwd: ctx.repoRoot,
+      env: atCwd(withoutHarnessIdentity(process.env), ctx.repoRoot),
+      detached: false,
+    });
+    child.unref();
+    // Close our copies; child holds its own.
+  } catch (err) {
+    if (promptFd != null) try { closeSync(promptFd); } catch {}
+    if (outFd != null) try { closeSync(outFd); } catch {}
+    if (errFd != null) try { closeSync(errFd); } catch {}
+    // Withdraw claim and lease on synchronous spawn failure.
+    try { rmSync(claimAbs, { force: true }); } catch {}
+    if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+    try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
+    try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
+    throw new DriveError(`failed to spawn executor "${executor}": ${(err as Error).message}`);
+  } finally {
+    if (promptFd != null) try { closeSync(promptFd); } catch {}
+    if (outFd != null) try { closeSync(outFd); } catch {}
+    if (errFd != null) try { closeSync(errFd); } catch {}
+  }
+
+  // The supervisor will atomically replace the claim and eventually drop it; do not remove it here.
+  // Lease is held by the supervisor until close.
+
+  return {
+    stepId,
+    role,
+    generation,
+    inBody,
+    outputRel,
+    artifactType,
+    ids,
+    attempt,
+    reason,
+    repairErrors,
+    stamps,
+    promptRes,
+    argv,
+    stdin,
+    session,
+    sessionId,
+    executor,
+    spec,
+    usedWriteVariant,
+    leaseHolder,
+    claimRel,
+    claimAbs,
+    statusAbs,
+    outputSnapshotAbs,
+    stderrSnapshotAbs,
+    promptSnapshotAbs,
+    startedMs: Date.now(),
+    startedAt: new Date(),
+    workspaceMode,
+    effectiveTimeout,
+    diagnosticsRel: null,
+    diagnosticsBytes: null,
+    child,
+  };
+}
+
+/**
+ * Collect phase: poll supervisor status, enforce output-size boundary, validate,
+ * append receipts, and release lease/claim. Must be called once per begin.
+ */
+function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): DispatchOutcome {
+  const { stepId, role, outputRel, artifactType, ids, attempt, executor, leaseHolder, statusAbs, claimAbs, outputSnapshotAbs, stderrSnapshotAbs, effectiveTimeout } = pending;
+  let sessionId: string | null = pending.sessionId;
+  const startedMs = pending.startedMs;
+  // Poll for supervisor status file, with liveness probe. The supervisor measures duration/ended.
+  let polls = 0;
+  while (!existsSync(statusAbs)) {
+    polls += 1;
+    if (polls % LIVENESS_EVERY === 0 && pending.child?.pid != null && !supervisorCanStillReport(pending.child.pid)) break;
+    sleepSync(POLL_MS);
+  }
+  let supervisorStatus = readSupervisorStatus(statusAbs, (path) => {
+    try { return readFileSync(path, 'utf8'); } catch { return '{}'; }
+  });
+  // The supervisor holds the claim and lease until close; the kernel never deletes a live claim here.
+  // A dead claim is kept for recoverInterruptedCommandDispatches to translate into engine_interrupted.
+
+  // Enforce output-size boundary before materialising the file. A runaway executor is bounded at collection by size on disk.
+  let stdout: string;
+  let stderr = '';
+  // stdout: size check then read; a read failure is a distinct failure, not empty output.
+  try {
+    const st = statSync(outputSnapshotAbs);
+    if (st.size > SPAWN_MAX_BUFFER) {
+      const durationMs = supervisorStatus?.durationMs ?? (Date.now() - startedMs);
+      const endedAt = supervisorStatus?.endedAt ?? new Date().toISOString();
+      const evidenceTiming = { duration_ms: durationMs, ended_at: endedAt };
+      const baseFail: Record<string, unknown> = { step: stepId, actor: role, step_execution_id: ids.stepExecutionId, actor_call_id: ids.actorCallId, attempt, executor, ...(sessionId != null ? { session_id: sessionId } : {}), ...(pending.session != null ? { session: pending.session } : {}) };
+      appendEvent(ctx.runDir, { type: 'actor_failed', ...baseFail, ...evidenceTiming, reason: 'output_too_large', error: `output exceeded ${SPAWN_MAX_BUFFER} bytes` }, ctx.now);
+      try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
+      try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
+      try { rmSync(statusAbs, { force: true }); } catch {}
+      try { rmSync(claimAbs, { force: true }); } catch {}
+      if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+      return { kind: 'exit_nonzero', detail: `${executor} output too large on ${stepId}${role ? ` (${role})` : ''}` };
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code != null && code !== 'ENOENT') {
+      const durationMs = supervisorStatus?.durationMs ?? (Date.now() - startedMs);
+      const endedAt = supervisorStatus?.endedAt ?? new Date().toISOString();
+      const evidenceTiming = { duration_ms: durationMs, ended_at: endedAt };
+      const baseFail: Record<string, unknown> = { step: stepId, actor: role, step_execution_id: ids.stepExecutionId, actor_call_id: ids.actorCallId, attempt, executor, ...(sessionId != null ? { session_id: sessionId } : {}), ...(pending.session != null ? { session: pending.session } : {}) };
+      appendEvent(ctx.runDir, { type: 'actor_failed', ...baseFail, ...evidenceTiming, reason: 'output_unreadable', error: `failed to stat output snapshot: ${(err as Error).message}` }, ctx.now);
+      try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
+      try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
+      try { rmSync(statusAbs, { force: true }); } catch {}
+      try { rmSync(claimAbs, { force: true }); } catch {}
+      if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+      return { kind: 'exit_nonzero', detail: `${executor} output unreadable on ${stepId}${role ? ` (${role})` : ''}: ${(err as Error).message}` };
+    }
+  }
+  try {
+    stdout = readFileSync(outputSnapshotAbs, 'utf8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') {
+      stdout = '';
+    } else {
+      const durationMs = supervisorStatus?.durationMs ?? (Date.now() - startedMs);
+      const endedAt = supervisorStatus?.endedAt ?? new Date().toISOString();
+      const evidenceTiming = { duration_ms: durationMs, ended_at: endedAt };
+      const baseFail: Record<string, unknown> = { step: stepId, actor: role, step_execution_id: ids.stepExecutionId, actor_call_id: ids.actorCallId, attempt, executor, ...(sessionId != null ? { session_id: sessionId } : {}), ...(pending.session != null ? { session: pending.session } : {}) };
+      appendEvent(ctx.runDir, { type: 'actor_failed', ...baseFail, ...evidenceTiming, reason: 'output_unreadable', error: `failed to read output snapshot: ${(err as Error).message}` }, ctx.now);
+      try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
+      try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
+      try { rmSync(statusAbs, { force: true }); } catch {}
+      try { rmSync(claimAbs, { force: true }); } catch {}
+      if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+      return { kind: 'exit_nonzero', detail: `${executor} output unreadable on ${stepId}${role ? ` (${role})` : ''}: ${(err as Error).message}` };
+    }
+  }
+  // stderr: bounded read. Under the cap read it whole (session harvest scans the full
+  // text); over the cap keep only the trailing STDERR_TAIL bytes so a runaway stderr
+  // cannot exhaust the drive process while its tail evidence survives.
+  try {
+    const errStat = statSync(stderrSnapshotAbs);
+    if (errStat.size > SPAWN_MAX_BUFFER) {
+      const fd = openSync(stderrSnapshotAbs, 'r');
+      try {
+        const tail = Buffer.alloc(STDERR_TAIL);
+        const read = readSync(fd, tail, 0, STDERR_TAIL, errStat.size - STDERR_TAIL);
+        stderr = tail.subarray(0, read).toString('utf8');
+      } finally {
+        try { closeSync(fd); } catch {}
+      }
+    } else {
+      stderr = readFileSync(stderrSnapshotAbs, 'utf8');
+    }
+  } catch { stderr = ''; }
+
+  // Harvest session id from output when the executor declares a pattern (fresh call, pattern mode).
+  let harvestedSessionId: string | null = sessionId;
+  if (pending.session === 'fresh' && harvestedSessionId == null && (pending.spec as any).sessionIdPattern != null) {
+    try {
+      const pattern = new RegExp((pending.spec as any).sessionIdPattern);
+      const match = pattern.exec(stderr ?? '') ?? pattern.exec(stdout ?? '');
+      harvestedSessionId = match?.[1] ?? null;
+    } catch {}
+  }
+  if (harvestedSessionId != null) sessionId = harvestedSessionId;
 
   const base: Record<string, unknown> = {
     step: stepId,
@@ -808,119 +1375,417 @@ function dispatchOnce(
     executor,
   };
   if (sessionId != null) base.session_id = sessionId;
+  if (pending.session != null) base.session = pending.session;
+  else if (harvestedSessionId != null) base.session = 'fresh';
 
-  if (spawned.error != null) {
-    appendEvent(
-      ctx.runDir,
-      { type: 'actor_failed', ...base, reason: 'spawn_failed', error: spawned.error.message },
-      ctx.now,
-    );
-    return { kind: 'spawn_failed', detail: `${executor}: ${spawned.error.message}` };
+  // Diagnostics (bounded, opt-in)
+  let diagnosticsRel: string | null = null;
+  let diagnosticsBytes: number | null = null;
+  const diagnosticsEnabled = isDiagnosticsEnabled({ diagnostics: ctx.diagnostics });
+  if (diagnosticsEnabled) {
+    try {
+      const truncatedStdout = truncateDiagnostics(stdout ?? '', 'stdout');
+      const truncatedStderr = truncateDiagnostics(stderr ?? '', 'stderr');
+      const content = `# diagnostics for run ${ctx.runId} dispatch ${ids.actorCallId}-a${attempt}\n# stdout_bytes=${Buffer.byteLength(stdout ?? '', 'utf8')} stderr_bytes=${Buffer.byteLength(stderr ?? '', 'utf8')}\n--- stdout ---\n${truncatedStdout}\n--- stderr ---\n${truncatedStderr}\n`;
+      const diagRel = join('.fadeno', 'local', 'outputs', 'diagnostics', `${ctx.runId}-${ids.actorCallId}-a${attempt}.log`).split('\\').join('/');
+      const diagAbs = join(ctx.repoRoot, diagRel);
+      mkdirSync(join(ctx.repoRoot, '.fadeno', 'local', 'outputs', 'diagnostics'), { recursive: true });
+      const tmp = `${diagAbs}.tmp-${process.pid}-${randomUUID()}`;
+      writeFileSync(tmp, content, 'utf8');
+      try {
+        renameSync(tmp, diagAbs);
+        diagnosticsRel = diagRel;
+        diagnosticsBytes = Buffer.byteLength(content, 'utf8');
+      } catch {
+        try { rmSync(tmp, { force: true }); } catch {}
+      }
+      ctx.act(`diagnostics: ${diagnosticsBytes ?? 0} bytes → ${diagRel}`);
+    } catch {}
   }
-  if (spawned.signal != null) {
-    const stderrTail = (spawned.stderr ?? '').slice(-STDERR_TAIL);
-    appendEvent(
-      ctx.runDir,
-      {
-        type: 'actor_failed',
-        ...base,
-        reason: 'signal',
-        signal: spawned.signal,
-        stderr_tail: stderrTail,
-      },
-      ctx.now,
-    );
-    return {
-      kind: 'exit_nonzero',
-      detail: `${executor} was interrupted by ${spawned.signal} on ${stepId}${role ? ` (${role})` : ''}`,
-    };
+  if (diagnosticsRel != null && diagnosticsBytes != null) {
+    base.diagnostics_snapshot = diagnosticsRel;
+    base.diagnostics_bytes = diagnosticsBytes;
   }
-  if (spawned.status !== 0) {
-    const stderrTail = (spawned.stderr ?? '').slice(-STDERR_TAIL);
-    appendEvent(
-      ctx.runDir,
-      {
-        type: 'actor_failed',
-        ...base,
-        reason: 'exit_nonzero',
-        exit_code: spawned.status,
-        stderr_tail: stderrTail,
-      },
-      ctx.now,
-    );
-    return {
-      kind: 'exit_nonzero',
-      detail: `${executor} exited ${spawned.status ?? '(signal)'} on ${stepId}${role ? ` (${role})` : ''}`,
-    };
+  // Resolve supervisor status, handling the race where the supervisor is still alive but hasn't yet written the status file.
+  // Use the supervisor's own duration/ended when available.
+  if (supervisorStatus == null) {
+    const isAlive = pending.child?.pid != null && supervisorCanStillReport(pending.child.pid);
+    if (!isAlive) {
+      let claimAlive = false;
+      try {
+        if (existsSync(claimAbs)) {
+          const claim = readInflightClaim(claimAbs, (p) => readFileSync(p, 'utf8'));
+          if (claim != null) claimAlive = inflightClaimIsAlive(claim);
+        }
+      } catch {}
+      if (!claimAlive) {
+        const durationMs = Date.now() - startedMs;
+        const endedAt = new Date().toISOString();
+        const evidenceTiming = { duration_ms: durationMs, ended_at: endedAt };
+        appendEvent(ctx.runDir, { type: 'actor_failed', ...base, ...evidenceTiming, reason: 'supervisor_lost', error: 'supervisor ended without an exit report' }, ctx.now);
+        try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
+        try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
+        try { rmSync(statusAbs, { force: true }); } catch {}
+        try { rmSync(claimAbs, { force: true }); } catch {}
+        if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+        return { kind: 'exit_nonzero', detail: `${executor} supervisor lost on ${stepId}${role ? ` (${role})` : ''}` };
+      }
+    }
+    // Supervisor still alive but status not yet visible: poll briefly.
+    let extraPolls = 0;
+    while (!existsSync(statusAbs) && extraPolls < 200) {
+      extraPolls += 1;
+      if (pending.child?.pid != null && !supervisorCanStillReport(pending.child.pid)) break;
+      sleepSync(POLL_MS);
+    }
+    const retryStatus = readSupervisorStatus(statusAbs, (p) => { try { return readFileSync(p, 'utf8'); } catch { return '{}'; } });
+    if (retryStatus == null) {
+      const durationMs = Date.now() - startedMs;
+      const endedAt = new Date().toISOString();
+      const evidenceTiming = { duration_ms: durationMs, ended_at: endedAt };
+      appendEvent(ctx.runDir, { type: 'actor_failed', ...base, ...evidenceTiming, reason: 'supervisor_lost', error: 'supervisor ended without an exit report' }, ctx.now);
+      try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
+      try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
+      try { rmSync(statusAbs, { force: true }); } catch {}
+      try { rmSync(claimAbs, { force: true }); } catch {}
+      if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+      return { kind: 'exit_nonzero', detail: `${executor} supervisor lost on ${stepId}${role ? ` (${role})` : ''}` };
+    }
+    supervisorStatus = retryStatus;
+  }
+  // From here supervisorStatus is non-null; use its measured duration/ended.
+  const durationMs = supervisorStatus.durationMs ?? (Date.now() - startedMs);
+  const endedAt = supervisorStatus.endedAt ?? new Date().toISOString();
+  const evidenceTiming = { duration_ms: durationMs, ended_at: endedAt };
+
+  const spawnFailure = supervisorStatus.spawnFailed ?? supervisedSpawnError(supervisorStatus.exitCode ?? null, stderr);
+  if (spawnFailure != null) {
+    appendEvent(ctx.runDir, { type: 'actor_failed', ...base, ...evidenceTiming, reason: 'spawn_failed', error: spawnFailure }, ctx.now);
+    try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
+    try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
+    try { rmSync(statusAbs, { force: true }); } catch {}
+    try { rmSync(claimAbs, { force: true }); } catch {}
+    if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+    return { kind: 'spawn_failed', detail: `${executor}: ${spawnFailure}` };
+  }
+  if (supervisorStatus.timedOut === true) {
+    const stderrTail = (stderr ?? '').slice(-STDERR_TAIL);
+    appendEvent(ctx.runDir, { type: 'actor_failed', ...base, ...evidenceTiming, reason: 'executor_timeout', ...(supervisorStatus.timeoutMs != null ? { timeout_ms: supervisorStatus.timeoutMs } : {}), ...(supervisorStatus.deadlineAt != null ? { deadline_at: supervisorStatus.deadlineAt } : {}), ...(supervisorStatus.signal != null ? { signal: supervisorStatus.signal } : {}), ...(supervisorStatus.exitCode != null ? { exit_code: supervisorStatus.exitCode } : {}), stderr_tail: stderrTail }, ctx.now);
+    try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
+    try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
+    try { rmSync(statusAbs, { force: true }); } catch {}
+    try { rmSync(claimAbs, { force: true }); } catch {}
+    if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+    return { kind: 'exit_nonzero', detail: `${executor} timed out after ${supervisorStatus.timeoutMs ?? effectiveTimeout ?? '?'}ms on ${stepId}${role ? ` (${role})` : ''}` };
+  }
+  if (supervisorStatus.signal != null) {
+    const stderrTail = (stderr ?? '').slice(-STDERR_TAIL);
+    appendEvent(ctx.runDir, { type: 'actor_failed', ...base, ...evidenceTiming, reason: 'signal', signal: supervisorStatus.signal, stderr_tail: stderrTail }, ctx.now);
+    try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
+    try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
+    try { rmSync(statusAbs, { force: true }); } catch {}
+    try { rmSync(claimAbs, { force: true }); } catch {}
+    if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+    return { kind: 'exit_nonzero', detail: `${executor} was interrupted by ${supervisorStatus.signal} on ${stepId}${role ? ` (${role})` : ''}` };
+  }
+  if (supervisorStatus.exitCode != null && supervisorStatus.exitCode !== 0) {
+    const stderrTail = (stderr ?? '').slice(-STDERR_TAIL);
+    appendEvent(ctx.runDir, { type: 'actor_failed', ...base, ...evidenceTiming, reason: 'exit_nonzero', exit_code: supervisorStatus.exitCode, stderr_tail: stderrTail }, ctx.now);
+    try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
+    try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
+    try { rmSync(statusAbs, { force: true }); } catch {}
+    try { rmSync(claimAbs, { force: true }); } catch {}
+    if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+    return { kind: 'exit_nonzero', detail: `${executor} exited ${supervisorStatus.exitCode ?? '(signal)'} on ${stepId}${role ? ` (${role})` : ''}` };
   }
 
-  const stdout = spawned.stdout ?? '';
   const verdict = validateTyped(ctx, artifactType, stdout);
 
   if (!verdict.ok) {
-    // Rejected output stays out of the planned path (the step must not look
-    // done), but the bytes are evidence: park them under artifacts/attempts/.
     const ext = extname(outputRel) || '.out';
     const attemptRel = `artifacts/attempts/${ids.actorCallId}-a${attempt}${ext}`;
     const abs = join(ctx.runDir, attemptRel);
     mkdirSync(dirname(abs), { recursive: true });
     writeFileSync(abs, stdout, 'utf8');
-    appendEvent(
-      ctx.runDir,
-      {
-        type: 'actor_completed',
-        ...base,
-        exit_code: 0,
-        output: attemptRel,
-        output_bytes: Buffer.byteLength(stdout),
-        output_sha256: sha256Hex(stdout),
-        output_valid: false,
-        validation_errors: verdict.errors.slice(0, 5),
-      },
-      ctx.now,
-    );
+    appendEvent(ctx.runDir, { type: 'actor_completed', ...base, ...evidenceTiming, exit_code: 0, output: attemptRel, output_bytes: Buffer.byteLength(stdout), output_sha256: sha256Hex(stdout), output_valid: false, validation_errors: verdict.errors.slice(0, 5) }, ctx.now);
     ctx.act(`  output failed ${artifactType} validation (attempt ${attempt})`);
-    return {
-      kind: 'invalid_output',
-      detail: `${stepId}${role ? ` (${role})` : ''}: output failed ${artifactType} validation`,
-      errors: verdict.errors,
-    };
+    try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
+    try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
+    try { rmSync(statusAbs, { force: true }); } catch {}
+    try { rmSync(claimAbs, { force: true }); } catch {}
+    if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+    return { kind: 'invalid_output', detail: `${stepId}${role ? ` (${role})` : ''}: output failed ${artifactType} validation`, errors: verdict.errors };
+  }
+
+  const extraction = verdict.ok ? verdict.extraction : undefined;
+  if (extraction) {
+    const ext = extname(outputRel) || '.out';
+    const rawRel = `artifacts/attempts/${ids.actorCallId}-a${attempt}.raw${ext}`;
+    const rawAbs = join(ctx.runDir, rawRel);
+    mkdirSync(dirname(rawAbs), { recursive: true });
+    writeFileSync(rawAbs, stdout, 'utf8');
+    const payload = extraction.payload;
+    const abs = join(ctx.runDir, outputRel);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, payload, 'utf8');
+    const artifactFields = [`step_execution_id=${ids.stepExecutionId}`, `actor_call_id=${ids.actorCallId}`, `attempt=${attempt}`];
+    if (pending.session != null) artifactFields.push(`session=${pending.session}`);
+    if (sessionId != null) artifactFields.push(`session_id=${sessionId}`);
+    try {
+      runRun({ run: ctx.runId, event: 'artifact_created', artifact: outputRel, member: role ?? undefined, fields: artifactFields, repoRoot: ctx.repoRoot, now: ctx.now });
+    } catch (err) {
+      if (err instanceof RunError) throw new DriveError(err.message);
+      throw err;
+    }
+    appendEvent(ctx.runDir, { type: 'actor_completed', ...base, ...evidenceTiming, exit_code: 0, output: outputRel, output_valid: true, output_extraction: extraction.kind, envelope_candidates: extraction.candidates, raw_output: rawRel, raw_output_bytes: Buffer.byteLength(stdout), raw_output_sha256: sha256Hex(stdout) }, ctx.now);
+    ctx.act(`  output normalized (${extraction.kind} envelope) → wrote ${outputRel}`);
+    try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
+    try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
+    try { rmSync(statusAbs, { force: true }); } catch {}
+    try { rmSync(claimAbs, { force: true }); } catch {}
+    if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+    return { kind: 'valid' };
   }
 
   const abs = join(ctx.runDir, outputRel);
   mkdirSync(dirname(abs), { recursive: true });
   writeFileSync(abs, stdout, 'utf8');
-  const artifactFields = [
-    `step_execution_id=${ids.stepExecutionId}`,
-    `actor_call_id=${ids.actorCallId}`,
-    `attempt=${attempt}`,
-  ];
-  // Mark artifacts born from session context: the id is auditable, the prior
-  // session contents are attested rather than recomputable.
-  if (session != null) artifactFields.push(`session=${session}`);
+  const artifactFields = [`step_execution_id=${ids.stepExecutionId}`, `actor_call_id=${ids.actorCallId}`, `attempt=${attempt}`];
+  if (pending.session != null) artifactFields.push(`session=${pending.session}`);
   if (sessionId != null) artifactFields.push(`session_id=${sessionId}`);
   try {
-    runRun({
-      run: ctx.runId,
-      event: 'artifact_created',
-      artifact: outputRel,
-      member: role ?? undefined,
-      fields: artifactFields,
-      repoRoot: ctx.repoRoot,
-      now: ctx.now,
-    });
+    runRun({ run: ctx.runId, event: 'artifact_created', artifact: outputRel, member: role ?? undefined, fields: artifactFields, repoRoot: ctx.repoRoot, now: ctx.now });
   } catch (err) {
     if (err instanceof RunError) throw new DriveError(err.message);
     throw err;
   }
-  appendEvent(
-    ctx.runDir,
-    { type: 'actor_completed', ...base, exit_code: 0, output: outputRel, output_valid: true },
-    ctx.now,
-  );
+  appendEvent(ctx.runDir, { type: 'actor_completed', ...base, ...evidenceTiming, exit_code: 0, output: outputRel, output_valid: true }, ctx.now);
   ctx.act(`  wrote ${outputRel}`);
+  try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
+  try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
+  try { rmSync(statusAbs, { force: true }); } catch {}
+  try { rmSync(claimAbs, { force: true }); } catch {}
+  if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
   return { kind: 'valid' };
 }
+
+function dispatchOnce(
+  ctx: EngineCtx,
+  stepId: string,
+  role: string | null,
+  generation: number,
+  inBody: boolean,
+  outputRel: string,
+  artifactType: string | null,
+  ids: { stepExecutionId: string; actorCallId: string },
+  attempt: number,
+  reason: string,
+  repairErrors: string[] | null,
+  stamps: { providerWarned?: boolean; shadowOnly?: boolean } = {},
+): DispatchOutcome {
+  const pending = beginCommandAttempt(ctx, stepId, role, generation, inBody, outputRel, artifactType, ids, attempt, reason, repairErrors, stamps);
+  return collectCommandAttempt(ctx, pending);
+}
+
+interface WaveMember {
+  role: string | null;
+  outputRel: string;
+  artifactType: string | null;
+  ids: { stepExecutionId: string; actorCallId: string };
+  reason: string;
+  repairErrors: string[] | null;
+  stamps: { providerWarned?: boolean; shadowOnly?: boolean };
+  // Per-member identity; stepId/generation/inBody are authoritative here, the
+  // wave parameters are the common case for classic maps and are kept for
+  // compatibility. Prefer head.stepId etc when they differ.
+  generation: number;
+  inBody: boolean;
+  stepId: string;
+}
+
+/**
+ * Shared preflight evaluation for a command member. Returns stamps on success
+ * or a terminal refusal that both wave and serial paths record identically.
+ * Binding is resolved by the caller (so lease admission can inspect writeAccess first).
+ */
+function evaluateMemberPreflight(
+  ctx: EngineCtx,
+  stepId: string,
+  role: string | null,
+  binding: ReturnType<typeof effectiveBinding>,
+): { ok: true; providerWarned: boolean; shadowOnly: boolean } | { ok: false; outcome: DispatchOutcome; reason: string; error: string; archetype: string | null; executor: string } {
+  const archetype = role == null ? null : roleArchetype(ctx.playbook, role);
+  const writeConflict = explainWriteConflict({ executor: binding.executor, spec: binding.spec }, archetype, ctx.profile as unknown as import('../lib/executors.ts').ExecutorProfile);
+  if (writeConflict != null && !binding.writePostureForced) {
+    return { ok: false, outcome: { kind: 'write_conflict', detail: `${stepId}${role ? ` (${role})` : ''} was not dispatched: ${writeConflict}` }, reason: 'write_access_denied', error: writeConflict, archetype, executor: binding.executor };
+  }
+  if (writeConflict != null && binding.writePostureForced) {
+    ctx.act(`WARNING: FORCED WRITE-POSTURE MISMATCH — ${stepId}${role ? ` (${role})` : ''} is proceeding because its dial was set with --force. ${writeConflict}`);
+  }
+  const delivery = { executor: binding.executor, spec: binding.spec };
+  const eligibilityConflict = explainEligibilityConflict(delivery, archetype);
+  if (eligibilityConflict != null) {
+    return { ok: false, outcome: { kind: 'eligibility_forbidden', detail: `${stepId}${role ? ` (${role})` : ''} was not dispatched: ${eligibilityConflict}` }, reason: 'eligibility_forbidden', error: eligibilityConflict, archetype, executor: binding.executor };
+  }
+  const producers = inputProducersFromRun(ctx.playbook, stepId, freshEvents(ctx.runDir), ctx.profile);
+  const providerConflict = explainProviderConflict(archetype, binding.spec.provider ?? null, producers, ctx.profile as unknown as import('../lib/executors.ts').ExecutorProfile);
+  if (providerConflict != null && providerConflict.level === 'refuse') {
+    return { ok: false, outcome: { kind: 'provider_conflict', detail: `${stepId}${role ? ` (${role})` : ''} was not dispatched: ${providerConflict.message}` }, reason: 'provider_conflict', error: providerConflict.message, archetype, executor: binding.executor };
+  }
+  const providerWarned = providerConflict != null && providerConflict.level === 'warn';
+  if (providerWarned) ctx.act(`dispatch warning ${stepId}${role ? ` (${role})` : ''}: ${providerConflict.message}`);
+
+  const chainInfo = (() => { try { return resolveChain(ctx, role); } catch { return null; } })();
+  const dialRef = ctx.overrides.get(role ?? '*') != null ? parseDialRef(ctx.overrides.get(role ?? '*')!, 'bind') : chainInfo?.ref ?? null;
+  const dialSource = ctx.overrides.get(role ?? '*') != null ? 'binding' : chainInfo?.source ?? null;
+  const toRefStr = (m: Record<string, import('../lib/executors.ts').DialRef>) => { const o: Record<string, string> = {}; for (const [k, v] of Object.entries(m)) o[k] = formatDialRef(v); return o; };
+  const modelId = (binding.spec as any).model ?? null;
+  const constraintContext: ConstraintContext = {
+    archetype, role, executor: binding.executor, driver: (binding.spec as any).driver ?? null, provider: (binding.spec as any).provider ?? null, model: (binding.spec as any).model ?? null, model_id: modelId, transport: 'command', write_access: binding.spec.writeAccess, write_variant: binding.usedWriteVariant, write_posture: declaredWritePosture(ctx.profile, archetype), dial: dialRef, dial_source: dialSource, dials: { session: toRefStr(ctx.dialLayers.session), repo: toRefStr(ctx.dialLayers.repo), user: toRefStr(ctx.dialLayers.user) }, resolved_via: chainInfo?.resolvedVia ?? null, input_provenance: producers.map((producer) => ({ dispatch_id: producer.dispatchId, executor: producer.executor, provider: producer.provider })), harness: ctx.harness,
+  };
+  let constraintVerdict;
+  try { constraintVerdict = evaluateConstraint(ctx.profile, constraintContext, { cwd: ctx.repoRoot }); } catch (err) { if (err instanceof ConstraintError) throw new DriveError(`constraint system error: ${(err as Error).message}`); throw err; }
+  if (constraintVerdict.verdict === 'refused') {
+    return { ok: false, outcome: { kind: 'constraint_refused', detail: `${stepId}${role ? ` (${role})` : ''} was not dispatched: ${constraintVerdict.reason}` }, reason: 'constraint_refused', error: constraintVerdict.reason, archetype, executor: binding.executor };
+  }
+  const shadowOnly = eligibilityFor(binding.spec, archetype) === 'shadow_only';
+  return { ok: true, providerWarned, shadowOnly };
+}
+
+/**
+ * Bounded wave scheduler for command-delivered actor calls.
+ * - Admission in canonical member order, up to --parallel.
+ * - At most one live shared writer; read-only lanes bypass the lease.
+ * - Collection head-of-line in canonical order, independent of wall-clock.
+ * - One bounded schema-repair requeue per actor call per invocation.
+ * - No sibling cancellation.
+ */
+function runCommandWave(
+  ctx: EngineCtx,
+  stepId: string,
+  generation: number,
+  inBody: boolean,
+  members: WaveMember[],
+  parallel: number,
+): { failure: DispatchOutcome | null; repairQueued: WaveMember[] } {
+  const queue: WaveMember[] = [...members];
+  const inflight: PendingAttempt[] = [];
+  let failure: DispatchOutcome | null = null;
+  const repairQueued: WaveMember[] = [];
+  let stopAdmitting = false;
+  // Ensure inflight siblings are receipted even if admission throws (foreign lease, spawn failure, etc.).
+  try {
+    while (queue.length > 0 || inflight.length > 0) {
+      while (!stopAdmitting && inflight.length < parallel && queue.length > 0) {
+        const head = queue[0]!;
+        // A prior preflight refusal stops further admission; inflight siblings run to receipt.
+        // Binding failures propagate as DriveError to preserve the true resolution error (matching serial path).
+        const binding = effectiveBinding(ctx, head.role);
+        const needsLease = binding.spec.writeAccess !== false;
+        if (needsLease && inflight.some((p) => p.leaseHolder != null)) {
+          break;
+        }
+        if (needsLease) {
+          const effectiveLease = (() => { try { return readEffectiveLease(ctx.repoRoot); } catch { return null; } })();
+          // Any live lease here is by construction foreign: the wave enforces at-most-one live writer via the inflight check above.
+          if (effectiveLease != null && isWorkspaceLeaseAlive(effectiveLease)) {
+            throw new DriveError(
+              `shared workspace is already held by ${effectiveLease.holder.kind} "${effectiveLease.holder.id}"` +
+                ` (supervisor_pid ${effectiveLease.supervisor_pid ?? 'unknown'}, started ${effectiveLease.started_at}); ` +
+                `holder "${ctx.runId}" must wait or retry. Inspect it with \`fadeno show ${effectiveLease.holder.runId ?? '<run>'}\`; ` +
+                'recover an abandoned host dispatch with dispatch-fail/dispatch-complete. Only after verifying no writer remains, ' +
+                `remove ${WORKSPACE_LEASE_FILE} as a last resort.`,
+            );
+          }
+        }
+        const preflight = evaluateMemberPreflight(ctx, stepId, head.role, binding);
+        if (!preflight.ok) {
+          const prior = priorAttempts(freshEvents(ctx.runDir), head.ids.actorCallId);
+          appendEvent(ctx.runDir, { type: 'actor_failed', step: stepId, actor: head.role, step_execution_id: head.ids.stepExecutionId, actor_call_id: head.ids.actorCallId, attempt: prior.count + 1, executor: preflight.executor, archetype: preflight.archetype, ...(preflight.reason === 'write_access_denied' ? { write_access: false } : {}), reason: preflight.reason, error: preflight.error }, ctx.now);
+          ctx.act(`dispatch refused ${stepId}${head.role ? ` (${head.role})` : ''}: ${preflight.error}`);
+          if (failure == null) failure = preflight.outcome;
+          queue.shift();
+          stopAdmitting = true;
+          break;
+        }
+        const { providerWarned, shadowOnly } = preflight;
+        // Compute attempt ordinal: freshEvents after prior dispatches.
+        const priorAttemptsInfo = priorAttempts(freshEvents(ctx.runDir), head.ids.actorCallId);
+        const attempt = priorAttemptsInfo.count + 1;
+        let reason = 'initial';
+        if (head.repairErrors != null) reason = 'schema_repair';
+        else if (priorAttemptsInfo.count > 0) {
+          const { executor } = effectiveBinding(ctx, head.role);
+          reason = executor !== priorAttemptsInfo.lastExecutor ? 'executor_override' : 'user_retry';
+        }
+        const pending = beginCommandAttempt(ctx, stepId, head.role, generation, inBody, head.outputRel, head.artifactType, head.ids, attempt, reason, head.repairErrors, { providerWarned, shadowOnly });
+        queue.shift();
+        inflight.push(pending);
+      }
+      if (inflight.length > 0) {
+        const headPending = inflight[0]!;
+        const outcome = collectCommandAttempt(ctx, headPending);
+        inflight.shift();
+        if (outcome.kind === 'invalid_output' && !ctx.repaired.has(headPending.ids.actorCallId)) {
+          ctx.repaired.add(headPending.ids.actorCallId);
+          // Requeue for repair wave: keep same member but with repairErrors
+          repairQueued.push({
+            role: headPending.role,
+            outputRel: headPending.outputRel,
+            artifactType: headPending.artifactType,
+            ids: headPending.ids,
+            reason: 'schema_repair',
+            repairErrors: outcome.errors,
+            stamps: headPending.stamps,
+            generation: headPending.generation,
+            inBody: headPending.inBody,
+            stepId: headPending.stepId,
+          });
+        } else if (outcome.kind !== 'valid') {
+          if (failure == null) failure = outcome;
+        }
+        // On valid, continue to next collection; no sibling cancellation.
+      } else if (queue.length === 0) {
+        break;
+      } else {
+        if (stopAdmitting) break;
+        sleepSync(POLL_MS);
+      }
+    }
+  } catch (err) {
+    // Admission threw (foreign lease, spawn failure, binding failure). Drain inflight siblings so their work is not lost.
+    while (inflight.length > 0) {
+      try {
+        const hp = inflight[0]!;
+        const out = collectCommandAttempt(ctx, hp);
+        inflight.shift();
+        if (out.kind === 'invalid_output' && !ctx.repaired.has(hp.ids.actorCallId)) {
+          ctx.repaired.add(hp.ids.actorCallId);
+          repairQueued.push({
+            role: hp.role,
+            outputRel: hp.outputRel,
+            artifactType: hp.artifactType,
+            ids: hp.ids,
+            reason: 'schema_repair',
+            repairErrors: out.errors,
+            stamps: hp.stamps,
+            generation: hp.generation,
+            inBody: hp.inBody,
+            stepId: hp.stepId,
+          });
+        } else if (out.kind !== 'valid' && failure == null) {
+          failure = out;
+        }
+      } catch {
+        // Best effort drain; individual collection failures are already recorded as actor_failed.
+        try { inflight.shift(); } catch {}
+      }
+    }
+    throw err;
+  }
+  return { failure, repairQueued };
+}
+
 
 function pendingHostRequest(events: RunEvent[], actorCallId: string, runId: string): HostDispatchRequest | null {
   const requested = events.filter(
@@ -1135,299 +2000,319 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
   }
 
   const stepExecutionId = `se-${stepId}-g${generation}`;
+
+  // Parallel <=1 preserves the original per-member inline ordering: dispatch rows
+  // appear in canonical actor order and a preflight refusal stops later members
+  // from ever dispatching. This keeps --parallel 1 bit-identical to the serial
+  // engine except for output arriving via snapshot files and timing evidence.
+  if (ctx.parallel <= 1) {
+    const hostRequests: HostDispatchRequest[] = [];
+    const hostNotes: string[] = [];
+    let serialFailure: DispatchOutcome | null = null;
+    for (let i = 0; i < actors.length; i += 1) {
+      if (serialFailure != null) break;
+      const role = actors[i];
+      const outputRel = outputs[i]!;
+      events = freshEvents(ctx.runDir);
+      if (artifactRecorded(events, outputRel)) continue;
+      const actorCallId = role ? `ac-${stepId}-g${generation}-${role}` : `ac-${stepId}-g${generation}`;
+      const ids = { stepExecutionId, actorCallId };
+      events = freshEvents(ctx.runDir);
+      const pendingDispatch = pendingHostRequest(events, actorCallId, ctx.runId);
+      if (pendingDispatch != null) {
+        const note = pendingResolutionNote(ctx, stepId, role, pendingDispatch);
+        if (note != null) { hostNotes.push(note); ctx.act(note); }
+        hostRequests.push(pendingDispatch);
+        continue;
+      }
+      const binding = effectiveBinding(ctx, role);
+      if (binding.spec.adapter === 'host') {
+        const priorHostAttempts = hostRequestAttempts(events, actorCallId);
+        const attempt = priorHostAttempts + 1;
+        const priorHostRequest = events.filter((e) => e.type === 'host_dispatch_requested' && e.extra.actor_call_id === actorCallId).at(-1);
+        const priorHostTerminal = priorHostRequest == null ? null : events.findLast((e) => (e.type === 'actor_completed' || e.type === 'actor_failed') && e.extra.dispatch_id === priorHostRequest.extra.dispatch_id);
+        const reason = priorHostAttempts === 0 ? 'initial' : priorHostTerminal?.type === 'actor_completed' && priorHostTerminal.extra.output_valid === false ? 'schema_repair' : binding.executor !== priorHostRequest?.extra.executor ? 'executor_override' : 'user_retry';
+        const repairErrors = reason === 'schema_repair' && priorHostTerminal != null && Array.isArray(priorHostTerminal.extra.validation_errors) ? priorHostTerminal.extra.validation_errors.filter((e): e is string => typeof e === 'string') : null;
+        const promptRes = (() => {
+          try {
+            return runPrompt({ run: ctx.runId, step: stepId, actor: role ?? undefined, iteration: step.loop.in_body ? generation : undefined, record: true, repoRoot: ctx.repoRoot, now: ctx.now });
+          } catch (err) { if (err instanceof PromptError) throw new DriveError(err.message); throw err; }
+        })();
+        hostRequests.push(hostRequestFor(ctx, stepId, role, outputRel, step.artifact_type, ids, attempt, reason, promptRes.promptPath, promptRes.sha256, repairErrors));
+        continue;
+      }
+      // Command member: preflight via shared helper before any spawn.
+      const preflight = evaluateMemberPreflight(ctx, stepId, role, binding);
+      if (!preflight.ok) {
+        events = freshEvents(ctx.runDir);
+        appendEvent(ctx.runDir, { type: 'actor_failed', step: stepId, actor: role, step_execution_id: ids.stepExecutionId, actor_call_id: ids.actorCallId, attempt: priorAttempts(events, ids.actorCallId).count + 1, executor: preflight.executor, archetype: preflight.archetype, ...(preflight.reason === 'write_access_denied' ? { write_access: false } : {}), reason: preflight.reason, error: preflight.error }, ctx.now);
+        ctx.act(`dispatch refused ${stepId}${role ? ` (${role})` : ''}: ${preflight.error}`);
+        serialFailure = { kind: preflight.outcome.kind as DispatchFailure['kind'], detail: (preflight.outcome as { detail: string }).detail } as DispatchOutcome;
+        break;
+      }
+      let repairErrors: string[] | null = null;
+      for (;;) {
+        events = freshEvents(ctx.runDir);
+        const prior = priorAttempts(events, ids.actorCallId);
+        const attempt = prior.count + 1;
+        let reason: string = 'initial';
+        if (repairErrors != null) reason = 'schema_repair';
+        else if (prior.count > 0) {
+          const { executor } = effectiveBinding(ctx, role);
+          reason = executor !== prior.lastExecutor ? 'executor_override' : 'user_retry';
+        }
+        const outcome = dispatchOnce(ctx, stepId, role, generation, step.loop.in_body, outputRel, step.artifact_type, ids, attempt, reason, repairErrors, { providerWarned: preflight.providerWarned, shadowOnly: preflight.shadowOnly });
+        if (outcome.kind === 'valid') break;
+        if (outcome.kind === 'invalid_output' && !ctx.repaired.has(ids.actorCallId)) {
+          ctx.repaired.add(ids.actorCallId);
+          repairErrors = outcome.errors;
+          continue;
+        }
+        serialFailure = outcome;
+        break;
+      }
+    }
+    if (hostRequests.length > 0 && serialFailure != null) {
+      const failureDetail = (serialFailure as { detail: string }).detail;
+      hostNotes.push(`command member failed: ${failureDetail} — host dispatch still required`);
+      return { kind: 'awaiting_host_dispatch', requests: hostRequests, notes: hostNotes };
+    }
+    if (serialFailure != null) return serialFailure as PromptableOutcome;
+    if (hostRequests.length > 0) {
+      return { kind: 'awaiting_host_dispatch', requests: hostRequests, notes: hostNotes };
+    }
+    // Collective assembly for serial path
+    if (step.collective != null) {
+      events = freshEvents(ctx.runDir);
+      if (!artifactRecorded(events, step.collective)) {
+        const parts = actors.map((role, i) => {
+          const rel = outputs[i]!;
+          const abs = join(ctx.runDir, rel);
+          try { return JSON.parse(readFileSync(abs, 'utf8')) as unknown; } catch (err) { throw new DriveError(`cannot assemble ${step.collective}: member output ${rel}${role ? ` (${role})` : ''} is not valid JSON: ${(err as Error).message}`); }
+        });
+        const abs = join(ctx.runDir, step.collective);
+        mkdirSync(dirname(abs), { recursive: true });
+        writeFileSync(abs, `${JSON.stringify(parts, null, 2)}\n`, 'utf8');
+        try { runRun({ run: ctx.runId, event: 'artifact_created', artifact: step.collective, fields: [`step_execution_id=${stepExecutionId}`], repoRoot: ctx.repoRoot, now: ctx.now }); } catch (err) { if (err instanceof RunError) throw new DriveError(err.message); throw err; }
+        ctx.act(`assembled collective ${step.collective}`);
+      }
+    }
+    return null;
+  }
+
+  // Parallel path (parallel >1): admit members in canonical order, executing
+  // read-only command members concurrently up to --parallel, serializing shared
+  // writers, and interleaving durable host requests in the same canonical order.
+  // A preflight refusal stops further admission; inflight command siblings run
+  // to receipt. Host requests that appear after a refused command are never
+  // created, preserving the serial durability invariant.
+  type PendingQueueEntry = { role: string | null; outputRel: string; ids: { stepExecutionId: string; actorCallId: string }; kind: 'host_pending'; pending: HostDispatchRequest } | { role: string | null; outputRel: string; ids: { stepExecutionId: string; actorCallId: string }; kind: 'host'; } | { role: string | null; outputRel: string; artifactType: string | null; ids: { stepExecutionId: string; actorCallId: string }; kind: 'command'; };
+  const queue: PendingQueueEntry[] = [];
   const hostRequests: HostDispatchRequest[] = [];
   const hostNotes: string[] = [];
-
   for (let i = 0; i < actors.length; i += 1) {
     const role = actors[i];
     const outputRel = outputs[i]!;
     events = freshEvents(ctx.runDir);
-    if (artifactRecorded(events, outputRel)) continue; // resume: already produced
-
+    if (artifactRecorded(events, outputRel)) continue;
     const actorCallId = role ? `ac-${stepId}-g${generation}-${role}` : `ac-${stepId}-g${generation}`;
     const ids = { stepExecutionId, actorCallId };
-
     events = freshEvents(ctx.runDir);
-    // An in-flight (requested, unresolved) host dispatch is attested pending
-    // work: it stays binding regardless of what the current loadout/profile
-    // resolution now says. Checked before resolution so a loadout switch can
-    // never silently abandon the request and execute the step another way.
     const pendingDispatch = pendingHostRequest(events, actorCallId, ctx.runId);
     if (pendingDispatch != null) {
-      const note = pendingResolutionNote(ctx, stepId, role, pendingDispatch);
-      if (note != null) {
-        hostNotes.push(note);
-        ctx.act(note);
-      }
-      hostRequests.push(pendingDispatch);
+      queue.push({ role, outputRel, ids, kind: 'host_pending', pending: pendingDispatch });
       continue;
     }
+    // Binding determines host vs command; let DriveError propagate to preserve true error.
     const binding = effectiveBinding(ctx, role);
     if (binding.spec.adapter === 'host') {
-      const priorHostAttempts = hostRequestAttempts(events, actorCallId);
-      const attempt = priorHostAttempts + 1;
-      const priorHostRequest = events
-        .filter((event) => event.type === 'host_dispatch_requested' && event.extra.actor_call_id === actorCallId)
-        .at(-1);
-      const priorHostTerminal = priorHostRequest == null
-        ? null
-        : events.findLast(
-            (event) =>
-              (event.type === 'actor_completed' || event.type === 'actor_failed') &&
-              event.extra.dispatch_id === priorHostRequest.extra.dispatch_id,
-          );
-      const reason = priorHostAttempts === 0
-        ? 'initial'
-        : priorHostTerminal?.type === 'actor_completed' && priorHostTerminal.extra.output_valid === false
-          ? 'schema_repair'
-          : binding.executor !== priorHostRequest?.extra.executor
-            ? 'executor_override'
-            : 'user_retry';
-      const repairErrors = reason === 'schema_repair' && priorHostTerminal != null && Array.isArray(priorHostTerminal.extra.validation_errors)
-        ? priorHostTerminal.extra.validation_errors.filter((error): error is string => typeof error === 'string')
-        : null;
-      const promptRes = (() => {
-        try {
-          return runPrompt({
-            run: ctx.runId,
-            step: stepId,
-            actor: role ?? undefined,
-            iteration: step.loop.in_body ? generation : undefined,
-            record: true,
-            repoRoot: ctx.repoRoot,
-            now: ctx.now,
-          });
-        } catch (err) {
-          if (err instanceof PromptError) throw new DriveError(err.message);
-          throw err;
+      queue.push({ role, outputRel, ids, kind: 'host' });
+    } else {
+      queue.push({ role, outputRel, artifactType: step.artifact_type, ids, kind: 'command' });
+    }
+  }
+
+  // Fast path when there are no hosts: reuse bounded wave primitive (already handles concurrency, lease, repair).
+  const hasHosts = queue.some((e) => e.kind !== 'command');
+  if (!hasHosts) {
+    const commandMembersInOrder: WaveMember[] = queue.filter((e) => e.kind === 'command').map((e) => {
+      const ce = e as Extract<PendingQueueEntry, { kind: 'command' }>;
+      return { role: ce.role, outputRel: ce.outputRel, artifactType: ce.artifactType, ids: ce.ids, reason: 'initial', repairErrors: null, stamps: {}, generation, inBody: step.loop.in_body, stepId };
+    });
+    if (commandMembersInOrder.length > 0) {
+      const waveResult = runCommandWave(ctx, stepId, generation, step.loop.in_body, commandMembersInOrder, ctx.parallel);
+      if (waveResult.repairQueued.length > 0) {
+        const repairWave = runCommandWave(ctx, stepId, generation, step.loop.in_body, waveResult.repairQueued, ctx.parallel);
+        waveResult.failure = waveResult.failure ?? repairWave.failure;
+        if (repairWave.repairQueued.length > 0 && waveResult.failure == null) {
+          waveResult.failure = { kind: 'invalid_output', detail: `${stepId}: output failed ${step.artifact_type} validation after the bounded repair`, errors: [] } as unknown as DispatchOutcome;
         }
-      })();
-      hostRequests.push(hostRequestFor(
-        ctx,
-        stepId,
-        role,
-        outputRel,
-        step.artifact_type,
-        ids,
-        attempt,
-        reason,
-        promptRes.promptPath,
-        promptRes.sha256,
-        repairErrors,
-      ));
-      continue;
-    }
-
-    // The delivery is a command, so the role's archetype needs a command that
-    // can do its work. Refused here — before the prompt is assembled and long
-    // before the spawn — in the same words `fadeno dispatch` refuses, so a
-    // playbook run cannot hand worker-shaped work to a read-only executor.
-    // Host dispatch requests are exempt above: in-session permissions belong
-    // to the host, not to this policy.
-    const archetype = role == null ? null : roleArchetype(ctx.playbook, role);
-    const writeConflict = explainWriteConflict(
-      { executor: binding.executor, spec: binding.spec },
-      archetype,
-      ctx.profile as unknown as ExecutorProfile,
-    );
-    if (writeConflict != null) {
-      appendEvent(
-        ctx.runDir,
-        {
-          type: 'actor_failed',
-          step: stepId,
-          actor: role,
-          step_execution_id: stepExecutionId,
-          actor_call_id: actorCallId,
-          attempt: priorAttempts(events, actorCallId).count + 1,
-          executor: binding.executor,
-          archetype,
-          write_access: false,
-          reason: 'write_access_denied',
-          error: writeConflict,
-        },
-        ctx.now,
-      );
-      ctx.act(`dispatch refused ${stepId}${role ? ` (${role})` : ''}: ${writeConflict}`);
-      return {
-        kind: 'write_conflict',
-        detail: `${stepId}${role ? ` (${role})` : ''} was not dispatched: ${writeConflict}`,
-      };
-    }
-
-    // Same chokepoint, same refusal shape: forbidden eligibility, then
-    // provider distinctness, then the tier-2 constraint command. shadow_only
-    // is not a refusal — it stamps the dispatch. Host adapters stay exempt
-    // above, matching write-posture.
-    const delivery = { executor: binding.executor, spec: binding.spec };
-    const eligibilityConflict = explainEligibilityConflict(delivery, archetype);
-    if (eligibilityConflict != null) {
-      appendEvent(
-        ctx.runDir,
-        {
-          type: 'actor_failed',
-          step: stepId,
-          actor: role,
-          step_execution_id: stepExecutionId,
-          actor_call_id: actorCallId,
-          attempt: priorAttempts(events, actorCallId).count + 1,
-          executor: binding.executor,
-          archetype,
-          reason: 'eligibility_forbidden',
-          error: eligibilityConflict,
-        },
-        ctx.now,
-      );
-      ctx.act(`dispatch refused ${stepId}${role ? ` (${role})` : ''}: ${eligibilityConflict}`);
-      return {
-        kind: 'eligibility_forbidden',
-        detail: `${stepId}${role ? ` (${role})` : ''} was not dispatched: ${eligibilityConflict}`,
-      };
-    }
-
-    const producers = inputProducersFromRun(ctx.playbook, stepId, events, ctx.profile);
-    const providerConflict = explainProviderConflict(
-      archetype,
-      binding.spec.provider ?? null,
-      producers,
-      ctx.profile as unknown as ExecutorProfile,
-    );
-    if (providerConflict != null && providerConflict.level === 'refuse') {
-      appendEvent(
-        ctx.runDir,
-        {
-          type: 'actor_failed',
-          step: stepId,
-          actor: role,
-          step_execution_id: stepExecutionId,
-          actor_call_id: actorCallId,
-          attempt: priorAttempts(events, actorCallId).count + 1,
-          executor: binding.executor,
-          archetype,
-          reason: 'provider_conflict',
-          error: providerConflict.message,
-        },
-        ctx.now,
-      );
-      ctx.act(`dispatch refused ${stepId}${role ? ` (${role})` : ''}: ${providerConflict.message}`);
-      return {
-        kind: 'provider_conflict',
-        detail: `${stepId}${role ? ` (${role})` : ''} was not dispatched: ${providerConflict.message}`,
-      };
-    }
-    const providerWarned = providerConflict != null && providerConflict.level === 'warn';
-    if (providerWarned) {
-      ctx.act(`dispatch warning ${stepId}${role ? ` (${role})` : ''}: ${providerConflict.message}`);
-    }
-
-    const chainInfo = (() => {
-      try { return resolveChain(ctx, role); } catch { return null; }
-    })();
-    const dialRef = ctx.overrides.get(role ?? '*') != null ? parseDialRef(ctx.overrides.get(role ?? '*')!, 'bind') : chainInfo?.ref ?? null;
-    const dialSource = ctx.overrides.get(role ?? '*') != null ? 'binding' : chainInfo?.source ?? null;
-    const toRefStr = (m: Record<string, DialRef>) => {
-      const o: Record<string, string> = {};
-      for (const [k,v] of Object.entries(m)) o[k]=formatDialRef(v);
-      return o;
-    };
-    const modelId = (binding.spec as any).model ?? null;
-    const constraintContext: ConstraintContext = {
-      archetype,
-      role,
-      executor: binding.executor,
-      driver: (binding.spec as any).driver ?? null,
-      provider: (binding.spec as any).provider ?? null,
-      model: (binding.spec as any).model ?? null,
-      model_id: modelId,
-      transport: 'command',
-      write_access: binding.spec.writeAccess,
-      write_posture: declaredWritePosture(ctx.profile, archetype),
-      dial: dialRef,
-      dial_source: dialSource,
-      dials: {
-        session: toRefStr(ctx.dialLayers.session),
-        repo: toRefStr(ctx.dialLayers.repo),
-        user: toRefStr(ctx.dialLayers.user),
-      },
-      resolved_via: chainInfo?.resolvedVia ?? null,
-      input_provenance: producers.map((producer) => ({
-        dispatch_id: producer.dispatchId,
-        executor: producer.executor,
-        provider: producer.provider,
-      })),
-      harness: ctx.harness,
-    };
-    let constraintVerdict;
-    try {
-      constraintVerdict = evaluateConstraint(ctx.profile, constraintContext, { cwd: ctx.repoRoot });
-    } catch (err) {
-      if (err instanceof ConstraintError) {
-        throw new DriveError(`constraint system error: ${err.message}`);
       }
-      throw err;
+      if (waveResult.failure != null) {
+        const f = waveResult.failure;
+        if (f.kind === 'write_conflict' || f.kind === 'eligibility_forbidden' || f.kind === 'provider_conflict' || f.kind === 'constraint_refused') {
+          return { kind: f.kind, detail: (f as { detail: string }).detail } as PromptableOutcome;
+        }
+        if (f.kind === 'invalid_output') return { kind: 'invalid_output', detail: (f as { detail: string }).detail, errors: (f as { detail: string; errors: string[] }).errors } as unknown as PromptableOutcome;
+        if (f.kind === 'valid') return null;
+        return { kind: 'exit_nonzero', detail: (f as { detail: string }).detail } as unknown as PromptableOutcome;
+      }
     }
-    if (constraintVerdict.verdict === 'refused') {
-      appendEvent(
-        ctx.runDir,
-        {
-          type: 'actor_failed',
-          step: stepId,
-          actor: role,
-          step_execution_id: stepExecutionId,
-          actor_call_id: actorCallId,
-          attempt: priorAttempts(events, actorCallId).count + 1,
-          executor: binding.executor,
-          archetype,
-          reason: 'constraint_refused',
-          error: constraintVerdict.reason,
-        },
-        ctx.now,
-      );
-      ctx.act(`dispatch refused ${stepId}${role ? ` (${role})` : ''}: ${constraintVerdict.reason}`);
-      return {
-        kind: 'constraint_refused',
-        detail: `${stepId}${role ? ` (${role})` : ''} was not dispatched: ${constraintVerdict.reason}`,
-      };
-    }
-
-    const shadowOnly = eligibilityFor(binding.spec, archetype) === 'shadow_only';
-
-    let repairErrors: string[] | null = null;
-    for (;;) {
+    if (step.collective != null) {
       events = freshEvents(ctx.runDir);
-      const prior = priorAttempts(events, actorCallId);
-      const attempt = prior.count + 1;
-      let reason = 'initial';
-      if (repairErrors != null) {
-        reason = 'schema_repair';
-      } else if (prior.count > 0) {
-        const { executor } = effectiveBinding(ctx, role);
-        reason = executor !== prior.lastExecutor ? 'executor_override' : 'user_retry';
+      if (!artifactRecorded(events, step.collective)) {
+        const parts = actors.map((role, i) => {
+          const rel = outputs[i]!;
+          const abs = join(ctx.runDir, rel);
+          try { return JSON.parse(readFileSync(abs, 'utf8')) as unknown; } catch (err) { throw new DriveError(`cannot assemble ${step.collective}: member output ${rel}${role ? ` (${role})` : ''} is not valid JSON: ${(err as Error).message}`); }
+        });
+        const abs = join(ctx.runDir, step.collective);
+        mkdirSync(dirname(abs), { recursive: true });
+        writeFileSync(abs, `${JSON.stringify(parts, null, 2)}\n`, 'utf8');
+        try { runRun({ run: ctx.runId, event: 'artifact_created', artifact: step.collective, fields: [`step_execution_id=${stepExecutionId}`], repoRoot: ctx.repoRoot, now: ctx.now }); } catch (err) { if (err instanceof RunError) throw new DriveError(err.message); throw err; }
+        ctx.act(`assembled collective ${step.collective}`);
       }
+    }
+    return null;
+  }
 
-      const outcome = dispatchOnce(
-        ctx,
-        stepId,
-        role,
-        generation,
-        step.loop.in_body,
-        outputRel,
-        step.artifact_type,
-        ids,
-        attempt,
-        reason,
-        repairErrors,
-        { providerWarned, shadowOnly },
-      );
+  // Mixed host/command path: schedule in canonical order with concurrent command lanes.
+  // We reuse the same wave admission/collection logic but inline host dispatch in canonical position.
+  const mixedQueue: PendingQueueEntry[] = [...queue];
+  const inflight: PendingAttempt[] = [];
+  let failure: DispatchOutcome | null = null;
+  const repairQueued: WaveMember[] = [];
+  let stopAdmitting = false;
 
-      if (outcome.kind === 'valid') break;
-      if (outcome.kind === 'invalid_output' && !ctx.repaired.has(actorCallId)) {
-        // One bounded re-ask per actor call per invocation, then fail honestly.
-        ctx.repaired.add(actorCallId);
-        repairErrors = outcome.errors;
-        continue;
+  const drainInflightOnThrow = () => {
+    while (inflight.length > 0) {
+      try {
+        const hp = inflight[0]!;
+        const out = collectCommandAttempt(ctx, hp);
+        inflight.shift();
+        if (out.kind === 'invalid_output' && !ctx.repaired.has(hp.ids.actorCallId)) {
+          ctx.repaired.add(hp.ids.actorCallId);
+          repairQueued.push({ role: hp.role, outputRel: hp.outputRel, artifactType: hp.artifactType, ids: hp.ids, reason: 'schema_repair', repairErrors: out.errors, stamps: hp.stamps, generation: hp.generation, inBody: hp.inBody, stepId: hp.stepId });
+        } else if (out.kind !== 'valid' && failure == null) {
+          failure = out;
+        }
+      } catch { try { inflight.shift(); } catch {} }
+    }
+  };
+
+  try {
+    while (mixedQueue.length > 0 || inflight.length > 0) {
+      // Admit as many as parallel allows, in canonical order, hosts do not count toward the cap.
+      while (!stopAdmitting && mixedQueue.length > 0) {
+        const head = mixedQueue[0]!;
+        if (head.kind === 'host_pending') {
+          const note = pendingResolutionNote(ctx, stepId, head.role, head.pending);
+          if (note != null) { hostNotes.push(note); ctx.act(note); }
+          hostRequests.push(head.pending);
+          mixedQueue.shift();
+          continue;
+        }
+        if (head.kind === 'host') {
+          // Fresh host: create durable request now, in canonical order.
+          events = freshEvents(ctx.runDir);
+          const binding = effectiveBinding(ctx, head.role);
+          const priorHostAttempts = hostRequestAttempts(events, head.ids.actorCallId);
+          const attempt = priorHostAttempts + 1;
+          const priorHostRequest = events.filter((e) => e.type === 'host_dispatch_requested' && e.extra.actor_call_id === head.ids.actorCallId).at(-1);
+          const priorHostTerminal = priorHostRequest == null ? null : events.findLast((e) => (e.type === 'actor_completed' || e.type === 'actor_failed') && e.extra.dispatch_id === priorHostRequest.extra.dispatch_id);
+          const reason = priorHostAttempts === 0 ? 'initial' : priorHostTerminal?.type === 'actor_completed' && priorHostTerminal.extra.output_valid === false ? 'schema_repair' : binding.executor !== priorHostRequest?.extra.executor ? 'executor_override' : 'user_retry';
+          const repairErrors = reason === 'schema_repair' && priorHostTerminal != null && Array.isArray(priorHostTerminal.extra.validation_errors) ? priorHostTerminal.extra.validation_errors.filter((e): e is string => typeof e === 'string') : null;
+          const promptRes = (() => {
+            try { return runPrompt({ run: ctx.runId, step: stepId, actor: head.role ?? undefined, iteration: step.loop.in_body ? generation : undefined, record: true, repoRoot: ctx.repoRoot, now: ctx.now }); } catch (err) { if (err instanceof PromptError) throw new DriveError(err.message); throw err; }
+          })();
+          hostRequests.push(hostRequestFor(ctx, stepId, head.role, head.outputRel, step.artifact_type, head.ids, attempt, reason, promptRes.promptPath, promptRes.sha256, repairErrors));
+          mixedQueue.shift();
+          continue;
+        }
+        // Command head
+        const binding = effectiveBinding(ctx, head.role);
+        const needsLease = binding.spec.writeAccess !== false;
+        if (needsLease && inflight.some((p) => p.leaseHolder != null)) break;
+        if (needsLease) {
+          const effectiveLease = (() => { try { return readEffectiveLease(ctx.repoRoot); } catch { return null; } })();
+          // Any live lease here is by construction foreign: the wave enforces at-most-one live writer via the inflight check above.
+          if (effectiveLease != null && isWorkspaceLeaseAlive(effectiveLease)) {
+            throw new DriveError(`shared workspace is already held by ${effectiveLease.holder.kind} "${effectiveLease.holder.id}" (supervisor_pid ${effectiveLease.supervisor_pid ?? 'unknown'}, started ${effectiveLease.started_at}); holder "${ctx.runId}" must wait or retry. Inspect it with \`fadeno show ${effectiveLease.holder.runId ?? '<run>'}\`; recover an abandoned host dispatch with dispatch-fail/dispatch-complete. Only after verifying no writer remains, remove ${WORKSPACE_LEASE_FILE} as a last resort.`);
+          }
+        }
+        if (inflight.length >= ctx.parallel) break;
+        const preflight = evaluateMemberPreflight(ctx, stepId, head.role, binding);
+        if (!preflight.ok) {
+          events = freshEvents(ctx.runDir);
+          appendEvent(ctx.runDir, { type: 'actor_failed', step: stepId, actor: head.role, step_execution_id: head.ids.stepExecutionId, actor_call_id: head.ids.actorCallId, attempt: priorAttempts(events, head.ids.actorCallId).count + 1, executor: preflight.executor, archetype: preflight.archetype, ...(preflight.reason === 'write_access_denied' ? { write_access: false } : {}), reason: preflight.reason, error: preflight.error }, ctx.now);
+          ctx.act(`dispatch refused ${stepId}${head.role ? ` (${head.role})` : ''}: ${preflight.error}`);
+          if (failure == null) failure = preflight.outcome;
+          mixedQueue.shift();
+          stopAdmitting = true;
+          break;
+        }
+        const priorAttemptsInfo = priorAttempts(freshEvents(ctx.runDir), head.ids.actorCallId);
+        const attempt = priorAttemptsInfo.count + 1;
+        // Fresh admissions here are never schema_repair: mixed-path repairs go through
+        // the post-wave runCommandWave below, which carries the real repairErrors.
+        let reason = 'initial';
+        if (priorAttemptsInfo.count > 0) {
+          const { executor } = effectiveBinding(ctx, head.role);
+          reason = executor !== priorAttemptsInfo.lastExecutor ? 'executor_override' : 'user_retry';
+        }
+        const pending = beginCommandAttempt(ctx, stepId, head.role, generation, step.loop.in_body, head.outputRel, step.artifact_type, head.ids, attempt, reason, null, { providerWarned: preflight.providerWarned, shadowOnly: preflight.shadowOnly });
+        mixedQueue.shift();
+        inflight.push(pending);
       }
-      return outcome;
+      if (inflight.length > 0) {
+        const hp = inflight[0]!;
+        const outcome = collectCommandAttempt(ctx, hp);
+        inflight.shift();
+        if (outcome.kind === 'invalid_output' && !ctx.repaired.has(hp.ids.actorCallId)) {
+          ctx.repaired.add(hp.ids.actorCallId);
+          repairQueued.push({ role: hp.role, outputRel: hp.outputRel, artifactType: hp.artifactType, ids: hp.ids, reason: 'schema_repair', repairErrors: outcome.errors, stamps: hp.stamps, generation: hp.generation, inBody: hp.inBody, stepId: hp.stepId });
+        } else if (outcome.kind !== 'valid' && failure == null) {
+          failure = outcome;
+        }
+      } else if (mixedQueue.length === 0) {
+        break;
+      } else {
+        if (stopAdmitting) break;
+        sleepSync(POLL_MS);
+      }
+    }
+  } catch (err) {
+    drainInflightOnThrow();
+    throw err;
+  }
+
+  // Bounded repair wave for invalid outputs (hosts never need repair). Align with no-host
+  // path: run the repair wave even when a sibling command already failed, so each
+  // invalid member gets its bounded retry regardless of sibling status.
+  if (repairQueued.length > 0) {
+    const repairResult = runCommandWave(ctx, stepId, generation, step.loop.in_body, repairQueued, ctx.parallel);
+    failure = failure ?? repairResult.failure;
+    if (repairResult.repairQueued.length > 0 && failure == null) {
+      failure = { kind: 'invalid_output', detail: `${stepId}: output failed ${step.artifact_type} validation after the bounded repair`, errors: [] } as unknown as DispatchOutcome;
+    } else if (repairResult.repairQueued.length > 0 && failure != null) {
+      // Preserve the original command failure but note that a repair also exceeded its bound;
+      // the original failure remains the authoritative terminal for this step.
+    }
+  }
+
+  if (failure != null && hostRequests.length > 0) {
+    const failureDetail = (failure as { detail: string }).detail;
+    hostNotes.push(`command member failed: ${failureDetail} — host dispatch still required`);
+    return { kind: 'awaiting_host_dispatch', requests: hostRequests, notes: hostNotes };
+  }
+
+  if (failure != null) {
+    if (failure.kind === 'write_conflict' || failure.kind === 'eligibility_forbidden' || failure.kind === 'provider_conflict' || failure.kind === 'constraint_refused') {
+      return { kind: failure.kind, detail: (failure as { detail: string }).detail } as PromptableOutcome;
+    }
+    if (failure.kind === 'invalid_output') return { kind: 'invalid_output', detail: (failure as { detail: string }).detail, errors: (failure as { detail: string; errors: string[] }).errors } as unknown as PromptableOutcome;
+    if (failure.kind === 'valid') { /* fall through */ } else {
+      return { kind: 'exit_nonzero', detail: (failure as { detail: string }).detail } as unknown as PromptableOutcome;
     }
   }
 
@@ -1441,39 +2326,73 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
       const parts = actors.map((role, i) => {
         const rel = outputs[i]!;
         const abs = join(ctx.runDir, rel);
-        try {
-          return JSON.parse(readFileSync(abs, 'utf8')) as unknown;
-        } catch (err) {
-          throw new DriveError(
-            `cannot assemble ${step.collective}: member output ${rel}` +
-              `${role ? ` (${role})` : ''} is not valid JSON: ${(err as Error).message}`,
-          );
-        }
+        try { return JSON.parse(readFileSync(abs, 'utf8')) as unknown; } catch (err) { throw new DriveError(`cannot assemble ${step.collective}: member output ${rel}${role ? ` (${role})` : ''} is not valid JSON: ${(err as Error).message}`); }
       });
       const abs = join(ctx.runDir, step.collective);
       mkdirSync(dirname(abs), { recursive: true });
       writeFileSync(abs, `${JSON.stringify(parts, null, 2)}\n`, 'utf8');
-      try {
-        runRun({
-          run: ctx.runId,
-          event: 'artifact_created',
-          artifact: step.collective,
-          fields: [`step_execution_id=${stepExecutionId}`],
-          repoRoot: ctx.repoRoot,
-          now: ctx.now,
-        });
-      } catch (err) {
-        if (err instanceof RunError) throw new DriveError(err.message);
-        throw err;
-      }
+      try { runRun({ run: ctx.runId, event: 'artifact_created', artifact: step.collective, fields: [`step_execution_id=${stepExecutionId}`], repoRoot: ctx.repoRoot, now: ctx.now }); } catch (err) { if (err instanceof RunError) throw new DriveError(err.message); throw err; }
       ctx.act(`assembled collective ${step.collective}`);
     }
   }
-
   return null;
 }
 
-/** Evaluate a gate (or a loop's `until`) with the deterministic evaluator. */
+function recoverInterruptedToolDispatches(ctx: EngineCtx): number {
+  const recovered = recoverInterruptedToolDispatchesShared(ctx.repoRoot, ctx.runDir, ctx.runId, ctx.now, (msg) => new DriveError(msg));
+  if (recovered > 0) ctx.act(`recovered ${recovered} interrupted tool dispatch receipt(s)`);
+  return recovered;
+}
+
+function driveTool(ctx: EngineCtx, step: import('../lib/flow-cursor.ts').NextStepInfo): { kind: 'executor_failed'; detail: string } | 'needs_decision' | null {
+  const toolName = step.tool;
+  if (toolName == null || toolName.length === 0) return 'needs_decision';
+  if (!isToolEligible(step.artifact_type)) return 'needs_decision';
+  const spec = (ctx.profile as any).tools?.[toolName];
+  if (spec == null) return 'needs_decision';
+  const outputRel = step.outputs?.[0];
+  if (outputRel == null) return 'needs_decision';
+  const generation = parseGeneration(outputRel).generation;
+  const loopOwner = step.loop.in_body ? bodyOwnerOf(ctx.playbook, step.id) : null;
+  const effectiveTimeoutMs = (() => {
+    if (ctx.timeoutMs !== undefined && ctx.timeoutMs !== null) {
+      if (ctx.timeoutMs === 0) return null;
+      if (typeof ctx.timeoutMs === 'number' && ctx.timeoutMs > 0) return ctx.timeoutMs;
+      return null;
+    }
+    if (spec.timeoutMs != null && spec.timeoutMs > 0) return spec.timeoutMs;
+    return null;
+  })();
+  try {
+    const result = executeToolCore({
+      repoRoot: ctx.repoRoot,
+      runId: ctx.runId,
+      runDir: ctx.runDir,
+      stepId: step.id,
+      stepKind: step.kind,
+      toolName,
+      artifactType: step.artifact_type,
+      outputRel,
+      generation,
+      loopOwner,
+      iteration: step.loop.iteration,
+      command: spec.command,
+      effectiveTimeoutMs: effectiveTimeoutMs ?? null,
+      now: ctx.now,
+    });
+    ctx.act(`tool ${toolName} → ${result.status} (exit ${result.exitCode}) → wrote ${outputRel}`);
+    return null;
+  } catch (err) {
+    if (err instanceof ToolExecError) {
+      // Infra failure is retryable executor_failed, and so is the refusal a
+      // live attempt earns from locked admission — recovery no longer raises
+      // that one, so every tool refusal arrives on this single path.
+      return { kind: 'executor_failed', detail: err.message };
+    }
+    throw err;
+  }
+}
+
 function driveGate(ctx: EngineCtx, comp: NextComputation): void {
   const step = comp.step!;
   const gate = comp.gate!;
@@ -1947,6 +2866,7 @@ export function runDrive(opts: DriveOptions): DriveResult {
   for (const v of bindMapEarly.values()) {
     try { bindRefsForSnapshot.push(parseDialRef(v, 'bind')); } catch {}
   }
+  const parallel = parseParallelOption(opts.parallel);
   const base: Omit<EngineCtx, 'profile' | 'dialLayers'> = {
     runId: run.runId,
     runDir: run.dir,
@@ -1958,6 +2878,9 @@ export function runDrive(opts: DriveOptions): DriveResult {
     schemas,
     overrides: new Map<string, string>(),
     repaired: new Set<string>(),
+    diagnostics: opts.diagnostics,
+    timeoutMs: opts.timeoutMs,
+    parallel,
     now: opts.now,
     act,
   };
@@ -1986,6 +2909,7 @@ export function runDrive(opts: DriveOptions): DriveResult {
   };
   // Handle recorded dialLayers for in-flight comparison? Load last snapshot's dials to detect change note (not needed)
   recoverInterruptedCommandDispatches(ctx);
+  recoverInterruptedToolDispatches(ctx);
   // Bind overrides: validate and record
   recordOverrides(ctx, bindMapEarly);
   recordResolutionSnapshot(ctx);
@@ -2080,6 +3004,16 @@ export function runDrive(opts: DriveOptions): DriveResult {
     const step = comp.step!;
     if (step.kind === 'gate' || (step.kind === 'loop' && comp.gate != null)) {
       driveGate(ctx, comp);
+      continue;
+    }
+    if (step.kind === 'tool_call') {
+      const toolOutcome = driveTool(ctx, step);
+      if (toolOutcome === 'needs_decision') {
+        return finish('needs_decision', comp.advice);
+      }
+      if (toolOutcome != null) {
+        return finish('executor_failed', toolOutcome.detail);
+      }
       continue;
     }
     if (!step.promptable) {

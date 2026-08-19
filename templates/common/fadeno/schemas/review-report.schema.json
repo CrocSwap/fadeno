@@ -36,7 +36,7 @@
         },
         "verdict": {
           "enum": ["approve", "request_changes", "comment"],
-          "description": "Overall recommendation. The gate relies on issues, not this field alone."
+          "description": "Overall recommendation. `all_reviews_approved` requires `approve` with no `blocking` issues; `no_blocking_issues` reads only `blocking` issues."
         }
       }
     }

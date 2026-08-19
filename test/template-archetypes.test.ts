@@ -81,8 +81,8 @@ test('starter catalog archetypes: worker is required, generator is forbidden wit
     readFileSync(join(import.meta.dirname, '..', 'templates', 'common', 'fadeno', 'executors.yaml'), 'utf8'),
     'templates/common/fadeno/executors.yaml',
   );
-  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null });
-  assert.deepEqual(profile.archetypes.generator, { requiresWrite: 'forbidden', fallback: 'worker', distinctProviderFromInputs: null });
+  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.generator, { requiresWrite: 'forbidden', fallback: null, distinctProviderFromInputs: null, brief: null });
   assert.deepEqual(profile.dials, {}, 'starter catalog ships no repo dials');
   assert.equal((profile as unknown as Record<string, unknown>).loadouts, undefined, 'starter catalog has no legacy loadouts');
   assert.equal((profile as unknown as Record<string, unknown>).defaultLoadout, undefined, 'starter catalog has no default_loadout');

@@ -300,3 +300,71 @@ test('gate rejects an unsupported condition and a missing report', (t) => {
     GateError, // no report written yet
   );
 });
+
+test('all_reviews_approved fails on request_changes with zero blocking, passes legacy', (t) => {
+  const { root, runId, runDir } = freshRun(t);
+  writeReport(runDir, { reviewer: 'r', summary: 's', issues: [{ severity: 'minor', title: 'nit' }], verdict: 'request_changes' });
+  const legacy = runGate({ repoRoot: root, run: runId, condition: 'no_blocking_issues' });
+  assert.equal(legacy.pass, true);
+  const approved = runGate({ repoRoot: root, run: runId, condition: 'all_reviews_approved' });
+  assert.equal(approved.pass, false);
+  assert.equal((approved.details.nonApproving as Array<unknown>).length, 1);
+});
+
+test('all_reviews_approved: comment verdict fails', (t) => {
+  const { root, runId, runDir } = freshRun(t);
+  writeReport(runDir, { reviewer: 'r', summary: 's', issues: [], verdict: 'comment' });
+  const result = runGate({ repoRoot: root, run: runId, condition: 'all_reviews_approved' });
+  assert.equal(result.pass, false);
+});
+
+test('all_reviews_approved aggregates array, names non-approving reviewer', (t) => {
+  const { root, runId, runDir } = freshRun(t);
+  writeReport(runDir, [
+    { reviewer: 'a', summary: 's', issues: [], verdict: 'approve' },
+    { reviewer: 'b', summary: 's', issues: [], verdict: 'request_changes' },
+    { reviewer: 'c', summary: 's', issues: [], verdict: 'approve' },
+  ]);
+  const result = runGate({ repoRoot: root, run: runId, condition: 'all_reviews_approved' });
+  assert.equal(result.pass, false);
+  const non = result.details.nonApproving as Array<{ reviewer: string; verdict: string }>;
+  assert.equal(non.length, 1);
+  assert.equal(non[0]!.reviewer, 'b');
+  assert.equal(non[0]!.verdict, 'request_changes');
+});
+
+test('all_reviews_approved all approve array passes', (t) => {
+  const { root, runId, runDir } = freshRun(t);
+  writeReport(runDir, [
+    { reviewer: 'a', summary: 's', issues: [], verdict: 'approve' },
+    { reviewer: 'b', summary: 's', issues: [], verdict: 'approve' },
+  ]);
+  const result = runGate({ repoRoot: root, run: runId, condition: 'all_reviews_approved' });
+  assert.equal(result.pass, true);
+  assert.equal(result.details.total, 2);
+  assert.equal(result.details.approvedCount, 2);
+});
+
+test('all_reviews_approved contradictory approve+blocking fails', (t) => {
+  const { root, runId, runDir } = freshRun(t);
+  writeReport(runDir, { reviewer: 'r', summary: 's', issues: [{ severity: 'blocking', title: 'boom' }], verdict: 'approve' });
+  const result = runGate({ repoRoot: root, run: runId, condition: 'all_reviews_approved' });
+  assert.equal(result.pass, false);
+  assert.equal(result.details.blockingCount, 1);
+});
+
+test('all_reviews_approved malformed report throws GateError', (t) => {
+  const { root, runId, runDir } = freshRun(t);
+  writeReport(runDir, { reviewer: 'r', summary: 's', verdict: 'approve' } as unknown);
+  assert.throws(() => runGate({ repoRoot: root, run: runId, condition: 'all_reviews_approved' }), /invalid.*all_reviews_approved/i);
+});
+
+test('all_reviews_approved logs gate_evaluated with condition', (t) => {
+  const { root, runId, runDir } = freshRun(t);
+  writeReport(runDir, { reviewer: 'r', summary: 's', issues: [], verdict: 'approve' });
+  runGate({ repoRoot: root, run: runId, condition: 'all_reviews_approved', now: new Date('2026-07-10T12:00:00Z') });
+  const event = readEvents(runDir).at(-1)!;
+  assert.equal(event.type, 'gate_evaluated');
+  assert.equal(event.condition, 'all_reviews_approved');
+  assert.equal(event.result, 'pass');
+});

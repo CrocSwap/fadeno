@@ -94,6 +94,20 @@ test('codex plugin: carries setup, bundled CLI, and built-in definitions', (t) =
   assert.notEqual(statSync(binary).mode & 0o111, 0, 'generated Codex plugin CLI must be executable');
   const expectedVersion = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).version;
   assert.equal(execFileSync(binary, ['--version'], { encoding: 'utf8' }).trim(), expectedVersion);
+  // Also assert bin/package.json markers without executing
+  const pkg = JSON.parse(readFileSync(join(outDir, 'bin', 'package.json'), 'utf8'));
+  assert.equal(pkg.name, 'fadeno-runtime');
+  assert.equal(pkg.version, expectedVersion);
+  assert.equal(pkg.type, 'commonjs');
+});
+
+test('codex plugin bin package marker without execution', () => {
+  const binDir = join(REPO, 'plugin-codex', 'bin');
+  const pkg = JSON.parse(readFileSync(join(binDir, 'package.json'), 'utf8'));
+  const expected = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).version;
+  assert.equal(pkg.name, 'fadeno-runtime');
+  assert.equal(pkg.version, expected);
+  assert.equal(pkg.type, 'commonjs');
 });
 
 test('the committed plugin-codex/ matches a fresh generation (no drift)', { skip: SKIP_DRIFT }, (t) => {

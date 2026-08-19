@@ -174,6 +174,96 @@ test('golden: single actor_call with an untyped output', (t) => {
   assert.match(result.prompt, /- actor: writer/);
 });
 
+test('downstream gate all_reviews_approved wording states approve verdict and blocking absence', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'codex', repoRoot: root });
+  // Use a playbook where a ReviewReport output feeds an all_reviews_approved gate
+  const playbook = `kind: AgentPlaybook
+schema_version: "0.1"
+name: downstream-approval
+description: test
+roles:
+  reviewer:
+    purpose: Review
+flow:
+  - id: review
+    kind: map
+    over: [reviewer]
+    output: ReviewReport[]
+    output_path:
+      reviewer: artifacts/review.reviewer.json
+  - id: gate
+    kind: gate
+    input:
+      - ReviewReport[]
+    condition: all_reviews_approved
+    on_pass: done
+    on_fail: revise
+  - id: done
+    kind: actor_call
+    actor: reviewer
+    input:
+      - ReviewReport[]
+    output: FinalSummary
+    terminal_status: completed
+  - id: revise
+    kind: actor_call
+    actor: reviewer
+    input:
+      - ReviewReport[]
+    output: FinalSummary
+    terminal_status: failed
+`;
+  writeFileSync(join(root, '.fadeno', 'playbooks', 'downstream-approval.yaml'), playbook);
+  const runId = RUN_ID;
+  const dir = join(root, '.fadeno', 'runs', runId);
+  mkdirSync(join(dir, 'artifacts'), { recursive: true });
+  writeFileSync(join(dir, 'run.yaml'), [
+    `run_id: ${runId}`,
+    'schema_version: "0.3"',
+    'playbook: downstream-approval',
+    'status: running',
+    `task: "${TASK}"`,
+    'started_at: 2026-07-12T21:18:58.647Z',
+    'host: cli',
+    'artifacts_dir: artifacts',
+    'current_step: review',
+    '',
+  ].join('\n'));
+  writeFileSync(join(dir, 'artifacts', 'note.md'), '# note');
+  writeFileSync(join(dir, 'events.jsonl'), [
+    '{"type":"run_started","step":null,"timestamp":"2026-07-12T21:18:58.647Z"}',
+    '{"type":"step_started","step":"review","timestamp":"2026-07-12T21:21:10.416Z"}',
+    '',
+  ].join('\n'));
+  const result = runPrompt({ repoRoot: root, run: runId, step: 'review', actor: 'reviewer', record: false });
+  assert.match(result.prompt, /Downstream: gate `gate` computes `all_reviews_approved` from ReviewReport\[\]/);
+  assert.match(result.prompt, /It passes only when every report's `verdict` is `approve` and no issue is `blocking`/);
+  assert.doesNotMatch(result.prompt, /A `blocking`-severity issue fails it\./);
+});
+
+test('reviewer template surfaces state all_reviews_approved verdict and blocking requirement', (t) => {
+  const claudeReviewer = readFileSync(join(import.meta.dirname, '..', 'templates', 'claude', 'claude-agents', 'reviewer.md'), 'utf8');
+  const grokReviewer = readFileSync(join(import.meta.dirname, '..', 'templates', 'grok', 'grok-agents', 'reviewer.md'), 'utf8');
+  for (const [name, body] of [['claude', claudeReviewer] as const, ['grok', grokReviewer] as const]) {
+    assert.match(body, /all_reviews_approved/, `${name} reviewer must mention all_reviews_approved`);
+    assert.match(body, /verdict.*approve/, `${name} reviewer must state approve verdict requirement`);
+    assert.match(body, /blocking/, `${name} reviewer must mention blocking`);
+    assert.match(body, /passes only when `verdict` is `approve` and no issue is `blocking`/, `${name} reviewer must have precise approval gate wording`);
+  }
+  // Also ensure the init-emitted copies are identical to templates (when init runs)
+  const codexRoot = tempRepo(t);
+  const claudeRoot = tempRepo(t);
+  const grokRoot = tempRepo(t);
+  runInit({ target: 'codex', repoRoot: codexRoot });
+  runInit({ target: 'claude', repoRoot: claudeRoot });
+  runInit({ target: 'grok', repoRoot: grokRoot });
+  // Codex does not have reviewer.md as file? But plugin does; check template existence
+  // For claude and grok, the emitted reviewer must match template
+  assert.equal(readFileSync(join(claudeRoot, '.claude', 'agents', 'reviewer.md'), 'utf8'), claudeReviewer);
+  assert.equal(readFileSync(join(grokRoot, '.grok', 'agents', 'reviewer.md'), 'utf8'), grokReviewer);
+});
+
 test('loop-body output is generation-scoped .v<G> with G = N + 1', (t) => {
   const root = tempRepo(t);
   seed(root, { events: RECONCILE_EVENTS, artifacts: RECONCILE_ARTIFACTS });

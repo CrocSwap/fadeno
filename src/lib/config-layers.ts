@@ -55,7 +55,7 @@ function mergeLayer(target: Record<string, unknown>, source: Record<string, unkn
   if (layer !== 'project' && mapping(source.dials) != null && Object.keys(mapping(source.dials)!).length > 0) {
     throw new ExecutorProfileError('repo pins live in the project catalog; user dials are state — use `fadeno loadout set <archetype> <model> --user`');
   }
-  for (const key of ['routes', 'archetypes', 'bindings', 'models', 'dials']) {
+  for (const key of ['routes', 'archetypes', 'bindings', 'models', 'dials', 'tools']) {
     const entries = mapping(source[key]);
     if (entries == null) continue;
     const current = mapping(target[key]) ?? {};

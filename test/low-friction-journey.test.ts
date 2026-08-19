@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
@@ -23,6 +23,7 @@ import { runDrive } from '../src/commands/drive.ts';
 import { runUninstall, UninstallError } from '../src/commands/uninstall.ts';
 import { runClean } from '../src/commands/clean.ts';
 import { runUnvendor } from '../src/commands/unvendor.ts';
+import { acquireWorkspaceLease } from '../src/lib/workspace-lease.ts';
 import { exists, read, tempRepo } from './helpers.ts';
 
 const REPO = join(import.meta.dirname, '..');
@@ -149,9 +150,17 @@ test('plugin-backed setup is user-only, installs a stable runtime, and uninstall
   assert.ok(existsSync(resolved.installationsFile));
   assert.match(readFileSync(join(paths.home!, '.codex', 'agents', 'fadeno-worker.toml'), 'utf8'), new RegExp(resolved.managedCli.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 
+  // create runtime temp siblings that uninstall must clean when removing final runtime
+  mkdirSync(join(resolved.dataDir, 'runtime.staging'), { recursive: true });
+  mkdirSync(join(resolved.dataDir, 'runtime.old'), { recursive: true });
+  mkdirSync(join(resolved.dataDir, '.runtime.lock'), { recursive: true });
+
   const removed = runUninstall({ target: 'codex', userPathOptions: paths });
   assert.equal(removed.preserved.length, 0);
   assert.equal(existsSync(resolved.managedRuntimeDir), false);
+  assert.equal(existsSync(join(resolved.dataDir, 'runtime.staging')), false, 'uninstall must remove runtime.staging');
+  assert.equal(existsSync(join(resolved.dataDir, 'runtime.old')), false, 'uninstall must remove runtime.old');
+  assert.equal(existsSync(join(resolved.dataDir, '.runtime.lock')), false, 'uninstall must remove .runtime.lock');
   assert.equal(existsSync(resolved.executorsFile), false, 'no provider probes meant no generated catalog');
   assert.throws(
     () => runUninstall({ purgeUserData: true, userPathOptions: paths }),
@@ -286,6 +295,14 @@ test('drive recovers a command start left without a terminal receipt', (t) => {
     attempt: 1,
     executor: 'fail-model',
   }, new Date('2026-08-11T03:00:01.000Z'));
+  const staleHolder = { id: 'engine:stale-run:old-call:a1', kind: 'engine' as const, runId: 'stale-run' };
+  acquireWorkspaceLease({
+    repoRoot: root,
+    workspaceMode: 'shared',
+    holder: staleHolder,
+    supervisorPid: 999_999_999,
+    now: new Date('2026-08-11T03:00:01.000Z'),
+  });
 
   const result = runDrive({ repoRoot: root, userPathOptions: paths, run: run.runId, env: null });
   assert.equal(result.outcome, 'executor_failed');
@@ -293,6 +310,10 @@ test('drive recovers a command start left without a terminal receipt', (t) => {
     event.type === 'actor_failed' && event.extra.reason === 'engine_interrupted',
   );
   assert.equal(recovered?.extra.recovered, true);
+  const leaseAudit = readEvents(run.runDir).events.find((event) => event.type === 'workspace_lease_recovered');
+  assert.deepEqual(leaseAudit?.extra.previous_holder, staleHolder);
+  assert.equal(leaseAudit?.extra.reason, 'dead_supervisor');
+  assert.equal(typeof leaseAudit?.extra.recovered_at, 'string');
   assert.match(result.actions.join('\n'), /recovered 1 interrupted command dispatch receipt/);
 });
 
@@ -421,11 +442,19 @@ test('nested hosts abstain rather than guess, and an executor child sheds our id
 
   // The real fix is at the spawn point: a child inherits no harness identity,
   // so whatever it launches asserts its own instead of ours.
-  const shed = withoutHarnessIdentity({ ...nested.env, FADENO_HARNESS: 'claude', CODEX_HOME: '/keep' });
+  const shed = withoutHarnessIdentity({ ...nested.env, FADENO_HARNESS: 'claude', FADENO_BUNDLED_RUNTIME: '/bundled', FADENO_INVOCATION_SOURCE: 'managed', CODEX_HOME: '/keep' });
   assert.equal(shed.CLAUDECODE, undefined);
   assert.equal(shed.CODEX_THREAD_ID, undefined);
   assert.equal(shed.FADENO_HARNESS, undefined);
+  assert.equal(shed.FADENO_BUNDLED_RUNTIME, undefined, 'FADENO_BUNDLED_RUNTIME must be stripped from executor children');
+  assert.equal(shed.FADENO_INVOCATION_SOURCE, undefined, 'FADENO_INVOCATION_SOURCE must be stripped from executor children');
   assert.equal(shed.CODEX_HOME, '/keep', 'a config location is not a session claim');
+  // Spawn-level proof: real child env lacks both new variables
+  const out = spawnSync(process.execPath, ['-e', 'console.log(JSON.stringify({a: process.env.FADENO_BUNDLED_RUNTIME, b: process.env.FADENO_INVOCATION_SOURCE}))'], { env: shed as any, encoding: 'utf8' });
+  assert.equal(out.status, 0);
+  const parsed = JSON.parse(out.stdout.trim());
+  assert.equal(parsed.a, undefined);
+  assert.equal(parsed.b, undefined);
 });
 
 test('an explicit FADENO_HARNESS still outranks the host in evidence, and doctor says so', (t) => {
@@ -523,4 +552,108 @@ test('Claude steering hook remains inert for native slots and is registered by t
   assert.equal(result.stdout, '');
   const manifest = JSON.parse(read(REPO, 'templates/claude/hooks/hooks.json'));
   assert.equal(manifest.hooks.PreToolUse[0].matcher, 'Agent');
+});
+
+test('doctor workspace-lease: no active lease reports ok', (t) => {
+  const root = tempRepo(t);
+  const paths = isolatedUser(root);
+  const result = runDoctor({ repoRoot: root, userPathOptions: paths });
+  const lease = result.findings.find((item) => item.check === 'workspace-lease' && item.detail === 'no active workspace lease');
+  assert.ok(lease, 'expected workspace-lease ok when none active');
+  assert.equal(lease.severity, 'ok');
+});
+
+test('doctor workspace-lease: live shared lease reports warning with remediation', (t) => {
+  const root = tempRepo(t);
+  const paths = isolatedUser(root);
+  mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
+  const runId = '2026-08-17-0001-live-lease';
+  const holder = { id: 'live-holder', kind: 'host-dispatch' as const, runId, dispatchId: 'dispatch-live' };
+  // Use an alive pid (current process) so readEffectiveLease treats it as live; 999999 would be stale dead
+  const livePid = process.pid;
+  writeFileSync(join(root, '.fadeno', 'local', 'workspace-lease.json'), JSON.stringify({
+    workspace_mode: 'shared',
+    holder,
+    holders: [holder],
+    supervisor_pid: livePid,
+    executor_pid: null,
+    process_group_id: null,
+    started_at: new Date('2026-08-17T00:00:00.000Z').toISOString(),
+    heartbeat_at: new Date('2026-08-17T00:00:01.000Z').toISOString(),
+    stdout_bytes: 0,
+    stderr_bytes: 0,
+    last_output_at: null,
+  }));
+  const result = runDoctor({ repoRoot: root, userPathOptions: paths });
+  const lease = result.findings.find((item) => item.check === 'workspace-lease' && item.severity === 'warning' && item.detail.includes('live-holder'));
+  assert.ok(lease, 'expected live lease warning');
+  assert.ok(lease.detail.includes(`host-dispatch "live-holder"`), `detail missing holder: ${lease.detail}`);
+  assert.ok(lease.detail.includes(`supervisor_pid ${livePid}`), `detail missing pid: ${lease.detail}`);
+  assert.ok(lease.detail.includes('holders: 1'), `detail missing holders: ${lease.detail}`);
+  assert.ok(lease.remediation?.includes(`fadeno show ${runId}`));
+  assert.ok(lease.remediation?.includes(`fadeno dispatch-complete ${runId} dispatch-live`) || lease.remediation?.includes('dispatch-fail'));
+  assert.ok(lease.remediation?.includes('.fadeno/local/workspace-lease.json'));
+});
+
+test('doctor workspace-lease: stale lease reports warning with reclaim remediation', (t) => {
+  const root = tempRepo(t);
+  const paths = isolatedUser(root);
+  mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
+  // Use a pid that is guaranteed dead: probe will say ESRCH, but doctor uses real process.kill -> pid 99999 likely dead or EPERM? Use 2147483647 unlikely
+  const deadPid = 2147483647;
+  writeFileSync(join(root, '.fadeno', 'local', 'workspace-lease.json'), JSON.stringify({
+    workspace_mode: 'shared',
+    holder: { id: 'stale-holder', kind: 'engine', runId: 'run-stale' },
+    supervisor_pid: deadPid,
+    executor_pid: null,
+    process_group_id: null,
+    started_at: new Date('2026-08-17T00:00:00.000Z').toISOString(),
+    heartbeat_at: new Date('2026-08-17T00:00:01.000Z').toISOString(),
+    stdout_bytes: 0,
+    stderr_bytes: 0,
+    last_output_at: null,
+  }));
+  const result = runDoctor({ repoRoot: root, userPathOptions: paths });
+  const lease = result.findings.find((item) => item.check === 'workspace-lease' && item.detail.includes('stale-holder'));
+  assert.ok(lease, 'expected stale lease warning');
+  assert.equal(lease.severity, 'warning');
+  assert.match(lease.detail, /stale lease for "stale-holder" \(supervisor_pid 2147483647 is dead\)/);
+  assert.ok(lease.remediation?.includes('re-acquire will reclaim it'));
+  assert.ok(lease.remediation?.includes('.fadeno/local/workspace-lease.json'));
+});
+
+test('doctor workspace-lease: stale lock directory reported as warning', (t) => {
+  const root = tempRepo(t);
+  const paths = isolatedUser(root);
+  const lockPath = join(root, '.fadeno', 'local', '.workspace-lease.lock');
+  mkdirSync(lockPath, { recursive: true });
+  // Make lock stale by setting mtime far in past
+  const staleTime = new Date(Date.now() - 200_000);
+  try { writeFileSync(join(lockPath, '.keep'), ''); } catch {}
+  try { utimesSync(lockPath, staleTime, staleTime); } catch {}
+  const result = runDoctor({ repoRoot: root, userPathOptions: paths });
+  const lockFinding = result.findings.find((item) => item.check === 'workspace-lease' && item.detail.includes('stale lock'));
+  assert.ok(lockFinding, 'expected stale lock warning');
+  assert.equal(lockFinding.severity, 'warning');
+});
+
+test('doctor never acquires or deletes a lease', (t) => {
+  const root = tempRepo(t);
+  const paths = isolatedUser(root);
+  mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
+  const holder = { id: 'no-delete', kind: 'ad-hoc' as const };
+  writeFileSync(join(root, '.fadeno', 'local', 'workspace-lease.json'), JSON.stringify({
+    workspace_mode: 'shared',
+    holder,
+    supervisor_pid: null,
+    executor_pid: null,
+    process_group_id: null,
+    started_at: new Date().toISOString(),
+    heartbeat_at: new Date().toISOString(),
+    stdout_bytes: 0,
+    stderr_bytes: 0,
+    last_output_at: null,
+  }));
+  runDoctor({ repoRoot: root, userPathOptions: paths });
+  assert.ok(existsSync(join(root, '.fadeno', 'local', 'workspace-lease.json')), 'doctor must not delete lease');
 });

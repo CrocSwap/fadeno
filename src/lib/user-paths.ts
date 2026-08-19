@@ -81,7 +81,7 @@ export function readUserHarness(options: UserPathOptions = {}): FadenoHarness | 
 
 // --- dials file ---
 
-export function readUserDials(options: UserPathOptions = {}): Record<string, { model: string; effort?: string; via?: string }> {
+export function readUserDials(options: UserPathOptions = {}): Record<string, { model: string; effort?: string; via?: string; force_write_posture?: true }> {
   const path = userPaths(options).dialsFile;
   if (!existsSync(path)) return {};
   const text = readFileSync(path, 'utf8').trim();
@@ -89,7 +89,7 @@ export function readUserDials(options: UserPathOptions = {}): Record<string, { m
   let doc: unknown;
   try { doc = JSON.parse(text); } catch { return {}; }
   if (doc == null || typeof doc !== 'object' || Array.isArray(doc)) return {};
-  const out: Record<string, { model: string; effort?: string; via?: string }> = {};
+  const out: Record<string, { model: string; effort?: string; via?: string; force_write_posture?: true }> = {};
   for (const [k, v] of Object.entries(doc as Record<string, unknown>)) {
     if (typeof v === 'string') {
       const trimmed = v.trim();
@@ -113,16 +113,17 @@ export function readUserDials(options: UserPathOptions = {}): Record<string, { m
       const map = v as Record<string, unknown>;
       const model = typeof map.model === 'string' ? map.model.trim() : '';
       if (model.length === 0) continue;
-      const entry: { model: string; effort?: string; via?: string } = { model };
+      const entry: { model: string; effort?: string; via?: string; force_write_posture?: true } = { model };
       if (typeof map.effort === 'string' && map.effort.trim().length > 0) entry.effort = map.effort.trim();
       if (typeof map.via === 'string' && map.via.trim().length > 0) entry.via = map.via.trim();
+      if (map.force_write_posture === true) entry.force_write_posture = true;
       out[k] = entry;
     }
   }
   return out;
 }
 
-export function writeUserDials(options: UserPathOptions, dials: Record<string, { model: string; effort?: string; via?: string }>): string {
+export function writeUserDials(options: UserPathOptions, dials: Record<string, { model: string; effort?: string; via?: string; force_write_posture?: true }>): string {
   const path = userPaths(options).dialsFile;
   const keys = Object.keys(dials).sort();
   if (keys.length === 0) {
@@ -133,10 +134,19 @@ export function writeUserDials(options: UserPathOptions, dials: Record<string, {
   const sorted: Record<string, unknown> = {};
   for (const k of keys) {
     const ref = dials[k]!;
-    let str = ref.model;
-    if (ref.effort) str += `@${ref.effort}`;
-    if (ref.via) str += ` via ${ref.via}`;
-    sorted[k] = str;
+    if (ref.force_write_posture === true) {
+      sorted[k] = {
+        model: ref.model,
+        ...(ref.effort ? { effort: ref.effort } : {}),
+        ...(ref.via ? { via: ref.via } : {}),
+        force_write_posture: true,
+      };
+    } else {
+      let str = ref.model;
+      if (ref.effort) str += `@${ref.effort}`;
+      if (ref.via) str += ` via ${ref.via}`;
+      sorted[k] = str;
+    }
   }
   const ordered: Record<string, unknown> = {};
   for (const k of Object.keys(sorted).sort()) ordered[k] = sorted[k];

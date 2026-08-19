@@ -22,6 +22,8 @@ export type EligibilityState = 'eligible' | 'shadow_only' | 'forbidden';
 export interface CommandExecutorSpec {
   adapter: 'command';
   command: string[];
+  /** Hard deadline in milliseconds; null when absent (no deadline). */
+  timeoutMs?: number | null;
   /** Optional metadata recorded in dispatch evidence; never alters `command`. */
   model: string | null;
   /**
@@ -46,6 +48,16 @@ export interface CommandExecutorSpec {
    * refusal, so a mutating archetype must not be dispatched onto it.
    */
   writeAccess: boolean | null;
+  /**
+   * Alternative write-capable argv for this same delivery, selected
+   * automatically when a `requires_write: required` archetype resolves here.
+   * The dial names the who; the archetype's declared policy picks this how —
+   * no capability-suffixed model spellings. A variant that declares no
+   * `resume` does not advertise session resumption (the base route's resume
+   * argv carries the base permission mode, which a write session must not
+   * inherit).
+   */
+  writeVariant?: { command: string[]; resume: string[] | null } | null;
   /**
    * Per-archetype eligibility of this delivery. Absent YAML is `{}`
    * (every archetype `eligible`).
@@ -99,6 +111,35 @@ export function substituteSessionId(argv: string[], sessionId: string): string[]
   return argv.map((part) => part.split(SESSION_ID_PLACEHOLDER).join(sessionId));
 }
 
+/**
+ * Placeholder for drivers that can only read a prompt from a regular file
+ * (Muse Code refuses /dev/stdin, bare stdin, and `-` — verified live
+ * 2026-08-16). Substituted at spawn time with the absolute path of the
+ * kernel's attested prompt snapshot, so the digest attests exactly the bytes
+ * the executor reads. Stdin is still piped alongside; file-reading drivers
+ * simply ignore it.
+ */
+export const PROMPT_FILE_PLACEHOLDER = '{prompt_file}';
+
+export function substitutePromptFile(argv: string[], promptPath: string): string[] {
+  return argv.map((part) => part.split(PROMPT_FILE_PLACEHOLDER).join(promptPath));
+}
+
+/**
+ * Canon archetype display order — most→least powerful model typically slotted
+ * into the role. Non-canon archetypes sort alphabetically after.
+ */
+export const ARCHETYPE_DISPLAY_ORDER = ['director', 'judge', 'reviewer', 'generator', 'worker'] as const;
+
+export function archetypeDisplaySort(names: Iterable<string>): string[] {
+  const rank = new Map<string, number>(ARCHETYPE_DISPLAY_ORDER.map((name, index) => [name, index]));
+  return [...names].sort((a, b) => {
+    const ra = rank.get(a) ?? Number.MAX_SAFE_INTEGER;
+    const rb = rank.get(b) ?? Number.MAX_SAFE_INTEGER;
+    return ra !== rb ? ra - rb : a.localeCompare(b);
+  });
+}
+
 /** Write constraint an archetype imposes on whatever delivers it. */
 export type WritePosture = 'required' | 'forbidden' | 'none';
 
@@ -116,6 +157,12 @@ export interface ArchetypePolicy {
   /** Next archetype in the binding-fallback chain, or null. */
   fallback: string | null;
   /**
+   * Name of a brief template composed in front of every ad-hoc dispatch of
+   * this archetype (resolved from .fadeno/briefs/<name>.md, then the builtin
+   * templates). How a director learns it should coordinate through fadeno.
+   */
+  brief: string | null;
+  /**
    * Whether this archetype's delivery provider must differ from every
    * input producer's. Absent YAML is `null` (no check).
    */
@@ -128,6 +175,8 @@ export interface DialRef {
   model: string;
   effort?: string;
   via?: string;
+  /** Explicit, persisted override for this binding's write-posture mismatch. */
+  force_write_posture?: true;
 }
 
 export function parseDialRef(raw: unknown, label: string): DialRef {
@@ -203,13 +252,19 @@ export function parseDialRef(raw: unknown, label: string): DialRef {
       }
       out.via = map.via.trim();
     }
-    const unknown = Object.keys(map).filter((k) => k !== 'model' && k !== 'effort' && k !== 'via');
+    if (map.force_write_posture !== undefined) {
+      if (map.force_write_posture !== true) {
+        throw new ExecutorProfileError(`${label} "force_write_posture" must be true when present.`);
+      }
+      out.force_write_posture = true;
+    }
+    const unknown = Object.keys(map).filter((k) => k !== 'model' && k !== 'effort' && k !== 'via' && k !== 'force_write_posture');
     if (unknown.length > 0) {
-      throw new ExecutorProfileError(`${label} has unknown key(s) ${unknown.join(', ')}; only model, effort, via are allowed.`);
+      throw new ExecutorProfileError(`${label} has unknown key(s) ${unknown.join(', ')}; only model, effort, via, force_write_posture are allowed.`);
     }
     return out;
   }
-  throw new ExecutorProfileError(`${label} must be a string "model[@effort]" or a mapping {model, effort?, via?}.`);
+  throw new ExecutorProfileError(`${label} must be a string "model[@effort]" or a mapping {model, effort?, via?, force_write_posture?}.`);
 }
 
 export function formatDialRef(ref: DialRef): string {
@@ -217,6 +272,22 @@ export function formatDialRef(ref: DialRef): string {
   if (ref.effort != null && ref.effort.length > 0) base += `@${ref.effort}`;
   if (ref.via != null && ref.via.length > 0) base += ` via ${ref.via}`;
   return base;
+}
+
+/** Compact scalars remain the normal storage form; forced refs stay explicit. */
+export function serializeDialRef(ref: DialRef): string | Record<string, unknown> {
+  if (ref.force_write_posture !== true) return formatDialRef(ref);
+  return {
+    model: ref.model,
+    ...(ref.effort != null ? { effort: ref.effort } : {}),
+    ...(ref.via != null ? { via: ref.via } : {}),
+    force_write_posture: true,
+  };
+}
+
+/** A force marker is scoped to the archetype dial that owns it, not a fallback. */
+export function forcesWritePosture(ref: DialRef, resolvedVia: string | null): boolean {
+  return ref.force_write_posture === true && resolvedVia == null;
 }
 
 export interface ModelEntry {
@@ -233,9 +304,24 @@ export interface RouteRaw {
   effort_encoding?: 'flag' | 'model-suffix';
   command?: string[] | null;
   write_access?: boolean | null;
+  timeout_ms?: number | null;
+  /**
+   * Write-capable argv variant of this route, applied when a
+   * `requires_write: required` archetype resolves onto it. Only meaningful on
+   * a route declared `write_access: false` — a variant exists to escalate a
+   * read-only delivery, nothing else.
+   */
+  write_variant?: { command: string[]; resume?: string[] | null } | null;
   host?: boolean;
   resume?: string[] | null;
   session_id_pattern?: string | null;
+  /**
+   * Per-archetype eligibility of every delivery through this route, merged
+   * with model-level eligibility (strictest wins). This is how a catalog says
+   * "this lane cannot host a director": the constraint is structural — it
+   * covers unregistered models falling through to this route too.
+   */
+  eligibility?: Record<string, EligibilityState>;
 }
 
 export interface CompiledDelivery {
@@ -254,6 +340,11 @@ export function deliveryIsHost(compiled: CompiledDelivery): boolean {
   return compiled.spec.adapter === 'host';
 }
 
+export interface ToolSpec {
+  command: string[];
+  timeoutMs?: number | null;
+}
+
 export interface ExecutorProfile {
   models: Record<string, ModelEntry>;
   routes: Record<string, Record<string, RouteRaw>>;
@@ -265,6 +356,7 @@ export interface ExecutorProfile {
   harness?: HarnessId;
   schemaVersion?: 3;
   notes: string[];
+  tools: Record<string, ToolSpec>;
 }
 
 export type HarnessId = 'codex' | 'claude' | 'grok' | 'standalone';
@@ -304,6 +396,8 @@ export function detectAmbientHarness(options: UserPathOptions = {}): AmbientHarn
 export function withoutHarnessIdentity(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const next: NodeJS.ProcessEnv = { ...env };
   delete next.FADENO_HARNESS;
+  delete next.FADENO_BUNDLED_RUNTIME;
+  delete next.FADENO_INVOCATION_SOURCE;
   for (const entry of AMBIENT_HARNESS_MARKERS) {
     for (const name of entry.variables) delete next[name];
   }
@@ -459,6 +553,33 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
           }
           route.write_access = rawRoute.write_access;
         }
+        if (rawRoute.write_variant !== undefined && rawRoute.write_variant !== null) {
+          const label = `routes.${harnessKey}.${routeKey}.write_variant`;
+          const rawVariant = rawRoute.write_variant;
+          if (!isMapping(rawVariant)) {
+            throw new ExecutorProfileError(`${source}: \`${label}\` must be a mapping with \`command\` (and optional \`resume\`).`);
+          }
+          const unknownVariantKeys = Object.keys(rawVariant).filter((k) => k !== 'command' && k !== 'resume');
+          if (unknownVariantKeys.length > 0) {
+            throw new ExecutorProfileError(`${source}: \`${label}\` has unknown key(s) ${unknownVariantKeys.join(', ')}; only \`command\` and \`resume\` are allowed.`);
+          }
+          const vcmd = rawVariant.command;
+          if (!Array.isArray(vcmd) || vcmd.length === 0 || !vcmd.every((p) => typeof p === 'string' && p.length > 0)) {
+            throw new ExecutorProfileError(`${source}: \`${label}.command\` must be a non-empty string array.`);
+          }
+          const variant: { command: string[]; resume?: string[] | null } = { command: vcmd as string[] };
+          if (rawVariant.resume !== undefined && rawVariant.resume !== null) {
+            const vrs = rawVariant.resume;
+            if (!Array.isArray(vrs) || vrs.length === 0 || !vrs.every((p) => typeof p === 'string' && p.length > 0)) {
+              throw new ExecutorProfileError(`${source}: \`${label}.resume\` must be a non-empty string array.`);
+            }
+            if (!(vrs as string[]).some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
+              throw new ExecutorProfileError(`${source}: \`${label}.resume\` must contain ${SESSION_ID_PLACEHOLDER}.`);
+            }
+            variant.resume = vrs as string[];
+          }
+          route.write_variant = variant;
+        }
         // host only (native alias removed)
         if (rawRoute.host !== undefined) {
           if (typeof rawRoute.host !== 'boolean') {
@@ -495,7 +616,76 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
             throw new ExecutorProfileError(`${source}: host route \`routes.${harnessKey}.${routeKey}\` rejects command-session fields.`);
           }
         }
-        const unknownRouteKeys = Object.keys(rawRoute).filter((k) => !['driver','models_command','effort_encoding','command','write_access','host','resume','session_id_pattern'].includes(k));
+        if (route.write_variant != null) {
+          if (route.host === true) {
+            throw new ExecutorProfileError(
+              `${source}: \`routes.${harnessKey}.${routeKey}\` declares \`write_variant\` on a \`host: true\` route — ` +
+                "in-session delivery carries the host's own permissions, and the locked fallback lane replays the " +
+                'snapshotted base argv byte-for-byte, so no host lane can deliver a variant. Declare it on a command route.',
+            );
+          }
+          if (route.write_access !== false) {
+            throw new ExecutorProfileError(
+              `${source}: \`routes.${harnessKey}.${routeKey}\` declares \`write_variant\` but not \`write_access: false\` — ` +
+                'a write variant exists to escalate a read-only delivery for `requires_write: required` archetypes; ' +
+                'a route that can already write does not need one.',
+            );
+          }
+          if (route.command == null) {
+            throw new ExecutorProfileError(
+              `${source}: \`routes.${harnessKey}.${routeKey}\` declares \`write_variant\` but no \`command\` — ` +
+                'the variant escalates a command delivery, so the base route must have one.',
+            );
+          }
+          if (JSON.stringify(route.write_variant.command) === JSON.stringify(route.command)) {
+            throw new ExecutorProfileError(
+              `${source}: \`routes.${harnessKey}.${routeKey}.write_variant.command\` is identical to the base command — ` +
+                'the variant exists to change the delivery; an identical argv would stamp write_access: true onto a ' +
+                'delivery that cannot write.',
+            );
+          }
+          // The postured spec must satisfy the same `resume ⟺ id source`
+          // invariant the base parse enforces: posture swaps in
+          // {command: variant.command, resume: variant.resume ?? null,
+          //  sessionIdPattern: variant.resume != null ? base pattern : null}.
+          const variantMintsId = route.write_variant.command.some((part) => part.includes(SESSION_ID_PLACEHOLDER));
+          if (route.write_variant.resume == null) {
+            if (variantMintsId) {
+              throw new ExecutorProfileError(
+                `${source}: \`routes.${harnessKey}.${routeKey}.write_variant.command\` contains ${SESSION_ID_PLACEHOLDER} ` +
+                  'but the variant declares no `resume` — the postured delivery would spawn the literal placeholder. ' +
+                  'Declare `write_variant.resume` or drop the placeholder from the variant command.',
+              );
+            }
+          } else {
+            const hasPattern = route.session_id_pattern != null;
+            if (variantMintsId && hasPattern) {
+              throw new ExecutorProfileError(
+                `${source}: \`routes.${harnessKey}.${routeKey}.write_variant\` declares both a ${SESSION_ID_PLACEHOLDER} ` +
+                  'placeholder in its command and inherits `session_id_pattern` — use one id source, not both.',
+              );
+            }
+            if (!variantMintsId && !hasPattern) {
+              throw new ExecutorProfileError(
+                `${source}: \`routes.${harnessKey}.${routeKey}.write_variant\` declares \`resume\` but no session id source — ` +
+                  `put ${SESSION_ID_PLACEHOLDER} in the variant command (engine-minted) or declare \`session_id_pattern\` on the route.`,
+              );
+            }
+          }
+        }
+        if (rawRoute.timeout_ms !== undefined) {
+          const tm = rawRoute.timeout_ms;
+          if (typeof tm !== 'number' || !Number.isInteger(tm) || tm <= 0) {
+            throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}.timeout_ms\` must be a positive integer (milliseconds).`);
+          }
+          route.timeout_ms = tm;
+        }
+        const routeEligibility = readEligibility(rawRoute as Record<string, unknown>, `route \`routes.${harnessKey}.${routeKey}\``, source);
+        if (Object.keys(routeEligibility).length > 0) route.eligibility = routeEligibility;
+        if (route.host === true && route.timeout_ms != null) {
+          throw new ExecutorProfileError(`${source}: host route \`routes.${harnessKey}.${routeKey}\` may not declare \`timeout_ms\` — host dispatch is not supervised.`);
+        }
+        const unknownRouteKeys = Object.keys(rawRoute).filter((k) => !['driver','models_command','effort_encoding','command','write_access','write_variant','host','resume','session_id_pattern','eligibility','timeout_ms'].includes(k));
         if (unknownRouteKeys.length > 0) {
           throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}\` has unknown key(s) ${unknownRouteKeys.join(', ')}.`);
         }
@@ -557,11 +747,11 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
         throw new ExecutorProfileError(`${source}: archetype name "${name}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
       }
       if (!isMapping(rawPolicy)) {
-        throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` is not a mapping (only \`requires_write\`, \`fallback\`, and \`distinct_provider_from_inputs\` are allowed).`);
+        throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` is not a mapping (only \`requires_write\`, \`fallback\`, \`distinct_provider_from_inputs\`, and \`brief\` are allowed).`);
       }
-      const unknown = Object.keys(rawPolicy).filter((key) => key !== 'requires_write' && key !== 'fallback' && key !== 'distinct_provider_from_inputs');
+      const unknown = Object.keys(rawPolicy).filter((key) => key !== 'requires_write' && key !== 'fallback' && key !== 'distinct_provider_from_inputs' && key !== 'brief');
       if (unknown.length > 0) {
-        throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(', ')}; only \`requires_write\`, \`fallback\`, and \`distinct_provider_from_inputs\` are allowed.`);
+        throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(', ')}; only \`requires_write\`, \`fallback\`, \`distinct_provider_from_inputs\`, and \`brief\` are allowed.`);
       }
       let requiresWrite: WritePosture = 'none';
       if (rawPolicy.requires_write !== undefined) {
@@ -587,7 +777,14 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
         }
         distinctProviderFromInputs = rawPolicy.distinct_provider_from_inputs;
       }
-      archetypes[name] = { requiresWrite, fallback, distinctProviderFromInputs };
+      let brief: string | null = null;
+      if (rawPolicy.brief != null) {
+        if (typeof rawPolicy.brief !== 'string' || !BARE_IDENTIFIER_RE.test(rawPolicy.brief)) {
+          throw new ExecutorProfileError(`${source}: \`archetypes.${name}.brief\` must be a bare lowercase identifier naming a brief template (${BARE_IDENTIFIER_RE.source}).`);
+        }
+        brief = rawPolicy.brief;
+      }
+      archetypes[name] = { requiresWrite, fallback, distinctProviderFromInputs, brief };
     }
     for (const start of Object.keys(archetypes)) {
       const path: string[] = [];
@@ -621,8 +818,61 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
     constraints = { command: command as string[] };
   }
 
+  const tools: Record<string, ToolSpec> = {};
+  if (doc.tools !== undefined && doc.tools !== null) {
+    if (!isMapping(doc.tools)) {
+      throw new ExecutorProfileError(`${source} \`tools\` is not a mapping (tool name → {command, timeout_ms?}).`);
+    }
+    for (const [name, raw] of Object.entries(doc.tools)) {
+      if (!BARE_IDENTIFIER_RE.test(name)) {
+        throw new ExecutorProfileError(`${source}: tool name "${name}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
+      }
+      if (!isMapping(raw)) {
+        throw new ExecutorProfileError(`${source}: tool "${name}" is not a mapping.`);
+      }
+      const unknown = Object.keys(raw).filter((k) => k !== 'command' && k !== 'timeout_ms' && k !== 'timeout');
+      if (unknown.length > 0) {
+        throw new ExecutorProfileError(`${source}: tool "${name}" has unknown key(s) ${unknown.join(', ')}; only command, timeout, timeout_ms are allowed.`);
+      }
+      const cmd = raw.command;
+      if (!Array.isArray(cmd) || cmd.length === 0 || !cmd.every((p) => typeof p === 'string' && p.length > 0)) {
+        throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` must be a non-empty array of non-empty strings.`);
+      }
+      for (const part of cmd as string[]) {
+        if (part.length === 0 || part.trim().length === 0) {
+          throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` contains an empty or whitespace-only string.`);
+        }
+        if (part.includes('{') || part.includes('}') || part.includes('$') || part.includes('`')) {
+          throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` must be a static argv without interpolation or placeholders; found "${part}".`);
+        }
+        if (part.includes('\n') || part.includes('\0')) {
+          throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` contains an illegal character.`);
+        }
+      }
+      let timeoutMs: number | null = null;
+      if (raw.timeout_ms !== undefined) {
+        const tm = raw.timeout_ms;
+        if (typeof tm !== 'number' || !Number.isInteger(tm) || tm <= 0) {
+          throw new ExecutorProfileError(`${source}: tool "${name}" \`timeout_ms\` must be a positive integer (milliseconds).`);
+        }
+        timeoutMs = tm;
+      }
+      if (raw.timeout !== undefined) {
+        if (timeoutMs != null) {
+          throw new ExecutorProfileError(`${source}: tool "${name}" has both timeout and timeout_ms — use one.`);
+        }
+        const tm = raw.timeout;
+        if (typeof tm !== 'number' || !Number.isInteger(tm) || tm <= 0) {
+          throw new ExecutorProfileError(`${source}: tool "${name}" \`timeout\` must be a positive integer (seconds).`);
+        }
+        timeoutMs = tm * 1000;
+      }
+      tools[name] = { command: cmd as string[], ...(timeoutMs != null ? { timeoutMs } : {}) };
+    }
+  }
+
   // Reject unknown top-level keys (to catch legacy loadouts etc. as error via schema_version already, but also unknown keys)
-  const allowedTop = ['schema_version','models','routes','dials','bindings','archetypes','constraints','unregistered_model_driver'];
+  const allowedTop = ['schema_version','models','routes','dials','bindings','archetypes','constraints','unregistered_model_driver','tools'];
   const unknownTop = Object.keys(doc).filter((k) => !allowedTop.includes(k));
   if (unknownTop.length > 0) {
     // If legacy keys like executors/targets/loadouts/default_loadout present, they already would be caught by schema_version check?
@@ -647,6 +897,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
     harness,
     schemaVersion: 3,
     notes,
+    tools,
   };
 }
 
@@ -811,7 +1062,7 @@ export function writeLocalDialState(repoRoot: string, state: LocalDialState): st
     const sorted: Record<string, unknown> = {};
     for (const k of dialKeys) {
       const ref = state.dials[k]!;
-      sorted[k] = formatDialRef(ref);
+      sorted[k] = serializeDialRef(ref);
     }
     out.dials = sorted;
   }
@@ -949,9 +1200,21 @@ export function compileDialRef(ref: DialRef, profile: ExecutorProfile): Compiled
     eligibility: Record<string, EligibilityState>,
   ): CompiledDelivery => {
     const isHost = route?.host === true || (route == null && model === 'current-host');
+    const subst = (argv: string[]): string[] =>
+      argv.map((part) => part.split('{model}').join(modelId).split('{reasoning_effort}').join(effort));
+    // Route-level eligibility merges over model-level, strictest wins — a
+    // lane's structural constraint (e.g. "no directors here") binds every
+    // model delivered through it, registered or not.
+    const ELIGIBILITY_RANK: Record<EligibilityState, number> = { eligible: 0, shadow_only: 1, forbidden: 2 };
+    const mergedEligibility: Record<string, EligibilityState> = { ...eligibility };
+    for (const [archKey, state] of Object.entries(route?.eligibility ?? {})) {
+      const current = mergedEligibility[archKey];
+      if (current == null || ELIGIBILITY_RANK[state] > ELIGIBILITY_RANK[current]) mergedEligibility[archKey] = state;
+    }
+    eligibility = mergedEligibility;
     let spec: ExecutorSpec;
     if (isHost) {
-      const fallback = route?.command ? route.command.map((part) => part.split('{model}').join(modelId).split('{reasoning_effort}').join(effort)) : null;
+      const fallback = route?.command ? subst(route.command) : null;
       spec = {
         adapter: 'host',
         model: modelId,
@@ -967,10 +1230,10 @@ export function compileDialRef(ref: DialRef, profile: ExecutorProfile): Compiled
       if (route?.command == null) {
         throw new ExecutorProfileError(`no route for driver "${driver}" in harness "${harness}" — declare routes.${harness}.${driver} with host:true or command`);
       }
-      const cmd = route.command.map((part) => part.split('{model}').join(modelId).split('{reasoning_effort}').join(effort));
+      const cmd = subst(route.command);
       let resume: string[] | null = null;
       if (route.resume != null) {
-        resume = route.resume.map((part) => part.split('{model}').join(modelId).split('{reasoning_effort}').join(effort));
+        resume = subst(route.resume);
       }
       spec = {
         adapter: 'command',
@@ -979,6 +1242,10 @@ export function compileDialRef(ref: DialRef, profile: ExecutorProfile): Compiled
         resume,
         sessionIdPattern: route.session_id_pattern ?? null,
         writeAccess: route.write_access ?? null,
+        ...(route.timeout_ms != null ? { timeoutMs: route.timeout_ms } : {}),
+        ...(route.write_variant != null
+          ? { writeVariant: { command: subst(route.write_variant.command), resume: route.write_variant.resume != null ? subst(route.write_variant.resume) : null } }
+          : {}),
         eligibility: { ...eligibility },
         ...(provider != null ? { provider } : {}),
         ...(driver ? { driver } : {}),
@@ -1046,6 +1313,48 @@ export interface DeliveryChoice {
   spec: ExecutorSpec;
 }
 
+/**
+ * Select the delivery a write posture actually gets. A `requires_write:
+ * required` archetype resolving onto a read-only spec that declares a write
+ * variant receives the variant argv (writeAccess true); every other posture
+ * receives the spec unchanged. The dial names the who; the archetype's
+ * declared policy — made once, in the catalog — authorizes the escalation.
+ */
+export function applyWritePosture(
+  spec: ExecutorSpec,
+  archetype: string | null,
+  archetypes: Record<string, ArchetypePolicy>,
+): { spec: ExecutorSpec; usedWriteVariant: boolean } {
+  if (archetype == null || !Object.hasOwn(archetypes, archetype)) return { spec, usedWriteVariant: false };
+  if (archetypes[archetype]!.requiresWrite !== 'required') return { spec, usedWriteVariant: false };
+  if (spec.writeAccess !== false) return { spec, usedWriteVariant: false };
+  // Command adapter only: in-session host delivery carries the host's own
+  // permissions, and the locked fallback lane replays the snapshotted base
+  // argv byte-for-byte — host routes refuse the write_variant key at parse.
+  if (spec.adapter !== 'command') return { spec, usedWriteVariant: false };
+  const variant = spec.writeVariant;
+  if (variant == null) return { spec, usedWriteVariant: false };
+  const next: CommandExecutorSpec = {
+    ...spec,
+    command: variant.command,
+    // A variant without its own resume does not advertise resumption: the
+    // base resume argv carries the base (read-only) permission mode.
+    resume: variant.resume ?? null,
+    sessionIdPattern: variant.resume != null ? spec.sessionIdPattern : null,
+    writeAccess: true,
+  };
+  delete next.writeVariant;
+  return { spec: next, usedWriteVariant: true };
+}
+
+// Belt-and-braces only: every in-tree caller of explainWriteConflict passes an
+// already-postured spec (writeAccess true, writeVariant deleted when a variant
+// applied), so this guard fires only for a caller that skipped posture. Kept so
+// a raw compiled spec still reads as satisfiable rather than conflicted.
+function hasWriteVariant(spec: ExecutorSpec): boolean {
+  return spec.adapter === 'command' && spec.writeVariant != null;
+}
+
 export function explainWriteConflict(
   delivery: DeliveryChoice,
   archetype: string | null,
@@ -1054,14 +1363,15 @@ export function explainWriteConflict(
   if (archetype == null) return null;
   if (!Object.hasOwn(profile.archetypes, archetype)) return null;
   const posture = profile.archetypes[archetype]!.requiresWrite;
-  if (posture === 'required' && delivery.spec.writeAccess === false) {
+  if (posture === 'required' && delivery.spec.writeAccess === false && !hasWriteVariant(delivery.spec)) {
     return (
       `archetype "${archetype}" declares \`requires_write: required\`, but executor "${delivery.executor}" ` +
       'delivers through a command route declared `write_access: false` — it cannot mutate the ' +
       'workspace, so the dispatch would burn a run and end in a refusal. ' +
       `Fix: bind "${archetype}" to a write-capable executor, ` +
-      "raise the route command's permission mode (and declare `write_access: true`), " +
-      `or run this ${archetype}-shaped task with the in-session ${archetype} agent.`
+      "declare a `write_variant` on the route (a write-capable argv selected automatically for write-requiring archetypes), " +
+      `or run this ${archetype}-shaped task with the in-session ${archetype} agent. ` +
+      'You can override this guard by rerunning the dial with `--force`, but doing so is not suggested because the executor may be unable to complete the work.'
     );
   }
   if (posture === 'forbidden' && delivery.spec.writeAccess === true) {
@@ -1070,8 +1380,9 @@ export function explainWriteConflict(
       'delivers through a command route declared `write_access: true` — the dispatch would hand a ' +
       'mutating toolchain to work that must not mutate the workspace. ' +
       `Fix: bind "${archetype}" to a read-only route, ` +
-      `clear the session dial (\`fadeno loadout clear ${archetype}\`), ` +
-      'or declare `requires_write: none`.'
+      `clear the session dial (\`fadeno dial clear ${archetype}\`), ` +
+      'or declare `requires_write: none`. ' +
+      'You can override this guard by rerunning the dial with `--force`, but doing so is not suggested because it hands mutating capability to write-forbidden work.'
     );
   }
   return null;
@@ -1182,6 +1493,7 @@ export interface SnapshotDocument {
   bindings: Record<string, DialRef>;
   archetypes: Record<string, ArchetypePolicy>;
   constraints: { command: string[] } | null;
+  tools: Record<string, ToolSpec>;
 }
 
 function parseExecutorSpecEntry(raw: unknown, label: string, source: string): ExecutorSpec {
@@ -1232,6 +1544,12 @@ function parseExecutorSpecEntry(raw: unknown, label: string, source: string): Ex
         if (v !== 'eligible' && v !== 'shadow_only' && v !== 'forbidden') throw new ExecutorProfileError(`${source}: ${label} host executor \`eligibility.${k}\` must be "eligible", "shadow_only", or "forbidden".`);
         eligibility[k] = v;
       }
+    }
+    if (raw.write_variant !== undefined) {
+      throw new ExecutorProfileError(`${source}: ${label} host executor rejects \`write_variant\` — write variants are command-delivery only.`);
+    }
+    if (raw.timeout_ms !== undefined) {
+      throw new ExecutorProfileError(`${source}: ${label} host executor rejects \`timeout_ms\` — host dispatch is not supervised.`);
     }
     const spec: HostExecutorSpec = {
       adapter: 'host', model, reasoningEffort, agentType, fallbackCommand, writeAccess, eligibility,
@@ -1299,6 +1617,51 @@ function parseExecutorSpecEntry(raw: unknown, label: string, source: string): Ex
       eligibility[k] = v;
     }
   }
+  let timeoutMs: number | null = null;
+  if (raw.timeout_ms !== undefined) {
+    const tm = raw.timeout_ms;
+    if (typeof tm !== 'number' || !Number.isInteger(tm) || tm <= 0) {
+      throw new ExecutorProfileError(`${source}: ${label} \`timeout_ms\` must be a positive integer (milliseconds).`);
+    }
+    timeoutMs = tm;
+  }
+  // The snapshot is the replay trust boundary: re-assert the same variant
+  // invariants the catalog parse enforces, never fewer.
+  let writeVariant: { command: string[]; resume: string[] | null } | null = null;
+  if (raw.write_variant != null) {
+    if (!isMapping(raw.write_variant)) {
+      throw new ExecutorProfileError(`${source}: ${label} \`write_variant\` is not a mapping.`);
+    }
+    const vcmd = raw.write_variant.command;
+    if (!Array.isArray(vcmd) || vcmd.length === 0 || !vcmd.every((part) => typeof part === 'string' && part.length > 0)) {
+      throw new ExecutorProfileError(`${source}: ${label} \`write_variant.command\` must be a non-empty array of strings.`);
+    }
+    let vresume: string[] | null = null;
+    if (raw.write_variant.resume != null) {
+      const vrs = raw.write_variant.resume;
+      if (!Array.isArray(vrs) || vrs.length === 0 || !vrs.every((part) => typeof part === 'string' && part.length > 0)) {
+        throw new ExecutorProfileError(`${source}: ${label} \`write_variant.resume\` must be a non-empty array of strings.`);
+      }
+      if (!(vrs as string[]).some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
+        throw new ExecutorProfileError(`${source}: ${label} \`write_variant.resume\` must contain ${SESSION_ID_PLACEHOLDER}.`);
+      }
+      vresume = vrs as string[];
+    }
+    const variantMintsId = (vcmd as string[]).some((part) => part.includes(SESSION_ID_PLACEHOLDER));
+    if (vresume == null && variantMintsId) {
+      throw new ExecutorProfileError(`${source}: ${label} \`write_variant.command\` contains ${SESSION_ID_PLACEHOLDER} but the variant declares no \`resume\` — the postured delivery would spawn the literal placeholder.`);
+    }
+    if (vresume != null) {
+      const hasPattern = sessionIdPattern != null;
+      if (variantMintsId && hasPattern) {
+        throw new ExecutorProfileError(`${source}: ${label} \`write_variant\` declares both a ${SESSION_ID_PLACEHOLDER} placeholder and inherits \`session_id_pattern\` — one id source only.`);
+      }
+      if (!variantMintsId && !hasPattern) {
+        throw new ExecutorProfileError(`${source}: ${label} \`write_variant\` declares \`resume\` but no session id source.`);
+      }
+    }
+    writeVariant = { command: vcmd as string[], resume: vresume };
+  }
   const spec: CommandExecutorSpec = {
     adapter: 'command',
     command: command as string[],
@@ -1306,6 +1669,8 @@ function parseExecutorSpecEntry(raw: unknown, label: string, source: string): Ex
     resume,
     sessionIdPattern,
     writeAccess,
+    ...(timeoutMs != null ? { timeoutMs } : {}),
+    ...(writeVariant != null ? { writeVariant } : {}),
     eligibility,
     ...(typeof raw.target === 'string' ? { target: raw.target } : {}),
     ...(typeof raw.provider === 'string' ? { provider: raw.provider } : {}),
@@ -1337,6 +1702,8 @@ export function serializeSnapshot(profile: ExecutorProfile, extraRefs: DialRef[]
   for (const ref of Object.values(profile.dials)) insertRef(ref);
   for (const ref of extraRefs) insertRef(ref);
 
+  const tools: Record<string, ToolSpec> = { ...profile.tools };
+
   const sortedExecutors: Record<string, Record<string, unknown>> = {};
   for (const name of Object.keys(executorsMap).sort()) {
     const spec = executorsMap[name]!;
@@ -1353,6 +1720,12 @@ export function serializeSnapshot(profile: ExecutorProfile, extraRefs: DialRef[]
     if ((spec as CommandExecutorSpec).driver != null) entry.driver = (spec as unknown as Record<string, unknown>).driver;
     if (spec.adapter === 'command' && (spec as CommandExecutorSpec).model != null) entry.model = (spec as CommandExecutorSpec).model;
     if (spec.writeAccess != null) entry.write_access = spec.writeAccess;
+    if (spec.adapter === 'command' && spec.writeVariant != null) {
+      entry.write_variant = {
+        command: spec.writeVariant.command,
+        ...(spec.writeVariant.resume != null ? { resume: spec.writeVariant.resume } : {}),
+      };
+    }
     if (spec.eligibility != null && Object.keys(spec.eligibility).length > 0) {
       const sortedEligibility: Record<string, EligibilityState> = {};
       for (const key of Object.keys(spec.eligibility).sort()) {
@@ -1361,6 +1734,7 @@ export function serializeSnapshot(profile: ExecutorProfile, extraRefs: DialRef[]
       }
       entry.eligibility = sortedEligibility;
     }
+    if (spec.adapter === 'command' && (spec as CommandExecutorSpec).timeoutMs != null) entry.timeout_ms = (spec as CommandExecutorSpec).timeoutMs;
     if (spec.adapter === 'command' && spec.resume != null) entry.resume = spec.resume;
     if (spec.adapter === 'command' && spec.sessionIdPattern != null) entry.session_id_pattern = spec.sessionIdPattern;
     if (spec.adapter === 'host' && spec.target != null) entry.target = spec.target;
@@ -1369,9 +1743,9 @@ export function serializeSnapshot(profile: ExecutorProfile, extraRefs: DialRef[]
   }
   const out: Record<string, unknown> = { snapshot_version: 3, executors: sortedExecutors };
   if (Object.keys(profile.bindings).length > 0) {
-    const sortedBindings: Record<string, string> = {};
+    const sortedBindings: Record<string, unknown> = {};
     for (const role of Object.keys(profile.bindings).sort()) {
-      sortedBindings[role] = formatDialRef(profile.bindings[role]!);
+      sortedBindings[role] = serializeDialRef(profile.bindings[role]!);
     }
     out.bindings = sortedBindings;
   }
@@ -1383,11 +1757,22 @@ export function serializeSnapshot(profile: ExecutorProfile, extraRefs: DialRef[]
       if (policy.requiresWrite !== 'none') entry.requires_write = policy.requiresWrite;
       if (typeof policy.fallback === 'string') entry.fallback = policy.fallback;
       if (policy.distinctProviderFromInputs != null) entry.distinct_provider_from_inputs = policy.distinctProviderFromInputs;
+      if (policy.brief != null) entry.brief = policy.brief;
       sortedArchetypes[name] = entry;
     }
     out.archetypes = sortedArchetypes;
   }
   if (profile.constraints != null) out.constraints = { command: profile.constraints.command };
+  if (Object.keys(tools).length > 0) {
+    const sortedTools: Record<string, Record<string, unknown>> = {};
+    for (const name of Object.keys(tools).sort()) {
+      const spec = tools[name]!;
+      const entry: Record<string, unknown> = { command: spec.command };
+      if (spec.timeoutMs != null) entry.timeout_ms = spec.timeoutMs;
+      sortedTools[name] = entry;
+    }
+    out.tools = sortedTools;
+  }
   return stringifyYaml(out);
 }
 
@@ -1425,7 +1810,7 @@ export function parseSnapshotDocument(text: string, source: string): SnapshotDoc
     for (const [name, rawPolicy] of Object.entries(doc.archetypes)) {
       if (!BARE_IDENTIFIER_RE.test(name)) throw new ExecutorProfileError(`${source}: archetype name "${name}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
       if (!isMapping(rawPolicy)) throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` is not a mapping.`);
-      const unknown = Object.keys(rawPolicy).filter((key) => key !== 'requires_write' && key !== 'fallback' && key !== 'distinct_provider_from_inputs');
+      const unknown = Object.keys(rawPolicy).filter((key) => key !== 'requires_write' && key !== 'fallback' && key !== 'distinct_provider_from_inputs' && key !== 'brief');
       if (unknown.length > 0) throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(', ')}.`);
       let requiresWrite: WritePosture = 'none';
       if (rawPolicy.requires_write !== undefined) {
@@ -1445,7 +1830,12 @@ export function parseSnapshotDocument(text: string, source: string): SnapshotDoc
         if (rawPolicy.distinct_provider_from_inputs !== 'advisory' && rawPolicy.distinct_provider_from_inputs !== 'required') throw new ExecutorProfileError(`${source}: \`archetypes.${name}.distinct_provider_from_inputs\` must be "advisory" or "required".`);
         distinctProviderFromInputs = rawPolicy.distinct_provider_from_inputs;
       }
-      archetypes[name] = { requiresWrite, fallback, distinctProviderFromInputs };
+      let brief: string | null = null;
+      if (rawPolicy.brief != null) {
+        if (typeof rawPolicy.brief !== 'string' || !BARE_IDENTIFIER_RE.test(rawPolicy.brief)) throw new ExecutorProfileError(`${source}: \`archetypes.${name}.brief\` must be a bare lowercase identifier.`);
+        brief = rawPolicy.brief;
+      }
+      archetypes[name] = { requiresWrite, fallback, distinctProviderFromInputs, brief };
     }
     for (const start of Object.keys(archetypes)) {
       const path: string[] = [];
@@ -1471,8 +1861,51 @@ export function parseSnapshotDocument(text: string, source: string): SnapshotDoc
     if (!Array.isArray(command) || command.length === 0 || !command.every((p) => typeof p === 'string' && p.length > 0)) throw new ExecutorProfileError(`${source}: \`constraints.command\` must be a non-empty array of non-empty strings.`);
     constraints = { command: command as string[] };
   }
-  const allowed = ['snapshot_version','executors','bindings','archetypes','constraints'];
+  const tools: Record<string, ToolSpec> = {};
+  if ((doc as Record<string, unknown>).tools !== undefined && (doc as Record<string, unknown>).tools !== null) {
+    const rawTools = (doc as Record<string, unknown>).tools;
+    if (!isMapping(rawTools)) throw new ExecutorProfileError(`${source} \`tools\` is not a mapping.`);
+    for (const [name, raw] of Object.entries(rawTools)) {
+      if (!BARE_IDENTIFIER_RE.test(name)) throw new ExecutorProfileError(`${source}: tool name "${name}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
+      if (!isMapping(raw)) throw new ExecutorProfileError(`${source}: tool "${name}" is not a mapping.`);
+      const unknown = Object.keys(raw).filter((k) => k !== 'command' && k !== 'timeout_ms' && k !== 'timeout');
+      if (unknown.length > 0) throw new ExecutorProfileError(`${source}: tool "${name}" has unknown key(s) ${unknown.join(', ')}; only command, timeout, timeout_ms are allowed.`);
+      const cmd = (raw as Record<string, unknown>).command;
+      if (!Array.isArray(cmd) || cmd.length === 0 || !cmd.every((p) => typeof p === 'string' && p.length > 0)) {
+        throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` must be a non-empty array of non-empty strings.`);
+      }
+      for (const part of cmd as string[]) {
+        if (part.length === 0 || part.trim().length === 0) {
+          throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` contains an empty or whitespace-only string.`);
+        }
+        if (part.includes('{') || part.includes('}') || part.includes('$') || part.includes('`')) {
+          throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` must be a static argv without interpolation or placeholders; found "${part}".`);
+        }
+        if (part.includes('\n') || part.includes('\0')) {
+          throw new ExecutorProfileError(`${source}: tool "${name}" \`command\` contains an illegal character.`);
+        }
+      }
+      let timeoutMs: number | null = null;
+      if ((raw as Record<string, unknown>).timeout_ms !== undefined) {
+        const tm = (raw as Record<string, unknown>).timeout_ms;
+        if (typeof tm !== 'number' || !Number.isInteger(tm) || tm <= 0) {
+          throw new ExecutorProfileError(`${source}: tool "${name}" \`timeout_ms\` must be a positive integer (milliseconds).`);
+        }
+        timeoutMs = tm as number;
+      }
+      if ((raw as Record<string, unknown>).timeout !== undefined) {
+        if (timeoutMs != null) throw new ExecutorProfileError(`${source}: tool "${name}" has both timeout and timeout_ms — use one.`);
+        const tm = (raw as Record<string, unknown>).timeout;
+        if (typeof tm !== 'number' || !Number.isInteger(tm) || tm <= 0) {
+          throw new ExecutorProfileError(`${source}: tool "${name}" \`timeout\` must be a positive integer (seconds).`);
+        }
+        timeoutMs = (tm as number) * 1000;
+      }
+      tools[name] = { command: cmd as string[], ...(timeoutMs != null ? { timeoutMs } : {}) };
+    }
+  }
+  const allowed = ['snapshot_version','executors','bindings','archetypes','constraints','tools'];
   const unknownTop = Object.keys(doc).filter((k) => !allowed.includes(k));
   if (unknownTop.length > 0) throw new ExecutorProfileError(`${source} has unknown key(s) ${unknownTop.join(', ')}.`);
-  return { executors, bindings, archetypes, constraints };
+  return { executors, bindings, archetypes, constraints, tools };
 }

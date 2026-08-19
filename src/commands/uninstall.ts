@@ -103,6 +103,10 @@ export function runUninstall(opts: UninstallOptions): UninstallResult {
   }
   if (Object.keys(manifest.harnesses).length === 0) {
     rmSync(paths.managedRuntimeDir, { recursive: true, force: true });
+    // Clean staging/rollback/lock siblings when removing final runtime
+    rmSync(join(paths.dataDir, 'runtime.staging'), { recursive: true, force: true });
+    rmSync(join(paths.dataDir, 'runtime.old'), { recursive: true, force: true });
+    rmSync(join(paths.dataDir, '.runtime.lock'), { recursive: true, force: true });
     manifest.runtime = null;
   }
   writeInstallationManifest(paths, manifest);

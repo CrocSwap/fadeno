@@ -6,6 +6,8 @@ import { loadLayeredProfile, type LayeredProfile } from '../lib/config-layers.ts
 import {
   activeHarness,
   BARE_IDENTIFIER_RE,
+  applyWritePosture,
+  archetypeDisplaySort,
   compileDialRef,
   deliveryIsHost,
   dispatchability,
@@ -14,10 +16,12 @@ import {
   explainEligibilityConflict,
   explainWriteConflict,
   formatDialRef,
+  forcesWritePosture,
   parseDialRef,
   readLocalDialState,
   resolveDialCascade,
   resolveRole,
+  serializeDialRef,
   writeLocalDialState,
   type DialRef,
   type ExecutorProfile,
@@ -44,12 +48,19 @@ export interface EffectiveRow {
   model_id: string;
   effort: string;
   driver: string;
+  /** Frame-neutral model harness identity. */
+  harness: string;
+  /** Backward-compatible alias for `harness`. */
   delivery: string;
   source: RoleResolutionSource;
   resolvedVia: string | null;
   dial: DialRef;
   refString: string;
   adapter: 'command' | 'host';
+  /** True when a write-requiring archetype gets this route's write variant. */
+  write_variant?: boolean;
+  /** True when this direct dial explicitly overrides a write-posture mismatch. */
+  write_posture_forced?: boolean;
   eligibility?: string;
   shadow?: ShadowAttachmentView;
   // display helpers
@@ -244,8 +255,11 @@ export interface DialSetOptions extends DialCommonOptions {
   archetype: string;
   model: string; // model[@effort]
   via?: string | null;
+  session?: boolean;
   user?: boolean;
   repo?: boolean;
+  /** Persist an explicit override when this binding mismatches write posture. */
+  force?: boolean;
   /** injectable spawn for probe */
   spawn?: ProbeOptions['spawn'];
 }
@@ -258,6 +272,7 @@ export interface DialSetResult {
   model_id: string;
   effort: string;
   driver: string;
+  harness: string;
   delivery: string;
   layer: 'session' | 'repo' | 'user';
   adaptive: boolean;
@@ -269,9 +284,96 @@ export interface DialSetResult {
   notes: string[];
 }
 
+export interface DialSetManyOptions extends DialCommonOptions {
+  /** Archetype names, already split (the CLI accepts `a+b`, `a,b`, and `a b`). */
+  archetypes: string[];
+  model: string;
+  via?: string | null;
+  session?: boolean;
+  user?: boolean;
+  repo?: boolean;
+  force?: boolean;
+  spawn?: ProbeOptions['spawn'];
+}
+
+/**
+ * Set the same dial on several archetypes, atomically: every archetype is
+ * validated (reserved words, identifier shape, write posture, eligibility)
+ * before ANY write, so `dial worker+generator muse` either lands everywhere
+ * or refuses whole, naming each conflict. The probe runs once — the first
+ * set verifies, the rest hit the positive cache.
+ */
+export function runDialSetMany(opts: DialSetManyOptions): DialSetResult[] {
+  const archetypes: string[] = [];
+  for (const raw of opts.archetypes) {
+    const name = raw.trim();
+    if (name.length > 0 && !archetypes.includes(name)) archetypes.push(name);
+  }
+  if (archetypes.length === 0) {
+    throw new DialError('Usage: fadeno dial <archetype>[+<archetype>…] <model>[@effort] [--via <driver>] [--session|--user|--repo] [--force]');
+  }
+  if ([opts.session, opts.user, opts.repo].filter(Boolean).length > 1) {
+    throw new DialError('--session, --user, and --repo are mutually exclusive.');
+  }
+  const repoRoot = repoRootOf(opts);
+  const modelInput = opts.model.trim();
+  if (modelInput.length === 0) {
+    throw new DialError('Usage: fadeno dial <archetype>[+<archetype>…] <model>[@effort] [--via <driver>] [--session|--user|--repo] [--force]');
+  }
+  let dial: DialRef;
+  try {
+    dial = buildDialRef(modelInput, opts.via?.trim() || undefined, `model "${modelInput}"`);
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new DialError(err.message);
+    throw err;
+  }
+  const layered = loadLayered(repoRoot, opts.userPathOptions);
+  const profile = layered.profile;
+  let compiled: CompiledDelivery;
+  try {
+    compiled = compileDialRef(dial, profile);
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new DialError(err.message);
+    throw err;
+  }
+  const refString = formatDialRef(dial);
+  // Atomic pre-validation: same checks runDialSet applies, over every
+  // archetype, before a single write.
+  const failures: string[] = [];
+  for (const archetype of archetypes) {
+    if (archetype === 'set' || archetype === 'clear' || archetype === 'shadow' || archetype === 'clear-shadow' || archetype === 'resolve') {
+      failures.push(`archetype "${archetype}" is a reserved word — rename the archetype`);
+      continue;
+    }
+    if (!BARE_IDENTIFIER_RE.test(archetype)) {
+      failures.push(`archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
+      continue;
+    }
+    if (compiled.spec.adapter === 'command') {
+      const conflict = explainWriteConflict({ executor: refString, spec: compiled.spec }, archetype, profile);
+      if (conflict != null && opts.force !== true) {
+        failures.push(conflict);
+        continue;
+      }
+    }
+    const eligibilityConflict = explainEligibilityConflict({ executor: refString, spec: compiled.spec }, archetype);
+    if (eligibilityConflict != null) failures.push(eligibilityConflict);
+  }
+  if (failures.length > 0) {
+    throw new DialError(
+      archetypes.length > 1
+        ? `nothing was dialed — ${failures.length} of ${archetypes.length} archetype(s) refused:\n  ${failures.join('\n  ')}`
+        : failures[0]!,
+    );
+  }
+  return archetypes.map((archetype) => runDialSet({ ...opts, archetype }));
+}
+
 export function runDialSet(opts: DialSetOptions): DialSetResult {
   const repoRoot = repoRootOf(opts);
-  if (opts.user && opts.repo) throw new DialError('--user and --repo are mutually exclusive.');
+  if ([opts.session, opts.user, opts.repo].filter(Boolean).length > 1) {
+    throw new DialError('--session, --user, and --repo are mutually exclusive.');
+  }
   const archetype = opts.archetype.trim();
   if (archetype === 'set' || archetype === 'clear' || archetype === 'shadow' || archetype === 'clear-shadow' || archetype === 'resolve') {
     throw new DialError(`archetype "${archetype}" is a reserved word — rename the archetype`);
@@ -280,7 +382,7 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
     throw new DialError(`archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
   }
   const modelInput = opts.model.trim();
-  if (modelInput.length === 0) throw new DialError('Usage: fadeno dial <archetype> <model>[@effort] [--via <driver>] [--user|--repo]');
+  if (modelInput.length === 0) throw new DialError('Usage: fadeno dial <archetype> <model>[@effort] [--via <driver>] [--session|--user|--repo] [--force]');
   // Build dial ref
   let dial: DialRef;
   try {
@@ -301,17 +403,14 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
   }
   const refString = formatDialRef(dial);
   // Set-time checks
-  // a. @effort on host delivery
-  if (dial.effort != null && deliveryIsHost(compiled)) {
-    throw new DialError('native delivery cannot pin reasoning effort (the host controls it). Dial a command-delivered model to control effort.');
-  }
   // b. Write posture and eligibility. Host deliveries are exempt from the
   // write check: the in-session agent's permissions are the host's business,
   // and a host spec's write_access describes only its command fallback.
-  if (compiled.spec.adapter === 'command') {
-    const conflict = explainWriteConflict({ executor: refString, spec: compiled.spec }, archetype, profile);
-    if (conflict != null) throw new DialError(conflict);
-  }
+  const writeConflict = compiled.spec.adapter === 'command'
+    ? explainWriteConflict({ executor: refString, spec: compiled.spec }, archetype, profile)
+    : null;
+  if (writeConflict != null && opts.force !== true) throw new DialError(writeConflict);
+  if (writeConflict != null) dial.force_write_posture = true;
   const eligibilityConflict = explainEligibilityConflict({ executor: refString, spec: compiled.spec }, archetype);
   if (eligibilityConflict != null) throw new DialError(eligibilityConflict);
 
@@ -319,6 +418,29 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
   let verification: VerificationStatus = null;
   let probeNote: string | null = null;
   const notes: string[] = [];
+  if (writeConflict != null) {
+    notes.push(
+      `WARNING: FORCED WRITE-POSTURE MISMATCH — ${archetype} → ${refString}\n` +
+      `${writeConflict}\n` +
+      'The override is persisted with this dial and applies at dispatch time. Clear or replace the dial to remove it.',
+    );
+  }
+  // @effort on host delivery is a request, not a live setting: it travels on
+  // the compiled spec and is applied by the materialized agent surface (codex
+  // TOMLs, .claude agent frontmatter). Say so instead of refusing.
+  if (dial.effort != null && deliveryIsHost(compiled)) {
+    notes.push(
+      `note: ${compiled.driver} host route — effort ${compiled.effort} is recorded as the request; run \`fadeno steering apply\` to pin it into the host agent slots`,
+    );
+  }
+  {
+    const postured = applyWritePosture(compiled.spec, archetype, profile.archetypes);
+    if (postured.usedWriteVariant) {
+      notes.push(
+        `note: ${archetype} requires write — ${refString} delivers through the ${compiled.driver} route's write variant`,
+      );
+    }
+  }
   if (!compiled.registered) {
     notes.push(
       `note: ${compiled.model} is not in the model registry — routing via ${compiled.driver}, id passed verbatim ` +
@@ -356,19 +478,23 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
   // Note: readLocalDialState may throw if malformed; convert to DialError
   // Already handled inside readLocalDialState which throws ExecutorProfileError
   const userDials = readUserDials(opts.userPathOptions);
+  const sessionPinned = Object.hasOwn(localState.dials, archetype);
   const repoPinned = Object.hasOwn(profile.dials, archetype) ? profile.dials[archetype]! : null;
+  const userPinned = Object.hasOwn(userDials, archetype);
   let layer: 'session' | 'repo' | 'user';
   let adaptive = false;
-  if (opts.user) layer = 'user';
+  if (opts.session) layer = 'session';
+  else if (opts.user) layer = 'user';
   else if (opts.repo) layer = 'repo';
   else {
-    if (repoPinned != null) {
-      layer = 'session';
-      adaptive = true;
-    } else {
-      layer = 'user';
-      adaptive = false;
-    }
+    // An unscoped set edits the highest existing dial instead of writing a
+    // shadowed lower layer. With no existing dial, the cross-repo user
+    // default remains the natural creation target.
+    if (sessionPinned) layer = 'session';
+    else if (repoPinned != null) layer = 'repo';
+    else if (userPinned) layer = 'user';
+    else layer = 'user';
+    adaptive = sessionPinned || repoPinned != null || userPinned;
   }
 
   // Determine previous in target layer
@@ -381,19 +507,15 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
     previous = { layer: 'repo', dial: repoPinned };
   }
 
-  // Narrative + delivery string
-  const delivery = deliveryIsHost(compiled) ? 'in-session (host)' : `${compiled.driver} (command)`;
+  // Frame-neutral model harness. Adapter mechanics remain separate on the
+  // compiled delivery and are selected by the caller's host at dispatch.
+  const delivery = compiled.driver;
   let narrative = '';
   const modelDisplay = refString;
   if (layer === 'user') {
     narrative = `${archetype} → ${modelDisplay}  [user default — applies across your repos]`;
   } else if (layer === 'session') {
-    if (adaptive && repoPinned != null) {
-      const repoStr = formatDialRef(repoPinned);
-      narrative = `${archetype} → ${modelDisplay}  [this repo only, sticky until cleared — ${archetype} is repo-pinned to ${repoStr} here; --user sets your global default, which this repo will keep overriding]`;
-    } else {
-      narrative = `${archetype} → ${modelDisplay}  [this repo only, sticky until cleared]`;
-    }
+    narrative = `${archetype} → ${modelDisplay}  [session dial — this checkout only, sticky until cleared]`;
   } else if (layer === 'repo') {
     narrative = `${archetype} → ${modelDisplay}  [repo pin — committed in .fadeno/executors.yaml]`;
   }
@@ -425,7 +547,7 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
     if (!doc.has('dials')) {
       doc.set('dials', doc.createNode({}));
     }
-    doc.setIn(['dials', archetype], refString);
+    doc.setIn(['dials', archetype], serializeDialRef(dial));
     // Ensure schema_version 3 exists
     if (!doc.has('schema_version')) {
       doc.set('schema_version', 3);
@@ -444,6 +566,7 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
     model_id: compiled.modelId,
     effort: compiled.effort,
     driver: compiled.driver,
+    harness: compiled.driver,
     delivery,
     layer,
     adaptive,
@@ -458,6 +581,7 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
 // ---- Clear ----
 export interface DialClearOptions extends DialCommonOptions {
   archetype?: string | null;
+  session?: boolean;
   user?: boolean;
   repo?: boolean;
   // repo clear requires explicit archetype
@@ -471,13 +595,23 @@ export interface DialClearResult {
   remaining: Record<string, DialRef>;
   // For no-arg clear all
   count?: number;
-  /** Where the dial actually lives when a session clear found nothing (never cleared adaptively). */
-  livesAt?: 'repo' | 'user' | null;
+  /** Where the dial lives when a plain clear found nothing it may remove: a
+   * repo pin blocks layer inference (committed config, explicit --repo only). */
+  livesAt?: 'repo' | null;
+  /** True when a plain clear fell through to the user default because it was
+   * the only layer holding a dial (no session dial, no repo pin). */
+  inferred?: boolean;
+  /** Bulk clear: how many dials each layer gave up. */
+  cleared_layers?: { session: number; user: number };
+  /** Bulk clear: repo pins left standing (committed config, --repo only). */
+  repo_pins_remaining?: string[];
 }
 
 export function runDialClear(opts: DialClearOptions = {}): DialClearResult {
   const repoRoot = repoRootOf(opts);
-  if (opts.user && opts.repo) throw new DialError('--user and --repo are mutually exclusive.');
+  if ([opts.session, opts.user, opts.repo].filter(Boolean).length > 1) {
+    throw new DialError('--session, --user, and --repo are mutually exclusive.');
+  }
   const archetypeRaw = opts.archetype?.trim() ?? null;
   const archetype = archetypeRaw && archetypeRaw.length > 0 ? archetypeRaw : null;
   if (archetype != null && !BARE_IDENTIFIER_RE.test(archetype)) {
@@ -491,6 +625,13 @@ export function runDialClear(opts: DialClearOptions = {}): DialClearResult {
 
   // No archetype: clear all in layer
   if (archetype == null) {
+    if (opts.session) {
+      const state = readLocalDialState(repoRoot);
+      const count = Object.keys(state.dials).length;
+      if (count === 0) return { cleared: null, removed: false, archetype: null, layer: 'session', remaining: {}, count: 0 };
+      writeLocalDialState(repoRoot, { dials: {}, shadows: state.shadows, legacyNote: null });
+      return { cleared: null, removed: true, archetype: null, layer: 'session', remaining: {}, count };
+    }
     if (opts.user) {
       const userDials = readUserDials(opts.userPathOptions);
       const count = Object.keys(userDials).length;
@@ -498,16 +639,42 @@ export function runDialClear(opts: DialClearOptions = {}): DialClearResult {
       writeUserDials(opts.userPathOptions ?? {}, {});
       return { cleared: null, removed: true, archetype: null, layer: 'user', remaining: {}, count };
     }
-    // default: clear ALL session dials, preserve shadows
+    // Default bulk clear: every archetype, every non-committed layer —
+    // session dials AND user dials go; repo pins are committed config and
+    // stay until an explicit `clear <archetype> --repo`. Shadows persist
+    // (they have their own clear-shadow).
     const state = readLocalDialState(repoRoot);
-    const count = Object.keys(state.dials).length;
-    if (count === 0) return { cleared: null, removed: false, archetype: null, layer: 'session', remaining: {}, count: 0 };
-    // Preserve shadows
-    writeLocalDialState(repoRoot, { dials: {}, shadows: state.shadows, legacyNote: null });
-    return { cleared: null, removed: true, archetype: null, layer: 'session', remaining: {}, count };
+    const userDials = readUserDials(opts.userPathOptions);
+    const sessionCount = Object.keys(state.dials).length;
+    const userCount = Object.keys(userDials).length;
+    const repoPins = (() => {
+      try {
+        return archetypeDisplaySort(Object.keys(loadLayered(repoRoot, opts.userPathOptions).profile.dials));
+      } catch {
+        return [] as string[];
+      }
+    })();
+    const count = sessionCount + userCount;
+    if (count === 0) {
+      return { cleared: null, removed: false, archetype: null, layer: null, remaining: {}, count: 0, cleared_layers: { session: 0, user: 0 }, repo_pins_remaining: repoPins };
+    }
+    if (sessionCount > 0) writeLocalDialState(repoRoot, { dials: {}, shadows: state.shadows, legacyNote: null });
+    if (userCount > 0) writeUserDials(opts.userPathOptions ?? {}, {});
+    return { cleared: null, removed: true, archetype: null, layer: null, remaining: {}, count, cleared_layers: { session: sessionCount, user: userCount }, repo_pins_remaining: repoPins };
   }
 
   // Single archetype clear
+  if (opts.session) {
+    const state = readLocalDialState(repoRoot);
+    if (!Object.hasOwn(state.dials, archetype)) {
+      return { cleared: null, removed: false, archetype, layer: 'session', remaining: state.dials };
+    }
+    const prev = state.dials[archetype]!;
+    const nextDials = { ...state.dials };
+    delete nextDials[archetype];
+    writeLocalDialState(repoRoot, { dials: nextDials, shadows: state.shadows, legacyNote: null });
+    return { cleared: formatDialRef(prev), removed: true, archetype, layer: 'session', remaining: nextDials };
+  }
   if (opts.repo) {
     // Remove from .fadeno/executors.yaml dials
     const executorsPath = join(repoRoot, '.fadeno', 'executors.yaml');
@@ -554,17 +721,23 @@ export function runDialClear(opts: DialClearOptions = {}): DialClearResult {
     writeUserDials(opts.userPathOptions ?? {}, next as Record<string, DialRef>);
     return { cleared: prev ? String((prev as { model: string }).model) : archetype, removed: true, archetype, layer: 'user', remaining: next as Record<string, DialRef> };
   }
-  // Default session clear (never adaptive downward): when the session holds
-  // no dial, report where one lives instead of reaching into another layer.
+  // Default clear: session first. When the session holds no dial and there is
+  // no repo pin, the user default is the only dial this clear can mean — clear
+  // it and say which layer answered. A repo pin blocks the inference (it is
+  // committed config, removed only with an explicit --repo) and keeps the
+  // guidance message instead.
   const state = readLocalDialState(repoRoot);
   if (!Object.hasOwn(state.dials, archetype)) {
     const layered = loadLayered(repoRoot, opts.userPathOptions);
     const userDials = readUserDials(opts.userPathOptions);
-    const livesAt = Object.hasOwn(layered.profile.dials, archetype)
-      ? ('repo' as const)
-      : Object.hasOwn(userDials, archetype)
-        ? ('user' as const)
-        : null;
+    if (!Object.hasOwn(layered.profile.dials, archetype) && Object.hasOwn(userDials, archetype)) {
+      const prev = userDials[archetype] as DialRef;
+      const next = { ...userDials } as Record<string, DialRef>;
+      delete next[archetype];
+      writeUserDials(opts.userPathOptions ?? {}, next);
+      return { cleared: formatDialRef(prev), removed: true, archetype, layer: 'user', inferred: true, remaining: next };
+    }
+    const livesAt = Object.hasOwn(layered.profile.dials, archetype) ? ('repo' as const) : null;
     return { cleared: null, removed: false, archetype, layer: null, remaining: state.dials, livesAt };
   }
   const prev = state.dials[archetype]!;
@@ -785,7 +958,7 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
   // Also include bindings keys that are archetype-like? bindings are role->dial, but effective table is per archetype
   // Include binding archetypes? Not needed.
 
-  const allArchetypes = [...archetypesSet].sort();
+  const allArchetypes = archetypeDisplaySort(archetypesSet);
 
   const layers: import('../lib/executors.ts').DialLayers = { session: sessionDials, repo: repoDials, user: userDials };
 
@@ -824,14 +997,16 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
       continue;
     }
     const adapter = compiled.spec.adapter;
-    const delivery = adapter === 'host' ? 'in-session (host)' : `${compiled.driver} (command)`;
-    const effort = adapter === 'host' ? 'inherit' : compiled.effort;
+    const postured = applyWritePosture(compiled.spec, archetype, profile.archetypes);
+    const writePostureForced = forcesWritePosture(cascade.ref, cascade.resolvedVia);
+    const delivery = compiled.driver;
+    const effort = compiled.effort;
     // Determine model display: canonical name + @effort only when off standard
     // Need registry standard effort
     let modelDisplay = compiled.model;
     const entry = (profile.models as Record<string, { effort: string }>)[compiled.model];
     const standard = entry?.effort ?? 'default';
-    if (compiled.effort !== standard && compiled.effort !== 'inherit' && compiled.model !== 'current-host') {
+    if (compiled.effort !== standard && compiled.model !== 'current-host') {
       modelDisplay = `${compiled.model} @ ${compiled.effort}`;
     } else if (compiled.model === 'current-host') {
       modelDisplay = 'current-host';
@@ -847,12 +1022,15 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
       model_id: compiled.modelId,
       effort: cascade.resolvedVia != null ? '—' : effort,
       driver: compiled.driver,
-      delivery: cascade.resolvedVia != null ? `${compiled.driver} (via fallback)` : delivery,
+      harness: compiled.driver,
+      delivery,
       source: cascade.source,
       resolvedVia: cascade.resolvedVia,
       dial: cascade.ref,
       refString: compiled.refString,
       adapter,
+      ...(postured.usedWriteVariant ? { write_variant: true } : {}),
+      ...(writePostureForced ? { write_posture_forced: true } : {}),
       modelDisplay,
     };
     // Eligibility mark
@@ -892,6 +1070,9 @@ export interface DialResolveResult {
   harness: string;
   source: RoleResolutionSource;
   resolved_via?: string;
+  /** True when the write-requiring archetype gets the route's write variant. */
+  write_variant?: boolean;
+  write_posture_forced?: boolean;
   eligibility?: string;
   dial: DialRef;
   delivery: { dispatchable: boolean; dispatch_command: string | null; action: string };
@@ -947,21 +1128,25 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string }):
     if (err instanceof ExecutorProfileError) throw new DialError(err.message);
     throw err;
   }
-  const eligibility = eligibilityFor(resolved.delivery.spec, archetype);
+  const postured = applyWritePosture(resolved.delivery.spec, archetype, profile.archetypes);
+  const spec = postured.spec;
+  const eligibility = eligibilityFor(spec, archetype);
   return {
     archetype,
     executor: resolved.delivery.refString,
     model: resolved.delivery.model,
     model_id: resolved.delivery.modelId,
-    effort: resolved.delivery.spec.adapter === 'host' ? 'inherited' : resolved.delivery.effort,
+    effort: resolved.delivery.effort,
     driver: resolved.delivery.driver,
-    adapter: resolved.delivery.spec.adapter,
+    adapter: spec.adapter,
     harness,
     source: resolved.source,
     ...(resolved.resolvedVia != null ? { resolved_via: resolved.resolvedVia } : {}),
+    ...(postured.usedWriteVariant ? { write_variant: true } : {}),
+    ...(forcesWritePosture(resolved.delivery.ref, resolved.resolvedVia) ? { write_posture_forced: true } : {}),
     ...(eligibility !== 'eligible' ? { eligibility } : {}),
     dial: resolved.delivery.ref,
-    delivery: deliveryGuidance(archetype, resolved.delivery.refString, resolved.delivery.spec, harness),
+    delivery: deliveryGuidance(archetype, resolved.delivery.refString, spec, harness),
   };
 }
 

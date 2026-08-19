@@ -19,6 +19,9 @@ export interface ConstraintContext {
   model_id: string | null;
   transport: 'command' | 'host';
   write_access: boolean | null;
+  /** True when the delivery is the route's write variant, selected because a
+   * `requires_write: required` archetype resolved onto a read-only base. */
+  write_variant?: boolean;
   write_posture: WritePosture | null;
   dial: { model: string; effort?: string; via?: string } | null;
   dial_source: string | null;

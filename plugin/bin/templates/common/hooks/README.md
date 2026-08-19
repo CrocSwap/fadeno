@@ -44,7 +44,7 @@ A reviewer writes `review-report.json` (conforming to
 re-prompt:
 
 ```bash
-fadeno gate <run-id> no_blocking_issues \
+fadeno gate <run-id> all_reviews_approved \
   --artifact artifacts/review-report.json
 ```
 

@@ -6,6 +6,7 @@ import test from 'node:test';
 import { runCompletion, runCompletionCandidates } from '../src/commands/completion.ts';
 import { runInit } from '../src/commands/init.ts';
 import { runNewRun } from '../src/commands/new-run.ts';
+import { LedgerWriter } from '../src/lib/run-ledger-write.ts';
 import { starterPlaybooks, tempRepo } from './helpers.ts';
 
 function complete(root: string, words: string[], cword = words.length - 1): string[] {
@@ -30,8 +31,8 @@ test('completion script is sourceable Bash and covers commands/options', () => {
     'test-result',
   ]);
   assert.deepEqual(complete('/tmp', ['fadeno', 'diagram', '--format=']), ['--format=ascii', '--format=mermaid']);
-  assert.deepEqual(complete('/tmp', ['fadeno', 'gate', 'run', '']), ['no_blocking_issues', 'tests_pass']);
-  // new flags: --via, --model, --user, --repo exist; old --executor gone
+  assert.deepEqual(complete('/tmp', ['fadeno', 'gate', 'run', '']), ['all_reviews_approved', 'no_blocking_issues', 'tests_pass']);
+  // new flags: --via, --model, --session, --user, --repo exist; old --executor gone
   assert.ok(complete('/tmp', ['fadeno', 'dial', 'shadow', '--']).includes('--via'));
   assert.ok(complete('/tmp', ['fadeno', 'dispatch', '--']).includes('--model'));
   assert.ok(complete('/tmp', ['fadeno', 'dispatch', '--']).includes('--via'));
@@ -89,11 +90,29 @@ test('completion: dial flags replace old flags', (t) => {
   // no profile needed for flag completion
   assert.ok(complete(root, ['fadeno', 'dial', 'worker', '--']).includes('--user'));
   assert.ok(complete(root, ['fadeno', 'dial', 'worker', '--']).includes('--repo'));
+  assert.ok(complete(root, ['fadeno', 'dial', 'worker', '--']).includes('--session'));
   assert.ok(complete(root, ['fadeno', 'dial', 'clear', '--']).includes('--user'));
   assert.ok(complete(root, ['fadeno', 'dial', 'clear', '--']).includes('--repo'));
+  assert.ok(complete(root, ['fadeno', 'dial', 'clear', '--']).includes('--session'));
   assert.ok(complete(root, ['fadeno', 'dispatch', '--']).includes('--archetype'));
   assert.ok(complete(root, ['fadeno', 'dispatch', '--']).includes('--role'));
   // old flags gone
   assert.ok(!complete(root, ['fadeno', 'dispatch', '--']).includes('--executor'));
   assert.ok(!complete(root, ['fadeno', 'dispatch', '--']).includes('--loadout'));
+});
+
+test('completion scopes host dispatch ids to pending requests in the selected run', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'codex', repoRoot: root });
+  const created = runNewRun({ repoRoot: root, playbook: 'code-change-review', task: 'dispatch completion' });
+  const writer = new LedgerWriter(created.runDir);
+  writer.append({ type: 'host_dispatch_requested', step: 'implement', dispatch_id: 'pending-a' }, new Date());
+  writer.append({ type: 'host_dispatch_requested', step: 'review', dispatch_id: 'finished-b' }, new Date());
+  writer.append({ type: 'actor_completed', step: 'review', dispatch_id: 'finished-b' }, new Date());
+
+  assert.deepEqual(complete(root, ['fadeno', 'dispatch-prompt', created.runId, '']), ['pending-a']);
+  assert.deepEqual(complete(root, ['fadeno', 'dispatch-start', created.runId, 'pending']), ['pending-a']);
+  assert.deepEqual(complete(root, ['fadeno', 'dispatch-complete', created.runId, '']), ['pending-a']);
+  assert.deepEqual(complete(root, ['fadeno', 'dispatch-fail', created.runId, '']), ['pending-a']);
+  assert.deepEqual(complete(root, ['fadeno', 'dispatch-complete', created.runId, 'pending-a', '--output', '-']), ['-']);
 });

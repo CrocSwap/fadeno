@@ -1,10 +1,12 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { computeNext, FlowCursorError, type NextComputation } from '../lib/flow-cursor.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { resolveRunPlaybookFile, runSchemaDirectories } from '../lib/definitions.ts';
 import { SchemaSet, validateFile } from '../lib/playbook-validate.ts';
 import type { Playbook } from '../lib/prompt-resolve.ts';
+import { parseSnapshotDocument, loadExecutorProfile } from '../lib/executors.ts';
 import {
   ledgerMode,
   normalizeLegacyEvents,
@@ -121,6 +123,39 @@ export function runNext(opts: NextOptions): NextResult {
   } catch (err) {
     if (err instanceof FlowCursorError) throw new NextError(err.message);
     throw err;
+  }
+
+  // Extend advice for tool_call steps to expose exact planned artifact path and tool-run eligibility
+  if (computation.status === 'ready' && computation.step?.kind === 'tool_call') {
+    const step = computation.step;
+    const toolName = step.tool;
+    const artifactType = step.artifact_type;
+    const outputPath = step.outputs?.[0] ?? null;
+    if (toolName && artifactType === 'test-result' && outputPath) {
+      // Check registry eligibility
+      let isRegistered = false;
+      try {
+        const snapshotPath = join(run.dir, 'profile.yaml');
+        if (existsSync(snapshotPath)) {
+          const snapText = readFileSync(snapshotPath, 'utf8');
+          const snap = parseSnapshotDocument(snapText, 'profile.yaml');
+          isRegistered = Object.hasOwn(snap.tools, toolName);
+        } else {
+          try {
+            const live = loadExecutorProfile(repoRoot).profile;
+            isRegistered = Object.hasOwn(live.tools, toolName);
+          } catch {}
+        }
+      } catch {}
+      if (isRegistered) {
+        computation.advice = `tool "${toolName}" is registered — run \`fadeno tool-run ${run.runId} --tool ${toolName}\` to execute (writes ${outputPath}, validates test-result, synthesizes status); or manually \`fadeno tool-complete ${run.runId} --output ${outputPath}\` (Diff/PostResult remain manual).`;
+      } else {
+        computation.advice = `tool "${toolName}" is not registered (produces ${artifactType}, planned artifact ${outputPath}) — automated tool-run is only for registered test-result tools; use manual \`fadeno tool-complete ${run.runId} --output ${outputPath}\` (no execution).`;
+      }
+    } else if (step.tool) {
+      const outputPath = step.outputs?.[0] ?? 'the planned artifact';
+      computation.advice = `tool "${step.tool}" produces ${artifactType ?? 'unknown'} — automated execution only supports test-result; save structured result at ${outputPath} then \`fadeno tool-complete ${run.runId} --output ${outputPath}\`.`;
+    }
   }
 
   return {

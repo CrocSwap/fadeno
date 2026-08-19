@@ -97,8 +97,13 @@ Runtime execution identities — `step_execution_id`, `actor_call_id`, `attempt`
 + `attempt_reason` — are minted **only by the engine** (`fadeno drive`) on its
 dispatch/output events; hand-driven ledgers simply omit them, and the CLI will
 not fabricate them. `verify` checks that attempt ordinals are contiguous per
-actor call and every redispatch carries an allowed reason (`schema_repair`,
-`executor_override`, `user_retry`).
+actor call, every redispatch carries an allowed reason (`schema_repair`,
+`executor_override`, `user_retry`), and every engine command receipt follows
+its own dispatch row. `fadeno drive --parallel <n>` (1-16, default 1) runs
+eligible command-delivered map members concurrently within one ready wave:
+read-only members overlap, shared writers stay serialized by the workspace
+lease, and dispatch/receipt rows keep canonical member order, so the ledger
+reads identically regardless of wall-clock interleaving.
 
 **Host dispatches pause the engine durably.** A host executor profile
 uses `adapter: host` plus `model`, `reasoning_effort`, and `agent_type`. Drive
@@ -203,17 +208,13 @@ it is what makes the run inspectable, and the seam a future compiled runtime rea
   artifact body. The director materializes that body at the resolved path under
   `artifacts/`; host submissions use a temporary file with
   `dispatch-complete`.
-- **tool_call** — Invoke the named capability (e.g. `test_runner`, `diff_loader`),
-  write its result to the planned artifact path, then atomically validate and
-  attribute it to the current step with `fadeno tool-complete <run>
-  --output <artifact-path>`. A typed result that fails its schema is rejected
-  before `step_started` or `artifact_created` is recorded, leaving the tool step
-  retryable.
+- **tool_call** — Invoke the named capability (e.g. `test_runner`, `diff_loader`).
+  If the step's output schema is `test-result` and the tool is registered in the layered `tools:` registry (`executors.yaml` as static argv + optional timeout), use `fadeno tool-run <run> [--tool <name>] [--timeout <seconds>]` — it executes without a shell under the supervisor, strips harness identity, acquires the shared writer lease, synthesizes a `TestResult` (`passed`/`failed`/`error`), validates, and attributes atomically via the shared execution core (same code as `fadeno drive`). Otherwise (Diff/PostResult, or unregistered), write the result manually and attribute with `fadeno tool-complete <run> --output <artifact-path>`. The two paths are mutually exclusive per generation (same `tool_call_id` namespace, live-claim scan, and ledger-serialized re-check). A typed result that fails its schema is rejected before `step_started` or `artifact_created` is recorded, leaving the tool step retryable.
 - **evaluator** — Have the actor produce a *structured* judgment artifact, e.g.
   `artifacts/review-report.json` conforming to `review-report.schema.json`. Do
   not let the evaluator make the control-flow decision.
 - **gate** — Compute `condition` from exactly one named, schema-valid artifact.
-  `no_blocking_issues` accepts `ReviewReport` or `ReviewReport[]`; `tests_pass`
+  `all_reviews_approved` and `no_blocking_issues` accept `ReviewReport` or `ReviewReport[]` (`all_reviews_approved` requires every `verdict` is `approve` and no `blocking` issue); `tests_pass`
   accepts `TestResult` and is true only when `status: passed` and `exit_code: 0`.
   Use `fadeno gate <run> <condition> --artifact <path>`; `--report` remains a
   deprecated alias. Route to `on_pass` / `on_fail` and record a `gate_evaluated`

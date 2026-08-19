@@ -1,12 +1,15 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
   compileDialRef,
+  applyWritePosture,
   explainWriteConflict,
+  eligibilityFor,
   formatDialRef,
+  forcesWritePosture,
   loadExecutorProfile,
   parseDialRef,
   parseSnapshotDocument,
@@ -22,8 +25,8 @@ import {
 } from '../lib/executors.ts';
 import { readUserDials } from '../lib/user-paths.ts';
 import { emitFile, type EmitResult } from '../lib/fsutil.ts';
-import { HostDispatchError, readHostDispatchRequest, type HostDispatchRequestLookup } from '../lib/host-dispatch.ts';
-import { findRepoRoot, packageVersion } from '../lib/paths.ts';
+import { HostDispatchError, readHostDispatchRequest, type HostDispatchRequest, type HostDispatchRequestLookup } from '../lib/host-dispatch.ts';
+import { findRepoRoot, packageVersion, templatesDir } from '../lib/paths.ts';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { userPaths, type UserPathOptions } from '../lib/user-paths.ts';
 
@@ -37,6 +40,25 @@ export class SteeringError extends Error {}
 export const HOST_SURFACE_ARCHETYPES = ['worker', 'reviewer', 'judge'] as const;
 
 const HOST_SURFACE_SET: ReadonlySet<string> = new Set(HOST_SURFACE_ARCHETYPES);
+
+export const NEUTRAL_HOST_EXECUTOR = 'current-host';
+
+/**
+ * A `current-host` + `agent_type: "*"` request is already assigned to a
+ * concrete host agent; the caller needs no `--host-executor` marker to prove it.
+ */
+export function isReferenceFrameNeutralHostRequest(
+  request: HostDispatchRequest,
+  spec: ExecutorSpec,
+): boolean {
+  return (
+    request.executor === NEUTRAL_HOST_EXECUTOR &&
+    request.agentType === '*' &&
+    spec.adapter === 'host' &&
+    spec.agentType === '*' &&
+    spec.model === NEUTRAL_HOST_EXECUTOR
+  );
+}
 
 const FORBIDDEN_HOST_ADVISORY =
   'This work is write-forbidden (requires_write: forbidden): produce artifacts in your reply only — do not edit, create, or commit workspace files.';
@@ -73,6 +95,12 @@ export interface SteeringResolution {
   surface_archetype?: string;
   /** Advisory-only write-forbidden instruction for host delivery. */
   advisory?: string;
+  /** Wildcard specialization: the immutable requested agent type (may be "*"), present on locked resolves. */
+  requested_agent_type?: string;
+  /** Wildcard specialization: the concrete archetype delivered when the request was wildcard, present when requested_agent_type is "*". */
+  delivered_archetype?: string;
+  /** Request-locked host identity remains requested evidence, never runtime verification. */
+  identity_evidence?: 'requested_only';
 }
 
 interface CommonOptions {
@@ -134,6 +162,7 @@ function decorateSteering(
   base: SteeringResolutionBase,
   profile: ExecutorProfile | SnapshotDocument,
   resolvedVia: string | null,
+  allowHostWithoutSurface = false,
 ): SteeringResolution {
   const result: SteeringResolution = { ...base, resolved_via: resolvedVia };
   if (result.mode !== 'host') return result;
@@ -141,12 +170,15 @@ function decorateSteering(
     const chain = fallbackChain(profile, result.archetype);
     const surface = chain.find((name) => HOST_SURFACE_SET.has(name));
     if (surface == null) {
-      throw new SteeringError(
-        `archetype "${result.archetype}" has no host agent surface on its fallback chain (${chain.join(' → ')}); ` +
-          `deliver it through a command route, or declare a fallback to ${HOST_SURFACE_ARCHETYPES.join(', ')}.`,
-      );
+      if (!allowHostWithoutSurface) {
+        throw new SteeringError(
+          `archetype "${result.archetype}" has no host agent surface on its fallback chain (${chain.join(' → ')}); ` +
+            `deliver it through a command route, or declare a fallback to ${HOST_SURFACE_ARCHETYPES.join(', ')}.`,
+        );
+      }
+    } else {
+      result.surface_archetype = surface;
     }
-    result.surface_archetype = surface;
   }
   if (
     Object.hasOwn(profile.archetypes, result.archetype) &&
@@ -236,7 +268,12 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
   if (request.actor == null) {
     throw new SteeringError(`host dispatch "${dispatchId}" has no actor identity for locked steering.`);
   }
-  if (request.agentType !== archetype) {
+  // `*` is an immutable wildcard, not the literal name of an agent surface.
+  // Archetyped roles are concretized when drive mints the request; an
+  // archetype-free role (notably the starter coordinator) intentionally keeps
+  // `*` so any concrete host surface may claim it. The run snapshot still
+  // locks model, effort, executor, and the fact that the type was wildcard.
+  if (request.agentType !== '*' && request.agentType !== archetype) {
     throw new SteeringError(
       `host dispatch "${dispatchId}" requests agent_type "${request.agentType}", not archetype "${archetype}".`,
     );
@@ -247,6 +284,11 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
     );
   }
   const profile = snapshotProfileForRequest(lookup);
+  if (!Object.hasOwn(profile.archetypes, archetype)) {
+    throw new SteeringError(
+      `host dispatch "${dispatchId}" cannot specialize wildcard identity to undeclared archetype "${archetype}".`,
+    );
+  }
   const executor = profile.executors[request.executor];
   if (executor == null || executor.adapter !== 'host') {
     throw new SteeringError(
@@ -262,19 +304,41 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
       `host dispatch "${dispatchId}" request identity does not match executor "${request.executor}" in the run profile snapshot.`,
     );
   }
+  if (eligibilityFor(executor, archetype) === 'forbidden') {
+    throw new SteeringError(
+      `host dispatch "${dispatchId}" cannot specialize to archetype "${archetype}": executor "${request.executor}" declares it eligibility: forbidden.`,
+    );
+  }
+  const writeConflict = explainWriteConflict(
+    { executor: request.executor, spec: executor },
+    archetype,
+    profile as unknown as ExecutorProfile,
+  );
+  if (writeConflict != null) {
+    throw new SteeringError(
+      `host dispatch "${dispatchId}" cannot specialize to archetype "${archetype}" because its snapshotted write posture is incompatible: ${writeConflict}`,
+    );
+  }
   const matchesHost = hostExecutor === request.executor;
   const hasFallback = executor.fallbackCommand != null;
+  const neutral = isReferenceFrameNeutralHostRequest(request, executor);
   const detail = matchesHost
     ? `host request ${dispatchId} is locked to run-snapshotted executor ${request.executor}; execute in-host`
-    : hasFallback
-      ? `host request ${dispatchId} is locked to ${request.executor}; deliver it through that executor's declared command fallback`
-      : `host request ${dispatchId} requires host executor ${request.executor}; this session is materialized for ${hostExecutor ?? 'no host executor'}, so start a matching Codex session`;
+    : neutral
+      ? `host request ${dispatchId} is locked to the reference-frame-neutral executor current-host; execute in-host`
+      : hasFallback
+        ? `host request ${dispatchId} is locked to ${request.executor}; deliver it through that executor's declared command fallback`
+        : `host request ${dispatchId} requires host executor ${request.executor}; this session is materialized for ${hostExecutor ?? 'no host executor'}, so start a matching Codex session`;
   // For locked, dial is the executor ref itself
   let dial: DialRef;
   try { dial = parseDialRef(request.executor, 'locked'); } catch { dial = { model: request.executor }; }
   const compiled = (() => { try { return compileDialRef(dial, profile as unknown as ExecutorProfile); } catch { return null; } })();
-  return decorateSteering({
-    mode: matchesHost ? 'host' : hasFallback ? 'command' : 'restart_required',
+  // Structured wildcard specialization: report both the immutable requested "*" and the concrete delivered archetype
+  // without upgrading identity_evidence. This is advisory routing, not a new attestation.
+  const requestedAgentType = request.agentType;
+  const deliveredArchetype = requestedAgentType === '*' ? archetype : undefined;
+  const base: SteeringResolution = {
+    mode: matchesHost || neutral ? 'host' : hasFallback ? 'command' : 'restart_required',
     archetype,
     role,
     executor: request.executor,
@@ -286,7 +350,16 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
     dial,
     hostExecutor,
     detail,
-  }, profile, null);
+    resolved_via: null,
+    requested_agent_type: requestedAgentType,
+    identity_evidence: 'requested_only',
+    ...(deliveredArchetype != null ? { delivered_archetype: deliveredArchetype } : {}),
+  };
+  // A wildcard request is already assigned to a concrete host agent. That
+  // agent may claim the locked request as `director` (or another declared,
+  // compatible archetype) without a separately materialized subagent surface.
+  // Concrete requests still require the ordinary host-surface contract.
+  return decorateSteering(base, profile, null, requestedAgentType === '*');
 }
 
 /**
@@ -364,12 +437,16 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
   if (spec == null) throw new SteeringError(`resolved dial "${refString}" has no compiled executor in profile`);
   // Bind neutral host agentType
   if (spec.adapter === 'host' && (spec as any).agentType === '*' && archetype != null) spec = { ...spec, agentType: archetype } as ExecutorSpec;
+  // Write-posture delivery selection, same rule as dispatch/drive.
+  spec = applyWritePosture(spec, archetype, profile.archetypes).spec;
 
   const finish = (base: Omit<SteeringResolution, 'resolved_via' | 'surface_archetype' | 'advisory'>): SteeringResolution =>
     decorateSteering(base as any, profile, cascade.resolvedVia);
 
   const refusal = (spec: ExecutorSpec, executorName: string): SteeringResolution | null => {
-    const conflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile);
+    const conflict = forcesWritePosture(cascade.ref, cascade.resolvedVia)
+      ? null
+      : explainWriteConflict({ executor: executorName, spec }, archetype, profile);
     if (conflict == null) return null;
     return finish({
       mode: 'write_conflict', archetype, role,
@@ -527,7 +604,7 @@ resolver owns the work.
 }
 
 export interface SteeringApplyOptions extends CommonOptions {
-  target: 'codex';
+  target: 'codex' | 'claude';
   force?: boolean;
   /** Advanced override; normal setup/use materialize at user scope. */
   scope?: 'project' | 'user';
@@ -552,6 +629,8 @@ export interface SteeringApplyResult {
   /** Files that were preserved because they are not Fadeno-managed. */
   conflicts: string[];
   scope: 'project' | 'user';
+  /** Managed files removed because their slot is no longer host-delivered. */
+  removed?: string[];
 }
 
 function codexAgentDir(scope: 'project' | 'user', repoRoot: string, userPathOptions?: UserPathOptions): string {
@@ -620,6 +699,8 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
     }
     // bind neutral host agentType
     if (spec.adapter === 'host' && (spec as any).agentType === '*' ) spec = { ...spec, agentType: archetype } as ExecutorSpec;
+    // Write-posture delivery selection, same rule as dispatch/drive.
+    spec = applyWritePosture(spec, archetype, profile.archetypes).spec;
     const filename = scope === 'user' ? `fadeno-${archetype}.toml` : `${archetype}.toml`;
     const path = join(agentDir, filename);
     let body: string;
@@ -639,7 +720,9 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
       // Materializing a broker for a slot whose command cannot write would
       // hand this archetype's work to a delivery that must refuse it. Skip the
       // slot — no agent file, no half-truth — and let the rest materialize.
-      const conflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile);
+      const conflict = forcesWritePosture(cascade.ref, cascade.resolvedVia)
+        ? null
+        : explainWriteConflict({ executor: executorName, spec }, archetype, profile);
       if (conflict != null) {
         materialization[archetype] = {
           kind: 'write-conflict', adapter: 'command', executor: executorName, model: spec.model,
@@ -665,4 +748,138 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
     .map((item) => item.path);
   const restartRequired = results.some((item) => item.status === 'created' || item.status === 'overwritten');
   return { results, materialization, baseline, restartRequired, conflicts, scope };
+}
+
+// --- Claude steering materialization ---
+
+function claudeAgentDir(scope: 'project' | 'user', repoRoot: string, userPathOptions?: UserPathOptions): string {
+  if (scope === 'project') return join(repoRoot, '.claude', 'agents');
+  return join(userPathOptions?.home ?? homedir(), '.claude', 'agents');
+}
+
+const CLAUDE_MANAGED_MARK = '<!-- fadeno:managed';
+
+function claudeManagedEmit(path: string, body: string, force: boolean, scope: 'project' | 'user'): EmitResult['status'] {
+  if (scope === 'project') return emitFile(path, body, force);
+  if (existsSync(path)) {
+    const existing = readFileSync(path, 'utf8');
+    if (!existing.includes(CLAUDE_MANAGED_MARK)) return 'skipped';
+    if (existing === body) return 'skipped';
+    mkdirSync(join(path, '..'), { recursive: true });
+    writeFileSync(path, body, 'utf8');
+    return 'overwritten';
+  }
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, body, 'utf8');
+  return 'created';
+}
+
+/** Re-emit an agent template's frontmatter with fields injected (existing keys replaced). */
+function withFrontmatterFields(template: string, fields: Record<string, string>): string {
+  const match = template.match(/^---\n([\s\S]*?)\n---\n/);
+  if (match == null) throw new SteeringError('agent template has no frontmatter block');
+  let block = match[1]!;
+  for (const key of Object.keys(fields)) {
+    block = block.split('\n').filter((line) => !line.startsWith(`${key}:`)).join('\n');
+  }
+  const added = Object.entries(fields).map(([key, value]) => `${key}: ${value}`).join('\n');
+  return `---\n${block}\n${added}\n---\n${template.slice(match[0].length)}`;
+}
+
+/**
+ * Materialize host-delivered dial slots into local Claude subagents
+ * (`.claude/agents/<archetype>.md`) carrying `model:` and `effort:`
+ * frontmatter, so an in-session worker runs at ITS model's effort rather
+ * than the session's. Command-delivered slots need no file — the plugin's
+ * dispatch proxies carry them — and a managed local file left over from a
+ * host era is removed so the steering hook never targets a stale identity.
+ */
+export function runSteeringApplyClaude(opts: SteeringApplyOptions): SteeringApplyResult {
+  const repoRoot = rootOf(opts);
+  // profileOf hardcodes the codex harness (steering resolve serves codex
+  // brokers); this apply materializes CLAUDE deliveries, so load that family.
+  const { profile } = (() => {
+    try {
+      return loadExecutorProfile(repoRoot, opts.userPathOptions, 'claude');
+    } catch (err) {
+      if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+      throw err;
+    }
+  })();
+  let dialLayers: DialLayers;
+  try {
+    const state = readLocalDialState(repoRoot);
+    const userRaw = readUserDials(opts.userPathOptions ?? {});
+    const user: Record<string, DialRef> = {};
+    for (const [k, v] of Object.entries(userRaw)) user[k] = v as DialRef;
+    dialLayers = { session: state.dials, repo: { ...profile.dials } as Record<string, DialRef>, user };
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+    throw err;
+  }
+  const baseline: Record<string, string> = {};
+  const materialization: SteeringApplyResult['materialization'] = {};
+  const results: EmitResult[] = [];
+  const removed: string[] = [];
+  const scope = opts.scope ?? 'project';
+  const agentDir = claudeAgentDir(scope, repoRoot, opts.userPathOptions);
+  for (const archetype of ['worker', 'reviewer', 'judge']) {
+    let cascade: { ref: DialRef; source: RoleResolutionSource; resolvedVia: string | null };
+    try {
+      cascade = resolveDialCascade(archetype, archetype, { bindings: profile.bindings, archetypes: profile.archetypes }, dialLayers);
+    } catch (err) {
+      if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+      throw err;
+    }
+    const executorName = formatDialRef(cascade.ref);
+    let spec: ExecutorSpec | null = (profile as unknown as SnapshotDocument).executors?.[executorName] ?? null;
+    try {
+      const compiled = compileDialRef(cascade.ref, profile);
+      if (spec == null) spec = compiled.spec;
+    } catch {}
+    if (spec == null) {
+      throw new SteeringError(`archetype "${archetype}" resolved to "${executorName}" but no executor exists in profile`);
+    }
+    if (spec.adapter === 'host' && (spec as { agentType?: string }).agentType === '*') spec = { ...spec, agentType: archetype } as ExecutorSpec;
+    spec = applyWritePosture(spec, archetype, profile.archetypes).spec;
+    const path = join(agentDir, `${archetype}.md`);
+    if (spec.adapter !== 'host') {
+      // Command slot: the dispatch proxy carries it; a managed host file left
+      // behind would make the hook target yesterday's model.
+      materialization[archetype] = {
+        kind: 'command-broker', adapter: 'command', executor: executorName, model: (spec as { model: string | null }).model,
+      };
+      if (existsSync(path) && readFileSync(path, 'utf8').includes(CLAUDE_MANAGED_MARK)) {
+        unlinkSync(path);
+        removed.push(path);
+      }
+      continue;
+    }
+    if (spec.model === 'current-host') {
+      // The session baseline needs no agent file: the plugin's native role
+      // agents already run on the session's own identity.
+      baseline[archetype] = executorName;
+      materialization[archetype] = { kind: 'host', adapter: 'host', executor: executorName, model: spec.model };
+      if (existsSync(path) && readFileSync(path, 'utf8').includes(CLAUDE_MANAGED_MARK)) {
+        unlinkSync(path);
+        removed.push(path);
+      }
+      continue;
+    }
+    const templatePath = join(templatesDir(), 'claude', 'claude-agents', `${archetype}.md`);
+    if (!existsSync(templatePath)) {
+      throw new SteeringError(`no claude agent template for archetype "${archetype}" at ${templatePath}`);
+    }
+    const template = readFileSync(templatePath, 'utf8');
+    const fields: Record<string, string> = { model: spec.model };
+    if (spec.reasoningEffort !== 'default' && spec.reasoningEffort.length > 0) fields.effort = spec.reasoningEffort;
+    let rendered = withFrontmatterFields(template, fields);
+    rendered = `${rendered.trimEnd()}\n\n${CLAUDE_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(rendered)} source=${executorName} -->\n`;
+    baseline[archetype] = executorName;
+    materialization[archetype] = { kind: 'host', adapter: 'host', executor: executorName, model: spec.model };
+    results.push({ path, status: claudeManagedEmit(path, rendered, opts.force ?? false, scope) });
+  }
+  const conflicts = results.filter((item) => item.status === 'skipped').map((item) => item.path);
+  const restartRequired = results.some((item) => item.status === 'created' || item.status === 'overwritten') || removed.length > 0;
+  return { results, materialization, baseline, restartRequired, conflicts, scope, removed };
 }

@@ -32,3 +32,26 @@ test('cancel live dispatch signals supervisor', (t) => {
   assert.ok(cancelled);
   assert.equal(cancelled.dispatch_id, OPEN_ID);
 });
+
+test('cancel signals the executor group when the supervisor was SIGKILLed', (t) => {
+  const root = seedLedger(t, [openRow]);
+  mkdirSync(join(root, ...INFLIGHT_DIR.split('/')), { recursive: true });
+  writeFileSync(join(root, ...INFLIGHT_DIR.split('/'), `${OPEN_ID}.json`), JSON.stringify({
+    pid: 4242,
+    supervisor_pid: 4242,
+    executor_pid: 4343,
+    process_group_id: 4343,
+    started_at: '2026-08-14T10:00:00.000Z',
+  }));
+  const signals: Array<[number, string]> = [];
+  const result = runDispatchesCancel({
+    repoRoot: root,
+    tag: 'worker-live',
+    kill: (pid, sig) => signals.push([pid, sig]),
+    probe: (pid) => {
+      if (pid === 4242) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+    },
+  });
+  assert.equal(result.pid, -4343);
+  assert.deepEqual(signals, [[-4343, 'SIGTERM']]);
+});

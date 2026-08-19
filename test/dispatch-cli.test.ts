@@ -299,6 +299,31 @@ test('dispatch: a write-capable delivery serves the same archetype', (t) => {
   assert.equal(comp.write_access, true);
 });
 
+test('dispatch: a forced direct dial proceeds across its recorded write-posture mismatch', (t) => {
+  const root = seedV3(t, {
+    models: { 'rw-model': { provider: 'openai', id: 'rw-model' } },
+    routes: {
+      standalone: { openai: { command: STDIN_ECHO('FORCED:'), write_access: true } },
+      codex: { openai: { command: STDIN_ECHO('FORCED:'), write_access: true } },
+    },
+    archetypes: { generator: { requires_write: 'forbidden' } },
+    dials: { generator: { model: 'rw-model', force_write_posture: true } },
+  });
+  const warnings: string[] = [];
+  const result = runDispatch({
+    archetype: 'generator',
+    prompt: 'make a report',
+    repoRoot: root,
+    userPathOptions: onHarness('standalone'),
+    onEcho: (line) => warnings.push(line),
+  });
+  assert.equal(result.stdout, 'FORCED:make a report');
+  assert.match(warnings.join('\n'), /WARNING: FORCED WRITE-POSTURE MISMATCH/);
+  const requested = evidenceRows(root).find((row) => row.event === 'dispatch_requested')!;
+  assert.equal(requested.write_posture_forced, true);
+  assert.equal((requested.dial as Record<string, unknown>).force_write_posture, true);
+});
+
 test('dispatch: exit-code propagation row.exit_code ===7 + sha256("") pinned', (t) => {
   const root = seedV3(t, {
     models: { 'fail-7': { provider: 'openai', id: 'fail-7' } },

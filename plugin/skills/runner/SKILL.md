@@ -1,6 +1,6 @@
 ---
 name: runner
-description: Execute or resume Fadeno playbooks from the bundled catalog or project `.fadeno/playbooks` for complex coding, review, research, or multi-step agent workflows. Use when the user says “Use Fadeno”, asks to run a playbook, names one, or provides a run id. [fadeno 0.6.0-rc.28]
+description: Execute or resume Fadeno playbooks from the bundled catalog or project `.fadeno/playbooks` for complex coding, review, research, or multi-step agent workflows. Use when the user says “Use Fadeno”, asks to run a playbook, names one, or provides a run id. [fadeno 0.6.0-rc.33]
 ---
 
 # Fadeno Runner
@@ -11,8 +11,7 @@ that plugin-bundled launcher for every command written below as `fadeno`
 Otherwise use `fadeno` from `PATH`. Never prefer an unrelated global CLI over
 the plugin launcher. Before the first run in a session, call `<cli> status`; if
 the current harness is not installed, invoke the setup skill and resume only
-after any required fresh-session boundary. When status reports a stable managed
-runtime, use that path for the rest of the session.
+after any required fresh-session boundary. Use the path status prints on the `use:` line for the rest of the session.
 
 Execute a Fadeno playbook as a bounded, inspectable workflow backed by files on
 disk. You are the director and sole Fadeno ledger writer: host workers return
@@ -89,8 +88,9 @@ bodies at canonical run paths; workers never invoke Fadeno ledger commands.
   runtime; never infer internal progress from idle/busy alone.
 - Progress is attested observability, never a gate input. Preserve its source
   (`agent`, `harness`, or `director`) and say `unavailable` when no channel exists.
+- For isolated host delivery, optionally run `fadeno dispatch-prepare <run> <dispatch-id> --isolate` before prompting: it creates `.fadeno/local/host-worktrees/<run>/<dispatch-id>` from HEAD (workspace_mode: isolated, state at `.fadeno/local/host-workspaces/<run>/<dispatch-id>.json`, diff at `.fadeno/local/outputs/host-isolated-<run>-<dispatch-id>.diff`), is serialized by `.host-workspace.lock`, guarded against traversal/symlink escape, makes `dispatch-prompt` include workspace_mode: isolated plus the absolute workspace path (prompt digest unchanged), makes `dispatch-start` stamp isolated workspace facts and bypass the shared lease, and makes `dispatch-complete`/`dispatch-fail` collect the binary diff before the terminal receipt; nothing auto-merges. `fadeno show` exposes workspace_mode as non-gating observability; `verify` never requires machine-local state.
 - Parallel writers use worktrees or patch-only output when the host supports it;
-  automatic worktree creation/merging is not part of Fadeno's MVP.
+  automatic worktree creation/merging is not part of Fadeno's MVP (opt-in isolated host workspaces are the narrow mechanical exception to confinement).
 - Ask for user approval before destructive commands, dependency additions,
   deployments, or external sends (the `require_user_approval_for` categories).
 

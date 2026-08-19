@@ -48,7 +48,7 @@ flow:
     kind: gate
     input:
       - ReviewReport[]
-    condition: no_blocking_issues
+    condition: all_reviews_approved
     on_pass: test
     on_fail: revise
 
@@ -59,8 +59,8 @@ flow:
     body:
       - implement_revision
       - review_revision
-    max_iterations: 1
-    until: no_blocking_issues
+    max_iterations: 2
+    until: all_reviews_approved
     on_success: test
     on_exhausted: unresolved_review
 
@@ -126,7 +126,7 @@ flow:
     terminal_status: failed
 
 policies:
-  max_revision_loops: 1
+  max_revision_loops: 2
   max_subagents: 4
   # ADVISORY in instruction-only hosts. For real enforcement, wire these to
   # pre-commit/CI (or Claude Code hooks). See .fadeno/enforcement.md.

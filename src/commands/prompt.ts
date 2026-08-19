@@ -190,6 +190,7 @@ export function runPrompt(opts: PromptOptions): PromptResult {
     policies,
     schemaText,
     inline: Boolean(opts.inline),
+    rejection: plan.rejection,
   };
 
   const prompt = renderStepPrompt(ctx);

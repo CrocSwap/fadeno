@@ -119,7 +119,7 @@ async function inspectTrace(workspace, outcome) {
   const finalImplementation = implementationIndices.at(-1) ?? -1;
   const testIndices = eventIndices(events, event => event.step === 'test' && event.type === 'step_started');
   const finalTest = testIndices.at(-1) ?? -1;
-  const reviewGateFailure = eventIndex(events, event => event.type === 'gate_evaluated' && event.condition === 'no_blocking_issues' && event.result === 'fail');
+  const reviewGateFailure = eventIndex(events, event => event.type === 'gate_evaluated' && (event.condition === 'no_blocking_issues' || event.condition === 'all_reviews_approved') && event.result === 'fail');
   const revisionStart = eventIndexAfter(events, reviewGateFailure, event => (event.step === 'revise' && ['step_started', 'loop_iteration_started'].includes(event.type)) || (event.step === 'implement_revision' && event.type === 'step_started'));
   const revisionImplementation = eventIndex(events, event => event.step === 'implement_revision' && event.type === 'step_started');
   const revisionReview = eventIndexAfter(events, revisionImplementation, event => event.step === 'review_revision' && event.type === 'step_started');

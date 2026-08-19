@@ -1,4 +1,4 @@
-import type { DownstreamNote, SchemaKind } from './prompt-resolve.ts';
+import type { DownstreamNote, RejectionContext, SchemaKind } from './prompt-resolve.ts';
 
 /**
  * Pure Markdown rendering of a resolved step assignment. No filesystem, no
@@ -56,6 +56,7 @@ export interface PromptContext {
   /** Canonical (key-sorted) schema text for a typed output, else null. */
   schemaText: string | null;
   inline: boolean;
+  rejection: RejectionContext | null;
 }
 
 /** Recursive key-sort JSON with 2-space indent and LF newlines. */
@@ -204,7 +205,12 @@ function renderOutput(ctx: PromptContext): string[] {
 
   if (ctx.downstream) {
     let note = `- Downstream: gate \`${ctx.downstream.gateStep}\` computes \`${ctx.downstream.condition}\` from ${out.collectiveType || out.memberType}.`;
-    if (out.schemaKind === 'review-report') note += ' A `blocking`-severity issue fails it.';
+    if (out.schemaKind === 'review-report') {
+      note +=
+        ctx.downstream.condition === 'all_reviews_approved'
+          ? ' It passes only when every report\'s `verdict` is `approve` and no issue is `blocking`.'
+          : ' A `blocking`-severity issue fails it.';
+    }
     if (out.isMap) note += ' The coordinator first assembles all map members into one array.';
     lines.push(note);
   }
@@ -237,6 +243,16 @@ export function renderStepPrompt(ctx: PromptContext): string {
   lines.push('');
 
   lines.push(...renderInputs(ctx), '');
+  if (ctx.rejection) {
+    lines.push('## Decision context', '');
+    const by = ctx.rejection.resolvedBy ? ` by ${ctx.rejection.resolvedBy}` : '';
+    const idPart = ctx.rejection.decisionId ? ` (decision \`${ctx.rejection.decisionId}\`)` : '';
+    lines.push(`- Human gate \`${ctx.rejection.gateStep}\` was rejected${by}${idPart}.`);
+    if (ctx.rejection.feedback) {
+      lines.push('- Feedback:', '', ...blockquote(ctx.rejection.feedback));
+    }
+    lines.push('');
+  }
   lines.push(...renderConstraints(ctx), '');
   lines.push(...renderOutput(ctx), '');
 

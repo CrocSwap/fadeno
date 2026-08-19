@@ -1,9 +1,12 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-import { parse as parseYaml } from 'yaml';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { RUN_LEDGER_SCHEMA_VERSION } from './run-ledger.ts';
 
 export class LedgerWriteError extends Error {}
+
+const RUN_YAML_MODELINE = '# yaml-language-server: $schema=definitions/schemas/run.schema.json';
 
 const LOCK_NAME = '.ledger.lock';
 const LOCK_WAIT_MS = 10;
@@ -15,15 +18,33 @@ function waitSync(milliseconds: number): void {
   Atomics.wait(signal, 0, 0, milliseconds);
 }
 
+/** Lock paths this process currently holds, with their nesting depth. */
+const heldLocks = new Map<string, number>();
+
 /**
  * Acquire an atomic per-run lock. `mkdir` is the lock acquisition primitive:
  * it succeeds for exactly one process, so sequence scanning and append happen
  * as one serialized critical section. A stale lock is recoverable after a
  * crashed writer; normal contention waits rather than allocating duplicate
  * sequence numbers.
+ *
+ * Re-entrant within a process: everything under the lock is synchronous, so a
+ * nested acquisition is always the same call stack, never a second writer.
+ * Nesting lets a caller widen the critical section over an existing writer
+ * (e.g. read-decide-then-append, where the append takes the lock itself)
+ * instead of self-deadlocking against its own `mkdir`.
  */
-function withRunLock<T>(runDir: string, action: () => T): T {
-  const lockPath = join(runDir, LOCK_NAME);
+export function withRunLock<T>(runDir: string, action: () => T): T {
+  const lockPath = resolve(runDir, LOCK_NAME);
+  const depth = heldLocks.get(lockPath) ?? 0;
+  if (depth > 0) {
+    heldLocks.set(lockPath, depth + 1);
+    try {
+      return action();
+    } finally {
+      heldLocks.set(lockPath, depth);
+    }
+  }
   const started = Date.now();
   for (;;) {
     try {
@@ -47,10 +68,36 @@ function withRunLock<T>(runDir: string, action: () => T): T {
       waitSync(LOCK_WAIT_MS);
     }
   }
+  heldLocks.set(lockPath, 1);
   try {
     return action();
   } finally {
+    heldLocks.delete(lockPath);
     rmSync(lockPath, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Publish `run.yaml` in one step: serialize the document, then place it by
+ * rename.
+ *
+ * `run.yaml` is the version gate every writer reads — the `LedgerWriter`
+ * constructor parses it and refuses a ledger with no `schema_version`. A plain
+ * `writeFileSync` truncates the file in place, so a concurrent reader can
+ * observe the empty (or partial) prefix and mistake a current ledger for a
+ * legacy one. Writing a sibling temp file and renaming makes every reader see
+ * either the whole previous document or the whole next one, never a torn
+ * middle. The temp name carries the pid so two writers cannot collide on it.
+ */
+export function writeRunDocument(runDir: string, document: unknown): void {
+  const target = join(runDir, 'run.yaml');
+  const tmp = `${target}.tmp-${process.pid}-${randomUUID()}`;
+  writeFileSync(tmp, `${RUN_YAML_MODELINE}\n${stringifyYaml(document)}`, 'utf8');
+  try {
+    renameSync(tmp, target);
+  } catch (err) {
+    try { rmSync(tmp, { force: true }); } catch {}
+    throw err;
   }
 }
 

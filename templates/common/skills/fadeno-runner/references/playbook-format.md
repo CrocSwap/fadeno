@@ -50,7 +50,7 @@ outgoing edge. Terminal statuses are `completed`, `failed`, and `aborted`.
 | `actor_call` | `actor` | Role does work; `input`/`output` as needed. |
 | `tool_call` | `tool` | Invoke a capability (`test_runner`, `diff_loader`, …). |
 | `evaluator` | `actor`, `output` | Produces a **structured judgment artifact**. |
-| `gate` | `input`, `condition`, `on_pass`, `on_fail` | Deterministic check on exactly one named artifact. Supported conditions are `no_blocking_issues` (`ReviewReport`/`ReviewReport[]`) and `tests_pass` (`TestResult`). |
+| `gate` | `input`, `condition`, `on_pass`, `on_fail` | Deterministic check on exactly one named artifact. Supported conditions are `all_reviews_approved` (`ReviewReport`/`ReviewReport[]`), `no_blocking_issues` (`ReviewReport`/`ReviewReport[]`), and `tests_pass` (`TestResult`). |
 | `human_gate` | `prompt` | Ask the user; route via `on_approve`/`on_reject`. |
 | `router` | `routes` | `routes` is label → step id; optional `default`. |
 | `map` | `over` | `over` = list of items or an artifact-field reference. |

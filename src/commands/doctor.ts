@@ -1,9 +1,17 @@
-import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, readFileSync, statSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, sep } from 'node:path';
 import { runStatus, type StatusOptions } from './status.ts';
 import { detectAmbientHarness } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { isFadenoPathIgnored } from '../lib/source-control.ts';
+import {
+  WORKSPACE_LEASE_FILE,
+  WORKSPACE_LEASE_LOCK,
+  readEffectiveLease,
+  readWorkspaceLease,
+} from '../lib/workspace-lease.ts';
+import { readInstallationManifest } from '../lib/installations.ts';
+import { userPaths } from '../lib/user-paths.ts';
 
 export class DoctorError extends Error {}
 
@@ -56,12 +64,6 @@ function commandOnPath(command: string): boolean {
 
 /**
  * The Claude plugin surface this session loaded, and the version it declares.
- *
- * Found two ways because the answer is visible differently depending on who is
- * asking: hooks and agent shells get `CLAUDE_PLUGIN_ROOT` outright, while the
- * main loop only sees the surface as a `<root>/bin` entry appended to PATH.
- * Several plugins can be installed, so a candidate only counts once its
- * manifest names this one.
  */
 export function pluginSurface(env: NodeJS.ProcessEnv): { root: string; version: string | null } | null {
   const candidates: string[] = [];
@@ -92,10 +94,55 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
   try {
     status = runStatus(opts);
     findings.push(finding('runtime', 'ok', `Fadeno ${status.version} and bundled definitions are available.`));
-    findings.push(finding('runtime-source', 'ok', `${status.runtime.invocationSource}; managed runtime ${status.runtime.managedVersion ?? 'not installed'}`));
-    if (!status.runtime.versionCurrent) {
-      findings.push(finding('runtime-version', 'warning', `managed runtime ${status.runtime.managedVersion} differs from caller ${status.version}`, 'Run the current plugin setup skill to refresh it.'));
+    // Directional runtime findings
+    const skew = (status.runtime as any).skew as 'managed-older' | 'managed-newer' | 'divergent' | null;
+    const managedV = status.runtime.managedVersion;
+    const invokingV = status.version;
+    const managedPath = status.runtime.managedPath;
+    const preferredCli = (status.runtime as any).preferredCli as string;
+    const preferredReason = (status.runtime as any).preferredReason as string | null;
+    // runtime-source finding (kept for compatibility but directional)
+    findings.push(finding('runtime-source', 'ok', `${status.runtime.invocationSource}; managed runtime ${managedV ?? 'not installed'}`));
+    if (managedV == null) {
+      if (status.runtime.installedHarnesses.length > 0 || managedPath) {
+        findings.push(finding('runtime', 'warning', `managed runtime not installed but host integrations reference ${managedPath ?? 'a managed path'}`, 'Run fadeno setup --from <bin-dir> to install it.'));
+      }
+    } else if (skew === 'managed-older') {
+      const harnessFlag = status.runtime.installedHarnesses.length === 1
+        ? ` --${status.runtime.installedHarnesses[0]}`
+        : status.runtime.installedHarnesses.includes('codex') && status.runtime.installedHarnesses.includes('claude')
+          ? (status.harness === 'claude' || status.harness === 'codex' ? ` --${status.harness}` : ' --codex')
+          : status.runtime.installedHarnesses.includes('claude') ? ' --claude' : status.runtime.installedHarnesses.includes('codex') ? ' --codex' : '';
+      const dir = preferredCli ? dirname(preferredCli) : '<bin-dir>';
+      const remediation = `refreshes at next plugin-launched command, or run fadeno setup${harnessFlag} --from ${dir} (e.g. fadeno setup${harnessFlag} --from ${dir})`;
+      findings.push(finding('runtime-version', 'warning', `managed runtime ${managedV} is older than this CLI ${invokingV} (managed-older); ${preferredReason ?? ''}`, remediation));
+    } else if (skew === 'managed-newer') {
+      findings.push(finding('runtime-version', 'warning', `managed runtime ${managedV} is newer than this CLI ${invokingV} (managed-newer); ${preferredReason ?? ''}`, 'Update this CLI via your package manager — do not rerun setup from this older CLI.'));
+    } else if (skew === 'divergent') {
+      findings.push(finding('runtime-version', 'warning', `managed runtime ${managedV} differs from caller ${invokingV} (divergent)`, `Run fadeno status to see preferred CLI: ${preferredCli}`));
     }
+    // Detect missing source
+    try {
+      const manifest = readInstallationManifest(opts.userPathOptions);
+      if (manifest.runtime?.source && !existsSync(manifest.runtime.source)) {
+        findings.push(finding('runtime-source-missing', 'warning', `managed runtime source ${manifest.runtime.source} no longer exists (version-keyed cache may have moved)`, 'Plugin-launched commands still refresh via their bundled runtime; a direct managed-CLI invocation cannot heal until the source reappears.'));
+      }
+
+      // Unstamped marker
+      const upaths = userPaths(opts.userPathOptions);
+      const pkgPath = join(upaths.managedRuntimeDir, 'package.json');
+      if (managedV != null && !existsSync(pkgPath)) {
+        findings.push(finding('runtime-unstamped', 'warning', `managed runtime at ${upaths.managedRuntimeDir} has no version marker (installed by a build older than 0.6.0-rc.33); refresh to stamp it`, 'Run fadeno setup --from <bin-dir> to add the marker.'));
+      }
+    } catch {}
+    // Preferred CLI guidance
+    if (preferredReason) {
+      findings.push(finding('preferred-cli', 'ok', `use: ${preferredCli} (${preferredReason})`));
+    } else if (managedV != null && managedV === invokingV) {
+      findings.push(finding('preferred-cli', 'ok', `use: ${preferredCli} (managed runtime matches this CLI)`));
+    }
+    // Session definitions - always state that current-session skills require fresh session
+    findings.push(finding('session-definitions', 'ok', `Skills and subagents are loaded at host session start; a fresh session is required to refresh them — no setup or refresh will update the current session. Compare the [fadeno ...] stamp in your skill/agent listing against ${invokingV}.`));
   } catch (err) {
     findings.push(finding('configuration', 'error', (err as Error).message, 'Fix the malformed YAML or missing catalog before running a playbook.'));
     return { repoRoot, findings, ok: false };
@@ -109,7 +156,6 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
       findings.push(finding(`path:${path}`, 'error', 'not writable', 'Choose a writable repository or state location.'));
     }
   }
-  // New dials finding replaces active dial
   const dials = (status as any).dials as { session: Record<string, unknown>; repo: Record<string, unknown>; user: Record<string, unknown> } | undefined;
   const legacyNote = (status as any).legacy_pin_note as string | null | undefined;
   if (dials) {
@@ -133,10 +179,6 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
       findings.push(finding(`executor:${role.executor}`, 'ok', 'executable is present on PATH (not executed)'));
     }
   }
-  // Routes are compiled per harness, and a wrong answer here is not cosmetic:
-  // under the wrong block a host slot compiles to `adapter: command` and runs
-  // as a subprocess. Resolution prefers ambient evidence, so this check now
-  // reports the two cases resolution cannot settle on its own.
   const ambient = detectAmbientHarness(opts.userPathOptions);
   if (ambient.evidence.length > 1) {
     const names = ambient.evidence.map((item) => `${item.harness} (${item.marker})`).join(' and ');
@@ -151,7 +193,6 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
   } else if (status.harness === ambient.harness) {
     findings.push(finding('harness', 'ok', `${ambient.harness}, detected from the host this session is running inside`));
   } else {
-    // Only an explicit flag or FADENO_HARNESS can outrank detection now.
     findings.push(finding(
       'harness',
       'warning',
@@ -159,9 +200,6 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
       `Drop the override to route as ${ambient.harness}; the two compile different adapters for the same slot.`,
     ));
   }
-  // Keyed on Codex being *maintained*, not on it being the harness in front of
-  // you: the agents go stale precisely when you switch a dial from the other
-  // host, which is exactly when an active-harness gate stops looking.
   if (status.codexMaterialization?.restartRequired) {
     findings.push(finding(
       'codex-agents',
@@ -172,14 +210,6 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
   } else if (status.codexMaterialization != null) {
     findings.push(finding('codex-agents', 'ok', 'managed host-agent state is current'));
   }
-  // A session's subagents and its CLI can be different builds, and until now
-  // nothing said so. A 2026-08-13 dogfood ran a registry stamped rc.20 against
-  // a CLI at rc.22 and reasoned about behaviour from the stamp. The two halves
-  // of the plugin age differently: hooks and the bundled binary are re-read
-  // from disk on every call, while subagent definitions are snapshotted into
-  // the harness at session start and stay frozen for the session's life. That
-  // snapshot is unreadable from out here, so this reports the half that can be
-  // checked and tells the caller how to check the half that cannot.
   const surface = pluginSurface(opts.processEnv ?? process.env);
   if (surface != null) {
     if (surface.version == null) {
@@ -205,6 +235,93 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
   const ignoreLines = ignored.split(/\r?\n/).map((line) => line.trim());
   for (const pattern of ['.fadeno/runs/', '.fadeno/progress/', '.fadeno/local/', '.fadeno/dispatches.jsonl', '.codex/agents/fadeno-*.toml', '.claude/settings.local.json']) {
     if (!isFadenoPathIgnored(ignoreLines, pattern)) findings.push(finding(`ignore:${pattern}`, 'warning', 'managed ignore entry is absent', 'The first `new-run`/`dispatch`, `fadeno init`, or `fadeno vendor` adds it non-destructively.'));
+  }
+  {
+    const LOCK_STALE_MS = 120_000;
+    let lockStale: { path: string; mtimeMs: number } | null = null;
+    const lockAbs = join(repoRoot, WORKSPACE_LEASE_LOCK);
+    if (existsSync(lockAbs)) {
+      try {
+        const lst = lstatSync(lockAbs);
+        if (lst.isSymbolicLink()) {
+          findings.push(finding(
+            'workspace-lease',
+            'warning',
+            `stale lock symlink at ${WORKSPACE_LEASE_LOCK}`,
+            `remove ${WORKSPACE_LEASE_LOCK} only after verifying no writer remains`,
+          ));
+        } else if (lst.isDirectory()) {
+          let mtime = lst.mtimeMs;
+          try {
+            mtime = statSync(lockAbs).mtimeMs;
+          } catch {}
+          if (Date.now() - mtime > LOCK_STALE_MS) {
+            lockStale = { path: WORKSPACE_LEASE_LOCK, mtimeMs: mtime };
+            findings.push(finding(
+              'workspace-lease',
+              'warning',
+              `stale lock directory at ${WORKSPACE_LEASE_LOCK} (mtime ${new Date(mtime).toISOString()})`,
+              `remove ${WORKSPACE_LEASE_LOCK} only after verifying no writer remains`,
+            ));
+          }
+        }
+      } catch {
+      }
+    }
+    let lease: ReturnType<typeof readWorkspaceLease> = null;
+    let effective: ReturnType<typeof readEffectiveLease> = null;
+    let leaseSymlinkWarning = false;
+    const leaseAbs = join(repoRoot, WORKSPACE_LEASE_FILE);
+    if (existsSync(leaseAbs)) {
+      try {
+        const lst = lstatSync(leaseAbs);
+        if (lst.isSymbolicLink()) {
+          findings.push(finding(
+            'workspace-lease',
+            'warning',
+            `unreadable workspace lease symlink at ${WORKSPACE_LEASE_FILE}`,
+            `remove ${WORKSPACE_LEASE_FILE} only after verifying no writer remains`,
+          ));
+          leaseSymlinkWarning = true;
+        }
+      } catch {}
+    }
+    if (!leaseSymlinkWarning) {
+      try {
+        lease = readWorkspaceLease(repoRoot);
+      } catch {
+        lease = null;
+      }
+      try {
+        effective = readEffectiveLease(repoRoot);
+      } catch {
+        effective = null;
+      }
+    }
+    if (leaseSymlinkWarning) {
+    } else if (lease == null) {
+      findings.push(finding('workspace-lease', 'ok', 'no active workspace lease'));
+    } else if (effective != null) {
+      const holder = lease.holder;
+      const holdersCount = lease.holders?.length ?? 1;
+      const detail = `${holder.kind} "${holder.id}" (supervisor_pid ${lease.supervisor_pid ?? 'unknown'}, started ${lease.started_at}, holders: ${holdersCount})`;
+      let remediation: string;
+      if (holder.kind === 'host-dispatch' && holder.runId != null && holder.dispatchId != null) {
+        remediation = `Inspect it with \`fadeno show ${holder.runId}\`; recover an abandoned host dispatch with \`fadeno dispatch-complete ${holder.runId} ${holder.dispatchId}\` or \`fadeno dispatch-fail ${holder.runId} ${holder.dispatchId}\`; Only after verifying no writer remains, remove ${WORKSPACE_LEASE_FILE} as a last resort.`;
+      } else if (holder.runId != null) {
+        remediation = `Inspect it with \`fadeno show ${holder.runId}\`; recover an abandoned host dispatch with dispatch-fail/dispatch-complete. Only after verifying no writer remains, remove ${WORKSPACE_LEASE_FILE} as a last resort.`;
+      } else {
+        remediation = `Inspect it with \`fadeno show <run>\`; recover an abandoned host dispatch with dispatch-fail/dispatch-complete. Only after verifying no writer remains, remove ${WORKSPACE_LEASE_FILE} as a last resort.`;
+      }
+      findings.push(finding('workspace-lease', 'warning', detail, remediation));
+    } else {
+      const holder = lease.holder;
+      const pid = lease.supervisor_pid ?? 'unknown';
+      const detail = `stale lease for "${holder.id}" (supervisor_pid ${pid} is dead)`;
+      const remediation = `re-acquire will reclaim it; or remove ${WORKSPACE_LEASE_FILE} only after verifying no writer remains`;
+      findings.push(finding('workspace-lease', 'warning', detail, remediation));
+    }
+    void lockStale;
   }
   return { repoRoot, findings, ok: findings.every((item) => item.severity !== 'error') };
 }
