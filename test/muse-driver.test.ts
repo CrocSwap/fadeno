@@ -117,7 +117,7 @@ test('starter catalog: muse compiles via muse-code in every family with the {pro
     const profile = parseExecutorProfile(starter, 'starter.yaml', harness);
     const compiled = compileDialRef({ model: 'muse' }, profile);
     assert.equal(compiled.driver, 'muse-code', harness);
-    assert.equal(compiled.effort, 'xhigh', harness);
+    assert.equal(compiled.effectiveEffort, 'xhigh', harness);
     const spec = compiled.spec;
     assert.equal(spec.adapter, 'command', harness);
     const command = (spec as { command: string[] }).command;

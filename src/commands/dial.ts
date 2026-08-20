@@ -33,6 +33,13 @@ import {
   type DialLayers,
   shadowSampleRoll,
 } from '../lib/executors.ts';
+import {
+  decideLane,
+  readSessionEffort,
+  type DeliveryLane,
+  type LaneDecision,
+  type LaneReason,
+} from '../lib/lane.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import {
   isModelVerified,
@@ -49,7 +56,22 @@ export interface EffectiveRow {
   archetype: string;
   model: string;
   model_id: string;
+  /**
+   * Unchanged legacy field: the effort this row's delivery runs at
+   * (`effective_effort`), or `—` on a fallback row. It cannot tell a pin from
+   * a registry default — every catalog model declares one — so anything that
+   * cares about user intent (the delivery lane, above all) must read
+   * `pinned_effort` instead. Kept as-is for scripts already parsing it.
+   */
   effort: string;
+  /**
+   * The effort the user pinned on this dial (`opus@xhigh` → `'xhigh'`), or
+   * null when the dial stated no opinion (`opus`). This is the field that
+   * says whether anyone asked for a specific effort.
+   */
+  pinned_effort: string | null;
+  /** The effort this delivery runs at: the pin, else the registry default. */
+  effective_effort: string;
   driver: string;
   /** Frame-neutral model harness identity. */
   harness: string;
@@ -103,6 +125,13 @@ export interface DialCommonOptions {
   cwd?: string;
   repoRoot?: string;
   userPathOptions?: UserPathOptions;
+  /**
+   * Testability seam for what would otherwise read `process.env`. The lane
+   * predicate reads `CLAUDE_EFFORT` from here, so a test that omitted it would
+   * pass or fail depending on the effort of whatever session ran the suite —
+   * the class of bug commit 0f6adfa fixed for user-scope dials.
+   */
+  env?: NodeJS.ProcessEnv;
 }
 
 function repoRootOf(opts: DialCommonOptions): string {
@@ -273,7 +302,13 @@ export interface DialSetResult {
   refString: string;
   model: string;
   model_id: string;
+  /** Legacy field: the effort this dial runs at. Cannot tell a pin from a
+   * registry default — read `pinned_effort` for that. */
   effort: string;
+  /** The effort the user pinned (`opus@xhigh` → `'xhigh'`), else null. */
+  pinned_effort: string | null;
+  /** The effort this dial runs at: the pin, else the registry default. */
+  effective_effort: string;
   driver: string;
   harness: string;
   delivery: string;
@@ -541,7 +576,7 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
   // TOMLs, .claude agent frontmatter). Say so instead of refusing.
   if (dial.effort != null && deliveryIsHost(compiled)) {
     notes.push(
-      `note: ${compiled.driver} host route — effort ${compiled.effort} is recorded as the request; run \`fadeno steering apply\` to pin it into the host agent slots`,
+      `note: ${compiled.driver} host route — effort ${compiled.effectiveEffort} is recorded as the request; run \`fadeno steering apply\` to pin it into the host agent slots`,
     );
   }
   {
@@ -687,7 +722,9 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
     refString,
     model: compiled.model,
     model_id: compiled.modelId,
-    effort: compiled.effort,
+    effort: compiled.effectiveEffort,
+    pinned_effort: compiled.pinnedEffort,
+    effective_effort: compiled.effectiveEffort,
     driver: compiled.driver,
     harness: compiled.driver,
     delivery,
@@ -885,7 +922,17 @@ export interface DialShadowResult {
   refString: string;
   model: string;
   model_id: string;
+  /** Legacy field: the effort this challenger runs at. Cannot tell a pin from
+   * a registry default — read `pinned_effort` for that. */
   effort: string;
+  /** The effort the user pinned on the challenger, else null. */
+  pinned_effort: string | null;
+  /**
+   * The effort the challenger runs at: the pin, else the registry default.
+   * A pair forces both arms onto the command lane, so for a shadow this
+   * default is the command-lane default, never an inherited session effort.
+   */
+  effective_effort: string;
   driver: string;
   rate: number | null;
   path: string;
@@ -1003,7 +1050,9 @@ export function runDialShadow(opts: DialShadowOptions): DialShadowResult {
     refString,
     model: compiled.model,
     model_id: compiled.modelId,
-    effort: compiled.effort,
+    effort: compiled.effectiveEffort,
+    pinned_effort: compiled.pinnedEffort,
+    effective_effort: compiled.effectiveEffort,
     driver: compiled.driver,
     rate: rate ?? null,
     path,
@@ -1140,16 +1189,16 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
     const postured = applyWritePosture(compiled.spec, archetype, profile.archetypes);
     const writePostureForced = forcesWritePosture(cascade.ref, cascade.resolvedVia);
     const delivery = compiled.driver;
-    const effort = compiled.effort;
-    // Determine model display: canonical name + @effort only when off standard
-    // Need registry standard effort
+    const effort = compiled.effectiveEffort;
+    // Model display: canonical name, plus `@ effort` exactly when the user
+    // pinned one. Keying on the PIN rather than on "differs from the registry
+    // standard" is what makes `opus@xhigh` legible even where xhigh is also
+    // the catalog default — the two deliver on different lanes, so a display
+    // that collapses them is misleading. `current-host` is no exception: a
+    // pin on it is precisely the dial that leaves the session.
     let modelDisplay = compiled.model;
-    const entry = (profile.models as Record<string, { effort: string }>)[compiled.model];
-    const standard = entry?.effort ?? 'default';
-    if (compiled.effort !== standard && compiled.model !== 'current-host') {
-      modelDisplay = `${compiled.model} @ ${compiled.effort}`;
-    } else if (compiled.model === 'current-host') {
-      modelDisplay = 'current-host';
+    if (compiled.pinnedEffort != null) {
+      modelDisplay = `${compiled.model} @ ${compiled.pinnedEffort}`;
     }
     // Handle fallback rendering: if resolvedVia != null, modelDisplay is → <via>
     if (cascade.resolvedVia != null) {
@@ -1161,6 +1210,8 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
       model: compiled.model,
       model_id: compiled.modelId,
       effort: cascade.resolvedVia != null ? '—' : effort,
+      pinned_effort: compiled.pinnedEffort,
+      effective_effort: compiled.effectiveEffort,
       driver: compiled.driver,
       harness: compiled.driver,
       delivery,
@@ -1204,7 +1255,32 @@ export interface DialResolveResult {
   executor: string;
   model: string;
   model_id: string;
+  /** Legacy field: the effort this delivery runs at. Cannot tell a pin from a
+   * registry default — read `pinned_effort` for that. */
   effort: string;
+  /**
+   * The effort the user pinned on the resolved dial, or null when unpinned.
+   * The lane predicate keys on this: an unpinned dial inherits the session
+   * and stays in-session; a pin that differs from the session's effort goes
+   * out on the command lane.
+   */
+  pinned_effort: string | null;
+  /** The effort this delivery runs at: the pin, else the registry default. */
+  effective_effort: string;
+  /**
+   * The lane decision, from the same `decideLane` that `steering resolve`
+   * calls. The Claude steering hook routes on `lane`, so this is not a
+   * convenience field: without it the hook falls back to deriving the lane
+   * from `adapter`, and effort routes nothing at all.
+   *
+   * `hostEffortProven` is deliberately never passed here — proving it needs a
+   * `--host-executor` this surface does not take — so an unobservable session
+   * effort resolves to the command lane, per the rule.
+   */
+  effort_pinned: boolean;
+  session_effort: string | null;
+  lane: DeliveryLane;
+  lane_reason: LaneReason;
   driver: string;
   adapter: 'command' | 'host';
   harness: string;
@@ -1331,7 +1407,15 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
     executor: resolved.delivery.refString,
     model: resolved.delivery.model,
     model_id: resolved.delivery.modelId,
-    effort: resolved.delivery.effort,
+    effort: resolved.delivery.effectiveEffort,
+    pinned_effort: resolved.delivery.pinnedEffort,
+    ...decideLane({
+      pinnedEffort: resolved.delivery.pinnedEffort,
+      effectiveEffort: resolved.delivery.effectiveEffort,
+      sessionEffort: readSessionEffort(opts.env ?? process.env),
+      hostModel: deliveryIsHost(resolved.delivery),
+      commandLane: commandRoutable(spec),
+    }),
     driver: resolved.delivery.driver,
     adapter: spec.adapter,
     harness,
@@ -1346,6 +1430,17 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
   };
 }
 
+/**
+ * The `~ shadow:` line under an effective-table row.
+ *
+ * `shadow.effort` is the attachment's own field, which is written only from
+ * `dial.effort` — the pin the user typed — so this line already shows a pin
+ * and only a pin. The unpinned case renders nothing rather than `inherit`:
+ * silence is unambiguous where a column is not (the table's effort column has
+ * to print *something*), and `inherit` would be actively wrong here — a pair
+ * forces both arms onto the command lane, so an unpinned challenger runs at
+ * its command-lane default and inherits no session effort at all.
+ */
 export function formatShadowLine(shadow: ShadowAttachmentView, baseIndent: string): string {
   const via = shadow.via ? ` via ${shadow.via}` : '';
   const effort = shadow.effort ? ` @ ${shadow.effort}` : '';
@@ -1353,4 +1448,79 @@ export function formatShadowLine(shadow: ShadowAttachmentView, baseIndent: strin
   const rate = shadow.rate != null ? ` rate ${shadow.rate}` : '';
   const transport = shadow.adapter != null ? ` [${shadow.adapter}]` : '';
   return `${baseIndent}  ~ shadow: ${model}${transport}${rate}`;
+}
+
+// ---- Delivery lane (why a dial leaves the session) ----
+
+/**
+ * Re-exported from `lib/lane.ts` so the CLI keeps one import site. There must
+ * be exactly one reader of this channel: a second one drifts silently, since
+ * both would look correct in isolation.
+ */
+export const sessionEffort = readSessionEffort;
+
+/**
+ * Why each resolved dial leaves the session on effort grounds — one entry per
+ * input ref, positionally aligned, null where effort is not the reason.
+ *
+ * Returns the resolver's own `LaneDecision` for each ref, or null where the
+ * delivery stays in-session — the same `decideLane` the hook routes on, never
+ * a second implementation of it.
+ *
+ * The predicate keys on the PIN, never on the resolved effort: every catalog
+ * model declares a default, so comparing effective efforts would report a
+ * plain `dial worker opus` as leaving the session in any non-default session
+ * — the exact inversion of the rule. A ref string carries the distinction
+ * losslessly (`formatDialRef` emits `@effort` only for a pin), which is why
+ * this takes ref strings and needs no side channel.
+ *
+ * Non-host deliveries return null: a command executor is on the command lane
+ * whatever the session's effort is, and naming effort as the reason there
+ * would misattribute it. Everything is best-effort — an unparseable ref, an
+ * unloadable profile, or an unmeasurable session effort yields null rather
+ * than a guess.
+ */
+export function offHostLanes(
+  refStrings: readonly (string | null)[],
+  session: string | null,
+  opts: DialCommonOptions = {},
+): Array<LaneDecision | null> {
+  const none = refStrings.map(() => null);
+  let profile: ExecutorProfile;
+  try {
+    profile = loadLayered(repoRootOf(opts), opts.userPathOptions).profile;
+  } catch {
+    return none;
+  }
+  return refStrings.map((refString) => {
+    if (refString == null) return null;
+    try {
+      const compiled = compileDialRef(parseDialRef(refString, `dial "${refString}"`), profile);
+      const hostModel = deliveryIsHost(compiled);
+      const decision = decideLane({
+        pinnedEffort: compiled.pinnedEffort,
+        effectiveEffort: compiled.effectiveEffort,
+        sessionEffort: session,
+        hostModel,
+        commandLane: commandRoutable(compiled.spec),
+      });
+      // Only an off-host answer is worth annotating: a host-lane delivery is
+      // what the reader already assumes, and labelling it would be noise.
+      // The whole decision comes back rather than just the reason, because
+      // `command` and `restart_required` must not render alike — a
+      // `restart_required` labelled "command lane" would assert the lane it
+      // just said does not exist. `hostEffortProven` is deliberately not
+      // passed: it needs a `--host-executor` this echo never has, so the echo
+      // degrades to the stricter answer rather than claiming proof.
+      // A delivery that was never a host candidate is suppressed for DISPLAY
+      // only — the decision above is still the resolver's. A command executor
+      // leaves the session because of its model, which the reader can already
+      // see on the same line; annotating it with an effort-shaped label would
+      // misattribute the cause. This is a rendering filter, never a second
+      // predicate: nothing here can turn an off-host answer into a host one.
+      return decision.lane === 'host' || !hostModel ? null : decision;
+    } catch {
+      return null;
+    }
+  });
 }

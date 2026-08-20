@@ -348,7 +348,26 @@ export interface CompiledDelivery {
   spec: ExecutorSpec;
   model: string;
   modelId: string;
-  effort: string;
+  /**
+   * The effort the *user* pinned on the dial (`opus@xhigh` → `'xhigh'`), or
+   * `null` when the dial stated no opinion (`opus`). Exactly
+   * `ref.effort ?? null` — no registry default ever fills it in.
+   *
+   * This is the only field that answers "did anyone ask for a specific
+   * effort?" — every model in the shipped catalog declares a registry
+   * default, so `effectiveEffort` is non-null for essentially every dial and
+   * cannot distinguish an opinion from a default. Predicates keying on user
+   * intent (e.g. which lane a delivery goes out on) must read this one.
+   */
+  pinnedEffort: string | null;
+  /**
+   * The effort this delivery actually runs at: the pin when there is one,
+   * otherwise the registry's declared default for the model
+   * (`models.<name>.effort`), otherwise `'default'` for an unregistered
+   * model. This is what gets substituted into `{reasoning_effort}`, encoded
+   * into a `model-suffix` model id, and recorded on evidence rows.
+   */
+  effectiveEffort: string;
   provider: string | null;
   driver: string;
   registered: boolean;
@@ -445,6 +464,93 @@ export interface LoadedExecutorProfile {
 /** Repo-relative location of the profile (playbooks stay harness-neutral). */
 export const EXECUTORS_FILE = join('.fadeno', 'executors.yaml');
 
+/**
+ * Every top-level key a v3 executor catalog may declare — the single source of
+ * truth for BOTH the strict unknown-key check in `parseExecutorProfile` below
+ * and the layered loader's selective merge (`mergeLayer`, config-layers.ts).
+ *
+ * These used to be two independent literal lists, which is precisely how a key
+ * could be known to the parser yet dropped by the merge: `mergeLayer` copies
+ * top-level keys by exact literal name, so a key it does not name never
+ * survives layering, and a key it does not name is also never seen by the
+ * check that would have complained. `worktree_carry` lived in that gap. One
+ * list, consumed by both, is what keeps that from recurring: config-layers
+ * copies whatever is listed here (whole-value unless it declares an entry-wise
+ * merge shape for the key), and rejects anything that is not.
+ */
+export const CATALOG_TOP_LEVEL_KEYS = [
+  'schema_version',
+  'models',
+  'routes',
+  'bindings',
+  'dials',
+  'archetypes',
+  'constraints',
+  'unregistered_model_driver',
+  'tools',
+  'worktree_carry',
+] as const;
+
+export type CatalogTopLevelKey = (typeof CATALOG_TOP_LEVEL_KEYS)[number];
+
+/**
+ * Pre-dials (schema_version < 3) top-level keys. Not allowed, but not
+ * "unknown" either: they are recognized purely so a legacy catalog keeps
+ * getting the migration instructions instead of a did-you-mean guess.
+ */
+export const PRE_DIALS_CATALOG_KEYS = ['executors', 'targets', 'loadouts', 'default_loadout'] as const;
+
+/** The one migration message a pre-dials catalog gets, wherever it is noticed. */
+export function preDialsCatalogError(source: string): ExecutorProfileError {
+  return new ExecutorProfileError(
+    `${source}: schema_version 3 required — pre-dials catalogs are not supported; migrate: targets:→models:, loadouts:→dials:, default_loadout: delete; see docs/experimental/dials-and-registry.md`,
+  );
+}
+
+/** Levenshtein distance, iterative two-row form. */
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  let previous: number[] = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i += 1) {
+    const current: number[] = [i];
+    for (let j = 1; j <= b.length; j += 1) {
+      const substitution = previous[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1);
+      current[j] = Math.min(current[j - 1]! + 1, previous[j]! + 1, substitution);
+    }
+    previous = current;
+  }
+  return previous[b.length]!;
+}
+
+/**
+ * Nearest catalog key to a misspelling, or `null` when nothing is close.
+ *
+ * A typo is the whole failure mode this guards, so the suggestion carries most
+ * of the value — but only a NEAR miss earns one: at most two edits, and never
+ * as many edits as the shorter of the two keys is long, so a two-character key
+ * cannot be declared to "mean" `dials`. Guessing wildly reads as authoritative
+ * and sends people down the wrong path; callers print the full known-key list
+ * either way, so silence here still leaves a usable error. Case is folded
+ * first, which makes `Worktree_Carry` a zero-distance hit rather than a miss.
+ */
+export function suggestCatalogKey(key: string): string | null {
+  const probe = key.toLowerCase();
+  let best: CatalogTopLevelKey | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const candidate of CATALOG_TOP_LEVEL_KEYS) {
+    const distance = editDistance(probe, candidate);
+    if (distance < bestDistance) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  }
+  if (best == null || bestDistance > 2) return null;
+  if (bestDistance >= Math.min(probe.length, best.length)) return null;
+  return best;
+}
+
 function isMapping(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -478,14 +584,10 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
   }
   // Strict v3 requirement — no backwards compat
   if (doc.schema_version !== 3) {
-    throw new ExecutorProfileError(
-      `${source}: schema_version 3 required — pre-dials catalogs are not supported; migrate: targets:→models:, loadouts:→dials:, default_loadout: delete; see docs/experimental/dials-and-registry.md`,
-    );
+    throw preDialsCatalogError(source);
   }
   if (!isMapping(doc.models) || Object.keys(doc.models).length === 0) {
-    throw new ExecutorProfileError(
-      `${source}: schema_version 3 required — pre-dials catalogs are not supported; migrate: targets:→models:, loadouts:→dials:, default_loadout: delete; see docs/experimental/dials-and-registry.md`,
-    );
+    throw preDialsCatalogError(source);
   }
 
   const notes: string[] = [];
@@ -1271,7 +1373,7 @@ export function compileDialRef(ref: DialRef, profile: ExecutorProfile): Compiled
   const buildDelivery = (
     model: string,
     modelId: string,
-    effort: string,
+    effectiveEffort: string,
     provider: string | null,
     driver: string,
     registered: boolean,
@@ -1280,7 +1382,7 @@ export function compileDialRef(ref: DialRef, profile: ExecutorProfile): Compiled
   ): CompiledDelivery => {
     const isHost = route?.host === true || (route == null && model === 'current-host');
     const subst = (argv: string[]): string[] =>
-      argv.map((part) => part.split('{model}').join(modelId).split('{reasoning_effort}').join(effort));
+      argv.map((part) => part.split('{model}').join(modelId).split('{reasoning_effort}').join(effectiveEffort));
     // Route-level eligibility merges over model-level, strictest wins — a
     // lane's structural constraint (e.g. "no directors here") binds every
     // model delivered through it, registered or not.
@@ -1297,7 +1399,7 @@ export function compileDialRef(ref: DialRef, profile: ExecutorProfile): Compiled
       spec = {
         adapter: 'host',
         model: modelId,
-        reasoningEffort: effort,
+        reasoningEffort: effectiveEffort,
         agentType: '*',
         fallbackCommand: fallback,
         writeAccess: route?.write_access ?? null,
@@ -1330,13 +1432,15 @@ export function compileDialRef(ref: DialRef, profile: ExecutorProfile): Compiled
         ...(driver ? { driver } : {}),
       };
     }
-    return { ref, refString, spec, model, modelId, effort, provider, driver, registered };
+    return { ref, refString, spec, model, modelId, pinnedEffort: ref.effort ?? null, effectiveEffort, provider, driver, registered };
   };
 
   if (Object.hasOwn(profile.models, ref.model)) {
     const entry = profile.models[ref.model]!;
     const provider = entry.provider;
-    const effort = ref.effort ?? entry.effort;
+    // The pin when there is one; otherwise the registry's declared default.
+    // `ref.effort` alone (the pin) survives on `CompiledDelivery.pinnedEffort`.
+    const effectiveEffort = ref.effort ?? entry.effort;
     const via = ref.via;
     let driver: string;
     let route: RouteRaw | null = null;
@@ -1359,7 +1463,7 @@ export function compileDialRef(ref: DialRef, profile: ExecutorProfile): Compiled
           route = null;
           id = entry.id;
           const modelId = id;
-          return buildDelivery(ref.model, modelId, effort, provider, driver, true, route, entry.eligibility);
+          return buildDelivery(ref.model, modelId, effectiveEffort, provider, driver, true, route, entry.eligibility);
         }
         const declared = declaredDriverAliases(routesForHarness);
         throw new ExecutorProfileError(`no route for provider "${provider}" in harness "${harness}" — declared drivers: ${declared.join(', ')}`);
@@ -1370,8 +1474,8 @@ export function compileDialRef(ref: DialRef, profile: ExecutorProfile): Compiled
     }
     let modelId = id;
     const enc = route?.effort_encoding ?? 'flag';
-    if (enc === 'model-suffix' && effort !== 'default') modelId = `${id}-${effort}`;
-    return buildDelivery(ref.model, modelId, effort, provider, driver, true, route, entry.eligibility);
+    if (enc === 'model-suffix' && effectiveEffort !== 'default') modelId = `${id}-${effectiveEffort}`;
+    return buildDelivery(ref.model, modelId, effectiveEffort, provider, driver, true, route, entry.eligibility);
   }
   const driver = ref.via ?? profile.unregisteredModelDriver;
   const found = findRouteByDriver(routesForHarness, driver);
@@ -1380,10 +1484,12 @@ export function compileDialRef(ref: DialRef, profile: ExecutorProfile): Compiled
     throw new ExecutorProfileError(`unknown driver "${driver}" — declared drivers: ${declared.join(', ')}`);
   }
   const route = found.route;
-  const effort = ref.effort ?? 'default';
+  // Unregistered: no registry entry to default from, so an unpinned dial runs
+  // at the neutral `'default'`. `pinnedEffort` still records only the pin.
+  const effectiveEffort = ref.effort ?? 'default';
   let modelId = ref.model;
-  if (route.effort_encoding === 'model-suffix' && effort !== 'default') modelId = `${ref.model}-${effort}`;
-  return buildDelivery(ref.model, modelId, effort, null, driver, false, route, {});
+  if (route.effort_encoding === 'model-suffix' && effectiveEffort !== 'default') modelId = `${ref.model}-${effectiveEffort}`;
+  return buildDelivery(ref.model, modelId, effectiveEffort, null, driver, false, route, {});
 }
 
 /** One delivery under consideration: the profile's name for it, plus its spec. */

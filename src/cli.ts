@@ -24,6 +24,7 @@ import { DRIVE_PARALLEL_DEFAULT, DRIVE_PARALLEL_MAX, DRIVE_PARALLEL_MIN, runDriv
 import { runGate } from './commands/gate.ts';
 import { runInit, type Target } from './commands/init.ts';
 import {
+  offHostLanes,
   formatShadowLine,
   runDialClear,
   runDialSetMany,
@@ -31,6 +32,7 @@ import {
   runDialResolve,
   runDialShadow,
   runDialShow,
+  sessionEffort,
   type DialShowResult,
 } from './commands/dial.ts';
 import { runModels, runModelsDriver, type DriverListingResult, type ModelsResult } from './commands/models.ts';
@@ -1202,6 +1204,45 @@ function printModelsDriver(result: DriverListingResult): void {
   }
 }
 
+/**
+ * Name the delivery lane in the resolution echo, where it is not the one the
+ * line's `[source]` implies.
+ *
+ * Two dials that print identically — `opus` and `opus@xhigh` differ by three
+ * characters — now deliver differently: the unpinned one inherits the session
+ * and runs in it, the pinned one goes out to the command lane whenever the
+ * session is at some other effort. Worse, the same dial flips lanes when the
+ * session's effort changes under it. Consecutive spawns behaving differently
+ * with nothing on screen to explain it is what this replaces:
+ *
+ *     worker → opus@xhigh (opus) [session dial]
+ *     worker → opus@xhigh (opus) [command lane: session is medium]
+ *
+ * The lane displaces the source label rather than crowding in beside it: when
+ * a delivery leaves the session, *why it left* is the fact the reader needs,
+ * and which layer held the dial is still one `fadeno dial` away (and stays in
+ * `--json`, untouched).
+ */
+function withLaneLabels(lines: string[], roles: unknown): string[] {
+  // `roles` and `echo` are built one-per-role in the same loop, so equal
+  // lengths mean equal positions. Anything else and this says nothing rather
+  // than labeling the wrong line.
+  if (!Array.isArray(roles) || roles.length !== lines.length) return lines;
+  const refs = roles.map((role) => (typeof role?.executor === 'string' ? role.executor : null));
+  const lanes = offHostLanes(refs, sessionEffort());
+  return lines.map((line, index) => {
+    const decision = lanes[index];
+    if (decision == null) return line;
+    // `restart_required` must not read as "command lane" — that would name a
+    // lane the same sentence says does not exist.
+    const label =
+      decision.lane === 'command'
+        ? `[command lane: ${decision.lane_reason}]`
+        : `[restart required: ${decision.lane_reason}]`;
+    return /\[[^\]]*\]$/.test(line) ? line.replace(/\[[^\]]*\]$/, label) : `${line} ${label}`;
+  });
+}
+
 function printDialShow(result: DialShowResult): void {
   if (result.legacy_pin_note) console.log(result.legacy_pin_note);
   if (result.staleDials.length > 0) printStaleDials(result.staleDials);
@@ -1212,7 +1253,17 @@ function printDialShow(result: DialShowResult): void {
   for (const row of result.rows) {
     const arch = row.archetype.padEnd(12);
     const model = row.modelDisplay.padEnd(18);
-    const effort = row.effort.padEnd(8);
+    // The PIN, never the resolved effort. Once the delivery lane depends on
+    // whether the user pinned an effort, printing the registry default in
+    // this column says "xhigh" for both `dial worker opus` and
+    // `dial worker opus@xhigh` — two dials that now deliver differently.
+    // `inherit` rather than `—`: `—` already means "not applicable" in this
+    // column (the fallback row below), and an unpinned dial is not
+    // effort-less, it takes its effort from elsewhere — the session on the
+    // host lane, the model's declared default on the command lane. `inherit`
+    // is also the one word that cannot be mistaken for a value, unlike
+    // `default`, which is a literal effort in the vocabulary.
+    const effort = (row.resolvedVia != null ? '—' : row.pinned_effort ?? 'inherit').padEnd(8);
     const harness = row.harness.padEnd(22);
     const elig = row.eligibility === 'shadow_only' ? '  SHADOW-ONLY (never gates)' : row.eligibility === 'forbidden' ? '  FORBIDDEN (refused at dispatch)' : '';
     const forced = row.write_posture_forced ? '  WARNING: FORCED WRITE-POSTURE MISMATCH' : '';
@@ -1595,6 +1646,13 @@ function main(argv: string[]): number {
           adapter: result.adapter,
           model: result.model,
           effort: result.effort ?? null,
+          // The lane decision. `steering resolve` is a hook/script contract,
+          // so a consumer that cannot see `lane` cannot route on effort at all.
+          effort_pinned: result.effort_pinned,
+          effective_effort: result.effective_effort,
+          session_effort: result.session_effort,
+          lane: result.lane,
+          lane_reason: result.lane_reason,
           driver: result.driver,
           host_executor: result.hostExecutor,
           resolution: result.source,
@@ -1628,16 +1686,16 @@ function main(argv: string[]): number {
             const how = slot.kind === 'host'
               ? slot.model === 'current-host'
                 ? 'session baseline (no agent file)'
-                : `local subagent (model: ${slot.model})`
+                : `in-session when the effort matches (model: ${slot.model})`
               : 'dispatch proxy (no agent file)';
             console.log(`  ${archetype} → ${how} ${slot.executor}`);
           }
-          for (const path of result.removed ?? []) console.log(`  removed stale per-dial agent: ${path}`);
-          console.log(`  identity grid: ${result.grid?.length ?? 0} cell(s) (archetype x effort), model supplied per spawn`);
+          const removed = result.removed ?? [];
+          for (const path of removed) console.log(`  removed managed agent: ${path}`);
           console.log(
-            changed === 0
-              ? '  0 agent definition(s) written; the grid is current — dial changes take effect immediately, no restart.'
-              : `  ${changed} agent definition(s) written; restart Claude Code once so the new names register. Dial changes after that need neither.`,
+            removed.length === 0
+              ? '  Nothing to remove; effort selects the delivery lane, so no agent file carries an identity.'
+              : `  Removed ${removed.length} managed agent definition(s). Effort now selects the lane, so nothing is written and no restart is needed.`,
           );
           if (changed === 0 && result.conflicts.length > 0) console.log('  Existing files were preserved; pass --force to replace them.');
           return 0;
@@ -1699,7 +1757,8 @@ function main(argv: string[]): number {
       if (inputs.length > 0) console.log(`  inputs: ${inputs.join(', ')}`);
       if (resolution != null && (resolution as any).echo?.length > 0) {
         console.log(`\nresolution:`);
-        for (const line of (resolution as any).echo) console.log(`  ${line}`);
+        const lines = (resolution as any).echo as string[];
+        for (const line of withLaneLabels(lines, (resolution as any).roles)) console.log(`  ${line}`);
       }
       console.log('\nAdvance it with `fadeno drive` first (engine):');
       console.log(`  fadeno drive ${runId}`);

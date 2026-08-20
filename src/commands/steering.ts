@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
@@ -29,7 +29,7 @@ import {
 import { readUserDials } from '../lib/user-paths.ts';
 import { emitFile, type EmitResult } from '../lib/fsutil.ts';
 import { HostDispatchError, readHostDispatchRequest, type HostDispatchRequest, type HostDispatchRequestLookup } from '../lib/host-dispatch.ts';
-import { findRepoRoot, packageVersion, templatesDir } from '../lib/paths.ts';
+import { findRepoRoot, packageVersion } from '../lib/paths.ts';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { userPaths, type UserPathOptions } from '../lib/user-paths.ts';
 
@@ -39,10 +39,12 @@ export class SteeringError extends Error {}
  * Archetypes that expose an in-session host agent surface today. A declared
  * archetype that is not itself one of these is delivered in-host through the
  * first chain member that is.
+ *
+ * Deliberately module-private. It used to be exported so `doctor` could
+ * enumerate identity-grid cell names from it; the grid is retired, and this
+ * is once again only about which archetypes have a role agent to land on.
  */
-export const HOST_SURFACE_ARCHETYPES = ['worker', 'reviewer', 'judge'] as const;
-
-const HOST_SURFACE_SET: ReadonlySet<string> = new Set(HOST_SURFACE_ARCHETYPES);
+const HOST_SURFACE_SET: ReadonlySet<string> = new Set(['worker', 'reviewer', 'judge']);
 
 export const NEUTRAL_HOST_EXECUTOR = 'current-host';
 
@@ -74,13 +76,39 @@ const FORBIDDEN_HOST_ADVISORY =
  */
 export type SteeringMode = 'host' | 'command' | 'restart_required' | 'write_conflict';
 
-export interface SteeringResolution {
+// The lane predicate lives in `lib/` because `dial resolve` must answer
+// identically — see src/lib/lane.ts. Re-exported so existing importers of
+// these names from this module keep working.
+import {
+  decideLane,
+  readSessionEffort,
+  type DeliveryLane,
+  type LaneDecision,
+  type LaneInput,
+  type LaneReason,
+} from '../lib/lane.ts';
+export { decideLane, readSessionEffort };
+export type { DeliveryLane, LaneDecision, LaneInput, LaneReason };
+
+export interface SteeringResolution extends LaneDecision {
+  /**
+   * The resolver's verdict, and what the agent acts on. It agrees with `lane`
+   * on all three lane values and adds a fourth, `write_conflict`: a delivery
+   * the lane predicate placed on the command lane but that the resolver
+   * refuses to present as runnable at all.
+   */
   mode: SteeringMode;
   archetype: string;
   role: string | null;
   executor: string;
   adapter: ExecutorSpec['adapter'];
   model: string | null;
+  /**
+   * The EFFECTIVE effort, unchanged in meaning since before the lane
+   * predicate existed. `effective_effort` is its non-null twin on the JSON
+   * contract; `effort_pinned` is the field that says whether anyone asked
+   * for it. Old readers must keep reading this one.
+   */
   effort: string | null;
   driver: string | null;
   source: RoleResolutionSource | 'host-request';
@@ -93,7 +121,7 @@ export interface SteeringResolution {
   resolved_via: string | null;
   /**
    * Host agent surface that should deliver this work when the declared
-   * archetype is not itself one of `HOST_SURFACE_ARCHETYPES`.
+   * archetype is not itself a host surface (`worker`/`reviewer`/`judge`).
    */
   surface_archetype?: string;
   /** Advisory-only write-forbidden instruction for host delivery. */
@@ -191,7 +219,7 @@ function decorateSteering(
       if (!allowHostWithoutSurface) {
         throw new SteeringError(
           `archetype "${result.archetype}" has no host agent surface on its fallback chain (${chain.join(' → ')}); ` +
-            `deliver it through a command route, or declare a fallback to ${HOST_SURFACE_ARCHETYPES.join(', ')}.`,
+            `deliver it through a command route, or declare a fallback to ${[...HOST_SURFACE_SET].join(', ')}.`,
         );
       }
     } else {
@@ -224,6 +252,12 @@ export interface SteeringResolveOptions extends CommonOptions {
    */
   promptSha256?: string | null;
   promptFile?: string | null;
+  /**
+   * Environment the session's own effort is read from (`CLAUDE_EFFORT`).
+   * Injectable so a test never depends on the effort the developer's real
+   * session happens to be running at — the same reason `runAttest` takes one.
+   */
+  env?: NodeJS.ProcessEnv;
 }
 
 function snapshotProfileForRequest(lookup: HostDispatchRequestLookup): SnapshotDocument {
@@ -368,8 +402,22 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
   // without upgrading identity_evidence. This is advisory routing, not a new attestation.
   const requestedAgentType = request.agentType;
   const deliveredArchetype = requestedAgentType === '*' ? archetype : undefined;
+  // The lane predicate deliberately does NOT run here. A locked engine
+  // request is an immutable dispatch with its own receipts contract, and its
+  // delivery was decided when the run snapshot was taken — re-deciding it
+  // against whatever effort *this* session happens to be running at would
+  // change an identity the snapshot already froze. Same reasoning as shadow
+  // pairing above. The lane fields still report faithfully: they mirror the
+  // locked mode, and `effort_pinned` reads the snapshotted executor ref.
+  const lockedLane: DeliveryLane =
+    matchesHost || neutral ? 'host' : hasFallback ? 'command' : 'restart_required';
   const base: SteeringResolution = {
     mode: matchesHost || neutral ? 'host' : hasFallback ? 'command' : 'restart_required',
+    effort_pinned: dial.effort != null,
+    effective_effort: request.reasoningEffort,
+    session_effort: readSessionEffort(opts.env ?? process.env),
+    lane: lockedLane,
+    lane_reason: 'locked to the run snapshot',
     archetype,
     role,
     executor: request.executor,
@@ -524,11 +572,45 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     };
   }
 
-  // Every branch below funnels through `finish`, so attaching `shadow` here
-  // once — rather than at each call site — is what keeps it uniformly
-  // visible regardless of which mode this resolution lands on.
-  const finish = (base: Omit<SteeringResolution, 'resolved_via' | 'surface_archetype' | 'advisory'>): SteeringResolution =>
-    decorateSteering({ ...(shadow != null ? { shadow } : {}), ...base } as any, profile, cascade.resolvedVia);
+  // --- The lane: model AND effort ---
+  //
+  // `pinnedEffort` is `ref.effort ?? null` and nothing else. Reading
+  // `compiled.effectiveEffort` here instead would route every casual
+  // `fadeno dial worker opus` to the command lane, because every model in the
+  // shipped catalog declares an `effort:` — see `LaneInput.pinnedEffort`.
+  // `cascade.ref.effort` is the same value by construction and keeps the
+  // predicate honest when the profile is too old to compile.
+  const pinnedEffort = compiled?.pinnedEffort ?? cascade.ref.effort ?? null;
+  const effectiveEffort =
+    compiled?.effectiveEffort ??
+    (spec.adapter === 'host' ? spec.reasoningEffort : null) ??
+    // Only reachable on a legacy profile whose command executor declares no
+    // effort at all and that `compileDialRef` could not compile.
+    'default';
+  const hostModel = spec.adapter === 'host' && (cascade.source === 'base' || hostExecutor === refString);
+  const lane = decideLane({
+    pinnedEffort,
+    effectiveEffort,
+    sessionEffort: readSessionEffort(opts.env ?? process.env),
+    hostModel,
+    // `refString` carries the pin (`formatDialRef` renders `luna@xhigh`), so a
+    // host executor that matches it identifies an agent materialized at that
+    // exact effort. This is how a Codex broker proves its own effort without
+    // any harness publishing one.
+    hostEffortProven: pinnedEffort != null && hostExecutor === refString,
+    commandLane: commandRoutable(spec),
+  });
+
+  // Every branch below funnels through `finish`, so attaching `shadow` and the
+  // lane fields here once — rather than at each call site — is what keeps them
+  // uniformly visible regardless of which mode this resolution lands on. Base
+  // wins on conflict, so a branch that genuinely overrides the lane (the
+  // shadow pair) says so in its own literal.
+  const finish = (
+    base: Omit<SteeringResolution, 'resolved_via' | 'surface_archetype' | 'advisory' | keyof LaneDecision>
+      & Partial<LaneDecision>,
+  ): SteeringResolution =>
+    decorateSteering({ ...lane, ...(shadow != null ? { shadow } : {}), ...base } as any, profile, cascade.resolvedVia);
 
   const refusal = (spec: ExecutorSpec, executorName: string): SteeringResolution | null => {
     const conflict = forcesWritePosture(cascade.ref, cascade.resolvedVia)
@@ -538,7 +620,7 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     return finish({
       mode: 'write_conflict', archetype, role,
       executor: executorName, adapter: spec.adapter, model: (spec as any).model ?? compiled?.model ?? null,
-      effort: compiled?.effort ?? (spec.adapter === 'host' ? (spec as any).reasoningEffort : null),
+      effort: compiled?.effectiveEffort ?? (spec.adapter === 'host' ? (spec as any).reasoningEffort : null),
       driver: (spec as any).driver ?? compiled?.driver ?? null,
       source: cascade.source, dial: cascade.ref, hostExecutor,
       detail: conflict + detailNote,
@@ -550,13 +632,13 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     return refusal(spec, refString) ?? finish({
       mode: 'command', archetype, role,
       executor: refString, adapter: 'command', model: (spec as any).model ?? compiled?.model ?? null,
-      effort: compiled?.effort ?? null, driver: (spec as any).driver ?? compiled?.driver ?? null,
+      effort: compiled?.effectiveEffort ?? null, driver: (spec as any).driver ?? compiled?.driver ?? null,
       source: cascade.source, dial: cascade.ref, hostExecutor,
       detail: `dispatch through command executor ${refString}; effective immediately${detailNote}`,
     } as any);
   }
   // host adapter
-  if (cascade.source === 'base' || hostExecutor === refString) {
+  if (lane.lane === 'host') {
     // A selected pair forces both arms onto the command lane even though this
     // host executor otherwise matches the session baseline and would resolve
     // in-session — an in-session primary cannot be isolated, measured, or
@@ -567,8 +649,14 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     if (shadow?.selected === true && shadow.routable === true) {
       return finish({
         mode: 'command', archetype, role,
+        // The pair overrides the lane the effort/model predicate chose, so it
+        // says so rather than letting `lane: 'host'` contradict `mode`. The
+        // contract guarantee still holds: this branch is gated on
+        // `shadow.routable`, which is `commandRoutable(spec)`.
+        lane: 'command',
+        lane_reason: 'shadow pair forces the command lane',
         executor: refString, adapter: 'host', model: (spec as any).model,
-        effort: (spec as any).reasoningEffort ?? compiled?.effort ?? null,
+        effort: (spec as any).reasoningEffort ?? compiled?.effectiveEffort ?? null,
         driver: (spec as any).driver ?? compiled?.driver ?? null,
         source: cascade.source, dial: cascade.ref, hostExecutor,
         detail: `pair selected: ${archetype} → ${refString} moved to its command lane so both arms are comparable${detailNote}`,
@@ -577,29 +665,40 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     return finish({
       mode: 'host', archetype, role,
       executor: refString, adapter: 'host', model: (spec as any).model,
-      effort: (spec as any).reasoningEffort ?? compiled?.effort ?? null,
+      effort: (spec as any).reasoningEffort ?? compiled?.effectiveEffort ?? null,
       driver: (spec as any).driver ?? compiled?.driver ?? null,
       source: cascade.source, dial: cascade.ref, hostExecutor,
       detail: `host executor ${refString} matches this session's host baseline${detailNote}`,
     } as any);
   }
-  if (spec.fallbackCommand != null) {
+  if (lane.lane === 'command') {
     return refusal(spec, refString) ?? finish({
       mode: 'command', archetype, role,
       executor: refString, adapter: 'host', model: (spec as any).model,
-      effort: (spec as any).reasoningEffort ?? compiled?.effort ?? null,
+      effort: (spec as any).reasoningEffort ?? compiled?.effectiveEffort ?? null,
       driver: (spec as any).driver ?? compiled?.driver ?? null,
       source: cascade.source, dial: cascade.ref, hostExecutor,
-      detail: `host executor ${refString} differs from this session's host baseline ${hostExecutor ?? '(none)'}; use its declared command fallback immediately${detailNote}`,
+      // Two ways to be here now, and the agent is told which: the model this
+      // session cannot host, or an effort it is not running at.
+      detail: hostModel
+        ? `host executor ${refString} matches this session's host baseline, but ${lane.lane_reason}; use its declared command fallback immediately${detailNote}`
+        : `host executor ${refString} differs from this session's host baseline ${hostExecutor ?? '(none)'}; use its declared command fallback immediately${detailNote}`,
     } as any);
   }
   return finish({
     mode: 'restart_required', archetype, role,
     executor: refString, adapter: 'host', model: (spec as any).model,
-    effort: (spec as any).reasoningEffort ?? compiled?.effort ?? null,
+    effort: (spec as any).reasoningEffort ?? compiled?.effectiveEffort ?? null,
     driver: (spec as any).driver ?? compiled?.driver ?? null,
     source: cascade.source, dial: cascade.ref, hostExecutor,
-    detail: `dial ${refString} requests host executor ${refString}, but this session was materialized for ${hostExecutor ?? 'no host executor'}; apply the dial and start a fresh session${detailNote}`,
+    // Restart reason 2 of the two that survive: a host slot naming an
+    // identity with neither a session that can deliver it nor a command
+    // fallback. It now has two shapes — the model, as always, and an effort
+    // the session is not running at.
+    detail: hostModel
+      ? `dial ${refString} pins effort ${pinnedEffort} but this session runs at ${lane.session_effort ?? 'no observable effort'}, ` +
+        `and ${refString} declares no command fallback; start a session at ${pinnedEffort}, drop the pin, or declare one${detailNote}`
+      : `dial ${refString} requests host executor ${refString}, but this session was materialized for ${hostExecutor ?? 'no host executor'}; apply the dial and start a fresh session${detailNote}`,
   } as any);
 }
 
@@ -740,12 +839,14 @@ export interface SteeringApplyResult {
   /** Host-only compatibility view; command-broker slots are omitted. */
   baseline: Record<string, string>;
   restartRequired: boolean;
-  /** Paths of the pre-registered identity grid, one per (archetype, effort). */
-  grid?: string[];
   /** Files that were preserved because they are not Fadeno-managed. */
   conflicts: string[];
   scope: 'project' | 'user';
-  /** Managed files removed because their slot is no longer host-delivered. */
+  /**
+   * Fadeno-managed files removed: a slot that is no longer host-delivered,
+   * a legacy per-dial agent, or a retired identity-grid cell. Never a file
+   * without the managed marker.
+   */
   removed?: string[];
 }
 
@@ -876,89 +977,81 @@ function claudeAgentDir(scope: 'project' | 'user', repoRoot: string, userPathOpt
 const CLAUDE_MANAGED_MARK = '<!-- fadeno:managed';
 
 /**
- * Named effort levels the Claude harness accepts in an agent definition.
- * Verified against the harness itself, whose turn-effort field enumerates
- * exactly these; integers are also accepted and deliberately not gridded.
+ * The marker `steering apply --claude` stamped into every identity-grid cell
+ * it ever wrote: `<!-- fadeno:managed version=… digest=… source=grid:<archetype>@<effort> -->`.
+ *
+ * The grid is retired — effort decides the lane now — so this exists only to
+ * RECOGNIZE the cells left on disk. It is the sole licence to delete one: a
+ * file of the same name without it belongs to the user, and nothing here ever
+ * touches it.
  */
-export const CLAUDE_EFFORT_LADDER = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+const CLAUDE_GRID_CELL_RE = /<!-- fadeno:managed\b[^>]*\bsource=grid:[^\s>]+/;
 
-/**
- * Agent name for one cell of the identity grid.
- *
- * The grid exists because the two halves of an identity travel different
- * channels: the steering hook can rewrite a spawn's MODEL per call, but the
- * Agent tool has no effort parameter, so effort can only come from a
- * definition file — and the harness registers definitions at session start.
- * Materializing per dial therefore made every dial change cost a restart.
- * Pre-registering every (archetype, effort) cell instead means the hook only
- * ever retargets among agents that are already registered.
- *
- * Keyed on effort and NOT on model, deliberately: model is already live, so
- * adding it would make the grid combinatorial in the one dimension that grows
- * (60 models x 20 archetypes x 5 efforts is 6,000 files). Keyed this way,
- * registering a model costs nothing at all.
- */
-export function claudeGridAgentName(archetype: string, effort: string): string {
-  return `fadeno-${archetype}-${effort}`;
+/** Does this file carry the retired identity grid's marker? Content, never name. */
+export function isRetiredClaudeGridCell(text: string): boolean {
+  return CLAUDE_GRID_CELL_RE.test(text);
 }
 
 /**
- * Emit a fadeno-managed agent definition.
+ * Absolute paths of retired identity-grid cells in one `.claude/agents`
+ * directory, sorted for a stable report.
  *
- * A managed file tracks its template at BOTH scopes: the grid is regenerated
- * output, and a cell left behind at an older template or version would keep
- * serving that content forever. `--force` is for someone else's file, not for
- * ours — so an unmanaged file of the same name is still skipped without it.
- * (Pre-grid this only mattered at user scope, where a single stale per-dial
- * agent was the whole risk; with fifteen regenerated cells per repo, a
- * project-scope grid that could not refresh itself would silently rot.)
+ * Shared with `doctor` (which reports them) and `uninstall` (which takes them
+ * with it) so all three agree on exactly one definition of "a cell Fadeno
+ * wrote". A missing or unreadable directory is not an error — there is simply
+ * nothing to retire.
  */
-function claudeManagedEmit(path: string, body: string, force: boolean, scope: 'project' | 'user'): EmitResult['status'] {
-  if (scope === 'project' && existsSync(path) && !readFileSync(path, 'utf8').includes(CLAUDE_MANAGED_MARK)) {
-    return emitFile(path, body, force); // not ours: non-destructive unless forced
+export function listRetiredClaudeGridCells(agentDir: string): string[] {
+  let entries: string[];
+  try {
+    entries = existsSync(agentDir) ? readdirSync(agentDir) : [];
+  } catch {
+    return [];
   }
-  if (existsSync(path)) {
-    const existing = readFileSync(path, 'utf8');
-    if (!existing.includes(CLAUDE_MANAGED_MARK)) return 'skipped';
-    if (existing === body) return 'skipped';
-    mkdirSync(join(path, '..'), { recursive: true });
-    writeFileSync(path, body, 'utf8');
-    return 'overwritten';
+  const found: string[] = [];
+  for (const name of entries) {
+    if (!name.endsWith('.md')) continue;
+    const path = join(agentDir, name);
+    try {
+      if (isRetiredClaudeGridCell(readFileSync(path, 'utf8'))) found.push(path);
+    } catch {
+      // Unreadable: not provably ours, so never claimed.
+    }
   }
-  mkdirSync(join(path, '..'), { recursive: true });
-  writeFileSync(path, body, 'utf8');
-  return 'created';
+  return found.sort();
 }
 
-/** Re-emit an agent template's frontmatter with fields injected (existing keys replaced). */
-function withFrontmatterFields(template: string, fields: Record<string, string>): string {
-  const match = template.match(/^---\n([\s\S]*?)\n---\n/);
-  if (match == null) throw new SteeringError('agent template has no frontmatter block');
-  let block = match[1]!;
-  for (const key of Object.keys(fields)) {
-    block = block.split('\n').filter((line) => !line.startsWith(`${key}:`)).join('\n');
+/** Delete a Fadeno-managed Claude agent file, recording it. Unmanaged files are untouched. */
+function removeManagedClaudeAgent(path: string, removed: string[]): void {
+  if (!existsSync(path)) return;
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return;
   }
-  const added = Object.entries(fields).map(([key, value]) => `${key}: ${value}`).join('\n');
-  return `---\n${block}\n${added}\n---\n${template.slice(match[0].length)}`;
+  if (!text.includes(CLAUDE_MANAGED_MARK)) return;
+  unlinkSync(path);
+  removed.push(path);
 }
 
 /**
- * Pre-register the Claude identity grid: one managed subagent per
- * (host-surface archetype, named effort level), each declaring `model:
- * inherit` and its own `effort:`.
+ * Report each Claude slot's resolved delivery, and REMOVE every managed agent
+ * file earlier versions wrote. This apply no longer writes anything.
  *
- * This is dial-INDEPENDENT by design. The grid is a function of the effort
- * vocabulary alone, so re-running it after a dial change writes nothing and
- * asks for no restart; the steering hook picks the cell matching whatever the
- * dial currently resolves to and supplies the model on the tool call, which
- * the harness documents as overriding the definition for that call. What still
- * costs a restart is a change to the grid itself — a new effort level, or the
- * first apply in a repo.
+ * The identity grid existed to let a host spawn run at an effort the session
+ * was not running at, because the Agent tool has no effort parameter and the
+ * harness registers definitions at session start. That goal is retired: a host
+ * spawn now runs at the session's effort, and an effort the session cannot
+ * give is delivered on the command lane instead (see `decideLane`). With
+ * nothing left for a file to pin, the fifteen cells are dead weight that the
+ * harness would still register at session start — so they go, alongside the
+ * legacy per-dial agents (`.claude/agents/<archetype>.md`) they replaced,
+ * which additionally pin a model the dial may have moved past.
  *
- * Legacy per-dial managed agents (`.claude/agents/<archetype>.md` written by
- * earlier versions) are removed: they pin a model the dial may have moved past,
- * and the hook must never target a stale identity. Unmanaged files of the same
- * name are never touched.
+ * Ownership discipline is unchanged and load-bearing: only a file carrying the
+ * `<!-- fadeno:managed …` marker is ever deleted. A hand-authored agent of the
+ * same name is never touched, with or without `--force`.
  */
 export function runSteeringApplyClaude(opts: SteeringApplyOptions): SteeringApplyResult {
   const repoRoot = rootOf(opts);
@@ -1008,76 +1101,38 @@ export function runSteeringApplyClaude(opts: SteeringApplyOptions): SteeringAppl
     }
     if (spec.adapter === 'host' && (spec as { agentType?: string }).agentType === '*') spec = { ...spec, agentType: archetype } as ExecutorSpec;
     spec = applyWritePosture(spec, archetype, profile.archetypes).spec;
-    const path = join(agentDir, `${archetype}.md`);
+    // Every slot reaches the same conclusion now — report the delivery, keep
+    // no file — so the three branches differ only in what they report.
     if (spec.adapter !== 'host') {
-      // Command slot: the dispatch proxy carries it; a managed host file left
-      // behind would make the hook target yesterday's model.
       materialization[archetype] = {
         kind: 'command-broker', adapter: 'command', executor: executorName, model: (spec as { model: string | null }).model,
       };
-      if (existsSync(path) && readFileSync(path, 'utf8').includes(CLAUDE_MANAGED_MARK)) {
-        unlinkSync(path);
-        removed.push(path);
-      }
-      continue;
-    }
-    if (spec.model === 'current-host') {
-      // The session baseline needs no agent file: the plugin's native role
-      // agents already run on the session's own identity.
+    } else {
+      // `current-host` and a dialed host identity alike: the plugin's native
+      // role agents run on the session's own identity, and the hook supplies
+      // the model per spawn. A managed per-dial file left here would pin
+      // whatever model was dialed the day it was written.
       baseline[archetype] = executorName;
       materialization[archetype] = { kind: 'host', adapter: 'host', executor: executorName, model: spec.model };
-      if (existsSync(path) && readFileSync(path, 'utf8').includes(CLAUDE_MANAGED_MARK)) {
-        unlinkSync(path);
-        removed.push(path);
-      }
-      continue;
     }
-    // A dialed host identity needs no file of its own any more: the grid below
-    // carries every effort, and the hook supplies the model per spawn. A
-    // legacy per-dial file left here would pin whatever model was dialed when
-    // it was written, so it goes the same way as the other two branches'.
-    baseline[archetype] = executorName;
-    materialization[archetype] = { kind: 'host', adapter: 'host', executor: executorName, model: spec.model };
-    if (existsSync(path) && readFileSync(path, 'utf8').includes(CLAUDE_MANAGED_MARK)) {
-      unlinkSync(path);
-      removed.push(path);
-    }
+    removeManagedClaudeAgent(join(agentDir, `${archetype}.md`), removed);
   }
 
-  // The grid itself. Dial-independent, so a re-apply after re-dialing is a
-  // no-op and asks for no restart.
-  const grid: string[] = [];
-  for (const archetype of HOST_SURFACE_ARCHETYPES) {
-    const templatePath = join(templatesDir(), 'claude', 'claude-agents', `${archetype}.md`);
-    if (!existsSync(templatePath)) {
-      throw new SteeringError(`no claude agent template for archetype "${archetype}" at ${templatePath}`);
-    }
-    const template = readFileSync(templatePath, 'utf8');
-    for (const effort of CLAUDE_EFFORT_LADDER) {
-      const name = claudeGridAgentName(archetype, effort);
-      // `inherit` is the documented spelling of "take the spawning
-      // conversation's model"; the hook's per-call `model` override then wins
-      // over it, which is what leaves effort as the only thing this file pins.
-      let rendered = withFrontmatterFields(template, { name, model: 'inherit', effort });
-      rendered = `${rendered.trimEnd()}\n\n${CLAUDE_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(rendered)} source=grid:${archetype}@${effort} -->\n`;
-      const gridPath = join(agentDir, `${name}.md`);
-      grid.push(gridPath);
-      results.push({ path: gridPath, status: claudeManagedEmit(gridPath, rendered, opts.force ?? false, scope) });
-    }
-  }
+  // The retired identity grid. Found by marker rather than by name, so a cell
+  // written for an archetype or an effort level this build no longer knows
+  // about is still cleaned up — and a file without the marker never is.
+  for (const cell of listRetiredClaudeGridCells(agentDir)) removeManagedClaudeAgent(cell, removed);
 
-  // A skipped MANAGED file is an up-to-date cell, not a collision. Reporting
-  // those as conflicts told every steady-state apply to pass `--force`.
-  const conflicts = results
-    .filter((item) => item.status === 'skipped')
-    .filter((item) => {
-      try {
-        return !readFileSync(item.path, 'utf8').includes(CLAUDE_MANAGED_MARK);
-      } catch {
-        return true;
-      }
-    })
-    .map((item) => item.path);
-  const restartRequired = results.some((item) => item.status === 'created' || item.status === 'overwritten') || removed.length > 0;
-  return { results, materialization, baseline, restartRequired, conflicts, scope, removed, grid };
+  // Nothing is written any more, so nothing can collide and nothing can be
+  // preserved: `--force` has no work left to do here. Both stay in the result
+  // shape because callers still read them.
+  const conflicts: string[] = [];
+  // Removing files needs no restart. The agents this apply deletes were
+  // registered at session start and are simply no longer targeted; the plain
+  // role agents that replace them are always registered. Restart reason 1 (a
+  // new effort value entering the vocabulary) retired with the grid, and
+  // neither surviving reason — a host slot with no delivery, a plugin upgrade
+  // — is something this command can cause.
+  const restartRequired = false;
+  return { results, materialization, baseline, restartRequired, conflicts, scope, removed };
 }

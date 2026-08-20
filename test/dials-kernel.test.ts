@@ -171,13 +171,17 @@ test('compileDialRef: registered home driver', () => {
   assert.equal(compiled.registered, true);
   assert.equal(compiled.provider, 'openai');
   assert.equal(compiled.driver, 'openai');
-  assert.equal(compiled.effort, 'high');
+  assert.equal(compiled.effectiveEffort, 'high');
+  // No `@effort` on the dial: the registry default fills the effective effort,
+  // and the absent pin stays visible as null.
+  assert.equal(compiled.pinnedEffort, null);
   assert.equal(compiled.model, 'sol');
   assert.equal(compiled.modelId, 'gpt-5.6-sol');
   assert.equal(compiled.spec.adapter, 'command');
   assert.deepEqual(compiled.spec.adapter === 'command' ? compiled.spec.command : null, ['codex','exec','-m','gpt-5.6-sol','--effort','high']);
   const over = compileDialRef({ model: 'sol', effort: 'low' }, profile);
-  assert.equal(over.effort, 'low');
+  assert.equal(over.effectiveEffort, 'low');
+  assert.equal(over.pinnedEffort, 'low');
   assert.deepEqual(over.spec.adapter === 'command' ? over.spec.command : null, ['codex','exec','-m','gpt-5.6-sol','--effort','low']);
 });
 
@@ -232,9 +236,11 @@ test('compileDialRef: unregistered fall-through via default driver', () => {
   assert.equal(compiled.provider, null);
   assert.equal(compiled.driver, 'opencode');
   assert.equal(compiled.modelId, 'kimi-k3');
-  assert.equal(compiled.effort, 'default');
+  assert.equal(compiled.effectiveEffort, 'default');
+  assert.equal(compiled.pinnedEffort, null);
   const withEffort = compileDialRef({ model: 'kimi-k3', effort: 'high' }, profile);
-  assert.equal(withEffort.effort, 'high');
+  assert.equal(withEffort.effectiveEffort, 'high');
+  assert.equal(withEffort.pinnedEffort, 'high');
   const profile2 = parseDoc({
     schema_version: 3,
     models: { sol: { provider: 'openai' } },
@@ -287,7 +293,7 @@ test('compileDialRef: host built-in current-host compiles to host', () => {
   const host = compileDialRef({ model: 'current-host' }, profile);
   assert.equal(host.spec.adapter, 'host');
   assert.equal(deliveryIsHost(host), true);
-  assert.equal(host.effort, 'default');
+  assert.equal(host.effectiveEffort, 'default');
   const profile2 = parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { openai: { command: ['codex'] } } } });
   const implicit = compileDialRef({ model: 'current-host' }, profile2);
   assert.equal(implicit.spec.adapter, 'host');

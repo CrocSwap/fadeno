@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
@@ -38,103 +38,128 @@ function seed(t: TestContext, dials: Record<string, string>): { root: string; us
   return { root, user };
 }
 
-test('steering apply --claude pre-registers an identity grid instead of per-dial agents', (t) => {
-  // Doug's example, mirrored: session on one model, worker dialed to another
-  // in-session model. The worker's OWN effort still wins over the session's —
-  // but it now comes from a pre-registered cell rather than a file cut for
-  // this dial, which is what makes the next re-dial free.
+/** One cell as `steering apply --claude` used to write it, marker and all. */
+function gridCell(archetype: string, effort: string): string {
+  return [
+    '---',
+    `name: fadeno-${archetype}-${effort}`,
+    'description: Grid cell.',
+    'model: inherit',
+    `effort: ${effort}`,
+    '---',
+    '',
+    'Body.',
+    '',
+    `<!-- fadeno:managed version=0.6.0-rc.34 digest=deadbeef source=grid:${archetype}@${effort} -->`,
+    '',
+  ].join('\n');
+}
+
+test('steering apply --claude writes nothing at all: effort decides the lane, so no file pins one', (t) => {
   const { root, user } = seed(t, { worker: 'fable', reviewer: 'luna', judge: 'current-host' });
   const result = runSteeringApplyClaude({ target: 'claude', repoRoot: root, userPathOptions: user });
 
-  const cellPath = join(root, '.claude', 'agents', 'fadeno-worker-high.md');
-  const cell = readFileSync(cellPath, 'utf8');
-  assert.match(cell, /^---\n[\s\S]*?\nname: fadeno-worker-high\nmodel: inherit\neffort: high\n---\n/);
-  assert.match(cell, /source=grid:worker@high -->/);
-  // The role body survives the frontmatter injection, exactly as before.
-  assert.match(cell, /implementer/);
-
-  // Every archetype x effort cell, and nothing keyed on a model.
-  for (const archetype of ['worker', 'reviewer', 'judge']) {
-    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
-      assert.ok(existsSync(join(root, '.claude', 'agents', `fadeno-${archetype}-${effort}.md`)), `${archetype}@${effort} missing`);
-    }
-    assert.equal(existsSync(join(root, '.claude', 'agents', `${archetype}.md`)), false);
-  }
-  assert.equal(result.grid?.length, 15);
+  // The whole grid is gone, and so is the per-dial file it replaced. A host
+  // spawn runs at the session's effort; a pinned effort the session cannot
+  // give goes out on the command lane instead. Neither needs a definition.
+  assert.deepEqual(result.results, []);
+  assert.deepEqual(result.removed, []);
+  assert.equal(existsSync(join(root, '.claude', 'agents')), false);
 
   // Resolution reporting is unchanged; it just no longer drives emission.
   assert.equal(result.materialization.reviewer!.kind, 'command-broker');
   assert.equal(result.materialization.judge!.kind, 'host');
-  assert.equal(result.restartRequired, true); // first apply registers new names
+  assert.equal(result.materialization.worker!.kind, 'host');
+  assert.equal(result.baseline.worker, 'fable');
+
+  // Nothing was registered, so nothing has to be registered again. Restart
+  // reason 1 (a new effort value entering the vocabulary) retired with the
+  // grid; the two that survive are not something this command can cause.
+  assert.equal(result.restartRequired, false);
+  assert.deepEqual(result.conflicts, []);
 });
 
-test('re-dialing needs no apply and no restart: the grid does not depend on dials', (t) => {
+test('steering apply --claude removes the retired identity grid, found by marker not by name', (t) => {
   const { root, user } = seed(t, { worker: 'fable' });
-  const first = runSteeringApplyClaude({ target: 'claude', repoRoot: root, userPathOptions: user });
-  assert.equal(first.restartRequired, true);
+  const dir = join(root, '.claude', 'agents');
+  mkdirSync(dir, { recursive: true });
+  for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+    for (const archetype of ['worker', 'reviewer', 'judge']) {
+      writeFileSync(join(dir, `fadeno-${archetype}-${effort}.md`), gridCell(archetype, effort));
+    }
+  }
+  // A cell for an archetype and an effort level this build knows nothing
+  // about. The marker is the identity, so it goes with the rest.
+  writeFileSync(join(dir, 'fadeno-scribe-glacial.md'), gridCell('scribe', 'glacial'));
 
-  // Move the worker to a different model at a different effort, and to the
-  // command lane — the three shapes that each used to rewrite a file.
-  mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
-  writeFileSync(join(root, '.fadeno', 'local', 'dials'), JSON.stringify({ dials: { worker: 'luna' } }));
-  const second = runSteeringApplyClaude({ target: 'claude', repoRoot: root, userPathOptions: user });
-
-  // This is the whole point of the grid: ending a session is expensive, and a
-  // dial change is not a grid change.
-  assert.equal(second.restartRequired, false);
-  assert.deepEqual(second.results.filter((r) => r.status !== 'skipped'), []);
-  assert.deepEqual(second.removed, []);
-});
-
-test('steering apply --claude removes a legacy per-dial managed agent but never an unmanaged one', (t) => {
-  const { root, user } = seed(t, { worker: 'fable' });
-  const workerPath = join(root, '.claude', 'agents', 'worker.md');
-  mkdirSync(join(root, '.claude', 'agents'), { recursive: true });
-  // What a pre-grid install left behind: a file pinning whatever was dialed
-  // the day it was written. The hook must never target that identity again.
-  writeFileSync(workerPath, '---\nname: worker\nmodel: fable\neffort: high\n---\nbody\n\n<!-- fadeno:managed version=0.0.0 digest=x source=fable -->\n');
   const result = runSteeringApplyClaude({ target: 'claude', repoRoot: root, userPathOptions: user });
-  assert.equal(existsSync(workerPath), false);
-  assert.deepEqual(result.removed, [workerPath]);
 
-  // A hand-written file of the same name is not ours and is left alone.
-  writeFileSync(workerPath, '---\nname: worker\n---\nhand-written\n');
+  assert.equal(result.removed?.length, 16);
+  assert.deepEqual(readdirSync(dir), []);
+  // Removal alone is not a restart: the plain role agents that take over are
+  // always registered, and a deleted cell simply stops being targeted.
+  assert.equal(result.restartRequired, false);
+
+  // And a second apply is a clean no-op rather than a repeated claim.
   const again = runSteeringApplyClaude({ target: 'claude', repoRoot: root, userPathOptions: user });
-  assert.equal(readFileSync(workerPath, 'utf8'), '---\nname: worker\n---\nhand-written\n');
   assert.deepEqual(again.removed, []);
 });
 
-test('steering apply --claude: an unmanaged existing file is preserved without --force at project scope', (t) => {
+test('steering apply --claude never touches a file lacking the managed marker, grid-named or not', (t) => {
   const { root, user } = seed(t, { worker: 'fable' });
-  const cellPath = join(root, '.claude', 'agents', 'fadeno-worker-high.md');
-  mkdirSync(join(root, '.claude', 'agents'), { recursive: true });
-  writeFileSync(cellPath, '---\nname: fadeno-worker-high\n---\nprecious\n');
-  const result = runSteeringApplyClaude({ target: 'claude', repoRoot: root, userPathOptions: user });
-  assert.equal(readFileSync(cellPath, 'utf8'), '---\nname: fadeno-worker-high\n---\nprecious\n');
-  assert.ok(result.conflicts.includes(cellPath));
+  const dir = join(root, '.claude', 'agents');
+  mkdirSync(dir, { recursive: true });
 
+  // Two traps, both hand-authored: one wearing a grid cell's exact name, one
+  // wearing a legacy per-dial agent's. Names are not ownership; the marker is.
+  const impostorCell = '---\nname: fadeno-worker-high\nmodel: inherit\neffort: high\n---\nprecious\n';
+  const impostorLegacy = '---\nname: worker\n---\nhand-written\n';
+  writeFileSync(join(dir, 'fadeno-worker-high.md'), impostorCell);
+  writeFileSync(join(dir, 'worker.md'), impostorLegacy);
+
+  const result = runSteeringApplyClaude({ target: 'claude', repoRoot: root, userPathOptions: user });
+  assert.deepEqual(result.removed, []);
+  assert.equal(readFileSync(join(dir, 'fadeno-worker-high.md'), 'utf8'), impostorCell);
+  assert.equal(readFileSync(join(dir, 'worker.md'), 'utf8'), impostorLegacy);
+
+  // `--force` is for overwriting someone else's file with ours. There is no
+  // "ours" left on this surface, so it must not become a licence to delete.
   const forced = runSteeringApplyClaude({ target: 'claude', repoRoot: root, userPathOptions: user, force: true });
-  assert.match(readFileSync(cellPath, 'utf8'), /model: inherit/);
-  assert.equal(forced.conflicts.length, 0);
+  assert.deepEqual(forced.removed, []);
+  assert.equal(readFileSync(join(dir, 'fadeno-worker-high.md'), 'utf8'), impostorCell);
+  assert.equal(readFileSync(join(dir, 'worker.md'), 'utf8'), impostorLegacy);
 });
 
-test('a managed grid cell refreshes itself; only someone else\'s file needs --force', (t) => {
+test('steering apply --claude still removes a legacy per-dial managed agent, on every slot kind', (t) => {
+  // `reviewer` is command-delivered here, `judge` is the bare session
+  // baseline, `worker` is a dialed host identity — the three shapes that used
+  // to take three different branches. All three now end the same way.
+  const { root, user } = seed(t, { worker: 'fable', reviewer: 'luna', judge: 'current-host' });
+  const dir = join(root, '.claude', 'agents');
+  mkdirSync(dir, { recursive: true });
+  for (const archetype of ['worker', 'reviewer', 'judge']) {
+    writeFileSync(
+      join(dir, `${archetype}.md`),
+      `---\nname: ${archetype}\nmodel: fable\neffort: high\n---\nbody\n\n<!-- fadeno:managed version=0.0.0 digest=x source=fable -->\n`,
+    );
+  }
+  const result = runSteeringApplyClaude({ target: 'claude', repoRoot: root, userPathOptions: user });
+  assert.deepEqual(
+    result.removed?.slice().sort(),
+    ['judge', 'reviewer', 'worker'].map((archetype) => join(dir, `${archetype}.md`)),
+  );
+});
+
+test('steering apply --claude at user scope cleans the user agent directory, not the repo', (t) => {
   const { root, user } = seed(t, { worker: 'fable' });
-  runSteeringApplyClaude({ target: 'claude', repoRoot: root, userPathOptions: user });
-  const cellPath = join(root, '.claude', 'agents', 'fadeno-worker-high.md');
+  const userDir = join(root, 'home', '.claude', 'agents');
+  const projectDir = join(root, '.claude', 'agents');
+  mkdirSync(userDir, { recursive: true });
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(join(userDir, 'fadeno-worker-high.md'), gridCell('worker', 'high'));
+  writeFileSync(join(projectDir, 'fadeno-worker-high.md'), gridCell('worker', 'high'));
 
-  // A cell left behind by an older template or version must not serve that
-  // content forever — the grid is regenerated output, and `--force` is for
-  // files that are not ours.
-  writeFileSync(cellPath, '---\nname: fadeno-worker-high\nmodel: inherit\neffort: high\n---\nSTALE\n\n<!-- fadeno:managed version=0.0.1 digest=old source=grid:worker@high -->\n');
-  const refreshed = runSteeringApplyClaude({ target: 'claude', repoRoot: root, userPathOptions: user });
-  assert.doesNotMatch(readFileSync(cellPath, 'utf8'), /STALE/);
-  assert.equal(refreshed.restartRequired, true);
-  assert.deepEqual(refreshed.conflicts, []);
-
-  // And a steady-state apply reports no conflicts at all, so it never tells
-  // the user to pass --force for files it is perfectly happy with.
-  const steady = runSteeringApplyClaude({ target: 'claude', repoRoot: root, userPathOptions: user });
-  assert.deepEqual(steady.conflicts, []);
-  assert.equal(steady.restartRequired, false);
+  const result = runSteeringApplyClaude({ target: 'claude', repoRoot: root, userPathOptions: user, scope: 'user' });
+  assert.deepEqual(result.removed, [join(userDir, 'fadeno-worker-high.md')]);
+  assert.equal(existsSync(join(projectDir, 'fadeno-worker-high.md')), true);
 });

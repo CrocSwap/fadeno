@@ -151,7 +151,7 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
         provider: compiled.provider,
         id: entry.id,
         model_id: compiled.modelId,
-        effort: compiled.effort,
+        effort: compiled.effectiveEffort,
         driver: compiled.driver,
         harness: modelHarness,
         adapter,

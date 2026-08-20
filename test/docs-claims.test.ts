@@ -33,6 +33,7 @@ type Side = {
 type Claim = { id: string; doc: Side; src: Side };
 
 const DIALS = 'docs/experimental/dials-and-registry.md';
+const SLOTS = 'docs/experimental/slots-and-archetypes.md';
 const EXTENDING = 'docs/extending.md';
 
 const CLAIMS: Claim[] = [
@@ -40,6 +41,29 @@ const CLAIMS: Claim[] = [
     id: 'two-row-evidence',
     doc: { files: [DIALS], patterns: [/dispatch_requested/, /dispatch_completed/] },
     src: { files: ['src/commands/dispatch.ts'], patterns: [/dispatch_requested/, /dispatch_completed/] },
+  },
+  {
+    // The lane predicate is the whole of "effort decides the lane"; if either
+    // side loses the name, the design doc and the code have diverged on the
+    // one decision the feature is.
+    id: 'delivery-lane-predicate',
+    doc: { files: [SLOTS], patterns: [/decideLane/, /lane_reason/, /hostEffortProven/] },
+    src: { files: ['src/lib/lane.ts'], patterns: [/decideLane/, /lane_reason/, /hostEffortProven/] },
+  },
+  {
+    // The trap: keying the lane on the resolved effort instead of the pin
+    // inverts the feature. Both names must survive in both places.
+    id: 'pinned-vs-effective-effort',
+    doc: { files: [SLOTS], patterns: [/pinnedEffort/, /effectiveEffort/] },
+    src: { files: ['src/lib/executors.ts'], patterns: [/pinnedEffort/, /effectiveEffort/] },
+  },
+  {
+    id: 'host-refused-row',
+    doc: { files: [SLOTS], patterns: [/host_refused/, /resolver_timeout/, /restart_required/] },
+    src: {
+      files: ['templates/claude/hooks/dispatch-steering.mjs'],
+      patterns: [/host_refused/, /resolver_timeout/, /restart_required/],
+    },
   },
   {
     id: 'host-delivery-row',

@@ -1150,7 +1150,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     executor: executorName,
     model: delivery.model,
     model_id: delivery.modelId,
-    reasoning_effort: delivery.effort,
+    reasoning_effort: delivery.effectiveEffort,
     driver: delivery.driver,
     ...(delivery.provider != null ? { provider: delivery.provider } : {}),
     transport,
@@ -1513,7 +1513,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         model: shadowDelivery.model,
         model_id: shadowDelivery.modelId,
         driver: shadowDelivery.driver,
-        reasoning_effort: shadowDelivery.effort,
+        reasoning_effort: shadowDelivery.effectiveEffort,
         transport: 'host',
       });
       return null;
@@ -1528,12 +1528,12 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     const eligibilityState = eligibilityFor(shadowSpec, archetype);
     if (eligibilityState === 'forbidden') {
       const msg = explainEligibilityConflict({ executor: shadowRefString, spec: shadowSpec }, archetype) ?? `archetype "${archetype}" is forbidden on executor "${shadowRefString}".`;
-      writeShadowRefusal('eligibility', msg, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effort, transport: 'command' });
+      writeShadowRefusal('eligibility', msg, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: 'command' });
       return null;
     }
     const shadowWriteConflict = explainWriteConflict({ executor: shadowRefString, spec: shadowSpec }, archetype, profile);
     if (shadowWriteConflict != null) {
-      writeShadowRefusal('write_posture', shadowWriteConflict, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effort, transport: 'command' });
+      writeShadowRefusal('write_posture', shadowWriteConflict, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: 'command' });
       return null;
     }
     // Constraint check with shadow:true
@@ -1578,7 +1578,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       throw err;
     }
     if (shadowConstraintVerdict.verdict === 'refused') {
-      writeShadowRefusal('constraint_command', shadowConstraintVerdict.reason, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effort, transport: 'command' });
+      writeShadowRefusal('constraint_command', shadowConstraintVerdict.reason, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: 'command' });
       return null;
     }
 
@@ -1600,7 +1600,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       writeShadowRefusal(
         'shadow_containment',
         `the prompt contains this repo's absolute path ("${repoRoot}") — both arms receive byte-identical prompt bytes, so a prompt naming absolute repo paths cannot be isolated: the challenger would follow that path straight into the primary's tree. Rewrite it repo-relative (drop the "${repoRoot}/" prefix) to make the pair possible.`,
-        { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effort, transport: 'command' },
+        { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: 'command' },
       );
       return null;
     }
@@ -1681,7 +1681,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       executor: shadowExecutorNameInner,
       model: shadowDelivery.model,
       model_id: shadowDelivery.modelId,
-      reasoning_effort: shadowDelivery.effort,
+      reasoning_effort: shadowDelivery.effectiveEffort,
       driver: shadowDelivery.driver,
       ...(shadowDelivery.provider != null ? { provider: shadowDelivery.provider } : {}),
       transport: 'command',
@@ -2145,7 +2145,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     model: delivery.model,
     modelId: delivery.modelId,
     driver: delivery.driver,
-    reasoningEffort: delivery.effort,
+    reasoningEffort: delivery.effectiveEffort,
     source,
     echo,
     exitCode: spawned.status ?? 1,

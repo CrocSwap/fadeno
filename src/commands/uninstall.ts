@@ -2,6 +2,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileDigest, readInstallationManifest, writeInstallationManifest } from '../lib/installations.ts';
+import { isRetiredClaudeGridCell, listRetiredClaudeGridCells } from './steering.ts';
 import { readUserHarness, userPaths, type FadenoHarness, type UserPathOptions } from '../lib/user-paths.ts';
 
 export class UninstallError extends Error {}
@@ -21,12 +22,43 @@ export interface UninstallResult {
   purged: boolean;
 }
 
-function legacyManagedFiles(harness: FadenoHarness, opts?: UserPathOptions): string[] {
-  if (harness !== 'codex') return [];
+/**
+ * Files an earlier Fadeno wrote that the installation manifest never
+ * recorded, so uninstall would otherwise leave them behind.
+ *
+ * Codex: user-scoped role agent TOMLs, named deterministically.
+ *
+ * Claude: cells of the retired identity grid. `fadeno steering apply --claude`
+ * wrote these outside the manifest, and the grid is gone — a spawn's effort
+ * comes from the lane rule now, not from a pre-registered file — so an
+ * uninstall that left them would leave the harness registering Fadeno agents
+ * for a Fadeno that is no longer installed. Found by their `source=grid:`
+ * marker rather than by name, which is also the only licence to delete one.
+ */
+function unrecordedManagedFiles(harness: FadenoHarness, opts?: UserPathOptions): string[] {
   const env = opts?.env ?? process.env;
   const home = opts?.home ?? homedir();
+  if (harness === 'claude') return listRetiredClaudeGridCells(join(home, '.claude', 'agents'));
+  if (harness !== 'codex') return [];
   const agentsDir = join(env.CODEX_HOME?.trim() || join(home, '.codex'), 'agents');
   return ['worker', 'reviewer', 'judge'].map((role) => join(agentsDir, `fadeno-${role}.toml`));
+}
+
+/**
+ * Is this file ours to delete? Ownership by marker, never by name or by
+ * location. Codex agent TOMLs carry `# fadeno:managed` on their first line;
+ * retired Claude grid cells carry the HTML-comment form with `source=grid:`.
+ * Re-checked at delete time even for paths `unrecordedManagedFiles` already
+ * vetted — the read is cheap and the mistake is not recoverable.
+ */
+function carriesManagedMarker(path: string): boolean {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return false;
+  }
+  return text.startsWith('# fadeno:managed') || isRetiredClaudeGridCell(text);
 }
 
 function removePermissionRule(
@@ -75,13 +107,13 @@ export function runUninstall(opts: UninstallOptions): UninstallResult {
     const recorded = installation?.files ?? [];
     const files = [
       ...recorded,
-      ...legacyManagedFiles(harness, opts.userPathOptions)
+      ...unrecordedManagedFiles(harness, opts.userPathOptions)
         .filter((path) => !recorded.some((file) => file.path === path))
         .map((path) => ({ path, sha256: '' })),
     ];
     for (const file of files) {
       if (!existsSync(file.path)) continue;
-      const managedMarker = readFileSync(file.path, 'utf8').startsWith('# fadeno:managed');
+      const managedMarker = carriesManagedMarker(file.path);
       if (managedMarker || (file.sha256 !== '' && fileDigest(file.path) === file.sha256)) {
         rmSync(file.path, { force: true });
         removed.push(file.path);

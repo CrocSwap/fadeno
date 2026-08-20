@@ -1,7 +1,7 @@
-import { accessSync, constants, existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { delimiter, dirname, isAbsolute, join, sep } from 'node:path';
+import { accessSync, constants, existsSync, lstatSync, readFileSync, statSync } from 'node:fs';
+import { basename, delimiter, dirname, isAbsolute, join, sep } from 'node:path';
 import { runStatus, type StatusOptions } from './status.ts';
-import { CLAUDE_EFFORT_LADDER, HOST_SURFACE_ARCHETYPES, claudeGridAgentName } from './steering.ts';
+import { listRetiredClaudeGridCells } from './steering.ts';
 import { detectAmbientHarness } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { isFadenoPathIgnored } from '../lib/source-control.ts';
@@ -11,14 +11,16 @@ import {
   readEffectiveLease,
   readWorkspaceLease,
 } from '../lib/workspace-lease.ts';
-import { compareFadenoVersions, readInstallationManifest } from '../lib/installations.ts';
+import { readInstallationManifest } from '../lib/installations.ts';
 import { userPaths } from '../lib/user-paths.ts';
 
 // Same literal `steering.ts` writes into every managed Claude agent file
-// (grid cell or legacy per-dial); not exported there, so duplicated here
-// rather than reaching into that module's internals. Already duplicated
+// (retired grid cell or legacy per-dial); not exported there, so duplicated
+// here rather than reaching into that module's internals. Already duplicated
 // independently by `setup.ts`'s codex equivalent and the dispatch-steering
 // hook, so one more read-only copy is consistent with the existing pattern.
+// (Grid cells carry a narrower marker, and `listRetiredClaudeGridCells` —
+// which steering.ts DOES export — is the single definition of that one.)
 const CLAUDE_MANAGED_MARK = '<!-- fadeno:managed';
 
 export class DoctorError extends Error {}
@@ -218,81 +220,53 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
   } else if (status.codexMaterialization != null) {
     findings.push(finding('codex-agents', 'ok', 'managed host-agent state is current'));
   }
-  // --- Claude identity grid & legacy per-dial managed agents ---
+  // --- Retired Claude managed agents ---
   //
-  // `fadeno steering apply --claude` pre-registers a dial-independent
-  // identity grid (`fadeno-<archetype>-<effort>.md`, one per host-surface
-  // archetype x effort level) and REMOVES the legacy per-dial managed agents
-  // it replaces (`<archetype>.md`), which pin whatever model was dialed the
-  // moment they were written. Nothing else detects a repo that has never
-  // run apply, or one whose legacy files survived from before the grid
-  // existed — a stale `judge.md` pinning yesterday's model silently
-  // overrides whatever `fadeno dial` currently reports, with no observable
-  // symptom short of the wrong model actually running. Read-only, and
-  // scoped to files this steering path itself wrote: only a file carrying
-  // the managed marker is ever inspected below, never a user's own
-  // hand-authored agent of the same name.
+  // `fadeno steering apply --claude` no longer WRITES anything. Effort decides
+  // the lane now — a host spawn runs at the session's effort, and a pinned
+  // effort the session cannot give goes out on the command lane — so there is
+  // nothing left for an agent file to pin. Apply's whole job on this surface
+  // is removal: the identity grid (`fadeno-<archetype>-<effort>.md`, marked
+  // `source=grid:…`) and the legacy per-dial agents it once replaced
+  // (`<archetype>.md`, which additionally pin whatever model was dialed the
+  // moment they were written).
+  //
+  // Both linger silently. The harness registers whatever is in the directory
+  // at session start, so a survivor keeps overriding what `fadeno dial`
+  // reports with no symptom short of the wrong identity actually running —
+  // this repo's own dogfooded tree was exactly that. Read-only here, and
+  // scoped to files this steering path itself wrote: only a file carrying the
+  // managed marker is ever inspected, never a user's own hand-authored agent
+  // of the same name.
   {
     const claudeAgentDir = join(repoRoot, '.claude', 'agents');
-    let entries: string[] = [];
-    try {
-      entries = existsSync(claudeAgentDir) ? readdirSync(claudeAgentDir) : [];
-    } catch {
-      entries = [];
-    }
-    const gridNames = new Set<string>();
-    for (const archetype of HOST_SURFACE_ARCHETYPES) {
-      for (const effort of CLAUDE_EFFORT_LADDER) gridNames.add(`${claudeGridAgentName(archetype, effort)}.md`);
-    }
-    const legacyNames = new Set<string>(HOST_SURFACE_ARCHETYPES.map((archetype) => `${archetype}.md`));
-    let gridPresent = 0;
-    for (const name of entries) {
-      if (!name.endsWith('.md')) continue;
+    for (const name of ['worker.md', 'reviewer.md', 'judge.md']) {
+      const path = join(claudeAgentDir, name);
       let text: string;
       try {
-        text = readFileSync(join(claudeAgentDir, name), 'utf8');
+        if (!existsSync(path)) continue;
+        text = readFileSync(path, 'utf8');
       } catch {
         continue;
       }
       if (!text.includes(CLAUDE_MANAGED_MARK)) continue; // never report on a hand-written agent
-      if (gridNames.has(name)) {
-        gridPresent += 1;
-      } else if (legacyNames.has(name)) {
-        const modelMatch = /^model:\s*(.+)$/m.exec(text);
-        const model = modelMatch ? modelMatch[1]!.trim() : 'unknown';
-        findings.push(finding(
-          'claude-agents-legacy',
-          'warning',
-          `${name} is a legacy per-dial managed agent pinning model "${model}" — it silently overrides whatever \`fadeno dial\` currently resolves for this archetype`,
-          'Run `fadeno steering apply --claude` to replace it with the dial-independent identity grid.',
-        ));
-      }
-      // Reuses the same directional vocabulary as the `runtime-version`
-      // finding above (`managed-older`) rather than inventing new severity
-      // words for what is the same underlying fact: a managed artifact
-      // stamped by an older build than the one running now.
-      const versionMatch = /\bversion=(\S+)/.exec(text);
-      if (versionMatch) {
-        const fileVersion = versionMatch[1]!;
-        if (compareFadenoVersions(fileVersion, status.version) === -1) {
-          findings.push(finding(
-            'claude-agents-stale',
-            'warning',
-            `${name} is stamped ${fileVersion}, older than this CLI ${status.version} (managed-older)`,
-            'Run `fadeno steering apply --claude` to refresh it.',
-          ));
-        }
-      }
+      const modelMatch = /^model:\s*(.+)$/m.exec(text);
+      const model = modelMatch ? modelMatch[1]!.trim() : 'unknown';
+      findings.push(finding(
+        'claude-agents-legacy',
+        'warning',
+        `${name} is a legacy per-dial managed agent pinning model "${model}" — it silently overrides whatever \`fadeno dial\` currently resolves for this archetype`,
+        'Run `fadeno steering apply --claude` to remove it; the plugin\'s role agents deliver the dial live.',
+      ));
     }
-    const dialsInUse = dials != null && (
-      Object.keys(dials.session).length > 0 || Object.keys(dials.repo).length > 0 || Object.keys(dials.user).length > 0
-    );
-    if (status.harness === 'claude' && dialsInUse && gridPresent === 0) {
+    const retiredGrid = listRetiredClaudeGridCells(claudeAgentDir);
+    if (retiredGrid.length > 0) {
       findings.push(finding(
         'claude-agents-grid',
         'warning',
-        'no Claude identity grid cells are registered even though dials are in use — spawns run on whatever the session already has, not what `fadeno dial` reports',
-        'Run `fadeno steering apply --claude` to pre-register the grid.',
+        `${retiredGrid.length} retired identity-grid cell(s) remain in ${claudeAgentDir} (${retiredGrid.map((path) => basename(path)).slice(0, 3).join(', ')}${retiredGrid.length > 3 ? ', …' : ''}) — ` +
+          'they pin an effort nothing consults any more, and the harness still registers them at session start',
+        'Run `fadeno steering apply --claude` to remove them.',
       ));
     }
   }

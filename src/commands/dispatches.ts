@@ -37,8 +37,11 @@ const OUTCOME_KEYS = ['exit_code', 'duration_ms', 'output_sha256', 'signal'];
  * One logical dispatch: a correlated `dispatch_requested` /
  * `dispatch_completed` pair from the kernel (`kind: "command"`), a single
  * `dispatch_refused` row (also `kind: "command"` — the refusal *is* the
- * request-point evidence), or a single `host_delivery` row from the Claude
- * steering hook (`kind: "host"`), which has no kernel downstream. A `host`
+ * request-point evidence), a single `host_delivery` row from the Claude
+ * steering hook (`kind: "host"`), which has no kernel downstream, or a single
+ * `host_refused` row from that same hook (also `kind: "host"` — the spawn was
+ * denied before any subagent existed, so there is nothing downstream at all).
+ * A `host`
  * entry may additionally carry a correlated `host_attestation` row — written
  * by `fadeno attest` running INSIDE the subagent itself, folded onto the
  * `attestedAt`/`attestedEffort`/`attestedEffortEvidence` fields rather than
@@ -73,7 +76,14 @@ export interface DispatchEntry {
   writeAccess: boolean | null;
   writeVariant: boolean | null;
   /**
-   * Present on a `dispatch_refused` row. Null on every other kind.
+   * Present on a kernel `dispatch_refused` row and on the steering hook's
+   * `host_refused` row — the two ways a dispatch is recorded as never having
+   * run. Null on every other kind. The predicate vocabularies are per-writer
+   * and disjoint (`DispatchRefusalPredicate` in dispatch.ts for the kernel;
+   * `resolver_error` / `resolver_timeout` / `restart_required` for the hook),
+   * so the predicate also says which side refused — and, across the hook's
+   * two resolver-side values, whether the resolver failed or merely hung,
+   * which have different remedies.
    */
   refusal: { predicate: string; message: string } | null;
   /**
@@ -458,6 +468,24 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
 }
 
 /**
+ * A `host_refused` row: the Claude steering hook DENIED the spawn, so no
+ * subagent ever existed. Built on `hostEntry` because the identity half is
+ * the same shape (and mostly null on the resolver-error path, which denies
+ * before anything is resolved), plus the refusal the kernel's own refusal
+ * rows already carry.
+ *
+ * The event name is the claim, so a row whose `refusal` object is missing or
+ * malformed still renders as a refusal rather than quietly reading as a
+ * delivery that was never attested — which is the exact confusion this row
+ * exists to end.
+ */
+function hostRefusedEntry(row: Record<string, unknown>): DispatchEntry {
+  const entry = hostEntry(row);
+  entry.refusal = refusalOf(row.refusal) ?? { predicate: 'unknown', message: '' };
+  return entry;
+}
+
+/**
  * Correlate a `host_attestation` row (written by `fadeno attest`, running
  * INSIDE the subagent) onto the `host_delivery` entry it measures.
  *
@@ -488,6 +516,12 @@ function correlateAttestation(entries: readonly DispatchEntry[], row: Record<str
   for (let i = entries.length - 1; i >= 0; i -= 1) {
     const candidate = entries[i]!;
     if (candidate.kind !== 'host') continue;
+    // A refused spawn never ran, so nothing inside it could have attested.
+    // Without this the nearest-preceding rule would happily fold a real
+    // subagent's attestation onto a denial — inventing a measurement of a
+    // spawn the hook blocked, and consuming the attestation the delivery it
+    // actually came from was owed.
+    if (candidate.refusal != null) continue;
     if (candidate.archetype !== archetype) continue;
     if (candidate.attestedAt != null) continue; // already claimed by an earlier attestation
     candidate.attestedAt = str(row.timestamp);
@@ -615,7 +649,15 @@ export function renderDispatchLine(entry: DispatchEntry): string {
       parts.push('no completion recorded (killed or in flight)');
     }
   } else if (entry.kind === 'host') {
-    if (entry.attestedAt == null) {
+    if (entry.refusal != null) {
+      // Denied by the steering hook: no subagent, so no attestation is owed
+      // and `[never attested]` would be an accusation about something that
+      // never existed. The same `[refused: <predicate>]` marker the command
+      // branch uses — one vocabulary for "this did not run", whichever side
+      // stopped it.
+      parts.push(`[refused: ${entry.refusal.predicate}]`);
+      if (entry.refusal.message !== '') parts.push(entry.refusal.message);
+    } else if (entry.attestedAt == null) {
       // The gap this whole feature closes: a host_delivery is a REQUEST the
       // parent's steering hook recorded before the subagent ever ran, and
       // running `fadeno attest` is only tier-1/advisory — an agent may not
@@ -677,7 +719,11 @@ function summarize(
  * Read `.fadeno/dispatches.jsonl` and answer "which executor actually ran
  * what?" — kernel `dispatch_requested`/`dispatch_completed` rows correlated by
  * `dispatch_id` into one logical entry each, `dispatch_refused` rows as
- * standalone command entries, plus the steering hook's `host_delivery` rows. Order is append order (oldest → newest), never
+ * standalone command entries, plus the steering hook's `host_delivery` and
+ * `host_refused` rows. Every refusal is a logical entry of its own and so
+ * counts against `--tail` exactly like a delivery does: a denial loop is
+ * evidence, and a tail that quietly dropped it would hide the one thing
+ * worth seeing. Order is append order (oldest → newest), never
  * re-sorted by timestamp: a killed dispatch's request row is still where it
  * happened. A missing or empty log is a friendly answer, not an error, and
  * rows that cannot be read are counted rather than fatal — the log is
@@ -751,6 +797,13 @@ export function runDispatches(opts: DispatchesOptions = {}): DispatchesResult {
     // by an older hook still renders.
     if (event === 'host_delivery' || event === 'native_delivery') {
       entries.push(hostEntry(row));
+      continue;
+    }
+    // A spawn the steering hook DENIED. Its own entry, not a skipped row: a
+    // repo whose every worker spawn is being refused must not read like a
+    // repo where nobody spawned anything.
+    if (event === 'host_refused') {
+      entries.push(hostRefusedEntry(row));
       continue;
     }
     if (event === 'host_attestation') {
@@ -1234,6 +1287,10 @@ function loadAllEntries(absolute: string): {
     }
     if (event === 'host_delivery' || event === 'native_delivery') {
       entries.push(hostEntry(row));
+      continue;
+    }
+    if (event === 'host_refused') {
+      entries.push(hostRefusedEntry(row));
       continue;
     }
     if (event === 'host_attestation') {
