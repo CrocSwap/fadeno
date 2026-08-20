@@ -554,7 +554,7 @@ export function preDialsCatalogError(source: string): ExecutorProfileError {
 }
 
 /** Levenshtein distance, iterative two-row form. */
-function editDistance(a: string, b: string): number {
+export function editDistance(a: string, b: string): number {
   if (a === b) return 0;
   if (a.length === 0) return b.length;
   if (b.length === 0) return a.length;

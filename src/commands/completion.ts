@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, type Dirent } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { loadExecutorProfile, type ExecutorProfile } from '../lib/executors.ts';
+import { editDistance, loadExecutorProfile, type ExecutorProfile } from '../lib/executors.ts';
 import { listRuns, readEvents, type RunSummary } from '../lib/run-ledger.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { listDefinitionNames, resolvePlaybookFile } from '../lib/definitions.ts';
@@ -62,10 +62,10 @@ const NONE: OptionSpec = { kind: 'none' };
 const PATH: OptionSpec = { kind: 'path' };
 
 const COMMANDS: Record<string, CommandSpec> = {
-  setup: command({ '--codex': NONE, '--claude': NONE, '--non-interactive': NONE }),
+  setup: command({ '--codex': NONE, '--claude': NONE, '--non-interactive': NONE, '--from': PATH, '--reset-runtime': NONE }),
   status: command({ '--verbose': NONE }),
   doctor: command({ '--codex': NONE, '--claude': NONE }),
-  vendor: command({ '--codex': NONE, '--claude': NONE, '--grok': NONE, '--with-hooks': NONE, '--force': NONE }),
+  vendor: command({ '--codex': NONE, '--claude': NONE, '--grok': NONE, '--with-hooks': NONE, '--no-steering': NONE, '--force': NONE }),
   uninstall: command({ '--codex': NONE, '--claude': NONE, '--all': NONE, '--purge-user-data': NONE, '--force': NONE }),
   clean: command({ '--force': NONE }),
   unvendor: command({ '--force': NONE }),
@@ -91,7 +91,7 @@ const COMMANDS: Record<string, CommandSpec> = {
       clear: command({ '--session': NONE, '--user': NONE, '--repo': NONE }, ['archetype']),
       shadow: command({ '--via': { kind: 'free' }, '--rate': { kind: 'free' } }, ['archetype', 'free']),
       'clear-shadow': command({}, ['archetype']),
-      resolve: command({ '--archetype': { kind: 'archetype' } }, []),
+      resolve: command({ '--archetype': { kind: 'archetype' }, '--prompt-sha256': { kind: 'free' } }, []),
     },
   ),
   steering: command(
@@ -101,11 +101,17 @@ const COMMANDS: Record<string, CommandSpec> = {
       resolve: command({
         '--archetype': { kind: 'archetype' },
         '--host-executor': { kind: 'free' },
+        // Legacy spelling of `--host-executor`, still read by cli.ts.
+        '--native-executor': { kind: 'free' },
         '--role': { kind: 'free' },
         '--run': { kind: 'run' },
         '--dispatch-id': { kind: 'free' },
+        // The prompt bytes the resolver hashes to decide pairing; the Codex
+        // broker passes one of these on every ordinary dispatch.
+        '--prompt-file': PATH,
+        '--prompt-sha256': { kind: 'free' },
       }),
-      apply: command({ '--codex': NONE, '--force': NONE, '--scope': { kind: 'enum', values: ['project', 'user'] } }, ['dial']),
+      apply: command({ '--codex': NONE, '--claude': NONE, '--grok': NONE, '--force': NONE, '--scope': { kind: 'enum', values: ['project', 'user'] } }, ['dial']),
     },
   ),
   dispatch: command(
@@ -142,7 +148,7 @@ const COMMANDS: Record<string, CommandSpec> = {
     },
     ['run'],
   ),
-  'tool-run': command({ '--tool': { kind: 'free' }, '--timeout': { kind: 'free' } }, ['run']),
+  'tool-run': command({ '--tool': { kind: 'free' }, '--timeout': { kind: 'free' }, '--output': PATH }, ['run']),
   'tool-complete': command({ '--output': PATH }, ['run']),
   gate: command(
     { '--artifact': PATH, '--report': PATH },
@@ -176,7 +182,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   'shadow-apply': command({ '--arm': { kind: 'enum', values: ['challenger', 'primary'] }, '--check': NONE }, ['free']),
   show: command({ '--legacy': NONE, '--events': NONE }, ['run']),
   verify: command({ '--latest': NONE, '--allow-failed': NONE, '--legacy': NONE }, ['run']),
-  plugin: command({ '--codex': NONE, '--force': NONE }, ['path']),
+  plugin: command({ '--codex': NONE, '--grok': NONE, '--force': NONE }, ['path']),
   completion: command({}, [], {
     bash: command({}),
   }),
@@ -575,4 +581,58 @@ export function runCompletionCandidates(opts: CompletionCandidatesOptions): stri
   // semantic candidates. An empty next word still benefits from relevant flags.
   if (current === '') return commandOptions(context.spec);
   return [];
+}
+
+/**
+ * Flags this command actually accepts, `--`-prefixed, including globals.
+ *
+ * `null` means the command is unknown here, and the caller must not treat
+ * that as "accepts nothing" — silently rejecting every flag of a command this
+ * registry forgot would be a worse failure than the one it prevents.
+ */
+export function knownFlagsFor(command: string, subcommand?: string): Set<string> | null {
+  const spec = COMMANDS[command];
+  if (spec == null) return null;
+  const sub = subcommand != null ? spec.subcommands?.[subcommand] : undefined;
+  // A subcommand's own options are additive: `steering resolve --archetype`
+  // is valid, and so is `steering --help`.
+  return new Set([...Object.keys(spec.options), ...(sub != null ? Object.keys(sub.options) : [])]);
+}
+
+/**
+ * Flags the caller passed that this command does not accept.
+ *
+ * `parseArgs` is strict, but its option table is GLOBAL across every command,
+ * so a flag declared for one command parses cleanly under any other and is
+ * then silently ignored — `fadeno doctor --repo <path>` consumed `--repo` as
+ * `dial`'s boolean and left the path as a stray positional, reporting on the
+ * wrong repository while looking like it had worked. A wrong answer that
+ * looks right is the failure this whole registry exists to prevent, so the
+ * one table that already knows which flags belong to which command now
+ * answers for both completion and validation.
+ */
+export function unknownFlagsFor(command: string, subcommand: string | undefined, passed: readonly string[]): string[] {
+  const known = knownFlagsFor(command, subcommand);
+  if (known == null) return [];
+  return passed.map((name) => `--${name}`).filter((flag) => !known.has(flag));
+}
+
+/** Nearest accepted flag within a small edit distance, for a did-you-mean. */
+export function suggestFlag(command: string, subcommand: string | undefined, flag: string): string | null {
+  const known = knownFlagsFor(command, subcommand);
+  if (known == null) return null;
+  let best: string | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const candidate of known) {
+    const distance = editDistance(flag, candidate);
+    if (distance < bestDistance) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  }
+  // Two, not three. `--repo` sits three edits from `--help`, and offering
+  // that as the intended flag is worse than offering nothing: a bad guess
+  // sends someone to verify a wrong lead, where silence sends them to
+  // `--help`, which is right there in the same message.
+  return best != null && bestDistance <= 2 && bestDistance < flag.length ? best : null;
 }

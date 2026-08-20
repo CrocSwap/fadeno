@@ -45,7 +45,7 @@ import { runRuns } from './commands/runs.ts';
 import { runShow } from './commands/show.ts';
 import { runValidate } from './commands/validate.ts';
 import { runVerify, type VerifyResult } from './commands/verify.ts';
-import { runCompletion, runCompletionCandidates } from './commands/completion.ts';
+import { knownFlagsFor, runCompletion, runCompletionCandidates, suggestFlag, unknownFlagsFor } from './commands/completion.ts';
 import { runShadowApply } from './commands/shadow-apply.ts';
 import { runSteeringApply, runSteeringApplyClaude, runSteeringResolve } from './commands/steering.ts';
 import { runDispatchPrompt } from './commands/dispatch-prompt.ts';
@@ -1467,11 +1467,38 @@ function main(argv: string[]): number {
   const { values, positionals } = parsed;
   const command = positionals[0];
 
-  if (
-    (values.run !== undefined || values['dispatch-id'] !== undefined) &&
-    !(command === 'steering' && positionals[1] === 'resolve')
-  ) {
-    throw new Error('--run and --dispatch-id are valid only for `fadeno steering resolve`.');
+  // `parseArgs` is strict, but its option table is GLOBAL across every
+  // command, so a flag declared for one command parses cleanly under any
+  // other and is then silently ignored. `fadeno doctor --repo <path>`
+  // consumed `--repo` as `dial`'s boolean and left the path as a stray
+  // positional — reporting on the current repository while appearing to
+  // inspect another one. A wrong answer that looks right is worse than an
+  // error, and this was found the only way that class ever is: by noticing
+  // the output described somewhere else.
+  //
+  // The per-command table in `completion.ts` already knew the answer; it now
+  // serves both completion and validation, so the two cannot drift. An
+  // unknown command answers `[]` rather than "accepts nothing", because
+  // rejecting every flag of a command the registry forgot would be a worse
+  // failure than the one being fixed.
+  if (command != null && values.help !== true && values.version !== true) {
+    const unknown = unknownFlagsFor(command, positionals[1], Object.keys(values));
+    if (unknown.length > 0) {
+      const described = unknown.map((flag: string) => {
+        const near = suggestFlag(command, positionals[1], flag);
+        return near != null ? `${flag} (did you mean ${near}?)` : flag;
+      });
+      // Name what IS accepted rather than only what is not. The list is
+      // short for most commands, and a reader who mistyped is one glance from
+      // the answer instead of one more invocation.
+      const accepted = [...(knownFlagsFor(command, positionals[1]) ?? [])].sort();
+      throw new Error(
+        `\`fadeno ${command}\` does not accept ${described.join(', ')}. ` +
+          (accepted.length > 0 && accepted.length <= 8
+            ? `It accepts: ${accepted.join(', ')}.`
+            : `Run \`fadeno ${command} --help\` for what it does accept.`),
+      );
+    }
   }
 
   if (values.version) {
