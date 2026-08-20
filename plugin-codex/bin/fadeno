@@ -14375,13 +14375,13 @@ function runDecide(opts) {
 
 // src/commands/dispatch.ts
 var import_node_child_process5 = require("node:child_process");
-var import_node_crypto6 = require("node:crypto");
+var import_node_crypto7 = require("node:crypto");
 var import_node_fs14 = require("node:fs");
 var import_node_os2 = require("node:os");
 var import_node_path14 = require("node:path");
 
 // src/lib/artifact-manifest.ts
-var import_node_crypto2 = require("node:crypto");
+var import_node_crypto3 = require("node:crypto");
 var import_node_fs8 = require("node:fs");
 var import_node_path8 = require("node:path");
 
@@ -14392,6 +14392,7 @@ var import_ajv = __toESM(require_ajv(), 1);
 var import_yaml5 = __toESM(require_dist(), 1);
 
 // src/lib/executors.ts
+var import_node_crypto2 = require("node:crypto");
 var import_node_fs6 = require("node:fs");
 var import_node_path6 = require("node:path");
 var import_yaml4 = __toESM(require_dist(), 1);
@@ -14649,6 +14650,10 @@ function stringifyObject(value) {
 var ExecutorProfileError = class extends Error {
 };
 var BARE_IDENTIFIER_RE = /^[a-z][a-z0-9_-]*$/;
+function shadowSampleRoll(promptSha256, archetype, challenger) {
+  const digest2 = (0, import_node_crypto2.createHash)("sha256").update(`${promptSha256}:${archetype}:${challenger}`).digest("hex");
+  return Number.parseInt(digest2.slice(0, 8), 16) / 4294967296;
+}
 var SESSION_ID_PLACEHOLDER = "{session_id}";
 function substituteSessionId(argv, sessionId) {
   return argv.map((part) => part.split(SESSION_ID_PLACEHOLDER).join(sessionId));
@@ -17158,7 +17163,7 @@ function resolveRejectionContext(flow, events, stepId, inputCutoff) {
 var ManifestError = class extends Error {
 };
 function sha256Hex(data) {
-  return (0, import_node_crypto2.createHash)("sha256").update(data).digest("hex");
+  return (0, import_node_crypto3.createHash)("sha256").update(data).digest("hex");
 }
 var MEDIA_TYPES = {
   ".json": "application/json",
@@ -17335,7 +17340,7 @@ function evaluateConstraint(profile, context, opts) {
 }
 
 // src/lib/host-dispatch.ts
-var import_node_crypto5 = require("node:crypto");
+var import_node_crypto6 = require("node:crypto");
 var import_node_fs12 = require("node:fs");
 var import_node_path12 = require("node:path");
 
@@ -17606,7 +17611,7 @@ function definitionSourceSummary(repoRoot) {
 
 // src/lib/workspace-lease.ts
 var import_node_fs10 = require("node:fs");
-var import_node_crypto3 = require("node:crypto");
+var import_node_crypto4 = require("node:crypto");
 var import_node_path10 = require("node:path");
 var import_node_child_process2 = require("node:child_process");
 var WORKSPACE_LEASE_FILE = (0, import_node_path10.join)(".fadeno", "local", "workspace-lease.json");
@@ -17716,7 +17721,7 @@ function readRecord(repoRoot) {
 function writeRecordAtomic(repoRoot, record2) {
   const abs = (0, import_node_path10.join)(repoRoot, WORKSPACE_LEASE_FILE);
   (0, import_node_fs10.mkdirSync)((0, import_node_path10.dirname)(abs), { recursive: true });
-  const tmp = `${abs}.tmp-${process.pid}-${(0, import_node_crypto3.randomUUID)()}`;
+  const tmp = `${abs}.tmp-${process.pid}-${(0, import_node_crypto4.randomUUID)()}`;
   (0, import_node_fs10.writeFileSync)(tmp, `${JSON.stringify(record2, null, 2)}
 `, "utf8");
   try {
@@ -17933,7 +17938,7 @@ function collectIsolatedDiff(opts) {
     throw new WorkspaceLeaseError(`could not collect isolated worktree diff: ${reason.slice(0, ISOLATED_DIFF_MAX_NOTE)}`);
   }
   const diffContent = Buffer.from(diffRes.stdout ?? []);
-  const tmp = `${opts.diffAbs}.tmp-${process.pid}-${(0, import_node_crypto3.randomUUID)()}`;
+  const tmp = `${opts.diffAbs}.tmp-${process.pid}-${(0, import_node_crypto4.randomUUID)()}`;
   (0, import_node_fs10.writeFileSync)(tmp, diffContent);
   try {
     (0, import_node_fs10.renameSync)(tmp, opts.diffAbs);
@@ -18044,7 +18049,7 @@ function withIsolatedWorktree(opts, action) {
 var import_node_fs11 = require("node:fs");
 var import_node_path11 = require("node:path");
 var import_node_child_process3 = require("node:child_process");
-var import_node_crypto4 = require("node:crypto");
+var import_node_crypto5 = require("node:crypto");
 var HOST_WORKSPACE_SCHEMA_VERSION = "1.0";
 var HOST_WORKTREES_DIR = (0, import_node_path11.join)(".fadeno", "local", "host-worktrees");
 var HOST_WORKSPACES_DIR = (0, import_node_path11.join)(".fadeno", "local", "host-workspaces");
@@ -18191,7 +18196,7 @@ function writeStateAtomic(repoRoot, state) {
   const rel = hostWorkspaceStatePath(state.run, state.dispatch_id);
   const abs = assertHostPathSafe(repoRoot, rel);
   (0, import_node_fs11.mkdirSync)((0, import_node_path11.dirname)(abs), { recursive: true });
-  const tmp = `${abs}.tmp-${process.pid}-${(0, import_node_crypto4.randomUUID)()}`;
+  const tmp = `${abs}.tmp-${process.pid}-${(0, import_node_crypto5.randomUUID)()}`;
   (0, import_node_fs11.writeFileSync)(tmp, `${JSON.stringify(state, null, 2)}
 `, "utf8");
   try {
@@ -18851,7 +18856,7 @@ function releaseHostLease(repoRoot, runId, dispatchId) {
   }
 }
 function writeArtifactAtomic(path, bytes) {
-  const temporary = `${path}.tmp-${process.pid}-${(0, import_node_crypto5.randomUUID)()}`;
+  const temporary = `${path}.tmp-${process.pid}-${(0, import_node_crypto6.randomUUID)()}`;
   try {
     (0, import_node_fs12.writeFileSync)(temporary, bytes, { flag: "wx" });
     (0, import_node_fs12.renameSync)(temporary, path);
@@ -20549,6 +20554,55 @@ function loadProfileOrThrow(repoRoot, userPathOptions) {
 }
 var SHADOW_POLL_MS = 50;
 var SHADOW_LIVENESS_EVERY = 20;
+var SHADOW_MARKER_SUFFIX = ".shadow.json";
+var SHADOW_MAX_LIVE_DEFAULT = 4;
+function shadowLiveCap(env = process.env) {
+  const raw = env.FADENO_SHADOW_MAX_LIVE;
+  if (raw == null || raw.trim() === "") return SHADOW_MAX_LIVE_DEFAULT;
+  const parsed = Number(raw.trim());
+  if (!Number.isInteger(parsed) || parsed < 0) return SHADOW_MAX_LIVE_DEFAULT;
+  return parsed;
+}
+function countLiveShadows(repoRoot) {
+  const dir = (0, import_node_path14.join)(repoRoot, ...INFLIGHT_DIR.split("/"));
+  let names;
+  try {
+    names = (0, import_node_fs14.readdirSync)(dir);
+  } catch {
+    return 0;
+  }
+  let live = 0;
+  for (const name of names) {
+    if (!name.endsWith(SHADOW_MARKER_SUFFIX)) continue;
+    const abs = (0, import_node_path14.join)(dir, name);
+    let pid;
+    try {
+      pid = JSON.parse((0, import_node_fs14.readFileSync)(abs, "utf8")).supervisor_pid;
+    } catch {
+      try {
+        (0, import_node_fs14.rmSync)(abs, { force: true });
+      } catch {
+      }
+      continue;
+    }
+    if (typeof pid !== "number") continue;
+    let alive;
+    try {
+      process.kill(pid, 0);
+      alive = true;
+    } catch (err) {
+      alive = err.code !== "ESRCH";
+    }
+    if (alive) live += 1;
+    else {
+      try {
+        (0, import_node_fs14.rmSync)(abs, { force: true });
+      } catch {
+      }
+    }
+  }
+  return live;
+}
 function workspaceFingerprint(repoRoot) {
   const status = (0, import_node_child_process5.spawnSync)("git", ["-C", repoRoot, "status", "--porcelain"], { encoding: "utf8" });
   if (status.error != null || status.status !== 0) return null;
@@ -20636,8 +20690,37 @@ function runDispatch(opts) {
   const spec = postured.spec;
   const usedWriteVariant = postured.usedWriteVariant;
   const executorName = delivery.refString;
+  const pairSelectedForPrompt = () => {
+    if (archetype == null) return false;
+    if (typeof opts.shadow === "string" && opts.shadow.trim().length > 0) return true;
+    let attachment;
+    try {
+      attachment = readLocalDialState(repoRoot).shadows[archetype];
+    } catch {
+      return false;
+    }
+    if (attachment == null) return false;
+    if (attachment.rate == null) return true;
+    let text = null;
+    try {
+      text = opts.promptFile != null && opts.promptFile !== "" ? (0, import_node_fs14.readFileSync)((0, import_node_path14.resolve)(cwd, opts.promptFile), "utf8") : opts.prompt ?? null;
+    } catch {
+      return false;
+    }
+    if (text == null) return false;
+    const challenger = formatDialRef({
+      model: attachment.model,
+      ...attachment.effort ? { effort: attachment.effort } : {},
+      ...attachment.via ? { via: attachment.via } : {}
+    });
+    return shadowSampleRoll(sha256Hex(text), archetype, challenger) < attachment.rate;
+  };
   const deliverable = dispatchability(spec, harness);
-  if (!deliverable.supported) {
+  const pairCommandFallback = !deliverable.supported && deliverable.reason === "host_in_session" && spec.adapter === "host" && spec.fallbackCommand != null && pairSelectedForPrompt();
+  if (pairCommandFallback) {
+    opts.onEcho?.(`pair selected: ${archetype} \u2192 ${executorName} moved to its command lane so both arms are comparable`);
+  }
+  if (!deliverable.supported && !pairCommandFallback) {
     const hostOnDemand = deliverable.reason === "host_in_session";
     const shape = archetype ?? role ?? "role";
     throw new DispatchCommandError(
@@ -20647,9 +20730,6 @@ function runDispatch(opts) {
   let command2 = spec.adapter === "command" ? spec.command : spec.fallbackCommand;
   const transport = spec.adapter === "command" ? "command" : "host-command-fallback";
   const deliveryTransport = spec.adapter === "command" ? "command" : "host-command-fallback";
-  if (opts.isolate && opts.shadow != null && String(opts.shadow).trim() !== "") {
-    throw new DispatchCommandError("--isolate conflicts with --shadow: both use worktrees \u2014 run one or the other.");
-  }
   const workspaceMode = opts.isolate ? "isolated" : "shared";
   const needsLease = workspaceMode === "shared" && spec.writeAccess !== false;
   let prompt;
@@ -20693,7 +20773,7 @@ ${prompt}`;
     briefApplied = briefName;
     opts.onEcho?.(`brief: ${briefName} (${(0, import_node_path14.relative)(repoRoot, briefPath) || briefPath}) composed ahead of the task`);
   }
-  const dispatchId = (0, import_node_crypto6.randomUUID)();
+  const dispatchId = (0, import_node_crypto7.randomUUID)();
   const now = opts.now ?? /* @__PURE__ */ new Date();
   let promptSnapshot;
   if (promptSource === "stdin" || briefApplied != null) {
@@ -20938,6 +21018,7 @@ ${prompt}`;
     throw error;
   }
   const startShadow = () => {
+    if (process.env.FADENO_IN_SHADOW === "1") return null;
     const hasFlag = typeof opts.shadow === "string" && opts.shadow.trim().length > 0;
     let shadowDial = null;
     let shadowExecutorNameInner = null;
@@ -20966,7 +21047,7 @@ ${prompt}`;
     }
     if (shadowExecutorNameInner == null || shadowSourceTag == null) return null;
     if (shadowSourceTag === "attachment" && attachmentRate != null) {
-      const sampler = opts.shadowSampler ?? Math.random;
+      const sampler = opts.shadowSampler ?? (() => shadowSampleRoll(promptSha256, archetype ?? "", shadowExecutorNameInner));
       let roll;
       try {
         roll = sampler();
@@ -20976,7 +21057,8 @@ ${prompt}`;
       if (!(roll < attachmentRate)) return null;
     }
     const shadowNow = /* @__PURE__ */ new Date();
-    const shadowDispatchId = (0, import_node_crypto6.randomUUID)();
+    const shadowDispatchId = (0, import_node_crypto7.randomUUID)();
+    const pairId = (0, import_node_crypto7.randomUUID)();
     const shadowId8 = shadowDispatchId.slice(0, 8);
     const shadowOutputRel = (0, import_node_path14.join)(".fadeno", "local", "outputs", `shadow-${shadowId8}.md`).split("\\").join("/");
     const shadowOutputAbs = (0, import_node_path14.join)(repoRoot, shadowOutputRel);
@@ -20990,6 +21072,7 @@ ${prompt}`;
         timestamp: shadowNow.toISOString(),
         event: "dispatch_refused",
         dispatch_id: shadowDispatchId,
+        pair_id: pairId,
         archetype,
         role,
         resolution: "shadow",
@@ -21003,6 +21086,12 @@ ${prompt}`;
       appendEvidenceRow(repoRoot, base);
       opts.onEcho?.(`shadow refused: ${message} [${predicate}]`);
     };
+    const cap = shadowLiveCap();
+    const live = countLiveShadows(repoRoot);
+    if (live >= cap) {
+      writeShadowRefusal("shadow_cap", `${live} shadow${live === 1 ? " is" : "s are"} already running and the live cap is ${cap} \u2014 raise FADENO_SHADOW_MAX_LIVE or let one finish.`);
+      return null;
+    }
     let shadowDelivery;
     if (shadowDial != null) {
       try {
@@ -21102,6 +21191,7 @@ ${prompt}`;
     if (shadowDial.via != null) shadowDialField.via = shadowDial.via;
     const shadowIdentity = {
       dispatch_id: shadowDispatchId,
+      pair_id: pairId,
       archetype,
       role,
       resolution: "shadow",
@@ -21126,7 +21216,10 @@ ${prompt}`;
       prompt_sha256: promptSha256,
       command: shadowCommand,
       command_sha256: shadowCommandSha,
-      output_snapshot: shadowOutputRel
+      output_snapshot: shadowOutputRel,
+      // Retained after collection so the pair stays reviewable; recording the
+      // path is what lets a later cleaner enumerate rather than glob.
+      workspace: shadowWorktreeRel
     };
     if (eligibilityState === "shadow_only") {
       shadowIdentity.eligibility = "shadow_only";
@@ -21156,9 +21249,10 @@ ${prompt}`;
     try {
       child = (0, import_node_child_process5.spawn)(process.execPath, superviseArgv(shadowCommand, shadowInflightAbs, statusAbs, void 0, timeoutFor(shadowSpec)), {
         cwd: shadowWorktreeAbs,
-        // Without this the shadow escapes its worktree and edits the real
-        // workspace; see `atCwd`.
-        env: atCwd(withoutHarnessIdentity(process.env), shadowWorktreeAbs),
+        // Without `atCwd` the shadow escapes its worktree and edits the real
+        // workspace. FADENO_IN_SHADOW rides along so any fadeno the challenger
+        // runs — at any depth — declines to fire challengers of its own.
+        env: { ...atCwd(withoutHarnessIdentity(process.env), shadowWorktreeAbs), FADENO_IN_SHADOW: "1" },
         stdio: [promptFd, sfd, "ignore"]
       });
     } finally {
@@ -21166,8 +21260,24 @@ ${prompt}`;
       (0, import_node_fs14.closeSync)(sfd);
     }
     child.unref();
+    const markerAbs = (0, import_node_path14.join)(repoRoot, ...INFLIGHT_DIR.split("/"), `${shadowDispatchId}${SHADOW_MARKER_SUFFIX}`);
+    try {
+      (0, import_node_fs14.writeFileSync)(markerAbs, `${JSON.stringify({
+        pair_id: pairId,
+        dispatch_id: shadowDispatchId,
+        primary_dispatch_id: dispatchId,
+        archetype,
+        supervisor_pid: child.pid ?? null,
+        started_at: shadowNow.toISOString(),
+        workspace: shadowWorktreeRel
+      })}
+`, "utf8");
+    } catch {
+    }
     return {
       dispatchId: shadowDispatchId,
+      pairId,
+      markerAbs,
       startedAt: shadowNow,
       startedMs,
       identity: shadowIdentity,
@@ -21178,7 +21288,8 @@ ${prompt}`;
       outputAbs: shadowOutputAbs,
       diffRel: shadowDiffRel,
       diffAbs: shadowDiffAbs,
-      worktreeAbs: shadowWorktreeAbs
+      worktreeAbs: shadowWorktreeAbs,
+      worktreeRel: shadowWorktreeRel
     };
   };
   const collectShadow = (pending) => {
@@ -21262,13 +21373,8 @@ ${prompt}`;
       opts.onEcho?.(`shadow diff: ${diffBytes} bytes \u2192 ${pending.diffRel}`);
     } finally {
       try {
-        const removed = (0, import_node_child_process5.spawnSync)("git", ["worktree", "remove", "--force", pending.worktreeAbs], { cwd: repoRoot, encoding: "utf8" });
-        if (removed.error != null || removed.status !== 0) (0, import_node_fs14.rmSync)(pending.worktreeAbs, { recursive: true, force: true });
+        (0, import_node_fs14.rmSync)(pending.markerAbs, { force: true });
       } catch {
-        try {
-          (0, import_node_fs14.rmSync)(pending.worktreeAbs, { recursive: true, force: true });
-        } catch {
-        }
       }
     }
   };
@@ -21400,7 +21506,7 @@ ${truncatedStderr}
         const diagRel = (0, import_node_path14.join)(".fadeno", "local", "outputs", "diagnostics", `dispatch-${dispatchId}.log`).split("\\").join("/");
         const diagAbs = (0, import_node_path14.join)(repoRoot, diagRel);
         (0, import_node_fs14.mkdirSync)((0, import_node_path14.join)(repoRoot, ".fadeno", "local", "outputs", "diagnostics"), { recursive: true });
-        const tmp = `${diagAbs}.tmp-${process.pid}-${(0, import_node_crypto6.randomUUID)()}`;
+        const tmp = `${diagAbs}.tmp-${process.pid}-${(0, import_node_crypto7.randomUUID)()}`;
         (0, import_node_fs14.writeFileSync)(tmp, content, "utf8");
         try {
           (0, import_node_fs14.renameSync)(tmp, diagAbs);
@@ -21431,7 +21537,10 @@ ${truncatedStderr}
       // success on the strength of `dispatch_completed` alone.
       ...outcome != null ? { outcome } : {},
       ...isTimeout && supervisorStatus?.timeoutMs != null ? { timeout_ms: supervisorStatus.timeoutMs } : {},
-      ...isTimeout && supervisorStatus?.deadlineAt != null ? { deadline_at: supervisorStatus.deadlineAt } : {}
+      ...isTimeout && supervisorStatus?.deadlineAt != null ? { deadline_at: supervisorStatus.deadlineAt } : {},
+      // Only when a challenger actually fired. The primary's request row was
+      // written before the roll, so this is the first row that can carry it.
+      ...pendingShadow != null ? { pair_id: pendingShadow.pairId } : {}
     };
     if (workspaceBefore != null && workspaceAfter != null) {
       row.workspace_changed = workspaceBefore !== workspaceAfter;
@@ -22788,13 +22897,13 @@ function runDiagram(opts) {
 
 // src/commands/drive.ts
 var import_node_child_process7 = require("node:child_process");
-var import_node_crypto9 = require("node:crypto");
+var import_node_crypto10 = require("node:crypto");
 var import_node_fs21 = require("node:fs");
 var import_node_path21 = require("node:path");
 var import_yaml11 = __toESM(require_dist(), 1);
 
 // src/lib/node-instance.ts
-var import_node_crypto7 = require("node:crypto");
+var import_node_crypto8 = require("node:crypto");
 var NodeInstanceError = class extends Error {
 };
 var STEP = /^[a-z0-9][a-z0-9_]*$/;
@@ -22910,7 +23019,7 @@ function nodeInstanceArtifactScope(id) {
   }).join("/")}`;
 }
 function digestId(prefix, parts) {
-  const digest2 = (0, import_node_crypto7.createHash)("sha256").update(parts.join("\0")).digest("hex").slice(0, 20);
+  const digest2 = (0, import_node_crypto8.createHash)("sha256").update(parts.join("\0")).digest("hex").slice(0, 20);
   return `${prefix}-${digest2}`;
 }
 function stepExecutionIdFor(nodeInstance) {
@@ -24518,7 +24627,7 @@ function runRun(opts) {
 // src/lib/tool-exec.ts
 var import_node_fs20 = require("node:fs");
 var import_node_path20 = require("node:path");
-var import_node_crypto8 = require("node:crypto");
+var import_node_crypto9 = require("node:crypto");
 var import_node_child_process6 = require("node:child_process");
 
 // src/lib/run-scope.ts
@@ -24672,7 +24781,7 @@ function pathNamedByLedger(events, rel) {
 function placeBytesExclusive(runDir, rel, contents, events) {
   const abs = (0, import_node_path20.join)(runDir, rel);
   (0, import_node_fs20.mkdirSync)((0, import_node_path20.dirname)(abs), { recursive: true });
-  const tmp = `${abs}.tmp-${(0, import_node_crypto8.randomUUID)()}`;
+  const tmp = `${abs}.tmp-${(0, import_node_crypto9.randomUUID)()}`;
   (0, import_node_fs20.writeFileSync)(tmp, contents, "utf8");
   try {
     (0, import_node_fs20.linkSync)(tmp, abs);
@@ -24692,7 +24801,7 @@ function placeBytesExclusive(runDir, rel, contents, events) {
 function writeAttemptBytes(runDir, rel, contents) {
   const abs = (0, import_node_path20.join)(runDir, rel);
   (0, import_node_fs20.mkdirSync)((0, import_node_path20.dirname)(abs), { recursive: true });
-  const tmp = `${abs}.tmp-${(0, import_node_crypto8.randomUUID)()}`;
+  const tmp = `${abs}.tmp-${(0, import_node_crypto9.randomUUID)()}`;
   (0, import_node_fs20.writeFileSync)(tmp, contents, "utf8");
   try {
     (0, import_node_fs20.renameSync)(tmp, abs);
@@ -24813,7 +24922,7 @@ function executeToolCore(params) {
       stdout_bytes: 0,
       stderr_bytes: 0
     };
-    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto8.randomUUID)()}`;
+    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto9.randomUUID)()}`;
     try {
       (0, import_node_fs20.writeFileSync)(tmp, JSON.stringify(initialClaim), { flag: "wx" });
       try {
@@ -25086,7 +25195,7 @@ function executeToolCore(params) {
     throw new ToolExecError(`tool "${params.toolName}" supervisor lost without report`);
   }
   {
-    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto8.randomUUID)()}`;
+    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto9.randomUUID)()}`;
     try {
       (0, import_node_fs20.writeFileSync)(tmp, ownedClaimBody(), "utf8");
       (0, import_node_fs20.renameSync)(tmp, claimAbs);
@@ -25332,7 +25441,7 @@ function executeToolCore(params) {
     if (detailsContent != null && plannedDetailsRel != null) {
       const detailsAbs = (0, import_node_path20.join)(params.runDir, plannedDetailsRel);
       (0, import_node_fs20.mkdirSync)((0, import_node_path20.dirname)(detailsAbs), { recursive: true });
-      const tmpDetails = `${detailsAbs}.tmp-${(0, import_node_crypto8.randomUUID)()}`;
+      const tmpDetails = `${detailsAbs}.tmp-${(0, import_node_crypto9.randomUUID)()}`;
       (0, import_node_fs20.writeFileSync)(tmpDetails, detailsContent, "utf8");
       let usePlanned;
       try {
@@ -26244,7 +26353,7 @@ function beginCommandAttempt(ctx, stepId, role, generation, inBody, outputRel, a
     } else {
       session = "fresh";
       if (spec.command.some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
-        sessionId = (0, import_node_crypto9.randomUUID)();
+        sessionId = (0, import_node_crypto10.randomUUID)();
         argv = substituteSessionId(spec.command, sessionId);
       }
     }
@@ -26305,7 +26414,7 @@ ${repairCore}`;
       stdout_bytes: 0,
       stderr_bytes: 0
     };
-    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto9.randomUUID)()}`;
+    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto10.randomUUID)()}`;
     try {
       (0, import_node_fs21.writeFileSync)(tmp, JSON.stringify(initialClaim), { flag: "wx" });
       (0, import_node_fs21.linkSync)(tmp, claimAbs);
@@ -26735,7 +26844,7 @@ ${truncatedStderr}
       const diagRel = (0, import_node_path21.join)(".fadeno", "local", "outputs", "diagnostics", `${ctx.runId}-${ids.actorCallId}-a${attempt}.log`).split("\\").join("/");
       const diagAbs = (0, import_node_path21.join)(ctx.repoRoot, diagRel);
       (0, import_node_fs21.mkdirSync)((0, import_node_path21.join)(ctx.repoRoot, ".fadeno", "local", "outputs", "diagnostics"), { recursive: true });
-      const tmp = `${diagAbs}.tmp-${process.pid}-${(0, import_node_crypto9.randomUUID)()}`;
+      const tmp = `${diagAbs}.tmp-${process.pid}-${(0, import_node_crypto10.randomUUID)()}`;
       (0, import_node_fs21.writeFileSync)(tmp, content, "utf8");
       try {
         (0, import_node_fs21.renameSync)(tmp, diagAbs);
@@ -28941,6 +29050,47 @@ function runDialSetMany(opts) {
   }
   return archetypes.map((archetype) => runDialSet({ ...opts, archetype }));
 }
+function providerNoveltyNote(params) {
+  const { profile, layers, shadows, archetype, refString, compiled, kind } = params;
+  const provider = compiled.provider;
+  if (provider == null || provider === "current-host") return null;
+  const inUse = /* @__PURE__ */ new Set();
+  const archetypes = /* @__PURE__ */ new Set(["worker", "reviewer", "judge"]);
+  for (const key of Object.keys(profile.archetypes)) archetypes.add(key);
+  for (const key of Object.keys(layers.session)) archetypes.add(key);
+  for (const key of Object.keys(layers.repo)) archetypes.add(key);
+  for (const key of Object.keys(layers.user)) archetypes.add(key);
+  const providerOf = (ref) => {
+    try {
+      const other = compileDialRef(ref, profile);
+      if (other.provider != null) inUse.add(other.provider);
+    } catch {
+    }
+  };
+  for (const other of archetypes) {
+    if (kind === "dial" && other === archetype) continue;
+    try {
+      const cascade = resolveDialCascade(other, other, { bindings: profile.bindings, archetypes: profile.archetypes }, layers);
+      providerOf(cascade.ref);
+    } catch {
+    }
+  }
+  for (const [other, attachment] of Object.entries(shadows)) {
+    if (kind === "shadow" && other === archetype) continue;
+    providerOf({
+      model: attachment.model,
+      ...attachment.effort ? { effort: attachment.effort } : {},
+      ...attachment.via ? { via: attachment.via } : {}
+    });
+  }
+  if (inUse.has(provider)) return null;
+  const arrow = kind === "shadow" ? "~" : "\u2192";
+  const consequence = kind === "shadow" ? "Every sampled dispatch duplicates the prompt to that vendor alongside the primary, and the challenger runs in a worktree of this repo." : "Prompts for this archetype \u2014 and, on a write delivery, the workspace the executor can read \u2014 go to a vendor this repo is not already sending work to.";
+  const undo = kind === "shadow" ? `Detach it with \`fadeno dial clear-shadow ${archetype}\`.` : `Change it with \`fadeno dial ${archetype} <model>\`.`;
+  return `WARNING: NEW PROVIDER \u2014 ${archetype} ${arrow} ${refString} routes to "${provider}", which nothing else dialed in this repo uses.
+${consequence}
+${undo}`;
+}
 function runDialSet(opts) {
   const repoRoot = repoRootOf(opts);
   if ([opts.session, opts.user, opts.repo].filter(Boolean).length > 1) {
@@ -29028,6 +29178,18 @@ The override is persisted with this dial and applies at dispatch time. Clear or 
   }
   const localState = readLocalDialState(repoRoot);
   const userDials = readUserDials(opts.userPathOptions);
+  {
+    const novelty = providerNoveltyNote({
+      profile,
+      layers: { session: localState.dials, repo: profile.dials, user: userDials },
+      shadows: localState.shadows,
+      archetype,
+      refString,
+      compiled,
+      kind: "dial"
+    });
+    if (novelty != null) notes.push(novelty);
+  }
   const sessionPinned = Object.hasOwn(localState.dials, archetype);
   const repoPinned = Object.hasOwn(profile.dials, archetype) ? profile.dials[archetype] : null;
   const userPinned = Object.hasOwn(userDials, archetype);
@@ -29289,6 +29451,18 @@ function runDialShadow(opts) {
     if (probe2.note != null) notes.push(probe2.note);
   }
   const state = readLocalDialState(repoRoot);
+  {
+    const novelty = providerNoveltyNote({
+      profile,
+      layers: { session: state.dials, repo: profile.dials, user: readUserDials(opts.userPathOptions) },
+      shadows: state.shadows,
+      archetype,
+      refString,
+      compiled,
+      kind: "shadow"
+    });
+    if (novelty != null) notes.push(novelty);
+  }
   const previous = state.shadows[archetype] ?? null;
   const nextShadows = { ...state.shadows, [archetype]: rate == null ? { model: dial.model, ...dial.effort ? { effort: dial.effort } : {}, ...dial.via ? { via: dial.via } : {} } : { model: dial.model, ...dial.effort ? { effort: dial.effort } : {}, ...dial.via ? { via: dial.via } : {}, rate } };
   const path = writeLocalDialState(repoRoot, { dials: state.dials, shadows: nextShadows, legacyNote: null });
@@ -29511,6 +29685,25 @@ function runDialResolve(opts) {
   const postured = applyWritePosture(resolved.delivery.spec, archetype, profile.archetypes);
   const spec = postured.spec;
   const eligibility = eligibilityFor(spec, archetype);
+  const attachment = dialState.shadows[archetype];
+  let shadow;
+  if (attachment != null) {
+    const challenger = formatDialRef({
+      model: attachment.model,
+      ...attachment.effort ? { effort: attachment.effort } : {},
+      ...attachment.via ? { via: attachment.via } : {}
+    });
+    const digest2 = opts.promptSha256?.trim();
+    const rate = attachment.rate ?? null;
+    shadow = {
+      attached: true,
+      challenger,
+      rate,
+      // No rate means every dispatch fires; no digest means the caller cannot
+      // be told, and must not read the silence as a "no".
+      selected: rate == null ? true : digest2 ? shadowSampleRoll(digest2, archetype, challenger) < rate : null
+    };
+  }
   return {
     archetype,
     executor: resolved.delivery.refString,
@@ -29526,7 +29719,8 @@ function runDialResolve(opts) {
     ...forcesWritePosture(resolved.delivery.ref, resolved.resolvedVia) ? { write_posture_forced: true } : {},
     ...eligibility !== "eligible" ? { eligibility } : {},
     dial: resolved.delivery.ref,
-    delivery: deliveryGuidance(archetype, resolved.delivery.refString, spec, harness)
+    delivery: deliveryGuidance(archetype, resolved.delivery.refString, spec, harness),
+    ...shadow != null ? { shadow } : {}
   };
 }
 function formatShadowLine(shadow, baseIndent) {
@@ -33448,8 +33642,14 @@ function claudeAgentDir(scope, repoRoot, userPathOptions) {
   return (0, import_node_path32.join)(userPathOptions?.home ?? (0, import_node_os3.homedir)(), ".claude", "agents");
 }
 var CLAUDE_MANAGED_MARK = "<!-- fadeno:managed";
+var CLAUDE_EFFORT_LADDER = ["low", "medium", "high", "xhigh", "max"];
+function claudeGridAgentName(archetype, effort) {
+  return `fadeno-${archetype}-${effort}`;
+}
 function claudeManagedEmit(path, body, force, scope) {
-  if (scope === "project") return emitFile(path, body, force);
+  if (scope === "project" && (0, import_node_fs32.existsSync)(path) && !(0, import_node_fs32.readFileSync)(path, "utf8").includes(CLAUDE_MANAGED_MARK)) {
+    return emitFile(path, body, force);
+  }
   if ((0, import_node_fs32.existsSync)(path)) {
     const existing = (0, import_node_fs32.readFileSync)(path, "utf8");
     if (!existing.includes(CLAUDE_MANAGED_MARK)) return "skipped";
@@ -33546,25 +33746,41 @@ function runSteeringApplyClaude(opts) {
       }
       continue;
     }
+    baseline[archetype] = executorName;
+    materialization2[archetype] = { kind: "host", adapter: "host", executor: executorName, model: spec.model };
+    if ((0, import_node_fs32.existsSync)(path) && (0, import_node_fs32.readFileSync)(path, "utf8").includes(CLAUDE_MANAGED_MARK)) {
+      (0, import_node_fs32.unlinkSync)(path);
+      removed.push(path);
+    }
+  }
+  const grid = [];
+  for (const archetype of HOST_SURFACE_ARCHETYPES) {
     const templatePath = (0, import_node_path32.join)(templatesDir(), "claude", "claude-agents", `${archetype}.md`);
     if (!(0, import_node_fs32.existsSync)(templatePath)) {
       throw new SteeringError(`no claude agent template for archetype "${archetype}" at ${templatePath}`);
     }
     const template = (0, import_node_fs32.readFileSync)(templatePath, "utf8");
-    const fields = { model: spec.model };
-    if (spec.reasoningEffort !== "default" && spec.reasoningEffort.length > 0) fields.effort = spec.reasoningEffort;
-    let rendered = withFrontmatterFields(template, fields);
-    rendered = `${rendered.trimEnd()}
+    for (const effort of CLAUDE_EFFORT_LADDER) {
+      const name = claudeGridAgentName(archetype, effort);
+      let rendered = withFrontmatterFields(template, { name, model: "inherit", effort });
+      rendered = `${rendered.trimEnd()}
 
-${CLAUDE_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(rendered)} source=${executorName} -->
+${CLAUDE_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(rendered)} source=grid:${archetype}@${effort} -->
 `;
-    baseline[archetype] = executorName;
-    materialization2[archetype] = { kind: "host", adapter: "host", executor: executorName, model: spec.model };
-    results.push({ path, status: claudeManagedEmit(path, rendered, opts.force ?? false, scope) });
+      const gridPath = (0, import_node_path32.join)(agentDir, `${name}.md`);
+      grid.push(gridPath);
+      results.push({ path: gridPath, status: claudeManagedEmit(gridPath, rendered, opts.force ?? false, scope) });
+    }
   }
-  const conflicts = results.filter((item) => item.status === "skipped").map((item) => item.path);
+  const conflicts = results.filter((item) => item.status === "skipped").filter((item) => {
+    try {
+      return !(0, import_node_fs32.readFileSync)(item.path, "utf8").includes(CLAUDE_MANAGED_MARK);
+    } catch {
+      return true;
+    }
+  }).map((item) => item.path);
   const restartRequired = results.some((item) => item.status === "created" || item.status === "overwritten") || removed.length > 0;
-  return { results, materialization: materialization2, baseline, restartRequired, conflicts, scope, removed };
+  return { results, materialization: materialization2, baseline, restartRequired, conflicts, scope, removed, grid };
 }
 
 // src/commands/dispatch-prompt.ts
@@ -33746,7 +33962,7 @@ function runDispatchPrepare(opts) {
 // src/commands/tool-complete.ts
 var import_node_fs34 = require("node:fs");
 var import_node_path35 = require("node:path");
-var import_node_crypto10 = require("node:crypto");
+var import_node_crypto11 = require("node:crypto");
 var ToolCompleteError = class extends Error {
 };
 function runToolComplete(opts) {
@@ -33842,7 +34058,7 @@ function runToolComplete(opts) {
   {
     const nowIso = (opts.now ?? /* @__PURE__ */ new Date()).toISOString();
     const claim = { pid: process.pid, supervisor_pid: process.pid, executor_pid: null, process_group_id: null, started_at: nowIso, heartbeat_at: nowIso, last_output_at: null, stdout_bytes: 0, stderr_bytes: 0 };
-    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto10.randomUUID)()}`;
+    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto11.randomUUID)()}`;
     try {
       (0, import_node_fs34.writeFileSync)(tmp, JSON.stringify(claim), { flag: "wx" });
       (0, import_node_fs34.linkSync)(tmp, claimAbs);
@@ -33899,7 +34115,7 @@ function runToolComplete(opts) {
 // src/commands/tool-run.ts
 var import_node_fs35 = require("node:fs");
 var import_node_path36 = require("node:path");
-var import_node_crypto11 = require("node:crypto");
+var import_node_crypto12 = require("node:crypto");
 var ToolRunError = class extends Error {
 };
 function parseTimeoutSeconds(value) {
@@ -33953,7 +34169,7 @@ function ensureProfileSnapshot2(repoRoot, runDir, _runId, now, userPathOptions, 
   }
   const extraRefs = [...Object.values(liveLayers.session), ...Object.values(liveLayers.repo), ...Object.values(liveLayers.user), ...Object.values(liveProfile.bindings), ...bindRefs];
   const text = serializeSnapshot(liveProfile, extraRefs);
-  const tmp = `${snapshotPath}.tmp-${process.pid}-${(0, import_node_crypto11.randomUUID)()}`;
+  const tmp = `${snapshotPath}.tmp-${process.pid}-${(0, import_node_crypto12.randomUUID)()}`;
   (0, import_node_fs35.writeFileSync)(tmp, text, "utf8");
   try {
     (0, import_node_fs35.renameSync)(tmp, snapshotPath);
@@ -34088,7 +34304,7 @@ var import_node_os4 = require("node:os");
 var import_node_path38 = require("node:path");
 
 // src/lib/installations.ts
-var import_node_crypto12 = require("node:crypto");
+var import_node_crypto13 = require("node:crypto");
 var import_node_fs36 = require("node:fs");
 var import_node_path37 = require("node:path");
 var InstallationError = class extends Error {
@@ -34125,7 +34341,7 @@ function writeInstallationManifest(paths, manifest) {
   (0, import_node_fs36.renameSync)(tmp, paths.installationsFile);
 }
 function fileDigest(path) {
-  return (0, import_node_crypto12.createHash)("sha256").update((0, import_node_fs36.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto13.createHash)("sha256").update((0, import_node_fs36.readFileSync)(path)).digest("hex");
 }
 var VERSION_RE = /^(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?$/;
 function compareFadenoVersions(a, b) {
@@ -35165,7 +35381,7 @@ function runDoctor(opts = {}) {
 }
 
 // src/commands/vendor.ts
-var import_node_crypto13 = require("node:crypto");
+var import_node_crypto14 = require("node:crypto");
 var import_node_fs40 = require("node:fs");
 var import_node_path41 = require("node:path");
 function makeVendoredCodexAgentsTrackable(repoRoot) {
@@ -35185,7 +35401,7 @@ function digestTree(root) {
     for (const entry of (0, import_node_fs40.readdirSync)(dir, { withFileTypes: true })) {
       const full = (0, import_node_path41.join)(dir, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (entry.isFile()) files[(0, import_node_path41.relative)(root, full).split("\\").join("/")] = (0, import_node_crypto13.createHash)("sha256").update((0, import_node_fs40.readFileSync)(full)).digest("hex");
+      else if (entry.isFile()) files[(0, import_node_path41.relative)(root, full).split("\\").join("/")] = (0, import_node_crypto14.createHash)("sha256").update((0, import_node_fs40.readFileSync)(full)).digest("hex");
     }
   }
   walk(root);
@@ -35198,7 +35414,7 @@ function ownedVendoredFiles(repoRoot, init) {
     if (result.status !== "created" && result.status !== "overwritten") continue;
     const rel = (0, import_node_path41.relative)(repoRoot, result.path).split("\\").join("/");
     if (shared.has(rel) || rel.startsWith("../") || !(0, import_node_fs40.existsSync)(result.path)) continue;
-    owned[rel] = (0, import_node_crypto13.createHash)("sha256").update((0, import_node_fs40.readFileSync)(result.path)).digest("hex");
+    owned[rel] = (0, import_node_crypto14.createHash)("sha256").update((0, import_node_fs40.readFileSync)(result.path)).digest("hex");
   }
   return owned;
 }
@@ -35228,13 +35444,13 @@ function runVendor(opts) {
 }
 
 // src/commands/evidence.ts
-var import_node_crypto14 = require("node:crypto");
+var import_node_crypto15 = require("node:crypto");
 var import_node_fs41 = require("node:fs");
 var import_node_path42 = require("node:path");
 var EvidenceError = class extends Error {
 };
 function sha256(path) {
-  return (0, import_node_crypto14.createHash)("sha256").update((0, import_node_fs41.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto15.createHash)("sha256").update((0, import_node_fs41.readFileSync)(path)).digest("hex");
 }
 function copyOne(source, destination, rel, files) {
   if ((0, import_node_fs41.existsSync)(destination)) {
@@ -35415,13 +35631,13 @@ function runClean(opts = {}) {
 }
 
 // src/commands/unvendor.ts
-var import_node_crypto15 = require("node:crypto");
+var import_node_crypto16 = require("node:crypto");
 var import_node_fs44 = require("node:fs");
 var import_node_path45 = require("node:path");
 var UnvendorError = class extends Error {
 };
 function digest(path) {
-  return (0, import_node_crypto15.createHash)("sha256").update((0, import_node_fs44.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto16.createHash)("sha256").update((0, import_node_fs44.readFileSync)(path)).digest("hex");
 }
 function runUnvendor(opts = {}) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
@@ -35673,6 +35889,7 @@ Options:
   --prompt-file <path>    (dispatch) Read the prompt from a file instead of stdin
   --tag <t>               (dispatch) Label the dispatch for recovery (dispatches --output tag:<t>)
   --shadow <ref>          (dispatch) Duplicate the prompt to a one-shot shadow challenger
+                          (FADENO_SHADOW_MAX_LIVE caps concurrent challengers; default 4)
   --isolate               (dispatch) Run in a detached worktree (preserves diff, bypasses shared-writer lease)
   --diagnostics           (dispatch/drive) Persist bounded process output (32 KiB / 500 lines) to diagnostics log
   --no-brief              (dispatch) Skip the archetype's declared brief preamble
@@ -35867,6 +36084,10 @@ Options:
   --repo           Write/clear the repo pin (committed to .fadeno/executors.yaml)
   --force          Set despite a write-posture mismatch (persisted, discouraged)
   --rate <r>       (shadow) Sampling rate in [0,1]
+  --prompt-sha256 <hex>
+                   (resolve) Prompt digest, so the reply carries the pair decision
+                   (shadow.selected) for this exact prompt. Omit it and selected
+                   is null \u2014 unknown, never "no".
   --json           Structured output
 
 The cascade: role binding \u2192 session dial \u2192 repo pin \u2192 user dial \u2192 host-native base.
@@ -35924,7 +36145,10 @@ Options:
   --via <driver>        Driver alias for --model (e.g. opencode)
   --prompt-file <path>  Read the prompt from a file instead of stdin
   --tag <t>             Label the dispatch for recovery (dispatches --output tag:<t>)
-  --shadow <ref>        Duplicate the prompt to a one-shot shadow challenger
+  --shadow <ref>        Duplicate the prompt to a one-shot shadow challenger. Sampling is
+                        keyed on the prompt digest, so a retry never re-rolls; challengers
+                        run concurrently, capped by FADENO_SHADOW_MAX_LIVE (default 4), and
+                        their worktrees are retained under .fadeno/local/shadow for review
   --timeout <seconds>   Hard executor deadline seconds; 0 disables route default (20 min)
   --isolate             Run in a detached worktree (opt-in, preserves diff, bypasses shared-writer lease)
   --diagnostics         Persist bounded process output (32 KiB / 500 lines per stream) to diagnostics log
@@ -36739,6 +36963,7 @@ function main(argv) {
         repo: { type: "boolean" },
         model: { type: "string" },
         archetype: { type: "string" },
+        "prompt-sha256": { type: "string" },
         role: { type: "string" },
         "host-executor": { type: "string" },
         // Pre-0.6 spelling. Kept parseable so a Codex agent TOML materialized
@@ -36979,8 +37204,11 @@ function main(argv) {
             const how = slot.kind === "host" ? slot.model === "current-host" ? "session baseline (no agent file)" : `local subagent (model: ${slot.model})` : "dispatch proxy (no agent file)";
             console.log(`  ${archetype} \u2192 ${how} ${slot.executor}`);
           }
-          for (const path of result2.removed ?? []) console.log(`  removed stale managed agent: ${path}`);
-          console.log(`  ${changed2} agent definition(s) written; restart Claude Code so changed subagents load.`);
+          for (const path of result2.removed ?? []) console.log(`  removed stale per-dial agent: ${path}`);
+          console.log(`  identity grid: ${result2.grid?.length ?? 0} cell(s) (archetype x effort), model supplied per spawn`);
+          console.log(
+            changed2 === 0 ? "  0 agent definition(s) written; the grid is current \u2014 dial changes take effect immediately, no restart." : `  ${changed2} agent definition(s) written; restart Claude Code once so the new names register. Dial changes after that need neither.`
+          );
           if (changed2 === 0 && result2.conflicts.length > 0) console.log("  Existing files were preserved; pass --force to replace them.");
           return 0;
         }
@@ -37374,9 +37602,9 @@ Or advance manually with the playbook cursor:`);
         return 0;
       }
       if (sub === "resolve") {
-        if (!values.archetype) throw new Error("Usage: fadeno dial resolve --archetype <name>");
+        if (!values.archetype) throw new Error("Usage: fadeno dial resolve --archetype <name> [--prompt-sha256 <hex>]");
         if (positionals.length > 2) throw new Error("Usage: fadeno dial resolve --archetype <name>");
-        const result = runDialResolve({ archetype: values.archetype });
+        const result = runDialResolve({ archetype: values.archetype, promptSha256: values["prompt-sha256"] ?? null });
         console.log(JSON.stringify(result, null, 2));
         return 0;
       }

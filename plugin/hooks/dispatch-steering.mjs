@@ -2,6 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 // Which generation of this hook wrote a given evidence row. Plugin hooks load
@@ -101,7 +102,15 @@ function passThrough() {
 
 // Resolve through a structured CLI surface. The same neutral dial can be
 // host-delivered in Claude and command-delivered in Codex (or vice versa).
-const resolution = spawnSync(cli, ['dial', 'resolve', '--archetype', archetype], {
+// The digest the pair roll is keyed on. Supplying it is what lets the
+// resolver answer "is this spawn a pair?" for THIS prompt rather than in
+// general — and the kernel re-derives the same answer at dispatch time, so
+// nothing has to be threaded through the relay.
+const promptText = typeof event.tool_input.prompt === 'string' ? event.tool_input.prompt : '';
+const promptDigest = promptText.length > 0 ? createHash('sha256').update(promptText).digest('hex') : null;
+const resolveArgv = ['dial', 'resolve', '--archetype', archetype];
+if (promptDigest != null) resolveArgv.push('--prompt-sha256', promptDigest);
+const resolution = spawnSync(cli, resolveArgv, {
   cwd,
   env: { ...process.env, FADENO_HARNESS: 'claude' },
   encoding: 'utf8',
@@ -130,15 +139,72 @@ try {
   passThrough();
 }
 if (slot?.adapter !== 'command' && slot?.adapter !== 'host') passThrough();
-const commandDelivery = slot.adapter === 'command';
+// A selected pair takes the command lane on BOTH arms. An in-session primary
+// cannot be isolated, measured, or diffed the way its challenger is, so a
+// comparison against one is not a comparison — the pair is only worth running
+// if the two sides differ in the model and nothing else. This is the whole of
+// "host spawns can be shadowed": not a challenger tagging along beside an
+// in-session agent, but the spawn becoming a pair of equals.
+const pairSelected = slot.shadow?.selected === true;
+const commandDelivery = slot.adapter === 'command' || pairSelected;
 // A host slot with no model of its own inherits the caller's; `current-host`
 // is the explicit spelling of that.
 const inheritModel =
   !commandDelivery && (typeof slot.model !== 'string' || slot.model === 'current-host');
 // An unsteered spawn already lands on the caller's host model, so there is
 // nothing to rewrite. A named proxy is not unsteered: leaving it alone would
-// ship the task to a subprocess the loadout never asked for.
-if (inheritModel && !explicitProxy) finish(null);
+// ship the task to a subprocess the loadout never asked for. A selected pair
+// is not unsteered either — the baseline model still has to reach the command
+// lane to be comparable.
+if (inheritModel && !explicitProxy && !pairSelected) finish(null);
+
+/**
+ * Which already-registered agent a host spawn should land on, and what that
+ * agent pins.
+ *
+ * `fadeno steering apply --claude` pre-registers an identity grid — one
+ * managed agent per (archetype, named effort) declaring `model: inherit` — so
+ * that changing a dial never needs a fresh session: the model rides the tool
+ * call, and the effort cell already exists. Falling back through the legacy
+ * per-dial file to the plain role agent keeps a repo that has not applied the
+ * grid working, at inherited effort.
+ *
+ * Project scope first, then user scope — the two places that command writes.
+ */
+function hostTarget(archetypeName, effort) {
+  const managed = (path) => {
+    let text;
+    try {
+      text = readFileSync(path, 'utf8');
+    } catch {
+      return null; // absent or unreadable
+    }
+    return text.includes('<!-- fadeno:managed') ? text : null;
+  };
+  const roots = [join(cwd, '.claude', 'agents'), join(homedir(), '.claude', 'agents')];
+  if (typeof effort === 'string' && effort.length > 0 && effort !== 'default') {
+    const name = `fadeno-${archetypeName}-${effort}`;
+    for (const root of roots) {
+      if (managed(join(root, `${name}.md`)) != null) {
+        return { agent: name, effort, source: `grid:${archetypeName}@${effort}` };
+      }
+    }
+  }
+  // Legacy per-dial file: pre-grid installs still pin an effort in frontmatter.
+  for (const root of roots) {
+    const text = managed(join(root, `${archetypeName}.md`));
+    if (text == null) continue;
+    const frontmatter = /^---\n([\s\S]*?)\n---/.exec(text);
+    const pinned = frontmatter ? /^effort:[ \t]*(\S+)[ \t]*$/m.exec(frontmatter[1]) : null;
+    const source = /<!-- fadeno:managed[^>]*\bsource=(\S+)/.exec(text);
+    return {
+      agent: archetypeName,
+      effort: pinned ? pinned[1] : null,
+      source: source ? source[1] : null,
+    };
+  }
+  return { agent: null, effort: null, source: null };
+}
 
 // Evidence for host delivery. Command delivery ends at `fadeno dispatch`,
 // where the kernel writes the request/completion row pair; host delivery
@@ -151,6 +217,12 @@ function recordHostDelivery() {
   if (typeof prompt !== 'string' || prompt.length === 0) return;
   if (!existsSync(join(cwd, '.fadeno'))) return; // not a Fadeno repo
   try {
+    const materialized = { effort: target.effort, source: target.source };
+    // Published by the harness to hook commands and Bash, already resolved
+    // past any per-model or per-org downgrade.
+    const sessionEffort = typeof process.env.CLAUDE_EFFORT === 'string' && process.env.CLAUDE_EFFORT.trim() !== ''
+      ? process.env.CLAUDE_EFFORT.trim()
+      : null;
     const promptSha256 = createHash('sha256').update(prompt).digest('hex');
     const snapshotRel = `.fadeno/local/prompts/host-${promptSha256.slice(0, 8)}.md`;
     mkdirSync(join(cwd, '.fadeno', 'local', 'prompts'), { recursive: true });
@@ -178,9 +250,26 @@ function recordHostDelivery() {
         executor: typeof slot?.executor === 'string' ? slot.executor : null,
         model: typeof slot?.model === 'string' ? slot.model : null,
         model_override: event.tool_input.model ?? null,
-        // Host delivery cannot pin reasoning effort: the harness Agent tool
-        // takes no effort parameter, so the spawn inherits the session's.
-        reasoning_effort: 'inherited',
+        // What the spawn runs at — see `materializedAgent`. Through rc.33 this
+        // was the literal 'inherited', which was true only of the baseline and
+        // wrong for every materialized dial. An unmaterialized slot really
+        // does take the session's, and the harness publishes that to hook
+        // commands, so record the value rather than the word.
+        reasoning_effort: materialized.effort ?? sessionEffort ?? 'inherited',
+        // Which channel won, so a reader never has to infer it.
+        effort_source: materialized.effort != null ? 'agent-file' : 'session',
+        // The session's own level at spawn time. Alongside an `agent-file`
+        // effort it is the fallback the frontmatter is overriding; it is also
+        // the only *observed* effort on the row, because the harness silently
+        // downgrades a level the model or the org will not serve. A row whose
+        // requested effort exceeds what any spawn here has ever observed is
+        // the shape of that downgrade.
+        session_effort: sessionEffort ?? null,
+        // The executor the agent file was cut from. Differs from `executor`
+        // when the dial moved and `steering apply --claude` has not been rerun
+        // since — the spawn then carries yesterday's identity, and only this
+        // field can say so after the fact.
+        materialized_source: materialized.source ?? null,
         transport: 'host',
         dial_source: typeof slot?.source === 'string' ? slot.source : slot?.dial_source ?? null,
         driver: typeof slot?.driver === 'string' ? slot.driver : null,
@@ -194,18 +283,32 @@ function recordHostDelivery() {
   }
 }
 
+// Resolve the host landing point before writing evidence, so the row reports
+// what the spawn will actually run at rather than what was asked for.
+const target = commandDelivery
+  ? { agent: null, effort: null, source: null }
+  : hostTarget(archetype, typeof slot?.effort === 'string' ? slot.effort : null);
+
 if (commandDelivery) stashRelay(); // rewritten-to-proxy spawns get attested too
 else recordHostDelivery(); // no kernel downstream: record the delivery here
-const prefix = commandDelivery ? 'dispatch-' : '';
-const localAgent = join(cwd, '.claude', 'agents', `${prefix}${archetype}.md`);
-const target = existsSync(localAgent) ? `${prefix}${archetype}` : `fadeno:${prefix}${archetype}`;
+
+let subagentType;
+if (commandDelivery) {
+  const localProxy = join(cwd, '.claude', 'agents', `dispatch-${archetype}.md`);
+  subagentType = existsSync(localProxy) ? `dispatch-${archetype}` : `fadeno:dispatch-${archetype}`;
+} else if (target.agent != null) {
+  subagentType = target.agent; // grid cell or legacy managed file — locally registered
+} else {
+  const localAgent = join(cwd, '.claude', 'agents', `${archetype}.md`);
+  subagentType = existsSync(localAgent) ? archetype : `fadeno:${archetype}`;
+}
 
 finish({
   hookSpecificOutput: {
     hookEventName: 'PreToolUse',
     updatedInput: {
       ...event.tool_input,
-      subagent_type: target,
+      subagent_type: subagentType,
       // Proxy relays run on sonnet: the 2026-08-12 dogfood A/B showed haiku
       // defecting on the relay contract (did the task itself, dropped the
       // prompt's first line, asserted unwritten evidence); sonnet relayed

@@ -167,6 +167,7 @@ Options:
   --prompt-file <path>    (dispatch) Read the prompt from a file instead of stdin
   --tag <t>               (dispatch) Label the dispatch for recovery (dispatches --output tag:<t>)
   --shadow <ref>          (dispatch) Duplicate the prompt to a one-shot shadow challenger
+                          (FADENO_SHADOW_MAX_LIVE caps concurrent challengers; default 4)
   --isolate               (dispatch) Run in a detached worktree (preserves diff, bypasses shared-writer lease)
   --diagnostics           (dispatch/drive) Persist bounded process output (32 KiB / 500 lines) to diagnostics log
   --no-brief              (dispatch) Skip the archetype's declared brief preamble
@@ -345,6 +346,10 @@ Options:
   --repo           Write/clear the repo pin (committed to .fadeno/executors.yaml)
   --force          Set despite a write-posture mismatch (persisted, discouraged)
   --rate <r>       (shadow) Sampling rate in [0,1]
+  --prompt-sha256 <hex>
+                   (resolve) Prompt digest, so the reply carries the pair decision
+                   (shadow.selected) for this exact prompt. Omit it and selected
+                   is null — unknown, never "no".
   --json           Structured output
 
 The cascade: role binding → session dial → repo pin → user dial → host-native base.
@@ -402,7 +407,10 @@ Options:
   --via <driver>        Driver alias for --model (e.g. opencode)
   --prompt-file <path>  Read the prompt from a file instead of stdin
   --tag <t>             Label the dispatch for recovery (dispatches --output tag:<t>)
-  --shadow <ref>        Duplicate the prompt to a one-shot shadow challenger
+  --shadow <ref>        Duplicate the prompt to a one-shot shadow challenger. Sampling is
+                        keyed on the prompt digest, so a retry never re-rolls; challengers
+                        run concurrently, capped by FADENO_SHADOW_MAX_LIVE (default 4), and
+                        their worktrees are retained under .fadeno/local/shadow for review
   --timeout <seconds>   Hard executor deadline seconds; 0 disables route default (20 min)
   --isolate             Run in a detached worktree (opt-in, preserves diff, bypasses shared-writer lease)
   --diagnostics         Persist bounded process output (32 KiB / 500 lines per stream) to diagnostics log
@@ -1280,6 +1288,7 @@ function main(argv: string[]): number {
         repo: { type: 'boolean' },
         model: { type: 'string' },
         archetype: { type: 'string' },
+        'prompt-sha256': { type: 'string' },
         role: { type: 'string' },
         'host-executor': { type: 'string' },
         // Pre-0.6 spelling. Kept parseable so a Codex agent TOML materialized
@@ -1535,8 +1544,13 @@ function main(argv: string[]): number {
               : 'dispatch proxy (no agent file)';
             console.log(`  ${archetype} → ${how} ${slot.executor}`);
           }
-          for (const path of result.removed ?? []) console.log(`  removed stale managed agent: ${path}`);
-          console.log(`  ${changed} agent definition(s) written; restart Claude Code so changed subagents load.`);
+          for (const path of result.removed ?? []) console.log(`  removed stale per-dial agent: ${path}`);
+          console.log(`  identity grid: ${result.grid?.length ?? 0} cell(s) (archetype x effort), model supplied per spawn`);
+          console.log(
+            changed === 0
+              ? '  0 agent definition(s) written; the grid is current — dial changes take effect immediately, no restart.'
+              : `  ${changed} agent definition(s) written; restart Claude Code once so the new names register. Dial changes after that need neither.`,
+          );
           if (changed === 0 && result.conflicts.length > 0) console.log('  Existing files were preserved; pass --force to replace them.');
           return 0;
         }
@@ -1941,9 +1955,9 @@ function main(argv: string[]): number {
         return 0;
       }
       if (sub === 'resolve') {
-        if (!values.archetype) throw new Error('Usage: fadeno dial resolve --archetype <name>');
+        if (!values.archetype) throw new Error('Usage: fadeno dial resolve --archetype <name> [--prompt-sha256 <hex>]');
         if (positionals.length > 2) throw new Error('Usage: fadeno dial resolve --archetype <name>');
-        const result = runDialResolve({ archetype: values.archetype });
+        const result = runDialResolve({ archetype: values.archetype, promptSha256: values['prompt-sha256'] ?? null });
         console.log(JSON.stringify(result, null, 2));
         return 0;
       }

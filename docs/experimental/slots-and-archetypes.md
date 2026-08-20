@@ -467,13 +467,10 @@ pairs distinctly.
 
 ## Open questions
 
-1. **Shadow on host primaries.** The highest-value shadow target is the
-   user's daily driver, which is often the host in-session worker — where
-   the kernel never sees a dispatch. Options: steering-hook-initiated
-   background dispatch of the shadow (hook already stashes the prompt and
-   sha); or accept kernel-dispatched-only scope initially. *Decided with
-   phase 4 (rc.15): kernel-dispatched-only initially; the hook-initiated
-   variant stays open.*
+1. **Shadow on host primaries.** *Decided — see "Phase 5" below.* The
+   question was how to capture a host primary well enough to compare it. The
+   answer is not to capture it: a shadow-selected spawn routes **both** arms
+   through the command lane, so there is no host primary to instrument.
 2. **Provenance ergonomics for `distinct_provider_from_inputs`.** Artifact-
    path lookup in the ledger covers kernel-produced artifacts; artifacts
    produced in-session are attributable only when the steering hook recorded
@@ -485,6 +482,237 @@ pairs distinctly.
 4. **`generator` proxy surface.** If generator traffic materializes, does it
    get its own dispatch proxy agent (with a Bash-constraining hook like the
    other three), or does the worker proxy grow an archetype parameter?
+
+## Phase 5 — symmetric pairs (design, not yet built)
+
+Phase 4 shipped shadows against kernel-dispatched primaries and deferred the
+host-primary case. Working the deferred case through produced a smaller design
+than the one it replaced, because it deletes the problem instead of solving it.
+
+**The move: a shadow-selected spawn forces command delivery on both arms.**
+When the kernel rolls a slot's shadow attachment and it fires, the wrapper
+(the Claude steering hook; the Codex `steering resolve` the agent already
+calls) routes the *primary* to the dispatch proxy rather than to the in-session
+agent. Both arms are then ordinary kernel dispatches: `dispatch_id`, prompt
+snapshot, worktree, diff, supervisor-measured `duration_ms`, exit code, output
+digest. Everything the host-primary design needed — a host `dispatch_id`, a
+`PostToolUse` completion capture, deferred reaping, a host-pair variant of the
+comparison renderer — becomes unnecessary rather than deferred.
+
+Three consequences worth stating plainly:
+
+- **It is harness-neutral.** The host side only has to *route*, never to
+  capture, so it needs no hook. Codex and Grok get the same feature through
+  the resolve call their agents already make. The tier-2/tier-1 split that
+  made host-primary capture Claude-only stops applying.
+- **The transport confound disappears** rather than being documented. Both
+  arms are headless CLI on the same route shape, and effort is pinnable on
+  both. What survives as a mandatory `ModelComparison` confound is the
+  workspace baseline, not the delivery.
+- **It is a worse simulation and a better experiment.** A CLI-vs-CLI pair does
+  not measure the in-session experience. Given that the purpose is accumulated
+  promotion evidence, control beats realism — but the docs must not imply the
+  scorecard predicts in-session behavior.
+
+**Sampling moves to the decision point.** The kernel currently rolls the rate
+inside `runDispatch`. That is too late: the wrapper has to know *before* it
+routes, or a 0.2 rate would degrade the in-session path on every spawn to fire
+a shadow on one in five. `fadeno dial resolve` and `fadeno steering resolve`
+gain a kernel-rolled `shadow_selected` field, and the wrapper forces command
+delivery iff it is set. The roll is keyed on `prompt_sha256`, not
+`Math.random`: a retried spawn must make the same decision, or a retry loop
+silently multiplies challengers.
+
+**Workspace baseline.** Each arm's worktree is cut at HEAD and the primary's
+pre-spawn dirty state is committed into it with a message naming the pair, so
+the baseline is an addressable commit rather than an implicit one and each
+arm's own work is the second commit. Untracked-but-unignored files must be
+carried in explicitly; `git worktree add` will not. A dirty tree that cannot
+be snapshotted refuses the pair *loudly* — an echo plus a `dispatch_refused`
+row — never the silent no-op an unfired sample gets.
+
+**Blinding is free and must stay that way.** The same-prompt guarantee means
+neither arm can tell from its input which it is. The only asymmetries are cwd
+and env, so `FADENO_IN_SHADOW=1` — the flag that enforces "nothing inside a
+shadow ever shadows" — is read by the kernel when a descendant invokes
+`fadeno`, and must never be surfaced in CLI output an agent can read.
+
+**Port-back is a kernel verb, not an instruction.** Applying the primary's
+worktree to the real workspace is deterministic mechanism, so it belongs in a
+command (`fadeno shadow-apply <pair>`), not in a relay agent improvising git.
+It must be conflict-aware from the first version — the main tree can move
+while a pair runs — and on any conflict it stops, keeps the diff artifact,
+records the row, and prints the path. It never auto-resolves.
+
+**Judging stays modular and deferred.** Passive pairs accumulate; a
+`ModelComparison` is produced later, by hand or by the `model-tryout` starter.
+That is only safe if the pair's evidence is complete and durable at pair time:
+both outputs, both diffs, both worktrees, the prompt snapshot, both durations
+and exit codes, and dial provenance. Worktrees are therefore retained, and
+`fadeno clean` for them is part of the post-shadow workflow that ships with
+judging. Both rows carry a `pair_id` from the start — correlation is cheap to
+emit and miserable to retrofit.
+
+**Bounded blast radius.** Two independent controls, because they bound
+different things: `--rate` bounds spend, and a cap on live shadow claims in
+`.fadeno/local/inflight/` bounds machine load. A serial trickle of two hundred
+shadows costs exactly what two hundred concurrent ones cost, so neither
+substitutes for the other. The nesting rule and the cap ship together: without
+the cap, depth-k nesting fires k shadows for one task.
+
+**Vendor egress is a set-time check.** *Shipped ahead of the rest.* Dialing or
+shadowing a model whose provider nothing else in the repo dials warns at set
+time, alongside the write-posture and eligibility checks — the unit is the
+slot, not the archetype, so shadowing `worker` with the vendor `worker`
+already dials is not new egress. A dial set once and forgotten is a standing
+egress path, and dispatch time is too late to say so.
+
+**Work list.** *Landed:* host spawns are now shadowable — `fadeno dial resolve
+--prompt-sha256 <hex>` reports `shadow.selected` for that exact prompt, the
+steering hook routes a selected spawn to the dispatch proxy instead of the
+in-session agent, and the kernel independently re-derives the same roll to let
+a host-dialed primary take its own command fallback (echoed as `pair
+selected`, `transport: host-command-fallback`). Nothing is threaded between
+them: the roll is a pure function of (prompt digest, archetype, challenger),
+so hook and kernel cannot disagree. An unselected spawn is untouched, which is
+what keeps a 0.25 attachment from taxing the other three spawns in four. Also
+landed: prompt-digest-keyed sampling (a retried spawn cannot re-roll);
+`pair_id` on both arms and the retained challenger `workspace` on shadow
+rows; `FADENO_IN_SHADOW` suppressing nested shadows, kernel-read and
+never echoed; a live-challenger cap leased through
+`.fadeno/local/inflight/*.shadow.json` (`FADENO_SHADOW_MAX_LIVE`, default 4)
+whose exhaustion is a `shadow_cap` refusal row rather than a silent skip;
+shadow worktrees retained for later judgment; the `--isolate` / `--shadow`
+conflict guard lifted, since the two arms never shared a path. *Remaining:*
+the same `shadow.selected` field on Codex's `steering resolve`;
+commit-the-baseline into each worktree; `fadeno shadow-apply`; the post-shadow
+cleaner that consumes the recorded `workspace` paths; and the comparison
+renderer's primary side, which still has no `diffBytes` field because the
+struct predates symmetric arms.
+
+**Deliberately out of scope.** Write-shaped primaries land last: for
+`reviewer` and `judge` nothing needs to reach the workspace, so both arms sit
+in worktrees and the user loses only latency. `worker` forces a choice about
+where the primary's edits go, and review quality is the better-posed judging
+question anyway.
+
+## Steering restart — what a dial change must not cost
+
+A dial change should never end a session. Today it can, and the two harnesses
+fail differently:
+
+- **Claude** splits the identity across two channels. Model is live — the
+  steering hook rewrites `updatedInput.model` per spawn. Effort is not: the
+  Agent tool takes no effort parameter, so the only channel is `effort:`
+  frontmatter in a materialized agent file, and the harness reads agent
+  definitions when the session starts. Re-dialing without re-applying
+  therefore runs the **new model at the old model's effort** — neither the old
+  dial nor the new one, and silent. `host_delivery` rows now carry
+  `effort_source` and `materialized_source` (the executor the file was cut
+  from), which makes the split-brain detectable after the fact; it does not
+  prevent it.
+- **Codex** bakes both model and effort into the agent TOML and detects the
+  mismatch instead of papering over it: the agent passes the
+  `--host-executor` it was materialized with, and `steering resolve` answers
+  `command` where a fallback exists and `restart_required` where none does. So
+  Codex is already mostly restart-free — via the command lane — and refuses
+  loudly rather than drifting.
+
+Note this is **not** about hooks. Hooks are cached at session start too, which
+is why every hook-written row stamps `hook_version`, but that cache tracks
+*upgrading Fadeno*, not dialing. The restart here is the harness's **agent
+registry**: a definition file created mid-session is not a registered agent,
+and one whose frontmatter changed keeps serving its old values.
+
+**The fix is to stop materializing per-dial and pre-register an effort grid
+once.** `steering apply` emits one managed agent per `(effort, archetype)`
+rather than one per archetype-currently-dialed, and the wrapper retargets
+`subagent_type` among agents the harness already registered.
+
+**The grid is not keyed on model, and must not be.** Model is already live —
+the hook sets `updatedInput.model` per spawn — so the only property an agent
+file has to carry is the one the Agent tool has no parameter for. Keying on
+model would make the grid combinatorial in the dimension that actually grows:
+60 models × 20 archetypes × 5 efforts is 6,000 managed files, and every new
+model adds 100. Keyed on effort it is `efforts × host-surface archetypes` — 15
+files for today's `claude` harness — and it stays 15 no matter how many models
+are registered. Registering a model becomes free: no apply, no restart, no
+file. Grid agents therefore declare `effort:` and **no** `model:`; the spawn's
+model arrives on the tool call.
+
+Materializing on demand instead is not an alternative, for a structural
+reason: the harness builds its agent registry at session start, so a file
+written at dial time is not registered until the next session. On-demand
+degrades to a warm cache — first use of a novel identity costs a restart,
+later uses are free. Reasonable if the grid were large; pointless at fifteen
+files.
+
+That moves the restart boundary from *dials* — frequent, casual, and the thing
+users actually change — onto the *effort vocabulary*, which is edited almost
+never. After it, a restart is required for exactly three things, and they
+should be the only three the docs ever claim:
+
+1. **A new effort value** entering the vocabulary, which the current grid does
+   not cover. Adding models, routes, or archetype dials does not qualify.
+2. **A host slot naming an identity with neither a materialized agent nor a
+   command fallback** — Codex's existing `restart_required`, narrowed to the
+   fallback-less case.
+3. **Upgrading the Fadeno plugin**, because hooks load once per session.
+
+Everything else becomes live: any dial among materialized identities (model,
+effort, or both), every shadow attach and detach (shadows are pure command
+dispatch and never needed a restart), and host↔command transitions in either
+direction, since the proxy agents are always registered and the grid covers
+the host side.
+
+**Shipped.** `fadeno steering apply --claude` now pre-registers
+`.claude/agents/fadeno-<archetype>-<effort>.md` for every host-surface
+archetype across the `low|medium|high|xhigh|max` ladder — 15 cells, each
+`model: inherit` plus its own `effort:`, carrying the archetype's role body
+unchanged. The steering hook retargets `subagent_type` onto the cell matching
+the dial's resolved effort and supplies the model on the tool call. Legacy
+per-dial managed agents are removed on apply, since they pin a model the dial
+may have moved past; unmanaged files of the same name are never touched. A
+resolution carrying no effort (or an integer one) falls back to the plain role
+agent at inherited effort. Re-applying after a dial change writes nothing and
+reports `restartRequired: false` — the property the whole design exists for.
+
+**Decided: the grid carries role bodies** — keyed `effort × archetype`, 15
+files today. It preserves the role templates verbatim and changes nothing
+about what an in-session role agent is. The alternative, role-generic keying
+(`effort` alone, 5 files, role behavior arriving in the composed prompt as it
+already does on the command lane), is the tidier end state and would end an
+inconsistency between the two lanes — but with model out of the grid this was
+an ergonomics choice, not a scaling one, and it can be collapsed later without
+redoing the grid.
+
+**Both load-bearing assumptions are confirmed** against the Claude Code
+binary (2.1.236), so the grid is viable as specified:
+
+- `effort` is a real subagent-definition field — *"Thinking effort: `low`,
+  `medium`, `high`, `max`, or an integer"*, default `medium` — and the Agent
+  tool's own description states that an agent type's model, reasoning effort,
+  and tool access come from `.claude/agents/*.md` frontmatter.
+- The tool-call `model` parameter *"overrides the definition for this one
+  call"*, which is what lets the grid drop the model dimension. Grid agents
+  should declare `model: inherit` — the documented spelling of "take the
+  caller's" — rather than omitting the key.
+- `xhigh` is a valid level (the accepted set is wider than the agent schema's
+  description: `low`, `medium`, `high`, `xhigh`, `max`), so the registry
+  vocabulary needs no translation on the Claude lane.
+
+**Effort is requested, not guaranteed.** The harness resolves a turn's level
+*"after any silent downgrade for the selected model"*, and also restricts
+higher levels by organization policy. A dial to `xhigh` can therefore land
+lower with nothing raised, which means a row stamped
+`effort_source: agent-file` records what was *asked for*. The observable is
+`CLAUDE_EFFORT`, published to hook commands and Bash and already resolved past
+any downgrade: `host_delivery` rows now carry it as `session_effort`, the only
+measured effort on the row. A requested effort that no spawn in the repo has
+ever been observed at is the signature of a silent downgrade. Attesting the
+subagent's *own* post-downgrade level is possible in principle — every
+dispatch proxy runs Bash and would see its own `CLAUDE_EFFORT` — and is left
+as follow-up rather than assumed.
 
 ## Phasing summary
 
