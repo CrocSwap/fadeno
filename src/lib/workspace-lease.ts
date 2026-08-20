@@ -21,7 +21,7 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, relative, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 
 /** Exactly the two workspace modes the contract allows. */
 export type WorkspaceMode = 'shared' | 'isolated';
@@ -553,6 +553,137 @@ export function isBlockedByLease(
 // ---------------------------------------------------------------------------
 
 const ISOLATED_DIFF_MAX_NOTE = 4000;
+
+// ---------------------------------------------------------------------------
+// Declared worktree carry — shared by shadow pairs and isolated deliveries
+// ---------------------------------------------------------------------------
+//
+// `git worktree add` cuts a clean checkout of *tracked* content only:
+// dependencies, build output, and a local `.fadeno/` catalog are almost
+// always gitignored, so a worktree cut this way has none of them and cannot
+// build or test for reasons that have nothing to do with whatever is being
+// compared or isolated. A repo declares `worktree_carry:` (a project-only
+// field on `ExecutorProfile`, see `executors.ts`) to name the paths that
+// must cross into a freshly-cut worktree regardless. One mechanism serves
+// both a shadow's challenger worktree and an `--isolate` delivery's worktree
+// — the gap is identical in both cases, so the carry logic lives here
+// rather than being duplicated per caller.
+
+/** Mechanism a declared path was actually carried by — recorded on the
+ * dispatch's evidence row so a worktree is checkable as warmed the same way.
+ * `reflink` and `hardlink` never appear together with a mutation concern
+ * noted per-path; see `carryPathIntoWorktree` for why.
+ */
+export type WorktreeCarryMechanism = 'reflink' | 'hardlink' | 'copy';
+
+export type CarryOutcome =
+  | { status: 'absent' }
+  | { status: 'carried'; mechanism: WorktreeCarryMechanism }
+  | { status: 'failed'; reason: string };
+
+/**
+ * Carry one declared path from the primary's tree into a worktree cut from
+ * HEAD. Ladder: reflink (copy-on-write clone) → hardlink → full copy.
+ *
+ * A non-CoW filesystem is not an edge case worth a single fallback line —
+ * ext4 (the default on Ubuntu, Debian, and GitHub Actions' Linux runners),
+ * NTFS, HFS+, tmpfs, NFS/SMB, and overlay2-on-ext4 all lack reflink support,
+ * so hardlink-or-copy is the MAJORITY path on Linux CI, not a rare escape
+ * hatch. `-c` is the macOS/APFS clonefile spelling; `--reflink=always` is the
+ * GNU coreutils one. Both FAIL rather than degrade when the filesystem cannot
+ * clone, which is the property the ladder depends on — see the note below
+ * for why `--reflink=auto` would quietly break it.
+ *
+ * The hardlink step never dereferences symlinks (`-a`'s `--no-dereference`
+ * half): a pnpm-style `node_modules` is full of intentional relative
+ * symlinks that must keep resolving inside the worktree, not get flattened
+ * into copies of whatever they happen to point at. Hardlinks cannot cross
+ * filesystems; that failure mode falls through to the copy step below
+ * rather than being treated as fatal.
+ *
+ * Cleanup is safe by construction: a hardlink is a second directory entry on
+ * one inode, and its data is freed only when the link count reaches zero, so
+ * removing a worktree (`rm -rf`, `git worktree remove --force`, the
+ * post-shadow cleaner) only ever unlinks that worktree's own entry — it can
+ * never destroy the primary's copy. This is exactly what makes a hardlink
+ * safe where a directory *symlink* would not be: symlinking a directory
+ * shares the namespace, so even a safe write-temp-then-rename still lands
+ * inside the primary's real files, whereas a hardlinked tree is a genuinely
+ * separate directory structure that a create-temp-then-rename write
+ * naturally detaches from — the mechanism `rsync --link-dest` and Time
+ * Machine rely on, and pnpm already hardlinks `node_modules` out of its
+ * global content-addressed store for the same reason. Symlinking is
+ * therefore never chosen automatically here — only a future declaration that
+ * opts in to it explicitly, per path, could ask for it.
+ *
+ * The residual hazard is mutation, not deletion, and it is silent: a tool
+ * that opens a carried file and writes IN PLACE (a SQLite-backed cache, an
+ * append-mode log) mutates the primary's copy too, because content — and
+ * mode — live on the shared inode. That cannot be defended by making the
+ * carried tree read-only: a `chmod` on a shared inode makes the PRIMARY's
+ * copy read-only as well, so that obvious mitigation is unavailable, not
+ * merely unbuilt. Detecting after the fact whether a carry was mutated
+ * (a `carry_mutated` stamp) is deliberately left for later; this function
+ * does not attempt it.
+ */
+export function carryPathIntoWorktree(repoRoot: string, worktreeAbs: string, relPath: string): CarryOutcome {
+  const srcAbs = join(repoRoot, relPath);
+  if (!existsSync(srcAbs)) return { status: 'absent' }; // undeclared-equivalent: nothing to carry, not an error
+  const destAbs = join(worktreeAbs, relPath);
+  try {
+    mkdirSync(dirname(destAbs), { recursive: true });
+  } catch (err) {
+    return { status: 'failed', reason: `could not prepare "${relPath}"'s parent directory in the worktree: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  const attempt = (args: string[]): SpawnSyncReturns<string> => spawnSync('cp', args, { encoding: 'utf8' });
+  const cleanupPartial = (): void => { try { rmSync(destAbs, { recursive: true, force: true }); } catch { /* best-effort */ } };
+
+  // `=always`, never `=auto`. GNU `cp --reflink=auto` silently degrades to a
+  // full byte copy when the filesystem cannot clone, and exits 0 — which on
+  // ext4 (the majority path) would report `mechanism: 'reflink'` for what was
+  // actually a copy, and make the hardlink rung below unreachable dead code.
+  // `=always` fails instead, which is what lets the ladder fall through.
+  // Darwin's `-c` (clonefile) already fails rather than degrading, so the two
+  // spellings behave the same way here.
+  const reflinkArgs = process.platform === 'darwin' ? ['-R', '-c', srcAbs, destAbs] : ['-R', '--reflink=always', srcAbs, destAbs];
+  const reflinkRes = attempt(reflinkArgs);
+  if (reflinkRes.error == null && reflinkRes.status === 0) return { status: 'carried', mechanism: 'reflink' };
+  cleanupPartial();
+
+  const hardlinkRes = attempt(['-a', '-l', srcAbs, destAbs]);
+  if (hardlinkRes.error == null && hardlinkRes.status === 0) return { status: 'carried', mechanism: 'hardlink' };
+  cleanupPartial();
+
+  const copyRes = attempt(['-a', srcAbs, destAbs]);
+  if (copyRes.error == null && copyRes.status === 0) return { status: 'carried', mechanism: 'copy' };
+  cleanupPartial();
+
+  const reason = copyRes.error != null
+    ? copyRes.error.message
+    : String(copyRes.stderr ?? '').trim() || `exit ${copyRes.status ?? 'unknown'}`;
+  return { status: 'failed', reason };
+}
+
+/** Every declared path, carried in declaration order into a worktree that
+ * was cut from HEAD, stopping at the first failure. Shared by shadow pairs
+ * and isolated deliveries so both call the same ladder and record results in
+ * the same shape (`{ path, mechanism }`) on their evidence row.
+ */
+export function carryDeclaredPaths(
+  repoRoot: string,
+  worktreeAbs: string,
+  declared: readonly string[],
+): { records: Array<{ path: string; mechanism: WorktreeCarryMechanism }>; failure: { path: string; reason: string } | null } {
+  const records: Array<{ path: string; mechanism: WorktreeCarryMechanism }> = [];
+  for (const relPath of declared) {
+    const outcome = carryPathIntoWorktree(repoRoot, worktreeAbs, relPath);
+    if (outcome.status === 'absent') continue; // declared but doesn't exist: not an error, skip silently
+    if (outcome.status === 'failed') return { records, failure: { path: relPath, reason: outcome.reason } };
+    records.push({ path: relPath, mechanism: outcome.mechanism });
+  }
+  return { records, failure: null };
+}
 
 /**
  * Create a detached worktree for an isolated delivery. The worktree is cut

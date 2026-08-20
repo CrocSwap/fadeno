@@ -358,3 +358,49 @@ test('a shadow attachment gets the same provider check, scoped to its own slot',
   assert.match(warning!, /worker ~ grok routes to "xai"/);
   assert.match(warning!, /duplicates the prompt/);
 });
+
+test('a shadow attachment warns at set time when the primary has no command lane to force', (t) => {
+  const root = seedV3(t);
+  // Isolated user scope: this checks the truly undialed base, so it must not
+  // pick up whatever the real machine's user-scoped worker dial happens to be.
+  const opts = { repoRoot: root, userPathOptions: isolatedUser(root) };
+  // worker carries no primary dial anywhere, so it falls through to the
+  // current-host base — a host executor with no fallback_command. A selected
+  // pair has nothing to reuse for the command lane, so this attachment could
+  // sample forever and never produce a pair; dispatch time is too late to
+  // say so.
+  const result = runDialShadow({ ...opts, archetype: 'worker', model: 'sol' });
+  const warning = result.notes.find((n) => n.includes('NO PAIR POSSIBLE'));
+  assert.ok(warning, result.notes.join('\n'));
+  assert.match(warning!, /worker.*current-host.*no fallback_command/s);
+
+  // A warning, not a refusal: dialing the primary onto a command-capable
+  // executor afterwards makes the same attachment usable without touching
+  // the shadow attachment itself.
+  runDialSet({ ...opts, archetype: 'worker', model: 'grok', session: true });
+  const fixed = runDialShadow({ ...opts, archetype: 'worker', model: 'sol' });
+  assert.ok(!fixed.notes.some((n) => n.includes('NO PAIR POSSIBLE')), fixed.notes.join('\n'));
+});
+
+test('dial resolve: shadow.routable mirrors whether the kernel could force the primary onto a command lane', (t) => {
+  const root = seedV3(t);
+  // Isolated user scope, same reason as above: the undialed check must not
+  // depend on the real machine's ambient user dial for worker.
+  const opts = { repoRoot: root, userPathOptions: isolatedUser(root) };
+  runDialShadow({ ...opts, archetype: 'worker', model: 'sol' });
+
+  // Undialed worker resolves to current-host, a host executor with no
+  // fallback_command — the same condition `dispatchability` reports as
+  // host_in_session/host_without_fallback and `pairCommandFallback` refuses.
+  const unroutable = runDialResolve({ ...opts, archetype: 'worker' });
+  assert.equal(unroutable.shadow?.routable, false);
+  // `selected` is unaffected — it stays a pure function of the roll, and
+  // with no rate on the attachment every dispatch "fires" the roll.
+  assert.equal(unroutable.shadow?.selected, true);
+
+  // Once the primary is dialed to a command executor, `routable` flips
+  // without the shadow attachment changing at all.
+  runDialSet({ ...opts, archetype: 'worker', model: 'grok', session: true });
+  const routable = runDialResolve({ ...opts, archetype: 'worker' });
+  assert.equal(routable.shadow?.routable, true);
+});

@@ -55,6 +55,16 @@ function mergeLayer(target: Record<string, unknown>, source: Record<string, unkn
   if (layer !== 'project' && mapping(source.dials) != null && Object.keys(mapping(source.dials)!).length > 0) {
     throw new ExecutorProfileError('repo pins live in the project catalog; user dials are state — use `fadeno loadout set <archetype> <model> --user`');
   }
+  // Disallow worktree_carry in non-project layers, same shape as `dials`
+  // above and for the same reason: it describes THIS repo's gitignored
+  // build state (deps, build output, a local `.fadeno/` catalog), not a
+  // role or a model, so a user- or builtin-scope declaration could never
+  // name paths that make sense in whatever repo happens to load that
+  // layer. Project-only keeps the declaration co-located with the repo it
+  // describes.
+  if (layer !== 'project' && Array.isArray(source.worktree_carry) && source.worktree_carry.length > 0) {
+    throw new ExecutorProfileError('worktree_carry describes this repo\'s build state; it is project-only — declare it in .fadeno/executors.yaml, not the user or builtin catalog.');
+  }
   for (const key of ['routes', 'archetypes', 'bindings', 'models', 'dials', 'tools']) {
     const entries = mapping(source[key]);
     if (entries == null) continue;
@@ -69,7 +79,7 @@ function mergeLayer(target: Record<string, unknown>, source: Record<string, unkn
     }
     target[key] = current;
   }
-  for (const key of ['schema_version', 'constraints', 'unregistered_model_driver']) {
+  for (const key of ['schema_version', 'constraints', 'unregistered_model_driver', 'worktree_carry']) {
     if (source[key] !== undefined) {
       target[key] = source[key];
     }

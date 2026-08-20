@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { loadLayeredProfile, type ProfileProvenance } from './config-layers.ts';
 import { readUserHarness, type FadenoHarness, type UserPathOptions } from './user-paths.ts';
@@ -375,6 +375,14 @@ export interface ExecutorProfile {
   schemaVersion?: 3;
   notes: string[];
   tools: Record<string, ToolSpec>;
+  /**
+   * Repo-relative paths carried into a shadow's or an isolated dispatch's
+   * freshly-cut worktree (`git worktree add` checks out tracked content
+   * only, so gitignored deps/build output/a local `.fadeno/` catalog never
+   * cross into it otherwise). Project-only — see the enforcement comment in
+   * `config-layers.ts`'s `mergeLayer`.
+   */
+  worktreeCarry: string[];
 }
 
 export type HarnessId = 'codex' | 'claude' | 'grok' | 'standalone';
@@ -889,8 +897,60 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
     }
   }
 
+  // worktree_carry
+  //
+  // Previously read directly off the raw catalog YAML in `dispatch.ts`,
+  // bypassing this parser entirely: `mergeLayer` (config-layers.ts) only
+  // copies a fixed allowlist of top-level keys between layers, so an
+  // unrecognized key like `worktree_carry` was dropped before it ever
+  // reached this function's strict unknown-key check below — which meant a
+  // value of the wrong type (or one holding a malformed entry) was silently
+  // ignored rather than rejected. Silent no-carry produces exactly the
+  // untrustworthy pair the carry list exists to prevent (a challenger with
+  // no `node_modules` cannot build or test, and nothing said so). Now that
+  // `worktree_carry` is a known, validated key here, a badly-shaped
+  // declaration — not an array, a non-string entry, an absolute path, a `..`
+  // segment — fails loudly like any other malformed catalog field, instead
+  // of quietly becoming "nothing to carry."
+  //
+  // Absolute paths and any ".." segment are rejected here, at parse time,
+  // rather than silently dropped the way the old reader did — carrying
+  // outside the repo is never sensible, so reporting it beats pretending the
+  // entry was never declared.
+  //
+  // Residual gap, not introduced by this change and not specific to this
+  // key: `mergeLayer` copies each layer's keys by exact literal name, so a
+  // top-level key that is MISSPELLED entirely (`worktree_carrry:` rather
+  // than `worktree_carry:`) is simply never looked up and never reaches this
+  // function at all — it vanishes during the merge rather than tripping the
+  // unknown-top-level-key check below. That is a pre-existing property of
+  // the layered loader that applies equally to every catalog key (`dials`,
+  // `tools`, etc.), not something this parser can catch on its own; closing
+  // it would mean validating each layer's raw keys before the selective
+  // merge, which is a wider change than this field's own parsing.
+  const worktreeCarry: string[] = [];
+  if (doc.worktree_carry !== undefined) {
+    if (!Array.isArray(doc.worktree_carry)) {
+      throw new ExecutorProfileError(`${source}: \`worktree_carry\` must be an array of repo-relative path strings.`);
+    }
+    for (const raw of doc.worktree_carry) {
+      if (typeof raw !== 'string' || raw.trim().length === 0) {
+        throw new ExecutorProfileError(`${source}: \`worktree_carry\` entries must be non-empty strings; found ${JSON.stringify(raw)}.`);
+      }
+      const trimmed = raw.trim();
+      if (isAbsolute(trimmed)) {
+        throw new ExecutorProfileError(`${source}: \`worktree_carry\` entry "${trimmed}" must be repo-relative, not absolute.`);
+      }
+      const normalized = trimmed.split('\\').join('/');
+      if (normalized.split('/').includes('..')) {
+        throw new ExecutorProfileError(`${source}: \`worktree_carry\` entry "${trimmed}" may not contain a ".." segment.`);
+      }
+      worktreeCarry.push(normalized);
+    }
+  }
+
   // Reject unknown top-level keys (to catch legacy loadouts etc. as error via schema_version already, but also unknown keys)
-  const allowedTop = ['schema_version','models','routes','dials','bindings','archetypes','constraints','unregistered_model_driver','tools'];
+  const allowedTop = ['schema_version','models','routes','dials','bindings','archetypes','constraints','unregistered_model_driver','tools','worktree_carry'];
   const unknownTop = Object.keys(doc).filter((k) => !allowedTop.includes(k));
   if (unknownTop.length > 0) {
     // If legacy keys like executors/targets/loadouts/default_loadout present, they already would be caught by schema_version check?
@@ -916,6 +976,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
     schemaVersion: 3,
     notes,
     tools,
+    worktreeCarry,
   };
 }
 
@@ -1424,6 +1485,23 @@ export function dispatchability(
   if (ON_DEMAND_HOST_HARNESSES.has(harness)) return { supported: false, reason: 'host_in_session' };
   if (spec.fallbackCommand == null) return { supported: false, reason: 'host_without_fallback' };
   return { supported: true };
+}
+
+/**
+ * Whether a resolved spec can take the command lane at all, independent of
+ * harness. `dispatchability` answers "can THIS harness dispatch it" (a
+ * command-capable host spec is still refused on an on-demand harness, to stop
+ * it shelling out to a subprocess of itself); this answers the narrower,
+ * harness-free question a symmetric pair needs — is there a command lane
+ * here for the pair's forced-command exception to use at all. A command
+ * adapter always qualifies; a host adapter qualifies only with a
+ * `fallbackCommand` to fall back to. This is exactly the condition the
+ * kernel's `pairCommandFallback` tests before it lets a selected pair reuse a
+ * host slot's fallback — computed here once so every caller (the dial/
+ * steering resolvers, the kernel) agrees by construction.
+ */
+export function commandRoutable(spec: ExecutorSpec): boolean {
+  return spec.adapter === 'command' || (spec.adapter === 'host' && spec.fallbackCommand != null);
 }
 
 export function explainEligibilityConflict(

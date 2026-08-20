@@ -1,8 +1,8 @@
 import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import {
   ConstraintError,
@@ -12,6 +12,7 @@ import {
 import {
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
+  commandRoutable,
   eligibilityFor,
   substitutePromptFile,
   explainEligibilityConflict,
@@ -58,6 +59,7 @@ import {
   WORKSPACE_LEASE_FILE,
   WORKSPACE_LEASE_LOCK,
   acquireWorkspaceLease,
+  carryDeclaredPaths,
   isWorkspaceLeaseAlive,
   readWorkspaceLease,
   releaseWorkspaceLease,
@@ -66,6 +68,7 @@ import {
   type LeaseHolder,
   type WorkspaceLeaseRecord,
   type WorkspaceMode,
+  type WorktreeCarryMechanism,
 } from '../lib/workspace-lease.ts';
 import { ensureFadenoIgnore } from '../lib/source-control.ts';
 import type { UserPathOptions } from '../lib/user-paths.ts';
@@ -239,6 +242,9 @@ export type DispatchRefusalPredicate =
   | 'shadow_isolation'
   | 'shadow_resolution'
   | 'shadow_cap'
+  | 'shadow_baseline'
+  | 'shadow_carry'
+  | 'shadow_containment'
   | 'workspace_lease';
 
 function producedByIds(opts: AdHocDispatchOptions): string[] {
@@ -537,6 +543,8 @@ interface PendingShadow {
   dispatchId: string;
   /** Addresses the primary/shadow pair as one thing, on every row of both arms. */
   pairId: string;
+  /** The pair's shared starting-state commit, same value the shadow arm carries. */
+  baselineCommit: string;
   /** Request-row clock reading; the completion row derives from it. */
   startedAt: Date;
   /** Kernel-side ms fallback when the supervisor's report has no duration. */
@@ -586,11 +594,75 @@ function shadowLiveCap(env: NodeJS.ProcessEnv = process.env): number {
 }
 
 /**
- * Challengers still running, by direct pid probe. Markers whose supervisor is
- * gone are the residue of a killed kernel; they are dropped in passing rather
- * than counted, so one crash cannot permanently consume the cap.
+ * A generous window between a marker's recorded `started_at` and the
+ * corroborating probe's observed start time. Marker writes always trail the
+ * actual spawn (JSON.stringify + fs write take real, if tiny, time), and
+ * `ps`'s locale-formatted timestamp only round-trips through `Date.parse` to
+ * whole-second precision — this only needs to catch "a wildly different
+ * process", not confirm agreement to the millisecond.
  */
-function countLiveShadows(repoRoot: string): number {
+const PID_START_TOLERANCE_MS = 5 * 60 * 1000;
+
+/**
+ * Best-effort corroboration that `pid` is still the SAME process the marker
+ * was written for, not a different process the OS later recycled onto that
+ * number. `ps -o lstart=` (supported by both BSD/macOS and GNU/Linux `ps` —
+ * no dependency added) reports the CURRENT holder's actual start time.
+ * `LC_ALL=C` pins the format so `Date.parse` sees the same shape on every
+ * machine. Returns null — "no answer", not "no match" — whenever `ps` is
+ * absent, sandboxed away, or its output does not parse; see the caller for
+ * why that must never be read as a mismatch.
+ */
+function realPidStartedAt(pid: number): string | null {
+  try {
+    const res = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf8',
+      env: { ...process.env, LC_ALL: 'C' },
+    });
+    if (res.error != null || res.status !== 0) return null;
+    const out = String(res.stdout ?? '').trim();
+    return out.length > 0 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Challengers still running, by direct pid probe corroborated against the
+ * marker's own recorded start time. Markers whose supervisor is gone are the
+ * residue of a killed kernel; they are dropped in passing rather than
+ * counted, so one crash cannot permanently consume the cap.
+ *
+ * ## The pid-reuse gap this narrows
+ *
+ * A bare `process.kill(pid, 0)` only proves SOME process currently holds
+ * `pid` — not that it is the same supervisor the marker was written for.
+ * PIDs wrap and get reused, more readily on a busy machine or inside a
+ * short-lived container, so a stale marker whose pid has since been recycled
+ * onto an unrelated process would read as "alive" forever, permanently
+ * consuming a slot under the live-shadow cap (undercounting free capacity —
+ * the reverse, a live shadow read as dead, cannot happen from reuse alone,
+ * since a freshly-recycled pid's start time will not match the old marker's
+ * either way `alive` starts).
+ *
+ * `startProbe` corroborates the bare pid check against the process's actual
+ * start time (`realPidStartedAt` by default). This is a ONE-DIRECTIONAL
+ * tightening, never a new way to undercount a genuinely live shadow: a probe
+ * that returns no answer (`ps` unavailable, unparseable output) leaves the
+ * original conservative pid-alive verdict standing exactly as it did before
+ * this existed; only a probe that clearly disagrees — the running process's
+ * start time falls outside `PID_START_TOLERANCE_MS` of what the marker
+ * recorded — can flip `alive` to `false`. It is corroboration, not a
+ * replacement for the primary liveness signal.
+ *
+ * `killProbe`/`startProbe` are injectable for tests; both default to the
+ * real OS calls.
+ */
+export function countLiveShadows(
+  repoRoot: string,
+  killProbe: (pid: number, signal: number) => void = (pid, signal) => process.kill(pid, signal),
+  startProbe: (pid: number) => string | null = realPidStartedAt,
+): number {
   const dir = join(repoRoot, ...INFLIGHT_DIR.split('/'));
   let names: string[];
   try {
@@ -602,21 +674,35 @@ function countLiveShadows(repoRoot: string): number {
   for (const name of names) {
     if (!name.endsWith(SHADOW_MARKER_SUFFIX)) continue;
     const abs = join(dir, name);
-    let pid: unknown;
+    let record: Record<string, unknown>;
     try {
-      pid = (JSON.parse(readFileSync(abs, 'utf8')) as Record<string, unknown>).supervisor_pid;
+      record = JSON.parse(readFileSync(abs, 'utf8')) as Record<string, unknown>;
     } catch {
       try { rmSync(abs, { force: true }); } catch { /* nothing to drop */ }
       continue;
     }
+    const pid = record.supervisor_pid;
     if (typeof pid !== 'number') continue;
     let alive: boolean;
     try {
-      process.kill(pid, 0);
+      killProbe(pid, 0);
       alive = true;
     } catch (err) {
       // EPERM means someone else's process holds the pid — conservatively live.
       alive = (err as NodeJS.ErrnoException).code !== 'ESRCH';
+    }
+    if (alive && typeof record.started_at === 'string') {
+      const recorded = Date.parse(record.started_at);
+      let observedRaw: string | null;
+      try {
+        observedRaw = startProbe(pid);
+      } catch {
+        observedRaw = null; // a throwing probe is "no answer", same as a null return
+      }
+      const observed = observedRaw != null ? Date.parse(observedRaw) : NaN;
+      if (!Number.isNaN(recorded) && !Number.isNaN(observed) && Math.abs(observed - recorded) > PID_START_TOLERANCE_MS) {
+        alive = false; // same pid, a different (later) process — recycled
+      }
     }
     if (alive) live += 1;
     else { try { rmSync(abs, { force: true }); } catch { /* nothing to drop */ } }
@@ -631,6 +717,141 @@ function workspaceFingerprint(repoRoot: string): string | null {
   const head = spawnSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
   if (head.error != null || head.status !== 0) return null;
   return sha256Hex(`${status.stdout ?? ''}\0${head.stdout ?? ''}`);
+}
+
+/** Never copy the shadow worktree's own home into itself — recursive, and the
+ * one path a repo's own `.gitignore` cannot be trusted to exclude, since a
+ * user repo may commit `.fadeno/` definitions while ignoring only some
+ * subpaths. Checked explicitly rather than delegated to `--exclude-standard`.
+ */
+function isUnderShadowHome(repoRelPath: string): boolean {
+  return repoRelPath === '.fadeno/local' || repoRelPath.startsWith('.fadeno/local/');
+}
+
+function gitFailureReason(result: { error?: Error | null; status: number | null; stderr?: string | Buffer | null }): string {
+  if (result.error != null) return result.error.message;
+  const stderr = String(result.stderr ?? '').trim();
+  if (stderr.length > 0) return stderr;
+  return `exit ${result.status ?? 'unknown'}`;
+}
+
+// Declared `worktree_carry:` paths and the mechanism that carries them
+// (reflink → hardlink → copy) now live in `workspace-lease.ts`
+// (`carryDeclaredPaths`/`carryPathIntoWorktree`), shared by this file's
+// shadow-pair carry (below) and its isolated-delivery carry. The
+// declaration itself comes off the PARSED, validated profile
+// (`profile.worktreeCarry`, from `loadExecutorProfile`/`parseExecutorProfile`
+// in `executors.ts`) rather than a second raw-YAML read of the project
+// catalog — a malformed declaration now fails the dispatch loudly at load
+// time instead of being silently dropped here.
+
+/**
+ * Replay the primary's pre-spawn workspace state into the challenger's
+ * worktree, as one commit, so the pair's starting state is an addressable
+ * commit rather than an implicit one and each arm's own work becomes the
+ * second commit. Three moves, in order:
+ *
+ * 1. Capture the primary's tracked-file state with `git diff HEAD --binary`
+ *    (staged AND unstaged, deletions, binary files) without ever touching
+ *    the primary's index — the primary is about to work, and mutating its
+ *    index out from under it is unacceptable.
+ * 2. Apply that patch in the worktree with `git apply --index`, which
+ *    `git worktree add` never does (it cuts a clean checkout of HEAD) and
+ *    `git diff` never sees (untracked files, handled separately below).
+ * 3. Carry untracked-but-unignored files explicitly, by copy — `git diff`
+ *    has no notion of them at all.
+ *
+ * A clean primary tree produces no diff and no untracked files, so nothing
+ * is staged and no commit is made; the caller's baseline is then simply the
+ * worktree's HEAD (the same commit the worktree was cut from). Any failure
+ * along the way throws, and the caller is responsible for treating that as
+ * a refusal — a dirty tree that cannot be replayed must never silently
+ * produce a skewed pair.
+ */
+function commitWorkspaceBaseline(repoRoot: string, worktreeAbs: string, pairId: string): string {
+  const diffRes = spawnSync('git', ['-C', repoRoot, 'diff', 'HEAD', '--binary'], {
+    encoding: 'buffer',
+    maxBuffer: SPAWN_MAX_BUFFER,
+  });
+  if (diffRes.error != null || diffRes.status !== 0) {
+    throw new Error(`could not capture the primary workspace's pre-spawn state: ${gitFailureReason(diffRes)}`);
+  }
+  const patch: Buffer = diffRes.stdout ?? Buffer.alloc(0);
+
+  if (patch.length > 0) {
+    const applyRes = spawnSync('git', ['-C', worktreeAbs, 'apply', '--index'], {
+      input: patch,
+      encoding: 'utf8',
+      maxBuffer: SPAWN_MAX_BUFFER,
+    });
+    if (applyRes.error != null || applyRes.status !== 0) {
+      throw new Error(`could not replay the primary's pre-spawn changes into the shadow worktree: ${gitFailureReason(applyRes)}`);
+    }
+  }
+
+  const untrackedRes = spawnSync('git', ['-C', repoRoot, 'ls-files', '--others', '--exclude-standard', '-z'], {
+    encoding: 'utf8',
+    maxBuffer: SPAWN_MAX_BUFFER,
+  });
+  if (untrackedRes.error != null || untrackedRes.status !== 0) {
+    throw new Error(`could not list the primary workspace's untracked files: ${gitFailureReason(untrackedRes)}`);
+  }
+  const untrackedFiles = String(untrackedRes.stdout ?? '')
+    .split('\0')
+    .filter((p) => p.length > 0)
+    .filter((p) => !isUnderShadowHome(p));
+
+  let copiedAny = false;
+  for (const relPath of untrackedFiles) {
+    try {
+      const srcAbs = join(repoRoot, relPath);
+      const destAbs = join(worktreeAbs, relPath);
+      mkdirSync(dirname(destAbs), { recursive: true });
+      copyFileSync(srcAbs, destAbs);
+      // copyFileSync does not preserve mode bits, notably the executable
+      // one: an untracked helper script (a repo's own build/test entry
+      // point is a common case) would otherwise land non-executable in the
+      // challenger's worktree, so the challenger could not run something
+      // the primary can — the same class of asymmetry `worktree_carry`
+      // exists to remove for gitignored paths. Match the source file's mode
+      // explicitly rather than trust the copy to carry it.
+      chmodSync(destAbs, statSync(srcAbs).mode);
+      copiedAny = true;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`could not copy untracked file "${relPath}" into the shadow worktree: ${reason}`);
+    }
+  }
+
+  if (patch.length === 0 && !copiedAny) {
+    // Nothing to replay: the primary's tree was clean, so the baseline is
+    // simply the commit the worktree was already cut from.
+    const headRes = spawnSync('git', ['-C', worktreeAbs, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+    if (headRes.error != null || headRes.status !== 0) {
+      throw new Error(`could not resolve the shadow worktree's HEAD: ${gitFailureReason(headRes)}`);
+    }
+    return String(headRes.stdout ?? '').trim();
+  }
+
+  const addRes = spawnSync('git', ['-C', worktreeAbs, 'add', '-A'], { encoding: 'utf8' });
+  if (addRes.error != null || addRes.status !== 0) {
+    throw new Error(`could not stage the workspace baseline in the shadow worktree: ${gitFailureReason(addRes)}`);
+  }
+  const commitRes = spawnSync('git', [
+    '-C', worktreeAbs,
+    '-c', 'user.name=fadeno',
+    '-c', 'user.email=fadeno@localhost',
+    'commit', '--no-verify', '--no-gpg-sign', '-m', `fadeno pair baseline ${pairId}`,
+  ], { encoding: 'utf8' });
+  if (commitRes.error != null || commitRes.status !== 0) {
+    throw new Error(`could not commit the workspace baseline in the shadow worktree: ${gitFailureReason(commitRes)}`);
+  }
+
+  const shaRes = spawnSync('git', ['-C', worktreeAbs, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+  if (shaRes.error != null || shaRes.status !== 0) {
+    throw new Error(`could not resolve the shadow worktree's baseline commit: ${gitFailureReason(shaRes)}`);
+  }
+  return String(shaRes.stdout ?? '').trim();
 }
 
 /**
@@ -781,8 +1002,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // subprocess of its own harness, would refuse the thing the pair is for.
   const pairCommandFallback = !deliverable.supported
     && deliverable.reason === 'host_in_session'
-    && spec.adapter === 'host'
-    && spec.fallbackCommand != null
+    && commandRoutable(spec)
     && pairSelectedForPrompt();
   if (pairCommandFallback) {
     opts.onEcho?.(`pair selected: ${archetype} → ${executorName} moved to its command lane so both arms are comparable`);
@@ -1362,6 +1582,29 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       return null;
     }
 
+    // Containment. Byte-identical prompts are what makes the pair a fair
+    // test, but that same identity means a prompt naming this repo's
+    // absolute root sends the challenger straight into the primary's tree
+    // the moment it opens that path — cwd isolation is advisory against an
+    // absolute reference, not a real boundary. Checked here, after every
+    // earlier refusal (cap, resolution, eligibility, write posture,
+    // constraint) and before the worktree that would need it exists: those
+    // earlier checks decide whether a shadow would fire AT ALL, so running
+    // containment after them means a more fundamental refusal reason is
+    // reported instead of being masked by a containment refusal on a shadow
+    // that was never going to fire anyway. Checked before worktree creation
+    // rather than after-plus-cleanup, on the same "refuse before you build"
+    // instinct that puts the cap ahead of resolution above — refusing before
+    // creating is simpler than creating and removing.
+    if (prompt.includes(repoRoot)) {
+      writeShadowRefusal(
+        'shadow_containment',
+        `the prompt contains this repo's absolute path ("${repoRoot}") — both arms receive byte-identical prompt bytes, so a prompt naming absolute repo paths cannot be isolated: the challenger would follow that path straight into the primary's tree. Rewrite it repo-relative (drop the "${repoRoot}/" prefix) to make the pair possible.`,
+        { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effort, transport: 'command' },
+      );
+      return null;
+    }
+
     // Isolation. Cut from HEAD before the primary spawns: both sides start
     // from the same committed state, whatever the primary goes on to do.
     try { spawnSync('git', ['worktree', 'prune'], { cwd: repoRoot, encoding: 'utf8' }); } catch {}
@@ -1369,6 +1612,45 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     if (addResult.error != null || addResult.status !== 0) {
       const reason = addResult.error?.message ?? (addResult.stderr != null ? String(addResult.stderr).trim() : '') ?? 'worktree add failed';
       writeShadowRefusal('shadow_isolation', reason.length > 0 ? reason : 'shadow worktree could not be created');
+      return null;
+    }
+
+    // Worktree carry. Declared paths are almost always gitignored (deps,
+    // build output, a local `.fadeno/` catalog), so the checkout above never
+    // puts them here — this is what closes that gap. Run before the baseline
+    // commit below (which writes git objects) so a carry failure is caught
+    // before that costlier step runs; order otherwise does not matter, since
+    // gitignored paths are invisible to the baseline's `git diff`/`git
+    // apply`/`git add -A` regardless of when they land.
+    const shadowCarry = carryDeclaredPaths(repoRoot, shadowWorktreeAbs, profile.worktreeCarry);
+    const carryRecords = shadowCarry.records;
+    if (shadowCarry.failure != null) {
+      writeShadowRefusal(
+        'shadow_carry',
+        `declared worktree_carry path "${shadowCarry.failure.path}" exists but could not be carried into the shadow worktree by any mechanism (${shadowCarry.failure.reason}) — refusing the pair rather than running a challenger whose build state does not match what was declared.`,
+      );
+      try { spawnSync('git', ['worktree', 'remove', '--force', shadowWorktreeAbs], { cwd: repoRoot, encoding: 'utf8' }); } catch {}
+      try { spawnSync('git', ['worktree', 'prune'], { cwd: repoRoot, encoding: 'utf8' }); } catch {}
+      return null;
+    }
+
+    // Workspace baseline. The worktree above is a clean checkout of HEAD, but
+    // the primary works from the real workspace — usually dirty. Replay the
+    // primary's pre-spawn state into the worktree as one commit, before the
+    // challenger is spawned, so the pair's starting state is an addressable
+    // commit shared by both arms rather than an implicit asymmetry between
+    // them. A tree that cannot be snapshotted must not silently produce a
+    // skewed pair, so it refuses loudly instead — and the worktree just
+    // created is removed, since a refused baseline must not leak a
+    // registered worktree the success path would otherwise retain.
+    let baselineCommit: string;
+    try {
+      baselineCommit = commitWorkspaceBaseline(repoRoot, shadowWorktreeAbs, pairId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      writeShadowRefusal('shadow_baseline', message);
+      try { spawnSync('git', ['worktree', 'remove', '--force', shadowWorktreeAbs], { cwd: repoRoot, encoding: 'utf8' }); } catch {}
+      try { spawnSync('git', ['worktree', 'prune'], { cwd: repoRoot, encoding: 'utf8' }); } catch {}
       return null;
     }
 
@@ -1415,9 +1697,23 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       // Retained after collection so the pair stays reviewable; recording the
       // path is what lets a later cleaner enumerate rather than glob.
       workspace: shadowWorktreeRel,
+      // Same value on both arms: the pair's starting state is one addressable
+      // commit rather than an implicit one. HEAD when the primary's tree was
+      // clean (nothing was replayed), the replay commit otherwise.
+      baseline_commit: baselineCommit,
     };
     if (eligibilityState === 'shadow_only') {
       shadowIdentity.eligibility = 'shadow_only';
+    }
+    // Absent when nothing was declared or nothing declared existed, matching
+    // the "absent declaration = carry nothing" rule below — omitted rather
+    // than an empty array, consistent with how `eligibility` above is only
+    // ever added, never defaulted. Present on both the request and
+    // completion rows, since `pending.identity` is spread into the
+    // completion row unchanged: a pair's arms are then checkable as warmed
+    // the same way from either row.
+    if (carryRecords.length > 0) {
+      shadowIdentity.worktree_carry = carryRecords;
     }
     appendEvidenceRow(repoRoot, {
       format: DISPATCHES_FORMAT,
@@ -1481,6 +1777,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     return {
       dispatchId: shadowDispatchId,
       pairId,
+      baselineCommit,
       markerAbs,
       startedAt: shadowNow,
       startedMs,
@@ -1618,6 +1915,12 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // lifecycle is owned by withIsolatedWorktree below, including action errors.
   let isolatedDiffRel: string | null = null;
   let isolatedDiffBytes: number | null = null;
+  // Same gap as a shadow's challenger worktree, and the same declaration:
+  // `git worktree add` checks out tracked content only, so an isolated
+  // delivery gets no `node_modules`, no `dist` — it cannot build or test
+  // either, for reasons that have nothing to do with the work it was asked
+  // to do. Populated below, inside the isolated branch only.
+  let isolatedCarryRecords: Array<{ path: string; mechanism: WorktreeCarryMechanism }> = [];
 
   // stdout is the snapshot fd so bytes survive a mid-flight SIGTERM;
   // encoding/maxBuffer then apply to stderr only. input still feeds stdin.
@@ -1672,7 +1975,19 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         diffRel,
         diffAbs: join(repoRoot, diffRel),
         onEcho: opts.onEcho,
-      }, invoke);
+      }, (worktreeAbs) => {
+        // Carry before the executor ever runs, same ordering reason as the
+        // shadow side: a failed carry must refuse before the more expensive
+        // (and, here, the only) work happens, not after.
+        const isolatedCarry = carryDeclaredPaths(repoRoot, worktreeAbs, profile.worktreeCarry);
+        if (isolatedCarry.failure != null) {
+          throw new WorkspaceLeaseError(
+            `declared worktree_carry path "${isolatedCarry.failure.path}" exists but could not be carried into the isolated worktree by any mechanism (${isolatedCarry.failure.reason}) — refusing the dispatch rather than running it against an incomplete checkout.`,
+          );
+        }
+        isolatedCarryRecords = isolatedCarry.records;
+        return invoke(worktreeAbs);
+      });
       spawned = isolated.result;
       isolatedDiffRel = isolated.diff.diffRel;
       isolatedDiffBytes = isolated.diff.diffBytes;
@@ -1779,7 +2094,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     ...(isTimeout && supervisorStatus?.deadlineAt != null ? { deadline_at: supervisorStatus.deadlineAt } : {}),
     // Only when a challenger actually fired. The primary's request row was
     // written before the roll, so this is the first row that can carry it.
-    ...(pendingShadow != null ? { pair_id: pendingShadow.pairId } : {}),
+    ...(pendingShadow != null ? { pair_id: pendingShadow.pairId, baseline_commit: pendingShadow.baselineCommit } : {}),
   };
   // Concurrent writers make this attestation, not judgment.
   if (workspaceBefore != null && workspaceAfter != null) {
@@ -1788,6 +2103,11 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   if (workspaceMode === 'isolated' && isolatedDiffRel != null && isolatedDiffBytes != null) {
     row.diff_snapshot = isolatedDiffRel;
     row.diff_bytes = isolatedDiffBytes;
+  }
+  // Absent when nothing was declared or nothing declared existed, matching
+  // the shadow row's same convention above.
+  if (workspaceMode === 'isolated' && isolatedCarryRecords.length > 0) {
+    row.worktree_carry = isolatedCarryRecords;
   }
   // Isolated deliveries omit workspace_changed by construction (contract 1.2)
   if (workspaceMode === 'isolated') {

@@ -8,6 +8,7 @@ import {
   BARE_IDENTIFIER_RE,
   applyWritePosture,
   archetypeDisplaySort,
+  commandRoutable,
   compileDialRef,
   deliveryIsHost,
   dispatchability,
@@ -440,6 +441,43 @@ function providerNoveltyNote(params: {
     ? `Detach it with \`fadeno dial clear-shadow ${archetype}\`.`
     : `Change it with \`fadeno dial ${archetype} <model>\`.`;
   return `WARNING: NEW PROVIDER — ${archetype} ${arrow} ${refString} routes to "${provider}", which nothing else dialed in this repo uses.\n${consequence}\n${undo}`;
+}
+
+/**
+ * Warn when the archetype's PRIMARY cannot reach the command lane, so a
+ * shadow attached here can never be sampled.
+ *
+ * A selected pair forces command delivery on both arms by reusing the
+ * primary's `fallback_command` (`commandRoutable`) — there is no other way
+ * for a host-delivered primary to become comparable. An archetype whose
+ * primary resolves to a host executor with none (the bare `current-host`
+ * base dial, most commonly) can therefore never produce a pair, no matter
+ * how the shadow itself is dialed. Dispatch time is too late to say so — the
+ * attachment would sit inert, silently sampling zero pairs forever. A
+ * warning, not a refusal: the primary can be redialed afterwards to make the
+ * attachment take effect.
+ */
+function unroutablePrimaryNote(params: {
+  profile: ExecutorProfile;
+  layers: DialLayers;
+  archetype: string;
+}): string | null {
+  const { profile, layers, archetype } = params;
+  let resolved: import('../lib/executors.ts').RoleResolution;
+  try {
+    resolved = resolveRole(archetype, archetype, profile, layers);
+  } catch {
+    return null; // unresolvable primary vouches for nothing here either
+  }
+  const postured = applyWritePosture(resolved.delivery.spec, archetype, profile.archetypes);
+  if (commandRoutable(postured.spec)) return null;
+  return (
+    `WARNING: NO PAIR POSSIBLE — ${archetype}'s primary (${resolved.delivery.refString}) resolves to a host ` +
+    'executor with no fallback_command, so this shadow attachment can never be sampled: a selected pair has no ' +
+    'command lane to force both arms onto, and an unroutable pair always degrades to no pair.\n' +
+    `Dial the primary to a command-capable executor to make this attachment take effect: ` +
+    `\`fadeno dial ${archetype} <model>\`.`
+  );
 }
 
 export function runDialSet(opts: DialSetOptions): DialSetResult {
@@ -928,10 +966,11 @@ export function runDialShadow(opts: DialShadowOptions): DialShadowResult {
   }
 
   const state = readLocalDialState(repoRoot);
+  const shadowLayers: DialLayers = { session: state.dials, repo: profile.dials, user: readUserDials(opts.userPathOptions) as Record<string, DialRef> };
   {
     const novelty = providerNoveltyNote({
       profile,
-      layers: { session: state.dials, repo: profile.dials, user: readUserDials(opts.userPathOptions) as Record<string, DialRef> },
+      layers: shadowLayers,
       shadows: state.shadows,
       archetype,
       refString,
@@ -939,6 +978,10 @@ export function runDialShadow(opts: DialShadowOptions): DialShadowResult {
       kind: 'shadow',
     });
     if (novelty != null) notes.push(novelty);
+  }
+  {
+    const unroutable = unroutablePrimaryNote({ profile, layers: shadowLayers, archetype });
+    if (unroutable != null) notes.push(unroutable);
   }
   const previous = state.shadows[archetype] ?? null;
   const nextShadows: Record<string, ShadowAttachment> = { ...state.shadows, [archetype]: rate == null ? { model: dial.model, ...(dial.effort ? { effort: dial.effort } : {}), ...(dial.via ? { via: dial.via } : {}) } : { model: dial.model, ...(dial.effort ? { effort: dial.effort } : {}), ...(dial.via ? { via: dial.via } : {}), rate } };
@@ -1184,12 +1227,21 @@ export interface DialResolveResult {
    *
    * `selected` is null when no prompt digest was supplied — the caller asked a
    * question the roll cannot answer, and must not read that as "no".
+   *
+   * `routable` is independent of the roll: it says whether the PRIMARY's
+   * resolved spec can take the command lane at all (a command adapter, or a
+   * host adapter with a `fallback_command`). It is exactly the condition the
+   * kernel's `pairCommandFallback` tests at dispatch time, computed here so
+   * the two agree by construction. A caller must force command delivery only
+   * when `selected && routable` — a selected-but-unroutable pair degrades to
+   * no pair, never to a dispatch the kernel would refuse.
    */
   shadow?: {
     attached: true;
     challenger: string;
     rate: number | null;
     selected: boolean | null;
+    routable: boolean;
   };
 }
 
@@ -1267,6 +1319,10 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
       // No rate means every dispatch fires; no digest means the caller cannot
       // be told, and must not read the silence as a "no".
       selected: rate == null ? true : digest ? shadowSampleRoll(digest, archetype, challenger) < rate : null,
+      // The PRIMARY's own resolved spec — `spec` above, after write-posture —
+      // not the challenger's. This is what a selected pair would have to
+      // reuse to reach the command lane.
+      routable: commandRoutable(spec),
     };
   }
 
