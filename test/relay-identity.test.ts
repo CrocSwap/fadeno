@@ -6,6 +6,7 @@ import test, { type TestContext } from 'node:test';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { runDialResolve, runDialSet } from '../src/commands/dial.ts';
 import { runInit } from '../src/commands/init.ts';
+import { relayModelForClaude, runPlugin, stampRelayModel } from '../src/commands/plugin.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
 import { tempRepo } from './helpers.ts';
 
@@ -211,4 +212,94 @@ test('the hook keeps exactly one relay literal, as the named fallback', () => {
   // model. Losing it invites the next reader to "save tokens" here.
   assert.match(template, /2026-08-12 dogfood A\/B/);
   assert.match(template, /haiku/);
+});
+
+// ---- Emit-time channel: the proxy agents' frontmatter ----
+//
+// Claude reads agent frontmatter once, at session start, so this channel can
+// only be refreshed when the files are written. The hook above wins where the
+// two disagree (it rewrites `updatedInput.model` per spawn), but a session
+// that spawns a proxy by name and never trips the hook still gets whatever
+// the frontmatter says — so it must not be a frozen literal either.
+
+test('stampRelayModel rewrites only a dispatch proxy frontmatter model', () => {
+  const proxy = readFileSync(join(REPO, 'templates', 'claude', 'claude-agents', 'dispatch-worker.md'), 'utf8');
+  const stamped = stampRelayModel(proxy, 'fable');
+  assert.deepEqual(stamped.match(/^model:.*$/gm), ['model: fable']);
+  // Everything but that one line is untouched — the body is the relay contract.
+  assert.equal(stamped.replace('model: fable', 'model: sonnet'), proxy);
+
+  // Null is "the catalog states no opinion": keep the template's own literal.
+  assert.equal(stampRelayModel(proxy, null), proxy);
+
+  // A role agent is a ROLE identity the dial owns; the relay never touches it.
+  const role = readFileSync(join(REPO, 'templates', 'claude', 'claude-agents', 'worker.md'), 'utf8');
+  assert.equal(stampRelayModel(role, 'fable'), role);
+});
+
+test('relayModelForClaude reads one catalog and never guesses', (t) => {
+  const root = tempRepo(t);
+  assert.equal(relayModelForClaude(join(REPO, 'templates', 'common', 'fadeno', 'executors.yaml')), 'sonnet');
+  // Absent or unreadable catalog: null, so the emitter keeps its literal.
+  assert.equal(relayModelForClaude(join(root, 'nope.yaml')), null);
+  writeFileSync(join(root, 'broken.yaml'), 'schema_version: 3\nmodels: [\n');
+  assert.equal(relayModelForClaude(join(root, 'broken.yaml')), null);
+});
+
+test('the plugin generator stamps the proxies from the shipped catalog', (t) => {
+  const root = tempRepo(t);
+  const { outDir } = runPlugin({ cwd: root, outDir: join(root, 'plugin') });
+  for (const archetype of ['worker', 'reviewer', 'judge', 'director']) {
+    const emitted = readFileSync(join(outDir, 'agents', `dispatch-${archetype}.md`), 'utf8');
+    assert.deepEqual(emitted.match(/^model:.*$/gm), ['model: sonnet']);
+  }
+  // Reproducible from `templates/` alone: the plugin is a committed build
+  // artifact, so it must never fold in a developer's local or user catalog.
+  writeFileSync(join(root, 'nonsense.txt'), 'x');
+  const { outDir: second } = runPlugin({ cwd: root, outDir: join(root, 'plugin2') });
+  assert.equal(
+    readFileSync(join(second, 'agents', 'dispatch-worker.md'), 'utf8'),
+    readFileSync(join(outDir, 'agents', 'dispatch-worker.md'), 'utf8'),
+  );
+});
+
+test('init --claude stamps the proxies from the repo catalog', (t) => {
+  const root = tempRepo(t);
+  // Pre-seed the project catalog with an override. Init's emit is
+  // non-destructive, so this is the catalog the repo keeps.
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  const shipped = parseYaml(
+    readFileSync(join(REPO, 'templates', 'common', 'fadeno', 'executors.yaml'), 'utf8'),
+  ) as Record<string, unknown>;
+  shipped.relay = { claude: 'fable' };
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml(shipped));
+
+  runInit({ target: 'claude', repoRoot: root });
+  for (const archetype of ['worker', 'reviewer', 'judge', 'director']) {
+    const emitted = readFileSync(join(root, '.claude', 'agents', `dispatch-${archetype}.md`), 'utf8');
+    assert.deepEqual(
+      emitted.match(/^model:.*$/gm),
+      ['model: fable'],
+      `dispatch-${archetype} must carry the repo catalog's relay`,
+    );
+  }
+  // The role agents are untouched — they declare no model, and a relay is not
+  // a role identity.
+  assert.doesNotMatch(readFileSync(join(root, '.claude', 'agents', 'worker.md'), 'utf8'), /^model:/m);
+});
+
+test('init --claude keeps the template literal when the catalog states no relay', (t) => {
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  const shipped = parseYaml(
+    readFileSync(join(REPO, 'templates', 'common', 'fadeno', 'executors.yaml'), 'utf8'),
+  ) as Record<string, unknown>;
+  delete shipped.relay;
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml(shipped));
+
+  runInit({ target: 'claude', repoRoot: root });
+  assert.deepEqual(
+    readFileSync(join(root, '.claude', 'agents', 'dispatch-worker.md'), 'utf8').match(/^model:.*$/gm),
+    ['model: sonnet'],
+  );
 });

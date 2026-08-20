@@ -460,7 +460,8 @@ capabilities and host `.grok/agents` definitions without an automatic
 
 Steering is enabled by default for Codex and Claude; `--no-steering` is the
 explicit opt-out and `--with-steering` remains a compatibility alias. On Codex,
-`runInit` selects honest unmaterialized brokers from `codex-steering-agents/`.
+`runInit` renders honest unmaterialized brokers through the same template
+`steering apply` uses, resolving the relay identity from the catalog it just wrote.
 `fadeno setup --codex` records the harness and materializes managed agents in
 the user Codex home. When setup is invoked from a plugin, it first copies the
 bundled CLI to the stable user data directory and records runtime and harness

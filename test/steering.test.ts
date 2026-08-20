@@ -38,7 +38,13 @@ test('Codex --with-steering installs loadout-aware role overrides', (t) => {
 
   for (const archetype of ARCHETYPES) {
     const body = read(root, `.codex/agents/${archetype}.toml`);
-    assert.match(body, /dial-aware/i);
+    // `init` no longer copies a frozen TOML: it renders the same
+    // command-broker template `steering apply` renders, so a scaffolded repo
+    // and a dialed one carry identical instructions. An unmaterialized slot
+    // is a broker by construction — nothing has been dialed yet, so it must
+    // relay the resolver's answer rather than claim a host identity.
+    assert.match(body, /command.broker/i);
+    assert.doesNotMatch(body, /--host-executor/);
     // The ORDERING is the contract, not any particular wording: the resolver
     // has to see the prompt bytes to answer the pair question, so the file
     // must exist before the resolve call. This assertion used to pin the
@@ -58,7 +64,7 @@ test('Codex --with-steering installs loadout-aware role overrides', (t) => {
     assert.match(body, /ENTIRE task prompt.*verbatim/s);
     assert.match(body, /mode=restart_required/);
     assert.match(body, /fadeno dispatch-fallback <run-id> <dispatch-id>/);
-    assert.match(body, /do not silently/);
+    assert.match(body, /never\s+silently substitute a different model or executor/);
   }
 });
 
@@ -627,7 +633,14 @@ test('bundled CLI parses --with-steering and carries its templates', (t) => {
   });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Materialize Codex steering with .*fadeno steering apply/);
-  assert.match(read(root, '.codex/agents/worker.toml'), /Fadeno worker broker/i);
+  assert.match(read(root, '.codex/agents/worker.toml'), /Fadeno command broker worker/i);
+  // The broker is rendered from the shipped catalog now, not copied from a
+  // frozen TOML, so the bundle's own `templates/common/fadeno/executors.yaml`
+  // (`relay.codex: luna@low`) is what these two literals come from. They
+  // deliberately equal the built-in fallback, so this asserts the emitted
+  // shape rather than distinguishing the two paths — test/relay-broker.test.ts
+  // is where an overriding catalog proves the resolution actually happens.
+  assert.match(read(root, '.codex/agents/worker.toml'), /model = "gpt-5\.6-luna"\nmodel_reasoning_effort = "low"/);
   assert.match(read(root, '.codex/agents/worker.toml'), /fadeno dispatch-fallback <run-id> <dispatch-id>/);
 });
 

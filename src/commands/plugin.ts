@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { copyTree, emitFile, type EmitResult } from '../lib/fsutil.ts';
+import { parseExecutorProfile, resolveRelay } from '../lib/executors.ts';
 import { packageVersion, templatesDir } from '../lib/paths.ts';
 
 export interface PluginOptions {
@@ -51,6 +52,57 @@ const HOOK_VERSION_DECL = "const HOOK_VERSION = 'dev';";
  */
 export function stampHookVersion(js: string): string {
   return js.replace(HOOK_VERSION_DECL, `const HOOK_VERSION = '${packageVersion()}';`);
+}
+
+/**
+ * The Claude relay identity declared by one executor catalog, or null when
+ * that catalog states no opinion (or cannot be read at all).
+ *
+ * Deliberately ONE file rather than the layered profile. An emitted artifact
+ * has to be a function of what it is emitted from: `plugin/` is committed and
+ * checked for drift, so folding in a developer's user-scope catalog would make
+ * the build machine-dependent, and `.claude/agents/` is scaffolding for one
+ * repo, so it should follow that repo's catalog and nothing else.
+ *
+ * Failure is silent by design, and it is the one place that is right: the
+ * alternative to the catalog's value here is the template's own literal, which
+ * is valid and servable. (At *resolve* time there is no such alternative, so
+ * `dial resolve` raises an unservable relay instead of swallowing it.)
+ */
+export function relayModelForClaude(catalogPath: string): string | null {
+  if (!existsSync(catalogPath)) return null;
+  try {
+    const profile = parseExecutorProfile(readFileSync(catalogPath, 'utf8'), catalogPath, 'claude');
+    return resolveRelay(profile, 'claude')?.modelId ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Rewrite a dispatch proxy's frontmatter `model:` to the catalog's relay.
+ *
+ * A post-copy rewrite rather than a placeholder in the template, for the same
+ * reason `stampHookVersion` is one: the template stays a valid, readable,
+ * directly-runnable artifact — `templates/claude/claude-agents/*.md` is a real
+ * agent definition a developer can read and a test can assert against, and a
+ * `__FADENO_RELAY__` token would make it neither. It also keeps the literal
+ * that the hook falls back to and the literal the frontmatter ships as the
+ * same visible value in the same place.
+ *
+ * `null` (the catalog states no opinion) leaves the template untouched — the
+ * built-in default, never an invented relay. Only a `dispatch-*` proxy's
+ * frontmatter is touched: the role agents (`worker.md` and friends) declare no
+ * model on purpose, and if one ever did it would be a ROLE identity, which the
+ * dial owns and the relay must never overwrite.
+ */
+export function stampRelayModel(md: string, relayModelId: string | null): string {
+  if (relayModelId == null || !md.startsWith('---\n')) return md;
+  const end = md.indexOf('\n---\n', 4);
+  if (end < 0) return md;
+  const frontmatter = md.slice(0, end);
+  if (!/^name: dispatch-/m.test(frontmatter) || !/^model: .*$/m.test(frontmatter)) return md;
+  return frontmatter.replace(/^model: .*$/m, `model: ${relayModelId}`) + md.slice(end);
 }
 
 /**
@@ -114,13 +166,22 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
   // :judge, plus the fadeno:dispatch-* proxies that relay archetype-shaped
   // subtasks to `fadeno dispatch` (loadouts-and-dispatch.md, plugin surface).
   // Descriptions get the version stamp for surface-staleness detection.
+  // The proxies' `model:` is the RELAY, and it comes from the catalog this
+  // plugin ships (`relay.claude`) rather than a frozen literal. Frontmatter is
+  // read once at session start, so this is the only moment it can be refreshed
+  // — the steering hook re-reads the same key per spawn and wins where the two
+  // disagree.
+  const relayModel = relayModelForClaude(join(tpl, 'common', 'fadeno', 'executors.yaml'));
   for (const file of readdirSync(join(tpl, 'claude', 'claude-agents')).sort()) {
     const agentPath = join(outDir, 'agents', file);
     results.push({
       path: agentPath,
       status: emitFile(
         agentPath,
-        stampSurfaceVersion(readFileSync(join(tpl, 'claude', 'claude-agents', file), 'utf8')),
+        stampRelayModel(
+          stampSurfaceVersion(readFileSync(join(tpl, 'claude', 'claude-agents', file), 'utf8')),
+          relayModel,
+        ),
         force,
       ),
     });

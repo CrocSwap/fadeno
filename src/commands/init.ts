@@ -1,9 +1,10 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { copyTree, emitBootstrap, emitFile, type EmitResult } from '../lib/fsutil.ts';
 import { findRepoRoot, templatesDir } from '../lib/paths.ts';
 import { FADENO_IGNORE_PATTERNS } from '../lib/source-control.ts';
-import { stampHookVersion } from './plugin.ts';
+import { relayModelForClaude, stampHookVersion, stampRelayModel } from './plugin.ts';
+import { emitCodexSteeringBrokers } from './steering.ts';
 
 export type Target = 'codex' | 'claude' | 'grok';
 
@@ -117,16 +118,32 @@ export function runInit(opts: InitOptions): InitResult {
     //    host subagents are unavailable).
     switch (opts.target) {
       case 'codex':
-        copyTree(
-          join(tpl, 'codex', withSteering ? 'codex-steering-agents' : 'codex-agents'),
-          join(repoRoot, '.codex', 'agents'),
-          force,
-          results,
-        );
+        // Steered Codex slots are RENDERED from the catalog (step 1 already
+        // wrote `.fadeno/`, so it is there to read), never copied: a frozen
+        // template tree is how a scaffolded repo's brokers drift out of step
+        // with the ones `steering apply` re-renders on every dial switch.
+        if (withSteering) {
+          results.push(...emitCodexSteeringBrokers({ repoRoot, force }));
+        } else {
+          copyTree(join(tpl, 'codex', 'codex-agents'), join(repoRoot, '.codex', 'agents'), force, results);
+        }
         break;
-      case 'claude':
-        copyTree(join(tpl, 'claude', 'claude-agents'), join(repoRoot, '.claude', 'agents'), force, results);
+      case 'claude': {
+        // Not a plain copyTree: the dispatch proxies' `model:` is the RELAY,
+        // and it comes from this repo's catalog (`relay.claude`) rather than a
+        // frozen literal. Step 1 has already written `.fadeno/executors.yaml`,
+        // so the catalog this repo resolves against exists by now. Frontmatter
+        // is read once at session start, which is why it can only be refreshed
+        // here; the steering hook re-reads the same key on every spawn.
+        const agentsSrc = join(tpl, 'claude', 'claude-agents');
+        const relayModel = relayModelForClaude(join(repoRoot, '.fadeno', 'executors.yaml'));
+        for (const file of readdirSync(agentsSrc).sort()) {
+          const dest = join(repoRoot, '.claude', 'agents', file);
+          const body = stampRelayModel(readFileSync(join(agentsSrc, file), 'utf8'), relayModel);
+          results.push({ path: dest, status: emitFile(dest, body, force) });
+        }
         break;
+      }
       case 'grok':
         copyTree(join(tpl, 'grok', 'grok-agents'), join(repoRoot, '.grok', 'agents'), force, results);
         break;
@@ -151,12 +168,7 @@ export function runInit(opts: InitOptions): InitResult {
   // A data-only plugin setup that explicitly requests steering still needs the
   // three local role overrides, while continuing to skip skills/bootstrap.
   if (opts.dataOnly && withSteering && opts.target === 'codex') {
-    copyTree(
-      join(tpl, 'codex', 'codex-steering-agents'),
-      join(repoRoot, '.codex', 'agents'),
-      force,
-      results,
-    );
+    results.push(...emitCodexSteeringBrokers({ repoRoot, force }));
   }
 
   // 5. Optional tier-2 enforcement scaffold (per-repo policy — allowed with --data-only).

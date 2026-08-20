@@ -16,22 +16,24 @@ import {
   parseSnapshotDocument,
   readLocalDialState,
   resolveDialCascade,
+  resolveRelay,
   shadowSampleRoll,
   type DialLayers,
   type DialRef,
   type ExecutorProfile,
   type LoadedExecutorProfile,
   type ExecutorSpec,
+  type ResolvedRelay,
   type RoleResolutionSource,
   type ShadowAttachment,
   type SnapshotDocument,
 } from '../lib/executors.ts';
 import { readUserDials } from '../lib/user-paths.ts';
-import { emitFile, type EmitResult } from '../lib/fsutil.ts';
+import { type EmitResult } from '../lib/fsutil.ts';
 import { HostDispatchError, readHostDispatchRequest, type HostDispatchRequest, type HostDispatchRequestLookup } from '../lib/host-dispatch.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
-import { userPaths, type UserPathOptions } from '../lib/user-paths.ts';
+import { codexUserAgentDir, userPaths, type UserPathOptions } from '../lib/user-paths.ts';
 
 export class SteeringError extends Error {}
 
@@ -768,12 +770,48 @@ silently substitute a different model or executor.
 `;
 }
 
-function renderCodexCommandBroker(archetype: string, cliPath: string): string {
+/**
+ * The relay this file falls back to when the catalog states no opinion for
+ * Codex — the exact literals every broker carried before `relay:` became a
+ * catalog key, so a repo whose catalog says nothing sees no diff at all.
+ *
+ * Not a default to "improve": a relay the session's provider cannot serve is
+ * worse than a stale-but-servable one, which is why `resolveRelay` returns
+ * null rather than guessing, and why this stays put until a dogfood receipt
+ * moves the catalog.
+ */
+const BUILTIN_CODEX_RELAY_MODEL = 'gpt-5.6-luna';
+const BUILTIN_CODEX_RELAY_EFFORT = 'low';
+
+/**
+ * The Codex relay named by `relay.codex`, or null for "no catalog opinion".
+ *
+ * A relay ref this build cannot compile (an unknown model, a provider with no
+ * route under the codex harness) is deliberately treated as the same "no
+ * servable opinion" answer as an absent key rather than as a hard error: the
+ * whole point of the null contract is that a broker must never be pointed at
+ * a model the provider cannot serve. Refusing to materialize any broker at
+ * all over a bad relay would be a strictly worse outcome than materializing
+ * the servable built-in one.
+ */
+function codexRelay(profile: ExecutorProfile): ResolvedRelay | null {
+  try {
+    return resolveRelay(profile, 'codex');
+  } catch {
+    return null;
+  }
+}
+
+function renderCodexCommandBroker(
+  archetype: string,
+  cliPath: string,
+  relay: ResolvedRelay | null,
+): string {
   const cli = /\s/.test(cliPath) ? JSON.stringify(cliPath) : cliPath;
   return `name = ${tomlString(archetype)}
 description = ${tomlString(`Fadeno command broker ${archetype}: delegates command slots through the active loadout and stops when a host slot needs host materialization.`)}
-model = "gpt-5.6-luna"
-model_reasoning_effort = "low"
+model = ${tomlString(relay?.modelId ?? BUILTIN_CODEX_RELAY_MODEL)}
+model_reasoning_effort = ${tomlString(relay?.effort ?? BUILTIN_CODEX_RELAY_EFFORT)}
 sandbox_mode = "workspace-write"
 
 developer_instructions = """
@@ -850,27 +888,70 @@ export interface SteeringApplyResult {
   removed?: string[];
 }
 
+/** The three Codex role slots that get a session-static agent file. */
+const CODEX_STEERING_ARCHETYPES = ['worker', 'reviewer', 'judge'] as const;
+
 function codexAgentDir(scope: 'project' | 'user', repoRoot: string, userPathOptions?: UserPathOptions): string {
   if (scope === 'project') return join(repoRoot, '.codex', 'agents');
-  const codexHome = userPathOptions?.env?.CODEX_HOME?.trim() ||
-    process.env.CODEX_HOME?.trim() ||
-    join(userPathOptions?.home ?? homedir(), '.codex');
-  return join(codexHome, 'agents');
+  // One definition of "$CODEX_HOME/agents", shared with status/doctor/uninstall.
+  // It resolves an injected env hermetically (`options.env ?? process.env`)
+  // rather than falling through to the process env key by key, so a test that
+  // injects an environment without `CODEX_HOME` can no longer reach the
+  // developer's real `~/.codex`.
+  return codexUserAgentDir(userPathOptions);
 }
 
+/**
+ * The header that makes a Codex agent file provably Fadeno's. Both scopes
+ * carry it: it is the only thing that lets a later emit tell a file Fadeno
+ * wrote from one a human did, and the only thing that lets `doctor` tell a
+ * current project broker from a frozen legacy one.
+ */
+const CODEX_MANAGED_MARK = '# fadeno:managed';
+
+/**
+ * Prepend the managed header to a rendered agent body.
+ *
+ * The digest deliberately covers the body WITHOUT the header — a digest
+ * cannot cover itself, and hashing the same bytes at both scopes means two
+ * files rendered from the same resolution carry the same digest and can be
+ * compared directly.
+ */
+function stampManagedAgent(body: string): string {
+  return `${CODEX_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(body)}\n${body}`;
+}
+
+/**
+ * Write a managed Codex agent, refreshing what Fadeno wrote and preserving
+ * what it did not.
+ *
+ * The marker governs overwriting: a file carrying it is Fadeno's to keep
+ * current (that is the whole point — an agent file that can never be
+ * refreshed is how a project broker came to predate `--prompt-file`), while a
+ * file without it is content Fadeno never wrote and never takes.
+ *
+ * `force` is the one override, and it is scope-dependent on purpose:
+ *
+ *  - At USER scope the filename (`fadeno-<archetype>.toml`) is a name Fadeno
+ *    owns by convention, so a foreign file there is a deliberate takeover and
+ *    is preserved with or without `--force` — the same ownership stance
+ *    `runSteeringApplyClaude` and `uninstall` take.
+ *  - At PROJECT scope the filename (`<archetype>.toml`) is an ordinary name in
+ *    the user's own repo, and `--force` there keeps `emitFile`'s exact
+ *    semantics — the documented "re-scaffold over what is there" of
+ *    `init`/`vendor`. Exempting these three paths from it would be its own
+ *    surprise, and every other file those commands write still obeys it.
+ */
 function managedAgentEmit(path: string, body: string, force: boolean, scope: 'project' | 'user'): EmitResult['status'] {
-  if (scope === 'project') return emitFile(path, body, force);
-  if (existsSync(path)) {
+  const existed = existsSync(path);
+  if (existed && !(scope === 'project' && force)) {
     const existing = readFileSync(path, 'utf8');
-    if (!existing.startsWith('# fadeno:managed')) return 'skipped';
+    if (!existing.startsWith(CODEX_MANAGED_MARK)) return 'skipped';
     if (existing === body) return 'skipped';
-    mkdirSync(join(path, '..'), { recursive: true });
-    writeFileSync(path, body, 'utf8');
-    return 'overwritten';
   }
   mkdirSync(join(path, '..'), { recursive: true });
   writeFileSync(path, body, 'utf8');
-  return 'created';
+  return existed ? 'overwritten' : 'created';
 }
 
 /** Materialize every archetype's resolved dial into a session-static Codex role agent. */
@@ -897,7 +978,10 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
   const agentDir = codexAgentDir(scope, repoRoot, opts.userPathOptions);
   const managedCli = userPaths(opts.userPathOptions).managedCli;
   const cliPath = opts.cliPath ?? (scope === 'user' && existsSync(managedCli) ? managedCli : 'fadeno');
-  for (const archetype of ['worker', 'reviewer', 'judge']) {
+  // One lookup for all three slots: the relay is a property of the catalog,
+  // not of any archetype's dial.
+  const relay = codexRelay(profile);
+  for (const archetype of CODEX_STEERING_ARCHETYPES) {
     let cascade: { ref: DialRef; source: RoleResolutionSource; resolvedVia: string | null };
     try {
       cascade = resolveDialCascade(archetype, archetype, { bindings: profile.bindings, archetypes: profile.archetypes }, dialLayers);
@@ -950,12 +1034,13 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
       materialization[archetype] = {
         kind: 'command-broker', adapter: 'command', executor: executorName, model: spec.model,
       };
-      body = renderCodexCommandBroker(archetype, cliPath);
+      body = renderCodexCommandBroker(archetype, cliPath, relay);
     }
-    const managed = scope === 'user'
-      ? `# fadeno:managed version=${packageVersion()} digest=${sha256Hex(body)}\n`
-      : '';
-    pending.push({ path, body: `${managed}${body}` });
+    // Both scopes now. A project broker without the header is indistinguishable
+    // from a hand-authored file, which is exactly why the frozen `init` copies
+    // could never be refreshed — and why `doctor` cannot tell a current project
+    // broker from a legacy one without it.
+    pending.push({ path, body: stampManagedAgent(body) });
   }
   for (const item of pending) {
     results.push({ path: item.path, status: managedAgentEmit(item.path, item.body, opts.force ?? false, scope) });
@@ -965,6 +1050,76 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
     .map((item) => item.path);
   const restartRequired = results.some((item) => item.status === 'created' || item.status === 'overwritten');
   return { results, materialization, baseline, restartRequired, conflicts, scope };
+}
+
+export interface CodexBrokerEmitOptions extends CommonOptions {
+  /** `init`/`vendor`'s "re-scaffold over what is there" — see `managedAgentEmit`. */
+  force?: boolean;
+  /** CLI the brokers invoke; bare `fadeno` is what a project scaffold gets. */
+  cliPath?: string;
+}
+
+/**
+ * Emit the three UNMATERIALIZED Codex brokers `init` scaffolds into
+ * `<repoRoot>/.codex/agents/`, rendered here rather than copied from a frozen
+ * template tree.
+ *
+ * These files used to be three static TOMLs under
+ * `templates/codex/codex-steering-agents/`, copied byte-for-byte. That gave
+ * the repo two mechanisms at two levels of currency: `steering apply`
+ * re-rendered its agents from this file's templates on every dial switch,
+ * while a scaffolded repo kept whatever text was frozen the day it ran `init`
+ * — which is how a project broker came to predate `--prompt-file` and so
+ * silently resolved without the digest that decides shadow pairing, excluding
+ * that repo from pairs entirely. Emitting through the same renderer removes
+ * the drift seam: a change to the broker's instructions reaches a scaffolded
+ * repo and a dialed one identically.
+ *
+ * Deliberately NOT `runSteeringApply({ scope: 'project' })`, despite writing
+ * the same three paths. That function resolves the live dial cascade, and at
+ * scaffold time that is the wrong input twice over:
+ *
+ *  1. A fresh repo has no dials, so every slot lands on the host-native base
+ *     `current-host` and materializes as a HOST agent carrying
+ *     `model = "current-host"` — a string no Codex provider serves. The
+ *     broker is the honest answer for a repo that has not dialed anything:
+ *     it relays the resolver's instruction instead of claiming a host
+ *     identity nobody has established.
+ *  2. The cascade reads the invoking developer's user-scope dials, and
+ *     `fadeno vendor` commits these files to the repo. Scaffolding must not
+ *     bake one machine's personal dial into a shared, tracked surface.
+ *
+ * What IS resolved from the catalog is the relay identity — the only model
+ * these files name — so `relay.codex` reaches them and a repo whose catalog
+ * states no opinion keeps the built-in default.
+ *
+ * The files carry the same managed header `steering apply` stamps, so a later
+ * `init` or `apply` can refresh what this wrote instead of being frozen out of
+ * its own scaffolding, and `doctor` can tell a current project broker from a
+ * legacy unmanaged one.
+ */
+export function emitCodexSteeringBrokers(opts: CodexBrokerEmitOptions): EmitResult[] {
+  const repoRoot = rootOf(opts);
+  // A catalog that cannot be loaded at all is the same practical answer as one
+  // that states no relay opinion, and `init` is a scaffolding command: it
+  // reports what it wrote rather than refusing to scaffold over a catalog
+  // `doctor`/`validate` exist to diagnose.
+  let relay: ResolvedRelay | null = null;
+  try {
+    relay = codexRelay(profileOf(repoRoot, opts.userPathOptions).profile);
+  } catch {
+    relay = null;
+  }
+  const agentDir = codexAgentDir('project', repoRoot, opts.userPathOptions);
+  const cliPath = opts.cliPath ?? 'fadeno';
+  return CODEX_STEERING_ARCHETYPES.map((archetype) => {
+    const path = join(agentDir, `${archetype}.toml`);
+    const body = stampManagedAgent(renderCodexCommandBroker(archetype, cliPath, relay));
+    // Same ownership rule `steering apply` uses at this scope, so re-running
+    // `init` after an upgrade refreshes the brokers it wrote instead of
+    // leaving them frozen — and still never touches a file it did not write.
+    return { path, status: managedAgentEmit(path, body, opts.force ?? false, 'project') };
+  });
 }
 
 // --- Claude steering materialization ---
