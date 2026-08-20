@@ -162,6 +162,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   cancel: command({ '--actor-call': { kind: 'free' } }, ['run']),
   decide: command({ '--decision': { kind: 'free' }, '--feedback': { kind: 'free' } }, ['run', 'free']),
   runs: command({}),
+  attest: command({ '--archetype': { kind: 'archetype' } }),
   dispatches: command({
     '--tail': { kind: 'free' },
     '--json': NONE,
@@ -171,6 +172,7 @@ const COMMANDS: Record<string, CommandSpec> = {
     '--tag': { kind: 'free' },
     '--cancel': { kind: 'free' },
   }),
+  'shadow-apply': command({ '--arm': { kind: 'enum', values: ['challenger', 'primary'] }, '--check': NONE }, ['free']),
   show: command({ '--legacy': NONE, '--events': NONE }, ['run']),
   verify: command({ '--latest': NONE, '--allow-failed': NONE, '--legacy': NONE }, ['run']),
   plugin: command({ '--codex': NONE, '--force': NONE }, ['path']),

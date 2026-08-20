@@ -2,6 +2,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { parseArgs } from 'node:util';
+import { runAttest } from './commands/attest.ts';
 import { runDecide } from './commands/decide.ts';
 import {
   runDispatch,
@@ -43,6 +44,7 @@ import { runShow } from './commands/show.ts';
 import { runValidate } from './commands/validate.ts';
 import { runVerify, type VerifyResult } from './commands/verify.ts';
 import { runCompletion, runCompletionCandidates } from './commands/completion.ts';
+import { runShadowApply } from './commands/shadow-apply.ts';
 import { runSteeringApply, runSteeringApplyClaude, runSteeringResolve } from './commands/steering.ts';
 import { runDispatchPrompt } from './commands/dispatch-prompt.ts';
 import { runDispatchPrepare } from './commands/dispatch-prepare.ts';
@@ -113,10 +115,13 @@ Usage:
   fadeno cancel <run>                   Cancel the active engine attempt for a run (SIGTERM to its executor group)
   fadeno decide <run> <option> [flags]  Resolve a pending named human decision
   fadeno runs                           List run ledgers under .fadeno/runs/
+  fadeno attest --archetype <a>         Record this subagent's own measured delivery (run FROM inside it)
   fadeno dispatches [--tail n] [--json] Show which executor ran what (.fadeno/dispatches.jsonl)
   fadeno dispatches --cancel <id|tag:h> Stop a running dispatch (SIGTERM to its executor group)
   fadeno dispatches --output <id|last> [--wait <s>]  Print a dispatch's output snapshot verbatim
   fadeno dispatches --comparisons       Paired primary/shadow scorecard per challenger
+  fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]
+                                        Port a shadow pair's diff into your workspace (git apply --3way)
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic claims (or --latest)
   fadeno plugin [dir] [--codex]         Generate a Claude Code (default) or Codex plugin
@@ -173,6 +178,8 @@ Options:
   --no-brief              (dispatch) Skip the archetype's declared brief preamble
   --tail <n>              (dispatches) Logical entries to show, newest last (default 10)
   --json                  (dispatches) Emit structured entries on stdout for scripting
+  --arm <arm>             (shadow-apply) challenger (default) | primary
+  --check                 (shadow-apply) Report applicability only (git apply --check --3way); changes nothing
   --isolate               (dispatch-prepare) Create isolated worktree at .fadeno/local/host-worktrees/<run>/<id> (workspace_mode: isolated)
   --agent-id <id>         (dispatch-start) Host agent identity
   --workspace <path>      (dispatch-start) Host workspace provenance
@@ -217,7 +224,10 @@ Examples:
   fadeno prompt 2026-05-30-1132-csv cross_review --actor architect_fable --no-record
   fadeno next 2026-05-30-1132-csv
   fadeno runs
+  fadeno attest --archetype worker
   fadeno dispatches --tail 20
+  fadeno shadow-apply pair-abcd1234 --check
+  fadeno shadow-apply pair-abcd1234
   fadeno show 2026-07-10-2212
   fadeno verify --latest
   source <(fadeno completion bash)
@@ -229,7 +239,7 @@ export const KNOWN_CLI_COMMANDS = new Set([
   'tool-run', 'tool-complete', 'plugin', 'completion', 'gate', 'prompt', 'next', 'drive',
   'cancel', 'models', 'dial', 'dispatch', 'dispatch-fallback', 'dispatch-start',
   'dispatch-prompt', 'dispatch-complete', 'dispatch-progress', 'dispatch-prepare',
-  'dispatch-fail', 'decide', 'runs', 'dispatches', 'show', 'verify',
+  'dispatch-fail', 'decide', 'runs', 'attest', 'dispatches', 'shadow-apply', 'show', 'verify',
 ]);
 
 export function shouldRunPreflight(command: string | undefined): boolean {
@@ -442,6 +452,34 @@ absolute workspace path; dispatch-start then bypasses the shared writer lease an
 Both dispatch-complete and dispatch-fail collect a binary staged diff to .fadeno/local/outputs/host-isolated-<run>-<dispatch-id>.diff
 and remove the worktree only after the terminal receipt is durable. Nothing merges automatically.
 `,
+  attest: `fadeno attest — record this subagent's own measured host delivery
+
+Usage:
+  fadeno attest --archetype <a>
+
+Run this FROM INSIDE the subagent it describes — a \`host_delivery\` row is
+written by the Claude steering hook in the PARENT, before the subagent ever
+runs, so everything on it is a request. This records what the subagent can
+actually MEASURE about itself: the resolved \`CLAUDE_EFFORT\` (already past any
+silent per-model/per-org downgrade), pid, cwd, and the archetype it was told
+it is. Model is never recorded here — there is no equivalent environment
+variable, and this command never asks the model to self-report its own name —
+so the row carries \`identity_evidence: requested_only\`, the same admission
+\`fadeno steering resolve\` already makes.
+
+Writes a \`host_attestation\` row to .fadeno/dispatches.jsonl, correlated by a
+later reader (\`fadeno dispatches\`) onto the nearest preceding unattested
+\`host_delivery\` row of the same archetype — best-effort, since the subagent
+has neither the parent's prompt digest nor its session id to key on exactly.
+Advisory only (tier-1): nothing forces a subagent to call this, which is
+exactly why \`fadeno dispatches\` marks a host delivery with no matching
+attestation as \`[never attested]\`, and one whose attested effort differs
+from what was requested as an \`[effort mismatch]\` — the signature of a
+silent downgrade.
+
+Examples:
+  fadeno attest --archetype worker
+`,
   dispatches: `fadeno dispatches — the executor evidence ledger (.fadeno/dispatches.jsonl)
 
 Usage:
@@ -458,6 +496,33 @@ Options:
 
 Rows carry dial provenance: [session dial], [repo pin], [user dial]. Old-format
 ledger generations still render, marked [legacy] / [format 0.x].
+`,
+  'shadow-apply': `fadeno shadow-apply — port a shadow pair's diff into your workspace
+
+Usage:
+  fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]
+
+Options:
+  --arm <arm>   Which pair arm's diff to apply: challenger (default) | primary
+  --check       Report applicability only (git apply --check --3way); changes nothing
+
+<pair-id|dispatch-id> is a pair's pair_id, or either arm's own dispatch_id —
+full, or an 8+ character prefix. Applies the arm's diff_snapshot with
+\`git apply --3way\` against the arm's recorded baseline_commit, so the port-back
+survives the main tree moving on while the pair ran. Conflict-aware from the
+first version: on any conflict it stops, keeps the diff artifact exactly where
+it was, records the attempt in .fadeno/dispatches.jsonl, and exits non-zero —
+it never auto-resolves. --arm primary refuses on an ordinary paired primary
+(it already shares your workspace, so there is nothing to apply) unless that
+primary itself carries a diff_snapshot (it ran under --isolate). A baseline
+commit that is no longer in the object database (for example, garbage
+collected after \`fadeno clean --force\` removed its retained shadow worktree)
+is diagnosed precisely rather than surfacing raw git output.
+
+Examples:
+  fadeno shadow-apply pair-abcd1234 --check
+  fadeno shadow-apply pair-abcd1234
+  fadeno shadow-apply pair-abcd1234 --arm primary
 `,
   drive: `fadeno drive — advance a run until terminal or paused
 
@@ -626,6 +691,7 @@ Checks include runtime skew (managed-older, managed-newer, divergent), preferred
 Usage:
   fadeno steering resolve --archetype <a> [--host-executor <n>] [--role <r>]
                           [--run <id> --dispatch-id <id>]
+                          [--prompt-file <path>|--prompt-sha256 <hex>]
   fadeno steering apply --codex|--claude [--scope project|user] [--force]
 
 resolve emits the routing JSON hooks consume (exit 2 = restart required or
@@ -635,6 +701,11 @@ Codex TOMLs (model + model_reasoning_effort), or local Claude subagents
 (.claude/agents/<archetype>.md with model + effort frontmatter) so an
 in-session model runs at ITS effort, not the session's. Re-run after
 re-dialing; host slots load on a fresh session.
+--prompt-file (or --prompt-sha256) lets resolve see this exact prompt's
+digest, so a shadow-attached archetype's reply carries the pair decision
+(shadow.selected/shadow.routable) and, on a selected routable pair, resolves
+mode=command instead of mode=host so both arms are comparable. Omitted, and
+a shadow attachment's selected is null — unknown, never "no".
 `,
   validate: `fadeno validate — validate playbooks and run documents
 
@@ -1306,6 +1377,8 @@ function main(argv: string[]): number {
         shadow: { type: 'string' },
         comparisons: { type: 'boolean' },
         wait: { type: 'string' },
+        arm: { type: 'string' },
+        check: { type: 'boolean' },
         json: { type: 'boolean' },
         'agent-id': { type: 'string' },
         workspace: { type: 'string' },
@@ -1441,6 +1514,18 @@ function main(argv: string[]): number {
       const result = runClean({ force: values.force });
       const paths = result.dryRun ? result.candidates : result.removed;
       for (const path of paths) console.log(`${result.dryRun ? 'would remove' : 'removed'} ${path}`);
+      // Retention is otherwise invisible and unbounded, so a user about to
+      // delete evidence sees what they are about to delete — on the dry run
+      // as a preview, and on a --force run as what was actually deregistered.
+      if (result.retainedShadowWorktrees.length > 0) {
+        const count = result.retainedShadowWorktrees.length;
+        console.log(
+          `${count} retained shadow worktree${count === 1 ? '' : 's'} ` +
+            `${result.dryRun ? 'would be deregistered and removed' : 'deregistered'}:`,
+        );
+        const shown = result.dryRun ? result.retainedShadowWorktrees : result.deregisteredShadowWorktrees;
+        for (const path of shown) console.log(`  ${path}`);
+      }
       if (result.dryRun && paths.length > 0) console.log('Re-run with --force to remove these ignored runtime files.');
       return 0;
     }
@@ -1499,6 +1584,8 @@ function main(argv: string[]): number {
           role: values.role != null ? String(values.role) : undefined,
           run: values.run != null ? String(values.run) : undefined,
           dispatchId: values['dispatch-id'] != null ? String(values['dispatch-id']) : undefined,
+          promptSha256: values['prompt-sha256'] != null ? String(values['prompt-sha256']) : undefined,
+          promptFile: values['prompt-file'] != null ? String(values['prompt-file']) : undefined,
         });
         const steeringOut: Record<string, unknown> = {
           mode: result.mode,
@@ -1519,6 +1606,7 @@ function main(argv: string[]): number {
           dispatch_id: values['dispatch-id'] ?? null,
           detail: result.detail,
           writeConflict: result.writeConflict ?? null,
+          shadow: result.shadow ?? null,
         };
         console.log(JSON.stringify(steeringOut, null, 2));
         // A refused slot is not runnable here, same as a restart: non-zero, so
@@ -2175,6 +2263,20 @@ function main(argv: string[]): number {
       printRuns(runs);
       return 0;
     }
+    case 'attest': {
+      if (!values.archetype) {
+        throw new Error('Usage: fadeno attest --archetype <a>');
+      }
+      const result = runAttest({ archetype: String(values.archetype) });
+      const effortNote = result.effortEvidence === 'measured'
+        ? `effort ${result.effort}`
+        : 'effort unavailable (CLAUDE_EFFORT not set)';
+      console.log(
+        `attested: ${result.archetype} — ${effortNote}, pid ${result.pid}, identity_evidence: ${result.identityEvidence}`,
+      );
+      console.log(`  recorded in .fadeno/dispatches.jsonl (fadeno ${result.fadenoVersion})`);
+      return 0;
+    }
     case 'dispatches': {
       if (values.comparisons) {
         const result = runDispatchesComparisons({});
@@ -2278,6 +2380,29 @@ function main(argv: string[]): number {
         return 0;
       }
       printDispatches(result);
+      return 0;
+    }
+    case 'shadow-apply': {
+      const ref = positionals[1];
+      if (!ref) {
+        throw new Error('Usage: fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]');
+      }
+      const result = runShadowApply({ ref, arm: values.arm, check: Boolean(values.check) });
+      const pairId8 = result.pairId.slice(0, 8);
+      const dispatchId8 = result.dispatchId ? result.dispatchId.slice(0, 8) : '(unknown)';
+      const bytes = result.diffBytes != null ? ` (${result.diffBytes} bytes)` : '';
+      if (result.check) {
+        console.log(
+          `pair ${pairId8} ${result.arm} arm (dispatch ${dispatchId8}): ` +
+            `${result.clean ? 'would apply cleanly' : 'would NOT apply cleanly'} — ${result.artifact}${bytes}`,
+        );
+        if (!result.clean) console.log(`  ${result.detail}`);
+        return result.clean ? 0 : 1;
+      }
+      console.log(
+        `applied pair ${pairId8}'s ${result.arm} diff (dispatch ${dispatchId8})${bytes} from ${result.artifact} ` +
+          '— evidence recorded.',
+      );
       return 0;
     }
     case 'show': {
