@@ -1,8 +1,10 @@
 # Slot ergonomics and the open archetype vocabulary
 
-**Status:** all four phases implemented — 1 (session slot overrides,
-0.6.0-rc.9), 2 (archetype schema pass, 0.6.0-rc.12), 3 (constraint tiers,
-0.6.0-rc.13), 4 (shadow dispatches + model tryouts, 0.6.0-rc.15)
+**Status:** phases 1–5.5 implemented — 1 (session slot overrides, 0.6.0-rc.9),
+2 (archetype schema pass, 0.6.0-rc.12), 3 (constraint tiers, 0.6.0-rc.13),
+4 (shadow dispatches + model tryouts, 0.6.0-rc.15), 5 + 5.5 (symmetric pairs,
+trustworthy isolation, measured identity — `feat/symmetric-shadow-pairs`,
+unmerged as of 0.6.0-rc.34). *Effort decides the lane* is designed, not built.
 **Decision date:** 2026-08-12
 **Relationship:** successor horizon to
 [`loadouts-and-dispatch.md`](loadouts-and-dispatch.md) (extends its catalog,
@@ -737,6 +739,13 @@ dispatch and never needed a restart), and host↔command transitions in either
 direction, since the proxy agents are always registered and the grid covers
 the host side.
 
+> **Superseded — see *Effort decides the lane* below.** The grid shipped and
+> works (measured: a spawn into the `xhigh` cell reports `CLAUDE_EFFORT=xhigh`,
+> the `low` cell reports `low`). It is retired not because it fails but because
+> a simpler rule makes effort mechanical on both lanes. The reasoning above
+> stays as the record of why on-demand materialization is impossible — that
+> constraint is real and outlives the grid.
+
 **Shipped.** `fadeno steering apply --claude` now pre-registers
 `.claude/agents/fadeno-<archetype>-<effort>.md` for every host-surface
 archetype across the `low|medium|high|xhigh|max` ladder — 15 cells, each
@@ -810,6 +819,103 @@ what was requested (`[effort mismatch: requested … attested …]`), the
 signature of a silent downgrade that makes any shadow pair spanning that row
 invalid.
 
+## Effort decides the lane (design, not yet built)
+
+The identity grid exists to let a host spawn run at an effort the session is
+not running at. Retire that goal and the grid goes with it: **a host spawn
+runs at the session's effort, and an effort the session cannot give is
+delivered on the command lane instead.**
+
+**This is not a new mechanism — it completes one.** The resolver already
+decides host-vs-command by asking whether the session can deliver the
+requested identity:
+
+```
+cascade.source === 'base' || hostExecutor === refString  -> host
+spec.fallbackCommand != null                             -> command
+                                                         -> restart_required
+```
+
+That predicate covers *model* only. Extending it to include effort is one
+condition, not a second subsystem, and its third branch — `restart_required`
+when there is no command lane — already exists and is already the honest
+answer.
+
+**The rule, in three states.** Effort is optional on a `DialRef`, so "the user
+declined to state an opinion" is already representable and must stay that way:
+
+| Dial | `ref.effort` | Reading | Lane |
+|---|---|---|---|
+| `opus@xhigh` | `'xhigh'` | an opinion | host iff session effort is `xhigh`, else command at `xhigh` |
+| `opus` | `undefined` | no opinion | host, inheriting the session |
+
+A dial with no pinned effort never leaves the session on effort grounds. This
+is deliberately the *casual* path: the cost of going out-of-process is paid
+only by a user who asked for something specific, which is also the user most
+likely to accept it.
+
+**The implementation trap, stated because it inverts the whole design.** The
+predicate must key on `ref.effort` **presence**, never on the compiled effort
+value. `compileDialRef` resolves `ref.effort ?? entry.effort`, and every model
+in the shipped catalog declares an `effort:` — so comparing the *resolved*
+effort sends a plain `dial worker opus` to the command lane in any non-`xhigh`
+session, which is the exact opposite of the intent. `CompiledDelivery.effort`
+therefore splits into `pinnedEffort: string | null` and
+`effectiveEffort: string`, so the type refuses the mistake rather than leaving
+each call site to remember which one it meant.
+
+`models.<name>.effort` keeps its job and gains a name for it: it is the
+**command-lane default**, the effort an unpinned dial runs at when it reaches
+that lane anyway. No new schema.
+
+**Evidence needs no format change.** `formatDialRef` omits `@effort` when
+unpinned, and that string is both the executor name on dispatch rows and the
+key of the snapshot's compiled executors map — so pinned-versus-unpinned is
+already recorded faithfully in every ledger on disk, and `verify` keeps
+recomputing without the registry.
+
+**What retires.** `HOST_SURFACE_ARCHETYPES`, `CLAUDE_EFFORT_LADDER`,
+`claudeGridAgentName`, the 15-cell emission in `steering apply --claude`, and
+the effort dimension of the hook's `hostTarget` (which collapses to "is there
+a managed role agent"). Restart reason 1 above — a new effort value entering
+the vocabulary — retires with them; reasons 2 and 3 stand.
+
+**Accepted tradeoffs, named rather than discovered.**
+
+- A shadow pair forces both arms onto the command lane, so an *unpinned* dial
+  is measured at its command-lane default rather than at the session effort it
+  actually runs at day to day. Accepted: Claude effort levels vary little in
+  what users set, and the pair already admits it is a better experiment than a
+  simulation.
+- The delivery lane becomes session-state dependent and can flip mid-session:
+  `opus@xhigh` is host in an `xhigh` session and command after the session
+  drops to `medium`. That liveness is the point, but it is surprising, so the
+  resolution echo must name the lane and the reason
+  (`worker -> opus@xhigh [command lane: session is medium]`).
+- `fadeno dial` must render an unpinned effort as `inherit`, never as the
+  resolved value. Once the lane depends on the distinction, a table that shows
+  a default where no pin exists is actively misleading.
+
+**Measured, not assumed** (2026-08-20, this repo, Claude harness):
+
+- The Agent tool's `model` is a strict enum (`sonnet|opus|haiku|fable`);
+  `opus@xhigh` is an `InputValidationError`. There is no compound spelling, so
+  effort has no live tool-call channel and never will without a new parameter.
+- `effort:` frontmatter *is* honored: spawning `fadeno-worker-xhigh` reports
+  `CLAUDE_EFFORT=xhigh`, `fadeno-worker-low` reports `low`. This also confirms
+  the channel `fadeno attest` reads.
+- The agent registry is a session-**start** snapshot: a well-formed agent file
+  written mid-session spawns as "not found". Cells cannot be materialized on
+  demand, which is why the grid was necessary rather than merely convenient.
+- Hook processes observe `CLAUDE_EFFORT` (every `host_delivery` row in this
+  repo carries `session_effort`, none null), so the lane predicate is
+  computable in the hook with no new capability.
+
+**Deferred.** Codex takes the same rule but has its own shape — model and
+effort are baked together in one agent TOML and the mismatch is already
+detected rather than papered over — so it is decided separately rather than
+assumed to be symmetric.
+
 ## Phasing summary
 
 | Phase | Ships | Depends on |
@@ -818,6 +924,10 @@ invalid.
 | 2 | three-valued `requires_write`, `generator` canon, fallback chains, key validation | nothing (1 recommended first) |
 | 3 | tier-1 predicates (`distinct_provider_from_inputs`, eligibility states), tier-2 constraint command | 2 (write-posture values) |
 | 4 | shadow attachments, comparisons view, `model-tryout` starter, `ModelComparison` contract | 1 (state file), 3 (`shadow_only` flag) |
+| 5 | symmetric pairs (both arms on the command lane), prompt-digest sampling, `pair_id`, live-challenger cap, `shadow-apply` | 4 (attachments), the steering wrapper |
+| 5.5 | `shadow.routable` gating, `worktree_carry:`, `shadow_containment`, `fadeno attest` | 5 |
+| — | *effort decides the lane* (retires the identity grid) | the grid having shipped; independent of 5/5.5 |
 
 Each phase is independently valuable and releasable; ledger 0.2 rides the
-first of 2–4 to land.
+first of 2–4 to land. *Effort decides the lane* rides no format change at all
+— `formatDialRef` already distinguishes a pinned effort from an unpinned one.
