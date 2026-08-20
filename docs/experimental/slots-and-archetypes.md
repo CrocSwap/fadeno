@@ -819,16 +819,28 @@ what was requested (`[effort mismatch: requested … attested …]`), the
 signature of a silent downgrade that makes any shadow pair spanning that row
 invalid.
 
-## Effort decides the lane (design, not yet built)
+## Effort decides the lane
+
+**Status:** the Claude half is **built** — predicate, grid retirement, hook,
+rendering, and hook-side refusal evidence. The Codex half below is designed,
+not built. `models.<name>.effort` and the `relay:` map are catalog work that
+depends on the layered loader rejecting misspelled top-level keys first.
+
 
 The identity grid exists to let a host spawn run at an effort the session is
 not running at. Retire that goal and the grid goes with it: **a host spawn
 runs at the session's effort, and an effort the session cannot give is
 delivered on the command lane instead.**
 
-**This is not a new mechanism — it completes one.** The resolver already
-decides host-vs-command by asking whether the session can deliver the
-requested identity:
+**This is not a new mechanism — it completes one.** The predicate is one pure
+function, `decideLane` in `src/lib/lane.ts` — deliberately in `lib/` rather
+than in either command, because `steering resolve` and `dial resolve` must
+answer identically (the hook routes on one, the resolution echo explains the
+other) and a second implementation would be a correctness bug, not a
+duplication nit. It returns the lane plus a `lane_reason` drawn from a closed
+vocabulary, so a denial is groupable in evidence rather than merely countable.
+The resolver already decides host-vs-command by asking whether the session can
+deliver the requested identity:
 
 ```
 cascade.source === 'base' || hostExecutor === refString  -> host
@@ -911,10 +923,99 @@ the vocabulary — retires with them; reasons 2 and 3 stand.
   repo carries `session_effort`, none null), so the lane predicate is
   computable in the hook with no new capability.
 
-**Deferred.** Codex takes the same rule but has its own shape — model and
-effort are baked together in one agent TOML and the mismatch is already
-detected rather than papered over — so it is decided separately rather than
-assumed to be symmetric.
+**A refused spawn leaves evidence.** The hook denies in two situations — the
+resolver failed, or the lane is `restart_required` — and both previously wrote
+nothing, so a repo where every worker spawn was being denied looked identical
+in `.fadeno/dispatches.jsonl` to one where nobody spawned at all. A
+`host_refused` row now carries `refusal: {predicate, message}` keyed the same
+way the kernel's `dispatch_refused` is, with a closed predicate vocabulary:
+`resolver_error`, `resolver_timeout`, and `restart_required`. The timeout is
+split out because it is the failure most likely to repeat in a loop and its
+remedy differs; the signature requires positive evidence of a kill, since a
+resolver that never *started* also exits with no status and deserves a
+different answer than "raise the budget". The row records the prompt digest
+but writes no prompt snapshot — nothing was delivered, and a file per denial
+would litter exactly the failure loop the row exists to expose.
+
+### Codex: the same rule, a different proof
+
+Codex has **no split-brain to fix** — that failure needs two channels
+refreshing at different rates, and Codex has no live channel at all. There is
+no spawn hook, so nothing rewrites anything per spawn; model and effort both
+come from one agent TOML, both frozen at session start, both equally stale.
+Equal staleness cannot drift.
+
+What Codex needs instead is a different *proof*. The predicate asks whether
+the host lane will actually deliver the pinned effort, and the answer source
+is harness-specific:
+
+| Harness | Host lane's deliverable effort | Channel |
+|---|---|---|
+| Claude | the session's (the role agent inherits) | `CLAUDE_EFFORT` |
+| Codex | the managed agent's baked `model_reasoning_effort` | `--host-executor` |
+
+Codex therefore needs no new channel: it has been passing the answer to the
+resolver all along, just for the model half. `hostEffortProven` is that
+generalization — when `hostExecutor === refString` the requesting agent was
+materialized at that exact ref, pin included (`formatDialRef` renders
+`luna@xhigh`), so the match *is* proof. It is consulted only when the session
+effort is unobservable, and an observed one always wins. It cannot reach the
+Claude hook, which calls `dial resolve` and passes no `--host-executor`.
+
+**No inheritance, and unpinned bakes the registry default.** A Codex managed
+agent inherits nothing; it runs at what its TOML says. So Claude and Codex
+genuinely differ on what an *unpinned* dial means — Claude resolves it to the
+live session effort, Codex to `models.<name>.effort`. That divergence is
+deliberate and is recorded here rather than left to be discovered by someone
+comparing two ledgers.
+
+**Staleness routes correctly instead of failing.** A stale Codex agent reports
+a `--host-executor` that no longer matches the dial, the resolver answers
+`command`, and the work goes out on the command lane — which under this design
+is simply the right answer, not a degradation. Re-apply and restart therefore
+drop from a *correctness requirement* to an optimization: you restart only to
+get an archetype back in-session, never to avoid being wrong.
+
+### The relay identity belongs in the catalog
+
+The Codex command broker hardcodes `model = "gpt-5.6-luna"` /
+`model_reasoning_effort = "low"`, and Claude's dispatch proxies hardcode
+`sonnet`. Both are correct choices for a relay — luna and sonnet both hold the
+relay contract under dogfood where haiku did not, and a proxy turn is only a
+few relay tokens. Neither is a *dialable* choice, which is the problem: the
+relay is the one role in a system built on dialable identities whose identity
+lives in a source literal.
+
+Fix the location, not the value: a per-harness `relay:` map in the catalog.
+
+```yaml
+relay:
+  claude: sonnet
+  codex: gpt-5.6-luna@low
+```
+
+Per-harness is required rather than stylistic — the relay must be a model the
+session's own provider can already serve, and `dials:` is a flat
+archetype→ref map while harness variation lives in `routes:`. It is
+deliberately *not* an archetype: this document's own rule is that canonical
+status is earned by a policy the kernel must enforce, and a relay carries
+none; making it one would also put it in the `fadeno dial` table as though it
+were work to be dialed.
+
+Record the dogfood receipt in a comment beside the value. The `sonnet` choice
+has its rationale in the hook; this one currently has none anywhere, which is
+how an unexamined default becomes load-bearing.
+
+**Emit the broker files, never copy them.** `init --codex` copies static
+template TOMLs into `<repoRoot>/.codex/agents` while `steering apply --codex`
+emits to `~/.codex/agents`. Two mechanisms, two scopes, two levels of
+currency — and the copied ones are frozen text that no dial ever reaches and
+no apply ever refreshes, which is why a project-scope broker can silently
+predate features like `--prompt-file` (and so quietly excludes that repo from
+shadow pairs entirely). Project-scope files must be emitted from the resolved
+catalog value like the user-scope ones, and `doctor` must report a
+project-scope broker shadowing a newer user-scope one, which is invisible
+today.
 
 ## Phasing summary
 
