@@ -21,6 +21,7 @@ import {
   parseDialRef,
   readLocalDialState,
   resolveDialCascade,
+  resolveRelay,
   resolveRole,
   serializeDialRef,
   writeLocalDialState,
@@ -1293,6 +1294,25 @@ export interface DialResolveResult {
   dial: DialRef;
   delivery: { dispatchable: boolean; dispatch_command: string | null; action: string };
   /**
+   * The relay identity for THIS harness — the cheap model a caller hands a
+   * dispatch proxy so the proxy forwards a delivery verbatim instead of doing
+   * the role work itself. `model_id` is the value to hand the harness; `ref`
+   * is what the catalog says, effort suffix and all.
+   *
+   * `null` means the catalog states no opinion, and a caller must then keep
+   * its own built-in default rather than invent one — a relay the session's
+   * provider cannot serve is worse than a stale but servable one. A
+   * self-contained project catalog suppresses the builtin layer entirely, so
+   * null is the common case in a real repo, not the exotic one.
+   *
+   * Always present (null rather than omitted), like `pinned_effort` and
+   * `session_effort`: this is a hook contract, and the Claude steering hook
+   * reads it on every spawn it rewrites onto a proxy. An omitted key would
+   * read the same as a `fadeno` too old to carry one — the same fallback
+   * either way, but the contract is better stated than inferred.
+   */
+  relay: { ref: string; model_id: string; effort: string } | null;
+  /**
    * The pair decision, when this archetype carries a shadow attachment.
    *
    * `selected` is the kernel's roll, not advice: a caller that routes on it
@@ -1402,6 +1422,23 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
     };
   }
 
+  // The relay, compiled for the harness this resolve is answering for. A
+  // catalog that names an UNSERVABLE relay throws rather than degrading to
+  // null: null is reserved for "stated no opinion", and collapsing the two
+  // would resurrect exactly the silent-vanish failure the catalog-key
+  // strictness work removed. The message names the key so the hook's denial
+  // text points at the line to fix.
+  const relay = (() => {
+    try {
+      return resolveRelay(profile, harness);
+    } catch (err) {
+      if (err instanceof ExecutorProfileError) {
+        throw new DialError(`relay.${harness}: ${err.message}`);
+      }
+      throw err;
+    }
+  })();
+
   return {
     archetype,
     executor: resolved.delivery.refString,
@@ -1426,6 +1463,9 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
     ...(eligibility !== 'eligible' ? { eligibility } : {}),
     dial: resolved.delivery.ref,
     delivery: deliveryGuidance(archetype, resolved.delivery.refString, spec, harness),
+    relay: relay != null
+      ? { ref: relay.refString, model_id: relay.modelId, effort: relay.effort }
+      : null,
     ...(shadow != null ? { shadow } : {}),
   };
 }

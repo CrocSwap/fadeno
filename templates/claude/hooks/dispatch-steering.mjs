@@ -365,6 +365,30 @@ const pairSelected = slot.shadow?.selected === true && slot.shadow?.routable ===
 // exists to carry it, the same routability `shadow.routable` reports for a
 // pair. The hook does not second-guess either one.
 const commandDelivery = lane === 'command' || pairSelected;
+// Which model a rewritten proxy spawn runs on.
+//
+// The relay does no role work — it forwards a delivery verbatim and reports
+// the result back — so it is deliberately cheap. It is NOT free to make it
+// cheaper: the 2026-08-12 dogfood A/B put haiku on this contract and watched
+// it defect three ways at once — it summarized deliveries instead of relaying
+// them verbatim, answered from the prompt's first line rather than reading
+// the whole thing, and asserted evidence it had never written. Sonnet relayed
+// flawlessly, and a proxy turn is only a few relay tokens either way, so the
+// saving was never worth the fidelity.
+//
+// The identity itself is the catalog's to state now (`relay.claude` in
+// executors.yaml), resolved by `fadeno dial resolve` and reported on
+// `slot.relay` — so a repo re-dials its relay the way it dials every other
+// identity, instead of editing a hook. The literal below is the fallback for
+// the two cases the resolver cannot answer: a catalog that states no opinion
+// (`relay: null`, which is what a self-contained project catalog produces —
+// the common case, not the exotic one) and a `fadeno` old enough to predate
+// the field. Never invent a relay from silence; keep this built-in default.
+const RELAY_FALLBACK_MODEL = 'sonnet';
+const relayModel =
+  typeof slot.relay?.model_id === 'string' && slot.relay.model_id.length > 0
+    ? slot.relay.model_id
+    : RELAY_FALLBACK_MODEL;
 // A host slot with no model of its own inherits the caller's; `current-host`
 // is the explicit spelling of that.
 const inheritModel =
@@ -461,16 +485,16 @@ function recordHostDelivery() {
         model: typeof slot?.model === 'string' ? slot.model : null,
         model_override: event.tool_input.model ?? null,
         // The model the hook actually placed on `updatedInput` below — see
-        // the `commandDelivery ? 'sonnet' : inheritModel ? … : slot.model`
+        // the `commandDelivery ? relayModel : inheritModel ? … : slot.model`
         // decision at the foot of this file (the `commandDelivery` branch is
         // unreachable from here today, since a command-delivered spawn takes
         // `stashRelay()` instead, but the field mirrors that ternary exactly
         // so it stays correct if that ever changes). `model_override` above
         // is only ever what the CALLER asked for — almost always null — so a
         // `host_delivery` row alone could not tell "the hook rewrote this
-        // spawn to sonnet" from "the caller happened to ask for sonnet".
+        // spawn to the relay" from "the caller happened to ask for it".
         model_applied: commandDelivery
-          ? 'sonnet'
+          ? relayModel
           : inheritModel
             ? (event.tool_input.model ?? null)
             : (typeof slot?.model === 'string' ? slot.model : null),
@@ -561,12 +585,12 @@ finish({
     updatedInput: {
       ...event.tool_input,
       subagent_type: subagentType,
-      // Proxy relays run on sonnet: the 2026-08-12 dogfood A/B showed haiku
-      // defecting on the relay contract (did the task itself, dropped the
-      // prompt's first line, asserted unwritten evidence); sonnet relayed
-      // flawlessly, and a proxy turn is only a few relay tokens. An inheriting
-      // host slot names no model, so the caller's carries through untouched.
-      ...(commandDelivery ? { model: 'sonnet' } : inheritModel ? {} : { model: slot.model }),
+      // Proxy relays run on the catalog's relay identity (`relay.claude`),
+      // resolved into `relayModel` above — the dogfood receipt for why it must
+      // stay a capable model, and why `sonnet` remains the built-in fallback,
+      // lives with it. An inheriting host slot names no model, so the caller's
+      // carries through untouched.
+      ...(commandDelivery ? { model: relayModel } : inheritModel ? {} : { model: slot.model }),
     },
   },
 });
