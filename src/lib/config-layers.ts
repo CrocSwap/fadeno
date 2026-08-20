@@ -144,6 +144,23 @@ function mergeLayer(target: Record<string, unknown>, source: Record<string, unkn
       if (source[key] !== undefined) target[key] = source[key];
       continue;
     }
+    // `undefined` is absent, and a bare `key:` with nothing under it parses
+    // as `null` — both mean "this layer says nothing", and both are skipped
+    // as they always were. Anything else that is not a mapping is a DECLARED
+    // value of the wrong shape: `dials: "sol"`, `tools: []`. Those used to be
+    // dropped right here, before the parser could reject them, so the catalog
+    // loaded clean and the declaration did nothing — the same silent-drop
+    // failure as a misspelled top-level key, one layer down.
+    //
+    // Rejecting only the non-null case is what makes this safe: the parser is
+    // inconsistent about null (`dials`/`bindings` throw, `archetypes`/
+    // `constraints`/`tools` tolerate), so forwarding null instead of skipping
+    // it would make a bare `dials:` start failing.
+    if (source[key] !== undefined && source[key] !== null && mapping(source[key]) == null) {
+      throw new ExecutorProfileError(
+        `${path}: \`${key}\` must be a mapping; found ${Array.isArray(source[key]) ? 'an array' : typeof source[key]}.`,
+      );
+    }
     const entries = mapping(source[key]);
     if (entries == null) continue;
     const current = mapping(target[key]) ?? {};
