@@ -279,9 +279,42 @@ The dispatch kernel's full horizon is implemented and in daily dogfood.
   backend verification (`models_command` probe, positives cached in
   `model-verifications.json`, fail-open). Dispatch rows now carry
   `model`/`model_id`/`effort`/`driver`/`dial`/`dial_source` and the effective
-  table is `fadeno dial` (no args, verb-first `dial <archetype> <model>`, `dial clear`, `dial shadow`). Post-0.6 hardening: pre-dials catalogs/snapshots are refused loudly (`schema_version 3` / `snapshot_version 3`; `verify` fails pre-dials ledgers with `snapshot_version 3` message), command renamed `fadeno dial` (verb-first), `--executor` removed, pin is `.fadeno/local/dials`, snapshot is `snapshot_version: 3` (replacing v1-shaped emission), and `ConstraintContext.transport` is `host` — while the dispatches reader still renders 0.x/legacy rows (`[legacy]`) as evidence history, not a compat surface. `fadeno models` remains a possible future inspection surface, not a promise — the effective table is the inspection surface today. Deliberately still backlog, not scope: route operational-policy fields (env, retry, concurrency, prompt-size ceilings),
-  hook-initiated shadows for host-native primaries, and canon distribution
-  into complete legacy catalogs.
+  table is `fadeno dial` (no args, verb-first `dial <archetype> <model>`, `dial clear`, `dial shadow`). Post-0.6 hardening: pre-dials catalogs/snapshots are refused loudly (`schema_version 3` / `snapshot_version 3`; `verify` fails pre-dials ledgers with `snapshot_version 3` message), command renamed `fadeno dial` (verb-first), `--executor` removed, pin is `.fadeno/local/dials`, snapshot is `snapshot_version: 3` (replacing v1-shaped emission), and `ConstraintContext.transport` is `host` — while the dispatches reader still renders 0.x/legacy rows (`[legacy]`) as evidence history, not a compat surface. `fadeno models` remains a possible future inspection surface, not a promise — the effective table is the inspection surface today. Deliberately still backlog, not scope: route operational-policy fields (env, retry, concurrency, prompt-size ceilings)
+  and canon distribution into complete legacy catalogs. (Hook-initiated
+  shadows for host-native primaries were on this list and have since shipped
+  — see horizon 8 below.)
+
+## Shadow pairs (horizon 8 shipped — symmetric pairs, isolation, measured identity)
+
+Implemented on `feat/symmetric-shadow-pairs` (unmerged as of 0.6.0-rc.34);
+the design record is `experimental/slots-and-archetypes.md`, phases 5 and 5.5.
+
+- **Symmetric pairs.** A shadow-selected spawn routes BOTH arms through the
+  command lane, which deletes the host-primary capture problem rather than
+  solving it. The roll is a pure function of (prompt digest, archetype,
+  challenger), so the steering hook and the kernel reach the same verdict with
+  no state threaded between them. `shadow.routable` gates it: a primary with
+  no command lane degrades to no pair rather than to a failed task. Codex gets
+  the same feature through `steering resolve --prompt-file`, so this is
+  harness-neutral rather than Claude-only.
+- **Trustworthy isolation.** Both arms start from one committed
+  `baseline_commit`; `worktree_carry:` carries declared gitignored build state
+  by reflink → hardlink → copy (never a directory symlink) so a challenger can
+  build and test what the primary can; a prompt naming absolute repo paths
+  refuses the pair rather than letting the challenger escape its worktree.
+  Every new failure writes a refusal row and leaves the primary untouched.
+- **Measured identity.** `fadeno attest`, run inside a subagent, records the
+  one component that is observable (`CLAUDE_EFFORT`, past any silent
+  downgrade); model remains `identity_evidence: requested_only`, because
+  nothing exposes it and asking the model to name itself is not evidence.
+  Unattested deliveries and effort/dial disagreement both render.
+- **Port-back.** `fadeno shadow-apply` applies a retained arm's diff with
+  `git apply --3way`, stopping and keeping the artifact on conflict.
+- **Honest limits, stated in the design doc rather than discovered later:**
+  blinding is advisory (the challenger's cwd names it; real blinding needs
+  both arms in neutrally-named worktrees), write-shaped primaries are still
+  deferred, and nobody judges accumulated pairs yet — that is the next
+  horizon, and judging untrustworthy pairs would be worse than not judging.
 
 ## Low-friction release boundary
 
