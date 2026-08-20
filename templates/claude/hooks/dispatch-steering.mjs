@@ -145,7 +145,18 @@ if (slot?.adapter !== 'command' && slot?.adapter !== 'host') passThrough();
 // if the two sides differ in the model and nothing else. This is the whole of
 // "host spawns can be shadowed": not a challenger tagging along beside an
 // in-session agent, but the spawn becoming a pair of equals.
-const pairSelected = slot.shadow?.selected === true;
+//
+// `routable` gates this alongside `selected`. The kernel can only reuse a
+// host slot's own `fallback_command` to get both arms onto the command lane
+// — it has no other way to deliver a host-adapter primary as a command — so
+// a primary with none (a bare `current-host` dial, most commonly) has no
+// command lane to force. Routing it here anyway would hand the spawn to the
+// dispatch proxy, which would run `fadeno dispatch` and hit the kernel's
+// ordinary `host_in_session` refusal — turning a selected pair into a failed
+// task instead of the in-session work it would otherwise have done. An
+// unroutable selected pair therefore degrades to "no pair": `pairSelected`
+// stays false and the spawn takes the path it would have taken anyway.
+const pairSelected = slot.shadow?.selected === true && slot.shadow?.routable === true;
 const commandDelivery = slot.adapter === 'command' || pairSelected;
 // A host slot with no model of its own inherits the caller's; `current-host`
 // is the explicit spelling of that.
@@ -250,6 +261,20 @@ function recordHostDelivery() {
         executor: typeof slot?.executor === 'string' ? slot.executor : null,
         model: typeof slot?.model === 'string' ? slot.model : null,
         model_override: event.tool_input.model ?? null,
+        // The model the hook actually placed on `updatedInput` below — see
+        // the `commandDelivery ? 'sonnet' : inheritModel ? … : slot.model`
+        // decision at the foot of this file (the `commandDelivery` branch is
+        // unreachable from here today, since a command-delivered spawn takes
+        // `stashRelay()` instead, but the field mirrors that ternary exactly
+        // so it stays correct if that ever changes). `model_override` above
+        // is only ever what the CALLER asked for — almost always null — so a
+        // `host_delivery` row alone could not tell "the hook rewrote this
+        // spawn to sonnet" from "the caller happened to ask for sonnet".
+        model_applied: commandDelivery
+          ? 'sonnet'
+          : inheritModel
+            ? (event.tool_input.model ?? null)
+            : (typeof slot?.model === 'string' ? slot.model : null),
         // What the spawn runs at — see `materializedAgent`. Through rc.33 this
         // was the literal 'inherited', which was true only of the baseline and
         // wrong for every materialized dial. An unmaterialized slot really

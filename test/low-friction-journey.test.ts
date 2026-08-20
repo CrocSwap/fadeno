@@ -490,7 +490,12 @@ test('vendor respects --no-steering and makes explicitly vendored Codex brokers 
   runVendor({ repoRoot: steeringRoot, target: 'codex', withSteering: true });
   assert.ok(exists(steeringRoot, '.codex/agents/worker.toml'));
   assert.match(read(steeringRoot, '.gitignore'), /!\.codex\/agents\/worker\.toml/);
-  assert.match(read(steeringRoot, '.codex/agents/worker.toml'), /--host-executor native-worker/);
+  // No `--host-executor` was ever materialized for this static broker (there
+  // is no such declared executor), so it must never invent one — see
+  // test/codex-steering-agents-templates.test.ts for the regression this
+  // guards against.
+  assert.doesNotMatch(read(steeringRoot, '.codex/agents/worker.toml'), /--host-executor/);
+  assert.match(read(steeringRoot, '.codex/agents/worker.toml'), /fadeno steering resolve --archetype worker --prompt-file <path>/);
 });
 
 test('evidence promotion refuses running traces and is idempotent for a verified terminal receipt', (t) => {

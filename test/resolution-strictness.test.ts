@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test, { type TestContext } from 'node:test';
@@ -253,4 +253,47 @@ test('Claude steering hook: unreadable resolve stdout still fail-opens; native s
   assert.equal(decision.hookSpecificOutput.permissionDecision, undefined);
   assert.equal(decision.hookSpecificOutput.updatedInput.subagent_type, 'fadeno:reviewer');
   assert.equal(decision.hookSpecificOutput.updatedInput.model, 'opus');
+});
+
+function evidenceRows(root: string): Record<string, unknown>[] {
+  return readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+test('Claude steering hook: host_delivery records model_applied, distinct from model_override', (t) => {
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+
+  // Case 1: a dial-driven rewrite. The caller's tool_input names no model at
+  // all (model_override stays null, same as before), but the resolved slot
+  // rewrites the spawn to opus. Only model_applied can say the rewrite
+  // happened — model_override alone would just look like "nothing asked".
+  const rewriteEvent = {
+    cwd: root,
+    tool_name: 'Agent',
+    tool_input: { prompt: 'Review it.', description: 'x', subagent_type: 'reviewer' },
+  };
+  runSteeringHook(root, rewriteEvent, '#!/bin/sh\nprintf \'%s\\n\' \'{"adapter":"host","model":"opus"}\'\nexit 0\n');
+  const rewritten = evidenceRows(root);
+  assert.equal(rewritten.length, 1);
+  assert.equal(rewritten[0]!.model_override, null);
+  assert.equal(rewritten[0]!.model_applied, 'opus');
+
+  // Case 2: an inheriting host slot (model: current-host) reached through an
+  // explicitly named proxy, so recordHostDelivery still runs. The hook
+  // applies no rewrite at all here, so model_applied must equal whatever the
+  // caller's own tool_input already carried — same value as model_override,
+  // because nothing changed it.
+  const inheritEvent = {
+    cwd: root,
+    tool_name: 'Agent',
+    tool_input: { prompt: 'Review it again.', description: 'x', subagent_type: 'dispatch-reviewer', model: 'sonnet' },
+  };
+  runSteeringHook(root, inheritEvent, '#!/bin/sh\nprintf \'%s\\n\' \'{"adapter":"host","model":"current-host"}\'\nexit 0\n');
+  const inherited = evidenceRows(root);
+  assert.equal(inherited.length, 2);
+  assert.equal(inherited[1]!.model_override, 'sonnet');
+  assert.equal(inherited[1]!.model_applied, 'sonnet');
 });

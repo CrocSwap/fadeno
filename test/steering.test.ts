@@ -3,9 +3,12 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
+import { stringify as stringifyYaml } from 'yaml';
 import { runInit } from '../src/commands/init.ts';
 import { stampHookVersion } from '../src/commands/plugin.ts';
+import { runSteeringApply, runSteeringResolve } from '../src/commands/steering.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
+import { writeLocalDialState } from '../src/lib/executors.ts';
 import { packageVersion } from '../src/lib/paths.ts';
 import { exists, read, tempRepo } from './helpers.ts';
 
@@ -36,7 +39,21 @@ test('Codex --with-steering installs loadout-aware role overrides', (t) => {
   for (const archetype of ARCHETYPES) {
     const body = read(root, `.codex/agents/${archetype}.toml`);
     assert.match(body, /dial-aware/i);
-    assert.match(body, new RegExp(`First run .*fadeno steering resolve --archetype ${archetype}`));
+    // The ORDERING is the contract, not any particular wording: the resolver
+    // has to see the prompt bytes to answer the pair question, so the file
+    // must exist before the resolve call. This assertion used to pin the
+    // literal phrase "First run", which is what let this static template
+    // drift out of step with its dynamically generated twin — and then
+    // pressured a later fix into contorting the prose to satisfy the regex
+    // rather than saying the thing plainly. Assert the sequence instead.
+    const writeAt = body.indexOf('ENTIRE task prompt');
+    // Anchored on `--prompt-file`: the engine-assignment line earlier in the
+    // same template also names `steering resolve --archetype <a>`, and only
+    // the ordinary path carries the digest.
+    const resolveAt = body.indexOf(`fadeno steering resolve --archetype ${archetype} --prompt-file`);
+    assert.ok(writeAt >= 0, `${archetype}: template must instruct writing the prompt verbatim`);
+    assert.ok(resolveAt > writeAt, `${archetype}: the prompt file must be written BEFORE steering resolve`);
+    assert.match(body, new RegExp(`fadeno steering resolve --archetype ${archetype} --prompt-file`));
     assert.match(body, new RegExp(`fadeno dispatch --archetype ${archetype} --prompt-file`));
     assert.match(body, /ENTIRE task prompt.*verbatim/s);
     assert.match(body, /mode=restart_required/);
@@ -368,7 +385,15 @@ test('Claude steering writes the host_delivery evidence the kernel never sees', 
     agent_type: 'reviewer',
     executor: 'claude-opus',
     model: 'opus',
+    // The two model fields answer different questions, and this row is the
+    // clearest case of them disagreeing: the caller asked for sonnet on the
+    // tool call, the dial says opus, and the hook applied opus. `_override`
+    // records what arrived, `_applied` what the hook put on `updatedInput`.
+    // Before `_applied` existed, a row could not distinguish "the hook
+    // rewrote this spawn" from "the caller already asked for that model" —
+    // which is exactly the question a host-delivery row exists to answer.
     model_override: 'sonnet',
+    model_applied: 'opus',
     dial_source: null,
     driver: null,
     effort: null,
@@ -588,17 +613,34 @@ test('bundled CLI parses --with-steering and carries its templates', (t) => {
   assert.match(read(root, '.codex/agents/worker.toml'), /fadeno dispatch-fallback <run-id> <dispatch-id>/);
 });
 
-/** A host slot whose archetype carries a shadow attachment the roll selected. */
+/**
+ * A host slot whose archetype carries a shadow attachment the roll selected,
+ * and whose primary has a fallback_command to force it onto — the case
+ * `pairCommandFallback` in the kernel actually honors.
+ */
 const PAIRED_SLOT = JSON.stringify({
   ...JSON.parse(NATIVE_SLOT),
   effort: 'xhigh',
-  shadow: { attached: true, challenger: 'grok', rate: 0.25, selected: true },
+  shadow: { attached: true, challenger: 'grok', rate: 0.25, selected: true, routable: true },
 });
 
 const UNPAIRED_SLOT = JSON.stringify({
   ...JSON.parse(NATIVE_SLOT),
   effort: 'xhigh',
-  shadow: { attached: true, challenger: 'grok', rate: 0.25, selected: false },
+  shadow: { attached: true, challenger: 'grok', rate: 0.25, selected: false, routable: true },
+});
+
+/**
+ * A selected pair whose primary has NO fallback_command — the `current-host`
+ * base dial, most commonly. `pairCommandFallback` in the kernel refuses to
+ * reuse a fallback that does not exist, so the hook must not route here
+ * either: a selected-but-unroutable pair degrades to "no pair", never to a
+ * `fadeno dispatch` the kernel would throw `host_in_session` on.
+ */
+const UNROUTABLE_PAIRED_SLOT = JSON.stringify({
+  ...JSON.parse(NATIVE_SLOT),
+  effort: 'xhigh',
+  shadow: { attached: true, challenger: 'grok', rate: 0.25, selected: true, routable: false },
 });
 
 test('a selected pair sends the in-session primary down the command lane too', (t) => {
@@ -635,4 +677,138 @@ test('an unselected spawn stays in-session: sampling must not tax the common pat
   assert.doesNotMatch(decision.hookSpecificOutput.updatedInput.subagent_type, /dispatch-/);
   assert.equal(decision.hookSpecificOutput.updatedInput.model, 'opus');
   assert.equal(evidenceRows(root).filter((r) => r.event === 'host_delivery').length, 1);
+});
+
+test('a selected pair with no command lane to force stays in-session — degrades to no pair, not a failed dispatch', (t) => {
+  // `dispatchability` refuses ANY host spec on an on-demand harness whether
+  // or not it has a fallback_command, and the kernel's `pairCommandFallback`
+  // correctly requires one. The hook used to force command delivery on
+  // `selected` alone, which would route this spawn to the dispatch proxy —
+  // and `fadeno dispatch` would then throw its ordinary `host_in_session`
+  // refusal, turning a selected pair into a failed task.
+  const root = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: root, withSteering: true });
+  const decision = JSON.parse(runClaudeSteering(
+    root,
+    { cwd: root, tool_name: 'Agent', tool_input: { prompt: 'Review it.', description: 'x', subagent_type: 'reviewer' } },
+    UNROUTABLE_PAIRED_SLOT,
+  )) as { hookSpecificOutput: { updatedInput: { subagent_type: string; model: string } } };
+
+  // Exactly the same outcome as an unselected spawn: routed to the ordinary
+  // in-session host agent, never to a dispatch proxy — the pair decision
+  // could not be honored, so it is as if there were no pair at all.
+  assert.doesNotMatch(decision.hookSpecificOutput.updatedInput.subagent_type, /dispatch-/);
+  assert.equal(decision.hookSpecificOutput.updatedInput.model, 'opus');
+  assert.equal(evidenceRows(root).filter((r) => r.event === 'host_delivery').length, 1);
+});
+
+/** A codex-harness catalog with a host worker that has a command fallback (`luna`) and a command-only shadow challenger (`grok`). */
+function seedCodexPairV3(root: string): void {
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    schema_version: 3,
+    models: {
+      luna: { provider: 'lunap', id: 'gpt-5.6-luna', effort: 'high' },
+      grok: { provider: 'xai', id: 'grok' },
+    },
+    routes: {
+      codex: {
+        lunap: {
+          host: true,
+          command: ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('HOST-FALLBACK:'+d))"],
+        },
+        xai: { command: ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('CHALLENGER:'+d))"] },
+        'current-host': { host: true },
+      },
+    },
+    archetypes: { worker: {} },
+    dials: { worker: 'luna' },
+  }));
+}
+
+test('Codex host agent instructions write the prompt file before resolving, so the resolver can see it', (t) => {
+  // Phase 5 parity: host-spawn shadowing was Claude-only because the Claude
+  // hook always has the prompt in hand before it resolves, while Codex's
+  // agent used to resolve with no prompt at all. Fixing the ORDER (write
+  // first, then resolve, then dispatch the same file) is what lets the
+  // resolver's digest match the one the kernel later hashes from the same
+  // path.
+  const root = tempRepo(t);
+  seedCodexPairV3(root);
+  const applied = runSteeringApply({ repoRoot: root, target: 'codex' });
+  assert.equal(applied.materialization.worker?.kind, 'host');
+  const body = read(root, '.codex/agents/worker.toml');
+  assert.match(body, /ordinary `# Fadeno step assignment` heading, FIRST\nwrite the ENTIRE task prompt/);
+  assert.match(body, /steering resolve --archetype worker --host-executor luna --prompt-file <path>/);
+  assert.match(body, /dispatch --archetype worker --prompt-file <path>/);
+  // mode=command now covers two distinct reasons (plain command dial, or a
+  // selected pair) and the instructions must not let the agent tell them
+  // apart before dispatching — both go through the same file, the same way.
+  assert.match(body, /both arms are moving to the command lane so they are comparable/);
+});
+
+test('Codex command-broker instructions also write the prompt file before resolving', (t) => {
+  // renderCodexCommandBroker() used to resolve with no prompt at all and only
+  // write the prompt file AFTER learning mode=command — its sibling
+  // renderCodexHostAgent() (tested just above) and the static
+  // templates/codex/codex-steering-agents/*.toml were already fixed to write
+  // first. Same fix here, same order: write the prompt file, THEN resolve
+  // with --prompt-file, THEN dispatch that same file — never a second write.
+  const root = tempRepo(t);
+  seedCodexPairV3(root);
+  // A command-only session dial (no host route at all) forces the
+  // command-broker branch instead of the host-agent branch tested above.
+  writeLocalDialState(root, { dials: { worker: { model: 'grok' } }, shadows: {}, legacyNote: null });
+  const applied = runSteeringApply({ repoRoot: root, target: 'codex' });
+  assert.equal(applied.materialization.worker?.kind, 'command-broker');
+  const body = read(root, '.codex/agents/worker.toml');
+  const writeAt = body.indexOf('ENTIRE task prompt');
+  const resolveAt = body.indexOf('steering resolve --archetype worker --prompt-file');
+  assert.ok(writeAt >= 0, 'template must instruct writing the prompt verbatim');
+  assert.ok(resolveAt > writeAt, 'the prompt file must be written BEFORE steering resolve');
+  assert.match(body, /ordinary `# Fadeno step assignment` heading, FIRST\nwrite the ENTIRE task prompt/);
+  assert.match(body, /steering resolve --archetype worker --prompt-file <path>/);
+  assert.doesNotMatch(body, /--host-executor/);
+  // Dispatches the SAME file the resolver was handed, never a second write.
+  assert.match(body, /dispatch --archetype worker --prompt-file <path>/);
+});
+
+test('Codex steering resolve forces mode=command on a selected, routable pair, keyed on the prompt file it is handed', (t) => {
+  const root = tempRepo(t);
+  seedCodexPairV3(root);
+  writeLocalDialState(root, { dials: {}, shadows: { worker: { model: 'grok', rate: 1 } }, legacyNote: null });
+  mkdirSync(join(root, '.fadeno', 'local', 'prompts'), { recursive: true });
+  const promptPath = join(root, '.fadeno', 'local', 'prompts', 'task-1.md');
+  writeFileSync(promptPath, 'do the pairable thing');
+
+  // Baseline: hostExecutor matches the resolved dial, so with no digest at
+  // all this resolves mode=host, same as it would with no shadow attached.
+  const noDigest = runSteeringResolve({ repoRoot: root, archetype: 'worker', hostExecutor: 'luna' });
+  assert.equal(noDigest.mode, 'host');
+  // A rate is set but no digest was supplied — the resolver cannot answer
+  // "is this a pair", and must not read that silence as "no".
+  assert.equal(noDigest.shadow?.selected, null);
+
+  const paired = runSteeringResolve({
+    repoRoot: root, archetype: 'worker', hostExecutor: 'luna', promptFile: promptPath,
+  });
+  assert.equal(paired.shadow?.selected, true);
+  assert.equal(paired.shadow?.routable, true);
+  // The whole point of a symmetric pair: an in-session primary cannot be
+  // isolated, measured, or diffed the way its command-delivered challenger
+  // is, so the resolution routes it to the command lane instead of `host`.
+  assert.equal(paired.mode, 'command');
+  assert.match(paired.detail, /pair selected/);
+  assert.match(paired.detail, /both arms are comparable/);
+
+  // `--prompt-sha256` is the pre-computed alternative, and it must agree
+  // exactly with hashing the file here — the same digest the kernel will
+  // compute from the same path when the agent later dispatches it, or hook
+  // and kernel (here, resolver and kernel) could disagree on the pair.
+  const digest = sha256Hex(readFileSync(promptPath, 'utf8'));
+  const viaSha = runSteeringResolve({
+    repoRoot: root, archetype: 'worker', hostExecutor: 'luna', promptSha256: digest,
+  });
+  assert.equal(viaSha.mode, 'command');
+  assert.equal(viaSha.shadow?.selected, true);
 });

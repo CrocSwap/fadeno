@@ -6,6 +6,7 @@ import {
   ExecutorProfileError,
   compileDialRef,
   applyWritePosture,
+  commandRoutable,
   explainWriteConflict,
   eligibilityFor,
   formatDialRef,
@@ -15,12 +16,14 @@ import {
   parseSnapshotDocument,
   readLocalDialState,
   resolveDialCascade,
+  shadowSampleRoll,
   type DialLayers,
   type DialRef,
   type ExecutorProfile,
   type LoadedExecutorProfile,
   type ExecutorSpec,
   type RoleResolutionSource,
+  type ShadowAttachment,
   type SnapshotDocument,
 } from '../lib/executors.ts';
 import { readUserDials } from '../lib/user-paths.ts';
@@ -101,6 +104,21 @@ export interface SteeringResolution {
   delivered_archetype?: string;
   /** Request-locked host identity remains requested evidence, never runtime verification. */
   identity_evidence?: 'requested_only';
+  /**
+   * The pair decision, when this archetype carries a shadow attachment.
+   * Computed identically to `runDialResolve`'s `shadow` field — same
+   * attachment lookup, same challenger string, same roll — so a Codex
+   * resolve and a Claude dial resolve for the same prompt cannot disagree.
+   * Ambient path only: a locked engine request (`runLockedSteeringResolve`)
+   * never sets this, since its delivery mode is fixed by the run snapshot.
+   */
+  shadow?: {
+    attached: true;
+    challenger: string;
+    rate: number | null;
+    selected: boolean | null;
+    routable: boolean;
+  };
 }
 
 interface CommonOptions {
@@ -196,6 +214,16 @@ export interface SteeringResolveOptions extends CommonOptions {
   /** Immutable engine delivery identity; must be supplied as a pair. */
   run?: string | null;
   dispatchId?: string | null;
+  /**
+   * The digest the shadow roll is keyed on, or the file to hash it from.
+   * `promptFile` is read and sha256'd here, over the same utf8 bytes the
+   * kernel hashes (`sha256Hex(prompt)` in `src/commands/dispatch.ts`) — the
+   * agent is expected to pass the very file it will later hand to `fadeno
+   * dispatch --prompt-file`, so the two hash the same content. `promptSha256`
+   * is the pre-computed alternative. Ambient path only (see `shadow` below).
+   */
+  promptSha256?: string | null;
+  promptFile?: string | null;
 }
 
 function snapshotProfileForRequest(lookup: HostDispatchRequestLookup): SnapshotDocument {
@@ -239,6 +267,9 @@ function snapshotProfileForRequest(lookup: HostDispatchRequestLookup): SnapshotD
   }
 }
 
+// Shadow pairing is deliberately not applied here: a locked engine request is
+// an immutable dispatch with its own receipts contract, and changing its
+// delivery mode out from under that contract is out of scope for phase 5.
 function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: string, role: string | null, hostExecutor: string | null): SteeringResolution {
   const run = opts.run?.trim() ?? '';
   const dispatchId = opts.dispatchId?.trim() ?? '';
@@ -363,6 +394,28 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
 }
 
 /**
+ * The digest the shadow roll is keyed on. `promptSha256` wins if given;
+ * otherwise a `promptFile` is read and hashed here, over the same utf8 bytes
+ * `sha256Hex(prompt)` hashes in `src/commands/dispatch.ts` for a dispatch of
+ * that same file — so a Codex agent that resolves and then dispatches the
+ * same path gets one digest, not two. An unreadable file answers "no digest"
+ * rather than throwing: a caller that cannot supply the prompt yet must not
+ * be refused resolution, only left with `shadow.selected: null`.
+ */
+function resolvePromptDigest(opts: SteeringResolveOptions): string | null {
+  const direct = opts.promptSha256?.trim();
+  if (direct) return direct;
+  const file = opts.promptFile?.trim();
+  if (!file) return null;
+  try {
+    const text = readFileSync(resolve(opts.cwd ?? process.cwd(), file), 'utf8');
+    return sha256Hex(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Resolve one invocation from a session-static host Codex role agent.
  * Command slots switch immediately; host slots execute locally only when they
  * match the executor materialized into that host agent definition.
@@ -408,10 +461,12 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
   let dialLayers: DialLayers;
   let legacyNote: string | null = null;
   let detailNote = '';
+  let shadows: Record<string, ShadowAttachment> = {};
   try {
     const state = readLocalDialState(repoRoot);
     legacyNote = state.legacyNote;
     if (legacyNote != null) detailNote = ` ${legacyNote}`;
+    shadows = state.shadows;
     const userRaw = readUserDials(opts.userPathOptions ?? {});
     const user: Record<string, DialRef> = {};
     for (const [k, v] of Object.entries(userRaw)) user[k] = v as DialRef;
@@ -440,8 +495,40 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
   // Write-posture delivery selection, same rule as dispatch/drive.
   spec = applyWritePosture(spec, archetype, profile.archetypes).spec;
 
+  // The pair decision — computed identically to `runDialResolve`'s `shadow`
+  // field (same attachment lookup, same challenger string, same roll) so a
+  // Codex and a Claude resolve for the same prompt cannot disagree. Surfaced
+  // on every mode, not only `host`: a caller wants to see the attachment
+  // regardless of what this resolution turns out to be, even though only the
+  // `host` branch below acts on it.
+  const attachment = shadows[archetype];
+  let shadow: SteeringResolution['shadow'];
+  if (attachment != null) {
+    const challenger = formatDialRef({
+      model: attachment.model,
+      ...(attachment.effort ? { effort: attachment.effort } : {}),
+      ...(attachment.via ? { via: attachment.via } : {}),
+    });
+    const digest = resolvePromptDigest(opts);
+    const rate = attachment.rate ?? null;
+    shadow = {
+      attached: true,
+      challenger,
+      rate,
+      // No rate means every dispatch fires; no digest means the caller cannot
+      // be told, and must not read the silence as a "no".
+      selected: rate == null ? true : digest ? shadowSampleRoll(digest, archetype, challenger) < rate : null,
+      // The PRIMARY's own resolved spec, after write-posture — what a
+      // selected pair would have to reuse to reach the command lane.
+      routable: commandRoutable(spec),
+    };
+  }
+
+  // Every branch below funnels through `finish`, so attaching `shadow` here
+  // once — rather than at each call site — is what keeps it uniformly
+  // visible regardless of which mode this resolution lands on.
   const finish = (base: Omit<SteeringResolution, 'resolved_via' | 'surface_archetype' | 'advisory'>): SteeringResolution =>
-    decorateSteering(base as any, profile, cascade.resolvedVia);
+    decorateSteering({ ...(shadow != null ? { shadow } : {}), ...base } as any, profile, cascade.resolvedVia);
 
   const refusal = (spec: ExecutorSpec, executorName: string): SteeringResolution | null => {
     const conflict = forcesWritePosture(cascade.ref, cascade.resolvedVia)
@@ -470,6 +557,23 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
   }
   // host adapter
   if (cascade.source === 'base' || hostExecutor === refString) {
+    // A selected pair forces both arms onto the command lane even though this
+    // host executor otherwise matches the session baseline and would resolve
+    // in-session — an in-session primary cannot be isolated, measured, or
+    // diffed the way its challenger is. Gated on `routable` too: a primary
+    // with no `fallback_command` has no command lane to force onto, and
+    // routing it here anyway would only hand the agent a `fadeno dispatch`
+    // that the kernel's own `host_in_session` refusal would then reject.
+    if (shadow?.selected === true && shadow.routable === true) {
+      return finish({
+        mode: 'command', archetype, role,
+        executor: refString, adapter: 'host', model: (spec as any).model,
+        effort: (spec as any).reasoningEffort ?? compiled?.effort ?? null,
+        driver: (spec as any).driver ?? compiled?.driver ?? null,
+        source: cascade.source, dial: cascade.ref, hostExecutor,
+        detail: `pair selected: ${archetype} → ${refString} moved to its command lane so both arms are comparable${detailNote}`,
+      } as any);
+    }
     return finish({
       mode: 'host', archetype, role,
       executor: refString, adapter: 'host', model: (spec as any).model,
@@ -538,15 +642,22 @@ For that engine assignment only:
   relay stdout verbatim. That command owns the start and terminal receipts.
 - mode=restart_required: stop and relay the resolver's restart instruction.
 
-For an ordinary task beginning with the ordinary \`# Fadeno step assignment\` heading, run:
-\`${cli} steering resolve --archetype ${archetype} --host-executor ${executorName}\`
+For an ordinary task beginning with the ordinary \`# Fadeno step assignment\` heading, FIRST
+write the ENTIRE task prompt you received verbatim to a unique file under
+.fadeno/local/prompts/, THEN run:
+\`${cli} steering resolve --archetype ${archetype} --host-executor ${executorName} --prompt-file <path>\`
+The resolver hashes that file to decide whether this spawn is paired with a
+shadow challenger, so it must see the prompt bytes before it answers — never
+omit \`--prompt-file\` on the ordinary path.
 For that ordinary task:
 - mode=host: ${behavior}
-- mode=command: write the ENTIRE task prompt you received verbatim to a unique
-  file under .fadeno/local/prompts/, run
-  \`${cli} dispatch --archetype ${archetype} --prompt-file <path>\`, and relay stdout
-  verbatim. On a non-zero exit, report the error and do not perform the
-  task yourself. The command executor runs outside this subagent's sandbox.
+- mode=command: run \`${cli} dispatch --archetype ${archetype} --prompt-file <path>\`
+  with that same file, and relay stdout verbatim. On a non-zero exit, report
+  the error and do not perform the task yourself. The command executor runs
+  outside this subagent's sandbox. A resolution of mode=command here can mean
+  either the dial itself is command-delivered, or a shadow pair was selected
+  and both arms are moving to the command lane so they are comparable —
+  either way, dispatch the same file the same way.
 - mode=restart_required: stop and relay the resolver's restart instruction.
 - mode=write_conflict: stop and relay the resolver's refusal verbatim. The
   loadout's delivery cannot write, so never dispatch it and never substitute
@@ -580,14 +691,17 @@ For that engine assignment only:
   relay stdout verbatim. That command owns the start and terminal receipts.
 - mode=host or mode=restart_required: stop and relay the resolver's instruction.
 
-For an ordinary task beginning with the ordinary \`# Fadeno step assignment\` heading, run:
-\`${cli} steering resolve --archetype ${archetype}\`
+For an ordinary task beginning with the ordinary \`# Fadeno step assignment\` heading, FIRST
+write the ENTIRE task prompt you received verbatim to a unique file under
+.fadeno/local/prompts/, THEN run:
+\`${cli} steering resolve --archetype ${archetype} --prompt-file <path>\`
+The resolver hashes that file to decide whether this spawn is paired with a
+shadow challenger, so it must see the prompt bytes before it answers — never
+omit \`--prompt-file\` on the ordinary path.
 For that ordinary task:
-- mode=command: write the ENTIRE task prompt you received verbatim to a unique
-  file under .fadeno/local/prompts/, run
-  \`${cli} dispatch --archetype ${archetype} --prompt-file <path>\`, and relay stdout verbatim.
-  On a non-zero exit, report the error and do not perform the
-  task yourself.
+- mode=command: run \`${cli} dispatch --archetype ${archetype} --prompt-file <path>\`
+  with that same file, and relay stdout verbatim. On a non-zero exit, report
+  the error and do not perform the task yourself.
 - mode=host or mode=restart_required: stop and relay the resolver's
   instruction; a host slot must run in a matching host Codex agent.
 - mode=write_conflict: stop and relay the resolver's refusal verbatim. The
