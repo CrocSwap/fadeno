@@ -12,6 +12,7 @@ import {
   readWorkspaceLease,
 } from '../lib/workspace-lease.ts';
 import { describeWorkspaceLeaseLiveness } from '../lib/supervisor.ts';
+import { explainSuppressedBuiltin } from '../lib/config-layers.ts';
 import { compareFadenoVersions, readInstallationManifest } from '../lib/installations.ts';
 import { codexUserAgentDir, userPaths } from '../lib/user-paths.ts';
 
@@ -268,6 +269,46 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
   } else {
     findings.push(finding('dials', 'ok', `${(status as any).activeLoadout.name} (${(status as any).activeLoadout.source})`));
   }
+
+  // Catalog layering. A self-contained project catalog is a supported mode and
+  // a one-way ratchet: it suppresses the builtin and user layers, so from that
+  // moment it can only fall behind the builtin shipped beside it. Nothing said
+  // so before — this repo's own catalog sat 25 `timeout_ms` declarations, a
+  // stale relay, and the whole `tools:` block behind the template in the same
+  // checkout while doctor reported zero warnings.
+  {
+    let suppressed: { missing: string[] } | null = null;
+    try {
+      suppressed = explainSuppressedBuiltin(repoRoot, opts.userPathOptions ?? {});
+    } catch {
+      suppressed = null;
+    }
+    if (suppressed != null) {
+      const missing = suppressed.missing;
+      if (missing.length === 0) {
+        findings.push(finding(
+          'catalog-layering',
+          'ok',
+          'project catalog is self-contained (suppresses the builtin and user layers) and omits no builtin declaration',
+        ));
+      } else {
+        const shown = missing.slice(0, 6).join(', ');
+        const rest = missing.length > 6 ? `, +${missing.length - 6} more` : '';
+        findings.push(finding(
+          'catalog-layering',
+          'warning',
+          `project catalog is self-contained (suppresses the builtin and user layers) and omits ` +
+            `${missing.length} declaration(s) the builtin makes: ${shown}${rest}`,
+          'Either re-declare them, or — usually better — delete everything from ' +
+            '`.fadeno/executors.yaml` that is not a deliberate override. Without its own `models:` ' +
+            'and `routes:` the file layers on the builtin instead of replacing it, and cannot fall ' +
+            'behind again. Note this reports ABSENCES only: a stale VALUE is indistinguishable from ' +
+            'a deliberate override and is not checked.',
+        ));
+      }
+    }
+  }
+
   for (const role of status.roles) {
     const spec = role.adapter === 'command' ? status.external.find((item) => item.archetype === role.archetype) : null;
     if (spec == null || spec.command == null) continue;

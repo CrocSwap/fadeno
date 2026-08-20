@@ -232,6 +232,88 @@ export function loadLayeredProfile(repoRoot: string, options: UserPathOptions = 
   };
 }
 
+/**
+ * Declarations the builtin catalog makes that a SELF-CONTAINED project catalog
+ * silently drops, as dotted paths.
+ *
+ * A project catalog that declares its own `models:` and `routes:` suppresses
+ * the builtin and user layers wholesale (see `projectIsComplete`). That is a
+ * supported, deliberate mode — and it is also a one-way ratchet: from that
+ * moment the catalog can only fall behind the builtin sitting next to it, and
+ * nothing ever says so. This repo's own catalog drifted 25 `timeout_ms`
+ * declarations, a stale `relay.codex`, and the entire `tools:` block that way
+ * while `doctor` reported zero warnings.
+ *
+ * **Absences only, never differing values.** A different value IS the point of
+ * an override, so reporting it would be noise on every honest catalog. An
+ * absence is almost never deliberate: someone overriding a route changes its
+ * argv, they do not delete `timeout_ms` from it. That asymmetry is what makes
+ * this check quiet enough to leave on — and it is also its known blind spot,
+ * so a stale VALUE still goes unreported.
+ *
+ * Descends only into nodes BOTH sides declare as mappings, and reports only
+ * SCALAR absences. Omitting a whole model or route is a legitimate way to ship
+ * a smaller catalog; omitting a scalar from a route you DID declare is the
+ * drift being looked for.
+ */
+export function missingBuiltinDeclarations(
+  builtinDoc: Record<string, unknown> | null,
+  projectDoc: Record<string, unknown> | null,
+): string[] {
+  if (builtinDoc == null || projectDoc == null) return [];
+  const missing: string[] = [];
+  const walk = (builtin: Record<string, unknown>, project: Record<string, unknown>, path: string): void => {
+    for (const [key, builtinValue] of Object.entries(builtin)) {
+      const here = path === '' ? key : `${path}.${key}`;
+      if (!Object.hasOwn(project, key)) {
+        // Only a SCALAR (or list) the builtin declares counts as drift. A
+        // missing mapping is a whole model, route, or archetype the project
+        // chose not to ship, which is the normal way to keep a catalog small —
+        // reporting it would fire on every honest self-contained catalog. A
+        // missing scalar on a node the project DID declare is the drift being
+        // looked for: nobody deliberately deletes `timeout_ms` from a route
+        // they are otherwise copying.
+        if (mapping(builtinValue) == null) missing.push(here);
+        continue;
+      }
+      // Arrays are leaves: a shorter list is a value difference, not an
+      // absence, and this check deliberately says nothing about values.
+      const builtinChild = mapping(builtinValue);
+      const projectChild = mapping(project[key]);
+      if (builtinChild != null && projectChild != null) walk(builtinChild, projectChild, here);
+    }
+  };
+  walk(builtinDoc, projectDoc, '');
+  return missing;
+}
+
+/**
+ * The same report for a repo on disk: `null` when nothing is suppressed —
+ * either there is no project catalog, or it layers normally and therefore
+ * cannot fall behind.
+ */
+export function explainSuppressedBuiltin(
+  repoRoot: string,
+  options: UserPathOptions = {},
+): { missing: string[] } | null {
+  void options;
+  const projectPath = join(repoRoot, '.fadeno', 'executors.yaml');
+  const builtinPath = `${templatesDir()}/common/fadeno/executors.yaml`;
+  if (!existsSync(projectPath) || !existsSync(builtinPath)) return null;
+  let projectDoc: Record<string, unknown>;
+  let builtinDoc: Record<string, unknown>;
+  try {
+    projectDoc = parseLayer(projectPath);
+    builtinDoc = parseLayer(builtinPath);
+  } catch {
+    // A catalog that will not parse is a louder problem that other checks
+    // already report; this one stays silent rather than double-reporting.
+    return null;
+  }
+  if (!projectIsComplete(projectDoc)) return null;
+  return { missing: missingBuiltinDeclarations(builtinDoc, projectDoc) };
+}
+
 function stringifyObject(value: Record<string, unknown>): string {
   return stringifyYaml(value);
 }
