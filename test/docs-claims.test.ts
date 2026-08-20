@@ -135,6 +135,14 @@ const CLAIMS: Claim[] = [
     src: { files: ['src/commands/dispatches.ts'], patterns: [/preferChallenger/, /preferBaseline/] },
   },
   {
+    id: 'shadow-apply-command',
+    doc: {
+      files: [EXTENDING, 'docs/experimental/slots-and-archetypes.md'],
+      patterns: [/fadeno shadow-apply/, /--3way/],
+    },
+    src: { files: ['src/commands/shadow-apply.ts', 'src/cli.ts'], patterns: [/runShadowApply/, /--3way/] },
+  },
+  {
     id: 'models-registry',
     doc: { files: [DIALS], patterns: [/models:/, /unregistered_model_driver/] },
     src: { files: ['src/lib/executors.ts'], patterns: [/models:/, /unregisteredModelDriver/] },
@@ -283,6 +291,17 @@ const CLAIMS: Claim[] = [
     id: 'verify-tool-checks',
     doc: { files: ['docs/roadmap.md', 'docs/architecture.md'], patterns: [/tool-result-coherence/, /tool-command-digest/, /tool-lifecycle/] },
     src: { files: ['src/commands/verify.ts'], patterns: [/tool-result-coherence/, /tool-command-digest/, /tool-lifecycle/] },
+  },
+  {
+    id: 'host-attestation-command',
+    doc: {
+      files: ['docs/experimental/slots-and-archetypes.md'],
+      patterns: [/fadeno attest/, /host_attestation/, /never attested/],
+    },
+    src: {
+      files: ['src/commands/attest.ts', 'src/cli.ts', 'src/commands/dispatches.ts'],
+      patterns: [/runAttest/, /host_attestation/, /never attested/],
+    },
   },
 ];
 
