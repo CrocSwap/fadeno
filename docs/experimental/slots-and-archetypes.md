@@ -707,12 +707,74 @@ Four things fell out of building it that the sketch did not anticipate:
   every later refusal degrades to "no pair, primary runs normally" with
   `workspace_mode_degraded` recording why the completion row differs from the
   request row's intent.
-- **A paired primary's gitignored output is discarded.** The merge-back diff
-  comes from `git add -A`, which respects `.gitignore`, so a worker whose real
-  product is a gitignored build directory loses it. Carried dependencies are
-  unaffected — they are input, not output — but this is a real narrowing of
-  what a paired `worker` can produce, and it is the open question this section
-  leaves behind rather than one it settles.
+- **A paired primary's gitignored output is discarded** — now declarable, see
+  below. The merge-back diff comes from `git add -A`, which respects
+  `.gitignore`, so a worker whose real product is a gitignored build directory
+  loses it. Carried dependencies are unaffected: they are input, not output.
+
+### Gitignored output: declare it, and the pair steps aside
+
+A dispatch declares whether its gitignored output has to survive. If it does,
+no pair is formed — the trade is one-directional and worth stating plainly: it
+costs a **comparison**, never **work**.
+
+```yaml
+archetypes:
+  worker:
+    requires_write: required     # executor selection, unchanged
+    ignored_output: kept         # pair eligibility. default: discardable
+```
+
+Overridable per dispatch with `--ignored-output kept|discardable`.
+
+**Why a refusal and not a repair.** Two other designs were considered and both
+fail on the same axis. Carrying gitignored paths back needs them *named in
+advance*, which is the problem `worktree_carry` already has and does not
+solve. Letting the arm report what it produced — and having the relay
+integrate it — would make carry-back depend on what a model chose to mention,
+so two runs of one pair could carry back different sets and the pair would
+stop being a controlled comparison. That comparability is the entire reason
+write-shaped pairs exist, so intelligence cannot sit in this path. It is also
+the wrong job for the relay specifically: the cheapest model in the system,
+which does no role work and has a dogfood receipt for defecting on its own
+contract, should not hold write authority over the caller's tree.
+
+Intelligence does have a place here, one step back: an arm reporting "I
+produced `dist/`, you probably want it" is a useful *proposal* that a human or
+a config promotes into the declaration. That is this document's own rule —
+evaluator → structured artifact → deterministic condition. The agent is the
+evaluator; it never becomes the condition.
+
+**It is deliberately not `requires_write`.** That is a `WritePosture`
+consumed during *resolution* to pick a write-capable delivery; this gates
+*pair formation* at materialization. Different axes, different times, and
+folding them would make illegal combinations expressible. The name also has to
+avoid a direction trap: `worktree_carry` already means gitignored files coming
+**in**, so `requires_ignored_output` would read almost exactly like its job.
+
+**The default is the whole design.** `discardable` keeps pairing alive; a
+conservative default would quietly kill the feature. What makes the permissive
+default safe is that the loss is no longer silent: every arm's worktree is
+scanned before teardown and anything gitignored that will not survive is
+recorded as `ignored_output_discarded`. The first time it bites, you see it
+and declare. Detection and the declaration are not alternatives — detection is
+what earns the default.
+
+`truncated: true` on that record means the scan could not guarantee
+completeness, and the list is a **floor, not a set**. "I could not tell" is
+never spelled the same as "there was nothing".
+
+Two things the scan cannot see, both stated here rather than discovered later:
+output written *underneath* a carried path (at this granularity it is
+indistinguishable from the input carried in — the largest gap), and anything
+under `.fadeno/`, which is excluded wholesale because a dispatch writes there
+by construction and reporting it would stamp the mechanism's own footprint on
+every pair.
+
+The builtin catalog deliberately does **not** declare `kept` for `worker`.
+`worker` is the default archetype for nearly every dispatch, so shipping that
+default would make workers globally ineligible for pairing and delete shadow
+pairing as a feature without anyone choosing to.
 
 **Blinding stops being advisory in the same change.** Both arms sit at
 `.fadeno/local/pair/<pair-id8>/<own-dispatch-id8>` — same depth, same shape, a

@@ -426,17 +426,39 @@ spawned.
     symmetry gap rather than a functional one. It matters the moment anything
     wants the relay from the steering path.
 
-11. **A paired `worker`'s gitignored output is discarded.** The merge-back
-    diff comes from `git add -A`, which respects `.gitignore`, so a worker
-    whose real product is a gitignored build directory loses it when a pair is
-    selected. Carried dependencies are unaffected (input, not output). This is
-    a real narrowing of what a paired `worker` can produce, introduced
-    knowingly when write-shaped pairs shipped, and it wants either an opt-out
-    or an explicit carry-back list.
+11. ~~**A paired `worker`'s gitignored output is discarded.**~~ **Fixed** —
+    it takes the opt-out, not the carry-back list. `ignored_output: kept` on
+    an archetype (or `--ignored-output kept` per dispatch) declines the pair
+    rather than destroy the output, and every arm's worktree is scanned before
+    teardown so the loss is recorded as `ignored_output_discarded` even when
+    it is accepted. The carry-back list was rejected for needing paths named
+    in advance — `worktree_carry`'s existing unsolved problem — and an
+    agent-reported carry-back for making the set depend on what a model chose
+    to mention, which would end the pair's comparability. Two gaps remain
+    knowingly: output written underneath a carried path is indistinguishable
+    from the input carried in, and anything under `.fadeno/` is excluded
+    wholesale.
 12. **Nobody judges accumulated pairs.** Phase 6. Both arms now produce
     comparable diffs from one shared baseline for every archetype, so the
     input a judge would need finally exists — which makes this the next real
     step on the shadow line rather than a distant one.
+
+13. **`ignored_output_discarded.truncated` is a boolean where a token would
+    be honest.** It is the narrowed-union defect one level down: a newer
+    writer wanting to spell a *reason* has nowhere to put it, and the reader
+    can only err toward "I could not tell". `note` carries the why as prose
+    today, which is enough to read and not enough to group by. The moment
+    anyone wants truncations grouped by cause, this wants `refusal.predicate`'s
+    shape — a string token — instead.
+14. **"Absent means nothing was discarded" is a claim that ages.** Absence on
+    an `ignored_output_discarded` row conflates three worlds: an unpaired
+    dispatch, a paired arm that scanned and found nothing, and a row written
+    by a Fadeno predating the field. The third does not exist yet; it will the
+    first time someone reads a week-old log after this ships, and by then the
+    states are spelled identically and unrecoverable. `pair_id` discriminates
+    partially, not reliably. Unlike `primary_merge`'s absence, which stays
+    honest, this one degrades with time — the fix is a format version bump,
+    which is why it is not being done casually.
 
 ## Low-friction release boundary
 

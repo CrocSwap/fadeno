@@ -223,8 +223,12 @@ reading docs:
 
 A route entry may also declare `write_access: <bool>` — whether that route's
 **command** delivery can mutate the workspace — beside an optional top-level
-`archetypes:` mapping whose values accept `requires_write`, `fallback`, and
-`distinct_provider_from_inputs`.
+`archetypes:` mapping whose values accept `requires_write`, `ignored_output`,
+`fallback`, `distinct_provider_from_inputs`, and `brief`.
+`ignored_output` is `kept` | `discardable` (absent is `discardable`): `kept`
+means this archetype's gitignored output is load-bearing, so it must not be
+paired — a shadow pair merges the primary back through `git add -A`, which
+drops ignored paths. Declaring it costs a comparison, never work.
 `requires_write` is `required` | `forbidden` | `none`; booleans alias
 (`true` → `required`, `false` → `none`). `fallback` names another archetype
 whose *binding* is used when this one has no slot (never its policy).

@@ -70,6 +70,18 @@ const CLAIMS: Claim[] = [
     },
   },
   {
+    // Gitignored output is the one thing a pair silently destroys, so the
+    // declaration that opts out of pairing and the detection that reports the
+    // loss must both keep their names. Losing either returns this to the
+    // silence it was built to end.
+    id: 'ignored-output-opt-out',
+    doc: { files: [SLOTS], patterns: [/ignored_output/, /kept/, /discardable/] },
+    src: {
+      files: ['src/lib/executors.ts', 'src/commands/dispatch.ts'],
+      patterns: [/ignored_output/, /'kept'/, /'discardable'/],
+    },
+  },
+  {
     // `carry_mutated` is the only signal that a hardlinked path was written
     // through. Losing the name in either place means the hazard is back to
     // being silent, which is how it survived this long.

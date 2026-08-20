@@ -146,8 +146,8 @@ A route entry declares:
   describes its fallback command, never the in-session agent.
 
 **Archetypes.** `archetypes:` is an optional top-level mapping whose values
-accept exactly three keys: `requires_write`, `fallback`, and
-`distinct_provider_from_inputs`. `requires_write` is
+accept exactly five keys: `requires_write`, `ignored_output`, `fallback`,
+`distinct_provider_from_inputs`, and `brief`. `requires_write` is
 `required` | `forbidden` | `none` (booleans alias: `true` → `required`,
 `false` → `none`); absent is `none`. `fallback` is a bare identifier naming
 another archetype whose *binding* is used when this one has no slot.
