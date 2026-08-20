@@ -1020,16 +1020,15 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
   // outside the repo is never sensible, so reporting it beats pretending the
   // entry was never declared.
   //
-  // Residual gap, not introduced by this change and not specific to this
-  // key: `mergeLayer` copies each layer's keys by exact literal name, so a
-  // top-level key that is MISSPELLED entirely (`worktree_carrry:` rather
-  // than `worktree_carry:`) is simply never looked up and never reaches this
-  // function at all — it vanishes during the merge rather than tripping the
-  // unknown-top-level-key check below. That is a pre-existing property of
-  // the layered loader that applies equally to every catalog key (`dials`,
-  // `tools`, etc.), not something this parser can catch on its own; closing
-  // it would mean validating each layer's raw keys before the selective
-  // merge, which is a wider change than this field's own parsing.
+  // The residual gap this comment used to describe — a top-level key
+  // MISSPELLED entirely (`worktree_carrry:` rather than `worktree_carry:`)
+  // being dropped by `mergeLayer`'s copy-by-literal-name before it could
+  // reach the unknown-key check below, and so silently doing nothing — is
+  // now closed, where it said it would have to be: config-layers.ts
+  // validates each layer's RAW keys before the selective merge, against
+  // `CATALOG_TOP_LEVEL_KEYS` above (the list this function also checks).
+  // That is the only place with the typo still in hand; by the time a
+  // document reaches this parser the misspelling is already gone.
   const worktreeCarry: string[] = [];
   if (doc.worktree_carry !== undefined) {
     if (!Array.isArray(doc.worktree_carry)) {
@@ -1051,16 +1050,17 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
     }
   }
 
-  // Reject unknown top-level keys (to catch legacy loadouts etc. as error via schema_version already, but also unknown keys)
-  const allowedTop = ['schema_version','models','routes','dials','bindings','archetypes','constraints','unregistered_model_driver','tools','worktree_carry'];
-  const unknownTop = Object.keys(doc).filter((k) => !allowedTop.includes(k));
+  // Reject unknown top-level keys (to catch legacy loadouts etc. as error via schema_version already, but also unknown keys).
+  // Via the layered loader this is now a backstop: config-layers.ts rejects an
+  // unknown key in each raw layer first, while the offending file is still
+  // identifiable. This still guards anything parsing a catalog document
+  // directly.
+  const unknownTop = Object.keys(doc).filter((k) => !(CATALOG_TOP_LEVEL_KEYS as readonly string[]).includes(k));
   if (unknownTop.length > 0) {
     // If legacy keys like executors/targets/loadouts/default_loadout present, they already would be caught by schema_version check?
     // But they would still be present as unknown keys; map to same migration error for clarity.
-    if (unknownTop.some((k) => ['executors','targets','loadouts','default_loadout','bindings'].includes(k) && (k !== 'bindings'))) {
-      throw new ExecutorProfileError(
-        `${source}: schema_version 3 required — pre-dials catalogs are not supported; migrate: targets:→models:, loadouts:→dials:, default_loadout: delete; see docs/experimental/dials-and-registry.md`,
-      );
+    if (unknownTop.some((k) => (PRE_DIALS_CATALOG_KEYS as readonly string[]).includes(k))) {
+      throw preDialsCatalogError(source);
     }
     // For truly unknown keys, throw generic
     throw new ExecutorProfileError(`${source} has unknown key(s) ${unknownTop.join(', ')}.`);
