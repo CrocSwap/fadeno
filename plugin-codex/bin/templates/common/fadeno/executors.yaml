@@ -57,6 +57,26 @@ models:
     id: muse-spark-1.2-contributor
     effort: xhigh
 
+# The relay: the model that reads a resolver answer and forwards a delivery,
+# doing none of the role work itself. Per-harness because a relay must be a
+# model that harness's own provider already serves. Not an archetype — it
+# carries no policy the kernel enforces, and listing it in `fadeno dial` would
+# imply it is work to be dialed. Absent for a harness = keep the built-in
+# default.
+#
+# These are dogfood receipts, not guesses. 2026-08-12 A/B: haiku broke the
+# relay contract — it summarized deliveries instead of relaying them verbatim,
+# answered from the prompt's first line, and asserted evidence it had not
+# written. sonnet and luna each held it. Raise a value here only against a
+# comparable run; a relay that paraphrases silently corrupts every dispatch.
+relay:
+  # Claude's proxies inherit session effort (the Agent tool has no effort
+  # channel), so a pin here would be inert — model only.
+  claude: sonnet
+  # Codex bakes both into the broker TOML, so effort is pinned: a broker that
+  # only relays has no use for luna's xhigh registry default.
+  codex: luna@low
+
 routes:
   codex:
     current-host:
