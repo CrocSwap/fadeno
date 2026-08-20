@@ -1116,6 +1116,263 @@ export function carryMutationStamp(verdicts: readonly CarryPathVerdict[]): Carry
   return stamps.length > 0 ? stamps : null;
 }
 
+// ---------------------------------------------------------------------------
+// Gitignored output detection — `ignored_output`
+// ---------------------------------------------------------------------------
+//
+// Both arms of a shadow pair now run in their own worktree, and the primary's
+// work reaches the caller's tree as a patch produced by `git add -A` +
+// `git diff --binary --cached` (see `collectIsolatedDiff`). `git add -A`
+// RESPECTS `.gitignore`. So anything an arm produced that the repo ignores —
+// a `dist/`, a `target/`, a generated `coverage/` — is staged by nothing,
+// diffed by nothing, and applied by nothing: it dies with the worktree,
+// silently, with no line anywhere saying it existed.
+//
+// This section is the detection half of removing that silence. It says what
+// ignored content was sitting in a worktree when its arm exited. It does not
+// rescue it, and deliberately so — see `scanIgnoredOutput`.
+
+/**
+ * How many entries one scan will name.
+ *
+ * Git collapses a wholly-ignored directory to a single entry (`dist/`,
+ * `node_modules/`), so an ordinary repo yields tens of entries and this
+ * budget is never approached — measured at 41 entries in Fadeno's own tree.
+ * It exists for the one shape git cannot collapse: ignored files scattered
+ * through a large TRACKED tree (compiled artifacts beside their sources),
+ * where the count is per-file. Hitting it sets `truncated`, and a truncated
+ * scan is a floor rather than a set.
+ *
+ * Three orders of magnitude below `CARRY_FINGERPRINT_MAX_ENTRIES` because
+ * these are paths destined for an evidence row a human reads, not stat tuples
+ * in a comparison map the machine consumes.
+ *
+ * Overridable per call via `scanIgnoredOutput`'s `{ maxEntries }`, the same
+ * shape `fingerprintCarriedPaths` takes — which is also what lets the cap's
+ * behaviour be tested without materializing ten thousand files.
+ */
+export const IGNORED_OUTPUT_MAX_ENTRIES = 10_000;
+
+const IGNORED_OUTPUT_MAX_BUFFER = 32 * 1024 * 1024;
+
+export interface IgnoredOutputScan {
+  /** Repo-relative paths, directory-collapsed the way git reports them.
+   * A trailing `/` is git's own marker that the entry is a whole directory
+   * and is preserved rather than trimmed: `dist/` and a file named `dist`
+   * are different findings. */
+  paths: string[];
+  /** The listing could not be trusted to be complete. `paths` is then a
+   * floor, not the set. */
+  truncated: boolean;
+  /** Why the scan is truncated, when it is. Optional so a caller can build an
+   * `IgnoredOutputScan` literal without it; follows `CarryMutationStamp.note`,
+   * which exists for the same reason — a degraded verdict that cannot say why
+   * is barely better than no verdict. */
+  note?: string;
+}
+
+/** Normalize one path for comparison: forward slashes, no `./` prefix, no
+ * trailing slash. Comparison only — the reported string keeps git's form. */
+function normalizeScanPath(raw: string): string {
+  let out = raw.split('\\').join('/');
+  while (out.startsWith('./')) out = out.slice(2);
+  while (out.length > 1 && out.endsWith('/')) out = out.slice(0, -1);
+  return out;
+}
+
+/**
+ * Is `rel` at or underneath `prefix`?
+ *
+ * The `/` in the second test is the whole point. A bare
+ * `rel.startsWith(prefix)` matches `node_modules_backup` against a carry of
+ * `node_modules` and silently erases a real finding — the exact class of bug
+ * this detector exists to stop producing, reintroduced one level down.
+ */
+function isAtOrUnder(rel: string, prefix: string): boolean {
+  return rel === prefix || rel.startsWith(`${prefix}/`);
+}
+
+/**
+ * Fadeno's own state inside a worktree, which is never the arm's output.
+ *
+ * `isUnderShadowHome` (dispatch.ts) makes the narrow version of this call for
+ * the copy direction — `.fadeno/local` only, checked explicitly rather than
+ * delegated to `--exclude-standard`, because a user repo may commit `.fadeno/`
+ * definitions while ignoring only some subpaths. That same observation is why
+ * the check here is WIDER, not narrower, and it is a granularity fact rather
+ * than a taste call:
+ *
+ * - In a user repo, `.fadeno/playbooks/` and `.fadeno/schemas/` are TRACKED,
+ *   so they can never appear in an `--others --ignored` listing at all. What
+ *   remains ignorable under `.fadeno/` is exactly Fadeno's own machine-local
+ *   state and traces (`local/`, `runs/`, `progress/`, `dispatches.jsonl`) —
+ *   by definition not a deliverable, and `runs/` is documented as output that
+ *   is safe to delete.
+ * - In a repo that ignores `.fadeno/` wholesale (Fadeno's own tree does), git
+ *   `--directory` collapses the lot to a single `.fadeno/` entry. There is
+ *   then no `.fadeno/local` to exclude separately: the choice is to report an
+ *   entry that is mostly the worktree's own scaffolding, or to drop it.
+ *   Distinguishing them would need the recursive walk this scan is built to
+ *   avoid.
+ * - A dispatch running inside a worktree writes under `.fadeno/` by
+ *   construction, so reporting it would put the mechanism's own footprint on
+ *   every single pair — the `node_modules` argument, applied to ourselves.
+ *
+ * The cost is stated on `scanIgnoredOutput` as a false negative: a repo that
+ * keeps genuine work product under an ignored `.fadeno/` path is not seen.
+ */
+function isFadenoWorktreeState(rel: string): boolean {
+  return isAtOrUnder(rel, '.fadeno');
+}
+
+/**
+ * List the gitignored content sitting in `worktreeAbs` that no diff will
+ * carry out of it.
+ *
+ * ## Why git does the listing
+ *
+ * `git ls-files --others --ignored --exclude-standard --directory` is the
+ * only listing that sees the same exclude set `git add -A` obeys — the
+ * `.gitignore` files, `.git/info/exclude`, and `core.excludesFile` together.
+ * A hand-rolled `.gitignore` parser would drift from the stager it is
+ * supposed to predict, and a recursive `readdir` walk cannot answer "is this
+ * ignored" at all. It is also cheap because git collapses wholly-ignored
+ * directories: 41 entries and ~38ms across Fadeno's own tree, against a
+ * `node_modules`-scale walk for the manual version.
+ *
+ * The spawn deliberately inherits the ambient environment. Neutralizing
+ * global/system git config (as `isRegisteredWorktree` does, for reasons that
+ * do not apply here) would drop `core.excludesFile` and make this scan see a
+ * DIFFERENT ignore set than the `git add -A` it exists to predict, which is
+ * the one property that must hold.
+ *
+ * ## What is excluded, and why each
+ *
+ * - **`carriedPaths`** — `worktree_carry:` entries are INPUT: they were
+ *   deliberately placed in the worktree before the arm started, and their
+ *   being ignored is why they had to be carried in the first place. Naming a
+ *   carried `node_modules` as discarded output would bury the `dist/` that
+ *   actually matters under the one entry guaranteed to be present.
+ * - **`.fadeno/`** — see `isFadenoWorktreeState`.
+ *
+ * An entry that is a strict ANCESTOR of a carried path is kept, not dropped:
+ * a carry of `build/cache` under a wholly-ignored `build/` yields the entry
+ * `build/`, which contains the carry AND whatever the arm built beside it.
+ * Dropping it would hide real output to suppress known input, and hiding is
+ * the failure mode this whole detector exists to end.
+ *
+ * ## Never throws, and "I could not tell" is never spelled "nothing"
+ *
+ * A git failure — not a repo, a removed worktree, a broken git — returns
+ * `truncated: true` with whatever partial listing was recovered (usually
+ * none). That asymmetry is the point: `{ paths: [], truncated: false }` is a
+ * positive claim that the worktree was clean, and it is only ever returned
+ * when git actually said so.
+ *
+ * ## Read-only
+ *
+ * This never stages, copies, rescues, or deletes anything. The worktree is
+ * about to be torn down and the caller decides what that means; a detector
+ * that also repaired would be making an unreviewable merge decision on the
+ * strength of a filename.
+ *
+ * ## False negatives — what this will not see
+ *
+ * 1. **Anything under `.fadeno/`**, per the exclusion above. A repo storing
+ *    real deliverables at an ignored `.fadeno/` path loses them invisibly.
+ * 2. **Anything at or under a declared `worktree_carry:` path.** An arm that
+ *    builds INTO its carried tree — a `node_modules/.bin` shim, a
+ *    `.venv/lib/.../site-packages` install — produces output that is dropped
+ *    and is not reported, because at this granularity it is indistinguishable
+ *    from the input that was carried in.
+ * 3. **Ignored content that survives anyway.** A path that is ignored but
+ *    also TRACKED is staged by `git add -A` regardless (ignore rules do not
+ *    apply to tracked files) and never appears in this listing either — the
+ *    two omissions agree, so this one is harmless.
+ * 4. **Beyond the budget.** Reported as `truncated`, never as clean.
+ * 5. **Causation, always.** This is an appearance scan with no "before"
+ *    snapshot, so it names what was ignored and present, not what the arm
+ *    wrote. The bound is tight rather than theoretical — `git worktree add`
+ *    cuts a clean checkout of tracked HEAD content, so a fresh worktree has
+ *    no ignored files except what the carry put there (excluded above) and
+ *    what ran inside it. Still an attestation, in the same sense as
+ *    `carry_mutated`: named for what was observed, not for a culprit.
+ */
+export function scanIgnoredOutput(
+  worktreeAbs: string,
+  carriedPaths: readonly string[],
+  opts: { maxEntries?: number } = {},
+): IgnoredOutputScan {
+  const maxEntries = opts.maxEntries ?? IGNORED_OUTPUT_MAX_ENTRIES;
+  if (typeof worktreeAbs !== 'string' || worktreeAbs.length === 0) {
+    // `git -C ''` would silently scan the CURRENT process's cwd — the
+    // primary's tree — and report its entire ignored set as a worktree's
+    // dropped output. Refuse rather than answer about the wrong directory.
+    return { paths: [], truncated: true, note: 'no worktree path was given, so nothing could be scanned.' };
+  }
+
+  let result: SpawnSyncReturns<string>;
+  try {
+    result = spawnSync(
+      'git',
+      ['-C', worktreeAbs, 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'],
+      { encoding: 'utf8', maxBuffer: IGNORED_OUTPUT_MAX_BUFFER },
+    );
+  } catch (err) {
+    // spawnSync itself throwing (EMFILE, ENOMEM) is rarer than a nonzero
+    // exit, but it is the same answer: unknown, not clean.
+    return { paths: [], truncated: true, note: `the ignored-output listing could not be run: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  const failed = result.error != null || result.status !== 0;
+  const raw = String(result.stdout ?? '');
+  const fields = raw.split('\0');
+  // `git ls-files -z` NUL-TERMINATES every record, so a successful run's last
+  // field is always empty. A failed run (a `maxBuffer` overflow is the case
+  // worth recovering) can end mid-path; that fragment is not a real path and
+  // is dropped rather than reported as one.
+  if (failed && raw.length > 0 && !raw.endsWith('\0')) fields.pop();
+
+  const carries: string[] = [];
+  for (const declared of carriedPaths) {
+    if (typeof declared !== 'string') continue;
+    const norm = normalizeScanPath(declared);
+    if (norm.length === 0 || norm === '.') continue; // a carry of the whole tree would exclude everything
+    carries.push(norm);
+  }
+
+  const paths: string[] = [];
+  let cappedOut = false;
+  for (const field of fields) {
+    if (field.length === 0) continue;
+    const rel = normalizeScanPath(field);
+    if (rel.length === 0 || rel === '.') continue;
+    if (isFadenoWorktreeState(rel)) continue;
+    if (carries.some((carry) => isAtOrUnder(rel, carry))) continue;
+    if (paths.length >= maxEntries) { cappedOut = true; break; }
+    paths.push(field); // git's own spelling, trailing slash and all
+  }
+
+  if (failed) {
+    const reason = result.error != null
+      ? result.error.message
+      : (String(result.stderr ?? '').trim() || `exit ${result.status ?? 'unknown'}`);
+    return {
+      paths,
+      truncated: true,
+      note: `the ignored-output listing failed (${reason.slice(0, ISOLATED_DIFF_MAX_NOTE)}), so these ${paths.length} ${paths.length === 1 ? 'path is' : 'paths are'} a floor, not the set.`,
+    };
+  }
+  if (cappedOut) {
+    return {
+      paths,
+      truncated: true,
+      note: `more than ${maxEntries} ignored entries are present; the listing stopped there, so these paths are a floor, not the set.`,
+    };
+  }
+  return { paths, truncated: false };
+}
+
 /**
  * Create a detached worktree for an isolated delivery. The worktree is cut
  * from `HEAD` before any primary work runs so both sides start from the same
