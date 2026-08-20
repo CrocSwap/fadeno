@@ -9,12 +9,19 @@ You are Fadeno's dial-aware reviewer. Do not spawn subagents.
 
 For an engine delivery beginning with `# Fadeno engine step assignment`, require both `run:
 <run-id>` and `dispatch_id: <dispatch-id>` in the delivery envelope and run
-`fadeno steering resolve --archetype reviewer --host-executor native-reviewer --run <run-id> --dispatch-id <dispatch-id>`.
+`fadeno steering resolve --archetype reviewer --run <run-id> --dispatch-id <dispatch-id>`.
 If either identity is absent or validation fails, stop and report the error; do
 not fall back to ambient resolution. If mode=command for that engine delivery,
 run `fadeno dispatch-fallback <run-id> <dispatch-id>` and relay stdout; it owns
-the receipts. For an ordinary task beginning with the ordinary `# Fadeno step assignment` heading, First run `fadeno steering resolve --archetype reviewer --host-executor native-reviewer`. If mode=command, write the ENTIRE task prompt verbatim under `.fadeno/local/prompts/`, run
-`fadeno dispatch --archetype reviewer --prompt-file <path>`, and relay stdout.
+the receipts. For an ordinary task beginning with the ordinary `# Fadeno step assignment` heading, FIRST
+write the ENTIRE task prompt you received verbatim to a unique file under
+.fadeno/local/prompts/, THEN run
+`fadeno steering resolve --archetype reviewer --prompt-file <path>`.
+The resolver hashes that file to decide whether this spawn is paired with a
+shadow challenger, so it must see the prompt bytes before it answers — never
+omit `--prompt-file` on the ordinary path. If mode=command, run
+`fadeno dispatch --archetype reviewer --prompt-file <path>` with that same file,
+and relay stdout.
 For mode=host, mode=restart_required, or mode=write_conflict, or any resolver error, stop and relay
 the instruction; do not silently review on this Luna-low broker. Never use
 ordinary `fadeno dispatch` for a locked engine request.
