@@ -342,11 +342,19 @@ spawned.
 
 **Follow-ups, in rough priority:**
 
-1. **Codex half** — per-harness `relay:` catalog map, no inheritance, emit
-   (never copy) the project-scope `.codex/agents` TOMLs, and a `doctor` check
-   for a project-scope broker shadowing a newer user-scope one. Blocked on the
-   layered loader rejecting misspelled top-level keys, since `relay:` would
-   otherwise ship depending on that bug.
+1. ~~**Codex half**~~ **Shipped.** `relay:` is a per-harness catalog key, both
+   scopes' `.codex/agents` TOMLs are emitted rather than copied, and `doctor`
+   reports a project-scope broker shadowing a user-scope one. Its blocker
+   (the layered loader silently dropping misspelled top-level keys) cleared
+   first, so `relay:` never shipped depending on that bug — and writing its
+   tests immediately found the same defect surviving by value type, which is
+   item 6 below.
+
+   Two things landed beyond the original sketch. Project scope now carries the
+   managed header, without which every freshly initialized repo would trip the
+   new shadowing warning forever. And Claude's relay came along too: the
+   spawn hook reads `relay.claude` from the resolver, and the proxy
+   frontmatter is stamped at emit.
 2. **The reader drops `session_effort` and `lane_reason`.** `DispatchEntry`
    has no field for either, so both are invisible in `fadeno dispatches` and
    in `--json` — pre-existing and identical for `host_delivery`, so fix it for
@@ -380,8 +388,12 @@ spawned.
    `test/drive-parallel.test.ts:169` intermittently time out on the same lock
    and pass in isolation. Not caused by this work; it muddies every agent
    verification run, which is reason enough to fix it.
-8. **Four copies of the user-scope Codex agent directory rule, and one of them
-   disagrees.** `steering.ts`, `status.ts`, `uninstall.ts`, and `doctor.ts`
+8. ~~**Four copies of the user-scope Codex agent directory rule, and one of
+   them disagrees.**~~ **Fixed** — one `codexUserAgentDir` in
+   `user-paths.ts`. The write-up below named the wrong file as the deviant:
+   `uninstall.ts` had the *correct*, hermetic spelling all along, matching
+   `userPaths`' own convention in that module, and it was the other three that
+   leaked a real `CODEX_HOME` into tests. Original finding, for the record: `steering.ts`, `status.ts`, `uninstall.ts`, and `doctor.ts`
    each re-derive `$CODEX_HOME/agents` else `<home>/.codex/agents`. Three read
    `opts?.env?.CODEX_HOME ?? process.env.CODEX_HOME`; `uninstall.ts` binds
    `env = opts?.env ?? process.env` first, so an injected env *without*
@@ -391,8 +403,12 @@ spawned.
    agents` — and silently leaves the managed agents it was asked to remove.
    Verified by reading all four. Wants one exported helper, with `steering.ts`
    as the definition since it decides where the file gets written.
-9. **`doctor`'s unmanaged-shadow finding asserts a mechanism it does not
-   observe.** It says a frozen broker "predating `--prompt-file` /
+9. ~~**`doctor`'s unmanaged-shadow finding asserts a mechanism it does not
+   observe.**~~ **Fixed** — the flags are read off the file and the wording
+   follows what was found. Verified against this repo, whose own frozen
+   brokers still carry `--prompt-file`: the finding now says "nothing is
+   broken yet" there instead of claiming a drift that is not happening.
+   Original finding: It says a frozen broker "predating `--prompt-file` /
    `--host-executor`" invokes `steering resolve` without them; it never reads
    the file's invocation to check. The claim is correctly conditional, but
    scanning for the flag would let it report the omission as fact instead —

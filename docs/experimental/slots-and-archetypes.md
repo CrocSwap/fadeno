@@ -3,8 +3,8 @@
 **Status:** phases 1–5.5 implemented — 1 (session slot overrides, 0.6.0-rc.9),
 2 (archetype schema pass, 0.6.0-rc.12), 3 (constraint tiers, 0.6.0-rc.13),
 4 (shadow dispatches + model tryouts, 0.6.0-rc.15), 5 + 5.5 (symmetric pairs,
-trustworthy isolation, measured identity — `feat/symmetric-shadow-pairs`,
-unmerged as of 0.6.0-rc.34). *Effort decides the lane* is designed, not built.
+trustworthy isolation, measured identity — merged to main 2026-08-20).
+*Effort decides the lane* is **built**, both halves.
 **Decision date:** 2026-08-12
 **Relationship:** successor horizon to
 [`loadouts-and-dispatch.md`](loadouts-and-dispatch.md) (extends its catalog,
@@ -826,12 +826,19 @@ invalid.
 
 ## Effort decides the lane
 
-**Status:** the Claude half is **built** — predicate, grid retirement, hook,
-rendering, and hook-side refusal evidence. The Codex half below is designed,
-not built. `models.<name>.effort` and the `relay:` map are catalog work that
-depended on the layered loader rejecting misspelled top-level keys first —
-now satisfied, so `relay:` joins `CATALOG_TOP_LEVEL_KEYS` and layers by
-default rather than needing the merge loop taught about it.
+**Status: built, both halves** (2026-08-20). Claude: predicate, grid
+retirement, hook, rendering, hook-side refusal evidence. Codex: the `relay:`
+catalog key, brokers emitted rather than copied at both scopes, and a `doctor`
+check for a project-scope broker shadowing a user-scope one.
+
+`relay:` did join `CATALOG_TOP_LEVEL_KEYS` and layer by default, exactly as
+this paragraph predicted once the misspelled-key fix landed. What the
+prediction missed is that the same silent-drop defect survived one layer down
+by value *type*: `relay: sonnet` loaded clean and did nothing, because the
+merge skipped any entry-merged key whose value was not a mapping. Writing the
+new key's tests is what found it. The merge now rejects a declared non-mapping
+while still tolerating a bare `key:` — which was the blocker that had deferred
+that fix, and turned out to be its shape.
 
 
 The identity grid exists to let a host spawn run at an effort the session is
@@ -985,8 +992,11 @@ get an archetype back in-session, never to avoid being wrong.
 
 ### The relay identity belongs in the catalog
 
-The Codex command broker hardcodes `model = "gpt-5.6-luna"` /
-`model_reasoning_effort = "low"`, and Claude's dispatch proxies hardcode
+**Built.** What follows is the design as written; three notes on what building
+it changed are at the end of the section.
+
+The Codex command broker hardcoded `model = "gpt-5.6-luna"` /
+`model_reasoning_effort = "low"`, and Claude's dispatch proxies hardcoded
 `sonnet`. Both are correct choices for a relay — luna and sonnet both hold the
 relay contract under dogfood where haiku did not, and a proxy turn is only a
 few relay tokens. Neither is a *dialable* choice, which is the problem: the
@@ -1023,6 +1033,31 @@ shadow pairs entirely). Project-scope files must be emitted from the resolved
 catalog value like the user-scope ones, and `doctor` must report a
 project-scope broker shadowing a newer user-scope one, which is invisible
 today.
+
+**What building it changed.**
+
+*Absent is not a value.* `relay:` missing for a harness resolves to `null`, and
+every caller keeps its own built-in literal rather than inventing one — a relay
+the session's provider cannot serve is worse than a stale but servable one. A
+self-contained project catalog suppresses the builtin layer entirely, so `null`
+is the common case in a real repo, not the exotic one. The old literals survive
+as those fallbacks, which is why a repo with no `relay:` sees no diff at all.
+
+*Named-but-unservable throws.* If the catalog names a relay whose provider has
+no route in that harness, resolution raises rather than degrading to `null`.
+Null is reserved for "stated no opinion", and collapsing the two would
+resurrect the silent-vanish failure the key-strictness work removed. The cost
+is real and deliberate: a broken `relay.<harness>` denies every spawn in the
+repo, including host-lane spawns that never touch a relay. It is reachable only
+by actively editing `relay:`, and the error names the key.
+
+*Claude's two channels refresh at different rates.* The spawn hook reads
+`relay.claude` from the resolver on every spawn, so it is live. The proxy
+frontmatter can only change when the file is written, so it is stamped at emit
+— scoped to frontmatter carrying both `name: dispatch-` and `model:`, so a role
+agent can never be relay-stamped even if one later gains a model of its own.
+That asymmetry is not an oversight: proxy bodies are long prose contracts, not
+generated text, so stamping is right where rendering would be wrong.
 
 ## Phasing summary
 
