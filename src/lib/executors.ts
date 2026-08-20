@@ -402,9 +402,34 @@ export interface ExecutorProfile {
    * `config-layers.ts`'s `mergeLayer`.
    */
   worktreeCarry: string[];
+  /**
+   * Per-harness identity of the *relay* — the cheap model that reads a
+   * resolver answer and forwards a delivery, doing none of the role work
+   * itself (Codex's command broker, Claude's dispatch proxies).
+   *
+   * Deliberately NOT an archetype. Canonical status in this system is earned
+   * by a policy the kernel enforces, and a relay carries none; making it one
+   * would also list it in `fadeno dial` as though it were work to be dialed.
+   * It is per-harness rather than a single value because a relay must be a
+   * model the session's own provider already serves — and `dials:` is a flat
+   * archetype→ref map, with harness variation living in `routes:`.
+   *
+   * Absent for a harness means "no catalog opinion": the caller keeps its own
+   * built-in default rather than being handed a model the provider may not
+   * serve. See `resolveRelay`.
+   */
+  relay: Record<string, DialRef>;
 }
 
 export type HarnessId = 'codex' | 'claude' | 'grok' | 'standalone';
+
+/**
+ * Harnesses that HAVE a relay, and so may key `relay:` in the catalog.
+ *
+ * `standalone` is absent by construction: a relay exists to forward work from
+ * inside a host session, and standalone has no host session to forward from.
+ */
+export const RELAY_HARNESSES = ['claude', 'codex', 'grok'] as const;
 
 export function activeHarness(explicit?: HarnessId, options: UserPathOptions = {}): HarnessId {
   if (explicit != null) return explicit;
@@ -489,6 +514,7 @@ export const CATALOG_TOP_LEVEL_KEYS = [
   'unregistered_model_driver',
   'tools',
   'worktree_carry',
+  'relay',
 ] as const;
 
 export type CatalogTopLevelKey = (typeof CATALOG_TOP_LEVEL_KEYS)[number];
@@ -1050,6 +1076,36 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
     }
   }
 
+  // relay
+  //
+  // The relay identity used to live in source literals — `gpt-5.6-luna` in
+  // the Codex broker renderer, `sonnet` in Claude's spawn hook and proxy
+  // frontmatter. Both were the right VALUE (each holds the relay contract
+  // under dogfood where a smaller model did not) and the wrong LOCATION: the
+  // relay was the one role in a system built on dialable identities whose
+  // identity was unreachable from the catalog.
+  //
+  // Keys are harness ids, and strictly so — a misspelled `cladue:` here would
+  // otherwise mean "no catalog opinion for claude", i.e. silently keeping the
+  // built-in default, which is the exact silent-drop failure the layered key
+  // check exists to prevent.
+  const relay: Record<string, DialRef> = {};
+  if (doc.relay !== undefined) {
+    if (!isMapping(doc.relay)) {
+      throw new ExecutorProfileError(
+        `${source}: \`relay\` must be a mapping of harness → dial ref (e.g. \`claude: sonnet\`).`,
+      );
+    }
+    for (const [harnessKey, value] of Object.entries(doc.relay)) {
+      if (!RELAY_HARNESSES.includes(harnessKey as (typeof RELAY_HARNESSES)[number])) {
+        throw new ExecutorProfileError(
+          `${source}: \`relay.${harnessKey}\` is not a harness that has a relay. Known: ${RELAY_HARNESSES.join(', ')}.`,
+        );
+      }
+      relay[harnessKey] = parseDialRef(value, `${source}: \`relay.${harnessKey}\``);
+    }
+  }
+
   // Reject unknown top-level keys (to catch legacy loadouts etc. as error via schema_version already, but also unknown keys).
   // Via the layered loader this is now a backstop: config-layers.ts rejects an
   // unknown key in each raw layer first, while the offending file is still
@@ -1079,6 +1135,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
     notes,
     tools,
     worktreeCarry,
+    relay,
   };
 }
 
@@ -1364,6 +1421,33 @@ function declaredDriverAliases(routes: Record<string, RouteRaw>): string[] {
     s.add(route.driver ?? key);
   }
   return [...s].sort();
+}
+
+export interface ResolvedRelay {
+  /** As written in the catalog, e.g. `gpt-5.6-luna@low`. */
+  refString: string;
+  /** Provider-facing id the harness must be handed, e.g. `gpt-5.6-luna`. */
+  modelId: string;
+  /** Pinned effort, or the model registry's default when the ref omits one. */
+  effort: string;
+}
+
+/**
+ * The relay identity for one harness, compiled to what an emitter writes.
+ *
+ * Returns null when the catalog states no opinion for that harness — callers
+ * keep their own built-in default rather than inventing one, because a relay
+ * the session's provider cannot serve is worse than a stale-but-servable one.
+ *
+ * The harness is applied to the profile before compiling so this answers for
+ * the REQUESTED harness's route table, not the ambient session's: the Claude
+ * plugin assets are routinely generated from a Codex session and vice versa.
+ */
+export function resolveRelay(profile: ExecutorProfile, harness: HarnessId): ResolvedRelay | null {
+  const ref = profile.relay?.[harness];
+  if (ref == null) return null;
+  const compiled = compileDialRef(ref, { ...profile, harness });
+  return { refString: formatDialRef(ref), modelId: compiled.modelId, effort: compiled.effectiveEffort };
 }
 
 export function compileDialRef(ref: DialRef, profile: ExecutorProfile): CompiledDelivery {

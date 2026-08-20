@@ -76,6 +76,9 @@ const ENTRY_MERGED_KEYS: ReadonlySet<CatalogTopLevelKey> = new Set<CatalogTopLev
   'models',
   'dials',
   'tools',
+  // Per-harness, so entry-merged: overriding the Codex relay in a project
+  // catalog must not silently drop the builtin's Claude relay beside it.
+  'relay',
 ]);
 
 /**

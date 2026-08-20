@@ -210,6 +210,17 @@ const SURVIVES_THE_MERGE: Record<string, { declare: Record<string, unknown>; che
     declare: { worktree_carry: ['node_modules'] },
     check: (p) => assert.deepEqual(p.worktreeCarry, ['node_modules']),
   },
+  relay: {
+    declare: { relay: { claude: 'sonnet', codex: 'luna@low' } },
+    check: (p) => {
+      assert.equal(p.relay.claude?.model, 'sonnet');
+      // The effort pin has to survive as a pin: the Codex broker bakes it,
+      // and losing it would silently promote the relay to luna's xhigh
+      // registry default on every dispatch.
+      assert.equal(p.relay.codex?.model, 'luna');
+      assert.equal(p.relay.codex?.effort, 'low');
+    },
+  },
 };
 
 test('every advertised top-level key survives the merge and reaches the parsed profile', (t) => {
