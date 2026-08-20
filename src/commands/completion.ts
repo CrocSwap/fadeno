@@ -61,6 +61,13 @@ const command = (
 const NONE: OptionSpec = { kind: 'none' };
 const PATH: OptionSpec = { kind: 'path' };
 
+// Shared by `dial shadow` and its top-level alias `shadow` — one spec so the
+// two spellings cannot drift apart on which flags they accept.
+const SHADOW_SPEC = command(
+  { '--via': { kind: 'free' }, '--rate': { kind: 'free' }, '--json': NONE },
+  ['archetype', 'free'],
+);
+
 const COMMANDS: Record<string, CommandSpec> = {
   setup: command({ '--codex': NONE, '--claude': NONE, '--non-interactive': NONE, '--from': PATH, '--reset-runtime': NONE }),
   status: command({ '--verbose': NONE }),
@@ -89,11 +96,13 @@ const COMMANDS: Record<string, CommandSpec> = {
     ['archetype', 'free'],
     {
       clear: command({ '--session': NONE, '--user': NONE, '--repo': NONE }, ['archetype']),
-      shadow: command({ '--via': { kind: 'free' }, '--rate': { kind: 'free' } }, ['archetype', 'free']),
+      shadow: SHADOW_SPEC,
       'clear-shadow': command({}, ['archetype']),
       resolve: command({ '--archetype': { kind: 'archetype' }, '--prompt-sha256': { kind: 'free' } }, []),
     },
   ),
+  // Top-level alias for `dial shadow` — same handler in cli.ts, same flags.
+  shadow: SHADOW_SPEC,
   steering: command(
     {},
     [],

@@ -1250,6 +1250,18 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
   };
 }
 
+/**
+ * `fadeno dial shadow` / `fadeno shadow` with no further arguments: the same
+ * effective table `runDialShow` builds, filtered to archetypes carrying an
+ * active shadow attachment. Composition, not a second renderer — every field
+ * besides `rows` (dials, shadows, staleShadows, note, …) passes through
+ * unchanged, so `--json` and the stale-shadow warnings stay correct for free.
+ */
+export function runShadowShow(opts: DialCommonOptions = {}): DialShowResult {
+  const result = runDialShow(opts);
+  return { ...result, rows: result.rows.filter((row) => row.shadow != null) };
+}
+
 // ---- Resolve ----
 export interface DialResolveResult {
   archetype: string;
