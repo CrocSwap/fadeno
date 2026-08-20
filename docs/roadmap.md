@@ -380,6 +380,24 @@ spawned.
    `test/drive-parallel.test.ts:169` intermittently time out on the same lock
    and pass in isolation. Not caused by this work; it muddies every agent
    verification run, which is reason enough to fix it.
+8. **Four copies of the user-scope Codex agent directory rule, and one of them
+   disagrees.** `steering.ts`, `status.ts`, `uninstall.ts`, and `doctor.ts`
+   each re-derive `$CODEX_HOME/agents` else `<home>/.codex/agents`. Three read
+   `opts?.env?.CODEX_HOME ?? process.env.CODEX_HOME`; `uninstall.ts` binds
+   `env = opts?.env ?? process.env` first, so an injected env *without*
+   `CODEX_HOME` never falls through to the process one. A caller who injects
+   an env while `CODEX_HOME` is set in the environment therefore has steering
+   write to `$CODEX_HOME/agents` while uninstall looks in `<home>/.codex/
+   agents` — and silently leaves the managed agents it was asked to remove.
+   Verified by reading all four. Wants one exported helper, with `steering.ts`
+   as the definition since it decides where the file gets written.
+9. **`doctor`'s unmanaged-shadow finding asserts a mechanism it does not
+   observe.** It says a frozen broker "predating `--prompt-file` /
+   `--host-executor`" invokes `steering resolve` without them; it never reads
+   the file's invocation to check. The claim is correctly conditional, but
+   scanning for the flag would let it report the omission as fact instead —
+   and this repo's own frozen copies happen to still carry `--prompt-file`,
+   so the conditional is doing real work today.
 
 ## Low-friction release boundary
 
