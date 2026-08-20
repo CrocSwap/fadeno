@@ -346,7 +346,14 @@ test('primary rows byte-stable when a shadow fires', (t) => {
     assert.equal(a.archetype, b.archetype);
   }
   // Also verify primary rows compared field-by-field: prompt_snapshot, dial, etc. should be equal ignoring timestamps/dispatch_id and snapshot paths
-  const ignore = new Set(['timestamp', 'dispatch_id', 'duration_ms', 'output_snapshot', 'prompt_snapshot', 'command_sha256', 'prompt_sha256']);
+  // `workspace_mode` is now an INTENDED difference, not drift: a selected pair
+  // puts the primary in its own worktree so both arms produce comparable
+  // diffs, where an unpaired dispatch still runs in the shared tree. Asserted
+  // explicitly below rather than merely tolerated here — the point of this
+  // test is that attaching a shadow leaves the primary's IDENTITY alone
+  // (executor, dial, model, archetype, resolution, prompt), and that is
+  // unchanged.
+  const ignore = new Set(['timestamp', 'dispatch_id', 'duration_ms', 'output_snapshot', 'prompt_snapshot', 'command_sha256', 'prompt_sha256', 'workspace_mode']);
   for (let i = 0; i < 2; i++) {
     const a = primaryShadow[i]!;
     const b = primaryNo[i]!;
@@ -360,6 +367,10 @@ test('primary rows byte-stable when a shadow fires', (t) => {
   }
   // prompt_sha256 already checked equal above
   assert.equal(primaryShadow[0]!.prompt_sha256, primaryNo[0]!.prompt_sha256);
+  // The one difference, stated positively so it cannot silently regress in
+  // either direction: paired means isolated, unpaired means shared.
+  assert.equal(primaryShadow[0]!.workspace_mode, 'isolated', 'a paired primary runs in its own worktree');
+  assert.equal(primaryNo[0]!.workspace_mode, 'shared', 'an unpaired primary still runs in the shared tree');
 });
 
 test('shadow identity re-spell: dial/model/model_id/driver/reasoning_effort', (t) => {
@@ -481,7 +492,14 @@ test('shadow worktree is cut from HEAD before the primary can move it', (t) => {
   const result = runDispatch({ archetype: 'worker', prompt: 'head', repoRoot: root, userPathOptions: onHarness('standalone') });
   assert.equal(result.stdout, 'COMMITTED');
   const headAfter = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim();
-  assert.notEqual(headAfter, headBefore, 'the primary must actually have moved HEAD');
+  // The primary DID commit — its stdout says so — but a selected pair now puts
+  // it in its own worktree, so the commit lands on that worktree's detached
+  // HEAD and the shared repo's HEAD cannot move at all. This assertion used to
+  // read `notEqual`, proving the shadow survived a contaminating primary; the
+  // guarantee is now stronger than the thing it was testing, so it asserts the
+  // stronger fact instead: there is no longer a way for the primary to
+  // contaminate the comparison, rather than a way that is defended against.
+  assert.equal(headAfter, headBefore, 'an isolated primary cannot move the shared repo HEAD');
   const sComp = evidenceRows(root).find((r) => r.shadow === true && r.event === 'dispatch_completed')!;
   const shadowHead = readFileSync(join(root, sComp.output_snapshot as string), 'utf8').trim();
   assert.equal(shadowHead, headBefore, 'the shadow must start from pre-primary HEAD');
@@ -491,7 +509,14 @@ test('a shadow worktree is retained for review, but its live lease is released e
   // Both request rows exist before the primary starts. Turning the ledger path
   // into a directory from the primary forces its completion append to throw,
   // after the concurrent shadow and its detached worktree already exist.
-  const primary = ['node', '-e', "const f=require('fs');f.rmSync('.fadeno/dispatches.jsonl');f.mkdirSync('.fadeno/dispatches.jsonl');process.stdout.write('BROKE_LEDGER');"];
+  // Resolved through `--git-common-dir` rather than a bare relative path: a
+  // selected pair runs the primary inside its own worktree, where
+  // `.fadeno/dispatches.jsonl` is that worktree's copy and breaking it would
+  // leave the real ledger — and so the completion append — perfectly healthy.
+  // The common dir is the same for a worktree and its main repo, so this
+  // reaches the real ledger from either, and the test no longer depends on
+  // which workspace mode the primary happens to run in.
+  const primary = ['node', '-e', "const{execSync}=require('child_process');const p=require('path');const f=require('fs');const root=p.dirname(p.resolve(execSync('git rev-parse --git-common-dir').toString().trim()));const led=p.join(root,'.fadeno','dispatches.jsonl');f.rmSync(led);f.mkdirSync(led);process.stdout.write('BROKE_LEDGER');"];
   const shadow = ['node', '-e', "process.stdout.write('SHADOW_DONE')"];
   const root = seedTwoProviders(t, primary, shadow);
   initGit(root);
@@ -504,11 +529,14 @@ test('a shadow worktree is retained for review, but its live lease is released e
   // The challenger's work product outlives the run: a pair is judged later, so
   // deleting it here would throw away half the comparison. It stays a
   // registered worktree, not an orphaned directory.
-  const shadowRoot = join(root, '.fadeno', 'local', 'shadow');
-  assert.equal(readdirSync(shadowRoot).length, 1);
+  // Both arms live under one neutral pair directory now, so the challenger is
+  // found by walking that rather than by a `shadow/` path that named it.
+  const pairRoot = join(root, '.fadeno', 'local', 'pair');
+  const pairDirs = readdirSync(pairRoot);
+  assert.equal(pairDirs.length, 1, 'exactly one pair');
   const worktrees = spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: root, encoding: 'utf8' });
   assert.equal(worktrees.status, 0);
-  assert.match(worktrees.stdout, /\.fadeno[/\\]local[/\\]shadow/);
+  assert.match(worktrees.stdout, /\.fadeno[/\\]local[/\\]pair[/\\]/);
 
   // What must NOT survive is the live-shadow lease: a failed primary receipt
   // that permanently consumed a slot under the cap would starve every later
@@ -615,7 +643,7 @@ test('a paired dispatch carries one pair_id on both arms and records the challen
 
   // The retained worktree is addressable from the row rather than by globbing.
   const workspace = shadowRows[0]!.workspace as string;
-  assert.match(workspace, /^\.fadeno\/local\/shadow\//);
+  assert.match(workspace, /^\.fadeno\/local\/pair\/[0-9a-f]{8}\/[0-9a-f]{8}$/);
   assert.ok(exists(root, workspace), `retained worktree missing at ${workspace}`);
 });
 
@@ -1296,4 +1324,91 @@ test('a prompt naming the repo root as an absolute path refuses the pair with sh
   assert.ok(relativeRows.every((r) => r.event !== 'dispatch_refused'), JSON.stringify(relativeRows));
   const relativeShadowRows = relativeRows.filter((r) => r.shadow === true);
   assert.equal(relativeShadowRows.length, 2);
+});
+
+// --- Write-shaped pairs: both arms in worktrees, primary merged back --------
+//
+// `worker` is `requires_write: required` and is the archetype most worth
+// shadowing — a model test-drive is worker-shaped. Before this, a pair for it
+// produced evidence that could not be compared: the challenger was always
+// isolated and emitted a real diff, while the primary ran in the shared tree
+// and emitted only a `workspace_changed` BOOLEAN. Nothing refused that — no
+// refusal predicate keys on an archetype being write-shaped — so the pair
+// formed, completed, stamped `pair_id` on both rows, and looked legitimate
+// while having nothing on the primary side to compare against.
+
+test('a write-shaped pair produces two comparable diffs, and the primary is merged back', (t) => {
+  const write = (marker: string): string[] => [
+    'node', '-e',
+    `require('fs').writeFileSync('made.txt','${marker}\\n');process.stdout.write('WROTE_${marker}');`,
+  ];
+  const root = seedTwoProviders(t, write('PRIMARY'), write('CHALLENGER'));
+  initGit(root);
+  writeLocalDialState(root, { dials: {}, shadows: { worker: { model: 'shadow-worker' } }, legacyNote: null });
+
+  const result = runDispatch({ archetype: 'worker', prompt: 'write', repoRoot: root, userPathOptions: onHarness('standalone') });
+  assert.equal(result.stdout, 'WROTE_PRIMARY');
+
+  const rows = evidenceRows(root);
+  const pComp = rows.find((r) => r.event === 'dispatch_completed' && r.shadow !== true)!;
+  const sComp = rows.find((r) => r.event === 'dispatch_completed' && r.shadow === true)!;
+
+  // Both arms emit a diff. This is the whole point: a boolean cannot be
+  // compared to a diff, so before this change one side of the pair had no
+  // comparable artifact at all.
+  assert.equal(pComp.workspace_mode, 'isolated');
+  assert.ok(typeof pComp.diff_snapshot === 'string', 'the primary must emit a diff, not just workspace_changed');
+  assert.ok(typeof sComp.diff_snapshot === 'string', 'the challenger must emit a diff');
+  assert.ok((pComp.diff_bytes as number) > 0);
+  assert.ok((sComp.diff_bytes as number) > 0);
+
+  // One addressable starting state, computed independently in each worktree
+  // and equal because the baseline commit is made with fixed dates over the
+  // same captured bytes — not copied from one arm onto the other's row.
+  assert.equal(pComp.pair_id, sComp.pair_id);
+  assert.equal(pComp.baseline_commit, sComp.baseline_commit);
+  assert.ok(typeof pComp.baseline_commit === 'string' && (pComp.baseline_commit as string).length === 40);
+
+  // The two diffs actually differ in content, which is what makes the pair a
+  // test rather than a formality.
+  const pDiff = readFileSync(join(root, pComp.diff_snapshot as string), 'utf8');
+  const sDiff = readFileSync(join(root, sComp.diff_snapshot as string), 'utf8');
+  assert.match(pDiff, /PRIMARY/);
+  assert.match(sDiff, /CHALLENGER/);
+
+  // Merged back, so `fadeno dispatch --archetype worker` still means "the work
+  // is in your tree when it returns".
+  assert.deepEqual(
+    { status: (pComp.primary_merge as Record<string, unknown>).status },
+    { status: 'clean' },
+  );
+  assert.equal(readFileSync(join(root, 'made.txt'), 'utf8').trim(), 'PRIMARY');
+
+  // The challenger's write never reaches the shared tree.
+  assert.ok(!readFileSync(join(root, 'made.txt'), 'utf8').includes('CHALLENGER'));
+});
+
+test('both arms sit at neutral, identically-shaped worktree paths', (t) => {
+  // Blinding used to be advisory: the challenger lived at
+  // `.fadeno/local/shadow/<id>` and could read its own cwd to learn which arm
+  // it was. Under a pair both arms live at
+  // `.fadeno/local/pair/<pair-id8>/<own-dispatch-id8>` — same depth, same
+  // shape, a random uuid on each — so the path says only "one arm of a pair".
+  const cwd = ['node', '-e', "process.stdout.write(process.cwd());"];
+  const root = seedTwoProviders(t, cwd, cwd);
+  initGit(root);
+  writeLocalDialState(root, { dials: {}, shadows: { worker: { model: 'shadow-worker' } }, legacyNote: null });
+
+  const result = runDispatch({ archetype: 'worker', prompt: 'where', repoRoot: root, userPathOptions: onHarness('standalone') });
+  const rows = evidenceRows(root);
+  const sComp = rows.find((r) => r.event === 'dispatch_completed' && r.shadow === true)!;
+  const challengerCwd = readFileSync(join(root, sComp.output_snapshot as string), 'utf8').trim();
+
+  for (const [label, observed] of [['primary', result.stdout], ['challenger', challengerCwd]] as const) {
+    assert.match(observed, /\.fadeno\/local\/pair\/[0-9a-f]{8}\/[0-9a-f]{8}$/, `${label} cwd must be neutral`);
+    assert.ok(!/shadow|challenger|primary/i.test(observed), `${label} cwd must not name the arm`);
+  }
+  // Same parent, different leaf: one pair, two indistinguishable arms.
+  assert.notEqual(result.stdout, challengerCwd);
+  assert.equal(result.stdout.split('/').slice(0, -1).join('/'), challengerCwd.split('/').slice(0, -1).join('/'));
 });

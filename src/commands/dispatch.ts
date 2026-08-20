@@ -768,7 +768,32 @@ function gitFailureReason(result: { error?: Error | null; status: number | null;
  * a refusal — a dirty tree that cannot be replayed must never silently
  * produce a skewed pair.
  */
-function commitWorkspaceBaseline(repoRoot: string, worktreeAbs: string, pairId: string): string {
+/**
+ * Fixed author/committer date for every pair baseline commit.
+ *
+ * Not a timestamp — an identity. Both arms must hash to the same commit for
+ * `baseline_commit` to mean what it claims, and a real clock would defeat
+ * that. Never read this back as a time.
+ */
+const BASELINE_COMMIT_DATE = '2000-01-01T00:00:00Z';
+
+/**
+ * The caller's pre-spawn workspace, captured ONCE.
+ *
+ * Both arms of a pair replay this same capture. Capturing per-arm instead
+ * would read the tree at two different moments — the challenger is
+ * materialized before the primary's worktree is — so a file written between
+ * the two reads would land in one arm's baseline and not the other's, which
+ * is precisely the asymmetry the shared baseline exists to remove.
+ */
+export interface CapturedWorkspaceBaseline {
+  /** `git diff HEAD --binary` over tracked content. Empty when clean. */
+  patch: Buffer;
+  /** Untracked-but-unignored paths; `git diff` has no notion of these. */
+  untrackedFiles: string[];
+}
+
+function captureWorkspaceBaseline(repoRoot: string): CapturedWorkspaceBaseline {
   const diffRes = spawnSync('git', ['-C', repoRoot, 'diff', 'HEAD', '--binary'], {
     encoding: 'buffer',
     maxBuffer: SPAWN_MAX_BUFFER,
@@ -776,7 +801,41 @@ function commitWorkspaceBaseline(repoRoot: string, worktreeAbs: string, pairId: 
   if (diffRes.error != null || diffRes.status !== 0) {
     throw new Error(`could not capture the primary workspace's pre-spawn state: ${gitFailureReason(diffRes)}`);
   }
-  const patch: Buffer = diffRes.stdout ?? Buffer.alloc(0);
+  const untrackedRes = spawnSync('git', ['-C', repoRoot, 'ls-files', '--others', '--exclude-standard', '-z'], {
+    encoding: 'utf8',
+    maxBuffer: SPAWN_MAX_BUFFER,
+  });
+  if (untrackedRes.error != null || untrackedRes.status !== 0) {
+    throw new Error(`could not list the primary workspace's untracked files: ${gitFailureReason(untrackedRes)}`);
+  }
+  return {
+    patch: diffRes.stdout ?? Buffer.alloc(0),
+    untrackedFiles: String(untrackedRes.stdout ?? '')
+      .split('\0')
+      .filter((p) => p.length > 0)
+      .filter((p) => !isUnderShadowHome(p)),
+  };
+}
+
+/**
+ * Replay one captured baseline into one worktree and commit it.
+ *
+ * The commit is made with a FIXED author/committer identity and date, so two
+ * worktrees cut from the same HEAD and given the same capture produce the
+ * byte-identical commit object — and therefore the same sha. That is what
+ * lets `baseline_commit` be one value genuinely shared by both arms rather
+ * than one arm's value copied onto the other's row. The caller asserts the
+ * equality; a mismatch means the arms did not start from the same state and
+ * the pair is not a fair test.
+ */
+function applyWorkspaceBaseline(
+  repoRoot: string,
+  worktreeAbs: string,
+  captured: CapturedWorkspaceBaseline,
+  pairId: string,
+  armLabel: string,
+): string {
+  const patch = captured.patch;
 
   if (patch.length > 0) {
     const applyRes = spawnSync('git', ['-C', worktreeAbs, 'apply', '--index'], {
@@ -785,24 +844,12 @@ function commitWorkspaceBaseline(repoRoot: string, worktreeAbs: string, pairId: 
       maxBuffer: SPAWN_MAX_BUFFER,
     });
     if (applyRes.error != null || applyRes.status !== 0) {
-      throw new Error(`could not replay the primary's pre-spawn changes into the shadow worktree: ${gitFailureReason(applyRes)}`);
+      throw new Error(`could not replay the caller's pre-spawn changes into the ${armLabel} worktree: ${gitFailureReason(applyRes)}`);
     }
   }
 
-  const untrackedRes = spawnSync('git', ['-C', repoRoot, 'ls-files', '--others', '--exclude-standard', '-z'], {
-    encoding: 'utf8',
-    maxBuffer: SPAWN_MAX_BUFFER,
-  });
-  if (untrackedRes.error != null || untrackedRes.status !== 0) {
-    throw new Error(`could not list the primary workspace's untracked files: ${gitFailureReason(untrackedRes)}`);
-  }
-  const untrackedFiles = String(untrackedRes.stdout ?? '')
-    .split('\0')
-    .filter((p) => p.length > 0)
-    .filter((p) => !isUnderShadowHome(p));
-
   let copiedAny = false;
-  for (const relPath of untrackedFiles) {
+  for (const relPath of captured.untrackedFiles) {
     try {
       const srcAbs = join(repoRoot, relPath);
       const destAbs = join(worktreeAbs, relPath);
@@ -819,7 +866,7 @@ function commitWorkspaceBaseline(repoRoot: string, worktreeAbs: string, pairId: 
       copiedAny = true;
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      throw new Error(`could not copy untracked file "${relPath}" into the shadow worktree: ${reason}`);
+      throw new Error(`could not copy untracked file "${relPath}" into the ${armLabel} worktree: ${reason}`);
     }
   }
 
@@ -828,28 +875,41 @@ function commitWorkspaceBaseline(repoRoot: string, worktreeAbs: string, pairId: 
     // simply the commit the worktree was already cut from.
     const headRes = spawnSync('git', ['-C', worktreeAbs, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
     if (headRes.error != null || headRes.status !== 0) {
-      throw new Error(`could not resolve the shadow worktree's HEAD: ${gitFailureReason(headRes)}`);
+      throw new Error(`could not resolve the ${armLabel} worktree's HEAD: ${gitFailureReason(headRes)}`);
     }
     return String(headRes.stdout ?? '').trim();
   }
 
   const addRes = spawnSync('git', ['-C', worktreeAbs, 'add', '-A'], { encoding: 'utf8' });
   if (addRes.error != null || addRes.status !== 0) {
-    throw new Error(`could not stage the workspace baseline in the shadow worktree: ${gitFailureReason(addRes)}`);
+    throw new Error(`could not stage the workspace baseline in the ${armLabel} worktree: ${gitFailureReason(addRes)}`);
   }
+  // Fixed identity AND fixed dates. A commit object hashes its author and
+  // committer timestamps, so letting them default to "now" would give the two
+  // arms different baseline shas for identical content — and the shared
+  // `baseline_commit` would become a fiction maintained by copying one arm's
+  // value onto the other's row. The epoch constant is arbitrary but must stay
+  // stable: it is an identity, not a time, and nothing reads it as one.
   const commitRes = spawnSync('git', [
     '-C', worktreeAbs,
     '-c', 'user.name=fadeno',
     '-c', 'user.email=fadeno@localhost',
     'commit', '--no-verify', '--no-gpg-sign', '-m', `fadeno pair baseline ${pairId}`,
-  ], { encoding: 'utf8' });
+  ], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GIT_AUTHOR_DATE: BASELINE_COMMIT_DATE,
+      GIT_COMMITTER_DATE: BASELINE_COMMIT_DATE,
+    },
+  });
   if (commitRes.error != null || commitRes.status !== 0) {
-    throw new Error(`could not commit the workspace baseline in the shadow worktree: ${gitFailureReason(commitRes)}`);
+    throw new Error(`could not commit the workspace baseline in the ${armLabel} worktree: ${gitFailureReason(commitRes)}`);
   }
 
   const shaRes = spawnSync('git', ['-C', worktreeAbs, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
   if (shaRes.error != null || shaRes.status !== 0) {
-    throw new Error(`could not resolve the shadow worktree's baseline commit: ${gitFailureReason(shaRes)}`);
+    throw new Error(`could not resolve the ${armLabel} worktree's baseline commit: ${gitFailureReason(shaRes)}`);
   }
   return String(shaRes.stdout ?? '').trim();
 }
@@ -1026,8 +1086,6 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const transport = spec.adapter === 'command' ? 'command' : 'host-command-fallback';
   const deliveryTransport = spec.adapter === 'command' ? 'command' : 'host-command-fallback';
 
-  const workspaceMode: WorkspaceMode = opts.isolate ? 'isolated' : 'shared';
-  const needsLease = workspaceMode === 'shared' && spec.writeAccess !== false;
 
   let prompt: string;
   let promptSource: 'stdin' | 'file';
@@ -1132,6 +1190,104 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const relayAttested = consumePendingRelay(repoRoot, prompt, now);
 
   const promptSha256 = sha256Hex(prompt);
+
+  /** Resolved challenger identity, before any worktree exists. Side-effect
+   * free apart from reading local dial state, so it is safe to run early. */
+  interface PairCandidate {
+    dial: DialRef | null;
+    executorName: string;
+    sourceTag: 'flag' | 'attachment';
+  }
+
+  const decidePairCandidate = (): PairCandidate | null => {
+    // Nothing inside a shadow ever shadows: a challenger that spawns its own
+    // challengers multiplies the fleet by nesting depth. The kernel reads this
+    // flag; it is never echoed, which also keeps the arms blind to which one
+    // they are.
+    if (process.env.FADENO_IN_SHADOW === '1') return null;
+    const hasFlag = typeof opts.shadow === 'string' && opts.shadow.trim().length > 0;
+    let dial: DialRef | null = null;
+    let executorName: string | null = null;
+    let sourceTag: 'flag' | 'attachment' | null = null;
+    let attachmentRate: number | undefined;
+    if (hasFlag) {
+      try {
+        const parsed = parseDialRef(opts.shadow!.trim(), '--shadow');
+        dial = parsed;
+        executorName = formatDialRef(parsed);
+        sourceTag = 'flag';
+      } catch {
+        // A malformed ref still names a shadow attempt; it becomes a
+        // shadow_resolution refusal row later.
+        dial = null;
+        executorName = opts.shadow!.trim();
+        sourceTag = 'flag';
+      }
+    } else if (archetype != null) {
+      const localStateForShadow = readLocalDialState(repoRoot);
+      const att = localStateForShadow.shadows[archetype];
+      if (att != null) {
+        dial = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.via ? { via: att.via } : {}) };
+        executorName = formatDialRef(dial);
+        sourceTag = 'attachment';
+        attachmentRate = att.rate;
+      }
+    }
+    if (executorName == null || sourceTag == null) return null;
+    // Rate sampling for attachments; the flag always fires. Rolled before the
+    // primary spawns — nothing about the primary's run can influence it.
+    if (sourceTag === 'attachment' && attachmentRate != null) {
+      const sampler = opts.shadowSampler ?? (() => shadowSampleRoll(promptSha256, archetype ?? '', executorName!));
+      let roll: number;
+      try { roll = sampler(); } catch { roll = 0; }
+      if (!(roll < attachmentRate)) return null;
+    }
+    return { dial, executorName, sourceTag };
+  };
+
+  // Captured lazily and at most once. Both arms replay this same value; see
+  // `CapturedWorkspaceBaseline` for why capturing per-arm would be wrong.
+  let capturedBaselineMemo: CapturedWorkspaceBaseline | null = null;
+  const capturedBaseline = (): CapturedWorkspaceBaseline => {
+    if (capturedBaselineMemo == null) capturedBaselineMemo = captureWorkspaceBaseline(repoRoot);
+    return capturedBaselineMemo;
+  };
+
+  // Pair candidacy, decided here and not later, because the request evidence
+  // row below records `workspace_mode` and that record must be true when it
+  // is written. A selected pair puts BOTH arms in worktrees — an in-session
+  // or shared-tree primary emits only a `workspace_changed` boolean while its
+  // challenger emits a real diff, and a boolean cannot be compared to a diff.
+  //
+  // Candidacy, not materialization: the challenger can still be refused below
+  // (cap, resolution, eligibility, write posture, constraint, containment,
+  // worktree, carry, baseline), and the primary stays isolated when it is.
+  // That is the deliberate choice. Deciding after materialization would mean
+  // either writing the row before the answer is known, or rewriting a fact
+  // already on disk; and isolation is the safe direction to be wrong in —
+  // an isolated primary that merges back cleanly is indistinguishable from a
+  // shared one, whereas a shared primary in a selected pair produces evidence
+  // that cannot be compared.
+  const pairCandidate = decidePairCandidate();
+  // Candidacy says a pair is WANTED. Whether the primary can be isolated is a
+  // separate question, and conflating them silences evidence: a non-git repo
+  // still gets its `shadow_isolation` refusal row from `startShadow` below —
+  // the challenger is what cannot be built — while the primary must stay
+  // shared, because isolating it would fail on the very same missing git.
+  //
+  // So the correction to a tempting piece of reasoning: isolation is NOT
+  // simply the safe direction to be wrong in. Isolating can itself fail, and
+  // when it does it turns a dispatch that used to work into a hard error.
+  const canIsolate = pairCandidate != null && (() => {
+    const probe = spawnSync('git', ['-C', repoRoot, 'rev-parse', '--git-dir'], { encoding: 'utf8' });
+    return probe.error == null && probe.status === 0;
+  })();
+  const workspaceMode: WorkspaceMode = opts.isolate || canIsolate ? 'isolated' : 'shared';
+  // An isolated primary cannot touch the shared tree while it works, so it
+  // takes no lease for the duration — it takes one only across its merge-back
+  // (see `mergePrimaryBack`). Net effect is MORE concurrency than a shared
+  // primary, which holds the repo-wide lease for its entire run.
+  const needsLease = workspaceMode === 'shared' && spec.writeAccess !== false;
   const commandSha256 = sha256Hex(JSON.stringify(command));
   const producers = lookupInputProducers(repoRoot, producedByIds(opts));
   const dialField: Record<string, unknown> = { model: dial.model };
@@ -1405,48 +1561,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // and still unable to affect the primary's result: every failure in here
   // lands as a shadow refusal row or is swallowed.
   const startShadow = (): PendingShadow | null => {
-    // Nothing inside a shadow ever shadows: a challenger that spawns its own
-    // challengers multiplies the fleet by nesting depth. The kernel reads this
-    // flag; it is never echoed, which also keeps the arms blind to which one
-    // they are.
-    if (process.env.FADENO_IN_SHADOW === '1') return null;
-    const hasFlag = typeof opts.shadow === 'string' && opts.shadow.trim().length > 0;
-    let shadowDial: DialRef | null = null;
-    let shadowExecutorNameInner: string | null = null;
-    let shadowSourceTag: 'flag' | 'attachment' | null = null;
-    let attachmentRate: number | undefined;
-    if (hasFlag) {
-      try {
-        const parsed = parseDialRef(opts.shadow!.trim(), '--shadow');
-        shadowDial = parsed;
-        shadowExecutorNameInner = formatDialRef(parsed);
-        shadowSourceTag = 'flag';
-      } catch {
-        // A malformed ref still names a shadow attempt; it becomes a
-        // shadow_resolution refusal row below.
-        shadowDial = null;
-        shadowExecutorNameInner = opts.shadow!.trim();
-        shadowSourceTag = 'flag';
-      }
-    } else if (archetype != null) {
-      const localStateForShadow = readLocalDialState(repoRoot);
-      const att = localStateForShadow.shadows[archetype];
-      if (att != null) {
-        shadowDial = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.via ? { via: att.via } : {}) };
-        shadowExecutorNameInner = formatDialRef(shadowDial);
-        shadowSourceTag = 'attachment';
-        attachmentRate = att.rate;
-      }
-    }
-    if (shadowExecutorNameInner == null || shadowSourceTag == null) return null;
-    // Rate sampling for attachments; the flag always fires. Rolled before the
-    // primary spawns — nothing about the primary's run can influence it.
-    if (shadowSourceTag === 'attachment' && attachmentRate != null) {
-      const sampler = opts.shadowSampler ?? (() => shadowSampleRoll(promptSha256, archetype ?? '', shadowExecutorNameInner!));
-      let roll: number;
-      try { roll = sampler(); } catch { roll = 0; }
-      if (!(roll < attachmentRate)) return null;
-    }
+    if (pairCandidate == null) return null;
+    const shadowDial = pairCandidate.dial;
+    const shadowExecutorNameInner: string | null = pairCandidate.executorName;
+    const shadowSourceTag: 'flag' | 'attachment' = pairCandidate.sourceTag;
 
     const shadowNow = new Date();
     const shadowDispatchId = randomUUID();
@@ -1459,7 +1577,15 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     const shadowOutputAbs = join(repoRoot, shadowOutputRel);
     const shadowDiffRel = join('.fadeno', 'local', 'outputs', `shadow-${shadowId8}.diff`).split('\\').join('/');
     const shadowDiffAbs = join(repoRoot, shadowDiffRel);
-    const shadowWorktreeRel = join('.fadeno', 'local', 'shadow', shadowId8).split('\\').join('/');
+    // Neutral, and identically shaped to the primary's. Both arms of a pair
+    // live at `.fadeno/local/pair/<pair-id8>/<own-dispatch-id8>`: same depth,
+    // same shape, a random uuid on each. Blinding was advisory while this
+    // said `shadow/` — either arm could read its own cwd and know which one
+    // it was, which is exactly the knowledge a fair comparison must withhold.
+    // `fadeno clean` finds retained worktrees through the `workspace` path
+    // recorded on the ledger row rather than by globbing this location, so
+    // moving it costs nothing there.
+    const shadowWorktreeRel = join('.fadeno', 'local', 'pair', pairId.slice(0, 8), shadowId8).split('\\').join('/');
     const shadowWorktreeAbs = join(repoRoot, shadowWorktreeRel);
 
     const writeShadowRefusal = (predicate: DispatchRefusalPredicate, message: string, extra: Record<string, unknown> = {}): void => {
@@ -1645,7 +1771,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // registered worktree the success path would otherwise retain.
     let baselineCommit: string;
     try {
-      baselineCommit = commitWorkspaceBaseline(repoRoot, shadowWorktreeAbs, pairId);
+      baselineCommit = applyWorkspaceBaseline(repoRoot, shadowWorktreeAbs, capturedBaseline(), pairId, 'challenger');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       writeShadowRefusal('shadow_baseline', message);
@@ -1921,6 +2047,23 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // either, for reasons that have nothing to do with the work it was asked
   // to do. Populated below, inside the isolated branch only.
   let isolatedCarryRecords: Array<{ path: string; mechanism: WorktreeCarryMechanism }> = [];
+  // The mode actually used. `workspaceMode` is the INTENT recorded on the
+  // request row; this is what happened. They differ only when a paired
+  // primary's own worktree could not be built (see the degradation below).
+  let effectiveWorkspaceMode: WorkspaceMode = workspaceMode;
+  let isolationDegraded: string | null = null;
+  /** Merge-back outcome for a paired, isolated primary; absent otherwise. */
+  // `diff_snapshot` is deliberately NOT repeated here: the completion row
+  // already carries it, and two spellings of one fact is the same defect that
+  // rules out a `skipped` status.
+  //
+  //   clean      — applied, nothing left to do
+  //   conflicted — git tried; the tree MAY be partially applied
+  //   blocked    — never attempted; the tree is untouched
+  let primaryMerge: {
+    status: 'clean' | 'conflicted' | 'blocked';
+    detail?: string;
+  } | null = null;
 
   // stdout is the snapshot fd so bytes survive a mid-flight SIGTERM;
   // encoding/maxBuffer then apply to stderr only. input still feeds stdin.
@@ -1966,12 +2109,33 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // Through the supervisor, never directly: `spawnSync` blocks the event
     // loop, so a killed kernel runs no cleanup and leaves the executor writing
     // the tree unattended. See src/lib/supervisor.ts.
-    if (workspaceMode === 'isolated') {
+    // Candidacy moved the primary toward isolation; materialization is what
+    // confirms it. Every way a pair can fail after candidacy — cap,
+    // resolution, eligibility, write posture, constraint, containment,
+    // worktree, carry, baseline — lands here as `pendingShadow == null`, and
+    // an unpaired primary has no reason to be isolated unless the caller
+    // asked with `--isolate`.
+    if (effectiveWorkspaceMode === 'isolated' && pendingShadow == null && !opts.isolate) {
+      effectiveWorkspaceMode = 'shared';
+      isolationDegraded = 'the pair did not materialize, so there was nothing to stay symmetric with';
+    }
+    if (effectiveWorkspaceMode === 'isolated') {
       const id8 = dispatchId.slice(0, 8);
       const diffRel = join('.fadeno', 'local', 'outputs', `isolated-${id8}.diff`).split('\\').join('/');
+      // Neutral worktree naming when paired. Blinding was advisory before
+      // this: the challenger sat at `.fadeno/local/shadow/<id>` and the
+      // primary at `.fadeno/local/isolated/<id>`, so either arm could read
+      // its own cwd and know which one it was. Under a pair both arms live at
+      // `.fadeno/local/pair/<pair-id8>/<own-dispatch-id8>` — same depth, same
+      // shape, and a random uuid prefix on each, so the path says only that
+      // this is one arm of some pair. The unpaired `--isolate` case keeps its
+      // old home: there is no second arm to be blind to.
+      const pairedWorktree = pendingShadow != null
+        ? join(repoRoot, '.fadeno', 'local', 'pair', pendingShadow.pairId.slice(0, 8), id8)
+        : join(repoRoot, '.fadeno', 'local', 'isolated', id8);
       const isolated = withIsolatedWorktree({
         repoRoot,
-        worktreePath: join(repoRoot, '.fadeno', 'local', 'isolated', id8),
+        worktreePath: pairedWorktree,
         diffRel,
         diffAbs: join(repoRoot, diffRel),
         onEcho: opts.onEcho,
@@ -1986,14 +2150,126 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
           );
         }
         isolatedCarryRecords = isolatedCarry.records;
+        // Replay the SAME captured baseline the challenger got. Without this
+        // the primary would start from a clean checkout of HEAD while its
+        // challenger starts from HEAD plus the caller's work-in-progress —
+        // the very asymmetry this whole change exists to remove, merely
+        // pointing the other way. `capturedBaseline()` is memoized, so this
+        // is the identical bytes the challenger replayed, not a second read
+        // of a tree that may have moved since.
+        if (pendingShadow != null) {
+          const primaryBaseline = applyWorkspaceBaseline(
+            repoRoot, worktreeAbs, capturedBaseline(), pendingShadow.pairId, 'primary',
+          );
+          // Same content, same fixed dates, same parent — so the same sha.
+          // If these ever diverge the arms did not start from the same state
+          // and the pair is not a fair test, which is worth failing over
+          // rather than recording a `baseline_commit` that only one arm has.
+          if (primaryBaseline !== pendingShadow.baselineCommit) {
+            throw new WorkspaceLeaseError(
+              `the pair's two arms produced different baseline commits (${primaryBaseline.slice(0, 12)} vs ` +
+                `${pendingShadow.baselineCommit.slice(0, 12)}) — they did not start from the same state, so the ` +
+                'comparison would be meaningless. Refusing rather than recording a baseline only one arm has.',
+            );
+          }
+        }
         return invoke(worktreeAbs);
       });
       spawned = isolated.result;
       isolatedDiffRel = isolated.diff.diffRel;
       isolatedDiffBytes = isolated.diff.diffBytes;
       opts.onEcho?.(`isolated diff: ${isolated.diff.diffBytes} bytes → ${isolated.diff.diffRel}`);
+      // ---- Merge-back -----------------------------------------------------
+      // Only for a PAIRED primary. A bare `--isolate` is an explicit request
+      // to keep the work out of the tree, and auto-applying it would break
+      // that contract; a paired primary, by contrast, was isolated by the
+      // kernel's choice rather than the caller's, so leaving its work stranded
+      // in a discarded worktree would silently change what `fadeno dispatch
+      // --archetype worker` does.
+      if (pendingShadow != null) {
+        // The lease, held across the apply and nothing else. An isolated
+        // primary takes none while it works — it cannot reach the shared tree
+        // — but the apply is exactly the moment it can, so it must not race a
+        // concurrent shared-mode writer. Sampling is prompt-digest-keyed, so a
+        // paired dispatch and an unpaired one coexist routinely; the unpaired
+        // one holds this same repo-wide lease for its whole run.
+        const mergeHolder: LeaseHolder = { id: `merge-back:${dispatchId}`, kind: 'ad-hoc', dispatchId };
+        let leaseTaken = false;
+        try {
+          acquireWorkspaceLease({
+            repoRoot,
+            workspaceMode: 'shared',
+            holder: mergeHolder,
+            supervisorPid: null,
+            executorPid: null,
+          });
+          leaseTaken = true;
+        } catch (err) {
+          // Could not serialize, so do not apply. The diff is durable and
+          // `shadow-apply` can port it once the tree settles; applying
+          // anyway is the one outcome that could corrupt another writer.
+          // NOT `conflicted`. A conflict means git tried and left the tree
+          // partly applied; this means nothing was attempted and the
+          // workspace is untouched. Collapsing the two would make a reader
+          // go inspect `git status` after a run that never wrote anything,
+          // and the only thing distinguishing them would be `detail`, which
+          // is free-form human text nothing should parse.
+          primaryMerge = {
+            status: 'blocked',
+            detail: `nothing was applied: could not acquire the workspace lease for merge-back (${err instanceof Error ? err.message : String(err)})`,
+          };
+        }
+        if (leaseTaken) {
+          try {
+            // Real `--3way`, never `--check`: it exits non-zero the moment any
+            // file is left carrying conflict markers, which is the signal we
+            // need. `--check` would exit 0 on a patch that WOULD conflict.
+            const applyRes = spawnSync('git', ['-C', repoRoot, 'apply', '--3way', join(repoRoot, isolated.diff.diffRel)], { encoding: 'utf8' });
+            const stderrText = String(applyRes.stderr ?? '').trim();
+            if (isolated.diff.diffBytes === 0) {
+              primaryMerge = { status: 'clean', detail: 'nothing to apply: the primary made no changes' };
+            } else if (applyRes.status === 0) {
+              primaryMerge = { status: 'clean' };
+              opts.onEcho?.(`merged back: ${isolated.diff.diffBytes} bytes applied to the workspace`);
+            } else {
+              // Nothing is reverted. `--3way` may have staged some hunks
+              // cleanly while leaving others unmerged, and guessing which is
+              // which is exactly the judgment this kernel does not make.
+              primaryMerge = {
+                status: 'conflicted',
+                detail: stderrText.length > 0 ? stderrText : `git apply --3way exited ${applyRes.status ?? 'unknown'}`,
+              };
+              opts.onEcho?.(
+                `merge-back CONFLICTED — the primary's work is kept at ${isolated.diff.diffRel}. ` +
+                  `Resolve with \`fadeno shadow-apply ${pendingShadow.pairId.slice(0, 8)} --arm primary\` ` +
+                  'once the tree settles; inspect `git status` first, some hunks may already be staged.',
+              );
+            }
+          } finally {
+            // Released whatever happened, including on a conflict: the lease
+            // exists to serialize writers, not to hold the repo hostage while
+            // a human resolves markers.
+            try { releaseWorkspaceLease({ repoRoot, holder: mergeHolder }); } catch {}
+          }
+        }
+      }
     } else {
       spawned = invoke(repoRoot);
+    }
+    if (isolationDegraded != null) {
+      // The pair was selected and the primary's own worktree could not be
+      // built — an uncarriable declared path is the realistic case. Before
+      // this change the identical condition refused the CHALLENGER and left
+      // the primary running normally; isolating the primary turned that
+      // graceful degradation into a hard failure of the whole dispatch.
+      //
+      // So it degrades the same way the pair does: no isolation, no
+      // merge-back, the primary runs exactly as an unpaired one would. The
+      // request row's `workspace_mode` said `isolated` because that was the
+      // intent when it was written; the completion row records what actually
+      // happened, and `workspace_mode_degraded` names why the two differ
+      // rather than leaving a reader to notice the discrepancy alone.
+      opts.onEcho?.(`primary isolation degraded to shared: ${isolationDegraded}`);
     }
   } catch (error) {
     if (error instanceof WorkspaceLeaseError) throw new DispatchCommandError(error.message);
@@ -2019,7 +2295,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const stdout = readFileSync(outputAbs, 'utf8');
   const stderr = spawned.stderr ?? '';
   const outputSha256 = sha256Hex(stdout);
-  const workspaceAfter = workspaceMode === 'isolated' ? null : workspaceFingerprint(repoRoot);
+  const workspaceAfter = effectiveWorkspaceMode === 'isolated' ? null : workspaceFingerprint(repoRoot);
 
   const outputBytes = Buffer.byteLength(stdout);
   // Status-file timeout facts outrank the supervisor process exit signal when classifying a receipt.
@@ -2100,17 +2376,31 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   if (workspaceBefore != null && workspaceAfter != null) {
     row.workspace_changed = workspaceBefore !== workspaceAfter;
   }
-  if (workspaceMode === 'isolated' && isolatedDiffRel != null && isolatedDiffBytes != null) {
+  if (effectiveWorkspaceMode === 'isolated' && isolatedDiffRel != null && isolatedDiffBytes != null) {
     row.diff_snapshot = isolatedDiffRel;
     row.diff_bytes = isolatedDiffBytes;
   }
+  // Omitted entirely when no merge-back was attempted — an unpaired
+  // `--isolate`, or a shared primary — rather than written as a "skipped"
+  // status. Absence already says "nothing was attempted", and a status value
+  // meaning the same thing would give a reader two spellings for one fact.
+  if (primaryMerge != null) {
+    row.primary_merge = primaryMerge;
+  }
+  // What actually happened, alongside the intent the request row recorded.
+  // Written only when the two differ, so an ordinary dispatch's rows are
+  // untouched and a reader never has to diff two rows to notice a fallback.
+  if (isolationDegraded != null) {
+    row.workspace_mode = effectiveWorkspaceMode;
+    row.workspace_mode_degraded = isolationDegraded;
+  }
   // Absent when nothing was declared or nothing declared existed, matching
   // the shadow row's same convention above.
-  if (workspaceMode === 'isolated' && isolatedCarryRecords.length > 0) {
+  if (effectiveWorkspaceMode === 'isolated' && isolatedCarryRecords.length > 0) {
     row.worktree_carry = isolatedCarryRecords;
   }
   // Isolated deliveries omit workspace_changed by construction (contract 1.2)
-  if (workspaceMode === 'isolated') {
+  if (effectiveWorkspaceMode === 'isolated') {
     delete (row as Record<string, unknown>).workspace_changed;
   }
   if (diagnosticsRel != null && diagnosticsBytes != null) {
