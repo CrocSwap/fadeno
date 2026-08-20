@@ -106,8 +106,10 @@ test('a catalog with no relay opinion renders the built-in broker identity uncha
   runSteeringApply({ repoRoot: root, target: 'codex' });
   for (const archetype of ARCHETYPES) {
     const body = read(root, `.codex/agents/${archetype}.toml`);
-    // Byte-for-byte the pair the renderer hardcoded before `relay:` existed.
-    assert.match(body, /^model = "gpt-5\.6-luna"\nmodel_reasoning_effort = "low"$/m);
+    // The built-in fallback, which is kept equal to the shipped catalog's
+    // `relay.codex` rather than frozen at what the renderer once hardcoded —
+    // see the test below, which is what holds those two together.
+    assert.match(body, /^model = "gpt-5\.6-luna"\nmodel_reasoning_effort = "high"$/m);
   }
 });
 
@@ -125,7 +127,40 @@ test('an uncompilable relay ref degrades to the built-in identity rather than fa
 
   const applied = runSteeringApply({ repoRoot: root, target: 'codex' });
   assert.equal(applied.materialization.worker?.kind, 'command-broker');
-  assert.match(read(root, '.codex/agents/worker.toml'), /^model = "gpt-5\.6-luna"\nmodel_reasoning_effort = "low"$/m);
+  assert.match(read(root, '.codex/agents/worker.toml'), /^model = "gpt-5\.6-luna"\nmodel_reasoning_effort = "high"$/m);
+});
+
+/**
+ * One question — what relays a Codex delivery — must not have two answers.
+ *
+ * The source constant and the shipped catalog are separate code paths on
+ * purpose (a self-contained project catalog suppresses the shipped layer, so
+ * the constant is what a real repo usually gets), which is exactly the
+ * one-question-two-places shape that has produced silent wrong answers here
+ * before. They were allowed to differ once, as a migration anchor; that
+ * migration is over, so this pins them together and fails the moment someone
+ * edits `relay.codex` without moving the fallback with it.
+ */
+test('the built-in relay fallback and the shipped catalog name the same identity', (t) => {
+  const shipped = tempRepo(t);
+  runInit({ target: 'codex', repoRoot: shipped, withSteering: true });
+
+  const noOpinion = tempRepo(t);
+  seedSelfContainedCatalog(noOpinion);
+  dialEverythingToCommand(noOpinion);
+  runSteeringApply({ repoRoot: noOpinion, target: 'codex' });
+
+  const identity = (body: string): string => {
+    const match = /^model = ".+"\nmodel_reasoning_effort = ".+"$/m.exec(body);
+    assert.ok(match, 'broker must declare a model and an effort');
+    return match[0];
+  };
+
+  assert.equal(
+    identity(read(noOpinion, '.codex/agents/worker.toml')),
+    identity(read(shipped, '.codex/agents/worker.toml')),
+    'the built-in fallback must track the shipped catalog relay, not drift from it',
+  );
 });
 
 test('init renders its Codex brokers from the repo catalog instead of copying frozen text', (t) => {

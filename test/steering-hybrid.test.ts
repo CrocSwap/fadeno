@@ -311,7 +311,7 @@ test('steering apply materializes mixed host and command slots without clobberin
   assert.equal(mixed.materialization.reviewer?.executor, 'opus');
   const broker = read(root, '.codex/agents/reviewer.toml');
   assert.match(broker, /model = "gpt-5\.6-luna"/);
-  assert.match(broker, /model_reasoning_effort = "low"/);
+  assert.match(broker, /model_reasoning_effort = "high"/);
   assert.match(broker, /fadeno steering resolve --archetype reviewer/);
   assert.doesNotMatch(broker, /--host-executor/);
   assert.match(broker, /mode=command/);

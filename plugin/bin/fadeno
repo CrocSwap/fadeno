@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.35";
+  if (true) return "0.6.0-rc.36";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -30286,7 +30286,7 @@ silently substitute a different model or executor.
 `;
 }
 var BUILTIN_CODEX_RELAY_MODEL = "gpt-5.6-luna";
-var BUILTIN_CODEX_RELAY_EFFORT = "low";
+var BUILTIN_CODEX_RELAY_EFFORT = "high";
 function codexRelay(profile) {
   try {
     return resolveRelay(profile, "codex");

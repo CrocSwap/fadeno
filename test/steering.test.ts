@@ -636,11 +636,11 @@ test('bundled CLI parses --with-steering and carries its templates', (t) => {
   assert.match(read(root, '.codex/agents/worker.toml'), /Fadeno command broker worker/i);
   // The broker is rendered from the shipped catalog now, not copied from a
   // frozen TOML, so the bundle's own `templates/common/fadeno/executors.yaml`
-  // (`relay.codex: luna@low`) is what these two literals come from. They
+  // (`relay.codex: luna@high`) is what these two literals come from. They
   // deliberately equal the built-in fallback, so this asserts the emitted
   // shape rather than distinguishing the two paths — test/relay-broker.test.ts
   // is where an overriding catalog proves the resolution actually happens.
-  assert.match(read(root, '.codex/agents/worker.toml'), /model = "gpt-5\.6-luna"\nmodel_reasoning_effort = "low"/);
+  assert.match(read(root, '.codex/agents/worker.toml'), /model = "gpt-5\.6-luna"\nmodel_reasoning_effort = "high"/);
   assert.match(read(root, '.codex/agents/worker.toml'), /fadeno dispatch-fallback <run-id> <dispatch-id>/);
 });
 

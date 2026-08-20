@@ -1161,7 +1161,18 @@ every caller keeps its own built-in literal rather than inventing one — a rela
 the session's provider cannot serve is worse than a stale but servable one. A
 self-contained project catalog suppresses the builtin layer entirely, so `null`
 is the common case in a real repo, not the exotic one. The old literals survive
-as those fallbacks, which is why a repo with no `relay:` sees no diff at all.
+as those fallbacks, which is why a repo with no `relay:` saw no diff at all at
+the moment the key shipped.
+
+*…but the fallback is not frozen.* That no-diff property was a migration
+argument, and it expired with the migration. What remained was one question
+with two answers — the constant and the shipped catalog — which is the shape
+this codebase keeps getting silently wrong. They are now pinned equal by test
+and moved together: `relay.codex` went `luna@low` → `luna@high` on 2026-08-20,
+a judgment call rather than a receipt (luna is cheap, and a broker routes a
+four-way branch table it must get right every time). Raising effort on a model
+that already held the relay contract is the safe direction; the A/B rule in
+the catalog guards changing *who* relays, which still needs one.
 
 *Named-but-unservable throws.* If the catalog names a relay whose provider has
 no route in that harness, resolution raises rather than degrading to `null`.

@@ -73,9 +73,23 @@ relay:
   # Claude's proxies inherit session effort (the Agent tool has no effort
   # channel), so a pin here would be inert — model only.
   claude: sonnet
-  # Codex bakes both into the broker TOML, so effort is pinned: a broker that
-  # only relays has no use for luna's xhigh registry default.
-  codex: luna@low
+  # Codex bakes both into the broker TOML, so effort is pinned rather than
+  # left at luna's xhigh registry default.
+  #
+  # Raised low -> high 2026-08-20. Unlike the model choice above, this is a
+  # judgment call and not a receipt: luna is cheap enough that the broker's
+  # few relay tokens are not worth optimizing, and the broker's contract is
+  # not one instruction but a branch table (engine vs ordinary delivery, then
+  # command / host / restart_required / write_conflict) that it must route
+  # correctly every time. Raising effort on a model that ALREADY held the
+  # relay contract moves in the safe direction, which is why it does not need
+  # the A/B the rule above demands -- that rule guards changing WHO relays.
+  #
+  # The failure mode to watch is the opposite of haiku's: a more capable
+  # broker is likelier to decide it can just do the work itself. Its
+  # instructions forbid that in every branch. If a broker is ever observed
+  # doing role work instead of dispatching, suspect this line first.
+  codex: luna@high
 
 routes:
   codex:

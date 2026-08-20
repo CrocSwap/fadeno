@@ -772,16 +772,25 @@ silently substitute a different model or executor.
 
 /**
  * The relay this file falls back to when the catalog states no opinion for
- * Codex — the exact literals every broker carried before `relay:` became a
- * catalog key, so a repo whose catalog says nothing sees no diff at all.
+ * Codex — a self-contained project catalog with no `relay:` key, or a
+ * `relay.codex` this build cannot compile.
  *
- * Not a default to "improve": a relay the session's provider cannot serve is
- * worse than a stale-but-servable one, which is why `resolveRelay` returns
- * null rather than guessing, and why this stays put until a dogfood receipt
- * moves the catalog.
+ * Deliberately kept EQUAL to the shipped catalog's `relay.codex`. These
+ * started life as the literals every broker carried before `relay:` became a
+ * catalog key, and the migration argument for freezing them ("a repo whose
+ * catalog says nothing sees no diff") expired once that migration was done.
+ * What is left is one question — what should relay a Codex delivery — and two
+ * places that answer it, which is the drift shape this codebase keeps getting
+ * bitten by. So the effort moved with the catalog (low → high, 2026-08-20);
+ * the rationale is recorded once, beside the catalog value.
+ *
+ * The MODEL still does not move on judgment alone: a relay the session's
+ * provider cannot serve is worse than a stale-but-servable one, which is why
+ * `resolveRelay` returns null rather than guessing, and why changing who
+ * relays still wants a dogfood receipt.
  */
 const BUILTIN_CODEX_RELAY_MODEL = 'gpt-5.6-luna';
-const BUILTIN_CODEX_RELAY_EFFORT = 'low';
+const BUILTIN_CODEX_RELAY_EFFORT = 'high';
 
 /**
  * The Codex relay named by `relay.codex`, or null for "no catalog opinion".
