@@ -97,7 +97,7 @@ Usage:
   fadeno models --driver <alias>        Live backend model listing (routes with models_command)
   fadeno steering resolve|apply [...]   Resolve or materialize hybrid Codex steering
   fadeno dispatch [flags]               Resolve archetype → executor and invoke it once (ad hoc)
-                                        (--shadow <executor> duplicates it to a one-shot challenger)
+                                        (--shadow <ref> duplicates it to a one-shot challenger)
   fadeno dispatch-prepare <run> <id> --isolate  Prepare an isolated worktree for a pending host dispatch (opt-in)
   fadeno dispatch-fallback <run> <id>   Deliver a locked host request by declared fallback
   fadeno dispatch-prompt <run> <id>     Emit the canonical engine envelope for a host dispatch

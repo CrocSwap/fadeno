@@ -14152,7 +14152,7 @@ function parseLayer(path) {
 }
 function mergeLayer(target, source, layer, provenance) {
   if (layer !== "project" && mapping(source.dials) != null && Object.keys(mapping(source.dials)).length > 0) {
-    throw new ExecutorProfileError("repo pins live in the project catalog; user dials are state \u2014 use `fadeno loadout set <archetype> <model> --user`");
+    throw new ExecutorProfileError("repo pins live in the project catalog; user dials are state \u2014 use `fadeno dial <archetype> <model> --user`");
   }
   if (layer !== "project" && Array.isArray(source.worktree_carry) && source.worktree_carry.length > 0) {
     throw new ExecutorProfileError("worktree_carry describes this repo's build state; it is project-only \u2014 declare it in .fadeno/executors.yaml, not the user or builtin catalog.");
@@ -14881,7 +14881,7 @@ function loadExecutorProfile(repoRoot, options = {}, harness) {
 var DIALS_LOCAL_FILE = (0, import_node_path4.join)(".fadeno", "local", "dials");
 function localDialPinError(detail2) {
   return new ExecutorProfileError(
-    `${DIALS_LOCAL_FILE} ${detail2} Fix: run \`fadeno loadout clear\` to drop the pin, then re-select with \`fadeno dial <archetype> <model>\`.`
+    `${DIALS_LOCAL_FILE} ${detail2} Fix: delete it (machine-local state, never committed), then re-dial with \`fadeno dial <archetype> <model>\`.`
   );
 }
 function readLocalDialState(repoRoot) {
@@ -14894,7 +14894,7 @@ function readLocalDialState(repoRoot) {
     return {
       dials: {},
       shadows: {},
-      legacyNote: "pre-0.6 loadout pin ignored (named loadouts retired) \u2014 re-dial with `fadeno loadout set`"
+      legacyNote: "pre-0.6 loadout pin ignored (named loadouts retired) \u2014 re-dial with `fadeno dial <archetype> <model>`"
     };
   }
   let doc;
@@ -14910,7 +14910,7 @@ function readLocalDialState(repoRoot) {
     return {
       dials: {},
       shadows: {},
-      legacyNote: "pre-0.6 loadout pin ignored (named loadouts retired) \u2014 re-dial with `fadeno loadout set`"
+      legacyNote: "pre-0.6 loadout pin ignored (named loadouts retired) \u2014 re-dial with `fadeno dial <archetype> <model>`"
     };
   }
   const dials = {};
@@ -36560,7 +36560,7 @@ Usage:
   fadeno models --driver <alias>        Live backend model listing (routes with models_command)
   fadeno steering resolve|apply [...]   Resolve or materialize hybrid Codex steering
   fadeno dispatch [flags]               Resolve archetype \u2192 executor and invoke it once (ad hoc)
-                                        (--shadow <executor> duplicates it to a one-shot challenger)
+                                        (--shadow <ref> duplicates it to a one-shot challenger)
   fadeno dispatch-prepare <run> <id> --isolate  Prepare an isolated worktree for a pending host dispatch (opt-in)
   fadeno dispatch-fallback <run> <id>   Deliver a locked host request by declared fallback
   fadeno dispatch-prompt <run> <id>     Emit the canonical engine envelope for a host dispatch

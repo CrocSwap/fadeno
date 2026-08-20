@@ -383,7 +383,7 @@ test('pin v3: legacy pin returns empty with legacyNote, never error', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
   writeFileSync(join(root, DIALS_LOCAL_FILE), 'openai-primary\n', 'utf8');
-  assert.deepEqual(readLocalDialState(root), { dials: {}, shadows: {}, legacyNote: 'pre-0.6 loadout pin ignored (named loadouts retired) — re-dial with `fadeno loadout set`' });
+  assert.deepEqual(readLocalDialState(root), { dials: {}, shadows: {}, legacyNote: 'pre-0.6 loadout pin ignored (named loadouts retired) — re-dial with `fadeno dial <archetype> <model>`' });
   writeFileSync(join(root, DIALS_LOCAL_FILE), '{"loadout":"x","overrides":{"worker":"luna-cli"}}\n', 'utf8');
   const legacy = readLocalDialState(root);
   assert.ok(legacy.legacyNote != null && legacy.legacyNote.includes('pre-0.6'));
@@ -392,11 +392,11 @@ test('pin v3: legacy pin returns empty with legacyNote, never error', (t) => {
   assert.deepEqual(readLocalDialState(root), { dials: {}, shadows: {}, legacyNote: null });
 });
 
-test('pin v3: an unreadable pin names the file and the reset command', (t) => {
+test('pin v3: an unreadable pin names the file and how to reset it', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
   writeFileSync(join(root, DIALS_LOCAL_FILE), '{"dials": 42}\n', 'utf8');
-  assert.throws(() => readLocalDialState(root), (err: unknown) => err instanceof ExecutorProfileError && (err.message.includes(DIALS_LOCAL_FILE) && /fadeno loadout clear/.test(err.message)));
+  assert.throws(() => readLocalDialState(root), (err: unknown) => err instanceof ExecutorProfileError && (err.message.includes(DIALS_LOCAL_FILE) && /delete it/.test(err.message) && /fadeno dial <archetype> <model>/.test(err.message)));
   writeFileSync(join(root, DIALS_LOCAL_FILE), '{"dials":{"Worker":"sol"}}\n', 'utf8');
   assert.throws(() => readLocalDialState(root), /bare lowercase identifier/);
 });

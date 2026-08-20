@@ -53,7 +53,7 @@ function parseLayer(path: string): Record<string, unknown> {
 function mergeLayer(target: Record<string, unknown>, source: Record<string, unknown>, layer: ConfigLayer, provenance: ProfileProvenance): void {
   // Disallow dials in non-project layers
   if (layer !== 'project' && mapping(source.dials) != null && Object.keys(mapping(source.dials)!).length > 0) {
-    throw new ExecutorProfileError('repo pins live in the project catalog; user dials are state — use `fadeno loadout set <archetype> <model> --user`');
+    throw new ExecutorProfileError('repo pins live in the project catalog; user dials are state — use `fadeno dial <archetype> <model> --user`');
   }
   // Disallow worktree_carry in non-project layers, same shape as `dials`
   // above and for the same reason: it describes THIS repo's gitignored

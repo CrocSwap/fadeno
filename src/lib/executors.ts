@@ -1035,7 +1035,7 @@ export interface LocalDialState {
 
 function localDialPinError(detail: string): ExecutorProfileError {
   return new ExecutorProfileError(
-    `${DIALS_LOCAL_FILE} ${detail} Fix: run \`fadeno loadout clear\` to drop the pin, then re-select with \`fadeno dial <archetype> <model>\`.`,
+    `${DIALS_LOCAL_FILE} ${detail} Fix: delete it (machine-local state, never committed), then re-dial with \`fadeno dial <archetype> <model>\`.`,
   );
 }
 
@@ -1049,7 +1049,7 @@ export function readLocalDialState(repoRoot: string): LocalDialState {
     return {
       dials: {},
       shadows: {},
-      legacyNote: 'pre-0.6 loadout pin ignored (named loadouts retired) — re-dial with `fadeno loadout set`',
+      legacyNote: 'pre-0.6 loadout pin ignored (named loadouts retired) — re-dial with `fadeno dial <archetype> <model>`',
     };
   }
   let doc: unknown;
@@ -1063,7 +1063,7 @@ export function readLocalDialState(repoRoot: string): LocalDialState {
     return {
       dials: {},
       shadows: {},
-      legacyNote: 'pre-0.6 loadout pin ignored (named loadouts retired) — re-dial with `fadeno loadout set`',
+      legacyNote: 'pre-0.6 loadout pin ignored (named loadouts retired) — re-dial with `fadeno dial <archetype> <model>`',
     };
   }
   const dials: Record<string, DialRef> = {};
