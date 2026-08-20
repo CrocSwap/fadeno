@@ -58,6 +58,29 @@ const CLAIMS: Claim[] = [
     src: { files: ['src/lib/executors.ts'], patterns: [/pinnedEffort/, /effectiveEffort/] },
   },
   {
+    // A write-shaped pair is only a comparison if BOTH arms are isolated. If
+    // the doc keeps claiming symmetry after someone reverts the primary to
+    // the shared tree, the pair silently goes back to comparing a boolean
+    // against a diff — the exact failure that looked legitimate for months.
+    id: 'write-shaped-pair-symmetry',
+    doc: { files: [SLOTS], patterns: [/workspace_mode_degraded/, /baseline_commit/, /local\/pair\//] },
+    src: {
+      files: ['src/commands/dispatch.ts'],
+      patterns: [/workspace_mode_degraded/, /baseline_commit/, /'pair'/],
+    },
+  },
+  {
+    // `carry_mutated` is the only signal that a hardlinked path was written
+    // through. Losing the name in either place means the hazard is back to
+    // being silent, which is how it survived this long.
+    id: 'carry-mutation-stamp',
+    doc: { files: [SLOTS], patterns: [/carry_mutated/, /nlink/, /ctime/] },
+    src: {
+      files: ['src/lib/workspace-lease.ts'],
+      patterns: [/carryMutationStamp/, /nlink/, /ctime/],
+    },
+  },
+  {
     id: 'host-refused-row',
     doc: { files: [SLOTS], patterns: [/host_refused/, /resolver_timeout/, /restart_required/] },
     src: {

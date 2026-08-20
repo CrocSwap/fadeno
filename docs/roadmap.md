@@ -355,10 +355,12 @@ spawned.
    new shadowing warning forever. And Claude's relay came along too: the
    spawn hook reads `relay.claude` from the resolver, and the proxy
    frontmatter is stamped at emit.
-2. **The reader drops `session_effort` and `lane_reason`.** `DispatchEntry`
-   has no field for either, so both are invisible in `fadeno dispatches` and
-   in `--json` — pre-existing and identical for `host_delivery`, so fix it for
-   both row types at once.
+2. ~~**The reader drops `session_effort` and `lane_reason`.**~~ **Fixed** —
+   both read through one helper shared by `host_delivery`, `host_refused`, and
+   kernel rows, so the gap closed for every row type at once. `primary_merge`
+   landed on the same pass. Still dropped, and the next one of these:
+   `worktree_carry`, which lands on isolated completion rows and has no home
+   on `DispatchEntry`.
 3. **`dial resolve` has no structured failure output.** Its failure is exit
    status plus free-form stderr, so the hook's `resolver_error` predicate
    covers everything from a malformed pin to a missing binary. A
@@ -384,7 +386,11 @@ spawned.
    nothing" spelling behaves exactly as before; only a genuinely declared
    value of the wrong shape fails. No blast-radius pass was needed after all,
    which is worth remembering the next time a deferral is justified by one.
-7. **Flaky workspace-lease-lock tests** — `test/tool-repairs.test.ts:558` and
+7. **Flaky workspace-lease-lock tests** — now worse, and worth doing.
+   Isolating paired primaries added worktree churn, so parallel runs surface
+   one or two *different* shadow/lease failures per run, all passing in
+   isolation. `--test-concurrency=1` is the current workaround for anything
+   conclusive. Original: — `test/tool-repairs.test.ts:558` and
    `test/drive-parallel.test.ts:169` intermittently time out on the same lock
    and pass in isolation. Not caused by this work; it muddies every agent
    verification run, which is reason enough to fix it.
@@ -419,6 +425,18 @@ spawned.
     and the Codex brokers get their relay baked in at emit time — so this is a
     symmetry gap rather than a functional one. It matters the moment anything
     wants the relay from the steering path.
+
+11. **A paired `worker`'s gitignored output is discarded.** The merge-back
+    diff comes from `git add -A`, which respects `.gitignore`, so a worker
+    whose real product is a gitignored build directory loses it when a pair is
+    selected. Carried dependencies are unaffected (input, not output). This is
+    a real narrowing of what a paired `worker` can produce, introduced
+    knowingly when write-shaped pairs shipped, and it wants either an opt-out
+    or an explicit carry-back list.
+12. **Nobody judges accumulated pairs.** Phase 6. Both arms now produce
+    comparable diffs from one shared baseline for every archetype, so the
+    input a judge would need finally exists — which makes this the next real
+    step on the shadow line rather than a distant one.
 
 ## Low-friction release boundary
 

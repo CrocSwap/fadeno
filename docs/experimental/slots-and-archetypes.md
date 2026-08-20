@@ -669,11 +669,69 @@ is still dropped by the merge before the parser can reject it); that wants its
 own change, because the parser is inconsistent about `null` and tightening the
 merge would make a bare `dials:` start failing.
 
-**Deliberately out of scope.** Write-shaped primaries land last: for
-`reviewer` and `judge` nothing needs to reach the workspace, so both arms sit
-in worktrees and the user loses only latency. `worker` forces a choice about
-where the primary's edits go, and review quality is the better-posed judging
-question anyway.
+**Write-shaped primaries — now built** (2026-08-20). This section deferred
+them, on the reasoning that `reviewer` and `judge` cost only latency while
+`worker` "forces a choice about where the primary's edits go". Two things were
+wrong with that. `worker` is the archetype most worth shadowing — a model
+test-drive is worker-shaped — and the deferral did not make write-shaped pairs
+*not happen*: nothing refused one, so a `worker` pair formed, completed, and
+stamped `pair_id` on both rows while the primary emitted only a
+`workspace_changed` boolean against the challenger's real diff. A boolean
+cannot be compared to a diff, so the pair looked legitimate and proved
+nothing.
+
+A selected pair now isolates both arms and merges the primary's diff back, so
+`fadeno dispatch --archetype worker` still means "the work is in your tree
+when it returns". The choice the deferral named is answered rather than
+avoided: the edits go to a worktree and come back through `git apply --3way`.
+
+Four things fell out of building it that the sketch did not anticipate:
+
+- **The baseline must be captured once and replayed into both worktrees.**
+  The challenger is materialized before the primary's worktree exists, so
+  capturing per-arm reads the tree at two moments; a file written between them
+  lands in one arm's baseline and not the other's. The commit uses fixed dates
+  so both arms compute the same sha, making `baseline_commit` one value
+  genuinely shared rather than one arm's copied onto the other's row.
+- **The workspace lease moves; it must not be dropped.** An isolated primary
+  cannot reach the shared tree while it works, so it takes no lease then — but
+  it takes one across the merge-back. Dropping it would remove worker
+  dispatches from the single repo-wide mechanism serializing writers, and
+  sampling is prompt-digest-keyed, so a paired dispatch and an unpaired one
+  coexist routinely. The result is *more* concurrency than before: a shared
+  primary holds that lease for its whole run.
+- **Candidacy is not capability.** Isolating can itself fail — a non-git repo
+  has no worktrees, an uncarriable declared path has no honest checkout — so
+  "isolate whenever a pair is wanted" turns working dispatches into hard
+  errors. The primary isolates only when the pair actually materialized, and
+  every later refusal degrades to "no pair, primary runs normally" with
+  `workspace_mode_degraded` recording why the completion row differs from the
+  request row's intent.
+- **A paired primary's gitignored output is discarded.** The merge-back diff
+  comes from `git add -A`, which respects `.gitignore`, so a worker whose real
+  product is a gitignored build directory loses it. Carried dependencies are
+  unaffected — they are input, not output — but this is a real narrowing of
+  what a paired `worker` can produce, and it is the open question this section
+  leaves behind rather than one it settles.
+
+**Blinding stops being advisory in the same change.** Both arms sit at
+`.fadeno/local/pair/<pair-id8>/<own-dispatch-id8>` — same depth, same shape, a
+random uuid on each — so neither can read its own cwd and learn which arm it
+is. `shadow_containment` remains necessary regardless: a prompt naming this
+repo's absolute path used to send the challenger into the primary's tree, and
+with both isolated it sends both into the shared tree, where they collide with
+each other.
+
+**`carry_mutated` closes the hazard `worktree_carry` always carried.** A
+hardlinked path is one inode in two trees, so a tool writing one in place
+mutates the primary's copy. Detection is an lstat tuple per entry — ino, size,
+mtime, ctime, mode, uid, gid, nlink — never a content hash, because hashing a
+`node_modules` on the critical path is unaffordable and a sampled hash would
+miss the common case silently. `ctime` closes the evasion `utimes` opens.
+`nlink` is recorded and deliberately never counted as drift, which is what
+lets verification run after a worktree is torn down. It reports and never
+repairs: a detector that mutated would destroy the evidence it exists to
+produce.
 
 ## Steering restart — what a dial change must not cost
 
