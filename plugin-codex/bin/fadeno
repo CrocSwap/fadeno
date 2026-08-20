@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.38";
+  if (true) return "0.6.0-rc.39";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -15350,6 +15350,17 @@ function dispatchability(spec, harness) {
 }
 function commandRoutable(spec) {
   return spec.adapter === "command" || spec.adapter === "host" && spec.fallbackCommand != null;
+}
+function explainPairRoutability(spec, executorName, archetype, profile) {
+  if (!commandRoutable(spec)) {
+    return {
+      routable: false,
+      reason: `executor "${executorName}" has no command lane \u2014 a host delivery with no fallback_command has nothing for a pair to force both arms onto.`
+    };
+  }
+  const conflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile);
+  if (conflict != null) return { routable: false, reason: conflict };
+  return { routable: true };
 }
 function explainEligibilityConflict(delivery, archetype) {
   if (eligibilityFor(delivery.spec, archetype) !== "forbidden") return null;
@@ -21576,6 +21587,11 @@ ${prompt}`;
     const live = countLiveShadows(repoRoot);
     if (live >= cap) {
       writeShadowRefusal("shadow_cap", `${live} shadow${live === 1 ? " is" : "s are"} already running and the live cap is ${cap} \u2014 raise FADENO_SHADOW_MAX_LIVE or let one finish.`);
+      return null;
+    }
+    const primaryRoutability = explainPairRoutability(spec, executorName, archetype, profile);
+    if (!primaryRoutability.routable) {
+      writeShadowRefusal("shadow_write_posture", primaryRoutability.reason);
       return null;
     }
     let shadowDelivery;
@@ -30124,8 +30140,11 @@ function runSteeringResolve(opts) {
       // be told, and must not read the silence as a "no".
       selected: rate == null ? true : digest2 ? shadowSampleRoll(digest2, archetype, challenger) < rate : null,
       // The PRIMARY's own resolved spec, after write-posture — what a
-      // selected pair would have to reuse to reach the command lane.
-      routable: commandRoutable(spec)
+      // selected pair would have to reuse to reach the command lane. Must
+      // also satisfy the archetype's write posture on that lane, not just
+      // have one: `commandRoutable` alone says a lane exists, not that
+      // forcing both arms onto it would actually work.
+      routable: explainPairRoutability(spec, refString, archetype, profile).routable
     };
   }
   const pinnedEffort = compiled?.pinnedEffort ?? cascade.ref.effort ?? null;
@@ -30190,7 +30209,7 @@ function runSteeringResolve(opts) {
         // The pair overrides the lane the effort/model predicate chose, so it
         // says so rather than letting `lane: 'host'` contradict `mode`. The
         // contract guarantee still holds: this branch is gated on
-        // `shadow.routable`, which is `commandRoutable(spec)`.
+        // `shadow.routable`, which is `explainPairRoutability(...).routable`.
         lane: "command",
         lane_reason: "shadow pair forces the command lane",
         executor: refString,
@@ -31699,8 +31718,9 @@ function runDialResolve(opts) {
       selected: rate == null ? true : digest2 ? shadowSampleRoll(digest2, archetype, challenger) < rate : null,
       // The PRIMARY's own resolved spec — `spec` above, after write-posture —
       // not the challenger's. This is what a selected pair would have to
-      // reuse to reach the command lane.
-      routable: commandRoutable(spec)
+      // reuse to reach the command lane, and that lane must also satisfy the
+      // archetype's write posture, not merely exist.
+      routable: explainPairRoutability(spec, resolved.delivery.refString, archetype, profile).routable
     };
   }
   const relay = (() => {
