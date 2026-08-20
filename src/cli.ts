@@ -176,6 +176,7 @@ Options:
   --shadow <ref>          (dispatch) Duplicate the prompt to a one-shot shadow challenger
                           (FADENO_SHADOW_MAX_LIVE caps concurrent challengers; default 4)
   --isolate               (dispatch) Run in a detached worktree (preserves diff, bypasses shared-writer lease)
+  --ignored-output <kept|discardable>  (dispatch) Whether this task's gitignored output must survive; kept forgoes a shadow pair
   --diagnostics           (dispatch/drive) Persist bounded process output (32 KiB / 500 lines) to diagnostics log
   --no-brief              (dispatch) Skip the archetype's declared brief preamble
   --tail <n>              (dispatches) Logical entries to show, newest last (default 10)
@@ -425,6 +426,11 @@ Options:
                         their worktrees are retained under .fadeno/local/shadow for review
   --timeout <seconds>   Hard executor deadline seconds; 0 disables route default (20 min)
   --isolate             Run in a detached worktree (opt-in, preserves diff, bypasses shared-writer lease)
+  --ignored-output <kept|discardable>
+                        Whether this task's gitignored output must survive. A shadow pair merges the
+                        primary back through git add -A, which respects .gitignore, so "kept" forgoes
+                        the pair rather than discard the output. Overrides the archetype's
+                        ignored_output policy. Default: discardable.
   --diagnostics         Persist bounded process output (32 KiB / 500 lines per stream) to diagnostics log
   --no-brief            Skip the archetype's declared brief preamble
 
@@ -1421,6 +1427,7 @@ function main(argv: string[]): number {
         'prompt-file': { type: 'string' },
         'no-brief': { type: 'boolean' },
         isolate: { type: 'boolean' },
+        'ignored-output': { type: 'string' },
         diagnostics: { type: 'boolean' },
         tail: { type: 'string' },
         rate: { type: 'string' },
@@ -2189,6 +2196,13 @@ function main(argv: string[]): number {
         shadow: values.shadow,
         timeoutMs: dispatchTimeoutMs,
         isolate: Boolean(values.isolate),
+        ignoredOutput: ((): 'kept' | 'discardable' | null => {
+          const raw = values['ignored-output'];
+          if (typeof raw !== 'string') return null;
+          const trimmed = raw.trim();
+          if (trimmed === 'kept' || trimmed === 'discardable') return trimmed;
+          throw new Error(`--ignored-output must be "kept" or "discardable"; got "${raw}"`);
+        })(),
         diagnostics: Boolean(values.diagnostics),
         noBrief: Boolean(values['no-brief']),
         promptFile,

@@ -119,6 +119,7 @@ const COMMANDS: Record<string, CommandSpec> = {
       '--shadow': { kind: 'free' },
       '--timeout': { kind: 'free' },
       '--isolate': NONE,
+      '--ignored-output': { kind: 'enum', values: ['kept', 'discardable'] },
       '--no-brief': NONE,
       '--diagnostics': NONE,
     },

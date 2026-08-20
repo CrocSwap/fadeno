@@ -64,10 +64,12 @@ import {
   isWorkspaceLeaseAlive,
   readWorkspaceLease,
   releaseWorkspaceLease,
+  scanIgnoredOutput,
   verifyCarriedPaths,
   withIsolatedWorktree,
   WorkspaceLeaseError,
   type CarryFingerprint,
+  type IgnoredOutputScan,
   type LeaseHolder,
   type WorkspaceLeaseRecord,
   type WorkspaceMode,
@@ -248,6 +250,7 @@ export type DispatchRefusalPredicate =
   | 'shadow_baseline'
   | 'shadow_carry'
   | 'shadow_containment'
+  | 'ignored_output_kept'
   | 'workspace_lease';
 
 function producedByIds(opts: AdHocDispatchOptions): string[] {
@@ -422,6 +425,16 @@ export interface AdHocDispatchOptions {
   shadow?: string | null;
   /** Isolated worktree delivery: opt-in via --isolate, bypasses shared-writer lease. */
   isolate?: boolean;
+  /**
+   * Whether THIS dispatch's gitignored output has to survive, overriding the
+   * archetype's `ignored_output` policy.
+   *
+   * A pair merges the primary back through a diff built by `git add -A`,
+   * which respects `.gitignore` — so a paired arm's gitignored output is
+   * discarded. `kept` therefore forgoes the pair. That trade is deliberate
+   * and one-directional: it costs a comparison, never work.
+   */
+  ignoredOutput?: 'kept' | 'discardable' | null;
   /** Hard executor deadline in milliseconds; 0 disables, null/undefined uses the route default. */
   timeoutMs?: number | null;
   /** Bounded opt-in process output diagnostics (per-stream 32 KiB / 500 lines). */
@@ -1713,6 +1726,40 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       return null;
     }
 
+    // Gitignored output. A pair merges the primary back through a diff built
+    // by `git add -A`, which respects `.gitignore` — so any gitignored output
+    // an arm produced is discarded. A dispatch that needs that output must
+    // therefore not be paired.
+    //
+    // A REFUSAL rather than a repair, deliberately. The alternative designs
+    // were carrying gitignored paths back (which needs them named in advance,
+    // the same problem `worktree_carry` already has) or letting the arm
+    // report what it made (which would make carry-back depend on what a model
+    // chose to mention — two runs of one pair could then carry different
+    // sets, and the pair would stop being a controlled comparison, which is
+    // the whole reason it exists). Skipping is always correct and costs a
+    // comparison, never work.
+    //
+    // Refused HERE, at materialization, and not by returning null from
+    // `decidePairCandidate` — suppressing candidacy writes no row at all, and
+    // "no pair, and here is why" is the entire value. The primary stays
+    // shared exactly as an unpaired dispatch's does.
+    const ignoredOutputPolicy = opts.ignoredOutput
+      ?? (profile.archetypes[archetype ?? '']?.ignoredOutput ?? 'discardable');
+    if (ignoredOutputPolicy === 'kept') {
+      writeShadowRefusal(
+        'ignored_output_kept',
+        `this dispatch declares \`ignored_output: kept\`, and a pair cannot preserve it: both arms run in ` +
+          `worktrees and the primary is merged back through \`git add -A\`, which respects .gitignore — so any ` +
+          `gitignored output would be discarded. No pair was formed and the primary runs normally in the ` +
+          `shared tree. This is a trade, not a fault: a comparison was given up to protect the work. Set ` +
+          `\`ignored_output: discardable\` on the archetype, or pass \`--ignored-output discardable\`, if this ` +
+          `task's gitignored output is intermediate and safe to lose.`,
+        { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: 'command' },
+      );
+      return null;
+    }
+
     // Containment. Byte-identical prompts are what makes the pair a fair
     // test, but that same identity means a prompt naming this repo's
     // absolute root sends the challenger straight into the primary's tree
@@ -2015,6 +2062,18 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // stamp never repairs, reverts, or deletes. Absent when clean.
     const shadowCarryMutation = carryMutationStamp(verifyCarriedPaths(repoRoot, pending.carryFingerprint));
     if (shadowCarryMutation != null) sRow.carry_mutated = shadowCarryMutation;
+    // The challenger's worktree is RETAINED, so this could run later — but it
+    // runs now, beside the primary's, so both arms of a pair are measured the
+    // same way at the same point in their lifecycle. A challenger's ignored
+    // output is discarded too: nothing merges its worktree back at all.
+    const shadowIgnored = scanIgnoredOutput(pending.worktreeAbs, profile.worktreeCarry);
+    if (shadowIgnored.paths.length > 0 || shadowIgnored.truncated) {
+      sRow.ignored_output_discarded = {
+        paths: shadowIgnored.paths,
+        ...(shadowIgnored.truncated ? { truncated: true } : {}),
+        ...(shadowIgnored.note != null ? { note: shadowIgnored.note } : {}),
+      };
+    }
     if (spawnFailedMsg != null) sRow.error = spawnFailedMsg;
     // Shadow completions OMIT workspace_changed by construction
     appendEvidenceRow(repoRoot, sRow);
@@ -2062,6 +2121,12 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // to do. Populated below, inside the isolated branch only.
   let isolatedCarryRecords: Array<{ path: string; mechanism: WorktreeCarryMechanism }> = [];
   let isolatedCarryFingerprint: CarryFingerprint | null = null;
+  // Annotated and read through a helper rather than narrowed inline: the only
+  // assignment happens inside the `withIsolatedWorktree` callback, and TS's
+  // control-flow analysis collapses the union to `null` at the row-projection
+  // site below, so a direct `!= null` there narrows to `never`.
+  let isolatedIgnoredOutput: IgnoredOutputScan | null = null;
+  const takeIsolatedIgnoredOutput = (): IgnoredOutputScan | null => isolatedIgnoredOutput;
   // The mode actually used. `workspaceMode` is the INTENT recorded on the
   // request row; this is what happened. They differ only when a paired
   // primary's own worktree could not be built (see the degradation below).
@@ -2189,7 +2254,14 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
             );
           }
         }
-        return invoke(worktreeAbs);
+        const spawnedInWorktree = invoke(worktreeAbs);
+        // Scanned here, inside the callback, because `withIsolatedWorktree`
+        // removes the worktree on its way out — and after the executor has
+        // run, because before it there is nothing but the carry to find.
+        // `git add -A` respects .gitignore, so whatever this names is about
+        // to die with the worktree unless something says so first.
+        isolatedIgnoredOutput = scanIgnoredOutput(worktreeAbs, profile.worktreeCarry);
+        return spawnedInWorktree;
       });
       spawned = isolated.result;
       isolatedDiffRel = isolated.diff.diffRel;
@@ -2412,6 +2484,18 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   }
   // Absent when nothing was declared or nothing declared existed, matching
   // the shadow row's same convention above.
+  // Gitignored output that will not survive. Recorded whenever the scan found
+  // something OR could not be sure it found everything: a truncated scan with
+  // a non-empty list is a floor, never a set, and "I could not tell" must not
+  // be spelled the same as "there was nothing".
+  const primaryIgnored = takeIsolatedIgnoredOutput();
+  if (primaryIgnored != null && (primaryIgnored.paths.length > 0 || primaryIgnored.truncated)) {
+    row.ignored_output_discarded = {
+      paths: primaryIgnored.paths,
+      ...(primaryIgnored.truncated ? { truncated: true } : {}),
+      ...(primaryIgnored.note != null ? { note: primaryIgnored.note } : {}),
+    };
+  }
   // Same shared-inode hazard on this arm, and it matters MORE here than on
   // the challenger: this is the arm whose work is kept, so a hardlinked file
   // it wrote in place has already reached the caller's tree by a channel the
