@@ -29,6 +29,8 @@ import {
   type ShadowAttachment,
   type RoleResolutionSource,
   type CompiledDelivery,
+  type DialLayers,
+  shadowSampleRoll,
 } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import {
@@ -369,6 +371,77 @@ export function runDialSetMany(opts: DialSetManyOptions): DialSetResult[] {
   return archetypes.map((archetype) => runDialSet({ ...opts, archetype }));
 }
 
+/**
+ * Warn when a dial is the first thing in this repo to send work to a vendor.
+ *
+ * Routing a model is a governance decision as much as a resolution one: the
+ * prompt goes to that provider, and for a write delivery — or any shadow,
+ * which runs in a worktree of the repo — so does the source. A dial set once
+ * and forgotten is a standing egress path, so the moment to say it is set
+ * time, alongside the write-posture and eligibility checks, not dispatch time.
+ *
+ * In use = the compiled provider of every effective dial plus every shadow
+ * attachment, minus THE SLOT BEING WRITTEN — which cannot vouch for itself.
+ * The unit is the slot, not the archetype: shadowing `worker` with the vendor
+ * `worker` already dials is not new egress, so a shadow write counts its own
+ * archetype's primary and a primary write counts its own archetype's shadow.
+ * An unresolvable dial vouches for nothing — a stale pin is reported on its
+ * own channel and must not silence this.
+ */
+function providerNoveltyNote(params: {
+  profile: ExecutorProfile;
+  layers: DialLayers;
+  shadows: Record<string, ShadowAttachment>;
+  archetype: string;
+  refString: string;
+  compiled: CompiledDelivery;
+  kind: 'dial' | 'shadow';
+}): string | null {
+  const { profile, layers, shadows, archetype, refString, compiled, kind } = params;
+  const provider = compiled.provider;
+  if (provider == null || provider === 'current-host') return null;
+  const inUse = new Set<string>();
+  const archetypes = new Set<string>(['worker', 'reviewer', 'judge']);
+  for (const key of Object.keys(profile.archetypes)) archetypes.add(key);
+  for (const key of Object.keys(layers.session)) archetypes.add(key);
+  for (const key of Object.keys(layers.repo)) archetypes.add(key);
+  for (const key of Object.keys(layers.user)) archetypes.add(key);
+  const providerOf = (ref: DialRef): void => {
+    try {
+      const other = compileDialRef(ref, profile);
+      if (other.provider != null) inUse.add(other.provider);
+    } catch {
+      // Unresolvable: vouches for nothing.
+    }
+  };
+  for (const other of archetypes) {
+    if (kind === 'dial' && other === archetype) continue; // the dial being replaced
+    try {
+      const cascade = resolveDialCascade(other, other, { bindings: profile.bindings, archetypes: profile.archetypes }, layers);
+      providerOf(cascade.ref);
+    } catch {
+      // Unresolvable: vouches for nothing.
+    }
+  }
+  for (const [other, attachment] of Object.entries(shadows)) {
+    if (kind === 'shadow' && other === archetype) continue; // the attachment being replaced
+    providerOf({
+      model: attachment.model,
+      ...(attachment.effort ? { effort: attachment.effort } : {}),
+      ...(attachment.via ? { via: attachment.via } : {}),
+    });
+  }
+  if (inUse.has(provider)) return null;
+  const arrow = kind === 'shadow' ? '~' : '→';
+  const consequence = kind === 'shadow'
+    ? 'Every sampled dispatch duplicates the prompt to that vendor alongside the primary, and the challenger runs in a worktree of this repo.'
+    : 'Prompts for this archetype — and, on a write delivery, the workspace the executor can read — go to a vendor this repo is not already sending work to.';
+  const undo = kind === 'shadow'
+    ? `Detach it with \`fadeno dial clear-shadow ${archetype}\`.`
+    : `Change it with \`fadeno dial ${archetype} <model>\`.`;
+  return `WARNING: NEW PROVIDER — ${archetype} ${arrow} ${refString} routes to "${provider}", which nothing else dialed in this repo uses.\n${consequence}\n${undo}`;
+}
+
 export function runDialSet(opts: DialSetOptions): DialSetResult {
   const repoRoot = repoRootOf(opts);
   if ([opts.session, opts.user, opts.repo].filter(Boolean).length > 1) {
@@ -478,6 +551,18 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
   // Note: readLocalDialState may throw if malformed; convert to DialError
   // Already handled inside readLocalDialState which throws ExecutorProfileError
   const userDials = readUserDials(opts.userPathOptions);
+  {
+    const novelty = providerNoveltyNote({
+      profile,
+      layers: { session: localState.dials, repo: profile.dials, user: userDials as Record<string, DialRef> },
+      shadows: localState.shadows,
+      archetype,
+      refString,
+      compiled,
+      kind: 'dial',
+    });
+    if (novelty != null) notes.push(novelty);
+  }
   const sessionPinned = Object.hasOwn(localState.dials, archetype);
   const repoPinned = Object.hasOwn(profile.dials, archetype) ? profile.dials[archetype]! : null;
   const userPinned = Object.hasOwn(userDials, archetype);
@@ -843,6 +928,18 @@ export function runDialShadow(opts: DialShadowOptions): DialShadowResult {
   }
 
   const state = readLocalDialState(repoRoot);
+  {
+    const novelty = providerNoveltyNote({
+      profile,
+      layers: { session: state.dials, repo: profile.dials, user: readUserDials(opts.userPathOptions) as Record<string, DialRef> },
+      shadows: state.shadows,
+      archetype,
+      refString,
+      compiled,
+      kind: 'shadow',
+    });
+    if (novelty != null) notes.push(novelty);
+  }
   const previous = state.shadows[archetype] ?? null;
   const nextShadows: Record<string, ShadowAttachment> = { ...state.shadows, [archetype]: rate == null ? { model: dial.model, ...(dial.effort ? { effort: dial.effort } : {}), ...(dial.via ? { via: dial.via } : {}) } : { model: dial.model, ...(dial.effort ? { effort: dial.effort } : {}), ...(dial.via ? { via: dial.via } : {}), rate } };
   const path = writeLocalDialState(repoRoot, { dials: state.dials, shadows: nextShadows, legacyNote: null });
@@ -1076,6 +1173,24 @@ export interface DialResolveResult {
   eligibility?: string;
   dial: DialRef;
   delivery: { dispatchable: boolean; dispatch_command: string | null; action: string };
+  /**
+   * The pair decision, when this archetype carries a shadow attachment.
+   *
+   * `selected` is the kernel's roll, not advice: a caller that routes on it
+   * and a kernel that later re-derives it at dispatch time reach the same
+   * answer, because the roll is a pure function of the prompt digest, the
+   * archetype, and the challenger. That is what lets a host wrapper decide
+   * whether a spawn is a pair *before* it routes, with no state to hand over.
+   *
+   * `selected` is null when no prompt digest was supplied — the caller asked a
+   * question the roll cannot answer, and must not read that as "no".
+   */
+  shadow?: {
+    attached: true;
+    challenger: string;
+    rate: number | null;
+    selected: boolean | null;
+  };
 }
 
 function deliveryGuidance(archetype: string, executorName: string, spec: ExecutorSpec, harness: string): DialResolveResult['delivery'] {
@@ -1096,7 +1211,7 @@ function deliveryGuidance(archetype: string, executorName: string, spec: Executo
   };
 }
 
-export function runDialResolve(opts: DialCommonOptions & { archetype: string }): DialResolveResult {
+export function runDialResolve(opts: DialCommonOptions & { archetype: string; promptSha256?: string | null }): DialResolveResult {
   const repoRoot = repoRootOf(opts);
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
@@ -1131,6 +1246,30 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string }):
   const postured = applyWritePosture(resolved.delivery.spec, archetype, profile.archetypes);
   const spec = postured.spec;
   const eligibility = eligibilityFor(spec, archetype);
+
+  // The pair decision. Re-derived rather than remembered: the same roll runs
+  // again inside `fadeno dispatch`, so a caller that routes on `selected` and
+  // the kernel that later fires the challenger cannot disagree.
+  const attachment = dialState.shadows[archetype];
+  let shadow: DialResolveResult['shadow'];
+  if (attachment != null) {
+    const challenger = formatDialRef({
+      model: attachment.model,
+      ...(attachment.effort ? { effort: attachment.effort } : {}),
+      ...(attachment.via ? { via: attachment.via } : {}),
+    });
+    const digest = opts.promptSha256?.trim();
+    const rate = attachment.rate ?? null;
+    shadow = {
+      attached: true,
+      challenger,
+      rate,
+      // No rate means every dispatch fires; no digest means the caller cannot
+      // be told, and must not read the silence as a "no".
+      selected: rate == null ? true : digest ? shadowSampleRoll(digest, archetype, challenger) < rate : null,
+    };
+  }
+
   return {
     archetype,
     executor: resolved.delivery.refString,
@@ -1147,6 +1286,7 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string }):
     ...(eligibility !== 'eligible' ? { eligibility } : {}),
     dial: resolved.delivery.ref,
     delivery: deliveryGuidance(archetype, resolved.delivery.refString, spec, harness),
+    ...(shadow != null ? { shadow } : {}),
   };
 }
 

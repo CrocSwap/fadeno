@@ -9,6 +9,7 @@ import {
   runDialResolve,
   runDialSet,
   runDialSetMany,
+  runDialShadow,
   runDialShow,
 } from '../src/commands/dial.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
@@ -314,4 +315,46 @@ test('set many: reserved words and duplicates handled; single archetype keeps th
     () => runDialSetMany({ repoRoot: root, userPathOptions: user, archetypes: ['clear'], model: 'sol' }),
     (err: unknown) => err instanceof DialError && !/nothing was dialed/.test((err as Error).message) && /reserved word/.test((err as Error).message),
   );
+});
+
+test('a dial that introduces a provider nothing else uses says so', (t) => {
+  const root = seedV3(t);
+  const opts = { repoRoot: root, userPathOptions: onHarness('standalone') };
+  // Seed the repo on one vendor. `sol` is openai; every other slot falls back
+  // to the host baseline, which has no provider to vouch for anything.
+  runDialSet({ ...opts, archetype: 'worker', model: 'sol', session: true });
+
+  // Another slot on the same vendor is not new egress — the repo already
+  // talks to them.
+  const familiar = runDialSet({ ...opts, archetype: 'reviewer', model: 'sol', session: true });
+  assert.ok(!familiar.notes.some((n) => n.includes('NEW PROVIDER')), familiar.notes.join('\n'));
+
+  // xai is.
+  const novel = runDialSet({ ...opts, archetype: 'judge', model: 'grok', session: true });
+  const warning = novel.notes.find((n) => n.includes('NEW PROVIDER'));
+  assert.ok(warning, novel.notes.join('\n'));
+  assert.match(warning!, /judge → grok routes to "xai"/);
+
+  // And once xai is dialed somewhere, it stops being news.
+  const repeat = runDialSet({ ...opts, archetype: 'worker', model: 'grok', session: true });
+  assert.ok(!repeat.notes.some((n) => n.includes('NEW PROVIDER')), repeat.notes.join('\n'));
+});
+
+test('a shadow attachment gets the same provider check, scoped to its own slot', (t) => {
+  const root = seedV3(t);
+  const opts = { repoRoot: root, userPathOptions: onHarness('standalone') };
+  runDialSet({ ...opts, archetype: 'worker', model: 'sol', session: true });
+
+  // The slot is the unit, not the archetype: shadowing worker with the vendor
+  // worker already dials duplicates the prompt to nobody new.
+  const sameVendor = runDialShadow({ ...opts, archetype: 'worker', model: 'sol' });
+  assert.ok(!sameVendor.notes.some((n) => n.includes('NEW PROVIDER')), sameVendor.notes.join('\n'));
+
+  // A challenger at a vendor this repo has never dialed is the case the
+  // warning exists for — a shadow is standing egress once attached.
+  const novel = runDialShadow({ ...opts, archetype: 'worker', model: 'grok' });
+  const warning = novel.notes.find((n) => n.includes('NEW PROVIDER'));
+  assert.ok(warning, novel.notes.join('\n'));
+  assert.match(warning!, /worker ~ grok routes to "xai"/);
+  assert.match(warning!, /duplicates the prompt/);
 });
