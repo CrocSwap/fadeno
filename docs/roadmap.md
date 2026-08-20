@@ -398,6 +398,11 @@ spawned.
    scanning for the flag would let it report the omission as fact instead —
    and this repo's own frozen copies happen to still carry `--prompt-file`,
    so the conditional is doing real work today.
+10. **`steering resolve` carries no `relay` field, though `dial resolve`
+    does.** Nothing consumes it today — the Claude hook reads `dial resolve`,
+    and the Codex brokers get their relay baked in at emit time — so this is a
+    symmetry gap rather than a functional one. It matters the moment anything
+    wants the relay from the steering path.
 
 ## Low-friction release boundary
 
