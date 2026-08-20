@@ -362,14 +362,20 @@ spawned.
    resolver's answer. One authoritative lane wants a field on those rows.
 5. **A repo with no `.fadeno/` denies silently.** Correct (never conjure an
    evidence tree) but undocumented.
-6. **The same drop survives by value type, one layer down.** The merge's
-   entry-merged branch does `mapping(source[key]) == null -> continue`, so
-   `dials: "sol"`, `tools: []`, or `tools: "lint"` still load clean and do
-   nothing — the parser would reject each, but the merge drops them first. Not
-   a blind fix: `key:` with nothing under it parses as `null`, and the parser
-   is inconsistent about null (`dials`/`bindings` throw, `archetypes`/
-   `constraints`/`tools` tolerate), so tightening the merge would make a bare
-   `dials:` start failing. Wants its own blast-radius pass.
+6. ~~**The same drop survives by value type, one layer down.**~~ **Fixed.**
+   The merge's entry-merged branch did `mapping(source[key]) == null ->
+   continue`, so `dials: "sol"`, `tools: []`, or `tools: "lint"` loaded clean
+   and did nothing — the parser would reject each, but the merge dropped them
+   first. Found again from the other end: the new `relay:` key inherited the
+   defect it was added under, and `relay: sonnet` silently did nothing.
+
+   The stated blocker turned out to be the fix. A bare `key:` parses as
+   `null`, and the parser is inconsistent about null (`dials`/`bindings`
+   throw, `archetypes`/`constraints`/`tools` tolerate) — so the merge now
+   rejects only the **non-null** non-mapping case. Every "this layer says
+   nothing" spelling behaves exactly as before; only a genuinely declared
+   value of the wrong shape fails. No blast-radius pass was needed after all,
+   which is worth remembering the next time a deferral is justified by one.
 7. **Flaky workspace-lease-lock tests** — `test/tool-repairs.test.ts:558` and
    `test/drive-parallel.test.ts:169` intermittently time out on the same lock
    and pass in isolation. Not caused by this work; it muddies every agent
