@@ -507,8 +507,17 @@ Three consequences worth stating plainly:
   made host-primary capture Claude-only stops applying.
 - **The transport confound disappears** rather than being documented. Both
   arms are headless CLI on the same route shape, and effort is pinnable on
-  both. What survives as a mandatory `ModelComparison` confound is the
-  workspace baseline, not the delivery.
+  both. What survives as mandatory `ModelComparison` confounds is the
+  workspace, not the delivery — and the workspace turned out to be two
+  confounds, not one. The tracked half is closed (a committed
+  `baseline_commit` shared by both arms). The ignored half is closed only
+  where a repo declares `worktree_carry:` — absent that, the challenger's
+  worktree has no `node_modules`, no build output, and cannot run what the
+  primary can. A pair must therefore record what was carried and by which
+  mechanism (reflink / hardlink / copy), because arms warmed differently are
+  not comparable. Effort is *requested* on both arms and measured on neither
+  unless `fadeno attest` ran inside the subagent, so an unattested pair
+  carries a silent-downgrade risk as a third confound.
 - **It is a worse simulation and a better experiment.** A CLI-vs-CLI pair does
   not measure the in-session experience. Given that the purpose is accumulated
   promotion evidence, control beats realism — but the docs must not imply the
@@ -531,11 +540,22 @@ carried in explicitly; `git worktree add` will not. A dirty tree that cannot
 be snapshotted refuses the pair *loudly* — an echo plus a `dispatch_refused`
 row — never the silent no-op an unfired sample gets.
 
-**Blinding is free and must stay that way.** The same-prompt guarantee means
-neither arm can tell from its input which it is. The only asymmetries are cwd
-and env, so `FADENO_IN_SHADOW=1` — the flag that enforces "nothing inside a
-shadow ever shadows" — is read by the kernel when a descendant invokes
-`fadeno`, and must never be surfaced in CLI output an agent can read.
+**Blinding is partial, and saying otherwise was wrong.** This section
+previously claimed blinding "is free and must stay that way" on the grounds
+that the same-prompt guarantee leaves neither arm able to tell which it is.
+The prompt half holds. The workspace half does not: the challenger's cwd is
+`.fadeno/local/shadow/<id8>`, which names the answer. `FADENO_IN_SHADOW=1`
+is likewise present in the challenger's environment and readable by any agent
+that looks, so exactly one arm can know what it is — an asymmetry applied to
+one side only, which is worse than symmetric knowledge, not better.
+
+Neither tell is removable in isolation. Real blinding requires both arms to
+sit in identically-shaped, neutrally-named worktrees, which is the deferred
+write-shaped-primary work below. Until then: `FADENO_IN_SHADOW` stays, because
+the nesting guard it enforces ("nothing inside a shadow ever shadows") is
+worth more than a partial blind, and it must still never be echoed in CLI
+output. Treat blinding as advisory and do not let a `ModelComparison` rest on
+it.
 
 **Port-back is a kernel verb, not an instruction.** Applying the primary's
 worktree to the real workspace is deterministic mechanism, so it belongs in a
@@ -583,12 +603,58 @@ never echoed; a live-challenger cap leased through
 `.fadeno/local/inflight/*.shadow.json` (`FADENO_SHADOW_MAX_LIVE`, default 4)
 whose exhaustion is a `shadow_cap` refusal row rather than a silent skip;
 shadow worktrees retained for later judgment; the `--isolate` / `--shadow`
-conflict guard lifted, since the two arms never shared a path. *Remaining:*
-the same `shadow.selected` field on Codex's `steering resolve`;
-commit-the-baseline into each worktree; `fadeno shadow-apply`; the post-shadow
-cleaner that consumes the recorded `workspace` paths; and the comparison
-renderer's primary side, which still has no `diffBytes` field because the
-struct predates symmetric arms.
+conflict guard lifted, since the two arms never shared a path. Also landed:
+`fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary]
+[--check]`, the port-back verb — it resolves either arm's id (full, or an 8+
+character prefix) to its pair, applies that arm's `diff_snapshot` with `git
+apply --3way` against the pair's `baseline_commit`, stops and keeps the diff
+artifact on any conflict rather than auto-resolving, and records a
+`shadow_apply` evidence row (`--check` reports applicability without
+mutating anything, including the ledger). `--arm primary` refuses on an
+ordinary paired primary — it already shares the workspace — unless that
+primary itself carries a `diff_snapshot` from running under `--isolate`. A
+baseline commit `git cat-file -e` can no longer find (its worktree removed
+by `fadeno clean --force`, then GC'd) is diagnosed by name instead of
+surfacing git's own "lacks the necessary blob" error; durably pinning the
+baseline under a ref at the moment `commitWorkspaceBaseline` creates it — so
+no removal-timing window can ever unreference it — remains an open
+follow-up there rather than something `shadow-apply` itself can fix.
+Phase 5's original remaining list is now empty: Codex's `steering resolve`
+carries `shadow.selected`/`shadow.routable` and routes a selected pair to the
+command lane; each worktree gets a committed baseline; `fadeno clean`
+deregisters retained worktrees instead of orphaning their git registrations;
+and the comparison renderer reports the primary's own diff, pairs on
+`pair_id`, and renders a refused challenger as refused rather than as a row of
+`?`.
+
+**Phase 5.5 — trustworthy isolation and measured identity.** Working through
+"is this rock solid?" found four ways a pair could produce a confident wrong
+verdict, all now closed. A selected pair whose primary had no command lane
+used to route the spawn to a proxy the kernel would then refuse, failing the
+task outright; `shadow.routable` gates that, and an unroutable pair degrades
+to no pair rather than to no work. A challenger's worktree lacked everything
+gitignored, so any task gated on building or testing was unwinnable for one
+arm alone; `worktree_carry:` carries declared paths by reflink, hardlink, or
+copy (never a directory symlink, which would share the namespace and let a
+rename-based write land in the primary's real tree), recording the mechanism
+per path. Byte-identical prompts plus differing cwd let a prompt naming
+absolute repo paths send the challenger into the primary's workspace; that
+now refuses the pair with `shadow_containment`. And host delivery recorded
+only what was *requested* — `fadeno attest`, run inside the subagent, measures
+the one identity component that is observable (`CLAUDE_EFFORT`, already past
+any silent downgrade), while `fadeno dispatches` surfaces both an unattested
+delivery and an effort that disagrees with its dial.
+
+*Remaining:* pin `baseline_commit` under a ref when it is created, so no
+worktree-removal timing window can leave a pair un-appliable; detect
+mutation of carried paths (a hardlinked file written in place changes the
+primary's copy, and cleanup cannot undo it) and stamp such a pair suspect
+rather than trying to prevent it; and one gap that is not shadow-specific at
+all — `mergeLayer` copies catalog keys by exact literal name, so a misspelled
+top-level key is dropped before `parseExecutorProfile`'s strict unknown-key
+check ever runs. A typo'd `dials:` silently does nothing today. That is a
+pre-existing loader property, verified against `dials` at HEAD, and it wants
+its own change rather than a blind fix.
 
 **Deliberately out of scope.** Write-shaped primaries land last: for
 `reviewer` and `judge` nothing needs to reach the workspace, so both arms sit
@@ -713,6 +779,30 @@ ever been observed at is the signature of a silent downgrade. Attesting the
 subagent's *own* post-downgrade level is possible in principle — every
 dispatch proxy runs Bash and would see its own `CLAUDE_EFFORT` — and is left
 as follow-up rather than assumed.
+
+**Shipped: the follow-up above.** `fadeno attest --archetype <a>`, run FROM
+INSIDE the subagent, writes a `host_attestation` row measuring what that
+process can actually observe about itself — the resolved `CLAUDE_EFFORT`
+(already past any silent downgrade), pid, cwd, and the archetype it was told
+it is. Model stays unmeasured — there is no environment-variable equivalent,
+and this deliberately never asks the model to self-report its own name — so
+the row carries `identity_evidence: requested_only`, the same admission
+`fadeno steering resolve` already makes. `fadeno attest` is now the first
+instruction in every host-surface role agent (the plain
+`templates/claude/claude-agents/{worker,reviewer,judge}.md` bodies, which the
+identity grid also carries verbatim), but it is tier-1/advisory like every
+other instruction those bodies contain — an agent may not comply, which is
+why the reader matters as much as the writer.
+
+`fadeno dispatches` correlates a `host_attestation` onto the nearest preceding
+unattested `host_delivery` row of the same archetype — the best a reader can
+do, since the subagent has neither the parent's prompt digest nor its session
+id to key on exactly — and renders two things that were previously
+indistinguishable from success: a `host_delivery` with no matching
+attestation (`[never attested]`), and an attested effort that differs from
+what was requested (`[effort mismatch: requested … attested …]`), the
+signature of a silent downgrade that makes any shadow pair spanning that row
+invalid.
 
 ## Phasing summary
 

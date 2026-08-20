@@ -517,6 +517,28 @@ line per artifact under its challenger, plus a per-challenger tally
 (`N pairs, M comparisons: X prefer_challenger / Y prefer_baseline / Z
 tie/inconclusive`). Missing dir or no pairs is a friendly empty output, exit 0.
 
+**Port-back.** Once a challenger has proven out, `fadeno shadow-apply
+<pair-id|dispatch-id> [--arm challenger|primary] [--check]` gets its diff into
+the real workspace — a kernel verb, not an instruction to a relay agent
+(slots-and-archetypes.md, "Port-back is a kernel verb, not an instruction").
+The id resolves either arm to its pair (full id or an 8+ character prefix,
+same convention as `dispatches --output`/`--cancel`). `--arm` defaults to
+`challenger`; `--arm primary` refuses on an ordinary paired primary — it
+already shares the workspace, so there is nothing to apply — unless that
+primary itself carries a `diff_snapshot` (it ran under `--isolate`). Applied
+with `git apply --3way` against the pair's `baseline_commit`, so port-back
+survives the main tree moving on while the pair ran; on any conflict it
+stops, leaves the diff artifact exactly where it was, records the attempt,
+and exits non-zero — it never auto-resolves. `--check` (`git apply --check
+--3way`) reports applicability without mutating anything, including the
+ledger. A successful (non-`--check`) attempt, clean or conflicted, is
+recorded as a `shadow_apply` evidence row (`pair_id`, `arm`, `artifact`,
+`baseline_commit`, `outcome`). A baseline commit that a `git cat-file -e` no
+longer finds — for example, garbage collected after `fadeno clean --force`
+removed its retained shadow worktree — is diagnosed by name rather than
+surfacing git's own "lacks the necessary blob" error. See
+`src/commands/shadow-apply.ts`.
+
 **The adoption ladder:**
 
 ```
