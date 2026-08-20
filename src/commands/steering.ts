@@ -886,6 +886,18 @@ export interface SteeringApplyResult {
    * without the managed marker.
    */
   removed?: string[];
+  /**
+   * Archetypes carrying a session dial or repo pin that a `--scope user`
+   * apply deliberately did NOT read, because a global agent set may only be
+   * cut from a global dial (see `dialLayersForApply`).
+   *
+   * Reported rather than dropped: a developer who just ran `fadeno dial
+   * worker opus` in this repo and then applied at user scope would otherwise
+   * watch the command succeed and change nothing, which is the same shape of
+   * silent wrong answer this scoping rule exists to remove. Always empty at
+   * project scope.
+   */
+  ignoredLocalDials?: string[];
 }
 
 /** The three Codex role slots that get a session-static agent file. */
@@ -954,18 +966,68 @@ function managedAgentEmit(path: string, body: string, force: boolean, scope: 'pr
   return existed ? 'overwritten' : 'created';
 }
 
+/**
+ * The dial layers an apply at `scope` is allowed to read, and the repo-local
+ * dials it had to ignore to stay honest.
+ *
+ * `steering resolve` reads all four layers, and should: it answers for the
+ * repo it is standing in. An APPLY is different, because it writes a file
+ * whose REACH is its scope. `--scope user` writes ONE agent set into
+ * `$CODEX_HOME/agents` (or `~/.claude/agents`) that every repo on this
+ * machine then steers by — so resolving it through a session dial or a repo
+ * pin exports a decision made about one repo to every other repo, silently.
+ *
+ * That is not hypothetical. `fadeno dial worker sonnet` in the Fadeno repo
+ * writes the SESSION layer (an unscoped set edits the highest EXISTING dial),
+ * and a later `steering apply --codex --scope user` run from that same repo
+ * rewrote the global worker agent as a command broker — whose only identity
+ * is the relay, `luna@low`. Every other repo on the machine, including ones
+ * whose user dial says `worker: luna`, then resolved `mode: host` into that
+ * broker and did worker-grade work at the relay's effort. Nothing reported a
+ * conflict, because from each repo's own point of view the resolution was
+ * correct; the agent it resolved INTO had been cut from someone else's dial.
+ *
+ * This mirrors the rule `emitCodexSteeringBrokers` already states in the
+ * other direction — scaffolding must not bake one machine's personal dial
+ * into a shared, tracked surface. Same principle, both directions: a dial may
+ * only be materialized into a surface whose reach it already has.
+ *
+ * Ignoring them silently would just move the wrong answer, so the ignored
+ * archetypes come back with the layers and every caller surfaces them.
+ */
+function dialLayersForApply(
+  scope: 'project' | 'user',
+  repoRoot: string,
+  profile: ExecutorProfile,
+  userPathOptions: UserPathOptions | undefined,
+): { layers: DialLayers; ignoredLocal: string[] } {
+  const state = readLocalDialState(repoRoot);
+  const userRaw = readUserDials(userPathOptions ?? {});
+  const user: Record<string, DialRef> = {};
+  for (const [k, v] of Object.entries(userRaw)) user[k] = v as DialRef;
+  const repo = { ...profile.dials } as Record<string, DialRef>;
+  if (scope !== 'user') {
+    return { layers: { session: state.dials, repo, user }, ignoredLocal: [] };
+  }
+  const ignoredLocal: string[] = [];
+  for (const archetype of [...Object.keys(state.dials), ...Object.keys(repo)]) {
+    if (!ignoredLocal.includes(archetype)) ignoredLocal.push(archetype);
+  }
+  return { layers: { session: {}, repo: {}, user }, ignoredLocal };
+}
+
 /** Materialize every archetype's resolved dial into a session-static Codex role agent. */
 export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResult {
   const repoRoot = rootOf(opts);
   const { profile } = profileOf(repoRoot, opts.userPathOptions);
   // Read live dial layers (ignore loadout if present)
+  const scope = opts.scope ?? 'project';
   let dialLayers: DialLayers;
+  let ignoredLocalDials: string[];
   try {
-    const state = readLocalDialState(repoRoot);
-    const userRaw = readUserDials(opts.userPathOptions ?? {});
-    const user: Record<string, DialRef> = {};
-    for (const [k, v] of Object.entries(userRaw)) user[k] = v as DialRef;
-    dialLayers = { session: state.dials, repo: { ...profile.dials } as Record<string, DialRef>, user };
+    const scoped = dialLayersForApply(scope, repoRoot, profile, opts.userPathOptions);
+    dialLayers = scoped.layers;
+    ignoredLocalDials = scoped.ignoredLocal;
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
     throw err;
@@ -974,7 +1036,6 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
   const materialization: SteeringApplyResult['materialization'] = {};
   const pending: Array<{ path: string; body: string }> = [];
   const results: EmitResult[] = [];
-  const scope = opts.scope ?? 'project';
   const agentDir = codexAgentDir(scope, repoRoot, opts.userPathOptions);
   const managedCli = userPaths(opts.userPathOptions).managedCli;
   const cliPath = opts.cliPath ?? (scope === 'user' && existsSync(managedCli) ? managedCli : 'fadeno');
@@ -1049,7 +1110,7 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
     .filter((item) => !existsSync(item.path) || readFileSync(item.path, 'utf8') !== item.body)
     .map((item) => item.path);
   const restartRequired = results.some((item) => item.status === 'created' || item.status === 'overwritten');
-  return { results, materialization, baseline, restartRequired, conflicts, scope };
+  return { results, materialization, baseline, restartRequired, conflicts, scope, ignoredLocalDials };
 }
 
 export interface CodexBrokerEmitOptions extends CommonOptions {
@@ -1220,13 +1281,13 @@ export function runSteeringApplyClaude(opts: SteeringApplyOptions): SteeringAppl
       throw err;
     }
   })();
+  const scope = opts.scope ?? 'project';
   let dialLayers: DialLayers;
+  let ignoredLocalDials: string[];
   try {
-    const state = readLocalDialState(repoRoot);
-    const userRaw = readUserDials(opts.userPathOptions ?? {});
-    const user: Record<string, DialRef> = {};
-    for (const [k, v] of Object.entries(userRaw)) user[k] = v as DialRef;
-    dialLayers = { session: state.dials, repo: { ...profile.dials } as Record<string, DialRef>, user };
+    const scoped = dialLayersForApply(scope, repoRoot, profile, opts.userPathOptions);
+    dialLayers = scoped.layers;
+    ignoredLocalDials = scoped.ignoredLocal;
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
     throw err;
@@ -1235,7 +1296,6 @@ export function runSteeringApplyClaude(opts: SteeringApplyOptions): SteeringAppl
   const materialization: SteeringApplyResult['materialization'] = {};
   const results: EmitResult[] = [];
   const removed: string[] = [];
-  const scope = opts.scope ?? 'project';
   const agentDir = claudeAgentDir(scope, repoRoot, opts.userPathOptions);
   for (const archetype of ['worker', 'reviewer', 'judge']) {
     let cascade: { ref: DialRef; source: RoleResolutionSource; resolvedVia: string | null };
@@ -1289,5 +1349,5 @@ export function runSteeringApplyClaude(opts: SteeringApplyOptions): SteeringAppl
   // neither surviving reason — a host slot with no delivery, a plugin upgrade
   // — is something this command can cause.
   const restartRequired = false;
-  return { results, materialization, baseline, restartRequired, conflicts, scope, removed };
+  return { results, materialization, baseline, restartRequired, conflicts, scope, removed, ignoredLocalDials };
 }

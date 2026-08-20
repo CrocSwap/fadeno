@@ -1731,6 +1731,14 @@ function main(argv: string[]): number {
               ? '  Nothing to remove; effort selects the delivery lane, so no agent file carries an identity.'
               : `  Removed ${removed.length} managed agent definition(s). Effort now selects the lane, so nothing is written and no restart is needed.`,
           );
+          const ignored = result.ignoredLocalDials ?? [];
+          if (ignored.length > 0) {
+            console.log(
+              `  Ignored repo-local dial(s) for ${ignored.join(', ')}: a user-scope agent set steers every ` +
+                'repo, so it is cut from user dials only. Use --scope project, or `fadeno dial <archetype> ' +
+                '<model> --user` to make the choice global.',
+            );
+          }
           if (changed === 0 && result.conflicts.length > 0) console.log('  Existing files were preserved; pass --force to replace them.');
           return 0;
         }
@@ -1751,6 +1759,14 @@ function main(argv: string[]): number {
           `  ${changed} agent definition(s) written; declared fallbacks work immediately, ` +
             'or start a fresh Codex session to deliver changed host slots in-session.',
         );
+        const ignored = result.ignoredLocalDials ?? [];
+        if (ignored.length > 0) {
+          console.log(
+            `  Ignored repo-local dial(s) for ${ignored.join(', ')}: a user-scope agent set steers every ` +
+              'repo, so it is cut from user dials only. Use --scope project, or `fadeno dial <archetype> ' +
+              '<model> --user` to make the choice global.',
+          );
+        }
         if (changed === 0) console.log('  Existing files were preserved; pass --force to replace them.');
         return 0;
       }

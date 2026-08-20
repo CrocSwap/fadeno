@@ -459,6 +459,29 @@ spawned.
     partially, not reliably. Unlike `primary_merge`'s absence, which stays
     honest, this one degrades with time — the fix is a format version bump,
     which is why it is not being done casually.
+15. ~~**A user-scope `steering apply` was cut from the repo you stood in.**~~
+    **Fixed.** Both applies now resolve a `--scope user` materialization
+    through the user dial layer alone; `dialLayersForApply` is the single
+    place that rule lives, so the Codex and Claude paths cannot drift on it,
+    and any repo-local dial it had to ignore comes back in
+    `ignoredLocalDials` and is printed.
+
+    Found by dogfood, not by a test. `fadeno dial worker sonnet` writes the
+    SESSION layer whenever one exists (an unscoped set edits the highest
+    existing dial), so applying at user scope from this repo rewrote the
+    global worker agent as a command broker — whose only identity is the
+    relay, `luna@low`. Every other repo on the machine then resolved
+    `mode: host` into that broker and did worker-grade work at the relay's
+    effort. Nothing reported a conflict, because from each repo's own point of
+    view the resolution was correct; the agent it resolved INTO had been cut
+    from a different repo's dial. The relay work did not cause this — the
+    broker always carried those literals — but it is what gave the wrong
+    agent a plausible identity instead of an obviously broken one.
+
+    The principle was already written down, in one direction only:
+    `emitCodexSteeringBrokers` refuses to bake a personal dial into a shared,
+    tracked surface. The same sentence read backwards is this fix — a dial may
+    only be materialized into a surface whose reach it already has.
 
 ## Low-friction release boundary
 
