@@ -626,6 +626,8 @@ export interface SteeringApplyResult {
   /** Host-only compatibility view; command-broker slots are omitted. */
   baseline: Record<string, string>;
   restartRequired: boolean;
+  /** Paths of the pre-registered identity grid, one per (archetype, effort). */
+  grid?: string[];
   /** Files that were preserved because they are not Fadeno-managed. */
   conflicts: string[];
   scope: 'project' | 'user';
@@ -759,8 +761,48 @@ function claudeAgentDir(scope: 'project' | 'user', repoRoot: string, userPathOpt
 
 const CLAUDE_MANAGED_MARK = '<!-- fadeno:managed';
 
+/**
+ * Named effort levels the Claude harness accepts in an agent definition.
+ * Verified against the harness itself, whose turn-effort field enumerates
+ * exactly these; integers are also accepted and deliberately not gridded.
+ */
+export const CLAUDE_EFFORT_LADDER = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+/**
+ * Agent name for one cell of the identity grid.
+ *
+ * The grid exists because the two halves of an identity travel different
+ * channels: the steering hook can rewrite a spawn's MODEL per call, but the
+ * Agent tool has no effort parameter, so effort can only come from a
+ * definition file — and the harness registers definitions at session start.
+ * Materializing per dial therefore made every dial change cost a restart.
+ * Pre-registering every (archetype, effort) cell instead means the hook only
+ * ever retargets among agents that are already registered.
+ *
+ * Keyed on effort and NOT on model, deliberately: model is already live, so
+ * adding it would make the grid combinatorial in the one dimension that grows
+ * (60 models x 20 archetypes x 5 efforts is 6,000 files). Keyed this way,
+ * registering a model costs nothing at all.
+ */
+export function claudeGridAgentName(archetype: string, effort: string): string {
+  return `fadeno-${archetype}-${effort}`;
+}
+
+/**
+ * Emit a fadeno-managed agent definition.
+ *
+ * A managed file tracks its template at BOTH scopes: the grid is regenerated
+ * output, and a cell left behind at an older template or version would keep
+ * serving that content forever. `--force` is for someone else's file, not for
+ * ours — so an unmanaged file of the same name is still skipped without it.
+ * (Pre-grid this only mattered at user scope, where a single stale per-dial
+ * agent was the whole risk; with fifteen regenerated cells per repo, a
+ * project-scope grid that could not refresh itself would silently rot.)
+ */
 function claudeManagedEmit(path: string, body: string, force: boolean, scope: 'project' | 'user'): EmitResult['status'] {
-  if (scope === 'project') return emitFile(path, body, force);
+  if (scope === 'project' && existsSync(path) && !readFileSync(path, 'utf8').includes(CLAUDE_MANAGED_MARK)) {
+    return emitFile(path, body, force); // not ours: non-destructive unless forced
+  }
   if (existsSync(path)) {
     const existing = readFileSync(path, 'utf8');
     if (!existing.includes(CLAUDE_MANAGED_MARK)) return 'skipped';
@@ -787,12 +829,22 @@ function withFrontmatterFields(template: string, fields: Record<string, string>)
 }
 
 /**
- * Materialize host-delivered dial slots into local Claude subagents
- * (`.claude/agents/<archetype>.md`) carrying `model:` and `effort:`
- * frontmatter, so an in-session worker runs at ITS model's effort rather
- * than the session's. Command-delivered slots need no file — the plugin's
- * dispatch proxies carry them — and a managed local file left over from a
- * host era is removed so the steering hook never targets a stale identity.
+ * Pre-register the Claude identity grid: one managed subagent per
+ * (host-surface archetype, named effort level), each declaring `model:
+ * inherit` and its own `effort:`.
+ *
+ * This is dial-INDEPENDENT by design. The grid is a function of the effort
+ * vocabulary alone, so re-running it after a dial change writes nothing and
+ * asks for no restart; the steering hook picks the cell matching whatever the
+ * dial currently resolves to and supplies the model on the tool call, which
+ * the harness documents as overriding the definition for that call. What still
+ * costs a restart is a change to the grid itself — a new effort level, or the
+ * first apply in a repo.
+ *
+ * Legacy per-dial managed agents (`.claude/agents/<archetype>.md` written by
+ * earlier versions) are removed: they pin a model the dial may have moved past,
+ * and the hook must never target a stale identity. Unmanaged files of the same
+ * name are never touched.
  */
 export function runSteeringApplyClaude(opts: SteeringApplyOptions): SteeringApplyResult {
   const repoRoot = rootOf(opts);
@@ -866,20 +918,52 @@ export function runSteeringApplyClaude(opts: SteeringApplyOptions): SteeringAppl
       }
       continue;
     }
+    // A dialed host identity needs no file of its own any more: the grid below
+    // carries every effort, and the hook supplies the model per spawn. A
+    // legacy per-dial file left here would pin whatever model was dialed when
+    // it was written, so it goes the same way as the other two branches'.
+    baseline[archetype] = executorName;
+    materialization[archetype] = { kind: 'host', adapter: 'host', executor: executorName, model: spec.model };
+    if (existsSync(path) && readFileSync(path, 'utf8').includes(CLAUDE_MANAGED_MARK)) {
+      unlinkSync(path);
+      removed.push(path);
+    }
+  }
+
+  // The grid itself. Dial-independent, so a re-apply after re-dialing is a
+  // no-op and asks for no restart.
+  const grid: string[] = [];
+  for (const archetype of HOST_SURFACE_ARCHETYPES) {
     const templatePath = join(templatesDir(), 'claude', 'claude-agents', `${archetype}.md`);
     if (!existsSync(templatePath)) {
       throw new SteeringError(`no claude agent template for archetype "${archetype}" at ${templatePath}`);
     }
     const template = readFileSync(templatePath, 'utf8');
-    const fields: Record<string, string> = { model: spec.model };
-    if (spec.reasoningEffort !== 'default' && spec.reasoningEffort.length > 0) fields.effort = spec.reasoningEffort;
-    let rendered = withFrontmatterFields(template, fields);
-    rendered = `${rendered.trimEnd()}\n\n${CLAUDE_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(rendered)} source=${executorName} -->\n`;
-    baseline[archetype] = executorName;
-    materialization[archetype] = { kind: 'host', adapter: 'host', executor: executorName, model: spec.model };
-    results.push({ path, status: claudeManagedEmit(path, rendered, opts.force ?? false, scope) });
+    for (const effort of CLAUDE_EFFORT_LADDER) {
+      const name = claudeGridAgentName(archetype, effort);
+      // `inherit` is the documented spelling of "take the spawning
+      // conversation's model"; the hook's per-call `model` override then wins
+      // over it, which is what leaves effort as the only thing this file pins.
+      let rendered = withFrontmatterFields(template, { name, model: 'inherit', effort });
+      rendered = `${rendered.trimEnd()}\n\n${CLAUDE_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(rendered)} source=grid:${archetype}@${effort} -->\n`;
+      const gridPath = join(agentDir, `${name}.md`);
+      grid.push(gridPath);
+      results.push({ path: gridPath, status: claudeManagedEmit(gridPath, rendered, opts.force ?? false, scope) });
+    }
   }
-  const conflicts = results.filter((item) => item.status === 'skipped').map((item) => item.path);
+
+  // A skipped MANAGED file is an up-to-date cell, not a collision. Reporting
+  // those as conflicts told every steady-state apply to pass `--force`.
+  const conflicts = results
+    .filter((item) => item.status === 'skipped')
+    .filter((item) => {
+      try {
+        return !readFileSync(item.path, 'utf8').includes(CLAUDE_MANAGED_MARK);
+      } catch {
+        return true;
+      }
+    })
+    .map((item) => item.path);
   const restartRequired = results.some((item) => item.status === 'created' || item.status === 'overwritten') || removed.length > 0;
-  return { results, materialization, baseline, restartRequired, conflicts, scope, removed };
+  return { results, materialization, baseline, restartRequired, conflicts, scope, removed, grid };
 }

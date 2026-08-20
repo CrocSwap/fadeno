@@ -309,6 +309,13 @@ const NATIVE_SLOT = JSON.stringify({
   harness: 'claude',
 });
 
+/**
+ * The same slot with the resolved effort the real `fadeno dial resolve`
+ * always reports. It is what selects a grid cell; a resolution carrying no
+ * effort has no cell to land on and inherits, which the test below relies on.
+ */
+const NATIVE_SLOT_XHIGH = JSON.stringify({ ...JSON.parse(NATIVE_SLOT), effort: 'xhigh' });
+
 type EvidenceRow = Record<string, unknown> & { timestamp: string; prompt_snapshot: string };
 
 function evidenceRows(root: string): EvidenceRow[] {
@@ -319,6 +326,11 @@ function evidenceRows(root: string): EvidenceRow[] {
 }
 
 test('Claude steering writes the host_delivery evidence the kernel never sees', (t) => {
+  // The suite itself may run inside a Claude session, which publishes
+  // CLAUDE_EFFORT to every child. Pin it off so the row is the unobserved case.
+  const previousEffort = process.env.CLAUDE_EFFORT;
+  delete process.env.CLAUDE_EFFORT;
+  t.after(() => { if (previousEffort != null) process.env.CLAUDE_EFFORT = previousEffort; });
   const root = tempRepo(t);
   runInit({ target: 'claude', repoRoot: root, withSteering: true });
   const prompt = 'Review the diff.\n\n  Keep every byte verbatim.\n';
@@ -360,8 +372,13 @@ test('Claude steering writes the host_delivery evidence the kernel never sees', 
     dial_source: null,
     driver: null,
     effort: null,
-    // The harness Agent tool has no effort parameter: native spawns inherit.
+    // No materialized agent file for this slot, so the spawn really does take
+    // the session's effort — the one case the old unconditional literal got
+    // right. `steering apply --claude` flips both fields; see the next test.
     reasoning_effort: 'inherited',
+    effort_source: 'session',
+    session_effort: null,
+    materialized_source: null,
     transport: 'host',
     prompt_sha256: digest,
     prompt_snapshot: `.fadeno/local/prompts/host-${digest.slice(0, 8)}.md`,
@@ -384,6 +401,78 @@ test('Claude steering writes the host_delivery evidence the kernel never sees', 
   assert.equal(latest.agent_type, 'worker');
   assert.equal(latest.model_override, null);
   assert.equal(read(root, latest.prompt_snapshot), second);
+});
+
+test('host_delivery records the effort a materialized agent pins, not the session\'s', (t) => {
+  // This suite may itself run inside a Claude session, which publishes
+  // CLAUDE_EFFORT to every child. Start from the unobserved case and turn it on
+  // deliberately below.
+  const previousEffort = process.env.CLAUDE_EFFORT;
+  delete process.env.CLAUDE_EFFORT;
+  t.after(() => { if (previousEffort == null) delete process.env.CLAUDE_EFFORT; else process.env.CLAUDE_EFFORT = previousEffort; });
+  const root = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: root, withSteering: true });
+  // What `fadeno steering apply --claude` pre-registers: one cell per
+  // (archetype, effort), declaring `model: inherit` so only effort is pinned.
+  mkdirSync(join(root, '.claude', 'agents'), { recursive: true });
+  writeFileSync(
+    join(root, '.claude', 'agents', 'fadeno-reviewer-xhigh.md'),
+    '---\nname: fadeno-reviewer-xhigh\nmodel: inherit\neffort: xhigh\n---\n\nBody.\n\n<!-- fadeno:managed version=0.0.0 digest=deadbeef source=grid:reviewer@xhigh -->\n',
+  );
+  const decision = JSON.parse(runClaudeSteering(
+    root,
+    { cwd: root, tool_name: 'Agent', tool_input: { prompt: 'Review it.', description: 'x', subagent_type: 'reviewer' } },
+    NATIVE_SLOT_XHIGH,
+  )) as { hookSpecificOutput: { updatedInput: { subagent_type: string; model: string } } };
+  // The spawn is retargeted onto the pre-registered cell, with the dialed
+  // model supplied on the call — the split that makes a re-dial restart-free.
+  assert.equal(decision.hookSpecificOutput.updatedInput.subagent_type, 'fadeno-reviewer-xhigh');
+  assert.equal(decision.hookSpecificOutput.updatedInput.model, 'opus');
+  const row = evidenceRows(root).at(-1)!;
+  // The Agent tool still carries no effort parameter; the cell does.
+  assert.equal(row.reasoning_effort, 'xhigh');
+  assert.equal(row.effort_source, 'agent-file');
+  assert.equal(row.materialized_source, 'grid:reviewer@xhigh');
+
+  // A hand-written agent file is not a Fadeno materialization: no mark, no
+  // claim. Reading its frontmatter anyway would attest an effort nothing in
+  // this system put there.
+  writeFileSync(join(root, '.claude', 'agents', 'fadeno-worker-xhigh.md'), '---\nname: fadeno-worker-xhigh\neffort: low\n---\n\nMine.\n');
+  runClaudeSteering(
+    root,
+    { cwd: root, tool_name: 'Agent', tool_input: { prompt: 'Do it.', description: 'x', subagent_type: 'worker' } },
+    NATIVE_SLOT_XHIGH,
+  );
+  const unmanaged = evidenceRows(root).at(-1)!;
+  assert.equal(unmanaged.reasoning_effort, 'inherited');
+  assert.equal(unmanaged.effort_source, 'session');
+  assert.equal(unmanaged.materialized_source, null);
+
+  // With the harness publishing CLAUDE_EFFORT, an inheriting spawn records the
+  // level it will actually run at instead of the word "inherited" — and a
+  // materialized slot still records the session level alongside its own, since
+  // that is the only *observed* number on the row. The harness downgrades an
+  // effort the model or the org will not serve, silently.
+  process.env.CLAUDE_EFFORT = 'high';
+  runClaudeSteering(
+    root,
+    { cwd: root, tool_name: 'Agent', tool_input: { prompt: 'Do it again.', description: 'x', subagent_type: 'worker' } },
+    NATIVE_SLOT,
+  );
+  const observed = evidenceRows(root).at(-1)!;
+  assert.equal(observed.reasoning_effort, 'high');
+  assert.equal(observed.effort_source, 'session');
+  assert.equal(observed.session_effort, 'high');
+
+  runClaudeSteering(
+    root,
+    { cwd: root, tool_name: 'Agent', tool_input: { prompt: 'Review again.', description: 'x', subagent_type: 'reviewer' } },
+    NATIVE_SLOT_XHIGH,
+  );
+  const pinnedOverSession = evidenceRows(root).at(-1)!;
+  assert.equal(pinnedOverSession.reasoning_effort, 'xhigh');
+  assert.equal(pinnedOverSession.effort_source, 'agent-file');
+  assert.equal(pinnedOverSession.session_effort, 'high');
 });
 
 test('Claude steering leaves command-delivery evidence to the kernel', (t) => {
@@ -497,4 +586,53 @@ test('bundled CLI parses --with-steering and carries its templates', (t) => {
   assert.match(result.stdout, /Materialize Codex steering with .*fadeno steering apply/);
   assert.match(read(root, '.codex/agents/worker.toml'), /Fadeno worker broker/i);
   assert.match(read(root, '.codex/agents/worker.toml'), /fadeno dispatch-fallback <run-id> <dispatch-id>/);
+});
+
+/** A host slot whose archetype carries a shadow attachment the roll selected. */
+const PAIRED_SLOT = JSON.stringify({
+  ...JSON.parse(NATIVE_SLOT),
+  effort: 'xhigh',
+  shadow: { attached: true, challenger: 'grok', rate: 0.25, selected: true },
+});
+
+const UNPAIRED_SLOT = JSON.stringify({
+  ...JSON.parse(NATIVE_SLOT),
+  effort: 'xhigh',
+  shadow: { attached: true, challenger: 'grok', rate: 0.25, selected: false },
+});
+
+test('a selected pair sends the in-session primary down the command lane too', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: root, withSteering: true });
+  const decision = JSON.parse(runClaudeSteering(
+    root,
+    { cwd: root, tool_name: 'Agent', tool_input: { prompt: 'Review it.', description: 'x', subagent_type: 'reviewer' } },
+    PAIRED_SLOT,
+  )) as { hookSpecificOutput: { updatedInput: { subagent_type: string; model: string } } };
+
+  // Not "an in-session agent with a challenger beside it" — the spawn becomes
+  // a pair of equals, both command-delivered, differing only in the model.
+  assert.match(decision.hookSpecificOutput.updatedInput.subagent_type, /dispatch-reviewer$/);
+  assert.equal(decision.hookSpecificOutput.updatedInput.model, 'sonnet'); // relay, not the work
+
+  // The kernel writes both arms' rows, so the hook writes none at all — it
+  // only stashes the relay attestation, as for any other command delivery.
+  assert.equal(exists(root, '.fadeno/dispatches.jsonl'), false);
+  assert.ok(exists(root, '.fadeno/local/pending-relays.jsonl'));
+});
+
+test('an unselected spawn stays in-session: sampling must not tax the common path', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: root, withSteering: true });
+  const decision = JSON.parse(runClaudeSteering(
+    root,
+    { cwd: root, tool_name: 'Agent', tool_input: { prompt: 'Review it.', description: 'x', subagent_type: 'reviewer' } },
+    UNPAIRED_SLOT,
+  )) as { hookSpecificOutput: { updatedInput: { subagent_type: string; model: string } } };
+
+  // At rate 0.25 the other three spawns in four must be untouched, or the
+  // attachment would degrade every in-session spawn to buy evidence on one.
+  assert.doesNotMatch(decision.hookSpecificOutput.updatedInput.subagent_type, /dispatch-/);
+  assert.equal(decision.hookSpecificOutput.updatedInput.model, 'opus');
+  assert.equal(evidenceRows(root).filter((r) => r.event === 'host_delivery').length, 1);
 });
