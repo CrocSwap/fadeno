@@ -17649,15 +17649,180 @@ function carryPathIntoWorktree(repoRoot, worktreeAbs, relPath) {
   const reason = copyRes.error != null ? copyRes.error.message : String(copyRes.stderr ?? "").trim() || `exit ${copyRes.status ?? "unknown"}`;
   return { status: "failed", reason };
 }
-function carryDeclaredPaths(repoRoot, worktreeAbs, declared) {
+function carryDeclaredPaths(repoRoot, worktreeAbs, declared, opts = {}) {
   const records = [];
   for (const relPath of declared) {
     const outcome = carryPathIntoWorktree(repoRoot, worktreeAbs, relPath);
     if (outcome.status === "absent") continue;
-    if (outcome.status === "failed") return { records, failure: { path: relPath, reason: outcome.reason } };
+    if (outcome.status === "failed") {
+      return { records, failure: { path: relPath, reason: outcome.reason }, fingerprint: emptyCarryFingerprint() };
+    }
     records.push({ path: relPath, mechanism: outcome.mechanism });
   }
-  return { records, failure: null };
+  const fingerprint = opts.fingerprint === false ? emptyCarryFingerprint() : fingerprintCarriedPaths(repoRoot, records);
+  return { records, failure: null, fingerprint };
+}
+var CARRY_FINGERPRINT_MAX_ENTRIES = 25e4;
+var CARRY_DRIFT_MAX_EXAMPLES = 10;
+var HAZARD_KINDS = ["in_place_write", "metadata_only"];
+function emptyCarryFingerprint() {
+  return { capturedAt: (/* @__PURE__ */ new Date()).toISOString(), paths: [] };
+}
+function stampOf(abs) {
+  try {
+    const st = (0, import_node_fs8.lstatSync)(abs, { bigint: true });
+    if (st.isDirectory()) return "d";
+    if (st.isSymbolicLink()) return `l|${st.ino}`;
+    if (st.isFile()) {
+      return `f|${st.ino}|${st.size}|${st.mtimeNs}|${st.ctimeNs}|${st.mode}|${st.uid}|${st.gid}|${st.nlink}`;
+    }
+    return `o|${st.ino}|${st.mode}`;
+  } catch (err) {
+    const code = err?.code ?? "EUNKNOWN";
+    return `!|${code}`;
+  }
+}
+function walkCarryPath(repoRoot, relPath, maxEntries) {
+  const stamps = /* @__PURE__ */ new Map();
+  let truncated = false;
+  let unreadable = 0;
+  const rootAbs = (0, import_node_path8.join)(repoRoot, relPath);
+  const rootRel = relPath.split("\\").join("/");
+  const stack = [{ abs: rootAbs, rel: rootRel }];
+  while (stack.length > 0) {
+    const cur = stack.pop();
+    if (stamps.size >= maxEntries) {
+      truncated = true;
+      break;
+    }
+    const stamp = stampOf(cur.abs);
+    if (stamp.startsWith("!|") && stamp !== "!|ENOENT") unreadable += 1;
+    stamps.set(cur.rel, stamp);
+    if (stamp !== "d") continue;
+    let entries;
+    try {
+      entries = (0, import_node_fs8.readdirSync)(cur.abs, { withFileTypes: true });
+    } catch {
+      stamps.set(cur.rel, "d|unlistable");
+      unreadable += 1;
+      continue;
+    }
+    for (const entry of entries.map((e) => e.name).sort().reverse()) {
+      stack.push({ abs: (0, import_node_path8.join)(cur.abs, entry), rel: `${cur.rel}/${entry}` });
+    }
+  }
+  return { stamps, truncated, unreadable };
+}
+function fingerprintCarriedPaths(repoRoot, records, opts = {}) {
+  const maxEntries = opts.maxEntries ?? CARRY_FINGERPRINT_MAX_ENTRIES;
+  const paths = [];
+  for (const record2 of records) {
+    if (record2.mechanism !== "hardlink") continue;
+    const walked = walkCarryPath(repoRoot, record2.path, maxEntries);
+    paths.push({
+      path: record2.path,
+      mechanism: "hardlink",
+      entries: walked.stamps.size,
+      truncated: walked.truncated,
+      unreadable: walked.unreadable,
+      maxEntries,
+      stamps: walked.stamps
+    });
+  }
+  return { capturedAt: (/* @__PURE__ */ new Date()).toISOString(), paths };
+}
+function fileFields(stamp) {
+  return stamp.split("|");
+}
+function classify(before, after) {
+  if (before === after) return null;
+  if (!before.startsWith("f|") || !after.startsWith("f|")) {
+    return "replaced";
+  }
+  const b = fileFields(before);
+  const a = fileFields(after);
+  if (b[1] !== a[1]) return "replaced";
+  if (b[2] !== a[2] || b[3] !== a[3]) return "in_place_write";
+  if (b[5] !== a[5] || b[6] !== a[6] || b[7] !== a[7]) return "metadata_only";
+  if (b[4] !== a[4]) {
+    if (b[8] !== a[8]) return null;
+    return "metadata_only";
+  }
+  return null;
+}
+function verifyCarriedPaths(repoRoot, fingerprint) {
+  const verdicts = [];
+  for (const captured of fingerprint.paths) {
+    const now = walkCarryPath(repoRoot, captured.path, captured.maxEntries);
+    const drift = [];
+    const kinds = {};
+    const bump = (kind, path) => {
+      kinds[kind] = (kinds[kind] ?? 0) + 1;
+      drift.push({ path, kind });
+    };
+    for (const [path, before] of captured.stamps) {
+      const after = now.stamps.get(path);
+      if (after === void 0) {
+        if (!now.truncated) bump("removed", path);
+        continue;
+      }
+      const kind = classify(before, after);
+      if (kind != null) bump(kind, path);
+    }
+    if (!captured.truncated) {
+      for (const path of now.stamps.keys()) {
+        if (!captured.stamps.has(path)) bump("added", path);
+      }
+    }
+    const hazards = HAZARD_KINDS.reduce((sum, kind) => sum + (kinds[kind] ?? 0), 0);
+    const degraded = captured.truncated || now.truncated || captured.unreadable > 0 || now.unreadable > 0;
+    let status;
+    let note = null;
+    if (hazards > 0) {
+      status = "mutated";
+      note = `${hazards} ${hazards === 1 ? "entry" : "entries"} changed on an inode this carry shares with the worktree; the primary's copy changed with it. Attestation, not attribution \u2014 the primary's own tooling writing in place produces the same evidence.`;
+    } else if (degraded) {
+      status = "unknown";
+      note = captured.truncated || now.truncated ? `the carried tree exceeds the ${captured.maxEntries}-entry fingerprint budget, so part of it was never compared \u2014 not a clean result.` : "part of the carried tree could not be read at capture or verify time, so part of it was never compared \u2014 not a clean result.";
+    } else if (drift.length > 0) {
+      status = "drifted";
+      note = "the carried tree changed, but only in ways a hardlinked worktree cannot cause (entries added, removed, or repointed in the primary's own directories).";
+    } else {
+      status = "clean";
+    }
+    const ordered = drift.slice().sort((x, y) => {
+      const hx = HAZARD_KINDS.includes(x.kind) ? 0 : 1;
+      const hy = HAZARD_KINDS.includes(y.kind) ? 0 : 1;
+      if (hx !== hy) return hx - hy;
+      return x.path < y.path ? -1 : x.path > y.path ? 1 : 0;
+    });
+    verdicts.push({
+      path: captured.path,
+      mechanism: "hardlink",
+      status,
+      entriesChanged: drift.length,
+      kinds,
+      examples: ordered.slice(0, CARRY_DRIFT_MAX_EXAMPLES),
+      note
+    });
+  }
+  return verdicts;
+}
+function carryMutationStamp(verdicts) {
+  const stamps = [];
+  for (const verdict of verdicts) {
+    if (verdict.status === "clean") continue;
+    stamps.push({
+      path: verdict.path,
+      mechanism: verdict.mechanism,
+      status: verdict.status,
+      entries_changed: verdict.entriesChanged,
+      kinds: verdict.kinds,
+      examples: verdict.examples,
+      ...verdict.note != null ? { note: verdict.note } : {}
+    });
+  }
+  return stamps.length > 0 ? stamps : null;
 }
 function createIsolatedWorktree(opts) {
   const worktreeAbs = opts.worktreePath;
@@ -20704,24 +20869,14 @@ function gitFailureReason(result) {
   if (stderr.length > 0) return stderr;
   return `exit ${result.status ?? "unknown"}`;
 }
-function commitWorkspaceBaseline(repoRoot, worktreeAbs, pairId) {
+var BASELINE_COMMIT_DATE = "2000-01-01T00:00:00Z";
+function captureWorkspaceBaseline(repoRoot) {
   const diffRes = (0, import_node_child_process5.spawnSync)("git", ["-C", repoRoot, "diff", "HEAD", "--binary"], {
     encoding: "buffer",
     maxBuffer: SPAWN_MAX_BUFFER
   });
   if (diffRes.error != null || diffRes.status !== 0) {
     throw new Error(`could not capture the primary workspace's pre-spawn state: ${gitFailureReason(diffRes)}`);
-  }
-  const patch = diffRes.stdout ?? Buffer.alloc(0);
-  if (patch.length > 0) {
-    const applyRes = (0, import_node_child_process5.spawnSync)("git", ["-C", worktreeAbs, "apply", "--index"], {
-      input: patch,
-      encoding: "utf8",
-      maxBuffer: SPAWN_MAX_BUFFER
-    });
-    if (applyRes.error != null || applyRes.status !== 0) {
-      throw new Error(`could not replay the primary's pre-spawn changes into the shadow worktree: ${gitFailureReason(applyRes)}`);
-    }
   }
   const untrackedRes = (0, import_node_child_process5.spawnSync)("git", ["-C", repoRoot, "ls-files", "--others", "--exclude-standard", "-z"], {
     encoding: "utf8",
@@ -20730,9 +20885,25 @@ function commitWorkspaceBaseline(repoRoot, worktreeAbs, pairId) {
   if (untrackedRes.error != null || untrackedRes.status !== 0) {
     throw new Error(`could not list the primary workspace's untracked files: ${gitFailureReason(untrackedRes)}`);
   }
-  const untrackedFiles = String(untrackedRes.stdout ?? "").split("\0").filter((p) => p.length > 0).filter((p) => !isUnderShadowHome(p));
+  return {
+    patch: diffRes.stdout ?? Buffer.alloc(0),
+    untrackedFiles: String(untrackedRes.stdout ?? "").split("\0").filter((p) => p.length > 0).filter((p) => !isUnderShadowHome(p))
+  };
+}
+function applyWorkspaceBaseline(repoRoot, worktreeAbs, captured, pairId, armLabel) {
+  const patch = captured.patch;
+  if (patch.length > 0) {
+    const applyRes = (0, import_node_child_process5.spawnSync)("git", ["-C", worktreeAbs, "apply", "--index"], {
+      input: patch,
+      encoding: "utf8",
+      maxBuffer: SPAWN_MAX_BUFFER
+    });
+    if (applyRes.error != null || applyRes.status !== 0) {
+      throw new Error(`could not replay the caller's pre-spawn changes into the ${armLabel} worktree: ${gitFailureReason(applyRes)}`);
+    }
+  }
   let copiedAny = false;
-  for (const relPath of untrackedFiles) {
+  for (const relPath of captured.untrackedFiles) {
     try {
       const srcAbs = (0, import_node_path14.join)(repoRoot, relPath);
       const destAbs = (0, import_node_path14.join)(worktreeAbs, relPath);
@@ -20742,19 +20913,19 @@ function commitWorkspaceBaseline(repoRoot, worktreeAbs, pairId) {
       copiedAny = true;
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      throw new Error(`could not copy untracked file "${relPath}" into the shadow worktree: ${reason}`);
+      throw new Error(`could not copy untracked file "${relPath}" into the ${armLabel} worktree: ${reason}`);
     }
   }
   if (patch.length === 0 && !copiedAny) {
     const headRes = (0, import_node_child_process5.spawnSync)("git", ["-C", worktreeAbs, "rev-parse", "HEAD"], { encoding: "utf8" });
     if (headRes.error != null || headRes.status !== 0) {
-      throw new Error(`could not resolve the shadow worktree's HEAD: ${gitFailureReason(headRes)}`);
+      throw new Error(`could not resolve the ${armLabel} worktree's HEAD: ${gitFailureReason(headRes)}`);
     }
     return String(headRes.stdout ?? "").trim();
   }
   const addRes = (0, import_node_child_process5.spawnSync)("git", ["-C", worktreeAbs, "add", "-A"], { encoding: "utf8" });
   if (addRes.error != null || addRes.status !== 0) {
-    throw new Error(`could not stage the workspace baseline in the shadow worktree: ${gitFailureReason(addRes)}`);
+    throw new Error(`could not stage the workspace baseline in the ${armLabel} worktree: ${gitFailureReason(addRes)}`);
   }
   const commitRes = (0, import_node_child_process5.spawnSync)("git", [
     "-C",
@@ -20768,13 +20939,20 @@ function commitWorkspaceBaseline(repoRoot, worktreeAbs, pairId) {
     "--no-gpg-sign",
     "-m",
     `fadeno pair baseline ${pairId}`
-  ], { encoding: "utf8" });
+  ], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GIT_AUTHOR_DATE: BASELINE_COMMIT_DATE,
+      GIT_COMMITTER_DATE: BASELINE_COMMIT_DATE
+    }
+  });
   if (commitRes.error != null || commitRes.status !== 0) {
-    throw new Error(`could not commit the workspace baseline in the shadow worktree: ${gitFailureReason(commitRes)}`);
+    throw new Error(`could not commit the workspace baseline in the ${armLabel} worktree: ${gitFailureReason(commitRes)}`);
   }
   const shaRes = (0, import_node_child_process5.spawnSync)("git", ["-C", worktreeAbs, "rev-parse", "HEAD"], { encoding: "utf8" });
   if (shaRes.error != null || shaRes.status !== 0) {
-    throw new Error(`could not resolve the shadow worktree's baseline commit: ${gitFailureReason(shaRes)}`);
+    throw new Error(`could not resolve the ${armLabel} worktree's baseline commit: ${gitFailureReason(shaRes)}`);
   }
   return String(shaRes.stdout ?? "").trim();
 }
@@ -20898,8 +21076,6 @@ function runDispatch(opts) {
   let command2 = spec.adapter === "command" ? spec.command : spec.fallbackCommand;
   const transport = spec.adapter === "command" ? "command" : "host-command-fallback";
   const deliveryTransport = spec.adapter === "command" ? "command" : "host-command-fallback";
-  const workspaceMode = opts.isolate ? "isolated" : "shared";
-  const needsLease = workspaceMode === "shared" && spec.writeAccess !== false;
   let prompt;
   let promptSource;
   let promptPath = null;
@@ -20971,6 +21147,59 @@ ${prompt}`;
   const outputSnapshot = outputRel.split("\\").join("/");
   const relayAttested = consumePendingRelay(repoRoot, prompt, now);
   const promptSha256 = sha256Hex(prompt);
+  const decidePairCandidate = () => {
+    if (process.env.FADENO_IN_SHADOW === "1") return null;
+    const hasFlag = typeof opts.shadow === "string" && opts.shadow.trim().length > 0;
+    let dial2 = null;
+    let executorName2 = null;
+    let sourceTag = null;
+    let attachmentRate;
+    if (hasFlag) {
+      try {
+        const parsed = parseDialRef(opts.shadow.trim(), "--shadow");
+        dial2 = parsed;
+        executorName2 = formatDialRef(parsed);
+        sourceTag = "flag";
+      } catch {
+        dial2 = null;
+        executorName2 = opts.shadow.trim();
+        sourceTag = "flag";
+      }
+    } else if (archetype != null) {
+      const localStateForShadow = readLocalDialState(repoRoot);
+      const att = localStateForShadow.shadows[archetype];
+      if (att != null) {
+        dial2 = { model: att.model, ...att.effort ? { effort: att.effort } : {}, ...att.via ? { via: att.via } : {} };
+        executorName2 = formatDialRef(dial2);
+        sourceTag = "attachment";
+        attachmentRate = att.rate;
+      }
+    }
+    if (executorName2 == null || sourceTag == null) return null;
+    if (sourceTag === "attachment" && attachmentRate != null) {
+      const sampler = opts.shadowSampler ?? (() => shadowSampleRoll(promptSha256, archetype ?? "", executorName2));
+      let roll;
+      try {
+        roll = sampler();
+      } catch {
+        roll = 0;
+      }
+      if (!(roll < attachmentRate)) return null;
+    }
+    return { dial: dial2, executorName: executorName2, sourceTag };
+  };
+  let capturedBaselineMemo = null;
+  const capturedBaseline = () => {
+    if (capturedBaselineMemo == null) capturedBaselineMemo = captureWorkspaceBaseline(repoRoot);
+    return capturedBaselineMemo;
+  };
+  const pairCandidate = decidePairCandidate();
+  const canIsolate = pairCandidate != null && (() => {
+    const probe2 = (0, import_node_child_process5.spawnSync)("git", ["-C", repoRoot, "rev-parse", "--git-dir"], { encoding: "utf8" });
+    return probe2.error == null && probe2.status === 0;
+  })();
+  const workspaceMode = opts.isolate || canIsolate ? "isolated" : "shared";
+  const needsLease = workspaceMode === "shared" && spec.writeAccess !== false;
   const commandSha256 = sha256Hex(JSON.stringify(command2));
   const producers = lookupInputProducers(repoRoot, producedByIds(opts));
   const dialField = { model: dial.model };
@@ -21186,44 +21415,10 @@ ${prompt}`;
     throw error;
   }
   const startShadow = () => {
-    if (process.env.FADENO_IN_SHADOW === "1") return null;
-    const hasFlag = typeof opts.shadow === "string" && opts.shadow.trim().length > 0;
-    let shadowDial = null;
-    let shadowExecutorNameInner = null;
-    let shadowSourceTag = null;
-    let attachmentRate;
-    if (hasFlag) {
-      try {
-        const parsed = parseDialRef(opts.shadow.trim(), "--shadow");
-        shadowDial = parsed;
-        shadowExecutorNameInner = formatDialRef(parsed);
-        shadowSourceTag = "flag";
-      } catch {
-        shadowDial = null;
-        shadowExecutorNameInner = opts.shadow.trim();
-        shadowSourceTag = "flag";
-      }
-    } else if (archetype != null) {
-      const localStateForShadow = readLocalDialState(repoRoot);
-      const att = localStateForShadow.shadows[archetype];
-      if (att != null) {
-        shadowDial = { model: att.model, ...att.effort ? { effort: att.effort } : {}, ...att.via ? { via: att.via } : {} };
-        shadowExecutorNameInner = formatDialRef(shadowDial);
-        shadowSourceTag = "attachment";
-        attachmentRate = att.rate;
-      }
-    }
-    if (shadowExecutorNameInner == null || shadowSourceTag == null) return null;
-    if (shadowSourceTag === "attachment" && attachmentRate != null) {
-      const sampler = opts.shadowSampler ?? (() => shadowSampleRoll(promptSha256, archetype ?? "", shadowExecutorNameInner));
-      let roll;
-      try {
-        roll = sampler();
-      } catch {
-        roll = 0;
-      }
-      if (!(roll < attachmentRate)) return null;
-    }
+    if (pairCandidate == null) return null;
+    const shadowDial = pairCandidate.dial;
+    const shadowExecutorNameInner = pairCandidate.executorName;
+    const shadowSourceTag = pairCandidate.sourceTag;
     const shadowNow = /* @__PURE__ */ new Date();
     const shadowDispatchId = (0, import_node_crypto7.randomUUID)();
     const pairId = (0, import_node_crypto7.randomUUID)();
@@ -21232,7 +21427,7 @@ ${prompt}`;
     const shadowOutputAbs = (0, import_node_path14.join)(repoRoot, shadowOutputRel);
     const shadowDiffRel = (0, import_node_path14.join)(".fadeno", "local", "outputs", `shadow-${shadowId8}.diff`).split("\\").join("/");
     const shadowDiffAbs = (0, import_node_path14.join)(repoRoot, shadowDiffRel);
-    const shadowWorktreeRel = (0, import_node_path14.join)(".fadeno", "local", "shadow", shadowId8).split("\\").join("/");
+    const shadowWorktreeRel = (0, import_node_path14.join)(".fadeno", "local", "pair", pairId.slice(0, 8), shadowId8).split("\\").join("/");
     const shadowWorktreeAbs = (0, import_node_path14.join)(repoRoot, shadowWorktreeRel);
     const writeShadowRefusal = (predicate, message, extra = {}) => {
       const base = {
@@ -21359,6 +21554,7 @@ ${prompt}`;
     }
     const shadowCarry = carryDeclaredPaths(repoRoot, shadowWorktreeAbs, profile.worktreeCarry);
     const carryRecords = shadowCarry.records;
+    const carryFingerprint = shadowCarry.fingerprint;
     if (shadowCarry.failure != null) {
       writeShadowRefusal(
         "shadow_carry",
@@ -21376,7 +21572,7 @@ ${prompt}`;
     }
     let baselineCommit;
     try {
-      baselineCommit = commitWorkspaceBaseline(repoRoot, shadowWorktreeAbs, pairId);
+      baselineCommit = applyWorkspaceBaseline(repoRoot, shadowWorktreeAbs, capturedBaseline(), pairId, "challenger");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       writeShadowRefusal("shadow_baseline", message);
@@ -21506,7 +21702,8 @@ ${prompt}`;
       diffRel: shadowDiffRel,
       diffAbs: shadowDiffAbs,
       worktreeAbs: shadowWorktreeAbs,
-      worktreeRel: shadowWorktreeRel
+      worktreeRel: shadowWorktreeRel,
+      carryFingerprint
     };
   };
   const collectShadow = (pending) => {
@@ -21585,6 +21782,8 @@ ${prompt}`;
         diff_snapshot: pending.diffRel,
         diff_bytes: diffBytes
       };
+      const shadowCarryMutation = carryMutationStamp(verifyCarriedPaths(repoRoot, pending.carryFingerprint));
+      if (shadowCarryMutation != null) sRow.carry_mutated = shadowCarryMutation;
       if (spawnFailedMsg != null) sRow.error = spawnFailedMsg;
       appendEvidenceRow(repoRoot, sRow);
       opts.onEcho?.(`shadow diff: ${diffBytes} bytes \u2192 ${pending.diffRel}`);
@@ -21613,6 +21812,10 @@ ${prompt}`;
     let isolatedDiffRel = null;
     let isolatedDiffBytes = null;
     let isolatedCarryRecords = [];
+    let isolatedCarryFingerprint = null;
+    let effectiveWorkspaceMode = workspaceMode;
+    let isolationDegraded = null;
+    let primaryMerge = null;
     const inflightAbs = (0, import_node_path14.join)(repoRoot, ...INFLIGHT_DIR.split("/"), `${dispatchId}.json`);
     const statusAbs = inflightAbs.replace(/\.json$/, ".status.json");
     const workspaceBefore = workspaceMode === "isolated" ? null : workspaceFingerprint(repoRoot);
@@ -21650,12 +21853,17 @@ ${prompt}`;
         supervisorTerminalObserved = result.error != null || readSupervisorStatus(statusAbs, (path) => (0, import_node_fs14.readFileSync)(path, "utf8")) != null;
         return result;
       };
-      if (workspaceMode === "isolated") {
+      if (effectiveWorkspaceMode === "isolated" && pendingShadow == null && !opts.isolate) {
+        effectiveWorkspaceMode = "shared";
+        isolationDegraded = "the pair did not materialize, so there was nothing to stay symmetric with";
+      }
+      if (effectiveWorkspaceMode === "isolated") {
         const id8 = dispatchId.slice(0, 8);
         const diffRel = (0, import_node_path14.join)(".fadeno", "local", "outputs", `isolated-${id8}.diff`).split("\\").join("/");
+        const pairedWorktree = pendingShadow != null ? (0, import_node_path14.join)(repoRoot, ".fadeno", "local", "pair", pendingShadow.pairId.slice(0, 8), id8) : (0, import_node_path14.join)(repoRoot, ".fadeno", "local", "isolated", id8);
         const isolated = withIsolatedWorktree({
           repoRoot,
-          worktreePath: (0, import_node_path14.join)(repoRoot, ".fadeno", "local", "isolated", id8),
+          worktreePath: pairedWorktree,
           diffRel,
           diffAbs: (0, import_node_path14.join)(repoRoot, diffRel),
           onEcho: opts.onEcho
@@ -21667,14 +21875,76 @@ ${prompt}`;
             );
           }
           isolatedCarryRecords = isolatedCarry.records;
+          isolatedCarryFingerprint = isolatedCarry.fingerprint;
+          if (pendingShadow != null) {
+            const primaryBaseline = applyWorkspaceBaseline(
+              repoRoot,
+              worktreeAbs,
+              capturedBaseline(),
+              pendingShadow.pairId,
+              "primary"
+            );
+            if (primaryBaseline !== pendingShadow.baselineCommit) {
+              throw new WorkspaceLeaseError(
+                `the pair's two arms produced different baseline commits (${primaryBaseline.slice(0, 12)} vs ${pendingShadow.baselineCommit.slice(0, 12)}) \u2014 they did not start from the same state, so the comparison would be meaningless. Refusing rather than recording a baseline only one arm has.`
+              );
+            }
+          }
           return invoke(worktreeAbs);
         });
         spawned = isolated.result;
         isolatedDiffRel = isolated.diff.diffRel;
         isolatedDiffBytes = isolated.diff.diffBytes;
         opts.onEcho?.(`isolated diff: ${isolated.diff.diffBytes} bytes \u2192 ${isolated.diff.diffRel}`);
+        if (pendingShadow != null) {
+          const mergeHolder = { id: `merge-back:${dispatchId}`, kind: "ad-hoc", dispatchId };
+          let leaseTaken = false;
+          try {
+            acquireWorkspaceLease({
+              repoRoot,
+              workspaceMode: "shared",
+              holder: mergeHolder,
+              supervisorPid: null,
+              executorPid: null
+            });
+            leaseTaken = true;
+          } catch (err) {
+            primaryMerge = {
+              status: "blocked",
+              detail: `nothing was applied: could not acquire the workspace lease for merge-back (${err instanceof Error ? err.message : String(err)})`
+            };
+          }
+          if (leaseTaken) {
+            try {
+              const applyRes = (0, import_node_child_process5.spawnSync)("git", ["-C", repoRoot, "apply", "--3way", (0, import_node_path14.join)(repoRoot, isolated.diff.diffRel)], { encoding: "utf8" });
+              const stderrText = String(applyRes.stderr ?? "").trim();
+              if (isolated.diff.diffBytes === 0) {
+                primaryMerge = { status: "clean", detail: "nothing to apply: the primary made no changes" };
+              } else if (applyRes.status === 0) {
+                primaryMerge = { status: "clean" };
+                opts.onEcho?.(`merged back: ${isolated.diff.diffBytes} bytes applied to the workspace`);
+              } else {
+                primaryMerge = {
+                  status: "conflicted",
+                  detail: stderrText.length > 0 ? stderrText : `git apply --3way exited ${applyRes.status ?? "unknown"}`
+                };
+                opts.onEcho?.(
+                  `merge-back CONFLICTED \u2014 the primary's work is kept at ${isolated.diff.diffRel}. Resolve with \`fadeno shadow-apply ${pendingShadow.pairId.slice(0, 8)} --arm primary\` once the tree settles; inspect \`git status\` first, some hunks may already be staged.`
+                );
+              }
+            } finally {
+              try {
+                releaseWorkspaceLease({ repoRoot, holder: mergeHolder });
+              } catch {
+              }
+            }
+          }
+        }
       } else {
         spawned = invoke(repoRoot);
+      }
+      if (isolationDegraded != null) {
+        opts.onEcho?.(`primary isolation degraded to shared: ${isolationDegraded}`);
       }
     } catch (error) {
       if (error instanceof WorkspaceLeaseError) throw new DispatchCommandError(error.message);
@@ -21699,7 +21969,7 @@ ${prompt}`;
     const stdout = (0, import_node_fs14.readFileSync)(outputAbs, "utf8");
     const stderr = spawned.stderr ?? "";
     const outputSha256 = sha256Hex(stdout);
-    const workspaceAfter = workspaceMode === "isolated" ? null : workspaceFingerprint(repoRoot);
+    const workspaceAfter = effectiveWorkspaceMode === "isolated" ? null : workspaceFingerprint(repoRoot);
     const outputBytes = Buffer.byteLength(stdout);
     const supervisorStatus = readSupervisorStatus(statusAbs, (path) => {
       try {
@@ -21772,14 +22042,25 @@ ${truncatedStderr}
     if (workspaceBefore != null && workspaceAfter != null) {
       row.workspace_changed = workspaceBefore !== workspaceAfter;
     }
-    if (workspaceMode === "isolated" && isolatedDiffRel != null && isolatedDiffBytes != null) {
+    if (effectiveWorkspaceMode === "isolated" && isolatedDiffRel != null && isolatedDiffBytes != null) {
       row.diff_snapshot = isolatedDiffRel;
       row.diff_bytes = isolatedDiffBytes;
     }
-    if (workspaceMode === "isolated" && isolatedCarryRecords.length > 0) {
+    if (primaryMerge != null) {
+      row.primary_merge = primaryMerge;
+    }
+    if (isolationDegraded != null) {
+      row.workspace_mode = effectiveWorkspaceMode;
+      row.workspace_mode_degraded = isolationDegraded;
+    }
+    if (isolatedCarryFingerprint != null) {
+      const primaryCarryMutation = carryMutationStamp(verifyCarriedPaths(repoRoot, isolatedCarryFingerprint));
+      if (primaryCarryMutation != null) row.carry_mutated = primaryCarryMutation;
+    }
+    if (effectiveWorkspaceMode === "isolated" && isolatedCarryRecords.length > 0) {
       row.worktree_carry = isolatedCarryRecords;
     }
-    if (workspaceMode === "isolated") {
+    if (effectiveWorkspaceMode === "isolated") {
       delete row.workspace_changed;
     }
     if (diagnosticsRel != null && diagnosticsBytes != null) {
@@ -22193,6 +22474,21 @@ function refusalOf(value) {
   if (predicate == null || message == null) return null;
   return { predicate, message };
 }
+function laneFieldsOf(row) {
+  return { sessionEffort: str(row.session_effort), laneReason: str(row.lane_reason) };
+}
+function primaryMergeOf(value) {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value;
+  const status = str(row.status);
+  if (status == null) return null;
+  const out = { status };
+  const detail2 = str(row.detail);
+  if (detail2 != null) out.detail = detail2;
+  const snapshot = str(row.diff_snapshot);
+  if (snapshot != null) out.diffSnapshot = snapshot;
+  return out;
+}
 function dialOf(value) {
   if (value == null || typeof value !== "object" || Array.isArray(value)) return null;
   const row = value;
@@ -22207,6 +22503,7 @@ function dialOf(value) {
 }
 function requestedEntry(row) {
   const loadout = loadoutOf(row.loadout);
+  const lane = laneFieldsOf(row);
   return {
     kind: "command",
     format: str(row.format),
@@ -22225,6 +22522,11 @@ function requestedEntry(row) {
     modelOverride: null,
     modelId: str(row.model_id),
     reasoningEffort: str(row.reasoning_effort),
+    // Read rather than hard-nulled: the kernel does not write lane fields
+    // today, but reading them costs nothing and is the difference between
+    // "the writer said nothing" and this reader dropping what it said.
+    sessionEffort: lane.sessionEffort,
+    laneReason: lane.laneReason,
     driver: str(row.driver),
     target: str(row.target),
     provider: str(row.provider),
@@ -22253,6 +22555,10 @@ function requestedEntry(row) {
     baselineCommit: str(row.baseline_commit),
     diffSnapshot: str(row.diff_snapshot),
     diffBytes: num(row.diff_bytes),
+    // A merge-back is a *result*: it happens after the arm has run, so it
+    // arrives on the completion row and is folded in by `applyCompletion`.
+    // A request row cannot yet know how its own diff merged.
+    primaryMerge: null,
     outputBytes: num(row.output_bytes),
     diagnosticsSnapshot: str(row.diagnostics_snapshot),
     diagnosticsBytes: num(row.diagnostics_bytes),
@@ -22266,6 +22572,7 @@ function requestedEntry(row) {
 }
 function hostEntry(row) {
   const loadout = loadoutOf(row.loadout);
+  const lane = laneFieldsOf(row);
   return {
     kind: "host",
     format: str(row.format),
@@ -22284,6 +22591,11 @@ function hostEntry(row) {
     modelOverride: str(row.model_override),
     modelId: str(row.model_id),
     reasoningEffort: str(row.reasoning_effort),
+    // The hook writes both on a delivery AND on a denial, so
+    // `hostRefusedEntry` (which builds on this) gets them for free — the two
+    // row types dropped them identically, and now surface them identically.
+    sessionEffort: lane.sessionEffort,
+    laneReason: lane.laneReason,
     driver: str(row.driver),
     target: null,
     provider: null,
@@ -22312,6 +22624,10 @@ function hostEntry(row) {
     baselineCommit: null,
     diffSnapshot: null,
     diffBytes: null,
+    // A host spawn has no worktree of its own, and a selected pair forces
+    // both arms onto the command lane anyway, so no host row is ever the
+    // primary arm of a merge-back.
+    primaryMerge: null,
     outputBytes: null,
     diagnosticsSnapshot: null,
     diagnosticsBytes: null,
@@ -22360,6 +22676,9 @@ function applyCompletion(entry, row) {
   entry.modelId = entry.modelId ?? str(row.model_id);
   entry.driver = entry.driver ?? str(row.driver);
   entry.reasoningEffort = entry.reasoningEffort ?? str(row.reasoning_effort);
+  const lane = laneFieldsOf(row);
+  entry.sessionEffort = entry.sessionEffort ?? lane.sessionEffort;
+  entry.laneReason = entry.laneReason ?? lane.laneReason;
   entry.dial = entry.dial ?? dialOf(row.dial);
   entry.executor = entry.executor ?? str(row.executor);
   if (row.gate_eligible === false) entry.gateEligible = false;
@@ -22373,6 +22692,7 @@ function applyCompletion(entry, row) {
   entry.diffSnapshot = entry.diffSnapshot ?? str(row.diff_snapshot);
   const db = num(row.diff_bytes);
   if (db != null) entry.diffBytes = db;
+  entry.primaryMerge = entry.primaryMerge ?? primaryMergeOf(row.primary_merge);
   const ob = num(row.output_bytes);
   if (ob != null) entry.outputBytes = ob;
   entry.diagnosticsSnapshot = entry.diagnosticsSnapshot ?? str(row.diagnostics_snapshot);
@@ -22428,6 +22748,25 @@ function renderDispatchLine(entry) {
       parts.push(`[effort mismatch: requested ${entry.reasoningEffort}, attested ${entry.attestedEffort}]`);
     } else {
       parts.push(`[attested: effort ${entry.attestedEffort ?? "unmeasured"}]`);
+    }
+  }
+  if (entry.sessionEffort != null) parts.push(`[session effort: ${entry.sessionEffort}]`);
+  if (entry.laneReason != null) parts.push(`[lane: ${entry.laneReason}]`);
+  const merge = entry.primaryMerge;
+  if (merge != null && merge.status !== "skipped") {
+    if (merge.status === "clean") {
+      parts.push("[primary merged: clean]");
+    } else if (merge.status === "conflicted") {
+      parts.push("[primary merge CONFLICTED \u2014 nothing reverted, the tree may be partially applied]");
+    } else if (merge.status === "blocked") {
+      parts.push("[primary merge BLOCKED \u2014 nothing was applied, the workspace is untouched]");
+    } else {
+      parts.push(`[primary merge: ${merge.status}]`);
+    }
+    if (merge.detail != null) parts.push(`[merge detail: ${excerpt(merge.detail, ERROR_EXCERPT)}]`);
+    if (merge.status === "conflicted" || merge.status === "blocked") {
+      const ref = entry.pairId ?? entry.dispatchId;
+      parts.push(`[recover: fadeno shadow-apply ${ref != null ? ref.slice(0, 8) : "<pair-id>"} --arm primary]`);
     }
   }
   if (entry.relayAttested != null) parts.push(`[relay_attested: ${entry.relayAttested}]`);
