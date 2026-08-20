@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileDigest, readInstallationManifest, writeInstallationManifest } from '../lib/installations.ts';
 import { isRetiredClaudeGridCell, listRetiredClaudeGridCells } from './steering.ts';
-import { readUserHarness, userPaths, type FadenoHarness, type UserPathOptions } from '../lib/user-paths.ts';
+import { codexUserAgentDir, readUserHarness, userPaths, type FadenoHarness, type UserPathOptions } from '../lib/user-paths.ts';
 
 export class UninstallError extends Error {}
 
@@ -36,11 +36,10 @@ export interface UninstallResult {
  * marker rather than by name, which is also the only licence to delete one.
  */
 function unrecordedManagedFiles(harness: FadenoHarness, opts?: UserPathOptions): string[] {
-  const env = opts?.env ?? process.env;
   const home = opts?.home ?? homedir();
   if (harness === 'claude') return listRetiredClaudeGridCells(join(home, '.claude', 'agents'));
   if (harness !== 'codex') return [];
-  const agentsDir = join(env.CODEX_HOME?.trim() || join(home, '.codex'), 'agents');
+  const agentsDir = codexUserAgentDir(opts);
   return ['worker', 'reviewer', 'judge'].map((role) => join(agentsDir, `fadeno-${role}.toml`));
 }
 

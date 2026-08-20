@@ -1,5 +1,4 @@
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   activeHarness,
@@ -10,7 +9,7 @@ import {
 } from '../lib/executors.ts';
 import { definitionSourceSummary } from '../lib/definitions.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
-import { readUserDials, type UserPathOptions, userPaths } from '../lib/user-paths.ts';
+import { codexUserAgentDir, readUserDials, type UserPathOptions, userPaths } from '../lib/user-paths.ts';
 import { loadLayeredProfile } from '../lib/config-layers.ts';
 import { maintainedHarnesses, readInstallationManifest, compareFadenoVersions, readRuntimeVersionAt } from '../lib/installations.ts';
 import type { DialRef } from '../lib/executors.ts';
@@ -78,10 +77,7 @@ function materialization(
   userPathOptions?: UserPathOptions,
 ): StatusResult['codexMaterialization'] {
   if (!codexMaintained) return null;
-  const path = join(
-    userPathOptions?.env?.CODEX_HOME?.trim() || process.env.CODEX_HOME?.trim() || join(userPathOptions?.home ?? homedir(), '.codex'),
-    'agents',
-  );
+  const path = codexUserAgentDir(userPathOptions);
   const needed = ['worker', 'reviewer', 'judge'];
   let allFresh = true;
   let anyHost = false;

@@ -204,3 +204,26 @@ export function recordVerifiedModel(options: UserPathOptions, entry: ModelVerifi
   mkdirSync(join(path, '..'), { recursive: true });
   writeFileSync(path, `${JSON.stringify(next)}\n`, 'utf8');
 }
+
+/**
+ * `$CODEX_HOME/agents`, else `<home>/.codex/agents` — where Codex looks for
+ * user-scope role agents, and so where `steering apply --codex` writes them,
+ * `status` and `doctor` look for them, and `uninstall` removes them.
+ *
+ * This lived as four hand-copied expressions, and one of them disagreed.
+ * Three read `options?.env?.CODEX_HOME ?? process.env.CODEX_HOME`; the fourth
+ * bound `env = options?.env ?? process.env` first. In production the two are
+ * identical, because nothing in `src/` ever builds a partial `env` — only
+ * tests inject one. In a test they are not: under the fall-through spelling an
+ * injected env WITHOUT `CODEX_HOME` still picks up the developer's real one,
+ * so a suite could read (or claim to remove) agents under a real `~/.codex`.
+ *
+ * This takes the hermetic spelling, which is also `userPaths`' own convention
+ * directly above: an injected env replaces the process env rather than layering
+ * over it. Injecting an env means declaring the whole environment.
+ */
+export function codexUserAgentDir(options: UserPathOptions = {}): string {
+  const env = options.env ?? process.env;
+  const home = options.home ?? homedir();
+  return join(env.CODEX_HOME?.trim() || join(home, '.codex'), 'agents');
+}
