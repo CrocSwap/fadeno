@@ -42,8 +42,8 @@ function seedProfile(t: TestContext, doc: Record<string, unknown>): string {
 
 test('starter catalog: parses; generator stands alone (no fallback), worker is required', () => {
   const profile = parseStarter();
-  assert.deepEqual(profile.archetypes.generator, { requiresWrite: 'forbidden', fallback: null, distinctProviderFromInputs: null, brief: null });
-  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.generator, { requiresWrite: 'forbidden', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
 });
 
 test('starter catalog: an undialed generator resolves to the host-native base, never through worker', () => {
@@ -219,6 +219,6 @@ test('archetypes: boolean aliases parse to required/none', () => {
     routes: { standalone: { openai: { command: ['node', '-e', "process.stdout.write('x')"], write_access: true } } },
     archetypes: { worker: { requires_write: true }, reviewer: { requires_write: false } },
   });
-  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null, brief: null });
-  assert.deepEqual(profile.archetypes.reviewer, { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.reviewer, { requiresWrite: 'none', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
 });

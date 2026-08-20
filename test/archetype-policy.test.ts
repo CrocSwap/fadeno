@@ -29,8 +29,8 @@ test('archetypes: boolean aliases map to required/none', () => {
     routes: { standalone: { openai: { command: ['codex'] } } },
     archetypes: { worker: { requires_write: true }, reviewer: { requires_write: false } },
   });
-  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null, brief: null });
-  assert.deepEqual(profile.archetypes.reviewer, { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.reviewer, { requiresWrite: 'none', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
 });
 
 test('archetypes: the three string postures parse', () => {
@@ -79,7 +79,7 @@ test('archetypes: an empty policy is legal (all-default)', () => {
     routes: { standalone: { openai: { command: ['codex'] } } },
     archetypes: { scout: {} },
   });
-  assert.deepEqual(profile.archetypes.scout, { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.scout, { requiresWrite: 'none', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
 });
 
 test('archetypes: unknown keys name the new allowed set', () => {
@@ -92,7 +92,7 @@ test('archetypes: unknown keys name the new allowed set', () => {
     }),
     (err: unknown) =>
       err instanceof ExecutorProfileError &&
-      /`archetypes\.worker` has unknown key\(s\) requires_network; only `requires_write`, `fallback`, `distinct_provider_from_inputs`, and `brief` are allowed/
+      /`archetypes\.worker` has unknown key\(s\) requires_network; only `requires_write`, `ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief` are allowed/
         .test(err.message),
   );
 });
@@ -177,7 +177,7 @@ test('archetypes: fallback to an undeclared archetype is allowed', () => {
     routes: { standalone: { openai: { command: ['codex'] } } },
     archetypes: { scout: { fallback: 'reviewer' } },
   });
-  assert.deepEqual(profile.archetypes.scout, { requiresWrite: 'none', fallback: 'reviewer', distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.scout, { requiresWrite: 'none', ignoredOutput: 'discardable', fallback: 'reviewer', distinctProviderFromInputs: null, brief: null });
   assert.equal(profile.archetypes.reviewer, undefined);
 });
 
@@ -243,11 +243,11 @@ test('serializeSnapshot: canonical strings, omits none, emits fallback, round-tr
     },
   });
   assert.deepEqual(profile.archetypes, {
-    worker: { requiresWrite: 'required', fallback: null, distinctProviderFromInputs: null, brief: null },
-    reviewer: { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null, brief: null },
-    generator: { requiresWrite: 'forbidden', fallback: 'worker', distinctProviderFromInputs: null, brief: null },
-    scout: { requiresWrite: 'none', fallback: 'reviewer', distinctProviderFromInputs: null, brief: null },
-    extra: { requiresWrite: 'none', fallback: null, distinctProviderFromInputs: null, brief: null },
+    worker: { requiresWrite: 'required', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null },
+    reviewer: { requiresWrite: 'none', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null },
+    generator: { requiresWrite: 'forbidden', ignoredOutput: 'discardable', fallback: 'worker', distinctProviderFromInputs: null, brief: null },
+    scout: { requiresWrite: 'none', ignoredOutput: 'discardable', fallback: 'reviewer', distinctProviderFromInputs: null, brief: null },
+    extra: { requiresWrite: 'none', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null },
   });
 
   const text = serializeSnapshot(profile);

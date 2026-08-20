@@ -165,6 +165,21 @@ export type WritePosture = 'required' | 'forbidden' | 'none';
 export type ProviderDistinctness = 'advisory' | 'required';
 
 /**
+ * Whether an archetype's *gitignored* output has to survive the dispatch.
+ *
+ * Not a write posture. `requiresWrite` gates executor selection — whether a
+ * delivery may write at all — and is consumed during resolution. This is
+ * consumed much later, at pair materialization, and says only whether the
+ * files `.gitignore` excludes are load-bearing product: a shadow pair runs
+ * each arm in its own worktree and merges the primary's work back through a
+ * `git add -A` diff, which drops every ignored path. `kept` therefore means
+ * "a pair would destroy this dispatch's output" — lose the comparison, never
+ * the work. Also not `worktree_carry`, which is the opposite direction:
+ * ignored files copied *into* a worktree before the arm runs.
+ */
+export type IgnoredOutputPolicy = 'kept' | 'discardable';
+
+/**
  * What an archetype needs from whatever delivers it. Declared once per
  * archetype, independent of which executor a dial binds today.
  * `fallback` selects another archetype's *binding* only — never its policy.
@@ -172,6 +187,11 @@ export type ProviderDistinctness = 'advisory' | 'required';
 export interface ArchetypePolicy {
   /** The archetype's write constraint. Absent YAML is `'none'`. */
   requiresWrite: WritePosture;
+  /**
+   * Whether this archetype's gitignored output must survive. Absent YAML is
+   * `'discardable'`. Read at pair formation, never at resolution.
+   */
+  ignoredOutput: IgnoredOutputPolicy;
   /** Next archetype in the binding-fallback chain, or null. */
   fallback: string | null;
   /**
@@ -587,6 +607,42 @@ function isWritePosture(value: unknown): value is WritePosture {
   return value === 'required' || value === 'forbidden' || value === 'none';
 }
 
+/**
+ * Keys an `archetypes.<name>` mapping may declare. Both parse sites — the
+ * catalog parser and the snapshot reader — filter against this one list, so a
+ * key added here can never be accepted by one and rejected by the other.
+ */
+const ARCHETYPE_POLICY_KEYS: readonly string[] = [
+  'requires_write',
+  'ignored_output',
+  'fallback',
+  'distinct_provider_from_inputs',
+  'brief',
+];
+
+/** The same list as prose, for the catalog parser's messages. */
+const ARCHETYPE_POLICY_KEY_FORMS =
+  '`requires_write`, `ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief`';
+
+function unknownArchetypeKeys(rawPolicy: Record<string, unknown>): string[] {
+  return Object.keys(rawPolicy).filter((key) => !ARCHETYPE_POLICY_KEYS.includes(key));
+}
+
+const IGNORED_OUTPUT_FORMS = '"kept" or "discardable"';
+
+/**
+ * Shared by both parse sites. Absent is `'discardable'`; unlike
+ * `requires_write` there is no boolean spelling, because "true" reads as
+ * neither value.
+ */
+function parseIgnoredOutput(raw: unknown, source: string, name: string): IgnoredOutputPolicy {
+  if (raw === undefined) return 'discardable';
+  if (raw === 'kept' || raw === 'discardable') return raw;
+  throw new ExecutorProfileError(
+    `${source}: \`archetypes.${name}.ignored_output\` must be ${IGNORED_OUTPUT_FORMS}.`,
+  );
+}
+
 /** Binding-chain successor. Undeclared names and non-string fallbacks are end-nodes. */
 function nextArchetypeFallback(
   archetypes: Record<string, ArchetypePolicy>,
@@ -901,11 +957,11 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
         throw new ExecutorProfileError(`${source}: archetype name "${name}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
       }
       if (!isMapping(rawPolicy)) {
-        throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` is not a mapping (only \`requires_write\`, \`fallback\`, \`distinct_provider_from_inputs\`, and \`brief\` are allowed).`);
+        throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` is not a mapping (only ${ARCHETYPE_POLICY_KEY_FORMS} are allowed).`);
       }
-      const unknown = Object.keys(rawPolicy).filter((key) => key !== 'requires_write' && key !== 'fallback' && key !== 'distinct_provider_from_inputs' && key !== 'brief');
+      const unknown = unknownArchetypeKeys(rawPolicy);
       if (unknown.length > 0) {
-        throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(', ')}; only \`requires_write\`, \`fallback\`, \`distinct_provider_from_inputs\`, and \`brief\` are allowed.`);
+        throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(', ')}; only ${ARCHETYPE_POLICY_KEY_FORMS} are allowed.`);
       }
       let requiresWrite: WritePosture = 'none';
       if (rawPolicy.requires_write !== undefined) {
@@ -914,6 +970,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
         else if (isWritePosture(rawPolicy.requires_write)) requiresWrite = rawPolicy.requires_write;
         else throw new ExecutorProfileError(`${source}: \`archetypes.${name}.requires_write\` must be ${WRITE_POSTURE_FORMS}.`);
       }
+      const ignoredOutput = parseIgnoredOutput(rawPolicy.ignored_output, source, name);
       let fallback: string | null = null;
       if (rawPolicy.fallback != null) {
         if (typeof rawPolicy.fallback !== 'string' || !BARE_IDENTIFIER_RE.test(rawPolicy.fallback)) {
@@ -938,7 +995,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
         }
         brief = rawPolicy.brief;
       }
-      archetypes[name] = { requiresWrite, fallback, distinctProviderFromInputs, brief };
+      archetypes[name] = { requiresWrite, ignoredOutput, fallback, distinctProviderFromInputs, brief };
     }
     for (const start of Object.keys(archetypes)) {
       const path: string[] = [];
@@ -2041,6 +2098,9 @@ export function serializeSnapshot(profile: ExecutorProfile, extraRefs: DialRef[]
       const policy = profile.archetypes[name]!;
       const entry: Record<string, unknown> = {};
       if (policy.requiresWrite !== 'none') entry.requires_write = policy.requiresWrite;
+      // Added, never defaulted: a `discardable` archetype serializes exactly
+      // as it did before this key existed, so no stored snapshot moves a byte.
+      if (policy.ignoredOutput !== 'discardable') entry.ignored_output = policy.ignoredOutput;
       if (typeof policy.fallback === 'string') entry.fallback = policy.fallback;
       if (policy.distinctProviderFromInputs != null) entry.distinct_provider_from_inputs = policy.distinctProviderFromInputs;
       if (policy.brief != null) entry.brief = policy.brief;
@@ -2096,7 +2156,7 @@ export function parseSnapshotDocument(text: string, source: string): SnapshotDoc
     for (const [name, rawPolicy] of Object.entries(doc.archetypes)) {
       if (!BARE_IDENTIFIER_RE.test(name)) throw new ExecutorProfileError(`${source}: archetype name "${name}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
       if (!isMapping(rawPolicy)) throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` is not a mapping.`);
-      const unknown = Object.keys(rawPolicy).filter((key) => key !== 'requires_write' && key !== 'fallback' && key !== 'distinct_provider_from_inputs' && key !== 'brief');
+      const unknown = unknownArchetypeKeys(rawPolicy);
       if (unknown.length > 0) throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(', ')}.`);
       let requiresWrite: WritePosture = 'none';
       if (rawPolicy.requires_write !== undefined) {
@@ -2105,6 +2165,7 @@ export function parseSnapshotDocument(text: string, source: string): SnapshotDoc
         else if (isWritePosture(rawPolicy.requires_write)) requiresWrite = rawPolicy.requires_write;
         else throw new ExecutorProfileError(`${source}: \`archetypes.${name}.requires_write\` must be ${WRITE_POSTURE_FORMS}.`);
       }
+      const ignoredOutput = parseIgnoredOutput(rawPolicy.ignored_output, source, name);
       let fallback: string | null = null;
       if (rawPolicy.fallback != null) {
         if (typeof rawPolicy.fallback !== 'string' || !BARE_IDENTIFIER_RE.test(rawPolicy.fallback)) throw new ExecutorProfileError(`${source}: \`archetypes.${name}.fallback\` ${JSON.stringify(rawPolicy.fallback)} is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
@@ -2121,7 +2182,7 @@ export function parseSnapshotDocument(text: string, source: string): SnapshotDoc
         if (typeof rawPolicy.brief !== 'string' || !BARE_IDENTIFIER_RE.test(rawPolicy.brief)) throw new ExecutorProfileError(`${source}: \`archetypes.${name}.brief\` must be a bare lowercase identifier.`);
         brief = rawPolicy.brief;
       }
-      archetypes[name] = { requiresWrite, fallback, distinctProviderFromInputs, brief };
+      archetypes[name] = { requiresWrite, ignoredOutput, fallback, distinctProviderFromInputs, brief };
     }
     for (const start of Object.keys(archetypes)) {
       const path: string[] = [];

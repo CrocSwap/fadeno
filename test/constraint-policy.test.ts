@@ -85,7 +85,7 @@ test('archetypes: advisory and required distinct_provider_from_inputs parse; abs
   assert.equal(profile.archetypes.judge!.distinctProviderFromInputs, 'required');
   assert.equal(profile.archetypes.worker!.distinctProviderFromInputs, null);
   assert.deepEqual(profile.archetypes.reviewer, {
-    requiresWrite: 'none', fallback: null, distinctProviderFromInputs: 'advisory', brief: null,
+    requiresWrite: 'none', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: 'advisory', brief: null,
   });
 });
 
@@ -108,7 +108,7 @@ test('archetypes: a bad distinct_provider_from_inputs value lists both forms', (
   }
 });
 
-test('archetypes: unknown keys name the three-key allowed set', () => {
+test('archetypes: unknown keys name the whole allowed set', () => {
   assert.throws(
     () => parseDoc({
       schema_version: 3,
@@ -118,7 +118,7 @@ test('archetypes: unknown keys name the three-key allowed set', () => {
     }),
     (err: unknown) =>
       err instanceof ExecutorProfileError &&
-      /`archetypes\.worker` has unknown key\(s\) requires_network; only `requires_write`, `fallback`, `distinct_provider_from_inputs`, and `brief` are allowed/
+      /`archetypes\.worker` has unknown key\(s\) requires_network; only `requires_write`, `ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief` are allowed/
         .test(err.message),
   );
   assert.throws(
@@ -128,7 +128,7 @@ test('archetypes: unknown keys name the three-key allowed set', () => {
       routes: { standalone: { openai: { command: ['codex'] } } },
       archetypes: { worker: 'yes' },
     }),
-    /`archetypes\.worker` is not a mapping \(only `requires_write`, `fallback`, `distinct_provider_from_inputs`, and `brief` are allowed\)/,
+    /`archetypes\.worker` is not a mapping \(only `requires_write`, `ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief` are allowed\)/,
   );
 });
 
