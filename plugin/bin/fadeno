@@ -14480,6 +14480,25 @@ var WRITE_POSTURE_FORMS = 'true, false, "required", "forbidden", or "none"';
 function isWritePosture(value) {
   return value === "required" || value === "forbidden" || value === "none";
 }
+var ARCHETYPE_POLICY_KEYS = [
+  "requires_write",
+  "ignored_output",
+  "fallback",
+  "distinct_provider_from_inputs",
+  "brief"
+];
+var ARCHETYPE_POLICY_KEY_FORMS = "`requires_write`, `ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief`";
+function unknownArchetypeKeys(rawPolicy) {
+  return Object.keys(rawPolicy).filter((key) => !ARCHETYPE_POLICY_KEYS.includes(key));
+}
+var IGNORED_OUTPUT_FORMS = '"kept" or "discardable"';
+function parseIgnoredOutput(raw, source, name) {
+  if (raw === void 0) return "discardable";
+  if (raw === "kept" || raw === "discardable") return raw;
+  throw new ExecutorProfileError(
+    `${source}: \`archetypes.${name}.ignored_output\` must be ${IGNORED_OUTPUT_FORMS}.`
+  );
+}
 function nextArchetypeFallback(archetypes, name) {
   if (!Object.hasOwn(archetypes, name)) return null;
   const next = archetypes[name].fallback;
@@ -14761,11 +14780,11 @@ function parseExecutorProfile(text, source, harness = "standalone") {
         throw new ExecutorProfileError(`${source}: archetype name "${name}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
       }
       if (!isMapping(rawPolicy)) {
-        throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` is not a mapping (only \`requires_write\`, \`fallback\`, \`distinct_provider_from_inputs\`, and \`brief\` are allowed).`);
+        throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` is not a mapping (only ${ARCHETYPE_POLICY_KEY_FORMS} are allowed).`);
       }
-      const unknown = Object.keys(rawPolicy).filter((key) => key !== "requires_write" && key !== "fallback" && key !== "distinct_provider_from_inputs" && key !== "brief");
+      const unknown = unknownArchetypeKeys(rawPolicy);
       if (unknown.length > 0) {
-        throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(", ")}; only \`requires_write\`, \`fallback\`, \`distinct_provider_from_inputs\`, and \`brief\` are allowed.`);
+        throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(", ")}; only ${ARCHETYPE_POLICY_KEY_FORMS} are allowed.`);
       }
       let requiresWrite = "none";
       if (rawPolicy.requires_write !== void 0) {
@@ -14774,6 +14793,7 @@ function parseExecutorProfile(text, source, harness = "standalone") {
         else if (isWritePosture(rawPolicy.requires_write)) requiresWrite = rawPolicy.requires_write;
         else throw new ExecutorProfileError(`${source}: \`archetypes.${name}.requires_write\` must be ${WRITE_POSTURE_FORMS}.`);
       }
+      const ignoredOutput = parseIgnoredOutput(rawPolicy.ignored_output, source, name);
       let fallback = null;
       if (rawPolicy.fallback != null) {
         if (typeof rawPolicy.fallback !== "string" || !BARE_IDENTIFIER_RE.test(rawPolicy.fallback)) {
@@ -14798,7 +14818,7 @@ function parseExecutorProfile(text, source, harness = "standalone") {
         }
         brief = rawPolicy.brief;
       }
-      archetypes[name] = { requiresWrite, fallback, distinctProviderFromInputs, brief };
+      archetypes[name] = { requiresWrite, ignoredOutput, fallback, distinctProviderFromInputs, brief };
     }
     for (const start of Object.keys(archetypes)) {
       const path = [];
@@ -15624,6 +15644,7 @@ function serializeSnapshot(profile, extraRefs = []) {
       const policy = profile.archetypes[name];
       const entry = {};
       if (policy.requiresWrite !== "none") entry.requires_write = policy.requiresWrite;
+      if (policy.ignoredOutput !== "discardable") entry.ignored_output = policy.ignoredOutput;
       if (typeof policy.fallback === "string") entry.fallback = policy.fallback;
       if (policy.distinctProviderFromInputs != null) entry.distinct_provider_from_inputs = policy.distinctProviderFromInputs;
       if (policy.brief != null) entry.brief = policy.brief;
@@ -15678,7 +15699,7 @@ function parseSnapshotDocument(text, source) {
     for (const [name, rawPolicy] of Object.entries(doc.archetypes)) {
       if (!BARE_IDENTIFIER_RE.test(name)) throw new ExecutorProfileError(`${source}: archetype name "${name}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
       if (!isMapping(rawPolicy)) throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` is not a mapping.`);
-      const unknown = Object.keys(rawPolicy).filter((key) => key !== "requires_write" && key !== "fallback" && key !== "distinct_provider_from_inputs" && key !== "brief");
+      const unknown = unknownArchetypeKeys(rawPolicy);
       if (unknown.length > 0) throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(", ")}.`);
       let requiresWrite = "none";
       if (rawPolicy.requires_write !== void 0) {
@@ -15687,6 +15708,7 @@ function parseSnapshotDocument(text, source) {
         else if (isWritePosture(rawPolicy.requires_write)) requiresWrite = rawPolicy.requires_write;
         else throw new ExecutorProfileError(`${source}: \`archetypes.${name}.requires_write\` must be ${WRITE_POSTURE_FORMS}.`);
       }
+      const ignoredOutput = parseIgnoredOutput(rawPolicy.ignored_output, source, name);
       let fallback = null;
       if (rawPolicy.fallback != null) {
         if (typeof rawPolicy.fallback !== "string" || !BARE_IDENTIFIER_RE.test(rawPolicy.fallback)) throw new ExecutorProfileError(`${source}: \`archetypes.${name}.fallback\` ${JSON.stringify(rawPolicy.fallback)} is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
@@ -15703,7 +15725,7 @@ function parseSnapshotDocument(text, source) {
         if (typeof rawPolicy.brief !== "string" || !BARE_IDENTIFIER_RE.test(rawPolicy.brief)) throw new ExecutorProfileError(`${source}: \`archetypes.${name}.brief\` must be a bare lowercase identifier.`);
         brief = rawPolicy.brief;
       }
-      archetypes[name] = { requiresWrite, fallback, distinctProviderFromInputs, brief };
+      archetypes[name] = { requiresWrite, ignoredOutput, fallback, distinctProviderFromInputs, brief };
     }
     for (const start of Object.keys(archetypes)) {
       const path = [];
@@ -17823,6 +17845,77 @@ function carryMutationStamp(verdicts) {
     });
   }
   return stamps.length > 0 ? stamps : null;
+}
+var IGNORED_OUTPUT_MAX_ENTRIES = 1e4;
+var IGNORED_OUTPUT_MAX_BUFFER = 32 * 1024 * 1024;
+function normalizeScanPath(raw) {
+  let out = raw.split("\\").join("/");
+  while (out.startsWith("./")) out = out.slice(2);
+  while (out.length > 1 && out.endsWith("/")) out = out.slice(0, -1);
+  return out;
+}
+function isAtOrUnder(rel, prefix) {
+  return rel === prefix || rel.startsWith(`${prefix}/`);
+}
+function isFadenoWorktreeState(rel) {
+  return isAtOrUnder(rel, ".fadeno");
+}
+function scanIgnoredOutput(worktreeAbs, carriedPaths, opts = {}) {
+  const maxEntries = opts.maxEntries ?? IGNORED_OUTPUT_MAX_ENTRIES;
+  if (typeof worktreeAbs !== "string" || worktreeAbs.length === 0) {
+    return { paths: [], truncated: true, note: "no worktree path was given, so nothing could be scanned." };
+  }
+  let result;
+  try {
+    result = (0, import_node_child_process2.spawnSync)(
+      "git",
+      ["-C", worktreeAbs, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
+      { encoding: "utf8", maxBuffer: IGNORED_OUTPUT_MAX_BUFFER }
+    );
+  } catch (err) {
+    return { paths: [], truncated: true, note: `the ignored-output listing could not be run: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  const failed = result.error != null || result.status !== 0;
+  const raw = String(result.stdout ?? "");
+  const fields = raw.split("\0");
+  if (failed && raw.length > 0 && !raw.endsWith("\0")) fields.pop();
+  const carries = [];
+  for (const declared of carriedPaths) {
+    if (typeof declared !== "string") continue;
+    const norm = normalizeScanPath(declared);
+    if (norm.length === 0 || norm === ".") continue;
+    carries.push(norm);
+  }
+  const paths = [];
+  let cappedOut = false;
+  for (const field of fields) {
+    if (field.length === 0) continue;
+    const rel = normalizeScanPath(field);
+    if (rel.length === 0 || rel === ".") continue;
+    if (isFadenoWorktreeState(rel)) continue;
+    if (carries.some((carry) => isAtOrUnder(rel, carry))) continue;
+    if (paths.length >= maxEntries) {
+      cappedOut = true;
+      break;
+    }
+    paths.push(field);
+  }
+  if (failed) {
+    const reason = result.error != null ? result.error.message : String(result.stderr ?? "").trim() || `exit ${result.status ?? "unknown"}`;
+    return {
+      paths,
+      truncated: true,
+      note: `the ignored-output listing failed (${reason.slice(0, ISOLATED_DIFF_MAX_NOTE)}), so these ${paths.length} ${paths.length === 1 ? "path is" : "paths are"} a floor, not the set.`
+    };
+  }
+  if (cappedOut) {
+    return {
+      paths,
+      truncated: true,
+      note: `more than ${maxEntries} ignored entries are present; the listing stopped there, so these paths are a floor, not the set.`
+    };
+  }
+  return { paths, truncated: false };
 }
 function createIsolatedWorktree(opts) {
   const worktreeAbs = opts.worktreePath;
@@ -21534,6 +21627,15 @@ ${prompt}`;
       writeShadowRefusal("constraint_command", shadowConstraintVerdict.reason, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: "command" });
       return null;
     }
+    const ignoredOutputPolicy = opts.ignoredOutput ?? (profile.archetypes[archetype ?? ""]?.ignoredOutput ?? "discardable");
+    if (ignoredOutputPolicy === "kept") {
+      writeShadowRefusal(
+        "ignored_output_kept",
+        `this dispatch declares \`ignored_output: kept\`, and a pair cannot preserve it: both arms run in worktrees and the primary is merged back through \`git add -A\`, which respects .gitignore \u2014 so any gitignored output would be discarded. No pair was formed and the primary runs normally in the shared tree. This is a trade, not a fault: a comparison was given up to protect the work. Set \`ignored_output: discardable\` on the archetype, or pass \`--ignored-output discardable\`, if this task's gitignored output is intermediate and safe to lose.`,
+        { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: "command" }
+      );
+      return null;
+    }
     if (prompt.includes(repoRoot)) {
       writeShadowRefusal(
         "shadow_containment",
@@ -21784,6 +21886,23 @@ ${prompt}`;
       };
       const shadowCarryMutation = carryMutationStamp(verifyCarriedPaths(repoRoot, pending.carryFingerprint));
       if (shadowCarryMutation != null) sRow.carry_mutated = shadowCarryMutation;
+      const shadowIgnored = scanIgnoredOutput(pending.worktreeAbs, profile.worktreeCarry);
+      if (shadowIgnored.paths.length > 0 || shadowIgnored.truncated) {
+        sRow.ignored_output_discarded = {
+          paths: shadowIgnored.paths,
+          ...shadowIgnored.truncated ? { truncated: true } : {},
+          ...shadowIgnored.note != null ? { note: shadowIgnored.note } : {},
+          // "Discarded" means two different things on the two arms, and the row
+          // has to say which. The challenger's worktree is RETAINED until
+          // `fadeno clean`, so its output is still on disk right here — gone
+          // from the comparison, not gone from the machine. The primary's
+          // worktree is torn down after the merge-back, so its output really is
+          // unrecoverable and this field is absent there. A reader must never
+          // have to infer the difference from whether some other field happens
+          // to be set.
+          retained_at: pending.worktreeRel
+        };
+      }
       if (spawnFailedMsg != null) sRow.error = spawnFailedMsg;
       appendEvidenceRow(repoRoot, sRow);
       opts.onEcho?.(`shadow diff: ${diffBytes} bytes \u2192 ${pending.diffRel}`);
@@ -21813,6 +21932,8 @@ ${prompt}`;
     let isolatedDiffBytes = null;
     let isolatedCarryRecords = [];
     let isolatedCarryFingerprint = null;
+    let isolatedIgnoredOutput = null;
+    const takeIsolatedIgnoredOutput = () => isolatedIgnoredOutput;
     let effectiveWorkspaceMode = workspaceMode;
     let isolationDegraded = null;
     let primaryMerge = null;
@@ -21890,7 +22011,9 @@ ${prompt}`;
               );
             }
           }
-          return invoke(worktreeAbs);
+          const spawnedInWorktree = invoke(worktreeAbs);
+          isolatedIgnoredOutput = scanIgnoredOutput(worktreeAbs, profile.worktreeCarry);
+          return spawnedInWorktree;
         });
         spawned = isolated.result;
         isolatedDiffRel = isolated.diff.diffRel;
@@ -22052,6 +22175,14 @@ ${truncatedStderr}
     if (isolationDegraded != null) {
       row.workspace_mode = effectiveWorkspaceMode;
       row.workspace_mode_degraded = isolationDegraded;
+    }
+    const primaryIgnored = takeIsolatedIgnoredOutput();
+    if (primaryIgnored != null && (primaryIgnored.paths.length > 0 || primaryIgnored.truncated)) {
+      row.ignored_output_discarded = {
+        paths: primaryIgnored.paths,
+        ...primaryIgnored.truncated ? { truncated: true } : {},
+        ...primaryIgnored.note != null ? { note: primaryIgnored.note } : {}
+      };
     }
     if (isolatedCarryFingerprint != null) {
       const primaryCarryMutation = carryMutationStamp(verifyCarriedPaths(repoRoot, isolatedCarryFingerprint));
@@ -22420,6 +22551,9 @@ var DispatchesCommandError = class extends Error {
 };
 var DEFAULT_TAIL = 10;
 var ERROR_EXCERPT = 80;
+var PATH_EXCERPT = 60;
+var NOTE_EXCERPT = 200;
+var IGNORED_PATHS_SHOWN = 3;
 var KNOWN_FORMAT_MAJOR = DISPATCHES_FORMAT.split(".")[0];
 var OUTCOME_KEYS = ["exit_code", "duration_ms", "output_sha256", "signal"];
 var OUTPUT_ID_PREFIX_MIN = 8;
@@ -22447,6 +22581,10 @@ function loadoutOf(value) {
 function excerpt(text, max) {
   const oneLine = text.split("\n")[0].trim();
   return oneLine.length > max ? `${oneLine.slice(0, max - 1)}\u2026` : oneLine;
+}
+function flatPath(path) {
+  const flat = path.split("\r").join("\\r").split("\n").join("\\n");
+  return flat.length > PATH_EXCERPT ? `${flat.slice(0, PATH_EXCERPT - 1)}\u2026` : flat;
 }
 function formatTier(value) {
   const format = str(value);
@@ -22487,6 +22625,18 @@ function primaryMergeOf(value) {
   if (detail2 != null) out.detail = detail2;
   const snapshot = str(row.diff_snapshot);
   if (snapshot != null) out.diffSnapshot = snapshot;
+  return out;
+}
+function ignoredOutputDiscardedOf(value) {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value;
+  const rawPaths = Array.isArray(row.paths) ? row.paths : null;
+  const truncated = row.truncated != null && row.truncated !== false;
+  const note = str(row.note);
+  if (rawPaths == null && !truncated && note == null) return null;
+  const paths = (rawPaths ?? []).filter((p) => typeof p === "string" && p !== "");
+  const out = { paths, truncated, retainedAt: str(row.retained_at) };
+  if (note != null) out.note = note;
   return out;
 }
 function dialOf(value) {
@@ -22559,6 +22709,10 @@ function requestedEntry(row) {
     // arrives on the completion row and is folded in by `applyCompletion`.
     // A request row cannot yet know how its own diff merged.
     primaryMerge: null,
+    // Likewise a result: what an arm built into an ignored path is only
+    // knowable once it has finished building it. Folded in by
+    // `applyCompletion`.
+    ignoredOutputDiscarded: null,
     outputBytes: num(row.output_bytes),
     diagnosticsSnapshot: str(row.diagnostics_snapshot),
     diagnosticsBytes: num(row.diagnostics_bytes),
@@ -22628,6 +22782,10 @@ function hostEntry(row) {
     // both arms onto the command lane anyway, so no host row is ever the
     // primary arm of a merge-back.
     primaryMerge: null,
+    // And with no worktree there is nothing to discard on the way out of one:
+    // a host subagent writes into the caller's own tree, where a gitignored
+    // build directory stays exactly where it was written.
+    ignoredOutputDiscarded: null,
     outputBytes: null,
     diagnosticsSnapshot: null,
     diagnosticsBytes: null,
@@ -22693,6 +22851,7 @@ function applyCompletion(entry, row) {
   const db = num(row.diff_bytes);
   if (db != null) entry.diffBytes = db;
   entry.primaryMerge = entry.primaryMerge ?? primaryMergeOf(row.primary_merge);
+  entry.ignoredOutputDiscarded = entry.ignoredOutputDiscarded ?? ignoredOutputDiscardedOf(row.ignored_output_discarded);
   const ob = num(row.output_bytes);
   if (ob != null) entry.outputBytes = ob;
   entry.diagnosticsSnapshot = entry.diagnosticsSnapshot ?? str(row.diagnostics_snapshot);
@@ -22705,6 +22864,15 @@ function legacyEntry(row) {
   entry.legacy = true;
   applyCompletion(entry, row);
   return entry;
+}
+var CHOICE_REFUSALS = /* @__PURE__ */ new Map([
+  [
+    "ignored_output_kept",
+    "[no pair: ignored_output_kept \u2014 the comparison was traded away so the gitignored output survives]"
+  ]
+]);
+function refusalMarker(predicate) {
+  return CHOICE_REFUSALS.get(predicate) ?? `[refused: ${predicate}]`;
 }
 function renderDispatchLine(entry) {
   const parts = [entry.timestamp ?? "?", `[${entry.kind}]`];
@@ -22725,7 +22893,7 @@ function renderDispatchLine(entry) {
   else if (entry.resolution === "user") parts.push("[user dial]");
   if (entry.kind === "command") {
     if (entry.refusal != null) {
-      parts.push(`[refused: ${entry.refusal.predicate}]`);
+      parts.push(refusalMarker(entry.refusal.predicate));
       parts.push(entry.refusal.message);
     } else if (entry.completed) {
       if (entry.outcome === "failed") parts.push("FAILED");
@@ -22740,7 +22908,7 @@ function renderDispatchLine(entry) {
     }
   } else if (entry.kind === "host") {
     if (entry.refusal != null) {
-      parts.push(`[refused: ${entry.refusal.predicate}]`);
+      parts.push(refusalMarker(entry.refusal.predicate));
       if (entry.refusal.message !== "") parts.push(entry.refusal.message);
     } else if (entry.attestedAt == null) {
       parts.push("[never attested]");
@@ -22767,6 +22935,29 @@ function renderDispatchLine(entry) {
     if (merge.status === "conflicted" || merge.status === "blocked") {
       const ref = entry.pairId ?? entry.dispatchId;
       parts.push(`[recover: fadeno shadow-apply ${ref != null ? ref.slice(0, 8) : "<pair-id>"} --arm primary]`);
+    }
+  }
+  const ignored = entry.ignoredOutputDiscarded;
+  if (ignored != null && (ignored.paths.length > 0 || ignored.truncated || ignored.note != null)) {
+    const shown = ignored.paths.slice(0, IGNORED_PATHS_SHOWN).map(flatPath);
+    const rest = ignored.paths.length - shown.length;
+    const listed = `${shown.join(", ")}${rest > 0 ? ` (+${rest} more)` : ""}`;
+    if (shown.length === 0) {
+      parts.push(
+        ignored.truncated ? "[ignored output DISCARDED \u2014 gitignored, and the listing could not be taken: what was left behind is unknown, not nothing]" : "[ignored output DISCARDED \u2014 gitignored; the row names no paths]"
+      );
+    } else if (ignored.truncated) {
+      parts.push(
+        `[ignored output DISCARDED: at least ${listed} \u2014 gitignored, so no diff carried it out of the worktree${ignored.note != null ? "" : "; the listing is a floor, not the set"}]`
+      );
+    } else {
+      parts.push(
+        `[ignored output DISCARDED: ${listed} \u2014 gitignored, so no diff carried it out of the worktree]`
+      );
+    }
+    if (ignored.note != null) parts.push(`[ignored output note: ${excerpt(ignored.note, NOTE_EXCERPT)}]`);
+    if (ignored.retainedAt != null) {
+      parts.push(`[still on disk at ${flatPath(ignored.retainedAt)} until \`fadeno clean\`]`);
     }
   }
   if (entry.relayAttested != null) parts.push(`[relay_attested: ${entry.relayAttested}]`);
@@ -34494,6 +34685,7 @@ var COMMANDS = {
       "--shadow": { kind: "free" },
       "--timeout": { kind: "free" },
       "--isolate": NONE,
+      "--ignored-output": { kind: "enum", values: ["kept", "discardable"] },
       "--no-brief": NONE,
       "--diagnostics": NONE
     }
@@ -37258,6 +37450,7 @@ Options:
   --shadow <ref>          (dispatch) Duplicate the prompt to a one-shot shadow challenger
                           (FADENO_SHADOW_MAX_LIVE caps concurrent challengers; default 4)
   --isolate               (dispatch) Run in a detached worktree (preserves diff, bypasses shared-writer lease)
+  --ignored-output <kept|discardable>  (dispatch) Whether this task's gitignored output must survive; kept forgoes a shadow pair
   --diagnostics           (dispatch/drive) Persist bounded process output (32 KiB / 500 lines) to diagnostics log
   --no-brief              (dispatch) Skip the archetype's declared brief preamble
   --tail <n>              (dispatches) Logical entries to show, newest last (default 10)
@@ -37525,6 +37718,11 @@ Options:
                         their worktrees are retained under .fadeno/local/shadow for review
   --timeout <seconds>   Hard executor deadline seconds; 0 disables route default (20 min)
   --isolate             Run in a detached worktree (opt-in, preserves diff, bypasses shared-writer lease)
+  --ignored-output <kept|discardable>
+                        Whether this task's gitignored output must survive. A shadow pair merges the
+                        primary back through git add -A, which respects .gitignore, so "kept" forgoes
+                        the pair rather than discard the output. Overrides the archetype's
+                        ignored_output policy. Default: discardable.
   --diagnostics         Persist bounded process output (32 KiB / 500 lines per stream) to diagnostics log
   --no-brief            Skip the archetype's declared brief preamble
 
@@ -38420,6 +38618,7 @@ function main(argv) {
         "prompt-file": { type: "string" },
         "no-brief": { type: "boolean" },
         isolate: { type: "boolean" },
+        "ignored-output": { type: "string" },
         diagnostics: { type: "boolean" },
         tail: { type: "string" },
         rate: { type: "string" },
@@ -39144,6 +39343,13 @@ Or advance manually with the playbook cursor:`);
         shadow: values.shadow,
         timeoutMs: dispatchTimeoutMs,
         isolate: Boolean(values.isolate),
+        ignoredOutput: (() => {
+          const raw = values["ignored-output"];
+          if (typeof raw !== "string") return null;
+          const trimmed = raw.trim();
+          if (trimmed === "kept" || trimmed === "discardable") return trimmed;
+          throw new Error(`--ignored-output must be "kept" or "discardable"; got "${raw}"`);
+        })(),
         diagnostics: Boolean(values.diagnostics),
         noBrief: Boolean(values["no-brief"]),
         promptFile,
