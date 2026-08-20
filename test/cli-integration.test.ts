@@ -10,6 +10,7 @@ import { runPrompt } from '../src/commands/prompt.ts';
 import { tempRepo } from './helpers.ts';
 import { userPaths } from '../src/lib/user-paths.ts';
 import { syncManagedRuntime, readInstallationManifest } from '../src/lib/installations.ts';
+import { packageVersion } from '../src/lib/paths.ts';
 
 const BIN = join(import.meta.dirname, '..', 'plugin', 'bin', 'fadeno');
 
@@ -338,7 +339,12 @@ test('CLI preflight refreshes older runtime without changing stdout/exit, never 
   syncManagedRuntime(up, older, manifest, { allowInstall: true, trustSource: true });
   manifest = readInstallationManifest(pathsOpts);
   // Refresh test: newer bundled should refresh on operational command
-  const newer = makeSource('newer-preflight-cli', '0.6.0-rc.33', 'new-bytes-cli');
+  // Derived from the package, never a literal: preflight compares the managed
+  // runtime against the INVOKING CLI's own version too, so a hardcoded
+  // "newer" fixture stops being newer the moment the package is bumped and
+  // the CLI silently refreshes past it. Pinning a version that must track the
+  // package is the same trap as pinning prose a template must match.
+  const newer = makeSource('newer-preflight-cli', packageVersion(), 'new-bytes-cli');
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   // operational command: `fadeno runs` should list no runs, exit 0, and preserve stdout
   const beforeRuns = runWithEnv(root, ['runs'], { ...homes, FADENO_BUNDLED_RUNTIME: newer });
@@ -354,7 +360,7 @@ test('CLI preflight refreshes older runtime without changing stdout/exit, never 
   const resultDowngrade = runWithEnv(root, ['runs'], { ...homes, FADENO_BUNDLED_RUNTIME: older });
   assert.equal(resultDowngrade.status, 0);
   const afterDowngradeManifest = readInstallationManifest(pathsOpts);
-  assert.equal(afterDowngradeManifest.runtime?.version, '0.6.0-rc.33', 'preflight must never downgrade version');
+  assert.equal(afterDowngradeManifest.runtime?.version, packageVersion(), 'preflight must never downgrade version');
   assert.notEqual(readFileSync(up.managedCli, 'utf8'), 'old-bytes-cli', 'preflight must not downgrade to older bytes');
   // Never installs fresh: new isolated homes with no prior runtime
   const freshRoot = tempRepo(t);
