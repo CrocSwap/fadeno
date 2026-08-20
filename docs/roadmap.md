@@ -316,6 +316,57 @@ the design record is `experimental/slots-and-archetypes.md`, phases 5 and 5.5.
   deferred, and nobody judges accumulated pairs yet — that is the next
   horizon, and judging untrustworthy pairs would be worse than not judging.
 
+## Effort decides the lane (horizon 9 shipped — Claude half; Codex designed)
+
+Merged to main 2026-08-20. The design record is
+[`slots-and-archetypes.md`](experimental/slots-and-archetypes.md), section
+"Effort decides the lane".
+
+A host spawn runs at the session's effort; an effort the session cannot give
+goes out on the command lane. This completes the predicate the resolver
+already applied to *model* rather than adding a second mechanism, and retires
+the 15-cell Claude identity grid along with `steering apply --claude`'s
+emission. The grid is superseded, not wrong: it shipped and worked (measured —
+the `xhigh` cell reports `CLAUDE_EFFORT=xhigh`, the `low` cell reports `low`).
+
+Four harness facts were measured rather than assumed, and are recorded in the
+design doc: the Agent tool's `model` is a strict enum, so effort has no live
+tool-call channel; `effort:` frontmatter is honored; the agent registry is a
+session-**start** snapshot, so cells cannot be materialized on demand (the
+grid was necessary, not merely convenient); and hook processes observe
+`CLAUDE_EFFORT`.
+
+Hook-side denials now leave a `host_refused` row — previously a repo where
+every spawn was refused looked identical in the ledger to one where nobody
+spawned.
+
+**Follow-ups, in rough priority:**
+
+1. **Codex half** — per-harness `relay:` catalog map, no inheritance, emit
+   (never copy) the project-scope `.codex/agents` TOMLs, and a `doctor` check
+   for a project-scope broker shadowing a newer user-scope one. Blocked on the
+   layered loader rejecting misspelled top-level keys, since `relay:` would
+   otherwise ship depending on that bug.
+2. **The reader drops `session_effort` and `lane_reason`.** `DispatchEntry`
+   has no field for either, so both are invisible in `fadeno dispatches` and
+   in `--json` — pre-existing and identical for `host_delivery`, so fix it for
+   both row types at once.
+3. **`dial resolve` has no structured failure output.** Its failure is exit
+   status plus free-form stderr, so the hook's `resolver_error` predicate
+   covers everything from a malformed pin to a missing binary. A
+   machine-readable failure would let a denial loop be grouped by cause rather
+   than merely counted.
+4. **Resolution echo covers only `new-run`.** `drive.ts` and `dispatch.ts`
+   build their own echo strings and stay unlabelled, and `new-run`'s role rows
+   carry no lane — the label is derived from the ref string instead of the
+   resolver's answer. One authoritative lane wants a field on those rows.
+5. **A repo with no `.fadeno/` denies silently.** Correct (never conjure an
+   evidence tree) but undocumented.
+6. **Flaky workspace-lease-lock tests** — `test/tool-repairs.test.ts:558` and
+   `test/drive-parallel.test.ts:169` intermittently time out on the same lock
+   and pass in isolation. Not caused by this work; it muddies every agent
+   verification run, which is reason enough to fix it.
+
 ## Low-friction release boundary
 
 The plugin runtime now carries the CLI and immutable built-in definitions, so
