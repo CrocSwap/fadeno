@@ -34,6 +34,57 @@ const KNOWN_FORMAT_MAJOR = DISPATCHES_FORMAT.split('.')[0]!;
 const OUTCOME_KEYS = ['exit_code', 'duration_ms', 'output_sha256', 'signal'];
 
 /**
+ * The primary arm's merge-back result, from a completion row's
+ * `primary_merge` object.
+ *
+ * When a shadow pair is selected, BOTH arms run in isolated worktrees so
+ * neither is advantaged by the caller's tree; the primary's diff is then
+ * merged back into that tree at the end. This records what happened to it —
+ * the one part of a paired dispatch that changes the caller's own workspace.
+ *
+ *   `clean`      — the diff applied with no conflict; the work is in the tree.
+ *   `conflicted` — `--3way` left markers or could not apply. Nothing was
+ *                  reverted, so the tree may be PARTIALLY applied — some
+ *                  hunks can be staged while others carry markers. The work
+ *                  is not lost either way: it is preserved at `diffSnapshot`,
+ *                  recoverable with `fadeno shadow-apply <pair-id> --arm
+ *                  primary`.
+ *
+ * There is deliberately no third status for "no merge was attempted" — an
+ * unpaired `--isolate` or a shared-mode primary omits the whole object, and
+ * absence already says it. A reader must never synthesize a status for an
+ * absent object; `primaryMerge == null` means *not applicable*, which is the
+ * ordinary case for nearly every row in the log.
+ *
+ * `status` is typed as a plain string rather than a two-member union, for the
+ * same reason `refusal.predicate` is: the vocabulary belongs to the writer,
+ * and a reader that narrowed it would silently DROP a status a newer fadeno
+ * introduced — the exact defect this field was added to fix. An unrecognized
+ * status renders verbatim. (`skipped` is the one value this reader knows to
+ * say nothing about: it is what the omission convention above replaced, and
+ * a row that still spells it out should not be louder than one that omits.)
+ */
+export interface DispatchPrimaryMerge {
+  /** `clean` or `conflicted` today; rendered verbatim if it is neither. */
+  status: string;
+  /**
+   * The writer's own prose for what happened: `git apply --3way`'s stderr, a
+   * lease it could not take, or why a `clean` merge changed nothing. Free
+   * text, so it is excerpted to one bounded line when rendered — git's stderr
+   * is multi-line, and this view is one line per dispatch.
+   */
+  detail?: string;
+  /**
+   * Repo-relative path to the diff that was applied, or left unapplied for
+   * `shadow-apply` to retry. The writer always states it; it is optional here
+   * so a row that somehow lost it still surfaces its status rather than
+   * failing to parse — the same tolerance `hostRefusedEntry` gives a refusal
+   * row with no refusal object.
+   */
+  diffSnapshot?: string;
+}
+
+/**
  * One logical dispatch: a correlated `dispatch_requested` /
  * `dispatch_completed` pair from the kernel (`kind: "command"`), a single
  * `dispatch_refused` row (also `kind: "command"` — the refusal *is* the
@@ -65,6 +116,29 @@ export interface DispatchEntry {
   modelOverride: string | null;
   modelId: string | null;
   reasoningEffort: string | null;
+  /**
+   * The effort the WRITER's own process observed (`CLAUDE_EFFORT` in the
+   * steering hook), as opposed to the effort the dial asked for. Null means
+   * unobservable — a Codex broker, a bare shell, or a row written before the
+   * field existed — never "the session has no effort" (see
+   * `readSessionEffort` in `src/lib/lane.ts`).
+   *
+   * On a `host_delivery` it repeats `reasoningEffort` whenever it is
+   * non-null, which is the writer's own stated redundancy: on that lane they
+   * are the same fact. It is kept as its own field anyway because it is the
+   * only *measured* one of the two — a requested effort that exceeds every
+   * effort ever observed here is the shape of a silent harness downgrade.
+   */
+  sessionEffort: string | null;
+  /**
+   * Why the resolver put this delivery on the lane it chose — a closed
+   * vocabulary (`LaneReason` in `src/lib/lane.ts`), written verbatim so this
+   * reader can GROUP on it. The lane is session-state dependent and can flip
+   * mid-session, so this is the only record of which state the spawn saw.
+   * Null on a row written by a fadeno that predates the field, and on kernel
+   * rows, which do not carry a lane today.
+   */
+  laneReason: string | null;
   driver: string | null;
   target: string | null;
   provider: string | null;
@@ -143,6 +217,13 @@ export interface DispatchEntry {
   baselineCommit: string | null;
   diffSnapshot: string | null;
   diffBytes: number | null;
+  /**
+   * What happened when a pair-selected, isolated PRIMARY's diff was merged
+   * back into the caller's tree — see `DispatchPrimaryMerge`. Null when the
+   * row says nothing, which is the ordinary case: an unpaired or shared-mode
+   * dispatch never attempts a merge, and absent is not a claim either way.
+   */
+  primaryMerge: DispatchPrimaryMerge | null;
   outputBytes: number | null;
   diagnosticsSnapshot: string | null;
   diagnosticsBytes: number | null;
@@ -335,6 +416,37 @@ function refusalOf(value: unknown): { predicate: string; message: string } | nul
   return { predicate, message };
 }
 
+/**
+ * The two lane facts every writer spells the same way, read in one place so
+ * a rename on the wire is a one-line edit here rather than a hunt. Kernel
+ * rows carry neither today and simply read null; the Claude steering hook
+ * writes both, on deliveries and on refusals alike.
+ */
+function laneFieldsOf(row: Record<string, unknown>): {
+  sessionEffort: string | null;
+  laneReason: string | null;
+} {
+  return { sessionEffort: str(row.session_effort), laneReason: str(row.lane_reason) };
+}
+
+/**
+ * Parse a completion row's `primary_merge` object (see
+ * `DispatchPrimaryMerge`). `status` is the whole claim, so a row without one
+ * reads as no claim at all rather than as a merge of unknown outcome.
+ */
+function primaryMergeOf(value: unknown): DispatchPrimaryMerge | null {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const status = str(row.status);
+  if (status == null) return null;
+  const out: DispatchPrimaryMerge = { status };
+  const detail = str(row.detail);
+  if (detail != null) out.detail = detail;
+  const snapshot = str(row.diff_snapshot);
+  if (snapshot != null) out.diffSnapshot = snapshot;
+  return out;
+}
+
 function dialOf(value: unknown): { model: string; effort?: string; via?: string } | null {
   if (value == null || typeof value !== 'object' || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
@@ -350,6 +462,7 @@ function dialOf(value: unknown): { model: string; effort?: string; via?: string 
 
 function requestedEntry(row: Record<string, unknown>): DispatchEntry {
   const loadout = loadoutOf(row.loadout);
+  const lane = laneFieldsOf(row);
   return {
     kind: 'command',
     format: str(row.format),
@@ -368,6 +481,11 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     modelOverride: null,
     modelId: str(row.model_id),
     reasoningEffort: str(row.reasoning_effort),
+    // Read rather than hard-nulled: the kernel does not write lane fields
+    // today, but reading them costs nothing and is the difference between
+    // "the writer said nothing" and this reader dropping what it said.
+    sessionEffort: lane.sessionEffort,
+    laneReason: lane.laneReason,
     driver: str(row.driver),
     target: str(row.target),
     provider: str(row.provider),
@@ -396,6 +514,10 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     baselineCommit: str(row.baseline_commit),
     diffSnapshot: str(row.diff_snapshot),
     diffBytes: num(row.diff_bytes),
+    // A merge-back is a *result*: it happens after the arm has run, so it
+    // arrives on the completion row and is folded in by `applyCompletion`.
+    // A request row cannot yet know how its own diff merged.
+    primaryMerge: null,
     outputBytes: num(row.output_bytes),
     diagnosticsSnapshot: str(row.diagnostics_snapshot),
     diagnosticsBytes: num(row.diagnostics_bytes),
@@ -410,6 +532,7 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
 
 function hostEntry(row: Record<string, unknown>): DispatchEntry {
   const loadout = loadoutOf(row.loadout);
+  const lane = laneFieldsOf(row);
   return {
     kind: 'host',
     format: str(row.format),
@@ -428,6 +551,11 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     modelOverride: str(row.model_override),
     modelId: str(row.model_id),
     reasoningEffort: str(row.reasoning_effort),
+    // The hook writes both on a delivery AND on a denial, so
+    // `hostRefusedEntry` (which builds on this) gets them for free — the two
+    // row types dropped them identically, and now surface them identically.
+    sessionEffort: lane.sessionEffort,
+    laneReason: lane.laneReason,
     driver: str(row.driver),
     target: null,
     provider: null,
@@ -456,6 +584,10 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     baselineCommit: null,
     diffSnapshot: null,
     diffBytes: null,
+    // A host spawn has no worktree of its own, and a selected pair forces
+    // both arms onto the command lane anyway, so no host row is ever the
+    // primary arm of a merge-back.
+    primaryMerge: null,
     outputBytes: null,
     diagnosticsSnapshot: null,
     diagnosticsBytes: null,
@@ -550,6 +682,9 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
   entry.modelId = entry.modelId ?? str(row.model_id);
   entry.driver = entry.driver ?? str(row.driver);
   entry.reasoningEffort = entry.reasoningEffort ?? str(row.reasoning_effort);
+  const lane = laneFieldsOf(row);
+  entry.sessionEffort = entry.sessionEffort ?? lane.sessionEffort;
+  entry.laneReason = entry.laneReason ?? lane.laneReason;
   entry.dial = entry.dial ?? dialOf(row.dial);
   entry.executor = entry.executor ?? str(row.executor);
   if (row.gate_eligible === false) entry.gateEligible = false;
@@ -565,6 +700,9 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
   entry.diffSnapshot = entry.diffSnapshot ?? str(row.diff_snapshot);
   const db = num(row.diff_bytes);
   if (db != null) entry.diffBytes = db;
+  // The merge-back result: written once, at the end of a paired primary's
+  // run, so the completion row is its only home (see `DispatchPrimaryMerge`).
+  entry.primaryMerge = entry.primaryMerge ?? primaryMergeOf(row.primary_merge);
   const ob = num(row.output_bytes);
   if (ob != null) entry.outputBytes = ob;
   entry.diagnosticsSnapshot = entry.diagnosticsSnapshot ?? str(row.diagnostics_snapshot);
@@ -677,6 +815,53 @@ export function renderDispatchLine(entry: DispatchEntry): string {
       parts.push(`[effort mismatch: requested ${entry.reasoningEffort}, attested ${entry.attestedEffort}]`);
     } else {
       parts.push(`[attested: effort ${entry.attestedEffort ?? 'unmeasured'}]`);
+    }
+  }
+
+  // Lane provenance. `sessionEffort` is the only *observed* effort on the
+  // row, and `laneReason` is why the resolver chose this lane at all — the
+  // lane is session-state dependent, so the same dial renders differently
+  // from a different session. Both render only when the row states them, so
+  // rows from before the fields existed (and kernel rows, which carry no
+  // lane) are untouched.
+  if (entry.sessionEffort != null) parts.push(`[session effort: ${entry.sessionEffort}]`);
+  if (entry.laneReason != null) parts.push(`[lane: ${entry.laneReason}]`);
+  // The primary arm's merge-back into the caller's tree. `clean` earns a mark
+  // of its own: it is the only evidence in this view that the tree the caller
+  // is looking at actually received the primary's work. `conflicted` says
+  // outright that the tree may be PARTIALLY applied — `git apply --3way`
+  // stages what it can and reverts nothing, so the failure a reader would
+  // otherwise assume ("nothing happened") is the one thing it does not mean —
+  // and names the remedy inline, because the work is preserved in a diff
+  // nobody finds by accident. An absent object is not rendered at all: no
+  // merge was attempted, which is the ordinary case for nearly every row.
+  const merge = entry.primaryMerge;
+  if (merge != null && merge.status !== 'skipped') {
+    if (merge.status === 'clean') {
+      parts.push('[primary merged: clean]');
+    } else if (merge.status === 'conflicted') {
+      parts.push('[primary merge CONFLICTED — nothing reverted, the tree may be partially applied]');
+    } else if (merge.status === 'blocked') {
+      // Distinct from `conflicted` on purpose. A conflict means git tried and
+      // may have left the tree half-applied, so the reader must go look; this
+      // means nothing was attempted and the workspace is exactly as it was.
+      // Sending someone to inspect `git status` after a run that wrote
+      // nothing is a false alarm, and false alarms are how real ones stop
+      // being read.
+      parts.push('[primary merge BLOCKED — nothing was applied, the workspace is untouched]');
+    } else {
+      // A status this reader does not know. Say it rather than swallow it.
+      parts.push(`[primary merge: ${merge.status}]`);
+    }
+    // Free-form writer prose (git stderr, a lease failure, "no changes"), so
+    // it is bounded exactly like a spawn error: one line, one entry.
+    if (merge.detail != null) parts.push(`[merge detail: ${excerpt(merge.detail, ERROR_EXCERPT)}]`);
+    if (merge.status === 'conflicted' || merge.status === 'blocked') {
+      // Both spellings resolve (`resolveDispatchPair` takes a pair id or
+      // either arm's dispatch id, whole or as an 8+ character prefix), so the
+      // hint stays runnable on a row that carries only one of them.
+      const ref = entry.pairId ?? entry.dispatchId;
+      parts.push(`[recover: fadeno shadow-apply ${ref != null ? ref.slice(0, 8) : '<pair-id>'} --arm primary]`);
     }
   }
 
