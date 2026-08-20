@@ -34628,10 +34628,10 @@ var command = (options, positionals = [], subcommands) => ({ options: { ...globa
 var NONE = { kind: "none" };
 var PATH = { kind: "path" };
 var COMMANDS = {
-  setup: command({ "--codex": NONE, "--claude": NONE, "--non-interactive": NONE }),
+  setup: command({ "--codex": NONE, "--claude": NONE, "--non-interactive": NONE, "--from": PATH, "--reset-runtime": NONE }),
   status: command({ "--verbose": NONE }),
   doctor: command({ "--codex": NONE, "--claude": NONE }),
-  vendor: command({ "--codex": NONE, "--claude": NONE, "--grok": NONE, "--with-hooks": NONE, "--force": NONE }),
+  vendor: command({ "--codex": NONE, "--claude": NONE, "--grok": NONE, "--with-hooks": NONE, "--no-steering": NONE, "--force": NONE }),
   uninstall: command({ "--codex": NONE, "--claude": NONE, "--all": NONE, "--purge-user-data": NONE, "--force": NONE }),
   clean: command({ "--force": NONE }),
   unvendor: command({ "--force": NONE }),
@@ -34657,7 +34657,7 @@ var COMMANDS = {
       clear: command({ "--session": NONE, "--user": NONE, "--repo": NONE }, ["archetype"]),
       shadow: command({ "--via": { kind: "free" }, "--rate": { kind: "free" } }, ["archetype", "free"]),
       "clear-shadow": command({}, ["archetype"]),
-      resolve: command({ "--archetype": { kind: "archetype" } }, [])
+      resolve: command({ "--archetype": { kind: "archetype" }, "--prompt-sha256": { kind: "free" } }, [])
     }
   ),
   steering: command(
@@ -34667,11 +34667,17 @@ var COMMANDS = {
       resolve: command({
         "--archetype": { kind: "archetype" },
         "--host-executor": { kind: "free" },
+        // Legacy spelling of `--host-executor`, still read by cli.ts.
+        "--native-executor": { kind: "free" },
         "--role": { kind: "free" },
         "--run": { kind: "run" },
-        "--dispatch-id": { kind: "free" }
+        "--dispatch-id": { kind: "free" },
+        // The prompt bytes the resolver hashes to decide pairing; the Codex
+        // broker passes one of these on every ordinary dispatch.
+        "--prompt-file": PATH,
+        "--prompt-sha256": { kind: "free" }
       }),
-      apply: command({ "--codex": NONE, "--force": NONE, "--scope": { kind: "enum", values: ["project", "user"] } }, ["dial"])
+      apply: command({ "--codex": NONE, "--claude": NONE, "--grok": NONE, "--force": NONE, "--scope": { kind: "enum", values: ["project", "user"] } }, ["dial"])
     }
   ),
   dispatch: command(
@@ -34708,7 +34714,7 @@ var COMMANDS = {
     },
     ["run"]
   ),
-  "tool-run": command({ "--tool": { kind: "free" }, "--timeout": { kind: "free" } }, ["run"]),
+  "tool-run": command({ "--tool": { kind: "free" }, "--timeout": { kind: "free" }, "--output": PATH }, ["run"]),
   "tool-complete": command({ "--output": PATH }, ["run"]),
   gate: command(
     { "--artifact": PATH, "--report": PATH },
@@ -34742,7 +34748,7 @@ var COMMANDS = {
   "shadow-apply": command({ "--arm": { kind: "enum", values: ["challenger", "primary"] }, "--check": NONE }, ["free"]),
   show: command({ "--legacy": NONE, "--events": NONE }, ["run"]),
   verify: command({ "--latest": NONE, "--allow-failed": NONE, "--legacy": NONE }, ["run"]),
-  plugin: command({ "--codex": NONE, "--force": NONE }, ["path"]),
+  plugin: command({ "--codex": NONE, "--grok": NONE, "--force": NONE }, ["path"]),
   completion: command({}, [], {
     bash: command({})
   })
@@ -35064,6 +35070,31 @@ function runCompletionCandidates(opts) {
   if (kind != null) return dynamicValues(kind, current, repoRoot, cwd, runRef);
   if (current === "") return commandOptions(context.spec);
   return [];
+}
+function knownFlagsFor(command2, subcommand) {
+  const spec = COMMANDS[command2];
+  if (spec == null) return null;
+  const sub = subcommand != null ? spec.subcommands?.[subcommand] : void 0;
+  return /* @__PURE__ */ new Set([...Object.keys(spec.options), ...sub != null ? Object.keys(sub.options) : []]);
+}
+function unknownFlagsFor(command2, subcommand, passed) {
+  const known = knownFlagsFor(command2, subcommand);
+  if (known == null) return [];
+  return passed.map((name) => `--${name}`).filter((flag) => !known.has(flag));
+}
+function suggestFlag(command2, subcommand, flag) {
+  const known = knownFlagsFor(command2, subcommand);
+  if (known == null) return null;
+  let best = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const candidate of known) {
+    const distance = editDistance(flag, candidate);
+    if (distance < bestDistance) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  }
+  return best != null && bestDistance <= 2 && bestDistance < flag.length ? best : null;
 }
 
 // src/commands/shadow-apply.ts
@@ -38657,8 +38688,18 @@ function main(argv) {
   }
   const { values, positionals } = parsed;
   const command2 = positionals[0];
-  if ((values.run !== void 0 || values["dispatch-id"] !== void 0) && !(command2 === "steering" && positionals[1] === "resolve")) {
-    throw new Error("--run and --dispatch-id are valid only for `fadeno steering resolve`.");
+  if (command2 != null && values.help !== true && values.version !== true) {
+    const unknown = unknownFlagsFor(command2, positionals[1], Object.keys(values));
+    if (unknown.length > 0) {
+      const described = unknown.map((flag) => {
+        const near = suggestFlag(command2, positionals[1], flag);
+        return near != null ? `${flag} (did you mean ${near}?)` : flag;
+      });
+      const accepted = [...knownFlagsFor(command2, positionals[1]) ?? []].sort();
+      throw new Error(
+        `\`fadeno ${command2}\` does not accept ${described.join(", ")}. ` + (accepted.length > 0 && accepted.length <= 8 ? `It accepts: ${accepted.join(", ")}.` : `Run \`fadeno ${command2} --help\` for what it does accept.`)
+      );
+    }
   }
   if (values.version) {
     console.log(packageVersion());
