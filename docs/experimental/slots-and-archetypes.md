@@ -354,6 +354,12 @@ fadeno dispatch ... --shadow grok-default            # one-shot opt-in
 fadeno loadout clear-shadow worker
 ```
 
+*Spelling note (added after the dials rename): these verbs shipped under
+`fadeno dial` — `fadeno dial shadow <archetype> <model>[@effort] [--rate <r>]`
+and `fadeno dial clear-shadow [<archetype>]`; `--shadow` takes a dial ref. The
+sketch is left in its original spelling as the record; the semantics below are
+unchanged.*
+
 **Mechanism:** when a slot with a shadow attachment dispatches, the kernel
 duplicates the dispatch to the shadow target with the byte-identical prompt
 (same snapshot, same `prompt_sha256`), delivered isolated — worktree or

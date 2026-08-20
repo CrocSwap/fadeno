@@ -516,20 +516,31 @@ policy language.
 
 ## CLI
 
-- `fadeno setup` / `fadeno use` / `fadeno status` / `fadeno doctor` — the
-  low-friction setup path, user selection, effective state, and read-only checks.
-- `fadeno loadout` — show the active loadout, its source, and the full
-  archetype→executor table.
-- `fadeno loadout list` / `fadeno loadout use <name>` / `fadeno loadout clear`
-  — `use` writes `.fadeno/local/loadout`; `clear` removes it.
-- `fadeno dispatch --archetype <a> [--role <name>] [--loadout <name>]
-  [--executor <name>] [--prompt-file <path>] [--shadow <executor>]` — prompt from `--prompt-file`
-  or stdin; resolves per the order above (`--executor` bypasses resolution
+> **Selection verbs moved in 0.6.0.** Per the *Successors* note above,
+> [`dials-and-registry.md`](dials-and-registry.md) superseded the selection
+> half of this document: `fadeno loadout` (and `fadeno use`, `--loadout`,
+> `--executor`) are **removed**, not renamed-in-spirit, and the selection
+> surface is verb-first `fadeno dial`. The commands below are spelled as they
+> ship; the kernel, route, and evidence semantics they carry are unchanged
+> from this document's design.
+
+- `fadeno setup` / `fadeno status` / `fadeno doctor` — the low-throughput
+  setup path, effective state, and read-only checks.
+- `fadeno dial` — the effective archetype→model table with per-row
+  `dial_source`; `fadeno dial <archetype>` shows one row plus its shadow
+  attachment.
+- `fadeno dial <archetype> <model>[@effort] [--via <driver>]
+  [--session|--user|--repo]` / `fadeno dial clear [<archetype>]` — set and
+  clear along the cascade (`binding → session dial → repo pin → user dial
+  → base`). The machine-local pin is `.fadeno/local/dials`.
+- `fadeno dispatch --archetype <a> [--role <name>] [--model <ref>]
+  [--prompt-file <path>] [--shadow <ref>]` — prompt from `--prompt-file`
+  or stdin; resolves per the order above (`--model` bypasses resolution
   for debugging); invokes the executor; report to stdout; appends the evidence
   row pair. `--shadow` fires a one-shot shadow duplication with the
-  byte-identical prompt, isolated in a worktree; also available as
-  `fadeno loadout shadow <archetype> <executor> [--rate <0..1>]` and
-  `fadeno loadout clear-shadow [archetype]`. The shadow runs *concurrently*
+  byte-identical prompt, isolated in a worktree; also available as a standing
+  attachment, `fadeno dial shadow <archetype> <model>[@effort] [--rate <0..1>]`
+  and `fadeno dial clear-shadow [archetype]`. The shadow runs *concurrently*
   with the primary — resolved, worktree-cut from HEAD, and spawned before the
   primary starts, collected after it finishes — so dispatch latency is
   max(primary, shadow) rather than their sum, both sides start from the same
@@ -553,11 +564,25 @@ prints where each actor landed, so a user burning a metered subscription
 never wonders which provider a run is spending:
 
 ```
-implementer → luna-medium (gpt-5.6-luna) [loadout luna]
-opus_reviewer → claude-default (opus) [binding]
+implementer → gpt-5.6-luna@medium (gpt-5.6-luna) [user dial]
+opus_reviewer → opus@high (opus) [binding]
 ```
 
+The dial ref is the executor name now, so the parenthesized model id repeats
+part of it; `[source]` is the cascade layer that won
+(`binding | session dial | repo pin | user dial | base`).
+
 ## Evidence
+
+> **Row spelling moved with the dials rename; the contract did not.** The
+> ledger is now **format 1.0**: the `loadout` / `override` / `target` fields
+> are gone, `resolution` is valued
+> `binding|session|repo|user|base|model-flag|shadow`, and
+> `dial` / `model_id` / `driver` / `reasoning_effort` were added.
+> [`dials-and-registry.md`](dials-and-registry.md) carries the current field
+> list. The 0.1 → 0.2 narrative below is kept as the record of *why* each
+> field exists — and because the reader still renders those rows, marked
+> `[format 0.x]`, rather than dropping them.
 
 - Playbook runs: the run ledger records the resolution snapshot — active
   loadout name + source, and per-role `(executor, model, resolution source)`
