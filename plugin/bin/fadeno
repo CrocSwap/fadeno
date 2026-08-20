@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.39";
+  if (true) return "0.6.0-rc.40";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -14252,6 +14252,40 @@ function loadLayeredProfile(repoRoot, options = {}, harness) {
     selfContained: suppressLayering,
     suppressedCanonArchetypes: suppressLayering ? missingCanonArchetypes(parsedLayers.get("builtin") ?? null, projectDoc) : []
   };
+}
+function missingBuiltinDeclarations(builtinDoc, projectDoc) {
+  if (builtinDoc == null || projectDoc == null) return [];
+  const missing = [];
+  const walk = (builtin, project, path) => {
+    for (const [key, builtinValue] of Object.entries(builtin)) {
+      const here = path === "" ? key : `${path}.${key}`;
+      if (!Object.hasOwn(project, key)) {
+        if (mapping(builtinValue) == null) missing.push(here);
+        continue;
+      }
+      const builtinChild = mapping(builtinValue);
+      const projectChild = mapping(project[key]);
+      if (builtinChild != null && projectChild != null) walk(builtinChild, projectChild, here);
+    }
+  };
+  walk(builtinDoc, projectDoc, "");
+  return missing;
+}
+function explainSuppressedBuiltin(repoRoot, options = {}) {
+  void options;
+  const projectPath = (0, import_node_path3.join)(repoRoot, ".fadeno", "executors.yaml");
+  const builtinPath = `${templatesDir()}/common/fadeno/executors.yaml`;
+  if (!(0, import_node_fs3.existsSync)(projectPath) || !(0, import_node_fs3.existsSync)(builtinPath)) return null;
+  let projectDoc;
+  let builtinDoc;
+  try {
+    projectDoc = parseLayer(projectPath);
+    builtinDoc = parseLayer(builtinPath);
+  } catch {
+    return null;
+  }
+  if (!projectIsComplete(projectDoc)) return null;
+  return { missing: missingBuiltinDeclarations(builtinDoc, projectDoc) };
 }
 function stringifyObject(value) {
   return (0, import_yaml.stringify)(value);
@@ -36777,6 +36811,33 @@ function runDoctor(opts = {}) {
     findings.push(finding("dials", "error", "no dials resolved", "Run `fadeno dial <archetype> <model>`"));
   } else {
     findings.push(finding("dials", "ok", `${status.activeLoadout.name} (${status.activeLoadout.source})`));
+  }
+  {
+    let suppressed = null;
+    try {
+      suppressed = explainSuppressedBuiltin(repoRoot, opts.userPathOptions ?? {});
+    } catch {
+      suppressed = null;
+    }
+    if (suppressed != null) {
+      const missing = suppressed.missing;
+      if (missing.length === 0) {
+        findings.push(finding(
+          "catalog-layering",
+          "ok",
+          "project catalog is self-contained (suppresses the builtin and user layers) and omits no builtin declaration"
+        ));
+      } else {
+        const shown = missing.slice(0, 6).join(", ");
+        const rest = missing.length > 6 ? `, +${missing.length - 6} more` : "";
+        findings.push(finding(
+          "catalog-layering",
+          "warning",
+          `project catalog is self-contained (suppresses the builtin and user layers) and omits ${missing.length} declaration(s) the builtin makes: ${shown}${rest}`,
+          "Either re-declare them, or \u2014 usually better \u2014 delete everything from `.fadeno/executors.yaml` that is not a deliberate override. Without its own `models:` and `routes:` the file layers on the builtin instead of replacing it, and cannot fall behind again. Note this reports ABSENCES only: a stale VALUE is indistinguishable from a deliberate override and is not checked."
+        ));
+      }
+    }
   }
   for (const role of status.roles) {
     const spec = role.adapter === "command" ? status.external.find((item) => item.archetype === role.archetype) : null;
