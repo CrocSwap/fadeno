@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.34";
+  if (true) return "0.6.0-rc.35";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -30362,16 +30362,31 @@ function managedAgentEmit(path, body, force, scope) {
   (0, import_node_fs24.writeFileSync)(path, body, "utf8");
   return existed ? "overwritten" : "created";
 }
+function dialLayersForApply(scope, repoRoot, profile, userPathOptions) {
+  const state = readLocalDialState(repoRoot);
+  const userRaw = readUserDials(userPathOptions ?? {});
+  const user = {};
+  for (const [k, v] of Object.entries(userRaw)) user[k] = v;
+  const repo = { ...profile.dials };
+  if (scope !== "user") {
+    return { layers: { session: state.dials, repo, user }, ignoredLocal: [] };
+  }
+  const ignoredLocal = [];
+  for (const archetype of [...Object.keys(state.dials), ...Object.keys(repo)]) {
+    if (!ignoredLocal.includes(archetype)) ignoredLocal.push(archetype);
+  }
+  return { layers: { session: {}, repo: {}, user }, ignoredLocal };
+}
 function runSteeringApply(opts) {
   const repoRoot = rootOf(opts);
   const { profile } = profileOf(repoRoot, opts.userPathOptions);
+  const scope = opts.scope ?? "project";
   let dialLayers;
+  let ignoredLocalDials;
   try {
-    const state = readLocalDialState(repoRoot);
-    const userRaw = readUserDials(opts.userPathOptions ?? {});
-    const user = {};
-    for (const [k, v] of Object.entries(userRaw)) user[k] = v;
-    dialLayers = { session: state.dials, repo: { ...profile.dials }, user };
+    const scoped = dialLayersForApply(scope, repoRoot, profile, opts.userPathOptions);
+    dialLayers = scoped.layers;
+    ignoredLocalDials = scoped.ignoredLocal;
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
     throw err;
@@ -30380,7 +30395,6 @@ function runSteeringApply(opts) {
   const materialization2 = {};
   const pending = [];
   const results = [];
-  const scope = opts.scope ?? "project";
   const agentDir = codexAgentDir(scope, repoRoot, opts.userPathOptions);
   const managedCli = userPaths(opts.userPathOptions).managedCli;
   const cliPath = opts.cliPath ?? (scope === "user" && (0, import_node_fs24.existsSync)(managedCli) ? managedCli : "fadeno");
@@ -30449,7 +30463,7 @@ function runSteeringApply(opts) {
   }
   const conflicts = pending.filter((item) => !(0, import_node_fs24.existsSync)(item.path) || (0, import_node_fs24.readFileSync)(item.path, "utf8") !== item.body).map((item) => item.path);
   const restartRequired = results.some((item) => item.status === "created" || item.status === "overwritten");
-  return { results, materialization: materialization2, baseline, restartRequired, conflicts, scope };
+  return { results, materialization: materialization2, baseline, restartRequired, conflicts, scope, ignoredLocalDials };
 }
 function emitCodexSteeringBrokers(opts) {
   const repoRoot = rootOf(opts);
@@ -30516,13 +30530,13 @@ function runSteeringApplyClaude(opts) {
       throw err;
     }
   })();
+  const scope = opts.scope ?? "project";
   let dialLayers;
+  let ignoredLocalDials;
   try {
-    const state = readLocalDialState(repoRoot);
-    const userRaw = readUserDials(opts.userPathOptions ?? {});
-    const user = {};
-    for (const [k, v] of Object.entries(userRaw)) user[k] = v;
-    dialLayers = { session: state.dials, repo: { ...profile.dials }, user };
+    const scoped = dialLayersForApply(scope, repoRoot, profile, opts.userPathOptions);
+    dialLayers = scoped.layers;
+    ignoredLocalDials = scoped.ignoredLocal;
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
     throw err;
@@ -30531,7 +30545,6 @@ function runSteeringApplyClaude(opts) {
   const materialization2 = {};
   const results = [];
   const removed = [];
-  const scope = opts.scope ?? "project";
   const agentDir = claudeAgentDir(scope, repoRoot, opts.userPathOptions);
   for (const archetype of ["worker", "reviewer", "judge"]) {
     let cascade;
@@ -30569,7 +30582,7 @@ function runSteeringApplyClaude(opts) {
   for (const cell of listRetiredClaudeGridCells(agentDir)) removeManagedClaudeAgent(cell, removed);
   const conflicts = [];
   const restartRequired = false;
-  return { results, materialization: materialization2, baseline, restartRequired, conflicts, scope, removed };
+  return { results, materialization: materialization2, baseline, restartRequired, conflicts, scope, removed, ignoredLocalDials };
 }
 
 // src/commands/init.ts
@@ -38915,6 +38928,12 @@ function main(argv) {
           console.log(
             removed.length === 0 ? "  Nothing to remove; effort selects the delivery lane, so no agent file carries an identity." : `  Removed ${removed.length} managed agent definition(s). Effort now selects the lane, so nothing is written and no restart is needed.`
           );
+          const ignored2 = result2.ignoredLocalDials ?? [];
+          if (ignored2.length > 0) {
+            console.log(
+              `  Ignored repo-local dial(s) for ${ignored2.join(", ")}: a user-scope agent set steers every repo, so it is cut from user dials only. Use --scope project, or \`fadeno dial <archetype> <model> --user\` to make the choice global.`
+            );
+          }
           if (changed2 === 0 && result2.conflicts.length > 0) console.log("  Existing files were preserved; pass --force to replace them.");
           return 0;
         }
@@ -38934,6 +38953,12 @@ function main(argv) {
         console.log(
           `  ${changed} agent definition(s) written; declared fallbacks work immediately, or start a fresh Codex session to deliver changed host slots in-session.`
         );
+        const ignored = result.ignoredLocalDials ?? [];
+        if (ignored.length > 0) {
+          console.log(
+            `  Ignored repo-local dial(s) for ${ignored.join(", ")}: a user-scope agent set steers every repo, so it is cut from user dials only. Use --scope project, or \`fadeno dial <archetype> <model> --user\` to make the choice global.`
+          );
+        }
         if (changed === 0) console.log("  Existing files were preserved; pass --force to replace them.");
         return 0;
       }
