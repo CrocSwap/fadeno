@@ -18,7 +18,7 @@
  * reclaimable so a crashed writer cannot permanently block the repo.
  */
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, relative, resolve } from 'node:path';
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
@@ -571,8 +571,10 @@ const ISOLATED_DIFF_MAX_NOTE = 4000;
 
 /** Mechanism a declared path was actually carried by — recorded on the
  * dispatch's evidence row so a worktree is checkable as warmed the same way.
- * `reflink` and `hardlink` never appear together with a mutation concern
- * noted per-path; see `carryPathIntoWorktree` for why.
+ * It is also what decides whether a path is fingerprinted for mutation:
+ * `hardlink` shares the inode and is, `reflink` (copy-on-write) and `copy`
+ * cannot and are not. See `carryPathIntoWorktree` for the ladder and
+ * `fingerprintCarriedPaths` for that distinction in full.
  */
 export type WorktreeCarryMechanism = 'reflink' | 'hardlink' | 'copy';
 
@@ -622,9 +624,13 @@ export type CarryOutcome =
  * mode — live on the shared inode. That cannot be defended by making the
  * carried tree read-only: a `chmod` on a shared inode makes the PRIMARY's
  * copy read-only as well, so that obvious mitigation is unavailable, not
- * merely unbuilt. Detecting after the fact whether a carry was mutated
- * (a `carry_mutated` stamp) is deliberately left for later; this function
- * does not attempt it.
+ * merely unbuilt. This function still makes no attempt to PREVENT it —
+ * prevention is what is unavailable. What exists now is detection after the
+ * fact: `carryDeclaredPaths` fingerprints every `hardlink`-carried path once
+ * the carry lands, and `verifyCarriedPaths` re-reads it after the run to say
+ * which declared paths drifted on a shared inode. See
+ * `fingerprintCarriedPaths` for the fingerprint's design and, importantly,
+ * for what it cannot see.
  */
 export function carryPathIntoWorktree(repoRoot: string, worktreeAbs: string, relPath: string): CarryOutcome {
   const srcAbs = join(repoRoot, relPath);
@@ -669,20 +675,445 @@ export function carryPathIntoWorktree(repoRoot: string, worktreeAbs: string, rel
  * was cut from HEAD, stopping at the first failure. Shared by shadow pairs
  * and isolated deliveries so both call the same ladder and record results in
  * the same shape (`{ path, mechanism }`) on their evidence row.
+ *
+ * `fingerprint` is the carry-time half of mutation detection: it is captured
+ * AFTER the carry lands (see `fingerprintCarriedPaths` for why the ordering
+ * is load-bearing) and covers only the `hardlink` records. Pass
+ * `{ fingerprint: false }` to skip the walk for a caller that will never
+ * verify; the default is on, so a caller gets detection without opting in.
  */
 export function carryDeclaredPaths(
   repoRoot: string,
   worktreeAbs: string,
   declared: readonly string[],
-): { records: Array<{ path: string; mechanism: WorktreeCarryMechanism }>; failure: { path: string; reason: string } | null } {
+  opts: { fingerprint?: boolean } = {},
+): {
+  records: Array<{ path: string; mechanism: WorktreeCarryMechanism }>;
+  failure: { path: string; reason: string } | null;
+  fingerprint: CarryFingerprint;
+} {
   const records: Array<{ path: string; mechanism: WorktreeCarryMechanism }> = [];
   for (const relPath of declared) {
     const outcome = carryPathIntoWorktree(repoRoot, worktreeAbs, relPath);
     if (outcome.status === 'absent') continue; // declared but doesn't exist: not an error, skip silently
-    if (outcome.status === 'failed') return { records, failure: { path: relPath, reason: outcome.reason } };
+    if (outcome.status === 'failed') {
+      // A refused carry is not run against, so nothing can mutate through it;
+      // an empty fingerprint keeps the return shape total rather than optional.
+      return { records, failure: { path: relPath, reason: outcome.reason }, fingerprint: emptyCarryFingerprint() };
+    }
     records.push({ path: relPath, mechanism: outcome.mechanism });
   }
-  return { records, failure: null };
+  const fingerprint = opts.fingerprint === false
+    ? emptyCarryFingerprint()
+    : fingerprintCarriedPaths(repoRoot, records);
+  return { records, failure: null, fingerprint };
+}
+
+// ---------------------------------------------------------------------------
+// Carry mutation detection — `carry_mutated`
+// ---------------------------------------------------------------------------
+
+/** Walk budget per declared path. A tree larger than this is fingerprinted
+ * only in part, which is recorded (`truncated`) and degrades that path's
+ * verdict to `unknown` — never to `clean`. A partial detector that reports
+ * "clean" is worse than no detector, so the budget is never allowed to look
+ * like a pass. Sized so a typical `node_modules` (tens of thousands of
+ * entries) fits whole; two maps this size cost tens of MB at verify time,
+ * which is the real reason there is a bound at all. */
+export const CARRY_FINGERPRINT_MAX_ENTRIES = 250_000;
+
+/** How many drifted entries a verdict names. The count is exact; the list is
+ * a sample, because a `node_modules` that drifted wholesale must not put
+ * 40,000 paths on an evidence row. */
+export const CARRY_DRIFT_MAX_EXAMPLES = 10;
+
+/** Per-entry identity inside one carried path. Keys are repo-relative paths;
+ * values are the packed stat tuple built by `stampOf`. Held in memory only —
+ * see `fingerprintCarriedPaths` for why it is deliberately not digested down
+ * to a single row-sized value. */
+export interface CarryPathFingerprint {
+  /** Repo-relative declared path, exactly as it appears in `worktree_carry:`. */
+  path: string;
+  /** Always `hardlink`: the only rung that shares an inode. */
+  mechanism: 'hardlink';
+  /** Entries walked (files, directories, symlinks, everything else). */
+  entries: number;
+  /** The walk hit `CARRY_FINGERPRINT_MAX_ENTRIES` and stopped early. */
+  truncated: boolean;
+  /** Entries that could not be stat'd at capture time. */
+  unreadable: number;
+  /** The budget this capture ran under. `verifyCarriedPaths` re-walks with the
+   * same number so both sides see the same slice of a truncated tree and a
+   * budget cut cannot masquerade as entries appearing or disappearing. */
+  maxEntries: number;
+  stamps: Map<string, string>;
+}
+
+export interface CarryFingerprint {
+  /** When the identity was captured — after the carry, before the run. */
+  capturedAt: string;
+  paths: CarryPathFingerprint[];
+}
+
+/**
+ * How one entry drifted.
+ *
+ * `in_place_write` and `metadata_only` are the HAZARD: they are changes to an
+ * inode the worktree still shares, which is the only channel by which work
+ * done inside a carried worktree can reach the primary's tree.
+ *
+ * `replaced`, `added`, and `removed` are drift the worktree cannot have
+ * caused — a hardlinked worktree has its own directory structure, so nothing
+ * done there can repoint or create an entry in the PRIMARY's directories.
+ * They mean the primary's own tooling changed the carried tree while the run
+ * was in flight (an `npm install` on the primary arm is the ordinary case).
+ * Reported, never conflated with the hazard.
+ */
+export type CarryDriftKind = 'in_place_write' | 'metadata_only' | 'replaced' | 'added' | 'removed';
+
+const HAZARD_KINDS: readonly CarryDriftKind[] = ['in_place_write', 'metadata_only'];
+
+export interface CarryDriftEntry {
+  /** Repo-relative path of the entry that drifted. */
+  path: string;
+  kind: CarryDriftKind;
+}
+
+export interface CarryPathVerdict {
+  path: string;
+  mechanism: 'hardlink';
+  /** `mutated` = at least one shared inode changed (the hazard). `drifted` =
+   * the carried tree changed, but only in ways the worktree could not cause.
+   * `unknown` = the fingerprint could not cover the tree, so `clean` cannot
+   * be claimed. `clean` = every fingerprinted entry is byte-for-byte the same
+   * identity it had at carry time. */
+  status: 'clean' | 'mutated' | 'drifted' | 'unknown';
+  /** Exact count across every kind. */
+  entriesChanged: number;
+  /** Only the kinds that actually occurred. */
+  kinds: Partial<Record<CarryDriftKind, number>>;
+  /** At most `CARRY_DRIFT_MAX_EXAMPLES`, hazard kinds first, then by path. */
+  examples: CarryDriftEntry[];
+  /** Why the verdict is `unknown`, or what qualifies a positive one. */
+  note: string | null;
+}
+
+/** The row-shaped projection of a non-clean verdict. snake_case because it
+ * lands verbatim on a `.fadeno/dispatches.jsonl` row. */
+export interface CarryMutationStamp {
+  path: string;
+  mechanism: 'hardlink';
+  status: 'mutated' | 'drifted' | 'unknown';
+  entries_changed: number;
+  kinds: Partial<Record<CarryDriftKind, number>>;
+  examples: CarryDriftEntry[];
+  note?: string;
+}
+
+function emptyCarryFingerprint(): CarryFingerprint {
+  return { capturedAt: new Date().toISOString(), paths: [] };
+}
+
+/**
+ * Pack one entry's identity into a comparable string.
+ *
+ * Regular files carry the full tuple. Everything else deliberately does not:
+ *
+ * - **Directories** are stamped by existence alone. `cp -a -l` cannot hardlink
+ *   a directory — each worktree gets its own directory inodes — so a
+ *   directory's own mtime can never be evidence of shared-inode mutation, and
+ *   including it would mislabel an ordinary `npm install` on the primary as
+ *   the hazard. Entries appearing and disappearing inside a directory are
+ *   already visible as `added`/`removed` keys.
+ * - **Symlinks** are stamped by inode only. A symlink's target is immutable:
+ *   retargeting means unlink + symlink, which in the worktree makes a NEW
+ *   inode there and cannot touch the primary's. Timestamps on a symlink are
+ *   therefore pure noise here.
+ * - **`nlink` is carried but never treated as drift.** It is a function of
+ *   the carry and of teardown, not of mutation: `link(2)` raises it (and, as
+ *   a side effect, bumps `ctime`), and removing the worktree lowers it again.
+ *   It is recorded solely so `classify` can tell a ctime bump that a
+ *   link-count change fully explains from one that nothing explains.
+ */
+function stampOf(abs: string): string {
+  try {
+    const st = lstatSync(abs, { bigint: true });
+    if (st.isDirectory()) return 'd';
+    if (st.isSymbolicLink()) return `l|${st.ino}`;
+    if (st.isFile()) {
+      return `f|${st.ino}|${st.size}|${st.mtimeNs}|${st.ctimeNs}|${st.mode}|${st.uid}|${st.gid}|${st.nlink}`;
+    }
+    return `o|${st.ino}|${st.mode}`;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | null)?.code ?? 'EUNKNOWN';
+    return `!|${code}`;
+  }
+}
+
+/** Walk one carried path, producing `repo-relative path -> stamp`. Never
+ * follows symlinks (`lstat`, and `readdir` type checks are `lstat`-shaped),
+ * so a pnpm store link out of the tree is recorded as a link and not chased.
+ */
+function walkCarryPath(repoRoot: string, relPath: string, maxEntries: number): { stamps: Map<string, string>; truncated: boolean; unreadable: number } {
+  const stamps = new Map<string, string>();
+  let truncated = false;
+  let unreadable = 0;
+  const rootAbs = join(repoRoot, relPath);
+  const rootRel = relPath.split('\\').join('/');
+  const stack: Array<{ abs: string; rel: string }> = [{ abs: rootAbs, rel: rootRel }];
+  while (stack.length > 0) {
+    const cur = stack.pop() as { abs: string; rel: string };
+    if (stamps.size >= maxEntries) { truncated = true; break; }
+    const stamp = stampOf(cur.abs);
+    // ENOENT is a fact, not a blind spot: the entry is not there, which is
+    // knowable drift. Every other stat failure (EACCES, EIO) means the walk
+    // could not look, which is what `unreadable` degrades a verdict for.
+    if (stamp.startsWith('!|') && stamp !== '!|ENOENT') unreadable += 1;
+    stamps.set(cur.rel, stamp);
+    if (stamp !== 'd') continue;
+    let entries;
+    try {
+      entries = readdirSync(cur.abs, { withFileTypes: true });
+    } catch {
+      // A directory we could stat but cannot list: mark it so verify cannot
+      // read the absence of its children as "nothing changed there".
+      stamps.set(cur.rel, 'd|unlistable');
+      unreadable += 1;
+      continue;
+    }
+    // Sorted, then reversed because the stack is LIFO: the walk order is
+    // deterministic, so a truncated capture and a truncated verify cover the
+    // same slice of the tree and the budget itself cannot read as drift.
+    for (const entry of entries.map((e) => e.name).sort().reverse()) {
+      stack.push({ abs: join(cur.abs, entry), rel: `${cur.rel}/${entry}` });
+    }
+  }
+  return { stamps, truncated, unreadable };
+}
+
+/**
+ * Capture the identity of every `hardlink`-carried path, in the PRIMARY's
+ * tree, so a later `verifyCarriedPaths` can say whether it drifted.
+ *
+ * ## What is fingerprinted, and what is not
+ *
+ * **Only `hardlink` records.** `reflink` is copy-on-write — a write inside the
+ * worktree allocates new blocks and the primary's extents are untouched — and
+ * `copy` is a byte copy with no relationship at all. Neither can carry a
+ * mutation back, so fingerprinting them would cost a full tree walk to prove
+ * something the mechanism already guarantees. This is a deliberate omission,
+ * not a gap to be "fixed" later: if you find yourself adding reflink here,
+ * the thing to change first is the claim in `carryPathIntoWorktree` that
+ * `--reflink=always` never degrades to a copy.
+ *
+ * **The primary's tree, not the worktree's.** The two are the same inodes
+ * while the links exist, so either side observes the same mutation — but the
+ * primary is the asset at risk and it outlives the worktree, so a verify can
+ * run after an isolated delivery has already torn its worktree down.
+ *
+ * ## Why stat metadata rather than content
+ *
+ * Hashing a `node_modules` is not affordable on a dispatch's critical path:
+ * it is hundreds of megabytes and tens of thousands of files, read twice.
+ * A stat walk is one `lstat` per entry and no bytes read. What that buys is
+ * exactly the write signal: any `write(2)` to a file updates `mtime` and
+ * `ctime`; an append also changes `size`; a `chmod`/`chown` on the shared
+ * inode — the second half of the hazard, since mode lives on the inode too —
+ * changes `mode`/`uid`/`gid` and `ctime`. A tool that restores `mtime` after
+ * writing (`utimes`) cannot restore `ctime`: no userspace API sets it, and
+ * `utimes` itself advances it. So `ctime` is the field that closes the
+ * obvious evasion, which is why it is in the tuple despite being noisy.
+ *
+ * ## Ordering: capture AFTER the carry
+ *
+ * `link(2)` bumps the source inode's `ctime` (the link count is inode
+ * metadata). Capturing before the carry would therefore record a `ctime` that
+ * the carry itself invalidates, and every file would read as drifted. Capture
+ * runs once all declared paths have landed.
+ *
+ * The symmetric hazard — the worktree's links being REMOVED before verify,
+ * which lowers `nlink` and bumps `ctime` again — is handled in `classify`
+ * rather than by an ordering rule, so a caller that verifies after teardown
+ * gets a correct answer instead of a tree full of false positives.
+ *
+ * ## False negatives — what this will not see
+ *
+ * 1. **A same-timestamp, same-size, same-mode in-place write.** If a
+ *    filesystem's timestamp granularity is coarse (1s on ext3, HFS+, and some
+ *    SMB/FUSE mounts) and the write lands in the same tick as the carry, and
+ *    the file's length is unchanged, nothing in the tuple moves. Content
+ *    hashing is the only defence and it is the thing being traded away.
+ * 2. **A filesystem that does not maintain `ctime` honestly** — some network
+ *    and FUSE mounts. Then an `mtime`-restoring writer is invisible.
+ * 3. **Anything outside a declared path.** Only `worktree_carry:` entries are
+ *    walked. A symlink pointing out of the carried tree (a global pnpm store)
+ *    is stamped as a link and its target is never visited — but such a target
+ *    was never carried, so it is not shared by way of this mechanism either.
+ * 4. **Beyond the walk budget.** Reported as `truncated`, and the verdict
+ *    degrades to `unknown` — this one is loud rather than silent by
+ *    construction.
+ * 5. **Attribution, always.** A shared inode that changed is proof that the
+ *    carried baseline moved, not proof of who moved it: the primary arm
+ *    writing its own `node_modules` in place produces the same evidence. This
+ *    is an attestation, in the same sense as `workspace_changed`, and the
+ *    stamp is named for what was observed rather than for a culprit.
+ */
+export function fingerprintCarriedPaths(
+  repoRoot: string,
+  records: ReadonlyArray<{ path: string; mechanism: WorktreeCarryMechanism }>,
+  opts: { maxEntries?: number } = {},
+): CarryFingerprint {
+  const maxEntries = opts.maxEntries ?? CARRY_FINGERPRINT_MAX_ENTRIES;
+  const paths: CarryPathFingerprint[] = [];
+  for (const record of records) {
+    if (record.mechanism !== 'hardlink') continue;
+    const walked = walkCarryPath(repoRoot, record.path, maxEntries);
+    paths.push({
+      path: record.path,
+      mechanism: 'hardlink',
+      entries: walked.stamps.size,
+      truncated: walked.truncated,
+      unreadable: walked.unreadable,
+      maxEntries,
+      stamps: walked.stamps,
+    });
+  }
+  return { capturedAt: new Date().toISOString(), paths };
+}
+
+/** Split a packed file stamp into its fields. Only meaningful for `f|…`. */
+function fileFields(stamp: string): string[] {
+  return stamp.split('|');
+}
+
+/**
+ * Decide how one entry drifted, given its stamp at carry time and now.
+ * Returns `null` when the difference is fully explained by the link count —
+ * i.e. the worktree's copy was linked or unlinked and nothing else moved.
+ */
+function classify(before: string, after: string): CarryDriftKind | null {
+  if (before === after) return null;
+  if (!before.startsWith('f|') || !after.startsWith('f|')) {
+    // A file that became a directory, a link that became a file, an entry
+    // that became unreadable, a directory that became unlistable: the
+    // primary's own directory entry changed, which a hardlinked worktree
+    // cannot do.
+    return 'replaced';
+  }
+  const b = fileFields(before);
+  const a = fileFields(after);
+  // f | ino | size | mtimeNs | ctimeNs | mode | uid | gid | nlink
+  if (b[1] !== a[1]) return 'replaced'; // primary's dentry now points elsewhere
+  if (b[2] !== a[2] || b[3] !== a[3]) return 'in_place_write';
+  if (b[5] !== a[5] || b[6] !== a[6] || b[7] !== a[7]) return 'metadata_only';
+  if (b[4] !== a[4]) {
+    // ctime moved but nothing else did. A link count that also moved explains
+    // it completely (the carry's link, or the worktree's teardown) — see
+    // `stampOf`. A link count that did NOT move leaves an inode touch with no
+    // benign explanation: an mtime-restoring in-place write is exactly this
+    // shape, so it is reported rather than swallowed.
+    if (b[8] !== a[8]) return null;
+    return 'metadata_only';
+  }
+  return null;
+}
+
+/**
+ * Re-read every fingerprinted path in the primary's tree and say which ones
+ * drifted. Read-only: this never repairs, reverts, or removes anything — the
+ * carried tree is the caller's to reason about, and a detector that also
+ * mutated would destroy the evidence it exists to produce.
+ *
+ * Safe to call whether or not the carrying worktree still exists; see
+ * `fingerprintCarriedPaths` on ordering.
+ */
+export function verifyCarriedPaths(repoRoot: string, fingerprint: CarryFingerprint): CarryPathVerdict[] {
+  const verdicts: CarryPathVerdict[] = [];
+  for (const captured of fingerprint.paths) {
+    const now = walkCarryPath(repoRoot, captured.path, captured.maxEntries);
+    const drift: CarryDriftEntry[] = [];
+    const kinds: Partial<Record<CarryDriftKind, number>> = {};
+    const bump = (kind: CarryDriftKind, path: string): void => {
+      kinds[kind] = (kinds[kind] ?? 0) + 1;
+      drift.push({ path, kind });
+    };
+    for (const [path, before] of captured.stamps) {
+      const after = now.stamps.get(path);
+      if (after === undefined) {
+        // Beyond a truncated walk we cannot tell "removed" from "not looked
+        // at", so do not assert removal; `truncated` already forces `unknown`.
+        if (!now.truncated) bump('removed', path);
+        continue;
+      }
+      const kind = classify(before, after);
+      if (kind != null) bump(kind, path);
+    }
+    if (!captured.truncated) {
+      for (const path of now.stamps.keys()) {
+        if (!captured.stamps.has(path)) bump('added', path);
+      }
+    }
+
+    const hazards = HAZARD_KINDS.reduce((sum, kind) => sum + (kinds[kind] ?? 0), 0);
+    const degraded = captured.truncated || now.truncated || captured.unreadable > 0 || now.unreadable > 0;
+    let status: CarryPathVerdict['status'];
+    let note: string | null = null;
+    if (hazards > 0) {
+      status = 'mutated';
+      note = `${hazards} ${hazards === 1 ? 'entry' : 'entries'} changed on an inode this carry shares with the worktree; the primary's copy changed with it. Attestation, not attribution — the primary's own tooling writing in place produces the same evidence.`;
+    } else if (degraded) {
+      status = 'unknown';
+      note = captured.truncated || now.truncated
+        ? `the carried tree exceeds the ${captured.maxEntries}-entry fingerprint budget, so part of it was never compared — not a clean result.`
+        : 'part of the carried tree could not be read at capture or verify time, so part of it was never compared — not a clean result.';
+    } else if (drift.length > 0) {
+      status = 'drifted';
+      note = 'the carried tree changed, but only in ways a hardlinked worktree cannot cause (entries added, removed, or repointed in the primary\'s own directories).';
+    } else {
+      status = 'clean';
+    }
+
+    // Hazards first so a truncated sample never shows only benign drift.
+    const ordered = drift.slice().sort((x, y) => {
+      const hx = HAZARD_KINDS.includes(x.kind) ? 0 : 1;
+      const hy = HAZARD_KINDS.includes(y.kind) ? 0 : 1;
+      if (hx !== hy) return hx - hy;
+      return x.path < y.path ? -1 : x.path > y.path ? 1 : 0;
+    });
+    verdicts.push({
+      path: captured.path,
+      mechanism: 'hardlink',
+      status,
+      entriesChanged: drift.length,
+      kinds,
+      examples: ordered.slice(0, CARRY_DRIFT_MAX_EXAMPLES),
+      note,
+    });
+  }
+  return verdicts;
+}
+
+/**
+ * Project verdicts onto the `carry_mutated` evidence field, or `null` when
+ * every fingerprinted path came back clean. `null` rather than `[]` so the
+ * caller omits the field entirely, matching how `worktree_carry` is only ever
+ * added and never defaulted onto a row.
+ */
+export function carryMutationStamp(verdicts: readonly CarryPathVerdict[]): CarryMutationStamp[] | null {
+  const stamps: CarryMutationStamp[] = [];
+  for (const verdict of verdicts) {
+    if (verdict.status === 'clean') continue;
+    stamps.push({
+      path: verdict.path,
+      mechanism: verdict.mechanism,
+      status: verdict.status,
+      entries_changed: verdict.entriesChanged,
+      kinds: verdict.kinds,
+      examples: verdict.examples,
+      ...(verdict.note != null ? { note: verdict.note } : {}),
+    });
+  }
+  return stamps.length > 0 ? stamps : null;
 }
 
 /**
