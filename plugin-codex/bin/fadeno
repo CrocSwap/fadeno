@@ -14388,6 +14388,11 @@ function atCwd(env, cwd) {
   return { ...env, PWD: cwd };
 }
 var EXECUTORS_FILE = (0, import_node_path4.join)(".fadeno", "executors.yaml");
+function preDialsCatalogError(source) {
+  return new ExecutorProfileError(
+    `${source}: schema_version 3 required \u2014 pre-dials catalogs are not supported; migrate: targets:\u2192models:, loadouts:\u2192dials:, default_loadout: delete; see docs/experimental/dials-and-registry.md`
+  );
+}
 function isMapping(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -14411,14 +14416,10 @@ function parseExecutorProfile(text, source, harness = "standalone") {
     throw new ExecutorProfileError(`${source} is not a mapping.`);
   }
   if (doc.schema_version !== 3) {
-    throw new ExecutorProfileError(
-      `${source}: schema_version 3 required \u2014 pre-dials catalogs are not supported; migrate: targets:\u2192models:, loadouts:\u2192dials:, default_loadout: delete; see docs/experimental/dials-and-registry.md`
-    );
+    throw preDialsCatalogError(source);
   }
   if (!isMapping(doc.models) || Object.keys(doc.models).length === 0) {
-    throw new ExecutorProfileError(
-      `${source}: schema_version 3 required \u2014 pre-dials catalogs are not supported; migrate: targets:\u2192models:, loadouts:\u2192dials:, default_loadout: delete; see docs/experimental/dials-and-registry.md`
-    );
+    throw preDialsCatalogError(source);
   }
   const notes = [];
   const models = {};
@@ -15078,9 +15079,9 @@ function compileDialRef(ref, profile) {
   const harness = profile.harness ?? "standalone";
   const routesForHarness2 = profile.routes?.[harness] ?? {};
   const refString = formatDialRef(ref);
-  const buildDelivery = (model, modelId2, effort2, provider, driver2, registered, route2, eligibility) => {
+  const buildDelivery = (model, modelId2, effectiveEffort2, provider, driver2, registered, route2, eligibility) => {
     const isHost = route2?.host === true || route2 == null && model === "current-host";
-    const subst = (argv) => argv.map((part) => part.split("{model}").join(modelId2).split("{reasoning_effort}").join(effort2));
+    const subst = (argv) => argv.map((part) => part.split("{model}").join(modelId2).split("{reasoning_effort}").join(effectiveEffort2));
     const ELIGIBILITY_RANK = { eligible: 0, shadow_only: 1, forbidden: 2 };
     const mergedEligibility = { ...eligibility };
     for (const [archKey, state] of Object.entries(route2?.eligibility ?? {})) {
@@ -15094,7 +15095,7 @@ function compileDialRef(ref, profile) {
       spec = {
         adapter: "host",
         model: modelId2,
-        reasoningEffort: effort2,
+        reasoningEffort: effectiveEffort2,
         agentType: "*",
         fallbackCommand: fallback,
         writeAccess: route2?.write_access ?? null,
@@ -15125,12 +15126,12 @@ function compileDialRef(ref, profile) {
         ...driver2 ? { driver: driver2 } : {}
       };
     }
-    return { ref, refString, spec, model, modelId: modelId2, effort: effort2, provider, driver: driver2, registered };
+    return { ref, refString, spec, model, modelId: modelId2, pinnedEffort: ref.effort ?? null, effectiveEffort: effectiveEffort2, provider, driver: driver2, registered };
   };
   if (Object.hasOwn(profile.models, ref.model)) {
     const entry = profile.models[ref.model];
     const provider = entry.provider;
-    const effort2 = ref.effort ?? entry.effort;
+    const effectiveEffort2 = ref.effort ?? entry.effort;
     const via = ref.via;
     let driver2;
     let route2 = null;
@@ -15153,7 +15154,7 @@ function compileDialRef(ref, profile) {
           route2 = null;
           id = entry.id;
           const modelId3 = id;
-          return buildDelivery(ref.model, modelId3, effort2, provider, driver2, true, route2, entry.eligibility);
+          return buildDelivery(ref.model, modelId3, effectiveEffort2, provider, driver2, true, route2, entry.eligibility);
         }
         const declared = declaredDriverAliases(routesForHarness2);
         throw new ExecutorProfileError(`no route for provider "${provider}" in harness "${harness}" \u2014 declared drivers: ${declared.join(", ")}`);
@@ -15164,8 +15165,8 @@ function compileDialRef(ref, profile) {
     }
     let modelId2 = id;
     const enc = route2?.effort_encoding ?? "flag";
-    if (enc === "model-suffix" && effort2 !== "default") modelId2 = `${id}-${effort2}`;
-    return buildDelivery(ref.model, modelId2, effort2, provider, driver2, true, route2, entry.eligibility);
+    if (enc === "model-suffix" && effectiveEffort2 !== "default") modelId2 = `${id}-${effectiveEffort2}`;
+    return buildDelivery(ref.model, modelId2, effectiveEffort2, provider, driver2, true, route2, entry.eligibility);
   }
   const driver = ref.via ?? profile.unregisteredModelDriver;
   const found = findRouteByDriver(routesForHarness2, driver);
@@ -15174,10 +15175,10 @@ function compileDialRef(ref, profile) {
     throw new ExecutorProfileError(`unknown driver "${driver}" \u2014 declared drivers: ${declared.join(", ")}`);
   }
   const route = found.route;
-  const effort = ref.effort ?? "default";
+  const effectiveEffort = ref.effort ?? "default";
   let modelId = ref.model;
-  if (route.effort_encoding === "model-suffix" && effort !== "default") modelId = `${ref.model}-${effort}`;
-  return buildDelivery(ref.model, modelId, effort, null, driver, false, route, {});
+  if (route.effort_encoding === "model-suffix" && effectiveEffort !== "default") modelId = `${ref.model}-${effectiveEffort}`;
+  return buildDelivery(ref.model, modelId, effectiveEffort, null, driver, false, route, {});
 }
 function applyWritePosture(spec, archetype, archetypes) {
   if (archetype == null || !Object.hasOwn(archetypes, archetype)) return { spec, usedWriteVariant: false };
@@ -20888,7 +20889,7 @@ ${prompt}`;
     executor: executorName,
     model: delivery.model,
     model_id: delivery.modelId,
-    reasoning_effort: delivery.effort,
+    reasoning_effort: delivery.effectiveEffort,
     driver: delivery.driver,
     ...delivery.provider != null ? { provider: delivery.provider } : {},
     transport,
@@ -21177,7 +21178,7 @@ ${prompt}`;
         model: shadowDelivery.model,
         model_id: shadowDelivery.modelId,
         driver: shadowDelivery.driver,
-        reasoning_effort: shadowDelivery.effort,
+        reasoning_effort: shadowDelivery.effectiveEffort,
         transport: "host"
       });
       return null;
@@ -21189,12 +21190,12 @@ ${prompt}`;
     const eligibilityState = eligibilityFor(shadowSpec, archetype);
     if (eligibilityState === "forbidden") {
       const msg = explainEligibilityConflict({ executor: shadowRefString, spec: shadowSpec }, archetype) ?? `archetype "${archetype}" is forbidden on executor "${shadowRefString}".`;
-      writeShadowRefusal("eligibility", msg, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effort, transport: "command" });
+      writeShadowRefusal("eligibility", msg, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: "command" });
       return null;
     }
     const shadowWriteConflict = explainWriteConflict({ executor: shadowRefString, spec: shadowSpec }, archetype, profile);
     if (shadowWriteConflict != null) {
-      writeShadowRefusal("write_posture", shadowWriteConflict, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effort, transport: "command" });
+      writeShadowRefusal("write_posture", shadowWriteConflict, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: "command" });
       return null;
     }
     const sSessionMap = {};
@@ -21235,14 +21236,14 @@ ${prompt}`;
       throw err;
     }
     if (shadowConstraintVerdict.verdict === "refused") {
-      writeShadowRefusal("constraint_command", shadowConstraintVerdict.reason, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effort, transport: "command" });
+      writeShadowRefusal("constraint_command", shadowConstraintVerdict.reason, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: "command" });
       return null;
     }
     if (prompt.includes(repoRoot)) {
       writeShadowRefusal(
         "shadow_containment",
         `the prompt contains this repo's absolute path ("${repoRoot}") \u2014 both arms receive byte-identical prompt bytes, so a prompt naming absolute repo paths cannot be isolated: the challenger would follow that path straight into the primary's tree. Rewrite it repo-relative (drop the "${repoRoot}/" prefix) to make the pair possible.`,
-        { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effort, transport: "command" }
+        { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: "command" }
       );
       return null;
     }
@@ -21312,7 +21313,7 @@ ${prompt}`;
       executor: shadowExecutorNameInner,
       model: shadowDelivery.model,
       model_id: shadowDelivery.modelId,
-      reasoning_effort: shadowDelivery.effort,
+      reasoning_effort: shadowDelivery.effectiveEffort,
       driver: shadowDelivery.driver,
       ...shadowDelivery.provider != null ? { provider: shadowDelivery.provider } : {},
       transport: "command",
@@ -21706,7 +21707,7 @@ ${truncatedStderr}
       model: delivery.model,
       modelId: delivery.modelId,
       driver: delivery.driver,
-      reasoningEffort: delivery.effort,
+      reasoningEffort: delivery.effectiveEffort,
       source,
       echo,
       exitCode: spawned.status ?? 1,
@@ -22221,12 +22222,18 @@ function hostEntry(row) {
     attestedEffortEvidence: null
   };
 }
+function hostRefusedEntry(row) {
+  const entry = hostEntry(row);
+  entry.refusal = refusalOf(row.refusal) ?? { predicate: "unknown", message: "" };
+  return entry;
+}
 function correlateAttestation(entries, row) {
   const archetype = str(row.archetype);
   if (archetype == null) return;
   for (let i = entries.length - 1; i >= 0; i -= 1) {
     const candidate = entries[i];
     if (candidate.kind !== "host") continue;
+    if (candidate.refusal != null) continue;
     if (candidate.archetype !== archetype) continue;
     if (candidate.attestedAt != null) continue;
     candidate.attestedAt = str(row.timestamp);
@@ -22312,7 +22319,10 @@ function renderDispatchLine(entry) {
       parts.push("no completion recorded (killed or in flight)");
     }
   } else if (entry.kind === "host") {
-    if (entry.attestedAt == null) {
+    if (entry.refusal != null) {
+      parts.push(`[refused: ${entry.refusal.predicate}]`);
+      if (entry.refusal.message !== "") parts.push(entry.refusal.message);
+    } else if (entry.attestedAt == null) {
       parts.push("[never attested]");
     } else if (entry.reasoningEffort != null && entry.reasoningEffort !== "inherited" && entry.attestedEffort != null && entry.reasoningEffort !== entry.attestedEffort) {
       parts.push(`[effort mismatch: requested ${entry.reasoningEffort}, attested ${entry.attestedEffort}]`);
@@ -22387,6 +22397,10 @@ function runDispatches(opts = {}) {
     }
     if (event === "host_delivery" || event === "native_delivery") {
       entries.push(hostEntry(row));
+      continue;
+    }
+    if (event === "host_refused") {
+      entries.push(hostRefusedEntry(row));
       continue;
     }
     if (event === "host_attestation") {
@@ -22622,6 +22636,10 @@ function loadAllEntries(absolute) {
     }
     if (event === "host_delivery" || event === "native_delivery") {
       entries.push(hostEntry(row));
+      continue;
+    }
+    if (event === "host_refused") {
+      entries.push(hostRefusedEntry(row));
       continue;
     }
     if (event === "host_attestation") {
@@ -29305,6 +29323,34 @@ var import_node_child_process8 = require("node:child_process");
 var import_node_fs25 = require("node:fs");
 var import_node_path25 = require("node:path");
 var import_yaml12 = __toESM(require_dist(), 1);
+
+// src/lib/lane.ts
+function readSessionEffort(env = process.env) {
+  const raw = typeof env.CLAUDE_EFFORT === "string" ? env.CLAUDE_EFFORT.trim() : "";
+  return raw !== "" ? raw : null;
+}
+function decideLane(input) {
+  const { pinnedEffort, effectiveEffort, sessionEffort: sessionEffort2, hostModel, commandLane } = input;
+  const base = {
+    effort_pinned: pinnedEffort != null,
+    effective_effort: effectiveEffort,
+    session_effort: sessionEffort2
+  };
+  const offHost = (why) => commandLane ? { ...base, lane: "command", lane_reason: why } : { ...base, lane: "restart_required", lane_reason: "no command fallback" };
+  if (!hostModel) return offHost("model not deliverable in-host");
+  if (pinnedEffort == null) {
+    return { ...base, lane: "host", lane_reason: "effort unpinned" };
+  }
+  if (sessionEffort2 == null) {
+    return input.hostEffortProven === true ? { ...base, lane: "host", lane_reason: "host agent pins the same effort" } : offHost("session effort unobserved");
+  }
+  if (sessionEffort2 === pinnedEffort) {
+    return { ...base, lane: "host", lane_reason: "session effort matches the pin" };
+  }
+  return offHost(`session effort is ${sessionEffort2}, dial pins ${pinnedEffort}`);
+}
+
+// src/commands/dial.ts
 var DialError = class extends Error {
 };
 function repoRootOf(opts) {
@@ -29583,7 +29629,7 @@ The override is persisted with this dial and applies at dispatch time. Clear or 
   }
   if (dial.effort != null && deliveryIsHost(compiled)) {
     notes.push(
-      `note: ${compiled.driver} host route \u2014 effort ${compiled.effort} is recorded as the request; run \`fadeno steering apply\` to pin it into the host agent slots`
+      `note: ${compiled.driver} host route \u2014 effort ${compiled.effectiveEffort} is recorded as the request; run \`fadeno steering apply\` to pin it into the host agent slots`
     );
   }
   {
@@ -29702,7 +29748,9 @@ The override is persisted with this dial and applies at dispatch time. Clear or 
     refString,
     model: compiled.model,
     model_id: compiled.modelId,
-    effort: compiled.effort,
+    effort: compiled.effectiveEffort,
+    pinned_effort: compiled.pinnedEffort,
+    effective_effort: compiled.effectiveEffort,
     driver: compiled.driver,
     harness: compiled.driver,
     delivery,
@@ -29931,7 +29979,9 @@ function runDialShadow(opts) {
     refString,
     model: compiled.model,
     model_id: compiled.modelId,
-    effort: compiled.effort,
+    effort: compiled.effectiveEffort,
+    pinned_effort: compiled.pinnedEffort,
+    effective_effort: compiled.effectiveEffort,
     driver: compiled.driver,
     rate: rate ?? null,
     path,
@@ -30037,14 +30087,10 @@ function runDialShow(opts = {}) {
     const postured = applyWritePosture(compiled.spec, archetype, profile.archetypes);
     const writePostureForced = forcesWritePosture(cascade.ref, cascade.resolvedVia);
     const delivery = compiled.driver;
-    const effort = compiled.effort;
+    const effort = compiled.effectiveEffort;
     let modelDisplay = compiled.model;
-    const entry = profile.models[compiled.model];
-    const standard = entry?.effort ?? "default";
-    if (compiled.effort !== standard && compiled.model !== "current-host") {
-      modelDisplay = `${compiled.model} @ ${compiled.effort}`;
-    } else if (compiled.model === "current-host") {
-      modelDisplay = "current-host";
+    if (compiled.pinnedEffort != null) {
+      modelDisplay = `${compiled.model} @ ${compiled.pinnedEffort}`;
     }
     if (cascade.resolvedVia != null) {
       modelDisplay = `\u2192 ${cascade.resolvedVia}`;
@@ -30054,6 +30100,8 @@ function runDialShow(opts = {}) {
       model: compiled.model,
       model_id: compiled.modelId,
       effort: cascade.resolvedVia != null ? "\u2014" : effort,
+      pinned_effort: compiled.pinnedEffort,
+      effective_effort: compiled.effectiveEffort,
       driver: compiled.driver,
       harness: compiled.driver,
       delivery,
@@ -30162,7 +30210,15 @@ function runDialResolve(opts) {
     executor: resolved.delivery.refString,
     model: resolved.delivery.model,
     model_id: resolved.delivery.modelId,
-    effort: resolved.delivery.effort,
+    effort: resolved.delivery.effectiveEffort,
+    pinned_effort: resolved.delivery.pinnedEffort,
+    ...decideLane({
+      pinnedEffort: resolved.delivery.pinnedEffort,
+      effectiveEffort: resolved.delivery.effectiveEffort,
+      sessionEffort: readSessionEffort(opts.env ?? process.env),
+      hostModel: deliveryIsHost(resolved.delivery),
+      commandLane: commandRoutable(spec)
+    }),
     driver: resolved.delivery.driver,
     adapter: spec.adapter,
     harness,
@@ -30183,6 +30239,33 @@ function formatShadowLine(shadow, baseIndent) {
   const rate = shadow.rate != null ? ` rate ${shadow.rate}` : "";
   const transport = shadow.adapter != null ? ` [${shadow.adapter}]` : "";
   return `${baseIndent}  ~ shadow: ${model}${transport}${rate}`;
+}
+var sessionEffort = readSessionEffort;
+function offHostLanes(refStrings, session, opts = {}) {
+  const none = refStrings.map(() => null);
+  let profile;
+  try {
+    profile = loadLayered(repoRootOf(opts), opts.userPathOptions).profile;
+  } catch {
+    return none;
+  }
+  return refStrings.map((refString) => {
+    if (refString == null) return null;
+    try {
+      const compiled = compileDialRef(parseDialRef(refString, `dial "${refString}"`), profile);
+      const hostModel = deliveryIsHost(compiled);
+      const decision = decideLane({
+        pinnedEffort: compiled.pinnedEffort,
+        effectiveEffort: compiled.effectiveEffort,
+        sessionEffort: session,
+        hostModel,
+        commandLane: commandRoutable(compiled.spec)
+      });
+      return decision.lane === "host" || !hostModel ? null : decision;
+    } catch {
+      return null;
+    }
+  });
 }
 
 // src/commands/models.ts
@@ -30253,7 +30336,7 @@ function runModels(opts = {}) {
         provider: compiled.provider,
         id: entry.id,
         model_id: compiled.modelId,
-        effort: compiled.effort,
+        effort: compiled.effectiveEffort,
         driver: compiled.driver,
         harness: modelHarness,
         adapter,
@@ -33666,8 +33749,7 @@ var import_node_os3 = require("node:os");
 var import_node_path33 = require("node:path");
 var SteeringError = class extends Error {
 };
-var HOST_SURFACE_ARCHETYPES = ["worker", "reviewer", "judge"];
-var HOST_SURFACE_SET = new Set(HOST_SURFACE_ARCHETYPES);
+var HOST_SURFACE_SET = /* @__PURE__ */ new Set(["worker", "reviewer", "judge"]);
 var NEUTRAL_HOST_EXECUTOR = "current-host";
 function isReferenceFrameNeutralHostRequest(request, spec) {
   return request.executor === NEUTRAL_HOST_EXECUTOR && request.agentType === "*" && spec.adapter === "host" && spec.agentType === "*" && spec.model === NEUTRAL_HOST_EXECUTOR;
@@ -33718,7 +33800,7 @@ function decorateSteering(base, profile, resolvedVia, allowHostWithoutSurface = 
     if (surface == null) {
       if (!allowHostWithoutSurface) {
         throw new SteeringError(
-          `archetype "${result.archetype}" has no host agent surface on its fallback chain (${chain.join(" \u2192 ")}); deliver it through a command route, or declare a fallback to ${HOST_SURFACE_ARCHETYPES.join(", ")}.`
+          `archetype "${result.archetype}" has no host agent surface on its fallback chain (${chain.join(" \u2192 ")}); deliver it through a command route, or declare a fallback to ${[...HOST_SURFACE_SET].join(", ")}.`
         );
       }
     } else {
@@ -33852,8 +33934,14 @@ function runLockedSteeringResolve(opts, archetype, role, hostExecutor) {
   })();
   const requestedAgentType = request.agentType;
   const deliveredArchetype = requestedAgentType === "*" ? archetype : void 0;
+  const lockedLane = matchesHost || neutral ? "host" : hasFallback ? "command" : "restart_required";
   const base = {
     mode: matchesHost || neutral ? "host" : hasFallback ? "command" : "restart_required",
+    effort_pinned: dial.effort != null,
+    effective_effort: request.reasoningEffort,
+    session_effort: readSessionEffort(opts.env ?? process.env),
+    lane: lockedLane,
+    lane_reason: "locked to the run snapshot",
     archetype,
     role,
     executor: request.executor,
@@ -33982,7 +34070,24 @@ function runSteeringResolve(opts) {
       routable: commandRoutable(spec)
     };
   }
-  const finish = (base) => decorateSteering({ ...shadow != null ? { shadow } : {}, ...base }, profile, cascade.resolvedVia);
+  const pinnedEffort = compiled?.pinnedEffort ?? cascade.ref.effort ?? null;
+  const effectiveEffort = compiled?.effectiveEffort ?? (spec.adapter === "host" ? spec.reasoningEffort : null) ?? // Only reachable on a legacy profile whose command executor declares no
+  // effort at all and that `compileDialRef` could not compile.
+  "default";
+  const hostModel = spec.adapter === "host" && (cascade.source === "base" || hostExecutor === refString);
+  const lane = decideLane({
+    pinnedEffort,
+    effectiveEffort,
+    sessionEffort: readSessionEffort(opts.env ?? process.env),
+    hostModel,
+    // `refString` carries the pin (`formatDialRef` renders `luna@xhigh`), so a
+    // host executor that matches it identifies an agent materialized at that
+    // exact effort. This is how a Codex broker proves its own effort without
+    // any harness publishing one.
+    hostEffortProven: pinnedEffort != null && hostExecutor === refString,
+    commandLane: commandRoutable(spec)
+  });
+  const finish = (base) => decorateSteering({ ...lane, ...shadow != null ? { shadow } : {}, ...base }, profile, cascade.resolvedVia);
   const refusal = (spec2, executorName) => {
     const conflict = forcesWritePosture(cascade.ref, cascade.resolvedVia) ? null : explainWriteConflict({ executor: executorName, spec: spec2 }, archetype, profile);
     if (conflict == null) return null;
@@ -33993,7 +34098,7 @@ function runSteeringResolve(opts) {
       executor: executorName,
       adapter: spec2.adapter,
       model: spec2.model ?? compiled?.model ?? null,
-      effort: compiled?.effort ?? (spec2.adapter === "host" ? spec2.reasoningEffort : null),
+      effort: compiled?.effectiveEffort ?? (spec2.adapter === "host" ? spec2.reasoningEffort : null),
       driver: spec2.driver ?? compiled?.driver ?? null,
       source: cascade.source,
       dial: cascade.ref,
@@ -34010,7 +34115,7 @@ function runSteeringResolve(opts) {
       executor: refString,
       adapter: "command",
       model: spec.model ?? compiled?.model ?? null,
-      effort: compiled?.effort ?? null,
+      effort: compiled?.effectiveEffort ?? null,
       driver: spec.driver ?? compiled?.driver ?? null,
       source: cascade.source,
       dial: cascade.ref,
@@ -34018,16 +34123,22 @@ function runSteeringResolve(opts) {
       detail: `dispatch through command executor ${refString}; effective immediately${detailNote}`
     });
   }
-  if (cascade.source === "base" || hostExecutor === refString) {
+  if (lane.lane === "host") {
     if (shadow?.selected === true && shadow.routable === true) {
       return finish({
         mode: "command",
         archetype,
         role,
+        // The pair overrides the lane the effort/model predicate chose, so it
+        // says so rather than letting `lane: 'host'` contradict `mode`. The
+        // contract guarantee still holds: this branch is gated on
+        // `shadow.routable`, which is `commandRoutable(spec)`.
+        lane: "command",
+        lane_reason: "shadow pair forces the command lane",
         executor: refString,
         adapter: "host",
         model: spec.model,
-        effort: spec.reasoningEffort ?? compiled?.effort ?? null,
+        effort: spec.reasoningEffort ?? compiled?.effectiveEffort ?? null,
         driver: spec.driver ?? compiled?.driver ?? null,
         source: cascade.source,
         dial: cascade.ref,
@@ -34042,7 +34153,7 @@ function runSteeringResolve(opts) {
       executor: refString,
       adapter: "host",
       model: spec.model,
-      effort: spec.reasoningEffort ?? compiled?.effort ?? null,
+      effort: spec.reasoningEffort ?? compiled?.effectiveEffort ?? null,
       driver: spec.driver ?? compiled?.driver ?? null,
       source: cascade.source,
       dial: cascade.ref,
@@ -34050,7 +34161,7 @@ function runSteeringResolve(opts) {
       detail: `host executor ${refString} matches this session's host baseline${detailNote}`
     });
   }
-  if (spec.fallbackCommand != null) {
+  if (lane.lane === "command") {
     return refusal(spec, refString) ?? finish({
       mode: "command",
       archetype,
@@ -34058,12 +34169,14 @@ function runSteeringResolve(opts) {
       executor: refString,
       adapter: "host",
       model: spec.model,
-      effort: spec.reasoningEffort ?? compiled?.effort ?? null,
+      effort: spec.reasoningEffort ?? compiled?.effectiveEffort ?? null,
       driver: spec.driver ?? compiled?.driver ?? null,
       source: cascade.source,
       dial: cascade.ref,
       hostExecutor,
-      detail: `host executor ${refString} differs from this session's host baseline ${hostExecutor ?? "(none)"}; use its declared command fallback immediately${detailNote}`
+      // Two ways to be here now, and the agent is told which: the model this
+      // session cannot host, or an effort it is not running at.
+      detail: hostModel ? `host executor ${refString} matches this session's host baseline, but ${lane.lane_reason}; use its declared command fallback immediately${detailNote}` : `host executor ${refString} differs from this session's host baseline ${hostExecutor ?? "(none)"}; use its declared command fallback immediately${detailNote}`
     });
   }
   return finish({
@@ -34073,12 +34186,16 @@ function runSteeringResolve(opts) {
     executor: refString,
     adapter: "host",
     model: spec.model,
-    effort: spec.reasoningEffort ?? compiled?.effort ?? null,
+    effort: spec.reasoningEffort ?? compiled?.effectiveEffort ?? null,
     driver: spec.driver ?? compiled?.driver ?? null,
     source: cascade.source,
     dial: cascade.ref,
     hostExecutor,
-    detail: `dial ${refString} requests host executor ${refString}, but this session was materialized for ${hostExecutor ?? "no host executor"}; apply the dial and start a fresh session${detailNote}`
+    // Restart reason 2 of the two that survive: a host slot naming an
+    // identity with neither a session that can deliver it nor a command
+    // fallback. It now has two shapes — the model, as always, and an effort
+    // the session is not running at.
+    detail: hostModel ? `dial ${refString} pins effort ${pinnedEffort} but this session runs at ${lane.session_effort ?? "no observable effort"}, and ${refString} declares no command fallback; start a session at ${pinnedEffort}, drop the pin, or declare one${detailNote}` : `dial ${refString} requests host executor ${refString}, but this session was materialized for ${hostExecutor ?? "no host executor"}; apply the dial and start a fresh session${detailNote}`
   });
 }
 var ROLE_BEHAVIOR = {
@@ -34300,39 +34417,39 @@ function claudeAgentDir(scope, repoRoot, userPathOptions) {
   return (0, import_node_path33.join)(userPathOptions?.home ?? (0, import_node_os3.homedir)(), ".claude", "agents");
 }
 var CLAUDE_MANAGED_MARK = "<!-- fadeno:managed";
-var CLAUDE_EFFORT_LADDER = ["low", "medium", "high", "xhigh", "max"];
-function claudeGridAgentName(archetype, effort) {
-  return `fadeno-${archetype}-${effort}`;
+var CLAUDE_GRID_CELL_RE = /<!-- fadeno:managed\b[^>]*\bsource=grid:[^\s>]+/;
+function isRetiredClaudeGridCell(text) {
+  return CLAUDE_GRID_CELL_RE.test(text);
 }
-function claudeManagedEmit(path, body, force, scope) {
-  if (scope === "project" && (0, import_node_fs33.existsSync)(path) && !(0, import_node_fs33.readFileSync)(path, "utf8").includes(CLAUDE_MANAGED_MARK)) {
-    return emitFile(path, body, force);
+function listRetiredClaudeGridCells(agentDir) {
+  let entries;
+  try {
+    entries = (0, import_node_fs33.existsSync)(agentDir) ? (0, import_node_fs33.readdirSync)(agentDir) : [];
+  } catch {
+    return [];
   }
-  if ((0, import_node_fs33.existsSync)(path)) {
-    const existing = (0, import_node_fs33.readFileSync)(path, "utf8");
-    if (!existing.includes(CLAUDE_MANAGED_MARK)) return "skipped";
-    if (existing === body) return "skipped";
-    (0, import_node_fs33.mkdirSync)((0, import_node_path33.join)(path, ".."), { recursive: true });
-    (0, import_node_fs33.writeFileSync)(path, body, "utf8");
-    return "overwritten";
+  const found = [];
+  for (const name of entries) {
+    if (!name.endsWith(".md")) continue;
+    const path = (0, import_node_path33.join)(agentDir, name);
+    try {
+      if (isRetiredClaudeGridCell((0, import_node_fs33.readFileSync)(path, "utf8"))) found.push(path);
+    } catch {
+    }
   }
-  (0, import_node_fs33.mkdirSync)((0, import_node_path33.join)(path, ".."), { recursive: true });
-  (0, import_node_fs33.writeFileSync)(path, body, "utf8");
-  return "created";
+  return found.sort();
 }
-function withFrontmatterFields(template, fields) {
-  const match = template.match(/^---\n([\s\S]*?)\n---\n/);
-  if (match == null) throw new SteeringError("agent template has no frontmatter block");
-  let block = match[1];
-  for (const key of Object.keys(fields)) {
-    block = block.split("\n").filter((line) => !line.startsWith(`${key}:`)).join("\n");
+function removeManagedClaudeAgent(path, removed) {
+  if (!(0, import_node_fs33.existsSync)(path)) return;
+  let text;
+  try {
+    text = (0, import_node_fs33.readFileSync)(path, "utf8");
+  } catch {
+    return;
   }
-  const added = Object.entries(fields).map(([key, value]) => `${key}: ${value}`).join("\n");
-  return `---
-${block}
-${added}
----
-${template.slice(match[0].length)}`;
+  if (!text.includes(CLAUDE_MANAGED_MARK)) return;
+  (0, import_node_fs33.unlinkSync)(path);
+  removed.push(path);
 }
 function runSteeringApplyClaude(opts) {
   const repoRoot = rootOf(opts);
@@ -34381,7 +34498,6 @@ function runSteeringApplyClaude(opts) {
     }
     if (spec.adapter === "host" && spec.agentType === "*") spec = { ...spec, agentType: archetype };
     spec = applyWritePosture(spec, archetype, profile.archetypes).spec;
-    const path = (0, import_node_path33.join)(agentDir, `${archetype}.md`);
     if (spec.adapter !== "host") {
       materialization2[archetype] = {
         kind: "command-broker",
@@ -34389,56 +34505,16 @@ function runSteeringApplyClaude(opts) {
         executor: executorName,
         model: spec.model
       };
-      if ((0, import_node_fs33.existsSync)(path) && (0, import_node_fs33.readFileSync)(path, "utf8").includes(CLAUDE_MANAGED_MARK)) {
-        (0, import_node_fs33.unlinkSync)(path);
-        removed.push(path);
-      }
-      continue;
-    }
-    if (spec.model === "current-host") {
+    } else {
       baseline[archetype] = executorName;
       materialization2[archetype] = { kind: "host", adapter: "host", executor: executorName, model: spec.model };
-      if ((0, import_node_fs33.existsSync)(path) && (0, import_node_fs33.readFileSync)(path, "utf8").includes(CLAUDE_MANAGED_MARK)) {
-        (0, import_node_fs33.unlinkSync)(path);
-        removed.push(path);
-      }
-      continue;
     }
-    baseline[archetype] = executorName;
-    materialization2[archetype] = { kind: "host", adapter: "host", executor: executorName, model: spec.model };
-    if ((0, import_node_fs33.existsSync)(path) && (0, import_node_fs33.readFileSync)(path, "utf8").includes(CLAUDE_MANAGED_MARK)) {
-      (0, import_node_fs33.unlinkSync)(path);
-      removed.push(path);
-    }
+    removeManagedClaudeAgent((0, import_node_path33.join)(agentDir, `${archetype}.md`), removed);
   }
-  const grid = [];
-  for (const archetype of HOST_SURFACE_ARCHETYPES) {
-    const templatePath = (0, import_node_path33.join)(templatesDir(), "claude", "claude-agents", `${archetype}.md`);
-    if (!(0, import_node_fs33.existsSync)(templatePath)) {
-      throw new SteeringError(`no claude agent template for archetype "${archetype}" at ${templatePath}`);
-    }
-    const template = (0, import_node_fs33.readFileSync)(templatePath, "utf8");
-    for (const effort of CLAUDE_EFFORT_LADDER) {
-      const name = claudeGridAgentName(archetype, effort);
-      let rendered = withFrontmatterFields(template, { name, model: "inherit", effort });
-      rendered = `${rendered.trimEnd()}
-
-${CLAUDE_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(rendered)} source=grid:${archetype}@${effort} -->
-`;
-      const gridPath = (0, import_node_path33.join)(agentDir, `${name}.md`);
-      grid.push(gridPath);
-      results.push({ path: gridPath, status: claudeManagedEmit(gridPath, rendered, opts.force ?? false, scope) });
-    }
-  }
-  const conflicts = results.filter((item) => item.status === "skipped").filter((item) => {
-    try {
-      return !(0, import_node_fs33.readFileSync)(item.path, "utf8").includes(CLAUDE_MANAGED_MARK);
-    } catch {
-      return true;
-    }
-  }).map((item) => item.path);
-  const restartRequired = results.some((item) => item.status === "created" || item.status === "overwritten") || removed.length > 0;
-  return { results, materialization: materialization2, baseline, restartRequired, conflicts, scope, removed, grid };
+  for (const cell of listRetiredClaudeGridCells(agentDir)) removeManagedClaudeAgent(cell, removed);
+  const conflicts = [];
+  const restartRequired = false;
+  return { results, materialization: materialization2, baseline, restartRequired, conflicts, scope, removed };
 }
 
 // src/commands/dispatch-prompt.ts
@@ -35923,59 +35999,32 @@ function runDoctor(opts = {}) {
   }
   {
     const claudeAgentDir2 = (0, import_node_path41.join)(repoRoot, ".claude", "agents");
-    let entries = [];
-    try {
-      entries = (0, import_node_fs40.existsSync)(claudeAgentDir2) ? (0, import_node_fs40.readdirSync)(claudeAgentDir2) : [];
-    } catch {
-      entries = [];
-    }
-    const gridNames = /* @__PURE__ */ new Set();
-    for (const archetype of HOST_SURFACE_ARCHETYPES) {
-      for (const effort of CLAUDE_EFFORT_LADDER) gridNames.add(`${claudeGridAgentName(archetype, effort)}.md`);
-    }
-    const legacyNames = new Set(HOST_SURFACE_ARCHETYPES.map((archetype) => `${archetype}.md`));
-    let gridPresent = 0;
-    for (const name of entries) {
-      if (!name.endsWith(".md")) continue;
+    for (const name of ["worker.md", "reviewer.md", "judge.md"]) {
+      const path = (0, import_node_path41.join)(claudeAgentDir2, name);
       let text;
       try {
-        text = (0, import_node_fs40.readFileSync)((0, import_node_path41.join)(claudeAgentDir2, name), "utf8");
+        if (!(0, import_node_fs40.existsSync)(path)) continue;
+        text = (0, import_node_fs40.readFileSync)(path, "utf8");
       } catch {
         continue;
       }
       if (!text.includes(CLAUDE_MANAGED_MARK2)) continue;
-      if (gridNames.has(name)) {
-        gridPresent += 1;
-      } else if (legacyNames.has(name)) {
-        const modelMatch = /^model:\s*(.+)$/m.exec(text);
-        const model = modelMatch ? modelMatch[1].trim() : "unknown";
-        findings.push(finding(
-          "claude-agents-legacy",
-          "warning",
-          `${name} is a legacy per-dial managed agent pinning model "${model}" \u2014 it silently overrides whatever \`fadeno dial\` currently resolves for this archetype`,
-          "Run `fadeno steering apply --claude` to replace it with the dial-independent identity grid."
-        ));
-      }
-      const versionMatch = /\bversion=(\S+)/.exec(text);
-      if (versionMatch) {
-        const fileVersion = versionMatch[1];
-        if (compareFadenoVersions(fileVersion, status.version) === -1) {
-          findings.push(finding(
-            "claude-agents-stale",
-            "warning",
-            `${name} is stamped ${fileVersion}, older than this CLI ${status.version} (managed-older)`,
-            "Run `fadeno steering apply --claude` to refresh it."
-          ));
-        }
-      }
+      const modelMatch = /^model:\s*(.+)$/m.exec(text);
+      const model = modelMatch ? modelMatch[1].trim() : "unknown";
+      findings.push(finding(
+        "claude-agents-legacy",
+        "warning",
+        `${name} is a legacy per-dial managed agent pinning model "${model}" \u2014 it silently overrides whatever \`fadeno dial\` currently resolves for this archetype`,
+        "Run `fadeno steering apply --claude` to remove it; the plugin's role agents deliver the dial live."
+      ));
     }
-    const dialsInUse = dials != null && (Object.keys(dials.session).length > 0 || Object.keys(dials.repo).length > 0 || Object.keys(dials.user).length > 0);
-    if (status.harness === "claude" && dialsInUse && gridPresent === 0) {
+    const retiredGrid = listRetiredClaudeGridCells(claudeAgentDir2);
+    if (retiredGrid.length > 0) {
       findings.push(finding(
         "claude-agents-grid",
         "warning",
-        "no Claude identity grid cells are registered even though dials are in use \u2014 spawns run on whatever the session already has, not what `fadeno dial` reports",
-        "Run `fadeno steering apply --claude` to pre-register the grid."
+        `${retiredGrid.length} retired identity-grid cell(s) remain in ${claudeAgentDir2} (${retiredGrid.map((path) => (0, import_node_path41.basename)(path)).slice(0, 3).join(", ")}${retiredGrid.length > 3 ? ", \u2026" : ""}) \u2014 they pin an effort nothing consults any more, and the harness still registers them at session start`,
+        "Run `fadeno steering apply --claude` to remove them."
       ));
     }
   }
@@ -36238,12 +36287,22 @@ var import_node_os6 = require("node:os");
 var import_node_path44 = require("node:path");
 var UninstallError = class extends Error {
 };
-function legacyManagedFiles(harness, opts) {
-  if (harness !== "codex") return [];
+function unrecordedManagedFiles(harness, opts) {
   const env = opts?.env ?? process.env;
   const home = opts?.home ?? (0, import_node_os6.homedir)();
+  if (harness === "claude") return listRetiredClaudeGridCells((0, import_node_path44.join)(home, ".claude", "agents"));
+  if (harness !== "codex") return [];
   const agentsDir = (0, import_node_path44.join)(env.CODEX_HOME?.trim() || (0, import_node_path44.join)(home, ".codex"), "agents");
   return ["worker", "reviewer", "judge"].map((role) => (0, import_node_path44.join)(agentsDir, `fadeno-${role}.toml`));
+}
+function carriesManagedMarker(path) {
+  let text;
+  try {
+    text = (0, import_node_fs43.readFileSync)(path, "utf8");
+  } catch {
+    return false;
+  }
+  return text.startsWith("# fadeno:managed") || isRetiredClaudeGridCell(text);
 }
 function removePermissionRule(permission, removed, preserved) {
   if (!(0, import_node_fs43.existsSync)(permission.path)) return;
@@ -36285,11 +36344,11 @@ function runUninstall(opts) {
     const recorded = installation?.files ?? [];
     const files = [
       ...recorded,
-      ...legacyManagedFiles(harness, opts.userPathOptions).filter((path) => !recorded.some((file) => file.path === path)).map((path) => ({ path, sha256: "" }))
+      ...unrecordedManagedFiles(harness, opts.userPathOptions).filter((path) => !recorded.some((file) => file.path === path)).map((path) => ({ path, sha256: "" }))
     ];
     for (const file of files) {
       if (!(0, import_node_fs43.existsSync)(file.path)) continue;
-      const managedMarker = (0, import_node_fs43.readFileSync)(file.path, "utf8").startsWith("# fadeno:managed");
+      const managedMarker = carriesManagedMarker(file.path);
       if (managedMarker || file.sha256 !== "" && fileDigest(file.path) === file.sha256) {
         (0, import_node_fs43.rmSync)(file.path, { force: true });
         removed.push(file.path);
@@ -37630,6 +37689,17 @@ function printModelsDriver(result) {
     console.log(`  ${model.id}${marks}`);
   }
 }
+function withLaneLabels(lines, roles) {
+  if (!Array.isArray(roles) || roles.length !== lines.length) return lines;
+  const refs = roles.map((role) => typeof role?.executor === "string" ? role.executor : null);
+  const lanes = offHostLanes(refs, sessionEffort());
+  return lines.map((line, index) => {
+    const decision = lanes[index];
+    if (decision == null) return line;
+    const label = decision.lane === "command" ? `[command lane: ${decision.lane_reason}]` : `[restart required: ${decision.lane_reason}]`;
+    return /\[[^\]]*\]$/.test(line) ? line.replace(/\[[^\]]*\]$/, label) : `${line} ${label}`;
+  });
+}
 function printDialShow(result) {
   if (result.legacy_pin_note) console.log(result.legacy_pin_note);
   if (result.staleDials.length > 0) printStaleDials(result.staleDials);
@@ -37639,7 +37709,7 @@ function printDialShow(result) {
   for (const row of result.rows) {
     const arch = row.archetype.padEnd(12);
     const model = row.modelDisplay.padEnd(18);
-    const effort = row.effort.padEnd(8);
+    const effort = (row.resolvedVia != null ? "\u2014" : row.pinned_effort ?? "inherit").padEnd(8);
     const harness = row.harness.padEnd(22);
     const elig = row.eligibility === "shadow_only" ? "  SHADOW-ONLY (never gates)" : row.eligibility === "forbidden" ? "  FORBIDDEN (refused at dispatch)" : "";
     const forced = row.write_posture_forced ? "  WARNING: FORCED WRITE-POSTURE MISMATCH" : "";
@@ -38000,6 +38070,13 @@ function main(argv) {
           adapter: result.adapter,
           model: result.model,
           effort: result.effort ?? null,
+          // The lane decision. `steering resolve` is a hook/script contract,
+          // so a consumer that cannot see `lane` cannot route on effort at all.
+          effort_pinned: result.effort_pinned,
+          effective_effort: result.effective_effort,
+          session_effort: result.session_effort,
+          lane: result.lane,
+          lane_reason: result.lane_reason,
           driver: result.driver,
           host_executor: result.hostExecutor,
           resolution: result.source,
@@ -38028,13 +38105,13 @@ function main(argv) {
           console.log(`Claude steering materialized: ${result2.scope}`);
           for (const archetype of ["judge", "reviewer", "worker"]) {
             const slot = result2.materialization[archetype];
-            const how = slot.kind === "host" ? slot.model === "current-host" ? "session baseline (no agent file)" : `local subagent (model: ${slot.model})` : "dispatch proxy (no agent file)";
+            const how = slot.kind === "host" ? slot.model === "current-host" ? "session baseline (no agent file)" : `in-session when the effort matches (model: ${slot.model})` : "dispatch proxy (no agent file)";
             console.log(`  ${archetype} \u2192 ${how} ${slot.executor}`);
           }
-          for (const path of result2.removed ?? []) console.log(`  removed stale per-dial agent: ${path}`);
-          console.log(`  identity grid: ${result2.grid?.length ?? 0} cell(s) (archetype x effort), model supplied per spawn`);
+          const removed = result2.removed ?? [];
+          for (const path of removed) console.log(`  removed managed agent: ${path}`);
           console.log(
-            changed2 === 0 ? "  0 agent definition(s) written; the grid is current \u2014 dial changes take effect immediately, no restart." : `  ${changed2} agent definition(s) written; restart Claude Code once so the new names register. Dial changes after that need neither.`
+            removed.length === 0 ? "  Nothing to remove; effort selects the delivery lane, so no agent file carries an identity." : `  Removed ${removed.length} managed agent definition(s). Effort now selects the lane, so nothing is written and no restart is needed.`
           );
           if (changed2 === 0 && result2.conflicts.length > 0) console.log("  Existing files were preserved; pass --force to replace them.");
           return 0;
@@ -38096,7 +38173,8 @@ function main(argv) {
       if (resolution != null && resolution.echo?.length > 0) {
         console.log(`
 resolution:`);
-        for (const line of resolution.echo) console.log(`  ${line}`);
+        const lines = resolution.echo;
+        for (const line of withLaneLabels(lines, resolution.roles)) console.log(`  ${line}`);
       }
       console.log("\nAdvance it with `fadeno drive` first (engine):");
       console.log(`  fadeno drive ${runId}`);
