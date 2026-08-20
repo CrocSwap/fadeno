@@ -290,3 +290,123 @@ test('dispatches: shadow rows discrimination via --json shadow fields (diffBytes
   assert.equal(shadow.diffBytes, 0);
   assert.equal(primary.diffBytes, null);
 });
+
+// `dispatch.ts` already writes diff_snapshot/diff_bytes onto an --isolated
+// primary's own completion row, and the parser already lifts them into
+// DispatchEntry (see the round-trip test above) — but DispatchComparisonPair
+// used to drop them on the floor, so a paired --isolated primary rendered no
+// diff at all even though the evidence was sitting right there.
+test('dispatches comparisons: a paired primary reports its own diff, workspace, and baseline_commit', (t) => {
+  const root = tempRepo(t);
+  const baselineCommit = 'cafef00d'.repeat(5);
+  seedLog(root, [
+    requested({ dispatch_id: PRIMARY_ID, executor: 'base-worker', model: 'base-worker' }),
+    completed({
+      dispatch_id: PRIMARY_ID,
+      executor: 'base-worker',
+      model: 'base-worker',
+      output_bytes: 40,
+      // What an --isolated primary's completion row carries: its own diff,
+      // plus (only once a shadow actually fired) pair_id/baseline_commit.
+      diff_snapshot: '.fadeno/local/outputs/isolated-11111111.diff',
+      diff_bytes: 7,
+      pair_id: 'pair-primary-diff',
+      baseline_commit: baselineCommit,
+    }),
+    shadowRequested(PRIMARY_ID, { dispatch_id: SHADOW_ID, pair_id: 'pair-primary-diff', executor: 'challenger-x', model: 'challenger-x' }),
+    shadowCompleted(PRIMARY_ID, { dispatch_id: SHADOW_ID, pair_id: 'pair-primary-diff', executor: 'challenger-x', model: 'challenger-x', output_bytes: 30, diff_bytes: 3 }),
+  ]);
+  const comps = runDispatchesComparisons({ repoRoot: root });
+  assert.equal(comps.totalPairs, 1);
+  const pair = comps.groups[0]!.pairs[0]!;
+  assert.equal(pair.primary.diffBytes, 7);
+  assert.equal(pair.primary.diffSnapshot, '.fadeno/local/outputs/isolated-11111111.diff');
+  assert.equal(pair.primary.baselineCommit, baselineCommit);
+  // No production writer ever puts `workspace` on a primary row today (only
+  // shadow rows retain a worktree), so this reads null — the field exists
+  // for when that stops being true, per the design doc's Phase 5 notes.
+  assert.equal(pair.primary.workspace, null);
+  const line = comps.lines.find((l) => l.includes('primary base-worker'))!;
+  // duration_ms defaults to 42 in `completed()`, formatted as "42ms".
+  assert.ok(line.includes('primary base-worker (base-worker) exit 0 in 42ms output 40 bytes diff 7 bytes'), line);
+  assert.match(line, /vs shadow challenger-x/);
+});
+
+// The comparisons loop used to pair solely by `primary_dispatch_id`. Now it
+// prefers `pair_id` when both rows carry it, so correlation survives even a
+// stale/misleading `primary_dispatch_id` — while a log written before
+// pair_id existed (no pair_id anywhere) must still pair by
+// primary_dispatch_id, or every pre-Phase-5 pair in a repo's history would
+// silently orphan.
+test('dispatches comparisons: pairing prefers pair_id, and still falls back for pre-pair_id rows', (t) => {
+  const root = tempRepo(t);
+  const otherPrimaryId = 'primary-99999999-9999-9999-9999-999999999999';
+  seedLog(root, [
+    // Two primaries in the log. The shadow's stale primary_dispatch_id
+    // points at the FIRST one, but its pair_id correlates it with the
+    // SECOND — pair_id must win, or the wrong primary gets compared.
+    requested({ dispatch_id: PRIMARY_ID, executor: 'stale-primary', model: 'stale-primary' }),
+    completed({ dispatch_id: PRIMARY_ID, executor: 'stale-primary', model: 'stale-primary', output_bytes: 1 }),
+    requested({ dispatch_id: otherPrimaryId, executor: 'true-primary', model: 'true-primary' }),
+    completed({ dispatch_id: otherPrimaryId, executor: 'true-primary', model: 'true-primary', output_bytes: 2, pair_id: 'pair-wins', baseline_commit: 'a'.repeat(40) }),
+    shadowRequested(PRIMARY_ID, { dispatch_id: SHADOW_ID, pair_id: 'pair-wins', executor: 'challenger-x', model: 'challenger-x' }),
+    shadowCompleted(PRIMARY_ID, { dispatch_id: SHADOW_ID, pair_id: 'pair-wins', executor: 'challenger-x', model: 'challenger-x', output_bytes: 9, diff_bytes: 1 }),
+  ]);
+  const comps = runDispatchesComparisons({ repoRoot: root });
+  const pair = comps.groups[0]!.pairs[0]!;
+  assert.equal(pair.primaryId, otherPrimaryId);
+  assert.equal(pair.primary.executor, 'true-primary');
+  assert.equal(pair.orphan, false);
+
+  // A second, independent pair with no pair_id anywhere (a log written
+  // before the field existed) must still correlate via primary_dispatch_id.
+  const legacyPrimaryId = 'primary-legacy-88888888-8888-8888-8888-888888888888';
+  const legacyShadowId = 'shadow-legacy-77777777-7777-7777-7777-777777777777';
+  const legacyRoot = tempRepo(t);
+  seedLog(legacyRoot, [
+    requested({ dispatch_id: legacyPrimaryId, executor: 'base-worker', model: 'base-worker' }),
+    completed({ dispatch_id: legacyPrimaryId, executor: 'base-worker', model: 'base-worker', output_bytes: 1 }),
+    shadowRequested(legacyPrimaryId, { dispatch_id: legacyShadowId, executor: 'challenger-x', model: 'challenger-x' }),
+    shadowCompleted(legacyPrimaryId, { dispatch_id: legacyShadowId, executor: 'challenger-x', model: 'challenger-x', output_bytes: 5, diff_bytes: 2 }),
+  ]);
+  const legacyComps = runDispatchesComparisons({ repoRoot: legacyRoot });
+  assert.equal(legacyComps.totalPairs, 1);
+  assert.equal(legacyComps.groups[0]!.pairs[0]!.orphan, false);
+  assert.equal(legacyComps.groups[0]!.pairs[0]!.primaryId, legacyPrimaryId);
+});
+
+// A shadow refused before it ever ran (capacity, eligibility, write posture,
+// a constraint, or a baseline that could not be snapshotted) used to render
+// as a row of "?" — indistinguishable from a challenger that crashed with no
+// output. `formatComparisonPair` must name the refusal instead.
+test('dispatches comparisons: a refused shadow renders as refused with its predicate, not "?"', (t) => {
+  const root = tempRepo(t);
+  const refusedShadowId = 'shadow-66666666-6666-6666-6666-666666666666';
+  seedLog(root, [
+    requested({ dispatch_id: PRIMARY_ID, executor: 'base-worker', model: 'base-worker' }),
+    completed({ dispatch_id: PRIMARY_ID, executor: 'base-worker', model: 'base-worker', output_bytes: 12 }),
+    {
+      format: DISPATCHES_FORMAT,
+      timestamp: '2026-08-12T12:00:11.000Z',
+      event: 'dispatch_refused',
+      dispatch_id: refusedShadowId,
+      pair_id: 'pair-refused',
+      archetype: 'worker',
+      role: null,
+      resolution: 'shadow',
+      shadow: true,
+      primary_dispatch_id: PRIMARY_ID,
+      executor: 'challenger-x',
+      refusal: { predicate: 'shadow_cap', message: '4 shadows are already running and the live cap is 4.' },
+    },
+  ]);
+  const comps = runDispatchesComparisons({ repoRoot: root });
+  assert.equal(comps.totalPairs, 1);
+  const pair = comps.groups[0]!.pairs[0]!;
+  assert.deepEqual(pair.shadow.refusal, { predicate: 'shadow_cap', message: '4 shadows are already running and the live cap is 4.' });
+  assert.equal(pair.shadow.exitCode, null);
+  assert.equal(pair.orphan, false);
+  const line = comps.lines.find((l) => l.includes(refusedShadowId.slice(0, 8)))!;
+  assert.match(line, /refused \[shadow_cap\]: 4 shadows are already running/);
+  assert.doesNotMatch(line, /exit \? in/);
+});

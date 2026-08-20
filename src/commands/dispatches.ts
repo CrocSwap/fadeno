@@ -38,7 +38,11 @@ const OUTCOME_KEYS = ['exit_code', 'duration_ms', 'output_sha256', 'signal'];
  * `dispatch_completed` pair from the kernel (`kind: "command"`), a single
  * `dispatch_refused` row (also `kind: "command"` — the refusal *is* the
  * request-point evidence), or a single `host_delivery` row from the Claude
- * steering hook (`kind: "host"`), which has no kernel downstream.
+ * steering hook (`kind: "host"`), which has no kernel downstream. A `host`
+ * entry may additionally carry a correlated `host_attestation` row — written
+ * by `fadeno attest` running INSIDE the subagent itself, folded onto the
+ * `attestedAt`/`attestedEffort`/`attestedEffortEvidence` fields rather than
+ * becoming an entry of its own (see `correlateAttestation`).
  */
 export interface DispatchEntry {
   kind: 'command' | 'host';
@@ -103,11 +107,51 @@ export interface DispatchEntry {
   shadow: boolean;
   primaryDispatchId: string | null;
   shadowSource: string | null;
+  /**
+   * Correlates one pair's rows as a single thing, independent of which arm
+   * happens to carry `primary_dispatch_id`. Written on the shadow's request
+   * row and refusal rows from the start, and folded onto the primary's own
+   * completion row once a challenger actually fires — so a row from before
+   * the field existed simply reads null rather than breaking correlation.
+   */
+  pairId: string | null;
+  /**
+   * The retained challenger worktree, repo-relative, on a shadow identity
+   * row (request or completion). Null on a refusal — the worktree is either
+   * never created or removed before the refusal is written — and on a
+   * primary, which never places its own worktree on the ledger today. How
+   * the post-shadow cleaner (`fadeno clean`) finds a challenger worktree to
+   * deregister rather than deleting it out from under git.
+   */
+  workspace: string | null;
+  /**
+   * The pair's shared starting-state commit: an addressable commit both arms
+   * were cut from, so the baseline is not an implicit asymmetry between them.
+   * Present on the shadow's rows and, when a shadow actually fired, on the
+   * primary's completion row too.
+   */
+  baselineCommit: string | null;
   diffSnapshot: string | null;
   diffBytes: number | null;
   outputBytes: number | null;
   diagnosticsSnapshot: string | null;
   diagnosticsBytes: number | null;
+  /**
+   * Measured from INSIDE the subagent by `fadeno attest` (a `host_attestation`
+   * row), correlated onto the `host_delivery` entry it attests — the request
+   * that row is a REQUEST recorded by the parent hook before the subagent ran.
+   * `attestedAt` is null until (if ever) a matching attestation is found,
+   * which is what makes "delivered, never attested" visible rather than
+   * indistinguishable from success. Always null on a `command`-kind entry:
+   * command dispatch already carries its own kernel-measured completion row.
+   * Correlation is archetype + nearest preceding unattested `host_delivery`
+   * (see `correlateAttestation`) — a best-effort match, not a guaranteed one.
+   */
+  attestedAt: string | null;
+  /** The attested `CLAUDE_EFFORT`, or null when the attestation itself could not measure one. */
+  attestedEffort: string | null;
+  /** Whether the matched attestation measured `effort` or said so was `unavailable`; null with no match. */
+  attestedEffortEvidence: 'measured' | 'unavailable' | null;
 }
 
 export interface DispatchesOptions {
@@ -337,11 +381,20 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     shadow: row.shadow === true,
     primaryDispatchId: str(row.primary_dispatch_id),
     shadowSource: str(row.shadow_source),
+    pairId: str(row.pair_id),
+    workspace: str(row.workspace),
+    baselineCommit: str(row.baseline_commit),
     diffSnapshot: str(row.diff_snapshot),
     diffBytes: num(row.diff_bytes),
     outputBytes: num(row.output_bytes),
     diagnosticsSnapshot: str(row.diagnostics_snapshot),
     diagnosticsBytes: num(row.diagnostics_bytes),
+    // Attestation only ever correlates onto a `host` entry (see
+    // `correlateAttestation`); a command dispatch's own completion row is
+    // already a kernel measurement, so these stay null for its whole life.
+    attestedAt: null,
+    attestedEffort: null,
+    attestedEffortEvidence: null,
   };
 }
 
@@ -388,12 +441,61 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     shadow: false,
     primaryDispatchId: null,
     shadowSource: null,
+    pairId: null,
+    workspace: null,
+    baselineCommit: null,
     diffSnapshot: null,
     diffBytes: null,
     outputBytes: null,
     diagnosticsSnapshot: null,
     diagnosticsBytes: null,
+    // Unattested until a later `host_attestation` row correlates onto this
+    // one — see `correlateAttestation`, called from the main read loop below.
+    attestedAt: null,
+    attestedEffort: null,
+    attestedEffortEvidence: null,
   };
+}
+
+/**
+ * Correlate a `host_attestation` row (written by `fadeno attest`, running
+ * INSIDE the subagent) onto the `host_delivery` entry it measures.
+ *
+ * The hard part, stated honestly: the subagent has neither the parent's
+ * prompt digest (injecting one into the prompt would make prompt bytes vary
+ * per spawn, which shadow pairs depend on NOT happening — see
+ * `runAttest` in `src/commands/attest.ts`) nor the parent's session id (its
+ * own differs). Archetype plus append order is all that is left, so this
+ * matches the NEAREST PRECEDING entry of `kind: 'host'` with the same
+ * archetype that no earlier attestation has already claimed — scanning
+ * backward through everything read so far, oldest match wins ties by being
+ * found last.
+ *
+ * Precision limits, plainly: two host deliveries of the SAME archetype that
+ * both go unattested, followed by one attestation, correlate that
+ * attestation to the more recent of the two — which is usually right (the
+ * subagent that just ran is more likely to be the one attesting) but is a
+ * heuristic, not a proof. An attestation with no preceding unattested
+ * `host_delivery` of its archetype at all (attest run twice for one
+ * delivery, or run outside a steered host spawn entirely) matches nothing
+ * and is silently dropped — it is real evidence that fadeno attest ran, but
+ * evidence of nothing THIS reader can render as a dispatch, so it is neither
+ * folded into an entry nor counted as an unreadable row.
+ */
+function correlateAttestation(entries: readonly DispatchEntry[], row: Record<string, unknown>): void {
+  const archetype = str(row.archetype);
+  if (archetype == null) return; // cannot correlate without knowing what it claims to be
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const candidate = entries[i]!;
+    if (candidate.kind !== 'host') continue;
+    if (candidate.archetype !== archetype) continue;
+    if (candidate.attestedAt != null) continue; // already claimed by an earlier attestation
+    candidate.attestedAt = str(row.timestamp);
+    candidate.attestedEffort = str(row.effort);
+    const evidence = str(row.effort_evidence);
+    candidate.attestedEffortEvidence = evidence === 'measured' || evidence === 'unavailable' ? evidence : null;
+    return;
+  }
 }
 
 /** Fold a completion row's outcome into the entry its request row opened. */
@@ -423,6 +525,9 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
   if (row.shadow === true) entry.shadow = true;
   entry.primaryDispatchId = entry.primaryDispatchId ?? str(row.primary_dispatch_id);
   entry.shadowSource = entry.shadowSource ?? str(row.shadow_source);
+  entry.pairId = entry.pairId ?? str(row.pair_id);
+  entry.workspace = entry.workspace ?? str(row.workspace);
+  entry.baselineCommit = entry.baselineCommit ?? str(row.baseline_commit);
   entry.diffSnapshot = entry.diffSnapshot ?? str(row.diff_snapshot);
   const db = num(row.diff_bytes);
   if (db != null) entry.diffBytes = db;
@@ -508,6 +613,28 @@ export function renderDispatchLine(entry: DispatchEntry): string {
       }
     } else {
       parts.push('no completion recorded (killed or in flight)');
+    }
+  } else if (entry.kind === 'host') {
+    if (entry.attestedAt == null) {
+      // The gap this whole feature closes: a host_delivery is a REQUEST the
+      // parent's steering hook recorded before the subagent ever ran, and
+      // running `fadeno attest` is only tier-1/advisory — an agent may not
+      // comply. An unattested row must read as visibly unconfirmed rather
+      // than look identical to a measured, successful one.
+      parts.push('[never attested]');
+    } else if (
+      entry.reasoningEffort != null &&
+      entry.reasoningEffort !== 'inherited' &&
+      entry.attestedEffort != null &&
+      entry.reasoningEffort !== entry.attestedEffort
+    ) {
+      // The signature of a silent downgrade: the harness resolves a turn's
+      // effort AFTER any per-model/per-org cap, so a dial asking for xhigh
+      // can land lower with nothing raised on the request-side row. A shadow
+      // pair spanning this row is not a comparison of equals.
+      parts.push(`[effort mismatch: requested ${entry.reasoningEffort}, attested ${entry.attestedEffort}]`);
+    } else {
+      parts.push(`[attested: effort ${entry.attestedEffort ?? 'unmeasured'}]`);
     }
   }
 
@@ -624,6 +751,14 @@ export function runDispatches(opts: DispatchesOptions = {}): DispatchesResult {
     // by an older hook still renders.
     if (event === 'host_delivery' || event === 'native_delivery') {
       entries.push(hostEntry(row));
+      continue;
+    }
+    if (event === 'host_attestation') {
+      // Not its own entry: this row measures a PRECEDING host_delivery, so
+      // it folds onto that entry rather than rendering as a dispatch of its
+      // own — see `correlateAttestation`'s doc comment for what "nearest
+      // preceding" means and its precision limits.
+      correlateAttestation(entries, row);
       continue;
     }
     if (event === 'dispatch_refused') {
@@ -986,6 +1121,20 @@ export interface DispatchComparisonPair {
     outputBytes: number | null;
     durationMs: number | null;
     promptSha256: string | null;
+    /**
+     * Set whenever the primary's own completion row carries `diff_snapshot`/
+     * `diff_bytes` — today that means an `--isolate`d primary, whose diff was
+     * already reaching `DispatchEntry` but being dropped on the floor here.
+     * The struct is symmetric with `shadow` on purpose: the moment a
+     * non-isolated primary also gets a retained worktree, this field is
+     * already the place that data lands.
+     */
+    diffBytes: number | null;
+    diffSnapshot: string | null;
+    /** Repo-relative retained worktree path, when the primary has one. */
+    workspace: string | null;
+    /** The pair's shared starting-state commit; same value as `shadow`'s. */
+    baselineCommit: string | null;
   };
   shadow: {
     dispatchId: string | null;
@@ -997,6 +1146,13 @@ export interface DispatchComparisonPair {
     diffBytes: number | null;
     diffSnapshot: string | null;
     promptSha256: string | null;
+    /**
+     * Present when the shadow never ran — capacity, eligibility, write
+     * posture, a constraint refusal, or a baseline that could not be
+     * snapshotted. A refused arm has no exit code, duration, or output: it
+     * must render as refused, not as a challenger that measured empty.
+     */
+    refusal: { predicate: string; message: string } | null;
   };
   promptShaMismatch: boolean;
   orphan: boolean;
@@ -1080,6 +1236,13 @@ function loadAllEntries(absolute: string): {
       entries.push(hostEntry(row));
       continue;
     }
+    if (event === 'host_attestation') {
+      // Same fold-onto-the-preceding-entry rule as the main reader above —
+      // never its own entry, never counted as unreadable (see
+      // `correlateAttestation`).
+      correlateAttestation(entries, row);
+      continue;
+    }
     if (event === 'dispatch_refused') {
       entries.push(requestedEntry(row));
       continue;
@@ -1110,6 +1273,160 @@ function loadAllEntries(absolute: string): {
     skipped += 1;
   }
   return { entries, skipped, skippedNewerFormat };
+}
+
+export interface RetainedShadowWorktree {
+  dispatchId: string | null;
+  /** Repo-relative worktree path, as recorded in the ledger's `workspace` field. */
+  workspace: string;
+  pairId: string | null;
+  baselineCommit: string | null;
+}
+
+/**
+ * Every shadow challenger worktree the ledger's `workspace` field still names
+ * (see `DispatchEntry.workspace`) — the retained work product of a shadow
+ * pair, kept for later judgment rather than cleaned up when the pair
+ * finishes. This is how `fadeno clean` finds a registered git worktree to
+ * deregister with `git worktree remove` before it deletes `.fadeno/local`,
+ * instead of pulling the directory out from under git and leaving a stale
+ * entry in `.git/worktrees`.
+ *
+ * Reads the whole log, not just the default tail: a worktree from ten
+ * dispatches ago is exactly as retained, and exactly as much a cleanup
+ * target, as one from the last row.
+ */
+export function listRetainedShadowWorktrees(opts: { cwd?: string; repoRoot?: string } = {}): RetainedShadowWorktree[] {
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const { entries } = loadAllEntries(join(repoRoot, DISPATCHES_FILE));
+  const out: RetainedShadowWorktree[] = [];
+  for (const entry of entries) {
+    if (!entry.shadow || entry.workspace == null) continue;
+    out.push({
+      dispatchId: entry.dispatchId,
+      workspace: entry.workspace,
+      pairId: entry.pairId,
+      baselineCommit: entry.baselineCommit,
+    });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Shadow pair resolution (for `fadeno shadow-apply`)
+// ---------------------------------------------------------------------------
+
+export interface ResolvedDispatchPair {
+  pairId: string;
+  /** The non-shadow arm's entry, or null when this log lacks its rows. */
+  primary: DispatchEntry | null;
+  /** The shadow arm's entry, or null when this log lacks its rows. */
+  shadow: DispatchEntry | null;
+}
+
+export interface ResolveDispatchPairOptions {
+  cwd?: string;
+  repoRoot?: string;
+}
+
+/**
+ * Resolve a caller-given `pair_id` or either arm's `dispatch_id` (full, or an
+ * 8+ character prefix — the read-side convention `resolveOutputRecord` above
+ * already established) to the shadow pair it names. Built for
+ * `fadeno shadow-apply <pair-id|dispatch-id>`.
+ *
+ * Reads the WHOLE log, like `listRetainedShadowWorktrees`: a pair from ten
+ * dispatches ago is exactly as applicable as one from the last row, and the
+ * default `--tail` view must never silently hide it from this lookup.
+ *
+ * `pair_id` and `dispatch_id` are drawn from the same `randomUUID()` space
+ * (see dispatch.ts), so an exact match is always checked, on both axes,
+ * before any prefix matching is attempted — exactness never loses to a
+ * shorter, coincidentally-matching prefix on the other axis.
+ */
+export function resolveDispatchPair(
+  query: string,
+  opts: ResolveDispatchPairOptions = {},
+): ResolvedDispatchPair {
+  const trimmed = query.trim();
+  if (trimmed === '') {
+    throw new DispatchesCommandError('name a pair id or dispatch id (full, or an 8+ character prefix).');
+  }
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const { entries } = loadAllEntries(join(repoRoot, DISPATCHES_FILE));
+
+  const primaryByPairId = new Map<string, DispatchEntry>();
+  const primaryById = new Map<string, DispatchEntry>();
+  const shadowByPairId = new Map<string, DispatchEntry>();
+  const shadowById = new Map<string, DispatchEntry>();
+  for (const entry of entries) {
+    if (entry.shadow) {
+      if (entry.dispatchId != null) shadowById.set(entry.dispatchId, entry);
+      if (entry.pairId != null) shadowByPairId.set(entry.pairId, entry);
+    } else {
+      if (entry.dispatchId != null) primaryById.set(entry.dispatchId, entry);
+      if (entry.pairId != null) primaryByPairId.set(entry.pairId, entry);
+    }
+  }
+
+  const pairFor = (pairId: string): ResolvedDispatchPair => ({
+    pairId,
+    primary: primaryByPairId.get(pairId) ?? null,
+    shadow: shadowByPairId.get(pairId) ?? null,
+  });
+
+  if (primaryByPairId.has(trimmed) || shadowByPairId.has(trimmed)) return pairFor(trimmed);
+
+  const exactDispatch = shadowById.get(trimmed) ?? primaryById.get(trimmed);
+  if (exactDispatch != null) {
+    if (exactDispatch.pairId == null) {
+      throw new DispatchesCommandError(
+        `dispatch "${trimmed.slice(0, 8)}" is not part of any recorded shadow pair (its evidence carries no pair_id).`,
+      );
+    }
+    return pairFor(exactDispatch.pairId);
+  }
+
+  if (trimmed.length < OUTPUT_ID_PREFIX_MIN) {
+    throw new DispatchesCommandError(
+      `unknown pair or dispatch "${trimmed}" (no exact match, and a prefix must be at least ${OUTPUT_ID_PREFIX_MIN} characters).`,
+    );
+  }
+
+  // Prefix match: a hit can name a pair either directly (its pair_id) or
+  // through one of its arms' dispatch_ids. Collected as a SET of resolved
+  // pair ids so a prefix that happens to match both a pair's own id and one
+  // of its arms' ids does not falsely read as ambiguous.
+  const matchedPairIds = new Set<string>();
+  for (const id of primaryByPairId.keys()) if (id.startsWith(trimmed)) matchedPairIds.add(id);
+  for (const id of shadowByPairId.keys()) if (id.startsWith(trimmed)) matchedPairIds.add(id);
+  const unpaired: DispatchEntry[] = [];
+  for (const [id, entry] of [...primaryById, ...shadowById]) {
+    if (!id.startsWith(trimmed)) continue;
+    if (entry.pairId != null) matchedPairIds.add(entry.pairId);
+    else unpaired.push(entry);
+  }
+
+  if (matchedPairIds.size === 0 && unpaired.length === 0) {
+    throw new DispatchesCommandError(`unknown pair or dispatch prefix "${trimmed}".`);
+  }
+  if (matchedPairIds.size === 0) {
+    // Every hit named a real dispatch, just not one that is part of a pair.
+    const names = unpaired.map((e) => (e.dispatchId ?? '?').slice(0, 8)).join(', ');
+    throw new DispatchesCommandError(
+      `"${trimmed}" matches dispatch${unpaired.length === 1 ? '' : 'es'} ${names}, but ` +
+        `${unpaired.length === 1 ? 'it is' : 'none are'} part of a recorded shadow pair.`,
+    );
+  }
+  if (matchedPairIds.size > 1) {
+    throw new DispatchesCommandError(
+      `ambiguous prefix "${trimmed}": matches ${matchedPairIds.size} distinct pairs ` +
+        `(${[...matchedPairIds].map((p) => p.slice(0, 8)).join(', ')}). Use a longer prefix or the full id.`,
+    );
+  }
+  return pairFor([...matchedPairIds][0]!);
 }
 
 function parseModelComparisonFile(repoRoot: string, relPath: string): ModelComparisonArtifact {
@@ -1194,11 +1511,24 @@ function formatComparisonPair(pair: DispatchComparisonPair): string {
   const primaryId8 = pair.primaryId ? pair.primaryId.slice(0, 8) : '?';
   const shadowId8 = pair.shadowId ? pair.shadowId.slice(0, 8) : '?';
   const arch = pair.archetype ?? '(none)';
-  const primaryInfo = `${pair.primary.executor ?? '(unresolved)'} (${pair.primary.model ?? '?'}) exit ${pair.primary.exitCode ?? '?'} in ${formatComparisonDuration(pair.primary.durationMs)} output ${pair.primary.outputBytes ?? '?'} bytes`;
-  const shadowInfo = `${pair.shadow.executor ?? '(unresolved)'} (${pair.shadow.model ?? '?'}) exit ${pair.shadow.exitCode ?? '?'} in ${formatComparisonDuration(pair.shadow.durationMs)} output ${pair.shadow.outputBytes ?? '?'} bytes diff ${pair.shadow.diffBytes ?? '?'} bytes`;
+  // Only rendered when the primary actually has a diff on its own completion
+  // row (today, an --isolated primary) — most primaries share the workspace
+  // and have no diff concept at all, so "diff ? bytes" would read as a
+  // missing value rather than a not-applicable one.
+  const primaryDiff = pair.primary.diffBytes != null ? ` diff ${pair.primary.diffBytes} bytes` : '';
+  const primaryInfo = `${pair.primary.executor ?? '(unresolved)'} (${pair.primary.model ?? '?'}) exit ${pair.primary.exitCode ?? '?'} in ${formatComparisonDuration(pair.primary.durationMs)} output ${pair.primary.outputBytes ?? '?'} bytes${primaryDiff}`;
+  // A refused shadow never ran: exit code, duration, and output are all
+  // absent, and rendering them as "?" would read as a challenger that
+  // measured empty rather than one that was never allowed to fire. Name the
+  // predicate instead — this is the whole reason the refusal was worth a row.
+  const shadowInfo = pair.shadow.refusal != null
+    ? `refused [${pair.shadow.refusal.predicate}]: ${pair.shadow.refusal.message}`
+    : `${pair.shadow.executor ?? '(unresolved)'} (${pair.shadow.model ?? '?'}) exit ${pair.shadow.exitCode ?? '?'} in ${formatComparisonDuration(pair.shadow.durationMs)} output ${pair.shadow.outputBytes ?? '?'} bytes diff ${pair.shadow.diffBytes ?? '?'} bytes`;
   const mismatch = pair.promptShaMismatch ? '  PROMPT SHA MISMATCH' : '';
   const orphan = pair.orphan ? '  [orphan: primary missing]' : '';
-  return `${primaryId8} → ${shadowId8}  ${arch}  primary ${primaryInfo}  vs shadow ${shadowInfo}${mismatch}${orphan}`;
+  const baseline = pair.primary.baselineCommit != null ? `  [baseline ${pair.primary.baselineCommit.slice(0, 8)}]` : '';
+  const workspace = pair.primary.workspace != null ? `  [primary workspace: ${pair.primary.workspace}]` : '';
+  return `${primaryId8} → ${shadowId8}  ${arch}  primary ${primaryInfo}  vs shadow ${shadowInfo}${mismatch}${orphan}${baseline}${workspace}`;
 }
 
 function formatComparisonArtifact(artifact: ModelComparisonArtifact): string {
@@ -1219,8 +1549,16 @@ export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}
   const { entries, skipped, skippedNewerFormat } = loadAllEntries(absolute);
 
   const primaryById = new Map<string, DispatchEntry>();
+  // `pair_id` is the addressable correlation from the start (see
+  // `DispatchEntry.pairId`); it lands on the primary's own row only once a
+  // shadow actually fires, via its completion row. Rows written before the
+  // field existed carry none, so this map is a preference, not a
+  // replacement — `primaryById` below stays the fallback for them.
+  const primaryByPairId = new Map<string, DispatchEntry>();
   for (const entry of entries) {
-    if (!entry.shadow && entry.dispatchId) primaryById.set(entry.dispatchId, entry);
+    if (entry.shadow) continue;
+    if (entry.dispatchId) primaryById.set(entry.dispatchId, entry);
+    if (entry.pairId) primaryByPairId.set(entry.pairId, entry);
   }
 
   const pairs: DispatchComparisonPair[] = [];
@@ -1228,7 +1566,10 @@ export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}
     if (!entry.shadow) continue;
     const shadowId = entry.dispatchId;
     const primaryId = entry.primaryDispatchId;
-    const primary = primaryId ? primaryById.get(primaryId) ?? null : null;
+    const primary =
+      (entry.pairId != null ? primaryByPairId.get(entry.pairId) : undefined) ??
+      (primaryId != null ? primaryById.get(primaryId) : undefined) ??
+      null;
     const orphan = primary == null;
     const promptShaMismatch = !orphan && entry.promptSha256 != null && primary!.promptSha256 != null && entry.promptSha256 !== primary!.promptSha256;
     pairs.push({
@@ -1244,6 +1585,10 @@ export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}
         outputBytes: primary?.outputBytes ?? null,
         durationMs: primary?.durationMs ?? null,
         promptSha256: primary?.promptSha256 ?? null,
+        diffBytes: primary?.diffBytes ?? null,
+        diffSnapshot: primary?.diffSnapshot ?? null,
+        workspace: primary?.workspace ?? null,
+        baselineCommit: primary?.baselineCommit ?? entry.baselineCommit ?? null,
       },
       shadow: {
         dispatchId: shadowId,
@@ -1255,6 +1600,7 @@ export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}
         diffBytes: entry.diffBytes,
         diffSnapshot: entry.diffSnapshot,
         promptSha256: entry.promptSha256,
+        refusal: entry.refusal,
       },
       promptShaMismatch: Boolean(promptShaMismatch),
       orphan,

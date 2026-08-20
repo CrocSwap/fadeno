@@ -207,6 +207,124 @@ test('dispatches: host_delivery rows render one entry each, with model_override'
   assert.equal(result.entries[0]!.completed, false);
 });
 
+function attestRow(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    format: '1.0',
+    timestamp: '2026-08-12T12:02:05.000Z',
+    event: 'host_attestation',
+    archetype: 'worker',
+    effort: 'xhigh',
+    effort_evidence: 'measured',
+    pid: 4242,
+    cwd: '/repo',
+    identity_evidence: 'requested_only',
+    ...over,
+  };
+}
+
+test('dispatches: a host_attestation row correlates onto its host_delivery and renders [attested]', (t) => {
+  const root = seedLog(t, [hostRow({ reasoning_effort: 'xhigh' }), attestRow()]);
+  const result = runDispatches({ repoRoot: root });
+  // The attestation folds onto the delivery it measures — it is not a
+  // dispatch of its own — so the log still reports exactly one entry.
+  assert.equal(result.total, 1);
+  const entry = result.entries[0]!;
+  assert.equal(entry.attestedAt, '2026-08-12T12:02:05.000Z');
+  assert.equal(entry.attestedEffort, 'xhigh');
+  assert.equal(entry.attestedEffortEvidence, 'measured');
+  assert.match(result.lines[0]!, /\[attested: effort xhigh\]/);
+  assert.doesNotMatch(result.lines[0]!, /never attested/);
+});
+
+test('dispatches: an attestation that itself could not measure effort renders [attested: effort unmeasured], not a mismatch', (t) => {
+  const root = seedLog(t, [
+    hostRow({ reasoning_effort: 'xhigh' }),
+    attestRow({ effort: null, effort_evidence: 'unavailable' }),
+  ]);
+  const result = runDispatches({ repoRoot: root });
+  const entry = result.entries[0]!;
+  assert.equal(entry.attestedAt, '2026-08-12T12:02:05.000Z');
+  assert.equal(entry.attestedEffort, null);
+  assert.equal(entry.attestedEffortEvidence, 'unavailable');
+  assert.match(result.lines[0]!, /\[attested: effort unmeasured\]/);
+  assert.doesNotMatch(result.lines[0]!, /effort mismatch/);
+  assert.doesNotMatch(result.lines[0]!, /never attested/);
+});
+
+test('dispatches: a host_delivery with no matching attestation renders [never attested]', (t) => {
+  const root = seedLog(t, [hostRow()]);
+  const result = runDispatches({ repoRoot: root });
+  const entry = result.entries[0]!;
+  assert.equal(entry.attestedAt, null);
+  assert.equal(entry.attestedEffort, null);
+  assert.match(result.lines[0]!, /\[never attested\]/);
+});
+
+test('dispatches: an attested effort that differs from the requested effort renders [effort mismatch]', (t) => {
+  // The signature of a silent downgrade: the dial asked for xhigh (the
+  // materialized grid cell's reasoning_effort), but the subagent's own
+  // CLAUDE_EFFORT measured only high.
+  const root = seedLog(t, [
+    hostRow({ reasoning_effort: 'xhigh' }),
+    attestRow({ effort: 'high' }),
+  ]);
+  const result = runDispatches({ repoRoot: root });
+  const entry = result.entries[0]!;
+  assert.equal(entry.reasoningEffort, 'xhigh');
+  assert.equal(entry.attestedEffort, 'high');
+  assert.match(result.lines[0]!, /\[effort mismatch: requested xhigh, attested high\]/);
+});
+
+test('dispatches: an unmaterialized "inherited" requested effort never reads as a mismatch', (t) => {
+  // `reasoning_effort: 'inherited'` is the hook's own fallback label for "no
+  // grid cell was materialized, so this rode the session's ambient effort" —
+  // not a specific ask, so it must not manufacture a downgrade signal against
+  // whatever the subagent happens to measure.
+  const root = seedLog(t, [
+    hostRow({ reasoning_effort: 'inherited' }),
+    attestRow({ effort: 'high' }),
+  ]);
+  const result = runDispatches({ repoRoot: root });
+  assert.match(result.lines[0]!, /\[attested: effort high\]/);
+  assert.doesNotMatch(result.lines[0]!, /effort mismatch/);
+});
+
+test('dispatches: correlation matches the NEAREST preceding unattested host_delivery of the same archetype', (t) => {
+  const root = seedLog(t, [
+    hostRow({ timestamp: '2026-08-12T12:00:00.000Z', reasoning_effort: 'high' }),
+    hostRow({ timestamp: '2026-08-12T12:01:00.000Z', reasoning_effort: 'xhigh' }),
+    attestRow({ timestamp: '2026-08-12T12:01:30.000Z', effort: 'xhigh' }),
+  ]);
+  const result = runDispatches({ repoRoot: root });
+  assert.equal(result.total, 2);
+  const [first, second] = result.entries;
+  // The second (more recent, still-unattested) delivery is the match, not
+  // the first — "nearest preceding", not "first unattested seen".
+  assert.equal(first!.attestedAt, null);
+  assert.equal(second!.attestedAt, '2026-08-12T12:01:30.000Z');
+});
+
+test('dispatches: an attestation with no preceding unattested delivery of its archetype is silently dropped', (t) => {
+  // Attest ran twice for one delivery, or ran outside a steered host spawn
+  // entirely: real evidence that fadeno attest ran, but nothing this reader
+  // can render as a dispatch of its own — it must not appear as an entry,
+  // and it must not be miscounted as an unreadable row either.
+  const root = seedLog(t, [hostRow(), attestRow(), attestRow({ timestamp: '2026-08-12T12:02:10.000Z' })]);
+  const result = runDispatches({ repoRoot: root });
+  assert.equal(result.total, 1);
+  assert.equal(result.skipped, 0);
+  assert.equal(result.entries[0]!.attestedAt, '2026-08-12T12:02:05.000Z');
+});
+
+test('dispatches: an attestation for a different archetype does not correlate', (t) => {
+  const root = seedLog(t, [hostRow({ archetype: 'worker' }), attestRow({ archetype: 'reviewer' })]);
+  const result = runDispatches({ repoRoot: root });
+  assert.equal(result.total, 1);
+  assert.equal(result.skipped, 0);
+  assert.equal(result.entries[0]!.attestedAt, null);
+  assert.match(result.lines[0]!, /\[never attested\]/);
+});
+
 test('dispatches: default shows the last 10 entries; --tail selects a different window', (t) => {
   const rows: Array<Record<string, unknown>> = [];
   for (let i = 1; i <= 12; i += 1) {
@@ -282,6 +400,85 @@ test('dispatches: entries are structured data (what --json prints) — 1.0 shape
   assert.equal(e.loadout, null);
   assert.equal(e.loadoutSource, null);
   assert.equal(payload.entries[1].kind, 'host');
+});
+
+// pair_id / workspace / baseline_commit are write-only until this reader
+// parses them: the kernel has stamped all three on shadow rows since Phase 5
+// landed (see docs/experimental/slots-and-archetypes.md), but nothing here
+// read them back. Round-tripping them is what unblocks pairing by pair_id
+// and the post-shadow cleaner, both of which read straight off DispatchEntry.
+test('dispatches: pair_id, workspace, and baseline_commit survive a round trip', (t) => {
+  const baselineCommit = 'deadbeef'.repeat(5);
+  const root = seedLog(t, [
+    // The primary's OWN request row predates pair_id: the kernel only knows
+    // a shadow fired after the roll, which happens later. pair_id and
+    // baseline_commit land on its completion row instead — see dispatch.ts.
+    requested({ dispatch_id: 'primary-1' }),
+    completed({ dispatch_id: 'primary-1', pair_id: 'pair-abc', baseline_commit: baselineCommit }),
+    // The shadow's rows carry all three from the start, plus `workspace` —
+    // the retained challenger worktree path — which the primary never gets.
+    requested({
+      dispatch_id: 'shadow-1',
+      shadow: true,
+      resolution: 'shadow',
+      primary_dispatch_id: 'primary-1',
+      pair_id: 'pair-abc',
+      workspace: '.fadeno/local/shadow/shadow-1a',
+      baseline_commit: baselineCommit,
+      output_snapshot: '.fadeno/local/outputs/shadow-shadow-1a.md',
+    }),
+    completed({
+      dispatch_id: 'shadow-1',
+      shadow: true,
+      resolution: 'shadow',
+      primary_dispatch_id: 'primary-1',
+      pair_id: 'pair-abc',
+      workspace: '.fadeno/local/shadow/shadow-1a',
+      baseline_commit: baselineCommit,
+      diff_snapshot: '.fadeno/local/outputs/shadow-shadow-1a.diff',
+      diff_bytes: 12,
+    }),
+  ]);
+  const result = runDispatches({ repoRoot: root });
+  const primary = result.entries.find((e) => e.dispatchId === 'primary-1')!;
+  const shadow = result.entries.find((e) => e.dispatchId === 'shadow-1')!;
+  assert.equal(primary.pairId, 'pair-abc');
+  assert.equal(primary.baselineCommit, baselineCommit);
+  // The primary never places its own worktree on the ledger today — only a
+  // shadow's identity rows carry `workspace`.
+  assert.equal(primary.workspace, null);
+  assert.equal(shadow.pairId, 'pair-abc');
+  assert.equal(shadow.workspace, '.fadeno/local/shadow/shadow-1a');
+  assert.equal(shadow.baselineCommit, baselineCommit);
+});
+
+test('dispatches: a shadow refusal row carries pair_id but never workspace', (t) => {
+  const root = seedLog(t, [
+    requested({ dispatch_id: 'primary-2' }),
+    completed({ dispatch_id: 'primary-2' }),
+    {
+      format: DISPATCHES_FORMAT,
+      timestamp: '2026-08-12T12:05:00.000Z',
+      event: 'dispatch_refused',
+      dispatch_id: 'shadow-refused-1',
+      pair_id: 'pair-xyz',
+      archetype: 'worker',
+      role: null,
+      resolution: 'shadow',
+      shadow: true,
+      primary_dispatch_id: 'primary-2',
+      executor: 'grok-worker',
+      refusal: { predicate: 'shadow_cap', message: '4 shadows are already running and the live cap is 4.' },
+    },
+  ]);
+  const result = runDispatches({ repoRoot: root });
+  const refused = result.entries.find((e) => e.dispatchId === 'shadow-refused-1')!;
+  assert.equal(refused.shadow, true);
+  assert.equal(refused.pairId, 'pair-xyz');
+  // The worktree is either never created or removed before a refusal is
+  // written, so a refused shadow never carries `workspace`.
+  assert.equal(refused.workspace, null);
+  assert.equal(refused.refusal?.predicate, 'shadow_cap');
 });
 
 test('dispatches: pre-dispatch_id rows read as [legacy] entries, not unreadable ones', (t) => {

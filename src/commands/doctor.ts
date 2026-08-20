@@ -1,6 +1,7 @@
-import { accessSync, constants, existsSync, lstatSync, readFileSync, statSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, sep } from 'node:path';
 import { runStatus, type StatusOptions } from './status.ts';
+import { CLAUDE_EFFORT_LADDER, HOST_SURFACE_ARCHETYPES, claudeGridAgentName } from './steering.ts';
 import { detectAmbientHarness } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { isFadenoPathIgnored } from '../lib/source-control.ts';
@@ -10,8 +11,15 @@ import {
   readEffectiveLease,
   readWorkspaceLease,
 } from '../lib/workspace-lease.ts';
-import { readInstallationManifest } from '../lib/installations.ts';
+import { compareFadenoVersions, readInstallationManifest } from '../lib/installations.ts';
 import { userPaths } from '../lib/user-paths.ts';
+
+// Same literal `steering.ts` writes into every managed Claude agent file
+// (grid cell or legacy per-dial); not exported there, so duplicated here
+// rather than reaching into that module's internals. Already duplicated
+// independently by `setup.ts`'s codex equivalent and the dispatch-steering
+// hook, so one more read-only copy is consistent with the existing pattern.
+const CLAUDE_MANAGED_MARK = '<!-- fadeno:managed';
 
 export class DoctorError extends Error {}
 
@@ -209,6 +217,84 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
     ));
   } else if (status.codexMaterialization != null) {
     findings.push(finding('codex-agents', 'ok', 'managed host-agent state is current'));
+  }
+  // --- Claude identity grid & legacy per-dial managed agents ---
+  //
+  // `fadeno steering apply --claude` pre-registers a dial-independent
+  // identity grid (`fadeno-<archetype>-<effort>.md`, one per host-surface
+  // archetype x effort level) and REMOVES the legacy per-dial managed agents
+  // it replaces (`<archetype>.md`), which pin whatever model was dialed the
+  // moment they were written. Nothing else detects a repo that has never
+  // run apply, or one whose legacy files survived from before the grid
+  // existed — a stale `judge.md` pinning yesterday's model silently
+  // overrides whatever `fadeno dial` currently reports, with no observable
+  // symptom short of the wrong model actually running. Read-only, and
+  // scoped to files this steering path itself wrote: only a file carrying
+  // the managed marker is ever inspected below, never a user's own
+  // hand-authored agent of the same name.
+  {
+    const claudeAgentDir = join(repoRoot, '.claude', 'agents');
+    let entries: string[] = [];
+    try {
+      entries = existsSync(claudeAgentDir) ? readdirSync(claudeAgentDir) : [];
+    } catch {
+      entries = [];
+    }
+    const gridNames = new Set<string>();
+    for (const archetype of HOST_SURFACE_ARCHETYPES) {
+      for (const effort of CLAUDE_EFFORT_LADDER) gridNames.add(`${claudeGridAgentName(archetype, effort)}.md`);
+    }
+    const legacyNames = new Set<string>(HOST_SURFACE_ARCHETYPES.map((archetype) => `${archetype}.md`));
+    let gridPresent = 0;
+    for (const name of entries) {
+      if (!name.endsWith('.md')) continue;
+      let text: string;
+      try {
+        text = readFileSync(join(claudeAgentDir, name), 'utf8');
+      } catch {
+        continue;
+      }
+      if (!text.includes(CLAUDE_MANAGED_MARK)) continue; // never report on a hand-written agent
+      if (gridNames.has(name)) {
+        gridPresent += 1;
+      } else if (legacyNames.has(name)) {
+        const modelMatch = /^model:\s*(.+)$/m.exec(text);
+        const model = modelMatch ? modelMatch[1]!.trim() : 'unknown';
+        findings.push(finding(
+          'claude-agents-legacy',
+          'warning',
+          `${name} is a legacy per-dial managed agent pinning model "${model}" — it silently overrides whatever \`fadeno dial\` currently resolves for this archetype`,
+          'Run `fadeno steering apply --claude` to replace it with the dial-independent identity grid.',
+        ));
+      }
+      // Reuses the same directional vocabulary as the `runtime-version`
+      // finding above (`managed-older`) rather than inventing new severity
+      // words for what is the same underlying fact: a managed artifact
+      // stamped by an older build than the one running now.
+      const versionMatch = /\bversion=(\S+)/.exec(text);
+      if (versionMatch) {
+        const fileVersion = versionMatch[1]!;
+        if (compareFadenoVersions(fileVersion, status.version) === -1) {
+          findings.push(finding(
+            'claude-agents-stale',
+            'warning',
+            `${name} is stamped ${fileVersion}, older than this CLI ${status.version} (managed-older)`,
+            'Run `fadeno steering apply --claude` to refresh it.',
+          ));
+        }
+      }
+    }
+    const dialsInUse = dials != null && (
+      Object.keys(dials.session).length > 0 || Object.keys(dials.repo).length > 0 || Object.keys(dials.user).length > 0
+    );
+    if (status.harness === 'claude' && dialsInUse && gridPresent === 0) {
+      findings.push(finding(
+        'claude-agents-grid',
+        'warning',
+        'no Claude identity grid cells are registered even though dials are in use — spawns run on whatever the session already has, not what `fadeno dial` reports',
+        'Run `fadeno steering apply --claude` to pre-register the grid.',
+      ));
+    }
   }
   const surface = pluginSurface(opts.processEnv ?? process.env);
   if (surface != null) {
