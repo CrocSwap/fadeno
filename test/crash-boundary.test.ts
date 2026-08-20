@@ -232,18 +232,26 @@ test('isolated dispatch: creates diff, omits workspace_changed, bypasses lease',
   assert.equal(readWorkspaceLease(root)?.holder.id, 'blocker');
 });
 
-test('isolated dispatch conflicts with --shadow before lease or worktree', (t) => {
+test('an isolated dispatch and its shadow keep separate worktrees with separate lifetimes', (t) => {
+  // These used to be refused as a pair on the theory that two worktrees would
+  // collide. They never shared a path, and a symmetric comparison wants both
+  // arms isolated — so what the boundary owes is not refusal but distinct
+  // lifetimes: the primary's worktree is consumed once its diff is collected,
+  // the challenger's is retained for a judgment that has not happened yet.
   const root = tempRepo(t);
   initGit(root);
   seedV3(root);
-  assert.throws(
-    () => runDispatch({ archetype: 'worker', prompt: 'x', isolate: true, shadow: 'echo-worker', repoRoot: root, userPathOptions: { env: { FADENO_HARNESS: 'standalone' } } }),
-    (err: unknown) => {
-      assert.ok(err instanceof Error);
-      assert.match((err as Error).message, /--isolate conflicts with --shadow/);
-      return true;
-    },
-  );
+  const result = runDispatch({ archetype: 'worker', prompt: 'x', isolate: true, shadow: 'echo-worker', repoRoot: root, userPathOptions: { env: { FADENO_HARNESS: 'standalone' } } });
+  assert.equal(result.exitCode, 0);
+
+  const isolatedDir = join(root, '.fadeno', 'local', 'isolated');
+  assert.deepEqual(existsSync(isolatedDir) ? readdirSync(isolatedDir) : [], []);
+  assert.equal(readdirSync(join(root, '.fadeno', 'local', 'shadow')).length, 1);
+
+  // Neither arm may leave a live-shadow lease behind; that is what the cap counts.
+  const inflight = join(root, '.fadeno', 'local', 'inflight');
+  const leases = (existsSync(inflight) ? readdirSync(inflight) : []).filter((f) => f.endsWith('.shadow.json'));
+  assert.deepEqual(leases, []);
 });
 
 test('isolated dispatch: empty diff is 0 bytes and preserved', (t) => {

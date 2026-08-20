@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
@@ -105,6 +106,23 @@ export interface HostExecutorSpec {
 export type ExecutorSpec = CommandExecutorSpec | HostExecutorSpec;
 
 /** Placeholder substituted into command/resume argv. */
+/**
+ * Deterministic shadow sampling roll, in [0, 1).
+ *
+ * Keyed on what is being compared rather than on chance, for two reasons.
+ * A retried spawn — same task, same prompt — must not fire a challenger the
+ * first attempt did not, or a retry loop silently multiplies challengers. And
+ * because the roll is a pure function of (prompt, archetype, challenger), two
+ * different processes reach the same verdict without passing state: the
+ * steering hook can decide whether a spawn is a pair *before* routing it, and
+ * the kernel independently re-derives the same answer at dispatch time.
+ * Re-attaching a different challenger re-rolls.
+ */
+export function shadowSampleRoll(promptSha256: string, archetype: string, challenger: string): number {
+  const digest = createHash('sha256').update(`${promptSha256}:${archetype}:${challenger}`).digest('hex');
+  return Number.parseInt(digest.slice(0, 8), 16) / 0x1_0000_0000;
+}
+
 export const SESSION_ID_PLACEHOLDER = '{session_id}';
 
 export function substituteSessionId(argv: string[], sessionId: string): string[] {

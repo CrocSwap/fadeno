@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
@@ -35,6 +35,7 @@ import {
   type DialRef,
   type RoleResolutionSource,
   type WritePosture,
+  shadowSampleRoll,
 } from '../lib/executors.ts';
 import { readUserDials } from '../lib/user-paths.ts';
 import {
@@ -237,6 +238,7 @@ export type DispatchRefusalPredicate =
   | 'constraint_command'
   | 'shadow_isolation'
   | 'shadow_resolution'
+  | 'shadow_cap'
   | 'workspace_lease';
 
 function producedByIds(opts: AdHocDispatchOptions): string[] {
@@ -533,6 +535,8 @@ function loadProfileOrThrow(
  */
 interface PendingShadow {
   dispatchId: string;
+  /** Addresses the primary/shadow pair as one thing, on every row of both arms. */
+  pairId: string;
   /** Request-row clock reading; the completion row derives from it. */
   startedAt: Date;
   /** Kernel-side ms fallback when the supervisor's report has no duration. */
@@ -546,11 +550,80 @@ interface PendingShadow {
   diffRel: string;
   diffAbs: string;
   worktreeAbs: string;
+  worktreeRel: string;
+  /** Live-shadow lease; its removal is what frees a slot under the cap. */
+  markerAbs: string;
 }
 
 /** How often shadow collection re-checks for the supervisor's exit report. */
 const SHADOW_POLL_MS = 50;
 const SHADOW_LIVENESS_EVERY = 20;
+
+/**
+ * Live-shadow lease, one file per running challenger, alongside the
+ * supervisor's own claim. It carries the supervisor pid so liveness is a
+ * direct probe rather than a dependency on the claim the supervisor may not
+ * have published yet, and it is what the cap counts.
+ */
+const SHADOW_MARKER_SUFFIX = '.shadow.json';
+
+/**
+ * How many challengers may be running at once in this repo.
+ *
+ * A cap and a `--rate` bound different things and neither substitutes for the
+ * other: the rate bounds spend, this bounds machine load. A serial trickle of
+ * two hundred shadows costs what two hundred concurrent ones cost, so the rate
+ * is the wallet control and this is the resource control.
+ */
+const SHADOW_MAX_LIVE_DEFAULT = 4;
+
+function shadowLiveCap(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.FADENO_SHADOW_MAX_LIVE;
+  if (raw == null || raw.trim() === '') return SHADOW_MAX_LIVE_DEFAULT;
+  const parsed = Number(raw.trim());
+  if (!Number.isInteger(parsed) || parsed < 0) return SHADOW_MAX_LIVE_DEFAULT;
+  return parsed;
+}
+
+/**
+ * Challengers still running, by direct pid probe. Markers whose supervisor is
+ * gone are the residue of a killed kernel; they are dropped in passing rather
+ * than counted, so one crash cannot permanently consume the cap.
+ */
+function countLiveShadows(repoRoot: string): number {
+  const dir = join(repoRoot, ...INFLIGHT_DIR.split('/'));
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return 0; // no inflight dir: nothing is running
+  }
+  let live = 0;
+  for (const name of names) {
+    if (!name.endsWith(SHADOW_MARKER_SUFFIX)) continue;
+    const abs = join(dir, name);
+    let pid: unknown;
+    try {
+      pid = (JSON.parse(readFileSync(abs, 'utf8')) as Record<string, unknown>).supervisor_pid;
+    } catch {
+      try { rmSync(abs, { force: true }); } catch { /* nothing to drop */ }
+      continue;
+    }
+    if (typeof pid !== 'number') continue;
+    let alive: boolean;
+    try {
+      process.kill(pid, 0);
+      alive = true;
+    } catch (err) {
+      // EPERM means someone else's process holds the pid — conservatively live.
+      alive = (err as NodeJS.ErrnoException).code !== 'ESRCH';
+    }
+    if (alive) live += 1;
+    else { try { rmSync(abs, { force: true }); } catch { /* nothing to drop */ } }
+  }
+  return live;
+}
+
 
 function workspaceFingerprint(repoRoot: string): string | null {
   const status = spawnSync('git', ['-C', repoRoot, 'status', '--porcelain'], { encoding: 'utf8' });
@@ -663,8 +736,58 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const spec = postured.spec;
   const usedWriteVariant = postured.usedWriteVariant;
   const executorName = delivery.refString;
+  /**
+   * Whether this dispatch is the primary arm of a selected pair.
+   *
+   * Re-derived, never handed over: the steering hook rolled the same function
+   * of (prompt digest, archetype, challenger) when it decided to route the
+   * spawn here, so the two cannot disagree and nothing has to be threaded
+   * through the relay.
+   */
+  const pairSelectedForPrompt = (): boolean => {
+    if (archetype == null) return false;
+    if (typeof opts.shadow === 'string' && opts.shadow.trim().length > 0) return true;
+    let attachment;
+    try {
+      attachment = readLocalDialState(repoRoot).shadows[archetype];
+    } catch {
+      return false;
+    }
+    if (attachment == null) return false;
+    if (attachment.rate == null) return true;
+    let text: string | null = null;
+    try {
+      text = opts.promptFile != null && opts.promptFile !== ''
+        ? readFileSync(resolve(cwd, opts.promptFile), 'utf8')
+        : opts.prompt ?? null;
+    } catch {
+      return false;
+    }
+    if (text == null) return false;
+    const challenger = formatDialRef({
+      model: attachment.model,
+      ...(attachment.effort ? { effort: attachment.effort } : {}),
+      ...(attachment.via ? { via: attachment.via } : {}),
+    });
+    return shadowSampleRoll(sha256Hex(text), archetype, challenger) < attachment.rate;
+  };
+
   const deliverable = dispatchability(spec, harness);
-  if (!deliverable.supported) {
+  // A selected pair is the one case where handing a host dial to its own
+  // command fallback is the point rather than an accident. Both arms have to
+  // be command-delivered to be comparable at all — same transport, same
+  // isolation, same measured duration — so the re-entrancy refusal below,
+  // which exists to stop a host slot from accidentally shelling out to a
+  // subprocess of its own harness, would refuse the thing the pair is for.
+  const pairCommandFallback = !deliverable.supported
+    && deliverable.reason === 'host_in_session'
+    && spec.adapter === 'host'
+    && spec.fallbackCommand != null
+    && pairSelectedForPrompt();
+  if (pairCommandFallback) {
+    opts.onEcho?.(`pair selected: ${archetype} → ${executorName} moved to its command lane so both arms are comparable`);
+  }
+  if (!deliverable.supported && !pairCommandFallback) {
     const hostOnDemand = deliverable.reason === 'host_in_session';
     const shape = archetype ?? role ?? 'role';
     throw new DispatchCommandError(
@@ -683,9 +806,6 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const transport = spec.adapter === 'command' ? 'command' : 'host-command-fallback';
   const deliveryTransport = spec.adapter === 'command' ? 'command' : 'host-command-fallback';
 
-  if (opts.isolate && opts.shadow != null && String(opts.shadow).trim() !== '') {
-    throw new DispatchCommandError('--isolate conflicts with --shadow: both use worktrees — run one or the other.');
-  }
   const workspaceMode: WorkspaceMode = opts.isolate ? 'isolated' : 'shared';
   const needsLease = workspaceMode === 'shared' && spec.writeAccess !== false;
 
@@ -1065,6 +1185,11 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // and still unable to affect the primary's result: every failure in here
   // lands as a shadow refusal row or is swallowed.
   const startShadow = (): PendingShadow | null => {
+    // Nothing inside a shadow ever shadows: a challenger that spawns its own
+    // challengers multiplies the fleet by nesting depth. The kernel reads this
+    // flag; it is never echoed, which also keeps the arms blind to which one
+    // they are.
+    if (process.env.FADENO_IN_SHADOW === '1') return null;
     const hasFlag = typeof opts.shadow === 'string' && opts.shadow.trim().length > 0;
     let shadowDial: DialRef | null = null;
     let shadowExecutorNameInner: string | null = null;
@@ -1097,7 +1222,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // Rate sampling for attachments; the flag always fires. Rolled before the
     // primary spawns — nothing about the primary's run can influence it.
     if (shadowSourceTag === 'attachment' && attachmentRate != null) {
-      const sampler = opts.shadowSampler ?? Math.random;
+      const sampler = opts.shadowSampler ?? (() => shadowSampleRoll(promptSha256, archetype ?? '', shadowExecutorNameInner!));
       let roll: number;
       try { roll = sampler(); } catch { roll = 0; }
       if (!(roll < attachmentRate)) return null;
@@ -1105,6 +1230,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
 
     const shadowNow = new Date();
     const shadowDispatchId = randomUUID();
+    // Addresses the pair as one thing from the first row. Deriving it later
+    // from `primary_dispatch_id` works only while one arm is privileged;
+    // emitting it now costs a field and survives that stopping to be true.
+    const pairId = randomUUID();
     const shadowId8 = shadowDispatchId.slice(0, 8);
     const shadowOutputRel = join('.fadeno', 'local', 'outputs', `shadow-${shadowId8}.md`).split('\\').join('/');
     const shadowOutputAbs = join(repoRoot, shadowOutputRel);
@@ -1119,6 +1248,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         timestamp: shadowNow.toISOString(),
         event: 'dispatch_refused',
         dispatch_id: shadowDispatchId,
+        pair_id: pairId,
         archetype,
         role,
         resolution: 'shadow',
@@ -1133,6 +1263,16 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       appendEvidenceRow(repoRoot, base);
       opts.onEcho?.(`shadow refused: ${message} [${predicate}]`);
     };
+
+    // Cap before resolution: a refused-for-capacity challenger is evidence a
+    // comparison you expected did not happen, so it lands as a row rather than
+    // vanishing the way an unfired sample does.
+    const cap = shadowLiveCap();
+    const live = countLiveShadows(repoRoot);
+    if (live >= cap) {
+      writeShadowRefusal('shadow_cap', `${live} shadow${live === 1 ? ' is' : 's are'} already running and the live cap is ${cap} — raise FADENO_SHADOW_MAX_LIVE or let one finish.`);
+      return null;
+    }
 
     // Resolve shadow delivery via compile
     let shadowDelivery: CompiledDelivery;
@@ -1246,6 +1386,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     if (shadowDial.via != null) shadowDialField.via = shadowDial.via;
     const shadowIdentity: Record<string, unknown> = {
       dispatch_id: shadowDispatchId,
+      pair_id: pairId,
       archetype,
       role,
       resolution: 'shadow',
@@ -1271,6 +1412,9 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       command: shadowCommand,
       command_sha256: shadowCommandSha,
       output_snapshot: shadowOutputRel,
+      // Retained after collection so the pair stays reviewable; recording the
+      // path is what lets a later cleaner enumerate rather than glob.
+      workspace: shadowWorktreeRel,
     };
     if (eligibilityState === 'shadow_only') {
       shadowIdentity.eligibility = 'shadow_only';
@@ -1308,9 +1452,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       // cancellable by its own id.
       child = spawn(process.execPath, superviseArgv(shadowCommand, shadowInflightAbs, statusAbs, undefined, timeoutFor(shadowSpec)), {
         cwd: shadowWorktreeAbs,
-        // Without this the shadow escapes its worktree and edits the real
-        // workspace; see `atCwd`.
-        env: atCwd(withoutHarnessIdentity(process.env), shadowWorktreeAbs),
+        // Without `atCwd` the shadow escapes its worktree and edits the real
+        // workspace. FADENO_IN_SHADOW rides along so any fadeno the challenger
+        // runs — at any depth — declines to fire challengers of its own.
+        env: { ...atCwd(withoutHarnessIdentity(process.env), shadowWorktreeAbs), FADENO_IN_SHADOW: '1' },
         stdio: [promptFd, sfd, 'ignore'],
       });
     } finally {
@@ -1319,8 +1464,24 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       closeSync(sfd);
     }
     child.unref();
+    const markerAbs = join(repoRoot, ...INFLIGHT_DIR.split('/'), `${shadowDispatchId}${SHADOW_MARKER_SUFFIX}`);
+    try {
+      writeFileSync(markerAbs, `${JSON.stringify({
+        pair_id: pairId,
+        dispatch_id: shadowDispatchId,
+        primary_dispatch_id: dispatchId,
+        archetype,
+        supervisor_pid: child.pid ?? null,
+        started_at: shadowNow.toISOString(),
+        workspace: shadowWorktreeRel,
+      })}\n`, 'utf8');
+    } catch {
+      // Best-effort: the lease bounds concurrency, it never gates the shadow.
+    }
     return {
       dispatchId: shadowDispatchId,
+      pairId,
+      markerAbs,
       startedAt: shadowNow,
       startedMs,
       identity: shadowIdentity,
@@ -1332,6 +1493,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       diffRel: shadowDiffRel,
       diffAbs: shadowDiffAbs,
       worktreeAbs: shadowWorktreeAbs,
+      worktreeRel: shadowWorktreeRel,
     };
   };
 
@@ -1421,15 +1583,14 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     appendEvidenceRow(repoRoot, sRow);
     opts.onEcho?.(`shadow diff: ${diffBytes} bytes → ${pending.diffRel}`);
     } finally {
-      // Collection is also the ownership boundary for the detached worktree.
-      // Keep cleanup in a finally: primary receipt failures and shadow evidence
-      // failures must not strand a registered worktree on disk.
-      try {
-        const removed = spawnSync('git', ['worktree', 'remove', '--force', pending.worktreeAbs], { cwd: repoRoot, encoding: 'utf8' });
-        if (removed.error != null || removed.status !== 0) rmSync(pending.worktreeAbs, { recursive: true, force: true });
-      } catch {
-        try { rmSync(pending.worktreeAbs, { recursive: true, force: true }); } catch {}
-      }
+      // The worktree is RETAINED: it is the challenger's work product, and a
+      // pair is judged later — often much later — so deleting it here would
+      // throw away half the comparison the moment it finished. The recorded
+      // `workspace` path is how the post-shadow cleaner finds it. What is
+      // released here is the live-shadow lease, in a finally: a primary
+      // receipt failure or a shadow evidence failure must not permanently
+      // consume a slot under the cap.
+      try { rmSync(pending.markerAbs, { force: true }); } catch { /* nothing to drop */ }
     }
   };
 
@@ -1616,6 +1777,9 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     ...(outcome != null ? { outcome } : {}),
     ...(isTimeout && supervisorStatus?.timeoutMs != null ? { timeout_ms: supervisorStatus.timeoutMs } : {}),
     ...(isTimeout && supervisorStatus?.deadlineAt != null ? { deadline_at: supervisorStatus.deadlineAt } : {}),
+    // Only when a challenger actually fired. The primary's request row was
+    // written before the roll, so this is the first row that can carry it.
+    ...(pendingShadow != null ? { pair_id: pendingShadow.pairId } : {}),
   };
   // Concurrent writers make this attestation, not judgment.
   if (workspaceBefore != null && workspaceAfter != null) {

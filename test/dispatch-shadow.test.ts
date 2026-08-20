@@ -9,7 +9,7 @@ import { runDispatchesOutput } from '../src/commands/dispatches.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
 import { readLocalDialState, writeLocalDialState } from '../src/lib/executors.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
-import { tempRepo } from './helpers.ts';
+import { exists, tempRepo } from './helpers.ts';
 import { read } from './helpers.ts';
 
 const onHarness = (harness: string): UserPathOptions => ({ env: { FADENO_HARNESS: harness } });
@@ -442,7 +442,7 @@ test('shadow worktree is cut from HEAD before the primary can move it', (t) => {
   assert.equal(shadowHead, headBefore, 'the shadow must start from pre-primary HEAD');
 });
 
-test('shadow worktree is removed when primary completion persistence throws', (t) => {
+test('a shadow worktree is retained for review, but its live lease is released even on the primary error path', (t) => {
   // Both request rows exist before the primary starts. Turning the ledger path
   // into a directory from the primary forces its completion append to throw,
   // after the concurrent shadow and its detached worktree already exist.
@@ -456,11 +456,21 @@ test('shadow worktree is removed when primary completion persistence throws', (t
     () => runDispatch({ archetype: 'worker', prompt: 'cleanup', repoRoot: root, userPathOptions: onHarness('standalone') }),
   );
 
+  // The challenger's work product outlives the run: a pair is judged later, so
+  // deleting it here would throw away half the comparison. It stays a
+  // registered worktree, not an orphaned directory.
   const shadowRoot = join(root, '.fadeno', 'local', 'shadow');
-  assert.deepEqual(existsSync(shadowRoot) ? readdirSync(shadowRoot) : [], []);
+  assert.equal(readdirSync(shadowRoot).length, 1);
   const worktrees = spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: root, encoding: 'utf8' });
   assert.equal(worktrees.status, 0);
-  assert.doesNotMatch(worktrees.stdout, /\.fadeno[/\\]local[/\\]shadow/);
+  assert.match(worktrees.stdout, /\.fadeno[/\\]local[/\\]shadow/);
+
+  // What must NOT survive is the live-shadow lease: a failed primary receipt
+  // that permanently consumed a slot under the cap would starve every later
+  // pair in the repo.
+  const inflight = join(root, '.fadeno', 'local', 'inflight');
+  const leases = (existsSync(inflight) ? readdirSync(inflight) : []).filter((f) => f.endsWith('.shadow.json'));
+  assert.deepEqual(leases, []);
 });
 
 test('dispatches --output last never resolves to a shadow', (t) => {
@@ -507,4 +517,168 @@ test('constraint-boundary shadow_only: assert rows.length ===2 + event names', (
     assert.equal(row.eligibility, 'shadow_only');
     assert.equal(row.gate_eligible, false);
   }
+});
+
+test('shadow sampling is a function of the prompt, so a retry cannot re-roll it', (t) => {
+  const root = seedV3(t);
+  initGit(root);
+  writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'luna-worker', rate: 0.5 } }, legacyNote: null });
+  // Three dispatches of the SAME prompt at a coin-flip rate. Under Math.random
+  // this is a 1-in-4 flake and, worse, a retry loop that fires a challenger the
+  // first attempt did not. Keyed on the prompt digest there is one decision.
+  const fired: number[] = [];
+  for (let i = 0; i < 3; i += 1) {
+    const before = evidenceRows(root).filter((r) => r.shadow === true).length;
+    runDispatch({ archetype: 'worker', prompt: 'the same task, retried', repoRoot: root, userPathOptions: onHarness('standalone') });
+    fired.push(evidenceRows(root).filter((r) => r.shadow === true).length - before);
+  }
+  assert.equal(new Set(fired).size, 1, `mixed decisions for one prompt: ${JSON.stringify(fired)}`);
+
+  // And the roll is not a constant: a different challenger on the same prompt
+  // is a different draw, so re-attaching re-rolls rather than inheriting.
+  const decisionFor = (challenger: string): number => {
+    writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: challenger, rate: 0.5 } }, legacyNote: null });
+    const before = evidenceRows(root).filter((r) => r.shadow === true).length;
+    runDispatch({ archetype: 'worker', prompt: 'the same task, retried', repoRoot: root, userPathOptions: onHarness('standalone') });
+    return evidenceRows(root).filter((r) => r.shadow === true).length - before;
+  };
+  // Same challenger, same answer as the loop above — the seam is stable across
+  // state rewrites, not just within one process.
+  assert.equal(decisionFor('luna-worker'), fired[0]);
+});
+
+test('a paired dispatch carries one pair_id on both arms and records the challenger workspace', (t) => {
+  const root = seedV3(t);
+  initGit(root);
+  writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'luna-worker' } }, legacyNote: null });
+  runDispatch({ archetype: 'worker', prompt: 'pair me', repoRoot: root, userPathOptions: onHarness('standalone') });
+
+  const rows = evidenceRows(root);
+  const shadowRows = rows.filter((r) => r.shadow === true);
+  assert.equal(shadowRows.length, 2);
+  const pairIds = new Set(shadowRows.map((r) => r.pair_id));
+  assert.equal(pairIds.size, 1);
+  const pairId = [...pairIds][0] as string;
+  assert.match(pairId, /^[0-9a-f-]{36}$/);
+
+  // The primary's request row predates the roll, so the completion row is the
+  // first place it can appear — and it appears only because a shadow fired.
+  const primaryRequest = rows.find((r) => r.event === 'dispatch_requested' && r.shadow !== true)!;
+  const primaryCompleted = rows.find((r) => r.event === 'dispatch_completed' && r.shadow !== true)!;
+  assert.equal(primaryRequest.pair_id, undefined);
+  assert.equal(primaryCompleted.pair_id, pairId);
+
+  // The retained worktree is addressable from the row rather than by globbing.
+  const workspace = shadowRows[0]!.workspace as string;
+  assert.match(workspace, /^\.fadeno\/local\/shadow\//);
+  assert.ok(exists(root, workspace), `retained worktree missing at ${workspace}`);
+});
+
+test('a dispatch with no shadow carries no pair_id', (t) => {
+  const root = seedV3(t);
+  initGit(root);
+  writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: {}, legacyNote: null });
+  runDispatch({ archetype: 'worker', prompt: 'solo', repoRoot: root, userPathOptions: onHarness('standalone') });
+  for (const row of evidenceRows(root)) assert.equal(row.pair_id, undefined);
+});
+
+test('nothing inside a shadow fires a shadow of its own', (t) => {
+  const root = seedV3(t);
+  initGit(root);
+  writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'luna-worker' } }, legacyNote: null });
+  const previous = process.env.FADENO_IN_SHADOW;
+  process.env.FADENO_IN_SHADOW = '1';
+  t.after(() => { if (previous == null) delete process.env.FADENO_IN_SHADOW; else process.env.FADENO_IN_SHADOW = previous; });
+
+  const echoes: string[] = [];
+  runDispatch({ archetype: 'worker', prompt: 'nested', repoRoot: root, onEcho: (l) => echoes.push(l), userPathOptions: onHarness('standalone') });
+
+  // Suppressed like an unfired sample: no rows, and — deliberately — no echo.
+  // An arm that could read "shadow suppressed" would learn which arm it is.
+  assert.deepEqual(evidenceRows(root).filter((r) => r.shadow === true), []);
+  assert.ok(!echoes.some((line) => line.toLowerCase().includes('shadow')), echoes.join('\n'));
+});
+
+test('the live-shadow cap refuses with a row rather than silently skipping', (t) => {
+  const root = seedV3(t);
+  initGit(root);
+  writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'luna-worker' } }, legacyNote: null });
+  const previous = process.env.FADENO_SHADOW_MAX_LIVE;
+  process.env.FADENO_SHADOW_MAX_LIVE = '0';
+  t.after(() => { if (previous == null) delete process.env.FADENO_SHADOW_MAX_LIVE; else process.env.FADENO_SHADOW_MAX_LIVE = previous; });
+
+  runDispatch({ archetype: 'worker', prompt: 'capped', repoRoot: root, userPathOptions: onHarness('standalone') });
+
+  // A comparison you expected and did not get is worth a row; an unfired
+  // sample is not. The distinction is the whole reason this is not silent.
+  const refusal = evidenceRows(root).find((r) => r.event === 'dispatch_refused')!;
+  const detail = refusal.refusal as { predicate: string; message: string };
+  assert.equal(detail.predicate, 'shadow_cap');
+  assert.equal(refusal.shadow, true);
+  assert.match(detail.message, /live cap is 0/);
+  // The primary is untouched, as with every other shadow-side refusal.
+  assert.equal(evidenceRows(root).filter((r) => r.event === 'dispatch_completed' && r.shadow !== true).length, 1);
+});
+
+test('--isolate and --shadow now coexist: two worktrees, two diffs', (t) => {
+  const root = seedV3(t);
+  initGit(root);
+  // The guard that refused this assumed only one arm could want a worktree.
+  // Symmetric pairs need both, and the paths never collided in the first place.
+  const result = runDispatch({
+    archetype: 'worker', prompt: 'both isolated', repoRoot: root,
+    isolate: true, shadow: 'luna-worker', userPathOptions: onHarness('standalone'),
+  });
+  assert.equal(result.exitCode, 0);
+
+  const rows = evidenceRows(root);
+  const primary = rows.find((r) => r.event === 'dispatch_completed' && r.shadow !== true)!;
+  const shadow = rows.find((r) => r.event === 'dispatch_completed' && r.shadow === true)!;
+  assert.ok(exists(root, String(primary.diff_snapshot)), 'primary isolated diff missing');
+  assert.ok(exists(root, String(shadow.diff_snapshot)), 'shadow diff missing');
+  assert.equal(primary.pair_id, shadow.pair_id);
+});
+
+test('a selected pair moves a host-dialed primary onto its own command lane', (t) => {
+  // The claude harness delivers this dial in-session, so an ordinary dispatch
+  // is refused to stop a host slot shelling out to a subprocess of its own
+  // harness. A selected pair is the exception: both arms must be
+  // command-delivered or there is nothing to compare.
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    schema_version: 3,
+    models: { opus: { provider: 'anthropic', id: 'opus' }, grok: { provider: 'xai', id: 'grok' } },
+    routes: {
+      claude: {
+        'current-host': { host: true },
+        anthropic: { driver: 'claude-cli', host: true, command: ECHO('HOST-FALLBACK:'), write_access: true },
+        xai: { driver: 'grok', command: ECHO('CHALLENGER:'), write_access: true },
+      },
+    },
+    archetypes: { worker: {} },
+    dials: { worker: 'opus' },
+  }));
+  initGit(root);
+
+  // No attachment: the refusal stands, and says why.
+  assert.throws(
+    () => runDispatch({ archetype: 'worker', prompt: 'solo', repoRoot: root, userPathOptions: onHarness('claude') }),
+    /runs in-session/,
+  );
+
+  writeLocalDialState(root, { dials: {}, shadows: { worker: { model: 'grok' } }, legacyNote: null });
+  const echoes: string[] = [];
+  const result = runDispatch({ archetype: 'worker', prompt: 'pair me', repoRoot: root, onEcho: (l) => echoes.push(l), userPathOptions: onHarness('claude') });
+
+  assert.equal(result.exitCode, 0);
+  assert.ok(echoes.some((l) => l.includes('pair selected')), echoes.join('\n'));
+  const rows = evidenceRows(root);
+  const primary = rows.find((r) => r.event === 'dispatch_completed' && r.shadow !== true)!;
+  const shadow = rows.find((r) => r.event === 'dispatch_completed' && r.shadow === true)!;
+  // Same transport on both arms — the confound the pair exists to remove.
+  assert.equal(primary.transport, 'host-command-fallback');
+  assert.equal(shadow.transport, 'command');
+  assert.equal(primary.pair_id, shadow.pair_id);
+  assert.equal(primary.prompt_sha256, shadow.prompt_sha256);
 });
