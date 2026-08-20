@@ -657,12 +657,17 @@ delivery and an effort that disagrees with its dial.
 worktree-removal timing window can leave a pair un-appliable; detect
 mutation of carried paths (a hardlinked file written in place changes the
 primary's copy, and cleanup cannot undo it) and stamp such a pair suspect
-rather than trying to prevent it; and one gap that is not shadow-specific at
-all — `mergeLayer` copies catalog keys by exact literal name, so a misspelled
-top-level key is dropped before `parseExecutorProfile`'s strict unknown-key
-check ever runs. A typo'd `dials:` silently does nothing today. That is a
-pre-existing loader property, verified against `dials` at HEAD, and it wants
-its own change rather than a blind fix.
+rather than trying to prevent it; and one gap that was not shadow-specific at
+all — `mergeLayer` copied catalog keys by exact literal name, so a misspelled
+top-level key was dropped before `parseExecutorProfile`'s strict unknown-key
+check ever ran, and a typo'd `dials:` silently did nothing. **Closed:** each
+layer's raw keys are validated before the merge against one shared
+`CATALOG_TOP_LEVEL_KEYS`, which the merge loop is now driven by — so a key
+added there layers by default instead of being inert. The same failure shape
+survives one layer down by value *type* rather than key name (`dials: "sol"`
+is still dropped by the merge before the parser can reject it); that wants its
+own change, because the parser is inconsistent about `null` and tightening the
+merge would make a bare `dials:` start failing.
 
 **Deliberately out of scope.** Write-shaped primaries land last: for
 `reviewer` and `judge` nothing needs to reach the workspace, so both arms sit
@@ -824,7 +829,9 @@ invalid.
 **Status:** the Claude half is **built** — predicate, grid retirement, hook,
 rendering, and hook-side refusal evidence. The Codex half below is designed,
 not built. `models.<name>.effort` and the `relay:` map are catalog work that
-depends on the layered loader rejecting misspelled top-level keys first.
+depended on the layered loader rejecting misspelled top-level keys first —
+now satisfied, so `relay:` joins `CATALOG_TOP_LEVEL_KEYS` and layers by
+default rather than needing the merge loop taught about it.
 
 
 The identity grid exists to let a host spawn run at an effort the session is
