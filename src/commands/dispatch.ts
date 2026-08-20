@@ -60,11 +60,14 @@ import {
   WORKSPACE_LEASE_LOCK,
   acquireWorkspaceLease,
   carryDeclaredPaths,
+  carryMutationStamp,
   isWorkspaceLeaseAlive,
   readWorkspaceLease,
   releaseWorkspaceLease,
+  verifyCarriedPaths,
   withIsolatedWorktree,
   WorkspaceLeaseError,
+  type CarryFingerprint,
   type LeaseHolder,
   type WorkspaceLeaseRecord,
   type WorkspaceMode,
@@ -559,6 +562,8 @@ interface PendingShadow {
   diffAbs: string;
   worktreeAbs: string;
   worktreeRel: string;
+  /** Carry-time identity of the hardlink-carried paths, for `carry_mutated`. */
+  carryFingerprint: CarryFingerprint;
   /** Live-shadow lease; its removal is what frees a slot under the cap. */
   markerAbs: string;
 }
@@ -1750,6 +1755,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // apply`/`git add -A` regardless of when they land.
     const shadowCarry = carryDeclaredPaths(repoRoot, shadowWorktreeAbs, profile.worktreeCarry);
     const carryRecords = shadowCarry.records;
+    const carryFingerprint = shadowCarry.fingerprint;
     if (shadowCarry.failure != null) {
       writeShadowRefusal(
         'shadow_carry',
@@ -1917,6 +1923,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       diffAbs: shadowDiffAbs,
       worktreeAbs: shadowWorktreeAbs,
       worktreeRel: shadowWorktreeRel,
+      carryFingerprint,
     };
   };
 
@@ -2001,6 +2008,13 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       diff_snapshot: pending.diffRel,
       diff_bytes: diffBytes,
     };
+    // Mutation through a shared inode: declared paths carried by hardlink are
+    // one inode in two trees, so a challenger tool that wrote one IN PLACE
+    // changed the primary's copy with it. Checked here, after the challenger
+    // exited and while its worktree is still retained. Evidence only — the
+    // stamp never repairs, reverts, or deletes. Absent when clean.
+    const shadowCarryMutation = carryMutationStamp(verifyCarriedPaths(repoRoot, pending.carryFingerprint));
+    if (shadowCarryMutation != null) sRow.carry_mutated = shadowCarryMutation;
     if (spawnFailedMsg != null) sRow.error = spawnFailedMsg;
     // Shadow completions OMIT workspace_changed by construction
     appendEvidenceRow(repoRoot, sRow);
@@ -2047,6 +2061,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // either, for reasons that have nothing to do with the work it was asked
   // to do. Populated below, inside the isolated branch only.
   let isolatedCarryRecords: Array<{ path: string; mechanism: WorktreeCarryMechanism }> = [];
+  let isolatedCarryFingerprint: CarryFingerprint | null = null;
   // The mode actually used. `workspaceMode` is the INTENT recorded on the
   // request row; this is what happened. They differ only when a paired
   // primary's own worktree could not be built (see the degradation below).
@@ -2150,6 +2165,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
           );
         }
         isolatedCarryRecords = isolatedCarry.records;
+        isolatedCarryFingerprint = isolatedCarry.fingerprint;
         // Replay the SAME captured baseline the challenger got. Without this
         // the primary would start from a clean checkout of HEAD while its
         // challenger starts from HEAD plus the caller's work-in-progress —
@@ -2396,6 +2412,16 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   }
   // Absent when nothing was declared or nothing declared existed, matching
   // the shadow row's same convention above.
+  // Same shared-inode hazard on this arm, and it matters MORE here than on
+  // the challenger: this is the arm whose work is kept, so a hardlinked file
+  // it wrote in place has already reached the caller's tree by a channel the
+  // merge-back never sees. Correct even though `withIsolatedWorktree` has
+  // already removed the worktree — a link-count change is not treated as
+  // drift, so teardown does not read as mutation.
+  if (isolatedCarryFingerprint != null) {
+    const primaryCarryMutation = carryMutationStamp(verifyCarriedPaths(repoRoot, isolatedCarryFingerprint));
+    if (primaryCarryMutation != null) row.carry_mutated = primaryCarryMutation;
+  }
   if (effectiveWorkspaceMode === 'isolated' && isolatedCarryRecords.length > 0) {
     row.worktree_carry = isolatedCarryRecords;
   }

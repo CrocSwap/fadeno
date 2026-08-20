@@ -246,7 +246,11 @@ test('an isolated dispatch and its shadow keep separate worktrees with separate 
 
   const isolatedDir = join(root, '.fadeno', 'local', 'isolated');
   assert.deepEqual(existsSync(isolatedDir) ? readdirSync(isolatedDir) : [], []);
-  assert.equal(readdirSync(join(root, '.fadeno', 'local', 'shadow')).length, 1);
+  // Both arms of a pair now live under one neutral directory
+  // (`.fadeno/local/pair/<pair-id8>/<arm>`), so the retained challenger is
+  // found by walking that rather than a path that named it.
+  const pairDirs = readdirSync(join(root, '.fadeno', 'local', 'pair'));
+  assert.equal(pairDirs.length, 1);
 
   // Neither arm may leave a live-shadow lease behind; that is what the cap counts.
   const inflight = join(root, '.fadeno', 'local', 'inflight');

@@ -96,8 +96,10 @@ test('a shadow sees PWD inside its worktree, not the workspace it must not touch
 
   const snapshot = join(root, String(shadowDone.output_snapshot));
   const reported = JSON.parse(readFileSync(snapshot, 'utf8')) as { pwd: string; cwd: string };
-  assert.match(reported.cwd, /[/\\]\.fadeno[/\\]local[/\\]shadow[/\\]/, 'shadow did not run in its worktree');
-  assert.match(reported.pwd, /[/\\]\.fadeno[/\\]local[/\\]shadow[/\\]/, 'PWD pointed outside the shadow worktree');
+  // Neutral by design: the path must NOT say "shadow", or an arm could read
+  // its own cwd and learn which one it is.
+  assert.match(reported.cwd, /[/\\]\.fadeno[/\\]local[/\\]pair[/\\]/, 'shadow did not run in its worktree');
+  assert.match(reported.pwd, /[/\\]\.fadeno[/\\]local[/\\]pair[/\\]/, 'PWD pointed outside the shadow worktree');
   // Compare tails, not whole paths: process.cwd() resolves symlinks
   // (/var → /private/var on macOS) while PWD keeps the logical spelling, and
   // the worktree is already removed by the time this assertion runs.
