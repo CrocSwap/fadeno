@@ -165,7 +165,10 @@ test('doctor is silent about Claude agents when apply has done its job', (t) => 
 // silently outranks whatever `fadeno setup --codex` maintains at user scope.
 // Older `fadeno init` runs copied frozen brokers into project scope with no
 // managed header — which is also what stops `steering apply` from refreshing
-// them, since project-scope emit skips existing files. A broker frozen before
+// them, since project-scope emit only ever refreshes a file that carries the
+// marker. (Fresh inits now stamp one, so they are refreshable and read as
+// healthy; an unmanaged file here is a genuinely frozen legacy copy.) A broker
+// frozen before
 // `--prompt-file`/`--host-executor` calls `steering resolve` without them, the
 // resolver never sees the prompt bytes it hashes, and the repo drops out of
 // shadow pairing with nothing on disk looking wrong. These tests pin the four
@@ -315,7 +318,9 @@ test('doctor reports a managed-but-older project-scope Codex broker as a stale s
   // A managed project file is not the unmanaged case: `steering apply` still
   // cannot refresh it in place, and the remedy says so rather than promising
   // a refresh that never happens.
-  assert.match(stale.remediation!, /cannot bring a project-scope file up to date in place/);
+  // A managed project file IS refreshed in place now that project scope is
+  // stamped, so the remedy offers that alongside deletion.
+  assert.match(stale.remediation!, /refreshed in place/);
   assert.equal(result.ok, true);
 });
 

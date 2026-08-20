@@ -1,5 +1,4 @@
 import { accessSync, constants, existsSync, lstatSync, readFileSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, sep } from 'node:path';
 import { runStatus, type StatusOptions } from './status.ts';
 import { listRetiredClaudeGridCells } from './steering.ts';
@@ -13,7 +12,7 @@ import {
   readWorkspaceLease,
 } from '../lib/workspace-lease.ts';
 import { compareFadenoVersions, readInstallationManifest } from '../lib/installations.ts';
-import { userPaths, type UserPathOptions } from '../lib/user-paths.ts';
+import { codexUserAgentDir, userPaths } from '../lib/user-paths.ts';
 
 // Same literal `steering.ts` writes into every managed Claude agent file
 // (retired grid cell or legacy per-dial); not exported there, so duplicated
@@ -33,11 +32,29 @@ const CLAUDE_MANAGED_MARK = '<!-- fadeno:managed';
 const CODEX_MANAGED_MARK = '# fadeno:managed';
 const CODEX_MANAGED_VERSION_RE = /^# fadeno:managed\b[^\n]*?\bversion=(\S+)/;
 
+/**
+ * Flags a current broker passes to `steering resolve`. Their absence is the
+ * concrete damage a frozen broker does, so it is read off the file rather
+ * than inferred from the file being old:
+ *
+ * `--prompt-file` is how the resolver sees the prompt bytes it hashes to
+ * decide whether a spawn is paired with a shadow challenger; without it that
+ * repo silently stops participating in shadow pairing. `--host-executor` is
+ * how a Codex broker proves the effort its agent was materialized at, which
+ * is what mismatch detection reads.
+ */
+const CODEX_RESOLVE_FLAGS = ['--prompt-file', '--host-executor'] as const;
+
 interface CodexBrokerState {
   /** The file's first line carries the managed header `steering apply` writes. */
   managed: boolean;
   /** `version=` off that header, when it carries one. */
   version: string | null;
+  /**
+   * Which of `CODEX_RESOLVE_FLAGS` this file's text never mentions. Empty
+   * means it is current on the resolver contract, whatever stamped it.
+   */
+  missingFlags: string[];
 }
 
 /**
@@ -53,22 +70,34 @@ function readCodexBroker(path: string): CodexBrokerState | null {
   } catch {
     return null;
   }
-  if (!text.startsWith(CODEX_MANAGED_MARK)) return { managed: false, version: null };
+  const missingFlags = CODEX_RESOLVE_FLAGS.filter((flag) => !text.includes(flag));
+  if (!text.startsWith(CODEX_MANAGED_MARK)) return { managed: false, version: null, missingFlags };
   const match = CODEX_MANAGED_VERSION_RE.exec(text);
-  return { managed: true, version: match ? match[1]! : null };
+  return { managed: true, version: match ? match[1]! : null, missingFlags };
 }
 
 /**
- * `$CODEX_HOME/agents`, else `<home>/.codex/agents` — the same precedence
- * `steering.ts`'s private `codexAgentDir('user', …)` and `status.ts`'s
- * materialization probe both apply. Replicated rather than imported because
- * that helper is not exported; keep the three in step if the rule ever moves.
+ * What a frozen broker's own text proves about its resolver contract.
+ *
+ * The point is to say only what was read. Staleness used to be inferred from
+ * the file being unrefreshable — plausible, and wrong here: this repo's own
+ * frozen copies still carry `--prompt-file`. So the flags are checked, and
+ * the sentence differs depending on what is actually missing.
  */
-function codexUserAgentDir(userPathOptions?: UserPathOptions): string {
-  const codexHome = userPathOptions?.env?.CODEX_HOME?.trim() ||
-    process.env.CODEX_HOME?.trim() ||
-    join(userPathOptions?.home ?? homedir(), '.codex');
-  return join(codexHome, 'agents');
+function describeContractDrift(items: Array<{ name: string; missingFlags: string[] }>): string {
+  const drifted = items.filter((item) => item.missingFlags.length > 0);
+  if (drifted.length === 0) {
+    return 'Each one still passes the resolver flags this build expects, so nothing is broken yet — ' +
+      'but frozen text cannot follow the contract, and nothing here will say so when it moves.';
+  }
+  const named = drifted
+    .map((item) => `${item.name} omits ${item.missingFlags.join(' and ')}`)
+    .join('; ');
+  return `${named} — so \`steering resolve\` is invoked without ${
+    drifted.some((item) => item.missingFlags.includes('--prompt-file'))
+      ? 'the prompt bytes it hashes to decide whether a spawn is paired, dropping this repo out of shadow pairing'
+      : 'the proof of the effort its agent was materialized at, defeating mismatch detection'
+  }.`;
 }
 
 export class DoctorError extends Error {}
@@ -296,7 +325,7 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
     const projectDir = join(repoRoot, '.codex', 'agents');
     const userDir = codexUserAgentDir(opts.userPathOptions);
     const soleProject: string[] = [];
-    const unmanagedShadow: string[] = [];
+    const unmanagedShadow: Array<{ name: string; missingFlags: string[] }> = [];
     const staleShadow: Array<{ name: string; label: string }> = [];
     for (const archetype of ['worker', 'reviewer', 'judge']) {
       const name = `${archetype}.toml`;
@@ -306,7 +335,7 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
       if (user == null) {
         soleProject.push(name);
       } else if (!project.managed) {
-        unmanagedShadow.push(name);
+        unmanagedShadow.push({ name, missingFlags: project.missingFlags });
       } else if (
         project.version != null && user.version != null &&
         compareFadenoVersions(project.version, user.version) === -1
@@ -327,8 +356,8 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
       findings.push(finding(
         'codex-agents-shadow',
         'warning',
-        `${unmanagedShadow.join(', ')} in ${projectDir} carry no managed header, and Codex prefers project scope over the user-scope broker(s) in ${userDir} — so the unmanaged copy is what every session loads, and \`fadeno steering apply --codex\` can never refresh it in place (project-scope emit skips an existing file). Frozen at whatever build wrote it, it drifts behind the resolver contract with no symptom: a copy predating \`--prompt-file\`/\`--host-executor\` invokes \`steering resolve\` without them, which drops this repo out of shadow pairing and silently defeats mismatch detection`,
-        `Delete ${absolute(unmanagedShadow)} so the user-scope broker takes over. Rewriting in place (\`fadeno steering apply --codex --scope project --force\`) refreshes the content but leaves the file unmanaged and still shadowing, so this finding would stay.`,
+        `${unmanagedShadow.map((item) => item.name).join(', ')} in ${projectDir} carry no managed header, and Codex prefers project scope over the user-scope broker(s) in ${userDir} — so the unmanaged copy is what every session loads, and no ordinary \`fadeno steering apply --codex\` or \`fadeno init\` refreshes it in place, because project-scope emit only ever refreshes a file carrying the managed header. ${describeContractDrift(unmanagedShadow)}`,
+        `Delete ${absolute(unmanagedShadow.map((item) => item.name))} so the user-scope broker takes over — or, to keep project scope deliberately, run \`fadeno steering apply --codex --scope project --force\`, which rewrites the content and stamps the managed header, clearing this finding.`,
       ));
     }
     if (staleShadow.length > 0) {
@@ -336,7 +365,7 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
         'codex-agents-shadow-stale',
         'warning',
         `${staleShadow.map((item) => item.label).join(', ')} in ${projectDir} are managed but stamped older than the user-scope broker(s) in ${userDir}, and Codex prefers project scope — so the older generation is what every session actually loads`,
-        `Delete ${absolute(staleShadow.map((item) => item.name))} so the current user-scope broker takes over; \`fadeno steering apply --codex\` cannot bring a project-scope file up to date in place, because it skips existing files and never stamps project scope with a managed header.`,
+        `Delete ${absolute(staleShadow.map((item) => item.name))} so the current user-scope broker takes over, or run \`fadeno steering apply --codex --scope project\` to bring the project copy up to this build — a managed project file is refreshed in place.`,
       ));
     }
   }
