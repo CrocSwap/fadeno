@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.37";
+  if (true) return "0.6.0-rc.38";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -31629,6 +31629,10 @@ function runDialShow(opts = {}) {
     legacyPinNote: legacy_pin_note
   };
 }
+function runShadowShow(opts = {}) {
+  const result = runDialShow(opts);
+  return { ...result, rows: result.rows.filter((row) => row.shadow != null) };
+}
 function deliveryGuidance(archetype, executorName, spec, harness) {
   const deliverable = dispatchability(spec, harness);
   if (deliverable.supported) {
@@ -34669,6 +34673,10 @@ var globalOptions = () => ({ ...GLOBAL_OPTIONS });
 var command = (options, positionals = [], subcommands) => ({ options: { ...globalOptions(), ...options }, positionals, subcommands });
 var NONE = { kind: "none" };
 var PATH = { kind: "path" };
+var SHADOW_SPEC = command(
+  { "--via": { kind: "free" }, "--rate": { kind: "free" }, "--json": NONE },
+  ["archetype", "free"]
+);
 var COMMANDS = {
   setup: command({ "--codex": NONE, "--claude": NONE, "--non-interactive": NONE, "--from": PATH, "--reset-runtime": NONE }),
   status: command({ "--verbose": NONE }),
@@ -34697,11 +34705,13 @@ var COMMANDS = {
     ["archetype", "free"],
     {
       clear: command({ "--session": NONE, "--user": NONE, "--repo": NONE }, ["archetype"]),
-      shadow: command({ "--via": { kind: "free" }, "--rate": { kind: "free" } }, ["archetype", "free"]),
+      shadow: SHADOW_SPEC,
       "clear-shadow": command({}, ["archetype"]),
       resolve: command({ "--archetype": { kind: "archetype" }, "--prompt-sha256": { kind: "free" } }, [])
     }
   ),
+  // Top-level alias for `dial shadow` — same handler in cli.ts, same flags.
+  shadow: SHADOW_SPEC,
   steering: command(
     {},
     [],
@@ -37461,6 +37471,8 @@ Usage:
   fadeno dial <archetype>[+<archetype>\u2026] <model>[@effort] [--via <driver>] [--session|--user|--repo] [--force]   # set (multi: a+b, a,b, or a b c)
   fadeno dial clear [<archetype>] [--session|--user|--repo]
   fadeno dial shadow <archetype> <model>[@effort] [--via <driver>] [--rate <r>]
+  fadeno dial shadow                           # show mode: archetypes with an active shadow
+  fadeno shadow ...                            # alias for 'fadeno dial shadow ...' (same forms)
   fadeno dial clear-shadow [<archetype>]
   fadeno dial resolve --archetype <a>          # JSON, hook contract unchanged
   fadeno models [<name>]                Model registry + frame-neutral harness identities
@@ -37629,6 +37641,7 @@ var KNOWN_CLI_COMMANDS = /* @__PURE__ */ new Set([
   "cancel",
   "models",
   "dial",
+  "shadow",
   "dispatch",
   "dispatch-fallback",
   "dispatch-start",
@@ -37735,8 +37748,12 @@ Usage:
                                                no archetype = all session + user dials
   fadeno dial shadow <archetype> <model>[@effort] [--rate <r>]
                                                Attach a shadow challenger (scored, never gates)
+  fadeno dial shadow                          Show mode: only archetypes with an active shadow
   fadeno dial clear-shadow [<archetype>]       Remove shadow attachment(s)
   fadeno dial resolve --archetype <a>          Resolution JSON (hook/script contract)
+
+'fadeno shadow ...' is a top-level alias for 'fadeno dial shadow ...' \u2014 same
+attach and show-mode forms, same flags (including --json).
 
 Options:
   --via <driver>   Driver alias that delivers the model (e.g. opencode, codex)
@@ -38554,10 +38571,15 @@ function withLaneLabels(lines, roles) {
     return /\[[^\]]*\]$/.test(line) ? line.replace(/\[[^\]]*\]$/, label) : `${line} ${label}`;
   });
 }
-function printDialShow(result) {
+function printDialShow(result, emptyMessage) {
   if (result.legacy_pin_note) console.log(result.legacy_pin_note);
   if (result.staleDials.length > 0) printStaleDials(result.staleDials);
   if (result.staleShadows.length > 0) printStaleShadows(result.staleShadows);
+  if (result.rows.length === 0 && emptyMessage != null) {
+    console.log(emptyMessage);
+    if (result.note) console.log(result.note);
+    return;
+  }
   const header2 = `${"archetype".padEnd(12)}  ${"model".padEnd(18)}  ${"effort".padEnd(8)}  ${"harness".padEnd(22)}  source`;
   console.log(header2);
   for (const row of result.rows) {
@@ -38572,6 +38594,28 @@ function printDialShow(result) {
     if (row.shadow) console.log(formatShadowLine(row.shadow, "  "));
   }
   if (result.note) console.log(result.note);
+}
+var SHADOW_EMPTY_MESSAGE = "no active shadow attachments \u2014 attach one with `fadeno shadow <archetype> <model> [--rate <r>]`";
+function runShadowCommand(archetype, model, opts) {
+  if (archetype == null) {
+    const result2 = runShadowShow({});
+    if (opts.json) {
+      console.log(JSON.stringify(result2, null, 2));
+      return 0;
+    }
+    printDialShow(result2, SHADOW_EMPTY_MESSAGE);
+    return 0;
+  }
+  const result = runDialShadow({ archetype, model, via: opts.via, rate: opts.rate });
+  if (opts.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return 0;
+  }
+  for (const note of result.notes) console.log(note);
+  const rate = result.rate != null ? ` [rate ${result.rate}]` : "";
+  console.log(`shadow attached: ${result.archetype} ~ ${result.refString} via ${result.driver}${rate}`);
+  if (result.previous) console.log(`  (was ${result.previous.model}${result.previous.rate ? ` rate ${result.previous.rate}` : ""})`);
+  return 0;
 }
 function printDrive(result) {
   console.log("");
@@ -39369,19 +39413,12 @@ Or advance manually with the playbook cursor:`);
         return 0;
       }
       if (sub === "shadow") {
-        if (positionals.length < 4) throw new Error("Usage: fadeno dial shadow <archetype> <model>[@effort] [--via <driver>] [--rate <n>]");
-        if (positionals.length > 4) throw new Error("Usage: fadeno dial shadow <archetype> <model>[@effort] [--via <driver>] [--rate <n>]");
-        const [, , archetype, model] = positionals;
-        const result = runDialShadow({ archetype, model, via: values.via ?? null, rate: values.rate });
-        if (values.json) {
-          console.log(JSON.stringify(result, null, 2));
-          return 0;
-        }
-        for (const note of result.notes) console.log(note);
-        const rate = result.rate != null ? ` [rate ${result.rate}]` : "";
-        console.log(`shadow attached: ${result.archetype} ~ ${result.refString} via ${result.driver}${rate}`);
-        if (result.previous) console.log(`  (was ${result.previous.model}${result.previous.rate ? ` rate ${result.previous.rate}` : ""})`);
-        return 0;
+        const shadowUsage = "Usage: fadeno dial shadow [<archetype> <model>[@effort] [--via <driver>] [--rate <n>]]";
+        if (positionals.length > 4) throw new Error(shadowUsage);
+        const archetype = positionals[2];
+        const model = positionals[3];
+        if (archetype != null && model == null) throw new Error(shadowUsage);
+        return runShadowCommand(archetype, model, { via: values.via ?? null, rate: values.rate, json: Boolean(values.json) });
       }
       if (sub === "resolve") {
         if (!values.archetype) throw new Error("Usage: fadeno dial resolve --archetype <name> [--prompt-sha256 <hex>]");
@@ -39435,7 +39472,18 @@ Or advance manually with the playbook cursor:`);
         }
         return 0;
       }
-      throw new Error("Usage: fadeno dial [<archetype> [<model>[@effort] [--via <driver>] [--session|--user|--repo] [--force]] | clear [<archetype>] [--session|--user|--repo] | shadow <archetype> <model>[@effort] [--via <driver>] [--rate <n>] | clear-shadow [<archetype>] | resolve --archetype <name>]");
+      throw new Error("Usage: fadeno dial [<archetype> [<model>[@effort] [--via <driver>] [--session|--user|--repo] [--force]] | clear [<archetype>] [--session|--user|--repo] | shadow [<archetype> <model>[@effort] [--via <driver>] [--rate <n>]] | clear-shadow [<archetype>] | resolve --archetype <name>]");
+    }
+    // Top-level alias for `fadeno dial shadow ...` — same handler
+    // (`runShadowCommand`) as the `dial` subcommand above, so the two
+    // spellings cannot drift apart.
+    case "shadow": {
+      const shadowUsage = "Usage: fadeno shadow [<archetype> <model>[@effort] [--via <driver>] [--rate <n>]]";
+      if (positionals.length > 3) throw new Error(shadowUsage);
+      const archetype = positionals[1];
+      const model = positionals[2];
+      if (archetype != null && model == null) throw new Error(shadowUsage);
+      return runShadowCommand(archetype, model, { via: values.via ?? null, rate: values.rate, json: Boolean(values.json) });
     }
     case "dispatch": {
       const promptFile = values["prompt-file"];
