@@ -7,6 +7,7 @@ import {
   compileDialRef,
   applyWritePosture,
   commandRoutable,
+  explainPairRoutability,
   explainWriteConflict,
   eligibilityFor,
   formatDialRef,
@@ -569,8 +570,11 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
       // be told, and must not read the silence as a "no".
       selected: rate == null ? true : digest ? shadowSampleRoll(digest, archetype, challenger) < rate : null,
       // The PRIMARY's own resolved spec, after write-posture — what a
-      // selected pair would have to reuse to reach the command lane.
-      routable: commandRoutable(spec),
+      // selected pair would have to reuse to reach the command lane. Must
+      // also satisfy the archetype's write posture on that lane, not just
+      // have one: `commandRoutable` alone says a lane exists, not that
+      // forcing both arms onto it would actually work.
+      routable: explainPairRoutability(spec, refString, archetype, profile).routable,
     };
   }
 
@@ -645,16 +649,17 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     // host executor otherwise matches the session baseline and would resolve
     // in-session — an in-session primary cannot be isolated, measured, or
     // diffed the way its challenger is. Gated on `routable` too: a primary
-    // with no `fallback_command` has no command lane to force onto, and
-    // routing it here anyway would only hand the agent a `fadeno dispatch`
-    // that the kernel's own `host_in_session` refusal would then reject.
+    // with no `fallback_command`, or whose command lane cannot satisfy the
+    // archetype's write posture, has no command lane a pair could actually
+    // use, and routing it here anyway would only hand the agent a `fadeno
+    // dispatch` that the kernel's own refusal would then reject.
     if (shadow?.selected === true && shadow.routable === true) {
       return finish({
         mode: 'command', archetype, role,
         // The pair overrides the lane the effort/model predicate chose, so it
         // says so rather than letting `lane: 'host'` contradict `mode`. The
         // contract guarantee still holds: this branch is gated on
-        // `shadow.routable`, which is `commandRoutable(spec)`.
+        // `shadow.routable`, which is `explainPairRoutability(...).routable`.
         lane: 'command',
         lane_reason: 'shadow pair forces the command lane',
         executor: refString, adapter: 'host', model: (spec as any).model,

@@ -15,6 +15,7 @@ import {
   eligibilityFor,
   ExecutorProfileError,
   explainEligibilityConflict,
+  explainPairRoutability,
   explainWriteConflict,
   formatDialRef,
   forcesWritePosture,
@@ -1429,8 +1430,9 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
       selected: rate == null ? true : digest ? shadowSampleRoll(digest, archetype, challenger) < rate : null,
       // The PRIMARY's own resolved spec — `spec` above, after write-posture —
       // not the challenger's. This is what a selected pair would have to
-      // reuse to reach the command lane.
-      routable: commandRoutable(spec),
+      // reuse to reach the command lane, and that lane must also satisfy the
+      // archetype's write posture, not merely exist.
+      routable: explainPairRoutability(spec, resolved.delivery.refString, archetype, profile).routable,
     };
   }
 

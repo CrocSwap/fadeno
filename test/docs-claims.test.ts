@@ -237,6 +237,17 @@ const CLAIMS: Claim[] = [
     src: { files: ['src/lib/executors.ts'], patterns: [/write_variant/, /applyWritePosture/] },
   },
   {
+    // Two independent `commandRoutable(spec)` literals at dial/steering
+    // resolve is how `shadow.routable` promised pairs the kernel then
+    // refused. One helper, named in the design record and at every caller.
+    id: 'pair-routability-write-posture',
+    doc: { files: [SLOTS], patterns: [/explainPairRoutability/, /shadow_write_posture/] },
+    src: {
+      files: ['src/lib/executors.ts', 'src/commands/dispatch.ts', 'src/commands/dial.ts', 'src/commands/steering.ts'],
+      patterns: [/explainPairRoutability/, /shadow_write_posture/],
+    },
+  },
+  {
     id: 'models-command-probe',
     doc: { files: [DIALS], patterns: [/models_command/] },
     src: { files: ['src/lib/executors.ts'], patterns: [/models_command/] },

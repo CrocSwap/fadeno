@@ -1751,6 +1751,35 @@ export function commandRoutable(spec: ExecutorSpec): boolean {
   return spec.adapter === 'command' || (spec.adapter === 'host' && spec.fallbackCommand != null);
 }
 
+/**
+ * Whether a selected pair can actually reach this spec's command lane: a
+ * lane must exist (`commandRoutable`) AND, once both arms are forced onto
+ * it, that lane must satisfy the archetype's declared write posture
+ * (`explainWriteConflict` — the same predicate a direct dial resolution is
+ * judged by, since forcing the command lane is exactly what a pair does to
+ * a host spec). One shared answer for both the `steering`/`dial` resolve
+ * previews (which decide whether to *announce* a pair) and the dispatch
+ * kernel (which decides whether to actually *form* one): two independent
+ * copies of this question is the drift shape this catalog keeps getting
+ * bitten by (see the `CATALOG_TOP_LEVEL_KEYS` comment above).
+ */
+export function explainPairRoutability(
+  spec: ExecutorSpec,
+  executorName: string,
+  archetype: string | null,
+  profile: ExecutorProfile,
+): { routable: true } | { routable: false; reason: string } {
+  if (!commandRoutable(spec)) {
+    return {
+      routable: false,
+      reason: `executor "${executorName}" has no command lane — a host delivery with no fallback_command has nothing for a pair to force both arms onto.`,
+    };
+  }
+  const conflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile);
+  if (conflict != null) return { routable: false, reason: conflict };
+  return { routable: true };
+}
+
 export function explainEligibilityConflict(
   delivery: DeliveryChoice,
   archetype: string | null,

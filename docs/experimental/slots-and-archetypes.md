@@ -639,10 +639,14 @@ and the comparison renderer reports the primary's own diff, pairs on
 "is this rock solid?" found four ways a pair could produce a confident wrong
 verdict, all now closed. A selected pair whose primary had no command lane
 used to route the spawn to a proxy the kernel would then refuse, failing the
-task outright; `shadow.routable` gates that, and an unroutable pair degrades
-to no pair rather than to no work. A challenger's worktree lacked everything
-gitignored, so any task gated on building or testing was unwinnable for one
-arm alone; `worktree_carry:` carries declared paths by reflink, hardlink, or
+task outright; `shadow.routable` gates that — lane exists *and* the command
+lane can satisfy the archetype's write posture (`explainPairRoutability`) —
+and an unroutable pair degrades to no pair rather than to no work. A
+selected pair whose command lane cannot write still writes a
+`shadow_write_posture` refusal row so `fadeno dispatches` can say why. A
+challenger's worktree lacked everything gitignored, so any task gated on
+building or testing was unwinnable for one arm alone; `worktree_carry:`
+carries declared paths by reflink, hardlink, or
 copy (never a directory symlink, which would share the namespace and let a
 rename-based write land in the primary's real tree), recording the mechanism
 per path. Byte-identical prompts plus differing cwd let a prompt naming

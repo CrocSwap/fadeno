@@ -18,6 +18,7 @@ import {
   explainEligibilityConflict,
   explainProviderConflict,
   applyWritePosture,
+  explainPairRoutability,
   explainWriteConflict,
   loadExecutorProfile,
   readLocalDialState,
@@ -250,6 +251,7 @@ export type DispatchRefusalPredicate =
   | 'shadow_baseline'
   | 'shadow_carry'
   | 'shadow_containment'
+  | 'shadow_write_posture'
   | 'ignored_output_kept'
   | 'workspace_lease';
 
@@ -1635,6 +1637,19 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     const live = countLiveShadows(repoRoot);
     if (live >= cap) {
       writeShadowRefusal('shadow_cap', `${live} shadow${live === 1 ? ' is' : 's are'} already running and the live cap is ${cap} — raise FADENO_SHADOW_MAX_LIVE or let one finish.`);
+      return null;
+    }
+
+    // A pair forces BOTH arms onto the PRIMARY's command lane (see
+    // `pairCommandFallback` above), so the pair is only as capable as that
+    // lane is — independent of how capable the challenger's own target is.
+    // Checked here, not folded into `decidePairCandidate`: candidacy says a
+    // pair is WANTED, this is a capability question decided after, and a
+    // refusal row here is what lets a user who attached a shadow at
+    // `--rate 1.0` and sees no pairs find out why from `fadeno dispatches`.
+    const primaryRoutability = explainPairRoutability(spec, executorName, archetype, profile);
+    if (!primaryRoutability.routable) {
+      writeShadowRefusal('shadow_write_posture', primaryRoutability.reason);
       return null;
     }
 
