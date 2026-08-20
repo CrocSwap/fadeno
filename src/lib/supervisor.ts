@@ -26,7 +26,9 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { WORKSPACE_LEASE_LOCK_STALE_MS } from './workspace-lease.ts';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { WORKSPACE_LEASE_LOCK_STALE_MS, type WorkspaceLeaseRecord } from './workspace-lease.ts';
 
 /**
  * How often the supervisor checks whether the kernel is still there.
@@ -626,6 +628,21 @@ export function readSupervisorStatus(path: string, read: (p: string) => string):
 export const INFLIGHT_DIR = ['.fadeno', 'local', 'inflight'].join('/');
 
 /**
+ * Repo-relative path of the in-flight claim a command-fallback delivery's
+ * supervisor publishes, given the dispatch it is delivering.
+ *
+ * One function rather than the literal, because it now has two consumers that
+ * must agree exactly: `runDispatchFallback` writes the claim here, and the
+ * workspace lease records this path so a third party can observe whether that
+ * delivery is still alive. A drifting spelling would not error — the reader
+ * would simply find no claim and report a running dispatch as finished, which
+ * is the failure this path exists to stop.
+ */
+export function fallbackClaimRelPath(runId: string, dispatchId: string): string {
+  return `${INFLIGHT_DIR}/fallback-${runId}-${dispatchId}.json`;
+}
+
+/**
  * What the supervisor publishes while its executor runs.
  *
  * Distinguishes every process fact the contract names:
@@ -790,4 +807,52 @@ export function readInflightClaim(path: string, read: (p: string) => string): In
     stdoutBytes: stdout,
     stderrBytes: stderr,
   };
+}
+
+/**
+ * What can actually be said about whether this lease's holder is still
+ * working — as opposed to whether the lease still blocks, which is
+ * `isWorkspaceLeaseAlive` and deliberately a different question.
+ *
+ * `unobservable` is the honest default and not a degraded answer: a host
+ * delivery runs inside another agent session that publishes no process
+ * identity here, so nothing on this machine can tell. The point of the
+ * three-way answer is that a reporter can stop saying "abandoned" about a
+ * dispatch it has no evidence for.
+ */
+export type WorkspaceLeaseLiveness =
+  /** A published process identity for this holder is still alive. */
+  | { state: 'running'; claim: string; heldMs: number }
+  /** A claim was recorded and every identity on it is gone. */
+  | { state: 'ended'; claim: string; heldMs: number }
+  /** No claim was ever recorded for this holder. */
+  | { state: 'unobservable'; claim: null; heldMs: number };
+
+/**
+ * Read the liveness the lease points at.
+ *
+ * Deliberately NOT wired into `isWorkspaceLeaseAlive`. That function decides
+ * whether a second writer may enter, and its conservatism — a null
+ * supervisor_pid stays blocking until a terminal receipt — is what keeps a
+ * crash between executor exit and receipt from admitting one. An observation
+ * may inform a human; it must never unlock the workspace.
+ */
+export function describeWorkspaceLeaseLiveness(
+  record: WorkspaceLeaseRecord | null,
+  repoRoot: string,
+  opts: { now?: Date; probe?: (pid: number, signal: 0) => void; read?: (p: string) => string } = {},
+): WorkspaceLeaseLiveness | null {
+  if (record == null) return null;
+  const now = opts.now ?? new Date();
+  const started = Date.parse(record.started_at);
+  const heldMs = Number.isNaN(started) ? 0 : Math.max(0, now.getTime() - started);
+  const rel = record.liveness_claim;
+  if (rel == null || rel === '') return { state: 'unobservable', claim: null, heldMs };
+  const read = opts.read ?? ((path: string) => readFileSync(path, 'utf8'));
+  const claim = readInflightClaim(join(repoRoot, ...rel.split('/')), read);
+  if (claim == null) return { state: 'ended', claim: rel, heldMs };
+  const alive = opts.probe != null
+    ? inflightClaimIsAlive(claim, opts.probe)
+    : inflightClaimIsAlive(claim);
+  return { state: alive ? 'running' : 'ended', claim: rel, heldMs };
 }

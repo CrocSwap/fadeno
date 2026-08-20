@@ -54,7 +54,7 @@ import {
   type HostDispatchProgressReceipt,
 } from '../lib/host-dispatch.ts';
 import { findRepoRoot, packageVersion, templatesDir } from '../lib/paths.ts';
-import { INFLIGHT_DIR, readSupervisorStatus, sleepSync, superviseArgv, supervisedSpawnError, supervisorCanStillReport } from '../lib/supervisor.ts';
+import { fallbackClaimRelPath, INFLIGHT_DIR, readSupervisorStatus, sleepSync, superviseArgv, supervisedSpawnError, supervisorCanStillReport } from '../lib/supervisor.ts';
 import {
   WORKSPACE_LEASE_FILE,
   WORKSPACE_LEASE_LOCK,
@@ -2644,8 +2644,7 @@ export function runDispatchFallback(opts: DispatchFallbackOptions): DispatchFall
   });
   const fallbackClaimAbs = join(
     repoRoot,
-    ...INFLIGHT_DIR.split('/'),
-    `fallback-${lookup.runId}-${request.dispatchId}.json`,
+    ...fallbackClaimRelPath(lookup.runId, request.dispatchId).split('/'),
   );
   mkdirSync(join(repoRoot, ...INFLIGHT_DIR.split('/')), { recursive: true });
   const spawned = (() => {

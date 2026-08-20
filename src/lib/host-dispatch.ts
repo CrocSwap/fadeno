@@ -10,6 +10,7 @@ import { acquireWorkspaceLease, heartbeatWorkspaceLease, releaseWorkspaceLease, 
 import { readEventsStrict, resolveRun, RUN_LEDGER_SCHEMA_VERSION, RunLedgerError, type RunEvent } from './run-ledger.ts';
 import { LedgerWriteError, LedgerWriter } from './run-ledger-write.ts';
 import { parseSnapshotDocument, type SnapshotDocument } from './executors.ts';
+import { fallbackClaimRelPath } from './supervisor.ts';
 import { collectHostWorkspaceDiff, collectIsolatedRecoveryDiff, HostWorkspaceError, hostIsolatedDiffPath, hostWorktreePath, isHostPathSafe, readHostWorkspaceState, removeHostWorkspace, removeHostWorkspaceByPath, type HostWorkspaceState } from './host-workspace.ts';
 import { isRegisteredWorktree } from './workspace-lease.ts';
 
@@ -812,6 +813,17 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
         supervisorPid: null,
         executorPid: null,
         processGroupId: null,
+        // ...which is right for exclusion and blind for reporting: with no pid
+        // here, a 47-minute command fallback and an abandoned one are the same
+        // bytes. A command fallback DOES have a supervisor publishing pids, so
+        // record where to find it. Read-only — see
+        // `describeWorkspaceLeaseLiveness`; it can never unlock the workspace.
+        // Host delivery keeps null: it runs in another agent's session, which
+        // publishes no identity here, and claiming otherwise would be worse
+        // than admitting the state is unobservable.
+        livenessClaim: transport === 'command-fallback'
+          ? fallbackClaimRelPath(runId, opts.dispatchId)
+          : null,
         startedAt: opts.now ?? new Date(),
         heartbeatAt: opts.now ?? new Date(),
         stdoutBytes: 0,

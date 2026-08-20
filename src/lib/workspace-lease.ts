@@ -72,6 +72,25 @@ export interface WorkspaceLeaseRecord {
   last_output_at: string | null;
   stdout_bytes: number;
   stderr_bytes: number;
+  /**
+   * Repo-relative path of the in-flight claim where THIS holder's liveness can
+   * be observed, or absent when nothing on this machine can observe it.
+   *
+   * A host dispatch deliberately publishes no `supervisor_pid` — the lease is a
+   * durable reservation that must outlive any supervisor, or a crash between
+   * the executor dying and the terminal receipt would admit a second writer.
+   * That is right for mutual exclusion and useless for reporting: a healthy
+   * 47-minute command fallback and an abandoned one are byte-identical here,
+   * and `doctor` called a running dispatch "abandoned" and offered destructive
+   * recovery on it.
+   *
+   * So liveness is recorded separately from the lock. The supervisor already
+   * publishes pids into an in-flight claim; this field is the pointer to it,
+   * and `describeWorkspaceLeaseLiveness` is the only reader. Nothing here
+   * feeds `isWorkspaceLeaseAlive` — an observation must never be able to
+   * weaken exclusion.
+   */
+  liveness_claim?: string | null;
 }
 
 /** Options for acquiring the shared writer lease. */
@@ -87,6 +106,8 @@ export interface AcquireWorkspaceLeaseOptions {
   lastOutputAt?: Date | null;
   stdoutBytes?: number;
   stderrBytes?: number;
+  /** See `WorkspaceLeaseRecord.liveness_claim`; repo-relative, or null. */
+  livenessClaim?: string | null;
   /** Injectable liveness probe for tests (pid, signal) => void. */
   probe?: (pid: number, signal: number) => void;
   now?: Date;
@@ -250,6 +271,7 @@ function readRecord(repoRoot: string): WorkspaceLeaseRecord | null {
   if (typeof doc.heartbeat_at !== 'string' || Number.isNaN(Date.parse(doc.heartbeat_at))) return null;
   if (doc.last_output_at != null && (typeof doc.last_output_at !== 'string' || Number.isNaN(Date.parse(doc.last_output_at as string)))) return null;
   if (typeof doc.stdout_bytes !== 'number' || typeof doc.stderr_bytes !== 'number') return null;
+  if (doc.liveness_claim != null && typeof doc.liveness_claim !== 'string') return null;
   return { ...(doc as unknown as WorkspaceLeaseRecord), holder, ...(holders == null ? {} : { holders }) };
 }
 
@@ -387,6 +409,9 @@ export function acquireWorkspaceLease(opts: AcquireWorkspaceLeaseOptions): Works
               ...(existing.holder_heartbeat_at ?? {}),
               [workspaceLeaseHolderKey(opts.holder)]: heartbeat.toISOString(),
             },
+            liveness_claim: opts.livenessClaim !== undefined
+              ? opts.livenessClaim
+              : (existing.liveness_claim ?? null),
             supervisor_pid: opts.supervisorPid ?? existing.supervisor_pid,
             executor_pid: opts.executorPid ?? existing.executor_pid,
             process_group_id: opts.processGroupId ?? existing.process_group_id,
@@ -421,6 +446,7 @@ export function acquireWorkspaceLease(opts: AcquireWorkspaceLeaseOptions): Works
       holders: [opts.holder],
       holder_started_at: { [workspaceLeaseHolderKey(opts.holder)]: started.toISOString() },
       holder_heartbeat_at: { [workspaceLeaseHolderKey(opts.holder)]: heartbeat.toISOString() },
+      liveness_claim: opts.livenessClaim ?? null,
       supervisor_pid: opts.supervisorPid ?? null,
       executor_pid: opts.executorPid ?? null,
       process_group_id: opts.processGroupId ?? null,

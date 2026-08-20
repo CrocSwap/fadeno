@@ -11,6 +11,7 @@ import {
   readEffectiveLease,
   readWorkspaceLease,
 } from '../lib/workspace-lease.ts';
+import { describeWorkspaceLeaseLiveness } from '../lib/supervisor.ts';
 import { compareFadenoVersions, readInstallationManifest } from '../lib/installations.ts';
 import { codexUserAgentDir, userPaths } from '../lib/user-paths.ts';
 
@@ -174,6 +175,16 @@ export function pluginSurface(env: NodeJS.ProcessEnv): { root: string; version: 
 }
 
 /** Read-only health checks; warnings never turn into a failing exit status. */
+/** Compact human duration for a lease hold: "3s", "12m", "1h47m". */
+function describeHeld(ms: number): string {
+  const totalMinutes = Math.floor(ms / 60_000);
+  if (totalMinutes < 1) return `${Math.max(0, Math.floor(ms / 1000))}s`;
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes === 0 ? `${hours}h` : `${hours}h${minutes}m`;
+}
+
 export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const findings: DoctorFinding[] = [];
@@ -513,16 +524,42 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
     } else if (effective != null) {
       const holder = lease.holder;
       const holdersCount = lease.holders?.length ?? 1;
-      const detail = `${holder.kind} "${holder.id}" (supervisor_pid ${lease.supervisor_pid ?? 'unknown'}, started ${lease.started_at}, holders: ${holdersCount})`;
-      let remediation: string;
-      if (holder.kind === 'host-dispatch' && holder.runId != null && holder.dispatchId != null) {
-        remediation = `Inspect it with \`fadeno show ${holder.runId}\`; recover an abandoned host dispatch with \`fadeno dispatch-complete ${holder.runId} ${holder.dispatchId}\` or \`fadeno dispatch-fail ${holder.runId} ${holder.dispatchId}\`; Only after verifying no writer remains, remove ${WORKSPACE_LEASE_FILE} as a last resort.`;
-      } else if (holder.runId != null) {
-        remediation = `Inspect it with \`fadeno show ${holder.runId}\`; recover an abandoned host dispatch with dispatch-fail/dispatch-complete. Only after verifying no writer remains, remove ${WORKSPACE_LEASE_FILE} as a last resort.`;
+      const liveness = describeWorkspaceLeaseLiveness(lease, repoRoot);
+      const held = describeHeld(liveness?.heldMs ?? 0);
+      // A running dispatch is not a problem, and calling it one had a cost:
+      // this check reported EVERY held lease as an abandoned host dispatch and
+      // offered `dispatch-fail` on it. Run against a live 47-minute command
+      // fallback, that destroys the run and re-does the work. Assert
+      // abandonment only where there is evidence for it.
+      if (liveness?.state === 'running') {
+        findings.push(finding(
+          'workspace-lease',
+          'ok',
+          `${holder.kind} "${holder.id}" is running (held ${held}, supervisor alive via ${liveness.claim})`,
+        ));
       } else {
-        remediation = `Inspect it with \`fadeno show <run>\`; recover an abandoned host dispatch with dispatch-fail/dispatch-complete. Only after verifying no writer remains, remove ${WORKSPACE_LEASE_FILE} as a last resort.`;
+        // The two remaining states are NOT the same claim, and the remediation
+        // says which one this is. `ended` has positive evidence the supervisor
+        // is gone; `unobservable` has no evidence either way — a host delivery
+        // runs in another agent's session, which publishes nothing here.
+        const ended = liveness?.state === 'ended';
+        const observed = ended
+          ? `held ${held}, supervisor has exited`
+          : `held ${held}, liveness not observable from here`;
+        const detail = `${holder.kind} "${holder.id}" (supervisor_pid ${lease.supervisor_pid ?? 'unknown'}, started ${lease.started_at}, ${observed}, holders: ${holdersCount})`;
+        const lead = ended
+          ? 'Its supervisor is gone, so recover it'
+          : 'If it is genuinely abandoned, recover it';
+        let remediation: string;
+        if (holder.kind === 'host-dispatch' && holder.runId != null && holder.dispatchId != null) {
+          remediation = `Inspect it with \`fadeno show ${holder.runId}\`; ${lead} with \`fadeno dispatch-complete ${holder.runId} ${holder.dispatchId}\` or \`fadeno dispatch-fail ${holder.runId} ${holder.dispatchId}\`; Only after verifying no writer remains, remove ${WORKSPACE_LEASE_FILE} as a last resort.`;
+        } else if (holder.runId != null) {
+          remediation = `Inspect it with \`fadeno show ${holder.runId}\`; ${lead} with dispatch-fail/dispatch-complete. Only after verifying no writer remains, remove ${WORKSPACE_LEASE_FILE} as a last resort.`;
+        } else {
+          remediation = `Inspect it with \`fadeno show <run>\`; ${lead} with dispatch-fail/dispatch-complete. Only after verifying no writer remains, remove ${WORKSPACE_LEASE_FILE} as a last resort.`;
+        }
+        findings.push(finding('workspace-lease', 'warning', detail, remediation));
       }
-      findings.push(finding('workspace-lease', 'warning', detail, remediation));
     } else {
       const holder = lease.holder;
       const pid = lease.supervisor_pid ?? 'unknown';
