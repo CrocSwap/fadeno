@@ -14150,14 +14150,41 @@ function parseLayer(path) {
   if (!doc) throw new ExecutorProfileError(`${path} is not a mapping.`);
   return doc;
 }
-function mergeLayer(target, source, layer, provenance) {
+var ENTRY_MERGED_KEYS = /* @__PURE__ */ new Set([
+  "routes",
+  "archetypes",
+  "bindings",
+  "models",
+  "dials",
+  "tools"
+]);
+function validateLayerKeys(doc, path) {
+  const unknown = Object.keys(doc).filter((key) => !CATALOG_TOP_LEVEL_KEYS.includes(key));
+  if (unknown.length === 0) return;
+  if (unknown.some((key) => PRE_DIALS_CATALOG_KEYS.includes(key))) {
+    throw preDialsCatalogError(path);
+  }
+  const described = unknown.map((key) => {
+    const near = suggestCatalogKey(key);
+    return near != null ? `\`${key}\` (did you mean \`${near}\`?)` : `\`${key}\``;
+  });
+  throw new ExecutorProfileError(
+    `${path}: unknown top-level key${unknown.length === 1 ? "" : "s"} ${described.join(", ")}. Known keys: ${CATALOG_TOP_LEVEL_KEYS.join(", ")}.`
+  );
+}
+function mergeLayer(target, source, layer, path, provenance) {
   if (layer !== "project" && mapping(source.dials) != null && Object.keys(mapping(source.dials)).length > 0) {
     throw new ExecutorProfileError("repo pins live in the project catalog; user dials are state \u2014 use `fadeno dial <archetype> <model> --user`");
   }
   if (layer !== "project" && Array.isArray(source.worktree_carry) && source.worktree_carry.length > 0) {
     throw new ExecutorProfileError("worktree_carry describes this repo's build state; it is project-only \u2014 declare it in .fadeno/executors.yaml, not the user or builtin catalog.");
   }
-  for (const key of ["routes", "archetypes", "bindings", "models", "dials", "tools"]) {
+  validateLayerKeys(source, path);
+  for (const key of CATALOG_TOP_LEVEL_KEYS) {
+    if (!ENTRY_MERGED_KEYS.has(key)) {
+      if (source[key] !== void 0) target[key] = source[key];
+      continue;
+    }
     const entries = mapping(source[key]);
     if (entries == null) continue;
     const current = mapping(target[key]) ?? {};
@@ -14170,11 +14197,6 @@ function mergeLayer(target, source, layer, provenance) {
       if (key === "bindings") provenance.bindings[name] = layer;
     }
     target[key] = current;
-  }
-  for (const key of ["schema_version", "constraints", "unregistered_model_driver", "worktree_carry"]) {
-    if (source[key] !== void 0) {
-      target[key] = source[key];
-    }
   }
 }
 function projectIsComplete(doc) {
@@ -14206,7 +14228,7 @@ function loadLayeredProfile(repoRoot, options = {}, harness) {
   const effective = suppressLayering ? [{ layer: "project", path: project.path }] : present;
   const document = {};
   const provenance = { bindings: {} };
-  for (const entry of effective) mergeLayer(document, parsedLayers.get(entry.layer), entry.layer, provenance);
+  for (const entry of effective) mergeLayer(document, parsedLayers.get(entry.layer), entry.layer, entry.path, provenance);
   const text = stringifyObject(document);
   return {
     profile: parseExecutorProfile(text, effective.map((entry) => entry.layer).join(" + "), harness),
@@ -14388,10 +14410,53 @@ function atCwd(env, cwd) {
   return { ...env, PWD: cwd };
 }
 var EXECUTORS_FILE = (0, import_node_path4.join)(".fadeno", "executors.yaml");
+var CATALOG_TOP_LEVEL_KEYS = [
+  "schema_version",
+  "models",
+  "routes",
+  "bindings",
+  "dials",
+  "archetypes",
+  "constraints",
+  "unregistered_model_driver",
+  "tools",
+  "worktree_carry"
+];
+var PRE_DIALS_CATALOG_KEYS = ["executors", "targets", "loadouts", "default_loadout"];
 function preDialsCatalogError(source) {
   return new ExecutorProfileError(
     `${source}: schema_version 3 required \u2014 pre-dials catalogs are not supported; migrate: targets:\u2192models:, loadouts:\u2192dials:, default_loadout: delete; see docs/experimental/dials-and-registry.md`
   );
+}
+function editDistance(a, b) {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  let previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j += 1) {
+      const substitution = previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1);
+      current[j] = Math.min(current[j - 1] + 1, previous[j] + 1, substitution);
+    }
+    previous = current;
+  }
+  return previous[b.length];
+}
+function suggestCatalogKey(key) {
+  const probe2 = key.toLowerCase();
+  let best = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const candidate of CATALOG_TOP_LEVEL_KEYS) {
+    const distance = editDistance(probe2, candidate);
+    if (distance < bestDistance) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  }
+  if (best == null || bestDistance > 2) return null;
+  if (bestDistance >= Math.min(probe2.length, best.length)) return null;
+  return best;
 }
 function isMapping(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -14822,13 +14887,10 @@ function parseExecutorProfile(text, source, harness = "standalone") {
       worktreeCarry.push(normalized);
     }
   }
-  const allowedTop = ["schema_version", "models", "routes", "dials", "bindings", "archetypes", "constraints", "unregistered_model_driver", "tools", "worktree_carry"];
-  const unknownTop = Object.keys(doc).filter((k) => !allowedTop.includes(k));
+  const unknownTop = Object.keys(doc).filter((k) => !CATALOG_TOP_LEVEL_KEYS.includes(k));
   if (unknownTop.length > 0) {
-    if (unknownTop.some((k) => ["executors", "targets", "loadouts", "default_loadout", "bindings"].includes(k) && k !== "bindings")) {
-      throw new ExecutorProfileError(
-        `${source}: schema_version 3 required \u2014 pre-dials catalogs are not supported; migrate: targets:\u2192models:, loadouts:\u2192dials:, default_loadout: delete; see docs/experimental/dials-and-registry.md`
-      );
+    if (unknownTop.some((k) => PRE_DIALS_CATALOG_KEYS.includes(k))) {
+      throw preDialsCatalogError(source);
     }
     throw new ExecutorProfileError(`${source} has unknown key(s) ${unknownTop.join(", ")}.`);
   }
