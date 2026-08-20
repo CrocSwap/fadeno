@@ -2072,6 +2072,15 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         paths: shadowIgnored.paths,
         ...(shadowIgnored.truncated ? { truncated: true } : {}),
         ...(shadowIgnored.note != null ? { note: shadowIgnored.note } : {}),
+        // "Discarded" means two different things on the two arms, and the row
+        // has to say which. The challenger's worktree is RETAINED until
+        // `fadeno clean`, so its output is still on disk right here — gone
+        // from the comparison, not gone from the machine. The primary's
+        // worktree is torn down after the merge-back, so its output really is
+        // unrecoverable and this field is absent there. A reader must never
+        // have to infer the difference from whether some other field happens
+        // to be set.
+        retained_at: pending.worktreeRel,
       };
     }
     if (spawnFailedMsg != null) sRow.error = spawnFailedMsg;

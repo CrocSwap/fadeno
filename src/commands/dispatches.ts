@@ -20,6 +20,26 @@ export const DEFAULT_TAIL = 10;
 /** Longest recorded spawn error rendered inline before ellipsis. */
 const ERROR_EXCERPT = 80;
 
+/** Longest single discarded path rendered inline before ellipsis. */
+const PATH_EXCERPT = 60;
+
+/**
+ * Longest writer note rendered inline. Wider than `ERROR_EXCERPT` on purpose:
+ * a note explains why a listing is a FLOOR, and its own reason sits at the
+ * end of the sentence — clipping at 80 would keep the preamble and cut the
+ * one fact worth reading. The cap is here to stop a pathological row taking
+ * the terminal, not to summarize.
+ */
+const NOTE_EXCERPT = 200;
+
+/**
+ * Discarded paths named inline before the rest are counted. The view is one
+ * line per dispatch, so a worktree with thirty ignored directories must not
+ * become thirty screens — but the count that follows keeps the line honest
+ * about how much it is not showing.
+ */
+const IGNORED_PATHS_SHOWN = 3;
+
 /**
  * The evidence-format major this reader understands, derived from the writer's
  * own stamp so the two can never disagree.
@@ -82,6 +102,68 @@ export interface DispatchPrimaryMerge {
    * row with no refusal object.
    */
   diffSnapshot?: string;
+}
+
+/**
+ * Gitignored output an arm produced that no diff carried out of its worktree,
+ * from a completion row's `ignored_output_discarded` object.
+ *
+ * A pair runs both arms in isolated worktrees and moves work back as a diff
+ * taken from `git add -A` — which RESPECTS `.gitignore`. So whatever the arm
+ * built into an ignored path (a `dist/`, a build cache, a coverage report) is
+ * not in that diff, and the caller's tree never receives it. Carried
+ * dependencies are the opposite case and unaffected: `worktree_carry` brings
+ * those IN as input, where this is only ever about output.
+ *
+ * Absent means nothing was discarded. There is deliberately no empty spelling
+ * for a reader to synthesize — the same rule `DispatchPrimaryMerge` states,
+ * and for the same reason: a reader that invents a value for silence is
+ * making a claim the writer did not make.
+ */
+export interface DispatchIgnoredOutputDiscarded {
+  /**
+   * Repo-relative, git-collapsed to directories, exactly as the writer stated
+   * them. May be empty when `truncated` is true — "I could not enumerate what
+   * was lost" is a different claim from "nothing was lost", and the whole
+   * point of this field is that the two never render the same.
+   */
+  paths: string[];
+  /**
+   * The listing is a FLOOR, not the set: detection could not guarantee
+   * completeness (a git failure, or a size cap).
+   *
+   * Normalized to a boolean here, where `DispatchPrimaryMerge` leaves its
+   * optionals off, because the two absences differ. An absent `detail` is the
+   * writer saying nothing; an absent `truncated` has exactly one meaning —
+   * the listing is the whole set — so stating it costs no invention. Any
+   * present value that is not an explicit `false` reads as truncated, so a
+   * newer writer that spells a REASON where this expects a flag still errs
+   * toward "I could not tell" rather than toward "that was everything". Only
+   * one of those two directions is a silent drop.
+   */
+  truncated: boolean;
+  /**
+   * The writer's own prose for WHY the listing is short — a git failure and
+   * its stderr, or the entry cap it stopped at. Optional exactly as
+   * `DispatchPrimaryMerge.detail` is: absent is the writer saying nothing.
+   *
+   * It is the difference between two truncations with different remedies:
+   * "git could not run here" is a broken tool, "there were more than 10,000
+   * ignored entries" is a build directory doing its job. A degraded verdict
+   * that cannot say why is barely better than no verdict, so this is read
+   * even though it renders as free text — the whole point of surfacing a
+   * floor is lost if the reader cannot tell which floor it is standing on.
+   */
+  note?: string;
+  /**
+   * Repo-relative worktree still holding this output, when it survives on
+   * disk. Present for a challenger, whose worktree is retained until
+   * `fadeno clean`; absent for a primary, whose worktree is torn down after
+   * the merge-back so the output is genuinely gone. Stated by the writer,
+   * never inferred here — a "still on disk" hint that turns out to be wrong
+   * is worse than silence.
+   */
+  retainedAt: string | null;
 }
 
 /**
@@ -158,6 +240,12 @@ export interface DispatchEntry {
    * so the predicate also says which side refused — and, across the hook's
    * two resolver-side values, whether the resolver failed or merely hung,
    * which have different remedies.
+   *
+   * A predicate is a plain string on purpose: the vocabularies are the
+   * writers' and they grow. `ignored_output_kept` is one such growth — a
+   * dispatch that declared its gitignored output must survive, so no pair was
+   * formed — and it is a deliberate TRADE, not a fault (see
+   * `CHOICE_REFUSALS`). Narrowing this to a union would have dropped it.
    */
   refusal: { predicate: string; message: string } | null;
   /**
@@ -224,6 +312,13 @@ export interface DispatchEntry {
    * dispatch never attempts a merge, and absent is not a claim either way.
    */
   primaryMerge: DispatchPrimaryMerge | null;
+  /**
+   * Gitignored output this arm produced that no diff carried out of its
+   * worktree — see `DispatchIgnoredOutputDiscarded`. Null when the row says
+   * nothing, which means nothing was discarded: an unpaired dispatch runs in
+   * the caller's own tree, where an ignored `dist/` simply stays put.
+   */
+  ignoredOutputDiscarded: DispatchIgnoredOutputDiscarded | null;
   outputBytes: number | null;
   diagnosticsSnapshot: string | null;
   diagnosticsBytes: number | null;
@@ -378,6 +473,17 @@ function excerpt(text: string, max: number): string {
 }
 
 /**
+ * One path, rendered as one line. A filename may legally contain a newline
+ * and this view is one line per dispatch, so the break is ESCAPED rather than
+ * cut at the way free prose is: truncating `we\nird/dist` to `we` would name
+ * a path that does not exist, which is worse than a long line.
+ */
+function flatPath(path: string): string {
+  const flat = path.split('\r').join('\\r').split('\n').join('\\n');
+  return flat.length > PATH_EXCERPT ? `${flat.slice(0, PATH_EXCERPT - 1)}…` : flat;
+}
+
+/**
  * Which reader tier a row's `format` stamp puts it in.
  */
 function formatTier(value: unknown): 'unversioned' | 'known' | 'older' | 'newer' {
@@ -444,6 +550,32 @@ function primaryMergeOf(value: unknown): DispatchPrimaryMerge | null {
   if (detail != null) out.detail = detail;
   const snapshot = str(row.diff_snapshot);
   if (snapshot != null) out.diffSnapshot = snapshot;
+  return out;
+}
+
+/**
+ * Parse a completion row's `ignored_output_discarded` object (see
+ * `DispatchIgnoredOutputDiscarded`).
+ *
+ * Two shapes are no claim at all and read as null: a non-object, and an
+ * object with neither a `paths` array nor a truncation flag. Everything else
+ * survives — including `truncated` with an unusable or missing `paths`, which
+ * is precisely the case where the writer is admitting it could not tell.
+ * Dropping that one would spell "I could not tell" the same as "there was
+ * nothing", which is the defect this field exists to remove.
+ */
+function ignoredOutputDiscardedOf(value: unknown): DispatchIgnoredOutputDiscarded | null {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const rawPaths = Array.isArray(row.paths) ? row.paths : null;
+  // Anything present that is not an explicit `false` counts as truncated —
+  // see the field's doc for why the ambiguity resolves in that direction.
+  const truncated = row.truncated != null && row.truncated !== false;
+  const note = str(row.note);
+  if (rawPaths == null && !truncated && note == null) return null;
+  const paths = (rawPaths ?? []).filter((p): p is string => typeof p === 'string' && p !== '');
+  const out: DispatchIgnoredOutputDiscarded = { paths, truncated, retainedAt: str(row.retained_at) };
+  if (note != null) out.note = note;
   return out;
 }
 
@@ -518,6 +650,10 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     // arrives on the completion row and is folded in by `applyCompletion`.
     // A request row cannot yet know how its own diff merged.
     primaryMerge: null,
+    // Likewise a result: what an arm built into an ignored path is only
+    // knowable once it has finished building it. Folded in by
+    // `applyCompletion`.
+    ignoredOutputDiscarded: null,
     outputBytes: num(row.output_bytes),
     diagnosticsSnapshot: str(row.diagnostics_snapshot),
     diagnosticsBytes: num(row.diagnostics_bytes),
@@ -588,6 +724,10 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     // both arms onto the command lane anyway, so no host row is ever the
     // primary arm of a merge-back.
     primaryMerge: null,
+    // And with no worktree there is nothing to discard on the way out of one:
+    // a host subagent writes into the caller's own tree, where a gitignored
+    // build directory stays exactly where it was written.
+    ignoredOutputDiscarded: null,
     outputBytes: null,
     diagnosticsSnapshot: null,
     diagnosticsBytes: null,
@@ -703,6 +843,10 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
   // The merge-back result: written once, at the end of a paired primary's
   // run, so the completion row is its only home (see `DispatchPrimaryMerge`).
   entry.primaryMerge = entry.primaryMerge ?? primaryMergeOf(row.primary_merge);
+  // What the arm built that the diff could not carry — written at the same
+  // moment and for the same reason as the merge result above.
+  entry.ignoredOutputDiscarded =
+    entry.ignoredOutputDiscarded ?? ignoredOutputDiscardedOf(row.ignored_output_discarded);
   const ob = num(row.output_bytes);
   if (ob != null) entry.outputBytes = ob;
   entry.diagnosticsSnapshot = entry.diagnosticsSnapshot ?? str(row.diagnostics_snapshot);
@@ -726,6 +870,40 @@ function legacyEntry(row: Record<string, unknown>): DispatchEntry {
   entry.legacy = true;
   applyCompletion(entry, row);
   return entry;
+}
+
+/**
+ * Refusal predicates that record a deliberate TRADE, rendered as one.
+ *
+ * `[refused: <predicate>]` is the right marker for a denial: something the
+ * caller asked for did not happen, and the remedy is to fix it.
+ * `ignored_output_kept` is not that. The dispatch declared — through the
+ * archetype policy `ignored_output: kept`, or a per-dispatch override — that
+ * its gitignored output must survive, and a pair cannot promise that: both
+ * arms run in isolated worktrees and the work comes back as a diff that
+ * respects `.gitignore`. So the kernel gave up the COMPARISON to keep the
+ * OUTPUT. Nothing failed, nothing needs fixing, and a marker that says
+ * "refused" invites someone to go undo a decision that was made on purpose.
+ *
+ * A map, not an object literal, because the key is writer-controlled text: an
+ * object would answer to `toString` and every other inherited name.
+ *
+ * Honest scope note: every `shadow_*` predicate has a version of this problem
+ * — a shadow refusal returns null and the primary runs on, so those rows also
+ * mean "no comparison" rather than "your dispatch failed" — but those really
+ * are conditions with remedies (raise the cap, fix the dial), where this one
+ * is a choice already made. Only the choice is re-worded here.
+ */
+const CHOICE_REFUSALS = new Map<string, string>([
+  [
+    'ignored_output_kept',
+    '[no pair: ignored_output_kept — the comparison was traded away so the gitignored output survives]',
+  ],
+]);
+
+/** The refusal marker for a predicate: a denial unless the writer meant a choice. */
+function refusalMarker(predicate: string): string {
+  return CHOICE_REFUSALS.get(predicate) ?? `[refused: ${predicate}]`;
 }
 
 /**
@@ -762,7 +940,7 @@ export function renderDispatchLine(entry: DispatchEntry): string {
 
   if (entry.kind === 'command') {
     if (entry.refusal != null) {
-      parts.push(`[refused: ${entry.refusal.predicate}]`);
+      parts.push(refusalMarker(entry.refusal.predicate));
       parts.push(entry.refusal.message);
     } else if (entry.completed) {
       // The outcome leads. `dispatch_completed` only means the spawn reached a
@@ -792,8 +970,10 @@ export function renderDispatchLine(entry: DispatchEntry): string {
       // and `[never attested]` would be an accusation about something that
       // never existed. The same `[refused: <predicate>]` marker the command
       // branch uses — one vocabulary for "this did not run", whichever side
-      // stopped it.
-      parts.push(`[refused: ${entry.refusal.predicate}]`);
+      // stopped it — and, for a predicate that names a deliberate trade
+      // rather than a denial, the same one-vocabulary rule applies to saying
+      // so (see `CHOICE_REFUSALS`).
+      parts.push(refusalMarker(entry.refusal.predicate));
       if (entry.refusal.message !== '') parts.push(entry.refusal.message);
     } else if (entry.attestedAt == null) {
       // The gap this whole feature closes: a host_delivery is a REQUEST the
@@ -862,6 +1042,57 @@ export function renderDispatchLine(entry: DispatchEntry): string {
       // hint stays runnable on a row that carries only one of them.
       const ref = entry.pairId ?? entry.dispatchId;
       parts.push(`[recover: fadeno shadow-apply ${ref != null ? ref.slice(0, 8) : '<pair-id>'} --arm primary]`);
+    }
+  }
+
+  // Gitignored output the arm produced that no diff carried out of its
+  // worktree. It renders on the line of a dispatch that otherwise reads as a
+  // success, because from the caller's side that is exactly the shape of the
+  // problem: exit 0, a merged diff, and no `dist/`. An absent object renders
+  // nothing — nothing was discarded, the ordinary case — but an object that
+  // carries only a truncation flag, or only a note, still renders: "I could
+  // not tell" and "there was nothing" must not be spelled the same way, and
+  // that is the whole reason this field exists.
+  const ignored = entry.ignoredOutputDiscarded;
+  if (ignored != null && (ignored.paths.length > 0 || ignored.truncated || ignored.note != null)) {
+    const shown = ignored.paths.slice(0, IGNORED_PATHS_SHOWN).map(flatPath);
+    const rest = ignored.paths.length - shown.length;
+    const listed = `${shown.join(', ')}${rest > 0 ? ` (+${rest} more)` : ''}`;
+    if (shown.length === 0) {
+      parts.push(
+        ignored.truncated
+          ? '[ignored output DISCARDED — gitignored, and the listing could not be taken: ' +
+            'what was left behind is unknown, not nothing]'
+          : '[ignored output DISCARDED — gitignored; the row names no paths]',
+      );
+    } else if (ignored.truncated) {
+      // `at least` carries the floor claim on its own, so the note below adds
+      // the reason without either one depending on the other's wording — the
+      // writer's note today ends "a floor, not the set" and saying it twice
+      // reads like two findings.
+      parts.push(
+        `[ignored output DISCARDED: at least ${listed} — gitignored, so no diff carried it out of the worktree` +
+          `${ignored.note != null ? '' : '; the listing is a floor, not the set'}]`,
+      );
+    } else {
+      parts.push(
+        `[ignored output DISCARDED: ${listed} — gitignored, so no diff carried it out of the worktree]`,
+      );
+    }
+    // Why the listing is short, in the writer's words: a git failure and a
+    // ten-thousand-entry cap are both floors, and they have different
+    // remedies. Bounded like every other piece of writer prose in this view —
+    // the note can run to thousands of characters, and `--json` keeps all of
+    // it — but bounded generously, because a truncation whose reason is
+    // itself truncated helps nobody.
+    if (ignored.note != null) parts.push(`[ignored output note: ${excerpt(ignored.note, NOTE_EXCERPT)}]`);
+    // "Discarded" means two different things on the two arms. A challenger's
+    // worktree is retained, so its output is gone from the COMPARISON while
+    // still sitting on disk; a primary's is torn down, so its output really is
+    // gone. The writer states which — this never guesses from whether some
+    // other field happens to be set.
+    if (ignored.retainedAt != null) {
+      parts.push(`[still on disk at ${flatPath(ignored.retainedAt)} until \`fadeno clean\`]`);
     }
   }
 
