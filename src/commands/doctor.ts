@@ -1,4 +1,5 @@
 import { accessSync, constants, existsSync, lstatSync, readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, sep } from 'node:path';
 import { runStatus, type StatusOptions } from './status.ts';
 import { listRetiredClaudeGridCells } from './steering.ts';
@@ -11,8 +12,8 @@ import {
   readEffectiveLease,
   readWorkspaceLease,
 } from '../lib/workspace-lease.ts';
-import { readInstallationManifest } from '../lib/installations.ts';
-import { userPaths } from '../lib/user-paths.ts';
+import { compareFadenoVersions, readInstallationManifest } from '../lib/installations.ts';
+import { userPaths, type UserPathOptions } from '../lib/user-paths.ts';
 
 // Same literal `steering.ts` writes into every managed Claude agent file
 // (retired grid cell or legacy per-dial); not exported there, so duplicated
@@ -22,6 +23,53 @@ import { userPaths } from '../lib/user-paths.ts';
 // (Grid cells carry a narrower marker, and `listRetiredClaudeGridCells` —
 // which steering.ts DOES export — is the single definition of that one.)
 const CLAUDE_MANAGED_MARK = '<!-- fadeno:managed';
+
+// The Codex equivalent: `steering apply --codex --scope user` stamps
+// `# fadeno:managed version=<pkg version> digest=<sha256>` as the FIRST line of
+// every user-scope role agent, and its `managedAgentEmit` gates overwriting on
+// exactly this prefix. `steering.ts` keeps that literal private, and that
+// module is not this one's to change, so the convention is replicated
+// read-only here — the same way `CLAUDE_MANAGED_MARK` above is.
+const CODEX_MANAGED_MARK = '# fadeno:managed';
+const CODEX_MANAGED_VERSION_RE = /^# fadeno:managed\b[^\n]*?\bversion=(\S+)/;
+
+interface CodexBrokerState {
+  /** The file's first line carries the managed header `steering apply` writes. */
+  managed: boolean;
+  /** `version=` off that header, when it carries one. */
+  version: string | null;
+}
+
+/**
+ * Read one Codex role-agent file's provenance. `null` means "no such file" —
+ * as does an unreadable one, which is not provably Fadeno's and so is never
+ * claimed (the same rule `listRetiredClaudeGridCells` applies).
+ */
+function readCodexBroker(path: string): CodexBrokerState | null {
+  let text: string;
+  try {
+    if (!existsSync(path)) return null;
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+  if (!text.startsWith(CODEX_MANAGED_MARK)) return { managed: false, version: null };
+  const match = CODEX_MANAGED_VERSION_RE.exec(text);
+  return { managed: true, version: match ? match[1]! : null };
+}
+
+/**
+ * `$CODEX_HOME/agents`, else `<home>/.codex/agents` — the same precedence
+ * `steering.ts`'s private `codexAgentDir('user', …)` and `status.ts`'s
+ * materialization probe both apply. Replicated rather than imported because
+ * that helper is not exported; keep the three in step if the rule ever moves.
+ */
+function codexUserAgentDir(userPathOptions?: UserPathOptions): string {
+  const codexHome = userPathOptions?.env?.CODEX_HOME?.trim() ||
+    process.env.CODEX_HOME?.trim() ||
+    join(userPathOptions?.home ?? homedir(), '.codex');
+  return join(codexHome, 'agents');
+}
 
 export class DoctorError extends Error {}
 
@@ -219,6 +267,78 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
     ));
   } else if (status.codexMaterialization != null) {
     findings.push(finding('codex-agents', 'ok', 'managed host-agent state is current'));
+  }
+  // --- Project-scope Codex brokers shadowing the user-scope ones ---
+  //
+  // Codex resolves a role agent from `<repo>/.codex/agents/<archetype>.toml`
+  // in preference to `$CODEX_HOME/agents/fadeno-<archetype>.toml`, so whatever
+  // a repo carries at project scope silently outranks what `fadeno setup
+  // --codex` maintains at user scope. Older `fadeno init` runs copied frozen
+  // brokers out of the templates into project scope and stamped no managed
+  // header on them — which is also what stops `steering apply` from ever
+  // refreshing them, since project-scope emit is non-destructive and skips an
+  // existing file without `--force`.
+  //
+  // The production symptom is pure silence. A broker frozen before
+  // `--prompt-file` / `--host-executor` invokes `steering resolve` without
+  // them, so the resolver never sees the prompt bytes it hashes to pair a
+  // spawn with a shadow challenger; that repo drops out of shadow pairing
+  // entirely and mismatch detection is off, with nothing on disk looking
+  // wrong.
+  //
+  // Read-only, and it separates the states rather than warning on all of them:
+  // a project broker with no user counterpart is simply the only broker there
+  // is; an unmanaged one that IS shadowing can never be refreshed in place; a
+  // managed one stamped older than user scope is a stale copy. Same
+  // generation — or a project copy NEWER than user scope, which shadows
+  // nothing current — says nothing at all.
+  {
+    const projectDir = join(repoRoot, '.codex', 'agents');
+    const userDir = codexUserAgentDir(opts.userPathOptions);
+    const soleProject: string[] = [];
+    const unmanagedShadow: string[] = [];
+    const staleShadow: Array<{ name: string; label: string }> = [];
+    for (const archetype of ['worker', 'reviewer', 'judge']) {
+      const name = `${archetype}.toml`;
+      const project = readCodexBroker(join(projectDir, name));
+      if (project == null) continue;
+      const user = readCodexBroker(join(userDir, `fadeno-${archetype}.toml`));
+      if (user == null) {
+        soleProject.push(name);
+      } else if (!project.managed) {
+        unmanagedShadow.push(name);
+      } else if (
+        project.version != null && user.version != null &&
+        compareFadenoVersions(project.version, user.version) === -1
+      ) {
+        staleShadow.push({ name, label: `${name} (${project.version} < ${user.version})` });
+      }
+    }
+    const absolute = (names: string[]): string => names.map((name) => join(projectDir, name)).join(', ');
+    if (soleProject.length > 0) {
+      findings.push(finding(
+        'codex-agents-project',
+        'ok',
+        `project-scope Codex broker(s) ${soleProject.join(', ')} in ${projectDir} have no user-scope counterpart in ${userDir}, so nothing is being shadowed`,
+        'Codex prefers project scope: once `fadeno setup --codex` materializes managed user-scope brokers, these files would win over them.',
+      ));
+    }
+    if (unmanagedShadow.length > 0) {
+      findings.push(finding(
+        'codex-agents-shadow',
+        'warning',
+        `${unmanagedShadow.join(', ')} in ${projectDir} carry no managed header, and Codex prefers project scope over the user-scope broker(s) in ${userDir} — so the unmanaged copy is what every session loads, and \`fadeno steering apply --codex\` can never refresh it in place (project-scope emit skips an existing file). Frozen at whatever build wrote it, it drifts behind the resolver contract with no symptom: a copy predating \`--prompt-file\`/\`--host-executor\` invokes \`steering resolve\` without them, which drops this repo out of shadow pairing and silently defeats mismatch detection`,
+        `Delete ${absolute(unmanagedShadow)} so the user-scope broker takes over. Rewriting in place (\`fadeno steering apply --codex --scope project --force\`) refreshes the content but leaves the file unmanaged and still shadowing, so this finding would stay.`,
+      ));
+    }
+    if (staleShadow.length > 0) {
+      findings.push(finding(
+        'codex-agents-shadow-stale',
+        'warning',
+        `${staleShadow.map((item) => item.label).join(', ')} in ${projectDir} are managed but stamped older than the user-scope broker(s) in ${userDir}, and Codex prefers project scope — so the older generation is what every session actually loads`,
+        `Delete ${absolute(staleShadow.map((item) => item.name))} so the current user-scope broker takes over; \`fadeno steering apply --codex\` cannot bring a project-scope file up to date in place, because it skips existing files and never stamps project scope with a managed header.`,
+      ));
+    }
   }
   // --- Retired Claude managed agents ---
   //
