@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Set up Fadeno's user-scoped executor catalog and host integration. Use when the user asks to set up Fadeno, install its local integration, or diagnose first-run configuration. [fadeno 0.6.0-rc.46]
+description: Set up Fadeno's user-scoped executor catalog and host integration. Use when the user asks to set up Fadeno, install its local integration, or diagnose first-run configuration. [fadeno 0.6.0-rc.47]
 ---
 
 # Fadeno setup

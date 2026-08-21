@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.46";
+  if (true) return "0.6.0-rc.47";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -22754,6 +22754,10 @@ function unblindVerdict(verdict, blinding) {
 }
 function isBakeoffVerdict(value) {
   return typeof value === "string" && BAKEOFF_VERDICTS.includes(value);
+}
+var EVIDENCE_MODES = ["inlined", "explored"];
+function isEvidenceMode(value) {
+  return typeof value === "string" && EVIDENCE_MODES.includes(value);
 }
 var VERDICT_BUCKET = {
   prefer_challenger: "challenger",
@@ -35134,6 +35138,7 @@ var COMMANDS = {
   bakeoff: command(
     {
       "--measure-only": NONE,
+      "--evidence": { kind: "enum", values: ["inlined", "explored"] },
       "--prepare": NONE,
       "--record": NONE,
       "--comparison": PATH,
@@ -35926,6 +35931,46 @@ function stripGeneratedHunks(diffText, generatedFiles) {
 [${omittedCount} generated file diff(s) omitted, ${omittedBytes} bytes \u2014 see the diffstat instead]
 `;
 }
+function materializeArmTree(repoRoot, relDest, baselineCommit, diffRelPath, armLabel) {
+  const absDest = (0, import_node_path36.join)(repoRoot, relDest);
+  (0, import_node_fs36.rmSync)(absDest, { recursive: true, force: true });
+  (0, import_node_fs36.mkdirSync)(absDest, { recursive: true });
+  const archive = (0, import_node_child_process11.spawnSync)("git", ["-C", repoRoot, "archive", "--format=tar", baselineCommit], {
+    encoding: "buffer",
+    maxBuffer: 512 * 1024 * 1024
+  });
+  if (archive.status !== 0) {
+    throw new BakeoffCommandError(
+      `could not read the ${armLabel} arm's baseline tree at ${baselineCommit.slice(0, 8)}: ${(archive.stderr ?? Buffer.from("")).toString("utf8").trim() || "git archive failed"}. The commit may have been garbage-collected \u2014 adjudicate with --evidence inlined, which needs only the diff.`
+    );
+  }
+  const untar = (0, import_node_child_process11.spawnSync)("tar", ["-x", "-C", absDest], { input: archive.stdout, encoding: "buffer" });
+  if (untar.status !== 0) {
+    throw new BakeoffCommandError(
+      `could not extract the ${armLabel} arm's baseline tree: ${(untar.stderr ?? Buffer.from("")).toString("utf8").trim()}`
+    );
+  }
+  const diffText = (0, import_node_fs36.readFileSync)((0, import_node_path36.join)(repoRoot, diffRelPath), "utf8");
+  if (diffText.trim().length === 0) return;
+  const applyArgs = ["-C", repoRoot, "apply", `--directory=${relDest}`, "--whitespace=nowarn", diffRelPath];
+  const applied = (0, import_node_child_process11.spawnSync)("git", [...applyArgs], { encoding: "utf8" });
+  if (applied.status !== 0) {
+    throw new BakeoffCommandError(
+      `could not replay the ${armLabel} arm's diff onto its baseline: ${applied.stderr.trim()}. The recorded diff and baseline_commit do not agree \u2014 adjudicate with --evidence inlined, which shows the diff as recorded without reconstructing anything.`
+    );
+  }
+  const reversible = (0, import_node_child_process11.spawnSync)(
+    "git",
+    ["-C", repoRoot, "apply", `--directory=${relDest}`, "--reverse", "--check", diffRelPath],
+    { encoding: "utf8" }
+  );
+  if (reversible.status !== 0) {
+    throw new BakeoffCommandError(
+      `the ${armLabel} arm's tree at ${relDest} does not match its recorded diff after replay \u2014 refusing to show a judge a tree that is not what it is labelled. Adjudicate with --evidence inlined.`
+    );
+  }
+}
+var posixJoin = (...parts) => import_node_path36.posix.join(...parts);
 var MAX_DIFF_PROMPT_BYTES = 2e5;
 function capDiffText(diffText) {
   const bytes = Buffer.byteLength(diffText, "utf8");
@@ -35952,7 +35997,7 @@ function blindArm(m, diffText) {
     diff: capDiffText(stripGeneratedHunks(diffText, m.diff?.generatedFiles ?? []))
   };
 }
-function renderBlindArm(label, m) {
+function renderBlindArm(label, m, evidence) {
   const lines = [`### arm_${label}`, ""];
   lines.push(`- exit code: ${m.exitCode ?? "(none)"}`);
   lines.push(`- duration: ${m.durationMs != null ? formatBakeoffDuration(m.durationMs) : "(unknown)"}`);
@@ -35969,11 +36014,28 @@ function renderBlindArm(label, m) {
     );
     lines.push(`- redefined identifiers (already defined at baseline): ${m.signals.redefined.length > 0 ? m.signals.redefined.join(", ") : "(none)"}`);
   }
-  const body = m.diff.trim().length > 0 ? m.diff : "(empty diff)";
-  const fence = fenceFor(body);
-  lines.push("", `${fence}diff`, body, fence);
+  if (evidence != null) {
+    lines.push(
+      "",
+      `- tree (baseline + this arm's changes applied): \`${evidence.treeRel}/\``,
+      `- changes as a diff: \`${evidence.diffRel}\``
+    );
+  } else {
+    const body = m.diff.trim().length > 0 ? m.diff : "(empty diff)";
+    const fence = fenceFor(body);
+    lines.push("", `${fence}diff`, body, fence);
+  }
   return lines.join("\n");
 }
+var EXPLORED_EVIDENCE_INSTRUCTIONS = [
+  "## How to read the evidence",
+  "",
+  "Each arm below names a DIRECTORY holding that arm's tree \u2014 the shared starting commit with that arm's changes applied \u2014 and a `.diff` file for the changes alone. Read them. The measurements are a summary, not the evidence, and a verdict written from the diffstat is worth less than no verdict.",
+  "",
+  "What a tree answers that a diff cannot: whether a change fits the conventions of the file it landed in, whether the rest of the file still makes sense around it, whether a caller elsewhere in the tree was updated to match, and whether anything tests it. Open the changed files whole, then look at what they touch.",
+  "",
+  "Read ONLY inside the two arm directories. Everything outside them \u2014 including the repository they sit in \u2014 is a different tree at a different commit, and consulting it will both mislead you and reveal which arm is which, which is exactly what these labels exist to prevent."
+].join("\n");
 function blindReach(diffs, blinding) {
   if (diffs == null) return null;
   return diffs.map((d) => ({
@@ -35996,7 +36058,7 @@ function blindConfoundForPrompt(c, blinding) {
   };
 }
 var BAKEOFF_PROMPT_MARKER = { comparison: "fadeno-bakeoff-task: comparison", adversarial: "fadeno-bakeoff-task: adversarial" };
-function buildComparisonPrompt(schemaText, blindA, blindB, reach, confounds, surfaces) {
+function buildComparisonPrompt(schemaText, blindA, blindB, reach, confounds, surfaces, explored) {
   const reachSection = reach != null && reach.length > 0 ? `### Reach differential
 
 Both arms introduced these identifiers; only one wired them to a declared consumer surface:
@@ -36013,6 +36075,7 @@ ${confounds.map((c) => `- [${c.code}] ${c.arm}: ${c.detail}`).join("\n")}` : "##
     "# Blinded shadow-pair comparison",
     "",
     'You are comparing two AI-agent work products on the SAME task, from the SAME starting commit. They are labeled `arm_a` and `arm_b` ONLY \u2014 you are never told, and must never guess or state, which one is the "primary"/incumbent and which is the "challenger". Judge the work, not who produced it.',
+    ...explored ? ["", EXPLORED_EVIDENCE_INSTRUCTIONS] : [],
     "",
     "## Deterministic measurements",
     "",
@@ -36041,12 +36104,13 @@ ${confounds.map((c) => `- [${c.code}] ${c.arm}: ${c.detail}`).join("\n")}` : "##
     '- `traits` describes how each MODEL worked, not whether this artifact is good \u2014 that is what `criteria` is for. A trait is not a score: "more defensive" may be right on this task and wrong on the next one, and `more` names the arm exhibiting MORE of the dimension, never the better one. Report a dimension even when it did not affect the verdict, and use `neither` freely \u2014 two arms being indistinguishable on a dimension is a real observation. These accumulate across many pairs into a picture of the two models, which is what a single comparison cannot give.'
   ].join("\n");
 }
-function buildAdversarialPrompt(blindA, blindB) {
+function buildAdversarialPrompt(blindA, blindB, explored) {
   return [
     `<!-- ${BAKEOFF_PROMPT_MARKER.adversarial} -->`,
     "# Blinded shadow-pair \u2014 shared blind spot search",
     "",
     'Two AI-agent work products on the SAME task, from the SAME starting commit, labeled `arm_a` / `arm_b` only. Do not try to pick a winner and do not guess which one is the "primary"/incumbent.',
+    ...explored ? ["", EXPLORED_EVIDENCE_INSTRUCTIONS] : [],
     "",
     blindA,
     "",
@@ -36178,7 +36242,7 @@ function renderComparisonArtifact(frontmatter, sections) {
   parts.push("");
   return parts.join("\n");
 }
-function preparePrompts(measurement, pair, repoRoot) {
+function preparePrompts(measurement, pair, repoRoot, evidenceMode) {
   const blinding = deriveBlinding(measurement.pairId);
   const primaryArm = measurement.arms.find((a) => a.arm === "primary");
   const challengerArm = measurement.arms.find((a) => a.arm === "challenger");
@@ -36198,8 +36262,33 @@ function preparePrompts(measurement, pair, repoRoot) {
     primary: blindArm(primaryArm, readDiffText(repoRoot, pair.primary)),
     challenger: blindArm(challengerArm, readDiffText(repoRoot, pair.shadow))
   };
-  const blindA = renderBlindArm("a", material[armFor("a", blinding)]);
-  const blindB = renderBlindArm("b", material[armFor("b", blinding)]);
+  const evidence = { a: null, b: null };
+  if (evidenceMode === "explored") {
+    const pairDirRel = posixJoin(".fadeno", "local", "judge", measurement.pairId.slice(0, 8));
+    for (const label of ["a", "b"]) {
+      const arm = armFor(label, blinding);
+      const entry = arm === "primary" ? pair.primary : pair.shadow;
+      const armMeasurement = arm === "primary" ? primaryArm : challengerArm;
+      const baseline = entry?.baselineCommit ?? null;
+      if (baseline == null || entry?.diffSnapshot == null) {
+        throw new BakeoffCommandError(
+          `pair ${measurement.pairId.slice(0, 8)} cannot be adjudicated with --evidence explored: an arm recorded no baseline_commit or diff_snapshot, so its tree cannot be reconstructed. Use --evidence inlined.`
+        );
+      }
+      const treeRel = posixJoin(pairDirRel, `arm_${label}`);
+      const diffRel = posixJoin(pairDirRel, `arm_${label}.diff`);
+      materializeArmTree(repoRoot, treeRel, baseline, entry.diffSnapshot, `arm_${label}`);
+      (0, import_node_fs36.mkdirSync)((0, import_node_path36.join)(repoRoot, pairDirRel), { recursive: true });
+      (0, import_node_fs36.writeFileSync)(
+        (0, import_node_path36.join)(repoRoot, diffRel),
+        capDiffText(stripGeneratedHunks(readDiffText(repoRoot, entry), armMeasurement.diff?.generatedFiles ?? [])),
+        "utf8"
+      );
+      evidence[label] = { treeRel, diffRel };
+    }
+  }
+  const blindA = renderBlindArm("a", material[armFor("a", blinding)], evidence.a);
+  const blindB = renderBlindArm("b", material[armFor("b", blinding)], evidence.b);
   const { text: schemaText, parsed: schemaJson, schemas } = loadModelComparisonSchema(repoRoot);
   if (!schemas.has("bakeoff")) {
     throw new BakeoffCommandError(
@@ -36214,10 +36303,18 @@ function preparePrompts(measurement, pair, repoRoot) {
     blindB,
     blindReach(measurement.reachDifferential, blinding),
     measurement.confounds.map((c) => blindConfoundForPrompt(c, blinding)),
-    measurement.surfaces
+    measurement.surfaces,
+    evidenceMode === "explored"
   );
-  const adversarialPrompt = buildAdversarialPrompt(blindA, blindB);
-  return { blinding, validateComparison, validateAdversarial, comparisonPrompt, adversarialPrompt };
+  const adversarialPrompt = buildAdversarialPrompt(blindA, blindB, evidenceMode === "explored");
+  return {
+    blinding,
+    validateComparison,
+    validateAdversarial,
+    comparisonPrompt,
+    adversarialPrompt,
+    armTrees: evidence.a != null && evidence.b != null ? { a: evidence.a, b: evidence.b } : null
+  };
 }
 function unblindAndCheckCoherence(comparison, blinding, errorLabel) {
   if (!isJudgmentVerdict(comparison.verdict)) {
@@ -36231,7 +36328,7 @@ function unblindAndCheckCoherence(comparison, blinding, errorLabel) {
   return verdict;
 }
 function writeComparisonArtifact(args) {
-  const { measurement, pair, repoRoot, blinding, verdict, comparison, adversarial, judgeDelivery, judgeProvider, judgeDispatchIds, now } = args;
+  const { measurement, pair, repoRoot, blinding, verdict, comparison, adversarial, judgeDelivery, evidenceMode, judgeProvider, judgeDispatchIds, now } = args;
   const primaryArm = measurement.arms.find((a) => a.arm === "primary");
   const challengerArm = measurement.arms.find((a) => a.arm === "challenger");
   const confounds = [...measurement.confounds];
@@ -36270,6 +36367,7 @@ function writeComparisonArtifact(args) {
     pair_id: measurement.pairId,
     dispatch_ids: dispatchIds,
     judge_delivery: judgeDelivery,
+    evidence_mode: evidenceMode,
     ...graftPlan != null ? { graft_plan: graftPlan } : {}
   };
   const body = renderComparisonArtifact(frontmatter, {
@@ -36302,7 +36400,8 @@ function writeComparisonArtifact(args) {
   };
 }
 function adjudicateViaCommand(measurement, pair, repoRoot, cwd, opts) {
-  const prepared = preparePrompts(measurement, pair, repoRoot);
+  const evidenceMode = opts.evidence ?? "inlined";
+  const prepared = preparePrompts(measurement, pair, repoRoot, evidenceMode);
   const pairId8 = measurement.pairId.slice(0, 8);
   const judgeCallOpts = { repoRoot, cwd, judgeModel: opts.judgeModel ?? null, judgeVia: opts.judgeVia ?? null, now: opts.now };
   const comparisonResult = dispatchJudge(prepared.comparisonPrompt, { ...judgeCallOpts, tag: `cmp-${pairId8}` });
@@ -36333,6 +36432,7 @@ function adjudicateViaCommand(measurement, pair, repoRoot, cwd, opts) {
     comparison,
     adversarial,
     judgeDelivery: "command",
+    evidenceMode,
     judgeProvider: comparisonResult.provider,
     judgeDispatchIds: { comparison: comparisonResult.dispatchId, adversarial: adversarialResult.dispatchId },
     now: opts.now ?? /* @__PURE__ */ new Date()
@@ -36355,7 +36455,8 @@ function runBakeoffPrepare(opts) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const { measurement, pair } = measureCompletePair(ref, cwd, repoRoot);
-  const prepared = preparePrompts(measurement, pair, repoRoot);
+  const evidenceMode = opts.evidence ?? "inlined";
+  const prepared = preparePrompts(measurement, pair, repoRoot, evidenceMode);
   const pairId8 = measurement.pairId.slice(0, 8);
   const promptsDir = (0, import_node_path36.join)(".fadeno", "local", "prompts");
   (0, import_node_fs36.mkdirSync)((0, import_node_path36.join)(repoRoot, promptsDir), { recursive: true });
@@ -36367,6 +36468,11 @@ function runBakeoffPrepare(opts) {
     ...measurement,
     prepared: true,
     judgeArchetype: "judge",
+    evidenceMode,
+    armTrees: prepared.armTrees != null ? {
+      a: { tree: prepared.armTrees.a.treeRel, diff: prepared.armTrees.a.diffRel },
+      b: { tree: prepared.armTrees.b.treeRel, diff: prepared.armTrees.b.diffRel }
+    } : null,
     comparisonPromptPath,
     adversarialPromptPath
   };
@@ -36392,7 +36498,8 @@ function runBakeoffRecord(opts) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const { measurement, pair } = measureCompletePair(ref, cwd, repoRoot);
-  const prepared = preparePrompts(measurement, pair, repoRoot);
+  const evidenceMode = opts.evidence ?? "inlined";
+  const prepared = preparePrompts(measurement, pair, repoRoot, evidenceMode);
   const comparisonText = readJudgmentFile(cwd, opts.comparisonPath, "comparison");
   const comparisonParsed = extractJsonObject(comparisonText);
   if (comparisonParsed == null || !prepared.validateComparison(comparisonParsed)) {
@@ -36421,6 +36528,7 @@ function runBakeoffRecord(opts) {
     comparison,
     adversarial,
     judgeDelivery: "host",
+    evidenceMode,
     judgeProvider: null,
     judgeDispatchIds: null,
     now: opts.now ?? /* @__PURE__ */ new Date()
@@ -38739,12 +38847,12 @@ Usage:
   fadeno dispatches --bakeoffs          Adjudicated bakeoff scorecard per challenger
   fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]
                                         Port a shadow pair's diff into your workspace (git apply --3way)
-  fadeno bakeoff <pair-id|dispatch-id> [--judge <ref>] [--via <driver>]
+  fadeno bakeoff <pair-id|dispatch-id> [--judge <ref>] [--via <driver>] [--evidence inlined|explored]
                                         Measure + adjudicate a shadow pair: two blinded judge dispatches, then
                                         write .fadeno/bakeoffs/<pair-id-8>.md
   fadeno bakeoff <pair-id|dispatch-id> --measure-only
                                         Measure a shadow pair's arms only (deterministic; no model is consulted)
-  fadeno bakeoff <pair-id|dispatch-id> --prepare
+  fadeno bakeoff <pair-id|dispatch-id> --prepare [--evidence inlined|explored]
                                         Measure + write the two blinded judge prompts under .fadeno/local/prompts/;
                                         writes no artifact \u2014 for a host coordinator to spawn judge subagents on
   fadeno bakeoff <pair-id|dispatch-id> --record --comparison <file> --adversarial <file>
@@ -38811,6 +38919,10 @@ Options:
   --arm <arm>             (shadow-apply) challenger (default) | primary
   --check                 (shadow-apply) Report applicability only (git apply --check --3way); changes nothing
   --measure-only          (bakeoff) Report the pair's measured facts and write nothing; skips adjudication
+  --evidence <mode>       (bakeoff) inlined (default) embeds each arm's diff in the prompt; explored
+                          reconstructs both arms' trees under .fadeno/local/judge/<pair-8>/ and passes
+                          paths, so the judge reads whole files instead of hunks. Pass the same value to
+                          --record that you passed to --prepare; the artifact stamps evidence_mode
   --prepare               (bakeoff) Measure + write the two blinded judge prompts; write no artifact
   --record                (bakeoff) Validate --comparison/--adversarial judgment files and write the artifact
   --comparison <path>     (bakeoff --record) The comparison judge subagent's raw JSON output
@@ -39827,11 +39939,16 @@ function printBakeoffPrepare(result) {
   console.log(`pair ${result.pairId.slice(0, 8)}  archetype ${result.archetype ?? "?"}  baseline ${base}`);
   for (const arm of result.arms) printBakeoffArm(arm);
   console.log("  prepared \u2014 no verdict was formed and nothing was written.");
+  if (result.armTrees != null) {
+    console.log(`  evidence: explored \u2014 each arm's tree was reconstructed on disk:`);
+    console.log(`    arm_a: ${result.armTrees.a.tree}/  (changes: ${result.armTrees.a.diff})`);
+    console.log(`    arm_b: ${result.armTrees.b.tree}/  (changes: ${result.armTrees.b.diff})`);
+  }
   console.log(`  spawn a "${result.judgeArchetype}" subagent per prompt file, INDEPENDENTLY:`);
   console.log(`    comparison prompt:  ${result.comparisonPromptPath}`);
   console.log(`    adversarial prompt: ${result.adversarialPromptPath}`);
   console.log(
-    "  then: fadeno bakeoff <pair-id> --record --comparison <file> --adversarial <file>"
+    `  then: fadeno bakeoff <pair-id> --record --comparison <file> --adversarial <file>` + (result.evidenceMode === "explored" ? " --evidence explored" : "")
   );
 }
 function printStaleShadows(stale) {
@@ -40099,6 +40216,7 @@ function main(argv) {
         arm: { type: "string" },
         check: { type: "boolean" },
         "measure-only": { type: "boolean" },
+        evidence: { type: "string" },
         prepare: { type: "boolean" },
         record: { type: "boolean" },
         comparison: { type: "string" },
@@ -41084,10 +41202,15 @@ Or advance manually with the playbook cursor:`);
     }
     case "bakeoff": {
       const ref = positionals[1];
-      const usage = "Usage: fadeno bakeoff <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--via <driver>]\n   or: fadeno bakeoff <pair-id|dispatch-id> --prepare\n   or: fadeno bakeoff <pair-id|dispatch-id> --record --comparison <file> --adversarial <file>";
+      const usage = "Usage: fadeno bakeoff <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--via <driver>] [--evidence inlined|explored]\n   or: fadeno bakeoff <pair-id|dispatch-id> --prepare [--evidence inlined|explored]\n   or: fadeno bakeoff <pair-id|dispatch-id> --record --comparison <file> --adversarial <file> [--evidence inlined|explored]";
       if (!ref) throw new Error(usage);
+      const evidence = (() => {
+        if (values.evidence == null) return void 0;
+        if (isEvidenceMode(values.evidence)) return values.evidence;
+        throw new Error(`--evidence must be one of: ${EVIDENCE_MODES.join(", ")} (got "${values.evidence}")`);
+      })();
       if (values.prepare) {
-        const result2 = runBakeoffPrepare({ ref });
+        const result2 = runBakeoffPrepare({ ref, evidence });
         if (values.json) {
           console.log(JSON.stringify(result2, null, 2));
           return 0;
@@ -41097,7 +41220,7 @@ Or advance manually with the playbook cursor:`);
       }
       if (values.record) {
         if (!values.comparison || !values.adversarial) throw new Error(usage);
-        const result2 = runBakeoffRecord({ ref, comparisonPath: values.comparison, adversarialPath: values.adversarial });
+        const result2 = runBakeoffRecord({ ref, comparisonPath: values.comparison, adversarialPath: values.adversarial, evidence });
         if (values.json) {
           console.log(JSON.stringify(result2, null, 2));
           return 0;
@@ -41109,7 +41232,8 @@ Or advance manually with the playbook cursor:`);
         ref,
         measureOnly: Boolean(values["measure-only"]),
         judgeModel: values.judge ?? null,
-        judgeVia: values.via ?? null
+        judgeVia: values.via ?? null,
+        evidence
       });
       if (values.json) {
         console.log(JSON.stringify(result, null, 2));

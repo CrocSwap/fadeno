@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, posix as posixPath, resolve } from 'node:path';
 import { Ajv, type ValidateFunction } from 'ajv';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { schemaDirectories } from '../lib/definitions.ts';
@@ -10,6 +10,7 @@ import {
   checkGraftCoherence,
   fenceFor,
   formatBakeoffDuration,
+  type EvidenceMode,
   isJudgmentVerdict,
   unblindVerdict,
   type GraftStep,
@@ -211,6 +212,12 @@ export interface BakeoffOptions {
   repoRoot?: string;
   /** Injectable clock, for a stable `date` on the written artifact. */
   now?: Date;
+  /**
+   * How the judge is shown the arms' work — see `EVIDENCE_MODES`. Defaults to
+   * `inlined`, the mode every artifact written before this option existed
+   * used, so an omitted flag never silently changes what a judge saw.
+   */
+  evidence?: EvidenceMode;
 }
 
 export interface ComparePrepareOptions {
@@ -218,6 +225,12 @@ export interface ComparePrepareOptions {
   ref: string;
   cwd?: string;
   repoRoot?: string;
+  /**
+   * How the judge is shown the arms' work — see `EVIDENCE_MODES`. Defaults to
+   * `inlined`, the mode every artifact written before this option existed
+   * used, so an omitted flag never silently changes what a judge saw.
+   */
+  evidence?: EvidenceMode;
 }
 
 export interface BakeoffPrepareResult extends BakeoffMeasurement {
@@ -229,6 +242,15 @@ export interface BakeoffPrepareResult extends BakeoffMeasurement {
    * have to hardcode it independently.
    */
   judgeArchetype: 'judge';
+  /** What this preparation showed the judge — pass the SAME value to `--record`. */
+  evidenceMode: EvidenceMode;
+  /**
+   * Explored mode only: the reconstructed arm trees and their diffs,
+   * repo-relative, keyed by BLINDED label. Null under `inlined`. Reported so a
+   * coordinator can see what was written without parsing the prompt — and so
+   * it knows what `fadeno clean` would take with it.
+   */
+  armTrees: { a: { tree: string; diff: string }; b: { tree: string; diff: string } } | null;
   /** Repo-relative blinded comparison prompt, under `.fadeno/local/prompts/`. */
   comparisonPromptPath: string;
   /** Repo-relative blinded adversarial (shared-blind-spot) prompt, under `.fadeno/local/prompts/`. */
@@ -246,6 +268,12 @@ export interface CompareRecordOptions {
   repoRoot?: string;
   /** Injectable clock, for a stable `date` on the written artifact. */
   now?: Date;
+  /**
+   * How the judge is shown the arms' work — see `EVIDENCE_MODES`. Defaults to
+   * `inlined`, the mode every artifact written before this option existed
+   * used, so an omitted flag never silently changes what a judge saw.
+   */
+  evidence?: EvidenceMode;
 }
 
 /**
@@ -660,7 +688,87 @@ function stripGeneratedHunks(diffText: string, generatedFiles: string[]): string
   return `${kept.join('')}\n[${omittedCount} generated file diff(s) omitted, ${omittedBytes} bytes — see the diffstat instead]\n`;
 }
 
+/**
+ * Reconstruct one arm's post-work tree at `relDest`, from the commit it
+ * started at plus the diff it produced.
+ *
+ * `git archive` rather than `git worktree add`: the result is a plain
+ * directory with no `.git`, so nothing is registered in `.git/worktrees` for a
+ * later `fadeno clean` to leave dangling, and — usefully — a judge exploring
+ * it cannot run `git log` to discover which arm it is holding.
+ *
+ * `--directory=` rather than running `git apply` inside the destination. That
+ * obvious form is a TRAP, verified: git walks up, finds the enclosing repo,
+ * resolves the patch's paths against the REPO ROOT rather than the cwd, prints
+ * "Skipped patch 'src/a.ts'." — and exits 0. The tree is left at pristine
+ * baseline while the prompt tells the judge it is looking at the arm's work,
+ * which is the worst available outcome: not a crash, a wrong answer delivered
+ * confidently. `--reverse --check` below is the guard against every other
+ * shape of that failure, since a patch that did not apply cannot be reversed.
+ */
+function materializeArmTree(
+  repoRoot: string,
+  relDest: string,
+  baselineCommit: string,
+  diffRelPath: string,
+  armLabel: string,
+): void {
+  const absDest = join(repoRoot, relDest);
+  rmSync(absDest, { recursive: true, force: true });
+  mkdirSync(absDest, { recursive: true });
+
+  const archive = spawnSync('git', ['-C', repoRoot, 'archive', '--format=tar', baselineCommit], {
+    encoding: 'buffer',
+    maxBuffer: 512 * 1024 * 1024,
+  });
+  if (archive.status !== 0) {
+    throw new BakeoffCommandError(
+      `could not read the ${armLabel} arm's baseline tree at ${baselineCommit.slice(0, 8)}: ` +
+        `${(archive.stderr ?? Buffer.from('')).toString('utf8').trim() || 'git archive failed'}. ` +
+        'The commit may have been garbage-collected — adjudicate with --evidence inlined, which needs only the diff.',
+    );
+  }
+  const untar = spawnSync('tar', ['-x', '-C', absDest], { input: archive.stdout, encoding: 'buffer' });
+  if (untar.status !== 0) {
+    throw new BakeoffCommandError(
+      `could not extract the ${armLabel} arm's baseline tree: ${(untar.stderr ?? Buffer.from('')).toString('utf8').trim()}`,
+    );
+  }
+
+  // An empty diff is a real, valid arm state (an arm that changed nothing),
+  // and `git apply` errors on an empty patch — so the baseline tree IS the
+  // answer and there is nothing to verify.
+  const diffText = readFileSync(join(repoRoot, diffRelPath), 'utf8');
+  if (diffText.trim().length === 0) return;
+
+  const applyArgs = ['-C', repoRoot, 'apply', `--directory=${relDest}`, '--whitespace=nowarn', diffRelPath];
+  const applied = spawnSync('git', [...applyArgs], { encoding: 'utf8' });
+  if (applied.status !== 0) {
+    throw new BakeoffCommandError(
+      `could not replay the ${armLabel} arm's diff onto its baseline: ${applied.stderr.trim()}. ` +
+        'The recorded diff and baseline_commit do not agree — adjudicate with --evidence inlined, which ' +
+        'shows the diff as recorded without reconstructing anything.',
+    );
+  }
+  // Exit 0 is not proof, per the trap above. A patch that landed can be
+  // reversed; one that was skipped cannot.
+  const reversible = spawnSync(
+    'git',
+    ['-C', repoRoot, 'apply', `--directory=${relDest}`, '--reverse', '--check', diffRelPath],
+    { encoding: 'utf8' },
+  );
+  if (reversible.status !== 0) {
+    throw new BakeoffCommandError(
+      `the ${armLabel} arm's tree at ${relDest} does not match its recorded diff after replay — refusing to ` +
+        'show a judge a tree that is not what it is labelled. Adjudicate with --evidence inlined.',
+    );
+  }
+}
+
 /** A judge prompt is not an unbounded sink; a pathological diff gets a note instead of blowing the budget. */
+/** Repo-relative paths in a prompt are read by a judge and stored in an artifact: always `/`, never a platform separator. */
+const posixJoin = (...parts: string[]): string => posixPath.join(...parts);
+
 const MAX_DIFF_PROMPT_BYTES = 200_000;
 
 function capDiffText(diffText: string): string {
@@ -711,7 +819,13 @@ function blindArm(m: BakeoffArmMeasurement, diffText: string): BlindArmMaterial 
   };
 }
 
-function renderBlindArm(label: BlindLabel, m: BlindArmMaterial): string {
+/** Where an explored-mode arm's reconstructed tree and its diff live, repo-relative. */
+interface ArmEvidencePaths {
+  treeRel: string;
+  diffRel: string;
+}
+
+function renderBlindArm(label: BlindLabel, m: BlindArmMaterial, evidence: ArmEvidencePaths | null): string {
   const lines: string[] = [`### arm_${label}`, ''];
   lines.push(`- exit code: ${m.exitCode ?? '(none)'}`);
   lines.push(`- duration: ${m.durationMs != null ? formatBakeoffDuration(m.durationMs) : '(unknown)'}`);
@@ -734,14 +848,57 @@ function renderBlindArm(label: BlindLabel, m: BlindArmMaterial): string {
     );
     lines.push(`- redefined identifiers (already defined at baseline): ${m.signals.redefined.length > 0 ? m.signals.redefined.join(', ') : '(none)'}`);
   }
-  // The one span of this prompt an arm authored. Fence it with a delimiter it
-  // cannot contain, so no diff content can end the quote and continue as
-  // instructions — see `fenceFor`.
-  const body = m.diff.trim().length > 0 ? m.diff : '(empty diff)';
-  const fence = fenceFor(body);
-  lines.push('', `${fence}diff`, body, fence);
+  if (evidence != null) {
+    // Explored mode: paths, not bytes. The diff still ships as a FILE so the
+    // judge can read exactly what changed without re-deriving it by eye — the
+    // tree answers "what does this code look like now", which a diff cannot.
+    lines.push(
+      '',
+      `- tree (baseline + this arm's changes applied): \`${evidence.treeRel}/\``,
+      `- changes as a diff: \`${evidence.diffRel}\``,
+    );
+  } else {
+    // The one span of this prompt an arm authored. Fence it with a delimiter
+    // it cannot contain, so no diff content can end the quote and continue as
+    // instructions — see `fenceFor`.
+    const body = m.diff.trim().length > 0 ? m.diff : '(empty diff)';
+    const fence = fenceFor(body);
+    lines.push('', `${fence}diff`, body, fence);
+  }
   return lines.join('\n');
 }
+
+/**
+ * What `explored` mode has to say that `inlined` does not.
+ *
+ * A judge handed a path instead of bytes will, left to itself, answer from
+ * the diffstat and the identifier lists — the cheap move, and the one that
+ * makes explored mode strictly worse than inlined rather than better. So the
+ * instruction is explicit that reading is the job, and names what a tree can
+ * answer that a diff cannot: whether the change fits the file it landed in,
+ * whether a caller elsewhere still type-checks, whether a test covers it.
+ *
+ * The last line is load-bearing for blinding. The trees are reconstructed
+ * from each arm's baseline and diff and carry no `.git`, but a judge that
+ * goes looking outside them — into the real repo the paths sit inside — can
+ * find the ledger that names both executors.
+ */
+const EXPLORED_EVIDENCE_INSTRUCTIONS = [
+  '## How to read the evidence',
+  '',
+  "Each arm below names a DIRECTORY holding that arm's tree — the shared starting commit with that arm's " +
+    'changes applied — and a `.diff` file for the changes alone. Read them. The measurements are a summary, ' +
+    'not the evidence, and a verdict written from the diffstat is worth less than no verdict.',
+  '',
+  'What a tree answers that a diff cannot: whether a change fits the conventions of the file it landed in, ' +
+    'whether the rest of the file still makes sense around it, whether a caller elsewhere in the tree was ' +
+    'updated to match, and whether anything tests it. Open the changed files whole, then look at what they ' +
+    'touch.',
+  '',
+  'Read ONLY inside the two arm directories. Everything outside them — including the repository they sit in — ' +
+    'is a different tree at a different commit, and consulting it will both mislead you and reveal which arm ' +
+    'is which, which is exactly what these labels exist to prevent.',
+].join('\n');
 
 interface BlindReachDifference {
   identifier: string;
@@ -804,6 +961,7 @@ function buildComparisonPrompt(
   reach: BlindReachDifference[] | null,
   confounds: BlindConfound[],
   surfaces: string[],
+  explored: boolean,
 ): string {
   const reachSection = reach != null && reach.length > 0
     ? `### Reach differential\n\nBoth arms introduced these identifiers; only one wired them to a declared consumer surface:\n\n${reach.map((d) => `- \`${d.identifier}\`: reached in arm_${d.reachedIn}, NEVER reached in arm_${d.unreachedIn}`).join('\n')}`
@@ -821,6 +979,7 @@ function buildComparisonPrompt(
     'You are comparing two AI-agent work products on the SAME task, from the SAME starting commit. They are ' +
       'labeled `arm_a` and `arm_b` ONLY — you are never told, and must never guess or state, which one is the ' +
       '"primary"/incumbent and which is the "challenger". Judge the work, not who produced it.',
+    ...(explored ? ['', EXPLORED_EVIDENCE_INSTRUCTIONS] : []),
     '',
     '## Deterministic measurements',
     '',
@@ -857,13 +1016,14 @@ function buildComparisonPrompt(
   ].join('\n');
 }
 
-function buildAdversarialPrompt(blindA: string, blindB: string): string {
+function buildAdversarialPrompt(blindA: string, blindB: string, explored: boolean): string {
   return [
     `<!-- ${BAKEOFF_PROMPT_MARKER.adversarial} -->`,
     '# Blinded shadow-pair — shared blind spot search',
     '',
     'Two AI-agent work products on the SAME task, from the SAME starting commit, labeled `arm_a` / `arm_b` only. ' +
       'Do not try to pick a winner and do not guess which one is the "primary"/incumbent.',
+    ...(explored ? ['', EXPLORED_EVIDENCE_INSTRUCTIONS] : []),
     '',
     blindA,
     '',
@@ -1110,6 +1270,8 @@ interface PreparedComparison {
   validateAdversarial: ValidateFunction;
   comparisonPrompt: string;
   adversarialPrompt: string;
+  /** Explored mode only: the materialized arm trees, by blinded label. Null under `inlined`. */
+  armTrees: Record<BlindLabel, ArmEvidencePaths> | null;
 }
 
 /**
@@ -1124,7 +1286,12 @@ interface PreparedComparison {
  * `--prepare`, once from `--record`) reconstructs the identical mapping with
  * nothing persisted in between.
  */
-function preparePrompts(measurement: BakeoffMeasurement, pair: ResolvedDispatchPair, repoRoot: string): PreparedComparison {
+function preparePrompts(
+  measurement: BakeoffMeasurement,
+  pair: ResolvedDispatchPair,
+  repoRoot: string,
+  evidenceMode: EvidenceMode,
+): PreparedComparison {
   const blinding = deriveBlinding(measurement.pairId);
   const primaryArm = measurement.arms.find((a) => a.arm === 'primary')!;
   const challengerArm = measurement.arms.find((a) => a.arm === 'challenger')!;
@@ -1163,8 +1330,46 @@ function preparePrompts(measurement: BakeoffMeasurement, pair: ResolvedDispatchP
     primary: blindArm(primaryArm, readDiffText(repoRoot, pair.primary)),
     challenger: blindArm(challengerArm, readDiffText(repoRoot, pair.shadow)),
   };
-  const blindA = renderBlindArm('a', material[armFor('a', blinding)]);
-  const blindB = renderBlindArm('b', material[armFor('b', blinding)]);
+
+  // Explored mode materializes under the BLINDED label, so the directory a
+  // judge is told to open is `arm_a`, never `primary`. The path is part of
+  // the prompt; naming it after the arm's real role would undo the blinding
+  // more thoroughly than any prose leak, since the judge reads it on the way
+  // to every file.
+  const evidence: Record<BlindLabel, ArmEvidencePaths | null> = { a: null, b: null };
+  if (evidenceMode === 'explored') {
+    const pairDirRel = posixJoin('.fadeno', 'local', 'judge', measurement.pairId.slice(0, 8));
+    for (const label of ['a', 'b'] as const) {
+      const arm = armFor(label, blinding);
+      const entry = arm === 'primary' ? pair.primary : pair.shadow;
+      const armMeasurement = arm === 'primary' ? primaryArm : challengerArm;
+      const baseline = entry?.baselineCommit ?? null;
+      if (baseline == null || entry?.diffSnapshot == null) {
+        throw new BakeoffCommandError(
+          `pair ${measurement.pairId.slice(0, 8)} cannot be adjudicated with --evidence explored: an arm ` +
+            'recorded no baseline_commit or diff_snapshot, so its tree cannot be reconstructed. Use ' +
+            '--evidence inlined.',
+        );
+      }
+      const treeRel = posixJoin(pairDirRel, `arm_${label}`);
+      const diffRel = posixJoin(pairDirRel, `arm_${label}.diff`);
+      materializeArmTree(repoRoot, treeRel, baseline, entry.diffSnapshot, `arm_${label}`);
+      // The diff is copied beside the tree rather than linked in place:
+      // `diff_snapshot` points into the dispatch's own output directory, whose
+      // name can carry a dispatch id, and a blinded judge must not be handed a
+      // path that identifies which arm it is reading.
+      mkdirSync(join(repoRoot, pairDirRel), { recursive: true });
+      writeFileSync(
+        join(repoRoot, diffRel),
+        capDiffText(stripGeneratedHunks(readDiffText(repoRoot, entry), armMeasurement.diff?.generatedFiles ?? [])),
+        'utf8',
+      );
+      evidence[label] = { treeRel, diffRel };
+    }
+  }
+
+  const blindA = renderBlindArm('a', material[armFor('a', blinding)], evidence.a);
+  const blindB = renderBlindArm('b', material[armFor('b', blinding)], evidence.b);
 
   const { text: schemaText, parsed: schemaJson, schemas } = loadModelComparisonSchema(repoRoot);
   if (!schemas.has('bakeoff')) {
@@ -1182,10 +1387,18 @@ function preparePrompts(measurement: BakeoffMeasurement, pair: ResolvedDispatchP
     blindReach(measurement.reachDifferential, blinding),
     measurement.confounds.map((c) => blindConfoundForPrompt(c, blinding)),
     measurement.surfaces,
+    evidenceMode === 'explored',
   );
-  const adversarialPrompt = buildAdversarialPrompt(blindA, blindB);
+  const adversarialPrompt = buildAdversarialPrompt(blindA, blindB, evidenceMode === 'explored');
 
-  return { blinding, validateComparison, validateAdversarial, comparisonPrompt, adversarialPrompt };
+  return {
+    blinding,
+    validateComparison,
+    validateAdversarial,
+    comparisonPrompt,
+    adversarialPrompt,
+    armTrees: evidence.a != null && evidence.b != null ? { a: evidence.a, b: evidence.b } : null,
+  };
 }
 
 /**
@@ -1233,12 +1446,14 @@ function writeComparisonArtifact(args: {
   comparison: RawComparisonJudgment;
   adversarial: RawAdversarialJudgment;
   judgeDelivery: JudgeDelivery;
+  /** What the judge was shown — stamped on the artifact, since a reader cannot tell from the verdict. */
+  evidenceMode: EvidenceMode;
   /** The resolved judge dispatch's own provider — command-lane only; null when nothing was dispatched. */
   judgeProvider: string | null;
   judgeDispatchIds: { comparison: string; adversarial: string } | null;
   now: Date;
 }): BakeoffAdjudicatedResult {
-  const { measurement, pair, repoRoot, blinding, verdict, comparison, adversarial, judgeDelivery, judgeProvider, judgeDispatchIds, now } = args;
+  const { measurement, pair, repoRoot, blinding, verdict, comparison, adversarial, judgeDelivery, evidenceMode, judgeProvider, judgeDispatchIds, now } = args;
   const primaryArm = measurement.arms.find((a) => a.arm === 'primary')!;
   const challengerArm = measurement.arms.find((a) => a.arm === 'challenger')!;
 
@@ -1296,6 +1511,7 @@ function writeComparisonArtifact(args: {
     pair_id: measurement.pairId,
     dispatch_ids: dispatchIds,
     judge_delivery: judgeDelivery,
+    evidence_mode: evidenceMode,
     ...(graftPlan != null ? { graft_plan: graftPlan } : {}),
   };
 
@@ -1351,7 +1567,8 @@ function adjudicateViaCommand(
   cwd: string,
   opts: BakeoffOptions,
 ): BakeoffAdjudicatedResult {
-  const prepared = preparePrompts(measurement, pair, repoRoot);
+  const evidenceMode = opts.evidence ?? 'inlined';
+  const prepared = preparePrompts(measurement, pair, repoRoot, evidenceMode);
   const pairId8 = measurement.pairId.slice(0, 8);
   const judgeCallOpts = { repoRoot, cwd, judgeModel: opts.judgeModel ?? null, judgeVia: opts.judgeVia ?? null, now: opts.now };
 
@@ -1391,6 +1608,7 @@ function adjudicateViaCommand(
     comparison,
     adversarial,
     judgeDelivery: 'command',
+    evidenceMode,
     judgeProvider: comparisonResult.provider,
     judgeDispatchIds: { comparison: comparisonResult.dispatchId, adversarial: adversarialResult.dispatchId },
     now: opts.now ?? new Date(),
@@ -1428,7 +1646,8 @@ export function runBakeoffPrepare(opts: ComparePrepareOptions): BakeoffPrepareRe
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const { measurement, pair } = measureCompletePair(ref, cwd, repoRoot);
-  const prepared = preparePrompts(measurement, pair, repoRoot);
+  const evidenceMode = opts.evidence ?? 'inlined';
+  const prepared = preparePrompts(measurement, pair, repoRoot, evidenceMode);
 
   const pairId8 = measurement.pairId.slice(0, 8);
   const promptsDir = join('.fadeno', 'local', 'prompts');
@@ -1442,6 +1661,13 @@ export function runBakeoffPrepare(opts: ComparePrepareOptions): BakeoffPrepareRe
     ...measurement,
     prepared: true,
     judgeArchetype: 'judge',
+    evidenceMode,
+    armTrees: prepared.armTrees != null
+      ? {
+          a: { tree: prepared.armTrees.a.treeRel, diff: prepared.armTrees.a.diffRel },
+          b: { tree: prepared.armTrees.b.treeRel, diff: prepared.armTrees.b.diffRel },
+        }
+      : null,
     comparisonPromptPath,
     adversarialPromptPath,
   };
@@ -1482,7 +1708,13 @@ export function runBakeoffRecord(opts: CompareRecordOptions): BakeoffAdjudicated
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const { measurement, pair } = measureCompletePair(ref, cwd, repoRoot);
-  const prepared = preparePrompts(measurement, pair, repoRoot);
+  // `--record` re-derives everything rather than trusting state from
+  // `--prepare`, so the mode must be named again here. A mismatch is not
+  // silently reconciled: the artifact stamps what THIS call was told, and a
+  // caller who explored and then recorded as inlined has mislabelled their
+  // own evidence.
+  const evidenceMode = opts.evidence ?? 'inlined';
+  const prepared = preparePrompts(measurement, pair, repoRoot, evidenceMode);
 
   const comparisonText = readJudgmentFile(cwd, opts.comparisonPath, 'comparison');
   const comparisonParsed = extractJsonObject(comparisonText);
@@ -1519,6 +1751,7 @@ export function runBakeoffRecord(opts: CompareRecordOptions): BakeoffAdjudicated
     comparison,
     adversarial,
     judgeDelivery: 'host',
+    evidenceMode,
     judgeProvider: null,
     judgeDispatchIds: null,
     now: opts.now ?? new Date(),

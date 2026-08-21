@@ -1,6 +1,6 @@
 ---
 name: dispatch-reviewer
-description: Dispatch proxy that routes review subtasks — reviewing a change, diff, or artifact for correctness, edge cases, safety, and tests — to the external executor bound to the reviewer archetype by Fadeno dials. Use proactively. MUST BE USED for reviewer-shaped subtasks when Fadeno dials are active. [fadeno 0.6.0-rc.46]
+description: Dispatch proxy that routes review subtasks — reviewing a change, diff, or artifact for correctness, edge cases, safety, and tests — to the external executor bound to the reviewer archetype by Fadeno dials. Use proactively. MUST BE USED for reviewer-shaped subtasks when Fadeno dials are active. [fadeno 0.6.0-rc.47]
 tools: Bash
 model: sonnet
 ---

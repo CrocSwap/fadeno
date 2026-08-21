@@ -672,6 +672,45 @@ part of it; `[source]` is the cascade layer that won
   a per-challenger tally (`N pairs, M comparisons: X prefer_challenger / Y
   prefer_baseline / Z tie/inconclusive`).
 
+### How the judge is shown the arms' work
+
+`fadeno bakeoff` takes `--evidence inlined|explored`, and the mode it ran
+under is stamped on the artifact as `evidence_mode` — a reader cannot tell
+from the verdict which kind of judgment they are holding.
+
+`inlined` is the default and embeds both arms' diffs in the prompt. The prompt
+file is then a complete record of what was judged, which is the right trade
+for a small pair. It scales badly: this repo's pair `49a1f92a` produced a
+55 KB comparison prompt, and a diff shows changed hunks while hiding the file
+they landed in — so the one question a reviewer most wants answered ("does
+this fit the code around it?") is the one a diff cannot answer.
+
+`explored` reconstructs each arm's post-work tree from its `baseline_commit`
+and `diff_snapshot` into `.fadeno/local/judge/<pair-id-8>/arm_a/` and
+`arm_b/`, writes each arm's diff beside it, and puts PATHS in the prompt. The
+same pair drops to 11 KB with strictly more available to the judge. The
+directories carry the blinded label, never `primary`/`challenger`: the path is
+read on the way to every file, so naming it after the arm's real role would
+undo the blinding more thoroughly than any prose leak. They are plain
+extracted trees with no `.git` — nothing for `fadeno clean` to leave dangling
+in `.git/worktrees`, and no `git log` for a curious judge to identify its arm
+with. The prompt tells the judge to read only inside the two directories, for
+the same reason.
+
+Reconstruction refuses rather than degrades. A baseline commit that has been
+garbage-collected, or a recorded diff that no longer applies to it, ends the
+command with a message pointing at `--evidence inlined`, which needs only the
+diff. The check is not `git apply`'s exit code: running `git apply` from
+inside the destination directory finds the enclosing repository, resolves the
+patch against the REPO root, prints `Skipped patch 'src/a.ts'.` — and exits 0,
+leaving a pristine baseline tree wearing an arm's label. The applier uses
+`--directory=` from the repo root and then verifies with `--reverse --check`,
+because a patch that did not land cannot be reversed.
+
+`--record` re-derives everything from the ledger rather than carrying state
+from `--prepare`, so it cannot know which mode `--prepare` used: pass the same
+`--evidence` value to both, or the artifact will mislabel its own evidence.
+
 This makes Fadeno the only layer that sees cross-provider usage — the natural
 future home of per-provider burn reporting (a later `fadeno usage`; not in
 this boundary), which closes the loop on the subscription-cycling need.

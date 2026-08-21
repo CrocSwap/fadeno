@@ -147,6 +147,34 @@ export function isJudgeDelivery(value: unknown): value is JudgeDelivery {
 }
 
 /**
+ * How the judge was given the arms' work.
+ *
+ * `inlined` embeds each arm's diff in the prompt. It is the honest default for
+ * a small pair: everything the judge saw is in one file, which is also the
+ * artifact's own audit trail. It scales badly — pair 49a1f92a's two diffs came
+ * to ~104 KB of prompt, which is both expensive and a poor way to read code,
+ * since a diff shows changed hunks and hides the file they landed in.
+ *
+ * `explored` reconstructs each arm's post-work tree on disk from its
+ * `baseline_commit` and `diff_snapshot`, and passes PATHS. The judge opens
+ * what it wants to see: the changed file whole, its callers, the tests. The
+ * cost is that the prompt is no longer a complete record of the evidence —
+ * hence this field, so a reader of the artifact knows which kind of judgment
+ * it is holding, and `fadeno clean` has not necessarily left the trees behind.
+ *
+ * Stamped by every writer, like `judge_delivery`; optional at the type level
+ * only for a reader parsing an artifact written before the field existed,
+ * where the absence correctly means `inlined`.
+ */
+export const EVIDENCE_MODES = ['inlined', 'explored'] as const;
+
+export type EvidenceMode = (typeof EVIDENCE_MODES)[number];
+
+export function isEvidenceMode(value: unknown): value is EvidenceMode {
+  return typeof value === 'string' && (EVIDENCE_MODES as readonly string[]).includes(value);
+}
+
+/**
  * How a verdict is counted in the running scorecard. Derived from the
  * vocabulary rather than restated, so a new verdict cannot be silently
  * uncounted: adding one here is a type error until it is given a bucket.
@@ -258,6 +286,8 @@ export interface BakeoffFrontmatter {
    * `JudgeDelivery`.
    */
   judge_delivery?: JudgeDelivery;
+  /** Absent means `inlined` — see `EVIDENCE_MODES`. */
+  evidence_mode?: EvidenceMode;
 }
 
 export type BakeoffParseError =

@@ -34,6 +34,7 @@ type Claim = { id: string; doc: Side; src: Side };
 
 const DIALS = 'docs/experimental/dials-and-registry.md';
 const SLOTS = 'docs/experimental/slots-and-archetypes.md';
+const LOADOUTS = 'docs/experimental/loadouts-and-dispatch.md';
 const EXTENDING = 'docs/extending.md';
 
 const CLAIMS: Claim[] = [
@@ -245,6 +246,20 @@ const CLAIMS: Claim[] = [
     src: {
       files: ['src/lib/executors.ts', 'src/commands/dispatch.ts', 'src/commands/dial.ts', 'src/commands/steering.ts'],
       patterns: [/explainPairRoutability/, /shadow_write_posture/],
+    },
+  },
+  {
+    // The reconstruction trap, recorded because it is invisible: `git apply`
+    // from inside the destination exits 0 and applies NOTHING, leaving a
+    // baseline tree wearing an arm's label. The doc says why the applier uses
+    // `--directory=` and verifies with `--reverse --check`; if the source
+    // ever stops doing either, the doc is describing a safety property the
+    // code no longer has.
+    id: 'bakeoff-evidence-explored',
+    doc: { files: [LOADOUTS], patterns: [/evidence_mode/, /--reverse --check/] },
+    src: {
+      files: ['src/commands/bakeoff.ts'],
+      patterns: [/--directory=\$\{relDest\}/, /'--reverse', '--check'/],
     },
   },
   {

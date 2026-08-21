@@ -56,6 +56,7 @@ import {
   type BakeoffPrepareResult,
   type BakeoffResult,
 } from './commands/bakeoff.ts';
+import { EVIDENCE_MODES, isEvidenceMode, type EvidenceMode } from './lib/bakeoff.ts';
 import { runSteeringApply, runSteeringApplyClaude, runSteeringResolve } from './commands/steering.ts';
 import { runDispatchPrompt } from './commands/dispatch-prompt.ts';
 import { runDispatchPrepare } from './commands/dispatch-prepare.ts';
@@ -136,12 +137,12 @@ Usage:
   fadeno dispatches --bakeoffs          Adjudicated bakeoff scorecard per challenger
   fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]
                                         Port a shadow pair's diff into your workspace (git apply --3way)
-  fadeno bakeoff <pair-id|dispatch-id> [--judge <ref>] [--via <driver>]
+  fadeno bakeoff <pair-id|dispatch-id> [--judge <ref>] [--via <driver>] [--evidence inlined|explored]
                                         Measure + adjudicate a shadow pair: two blinded judge dispatches, then
                                         write .fadeno/bakeoffs/<pair-id-8>.md
   fadeno bakeoff <pair-id|dispatch-id> --measure-only
                                         Measure a shadow pair's arms only (deterministic; no model is consulted)
-  fadeno bakeoff <pair-id|dispatch-id> --prepare
+  fadeno bakeoff <pair-id|dispatch-id> --prepare [--evidence inlined|explored]
                                         Measure + write the two blinded judge prompts under .fadeno/local/prompts/;
                                         writes no artifact — for a host coordinator to spawn judge subagents on
   fadeno bakeoff <pair-id|dispatch-id> --record --comparison <file> --adversarial <file>
@@ -208,6 +209,10 @@ Options:
   --arm <arm>             (shadow-apply) challenger (default) | primary
   --check                 (shadow-apply) Report applicability only (git apply --check --3way); changes nothing
   --measure-only          (bakeoff) Report the pair's measured facts and write nothing; skips adjudication
+  --evidence <mode>       (bakeoff) inlined (default) embeds each arm's diff in the prompt; explored
+                          reconstructs both arms' trees under .fadeno/local/judge/<pair-8>/ and passes
+                          paths, so the judge reads whole files instead of hunks. Pass the same value to
+                          --record that you passed to --prepare; the artifact stamps evidence_mode
   --prepare               (bakeoff) Measure + write the two blinded judge prompts; write no artifact
   --record                (bakeoff) Validate --comparison/--adversarial judgment files and write the artifact
   --comparison <path>     (bakeoff --record) The comparison judge subagent's raw JSON output
@@ -1260,11 +1265,20 @@ function printBakeoffPrepare(result: BakeoffPrepareResult): void {
   console.log(`pair ${result.pairId.slice(0, 8)}  archetype ${result.archetype ?? '?'}  baseline ${base}`);
   for (const arm of result.arms) printBakeoffArm(arm);
   console.log('  prepared — no verdict was formed and nothing was written.');
+  if (result.armTrees != null) {
+    // Named even though the prompt already carries them: these are real
+    // directories on disk that `fadeno clean` will remove, and a caller who
+    // cannot see what was written cannot know what it is about to lose.
+    console.log(`  evidence: explored — each arm's tree was reconstructed on disk:`);
+    console.log(`    arm_a: ${result.armTrees.a.tree}/  (changes: ${result.armTrees.a.diff})`);
+    console.log(`    arm_b: ${result.armTrees.b.tree}/  (changes: ${result.armTrees.b.diff})`);
+  }
   console.log(`  spawn a "${result.judgeArchetype}" subagent per prompt file, INDEPENDENTLY:`);
   console.log(`    comparison prompt:  ${result.comparisonPromptPath}`);
   console.log(`    adversarial prompt: ${result.adversarialPromptPath}`);
   console.log(
-    '  then: fadeno bakeoff <pair-id> --record --comparison <file> --adversarial <file>',
+    `  then: fadeno bakeoff <pair-id> --record --comparison <file> --adversarial <file>` +
+      (result.evidenceMode === 'explored' ? ' --evidence explored' : ''),
   );
 }
 
@@ -1618,6 +1632,7 @@ function main(argv: string[]): number {
         arm: { type: 'string' },
         check: { type: 'boolean' },
         'measure-only': { type: 'boolean' },
+        evidence: { type: 'string' },
         prepare: { type: 'boolean' },
         record: { type: 'boolean' },
         comparison: { type: 'string' },
@@ -2715,12 +2730,21 @@ function main(argv: string[]): number {
     case 'bakeoff': {
       const ref = positionals[1];
       const usage =
-        'Usage: fadeno bakeoff <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--via <driver>]\n' +
-        '   or: fadeno bakeoff <pair-id|dispatch-id> --prepare\n' +
-        '   or: fadeno bakeoff <pair-id|dispatch-id> --record --comparison <file> --adversarial <file>';
+        'Usage: fadeno bakeoff <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--via <driver>] [--evidence inlined|explored]\n' +
+        '   or: fadeno bakeoff <pair-id|dispatch-id> --prepare [--evidence inlined|explored]\n' +
+        '   or: fadeno bakeoff <pair-id|dispatch-id> --record --comparison <file> --adversarial <file> [--evidence inlined|explored]';
       if (!ref) throw new Error(usage);
+      // Rejected here rather than defaulted: a typo'd `--evidence explored`
+      // that silently fell back to `inlined` would stamp the artifact with a
+      // mode the caller did not choose, which is the one thing this field
+      // exists to make legible.
+      const evidence = ((): EvidenceMode | undefined => {
+        if (values.evidence == null) return undefined;
+        if (isEvidenceMode(values.evidence)) return values.evidence;
+        throw new Error(`--evidence must be one of: ${EVIDENCE_MODES.join(', ')} (got "${values.evidence}")`);
+      })();
       if (values.prepare) {
-        const result = runBakeoffPrepare({ ref });
+        const result = runBakeoffPrepare({ ref, evidence });
         if (values.json) {
           console.log(JSON.stringify(result, null, 2));
           return 0;
@@ -2730,7 +2754,7 @@ function main(argv: string[]): number {
       }
       if (values.record) {
         if (!values.comparison || !values.adversarial) throw new Error(usage);
-        const result = runBakeoffRecord({ ref, comparisonPath: values.comparison, adversarialPath: values.adversarial });
+        const result = runBakeoffRecord({ ref, comparisonPath: values.comparison, adversarialPath: values.adversarial, evidence });
         if (values.json) {
           console.log(JSON.stringify(result, null, 2));
           return 0;
@@ -2743,6 +2767,7 @@ function main(argv: string[]): number {
         measureOnly: Boolean(values['measure-only']),
         judgeModel: values.judge ?? null,
         judgeVia: values.via ?? null,
+        evidence,
       });
       if (values.json) {
         console.log(JSON.stringify(result, null, 2));

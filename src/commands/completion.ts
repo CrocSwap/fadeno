@@ -193,6 +193,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   bakeoff: command(
     {
       '--measure-only': NONE,
+      '--evidence': { kind: 'enum', values: ['inlined', 'explored'] },
       '--prepare': NONE,
       '--record': NONE,
       '--comparison': PATH,

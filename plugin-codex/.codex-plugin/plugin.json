@@ -1,6 +1,6 @@
 {
   "name": "fadeno",
-  "version": "0.6.0-rc.46",
+  "version": "0.6.0-rc.47",
   "description": "Run and author Fadeno playbooks — repeatable plan/implement/review/test workflows with file-backed run traces. Seed a repo with `fadeno init --codex --data-only`.",
   "author": {
     "name": "Fadeno"

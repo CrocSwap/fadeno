@@ -25,6 +25,16 @@ instead of the CLI shelling out to a second command-lane process.
    it writes NO artifact and consults no model. The result names
    `comparisonPromptPath`, `adversarialPromptPath`, and `judgeArchetype`
    (always `judge`).
+
+   Add `--evidence explored` when the arms' diffs are large or when the
+   question is whether the change FITS the code it landed in. It reconstructs
+   each arm's tree under `.fadeno/local/judge/<pair-id-8>/arm_a|arm_b/` and
+   puts paths in the prompt instead of the diff bytes — on this repo's pair
+   `49a1f92a` that took the comparison prompt from 55 KB to 11 KB while
+   giving the judge strictly more to look at. Your judge subagents then need
+   file-reading tools, which a host subagent has and a `claude -p` command
+   lane may not. Default is `inlined`, which embeds both diffs and keeps the
+   prompt file a complete record of what was judged.
 2. **Spawn two `judge` subagents — INDEPENDENTLY.** One per prompt file, as
    separate spawns with no shared context between them. Each spawn's
    instruction is just: "Read `<promptPath>` and follow its instructions
@@ -39,7 +49,11 @@ instead of the CLI shelling out to a second command-lane process.
    object is fine) — that logic lives in one place so both delivery paths
    fail the same way on the same malformed output.
 4. **Record.** Run
-   `fadeno bakeoff <pair-id> --record --comparison <comparison-file> --adversarial <adversarial-file>`.
+   `fadeno bakeoff <pair-id> --record --comparison <comparison-file> --adversarial <adversarial-file>`,
+   adding `--evidence explored` if you used it in step 1. `--record`
+   re-derives everything from the ledger rather than carrying state from
+   `--prepare`, so it has no way to know which mode you chose; passing the
+   wrong one mislabels your own evidence in the artifact.
    This validates both judgments against `bakeoff.schema.json`,
    unblinds, renders, and writes `.fadeno/bakeoffs/<pair-id>.md` — with
    `judge_delivery: host` stamped in its frontmatter and a
