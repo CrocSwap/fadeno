@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.43";
+  if (true) return "0.6.0-rc.44";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -31920,7 +31920,16 @@ function runShadowShow(opts = {}) {
   const result = runDialShow(opts);
   return { ...result, rows: result.rows.filter((row) => row.shadow != null) };
 }
-function deliveryGuidance(archetype, executorName, spec) {
+function deliveryGuidance(archetype, executorName, spec, conflict) {
+  if (conflict != null) {
+    return {
+      dispatchable: false,
+      dispatch_command: null,
+      // The kernel's exact refusal, verbatim: it already names the remedy,
+      // and rewording it here is how the two drift apart.
+      action: `Do NOT dispatch \u2014 it would be refused. ${conflict}`
+    };
+  }
   if (commandRoutable(spec)) {
     const lane = spec.adapter === "host" ? `Host executor "${executorName}" has a command lane (\`fallback_command\`), and the dispatch delivers there rather than in-session \u2014 an isolated worktree, a dispatch id, and a terminal receipt.` : `Executor "${executorName}" runs outside this harness.`;
     return {
@@ -32029,7 +32038,15 @@ function runDialResolve(opts) {
     ...forcesWritePosture(resolved.delivery.ref, resolved.resolvedVia) ? { write_posture_forced: true } : {},
     ...eligibility !== "eligible" ? { eligibility } : {},
     dial: resolved.delivery.ref,
-    delivery: deliveryGuidance(archetype, resolved.delivery.refString, spec),
+    delivery: deliveryGuidance(
+      archetype,
+      resolved.delivery.refString,
+      spec,
+      // Same guard the kernel and `steering resolve` apply: a dial set with
+      // `--force` has already overridden this posture on purpose, and
+      // re-asserting it here would refuse what the user explicitly forced.
+      forcesWritePosture(resolved.delivery.ref, resolved.resolvedVia) ? null : explainWriteConflict({ executor: resolved.delivery.refString, spec }, archetype, profile)
+    ),
     relay: relay != null ? { ref: relay.refString, model_id: relay.modelId, effort: relay.effort } : null,
     ...shadow != null ? { shadow } : {}
   };

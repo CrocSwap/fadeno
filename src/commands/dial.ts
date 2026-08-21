@@ -1340,7 +1340,34 @@ export interface DialResolveResult {
   };
 }
 
-function deliveryGuidance(archetype: string, executorName: string, spec: ExecutorSpec): DialResolveResult['delivery'] {
+/**
+ * The dispatch advice this resolution hands its reader.
+ *
+ * `conflict` is the kernel's OWN write-posture refusal for this delivery,
+ * computed by the caller and passed in — not re-derived here. A lane that
+ * exists is not a lane that can do the work: an effort-pinned host dial
+ * (`worker sonnet@medium`) leaves the session for its route's
+ * `fallback_command`, and that lane is `write_access: false` with no
+ * `write_variant` available to a host route. `commandRoutable` alone says
+ * true there, so advising a dispatch on it would tell the reader to run a
+ * command that this same binary refuses — the guidance and the kernel must
+ * answer from one predicate, not two that agree only by coincidence.
+ */
+function deliveryGuidance(
+  archetype: string,
+  executorName: string,
+  spec: ExecutorSpec,
+  conflict: string | null,
+): DialResolveResult['delivery'] {
+  if (conflict != null) {
+    return {
+      dispatchable: false,
+      dispatch_command: null,
+      // The kernel's exact refusal, verbatim: it already names the remedy,
+      // and rewording it here is how the two drift apart.
+      action: `Do NOT dispatch — it would be refused. ${conflict}`,
+    };
+  }
   if (commandRoutable(spec)) {
     const lane = spec.adapter === 'host'
       ? `Host executor "${executorName}" has a command lane (\`fallback_command\`), and the dispatch delivers ` +
@@ -1472,7 +1499,17 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
     ...(forcesWritePosture(resolved.delivery.ref, resolved.resolvedVia) ? { write_posture_forced: true } : {}),
     ...(eligibility !== 'eligible' ? { eligibility } : {}),
     dial: resolved.delivery.ref,
-    delivery: deliveryGuidance(archetype, resolved.delivery.refString, spec),
+    delivery: deliveryGuidance(
+      archetype,
+      resolved.delivery.refString,
+      spec,
+      // Same guard the kernel and `steering resolve` apply: a dial set with
+      // `--force` has already overridden this posture on purpose, and
+      // re-asserting it here would refuse what the user explicitly forced.
+      forcesWritePosture(resolved.delivery.ref, resolved.resolvedVia)
+        ? null
+        : explainWriteConflict({ executor: resolved.delivery.refString, spec }, archetype, profile),
+    ),
     relay: relay != null
       ? { ref: relay.refString, model_id: relay.modelId, effort: relay.effort }
       : null,
