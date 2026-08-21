@@ -31,7 +31,19 @@ export interface InitResult {
   results: EmitResult[];
 }
 
-const SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver'] as const;
+/**
+ * Skills a PROJECT install gets. `fadeno-setup` is deliberately absent: it
+ * teaches installing Fadeno's user-scoped integration, which has necessarily
+ * already happened by the time `init` runs inside a repo. That is a bootstrap/
+ * project-work distinction, not a curated shortlist — anything a person does
+ * IN a repo belongs here.
+ *
+ * `fadeno-compare` is project work by that rule: it judges shadow pairs from
+ * evidence in this repo's own `.fadeno/`. Step 3 below already installs the
+ * `judge` subagent the skill spawns, so omitting it shipped the actor without
+ * the instructions for using it.
+ */
+const SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-compare'] as const;
 
 /**
  * Scaffold a Fadeno setup for the given target into the repository.
@@ -105,7 +117,12 @@ export function runInit(opts: InitOptions): InitResult {
       const skillMdPath = join(skillDest, 'SKILL.md');
       results.push({ path: skillMdPath, status: emitFile(skillMdPath, skillMd, force) });
 
-      copyTree(join(skillSrc, 'references'), join(skillDest, 'references'), force, results);
+      // Guarded, exactly as the plugin generator guards it: `references/` is
+      // optional and `fadeno-compare` has none. Two readers of one template
+      // layout, and only one of them checked — so adding the first skill
+      // without references broke `init` while the generator was fine.
+      const references = join(skillSrc, 'references');
+      if (existsSync(references)) copyTree(references, join(skillDest, 'references'), force, results);
 
       if (opts.target === 'codex') {
         const policy = readFileSync(join(tpl, 'codex', 'openai', `${skill}.yaml`), 'utf8');

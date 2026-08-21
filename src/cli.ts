@@ -48,7 +48,14 @@ import { runValidate } from './commands/validate.ts';
 import { runVerify, type VerifyResult } from './commands/verify.ts';
 import { knownFlagsFor, runCompletion, runCompletionCandidates, suggestFlag, unknownFlagsFor } from './commands/completion.ts';
 import { runShadowApply } from './commands/shadow-apply.ts';
-import { runCompare, type CompareArmMeasurement, type CompareResult } from './commands/compare.ts';
+import {
+  runCompare,
+  runComparePrepare,
+  runCompareRecord,
+  type CompareArmMeasurement,
+  type ComparePrepareResult,
+  type CompareResult,
+} from './commands/compare.ts';
 import { runSteeringApply, runSteeringApplyClaude, runSteeringResolve } from './commands/steering.ts';
 import { runDispatchPrompt } from './commands/dispatch-prompt.ts';
 import { runDispatchPrepare } from './commands/dispatch-prepare.ts';
@@ -134,6 +141,12 @@ Usage:
                                         write .fadeno/comparisons/<pair-id-8>.md
   fadeno compare <pair-id|dispatch-id> --measure-only
                                         Measure a shadow pair's arms only (deterministic; no model is consulted)
+  fadeno compare <pair-id|dispatch-id> --prepare
+                                        Measure + write the two blinded judge prompts under .fadeno/local/prompts/;
+                                        writes no artifact — for a host coordinator to spawn judge subagents on
+  fadeno compare <pair-id|dispatch-id> --record --comparison <file> --adversarial <file>
+                                        Validate two host-delivered judgments and write the artifact
+                                        (judge_delivery: host — see the fadeno-judge skill)
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic claims (or --latest)
   fadeno plugin [dir] [--codex]         Generate a Claude Code (default) or Codex plugin
@@ -194,6 +207,10 @@ Options:
   --arm <arm>             (shadow-apply) challenger (default) | primary
   --check                 (shadow-apply) Report applicability only (git apply --check --3way); changes nothing
   --measure-only          (compare) Report the pair's measured facts and write nothing; skips adjudication
+  --prepare               (compare) Measure + write the two blinded judge prompts; write no artifact
+  --record                (compare) Validate --comparison/--adversarial judgment files and write the artifact
+  --comparison <path>     (compare --record) The comparison judge subagent's raw JSON output
+  --adversarial <path>    (compare --record) The adversarial judge subagent's raw JSON output
   --judge <ref>           (compare) Override the judge archetype's dial model (bypasses catalog resolution)
   --isolate               (dispatch-prepare) Create isolated worktree at .fadeno/local/host-worktrees/<run>/<id> (workspace_mode: isolated)
   --agent-id <id>         (dispatch-start) Host agent identity
@@ -1225,9 +1242,26 @@ function printCompare(result: CompareResult): void {
     }
   }
   console.log(`  written: ${result.comparisonPath}`);
+  if (result.judgeDispatchIds != null) {
+    console.log(
+      `  judge dispatches: comparison ${result.judgeDispatchIds.comparison.slice(0, 8)}, ` +
+        `adversarial ${result.judgeDispatchIds.adversarial.slice(0, 8)}`,
+    );
+  } else {
+    console.log('  judge delivery: host — recorded from a file, no dispatch receipt (see Confounds)');
+  }
+}
+
+function printComparePrepare(result: ComparePrepareResult): void {
+  const base = result.baselineCommit != null ? result.baselineCommit.slice(0, 8) : '(none)';
+  console.log(`pair ${result.pairId.slice(0, 8)}  archetype ${result.archetype ?? '?'}  baseline ${base}`);
+  for (const arm of result.arms) printCompareArm(arm);
+  console.log('  prepared — no verdict was formed and nothing was written.');
+  console.log(`  spawn a "${result.judgeArchetype}" subagent per prompt file, INDEPENDENTLY:`);
+  console.log(`    comparison prompt:  ${result.comparisonPromptPath}`);
+  console.log(`    adversarial prompt: ${result.adversarialPromptPath}`);
   console.log(
-    `  judge dispatches: comparison ${result.judgeDispatchIds.comparison.slice(0, 8)}, ` +
-      `adversarial ${result.judgeDispatchIds.adversarial.slice(0, 8)}`,
+    '  then: fadeno compare <pair-id> --record --comparison <file> --adversarial <file>',
   );
 }
 
@@ -1570,6 +1604,10 @@ function main(argv: string[]): number {
         arm: { type: 'string' },
         check: { type: 'boolean' },
         'measure-only': { type: 'boolean' },
+        prepare: { type: 'boolean' },
+        record: { type: 'boolean' },
+        comparison: { type: 'string' },
+        adversarial: { type: 'string' },
         judge: { type: 'string' },
         json: { type: 'boolean' },
         'agent-id': { type: 'string' },
@@ -2662,7 +2700,30 @@ function main(argv: string[]): number {
     }
     case 'compare': {
       const ref = positionals[1];
-      if (!ref) throw new Error('Usage: fadeno compare <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--via <driver>]');
+      const usage =
+        'Usage: fadeno compare <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--via <driver>]\n' +
+        '   or: fadeno compare <pair-id|dispatch-id> --prepare\n' +
+        '   or: fadeno compare <pair-id|dispatch-id> --record --comparison <file> --adversarial <file>';
+      if (!ref) throw new Error(usage);
+      if (values.prepare) {
+        const result = runComparePrepare({ ref });
+        if (values.json) {
+          console.log(JSON.stringify(result, null, 2));
+          return 0;
+        }
+        printComparePrepare(result);
+        return 0;
+      }
+      if (values.record) {
+        if (!values.comparison || !values.adversarial) throw new Error(usage);
+        const result = runCompareRecord({ ref, comparisonPath: values.comparison, adversarialPath: values.adversarial });
+        if (values.json) {
+          console.log(JSON.stringify(result, null, 2));
+          return 0;
+        }
+        printCompare(result);
+        return 0;
+      }
       const result = runCompare({
         ref,
         measureOnly: Boolean(values['measure-only']),

@@ -1,0 +1,7 @@
+# Codex invocation policy for the Fadeno Judge skill.
+# Explicit "adjudicate/judge this shadow pair" intent only — not ambient
+# task matching, same posture as the driver and setup skills.
+interface:
+  displayname: "Fadeno Judge"
+  shortdescription: "Adjudicate a Fadeno shadow pair with host judge subagents."
+allow_implicit_invocation: false

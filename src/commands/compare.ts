@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { Ajv, type ValidateFunction } from 'ajv';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { schemaDirectories } from '../lib/definitions.ts';
@@ -11,6 +11,7 @@ import {
   isJudgmentVerdict,
   unblindVerdict,
   type GraftStep,
+  type JudgeDelivery,
   type ModelComparisonFrontmatter,
   type ModelComparisonVerdict,
 } from '../lib/model-comparison.ts';
@@ -47,7 +48,8 @@ export interface CompareConfound {
     | 'baseline_not_shared'
     | 'arm_refused'
     | 'exit_code_differs'
-    | 'judge_provider_shared';
+    | 'judge_provider_shared'
+    | 'judge_delivery_unattested';
   arm: CompareArm | 'pair';
   detail: string;
 }
@@ -166,8 +168,19 @@ export interface CompareAdjudicatedResult extends CompareMeasurement {
   verdict: ModelComparisonVerdict;
   /** Repo-relative path of the `ModelComparison` artifact this run wrote. */
   comparisonPath: string;
-  /** The two blinded judge dispatches this verdict was built from. */
-  judgeDispatchIds: { comparison: string; adversarial: string };
+  /**
+   * How this verdict was delivered — see `JudgeDelivery`. `command` means
+   * this run dispatched the judge itself; `host` means `--record` accepted a
+   * judgment file a host-spawned subagent (or a coordinator) produced outside
+   * any dispatch this kernel can attest.
+   */
+  judgeDelivery: JudgeDelivery;
+  /**
+   * The two blinded judge dispatches this verdict was built from —
+   * command-lane delivery only. Null when `judgeDelivery` is `host`: nothing
+   * was dispatched, so there is no receipt to name.
+   */
+  judgeDispatchIds: { comparison: string; adversarial: string } | null;
   /**
    * The graft plan, already unblinded to primary/challenger. Null unless the
    * verdict is `graft`.
@@ -192,6 +205,41 @@ export interface CompareOptions {
   judgeModel?: string | null;
   /** Driver override for `judgeModel`; ignored without it. */
   judgeVia?: string | null;
+  cwd?: string;
+  repoRoot?: string;
+  /** Injectable clock, for a stable `date` on the written artifact. */
+  now?: Date;
+}
+
+export interface ComparePrepareOptions {
+  /** A `pair_id`, or either arm's `dispatch_id` (full, or an 8+ char prefix). */
+  ref: string;
+  cwd?: string;
+  repoRoot?: string;
+}
+
+export interface ComparePrepareResult extends CompareMeasurement {
+  prepared: true;
+  /**
+   * The host archetype a coordinator should spawn once per prompt path below
+   * — always `judge` today. Named here (rather than left implicit in the
+   * skill's prose) so a caller driving this command programmatically does not
+   * have to hardcode it independently.
+   */
+  judgeArchetype: 'judge';
+  /** Repo-relative blinded comparison prompt, under `.fadeno/local/prompts/`. */
+  comparisonPromptPath: string;
+  /** Repo-relative blinded adversarial (shared-blind-spot) prompt, under `.fadeno/local/prompts/`. */
+  adversarialPromptPath: string;
+}
+
+export interface CompareRecordOptions {
+  /** A `pair_id`, or either arm's `dispatch_id` (full, or an 8+ char prefix). */
+  ref: string;
+  /** Path to the comparison judge's raw JSON output, resolved against `cwd`. */
+  comparisonPath: string;
+  /** Path to the adversarial judge's raw JSON output, resolved against `cwd`. */
+  adversarialPath: string;
   cwd?: string;
   repoRoot?: string;
   /** Injectable clock, for a stable `date` on the written artifact. */
@@ -1041,13 +1089,28 @@ function renderComparisonArtifact(
   return parts.join('\n');
 }
 
-function adjudicate(
-  measurement: CompareMeasurement,
-  pair: ResolvedDispatchPair,
-  repoRoot: string,
-  cwd: string,
-  opts: CompareOptions,
-): CompareAdjudicatedResult {
+/** Everything derivable from a measured, complete pair without consulting a model — the shared front half of `--prepare` and the one-shot path. */
+interface PreparedComparison {
+  blinding: { a: CompareArm; b: CompareArm };
+  validateComparison: ValidateFunction;
+  validateAdversarial: ValidateFunction;
+  comparisonPrompt: string;
+  adversarialPrompt: string;
+}
+
+/**
+ * Derive blinding, build the two blinded prompts, and compile the two
+ * judgment validators — the seam where a model becomes necessary. Everything
+ * before this point is measurement; everything after it needs a judgment in
+ * hand, whether that judgment arrives over the command lane (`adjudicateViaCommand`)
+ * or is read back from a file a host subagent wrote (`runCompareRecord`).
+ *
+ * Pure given `measurement`/`pair`/`repoRoot`: `deriveBlinding` is a function
+ * of the pair id alone, so calling this twice for the same pair (once from
+ * `--prepare`, once from `--record`) reconstructs the identical mapping with
+ * nothing persisted in between.
+ */
+function preparePrompts(measurement: CompareMeasurement, pair: ResolvedDispatchPair, repoRoot: string): PreparedComparison {
   const blinding = deriveBlinding(measurement.pairId);
   const primaryArm = measurement.arms.find((a) => a.arm === 'primary')!;
   const challengerArm = measurement.arms.find((a) => a.arm === 'challenger')!;
@@ -1098,9 +1161,6 @@ function adjudicate(
   const validateComparison = schemas.get('model-comparison');
   const validateAdversarial = compileSharedBlindSpotsValidator(schemaJson);
 
-  const pairId8 = measurement.pairId.slice(0, 8);
-  const judgeCallOpts = { repoRoot, cwd, judgeModel: opts.judgeModel ?? null, judgeVia: opts.judgeVia ?? null, now: opts.now };
-
   const comparisonPrompt = buildComparisonPrompt(
     schemaText,
     blindA,
@@ -1109,28 +1169,30 @@ function adjudicate(
     measurement.confounds.map((c) => blindConfoundForPrompt(c, blinding)),
     measurement.surfaces,
   );
-  const comparisonResult = dispatchJudge(comparisonPrompt, { ...judgeCallOpts, tag: `cmp-${pairId8}` });
-  const comparisonParsed = extractJsonObject(comparisonResult.stdout);
-  if (comparisonParsed == null || !validateComparison(comparisonParsed)) {
-    const errors = comparisonParsed == null
-      ? ["could not find a JSON object in the judge's output"]
-      : schemaErrorMessages(validateComparison);
-    throw new CompareCommandError(
-      `comparison judge dispatch ${comparisonResult.dispatchId.slice(0, 8)} did not return a judgment that validates ` +
-        `against model-comparison.schema.json — writing nothing. ${errors.join('; ')}`,
-    );
-  }
-  const comparison = comparisonParsed as RawComparisonJudgment;
+  const adversarialPrompt = buildAdversarialPrompt(blindA, blindB);
+
+  return { blinding, validateComparison, validateAdversarial, comparisonPrompt, adversarialPrompt };
+}
+
+/**
+ * Unblind a validated comparison judgment's verdict and check graft
+ * coherence — the one place both delivery paths must agree before anything is
+ * rendered. `errorLabel` names the judgment's source (a dispatch id for the
+ * command lane, a file path for `--record`) so a refusal points at the thing
+ * that produced the bad judgment.
+ */
+function unblindAndCheckCoherence(
+  comparison: RawComparisonJudgment,
+  blinding: { a: CompareArm; b: CompareArm },
+  errorLabel: string,
+): ModelComparisonVerdict {
   if (!isJudgmentVerdict(comparison.verdict)) {
     // Structurally redundant with the schema's own `verdict` enum, but that
     // enum and `MODEL_COMPARISON_VERDICTS` are two independently maintained
     // lists — the exact drift shape this module exists to close off. If they
     // ever disagree, refuse rather than write a verdict `VERDICT_BUCKET`
     // cannot count.
-    throw new CompareCommandError(
-      `comparison judge dispatch ${comparisonResult.dispatchId.slice(0, 8)} emitted an unrecognized verdict ` +
-        `"${comparison.verdict}" — writing nothing.`,
-    );
+    throw new CompareCommandError(`${errorLabel} emitted an unrecognized verdict "${comparison.verdict}" — writing nothing.`);
   }
   // Unblind the verdict HERE, with `graft_plan.from_arm`, and nowhere else.
   // The judge answers in `prefer_a` / `prefer_b`, the only frame it has; this
@@ -1138,31 +1200,39 @@ function adjudicate(
   const verdict = unblindVerdict(comparison.verdict, blinding);
   const coherence = checkGraftCoherence(verdict, comparison.graft_plan as unknown as GraftStep[] | undefined);
   if (coherence != null) {
-    throw new CompareCommandError(
-      `comparison judge dispatch ${comparisonResult.dispatchId.slice(0, 8)} produced an incoherent judgment ` +
-        `(${coherence}) — writing nothing.`,
-    );
+    throw new CompareCommandError(`${errorLabel} produced an incoherent judgment (${coherence}) — writing nothing.`);
   }
+  return verdict;
+}
 
-  const adversarialPrompt = buildAdversarialPrompt(blindA, blindB);
-  const adversarialResult = dispatchJudge(adversarialPrompt, { ...judgeCallOpts, tag: `adv-${pairId8}` });
-  const adversarialParsed = extractJsonObject(adversarialResult.stdout);
-  if (adversarialParsed == null || !validateAdversarial(adversarialParsed)) {
-    const errors = adversarialParsed == null
-      ? ["could not find a JSON object in the judge's output"]
-      : schemaErrorMessages(validateAdversarial);
-    throw new CompareCommandError(
-      `adversarial judge dispatch ${adversarialResult.dispatchId.slice(0, 8)} did not return a judgment that validates ` +
-        `— writing nothing. ${errors.join('; ')}`,
-    );
-  }
-  const adversarial = adversarialParsed as RawAdversarialJudgment;
+/**
+ * Render, write, and round-trip-verify the `ModelComparison` artifact — the
+ * back half shared by every delivery path, once a validated, unblinded
+ * verdict and both judgments are in hand.
+ */
+function writeComparisonArtifact(args: {
+  measurement: CompareMeasurement;
+  pair: ResolvedDispatchPair;
+  repoRoot: string;
+  blinding: { a: CompareArm; b: CompareArm };
+  verdict: ModelComparisonVerdict;
+  comparison: RawComparisonJudgment;
+  adversarial: RawAdversarialJudgment;
+  judgeDelivery: JudgeDelivery;
+  /** The resolved judge dispatch's own provider — command-lane only; null when nothing was dispatched. */
+  judgeProvider: string | null;
+  judgeDispatchIds: { comparison: string; adversarial: string } | null;
+  now: Date;
+}): CompareAdjudicatedResult {
+  const { measurement, pair, repoRoot, blinding, verdict, comparison, adversarial, judgeDelivery, judgeProvider, judgeDispatchIds, now } = args;
+  const primaryArm = measurement.arms.find((a) => a.arm === 'primary')!;
+  const challengerArm = measurement.arms.find((a) => a.arm === 'challenger')!;
 
-  // Judge-provider confound: computed AFTER both dispatches, from the
-  // resolved delivery's own provider — never shown to the judge, since it is
-  // a caveat about trusting the verdict, not a fact about the pair.
+  // Judge-provider confound: computed AFTER dispatch, from the resolved
+  // delivery's own provider — never shown to the judge, since it is a caveat
+  // about trusting the verdict, not a fact about the pair. Only known on the
+  // command lane: a host-delivered judgment names no provider to compare.
   const confounds = [...measurement.confounds];
-  const judgeProvider = comparisonResult.provider;
   if (judgeProvider != null) {
     const matches: CompareArm[] = [];
     if (primaryArm.provider != null && primaryArm.provider === judgeProvider) matches.push('primary');
@@ -1175,6 +1245,21 @@ function adjudicate(
       });
     }
   }
+  // A host-delivered judgment carries no dispatch receipt: the kernel cannot
+  // attest that a model produced it, only that the JSON validates. The same
+  // access that lets a host `judge` subagent read this pair also lets a
+  // coordinator author the file by hand — this is disclosed as a confound
+  // (the vocabulary readers already check) rather than left inferrable only
+  // from `judge_delivery` in the frontmatter a reader must know to look for.
+  if (judgeDelivery === 'host') {
+    confounds.push({
+      code: 'judge_delivery_unattested',
+      arm: 'pair',
+      detail:
+        'this judgment was recorded via `fadeno compare --record`, not dispatched by this command — there is no ' +
+        'receipt for who or what produced the JSON, only that it validates against the schema.',
+    });
+  }
 
   const graftPlan: GraftStep[] | undefined = comparison.graft_plan != null
     ? comparison.graft_plan.map((s) => ({
@@ -1185,8 +1270,7 @@ function adjudicate(
       }))
     : undefined;
 
-  const now = opts.now ?? new Date();
-  const dispatchIds = [pair.primary?.dispatchId, pair.shadow?.dispatchId, comparisonResult.dispatchId, adversarialResult.dispatchId]
+  const dispatchIds = [pair.primary?.dispatchId, pair.shadow?.dispatchId, judgeDispatchIds?.comparison, judgeDispatchIds?.adversarial]
     .filter((id): id is string => id != null);
 
   const frontmatter: ModelComparisonFrontmatter = {
@@ -1197,6 +1281,7 @@ function adjudicate(
     date: now.toISOString().slice(0, 10),
     pair_id: measurement.pairId,
     dispatch_ids: dispatchIds,
+    judge_delivery: judgeDelivery,
     ...(graftPlan != null ? { graft_plan: graftPlan } : {}),
   };
 
@@ -1238,9 +1323,192 @@ function adjudicate(
     measureOnly: false,
     verdict,
     comparisonPath,
-    judgeDispatchIds: { comparison: comparisonResult.dispatchId, adversarial: adversarialResult.dispatchId },
+    judgeDelivery,
+    judgeDispatchIds,
     graftPlan: graftPlan ?? null,
   };
+}
+
+/** The one-shot path: dispatch both judges over the command lane, then render. Unchanged behaviour from before the `--prepare`/`--record` split. */
+function adjudicateViaCommand(
+  measurement: CompareMeasurement,
+  pair: ResolvedDispatchPair,
+  repoRoot: string,
+  cwd: string,
+  opts: CompareOptions,
+): CompareAdjudicatedResult {
+  const prepared = preparePrompts(measurement, pair, repoRoot);
+  const pairId8 = measurement.pairId.slice(0, 8);
+  const judgeCallOpts = { repoRoot, cwd, judgeModel: opts.judgeModel ?? null, judgeVia: opts.judgeVia ?? null, now: opts.now };
+
+  const comparisonResult = dispatchJudge(prepared.comparisonPrompt, { ...judgeCallOpts, tag: `cmp-${pairId8}` });
+  const comparisonParsed = extractJsonObject(comparisonResult.stdout);
+  if (comparisonParsed == null || !prepared.validateComparison(comparisonParsed)) {
+    const errors = comparisonParsed == null
+      ? ["could not find a JSON object in the judge's output"]
+      : schemaErrorMessages(prepared.validateComparison);
+    throw new CompareCommandError(
+      `comparison judge dispatch ${comparisonResult.dispatchId.slice(0, 8)} did not return a judgment that validates ` +
+        `against model-comparison.schema.json — writing nothing. ${errors.join('; ')}`,
+    );
+  }
+  const comparison = comparisonParsed as RawComparisonJudgment;
+  const verdict = unblindAndCheckCoherence(comparison, prepared.blinding, `comparison judge dispatch ${comparisonResult.dispatchId.slice(0, 8)}`);
+
+  const adversarialResult = dispatchJudge(prepared.adversarialPrompt, { ...judgeCallOpts, tag: `adv-${pairId8}` });
+  const adversarialParsed = extractJsonObject(adversarialResult.stdout);
+  if (adversarialParsed == null || !prepared.validateAdversarial(adversarialParsed)) {
+    const errors = adversarialParsed == null
+      ? ["could not find a JSON object in the judge's output"]
+      : schemaErrorMessages(prepared.validateAdversarial);
+    throw new CompareCommandError(
+      `adversarial judge dispatch ${adversarialResult.dispatchId.slice(0, 8)} did not return a judgment that validates ` +
+        `— writing nothing. ${errors.join('; ')}`,
+    );
+  }
+  const adversarial = adversarialParsed as RawAdversarialJudgment;
+
+  return writeComparisonArtifact({
+    measurement,
+    pair,
+    repoRoot,
+    blinding: prepared.blinding,
+    verdict,
+    comparison,
+    adversarial,
+    judgeDelivery: 'command',
+    judgeProvider: comparisonResult.provider,
+    judgeDispatchIds: { comparison: comparisonResult.dispatchId, adversarial: adversarialResult.dispatchId },
+    now: opts.now ?? new Date(),
+  });
+}
+
+/** Common front matter for `--prepare` and `--record`: resolve the ref, measure, and refuse an incomplete pair before doing anything else. */
+function measureCompletePair(ref: string, cwd: string, repoRoot: string): { measurement: CompareMeasurement; pair: ResolvedDispatchPair } {
+  const { measurement, pair } = measure(ref, cwd, repoRoot);
+  if (pair.primary == null || pair.shadow == null) {
+    throw new CompareCommandError(
+      `pair "${measurement.pairId.slice(0, 8)}" is missing an arm (primary: ${pair.primary != null}, ` +
+        `challenger: ${pair.shadow != null}) — adjudication needs both to compare.`,
+    );
+  }
+  return { measurement, pair };
+}
+
+/**
+ * Measure a shadow pair, derive its blinding, and write the two blinded judge
+ * prompts to disk. Writes NO artifact — nothing is judged yet.
+ *
+ * This is the half of adjudication that needs no model: a host harness that
+ * already has a `judge` subagent for free can spawn it directly on these
+ * prompt files instead of going through a second dial'd command-lane vendor.
+ * The two prompt files are independent inputs for two INDEPENDENT spawns —
+ * see the `fadeno-judge` skill for why folding the adversarial pass into the
+ * comparison spawn defeats its purpose.
+ */
+export function runComparePrepare(opts: ComparePrepareOptions): ComparePrepareResult {
+  const ref = (opts.ref ?? '').trim();
+  if (ref === '') {
+    throw new CompareCommandError('name a pair id or dispatch id (fadeno compare <pair-id|dispatch-id> --prepare).');
+  }
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const { measurement, pair } = measureCompletePair(ref, cwd, repoRoot);
+  const prepared = preparePrompts(measurement, pair, repoRoot);
+
+  const pairId8 = measurement.pairId.slice(0, 8);
+  const promptsDir = join('.fadeno', 'local', 'prompts');
+  mkdirSync(join(repoRoot, promptsDir), { recursive: true });
+  const comparisonPromptPath = join(promptsDir, `judge-comparison-${pairId8}.md`).split('\\').join('/');
+  const adversarialPromptPath = join(promptsDir, `judge-adversarial-${pairId8}.md`).split('\\').join('/');
+  writeFileSync(join(repoRoot, comparisonPromptPath), prepared.comparisonPrompt, 'utf8');
+  writeFileSync(join(repoRoot, adversarialPromptPath), prepared.adversarialPrompt, 'utf8');
+
+  return {
+    ...measurement,
+    prepared: true,
+    judgeArchetype: 'judge',
+    comparisonPromptPath,
+    adversarialPromptPath,
+  };
+}
+
+/** Read a judgment file a caller passed to `--record`, resolved against `cwd` exactly like `dispatch --prompt-file`. */
+function readJudgmentFile(cwd: string, path: string, label: 'comparison' | 'adversarial'): string {
+  const abs = resolve(cwd, path);
+  if (!existsSync(abs)) {
+    throw new CompareCommandError(
+      `no ${label} judgment file at "${path}" — fadeno compare --record needs the file the judge subagent ` +
+        '--prepare told you to spawn actually wrote.',
+    );
+  }
+  try {
+    return readFileSync(abs, 'utf8');
+  } catch (err) {
+    throw new CompareCommandError(`could not read ${label} judgment file "${path}": ${(err as Error).message}`);
+  }
+}
+
+/**
+ * Read back the two judgments `--prepare`'s prompts produced, validate them
+ * against the same schema the command lane uses, unblind, render, and write
+ * the `ModelComparison` artifact — with `judge_delivery: host`.
+ *
+ * Re-derives blinding and re-measures the pair from scratch rather than
+ * trusting anything passed between calls: `deriveBlinding` is a pure function
+ * of the pair id, so as long as the ledger and diffs `--prepare` read are
+ * unchanged, this reconstructs byte-identical blinding and measurement with
+ * no state carried over.
+ */
+export function runCompareRecord(opts: CompareRecordOptions): CompareAdjudicatedResult {
+  const ref = (opts.ref ?? '').trim();
+  if (ref === '') {
+    throw new CompareCommandError('name a pair id or dispatch id (fadeno compare <pair-id|dispatch-id> --record).');
+  }
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const { measurement, pair } = measureCompletePair(ref, cwd, repoRoot);
+  const prepared = preparePrompts(measurement, pair, repoRoot);
+
+  const comparisonText = readJudgmentFile(cwd, opts.comparisonPath, 'comparison');
+  const comparisonParsed = extractJsonObject(comparisonText);
+  if (comparisonParsed == null || !prepared.validateComparison(comparisonParsed)) {
+    const errors = comparisonParsed == null
+      ? ['could not find a JSON object in the recorded comparison judgment']
+      : schemaErrorMessages(prepared.validateComparison);
+    throw new CompareCommandError(
+      `the recorded comparison judgment (${opts.comparisonPath}) did not validate against ` +
+        `model-comparison.schema.json — writing nothing. ${errors.join('; ')}`,
+    );
+  }
+  const comparison = comparisonParsed as RawComparisonJudgment;
+  const verdict = unblindAndCheckCoherence(comparison, prepared.blinding, `the recorded comparison judgment (${opts.comparisonPath})`);
+
+  const adversarialText = readJudgmentFile(cwd, opts.adversarialPath, 'adversarial');
+  const adversarialParsed = extractJsonObject(adversarialText);
+  if (adversarialParsed == null || !prepared.validateAdversarial(adversarialParsed)) {
+    const errors = adversarialParsed == null
+      ? ['could not find a JSON object in the recorded adversarial judgment']
+      : schemaErrorMessages(prepared.validateAdversarial);
+    throw new CompareCommandError(
+      `the recorded adversarial judgment (${opts.adversarialPath}) did not validate — writing nothing. ${errors.join('; ')}`,
+    );
+  }
+  const adversarial = adversarialParsed as RawAdversarialJudgment;
+
+  return writeComparisonArtifact({
+    measurement,
+    pair,
+    repoRoot,
+    blinding: prepared.blinding,
+    verdict,
+    comparison,
+    adversarial,
+    judgeDelivery: 'host',
+    judgeProvider: null,
+    judgeDispatchIds: null,
+    now: opts.now ?? new Date(),
+  });
 }
 
 /**
@@ -1267,5 +1535,5 @@ export function runCompare(opts: CompareOptions): CompareResult {
         `challenger: ${pair.shadow != null}) — adjudication needs both to compare.`,
     );
   }
-  return adjudicate(measurement, pair, repoRoot, cwd, opts);
+  return adjudicateViaCommand(measurement, pair, repoRoot, cwd, opts);
 }

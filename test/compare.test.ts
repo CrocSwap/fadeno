@@ -4,7 +4,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
-import { COMPARE_PROMPT_MARKER, deriveBlinding, runCompare, CompareCommandError } from '../src/commands/compare.ts';
+import {
+  COMPARE_PROMPT_MARKER,
+  deriveBlinding,
+  runCompare,
+  runComparePrepare,
+  runCompareRecord,
+  CompareCommandError,
+} from '../src/commands/compare.ts';
 import { parseModelComparisonFile, runDispatchesComparisons } from '../src/commands/dispatches.ts';
 import { tempRepo } from './helpers.ts';
 
@@ -520,4 +527,165 @@ test("the judge's own prose is unblinded too, so the artifact never names one ar
   assert.doesNotMatch(written, /\barm_[ab]\b/i, 'no blinded label may survive into the artifact');
   assert.match(written, new RegExp(`${blinding.a} is tighter than ${blinding.b}`));
   assert.match(written, new RegExp(`${blinding.b} wrote more than ${blinding.a}`));
+});
+
+// ---------------------------------------------------------------------------
+// --prepare / --record: the host-subagent path.
+// ---------------------------------------------------------------------------
+
+test('--prepare measures and writes the two blinded prompts, and writes no artifact', (t) => {
+  // No judgeCommand configured at all — --prepare must need no judge dial.
+  const root = seedPair(t, { primaryDiff: diffFor('src/a.ts', ['+x']), challengerDiff: diffFor('src/b.ts', ['+y']) });
+  const result = runComparePrepare({ repoRoot: root, ref: 'pair0001' });
+
+  assert.equal(result.prepared, true);
+  assert.equal(result.judgeArchetype, 'judge');
+  assert.ok(existsSync(join(root, result.comparisonPromptPath)));
+  assert.ok(existsSync(join(root, result.adversarialPromptPath)));
+  const comparisonPrompt = readFileSync(join(root, result.comparisonPromptPath), 'utf8');
+  const adversarialPrompt = readFileSync(join(root, result.adversarialPromptPath), 'utf8');
+  assert.match(comparisonPrompt, /fadeno-compare-task: comparison/);
+  assert.match(adversarialPrompt, /fadeno-compare-task: adversarial/);
+  assert.equal(existsSync(join(root, '.fadeno', 'comparisons')), false, '--prepare must write no artifact');
+});
+
+test('--prepare refuses an incomplete pair before writing anything, same as the one-shot path', (t) => {
+  const root = seedPair(t, {
+    primaryDiff: diffFor('src/a.ts', ['+x']),
+    challengerDiff: diffFor('src/b.ts', ['+y']),
+    challengerRowExtra: {
+      event: 'dispatch_refused',
+      refusal: { predicate: 'shadow_containment', message: 'the prompt contains this repo\'s absolute path' },
+    },
+  });
+  assert.throws(
+    () => runComparePrepare({ repoRoot: root, ref: 'pair0001' }),
+    (err: unknown) => err instanceof CompareCommandError && /cannot be adjudicated/.test((err as Error).message),
+  );
+  assert.equal(existsSync(join(root, '.fadeno', 'local', 'prompts')), false, 'a refused pair gets no prompts either');
+});
+
+test('--record reconstructs the same blinding and writes an artifact byte-identical to the one-shot path, aside from delivery provenance', (t) => {
+  const judgment = {
+    verdict: 'prefer_a',
+    criteria: [{ criterion: 'correctness', assessment: 'arm_a is better organized.', favors: 'a' }],
+    shared_blind_spots: [],
+    traits: [{ dimension: 'output_volume', more: 'b', note: 'arm_b wrote more for the same task.' }],
+  };
+  const adversarial = {
+    shared_blind_spots: [{ issue: 'no offline test for the tool', why_invisible: 'both arms only ran the online suite', config_that_breaks_it: 'FADENO_OFFLINE=1' }],
+  };
+
+  const oneShotRoot = seedPair(t, {
+    primaryDiff: diffFor('src/a.ts', ['+x']),
+    challengerDiff: diffFor('src/b.ts', ['+y']),
+    judgeCommand: judgeCommand(judgment, adversarial),
+  });
+  const oneShot = runCompare({ repoRoot: oneShotRoot, ref: 'pair0001' });
+  const oneShotBody = readFileSync(join(oneShotRoot, oneShot.comparisonPath), 'utf8');
+
+  // A SEPARATE, identically-seeded root — --prepare/--record need no judge
+  // dial at all, which is the entire point of this path.
+  const recordRoot = seedPair(t, {
+    primaryDiff: diffFor('src/a.ts', ['+x']),
+    challengerDiff: diffFor('src/b.ts', ['+y']),
+  });
+  runComparePrepare({ repoRoot: recordRoot, ref: 'pair0001' });
+  const comparisonFile = join(recordRoot, 'judge-comparison-result.json');
+  const adversarialFile = join(recordRoot, 'judge-adversarial-result.json');
+  writeFileSync(comparisonFile, JSON.stringify(judgment));
+  writeFileSync(adversarialFile, JSON.stringify(adversarial));
+  const recorded = runCompareRecord({
+    repoRoot: recordRoot,
+    ref: 'pair0001',
+    comparisonPath: comparisonFile,
+    adversarialPath: adversarialFile,
+  });
+  const recordedBody = readFileSync(join(recordRoot, recorded.comparisonPath), 'utf8');
+
+  assert.equal(recorded.verdict, oneShot.verdict, 'the same judgment must unblind to the same verdict');
+
+  // Strip what legitimately differs between the two delivery paths:
+  // judge_delivery and dispatch_ids in the frontmatter (the recorded path
+  // names no judge dispatch, because none was dispatched), and the one extra
+  // Confounds line the host path is REQUIRED to disclose (see the
+  // judge_delivery test below) — before comparing the rest of the artifact
+  // byte-for-byte.
+  const normalize = (body: string): string =>
+    body
+      .replace(/^judge_delivery:.*$/m, 'judge_delivery: <normalized>')
+      .replace(/^dispatch_ids:\n(?: {2}- .*\n)*/m, 'dispatch_ids: <normalized>\n')
+      .replace(/^- \[judge_delivery_unattested\].*\n/m, '');
+  assert.equal(normalize(recordedBody), normalize(oneShotBody));
+});
+
+test('--record refuses a fabricated or schema-invalid judgment file, and writes nothing', (t) => {
+  const root = seedPair(t, { primaryDiff: diffFor('src/a.ts', ['+x']), challengerDiff: diffFor('src/b.ts', ['+y']) });
+  runComparePrepare({ repoRoot: root, ref: 'pair0001' });
+
+  // The file does not exist at all.
+  assert.throws(
+    () => runCompareRecord({
+      repoRoot: root, ref: 'pair0001',
+      comparisonPath: join(root, 'missing.json'), adversarialPath: join(root, 'also-missing.json'),
+    }),
+    CompareCommandError,
+  );
+
+  // The file exists and is valid JSON, but not a shape the schema accepts —
+  // the "fabricated" case: nothing prevents a coordinator from handing
+  // --record any JSON at all, and this must be refused exactly like a
+  // command-lane judge's invalid output is.
+  const fabricated = join(root, 'fabricated.json');
+  writeFileSync(fabricated, JSON.stringify({ hello: 'world' }));
+  const goodAdversarial = join(root, 'good-adversarial.json');
+  writeFileSync(goodAdversarial, JSON.stringify(GOOD_ADVERSARIAL));
+  assert.throws(
+    () => runCompareRecord({
+      repoRoot: root, ref: 'pair0001',
+      comparisonPath: fabricated, adversarialPath: goodAdversarial,
+    }),
+    CompareCommandError,
+  );
+  assert.equal(existsSync(join(root, '.fadeno', 'comparisons')), false, 'a refused record must write nothing');
+});
+
+test('judge_delivery is command on the one-shot path and host on --record, and the scorecard can tell them apart', (t) => {
+  const judgment = {
+    verdict: 'prefer_a',
+    criteria: [{ criterion: 'correctness', assessment: 'x', favors: 'a' }],
+    shared_blind_spots: [],
+    traits: [],
+  };
+
+  const commandRoot = seedPair(t, {
+    primaryDiff: diffFor('src/a.ts', ['+x']),
+    challengerDiff: diffFor('src/b.ts', ['+y']),
+    judgeCommand: judgeCommand(judgment, GOOD_ADVERSARIAL),
+  });
+  const commandResult = runCompare({ repoRoot: commandRoot, ref: 'pair0001' });
+  assert.equal(commandResult.judgeDelivery, 'command');
+  assert.ok(commandResult.judgeDispatchIds != null, 'the command lane must name its two judge dispatches');
+  const commandArtifact = parseModelComparisonFile(commandRoot, commandResult.comparisonPath);
+  assert.equal(commandArtifact.judgeDelivery, 'command');
+  assert.ok(!commandResult.confounds.some((c) => c.code === 'judge_delivery_unattested'));
+
+  const hostRoot = seedPair(t, { primaryDiff: diffFor('src/a.ts', ['+x']), challengerDiff: diffFor('src/b.ts', ['+y']) });
+  runComparePrepare({ repoRoot: hostRoot, ref: 'pair0001' });
+  const cmpFile = join(hostRoot, 'cmp.json');
+  const advFile = join(hostRoot, 'adv.json');
+  writeFileSync(cmpFile, JSON.stringify(judgment));
+  writeFileSync(advFile, JSON.stringify(GOOD_ADVERSARIAL));
+  const hostResult = runCompareRecord({ repoRoot: hostRoot, ref: 'pair0001', comparisonPath: cmpFile, adversarialPath: advFile });
+  assert.equal(hostResult.judgeDelivery, 'host');
+  assert.equal(hostResult.judgeDispatchIds, null, 'nothing was dispatched, so there is no receipt to name');
+  assert.ok(
+    hostResult.confounds.some((c) => c.code === 'judge_delivery_unattested'),
+    'a host-delivered judgment must be disclosed as a confound, not just a frontmatter field',
+  );
+  const hostArtifact = parseModelComparisonFile(hostRoot, hostResult.comparisonPath);
+  assert.equal(hostArtifact.judgeDelivery, 'host');
+
+  const scorecard = runDispatchesComparisons({ repoRoot: hostRoot });
+  assert.match(scorecard.lines.join('\n'), /judge delivery: host/);
 });

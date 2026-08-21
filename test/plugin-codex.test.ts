@@ -7,7 +7,7 @@ import { runCodexPlugin } from '../src/commands/plugin.ts';
 import { exists, read, tempRepo } from './helpers.ts';
 
 const REPO = join(import.meta.dirname, '..');
-const SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-setup'] as const;
+const SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-setup', 'fadeno-compare'] as const;
 
 // Same escape hatch as test/plugin.test.ts: `FADENO_SKIP_DRIFT=1` skips only the
 // committed-vs-fresh comparison so a work-in-progress template edit doesn't block

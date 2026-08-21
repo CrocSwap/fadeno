@@ -10309,7 +10309,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve23.call(this, root, ref);
+      let _sch = resolve24.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a = root.localRefs) === null || _a === void 0 ? void 0 : _a[ref];
         const { schemaId } = this.opts;
@@ -10336,7 +10336,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve23(root, ref) {
+    function resolve24(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -10967,7 +10967,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve23(baseURI, relativeURI, options) {
+    function resolve24(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const resolved = resolveComponent(parse(baseURI, schemelessOptions), parse(relativeURI, schemelessOptions), schemelessOptions, true);
       schemelessOptions.skipEscape = true;
@@ -11225,7 +11225,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve23,
+      resolve: resolve24,
       resolveComponent,
       equal,
       serialize,
@@ -11356,7 +11356,7 @@ var require_core = __commonJS({
         uriResolver
       };
     }
-    var Ajv2 = class {
+    var Ajv3 = class {
       constructor(opts = {}) {
         this.schemas = {};
         this.refs = {};
@@ -11726,9 +11726,9 @@ var require_core = __commonJS({
         }
       }
     };
-    Ajv2.ValidationError = validation_error_1.default;
-    Ajv2.MissingRefError = ref_error_1.default;
-    exports2.default = Ajv2;
+    Ajv3.ValidationError = validation_error_1.default;
+    Ajv3.MissingRefError = ref_error_1.default;
+    exports2.default = Ajv3;
     function checkOptions(checkOpts, options, msg, log = "error") {
       for (const key in checkOpts) {
         const opt = key;
@@ -13839,7 +13839,7 @@ var require_ajv = __commonJS({
     var draft7MetaSchema = require_json_schema_draft_07();
     var META_SUPPORT_DATA = ["/properties"];
     var META_SCHEMA_ID = "http://json-schema.org/draft-07/schema";
-    var Ajv2 = class extends core_1.default {
+    var Ajv3 = class extends core_1.default {
       _addVocabularies() {
         super._addVocabularies();
         draft7_1.default.forEach((v) => this.addVocabulary(v));
@@ -13858,11 +13858,11 @@ var require_ajv = __commonJS({
         return this.opts.defaultMeta = super.defaultMeta() || (this.getSchema(META_SCHEMA_ID) ? META_SCHEMA_ID : void 0);
       }
     };
-    exports2.Ajv = Ajv2;
-    module2.exports = exports2 = Ajv2;
-    module2.exports.Ajv = Ajv2;
+    exports2.Ajv = Ajv3;
+    module2.exports = exports2 = Ajv3;
+    module2.exports.Ajv = Ajv3;
     Object.defineProperty(exports2, "__esModule", { value: true });
-    exports2.default = Ajv2;
+    exports2.default = Ajv3;
     var validate_1 = require_validate();
     Object.defineProperty(exports2, "KeywordCxt", { enumerable: true, get: function() {
       return validate_1.KeywordCxt;
@@ -13906,8 +13906,8 @@ __export(cli_exports, {
   shouldRunPreflight: () => shouldRunPreflight
 });
 module.exports = __toCommonJS(cli_exports);
-var import_node_fs49 = require("node:fs");
-var import_node_path50 = require("node:path");
+var import_node_fs50 = require("node:fs");
+var import_node_path51 = require("node:path");
 var import_node_util = require("node:util");
 
 // src/lib/executors.ts
@@ -14183,6 +14183,9 @@ function validateLayerKeys(doc, path) {
 function mergeLayer(target, source, layer, path, provenance) {
   if (layer !== "project" && mapping(source.dials) != null && Object.keys(mapping(source.dials)).length > 0) {
     throw new ExecutorProfileError("repo pins live in the project catalog; user dials are state \u2014 use `fadeno dial <archetype> <model> --user`");
+  }
+  if (layer !== "project" && Array.isArray(source.surfaces) && source.surfaces.length > 0) {
+    throw new ExecutorProfileError("surfaces describes this repo's shape; it is project-only \u2014 declare it in .fadeno/executors.yaml, not the user or builtin catalog.");
   }
   if (layer !== "project" && Array.isArray(source.worktree_carry) && source.worktree_carry.length > 0) {
     throw new ExecutorProfileError("worktree_carry describes this repo's build state; it is project-only \u2014 declare it in .fadeno/executors.yaml, not the user or builtin catalog.");
@@ -14478,6 +14481,7 @@ var CATALOG_TOP_LEVEL_KEYS = [
   "unregistered_model_driver",
   "tools",
   "worktree_carry",
+  "surfaces",
   "relay"
 ];
 var PRE_DIALS_CATALOG_KEYS = ["executors", "targets", "loadouts", "default_loadout"];
@@ -14965,6 +14969,26 @@ function parseExecutorProfile(text, source, harness = "standalone") {
       worktreeCarry.push(normalized);
     }
   }
+  const surfaces = [];
+  if (doc.surfaces !== void 0) {
+    if (!Array.isArray(doc.surfaces)) {
+      throw new ExecutorProfileError(`${source}: \`surfaces\` must be an array of repo-relative path strings.`);
+    }
+    for (const raw of doc.surfaces) {
+      if (typeof raw !== "string" || raw.trim().length === 0) {
+        throw new ExecutorProfileError(`${source}: \`surfaces\` entries must be non-empty strings; found ${JSON.stringify(raw)}.`);
+      }
+      const trimmed = raw.trim();
+      if ((0, import_node_path4.isAbsolute)(trimmed)) {
+        throw new ExecutorProfileError(`${source}: \`surfaces\` entry "${trimmed}" must be repo-relative, not absolute.`);
+      }
+      const normalized = trimmed.split("\\").join("/");
+      if (normalized.split("/").includes("..")) {
+        throw new ExecutorProfileError(`${source}: \`surfaces\` entry "${trimmed}" may not contain a ".." segment.`);
+      }
+      surfaces.push(normalized);
+    }
+  }
   const relay = {};
   if (doc.relay !== void 0) {
     if (!isMapping(doc.relay)) {
@@ -15001,6 +15025,7 @@ function parseExecutorProfile(text, source, harness = "standalone") {
     notes,
     tools,
     worktreeCarry,
+    surfaces,
     relay
   };
 }
@@ -15387,8 +15412,8 @@ function eligibilityFor(spec, archetype) {
 var IN_SESSION_ONLY_HOST_HARNESSES = /* @__PURE__ */ new Set(["claude"]);
 function dispatchability(spec, harness) {
   if (spec.adapter !== "host") return { supported: true };
-  if (IN_SESSION_ONLY_HOST_HARNESSES.has(harness)) return { supported: false, reason: "host_in_session" };
   if (spec.fallbackCommand == null) return { supported: false, reason: "host_without_fallback" };
+  if (IN_SESSION_ONLY_HOST_HARNESSES.has(harness)) return { supported: false, reason: "host_in_session" };
   return { supported: true };
 }
 function commandRoutable(spec) {
@@ -15871,11 +15896,13 @@ var import_node_fs5 = require("node:fs");
 var import_node_path5 = require("node:path");
 var import_ajv = __toESM(require_ajv(), 1);
 var import_yaml3 = __toESM(require_dist(), 1);
+var SCHEMA_KINDS = ["playbook", "run", "review-report", "test-result", "model-comparison"];
 var SCHEMA_FILE = {
   playbook: "playbook.schema.json",
   run: "run.schema.json",
   "review-report": "review-report.schema.json",
-  "test-result": "test-result.schema.json"
+  "test-result": "test-result.schema.json",
+  "model-comparison": "model-comparison.schema.json"
 };
 var SINGLE_REF_FIELDS = [
   "next",
@@ -21275,8 +21302,11 @@ function runDispatch(opts) {
   if (!deliverable.supported && !pairCommandFallback) {
     const hostOnDemand = deliverable.reason === "host_in_session";
     const shape = archetype ?? role ?? "role";
+    const lost = "An in-session agent is NOT an equivalent substitute. It writes a host_delivery evidence row (with the prompt snapshot), but that row carries no dispatch id and no terminal receipt \u2014 no exit code, no duration, no captured output, and nothing to read back with `fadeno dispatches --output tag:<tag>`. It also runs in this workspace with no isolated worktree, honours neither --timeout nor --diagnostics, and forms no shadow pair. Take it only if you do not need those.";
+    const dialModel = spec.model != null && spec.model !== "current-host" ? spec.model : "<model>";
+    const remedy = `To dispatch for real, give ${shape} a command lane: \`fadeno dial ${archetype ?? "<archetype>"} ${dialModel} --via <driver>\` (\`fadeno models\` lists the drivers; an *-exec route is the command-lane counterpart of a host one).`;
     throw new DispatchCommandError(
-      hostOnDemand ? `resolved to host executor "${executorName}", which the ${harness} harness runs in-session in this session; dispatching its fallback_command would hand the task to a subprocess of the same harness and re-enter this dispatch one level down. Run this ${shape}-shaped task with the in-session ${archetype ?? "role"} agent, or bind a command executor.` : `resolved to host executor "${executorName}"; ad-hoc dispatch invokes command adapters only \u2014 run this ${shape}-shaped task with the in-session ${archetype ?? "role"} agent instead, declare fallback_command on the executor, or bind a command executor.`
+      hostOnDemand ? `resolved to host executor "${executorName}", which the ${harness} harness runs in-session in this session; dispatching its fallback_command would hand the task to a subprocess of the same harness and re-enter this dispatch one level down. ${remedy} ${lost}` : `resolved to host executor "${executorName}", which declares no fallback_command, so ad-hoc dispatch has nothing to invoke. ${remedy} ${lost}`
     );
   }
   let command2 = spec.adapter === "command" ? spec.command : spec.fallbackCommand;
@@ -22341,6 +22371,7 @@ ${truncatedStderr}
       executor: executorName,
       model: delivery.model,
       modelId: delivery.modelId,
+      provider: delivery.provider ?? null,
       driver: delivery.driver,
       reasoningEffort: delivery.effectiveEffort,
       source,
@@ -22669,6 +22700,43 @@ function runDecide(opts) {
 var import_node_fs16 = require("node:fs");
 var import_node_path16 = require("node:path");
 var import_yaml6 = __toESM(require_dist(), 1);
+
+// src/lib/model-comparison.ts
+var MODEL_COMPARISON_VERDICTS = [
+  "prefer_baseline",
+  "prefer_challenger",
+  "graft",
+  "tie",
+  "inconclusive"
+];
+var JUDGMENT_VERDICTS = ["prefer_a", "prefer_b", "graft", "tie", "inconclusive"];
+function isJudgmentVerdict(value) {
+  return typeof value === "string" && JUDGMENT_VERDICTS.includes(value);
+}
+function unblindVerdict(verdict, blinding) {
+  if (verdict !== "prefer_a" && verdict !== "prefer_b") return verdict;
+  const preferred = verdict === "prefer_a" ? blinding.a : blinding.b;
+  return preferred === "primary" ? "prefer_baseline" : "prefer_challenger";
+}
+function isModelComparisonVerdict(value) {
+  return typeof value === "string" && MODEL_COMPARISON_VERDICTS.includes(value);
+}
+var VERDICT_BUCKET = {
+  prefer_challenger: "challenger",
+  prefer_baseline: "baseline",
+  graft: "graft",
+  tie: "neither",
+  inconclusive: "neither"
+};
+var MODEL_COMPARISON_REQUIRED_SECTIONS = ["Criteria", "Model traits", "Confounds", "Shared blind spots"];
+function checkGraftCoherence(verdict, plan) {
+  const hasPlan = Array.isArray(plan) && plan.length > 0;
+  if (verdict === "graft" && !hasPlan) return "graft without a plan";
+  if (verdict !== "graft" && hasPlan) return "plan without a graft verdict";
+  return null;
+}
+
+// src/commands/dispatches.ts
 var DispatchesCommandError = class extends Error {
 };
 var DEFAULT_TAIL = 10;
@@ -22835,6 +22903,8 @@ function requestedEntry(row) {
     // knowable once it has finished building it. Folded in by
     // `applyCompletion`.
     ignoredOutputDiscarded: null,
+    workspaceModeDegraded: null,
+    carryMutated: null,
     outputBytes: num(row.output_bytes),
     diagnosticsSnapshot: str(row.diagnostics_snapshot),
     diagnosticsBytes: num(row.diagnostics_bytes),
@@ -22908,6 +22978,8 @@ function hostEntry(row) {
     // a host subagent writes into the caller's own tree, where a gitignored
     // build directory stays exactly where it was written.
     ignoredOutputDiscarded: null,
+    workspaceModeDegraded: null,
+    carryMutated: null,
     outputBytes: null,
     diagnosticsSnapshot: null,
     diagnosticsBytes: null,
@@ -22974,6 +23046,9 @@ function applyCompletion(entry, row) {
   if (db != null) entry.diffBytes = db;
   entry.primaryMerge = entry.primaryMerge ?? primaryMergeOf(row.primary_merge);
   entry.ignoredOutputDiscarded = entry.ignoredOutputDiscarded ?? ignoredOutputDiscardedOf(row.ignored_output_discarded);
+  entry.workspaceModeDegraded = entry.workspaceModeDegraded ?? str(row.workspace_mode_degraded);
+  if (typeof row.carry_mutated === "boolean") entry.carryMutated = row.carry_mutated;
+  else if (row.carry_mutated != null && entry.carryMutated == null) entry.carryMutated = true;
   const ob = num(row.output_bytes);
   if (ob != null) entry.outputBytes = ob;
   entry.diagnosticsSnapshot = entry.diagnosticsSnapshot ?? str(row.diagnostics_snapshot);
@@ -23517,11 +23592,11 @@ function parseModelComparisonFile(repoRoot, relPath) {
   try {
     content = (0, import_node_fs16.readFileSync)(abs, "utf8");
   } catch {
-    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, valid: false, error: "unreadable" };
+    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, judgeDelivery: null, valid: false, error: "unreadable" };
   }
   const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n/);
   if (!match) {
-    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, valid: false, error: "missing frontmatter" };
+    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, judgeDelivery: null, valid: false, error: "missing frontmatter" };
   }
   const frontmatterText = match[1];
   let data;
@@ -23530,29 +23605,47 @@ function parseModelComparisonFile(repoRoot, relPath) {
     if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
     data = parsed;
   } catch {
-    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, valid: false, error: "invalid yaml" };
+    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, judgeDelivery: null, valid: false, error: "invalid yaml" };
   }
   const kind = str(data.kind);
   const baseline = str(data.baseline);
   const challenger = str(data.challenger);
   const verdict = str(data.verdict);
   const date = str(data.date);
+  const judgeDelivery = str(data.judge_delivery);
   const dispatchIdsRaw = data.dispatch_ids;
   let dispatchIds = null;
   if (Array.isArray(dispatchIdsRaw)) dispatchIds = dispatchIdsRaw.filter((v) => typeof v === "string" && v !== "");
   const valid = kind === "ModelComparison" && baseline != null && challenger != null && verdict != null && date != null;
   const body = content.slice(match[0].length);
-  const hasCriteria = /^##\s+Criteria/m.test(body);
-  const hasConfounds = /^##\s+Confounds/m.test(body);
-  if (!hasCriteria || !hasConfounds) {
-    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: "missing required sections" };
+  const missingSection = MODEL_COMPARISON_REQUIRED_SECTIONS.find(
+    (section) => !new RegExp(`^##\\s+${section}`, "m").test(body)
+  );
+  if (missingSection != null) {
+    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, valid: false, error: "missing required sections" };
   }
-  if (!valid) return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: "invalid frontmatter" };
-  const allowedVerdicts = /* @__PURE__ */ new Set(["prefer_baseline", "prefer_challenger", "tie", "inconclusive"]);
-  if (!allowedVerdicts.has(verdict)) {
-    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: "invalid verdict" };
+  if (!valid) return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, valid: false, error: "invalid frontmatter" };
+  if (!isModelComparisonVerdict(verdict)) {
+    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, valid: false, error: "invalid verdict" };
   }
-  return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: true };
+  const traits = parseTraitSection(body);
+  const planRaw = data.graft_plan;
+  const plan = Array.isArray(planRaw) ? planRaw : void 0;
+  const incoherent = checkGraftCoherence(verdict, plan);
+  if (incoherent != null) {
+    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, valid: false, error: incoherent };
+  }
+  return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, traits, valid: true };
+}
+function parseTraitSection(body) {
+  const section = /^##\s+Model traits\s*$([\s\S]*?)(?=^##\s|\Z)/m.exec(body);
+  if (section == null) return [];
+  const out = [];
+  for (const line of section[1].split("\n")) {
+    const m = /^-\s+\*\*([a-z_]+)\*\*\s+\(more:\s*([a-z]+)\)/.exec(line.trim());
+    if (m != null) out.push({ dimension: m[1], more: m[2] });
+  }
+  return out;
 }
 function scanComparisons(repoRoot, dirRel) {
   const abs = (0, import_node_path16.join)(repoRoot, dirRel);
@@ -23594,13 +23687,17 @@ function formatComparisonPair(pair) {
   const workspace = pair.primary.workspace != null ? `  [primary workspace: ${pair.primary.workspace}]` : "";
   return `${primaryId8} \u2192 ${shadowId8}  ${arch}  primary ${primaryInfo}  vs shadow ${shadowInfo}${mismatch}${orphan}${baseline}${workspace}`;
 }
+function judgeDeliveryNote(judgeDelivery) {
+  if (judgeDelivery == null || judgeDelivery === "command") return "";
+  return judgeDelivery === "host" ? "  [judge delivery: host \u2014 unattested, see Confounds]" : `  [judge delivery: ${judgeDelivery}]`;
+}
 function formatComparisonArtifact(artifact) {
   const verdict = artifact.verdict ?? "?";
   const baseline = artifact.baseline ?? "?";
   const challenger = artifact.challenger ?? "?";
   const date = artifact.date ?? "?";
   if (!artifact.valid) return `${artifact.file}: invalid (${artifact.error ?? "unknown"})`;
-  return `${artifact.file}: ${verdict} (baseline ${baseline} vs challenger ${challenger} on ${date})`;
+  return `${artifact.file}: ${verdict} (baseline ${baseline} vs challenger ${challenger} on ${date})${judgeDeliveryNote(artifact.judgeDelivery)}`;
 }
 function runDispatchesComparisons(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
@@ -23672,9 +23769,25 @@ function runDispatchesComparisons(opts = {}) {
   for (const challenger of sortedChallengers) {
     const groupPairs = pairs.filter((p) => (p.shadow.executor ?? "(unknown)") === challenger);
     const groupComparisons = artifacts.filter((a) => a.challenger === challenger);
-    const preferChallenger = groupComparisons.filter((a) => a.valid && a.verdict === "prefer_challenger").length;
-    const preferBaseline = groupComparisons.filter((a) => a.valid && a.verdict === "prefer_baseline").length;
-    const tieOrInconclusive = groupComparisons.filter((a) => a.valid && (a.verdict === "tie" || a.verdict === "inconclusive")).length;
+    const traitCounts = /* @__PURE__ */ new Map();
+    for (const artifact of groupComparisons) {
+      if (!artifact.valid) continue;
+      for (const trait of artifact.traits ?? []) {
+        const row = traitCounts.get(trait.dimension) ?? { dimension: trait.dimension, challenger: 0, baseline: 0, neither: 0 };
+        if (trait.more === "challenger") row.challenger += 1;
+        else if (trait.more === "primary" || trait.more === "baseline") row.baseline += 1;
+        else row.neither += 1;
+        traitCounts.set(trait.dimension, row);
+      }
+    }
+    const traitTally = [...traitCounts.values()].sort(
+      (x, y) => y.challenger + y.baseline - (x.challenger + x.baseline) || x.dimension.localeCompare(y.dimension)
+    );
+    const bucketed = groupComparisons.filter((a) => a.valid && isModelComparisonVerdict(a.verdict)).map((a) => VERDICT_BUCKET[a.verdict]);
+    const preferChallenger = bucketed.filter((b) => b === "challenger").length;
+    const preferBaseline = bucketed.filter((b) => b === "baseline").length;
+    const graft = bucketed.filter((b) => b === "graft").length;
+    const tieOrInconclusive = bucketed.filter((b) => b === "neither").length;
     groups.push({
       challenger,
       pairs: groupPairs,
@@ -23684,8 +23797,10 @@ function runDispatchesComparisons(opts = {}) {
         comparisons: groupComparisons.filter((a) => a.valid).length,
         preferChallenger,
         preferBaseline,
+        graft,
         tieOrInconclusive
-      }
+      },
+      traitTally
     });
   }
   const totalPairs = pairs.length;
@@ -23700,7 +23815,13 @@ function runDispatchesComparisons(opts = {}) {
     }
   } else {
     for (const group of groups) {
-      lines.push(`challenger ${group.challenger}: ${group.tally.pairs} pairs, ${group.tally.comparisons} comparisons: ${group.tally.preferChallenger} prefer_challenger / ${group.tally.preferBaseline} prefer_baseline / ${group.tally.tieOrInconclusive} tie/inconclusive`);
+      lines.push(`challenger ${group.challenger}: ${group.tally.pairs} pairs, ${group.tally.comparisons} comparisons: ${group.tally.preferChallenger} prefer_challenger / ${group.tally.preferBaseline} prefer_baseline / ${group.tally.graft} graft / ${group.tally.tieOrInconclusive} tie/inconclusive`);
+      if (group.tally.comparisons > 1 && group.traitTally.length > 0) {
+        lines.push("  model traits across these comparisons (who exhibited MORE \u2014 not who was better):");
+        for (const t of group.traitTally) {
+          lines.push(`    ${t.dimension.padEnd(22)} challenger ${t.challenger} / baseline ${t.baseline} / neither ${t.neither}`);
+        }
+      }
       for (const pair of group.pairs) {
         lines.push(`  ${formatComparisonPair(pair)}`);
       }
@@ -29704,7 +29825,14 @@ var SKILLS = [
   { src: "fadeno-runner", dst: "runner" },
   { src: "fadeno-builder", dst: "builder" },
   { src: "fadeno-driver", dst: "driver" },
-  { src: "fadeno-setup", dst: "setup" }
+  { src: "fadeno-setup", dst: "setup" },
+  // Named `compare`, never `judge`: the plugin already ships a SUBAGENT
+  // named `judge` (`fadeno:judge`, the evaluator role this skill spawns), and
+  // a skill answering to the same identifier would put two different things
+  // behind one name across two tool surfaces. Named for the command it drives,
+  // like the four above are named for their workflow rather than a role — so
+  // the rule stays "strip the prefix", with no entry needing an exception.
+  { src: "fadeno-compare", dst: "compare" }
 ];
 function stampSurfaceVersion(md) {
   return md.replace(/^(description:.*?)\s*$/m, `$1 [fadeno ${packageVersion()}]`);
@@ -29752,6 +29880,11 @@ function runPlugin(opts = {}) {
   results.push({ path: manifestPath, status: emitFile(manifestPath, manifest, force) });
   for (const { src, dst } of SKILLS) {
     let md = (0, import_node_fs24.readFileSync)((0, import_node_path24.join)(tpl, "common", "skills", src, "SKILL.md"), "utf8");
+    if (!md.includes(`name: ${src}`)) {
+      throw new Error(
+        `templates/common/skills/${src}/SKILL.md must declare \`name: ${src}\` in its frontmatter \u2014 the emitted skill name is derived from it, so a mismatch renames nothing and ships silently.`
+      );
+    }
     md = stampSurfaceVersion(md.replace(`name: ${src}`, `name: ${dst}`));
     const skillPath = (0, import_node_path24.join)(outDir, "skills", dst, "SKILL.md");
     results.push({ path: skillPath, status: emitFile(skillPath, md, force) });
@@ -29805,7 +29938,7 @@ function runPlugin(opts = {}) {
   });
   return { outDir, results };
 }
-var CODEX_SKILLS = ["fadeno-runner", "fadeno-builder", "fadeno-driver", "fadeno-setup"];
+var CODEX_SKILLS = ["fadeno-runner", "fadeno-builder", "fadeno-driver", "fadeno-setup", "fadeno-compare"];
 function runCodexPlugin(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const tpl = templatesDir();
@@ -30793,7 +30926,7 @@ function runSteeringApplyClaude(opts) {
 }
 
 // src/commands/init.ts
-var SKILLS2 = ["fadeno-runner", "fadeno-builder", "fadeno-driver"];
+var SKILLS2 = ["fadeno-runner", "fadeno-builder", "fadeno-driver", "fadeno-compare"];
 function runInit(opts) {
   const tpl = templatesDir();
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
@@ -30834,7 +30967,8 @@ function runInit(opts) {
       const skillMd = (0, import_node_fs27.readFileSync)((0, import_node_path27.join)(skillSrc, "SKILL.md"), "utf8");
       const skillMdPath = (0, import_node_path27.join)(skillDest, "SKILL.md");
       results.push({ path: skillMdPath, status: emitFile(skillMdPath, skillMd, force) });
-      copyTree((0, import_node_path27.join)(skillSrc, "references"), (0, import_node_path27.join)(skillDest, "references"), force, results);
+      const references = (0, import_node_path27.join)(skillSrc, "references");
+      if ((0, import_node_fs27.existsSync)(references)) copyTree(references, (0, import_node_path27.join)(skillDest, "references"), force, results);
       if (opts.target === "codex") {
         const policy = (0, import_node_fs27.readFileSync)((0, import_node_path27.join)(tpl, "codex", "openai", `${skill}.yaml`), "utf8");
         const policyPath = (0, import_node_path27.join)(skillDest, "agents", "openai.yaml");
@@ -31814,7 +31948,12 @@ function deliveryGuidance(archetype, executorName, spec, harness) {
   return {
     dispatchable: false,
     dispatch_command: null,
-    action: deliverable.reason === "host_in_session" ? `Do NOT dispatch. Host executor "${executorName}" is delivered in-session by the ${harness} harness \u2014 spawn the in-session ${archetype} agent instead. Dispatching would hand the task to a subprocess of this same harness and be refused.` : `Do NOT dispatch. Host executor "${executorName}" declares no fallback_command, so ad-hoc dispatch has nothing to invoke \u2014 spawn the in-session ${archetype} agent instead.`
+    // Same wording discipline as the kernel's refusal: name the remedy that
+    // restores a real dispatch, and never present the in-session agent as an
+    // equal. It writes a host_delivery row, but that row carries no dispatch
+    // id and no terminal receipt, so there is nothing to read back; it also
+    // has no isolated worktree and forms no shadow pair.
+    action: deliverable.reason === "host_in_session" ? `Do NOT dispatch. Host executor "${executorName}" is delivered in-session by the ${harness} harness; dispatching would hand the task to a subprocess of this same harness and be refused. Either spawn the in-session ${archetype} agent \u2014 which writes a host_delivery row but no dispatch id or terminal receipt, has no isolated worktree, and forms no shadow pair \u2014 or give it a command lane: \`fadeno dial ${archetype} ${executorName} --via <driver>\`.` : `Do NOT dispatch. Host executor "${executorName}" declares no fallback_command, so ad-hoc dispatch has nothing to invoke. Either spawn the in-session ${archetype} agent \u2014 which writes a host_delivery row but no dispatch id or terminal receipt, has no isolated worktree, and forms no shadow pair \u2014 or give it a command lane: \`fadeno dial ${archetype} ${executorName} --via <driver>\`.`
   };
 }
 function runDialResolve(opts) {
@@ -34866,7 +35005,7 @@ var COMMANDS = {
     "--no-steering": NONE,
     "--data-only": NONE
   }),
-  validate: command({ "--schema": { kind: "enum", values: ["playbook", "run", "review-report", "test-result"] } }, ["path"]),
+  validate: command({ "--schema": { kind: "enum", values: [...SCHEMA_KINDS] } }, ["path"]),
   diagram: command({ "--format": { kind: "enum", values: ["ascii", "mermaid"] } }, ["playbook"]),
   "new-run": command({ "--input": { kind: "input" } }, ["playbook", "free"]),
   models: command({ "--driver": { kind: "free" }, "--json": NONE }, ["executor"]),
@@ -34968,6 +35107,19 @@ var COMMANDS = {
     "--cancel": { kind: "free" }
   }),
   "shadow-apply": command({ "--arm": { kind: "enum", values: ["challenger", "primary"] }, "--check": NONE }, ["free"]),
+  compare: command(
+    {
+      "--measure-only": NONE,
+      "--prepare": NONE,
+      "--record": NONE,
+      "--comparison": PATH,
+      "--adversarial": PATH,
+      "--json": NONE,
+      "--judge": { kind: "free" },
+      "--via": { kind: "free" }
+    },
+    ["free"]
+  ),
   show: command({ "--legacy": NONE, "--events": NONE }, ["run"]),
   verify: command({ "--latest": NONE, "--allow-failed": NONE, "--legacy": NONE }, ["run"]),
   plugin: command({ "--codex": NONE, "--grok": NONE, "--force": NONE }, ["path"]),
@@ -35191,7 +35343,7 @@ function dynamicValues(kind, prefix, repoRoot, cwd, runRef, optionToken) {
   let values;
   switch (kind) {
     case "enum":
-      values = optionToken === "--schema" ? ["playbook", "run", "review-report", "test-result"] : optionToken === "--format" ? ["ascii", "mermaid", "text", "json"] : optionToken === "--status" ? ["running", "completed", "failed", "aborted"] : optionToken === "--source" ? ["agent", "harness", "director"] : GATE_CONDITIONS;
+      values = optionToken === "--schema" ? [...SCHEMA_KINDS] : optionToken === "--format" ? ["ascii", "mermaid", "text", "json"] : optionToken === "--status" ? ["running", "completed", "failed", "aborted"] : optionToken === "--source" ? ["agent", "harness", "director"] : GATE_CONDITIONS;
       return startsWith(values, prefix);
     case "path":
       return pathCandidates(prefix, cwd);
@@ -35460,9 +35612,815 @@ function runShadowApply(opts) {
   };
 }
 
-// src/commands/dispatch-prompt.ts
+// src/commands/compare.ts
+var import_node_child_process11 = require("node:child_process");
 var import_node_fs36 = require("node:fs");
 var import_node_path36 = require("node:path");
+var import_ajv2 = __toESM(require_ajv(), 1);
+var import_yaml18 = __toESM(require_dist(), 1);
+var CompareCommandError = class extends Error {
+};
+var GENERATED_PREFIXES = ["plugin/bin/", "plugin-codex/bin/", "dist/", "plugin/skills/", "plugin/agents/", "plugin/hooks/", "plugin/commands/"];
+function isGenerated(path) {
+  return GENERATED_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
+var DECLARATION_PATTERNS = [
+  /^\+\s*export (?:async )?function ([A-Za-z_$][\w$]*)/,
+  /^\+\s*export (?:const|let|class|interface|type) ([A-Za-z_$][\w$]*)/,
+  // A serialized field name. Fadeno's wire format is snake_case and `cli.ts`
+  // prints it key by key, so this is the shape of the exact defect the reach
+  // signal exists to catch — `delegate_to` was a KEY, never a binding.
+  /^\+\s*([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\??:\s*[^=]/
+];
+function isExcludedFromSignals(path) {
+  return path.startsWith("test/") || path.startsWith("evals/") || isGenerated(path);
+}
+function introducedIdentifiers(diffText) {
+  return declaredIn(diffText, "+");
+}
+function removedIdentifiers(diffText) {
+  return declaredIn(diffText, "-", REMOVAL_PATTERNS);
+}
+var REMOVAL_PATTERNS = [
+  /^\+\s*(?:export )?(?:async )?function ([A-Za-z_$][\w$]*)/,
+  /^\+\s*(?:export )?(?:const|let|var|class|interface|type) ([A-Za-z_$][\w$]*)/,
+  /^\+\s*([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\??:\s*[^=]/
+];
+function declaredIn(diffText, sign, patterns = DECLARATION_PATTERNS) {
+  const fileMarker = sign === "+" ? "+++ b/" : "--- a/";
+  const skipMarker = sign === "+" ? "+++" : "---";
+  const found = /* @__PURE__ */ new Set();
+  let current = null;
+  for (const line of diffText.split("\n")) {
+    if (line.startsWith(fileMarker)) {
+      current = line.slice(6);
+      continue;
+    }
+    if (!line.startsWith(sign) || line.startsWith(skipMarker)) continue;
+    if (current != null && isExcludedFromSignals(current)) continue;
+    for (const pattern of patterns) {
+      const match = pattern.exec(sign === "+" ? line : `+${line.slice(1)}`);
+      if (match?.[1] != null) {
+        found.add(match[1]);
+        break;
+      }
+    }
+  }
+  return [...found].sort();
+}
+function parseDiffstat(repoRoot, relPath, bytes) {
+  const abs = (0, import_node_path36.join)(repoRoot, relPath);
+  let text;
+  try {
+    if (!(0, import_node_fs36.existsSync)(abs)) return null;
+    text = (0, import_node_fs36.readFileSync)(abs, "utf8");
+  } catch {
+    return null;
+  }
+  const files = /* @__PURE__ */ new Set();
+  let insertions = 0;
+  let deletions = 0;
+  for (const line of text.split("\n")) {
+    if (line.startsWith("+++ b/")) files.add(line.slice(6));
+    else if (line.startsWith("+") && !line.startsWith("+++")) insertions += 1;
+    else if (line.startsWith("-") && !line.startsWith("---")) deletions += 1;
+  }
+  return {
+    path: relPath,
+    bytes: bytes ?? Buffer.byteLength(text),
+    files: files.size,
+    insertions,
+    deletions,
+    generatedFiles: [...files].filter(isGenerated).sort()
+  };
+}
+function redefinedAtBaseline(repoRoot, baseline, identifiers) {
+  if (baseline == null || identifiers.length === 0) return [];
+  const out = [];
+  for (const name of identifiers) {
+    const pattern = `(function|const|let|class|interface|type)[[:space:]]+${name}([^A-Za-z0-9_$]|$)`;
+    const res = (0, import_node_child_process11.spawnSync)(
+      "git",
+      ["-C", repoRoot, "grep", "-l", "-E", pattern, baseline, "--", "src", "templates"],
+      { encoding: "utf8" }
+    );
+    if (res.status === 0 && (res.stdout ?? "").trim() !== "") out.push(name);
+  }
+  return out;
+}
+function surfaceAdditions(diffText, surfaces) {
+  const kept = [];
+  let current = null;
+  for (const line of diffText.split("\n")) {
+    if (line.startsWith("+++ b/")) {
+      current = line.slice(6);
+      continue;
+    }
+    if (line.startsWith("--- ") || line.startsWith("diff --git ")) continue;
+    if (current != null && surfaces.has(current) && line.startsWith("+")) kept.push(line);
+  }
+  return kept.join("\n");
+}
+function unreachedAtSurfaces(repoRoot, baseline, surfaces, identifiers, diffText) {
+  if (surfaces.length === 0) return null;
+  const parts = [surfaceAdditions(diffText, new Set(surfaces))];
+  if (baseline != null) {
+    for (const rel of surfaces) {
+      const res = (0, import_node_child_process11.spawnSync)("git", ["-C", repoRoot, "show", `${baseline}:${rel}`], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+      if (res.status === 0) parts.push(res.stdout ?? "");
+    }
+  }
+  const text = parts.join("\n");
+  return identifiers.filter((name) => !new RegExp(`\\b${name}\\b`).test(text));
+}
+function armOf(entry, arm, repoRoot, baseline, surfaces) {
+  if (entry == null) {
+    return {
+      arm,
+      dispatchId: null,
+      executor: null,
+      provider: null,
+      model: null,
+      reasoningEffort: null,
+      attestedEffort: null,
+      exitCode: null,
+      durationMs: null,
+      outputBytes: null,
+      refused: null,
+      diff: null,
+      signals: null
+    };
+  }
+  const diff = entry.diffSnapshot != null ? parseDiffstat(repoRoot, entry.diffSnapshot, entry.diffBytes) : null;
+  let signals = null;
+  if (diff != null && entry.diffSnapshot != null) {
+    let diffText = "";
+    try {
+      diffText = (0, import_node_fs36.readFileSync)((0, import_node_path36.join)(repoRoot, entry.diffSnapshot), "utf8");
+    } catch {
+      diffText = "";
+    }
+    const introduced = introducedIdentifiers(diffText);
+    const moved = new Set(removedIdentifiers(diffText));
+    signals = {
+      introduced,
+      unreached: unreachedAtSurfaces(repoRoot, baseline, surfaces, introduced, diffText),
+      redefined: redefinedAtBaseline(repoRoot, baseline, introduced.filter((name) => !moved.has(name)))
+    };
+  }
+  return {
+    arm,
+    dispatchId: entry.dispatchId,
+    executor: entry.executor,
+    provider: entry.provider,
+    model: entry.model,
+    reasoningEffort: entry.reasoningEffort,
+    attestedEffort: entry.attestedEffort,
+    exitCode: entry.exitCode,
+    durationMs: entry.durationMs,
+    outputBytes: entry.outputBytes,
+    refused: entry.refusal,
+    diff,
+    signals
+  };
+}
+function reachDifferentialOf(primary, challenger) {
+  const a = primary.signals;
+  const b = challenger.signals;
+  if (a == null || b == null || a.unreached == null || b.unreached == null) return null;
+  const shared = new Set(a.introduced.filter((name) => b.introduced.includes(name)));
+  const out = [];
+  for (const name of [...shared].sort()) {
+    const aMissed = a.unreached.includes(name);
+    const bMissed = b.unreached.includes(name);
+    if (aMissed && !bMissed) out.push({ identifier: name, reachedIn: "challenger", unreachedIn: "primary" });
+    else if (bMissed && !aMissed) out.push({ identifier: name, reachedIn: "primary", unreachedIn: "challenger" });
+  }
+  return out;
+}
+function confoundsOf(primary, shadow) {
+  const out = [];
+  const push = (code, arm, detail2) => {
+    out.push({ code, arm, detail: detail2 });
+  };
+  const pairs = [["primary", primary], ["challenger", shadow]];
+  for (const [arm, entry] of pairs) {
+    if (entry == null) continue;
+    if (entry.refusal != null) push("arm_refused", arm, `${entry.refusal.predicate}: ${entry.refusal.message}`);
+    if (entry.attestedEffort == null) {
+      push("effort_unattested", arm, "no measured effort \u2014 model identity remains requested_only, never verified.");
+    } else if (entry.reasoningEffort != null && entry.attestedEffort !== entry.reasoningEffort) {
+      push("effort_disagrees_with_dial", arm, `dial asked ${entry.reasoningEffort}, the process measured ${entry.attestedEffort}.`);
+    }
+    if (entry.ignoredOutputDiscarded != null) {
+      const paths = entry.ignoredOutputDiscarded.paths ?? [];
+      push("ignored_output_discarded", arm, `gitignored output was not carried back: ${paths.join(", ") || "(paths unrecorded)"}`);
+    }
+    if (entry.workspaceModeDegraded != null) {
+      push("workspace_mode_degraded", arm, String(entry.workspaceModeDegraded));
+    }
+    if (entry.carryMutated != null) {
+      push("carry_mutated", arm, "a carried path was written through \u2014 one inode, two trees; the arms may have contaminated each other.");
+    }
+  }
+  if (primary != null && shadow != null) {
+    if (primary.transport != null && shadow.transport != null && primary.transport !== shadow.transport) {
+      push("transport_differs", "pair", `primary went out over ${primary.transport}, challenger over ${shadow.transport}.`);
+    }
+    if (primary.baselineCommit != null && shadow.baselineCommit != null && primary.baselineCommit !== shadow.baselineCommit) {
+      push("baseline_not_shared", "pair", `primary from ${primary.baselineCommit.slice(0, 8)}, challenger from ${shadow.baselineCommit.slice(0, 8)} \u2014 the arms did not start from one tree.`);
+    }
+    if (primary.exitCode != null && shadow.exitCode != null && primary.exitCode !== shadow.exitCode) {
+      push("exit_code_differs", "pair", `primary exit ${primary.exitCode}, challenger exit ${shadow.exitCode} \u2014 challenger-succeeds-where-primary-failed is a signal, not noise.`);
+    }
+  }
+  return out;
+}
+function measure(ref, cwd, repoRoot) {
+  const pair = resolveDispatchPair(ref, { cwd, repoRoot });
+  if (pair.primary == null && pair.shadow == null) {
+    throw new CompareCommandError(`pair "${pair.pairId}" has no recorded arms.`);
+  }
+  const baseline = pair.primary?.baselineCommit ?? pair.shadow?.baselineCommit ?? null;
+  let surfaces = [];
+  try {
+    surfaces = loadExecutorProfile(repoRoot).profile.surfaces ?? [];
+  } catch {
+    surfaces = [];
+  }
+  const arms = [
+    armOf(pair.primary, "primary", repoRoot, baseline, surfaces),
+    armOf(pair.shadow, "challenger", repoRoot, baseline, surfaces)
+  ];
+  const measurement = {
+    pairId: pair.pairId,
+    archetype: pair.primary?.archetype ?? pair.shadow?.archetype ?? null,
+    baselineCommit: baseline,
+    arms,
+    reachDifferential: reachDifferentialOf(arms[0], arms[1]),
+    confounds: confoundsOf(pair.primary, pair.shadow),
+    surfaces
+  };
+  return { measurement, pair };
+}
+function deriveBlinding(pairId) {
+  const firstByte = parseInt(sha256Hex(pairId).slice(0, 2), 16);
+  return firstByte % 2 === 0 ? { a: "primary", b: "challenger" } : { a: "challenger", b: "primary" };
+}
+function labelFor(arm, blinding) {
+  return blinding.a === arm ? "a" : "b";
+}
+function armFor(label, blinding) {
+  return blinding[label];
+}
+function readDiffText(repoRoot, entry) {
+  if (entry?.diffSnapshot == null) return "";
+  try {
+    return (0, import_node_fs36.readFileSync)((0, import_node_path36.join)(repoRoot, entry.diffSnapshot), "utf8");
+  } catch {
+    return "";
+  }
+}
+function stripGeneratedHunks(diffText, generatedFiles) {
+  if (generatedFiles.length === 0 || diffText === "") return diffText;
+  const generated = new Set(generatedFiles);
+  const blocks = diffText.split(/(?=^diff --git )/m);
+  const kept = [];
+  let omittedCount = 0;
+  let omittedBytes = 0;
+  for (const block of blocks) {
+    const path = block.match(/^\+\+\+ b\/(.+)$/m)?.[1] ?? null;
+    if (path != null && generated.has(path)) {
+      omittedCount += 1;
+      omittedBytes += Buffer.byteLength(block, "utf8");
+      continue;
+    }
+    kept.push(block);
+  }
+  if (omittedCount === 0) return diffText;
+  return `${kept.join("")}
+[${omittedCount} generated file diff(s) omitted, ${omittedBytes} bytes \u2014 see the diffstat instead]
+`;
+}
+var MAX_DIFF_PROMPT_BYTES = 2e5;
+function capDiffText(diffText) {
+  const bytes = Buffer.byteLength(diffText, "utf8");
+  if (bytes <= MAX_DIFF_PROMPT_BYTES) return diffText;
+  return `${diffText.slice(0, MAX_DIFF_PROMPT_BYTES)}
+\u2026 [diff truncated at ${MAX_DIFF_PROMPT_BYTES} bytes of ${bytes} total \u2014 see the diffstat for the full shape]
+`;
+}
+function blindArm(m, diffText) {
+  return {
+    exitCode: m.exitCode,
+    durationMs: m.durationMs,
+    outputBytes: m.outputBytes,
+    refused: m.refused != null ? { predicate: m.refused.predicate } : null,
+    diffstat: m.diff == null ? null : {
+      files: m.diff.files,
+      insertions: m.diff.insertions,
+      deletions: m.diff.deletions,
+      bytes: m.diff.bytes,
+      generatedFiles: m.diff.generatedFiles.length
+    },
+    signals: m.signals,
+    diff: capDiffText(stripGeneratedHunks(diffText, m.diff?.generatedFiles ?? []))
+  };
+}
+function renderBlindArm(label, m) {
+  const lines = [`### arm_${label}`, ""];
+  lines.push(`- exit code: ${m.exitCode ?? "(none)"}`);
+  lines.push(`- duration: ${m.durationMs != null ? `${m.durationMs}ms` : "(unknown)"}`);
+  lines.push(`- output: ${m.outputBytes != null ? `${m.outputBytes} bytes` : "(unknown)"}`);
+  if (m.refused != null) lines.push(`- REFUSED before it ran: [${m.refused.predicate}]`);
+  if (m.diffstat != null) {
+    const gen = m.diffstat.generatedFiles > 0 ? `, ${m.diffstat.generatedFiles} generated file(s) omitted below` : "";
+    lines.push(`- diff: ${m.diffstat.files} files, +${m.diffstat.insertions}/-${m.diffstat.deletions} (${m.diffstat.bytes} bytes)${gen}`);
+  }
+  if (m.signals != null) {
+    lines.push(`- introduced identifiers: ${m.signals.introduced.length > 0 ? m.signals.introduced.join(", ") : "(none)"}`);
+    lines.push(
+      `- unreached identifiers: ${m.signals.unreached == null ? "(undeclared \u2014 no `surfaces:` configured, so this is not claimed either way)" : m.signals.unreached.length > 0 ? m.signals.unreached.join(", ") : "(none \u2014 every introduced identifier reached a declared surface)"}`
+    );
+    lines.push(`- redefined identifiers (already defined at baseline): ${m.signals.redefined.length > 0 ? m.signals.redefined.join(", ") : "(none)"}`);
+  }
+  lines.push("", "```diff", m.diff.trim().length > 0 ? m.diff : "(empty diff)", "```");
+  return lines.join("\n");
+}
+function blindReach(diffs, blinding) {
+  if (diffs == null) return null;
+  return diffs.map((d) => ({
+    identifier: d.identifier,
+    reachedIn: labelFor(d.reachedIn, blinding),
+    unreachedIn: labelFor(d.unreachedIn, blinding)
+  }));
+}
+var GENERIC_CONFOUND_DETAIL = {
+  transport_differs: "the two arms were dispatched over different transports.",
+  baseline_not_shared: "the two arms did not start from the same baseline commit \u2014 not a strictly fair comparison.",
+  exit_code_differs: "the two arms' exit codes differ \u2014 see each arm's own measurements above.",
+  arm_refused: "this arm was refused before it ran \u2014 see its own measurement above for the predicate."
+};
+function blindConfoundForPrompt(c, blinding) {
+  return {
+    code: c.code,
+    arm: c.arm === "pair" ? "pair" : labelFor(c.arm, blinding),
+    detail: GENERIC_CONFOUND_DETAIL[c.code] ?? c.detail
+  };
+}
+var COMPARE_PROMPT_MARKER = { comparison: "fadeno-compare-task: comparison", adversarial: "fadeno-compare-task: adversarial" };
+function buildComparisonPrompt(schemaText, blindA, blindB, reach, confounds, surfaces) {
+  const reachSection = reach != null && reach.length > 0 ? `### Reach differential
+
+Both arms introduced these identifiers; only one wired them to a declared consumer surface:
+
+${reach.map((d) => `- \`${d.identifier}\`: reached in arm_${d.reachedIn}, NEVER reached in arm_${d.unreachedIn}`).join("\n")}` : "### Reach differential\n\n(none \u2014 see each arm's own `unreached identifiers` line above)";
+  const surfacesSection = surfaces.length > 0 ? `### Declared consumer surfaces
+
+${surfaces.join(", ")}` : "### Declared consumer surfaces\n\n(none declared)";
+  const confoundsSection = confounds.length > 0 ? `### Confounds (kernel-stamped facts, not judgment)
+
+${confounds.map((c) => `- [${c.code}] ${c.arm}: ${c.detail}`).join("\n")}` : "### Confounds\n\nnone recorded.";
+  return [
+    `<!-- ${COMPARE_PROMPT_MARKER.comparison} -->`,
+    "# Blinded shadow-pair comparison",
+    "",
+    'You are comparing two AI-agent work products on the SAME task, from the SAME starting commit. They are labeled `arm_a` and `arm_b` ONLY \u2014 you are never told, and must never guess or state, which one is the "primary"/incumbent and which is the "challenger". Judge the work, not who produced it.',
+    "",
+    "## Deterministic measurements",
+    "",
+    "These numbers were computed by code, not recalled from memory \u2014 treat them as ground truth.",
+    "",
+    blindA,
+    "",
+    blindB,
+    "",
+    reachSection,
+    "",
+    surfacesSection,
+    "",
+    confoundsSection,
+    "",
+    "## Your task",
+    "",
+    "Emit ONLY a single JSON object \u2014 no prose before or after it, no markdown code fence \u2014 that validates against this JSON Schema:",
+    "",
+    schemaText,
+    "",
+    "Notes:",
+    "- `verdict`, `favors` and `from_arm` all use the blinded labels `a` / `b`. You do not know which arm is the baseline and must not guess: answer `prefer_a` / `prefer_b`, and the kernel translates it once.",
+    "- A separate adversarial pass already searches for defects both arms share; emit an empty array for `shared_blind_spots` here.",
+    "- `inconclusive` is a valid, honest verdict when the evidence does not support a call \u2014 do not guess to avoid it.",
+    '- `traits` describes how each MODEL worked, not whether this artifact is good \u2014 that is what `criteria` is for. A trait is not a score: "more defensive" may be right on this task and wrong on the next one, and `more` names the arm exhibiting MORE of the dimension, never the better one. Report a dimension even when it did not affect the verdict, and use `neither` freely \u2014 two arms being indistinguishable on a dimension is a real observation. These accumulate across many pairs into a picture of the two models, which is what a single comparison cannot give.'
+  ].join("\n");
+}
+function buildAdversarialPrompt(blindA, blindB) {
+  return [
+    `<!-- ${COMPARE_PROMPT_MARKER.adversarial} -->`,
+    "# Blinded shadow-pair \u2014 shared blind spot search",
+    "",
+    'Two AI-agent work products on the SAME task, from the SAME starting commit, labeled `arm_a` / `arm_b` only. Do not try to pick a winner and do not guess which one is the "primary"/incumbent.',
+    "",
+    blindA,
+    "",
+    blindB,
+    "",
+    "## Your task",
+    "",
+    "Answer ONLY this question: what configuration, input, or environment would break BOTH arms \u2014 a defect present in both that an arm-vs-arm comparison could never surface, because both arms agree on it? Agreement between two arms is not evidence they are right.",
+    "",
+    "Emit ONLY a single JSON object \u2014 no prose before or after it, no markdown code fence \u2014 of this shape:",
+    "",
+    "```json",
+    '{ "shared_blind_spots": [ { "issue": "...", "why_invisible": "...", "config_that_breaks_it": "..." } ] }',
+    "```",
+    "",
+    "`shared_blind_spots` may be an empty array, but only after actually looking \u2014 do not skip the search."
+  ].join("\n");
+}
+function extractJsonObject(text) {
+  const trimmed = text.trim();
+  const candidates = [trimmed];
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1] != null) candidates.push(fenced[1].trim());
+  const first = trimmed.indexOf("{");
+  const last = trimmed.lastIndexOf("}");
+  if (first !== -1 && last > first) candidates.push(trimmed.slice(first, last + 1));
+  for (const candidate of candidates) {
+    if (candidate === "") continue;
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+function loadModelComparisonSchema(repoRoot) {
+  const dirs = schemaDirectories(repoRoot);
+  const candidates = [(0, import_node_path36.join)(dirs.project, "model-comparison.schema.json"), (0, import_node_path36.join)(dirs.builtin, "model-comparison.schema.json")];
+  const schemaPath = candidates.find((p) => (0, import_node_fs36.existsSync)(p));
+  if (schemaPath == null) {
+    throw new CompareCommandError(
+      "no model-comparison schema available (missing .fadeno/schemas and the bundled template) \u2014 cannot validate a judge's output."
+    );
+  }
+  const text = (0, import_node_fs36.readFileSync)(schemaPath, "utf8");
+  const parsed = JSON.parse(text);
+  const schemas = new SchemaSet(dirs.project, dirs.builtin);
+  return { text, parsed, schemas };
+}
+function compileSharedBlindSpotsValidator(schemaJson) {
+  const properties = schemaJson.properties;
+  const ajv = new import_ajv2.Ajv({ allErrors: true, strict: false });
+  return ajv.compile({
+    type: "object",
+    additionalProperties: false,
+    required: ["shared_blind_spots"],
+    properties: { shared_blind_spots: properties.shared_blind_spots }
+  });
+}
+function dispatchJudge(prompt, opts) {
+  let result;
+  try {
+    result = runDispatch({
+      // `archetype: 'judge'` even under a model override: the override only
+      // bypasses which DIAL is compiled (see `runDispatch`'s own `--model`
+      // bypass), so a no-command-lane refusal still names "judge" — the same
+      // wording discipline as `fadeno dial judge <model> --via <driver>`.
+      archetype: "judge",
+      prompt,
+      model: opts.judgeModel,
+      via: opts.judgeVia,
+      noBrief: true,
+      cwd: opts.cwd,
+      repoRoot: opts.repoRoot,
+      now: opts.now,
+      tag: opts.tag
+    });
+  } catch (err) {
+    if (err instanceof DispatchCommandError) throw new CompareCommandError(err.message);
+    throw err;
+  }
+  if (result.outcome !== "ok") {
+    throw new CompareCommandError(
+      `judge dispatch ${result.dispatchId.slice(0, 8)} did not produce usable output (outcome: ${result.outcome ?? "unknown"}, exit ${result.exitCode}) \u2014 writing nothing rather than a partial verdict. stderr: ${result.stderr.slice(0, 400)}`
+    );
+  }
+  return result;
+}
+function renderCriteria(criteria, blinding) {
+  if (criteria.length === 0) return "(none provided)";
+  return criteria.map((c) => {
+    const favors = c.favors === "a" || c.favors === "b" ? armFor(c.favors, blinding) : c.favors ?? "neither";
+    return `- **${c.criterion}** (favors: ${favors}): ${unblindProse(c.assessment, blinding)}`;
+  }).join("\n");
+}
+function unblindProse(text, blinding) {
+  return text.replace(/\barm_a\b/gi, blinding.a).replace(/\barm_b\b/gi, blinding.b);
+}
+function renderTraits(traits, blinding) {
+  if (traits.length === 0) return "(none reported)";
+  return traits.map((t) => {
+    const more = t.more === "a" || t.more === "b" ? armFor(t.more, blinding) : "neither";
+    return `- **${t.dimension}** (more: ${more}): ${unblindProse(t.note, blinding)}`;
+  }).join("\n");
+}
+function renderConfounds(confounds, judgeConfoundNotes) {
+  const lines = confounds.length > 0 ? confounds.map((c) => `- [${c.code}] ${c.arm}: ${c.detail}`) : ["none recorded."];
+  if (judgeConfoundNotes != null && judgeConfoundNotes.trim() !== "") {
+    lines.push("", "_The judge's own observation \u2014 not kernel-verified:_", judgeConfoundNotes.trim());
+  }
+  return lines.join("\n");
+}
+function renderSharedBlindSpots(spots) {
+  if (spots.length === 0) return "none found \u2014 the adversarial pass looked and came up empty.";
+  return spots.map((s) => `- **${s.issue}** \u2014 ${s.why_invisible}${s.config_that_breaks_it != null ? ` (breaks under: ${s.config_that_breaks_it})` : ""}`).join("\n");
+}
+function renderGraftPlan(plan) {
+  return plan.map((s) => `- from **${s.from_arm}**: ${s.what} \u2014 ${s.why}${s.paths != null && s.paths.length > 0 ? ` (paths: ${s.paths.join(", ")})` : ""}`).join("\n");
+}
+function renderComparisonArtifact(frontmatter, sections) {
+  const parts = ["---", (0, import_yaml18.stringify)(frontmatter).trimEnd(), "---"];
+  for (const name of MODEL_COMPARISON_REQUIRED_SECTIONS) {
+    parts.push("", `## ${name}`, "", sections[name]);
+  }
+  if (sections.graftPlan != null) {
+    parts.push("", "## Graft plan", "", sections.graftPlan);
+  }
+  parts.push("");
+  return parts.join("\n");
+}
+function preparePrompts(measurement, pair, repoRoot) {
+  const blinding = deriveBlinding(measurement.pairId);
+  const primaryArm = measurement.arms.find((a) => a.arm === "primary");
+  const challengerArm = measurement.arms.find((a) => a.arm === "challenger");
+  for (const arm of [primaryArm, challengerArm]) {
+    if (arm.refused != null) {
+      throw new CompareCommandError(
+        `pair ${measurement.pairId.slice(0, 8)} cannot be adjudicated: the ${arm.arm} arm was refused before it ran [${arm.refused.predicate}], so there is nothing to compare it against. Re-run the pair, or use --measure-only to see what was recorded.`
+      );
+    }
+    if (arm.diff == null) {
+      throw new CompareCommandError(
+        `pair ${measurement.pairId.slice(0, 8)} cannot be adjudicated: the ${arm.arm} arm recorded no diff (it may still be in flight, or have been killed). Use --measure-only to see what was recorded.`
+      );
+    }
+  }
+  const material = {
+    primary: blindArm(primaryArm, readDiffText(repoRoot, pair.primary)),
+    challenger: blindArm(challengerArm, readDiffText(repoRoot, pair.shadow))
+  };
+  const blindA = renderBlindArm("a", material[armFor("a", blinding)]);
+  const blindB = renderBlindArm("b", material[armFor("b", blinding)]);
+  const { text: schemaText, parsed: schemaJson, schemas } = loadModelComparisonSchema(repoRoot);
+  if (!schemas.has("model-comparison")) {
+    throw new CompareCommandError(
+      "no model-comparison schema available (missing .fadeno/schemas and the bundled template) \u2014 cannot validate a judge's output."
+    );
+  }
+  const validateComparison = schemas.get("model-comparison");
+  const validateAdversarial = compileSharedBlindSpotsValidator(schemaJson);
+  const comparisonPrompt = buildComparisonPrompt(
+    schemaText,
+    blindA,
+    blindB,
+    blindReach(measurement.reachDifferential, blinding),
+    measurement.confounds.map((c) => blindConfoundForPrompt(c, blinding)),
+    measurement.surfaces
+  );
+  const adversarialPrompt = buildAdversarialPrompt(blindA, blindB);
+  return { blinding, validateComparison, validateAdversarial, comparisonPrompt, adversarialPrompt };
+}
+function unblindAndCheckCoherence(comparison, blinding, errorLabel) {
+  if (!isJudgmentVerdict(comparison.verdict)) {
+    throw new CompareCommandError(`${errorLabel} emitted an unrecognized verdict "${comparison.verdict}" \u2014 writing nothing.`);
+  }
+  const verdict = unblindVerdict(comparison.verdict, blinding);
+  const coherence = checkGraftCoherence(verdict, comparison.graft_plan);
+  if (coherence != null) {
+    throw new CompareCommandError(`${errorLabel} produced an incoherent judgment (${coherence}) \u2014 writing nothing.`);
+  }
+  return verdict;
+}
+function writeComparisonArtifact(args) {
+  const { measurement, pair, repoRoot, blinding, verdict, comparison, adversarial, judgeDelivery, judgeProvider, judgeDispatchIds, now } = args;
+  const primaryArm = measurement.arms.find((a) => a.arm === "primary");
+  const challengerArm = measurement.arms.find((a) => a.arm === "challenger");
+  const confounds = [...measurement.confounds];
+  if (judgeProvider != null) {
+    const matches = [];
+    if (primaryArm.provider != null && primaryArm.provider === judgeProvider) matches.push("primary");
+    if (challengerArm.provider != null && challengerArm.provider === judgeProvider) matches.push("challenger");
+    if (matches.length > 0) {
+      confounds.push({
+        code: "judge_provider_shared",
+        arm: matches.length === 2 ? "pair" : matches[0],
+        detail: `the judge's provider ("${judgeProvider}") matches ${matches.join(" and ")} \u2014 a same-family judge is a disclosure, not an error.`
+      });
+    }
+  }
+  if (judgeDelivery === "host") {
+    confounds.push({
+      code: "judge_delivery_unattested",
+      arm: "pair",
+      detail: "this judgment was recorded via `fadeno compare --record`, not dispatched by this command \u2014 there is no receipt for who or what produced the JSON, only that it validates against the schema."
+    });
+  }
+  const graftPlan = comparison.graft_plan != null ? comparison.graft_plan.map((s) => ({
+    from_arm: armFor(s.from_arm, blinding),
+    what: s.what,
+    why: s.why,
+    ...s.paths != null ? { paths: s.paths } : {}
+  })) : void 0;
+  const dispatchIds = [pair.primary?.dispatchId, pair.shadow?.dispatchId, judgeDispatchIds?.comparison, judgeDispatchIds?.adversarial].filter((id) => id != null);
+  const frontmatter = {
+    kind: "ModelComparison",
+    baseline: primaryArm.executor ?? "unknown",
+    challenger: challengerArm.executor ?? "unknown",
+    verdict,
+    date: now.toISOString().slice(0, 10),
+    pair_id: measurement.pairId,
+    dispatch_ids: dispatchIds,
+    judge_delivery: judgeDelivery,
+    ...graftPlan != null ? { graft_plan: graftPlan } : {}
+  };
+  const body = renderComparisonArtifact(frontmatter, {
+    Criteria: renderCriteria(comparison.criteria, blinding),
+    "Model traits": renderTraits(comparison.traits ?? [], blinding),
+    Confounds: renderConfounds(confounds, comparison.confound_notes),
+    "Shared blind spots": renderSharedBlindSpots(adversarial.shared_blind_spots),
+    graftPlan: graftPlan != null ? renderGraftPlan(graftPlan) : null
+  });
+  const comparisonsRelDir = COMPARISONS_DIR.split("\\").join("/");
+  const comparisonPath = `${comparisonsRelDir}/${measurement.pairId}.md`;
+  (0, import_node_fs36.mkdirSync)((0, import_node_path36.join)(repoRoot, comparisonsRelDir), { recursive: true });
+  (0, import_node_fs36.writeFileSync)((0, import_node_path36.join)(repoRoot, comparisonPath), body, "utf8");
+  const roundTrip = parseModelComparisonFile(repoRoot, comparisonPath);
+  if (!roundTrip.valid) {
+    (0, import_node_fs36.rmSync)((0, import_node_path36.join)(repoRoot, comparisonPath), { force: true });
+    throw new CompareCommandError(
+      `the rendered artifact for pair ${measurement.pairId.slice(0, 8)} is not readable by the scorecard (${roundTrip.error ?? "unknown"}) \u2014 removed it rather than leave a verdict the reader silently skips.`
+    );
+  }
+  return {
+    ...measurement,
+    confounds,
+    measureOnly: false,
+    verdict,
+    comparisonPath,
+    judgeDelivery,
+    judgeDispatchIds,
+    graftPlan: graftPlan ?? null
+  };
+}
+function adjudicateViaCommand(measurement, pair, repoRoot, cwd, opts) {
+  const prepared = preparePrompts(measurement, pair, repoRoot);
+  const pairId8 = measurement.pairId.slice(0, 8);
+  const judgeCallOpts = { repoRoot, cwd, judgeModel: opts.judgeModel ?? null, judgeVia: opts.judgeVia ?? null, now: opts.now };
+  const comparisonResult = dispatchJudge(prepared.comparisonPrompt, { ...judgeCallOpts, tag: `cmp-${pairId8}` });
+  const comparisonParsed = extractJsonObject(comparisonResult.stdout);
+  if (comparisonParsed == null || !prepared.validateComparison(comparisonParsed)) {
+    const errors = comparisonParsed == null ? ["could not find a JSON object in the judge's output"] : schemaErrorMessages(prepared.validateComparison);
+    throw new CompareCommandError(
+      `comparison judge dispatch ${comparisonResult.dispatchId.slice(0, 8)} did not return a judgment that validates against model-comparison.schema.json \u2014 writing nothing. ${errors.join("; ")}`
+    );
+  }
+  const comparison = comparisonParsed;
+  const verdict = unblindAndCheckCoherence(comparison, prepared.blinding, `comparison judge dispatch ${comparisonResult.dispatchId.slice(0, 8)}`);
+  const adversarialResult = dispatchJudge(prepared.adversarialPrompt, { ...judgeCallOpts, tag: `adv-${pairId8}` });
+  const adversarialParsed = extractJsonObject(adversarialResult.stdout);
+  if (adversarialParsed == null || !prepared.validateAdversarial(adversarialParsed)) {
+    const errors = adversarialParsed == null ? ["could not find a JSON object in the judge's output"] : schemaErrorMessages(prepared.validateAdversarial);
+    throw new CompareCommandError(
+      `adversarial judge dispatch ${adversarialResult.dispatchId.slice(0, 8)} did not return a judgment that validates \u2014 writing nothing. ${errors.join("; ")}`
+    );
+  }
+  const adversarial = adversarialParsed;
+  return writeComparisonArtifact({
+    measurement,
+    pair,
+    repoRoot,
+    blinding: prepared.blinding,
+    verdict,
+    comparison,
+    adversarial,
+    judgeDelivery: "command",
+    judgeProvider: comparisonResult.provider,
+    judgeDispatchIds: { comparison: comparisonResult.dispatchId, adversarial: adversarialResult.dispatchId },
+    now: opts.now ?? /* @__PURE__ */ new Date()
+  });
+}
+function measureCompletePair(ref, cwd, repoRoot) {
+  const { measurement, pair } = measure(ref, cwd, repoRoot);
+  if (pair.primary == null || pair.shadow == null) {
+    throw new CompareCommandError(
+      `pair "${measurement.pairId.slice(0, 8)}" is missing an arm (primary: ${pair.primary != null}, challenger: ${pair.shadow != null}) \u2014 adjudication needs both to compare.`
+    );
+  }
+  return { measurement, pair };
+}
+function runComparePrepare(opts) {
+  const ref = (opts.ref ?? "").trim();
+  if (ref === "") {
+    throw new CompareCommandError("name a pair id or dispatch id (fadeno compare <pair-id|dispatch-id> --prepare).");
+  }
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const { measurement, pair } = measureCompletePair(ref, cwd, repoRoot);
+  const prepared = preparePrompts(measurement, pair, repoRoot);
+  const pairId8 = measurement.pairId.slice(0, 8);
+  const promptsDir = (0, import_node_path36.join)(".fadeno", "local", "prompts");
+  (0, import_node_fs36.mkdirSync)((0, import_node_path36.join)(repoRoot, promptsDir), { recursive: true });
+  const comparisonPromptPath = (0, import_node_path36.join)(promptsDir, `judge-comparison-${pairId8}.md`).split("\\").join("/");
+  const adversarialPromptPath = (0, import_node_path36.join)(promptsDir, `judge-adversarial-${pairId8}.md`).split("\\").join("/");
+  (0, import_node_fs36.writeFileSync)((0, import_node_path36.join)(repoRoot, comparisonPromptPath), prepared.comparisonPrompt, "utf8");
+  (0, import_node_fs36.writeFileSync)((0, import_node_path36.join)(repoRoot, adversarialPromptPath), prepared.adversarialPrompt, "utf8");
+  return {
+    ...measurement,
+    prepared: true,
+    judgeArchetype: "judge",
+    comparisonPromptPath,
+    adversarialPromptPath
+  };
+}
+function readJudgmentFile(cwd, path, label) {
+  const abs = (0, import_node_path36.resolve)(cwd, path);
+  if (!(0, import_node_fs36.existsSync)(abs)) {
+    throw new CompareCommandError(
+      `no ${label} judgment file at "${path}" \u2014 fadeno compare --record needs the file the judge subagent --prepare told you to spawn actually wrote.`
+    );
+  }
+  try {
+    return (0, import_node_fs36.readFileSync)(abs, "utf8");
+  } catch (err) {
+    throw new CompareCommandError(`could not read ${label} judgment file "${path}": ${err.message}`);
+  }
+}
+function runCompareRecord(opts) {
+  const ref = (opts.ref ?? "").trim();
+  if (ref === "") {
+    throw new CompareCommandError("name a pair id or dispatch id (fadeno compare <pair-id|dispatch-id> --record).");
+  }
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const { measurement, pair } = measureCompletePair(ref, cwd, repoRoot);
+  const prepared = preparePrompts(measurement, pair, repoRoot);
+  const comparisonText = readJudgmentFile(cwd, opts.comparisonPath, "comparison");
+  const comparisonParsed = extractJsonObject(comparisonText);
+  if (comparisonParsed == null || !prepared.validateComparison(comparisonParsed)) {
+    const errors = comparisonParsed == null ? ["could not find a JSON object in the recorded comparison judgment"] : schemaErrorMessages(prepared.validateComparison);
+    throw new CompareCommandError(
+      `the recorded comparison judgment (${opts.comparisonPath}) did not validate against model-comparison.schema.json \u2014 writing nothing. ${errors.join("; ")}`
+    );
+  }
+  const comparison = comparisonParsed;
+  const verdict = unblindAndCheckCoherence(comparison, prepared.blinding, `the recorded comparison judgment (${opts.comparisonPath})`);
+  const adversarialText = readJudgmentFile(cwd, opts.adversarialPath, "adversarial");
+  const adversarialParsed = extractJsonObject(adversarialText);
+  if (adversarialParsed == null || !prepared.validateAdversarial(adversarialParsed)) {
+    const errors = adversarialParsed == null ? ["could not find a JSON object in the recorded adversarial judgment"] : schemaErrorMessages(prepared.validateAdversarial);
+    throw new CompareCommandError(
+      `the recorded adversarial judgment (${opts.adversarialPath}) did not validate \u2014 writing nothing. ${errors.join("; ")}`
+    );
+  }
+  const adversarial = adversarialParsed;
+  return writeComparisonArtifact({
+    measurement,
+    pair,
+    repoRoot,
+    blinding: prepared.blinding,
+    verdict,
+    comparison,
+    adversarial,
+    judgeDelivery: "host",
+    judgeProvider: null,
+    judgeDispatchIds: null,
+    now: opts.now ?? /* @__PURE__ */ new Date()
+  });
+}
+function runCompare(opts) {
+  const ref = (opts.ref ?? "").trim();
+  if (ref === "") {
+    throw new CompareCommandError("name a pair id or dispatch id (fadeno compare <pair-id|dispatch-id>).");
+  }
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const { measurement, pair } = measure(ref, cwd, repoRoot);
+  if (opts.measureOnly === true) {
+    return { ...measurement, measureOnly: true };
+  }
+  if (pair.primary == null || pair.shadow == null) {
+    throw new CompareCommandError(
+      `pair "${measurement.pairId.slice(0, 8)}" is missing an arm (primary: ${pair.primary != null}, challenger: ${pair.shadow != null}) \u2014 adjudication needs both to compare.`
+    );
+  }
+  return adjudicateViaCommand(measurement, pair, repoRoot, cwd, opts);
+}
+
+// src/commands/dispatch-prompt.ts
+var import_node_fs37 = require("node:fs");
+var import_node_path37 = require("node:path");
 var DispatchPromptError = class extends Error {
 };
 function runDispatchPrompt(opts) {
@@ -35481,26 +36439,26 @@ function runDispatchPrompt(opts) {
     throw err;
   }
   const request = lookup.request;
-  const runAbsolute = (0, import_node_path36.resolve)(lookup.runDir);
+  const runAbsolute = (0, import_node_path37.resolve)(lookup.runDir);
   const promptRel = request.promptPath;
-  if ((0, import_node_path36.isAbsolute)(promptRel)) {
+  if ((0, import_node_path37.isAbsolute)(promptRel)) {
     throw new DispatchPromptError(`prompt snapshot must be run-relative, not absolute: ${promptRel}`);
   }
-  const promptAbs = (0, import_node_path36.resolve)(runAbsolute, promptRel);
-  const rel = (0, import_node_path36.relative)(runAbsolute, promptAbs).split("\\").join("/");
-  if (rel === "" || rel === ".." || rel.startsWith("../") || (0, import_node_path36.isAbsolute)(rel)) {
+  const promptAbs = (0, import_node_path37.resolve)(runAbsolute, promptRel);
+  const rel = (0, import_node_path37.relative)(runAbsolute, promptAbs).split("\\").join("/");
+  if (rel === "" || rel === ".." || rel.startsWith("../") || (0, import_node_path37.isAbsolute)(rel)) {
     throw new DispatchPromptError(`prompt snapshot escapes its run directory: ${promptRel}`);
   }
   let cursor = runAbsolute;
   try {
     for (const segment of rel.split("/")) {
-      cursor = (0, import_node_path36.join)(cursor, segment);
-      if ((0, import_node_fs36.lstatSync)(cursor).isSymbolicLink()) {
+      cursor = (0, import_node_path37.join)(cursor, segment);
+      if ((0, import_node_fs37.lstatSync)(cursor).isSymbolicLink()) {
         throw new DispatchPromptError(`prompt snapshot traverses a symlink: ${promptRel}`);
       }
     }
-    const realRel = (0, import_node_path36.relative)((0, import_node_fs36.realpathSync)(runAbsolute), (0, import_node_fs36.realpathSync)(promptAbs)).split("\\").join("/");
-    if (realRel === ".." || realRel.startsWith("../") || (0, import_node_path36.isAbsolute)(realRel)) {
+    const realRel = (0, import_node_path37.relative)((0, import_node_fs37.realpathSync)(runAbsolute), (0, import_node_fs37.realpathSync)(promptAbs)).split("\\").join("/");
+    if (realRel === ".." || realRel.startsWith("../") || (0, import_node_path37.isAbsolute)(realRel)) {
       throw new DispatchPromptError(`prompt snapshot escapes its run directory: ${promptRel}`);
     }
   } catch (err) {
@@ -35512,7 +36470,7 @@ function runDispatchPrompt(opts) {
   }
   let promptBytes;
   try {
-    promptBytes = (0, import_node_fs36.readFileSync)(promptAbs);
+    promptBytes = (0, import_node_fs37.readFileSync)(promptAbs);
   } catch (err) {
     throw new DispatchPromptError(`cannot read prompt snapshot ${promptRel}: ${err.message}`);
   }
@@ -35529,7 +36487,7 @@ function runDispatchPrompt(opts) {
     const prepared = readHostWorkspaceState(repoRoot, lookup.runId, request.dispatchId);
     if (prepared != null) {
       workspaceMode = "isolated";
-      workspace = (0, import_node_path36.resolve)(repoRoot, prepared.workspace);
+      workspace = (0, import_node_path37.resolve)(repoRoot, prepared.workspace);
       baseCommit = prepared.base_commit;
     }
   } catch (err) {
@@ -35582,7 +36540,7 @@ dispatch_id: ${request.dispatchId}
 }
 
 // src/commands/dispatch-prepare.ts
-var import_node_path37 = require("node:path");
+var import_node_path38 = require("node:path");
 var DispatchPrepareError = class extends Error {
 };
 function alreadyStartedMessage(dispatchId) {
@@ -35623,7 +36581,7 @@ function runDispatchPrepare(opts) {
     throw new DispatchPrepareError(alreadyStartedMessage(dispatchId));
   }
   const { state, idempotent } = prepareHostWorkspace({ repoRoot, run: lookup.runId, dispatchId, now: opts.now });
-  const workspaceAbs = (0, import_node_path37.resolve)(repoRoot, state.workspace);
+  const workspaceAbs = (0, import_node_path38.resolve)(repoRoot, state.workspace);
   return {
     run: state.run,
     dispatchId: state.dispatch_id,
@@ -35637,8 +36595,8 @@ function runDispatchPrepare(opts) {
 }
 
 // src/commands/tool-complete.ts
-var import_node_fs37 = require("node:fs");
-var import_node_path38 = require("node:path");
+var import_node_fs38 = require("node:fs");
+var import_node_path39 = require("node:path");
 var import_node_crypto11 = require("node:crypto");
 var ToolCompleteError = class extends Error {
 };
@@ -35657,7 +36615,7 @@ function runToolComplete(opts) {
     );
   }
   if (next.step.artifact_type != null) {
-    const schemaKinds = /* @__PURE__ */ new Set(["playbook", "run", "review-report", "test-result"]);
+    const schemaKinds = new Set(SCHEMA_KINDS);
     if (!schemaKinds.has(next.step.artifact_type)) {
       throw new ToolCompleteError(`tool step "${next.step.id}" declares unsupported artifact schema "${next.step.artifact_type}".`);
     }
@@ -35668,7 +36626,7 @@ function runToolComplete(opts) {
       if (err instanceof RunLedgerError) throw new ToolCompleteError(err.message);
       throw err;
     }
-    const outputPath = (0, import_node_path38.isAbsolute)(opts.output) ? opts.output : (0, import_node_path38.join)(runDir, opts.output);
+    const outputPath = (0, import_node_path39.isAbsolute)(opts.output) ? opts.output : (0, import_node_path39.join)(runDir, opts.output);
     const schemaPaths = runSchemaDirectories(runDir, repoRoot);
     const validation = validateFile(outputPath, new SchemaSet(schemaPaths.snapshot, schemaPaths.project, schemaPaths.builtin), next.step.artifact_type);
     if (!validation.ok) {
@@ -35689,19 +36647,19 @@ function runToolComplete(opts) {
   const eventsForAttempt = readEventsStrict(runDirForClaim);
   const dispatchedCount = eventsForAttempt.filter((e) => e.type === "tool_dispatched" && e.extra.tool_call_id === ids.toolCallId).length;
   const attempt = dispatchedCount + 1;
-  const inflightDir = (0, import_node_path38.join)(repoRoot, ...INFLIGHT_DIR.split("/"));
-  if ((0, import_node_fs37.existsSync)(inflightDir)) {
+  const inflightDir = (0, import_node_path39.join)(repoRoot, ...INFLIGHT_DIR.split("/"));
+  if ((0, import_node_fs38.existsSync)(inflightDir)) {
     let files;
     try {
-      files = (0, import_node_fs37.readdirSync)(inflightDir);
+      files = (0, import_node_fs38.readdirSync)(inflightDir);
     } catch (err) {
       throw new ToolCompleteError(`failed to scan inflight claims: ${err.message}`);
     }
     for (const file of files) {
       if (!file.startsWith(`tool-${next.run}-${ids.toolCallId}-a`) || !file.endsWith(".json")) continue;
       if (file.includes(".status.json")) continue;
-      const abs = (0, import_node_path38.join)(inflightDir, file);
-      const claim = readInflightClaim(abs, (p) => (0, import_node_fs37.readFileSync)(p, "utf8"));
+      const abs = (0, import_node_path39.join)(inflightDir, file);
+      const claim = readInflightClaim(abs, (p) => (0, import_node_fs38.readFileSync)(p, "utf8"));
       if (claim != null && inflightClaimIsAlive(claim)) {
         throw new ToolCompleteError(`tool attempt ${ids.toolCallId} has a live concurrent execution (claim ${file} pid ${claim.pid}); manual completion refused for generation ${generation} \u2014 wait or cancel the live attempt`);
       }
@@ -35720,41 +36678,41 @@ function runToolComplete(opts) {
     }
   }
   const claimRel = `${INFLIGHT_DIR}/tool-${next.run}-${ids.toolCallId}-a${attempt}.json`;
-  const claimAbs = (0, import_node_path38.join)(repoRoot, ...claimRel.split("/"));
-  (0, import_node_fs37.mkdirSync)((0, import_node_path38.join)(repoRoot, ...INFLIGHT_DIR.split("/")), { recursive: true });
-  if ((0, import_node_fs37.existsSync)(claimAbs)) {
-    const existing = readInflightClaim(claimAbs, (p) => (0, import_node_fs37.readFileSync)(p, "utf8"));
+  const claimAbs = (0, import_node_path39.join)(repoRoot, ...claimRel.split("/"));
+  (0, import_node_fs38.mkdirSync)((0, import_node_path39.join)(repoRoot, ...INFLIGHT_DIR.split("/")), { recursive: true });
+  if ((0, import_node_fs38.existsSync)(claimAbs)) {
+    const existing = readInflightClaim(claimAbs, (p) => (0, import_node_fs38.readFileSync)(p, "utf8"));
     if (existing == null) {
       throw new ToolCompleteError(`tool attempt ${ids.toolCallId}:a${attempt} has unreadable claim at ${claimRel}`);
     }
     if (inflightClaimIsAlive(existing)) {
       throw new ToolCompleteError(`tool attempt ${ids.toolCallId}:a${attempt} still has a live supervisor (pid ${existing.pid}); wait before retry`);
     }
-    (0, import_node_fs37.rmSync)(claimAbs, { force: true });
+    (0, import_node_fs38.rmSync)(claimAbs, { force: true });
   }
   {
     const nowIso = (opts.now ?? /* @__PURE__ */ new Date()).toISOString();
     const claim = { pid: process.pid, supervisor_pid: process.pid, executor_pid: null, process_group_id: null, started_at: nowIso, heartbeat_at: nowIso, last_output_at: null, stdout_bytes: 0, stderr_bytes: 0 };
     const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto11.randomUUID)()}`;
     try {
-      (0, import_node_fs37.writeFileSync)(tmp, JSON.stringify(claim), { flag: "wx" });
-      (0, import_node_fs37.linkSync)(tmp, claimAbs);
+      (0, import_node_fs38.writeFileSync)(tmp, JSON.stringify(claim), { flag: "wx" });
+      (0, import_node_fs38.linkSync)(tmp, claimAbs);
     } catch (error) {
-      (0, import_node_fs37.rmSync)(tmp, { force: true });
+      (0, import_node_fs38.rmSync)(tmp, { force: true });
       if (error.code === "EEXIST") {
-        const competing = readInflightClaim(claimAbs, (p) => (0, import_node_fs37.readFileSync)(p, "utf8"));
+        const competing = readInflightClaim(claimAbs, (p) => (0, import_node_fs38.readFileSync)(p, "utf8"));
         throw new ToolCompleteError(`tool attempt ${ids.toolCallId}:a${attempt} already has concurrent claim (pid ${competing?.pid ?? "unknown"})`);
       }
       throw new ToolCompleteError(`failed to publish claim for ${ids.toolCallId}:a${attempt}`);
     } finally {
-      (0, import_node_fs37.rmSync)(tmp, { force: true });
+      (0, import_node_fs38.rmSync)(tmp, { force: true });
     }
   }
   const fresh = readEventsStrict(runDirForClaim);
   const already = plannedGenerationAttributed(fresh, next.step.id, plannedOutput, generation) || fresh.some((e) => e.type === "artifact_created" && e.step === next.step.id && e.extra.artifact === opts.output);
   if (already) {
     try {
-      (0, import_node_fs37.rmSync)(claimAbs, { force: true });
+      (0, import_node_fs38.rmSync)(claimAbs, { force: true });
     } catch {
     }
     throw new ToolCompleteError(`step "${next.step.id}" generation ${generation} already has an attributed artifact; refusing duplicate manual completion`);
@@ -35762,7 +36720,7 @@ function runToolComplete(opts) {
   const stillNext = runNext({ run: opts.run, cwd: opts.cwd, repoRoot });
   if (stillNext.step?.id !== next.step.id || stillNext.status !== "ready") {
     try {
-      (0, import_node_fs37.rmSync)(claimAbs, { force: true });
+      (0, import_node_fs38.rmSync)(claimAbs, { force: true });
     } catch {
     }
     throw new ToolCompleteError(`run "${opts.run}" is no longer waiting at step "${next.step.id}" (now ${stillNext.step?.id ?? stillNext.status}); concurrent attribution won`);
@@ -35783,15 +36741,15 @@ function runToolComplete(opts) {
     throw err;
   } finally {
     try {
-      (0, import_node_fs37.rmSync)(claimAbs, { force: true });
+      (0, import_node_fs38.rmSync)(claimAbs, { force: true });
     } catch {
     }
   }
 }
 
 // src/commands/tool-run.ts
-var import_node_fs38 = require("node:fs");
-var import_node_path39 = require("node:path");
+var import_node_fs39 = require("node:fs");
+var import_node_path40 = require("node:path");
 var import_node_crypto12 = require("node:crypto");
 var ToolRunError = class extends Error {
 };
@@ -35807,9 +36765,9 @@ function parseTimeoutSeconds(value) {
   return sec * 1e3;
 }
 function ensureProfileSnapshot2(repoRoot, runDir, _runId, now, userPathOptions, harness, bindRefs = []) {
-  const snapshotPath = (0, import_node_path39.join)(runDir, "profile.yaml");
-  if ((0, import_node_fs38.existsSync)(snapshotPath)) {
-    const text2 = (0, import_node_fs38.readFileSync)(snapshotPath, "utf8");
+  const snapshotPath = (0, import_node_path40.join)(runDir, "profile.yaml");
+  if ((0, import_node_fs39.existsSync)(snapshotPath)) {
+    const text2 = (0, import_node_fs39.readFileSync)(snapshotPath, "utf8");
     try {
       return parseSnapshotDocument(text2, "profile.yaml (run snapshot)");
     } catch (err) {
@@ -35847,12 +36805,12 @@ function ensureProfileSnapshot2(repoRoot, runDir, _runId, now, userPathOptions, 
   const extraRefs = [...Object.values(liveLayers.session), ...Object.values(liveLayers.repo), ...Object.values(liveLayers.user), ...Object.values(liveProfile.bindings), ...bindRefs];
   const text = serializeSnapshot(liveProfile, extraRefs);
   const tmp = `${snapshotPath}.tmp-${process.pid}-${(0, import_node_crypto12.randomUUID)()}`;
-  (0, import_node_fs38.writeFileSync)(tmp, text, "utf8");
+  (0, import_node_fs39.writeFileSync)(tmp, text, "utf8");
   try {
-    (0, import_node_fs38.renameSync)(tmp, snapshotPath);
+    (0, import_node_fs39.renameSync)(tmp, snapshotPath);
   } catch (err) {
     try {
-      (0, import_node_fs38.rmSync)(tmp, { force: true });
+      (0, import_node_fs39.rmSync)(tmp, { force: true });
     } catch {
     }
     throw err;
@@ -35928,7 +36886,7 @@ function runToolRun(opts) {
   const profile = ensureProfileSnapshot2(repoRoot, run.dir, run.runId, opts.now, opts.userPathOptions, opts.harness);
   const spec = profile.tools[toolName];
   if (spec == null) {
-    const snapshotPath = (0, import_node_path39.join)(run.dir, "profile.yaml");
+    const snapshotPath = (0, import_node_path40.join)(run.dir, "profile.yaml");
     throw new ToolRunError(`tool "${toolName}" is registered in the live profile but absent from this run's immutable snapshot at ${snapshotPath} \u2014 this run was created before the tool was added. Use manual \`fadeno tool-complete ${run.runId} --output <artifact-path>\` for this run, or create a new run to use the registry binding.`);
   }
   const generation = parseGeneration(outputRel).generation;
@@ -35975,15 +36933,15 @@ function runToolRun(opts) {
 }
 
 // src/commands/setup.ts
-var import_node_child_process11 = require("node:child_process");
-var import_node_fs40 = require("node:fs");
+var import_node_child_process12 = require("node:child_process");
+var import_node_fs41 = require("node:fs");
 var import_node_os4 = require("node:os");
-var import_node_path41 = require("node:path");
+var import_node_path42 = require("node:path");
 
 // src/lib/installations.ts
 var import_node_crypto13 = require("node:crypto");
-var import_node_fs39 = require("node:fs");
-var import_node_path40 = require("node:path");
+var import_node_fs40 = require("node:fs");
+var import_node_path41 = require("node:path");
 var InstallationError = class extends Error {
 };
 function emptyInstallationManifest() {
@@ -35991,9 +36949,9 @@ function emptyInstallationManifest() {
 }
 function readInstallationManifest(options = {}) {
   const path = userPaths(options).installationsFile;
-  if (!(0, import_node_fs39.existsSync)(path)) return emptyInstallationManifest();
+  if (!(0, import_node_fs40.existsSync)(path)) return emptyInstallationManifest();
   try {
-    const parsed = JSON.parse((0, import_node_fs39.readFileSync)(path, "utf8"));
+    const parsed = JSON.parse((0, import_node_fs40.readFileSync)(path, "utf8"));
     if (parsed.schema_version !== 1 || parsed.harnesses == null || typeof parsed.harnesses !== "object") {
       throw new InstallationError(`unsupported or malformed installation manifest at ${path}`);
     }
@@ -36011,14 +36969,14 @@ function maintainedHarnesses(options = {}) {
   return [...names].sort();
 }
 function writeInstallationManifest(paths, manifest) {
-  (0, import_node_fs39.mkdirSync)((0, import_node_path40.dirname)(paths.installationsFile), { recursive: true });
+  (0, import_node_fs40.mkdirSync)((0, import_node_path41.dirname)(paths.installationsFile), { recursive: true });
   const tmp = `${paths.installationsFile}.tmp-${process.pid}-${Date.now()}`;
-  (0, import_node_fs39.writeFileSync)(tmp, `${JSON.stringify(manifest, null, 2)}
+  (0, import_node_fs40.writeFileSync)(tmp, `${JSON.stringify(manifest, null, 2)}
 `, "utf8");
-  (0, import_node_fs39.renameSync)(tmp, paths.installationsFile);
+  (0, import_node_fs40.renameSync)(tmp, paths.installationsFile);
 }
 function fileDigest(path) {
-  return (0, import_node_crypto13.createHash)("sha256").update((0, import_node_fs39.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto13.createHash)("sha256").update((0, import_node_fs40.readFileSync)(path)).digest("hex");
 }
 var VERSION_RE = /^(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?$/;
 function compareFadenoVersions(a, b) {
@@ -36040,13 +36998,13 @@ function compareFadenoVersions(a, b) {
 }
 function sourceBundleVersion(sourceDir) {
   const candidates = [
-    (0, import_node_path40.join)((0, import_node_path40.dirname)(sourceDir), ".claude-plugin", "plugin.json"),
-    (0, import_node_path40.join)((0, import_node_path40.dirname)(sourceDir), ".codex-plugin", "plugin.json")
+    (0, import_node_path41.join)((0, import_node_path41.dirname)(sourceDir), ".claude-plugin", "plugin.json"),
+    (0, import_node_path41.join)((0, import_node_path41.dirname)(sourceDir), ".codex-plugin", "plugin.json")
   ];
   for (const candidate of candidates) {
     try {
-      if (!(0, import_node_fs39.existsSync)(candidate)) continue;
-      const parsed = JSON.parse((0, import_node_fs39.readFileSync)(candidate, "utf8"));
+      if (!(0, import_node_fs40.existsSync)(candidate)) continue;
+      const parsed = JSON.parse((0, import_node_fs40.readFileSync)(candidate, "utf8"));
       if (parsed.name !== "fadeno") continue;
       if (typeof parsed.version === "string" && parsed.version.trim().length > 0) {
         return parsed.version.trim();
@@ -36055,9 +37013,9 @@ function sourceBundleVersion(sourceDir) {
     }
   }
   try {
-    const pkg = (0, import_node_path40.join)(sourceDir, "package.json");
-    if ((0, import_node_fs39.existsSync)(pkg)) {
-      const parsed = JSON.parse((0, import_node_fs39.readFileSync)(pkg, "utf8"));
+    const pkg = (0, import_node_path41.join)(sourceDir, "package.json");
+    if ((0, import_node_fs40.existsSync)(pkg)) {
+      const parsed = JSON.parse((0, import_node_fs40.readFileSync)(pkg, "utf8"));
       if (typeof parsed.version === "string" && parsed.version.trim().length > 0) {
         if (parsed.name === "fadeno-runtime" || parsed.name === "fadeno") {
           return parsed.version.trim();
@@ -36070,9 +37028,9 @@ function sourceBundleVersion(sourceDir) {
 }
 function readRuntimeVersionAt(binDir) {
   try {
-    const pkgPath = (0, import_node_path40.join)(binDir, "package.json");
-    if ((0, import_node_fs39.existsSync)(pkgPath)) {
-      const parsed = JSON.parse((0, import_node_fs39.readFileSync)(pkgPath, "utf8"));
+    const pkgPath = (0, import_node_path41.join)(binDir, "package.json");
+    if ((0, import_node_fs40.existsSync)(pkgPath)) {
+      const parsed = JSON.parse((0, import_node_fs40.readFileSync)(pkgPath, "utf8"));
       if (typeof parsed.version === "string" && parsed.version.trim().length > 0) {
         if (parsed.name === "fadeno-runtime" || parsed.name === "fadeno") {
           return { version: parsed.version.trim(), source: "observed" };
@@ -36086,11 +37044,11 @@ function readRuntimeVersionAt(binDir) {
 var LOCK_STALE_MS2 = 12e4;
 function isStaleLock(lockPath) {
   try {
-    const st = (0, import_node_fs39.statSync)(lockPath);
+    const st = (0, import_node_fs40.statSync)(lockPath);
     return Date.now() - st.mtimeMs > LOCK_STALE_MS2;
   } catch {
     try {
-      const lst = (0, import_node_fs39.lstatSync)(lockPath);
+      const lst = (0, import_node_fs40.lstatSync)(lockPath);
       return Date.now() - lst.mtimeMs > LOCK_STALE_MS2;
     } catch {
       return false;
@@ -36101,25 +37059,25 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
   const allowInstall = opts.allowInstall ?? false;
   const trustSource = opts.trustSource ?? false;
   const force = opts.force ?? false;
-  const copyFn = opts.copyFn ?? import_node_fs39.cpSync;
+  const copyFn = opts.copyFn ?? import_node_fs40.cpSync;
   const digestFn = opts.digestFn ?? fileDigest;
-  const renameFn = opts.renameFn ?? import_node_fs39.renameSync;
-  const rmFn = opts.rmFn ?? import_node_fs39.rmSync;
+  const renameFn = opts.renameFn ?? import_node_fs40.renameSync;
+  const rmFn = opts.rmFn ?? import_node_fs40.rmSync;
   const managedDir = paths.managedRuntimeDir;
   const managedCli = paths.managedCli;
   const dataDir = paths.dataDir;
-  const lockPath = (0, import_node_path40.join)(dataDir, ".runtime.lock");
-  const stagingPath = (0, import_node_path40.join)(dataDir, "runtime.staging");
-  const oldPath = (0, import_node_path40.join)(dataDir, "runtime.old");
+  const lockPath = (0, import_node_path41.join)(dataDir, ".runtime.lock");
+  const stagingPath = (0, import_node_path41.join)(dataDir, "runtime.staging");
+  const oldPath = (0, import_node_path41.join)(dataDir, "runtime.old");
   const fromVersion = manifest.runtime?.version ?? null;
-  if (sourceDir == null || !(0, import_node_fs39.existsSync)((0, import_node_path40.join)(sourceDir, "fadeno"))) {
+  if (sourceDir == null || !(0, import_node_fs40.existsSync)((0, import_node_path41.join)(sourceDir, "fadeno"))) {
     if (manifest.runtime != null) {
       return { outcome: "skipped-no-source", from: fromVersion, to: fromVersion };
     }
     return { outcome: "absent", from: null, to: null };
   }
   try {
-    if ((0, import_node_path40.resolve)(sourceDir) === (0, import_node_path40.resolve)(managedDir)) {
+    if ((0, import_node_path41.resolve)(sourceDir) === (0, import_node_path41.resolve)(managedDir)) {
       const observed = readRuntimeVersionAt(sourceDir);
       const ver = observed.version ?? packageVersion();
       const src = observed.version != null ? "observed" : "assumed";
@@ -36155,9 +37113,9 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
     if (srcVer == null) {
       return { outcome: "kept-newer", from: null, to: null };
     }
-    (0, import_node_fs39.mkdirSync)(dataDir, { recursive: true });
+    (0, import_node_fs40.mkdirSync)(dataDir, { recursive: true });
     try {
-      (0, import_node_fs39.mkdirSync)(lockPath);
+      (0, import_node_fs40.mkdirSync)(lockPath);
     } catch (err) {
       if (err.code === "EEXIST") {
         if (isStaleLock(lockPath)) {
@@ -36166,7 +37124,7 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
           } catch {
           }
           try {
-            (0, import_node_fs39.mkdirSync)(lockPath);
+            (0, import_node_fs40.mkdirSync)(lockPath);
           } catch {
             return { outcome: "locked", from: null, to: srcVer };
           }
@@ -36189,12 +37147,12 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
       }
       copyFn(sourceDir, stagingPath, { recursive: true });
       staged2 = true;
-      if (!(0, import_node_fs39.existsSync)((0, import_node_path40.join)(stagingPath, "fadeno"))) throw new InstallationError(`staged runtime missing fadeno binary`);
-      if ((0, import_node_fs39.existsSync)((0, import_node_path40.join)(sourceDir, "templates")) && !(0, import_node_fs39.existsSync)((0, import_node_path40.join)(stagingPath, "templates"))) {
+      if (!(0, import_node_fs40.existsSync)((0, import_node_path41.join)(stagingPath, "fadeno"))) throw new InstallationError(`staged runtime missing fadeno binary`);
+      if ((0, import_node_fs40.existsSync)((0, import_node_path41.join)(sourceDir, "templates")) && !(0, import_node_fs40.existsSync)((0, import_node_path41.join)(stagingPath, "templates"))) {
         throw new InstallationError(`staged runtime missing templates`);
       }
       if (managedCli.endsWith(".cmd")) {
-        (0, import_node_fs39.writeFileSync)((0, import_node_path40.join)(stagingPath, "fadeno.cmd"), '@echo off\r\nnode "%~dp0fadeno" %*\r\n', "utf8");
+        (0, import_node_fs40.writeFileSync)((0, import_node_path41.join)(stagingPath, "fadeno.cmd"), '@echo off\r\nnode "%~dp0fadeno" %*\r\n', "utf8");
       }
       renameFn(stagingPath, managedDir);
       staged2 = false;
@@ -36221,11 +37179,11 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
       } catch {
       }
       try {
-        if ((0, import_node_fs39.existsSync)(stagingPath)) rmFn(stagingPath, { recursive: true, force: true });
+        if ((0, import_node_fs40.existsSync)(stagingPath)) rmFn(stagingPath, { recursive: true, force: true });
       } catch {
       }
       try {
-        if ((0, import_node_fs39.existsSync)(oldPath)) rmFn(oldPath, { recursive: true, force: true });
+        if ((0, import_node_fs40.existsSync)(oldPath)) rmFn(oldPath, { recursive: true, force: true });
       } catch {
       }
     }
@@ -36244,8 +37202,8 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
     let srcDigest = null;
     let dstDigest = null;
     try {
-      srcDigest = digestFn((0, import_node_path40.join)(sourceDir, "fadeno"));
-      dstDigest = digestFn((0, import_node_path40.join)(managedDir, "fadeno"));
+      srcDigest = digestFn((0, import_node_path41.join)(sourceDir, "fadeno"));
+      dstDigest = digestFn((0, import_node_path41.join)(managedDir, "fadeno"));
     } catch {
       srcDigest = "missing-src";
       dstDigest = "missing-dst";
@@ -36264,8 +37222,8 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
     let srcDigest = null;
     let dstDigest = null;
     try {
-      srcDigest = digestFn((0, import_node_path40.join)(sourceDir, "fadeno"));
-      dstDigest = digestFn((0, import_node_path40.join)(managedDir, "fadeno"));
+      srcDigest = digestFn((0, import_node_path41.join)(sourceDir, "fadeno"));
+      dstDigest = digestFn((0, import_node_path41.join)(managedDir, "fadeno"));
     } catch {
       srcDigest = "missing-src";
       dstDigest = "missing-dst";
@@ -36274,9 +37232,9 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
       return { outcome: "current", from: currentVersion, to: currentVersion };
     }
   }
-  (0, import_node_fs39.mkdirSync)(dataDir, { recursive: true });
+  (0, import_node_fs40.mkdirSync)(dataDir, { recursive: true });
   try {
-    (0, import_node_fs39.mkdirSync)(lockPath);
+    (0, import_node_fs40.mkdirSync)(lockPath);
   } catch (err) {
     if (err.code === "EEXIST") {
       if (isStaleLock(lockPath)) {
@@ -36285,7 +37243,7 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
         } catch {
         }
         try {
-          (0, import_node_fs39.mkdirSync)(lockPath);
+          (0, import_node_fs40.mkdirSync)(lockPath);
         } catch (e) {
           if (e.code === "EEXIST") return { outcome: "locked", from: currentVersion, to: sourceVersion };
           throw e;
@@ -36311,14 +37269,14 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
     }
     copyFn(sourceDir, stagingPath, { recursive: true });
     staged = true;
-    if (!(0, import_node_fs39.existsSync)((0, import_node_path40.join)(stagingPath, "fadeno"))) throw new InstallationError(`staged runtime missing fadeno binary`);
-    if ((0, import_node_fs39.existsSync)((0, import_node_path40.join)(sourceDir, "templates")) && !(0, import_node_fs39.existsSync)((0, import_node_path40.join)(stagingPath, "templates"))) {
+    if (!(0, import_node_fs40.existsSync)((0, import_node_path41.join)(stagingPath, "fadeno"))) throw new InstallationError(`staged runtime missing fadeno binary`);
+    if ((0, import_node_fs40.existsSync)((0, import_node_path41.join)(sourceDir, "templates")) && !(0, import_node_fs40.existsSync)((0, import_node_path41.join)(stagingPath, "templates"))) {
       throw new InstallationError(`staged runtime missing templates`);
     }
     if (managedCli.endsWith(".cmd")) {
-      (0, import_node_fs39.writeFileSync)((0, import_node_path40.join)(stagingPath, "fadeno.cmd"), '@echo off\r\nnode "%~dp0fadeno" %*\r\n', "utf8");
+      (0, import_node_fs40.writeFileSync)((0, import_node_path41.join)(stagingPath, "fadeno.cmd"), '@echo off\r\nnode "%~dp0fadeno" %*\r\n', "utf8");
     }
-    if ((0, import_node_fs39.existsSync)(managedDir)) {
+    if ((0, import_node_fs40.existsSync)(managedDir)) {
       renameFn(managedDir, oldPath);
       renamed = true;
     }
@@ -36342,14 +37300,14 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
     if (renamed) {
       let restored = false;
       try {
-        if ((0, import_node_fs39.existsSync)(oldPath) && !(0, import_node_fs39.existsSync)(managedDir)) {
+        if ((0, import_node_fs40.existsSync)(oldPath) && !(0, import_node_fs40.existsSync)(managedDir)) {
           try {
             renameFn(oldPath, managedDir);
             restored = true;
           } catch {
             restoreFailed = true;
           }
-        } else if ((0, import_node_fs39.existsSync)(oldPath) && (0, import_node_fs39.existsSync)(managedDir)) {
+        } else if ((0, import_node_fs40.existsSync)(oldPath) && (0, import_node_fs40.existsSync)(managedDir)) {
           try {
             rmFn(managedDir, { recursive: true, force: true });
           } catch {
@@ -36374,7 +37332,7 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
       }
     }
     try {
-      if ((0, import_node_fs39.existsSync)(stagingPath)) rmFn(stagingPath, { recursive: true, force: true });
+      if ((0, import_node_fs40.existsSync)(stagingPath)) rmFn(stagingPath, { recursive: true, force: true });
     } catch {
     }
     throw e;
@@ -36384,12 +37342,12 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
     } catch {
     }
     try {
-      if ((0, import_node_fs39.existsSync)(stagingPath)) rmFn(stagingPath, { recursive: true, force: true });
+      if ((0, import_node_fs40.existsSync)(stagingPath)) rmFn(stagingPath, { recursive: true, force: true });
     } catch {
     }
     if (!restoreFailed) {
       try {
-        if ((0, import_node_fs39.existsSync)(oldPath)) rmFn(oldPath, { recursive: true, force: true });
+        if ((0, import_node_fs40.existsSync)(oldPath)) rmFn(oldPath, { recursive: true, force: true });
       } catch {
       }
     } else {
@@ -36403,7 +37361,7 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
 function recordHarnessInstallation(paths, harness, files, manifest, permissionRules = []) {
   manifest.harnesses[harness] = {
     version: packageVersion(),
-    files: files.filter(import_node_fs39.existsSync).map((path) => ({ path, sha256: fileDigest(path) })),
+    files: files.filter(import_node_fs40.existsSync).map((path) => ({ path, sha256: fileDigest(path) })),
     ...permissionRules.length > 0 ? { permissionRules } : {}
   };
   writeInstallationManifest(paths, manifest);
@@ -36418,7 +37376,7 @@ var PROBES = [
   { name: "grok", command: "grok" }
 ];
 function probe(command2) {
-  const result = (0, import_node_child_process11.spawnSync)(command2, ["--version"], { encoding: "utf8", timeout: 1e4 });
+  const result = (0, import_node_child_process12.spawnSync)(command2, ["--version"], { encoding: "utf8", timeout: 1e4 });
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
   return {
     name: command2,
@@ -36430,20 +37388,20 @@ function probe(command2) {
 function rememberHarness(paths, target, created) {
   const body = `${target}
 `;
-  if ((0, import_node_fs40.existsSync)(paths.harnessFile) && (0, import_node_fs40.readFileSync)(paths.harnessFile, "utf8") === body) return;
-  (0, import_node_fs40.mkdirSync)(paths.stateDir, { recursive: true });
-  (0, import_node_fs40.writeFileSync)(paths.harnessFile, body, "utf8");
+  if ((0, import_node_fs41.existsSync)(paths.harnessFile) && (0, import_node_fs41.readFileSync)(paths.harnessFile, "utf8") === body) return;
+  (0, import_node_fs41.mkdirSync)(paths.stateDir, { recursive: true });
+  (0, import_node_fs41.writeFileSync)(paths.harnessFile, body, "utf8");
   created.push(paths.harnessFile);
 }
 function ensureClaudePermission(paths, options, notices) {
-  if (!(0, import_node_fs40.existsSync)(paths.managedCli)) return null;
+  if (!(0, import_node_fs41.existsSync)(paths.managedCli)) return null;
   const env = options?.env ?? process.env;
-  const settingsPath = (0, import_node_path41.join)(env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path41.join)(options?.home ?? (0, import_node_os4.homedir)(), ".claude"), "settings.json");
-  const createdFile = !(0, import_node_fs40.existsSync)(settingsPath);
+  const settingsPath = (0, import_node_path42.join)(env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path42.join)(options?.home ?? (0, import_node_os4.homedir)(), ".claude"), "settings.json");
+  const createdFile = !(0, import_node_fs41.existsSync)(settingsPath);
   let data = {};
   if (!createdFile) {
     try {
-      const parsed = JSON.parse((0, import_node_fs40.readFileSync)(settingsPath, "utf8"));
+      const parsed = JSON.parse((0, import_node_fs41.readFileSync)(settingsPath, "utf8"));
       if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
         notices.push(`Claude user settings ${settingsPath} are not an object; permission setup left them untouched.`);
         return null;
@@ -36469,28 +37427,28 @@ function ensureClaudePermission(paths, options, notices) {
   allow.push(rule);
   permissions.allow = allow;
   data.permissions = permissions;
-  (0, import_node_fs40.mkdirSync)((0, import_node_path41.dirname)(settingsPath), { recursive: true });
-  (0, import_node_fs40.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
+  (0, import_node_fs41.mkdirSync)((0, import_node_path42.dirname)(settingsPath), { recursive: true });
+  (0, import_node_fs41.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
 `, "utf8");
   notices.push(`Claude user permission added for the managed Fadeno runtime only: ${rule}`);
   return { path: settingsPath, rule, createdFile };
 }
 function inferBundledRuntimeForRemediation(userPathOptions) {
   const env = userPathOptions?.env ?? process.env;
-  if (env.FADENO_BUNDLED_RUNTIME && (0, import_node_fs40.existsSync)((0, import_node_path41.join)(env.FADENO_BUNDLED_RUNTIME, "fadeno"))) {
+  if (env.FADENO_BUNDLED_RUNTIME && (0, import_node_fs41.existsSync)((0, import_node_path42.join)(env.FADENO_BUNDLED_RUNTIME, "fadeno"))) {
     return env.FADENO_BUNDLED_RUNTIME;
   }
   try {
     const argv1 = process.argv[1];
     if (argv1) {
-      const dir = (0, import_node_path41.dirname)((0, import_node_path41.resolve)(argv1));
-      if ((0, import_node_fs40.existsSync)((0, import_node_path41.join)(dir, "fadeno")) && (0, import_node_fs40.existsSync)((0, import_node_path41.join)(dir, "package.json"))) {
+      const dir = (0, import_node_path42.dirname)((0, import_node_path42.resolve)(argv1));
+      if ((0, import_node_fs41.existsSync)((0, import_node_path42.join)(dir, "fadeno")) && (0, import_node_fs41.existsSync)((0, import_node_path42.join)(dir, "package.json"))) {
         return dir;
       }
       try {
-        const real = (0, import_node_fs40.realpathSync)(argv1);
-        const realDir = (0, import_node_path41.dirname)((0, import_node_path41.resolve)(real));
-        if ((0, import_node_fs40.existsSync)((0, import_node_path41.join)(realDir, "fadeno"))) return realDir;
+        const real = (0, import_node_fs41.realpathSync)(argv1);
+        const realDir = (0, import_node_path42.dirname)((0, import_node_path42.resolve)(real));
+        if ((0, import_node_fs41.existsSync)((0, import_node_path42.join)(realDir, "fadeno"))) return realDir;
       } catch {
       }
     }
@@ -36505,7 +37463,7 @@ function runSetup(opts = {}) {
   const probes = PROBES.map((item) => probeCommand(item.command));
   const created = [];
   const setupNotices = [];
-  const manifestExisted = (0, import_node_fs40.existsSync)(paths.installationsFile);
+  const manifestExisted = (0, import_node_fs41.existsSync)(paths.installationsFile);
   const manifest = readInstallationManifest(opts.userPathOptions);
   const runtimeSource = opts.runtimeSource !== void 0 ? opts.runtimeSource : (opts.userPathOptions?.env ?? process.env).FADENO_BUNDLED_RUNTIME ?? null;
   let syncOutcome = "absent";
@@ -36539,13 +37497,13 @@ function runSetup(opts = {}) {
       target: "codex",
       scope: "user",
       userPathOptions: opts.userPathOptions,
-      cliPath: (0, import_node_fs40.existsSync)(paths.managedCli) ? paths.managedCli : void 0
+      cliPath: (0, import_node_fs41.existsSync)(paths.managedCli) ? paths.managedCli : void 0
     });
   }
   const priorPermissionRules = opts.target == null ? [] : manifest.harnesses[opts.target]?.permissionRules ?? [];
   const addedPermission = opts.target === "claude" ? ensureClaudePermission(paths, opts.userPathOptions, setupNotices) : null;
   if (opts.target != null) {
-    const managedFiles = steering?.results.map((item) => item.path).filter((path) => (0, import_node_fs40.existsSync)(path) && (0, import_node_fs40.readFileSync)(path, "utf8").startsWith("# fadeno:managed")) ?? [];
+    const managedFiles = steering?.results.map((item) => item.path).filter((path) => (0, import_node_fs41.existsSync)(path) && (0, import_node_fs41.readFileSync)(path, "utf8").startsWith("# fadeno:managed")) ?? [];
     const permissionRules = (addedPermission == null ? priorPermissionRules : [...priorPermissionRules, addedPermission]).filter((item, index, all) => all.findIndex((other) => other.path === item.path && other.rule === item.rule) === index);
     recordHarnessInstallation(
       paths,
@@ -36556,7 +37514,7 @@ function runSetup(opts = {}) {
     );
     if (!manifestExisted && !created.includes(paths.installationsFile)) created.push(paths.installationsFile);
   } else if (manifest.runtime != null) {
-    if (!(0, import_node_fs40.existsSync)(paths.installationsFile)) {
+    if (!(0, import_node_fs41.existsSync)(paths.installationsFile)) {
       writeInstallationManifest(paths, manifest);
       if (!manifestExisted && !created.includes(paths.installationsFile)) created.push(paths.installationsFile);
     }
@@ -36622,8 +37580,8 @@ function runSetup(opts = {}) {
 }
 
 // src/commands/status.ts
-var import_node_fs41 = require("node:fs");
-var import_node_path42 = require("node:path");
+var import_node_fs42 = require("node:fs");
+var import_node_path43 = require("node:path");
 var StatusError = class extends Error {
 };
 function harnessOf(target, userPathOptions) {
@@ -36636,8 +37594,8 @@ function materialization(_profile, codexMaintained, userPathOptions) {
   let allFresh = true;
   let anyHost = false;
   for (const arch of needed) {
-    const file = (0, import_node_path42.join)(path, `fadeno-${arch}.toml`);
-    if (!(0, import_node_fs41.existsSync)(file)) {
+    const file = (0, import_node_path43.join)(path, `fadeno-${arch}.toml`);
+    if (!(0, import_node_fs42.existsSync)(file)) {
       allFresh = false;
     } else {
       anyHost = true;
@@ -36687,7 +37645,7 @@ function runStatus(opts = {}) {
   const external = roles.filter((r) => r.adapter === "command");
   const installation = readInstallationManifest(opts.userPathOptions);
   const upaths = userPaths(opts.userPathOptions);
-  const invocationSource = process.env.FADENO_INVOCATION_SOURCE?.trim() || (installation.runtime != null && (0, import_node_path42.resolve)(process.argv[1] ?? "") === (0, import_node_path42.resolve)(installation.runtime.path) ? "managed" : "path");
+  const invocationSource = process.env.FADENO_INVOCATION_SOURCE?.trim() || (installation.runtime != null && (0, import_node_path43.resolve)(process.argv[1] ?? "") === (0, import_node_path43.resolve)(installation.runtime.path) ? "managed" : "path");
   const codexMaintained = maintainedHarnesses(opts.userPathOptions).includes("codex");
   let codexProfile = null;
   if (codexMaintained) {
@@ -36704,7 +37662,7 @@ function runStatus(opts = {}) {
   let observedVersion = null;
   let observedSource = null;
   try {
-    if ((0, import_node_fs41.existsSync)(upaths.managedRuntimeDir)) {
+    if ((0, import_node_fs42.existsSync)(upaths.managedRuntimeDir)) {
       const obs = readRuntimeVersionAt(upaths.managedRuntimeDir);
       if (obs.version != null) {
         observedVersion = obs.version;
@@ -36732,7 +37690,7 @@ function runStatus(opts = {}) {
   }
   let preferredCli;
   let preferredReason = null;
-  const invokingPath = (0, import_node_path42.resolve)(process.argv[1] ?? "fadeno");
+  const invokingPath = (0, import_node_path43.resolve)(process.argv[1] ?? "fadeno");
   if (managedVersion != null && managedVersion === invokingVersion && installation.runtime?.path) {
     preferredCli = installation.runtime.path;
   } else {
@@ -36759,7 +37717,7 @@ function runStatus(opts = {}) {
     roles,
     external,
     codexMaterialization: materialized,
-    projectCustomized: (0, import_node_fs41.existsSync)((0, import_node_path42.join)(repoRoot, ".fadeno")),
+    projectCustomized: (0, import_node_fs42.existsSync)((0, import_node_path43.join)(repoRoot, ".fadeno")),
     verbose: Boolean(opts.verbose),
     next,
     runtime: {
@@ -36782,8 +37740,8 @@ function runStatus(opts = {}) {
 }
 
 // src/commands/doctor.ts
-var import_node_fs42 = require("node:fs");
-var import_node_path43 = require("node:path");
+var import_node_fs43 = require("node:fs");
+var import_node_path44 = require("node:path");
 var CLAUDE_MANAGED_MARK2 = "<!-- fadeno:managed";
 function describeContractDrift(items) {
   const drifted = items.filter((item) => item.missingFlags.length > 0);
@@ -36797,14 +37755,14 @@ function finding(check, severity, detail2, remediation) {
   return remediation ? { check, severity, detail: detail2, remediation } : { check, severity, detail: detail2 };
 }
 function commandOnPath(command2) {
-  const candidates = (0, import_node_path43.isAbsolute)(command2) || command2.includes("/") || command2.includes("\\") ? [""] : (process.env.PATH ?? "").split(import_node_path43.delimiter);
+  const candidates = (0, import_node_path44.isAbsolute)(command2) || command2.includes("/") || command2.includes("\\") ? [""] : (process.env.PATH ?? "").split(import_node_path44.delimiter);
   const suffixes = process.platform === "win32" ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";") : [""];
   for (const directory of candidates) {
-    const base = directory === "" ? command2 : (0, import_node_path43.join)(directory, command2);
+    const base = directory === "" ? command2 : (0, import_node_path44.join)(directory, command2);
     for (const suffix of suffixes) {
       const path = suffix !== "" && !base.toUpperCase().endsWith(suffix.toUpperCase()) ? `${base}${suffix}` : base;
       try {
-        (0, import_node_fs42.accessSync)(path, process.platform === "win32" ? import_node_fs42.constants.F_OK : import_node_fs42.constants.X_OK);
+        (0, import_node_fs43.accessSync)(path, process.platform === "win32" ? import_node_fs43.constants.F_OK : import_node_fs43.constants.X_OK);
         return true;
       } catch {
       }
@@ -36816,13 +37774,13 @@ function pluginSurface(env) {
   const candidates = [];
   const explicit = env.CLAUDE_PLUGIN_ROOT;
   if (typeof explicit === "string" && explicit.length > 0) candidates.push(explicit);
-  for (const entry of (env.PATH ?? "").split(import_node_path43.delimiter)) {
-    if (entry.endsWith(`${import_node_path43.sep}bin`)) candidates.push((0, import_node_path43.dirname)(entry));
+  for (const entry of (env.PATH ?? "").split(import_node_path44.delimiter)) {
+    if (entry.endsWith(`${import_node_path44.sep}bin`)) candidates.push((0, import_node_path44.dirname)(entry));
   }
   for (const root of candidates) {
     try {
       const parsed = JSON.parse(
-        (0, import_node_fs42.readFileSync)((0, import_node_path43.join)(root, ".claude-plugin", "plugin.json"), "utf8")
+        (0, import_node_fs43.readFileSync)((0, import_node_path44.join)(root, ".claude-plugin", "plugin.json"), "utf8")
       );
       if (parsed.name !== "fadeno") continue;
       return { root, version: typeof parsed.version === "string" ? parsed.version : null };
@@ -36859,7 +37817,7 @@ function runDoctor(opts = {}) {
       }
     } else if (skew === "managed-older") {
       const harnessFlag = status.runtime.installedHarnesses.length === 1 ? ` --${status.runtime.installedHarnesses[0]}` : status.runtime.installedHarnesses.includes("codex") && status.runtime.installedHarnesses.includes("claude") ? status.harness === "claude" || status.harness === "codex" ? ` --${status.harness}` : " --codex" : status.runtime.installedHarnesses.includes("claude") ? " --claude" : status.runtime.installedHarnesses.includes("codex") ? " --codex" : "";
-      const dir = preferredCli ? (0, import_node_path43.dirname)(preferredCli) : "<bin-dir>";
+      const dir = preferredCli ? (0, import_node_path44.dirname)(preferredCli) : "<bin-dir>";
       const remediation = `refreshes at next plugin-launched command, or run fadeno setup${harnessFlag} --from ${dir} (e.g. fadeno setup${harnessFlag} --from ${dir})`;
       findings.push(finding("runtime-version", "warning", `managed runtime ${managedV} is older than this CLI ${invokingV} (managed-older); ${preferredReason ?? ""}`, remediation));
     } else if (skew === "managed-newer") {
@@ -36869,12 +37827,12 @@ function runDoctor(opts = {}) {
     }
     try {
       const manifest = readInstallationManifest(opts.userPathOptions);
-      if (manifest.runtime?.source && !(0, import_node_fs42.existsSync)(manifest.runtime.source)) {
+      if (manifest.runtime?.source && !(0, import_node_fs43.existsSync)(manifest.runtime.source)) {
         findings.push(finding("runtime-source-missing", "warning", `managed runtime source ${manifest.runtime.source} no longer exists (version-keyed cache may have moved)`, "Plugin-launched commands still refresh via their bundled runtime; a direct managed-CLI invocation cannot heal until the source reappears."));
       }
       const upaths = userPaths(opts.userPathOptions);
-      const pkgPath = (0, import_node_path43.join)(upaths.managedRuntimeDir, "package.json");
-      if (managedV != null && !(0, import_node_fs42.existsSync)(pkgPath)) {
+      const pkgPath = (0, import_node_path44.join)(upaths.managedRuntimeDir, "package.json");
+      if (managedV != null && !(0, import_node_fs43.existsSync)(pkgPath)) {
         findings.push(finding("runtime-unstamped", "warning", `managed runtime at ${upaths.managedRuntimeDir} has no version marker (installed by a build older than 0.6.0-rc.33); refresh to stamp it`, "Run fadeno setup --from <bin-dir> to add the marker."));
       }
     } catch {
@@ -36889,11 +37847,11 @@ function runDoctor(opts = {}) {
     findings.push(finding("configuration", "error", err.message, "Fix the malformed YAML or missing catalog before running a playbook."));
     return { repoRoot, findings, ok: false };
   }
-  const paths = [(0, import_node_path43.join)(repoRoot, ".fadeno"), (0, import_node_path43.join)(repoRoot, ".fadeno", "runs"), (0, import_node_path43.join)(repoRoot, ".fadeno", "progress")];
+  const paths = [(0, import_node_path44.join)(repoRoot, ".fadeno"), (0, import_node_path44.join)(repoRoot, ".fadeno", "runs"), (0, import_node_path44.join)(repoRoot, ".fadeno", "progress")];
   for (const path of paths) {
     try {
-      if ((0, import_node_fs42.existsSync)(path)) (0, import_node_fs42.accessSync)(path, import_node_fs42.constants.W_OK);
-      findings.push(finding(`path:${path}`, "ok", (0, import_node_fs42.existsSync)(path) ? "writable" : "will be created lazily"));
+      if ((0, import_node_fs43.existsSync)(path)) (0, import_node_fs43.accessSync)(path, import_node_fs43.constants.W_OK);
+      findings.push(finding(`path:${path}`, "ok", (0, import_node_fs43.existsSync)(path) ? "writable" : "will be created lazily"));
     } catch {
       findings.push(finding(`path:${path}`, "error", "not writable", "Choose a writable repository or state location."));
     }
@@ -36980,16 +37938,16 @@ function runDoctor(opts = {}) {
     findings.push(finding("codex-agents", "ok", "managed host-agent state is current"));
   }
   {
-    const projectDir = (0, import_node_path43.join)(repoRoot, ".codex", "agents");
+    const projectDir = (0, import_node_path44.join)(repoRoot, ".codex", "agents");
     const userDir = codexUserAgentDir(opts.userPathOptions);
     const soleProject = [];
     const unmanagedShadow = [];
     const staleShadow = [];
     for (const archetype of CODEX_STEERING_ARCHETYPES) {
       const name = `${archetype}.toml`;
-      const project = readCodexAgentFile((0, import_node_path43.join)(projectDir, name));
+      const project = readCodexAgentFile((0, import_node_path44.join)(projectDir, name));
       if (project == null) continue;
-      const user = readCodexAgentFile((0, import_node_path43.join)(userDir, `fadeno-${archetype}.toml`));
+      const user = readCodexAgentFile((0, import_node_path44.join)(userDir, `fadeno-${archetype}.toml`));
       if (user == null) {
         soleProject.push(name);
       } else if (!project.managed) {
@@ -36998,7 +37956,7 @@ function runDoctor(opts = {}) {
         staleShadow.push({ name, label: `${name} (${project.version} < ${user.version})` });
       }
     }
-    const absolute = (names) => names.map((name) => (0, import_node_path43.join)(projectDir, name)).join(", ");
+    const absolute = (names) => names.map((name) => (0, import_node_path44.join)(projectDir, name)).join(", ");
     if (soleProject.length > 0) {
       findings.push(finding(
         "codex-agents-project",
@@ -37056,13 +38014,13 @@ function runDoctor(opts = {}) {
   } catch {
   }
   {
-    const claudeAgentDir2 = (0, import_node_path43.join)(repoRoot, ".claude", "agents");
+    const claudeAgentDir2 = (0, import_node_path44.join)(repoRoot, ".claude", "agents");
     for (const name of ["worker.md", "reviewer.md", "judge.md"]) {
-      const path = (0, import_node_path43.join)(claudeAgentDir2, name);
+      const path = (0, import_node_path44.join)(claudeAgentDir2, name);
       let text;
       try {
-        if (!(0, import_node_fs42.existsSync)(path)) continue;
-        text = (0, import_node_fs42.readFileSync)(path, "utf8");
+        if (!(0, import_node_fs43.existsSync)(path)) continue;
+        text = (0, import_node_fs43.readFileSync)(path, "utf8");
       } catch {
         continue;
       }
@@ -37081,10 +38039,38 @@ function runDoctor(opts = {}) {
       findings.push(finding(
         "claude-agents-grid",
         "warning",
-        `${retiredGrid.length} retired identity-grid cell(s) remain in ${claudeAgentDir2} (${retiredGrid.map((path) => (0, import_node_path43.basename)(path)).slice(0, 3).join(", ")}${retiredGrid.length > 3 ? ", \u2026" : ""}) \u2014 they pin an effort nothing consults any more, and the harness still registers them at session start`,
+        `${retiredGrid.length} retired identity-grid cell(s) remain in ${claudeAgentDir2} (${retiredGrid.map((path) => (0, import_node_path44.basename)(path)).slice(0, 3).join(", ")}${retiredGrid.length > 3 ? ", \u2026" : ""}) \u2014 they pin an effort nothing consults any more, and the harness still registers them at session start`,
         "Run `fadeno steering apply --claude` to remove them."
       ));
     }
+  }
+  function missingBundledTemplates(pluginRoot) {
+    const relDir = (0, import_node_path44.join)("common", "fadeno");
+    const source = (0, import_node_path44.join)(templatesDir(), relDir);
+    const bundled = (0, import_node_path44.join)(pluginRoot, "bin", "templates", relDir);
+    if (!(0, import_node_fs43.existsSync)(source) || !(0, import_node_fs43.existsSync)(bundled)) return [];
+    const walk = (dir, prefix, out) => {
+      let entries = [];
+      try {
+        entries = (0, import_node_fs43.readdirSync)(dir);
+      } catch {
+        return out;
+      }
+      for (const entry of entries) {
+        const abs = (0, import_node_path44.join)(dir, entry);
+        let isDir = false;
+        try {
+          isDir = (0, import_node_fs43.statSync)(abs).isDirectory();
+        } catch {
+          continue;
+        }
+        if (isDir) walk(abs, `${prefix}${entry}/`, out);
+        else out.push(`${prefix}${entry}`);
+      }
+      return out;
+    };
+    const want = walk(source, "", []);
+    return want.filter((rel) => !(0, import_node_fs43.existsSync)((0, import_node_path44.join)(bundled, rel))).sort();
   }
   const surface = pluginSurface(opts.processEnv ?? process.env);
   if (surface != null) {
@@ -37098,16 +38084,26 @@ function runDoctor(opts = {}) {
         "Restart the harness so both halves are the same build; dispatch rows record the version that actually ran under `fadeno_version`."
       ));
     } else {
-      findings.push(finding(
-        "plugin-surface",
-        "ok",
-        `plugin ${surface.version} on disk matches this CLI`,
-        `Subagent definitions are still whatever this session loaded at startup \u2014 if your agent list stamps a version other than ${status.version}, restart to refresh it.`
-      ));
+      const missing = missingBundledTemplates(surface.root);
+      if (missing.length > 0) {
+        findings.push(finding(
+          "plugin-surface",
+          "warning",
+          `plugin ${surface.version} is the same version as this CLI but its bundled templates are stale: ${missing.length} file(s) present in templates/ and missing from the bundle (${missing.slice(0, 3).join(", ")}${missing.length > 3 ? ", \u2026" : ""})`,
+          "Regenerate with `npm run build:plugin` and `npm run build:plugin:codex` \u2014 a version bump alone does not rebuild the bundle."
+        ));
+      } else {
+        findings.push(finding(
+          "plugin-surface",
+          "ok",
+          `plugin ${surface.version} matches this CLI, and its bundled templates are complete`,
+          `Subagent definitions are still whatever this session loaded at startup \u2014 if your agent list stamps a version other than ${status.version}, restart to refresh it.`
+        ));
+      }
     }
   }
-  const gitignore = (0, import_node_path43.join)(repoRoot, ".gitignore");
-  const ignored = (0, import_node_fs42.existsSync)(gitignore) ? (0, import_node_fs42.readFileSync)(gitignore, "utf8") : "";
+  const gitignore = (0, import_node_path44.join)(repoRoot, ".gitignore");
+  const ignored = (0, import_node_fs43.existsSync)(gitignore) ? (0, import_node_fs43.readFileSync)(gitignore, "utf8") : "";
   const ignoreLines = ignored.split(/\r?\n/).map((line) => line.trim());
   for (const pattern of [".fadeno/runs/", ".fadeno/progress/", ".fadeno/local/", ".fadeno/dispatches.jsonl", ".codex/agents/fadeno-*.toml", ".claude/settings.local.json"]) {
     if (!isFadenoPathIgnored(ignoreLines, pattern)) findings.push(finding(`ignore:${pattern}`, "warning", "managed ignore entry is absent", "The first `new-run`/`dispatch`, `fadeno init`, or `fadeno vendor` adds it non-destructively."));
@@ -37115,10 +38111,10 @@ function runDoctor(opts = {}) {
   {
     const LOCK_STALE_MS3 = 12e4;
     let lockStale = null;
-    const lockAbs = (0, import_node_path43.join)(repoRoot, WORKSPACE_LEASE_LOCK);
-    if ((0, import_node_fs42.existsSync)(lockAbs)) {
+    const lockAbs = (0, import_node_path44.join)(repoRoot, WORKSPACE_LEASE_LOCK);
+    if ((0, import_node_fs43.existsSync)(lockAbs)) {
       try {
-        const lst = (0, import_node_fs42.lstatSync)(lockAbs);
+        const lst = (0, import_node_fs43.lstatSync)(lockAbs);
         if (lst.isSymbolicLink()) {
           findings.push(finding(
             "workspace-lease",
@@ -37129,7 +38125,7 @@ function runDoctor(opts = {}) {
         } else if (lst.isDirectory()) {
           let mtime = lst.mtimeMs;
           try {
-            mtime = (0, import_node_fs42.statSync)(lockAbs).mtimeMs;
+            mtime = (0, import_node_fs43.statSync)(lockAbs).mtimeMs;
           } catch {
           }
           if (Date.now() - mtime > LOCK_STALE_MS3) {
@@ -37148,10 +38144,10 @@ function runDoctor(opts = {}) {
     let lease = null;
     let effective = null;
     let leaseSymlinkWarning = false;
-    const leaseAbs = (0, import_node_path43.join)(repoRoot, WORKSPACE_LEASE_FILE);
-    if ((0, import_node_fs42.existsSync)(leaseAbs)) {
+    const leaseAbs = (0, import_node_path44.join)(repoRoot, WORKSPACE_LEASE_FILE);
+    if ((0, import_node_fs43.existsSync)(leaseAbs)) {
       try {
-        const lst = (0, import_node_fs42.lstatSync)(leaseAbs);
+        const lst = (0, import_node_fs43.lstatSync)(leaseAbs);
         if (lst.isSymbolicLink()) {
           findings.push(finding(
             "workspace-lease",
@@ -37219,26 +38215,26 @@ function runDoctor(opts = {}) {
 
 // src/commands/vendor.ts
 var import_node_crypto14 = require("node:crypto");
-var import_node_fs43 = require("node:fs");
-var import_node_path44 = require("node:path");
+var import_node_fs44 = require("node:fs");
+var import_node_path45 = require("node:path");
 function makeVendoredCodexAgentsTrackable(repoRoot) {
-  const path = (0, import_node_path44.join)(repoRoot, ".gitignore");
-  const current = (0, import_node_fs43.existsSync)(path) ? (0, import_node_fs43.readFileSync)(path, "utf8") : "";
+  const path = (0, import_node_path45.join)(repoRoot, ".gitignore");
+  const current = (0, import_node_fs44.existsSync)(path) ? (0, import_node_fs44.readFileSync)(path, "utf8") : "";
   const rules = ["!.codex/agents/worker.toml", "!.codex/agents/reviewer.toml", "!.codex/agents/judge.toml"];
   const missing = rules.filter((rule) => !current.split(/\r?\n/).includes(rule));
   if (missing.length === 0) return;
   const separator = current.length === 0 || current.endsWith("\n") ? "" : "\n";
-  (0, import_node_fs43.writeFileSync)(path, `${current}${separator}# Fadeno: explicitly vendored Codex brokers
+  (0, import_node_fs44.writeFileSync)(path, `${current}${separator}# Fadeno: explicitly vendored Codex brokers
 ${missing.join("\n")}
 `, "utf8");
 }
 function digestTree(root) {
   const files = {};
   function walk(dir) {
-    for (const entry of (0, import_node_fs43.readdirSync)(dir, { withFileTypes: true })) {
-      const full = (0, import_node_path44.join)(dir, entry.name);
+    for (const entry of (0, import_node_fs44.readdirSync)(dir, { withFileTypes: true })) {
+      const full = (0, import_node_path45.join)(dir, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (entry.isFile()) files[(0, import_node_path44.relative)(root, full).split("\\").join("/")] = (0, import_node_crypto14.createHash)("sha256").update((0, import_node_fs43.readFileSync)(full)).digest("hex");
+      else if (entry.isFile()) files[(0, import_node_path45.relative)(root, full).split("\\").join("/")] = (0, import_node_crypto14.createHash)("sha256").update((0, import_node_fs44.readFileSync)(full)).digest("hex");
     }
   }
   walk(root);
@@ -37249,9 +38245,9 @@ function ownedVendoredFiles(repoRoot, init) {
   const shared = /* @__PURE__ */ new Set(["AGENTS.md", "CLAUDE.md", ".gitignore", ".claude/settings.local.json"]);
   for (const result of init.results) {
     if (result.status !== "created" && result.status !== "overwritten") continue;
-    const rel = (0, import_node_path44.relative)(repoRoot, result.path).split("\\").join("/");
-    if (shared.has(rel) || rel.startsWith("../") || !(0, import_node_fs43.existsSync)(result.path)) continue;
-    owned[rel] = (0, import_node_crypto14.createHash)("sha256").update((0, import_node_fs43.readFileSync)(result.path)).digest("hex");
+    const rel = (0, import_node_path45.relative)(repoRoot, result.path).split("\\").join("/");
+    if (shared.has(rel) || rel.startsWith("../") || !(0, import_node_fs44.existsSync)(result.path)) continue;
+    owned[rel] = (0, import_node_crypto14.createHash)("sha256").update((0, import_node_fs44.readFileSync)(result.path)).digest("hex");
   }
   return owned;
 }
@@ -37265,14 +38261,14 @@ function runVendor(opts) {
     withSteering: opts.withSteering ?? opts.target !== "grok"
   });
   if (opts.target === "codex") makeVendoredCodexAgentsTrackable(repoRoot);
-  const lockPath = (0, import_node_path44.join)(repoRoot, "fadeno.lock");
+  const lockPath = (0, import_node_path45.join)(repoRoot, "fadeno.lock");
   const lockDoc = {
     version: 1,
     fadeno_version: packageVersion(),
     target: opts.target,
     mode: "vendored",
-    definitions: digestTree((0, import_node_path44.join)(templatesDir(), "common", "fadeno")),
-    capability: digestTree((0, import_node_path44.join)(templatesDir(), opts.target)),
+    definitions: digestTree((0, import_node_path45.join)(templatesDir(), "common", "fadeno")),
+    capability: digestTree((0, import_node_path45.join)(templatesDir(), opts.target)),
     files: ownedVendoredFiles(repoRoot, init)
   };
   const lock = emitFile(lockPath, `${JSON.stringify(lockDoc, null, 2)}
@@ -37282,27 +38278,27 @@ function runVendor(opts) {
 
 // src/commands/evidence.ts
 var import_node_crypto15 = require("node:crypto");
-var import_node_fs44 = require("node:fs");
-var import_node_path45 = require("node:path");
+var import_node_fs45 = require("node:fs");
+var import_node_path46 = require("node:path");
 var EvidenceError = class extends Error {
 };
 function sha256(path) {
-  return (0, import_node_crypto15.createHash)("sha256").update((0, import_node_fs44.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto15.createHash)("sha256").update((0, import_node_fs45.readFileSync)(path)).digest("hex");
 }
 function copyOne(source, destination, rel, files) {
-  if ((0, import_node_fs44.existsSync)(destination)) {
+  if ((0, import_node_fs45.existsSync)(destination)) {
     if (sha256(source) !== sha256(destination)) throw new EvidenceError(`evidence destination conflict at ${destination}; refusing to overwrite it.`);
   } else {
-    (0, import_node_fs44.mkdirSync)((0, import_node_path45.join)(destination, ".."), { recursive: true });
-    (0, import_node_fs44.cpSync)(source, destination);
+    (0, import_node_fs45.mkdirSync)((0, import_node_path46.join)(destination, ".."), { recursive: true });
+    (0, import_node_fs45.cpSync)(source, destination);
   }
   files.push(rel);
 }
 function copyTree2(sourceRoot, destinationRoot, files, prefix = "artifacts") {
-  if (!(0, import_node_fs44.existsSync)(sourceRoot)) return;
-  for (const entry of (0, import_node_fs44.readdirSync)(sourceRoot, { withFileTypes: true })) {
-    const source = (0, import_node_path45.join)(sourceRoot, entry.name);
-    const destination = (0, import_node_path45.join)(destinationRoot, entry.name);
+  if (!(0, import_node_fs45.existsSync)(sourceRoot)) return;
+  for (const entry of (0, import_node_fs45.readdirSync)(sourceRoot, { withFileTypes: true })) {
+    const source = (0, import_node_path46.join)(sourceRoot, entry.name);
+    const destination = (0, import_node_path46.join)(destinationRoot, entry.name);
     const childPrefix = `${prefix}/${entry.name}`;
     if (entry.isDirectory()) copyTree2(source, destination, files, childPrefix);
     else if (entry.isFile()) copyOne(source, destination, childPrefix, files);
@@ -37313,25 +38309,25 @@ function runEvidencePromote(opts) {
   const verification = runVerify({ run: opts.run, repoRoot });
   if (!verification.ok) throw new EvidenceError(`run ${verification.run.runId} did not verify successfully; promotion refused.`);
   const run = resolveRun(repoRoot, opts.run);
-  const destination = (0, import_node_path45.join)(repoRoot, ".fadeno", "evidence", run.runId);
-  (0, import_node_fs44.mkdirSync)(destination, { recursive: true });
+  const destination = (0, import_node_path46.join)(repoRoot, ".fadeno", "evidence", run.runId);
+  (0, import_node_fs45.mkdirSync)(destination, { recursive: true });
   const files = [];
-  copyOne((0, import_node_path45.join)(run.dir, "run.yaml"), (0, import_node_path45.join)(destination, "run.yaml"), "run.yaml", files);
-  copyOne((0, import_node_path45.join)(run.dir, "events.jsonl"), (0, import_node_path45.join)(destination, "events.jsonl"), "events.jsonl", files);
-  if ((0, import_node_fs44.existsSync)((0, import_node_path45.join)(run.dir, "profile.yaml"))) copyOne((0, import_node_path45.join)(run.dir, "profile.yaml"), (0, import_node_path45.join)(destination, "profile.yaml"), "profile.yaml", files);
-  copyTree2((0, import_node_path45.join)(run.dir, "artifacts"), (0, import_node_path45.join)(destination, "artifacts"), files);
-  const snapshottedDefinitions = (0, import_node_path45.join)(run.dir, "definitions");
-  if ((0, import_node_fs44.existsSync)(snapshottedDefinitions)) {
-    copyTree2(snapshottedDefinitions, (0, import_node_path45.join)(destination, "definitions"), files, "definitions");
+  copyOne((0, import_node_path46.join)(run.dir, "run.yaml"), (0, import_node_path46.join)(destination, "run.yaml"), "run.yaml", files);
+  copyOne((0, import_node_path46.join)(run.dir, "events.jsonl"), (0, import_node_path46.join)(destination, "events.jsonl"), "events.jsonl", files);
+  if ((0, import_node_fs45.existsSync)((0, import_node_path46.join)(run.dir, "profile.yaml"))) copyOne((0, import_node_path46.join)(run.dir, "profile.yaml"), (0, import_node_path46.join)(destination, "profile.yaml"), "profile.yaml", files);
+  copyTree2((0, import_node_path46.join)(run.dir, "artifacts"), (0, import_node_path46.join)(destination, "artifacts"), files);
+  const snapshottedDefinitions = (0, import_node_path46.join)(run.dir, "definitions");
+  if ((0, import_node_fs45.existsSync)(snapshottedDefinitions)) {
+    copyTree2(snapshottedDefinitions, (0, import_node_path46.join)(destination, "definitions"), files, "definitions");
   } else {
     if (run.playbook != null) {
       const playbook = resolvePlaybookFile(repoRoot, run.playbook);
-      if (playbook) copyOne(playbook.path, (0, import_node_path45.join)(destination, "definitions", "playbook.yaml"), "definitions/playbook.yaml", files);
+      if (playbook) copyOne(playbook.path, (0, import_node_path46.join)(destination, "definitions", "playbook.yaml"), "definitions/playbook.yaml", files);
     }
     const schemaNames = ["playbook.schema.json", "run.schema.json", "review-report.schema.json", "test-result.schema.json"];
     for (const name of schemaNames) {
       const schema = resolveDefinition(repoRoot, "schema", name);
-      if (schema) copyOne(schema.path, (0, import_node_path45.join)(destination, "definitions", "schemas", name), `definitions/schemas/${name}`, files);
+      if (schema) copyOne(schema.path, (0, import_node_path46.join)(destination, "definitions", "schemas", name), `definitions/schemas/${name}`, files);
     }
   }
   files.sort();
@@ -37339,46 +38335,46 @@ function runEvidencePromote(opts) {
     fadeno_version: packageVersion(),
     run_id: run.runId,
     files: Object.fromEntries(files.map((rel) => {
-      const path = (0, import_node_path45.join)(destination, rel);
+      const path = (0, import_node_path46.join)(destination, rel);
       return [rel, sha256(path)];
     }))
   };
-  const manifestPath = (0, import_node_path45.join)(destination, "manifest.json");
+  const manifestPath = (0, import_node_path46.join)(destination, "manifest.json");
   const text = `${JSON.stringify(manifest, null, 2)}
 `;
-  const hadManifest = (0, import_node_fs44.existsSync)(manifestPath);
-  if (hadManifest && (0, import_node_fs44.readFileSync)(manifestPath, "utf8") !== text) throw new EvidenceError(`evidence destination conflict at ${manifestPath}; refusing to overwrite it.`);
-  if (!(0, import_node_fs44.existsSync)(manifestPath)) (0, import_node_fs44.writeFileSync)(manifestPath, text, "utf8");
+  const hadManifest = (0, import_node_fs45.existsSync)(manifestPath);
+  if (hadManifest && (0, import_node_fs45.readFileSync)(manifestPath, "utf8") !== text) throw new EvidenceError(`evidence destination conflict at ${manifestPath}; refusing to overwrite it.`);
+  if (!(0, import_node_fs45.existsSync)(manifestPath)) (0, import_node_fs45.writeFileSync)(manifestPath, text, "utf8");
   return { run: run.runId, destination, manifest: manifestPath, idempotent: hadManifest, files };
 }
 
 // src/commands/uninstall.ts
-var import_node_fs45 = require("node:fs");
+var import_node_fs46 = require("node:fs");
 var import_node_os5 = require("node:os");
-var import_node_path46 = require("node:path");
+var import_node_path47 = require("node:path");
 var UninstallError = class extends Error {
 };
 function unrecordedManagedFiles(harness, opts) {
   const home = opts?.home ?? (0, import_node_os5.homedir)();
-  if (harness === "claude") return listRetiredClaudeGridCells((0, import_node_path46.join)(home, ".claude", "agents"));
+  if (harness === "claude") return listRetiredClaudeGridCells((0, import_node_path47.join)(home, ".claude", "agents"));
   if (harness !== "codex") return [];
   const agentsDir = codexUserAgentDir(opts);
-  return ["worker", "reviewer", "judge"].map((role) => (0, import_node_path46.join)(agentsDir, `fadeno-${role}.toml`));
+  return ["worker", "reviewer", "judge"].map((role) => (0, import_node_path47.join)(agentsDir, `fadeno-${role}.toml`));
 }
 function carriesManagedMarker(path) {
   let text;
   try {
-    text = (0, import_node_fs45.readFileSync)(path, "utf8");
+    text = (0, import_node_fs46.readFileSync)(path, "utf8");
   } catch {
     return false;
   }
   return text.startsWith("# fadeno:managed") || isRetiredClaudeGridCell(text);
 }
 function removePermissionRule(permission, removed, preserved) {
-  if (!(0, import_node_fs45.existsSync)(permission.path)) return;
+  if (!(0, import_node_fs46.existsSync)(permission.path)) return;
   let data;
   try {
-    const parsed = JSON.parse((0, import_node_fs45.readFileSync)(permission.path, "utf8"));
+    const parsed = JSON.parse((0, import_node_fs46.readFileSync)(permission.path, "utf8"));
     if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
     data = parsed;
   } catch {
@@ -37392,8 +38388,8 @@ function removePermissionRule(permission, removed, preserved) {
   permissions.allow = allow.filter((item) => item !== permission.rule);
   const emptyPermissions = Object.values(permissions).every((value) => Array.isArray(value) && value.length === 0);
   if (emptyPermissions) delete data.permissions;
-  if (permission.createdFile && Object.keys(data).length === 0) (0, import_node_fs45.rmSync)(permission.path, { force: true });
-  else (0, import_node_fs45.writeFileSync)(permission.path, `${JSON.stringify(data, null, 2)}
+  if (permission.createdFile && Object.keys(data).length === 0) (0, import_node_fs46.rmSync)(permission.path, { force: true });
+  else (0, import_node_fs46.writeFileSync)(permission.path, `${JSON.stringify(data, null, 2)}
 `, "utf8");
   removed.push(`${permission.path} permission ${permission.rule}`);
 }
@@ -37417,10 +38413,10 @@ function runUninstall(opts) {
       ...unrecordedManagedFiles(harness, opts.userPathOptions).filter((path) => !recorded.some((file) => file.path === path)).map((path) => ({ path, sha256: "" }))
     ];
     for (const file of files) {
-      if (!(0, import_node_fs45.existsSync)(file.path)) continue;
+      if (!(0, import_node_fs46.existsSync)(file.path)) continue;
       const managedMarker = carriesManagedMarker(file.path);
       if (managedMarker || file.sha256 !== "" && fileDigest(file.path) === file.sha256) {
-        (0, import_node_fs45.rmSync)(file.path, { force: true });
+        (0, import_node_fs46.rmSync)(file.path, { force: true });
         removed.push(file.path);
       } else {
         preserved.push(file.path);
@@ -37434,48 +38430,48 @@ function runUninstall(opts) {
   const currentHarness = readUserHarness(opts.userPathOptions);
   if (currentHarness != null && selected.includes(currentHarness)) {
     const remaining = ["codex", "claude"].find((name) => manifest.harnesses[name] != null);
-    if (remaining == null) (0, import_node_fs45.rmSync)(paths.harnessFile, { force: true });
-    else (0, import_node_fs45.writeFileSync)(paths.harnessFile, `${remaining}
+    if (remaining == null) (0, import_node_fs46.rmSync)(paths.harnessFile, { force: true });
+    else (0, import_node_fs46.writeFileSync)(paths.harnessFile, `${remaining}
 `, "utf8");
   }
   if (Object.keys(manifest.harnesses).length === 0) {
-    (0, import_node_fs45.rmSync)(paths.managedRuntimeDir, { recursive: true, force: true });
-    (0, import_node_fs45.rmSync)((0, import_node_path46.join)(paths.dataDir, "runtime.staging"), { recursive: true, force: true });
-    (0, import_node_fs45.rmSync)((0, import_node_path46.join)(paths.dataDir, "runtime.old"), { recursive: true, force: true });
-    (0, import_node_fs45.rmSync)((0, import_node_path46.join)(paths.dataDir, ".runtime.lock"), { recursive: true, force: true });
+    (0, import_node_fs46.rmSync)(paths.managedRuntimeDir, { recursive: true, force: true });
+    (0, import_node_fs46.rmSync)((0, import_node_path47.join)(paths.dataDir, "runtime.staging"), { recursive: true, force: true });
+    (0, import_node_fs46.rmSync)((0, import_node_path47.join)(paths.dataDir, "runtime.old"), { recursive: true, force: true });
+    (0, import_node_fs46.rmSync)((0, import_node_path47.join)(paths.dataDir, ".runtime.lock"), { recursive: true, force: true });
     manifest.runtime = null;
   }
   writeInstallationManifest(paths, manifest);
   if (opts.purgeUserData) {
-    (0, import_node_fs45.rmSync)(paths.configDir, { recursive: true, force: true });
-    (0, import_node_fs45.rmSync)(paths.stateDir, { recursive: true, force: true });
-    (0, import_node_fs45.rmSync)(paths.dataDir, { recursive: true, force: true });
+    (0, import_node_fs46.rmSync)(paths.configDir, { recursive: true, force: true });
+    (0, import_node_fs46.rmSync)(paths.stateDir, { recursive: true, force: true });
+    (0, import_node_fs46.rmSync)(paths.dataDir, { recursive: true, force: true });
     return { harnesses: selected, removed, preserved, purged: true };
   }
   return { harnesses: selected, removed, preserved, purged: false };
 }
 
 // src/commands/clean.ts
-var import_node_child_process12 = require("node:child_process");
-var import_node_fs46 = require("node:fs");
-var import_node_path47 = require("node:path");
+var import_node_child_process13 = require("node:child_process");
+var import_node_fs47 = require("node:fs");
+var import_node_path48 = require("node:path");
 function runClean(opts = {}) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const candidates = [
-    (0, import_node_path47.join)(repoRoot, ".fadeno", "runs"),
-    (0, import_node_path47.join)(repoRoot, ".fadeno", "progress"),
-    (0, import_node_path47.join)(repoRoot, ".fadeno", "local"),
-    (0, import_node_path47.join)(repoRoot, ".fadeno", "dispatches.jsonl")
-  ].filter(import_node_fs46.existsSync);
+    (0, import_node_path48.join)(repoRoot, ".fadeno", "runs"),
+    (0, import_node_path48.join)(repoRoot, ".fadeno", "progress"),
+    (0, import_node_path48.join)(repoRoot, ".fadeno", "local"),
+    (0, import_node_path48.join)(repoRoot, ".fadeno", "dispatches.jsonl")
+  ].filter(import_node_fs47.existsSync);
   const retainedShadowWorktrees = listRetainedShadowWorktrees({ repoRoot }).map(
-    (w) => (0, import_node_path47.join)(repoRoot, w.workspace)
+    (w) => (0, import_node_path48.join)(repoRoot, w.workspace)
   );
   const removed = [];
   const deregisteredShadowWorktrees = [];
   if (opts.force) {
     for (const worktree of retainedShadowWorktrees) {
       try {
-        const result = (0, import_node_child_process12.spawnSync)("git", ["worktree", "remove", "--force", worktree], {
+        const result = (0, import_node_child_process13.spawnSync)("git", ["worktree", "remove", "--force", worktree], {
           cwd: repoRoot,
           encoding: "utf8"
         });
@@ -37484,11 +38480,11 @@ function runClean(opts = {}) {
       }
     }
     try {
-      (0, import_node_child_process12.spawnSync)("git", ["worktree", "prune"], { cwd: repoRoot, encoding: "utf8" });
+      (0, import_node_child_process13.spawnSync)("git", ["worktree", "prune"], { cwd: repoRoot, encoding: "utf8" });
     } catch {
     }
     for (const path of candidates) {
-      (0, import_node_fs46.rmSync)(path, { recursive: true, force: true });
+      (0, import_node_fs47.rmSync)(path, { recursive: true, force: true });
       removed.push(path);
     }
   }
@@ -37504,38 +38500,38 @@ function runClean(opts = {}) {
 
 // src/commands/unvendor.ts
 var import_node_crypto16 = require("node:crypto");
-var import_node_fs47 = require("node:fs");
-var import_node_path48 = require("node:path");
+var import_node_fs48 = require("node:fs");
+var import_node_path49 = require("node:path");
 var UnvendorError = class extends Error {
 };
 function digest(path) {
-  return (0, import_node_crypto16.createHash)("sha256").update((0, import_node_fs47.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto16.createHash)("sha256").update((0, import_node_fs48.readFileSync)(path)).digest("hex");
 }
 function runUnvendor(opts = {}) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
-  const lockPath = (0, import_node_path48.join)(repoRoot, "fadeno.lock");
-  if (!(0, import_node_fs47.existsSync)(lockPath)) throw new UnvendorError("fadeno.lock is missing; refusing an ownership-blind unvendor.");
-  const lock = JSON.parse((0, import_node_fs47.readFileSync)(lockPath, "utf8"));
+  const lockPath = (0, import_node_path49.join)(repoRoot, "fadeno.lock");
+  if (!(0, import_node_fs48.existsSync)(lockPath)) throw new UnvendorError("fadeno.lock is missing; refusing an ownership-blind unvendor.");
+  const lock = JSON.parse((0, import_node_fs48.readFileSync)(lockPath, "utf8"));
   if (lock.files == null) throw new UnvendorError("fadeno.lock predates managed file ownership; re-run `fadeno vendor --force` first.");
   const removed = [];
   const preserved = [];
   for (const [rel, expected] of Object.entries(lock.files)) {
-    const path = (0, import_node_path48.resolve)(repoRoot, rel);
-    const back = (0, import_node_path48.relative)(repoRoot, path).split("\\").join("/");
-    if (back.startsWith("../") || (0, import_node_path48.isAbsolute)(back) || !(0, import_node_fs47.existsSync)(path)) continue;
+    const path = (0, import_node_path49.resolve)(repoRoot, rel);
+    const back = (0, import_node_path49.relative)(repoRoot, path).split("\\").join("/");
+    if (back.startsWith("../") || (0, import_node_path49.isAbsolute)(back) || !(0, import_node_fs48.existsSync)(path)) continue;
     if (opts.force || digest(path) === expected) {
-      (0, import_node_fs47.rmSync)(path, { force: true });
+      (0, import_node_fs48.rmSync)(path, { force: true });
       removed.push(path);
     } else preserved.push(path);
   }
   const lockRemoved = preserved.length === 0 || Boolean(opts.force);
-  if (lockRemoved) (0, import_node_fs47.rmSync)(lockPath, { force: true });
+  if (lockRemoved) (0, import_node_fs48.rmSync)(lockPath, { force: true });
   return { repoRoot, removed, preserved, lockRemoved };
 }
 
 // src/commands/cancel.ts
-var import_node_fs48 = require("node:fs");
-var import_node_path49 = require("node:path");
+var import_node_fs49 = require("node:fs");
+var import_node_path50 = require("node:path");
 var CancelError = class extends Error {
 };
 function defaultProbe2(pid, signal) {
@@ -37572,11 +38568,11 @@ function runCancel(opts) {
     throw new CancelError(err.message);
   }
   const runId = summary.runId;
-  const inflightDir = (0, import_node_path49.join)(repoRoot, ...INFLIGHT_DIR.split("/"));
+  const inflightDir = (0, import_node_path50.join)(repoRoot, ...INFLIGHT_DIR.split("/"));
   let fileNames = [];
-  if ((0, import_node_fs48.existsSync)(inflightDir)) {
+  if ((0, import_node_fs49.existsSync)(inflightDir)) {
     try {
-      fileNames = (0, import_node_fs48.readdirSync)(inflightDir);
+      fileNames = (0, import_node_fs49.readdirSync)(inflightDir);
     } catch {
       fileNames = [];
     }
@@ -37591,8 +38587,8 @@ function runCancel(opts) {
     const parsed = parseFilenameForRun(fileName, runId);
     if (parsed == null) continue;
     if (actorCallFilter != null && parsed.actorCallId !== actorCallFilter) continue;
-    const abs = (0, import_node_path49.join)(inflightDir, fileName);
-    const claim2 = readInflightClaim(abs, (p) => (0, import_node_fs48.readFileSync)(p, "utf8"));
+    const abs = (0, import_node_path50.join)(inflightDir, fileName);
+    const claim2 = readInflightClaim(abs, (p) => (0, import_node_fs49.readFileSync)(p, "utf8"));
     if (claim2 == null) continue;
     if (!inflightClaimIsAlive(claim2, probe2)) continue;
     aliveMatches.push({ fileName, claim: claim2, actorCallId: parsed.actorCallId, attempt: parsed.attempt });
@@ -37716,6 +38712,17 @@ Usage:
   fadeno dispatches --comparisons       Paired primary/shadow scorecard per challenger
   fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]
                                         Port a shadow pair's diff into your workspace (git apply --3way)
+  fadeno compare <pair-id|dispatch-id> [--judge <ref>] [--via <driver>]
+                                        Measure + adjudicate a shadow pair: two blinded judge dispatches, then
+                                        write .fadeno/comparisons/<pair-id-8>.md
+  fadeno compare <pair-id|dispatch-id> --measure-only
+                                        Measure a shadow pair's arms only (deterministic; no model is consulted)
+  fadeno compare <pair-id|dispatch-id> --prepare
+                                        Measure + write the two blinded judge prompts under .fadeno/local/prompts/;
+                                        writes no artifact \u2014 for a host coordinator to spawn judge subagents on
+  fadeno compare <pair-id|dispatch-id> --record --comparison <file> --adversarial <file>
+                                        Validate two host-delivered judgments and write the artifact
+                                        (judge_delivery: host \u2014 see the fadeno-judge skill)
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic claims (or --latest)
   fadeno plugin [dir] [--codex]         Generate a Claude Code (default) or Codex plugin
@@ -37775,6 +38782,12 @@ Options:
   --json                  (dispatches) Emit structured entries on stdout for scripting
   --arm <arm>             (shadow-apply) challenger (default) | primary
   --check                 (shadow-apply) Report applicability only (git apply --check --3way); changes nothing
+  --measure-only          (compare) Report the pair's measured facts and write nothing; skips adjudication
+  --prepare               (compare) Measure + write the two blinded judge prompts; write no artifact
+  --record                (compare) Validate --comparison/--adversarial judgment files and write the artifact
+  --comparison <path>     (compare --record) The comparison judge subagent's raw JSON output
+  --adversarial <path>    (compare --record) The adversarial judge subagent's raw JSON output
+  --judge <ref>           (compare) Override the judge archetype's dial model (bypasses catalog resolution)
   --isolate               (dispatch-prepare) Create isolated worktree at .fadeno/local/host-worktrees/<run>/<id> (workspace_mode: isolated)
   --agent-id <id>         (dispatch-start) Host agent identity
   --workspace <path>      (dispatch-start) Host workspace provenance
@@ -37867,6 +38880,7 @@ var KNOWN_CLI_COMMANDS = /* @__PURE__ */ new Set([
   "attest",
   "dispatches",
   "shadow-apply",
+  "compare",
   "show",
   "verify"
 ]);
@@ -37878,19 +38892,19 @@ function shouldRunPreflight(command2) {
   return true;
 }
 function resolveRuntimeSyncCandidate(env, argv1, paths, manifest) {
-  if (env.FADENO_BUNDLED_RUNTIME && (0, import_node_fs49.existsSync)((0, import_node_path50.join)(env.FADENO_BUNDLED_RUNTIME, "fadeno"))) {
+  if (env.FADENO_BUNDLED_RUNTIME && (0, import_node_fs50.existsSync)((0, import_node_path51.join)(env.FADENO_BUNDLED_RUNTIME, "fadeno"))) {
     return { sourceDir: env.FADENO_BUNDLED_RUNTIME, trustSource: true };
   }
   if (argv1) {
     try {
-      const dir = (0, import_node_path50.dirname)((0, import_node_path50.resolve)(argv1));
-      const parent = (0, import_node_path50.dirname)(dir);
-      const candidates = [(0, import_node_path50.join)(parent, ".claude-plugin", "plugin.json"), (0, import_node_path50.join)(parent, ".codex-plugin", "plugin.json")];
+      const dir = (0, import_node_path51.dirname)((0, import_node_path51.resolve)(argv1));
+      const parent = (0, import_node_path51.dirname)(dir);
+      const candidates = [(0, import_node_path51.join)(parent, ".claude-plugin", "plugin.json"), (0, import_node_path51.join)(parent, ".codex-plugin", "plugin.json")];
       let isFadeno = false;
       for (const cand of candidates) {
         try {
-          if ((0, import_node_fs49.existsSync)(cand)) {
-            const p = JSON.parse((0, import_node_fs49.readFileSync)(cand, "utf8"));
+          if ((0, import_node_fs50.existsSync)(cand)) {
+            const p = JSON.parse((0, import_node_fs50.readFileSync)(cand, "utf8"));
             if (p.name === "fadeno") {
               isFadeno = true;
               break;
@@ -37899,7 +38913,7 @@ function resolveRuntimeSyncCandidate(env, argv1, paths, manifest) {
         } catch {
         }
       }
-      if (isFadeno && (0, import_node_fs49.existsSync)((0, import_node_path50.join)(dir, "fadeno"))) {
+      if (isFadeno && (0, import_node_fs50.existsSync)((0, import_node_path51.join)(dir, "fadeno"))) {
         return { sourceDir: dir, trustSource: true };
       }
     } catch {
@@ -37907,12 +38921,12 @@ function resolveRuntimeSyncCandidate(env, argv1, paths, manifest) {
   }
   if (argv1) {
     try {
-      const resolvedArgv = (0, import_node_path50.resolve)(argv1);
-      const managedDir = (0, import_node_path50.resolve)(paths.managedRuntimeDir);
-      const isManaged = resolvedArgv === (0, import_node_path50.resolve)(paths.managedCli) || (0, import_node_path50.dirname)(resolvedArgv) === managedDir || resolvedArgv.startsWith(managedDir + import_node_path50.sep);
+      const resolvedArgv = (0, import_node_path51.resolve)(argv1);
+      const managedDir = (0, import_node_path51.resolve)(paths.managedRuntimeDir);
+      const isManaged = resolvedArgv === (0, import_node_path51.resolve)(paths.managedCli) || (0, import_node_path51.dirname)(resolvedArgv) === managedDir || resolvedArgv.startsWith(managedDir + import_node_path51.sep);
       if (isManaged) {
         const src = manifest.runtime?.source;
-        if (src && (0, import_node_fs49.existsSync)(src) && (0, import_node_fs49.existsSync)((0, import_node_path50.join)(src, "fadeno"))) {
+        if (src && (0, import_node_fs50.existsSync)(src) && (0, import_node_fs50.existsSync)((0, import_node_path51.join)(src, "fadeno"))) {
           return { sourceDir: src, trustSource: false };
         }
         return null;
@@ -38376,14 +39390,14 @@ Options:
 `
 };
 var SIGIL = { codex: "$", claude: "/", grok: "/" };
-var SCHEMA_KINDS = ["playbook", "run", "review-report", "test-result"];
+var SCHEMA_KINDS2 = SCHEMA_KINDS;
 function printInitSummary(target, repoRoot, results, withHooks, withSteering, dataOnly) {
   const counts = { created: 0, overwritten: 0, appended: 0, skipped: 0 };
   for (const r of results) counts[r.status] += 1;
   console.log(`Fadeno initialized for ${target} in ${repoRoot}
 `);
   for (const r of results) {
-    console.log(`  ${r.status.padEnd(11)} ${(0, import_node_path50.relative)(repoRoot, r.path) || r.path}`);
+    console.log(`  ${r.status.padEnd(11)} ${(0, import_node_path51.relative)(repoRoot, r.path) || r.path}`);
   }
   console.log(
     `
@@ -38430,7 +39444,7 @@ function printIssue(issue) {
 function printValidate(outcome) {
   let warnings = 0;
   for (const result of outcome.results) {
-    const rel = (0, import_node_path50.relative)(outcome.repoRoot, result.file) || result.file;
+    const rel = (0, import_node_path51.relative)(outcome.repoRoot, result.file) || result.file;
     const fileWarnings = result.issues.filter((i) => i.severity === "warning").length;
     warnings += fileWarnings;
     if (result.ok) {
@@ -38675,7 +39689,7 @@ workflow${projection.playbook ? ` \xB7 ${projection.playbook}` : ""}${total ? ` 
 function printShow(repoRoot, result, rawTimeline) {
   const { run, mode, events, badLines, artifacts, projection } = result;
   const dash = (value) => value ?? "\u2014";
-  const relDir = (0, import_node_path50.relative)(repoRoot, run.dir) || run.dir;
+  const relDir = (0, import_node_path51.relative)(repoRoot, run.dir) || run.dir;
   console.log(`run ${run.runId}`);
   console.log(`  playbook:  ${dash(run.playbook)}`);
   console.log(`  task:      ${dash(run.task)}`);
@@ -38713,6 +39727,83 @@ var DIAL_SOURCE_TEXT = {
   user: "user dial",
   base: "base"
 };
+function printCompareArm(arm) {
+  const id = arm.dispatchId != null ? arm.dispatchId.slice(0, 8) : "(missing)";
+  const identity = `${arm.executor ?? "(unresolved)"} (${arm.model ?? "?"}${arm.reasoningEffort != null ? `@${arm.reasoningEffort}` : ""})`;
+  console.log(`  ${arm.arm.padEnd(10)} ${id}  ${identity}`);
+  if (arm.refused != null) {
+    console.log(`    refused [${arm.refused.predicate}] ${arm.refused.message}`);
+    return;
+  }
+  const secs = arm.durationMs != null ? `${Math.round(arm.durationMs / 1e3)}s` : "?";
+  console.log(`    exit ${arm.exitCode ?? "?"} in ${secs}, output ${arm.outputBytes ?? "?"} bytes`);
+  if (arm.diff != null) {
+    const gen = arm.diff.generatedFiles.length > 0 ? `  [${arm.diff.generatedFiles.length} generated: ${arm.diff.generatedFiles.slice(0, 3).join(", ")}]` : "";
+    console.log(`    diff ${arm.diff.files} files +${arm.diff.insertions}/-${arm.diff.deletions} (${arm.diff.bytes} bytes)${gen}`);
+  }
+  if (arm.signals != null) {
+    console.log(`    introduced ${arm.signals.introduced.length} identifier(s)`);
+    if (arm.signals.unreached == null) {
+      console.log("    reach:      undeclared \u2014 no `surfaces:` in .fadeno/executors.yaml, so this is not claimed either way");
+    } else if (arm.signals.unreached.length === 0) {
+      console.log("    reach:      every introduced identifier appears on a declared surface");
+    } else {
+      console.log(`    reach:      ${arm.signals.unreached.length} never reach a surface: ${arm.signals.unreached.join(", ")}`);
+    }
+    if (arm.signals.redefined.length > 0) {
+      console.log(`    redefined:  already defined at baseline: ${arm.signals.redefined.join(", ")}`);
+    }
+  }
+}
+function printCompare(result) {
+  const base = result.baselineCommit != null ? result.baselineCommit.slice(0, 8) : "(none)";
+  console.log(`pair ${result.pairId.slice(0, 8)}  archetype ${result.archetype ?? "?"}  baseline ${base}`);
+  for (const arm of result.arms) printCompareArm(arm);
+  if (result.reachDifferential != null && result.reachDifferential.length > 0) {
+    console.log("  reach differential \u2014 both arms introduced these; only one wired them to a surface:");
+    for (const d of result.reachDifferential) {
+      console.log(`    ${d.identifier}: reached in ${d.reachedIn}, NEVER reached in ${d.unreachedIn}`);
+    }
+  }
+  if (result.confounds.length === 0) {
+    console.log("  confounds: none recorded");
+  } else {
+    console.log(`  confounds (${result.confounds.length}) \u2014 kernel-stamped, not judged:`);
+    for (const c of result.confounds) console.log(`    [${c.code}] ${c.arm}: ${c.detail}`);
+  }
+  if (result.measureOnly) {
+    console.log("  measured only \u2014 no verdict was formed and nothing was written.");
+    return;
+  }
+  console.log(`  verdict: ${result.verdict}`);
+  if (result.graftPlan != null && result.graftPlan.length > 0) {
+    console.log("  graft plan:");
+    for (const step of result.graftPlan) {
+      const paths = step.paths != null && step.paths.length > 0 ? ` [${step.paths.join(", ")}]` : "";
+      console.log(`    from ${step.from_arm}: ${step.what} \u2014 ${step.why}${paths}`);
+    }
+  }
+  console.log(`  written: ${result.comparisonPath}`);
+  if (result.judgeDispatchIds != null) {
+    console.log(
+      `  judge dispatches: comparison ${result.judgeDispatchIds.comparison.slice(0, 8)}, adversarial ${result.judgeDispatchIds.adversarial.slice(0, 8)}`
+    );
+  } else {
+    console.log("  judge delivery: host \u2014 recorded from a file, no dispatch receipt (see Confounds)");
+  }
+}
+function printComparePrepare(result) {
+  const base = result.baselineCommit != null ? result.baselineCommit.slice(0, 8) : "(none)";
+  console.log(`pair ${result.pairId.slice(0, 8)}  archetype ${result.archetype ?? "?"}  baseline ${base}`);
+  for (const arm of result.arms) printCompareArm(arm);
+  console.log("  prepared \u2014 no verdict was formed and nothing was written.");
+  console.log(`  spawn a "${result.judgeArchetype}" subagent per prompt file, INDEPENDENTLY:`);
+  console.log(`    comparison prompt:  ${result.comparisonPromptPath}`);
+  console.log(`    adversarial prompt: ${result.adversarialPromptPath}`);
+  console.log(
+    "  then: fadeno compare <pair-id> --record --comparison <file> --adversarial <file>"
+  );
+}
 function printStaleShadows(stale) {
   for (const item of stale) {
     console.error(
@@ -38978,6 +40069,12 @@ function main(argv) {
         wait: { type: "string" },
         arm: { type: "string" },
         check: { type: "boolean" },
+        "measure-only": { type: "boolean" },
+        prepare: { type: "boolean" },
+        record: { type: "boolean" },
+        comparison: { type: "string" },
+        adversarial: { type: "string" },
+        judge: { type: "string" },
         json: { type: "boolean" },
         "agent-id": { type: "string" },
         workspace: { type: "string" },
@@ -39272,8 +40369,8 @@ function main(argv) {
       throw new Error("Usage: fadeno steering resolve|apply [...]");
     }
     case "validate": {
-      if (values.schema && !SCHEMA_KINDS.includes(values.schema)) {
-        throw new Error(`Invalid --schema "${values.schema}". Use: ${SCHEMA_KINDS.join(", ")}.`);
+      if (values.schema && !SCHEMA_KINDS2.includes(values.schema)) {
+        throw new Error(`Invalid --schema "${values.schema}". Use: ${SCHEMA_KINDS2.join(", ")}.`);
       }
       const outcome = runValidate({
         path: positionals[1],
@@ -39334,7 +40431,7 @@ Or advance manually with the playbook cursor:`);
       const parts = [];
       if (result.updatedFields.length) parts.push(`updated ${result.updatedFields.join(", ")}`);
       if (result.appendedEvents.length) parts.push(`logged ${result.appendedEvents.join(", ")}`);
-      console.log(`${(0, import_node_path50.relative)(process.cwd(), result.runDir) || result.runDir}: ${parts.join("; ")}`);
+      console.log(`${(0, import_node_path51.relative)(process.cwd(), result.runDir) || result.runDir}: ${parts.join("; ")}`);
       if (result.manifest) {
         const v = result.manifest.validation;
         const note = v.schema ? `, ${v.schema}: ${v.ok ? "valid" : "INVALID"}` : "";
@@ -39354,9 +40451,9 @@ Or advance manually with the playbook cursor:`);
       }
       const result = runToolRun({ run, tool: values.tool, timeout: values.timeout });
       const repoRoot = findRepoRoot();
-      const runDir = (0, import_node_path50.join)(repoRoot, ".fadeno", "runs", result.run);
-      const absArtifact = (0, import_node_path50.join)(runDir, result.artifact);
-      const rel = (0, import_node_path50.relative)(process.cwd(), absArtifact) || absArtifact;
+      const runDir = (0, import_node_path51.join)(repoRoot, ".fadeno", "runs", result.run);
+      const absArtifact = (0, import_node_path51.join)(runDir, result.artifact);
+      const rel = (0, import_node_path51.relative)(process.cwd(), absArtifact) || absArtifact;
       console.log(`${rel}: tool ${result.tool} \u2192 ${result.status} (exit ${result.exitCode ?? "null"})`);
       console.log(`  attempt ${result.attempt} duration ${result.durationMs ?? 0}ms`);
       return result.status === "passed" || result.status === "failed" ? 0 : 1;
@@ -39367,7 +40464,7 @@ Or advance manually with the playbook cursor:`);
         throw new Error("Usage: fadeno tool-complete <run> --output <artifact-path>");
       }
       const result = runToolComplete({ run, output: values.output });
-      console.log(`${(0, import_node_path50.relative)(process.cwd(), result.runDir) || result.runDir}: completed tool step ${result.step}`);
+      console.log(`${(0, import_node_path51.relative)(process.cwd(), result.runDir) || result.runDir}: completed tool step ${result.step}`);
       if (result.manifest) {
         const validation = result.manifest.validation;
         const note = validation.schema ? `, ${validation.schema}: ${validation.ok ? "valid" : "INVALID"}` : "";
@@ -39390,7 +40487,7 @@ Or advance manually with the playbook cursor:`);
       if (codex) {
         console.log("\nTest it: `codex plugin marketplace add . && codex plugin add fadeno@fadeno`");
       } else {
-        console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path50.relative)(process.cwd(), outDir) + "`");
+        console.log("\nTest it: `claude --plugin-dir " + (0, import_node_path51.relative)(process.cwd(), outDir) + "`");
       }
       return 0;
     }
@@ -39730,7 +40827,7 @@ Or advance manually with the playbook cursor:`);
         diagnostics: Boolean(values.diagnostics),
         noBrief: Boolean(values["no-brief"]),
         promptFile,
-        prompt: promptFile == null ? (0, import_node_fs49.readFileSync)(0, "utf8") : void 0,
+        prompt: promptFile == null ? (0, import_node_fs50.readFileSync)(0, "utf8") : void 0,
         onEcho: (line) => console.error(line)
       });
       if (result.stdout.length > 0) process.stdout.write(result.stdout);
@@ -39788,7 +40885,7 @@ Or advance manually with the playbook cursor:`);
       let stdinBytes;
       if (values.output === "-") {
         try {
-          stdinBytes = (0, import_node_fs49.readFileSync)(0);
+          stdinBytes = (0, import_node_fs50.readFileSync)(0);
         } catch (err) {
           throw new Error(`failed to read stdin for --output -: ${err.message}`);
         }
@@ -39954,6 +41051,42 @@ Or advance manually with the playbook cursor:`);
       console.log(
         `applied pair ${pairId8}'s ${result.arm} diff (dispatch ${dispatchId8})${bytes} from ${result.artifact} \u2014 evidence recorded.`
       );
+      return 0;
+    }
+    case "compare": {
+      const ref = positionals[1];
+      const usage = "Usage: fadeno compare <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--via <driver>]\n   or: fadeno compare <pair-id|dispatch-id> --prepare\n   or: fadeno compare <pair-id|dispatch-id> --record --comparison <file> --adversarial <file>";
+      if (!ref) throw new Error(usage);
+      if (values.prepare) {
+        const result2 = runComparePrepare({ ref });
+        if (values.json) {
+          console.log(JSON.stringify(result2, null, 2));
+          return 0;
+        }
+        printComparePrepare(result2);
+        return 0;
+      }
+      if (values.record) {
+        if (!values.comparison || !values.adversarial) throw new Error(usage);
+        const result2 = runCompareRecord({ ref, comparisonPath: values.comparison, adversarialPath: values.adversarial });
+        if (values.json) {
+          console.log(JSON.stringify(result2, null, 2));
+          return 0;
+        }
+        printCompare(result2);
+        return 0;
+      }
+      const result = runCompare({
+        ref,
+        measureOnly: Boolean(values["measure-only"]),
+        judgeModel: values.judge ?? null,
+        judgeVia: values.via ?? null
+      });
+      if (values.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      printCompare(result);
       return 0;
     }
     case "show": {

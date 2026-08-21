@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { templatesDir } from '../src/lib/paths.ts';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
@@ -41,7 +42,13 @@ test('plugin generates manifest, namespaced skills, and subagents', (t) => {
   assert.ok(exists(outDir, 'skills/builder/SKILL.md'));
   assert.ok(exists(outDir, 'skills/driver/SKILL.md'));
   assert.ok(exists(outDir, 'skills/setup/SKILL.md'));
-  for (const skill of ['runner', 'builder', 'driver', 'setup']) {
+  // `fadeno-judge`'s template shortens to `compare`, not `judge` — the plugin
+  // already ships a SUBAGENT named `judge` (checked below), and a skill and a
+  // subagent sharing one identifier across two different tool surfaces would
+  // be ambiguous to a coordinator choosing between them.
+  assert.ok(exists(outDir, 'skills/compare/SKILL.md'));
+  assert.ok(!exists(outDir, 'skills/judge/SKILL.md'), 'the judge skill must not collide with the judge subagent');
+  for (const skill of ['runner', 'builder', 'driver', 'setup', 'compare']) {
     const launcher = join(outDir, 'skills', skill, 'scripts', 'fadeno.cjs');
     assert.ok(existsSync(launcher), `${skill} must carry its private CLI launcher`);
     assert.notEqual(statSync(launcher).mode & 0o111, 0, `${skill} CLI launcher must be executable`);
@@ -50,6 +57,8 @@ test('plugin generates manifest, namespaced skills, and subagents', (t) => {
   const runner = readFileSync(join(outDir, 'skills/runner/SKILL.md'), 'utf8');
   const builder = readFileSync(join(outDir, 'skills/builder/SKILL.md'), 'utf8');
   const driver = readFileSync(join(outDir, 'skills/driver/SKILL.md'), 'utf8');
+  const compare = readFileSync(join(outDir, 'skills/compare/SKILL.md'), 'utf8');
+  assert.match(compare, /^name: compare$/m);
   assert.match(runner, /^name: runner$/m);
   assert.doesNotMatch(runner, /disable-model-invocation/);
   assert.match(builder, /^name: builder$/m);
@@ -140,4 +149,23 @@ test('the bundled CLI carries the Grok adapter templates', () => {
     assert.match(readFileSync(agent, 'utf8'), new RegExp(`^name: ${role}$`, 'm'));
   }
   assert.match(readFileSync(join(grokDir, 'AGENTS.md'), 'utf8'), /\/fadeno-runner/);
+});
+
+test('every skill template declares the name of the directory it lives in', () => {
+  // The generator renames a skill by replacing `name: <src>` with `name: <dst>`,
+  // and `String.replace` with a needle that does not occur is a SILENT no-op —
+  // so a template whose frontmatter disagrees with its directory ships the
+  // WRONG name. That happened: `fadeno-judge/` was renamed to
+  // `fadeno-compare/` and the frontmatter inside it was not, emitting
+  // `name: fadeno-judge` into a directory called `compare`.
+  //
+  // Asserted over the real templates rather than a fixture, because this is
+  // the precondition the generator now throws on, and the drift starts here.
+  const skillsDir = join(templatesDir(), 'common', 'skills');
+  const dirs = readdirSync(skillsDir).filter((d) => statSync(join(skillsDir, d)).isDirectory());
+  assert.ok(dirs.length >= 5, 'expected the shipped skill set');
+  for (const dir of dirs) {
+    const md = readFileSync(join(skillsDir, dir, 'SKILL.md'), 'utf8');
+    assert.match(md, new RegExp(`^name: ${dir}$`, 'm'), `${dir}/SKILL.md must declare name: ${dir}`);
+  }
 });

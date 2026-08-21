@@ -1672,6 +1672,17 @@ export interface ModelComparisonArtifact {
   verdict: string | null;
   date: string | null;
   dispatchIds: string[] | null;
+  /**
+   * How the verdict reached this artifact (`command` | `host`), verbatim from
+   * the writer — see `JudgeDelivery` in `model-comparison.ts`. A plain string,
+   * not narrowed to the known union, for the same reason `DispatchPrimaryMerge
+   * .status` isn't: the vocabulary belongs to the writer and a narrower reader
+   * type would silently drop a value a newer fadeno introduces. `null` means
+   * the artifact predates the field, not that delivery is unknown to be
+   * either kind — the ordinary case for every artifact written before this
+   * command shipped `--record`.
+   */
+  judgeDelivery: string | null;
   valid: boolean;
   error?: string;
 }
@@ -1960,11 +1971,11 @@ export function parseModelComparisonFile(repoRoot: string, relPath: string): Mod
   try {
     content = readFileSync(abs, 'utf8');
   } catch {
-    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, valid: false, error: 'unreadable' };
+    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, judgeDelivery: null, valid: false, error: 'unreadable' };
   }
   const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n/);
   if (!match) {
-    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, valid: false, error: 'missing frontmatter' };
+    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, judgeDelivery: null, valid: false, error: 'missing frontmatter' };
   }
   const frontmatterText = match[1]!;
   let data: Record<string, unknown>;
@@ -1973,13 +1984,14 @@ export function parseModelComparisonFile(repoRoot: string, relPath: string): Mod
     if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
     data = parsed as Record<string, unknown>;
   } catch {
-    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, valid: false, error: 'invalid yaml' };
+    return { file: relPath, baseline: null, challenger: null, verdict: null, date: null, dispatchIds: null, judgeDelivery: null, valid: false, error: 'invalid yaml' };
   }
   const kind = str(data.kind);
   const baseline = str(data.baseline);
   const challenger = str(data.challenger);
   const verdict = str(data.verdict);
   const date = str(data.date);
+  const judgeDelivery = str(data.judge_delivery);
   const dispatchIdsRaw = data.dispatch_ids;
   let dispatchIds: string[] | null = null;
   if (Array.isArray(dispatchIdsRaw)) dispatchIds = dispatchIdsRaw.filter((v): v is string => typeof v === 'string' && v !== '');
@@ -1989,11 +2001,11 @@ export function parseModelComparisonFile(repoRoot: string, relPath: string): Mod
     (section) => !new RegExp(`^##\\s+${section}`, 'm').test(body),
   );
   if (missingSection != null) {
-    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: 'missing required sections' };
+    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, valid: false, error: 'missing required sections' };
   }
-  if (!valid) return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: 'invalid frontmatter' };
+  if (!valid) return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, valid: false, error: 'invalid frontmatter' };
   if (!isModelComparisonVerdict(verdict)) {
-    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: 'invalid verdict' };
+    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, valid: false, error: 'invalid verdict' };
   }
   // Traits accumulate; verdicts alone do not tell you what the two models are
   // LIKE. Parsed back out of the rendered section because the artifact is the
@@ -2004,9 +2016,9 @@ export function parseModelComparisonFile(repoRoot: string, relPath: string): Mod
   const plan = Array.isArray(planRaw) ? (planRaw as GraftStep[]) : undefined;
   const incoherent = checkGraftCoherence(verdict, plan);
   if (incoherent != null) {
-    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: incoherent };
+    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, valid: false, error: incoherent };
   }
-  return { file: relPath, baseline, challenger, verdict, date, dispatchIds, traits, valid: true };
+  return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, traits, valid: true };
 }
 
 /**
@@ -2085,13 +2097,28 @@ function formatComparisonPair(pair: DispatchComparisonPair): string {
   return `${primaryId8} → ${shadowId8}  ${arch}  primary ${primaryInfo}  vs shadow ${shadowInfo}${mismatch}${orphan}${baseline}${workspace}`;
 }
 
+/**
+ * `command` is the ordinary case (a kernel-dispatched judge) and renders
+ * silently; anything else — today only `host`, `fadeno compare --record` —
+ * earns a marker, because that is the delivery a reader must discount: no
+ * dispatch receipt backs it. Rendered verbatim rather than narrowed to the
+ * known pair, so a delivery kind a newer fadeno introduces still surfaces
+ * instead of silently reading as the default.
+ */
+function judgeDeliveryNote(judgeDelivery: string | null): string {
+  if (judgeDelivery == null || judgeDelivery === 'command') return '';
+  return judgeDelivery === 'host'
+    ? '  [judge delivery: host — unattested, see Confounds]'
+    : `  [judge delivery: ${judgeDelivery}]`;
+}
+
 function formatComparisonArtifact(artifact: ModelComparisonArtifact): string {
   const verdict = artifact.verdict ?? '?';
   const baseline = artifact.baseline ?? '?';
   const challenger = artifact.challenger ?? '?';
   const date = artifact.date ?? '?';
   if (!artifact.valid) return `${artifact.file}: invalid (${artifact.error ?? 'unknown'})`;
-  return `${artifact.file}: ${verdict} (baseline ${baseline} vs challenger ${challenger} on ${date})`;
+  return `${artifact.file}: ${verdict} (baseline ${baseline} vs challenger ${challenger} on ${date})${judgeDeliveryNote(artifact.judgeDelivery)}`;
 }
 
 export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}): DispatchesComparisonsResult {

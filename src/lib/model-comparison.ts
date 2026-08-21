@@ -74,6 +74,30 @@ export function isModelComparisonVerdict(value: unknown): value is ModelComparis
 }
 
 /**
+ * How a verdict reached the artifact — the one list `fadeno compare` (writer)
+ * and `fadeno dispatches --comparisons` (reader) both read, so a third
+ * delivery path cannot be added to one and forgotten by the other.
+ *
+ * `command` is a kernel-dispatched judge: `dispatch_completed` rows exist for
+ * it, so `judgeDispatchIds` on the result names evidence a reader can go
+ * inspect. `host` is `fadeno compare --record`: a coordinator handed the
+ * kernel a JSON file it read back from a host-spawned subagent (or wrote
+ * itself) with no dispatch receipt behind it — the same gap
+ * `identity_evidence: 'requested_only'` already names for a host delivery
+ * that skipped `fadeno attest`. Labelled here rather than hidden, because a
+ * verdict a coordinator could have authored by hand and a verdict a model
+ * actually produced are different kinds of evidence even when the JSON bytes
+ * are identical.
+ */
+export const JUDGE_DELIVERIES = ['command', 'host'] as const;
+
+export type JudgeDelivery = (typeof JUDGE_DELIVERIES)[number];
+
+export function isJudgeDelivery(value: unknown): value is JudgeDelivery {
+  return typeof value === 'string' && (JUDGE_DELIVERIES as readonly string[]).includes(value);
+}
+
+/**
  * How a verdict is counted in the running scorecard. Derived from the
  * vocabulary rather than restated, so a new verdict cannot be silently
  * uncounted: adding one here is a type error until it is given a bucket.
@@ -179,6 +203,12 @@ export interface ModelComparisonFrontmatter {
   dispatch_ids?: string[];
   pair_id?: string;
   graft_plan?: GraftStep[];
+  /**
+   * Optional at the type level only for a reader parsing an artifact written
+   * before this field existed. Every writer in this codebase stamps it — see
+   * `JudgeDelivery`.
+   */
+  judge_delivery?: JudgeDelivery;
 }
 
 export type ModelComparisonError =
