@@ -1,9 +1,9 @@
 ---
-name: fadeno-compare
-description: Adjudicate a Fadeno shadow pair (two arms of the same task) using host `judge` subagents instead of a second command-lane vendor. Use when asked to assess, judge, compare, or adjudicate a shadow pair, or when handed a pair id and asked to form a verdict.
+name: bakeoff
+description: Adjudicate a Fadeno shadow pair (two arms of the same task) using host `judge` subagents instead of a second command-lane vendor. Use when asked to assess, judge, compare, or adjudicate a shadow pair, or when handed a pair id and asked to form a verdict. [fadeno 0.6.0-rc.41]
 ---
 
-# Fadeno Judge
+# Fadeno shadow-pair comparison
 
 Resolve the CLI first: when `scripts/fadeno.cjs` exists beside this `SKILL.md`, use
 that plugin-bundled launcher for every command written below as `fadeno`
@@ -11,16 +11,16 @@ that plugin-bundled launcher for every command written below as `fadeno`
 Otherwise use `fadeno` from `PATH`. Never prefer an unrelated global CLI over
 the plugin launcher.
 
-`fadeno compare <pair-id>` alone dispatches both judges itself, over the
+`fadeno bakeoff <pair-id>` alone dispatches both judges itself, over the
 command lane — which needs a `judge` dial configured with `--via` a second
 vendor. Most hosts already have a `judge` subagent for free (the same one a
 Fadeno playbook's judging step spawns). This skill inverts control: it drives
-`fadeno compare` in two phases so YOU spawn the judges, as host subagents,
+`fadeno bakeoff` in two phases so YOU spawn the judges, as host subagents,
 instead of the CLI shelling out to a second command-lane process.
 
 ## Procedure
 
-1. **Prepare.** Run `fadeno compare <pair-id> --prepare`. This measures the
+1. **Prepare.** Run `fadeno bakeoff <pair-id> --prepare`. This measures the
    pair and writes two blinded prompt files under `.fadeno/local/prompts/` —
    it writes NO artifact and consults no model. The result names
    `comparisonPromptPath`, `adversarialPromptPath`, and `judgeArchetype`
@@ -39,9 +39,9 @@ instead of the CLI shelling out to a second command-lane process.
    object is fine) — that logic lives in one place so both delivery paths
    fail the same way on the same malformed output.
 4. **Record.** Run
-   `fadeno compare <pair-id> --record --comparison <comparison-file> --adversarial <adversarial-file>`.
-   This validates both judgments against `model-comparison.schema.json`,
-   unblinds, renders, and writes `.fadeno/comparisons/<pair-id>.md` — with
+   `fadeno bakeoff <pair-id> --record --comparison <comparison-file> --adversarial <adversarial-file>`.
+   This validates both judgments against `bakeoff.schema.json`,
+   unblinds, renders, and writes `.fadeno/bakeoffs/<pair-id>.md` — with
    `judge_delivery: host` stamped in its frontmatter and a
    `judge_delivery_unattested` confound in its body. A judgment that fails to
    parse or fails schema validation is refused; nothing is written.

@@ -5,12 +5,12 @@ import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import {
   checkGraftCoherence,
-  isModelComparisonVerdict,
-  MODEL_COMPARISON_REQUIRED_SECTIONS,
+  isBakeoffVerdict,
+  BAKEOFF_REQUIRED_SECTIONS,
   VERDICT_BUCKET,
   type GraftStep,
-  type ModelComparisonVerdict,
-} from '../lib/model-comparison.ts';
+  type BakeoffVerdict,
+} from '../lib/bakeoff.ts';
 import {
   DISPATCHES_FILE,
   DISPATCHES_FORMAT,
@@ -334,7 +334,7 @@ export interface DispatchEntry {
    * later failure degrades to "no pair, primary runs normally" rather than
    * killing the dispatch. Null means no degradation was recorded.
    *
-   * Read by `fadeno compare` as a confound: a degraded arm did not run in the
+   * Read by `fadeno bakeoff` as a confound: a degraded arm did not run in the
    * conditions the other one did.
    */
   workspaceModeDegraded: string | null;
@@ -876,7 +876,7 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
   // moment and for the same reason as the merge result above.
   entry.ignoredOutputDiscarded =
     entry.ignoredOutputDiscarded ?? ignoredOutputDiscardedOf(row.ignored_output_discarded);
-  // Both written by the kernel at completion and, until `fadeno compare`,
+  // Both written by the kernel at completion and, until `fadeno bakeoff`,
   // read by nobody — the reader-drops-the-next-field pattern this codebase
   // keeps re-committing (roadmap item 2). They are confounds, so a comparison
   // that cannot see them silently judges arms that never ran alike.
@@ -1611,9 +1611,9 @@ export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOu
 // Comparisons (shadow pairs + ModelComparison artifacts)
 // ---------------------------------------------------------------------------
 
-export const COMPARISONS_DIR = join('.fadeno', 'comparisons');
+export const BAKEOFFS_DIR = join('.fadeno', 'bakeoffs');
 
-export interface DispatchComparisonPair {
+export interface DispatchBakeoffPair {
   primaryId: string | null;
   shadowId: string | null;
   primaryDispatchId: string | null;
@@ -1663,7 +1663,7 @@ export interface DispatchComparisonPair {
   orphan: boolean;
 }
 
-export interface ModelComparisonArtifact {
+export interface BakeoffArtifact {
   /** Model-level dispositions this comparison observed, for cross-pair accumulation. */
   traits?: Array<{ dimension: string; more: string }>;
   file: string;
@@ -1687,10 +1687,10 @@ export interface ModelComparisonArtifact {
   error?: string;
 }
 
-export interface DispatchComparisonGroup {
+export interface DispatchBakeoffGroup {
   challenger: string;
-  pairs: DispatchComparisonPair[];
-  comparisons: ModelComparisonArtifact[];
+  pairs: DispatchBakeoffPair[];
+  comparisons: BakeoffArtifact[];
   tally: {
     pairs: number;
     comparisons: number;
@@ -1707,12 +1707,12 @@ export interface DispatchComparisonGroup {
   traitTally: Array<{ dimension: string; challenger: number; baseline: number; neither: number }>;
 }
 
-export interface DispatchesComparisonsOptions {
+export interface DispatchesBakeoffsOptions {
   cwd?: string;
   repoRoot?: string;
 }
 
-export interface DispatchesComparisonsResult {
+export interface DispatchesBakeoffsResult {
   repoRoot: string;
   path: string;
   comparisonsDir: string;
@@ -1721,7 +1721,7 @@ export interface DispatchesComparisonsResult {
   skippedComparisons: number;
   skipped: number;
   skippedNewerFormat: number;
-  groups: DispatchComparisonGroup[];
+  groups: DispatchBakeoffGroup[];
   lines: string[];
   summary: string;
 }
@@ -1962,10 +1962,10 @@ export function resolveDispatchPair(
  * Exported so the WRITER can verify its own output through the reader that
  * will consume it, instead of assuming they agree. A rendered artifact the
  * scorecard rejects is not an error anywhere — the file simply sits in
- * `.fadeno/comparisons/` and is counted as skipped, so a judged pair costing
+ * `.fadeno/bakeoffs/` and is counted as skipped, so a judged pair costing
  * two dispatches disappears from the accumulation the scorecard exists for.
  */
-export function parseModelComparisonFile(repoRoot: string, relPath: string): ModelComparisonArtifact {
+export function parseBakeoffFile(repoRoot: string, relPath: string): BakeoffArtifact {
   const abs = join(repoRoot, relPath);
   let content: string;
   try {
@@ -1995,16 +1995,16 @@ export function parseModelComparisonFile(repoRoot: string, relPath: string): Mod
   const dispatchIdsRaw = data.dispatch_ids;
   let dispatchIds: string[] | null = null;
   if (Array.isArray(dispatchIdsRaw)) dispatchIds = dispatchIdsRaw.filter((v): v is string => typeof v === 'string' && v !== '');
-  const valid = kind === 'ModelComparison' && baseline != null && challenger != null && verdict != null && date != null;
+  const valid = kind === 'Bakeoff' && baseline != null && challenger != null && verdict != null && date != null;
   const body = content.slice(match[0].length);
-  const missingSection = MODEL_COMPARISON_REQUIRED_SECTIONS.find(
+  const missingSection = BAKEOFF_REQUIRED_SECTIONS.find(
     (section) => !new RegExp(`^##\\s+${section}`, 'm').test(body),
   );
   if (missingSection != null) {
     return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, valid: false, error: 'missing required sections' };
   }
   if (!valid) return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, valid: false, error: 'invalid frontmatter' };
-  if (!isModelComparisonVerdict(verdict)) {
+  if (!isBakeoffVerdict(verdict)) {
     return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, valid: false, error: 'invalid verdict' };
   }
   // Traits accumulate; verdicts alone do not tell you what the two models are
@@ -2039,7 +2039,7 @@ function parseTraitSection(body: string): Array<{ dimension: string; more: strin
   return out;
 }
 
-function scanComparisons(repoRoot: string, dirRel: string): { artifacts: ModelComparisonArtifact[]; skipped: number } {
+function scanBakeoffs(repoRoot: string, dirRel: string): { artifacts: BakeoffArtifact[]; skipped: number } {
   const abs = join(repoRoot, dirRel);
   if (!existsSync(abs)) return { artifacts: [], skipped: 0 };
   let files: string[];
@@ -2048,11 +2048,11 @@ function scanComparisons(repoRoot: string, dirRel: string): { artifacts: ModelCo
   } catch {
     return { artifacts: [], skipped: 0 };
   }
-  const artifacts: ModelComparisonArtifact[] = [];
+  const artifacts: BakeoffArtifact[] = [];
   let skipped = 0;
   for (const file of files) {
     const rel = join(dirRel, file).split('\\').join('/');
-    const artifact = parseModelComparisonFile(repoRoot, rel);
+    const artifact = parseBakeoffFile(repoRoot, rel);
     if (!artifact.valid) skipped += 1;
     artifacts.push(artifact);
   }
@@ -2064,7 +2064,7 @@ function scanComparisons(repoRoot: string, dirRel: string): { artifacts: ModelCo
  * comparison between baseline and challenger, so it reads as a human quantity
  * (`42.3s`, `5m12s`) rather than the raw ms the rows carry.
  */
-function formatComparisonDuration(ms: number | null): string {
+function formatBakeoffDuration(ms: number | null): string {
   if (ms == null) return '?';
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
@@ -2073,7 +2073,7 @@ function formatComparisonDuration(ms: number | null): string {
   return `${minutes}m${String(seconds).padStart(2, '0')}s`;
 }
 
-function formatComparisonPair(pair: DispatchComparisonPair): string {
+function formatBakeoffPair(pair: DispatchBakeoffPair): string {
   const primaryId8 = pair.primaryId ? pair.primaryId.slice(0, 8) : '?';
   const shadowId8 = pair.shadowId ? pair.shadowId.slice(0, 8) : '?';
   const arch = pair.archetype ?? '(none)';
@@ -2082,14 +2082,14 @@ function formatComparisonPair(pair: DispatchComparisonPair): string {
   // and have no diff concept at all, so "diff ? bytes" would read as a
   // missing value rather than a not-applicable one.
   const primaryDiff = pair.primary.diffBytes != null ? ` diff ${pair.primary.diffBytes} bytes` : '';
-  const primaryInfo = `${pair.primary.executor ?? '(unresolved)'} (${pair.primary.model ?? '?'}) exit ${pair.primary.exitCode ?? '?'} in ${formatComparisonDuration(pair.primary.durationMs)} output ${pair.primary.outputBytes ?? '?'} bytes${primaryDiff}`;
+  const primaryInfo = `${pair.primary.executor ?? '(unresolved)'} (${pair.primary.model ?? '?'}) exit ${pair.primary.exitCode ?? '?'} in ${formatBakeoffDuration(pair.primary.durationMs)} output ${pair.primary.outputBytes ?? '?'} bytes${primaryDiff}`;
   // A refused shadow never ran: exit code, duration, and output are all
   // absent, and rendering them as "?" would read as a challenger that
   // measured empty rather than one that was never allowed to fire. Name the
   // predicate instead — this is the whole reason the refusal was worth a row.
   const shadowInfo = pair.shadow.refusal != null
     ? `refused [${pair.shadow.refusal.predicate}]: ${pair.shadow.refusal.message}`
-    : `${pair.shadow.executor ?? '(unresolved)'} (${pair.shadow.model ?? '?'}) exit ${pair.shadow.exitCode ?? '?'} in ${formatComparisonDuration(pair.shadow.durationMs)} output ${pair.shadow.outputBytes ?? '?'} bytes diff ${pair.shadow.diffBytes ?? '?'} bytes`;
+    : `${pair.shadow.executor ?? '(unresolved)'} (${pair.shadow.model ?? '?'}) exit ${pair.shadow.exitCode ?? '?'} in ${formatBakeoffDuration(pair.shadow.durationMs)} output ${pair.shadow.outputBytes ?? '?'} bytes diff ${pair.shadow.diffBytes ?? '?'} bytes`;
   const mismatch = pair.promptShaMismatch ? '  PROMPT SHA MISMATCH' : '';
   const orphan = pair.orphan ? '  [orphan: primary missing]' : '';
   const baseline = pair.primary.baselineCommit != null ? `  [baseline ${pair.primary.baselineCommit.slice(0, 8)}]` : '';
@@ -2099,7 +2099,7 @@ function formatComparisonPair(pair: DispatchComparisonPair): string {
 
 /**
  * `command` is the ordinary case (a kernel-dispatched judge) and renders
- * silently; anything else — today only `host`, `fadeno compare --record` —
+ * silently; anything else — today only `host`, `fadeno bakeoff --record` —
  * earns a marker, because that is the delivery a reader must discount: no
  * dispatch receipt backs it. Rendered verbatim rather than narrowed to the
  * known pair, so a delivery kind a newer fadeno introduces still surfaces
@@ -2112,7 +2112,7 @@ function judgeDeliveryNote(judgeDelivery: string | null): string {
     : `  [judge delivery: ${judgeDelivery}]`;
 }
 
-function formatComparisonArtifact(artifact: ModelComparisonArtifact): string {
+function formatBakeoffArtifact(artifact: BakeoffArtifact): string {
   const verdict = artifact.verdict ?? '?';
   const baseline = artifact.baseline ?? '?';
   const challenger = artifact.challenger ?? '?';
@@ -2121,11 +2121,11 @@ function formatComparisonArtifact(artifact: ModelComparisonArtifact): string {
   return `${artifact.file}: ${verdict} (baseline ${baseline} vs challenger ${challenger} on ${date})${judgeDeliveryNote(artifact.judgeDelivery)}`;
 }
 
-export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}): DispatchesComparisonsResult {
+export function runDispatchesBakeoffs(opts: DispatchesBakeoffsOptions = {}): DispatchesBakeoffsResult {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const path = DISPATCHES_FILE.split('\\').join('/');
-  const comparisonsDir = COMPARISONS_DIR.split('\\').join('/');
+  const comparisonsDir = BAKEOFFS_DIR.split('\\').join('/');
   const absolute = join(repoRoot, DISPATCHES_FILE);
   const { entries, skipped, skippedNewerFormat } = loadAllEntries(absolute);
 
@@ -2142,7 +2142,7 @@ export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}
     if (entry.pairId) primaryByPairId.set(entry.pairId, entry);
   }
 
-  const pairs: DispatchComparisonPair[] = [];
+  const pairs: DispatchBakeoffPair[] = [];
   for (const entry of entries) {
     if (!entry.shadow) continue;
     const shadowId = entry.dispatchId;
@@ -2188,7 +2188,7 @@ export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}
     });
   }
 
-  const { artifacts, skipped: skippedComparisons } = scanComparisons(repoRoot, comparisonsDir);
+  const { artifacts, skipped: skippedComparisons } = scanBakeoffs(repoRoot, comparisonsDir);
 
   const challengers = new Set<string>();
   for (const p of pairs) {
@@ -2201,7 +2201,7 @@ export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}
 
   const sortedChallengers = [...challengers].sort();
 
-  const groups: DispatchComparisonGroup[] = [];
+  const groups: DispatchBakeoffGroup[] = [];
   for (const challenger of sortedChallengers) {
     const groupPairs = pairs.filter((p) => (p.shadow.executor ?? '(unknown)') === challenger);
     const groupComparisons = artifacts.filter((a) => a.challenger === challenger);
@@ -2236,8 +2236,8 @@ export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}
     // would have parsed as valid, counted toward `comparisons`, and landed in
     // none of the buckets, so the row's own numbers would stop adding up with
     // nothing to say so — and `graft` is the COMMON case, not an edge one.
-    const bucketed = groupComparisons.filter((a) => a.valid && isModelComparisonVerdict(a.verdict))
-      .map((a) => VERDICT_BUCKET[a.verdict as ModelComparisonVerdict]);
+    const bucketed = groupComparisons.filter((a) => a.valid && isBakeoffVerdict(a.verdict))
+      .map((a) => VERDICT_BUCKET[a.verdict as BakeoffVerdict]);
     const preferChallenger = bucketed.filter((b) => b === 'challenger').length;
     const preferBaseline = bucketed.filter((b) => b === 'baseline').length;
     const graft = bucketed.filter((b) => b === 'graft').length;
@@ -2271,22 +2271,22 @@ export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}
     }
   } else {
     for (const group of groups) {
-      lines.push(`challenger ${group.challenger}: ${group.tally.pairs} pairs, ${group.tally.comparisons} comparisons: ${group.tally.preferChallenger} prefer_challenger / ${group.tally.preferBaseline} prefer_baseline / ${group.tally.graft} graft / ${group.tally.tieOrInconclusive} tie/inconclusive`);
+      lines.push(`challenger ${group.challenger}: ${group.tally.pairs} pairs, ${group.tally.comparisons} bakeoffs: ${group.tally.preferChallenger} prefer_challenger / ${group.tally.preferBaseline} prefer_baseline / ${group.tally.graft} graft / ${group.tally.tieOrInconclusive} tie/inconclusive`);
       // The model-level reading, printed only once there is something to
       // accumulate — a trait line off ONE comparison is an anecdote wearing a
       // tally's clothes, and the design's own rule is that single comparisons
       // are noise.
       if (group.tally.comparisons > 1 && group.traitTally.length > 0) {
-        lines.push('  model traits across these comparisons (who exhibited MORE — not who was better):');
+        lines.push('  model traits across these bakeoffs (who exhibited MORE — not who was better):');
         for (const t of group.traitTally) {
           lines.push(`    ${t.dimension.padEnd(22)} challenger ${t.challenger} / baseline ${t.baseline} / neither ${t.neither}`);
         }
       }
       for (const pair of group.pairs) {
-        lines.push(`  ${formatComparisonPair(pair)}`);
+        lines.push(`  ${formatBakeoffPair(pair)}`);
       }
       for (const comp of group.comparisons) {
-        lines.push(`  ${formatComparisonArtifact(comp)}`);
+        lines.push(`  ${formatBakeoffArtifact(comp)}`);
       }
     }
   }

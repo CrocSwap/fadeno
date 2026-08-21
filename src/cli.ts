@@ -15,7 +15,7 @@ import {
 import {
   runDispatches,
   runDispatchesCancel,
-  runDispatchesComparisons,
+  runDispatchesBakeoffs,
   runDispatchesOutput,
   type DispatchesResult,
 } from './commands/dispatches.ts';
@@ -49,13 +49,13 @@ import { runVerify, type VerifyResult } from './commands/verify.ts';
 import { knownFlagsFor, runCompletion, runCompletionCandidates, suggestFlag, unknownFlagsFor } from './commands/completion.ts';
 import { runShadowApply } from './commands/shadow-apply.ts';
 import {
-  runCompare,
-  runComparePrepare,
-  runCompareRecord,
-  type CompareArmMeasurement,
-  type ComparePrepareResult,
-  type CompareResult,
-} from './commands/compare.ts';
+  runBakeoff,
+  runBakeoffPrepare,
+  runBakeoffRecord,
+  type BakeoffArmMeasurement,
+  type BakeoffPrepareResult,
+  type BakeoffResult,
+} from './commands/bakeoff.ts';
 import { runSteeringApply, runSteeringApplyClaude, runSteeringResolve } from './commands/steering.ts';
 import { runDispatchPrompt } from './commands/dispatch-prompt.ts';
 import { runDispatchPrepare } from './commands/dispatch-prepare.ts';
@@ -133,18 +133,18 @@ Usage:
   fadeno dispatches [--tail n] [--json] Show which executor ran what (.fadeno/dispatches.jsonl)
   fadeno dispatches --cancel <id|tag:h> Stop a running dispatch (SIGTERM to its executor group)
   fadeno dispatches --output <id|last> [--wait <s>]  Print a dispatch's output snapshot verbatim
-  fadeno dispatches --comparisons       Paired primary/shadow scorecard per challenger
+  fadeno dispatches --bakeoffs          Adjudicated bakeoff scorecard per challenger
   fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]
                                         Port a shadow pair's diff into your workspace (git apply --3way)
-  fadeno compare <pair-id|dispatch-id> [--judge <ref>] [--via <driver>]
+  fadeno bakeoff <pair-id|dispatch-id> [--judge <ref>] [--via <driver>]
                                         Measure + adjudicate a shadow pair: two blinded judge dispatches, then
-                                        write .fadeno/comparisons/<pair-id-8>.md
-  fadeno compare <pair-id|dispatch-id> --measure-only
+                                        write .fadeno/bakeoffs/<pair-id-8>.md
+  fadeno bakeoff <pair-id|dispatch-id> --measure-only
                                         Measure a shadow pair's arms only (deterministic; no model is consulted)
-  fadeno compare <pair-id|dispatch-id> --prepare
+  fadeno bakeoff <pair-id|dispatch-id> --prepare
                                         Measure + write the two blinded judge prompts under .fadeno/local/prompts/;
                                         writes no artifact — for a host coordinator to spawn judge subagents on
-  fadeno compare <pair-id|dispatch-id> --record --comparison <file> --adversarial <file>
+  fadeno bakeoff <pair-id|dispatch-id> --record --comparison <file> --adversarial <file>
                                         Validate two host-delivered judgments and write the artifact
                                         (judge_delivery: host — see the fadeno-judge skill)
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
@@ -271,7 +271,7 @@ export const KNOWN_CLI_COMMANDS = new Set([
   'tool-run', 'tool-complete', 'plugin', 'completion', 'gate', 'prompt', 'next', 'drive',
   'cancel', 'models', 'dial', 'shadow', 'dispatch', 'dispatch-fallback', 'dispatch-start',
   'dispatch-prompt', 'dispatch-complete', 'dispatch-progress', 'dispatch-prepare',
-  'dispatch-fail', 'decide', 'runs', 'attest', 'dispatches', 'shadow-apply', 'compare', 'show', 'verify',
+  'dispatch-fail', 'decide', 'runs', 'attest', 'dispatches', 'shadow-apply', 'bakeoff', 'show', 'verify',
 ]);
 
 export function shouldRunPreflight(command: string | undefined): boolean {
@@ -528,7 +528,7 @@ Usage:
   fadeno dispatches --output <id|last|tag:<t>> [--wait [s]]
                                                Print a dispatch's output snapshot verbatim
   fadeno dispatches --cancel <id|tag:<t>>      Stop a running dispatch (SIGTERM to its group)
-  fadeno dispatches --comparisons              Paired primary/shadow scorecard per challenger
+  fadeno dispatches --bakeoffs                 Adjudicated bakeoff scorecard per challenger
 
 Options:
   --tail <n>       Logical entries to show (default 10)
@@ -1179,7 +1179,7 @@ const DIAL_SOURCE_TEXT: Record<string, string> = {
   base: 'base',
 };
 
-function printCompareArm(arm: CompareArmMeasurement): void {
+function printBakeoffArm(arm: BakeoffArmMeasurement): void {
   const id = arm.dispatchId != null ? arm.dispatchId.slice(0, 8) : '(missing)';
   const identity = `${arm.executor ?? '(unresolved)'} (${arm.model ?? '?'}${arm.reasoningEffort != null ? `@${arm.reasoningEffort}` : ''})`;
   console.log(`  ${arm.arm.padEnd(10)} ${id}  ${identity}`);
@@ -1210,10 +1210,10 @@ function printCompareArm(arm: CompareArmMeasurement): void {
   }
 }
 
-function printCompare(result: CompareResult): void {
+function printBakeoff(result: BakeoffResult): void {
   const base = result.baselineCommit != null ? result.baselineCommit.slice(0, 8) : '(none)';
   console.log(`pair ${result.pairId.slice(0, 8)}  archetype ${result.archetype ?? '?'}  baseline ${base}`);
-  for (const arm of result.arms) printCompareArm(arm);
+  for (const arm of result.arms) printBakeoffArm(arm);
   if (result.reachDifferential != null && result.reachDifferential.length > 0) {
     console.log('  reach differential — both arms introduced these; only one wired them to a surface:');
     for (const d of result.reachDifferential) {
@@ -1252,16 +1252,16 @@ function printCompare(result: CompareResult): void {
   }
 }
 
-function printComparePrepare(result: ComparePrepareResult): void {
+function printBakeoffPrepare(result: BakeoffPrepareResult): void {
   const base = result.baselineCommit != null ? result.baselineCommit.slice(0, 8) : '(none)';
   console.log(`pair ${result.pairId.slice(0, 8)}  archetype ${result.archetype ?? '?'}  baseline ${base}`);
-  for (const arm of result.arms) printCompareArm(arm);
+  for (const arm of result.arms) printBakeoffArm(arm);
   console.log('  prepared — no verdict was formed and nothing was written.');
   console.log(`  spawn a "${result.judgeArchetype}" subagent per prompt file, INDEPENDENTLY:`);
   console.log(`    comparison prompt:  ${result.comparisonPromptPath}`);
   console.log(`    adversarial prompt: ${result.adversarialPromptPath}`);
   console.log(
-    '  then: fadeno compare <pair-id> --record --comparison <file> --adversarial <file>',
+    '  then: fadeno bakeoff <pair-id> --record --comparison <file> --adversarial <file>',
   );
 }
 
@@ -1599,7 +1599,7 @@ function main(argv: string[]): number {
         rate: { type: 'string' },
         tag: { type: 'string' },
         shadow: { type: 'string' },
-        comparisons: { type: 'boolean' },
+        bakeoffs: { type: 'boolean' },
         wait: { type: 'string' },
         arm: { type: 'string' },
         check: { type: 'boolean' },
@@ -2571,8 +2571,8 @@ function main(argv: string[]): number {
       return 0;
     }
     case 'dispatches': {
-      if (values.comparisons) {
-        const result = runDispatchesComparisons({});
+      if (values.bakeoffs) {
+        const result = runDispatchesBakeoffs({});
         if (values.json) {
           console.log(JSON.stringify(result, null, 2));
           return 0;
@@ -2698,33 +2698,33 @@ function main(argv: string[]): number {
       );
       return 0;
     }
-    case 'compare': {
+    case 'bakeoff': {
       const ref = positionals[1];
       const usage =
-        'Usage: fadeno compare <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--via <driver>]\n' +
-        '   or: fadeno compare <pair-id|dispatch-id> --prepare\n' +
-        '   or: fadeno compare <pair-id|dispatch-id> --record --comparison <file> --adversarial <file>';
+        'Usage: fadeno bakeoff <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--via <driver>]\n' +
+        '   or: fadeno bakeoff <pair-id|dispatch-id> --prepare\n' +
+        '   or: fadeno bakeoff <pair-id|dispatch-id> --record --comparison <file> --adversarial <file>';
       if (!ref) throw new Error(usage);
       if (values.prepare) {
-        const result = runComparePrepare({ ref });
+        const result = runBakeoffPrepare({ ref });
         if (values.json) {
           console.log(JSON.stringify(result, null, 2));
           return 0;
         }
-        printComparePrepare(result);
+        printBakeoffPrepare(result);
         return 0;
       }
       if (values.record) {
         if (!values.comparison || !values.adversarial) throw new Error(usage);
-        const result = runCompareRecord({ ref, comparisonPath: values.comparison, adversarialPath: values.adversarial });
+        const result = runBakeoffRecord({ ref, comparisonPath: values.comparison, adversarialPath: values.adversarial });
         if (values.json) {
           console.log(JSON.stringify(result, null, 2));
           return 0;
         }
-        printCompare(result);
+        printBakeoff(result);
         return 0;
       }
-      const result = runCompare({
+      const result = runBakeoff({
         ref,
         measureOnly: Boolean(values['measure-only']),
         judgeModel: values.judge ?? null,
@@ -2734,7 +2734,7 @@ function main(argv: string[]): number {
         console.log(JSON.stringify(result, null, 2));
         return 0;
       }
-      printCompare(result);
+      printBakeoff(result);
       return 0;
     }
     case 'show': {

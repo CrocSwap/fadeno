@@ -554,8 +554,8 @@ policy language.
   error that names the fix — run this archetype-shaped task with the
   in-session agent, declare a fallback command on the route, or bind the
   archetype to a command-delivered target.
-- `fadeno dispatches [--tail <N>] [--json] [--comparisons]` — read the evidence back; see
-  *Evidence*. `--comparisons` groups shadow pairs by challenger, attests
+- `fadeno dispatches [--tail <N>] [--json] [--bakeoffs]` — read the evidence back; see
+  *Evidence*. `--bakeoffs` groups shadow pairs by challenger, attests
   prompt-sha pairing, and scans `.fadeno/comparisons/*.md` (`kind: ModelComparison`)
   for verdict tallies.
 
@@ -659,7 +659,7 @@ part of it; `[source]` is the cascade layer that won
   launched the primary, the kernel launched the shadow, and a shadow overlaps
   its own primary by design. `--tail <N>` defaults to 10; `--json` emits
   the correlated rows for scripts, carrying `shadow`, `primary_dispatch_id`,
-  and `diff_bytes`. `fadeno dispatches --comparisons [--json]` renders paired
+  and `diff_bytes`. `fadeno dispatches --bakeoffs [--json]` renders paired
   primary/shadow rows grouped by challenger executor (both id8s, archetype,
   `primary executor (model) exit N in <duration>, output B bytes` vs
   `shadow executor (model) exit N in <duration>, output B bytes, diff D bytes`

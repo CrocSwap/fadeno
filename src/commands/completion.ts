@@ -183,14 +183,14 @@ const COMMANDS: Record<string, CommandSpec> = {
   dispatches: command({
     '--tail': { kind: 'free' },
     '--json': NONE,
-    '--comparisons': NONE,
+    '--bakeoffs': NONE,
     '--output': { kind: 'free' },
     '--wait': { kind: 'free' },
     '--tag': { kind: 'free' },
     '--cancel': { kind: 'free' },
   }),
   'shadow-apply': command({ '--arm': { kind: 'enum', values: ['challenger', 'primary'] }, '--check': NONE }, ['free']),
-  compare: command(
+  bakeoff: command(
     {
       '--measure-only': NONE,
       '--prepare': NONE,

@@ -21,7 +21,7 @@
  * judge to name a winner it does not believe in, and the cost is concrete —
  * you lose either the tripwire or you ship the duplication.
  */
-export const MODEL_COMPARISON_VERDICTS = [
+export const BAKEOFF_VERDICTS = [
   'prefer_baseline',
   'prefer_challenger',
   'graft',
@@ -29,7 +29,7 @@ export const MODEL_COMPARISON_VERDICTS = [
   'inconclusive',
 ] as const;
 
-export type ModelComparisonVerdict = (typeof MODEL_COMPARISON_VERDICTS)[number];
+export type BakeoffVerdict = (typeof BAKEOFF_VERDICTS)[number];
 
 /**
  * What a BLINDED judge may emit. The artifact vocabulary above is the frame
@@ -63,24 +63,24 @@ export function isJudgmentVerdict(value: unknown): value is JudgmentVerdict {
 export function unblindVerdict(
   verdict: JudgmentVerdict,
   blinding: { a: 'primary' | 'challenger'; b: 'primary' | 'challenger' },
-): ModelComparisonVerdict {
+): BakeoffVerdict {
   if (verdict !== 'prefer_a' && verdict !== 'prefer_b') return verdict;
   const preferred = verdict === 'prefer_a' ? blinding.a : blinding.b;
   return preferred === 'primary' ? 'prefer_baseline' : 'prefer_challenger';
 }
 
-export function isModelComparisonVerdict(value: unknown): value is ModelComparisonVerdict {
-  return typeof value === 'string' && (MODEL_COMPARISON_VERDICTS as readonly string[]).includes(value);
+export function isBakeoffVerdict(value: unknown): value is BakeoffVerdict {
+  return typeof value === 'string' && (BAKEOFF_VERDICTS as readonly string[]).includes(value);
 }
 
 /**
- * How a verdict reached the artifact — the one list `fadeno compare` (writer)
- * and `fadeno dispatches --comparisons` (reader) both read, so a third
+ * How a verdict reached the artifact — the one list `fadeno bakeoff` (writer)
+ * and `fadeno dispatches --bakeoffs` (reader) both read, so a third
  * delivery path cannot be added to one and forgotten by the other.
  *
  * `command` is a kernel-dispatched judge: `dispatch_completed` rows exist for
  * it, so `judgeDispatchIds` on the result names evidence a reader can go
- * inspect. `host` is `fadeno compare --record`: a coordinator handed the
+ * inspect. `host` is `fadeno bakeoff --record`: a coordinator handed the
  * kernel a JSON file it read back from a host-spawned subagent (or wrote
  * itself) with no dispatch receipt behind it — the same gap
  * `identity_evidence: 'requested_only'` already names for a host delivery
@@ -102,7 +102,7 @@ export function isJudgeDelivery(value: unknown): value is JudgeDelivery {
  * vocabulary rather than restated, so a new verdict cannot be silently
  * uncounted: adding one here is a type error until it is given a bucket.
  */
-export const VERDICT_BUCKET: Record<ModelComparisonVerdict, 'challenger' | 'baseline' | 'graft' | 'neither'> = {
+export const VERDICT_BUCKET: Record<BakeoffVerdict, 'challenger' | 'baseline' | 'graft' | 'neither'> = {
   prefer_challenger: 'challenger',
   prefer_baseline: 'baseline',
   graft: 'graft',
@@ -169,7 +169,7 @@ export interface ModelTrait {
   note: string;
 }
 
-export const MODEL_COMPARISON_REQUIRED_SECTIONS = ['Criteria', 'Model traits', 'Confounds', 'Shared blind spots'] as const;
+export const BAKEOFF_REQUIRED_SECTIONS = ['Criteria', 'Model traits', 'Confounds', 'Shared blind spots'] as const;
 
 /**
  * One instruction in a graft plan: take THIS from THAT arm, for a stated
@@ -194,11 +194,11 @@ export interface GraftStep {
   paths?: string[];
 }
 
-export interface ModelComparisonFrontmatter {
-  kind: 'ModelComparison';
+export interface BakeoffFrontmatter {
+  kind: 'Bakeoff';
   baseline: string;
   challenger: string;
-  verdict: ModelComparisonVerdict;
+  verdict: BakeoffVerdict;
   date: string;
   dispatch_ids?: string[];
   pair_id?: string;
@@ -211,7 +211,7 @@ export interface ModelComparisonFrontmatter {
   judge_delivery?: JudgeDelivery;
 }
 
-export type ModelComparisonError =
+export type BakeoffParseError =
   | 'unreadable'
   | 'missing frontmatter'
   | 'invalid yaml'
@@ -232,9 +232,9 @@ export type ModelComparisonError =
  * scorecard never renders one.
  */
 export function checkGraftCoherence(
-  verdict: ModelComparisonVerdict,
+  verdict: BakeoffVerdict,
   plan: GraftStep[] | undefined,
-): ModelComparisonError | null {
+): BakeoffParseError | null {
   const hasPlan = Array.isArray(plan) && plan.length > 0;
   if (verdict === 'graft' && !hasPlan) return 'graft without a plan';
   if (verdict !== 'graft' && hasPlan) return 'plan without a graft verdict';

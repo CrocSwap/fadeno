@@ -215,7 +215,7 @@ test('prompt-resolve: non-map producer with output_path resolves as files not ag
   // Direct regression for src/lib/prompt-resolve.ts:275 — a non-map producer that carries
   // a plain output_path must not be misclassified as an assembled map aggregate.
   // The old code was `producer != null && producer.output_path != null` without checking `over`.
-  // That would make a compare → done flow (model-tryout) resolve ModelComparison with files:[].
+  // That would make a compare → done flow (a bakeoff) resolve ModelComparison with files:[].
   const playbook: any = {
     name: 'aggregate-regression',
     schema_version: '0.1',
@@ -240,29 +240,29 @@ test('prompt-resolve: non-map producer with output_path resolves as files not ag
   assert.equal(input.files.length, 1);
   assert.equal(input.files[0]!.path, 'artifacts/contract.md');
 
-  // Also verify the model-tryout pattern: compare (non-map) with output_path .fadeno/comparisons/model-tryout.md
+  // Also verify the bakeoff pattern: compare (non-map) with output_path .fadeno/bakeoffs/bakeoff.md
   // must not become an aggregate for its consumer.
   const playbook2: any = {
-    name: 'model-tryout',
+    name: 'bakeoff',
     schema_version: '0.1',
     roles: { comparison_judge: { purpose: 'judge' }, coordinator: { purpose: 'coord' } },
     flow: [
-      { id: 'compare', kind: 'evaluator', actor: 'comparison_judge', input: ['WorkSpec', 'CandidateResult[]'], output: 'ModelComparison', output_path: '.fadeno/comparisons/model-tryout.md' },
-      { id: 'done', kind: 'actor_call', actor: 'coordinator', input: ['ModelComparison'], output: 'FinalSummary' },
+      { id: 'compare', kind: 'evaluator', actor: 'comparison_judge', input: ['WorkSpec', 'CandidateResult[]'], output: 'Bakeoff', output_path: '.fadeno/bakeoffs/bakeoff.md' },
+      { id: 'done', kind: 'actor_call', actor: 'coordinator', input: ['Bakeoff'], output: 'FinalSummary' },
     ],
   };
   const events2: any[] = [
     { type: 'run_started', step: null, seq: 1, timestamp: '2026-01-01T00:00:00Z', extra: {} },
     { type: 'step_started', step: 'compare', seq: 2, timestamp: '2026-01-01T00:00:01Z', extra: {} },
-    { type: 'artifact_created', step: 'compare', seq: 3, timestamp: '2026-01-01T00:00:02Z', extra: { artifact: '.fadeno/comparisons/model-tryout.md' } },
+    { type: 'artifact_created', step: 'compare', seq: 3, timestamp: '2026-01-01T00:00:02Z', extra: { artifact: '.fadeno/bakeoffs/bakeoff.md' } },
     { type: 'step_started', step: 'done', seq: 4, timestamp: '2026-01-01T00:00:03Z', extra: {} },
   ];
   const plan2 = resolveStepPlan(playbook2, events2, { step: 'done', actor: 'coordinator', iteration: null });
-  const mc = plan2.inputs.find((i) => i.artifact === 'ModelComparison');
+  const mc = plan2.inputs.find((i) => i.artifact === 'Bakeoff');
   assert.ok(mc, 'ModelComparison must be resolved');
   assert.equal(mc.isAssembledAggregate, false);
   assert.equal(mc.files.length, 1);
-  assert.equal(mc.files[0]!.path, '.fadeno/comparisons/model-tryout.md');
+  assert.equal(mc.files[0]!.path, '.fadeno/bakeoffs/bakeoff.md');
 
   // Preserve map-aggregate behavior: a map over roles with output_path should still produce an aggregate.
   const playbookMap: any = {

@@ -532,9 +532,9 @@ function missingBundledTemplates(pluginRoot: string): string[] {
       ));
     } else {
       // Version equality is NOT content equality, and this finding used to
-      // claim the stronger one. `model-comparison.schema.json` shipped in
+      // claim the stronger one. `bakeoff.schema.json` shipped in
       // templates/ and was absent from both bundled `bin/templates` snapshots
-      // for five commits at the SAME version — so `fadeno compare` from a
+      // for five commits at the SAME version — so `fadeno bakeoff` from a
       // managed runtime failed with "no model-comparison schema available"
       // while doctor reported a match. A check must not assert a property it
       // does not test.

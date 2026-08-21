@@ -15896,13 +15896,13 @@ var import_node_fs5 = require("node:fs");
 var import_node_path5 = require("node:path");
 var import_ajv = __toESM(require_ajv(), 1);
 var import_yaml3 = __toESM(require_dist(), 1);
-var SCHEMA_KINDS = ["playbook", "run", "review-report", "test-result", "model-comparison"];
+var SCHEMA_KINDS = ["playbook", "run", "review-report", "test-result", "bakeoff"];
 var SCHEMA_FILE = {
   playbook: "playbook.schema.json",
   run: "run.schema.json",
   "review-report": "review-report.schema.json",
   "test-result": "test-result.schema.json",
-  "model-comparison": "model-comparison.schema.json"
+  "bakeoff": "bakeoff.schema.json"
 };
 var SINGLE_REF_FIELDS = [
   "next",
@@ -22701,8 +22701,8 @@ var import_node_fs16 = require("node:fs");
 var import_node_path16 = require("node:path");
 var import_yaml6 = __toESM(require_dist(), 1);
 
-// src/lib/model-comparison.ts
-var MODEL_COMPARISON_VERDICTS = [
+// src/lib/bakeoff.ts
+var BAKEOFF_VERDICTS = [
   "prefer_baseline",
   "prefer_challenger",
   "graft",
@@ -22718,8 +22718,8 @@ function unblindVerdict(verdict, blinding) {
   const preferred = verdict === "prefer_a" ? blinding.a : blinding.b;
   return preferred === "primary" ? "prefer_baseline" : "prefer_challenger";
 }
-function isModelComparisonVerdict(value) {
-  return typeof value === "string" && MODEL_COMPARISON_VERDICTS.includes(value);
+function isBakeoffVerdict(value) {
+  return typeof value === "string" && BAKEOFF_VERDICTS.includes(value);
 }
 var VERDICT_BUCKET = {
   prefer_challenger: "challenger",
@@ -22728,7 +22728,7 @@ var VERDICT_BUCKET = {
   tie: "neither",
   inconclusive: "neither"
 };
-var MODEL_COMPARISON_REQUIRED_SECTIONS = ["Criteria", "Model traits", "Confounds", "Shared blind spots"];
+var BAKEOFF_REQUIRED_SECTIONS = ["Criteria", "Model traits", "Confounds", "Shared blind spots"];
 function checkGraftCoherence(verdict, plan) {
   const hasPlan = Array.isArray(plan) && plan.length > 0;
   if (verdict === "graft" && !hasPlan) return "graft without a plan";
@@ -23433,7 +23433,7 @@ function runDispatchesOutput(opts) {
   const attested = !rec.completed ? "incomplete" : sha256Hex(bytes) === rec.outputSha256 ? "match" : "mismatch";
   return { dispatchId: rec.dispatchId, path: snapshotRel, bytes, attested, resolvedBy };
 }
-var COMPARISONS_DIR = (0, import_node_path16.join)(".fadeno", "comparisons");
+var BAKEOFFS_DIR = (0, import_node_path16.join)(".fadeno", "bakeoffs");
 function loadAllEntries(absolute) {
   const entries = [];
   const byDispatchId = /* @__PURE__ */ new Map();
@@ -23586,7 +23586,7 @@ function resolveDispatchPair(query, opts = {}) {
   }
   return pairFor([...matchedPairIds][0]);
 }
-function parseModelComparisonFile(repoRoot, relPath) {
+function parseBakeoffFile(repoRoot, relPath) {
   const abs = (0, import_node_path16.join)(repoRoot, relPath);
   let content;
   try {
@@ -23616,16 +23616,16 @@ function parseModelComparisonFile(repoRoot, relPath) {
   const dispatchIdsRaw = data.dispatch_ids;
   let dispatchIds = null;
   if (Array.isArray(dispatchIdsRaw)) dispatchIds = dispatchIdsRaw.filter((v) => typeof v === "string" && v !== "");
-  const valid = kind === "ModelComparison" && baseline != null && challenger != null && verdict != null && date != null;
+  const valid = kind === "Bakeoff" && baseline != null && challenger != null && verdict != null && date != null;
   const body = content.slice(match[0].length);
-  const missingSection = MODEL_COMPARISON_REQUIRED_SECTIONS.find(
+  const missingSection = BAKEOFF_REQUIRED_SECTIONS.find(
     (section) => !new RegExp(`^##\\s+${section}`, "m").test(body)
   );
   if (missingSection != null) {
     return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, valid: false, error: "missing required sections" };
   }
   if (!valid) return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, valid: false, error: "invalid frontmatter" };
-  if (!isModelComparisonVerdict(verdict)) {
+  if (!isBakeoffVerdict(verdict)) {
     return { file: relPath, baseline, challenger, verdict, date, dispatchIds, judgeDelivery, valid: false, error: "invalid verdict" };
   }
   const traits = parseTraitSection(body);
@@ -23647,7 +23647,7 @@ function parseTraitSection(body) {
   }
   return out;
 }
-function scanComparisons(repoRoot, dirRel) {
+function scanBakeoffs(repoRoot, dirRel) {
   const abs = (0, import_node_path16.join)(repoRoot, dirRel);
   if (!(0, import_node_fs16.existsSync)(abs)) return { artifacts: [], skipped: 0 };
   let files;
@@ -23660,13 +23660,13 @@ function scanComparisons(repoRoot, dirRel) {
   let skipped = 0;
   for (const file of files) {
     const rel = (0, import_node_path16.join)(dirRel, file).split("\\").join("/");
-    const artifact = parseModelComparisonFile(repoRoot, rel);
+    const artifact = parseBakeoffFile(repoRoot, rel);
     if (!artifact.valid) skipped += 1;
     artifacts.push(artifact);
   }
   return { artifacts, skipped };
 }
-function formatComparisonDuration(ms) {
+function formatBakeoffDuration(ms) {
   if (ms == null) return "?";
   if (ms < 1e3) return `${ms}ms`;
   if (ms < 6e4) return `${(ms / 1e3).toFixed(1)}s`;
@@ -23674,13 +23674,13 @@ function formatComparisonDuration(ms) {
   const seconds = Math.round(ms % 6e4 / 1e3);
   return `${minutes}m${String(seconds).padStart(2, "0")}s`;
 }
-function formatComparisonPair(pair) {
+function formatBakeoffPair(pair) {
   const primaryId8 = pair.primaryId ? pair.primaryId.slice(0, 8) : "?";
   const shadowId8 = pair.shadowId ? pair.shadowId.slice(0, 8) : "?";
   const arch = pair.archetype ?? "(none)";
   const primaryDiff = pair.primary.diffBytes != null ? ` diff ${pair.primary.diffBytes} bytes` : "";
-  const primaryInfo = `${pair.primary.executor ?? "(unresolved)"} (${pair.primary.model ?? "?"}) exit ${pair.primary.exitCode ?? "?"} in ${formatComparisonDuration(pair.primary.durationMs)} output ${pair.primary.outputBytes ?? "?"} bytes${primaryDiff}`;
-  const shadowInfo = pair.shadow.refusal != null ? `refused [${pair.shadow.refusal.predicate}]: ${pair.shadow.refusal.message}` : `${pair.shadow.executor ?? "(unresolved)"} (${pair.shadow.model ?? "?"}) exit ${pair.shadow.exitCode ?? "?"} in ${formatComparisonDuration(pair.shadow.durationMs)} output ${pair.shadow.outputBytes ?? "?"} bytes diff ${pair.shadow.diffBytes ?? "?"} bytes`;
+  const primaryInfo = `${pair.primary.executor ?? "(unresolved)"} (${pair.primary.model ?? "?"}) exit ${pair.primary.exitCode ?? "?"} in ${formatBakeoffDuration(pair.primary.durationMs)} output ${pair.primary.outputBytes ?? "?"} bytes${primaryDiff}`;
+  const shadowInfo = pair.shadow.refusal != null ? `refused [${pair.shadow.refusal.predicate}]: ${pair.shadow.refusal.message}` : `${pair.shadow.executor ?? "(unresolved)"} (${pair.shadow.model ?? "?"}) exit ${pair.shadow.exitCode ?? "?"} in ${formatBakeoffDuration(pair.shadow.durationMs)} output ${pair.shadow.outputBytes ?? "?"} bytes diff ${pair.shadow.diffBytes ?? "?"} bytes`;
   const mismatch = pair.promptShaMismatch ? "  PROMPT SHA MISMATCH" : "";
   const orphan = pair.orphan ? "  [orphan: primary missing]" : "";
   const baseline = pair.primary.baselineCommit != null ? `  [baseline ${pair.primary.baselineCommit.slice(0, 8)}]` : "";
@@ -23691,7 +23691,7 @@ function judgeDeliveryNote(judgeDelivery) {
   if (judgeDelivery == null || judgeDelivery === "command") return "";
   return judgeDelivery === "host" ? "  [judge delivery: host \u2014 unattested, see Confounds]" : `  [judge delivery: ${judgeDelivery}]`;
 }
-function formatComparisonArtifact(artifact) {
+function formatBakeoffArtifact(artifact) {
   const verdict = artifact.verdict ?? "?";
   const baseline = artifact.baseline ?? "?";
   const challenger = artifact.challenger ?? "?";
@@ -23699,11 +23699,11 @@ function formatComparisonArtifact(artifact) {
   if (!artifact.valid) return `${artifact.file}: invalid (${artifact.error ?? "unknown"})`;
   return `${artifact.file}: ${verdict} (baseline ${baseline} vs challenger ${challenger} on ${date})${judgeDeliveryNote(artifact.judgeDelivery)}`;
 }
-function runDispatchesComparisons(opts = {}) {
+function runDispatchesBakeoffs(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const path = DISPATCHES_FILE.split("\\").join("/");
-  const comparisonsDir = COMPARISONS_DIR.split("\\").join("/");
+  const comparisonsDir = BAKEOFFS_DIR.split("\\").join("/");
   const absolute = (0, import_node_path16.join)(repoRoot, DISPATCHES_FILE);
   const { entries, skipped, skippedNewerFormat } = loadAllEntries(absolute);
   const primaryById = /* @__PURE__ */ new Map();
@@ -23755,7 +23755,7 @@ function runDispatchesComparisons(opts = {}) {
       orphan
     });
   }
-  const { artifacts, skipped: skippedComparisons } = scanComparisons(repoRoot, comparisonsDir);
+  const { artifacts, skipped: skippedComparisons } = scanBakeoffs(repoRoot, comparisonsDir);
   const challengers = /* @__PURE__ */ new Set();
   for (const p of pairs) {
     const name = p.shadow.executor ?? "(unknown)";
@@ -23783,7 +23783,7 @@ function runDispatchesComparisons(opts = {}) {
     const traitTally = [...traitCounts.values()].sort(
       (x, y) => y.challenger + y.baseline - (x.challenger + x.baseline) || x.dimension.localeCompare(y.dimension)
     );
-    const bucketed = groupComparisons.filter((a) => a.valid && isModelComparisonVerdict(a.verdict)).map((a) => VERDICT_BUCKET[a.verdict]);
+    const bucketed = groupComparisons.filter((a) => a.valid && isBakeoffVerdict(a.verdict)).map((a) => VERDICT_BUCKET[a.verdict]);
     const preferChallenger = bucketed.filter((b) => b === "challenger").length;
     const preferBaseline = bucketed.filter((b) => b === "baseline").length;
     const graft = bucketed.filter((b) => b === "graft").length;
@@ -23815,18 +23815,18 @@ function runDispatchesComparisons(opts = {}) {
     }
   } else {
     for (const group of groups) {
-      lines.push(`challenger ${group.challenger}: ${group.tally.pairs} pairs, ${group.tally.comparisons} comparisons: ${group.tally.preferChallenger} prefer_challenger / ${group.tally.preferBaseline} prefer_baseline / ${group.tally.graft} graft / ${group.tally.tieOrInconclusive} tie/inconclusive`);
+      lines.push(`challenger ${group.challenger}: ${group.tally.pairs} pairs, ${group.tally.comparisons} bakeoffs: ${group.tally.preferChallenger} prefer_challenger / ${group.tally.preferBaseline} prefer_baseline / ${group.tally.graft} graft / ${group.tally.tieOrInconclusive} tie/inconclusive`);
       if (group.tally.comparisons > 1 && group.traitTally.length > 0) {
-        lines.push("  model traits across these comparisons (who exhibited MORE \u2014 not who was better):");
+        lines.push("  model traits across these bakeoffs (who exhibited MORE \u2014 not who was better):");
         for (const t of group.traitTally) {
           lines.push(`    ${t.dimension.padEnd(22)} challenger ${t.challenger} / baseline ${t.baseline} / neither ${t.neither}`);
         }
       }
       for (const pair of group.pairs) {
-        lines.push(`  ${formatComparisonPair(pair)}`);
+        lines.push(`  ${formatBakeoffPair(pair)}`);
       }
       for (const comp of group.comparisons) {
-        lines.push(`  ${formatComparisonArtifact(comp)}`);
+        lines.push(`  ${formatBakeoffArtifact(comp)}`);
       }
     }
   }
@@ -29832,7 +29832,7 @@ var SKILLS = [
   // behind one name across two tool surfaces. Named for the command it drives,
   // like the four above are named for their workflow rather than a role — so
   // the rule stays "strip the prefix", with no entry needing an exception.
-  { src: "fadeno-compare", dst: "compare" }
+  { src: "fadeno-bakeoff", dst: "bakeoff" }
 ];
 function stampSurfaceVersion(md) {
   return md.replace(/^(description:.*?)\s*$/m, `$1 [fadeno ${packageVersion()}]`);
@@ -29938,7 +29938,7 @@ function runPlugin(opts = {}) {
   });
   return { outDir, results };
 }
-var CODEX_SKILLS = ["fadeno-runner", "fadeno-builder", "fadeno-driver", "fadeno-setup", "fadeno-compare"];
+var CODEX_SKILLS = ["fadeno-runner", "fadeno-builder", "fadeno-driver", "fadeno-setup", "fadeno-bakeoff"];
 function runCodexPlugin(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const tpl = templatesDir();
@@ -30926,7 +30926,7 @@ function runSteeringApplyClaude(opts) {
 }
 
 // src/commands/init.ts
-var SKILLS2 = ["fadeno-runner", "fadeno-builder", "fadeno-driver", "fadeno-compare"];
+var SKILLS2 = ["fadeno-runner", "fadeno-builder", "fadeno-driver", "fadeno-bakeoff"];
 function runInit(opts) {
   const tpl = templatesDir();
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
@@ -35100,14 +35100,14 @@ var COMMANDS = {
   dispatches: command({
     "--tail": { kind: "free" },
     "--json": NONE,
-    "--comparisons": NONE,
+    "--bakeoffs": NONE,
     "--output": { kind: "free" },
     "--wait": { kind: "free" },
     "--tag": { kind: "free" },
     "--cancel": { kind: "free" }
   }),
   "shadow-apply": command({ "--arm": { kind: "enum", values: ["challenger", "primary"] }, "--check": NONE }, ["free"]),
-  compare: command(
+  bakeoff: command(
     {
       "--measure-only": NONE,
       "--prepare": NONE,
@@ -35612,13 +35612,13 @@ function runShadowApply(opts) {
   };
 }
 
-// src/commands/compare.ts
+// src/commands/bakeoff.ts
 var import_node_child_process11 = require("node:child_process");
 var import_node_fs36 = require("node:fs");
 var import_node_path36 = require("node:path");
 var import_ajv2 = __toESM(require_ajv(), 1);
 var import_yaml18 = __toESM(require_dist(), 1);
-var CompareCommandError = class extends Error {
+var BakeoffCommandError = class extends Error {
 };
 var GENERATED_PREFIXES = ["plugin/bin/", "plugin-codex/bin/", "dist/", "plugin/skills/", "plugin/agents/", "plugin/hooks/", "plugin/commands/"];
 function isGenerated(path) {
@@ -35839,7 +35839,7 @@ function confoundsOf(primary, shadow) {
 function measure(ref, cwd, repoRoot) {
   const pair = resolveDispatchPair(ref, { cwd, repoRoot });
   if (pair.primary == null && pair.shadow == null) {
-    throw new CompareCommandError(`pair "${pair.pairId}" has no recorded arms.`);
+    throw new BakeoffCommandError(`pair "${pair.pairId}" has no recorded arms.`);
   }
   const baseline = pair.primary?.baselineCommit ?? pair.shadow?.baselineCommit ?? null;
   let surfaces = [];
@@ -35968,7 +35968,7 @@ function blindConfoundForPrompt(c, blinding) {
     detail: GENERIC_CONFOUND_DETAIL[c.code] ?? c.detail
   };
 }
-var COMPARE_PROMPT_MARKER = { comparison: "fadeno-compare-task: comparison", adversarial: "fadeno-compare-task: adversarial" };
+var BAKEOFF_PROMPT_MARKER = { comparison: "fadeno-bakeoff-task: comparison", adversarial: "fadeno-bakeoff-task: adversarial" };
 function buildComparisonPrompt(schemaText, blindA, blindB, reach, confounds, surfaces) {
   const reachSection = reach != null && reach.length > 0 ? `### Reach differential
 
@@ -35982,7 +35982,7 @@ ${surfaces.join(", ")}` : "### Declared consumer surfaces\n\n(none declared)";
 
 ${confounds.map((c) => `- [${c.code}] ${c.arm}: ${c.detail}`).join("\n")}` : "### Confounds\n\nnone recorded.";
   return [
-    `<!-- ${COMPARE_PROMPT_MARKER.comparison} -->`,
+    `<!-- ${BAKEOFF_PROMPT_MARKER.comparison} -->`,
     "# Blinded shadow-pair comparison",
     "",
     'You are comparing two AI-agent work products on the SAME task, from the SAME starting commit. They are labeled `arm_a` and `arm_b` ONLY \u2014 you are never told, and must never guess or state, which one is the "primary"/incumbent and which is the "challenger". Judge the work, not who produced it.',
@@ -36016,7 +36016,7 @@ ${confounds.map((c) => `- [${c.code}] ${c.arm}: ${c.detail}`).join("\n")}` : "##
 }
 function buildAdversarialPrompt(blindA, blindB) {
   return [
-    `<!-- ${COMPARE_PROMPT_MARKER.adversarial} -->`,
+    `<!-- ${BAKEOFF_PROMPT_MARKER.adversarial} -->`,
     "# Blinded shadow-pair \u2014 shared blind spot search",
     "",
     'Two AI-agent work products on the SAME task, from the SAME starting commit, labeled `arm_a` / `arm_b` only. Do not try to pick a winner and do not guess which one is the "primary"/incumbent.',
@@ -36058,10 +36058,10 @@ function extractJsonObject(text) {
 }
 function loadModelComparisonSchema(repoRoot) {
   const dirs = schemaDirectories(repoRoot);
-  const candidates = [(0, import_node_path36.join)(dirs.project, "model-comparison.schema.json"), (0, import_node_path36.join)(dirs.builtin, "model-comparison.schema.json")];
+  const candidates = [(0, import_node_path36.join)(dirs.project, "bakeoff.schema.json"), (0, import_node_path36.join)(dirs.builtin, "bakeoff.schema.json")];
   const schemaPath = candidates.find((p) => (0, import_node_fs36.existsSync)(p));
   if (schemaPath == null) {
-    throw new CompareCommandError(
+    throw new BakeoffCommandError(
       "no model-comparison schema available (missing .fadeno/schemas and the bundled template) \u2014 cannot validate a judge's output."
     );
   }
@@ -36099,11 +36099,11 @@ function dispatchJudge(prompt, opts) {
       tag: opts.tag
     });
   } catch (err) {
-    if (err instanceof DispatchCommandError) throw new CompareCommandError(err.message);
+    if (err instanceof DispatchCommandError) throw new BakeoffCommandError(err.message);
     throw err;
   }
   if (result.outcome !== "ok") {
-    throw new CompareCommandError(
+    throw new BakeoffCommandError(
       `judge dispatch ${result.dispatchId.slice(0, 8)} did not produce usable output (outcome: ${result.outcome ?? "unknown"}, exit ${result.exitCode}) \u2014 writing nothing rather than a partial verdict. stderr: ${result.stderr.slice(0, 400)}`
     );
   }
@@ -36142,7 +36142,7 @@ function renderGraftPlan(plan) {
 }
 function renderComparisonArtifact(frontmatter, sections) {
   const parts = ["---", (0, import_yaml18.stringify)(frontmatter).trimEnd(), "---"];
-  for (const name of MODEL_COMPARISON_REQUIRED_SECTIONS) {
+  for (const name of BAKEOFF_REQUIRED_SECTIONS) {
     parts.push("", `## ${name}`, "", sections[name]);
   }
   if (sections.graftPlan != null) {
@@ -36157,12 +36157,12 @@ function preparePrompts(measurement, pair, repoRoot) {
   const challengerArm = measurement.arms.find((a) => a.arm === "challenger");
   for (const arm of [primaryArm, challengerArm]) {
     if (arm.refused != null) {
-      throw new CompareCommandError(
+      throw new BakeoffCommandError(
         `pair ${measurement.pairId.slice(0, 8)} cannot be adjudicated: the ${arm.arm} arm was refused before it ran [${arm.refused.predicate}], so there is nothing to compare it against. Re-run the pair, or use --measure-only to see what was recorded.`
       );
     }
     if (arm.diff == null) {
-      throw new CompareCommandError(
+      throw new BakeoffCommandError(
         `pair ${measurement.pairId.slice(0, 8)} cannot be adjudicated: the ${arm.arm} arm recorded no diff (it may still be in flight, or have been killed). Use --measure-only to see what was recorded.`
       );
     }
@@ -36174,12 +36174,12 @@ function preparePrompts(measurement, pair, repoRoot) {
   const blindA = renderBlindArm("a", material[armFor("a", blinding)]);
   const blindB = renderBlindArm("b", material[armFor("b", blinding)]);
   const { text: schemaText, parsed: schemaJson, schemas } = loadModelComparisonSchema(repoRoot);
-  if (!schemas.has("model-comparison")) {
-    throw new CompareCommandError(
+  if (!schemas.has("bakeoff")) {
+    throw new BakeoffCommandError(
       "no model-comparison schema available (missing .fadeno/schemas and the bundled template) \u2014 cannot validate a judge's output."
     );
   }
-  const validateComparison = schemas.get("model-comparison");
+  const validateComparison = schemas.get("bakeoff");
   const validateAdversarial = compileSharedBlindSpotsValidator(schemaJson);
   const comparisonPrompt = buildComparisonPrompt(
     schemaText,
@@ -36194,12 +36194,12 @@ function preparePrompts(measurement, pair, repoRoot) {
 }
 function unblindAndCheckCoherence(comparison, blinding, errorLabel) {
   if (!isJudgmentVerdict(comparison.verdict)) {
-    throw new CompareCommandError(`${errorLabel} emitted an unrecognized verdict "${comparison.verdict}" \u2014 writing nothing.`);
+    throw new BakeoffCommandError(`${errorLabel} emitted an unrecognized verdict "${comparison.verdict}" \u2014 writing nothing.`);
   }
   const verdict = unblindVerdict(comparison.verdict, blinding);
   const coherence = checkGraftCoherence(verdict, comparison.graft_plan);
   if (coherence != null) {
-    throw new CompareCommandError(`${errorLabel} produced an incoherent judgment (${coherence}) \u2014 writing nothing.`);
+    throw new BakeoffCommandError(`${errorLabel} produced an incoherent judgment (${coherence}) \u2014 writing nothing.`);
   }
   return verdict;
 }
@@ -36224,7 +36224,7 @@ function writeComparisonArtifact(args) {
     confounds.push({
       code: "judge_delivery_unattested",
       arm: "pair",
-      detail: "this judgment was recorded via `fadeno compare --record`, not dispatched by this command \u2014 there is no receipt for who or what produced the JSON, only that it validates against the schema."
+      detail: "this judgment was recorded via `fadeno bakeoff --record`, not dispatched by this command \u2014 there is no receipt for who or what produced the JSON, only that it validates against the schema."
     });
   }
   const graftPlan = comparison.graft_plan != null ? comparison.graft_plan.map((s) => ({
@@ -36235,7 +36235,7 @@ function writeComparisonArtifact(args) {
   })) : void 0;
   const dispatchIds = [pair.primary?.dispatchId, pair.shadow?.dispatchId, judgeDispatchIds?.comparison, judgeDispatchIds?.adversarial].filter((id) => id != null);
   const frontmatter = {
-    kind: "ModelComparison",
+    kind: "Bakeoff",
     baseline: primaryArm.executor ?? "unknown",
     challenger: challengerArm.executor ?? "unknown",
     verdict,
@@ -36252,14 +36252,14 @@ function writeComparisonArtifact(args) {
     "Shared blind spots": renderSharedBlindSpots(adversarial.shared_blind_spots),
     graftPlan: graftPlan != null ? renderGraftPlan(graftPlan) : null
   });
-  const comparisonsRelDir = COMPARISONS_DIR.split("\\").join("/");
+  const comparisonsRelDir = BAKEOFFS_DIR.split("\\").join("/");
   const comparisonPath = `${comparisonsRelDir}/${measurement.pairId}.md`;
   (0, import_node_fs36.mkdirSync)((0, import_node_path36.join)(repoRoot, comparisonsRelDir), { recursive: true });
   (0, import_node_fs36.writeFileSync)((0, import_node_path36.join)(repoRoot, comparisonPath), body, "utf8");
-  const roundTrip = parseModelComparisonFile(repoRoot, comparisonPath);
+  const roundTrip = parseBakeoffFile(repoRoot, comparisonPath);
   if (!roundTrip.valid) {
     (0, import_node_fs36.rmSync)((0, import_node_path36.join)(repoRoot, comparisonPath), { force: true });
-    throw new CompareCommandError(
+    throw new BakeoffCommandError(
       `the rendered artifact for pair ${measurement.pairId.slice(0, 8)} is not readable by the scorecard (${roundTrip.error ?? "unknown"}) \u2014 removed it rather than leave a verdict the reader silently skips.`
     );
   }
@@ -36282,8 +36282,8 @@ function adjudicateViaCommand(measurement, pair, repoRoot, cwd, opts) {
   const comparisonParsed = extractJsonObject(comparisonResult.stdout);
   if (comparisonParsed == null || !prepared.validateComparison(comparisonParsed)) {
     const errors = comparisonParsed == null ? ["could not find a JSON object in the judge's output"] : schemaErrorMessages(prepared.validateComparison);
-    throw new CompareCommandError(
-      `comparison judge dispatch ${comparisonResult.dispatchId.slice(0, 8)} did not return a judgment that validates against model-comparison.schema.json \u2014 writing nothing. ${errors.join("; ")}`
+    throw new BakeoffCommandError(
+      `comparison judge dispatch ${comparisonResult.dispatchId.slice(0, 8)} did not return a judgment that validates against bakeoff.schema.json \u2014 writing nothing. ${errors.join("; ")}`
     );
   }
   const comparison = comparisonParsed;
@@ -36292,7 +36292,7 @@ function adjudicateViaCommand(measurement, pair, repoRoot, cwd, opts) {
   const adversarialParsed = extractJsonObject(adversarialResult.stdout);
   if (adversarialParsed == null || !prepared.validateAdversarial(adversarialParsed)) {
     const errors = adversarialParsed == null ? ["could not find a JSON object in the judge's output"] : schemaErrorMessages(prepared.validateAdversarial);
-    throw new CompareCommandError(
+    throw new BakeoffCommandError(
       `adversarial judge dispatch ${adversarialResult.dispatchId.slice(0, 8)} did not return a judgment that validates \u2014 writing nothing. ${errors.join("; ")}`
     );
   }
@@ -36314,16 +36314,16 @@ function adjudicateViaCommand(measurement, pair, repoRoot, cwd, opts) {
 function measureCompletePair(ref, cwd, repoRoot) {
   const { measurement, pair } = measure(ref, cwd, repoRoot);
   if (pair.primary == null || pair.shadow == null) {
-    throw new CompareCommandError(
+    throw new BakeoffCommandError(
       `pair "${measurement.pairId.slice(0, 8)}" is missing an arm (primary: ${pair.primary != null}, challenger: ${pair.shadow != null}) \u2014 adjudication needs both to compare.`
     );
   }
   return { measurement, pair };
 }
-function runComparePrepare(opts) {
+function runBakeoffPrepare(opts) {
   const ref = (opts.ref ?? "").trim();
   if (ref === "") {
-    throw new CompareCommandError("name a pair id or dispatch id (fadeno compare <pair-id|dispatch-id> --prepare).");
+    throw new BakeoffCommandError("name a pair id or dispatch id (fadeno bakeoff <pair-id|dispatch-id> --prepare).");
   }
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
@@ -36347,20 +36347,20 @@ function runComparePrepare(opts) {
 function readJudgmentFile(cwd, path, label) {
   const abs = (0, import_node_path36.resolve)(cwd, path);
   if (!(0, import_node_fs36.existsSync)(abs)) {
-    throw new CompareCommandError(
-      `no ${label} judgment file at "${path}" \u2014 fadeno compare --record needs the file the judge subagent --prepare told you to spawn actually wrote.`
+    throw new BakeoffCommandError(
+      `no ${label} judgment file at "${path}" \u2014 fadeno bakeoff --record needs the file the judge subagent --prepare told you to spawn actually wrote.`
     );
   }
   try {
     return (0, import_node_fs36.readFileSync)(abs, "utf8");
   } catch (err) {
-    throw new CompareCommandError(`could not read ${label} judgment file "${path}": ${err.message}`);
+    throw new BakeoffCommandError(`could not read ${label} judgment file "${path}": ${err.message}`);
   }
 }
-function runCompareRecord(opts) {
+function runBakeoffRecord(opts) {
   const ref = (opts.ref ?? "").trim();
   if (ref === "") {
-    throw new CompareCommandError("name a pair id or dispatch id (fadeno compare <pair-id|dispatch-id> --record).");
+    throw new BakeoffCommandError("name a pair id or dispatch id (fadeno bakeoff <pair-id|dispatch-id> --record).");
   }
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
@@ -36370,8 +36370,8 @@ function runCompareRecord(opts) {
   const comparisonParsed = extractJsonObject(comparisonText);
   if (comparisonParsed == null || !prepared.validateComparison(comparisonParsed)) {
     const errors = comparisonParsed == null ? ["could not find a JSON object in the recorded comparison judgment"] : schemaErrorMessages(prepared.validateComparison);
-    throw new CompareCommandError(
-      `the recorded comparison judgment (${opts.comparisonPath}) did not validate against model-comparison.schema.json \u2014 writing nothing. ${errors.join("; ")}`
+    throw new BakeoffCommandError(
+      `the recorded comparison judgment (${opts.comparisonPath}) did not validate against bakeoff.schema.json \u2014 writing nothing. ${errors.join("; ")}`
     );
   }
   const comparison = comparisonParsed;
@@ -36380,7 +36380,7 @@ function runCompareRecord(opts) {
   const adversarialParsed = extractJsonObject(adversarialText);
   if (adversarialParsed == null || !prepared.validateAdversarial(adversarialParsed)) {
     const errors = adversarialParsed == null ? ["could not find a JSON object in the recorded adversarial judgment"] : schemaErrorMessages(prepared.validateAdversarial);
-    throw new CompareCommandError(
+    throw new BakeoffCommandError(
       `the recorded adversarial judgment (${opts.adversarialPath}) did not validate \u2014 writing nothing. ${errors.join("; ")}`
     );
   }
@@ -36399,10 +36399,10 @@ function runCompareRecord(opts) {
     now: opts.now ?? /* @__PURE__ */ new Date()
   });
 }
-function runCompare(opts) {
+function runBakeoff(opts) {
   const ref = (opts.ref ?? "").trim();
   if (ref === "") {
-    throw new CompareCommandError("name a pair id or dispatch id (fadeno compare <pair-id|dispatch-id>).");
+    throw new BakeoffCommandError("name a pair id or dispatch id (fadeno bakeoff <pair-id|dispatch-id>).");
   }
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
@@ -36411,7 +36411,7 @@ function runCompare(opts) {
     return { ...measurement, measureOnly: true };
   }
   if (pair.primary == null || pair.shadow == null) {
-    throw new CompareCommandError(
+    throw new BakeoffCommandError(
       `pair "${measurement.pairId.slice(0, 8)}" is missing an arm (primary: ${pair.primary != null}, challenger: ${pair.shadow != null}) \u2014 adjudication needs both to compare.`
     );
   }
@@ -38709,18 +38709,18 @@ Usage:
   fadeno dispatches [--tail n] [--json] Show which executor ran what (.fadeno/dispatches.jsonl)
   fadeno dispatches --cancel <id|tag:h> Stop a running dispatch (SIGTERM to its executor group)
   fadeno dispatches --output <id|last> [--wait <s>]  Print a dispatch's output snapshot verbatim
-  fadeno dispatches --comparisons       Paired primary/shadow scorecard per challenger
+  fadeno dispatches --bakeoffs          Adjudicated bakeoff scorecard per challenger
   fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]
                                         Port a shadow pair's diff into your workspace (git apply --3way)
-  fadeno compare <pair-id|dispatch-id> [--judge <ref>] [--via <driver>]
+  fadeno bakeoff <pair-id|dispatch-id> [--judge <ref>] [--via <driver>]
                                         Measure + adjudicate a shadow pair: two blinded judge dispatches, then
-                                        write .fadeno/comparisons/<pair-id-8>.md
-  fadeno compare <pair-id|dispatch-id> --measure-only
+                                        write .fadeno/bakeoffs/<pair-id-8>.md
+  fadeno bakeoff <pair-id|dispatch-id> --measure-only
                                         Measure a shadow pair's arms only (deterministic; no model is consulted)
-  fadeno compare <pair-id|dispatch-id> --prepare
+  fadeno bakeoff <pair-id|dispatch-id> --prepare
                                         Measure + write the two blinded judge prompts under .fadeno/local/prompts/;
                                         writes no artifact \u2014 for a host coordinator to spawn judge subagents on
-  fadeno compare <pair-id|dispatch-id> --record --comparison <file> --adversarial <file>
+  fadeno bakeoff <pair-id|dispatch-id> --record --comparison <file> --adversarial <file>
                                         Validate two host-delivered judgments and write the artifact
                                         (judge_delivery: host \u2014 see the fadeno-judge skill)
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
@@ -38880,7 +38880,7 @@ var KNOWN_CLI_COMMANDS = /* @__PURE__ */ new Set([
   "attest",
   "dispatches",
   "shadow-apply",
-  "compare",
+  "bakeoff",
   "show",
   "verify"
 ]);
@@ -39124,7 +39124,7 @@ Usage:
   fadeno dispatches --output <id|last|tag:<t>> [--wait [s]]
                                                Print a dispatch's output snapshot verbatim
   fadeno dispatches --cancel <id|tag:<t>>      Stop a running dispatch (SIGTERM to its group)
-  fadeno dispatches --comparisons              Paired primary/shadow scorecard per challenger
+  fadeno dispatches --bakeoffs                 Adjudicated bakeoff scorecard per challenger
 
 Options:
   --tail <n>       Logical entries to show (default 10)
@@ -39727,7 +39727,7 @@ var DIAL_SOURCE_TEXT = {
   user: "user dial",
   base: "base"
 };
-function printCompareArm(arm) {
+function printBakeoffArm(arm) {
   const id = arm.dispatchId != null ? arm.dispatchId.slice(0, 8) : "(missing)";
   const identity = `${arm.executor ?? "(unresolved)"} (${arm.model ?? "?"}${arm.reasoningEffort != null ? `@${arm.reasoningEffort}` : ""})`;
   console.log(`  ${arm.arm.padEnd(10)} ${id}  ${identity}`);
@@ -39755,10 +39755,10 @@ function printCompareArm(arm) {
     }
   }
 }
-function printCompare(result) {
+function printBakeoff(result) {
   const base = result.baselineCommit != null ? result.baselineCommit.slice(0, 8) : "(none)";
   console.log(`pair ${result.pairId.slice(0, 8)}  archetype ${result.archetype ?? "?"}  baseline ${base}`);
-  for (const arm of result.arms) printCompareArm(arm);
+  for (const arm of result.arms) printBakeoffArm(arm);
   if (result.reachDifferential != null && result.reachDifferential.length > 0) {
     console.log("  reach differential \u2014 both arms introduced these; only one wired them to a surface:");
     for (const d of result.reachDifferential) {
@@ -39792,16 +39792,16 @@ function printCompare(result) {
     console.log("  judge delivery: host \u2014 recorded from a file, no dispatch receipt (see Confounds)");
   }
 }
-function printComparePrepare(result) {
+function printBakeoffPrepare(result) {
   const base = result.baselineCommit != null ? result.baselineCommit.slice(0, 8) : "(none)";
   console.log(`pair ${result.pairId.slice(0, 8)}  archetype ${result.archetype ?? "?"}  baseline ${base}`);
-  for (const arm of result.arms) printCompareArm(arm);
+  for (const arm of result.arms) printBakeoffArm(arm);
   console.log("  prepared \u2014 no verdict was formed and nothing was written.");
   console.log(`  spawn a "${result.judgeArchetype}" subagent per prompt file, INDEPENDENTLY:`);
   console.log(`    comparison prompt:  ${result.comparisonPromptPath}`);
   console.log(`    adversarial prompt: ${result.adversarialPromptPath}`);
   console.log(
-    "  then: fadeno compare <pair-id> --record --comparison <file> --adversarial <file>"
+    "  then: fadeno bakeoff <pair-id> --record --comparison <file> --adversarial <file>"
   );
 }
 function printStaleShadows(stale) {
@@ -40065,7 +40065,7 @@ function main(argv) {
         rate: { type: "string" },
         tag: { type: "string" },
         shadow: { type: "string" },
-        comparisons: { type: "boolean" },
+        bakeoffs: { type: "boolean" },
         wait: { type: "string" },
         arm: { type: "string" },
         check: { type: "boolean" },
@@ -40961,8 +40961,8 @@ Or advance manually with the playbook cursor:`);
       return 0;
     }
     case "dispatches": {
-      if (values.comparisons) {
-        const result2 = runDispatchesComparisons({});
+      if (values.bakeoffs) {
+        const result2 = runDispatchesBakeoffs({});
         if (values.json) {
           console.log(JSON.stringify(result2, null, 2));
           return 0;
@@ -41053,30 +41053,30 @@ Or advance manually with the playbook cursor:`);
       );
       return 0;
     }
-    case "compare": {
+    case "bakeoff": {
       const ref = positionals[1];
-      const usage = "Usage: fadeno compare <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--via <driver>]\n   or: fadeno compare <pair-id|dispatch-id> --prepare\n   or: fadeno compare <pair-id|dispatch-id> --record --comparison <file> --adversarial <file>";
+      const usage = "Usage: fadeno bakeoff <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--via <driver>]\n   or: fadeno bakeoff <pair-id|dispatch-id> --prepare\n   or: fadeno bakeoff <pair-id|dispatch-id> --record --comparison <file> --adversarial <file>";
       if (!ref) throw new Error(usage);
       if (values.prepare) {
-        const result2 = runComparePrepare({ ref });
+        const result2 = runBakeoffPrepare({ ref });
         if (values.json) {
           console.log(JSON.stringify(result2, null, 2));
           return 0;
         }
-        printComparePrepare(result2);
+        printBakeoffPrepare(result2);
         return 0;
       }
       if (values.record) {
         if (!values.comparison || !values.adversarial) throw new Error(usage);
-        const result2 = runCompareRecord({ ref, comparisonPath: values.comparison, adversarialPath: values.adversarial });
+        const result2 = runBakeoffRecord({ ref, comparisonPath: values.comparison, adversarialPath: values.adversarial });
         if (values.json) {
           console.log(JSON.stringify(result2, null, 2));
           return 0;
         }
-        printCompare(result2);
+        printBakeoff(result2);
         return 0;
       }
-      const result = runCompare({
+      const result = runBakeoff({
         ref,
         measureOnly: Boolean(values["measure-only"]),
         judgeModel: values.judge ?? null,
@@ -41086,7 +41086,7 @@ Or advance manually with the playbook cursor:`);
         console.log(JSON.stringify(result, null, 2));
         return 0;
       }
-      printCompare(result);
+      printBakeoff(result);
       return 0;
     }
     case "show": {

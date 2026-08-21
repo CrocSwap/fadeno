@@ -492,7 +492,7 @@ not a side effect of this feature.
 2. **Effort for one gnarly review:** `set judge sol@xhigh` → run →
    `clear judge`. No named entries touched.
 3. **New model drops:** the shadow flow above; after evidence accumulates,
-   `fadeno dispatches --comparisons` → `set worker kimi-k3` — the adoption
+   `fadeno dispatches --bakeoffs` → `set worker kimi-k3` — the adoption
    ladder (shadow → dial) with zero authoring.
 4. **Model through a non-home driver:** `set worker opus` refuses (home
    route can't write) and names the fix; `set worker opus --via opencode`

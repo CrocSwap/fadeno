@@ -267,7 +267,7 @@ The dispatch kernel's full horizon is implemented and in daily dogfood.
   3. **Shadow dispatches and model tryouts** — per-slot shadow attachments
      with sha-identical paired prompts and `--rate` sampling, isolated
      worktree delivery with diff-as-artifact, `fadeno dispatches
-     --comparisons`, and the model-tryout starter with its
+     --bakeoffs`, and the model-tryout starter with its
      mandatory-confounds ModelComparison contract.
 
 - **Horizon-7 — dials and the model registry (implemented, `experimental/dials-and-registry.md`; hardened post-0.6 with no compat):**

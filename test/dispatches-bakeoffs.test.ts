@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { DISPATCHES_FILE, DISPATCHES_FORMAT } from '../src/commands/dispatch.ts';
-import { runDispatches, runDispatchesComparisons } from '../src/commands/dispatches.ts';
+import { runDispatches, runDispatchesBakeoffs } from '../src/commands/dispatches.ts';
 import { tempRepo } from './helpers.ts';
 
 function seedLog(root: string, rows: Array<Record<string, unknown> | string>): void {
@@ -158,7 +158,7 @@ test('dispatches comparisons: pairs by challenger, prompt sha mismatch flag, orp
     shadowRequested('missing-primary-99999999-9999-9999-9999-999999999999', { dispatch_id: orphanShadowId, executor: 'lonely-challenger', model: 'lonely-challenger' }),
     shadowCompleted('missing-primary-99999999-9999-9999-9999-999999999999', { dispatch_id: orphanShadowId, executor: 'lonely-challenger', model: 'lonely-challenger', output_bytes: 70, diff_bytes: 0 }),
   ]);
-  const comps = runDispatchesComparisons({ repoRoot: root });
+  const comps = runDispatchesBakeoffs({ repoRoot: root });
   assert.equal(comps.totalPairs, 3);
   const challengerX = comps.groups.find((g) => g.challenger === 'challenger-x')!;
   assert.equal(challengerX.pairs.length, 2);
@@ -183,9 +183,9 @@ test('dispatches comparisons: ModelComparison artifact frontmatter parse + tally
     shadowRequested(PRIMARY_ID, { dispatch_id: SHADOW_ID, executor: 'challenger-x', model: 'challenger-x', prompt_sha256: 'a'.repeat(64) }),
     shadowCompleted(PRIMARY_ID, { dispatch_id: SHADOW_ID, executor: 'challenger-x', model: 'challenger-x', prompt_sha256: 'a'.repeat(64), output_bytes: 9, diff_bytes: 2 }),
   ]);
-  mkdirSync(join(root, '.fadeno', 'comparisons'), { recursive: true });
-  writeFileSync(join(root, '.fadeno', 'comparisons', 'run-01.md'), `---
-kind: ModelComparison
+  mkdirSync(join(root, '.fadeno', 'bakeoffs'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'bakeoffs', 'run-01.md'), `---
+kind: Bakeoff
 baseline: base-worker
 challenger: challenger-x
 verdict: prefer_challenger
@@ -210,8 +210,8 @@ isolation: detached-HEAD worktree vs dirty workspace — dirty case
 none identified
 
 `, 'utf8');
-  writeFileSync(join(root, '.fadeno', 'comparisons', 'run-02.md'), `---
-kind: ModelComparison
+  writeFileSync(join(root, '.fadeno', 'bakeoffs', 'run-02.md'), `---
+kind: Bakeoff
 baseline: base-worker
 challenger: challenger-x
 verdict: prefer_baseline
@@ -232,8 +232,8 @@ isolation: clean worktree
 none identified
 
 `, 'utf8');
-  writeFileSync(join(root, '.fadeno', 'comparisons', 'run-03.md'), `---
-kind: ModelComparison
+  writeFileSync(join(root, '.fadeno', 'bakeoffs', 'run-03.md'), `---
+kind: Bakeoff
 baseline: base-worker
 challenger: challenger-x
 verdict: tie
@@ -251,7 +251,7 @@ confounds here
 none identified
 
 `, 'utf8');
-  const comps = runDispatchesComparisons({ repoRoot: root });
+  const comps = runDispatchesBakeoffs({ repoRoot: root });
   assert.equal(comps.totalComparisons, 3);
   const group = comps.groups.find((g) => g.challenger === 'challenger-x')!;
   assert.equal(group.tally.preferChallenger, 1);
@@ -269,13 +269,13 @@ none identified
 
 test('dispatches comparisons: empty states friendly output', (t) => {
   const root = tempRepo(t);
-  const comps = runDispatchesComparisons({ repoRoot: root });
+  const comps = runDispatchesBakeoffs({ repoRoot: root });
   assert.equal(comps.totalPairs, 0);
   assert.equal(comps.totalComparisons, 0);
   assert.match(comps.lines.join('\n'), /No shadow pairs recorded/);
   assert.match(comps.summary, /No comparisons to show/);
-  mkdirSync(join(root, '.fadeno', 'comparisons'), { recursive: true });
-  const comps2 = runDispatchesComparisons({ repoRoot: root });
+  mkdirSync(join(root, '.fadeno', 'bakeoffs'), { recursive: true });
+  const comps2 = runDispatchesBakeoffs({ repoRoot: root });
   assert.equal(comps2.totalPairs, 0);
   assert.match(comps2.lines.join('\n'), /No ModelComparison artifacts/);
 });
@@ -287,7 +287,7 @@ test('dispatches comparisons: missing primary renders orphan not dropped (json)'
     shadowRequested('no-such-primary-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', { dispatch_id: orphanId, executor: 'orphan-challenger', model: 'orphan-challenger', prompt_sha256: 'a'.repeat(64) }),
     shadowCompleted('no-such-primary-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', { dispatch_id: orphanId, executor: 'orphan-challenger', model: 'orphan-challenger', prompt_sha256: 'a'.repeat(64), output_bytes: 11, diff_bytes: 3 }),
   ]);
-  const comps = runDispatchesComparisons({ repoRoot: root });
+  const comps = runDispatchesBakeoffs({ repoRoot: root });
   assert.equal(comps.totalPairs, 1);
   assert.equal(comps.groups[0]!.pairs[0]!.orphan, true);
   const payload = JSON.parse(JSON.stringify(comps)) as typeof comps;
@@ -311,7 +311,7 @@ test('dispatches: shadow rows discrimination via --json shadow fields (diffBytes
 
 // `dispatch.ts` already writes diff_snapshot/diff_bytes onto an --isolated
 // primary's own completion row, and the parser already lifts them into
-// DispatchEntry (see the round-trip test above) — but DispatchComparisonPair
+// DispatchEntry (see the round-trip test above) — but DispatchBakeoffPair
 // used to drop them on the floor, so a paired --isolated primary rendered no
 // diff at all even though the evidence was sitting right there.
 test('dispatches comparisons: a paired primary reports its own diff, workspace, and baseline_commit', (t) => {
@@ -334,7 +334,7 @@ test('dispatches comparisons: a paired primary reports its own diff, workspace, 
     shadowRequested(PRIMARY_ID, { dispatch_id: SHADOW_ID, pair_id: 'pair-primary-diff', executor: 'challenger-x', model: 'challenger-x' }),
     shadowCompleted(PRIMARY_ID, { dispatch_id: SHADOW_ID, pair_id: 'pair-primary-diff', executor: 'challenger-x', model: 'challenger-x', output_bytes: 30, diff_bytes: 3 }),
   ]);
-  const comps = runDispatchesComparisons({ repoRoot: root });
+  const comps = runDispatchesBakeoffs({ repoRoot: root });
   assert.equal(comps.totalPairs, 1);
   const pair = comps.groups[0]!.pairs[0]!;
   assert.equal(pair.primary.diffBytes, 7);
@@ -370,7 +370,7 @@ test('dispatches comparisons: pairing prefers pair_id, and still falls back for 
     shadowRequested(PRIMARY_ID, { dispatch_id: SHADOW_ID, pair_id: 'pair-wins', executor: 'challenger-x', model: 'challenger-x' }),
     shadowCompleted(PRIMARY_ID, { dispatch_id: SHADOW_ID, pair_id: 'pair-wins', executor: 'challenger-x', model: 'challenger-x', output_bytes: 9, diff_bytes: 1 }),
   ]);
-  const comps = runDispatchesComparisons({ repoRoot: root });
+  const comps = runDispatchesBakeoffs({ repoRoot: root });
   const pair = comps.groups[0]!.pairs[0]!;
   assert.equal(pair.primaryId, otherPrimaryId);
   assert.equal(pair.primary.executor, 'true-primary');
@@ -387,7 +387,7 @@ test('dispatches comparisons: pairing prefers pair_id, and still falls back for 
     shadowRequested(legacyPrimaryId, { dispatch_id: legacyShadowId, executor: 'challenger-x', model: 'challenger-x' }),
     shadowCompleted(legacyPrimaryId, { dispatch_id: legacyShadowId, executor: 'challenger-x', model: 'challenger-x', output_bytes: 5, diff_bytes: 2 }),
   ]);
-  const legacyComps = runDispatchesComparisons({ repoRoot: legacyRoot });
+  const legacyComps = runDispatchesBakeoffs({ repoRoot: legacyRoot });
   assert.equal(legacyComps.totalPairs, 1);
   assert.equal(legacyComps.groups[0]!.pairs[0]!.orphan, false);
   assert.equal(legacyComps.groups[0]!.pairs[0]!.primaryId, legacyPrimaryId);
@@ -396,7 +396,7 @@ test('dispatches comparisons: pairing prefers pair_id, and still falls back for 
 // A shadow refused before it ever ran (capacity, eligibility, write posture,
 // a constraint, or a baseline that could not be snapshotted) used to render
 // as a row of "?" — indistinguishable from a challenger that crashed with no
-// output. `formatComparisonPair` must name the refusal instead.
+// output. `formatBakeoffPair` must name the refusal instead.
 test('dispatches comparisons: a refused shadow renders as refused with its predicate, not "?"', (t) => {
   const root = tempRepo(t);
   const refusedShadowId = 'shadow-66666666-6666-6666-6666-666666666666';
@@ -418,7 +418,7 @@ test('dispatches comparisons: a refused shadow renders as refused with its predi
       refusal: { predicate: 'shadow_cap', message: '4 shadows are already running and the live cap is 4.' },
     },
   ]);
-  const comps = runDispatchesComparisons({ repoRoot: root });
+  const comps = runDispatchesBakeoffs({ repoRoot: root });
   assert.equal(comps.totalPairs, 1);
   const pair = comps.groups[0]!.pairs[0]!;
   assert.deepEqual(pair.shadow.refusal, { predicate: 'shadow_cap', message: '4 shadows are already running and the live cap is 4.' });

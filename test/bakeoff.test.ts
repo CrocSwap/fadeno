@@ -5,19 +5,19 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import {
-  COMPARE_PROMPT_MARKER,
+  BAKEOFF_PROMPT_MARKER,
   deriveBlinding,
-  runCompare,
-  runComparePrepare,
-  runCompareRecord,
-  CompareCommandError,
-} from '../src/commands/compare.ts';
-import { parseModelComparisonFile, runDispatchesComparisons } from '../src/commands/dispatches.ts';
+  runBakeoff,
+  runBakeoffPrepare,
+  runBakeoffRecord,
+  BakeoffCommandError,
+} from '../src/commands/bakeoff.ts';
+import { parseBakeoffFile, runDispatchesBakeoffs } from '../src/commands/dispatches.ts';
 import { tempRepo } from './helpers.ts';
 
 /** A fake `judge` command: reads the prompt on stdin, and answers with whichever canned JSON matches its task marker. */
 function judgeCommand(comparisonJson: unknown, adversarialJson: unknown): string[] {
-  const marker = JSON.stringify(COMPARE_PROMPT_MARKER.adversarial);
+  const marker = JSON.stringify(BAKEOFF_PROMPT_MARKER.adversarial);
   const adv = JSON.stringify(JSON.stringify(adversarialJson));
   const cmp = JSON.stringify(JSON.stringify(comparisonJson));
   const script =
@@ -40,7 +40,7 @@ function git(root: string, ...args: string[]): void {
 
 /**
  * A repo with one committed baseline and a pair of diff artifacts, seeded
- * straight into the ledger. `runCompare` reads evidence and git, so the
+ * straight into the ledger. `runBakeoff` reads evidence and git, so the
  * fixture has to be a real commit — not a stub — for the baseline probes to
  * mean anything.
  */
@@ -141,7 +141,7 @@ test('the reach differential names a value one arm wired to a surface and the ot
       diffFor('src/commands/steering.ts', ['  delegate_to: DelegateTo;']) +
       diffFor('src/cli.ts', ['      delegate_to: result.delegate_to ?? null,']),
   });
-  const result = runCompare({ repoRoot: root, ref: 'pair0001-aaaa-bbbb-cccc-dddddddddddd', measureOnly: true });
+  const result = runBakeoff({ repoRoot: root, ref: 'pair0001-aaaa-bbbb-cccc-dddddddddddd', measureOnly: true });
 
   assert.deepEqual(result.reachDifferential, [
     { identifier: 'delegate_to', reachedIn: 'challenger', unreachedIn: 'primary' },
@@ -157,7 +157,7 @@ test('reach is withheld, not reported clean, when the repo declares no surfaces'
     primaryDiff: diffFor('src/commands/steering.ts', ['  delegate_to: DelegateTo;']),
     challengerDiff: diffFor('src/commands/steering.ts', ['  delegate_to: DelegateTo;']),
   });
-  const result = runCompare({ repoRoot: root, ref: 'pair0001', measureOnly: true });
+  const result = runBakeoff({ repoRoot: root, ref: 'pair0001', measureOnly: true });
 
   // `null`, never `[]`. An empty list reads as "everything reached a
   // consumer"; absent a declaration this cannot tell that from "there was
@@ -177,7 +177,7 @@ test('a MOVED symbol is not reported as a duplication', (t) => {
       diffFor('src/shared.ts', ["export const SHARED_MARK = '# fadeno:managed';"]),
     challengerDiff: diffFor('src/other.ts', ["export const SHARED_MARK = '# fadeno:managed';"]),
   });
-  const result = runCompare({ repoRoot: root, ref: 'pair0001', measureOnly: true });
+  const result = runBakeoff({ repoRoot: root, ref: 'pair0001', measureOnly: true });
 
   const primary = result.arms.find((a) => a.arm === 'primary')!;
   assert.deepEqual(primary.signals?.redefined, [], 'the primary moved the symbol, it did not duplicate it');
@@ -198,7 +198,7 @@ test('confounds are stamped from the ledger, and generated files are called out'
     primaryRowExtra: { ignored_output_discarded: { paths: ['dist/'] }, exit_code: 1 },
     challengerRowExtra: { carry_mutated: true, workspace_mode_degraded: 'worktree_unavailable' },
   });
-  const result = runCompare({ repoRoot: root, ref: 'pair0001', measureOnly: true });
+  const result = runBakeoff({ repoRoot: root, ref: 'pair0001', measureOnly: true });
   const codes = result.confounds.map((c) => c.code).sort();
 
   assert.ok(codes.includes('ignored_output_discarded'));
@@ -222,17 +222,17 @@ test('a judge with no command lane refuses with an actionable message, and write
   // borrows verbatim: `fadeno dial judge <model> --via <driver>`.
   const root = seedPair(t, { primaryDiff: diffFor('src/a.ts', ['+x']), challengerDiff: diffFor('src/b.ts', ['+y']) });
   assert.throws(
-    () => runCompare({ repoRoot: root, ref: 'pair0001' }),
+    () => runBakeoff({ repoRoot: root, ref: 'pair0001' }),
     (err: unknown) =>
-      err instanceof CompareCommandError &&
+      err instanceof BakeoffCommandError &&
       /fadeno dial judge <model> --via <driver>/.test((err as Error).message),
   );
-  assert.equal(existsSync(join(root, '.fadeno', 'comparisons')), false, 'a refused adjudication must write nothing');
+  assert.equal(existsSync(join(root, '.fadeno', 'bakeoffs')), false, 'a refused adjudication must write nothing');
 });
 
 test('--measure-only keeps working exactly as before, needing no judge dial at all', (t) => {
   const root = seedPair(t, { primaryDiff: diffFor('src/a.ts', ['+x']), challengerDiff: diffFor('src/b.ts', ['+y']) });
-  const result = runCompare({ repoRoot: root, ref: 'pair0001', measureOnly: true });
+  const result = runBakeoff({ repoRoot: root, ref: 'pair0001', measureOnly: true });
   assert.equal(result.measureOnly, true);
   assert.ok(!('verdict' in result));
 });
@@ -255,8 +255,8 @@ test('a dispatch that fails, or a judgment that fails schema validation, writes 
     challengerDiff: diffFor('src/b.ts', ['+y']),
     judgeCommand: failingJudgeCommand(),
   });
-  assert.throws(() => runCompare({ repoRoot: failing, ref: 'pair0001' }), CompareCommandError);
-  assert.equal(existsSync(join(failing, '.fadeno', 'comparisons')), false);
+  assert.throws(() => runBakeoff({ repoRoot: failing, ref: 'pair0001' }), BakeoffCommandError);
+  assert.equal(existsSync(join(failing, '.fadeno', 'bakeoffs')), false);
 
   // The dispatch succeeds, but the JSON it emits does not validate — an
   // unrecognized verdict rather than one of the five the schema names.
@@ -265,8 +265,8 @@ test('a dispatch that fails, or a judgment that fails schema validation, writes 
     challengerDiff: diffFor('src/b.ts', ['+y']),
     judgeCommand: judgeCommand({ verdict: 'definitely_the_best', criteria: [], shared_blind_spots: [] }, GOOD_ADVERSARIAL),
   });
-  assert.throws(() => runCompare({ repoRoot: invalidVerdict, ref: 'pair0001' }), CompareCommandError);
-  assert.equal(existsSync(join(invalidVerdict, '.fadeno', 'comparisons')), false);
+  assert.throws(() => runBakeoff({ repoRoot: invalidVerdict, ref: 'pair0001' }), BakeoffCommandError);
+  assert.equal(existsSync(join(invalidVerdict, '.fadeno', 'bakeoffs')), false);
 });
 
 test('a graft judgment round-trips through render, unblinds from_arm, and is accepted + counted by the scorecard', (t) => {
@@ -296,12 +296,12 @@ test('a graft judgment round-trips through render, unblinds from_arm, and is acc
     judgeCommand: judgeCommand(comparisonJudgment, adversarialJudgment),
   });
 
-  const result = runCompare({ repoRoot: root, ref: pairId });
+  const result = runBakeoff({ repoRoot: root, ref: pairId });
   assert.equal(result.measureOnly, false);
   assert.equal(result.verdict, 'graft');
   // The FULL pair id: an 8-char prefix lets two pairs overwrite each other's
   // verdict silently.
-  assert.equal(result.comparisonPath, `.fadeno/comparisons/${pairId}.md`);
+  assert.equal(result.comparisonPath, `.fadeno/bakeoffs/${pairId}.md`);
 
   const written = readFileSync(join(root, result.comparisonPath), 'utf8');
   assert.match(written, new RegExp(`from_arm: ${graftFromArm}`), 'from_arm must be unblinded to the real arm name, not left as a/b');
@@ -310,11 +310,11 @@ test('a graft judgment round-trips through render, unblinds from_arm, and is acc
   assert.match(written, /## Confounds/);
   assert.match(written, /judge's own observation/);
 
-  const scorecard = runDispatchesComparisons({ repoRoot: root });
+  const scorecard = runDispatchesBakeoffs({ repoRoot: root });
   const group = scorecard.groups.find((g) => g.comparisons.some((c) => c.file === result.comparisonPath));
   assert.ok(group, 'the written artifact must be findable in its own challenger group');
   const artifact = group!.comparisons.find((c) => c.file === result.comparisonPath)!;
-  assert.equal(artifact.valid, true, 'parseModelComparisonFile must accept what this command wrote');
+  assert.equal(artifact.valid, true, 'parseBakeoffFile must accept what this command wrote');
   assert.equal(artifact.verdict, 'graft');
   assert.equal(group!.tally.graft, 1, 'a graft verdict must be counted, not silently dropped');
 });
@@ -342,12 +342,12 @@ test('a refused arm blocks adjudication before any judge is dispatched', (t) => 
   });
 
   assert.throws(
-    () => runCompare({ repoRoot: root, ref: 'pair0001' }),
-    (err: unknown) => err instanceof CompareCommandError
+    () => runBakeoff({ repoRoot: root, ref: 'pair0001' }),
+    (err: unknown) => err instanceof BakeoffCommandError
       && /cannot be adjudicated/.test((err as Error).message)
       && /shadow_containment/.test((err as Error).message),
   );
-  assert.equal(existsSync(join(root, '.fadeno', 'comparisons')), false, 'nothing may be written for a pair that cannot be judged');
+  assert.equal(existsSync(join(root, '.fadeno', 'bakeoffs')), false, 'nothing may be written for a pair that cannot be judged');
 });
 
 test('the graft plan reaches the returned result, not only the written file', (t) => {
@@ -372,7 +372,7 @@ test('the graft plan reaches the returned result, not only the written file', (t
     ),
   });
 
-  const result = runCompare({ repoRoot: root, ref: pairId });
+  const result = runBakeoff({ repoRoot: root, ref: pairId });
   assert.equal(result.measureOnly, false);
   assert.ok(result.graftPlan != null, 'a graft verdict must return its plan');
   assert.equal(result.graftPlan!.length, 1);
@@ -410,7 +410,7 @@ test('the verdict is unblinded, so a swapped mapping cannot invert the recorded 
     ),
   });
 
-  const result = runCompare({ repoRoot: root, ref: pairId });
+  const result = runBakeoff({ repoRoot: root, ref: pairId });
   assert.equal(result.measureOnly, false);
   assert.equal(result.verdict, 'prefer_challenger', 'prefer_a under a swapped mapping is the CHALLENGER');
 
@@ -437,12 +437,12 @@ test('a judgment using the artifact vocabulary is refused, not silently reinterp
     ),
   });
   assert.throws(
-    () => runCompare({ repoRoot: root, ref: 'pair0001' }),
-    (err: unknown) => err instanceof CompareCommandError
+    () => runBakeoff({ repoRoot: root, ref: 'pair0001' }),
+    (err: unknown) => err instanceof BakeoffCommandError
       && /does not validate|did not return a judgment that validates/.test((err as Error).message)
       && /prefer_a/.test((err as Error).message),
   );
-  assert.equal(existsSync(join(root, '.fadeno', 'comparisons')), false);
+  assert.equal(existsSync(join(root, '.fadeno', 'bakeoffs')), false);
 });
 
 test('two pairs sharing eight hex characters do not overwrite each other', (t) => {
@@ -466,13 +466,13 @@ test('two pairs sharing eight hex characters do not overwrite each other', (t) =
     judgeCommand: judgeCommand(judgment, { shared_blind_spots: [] }),
   });
 
-  const first = runCompare({ repoRoot: root, ref: a });
-  const second = runCompare({ repoRoot: root, ref: b });
+  const first = runBakeoff({ repoRoot: root, ref: a });
+  const second = runBakeoff({ repoRoot: root, ref: b });
   assert.notEqual(first.comparisonPath, second.comparisonPath, 'each pair needs its own artifact path');
   assert.ok(existsSync(join(root, first.comparisonPath)));
   assert.ok(existsSync(join(root, second.comparisonPath)));
 
-  const scorecard = runDispatchesComparisons({ repoRoot: root });
+  const scorecard = runDispatchesBakeoffs({ repoRoot: root });
   assert.equal(scorecard.totalComparisons, 2, 'both verdicts must survive');
 });
 
@@ -495,9 +495,9 @@ test('an artifact the scorecard cannot read is removed, not left to be silently 
   });
   // Break the contract from the reader's side: drop a required section name so
   // whatever render produces cannot parse.
-  const result = runCompare({ repoRoot: root, ref: 'pair0001' });
+  const result = runBakeoff({ repoRoot: root, ref: 'pair0001' });
   const written = readFileSync(join(root, result.comparisonPath), 'utf8');
-  const reparsed = parseModelComparisonFile(root, result.comparisonPath);
+  const reparsed = parseBakeoffFile(root, result.comparisonPath);
   assert.equal(reparsed.valid, true, 'what compare writes must be what the scorecard reads');
   assert.match(written, /## Shared blind spots/);
 });
@@ -520,7 +520,7 @@ test("the judge's own prose is unblinded too, so the artifact never names one ar
       { shared_blind_spots: [] },
     ),
   });
-  const result = runCompare({ repoRoot: root, ref: 'pair0001' });
+  const result = runBakeoff({ repoRoot: root, ref: 'pair0001' });
   const written = readFileSync(join(root, result.comparisonPath), 'utf8');
   const blinding = deriveBlinding('pair0001-aaaa-bbbb-cccc-dddddddddddd');
 
@@ -536,7 +536,7 @@ test("the judge's own prose is unblinded too, so the artifact never names one ar
 test('--prepare measures and writes the two blinded prompts, and writes no artifact', (t) => {
   // No judgeCommand configured at all — --prepare must need no judge dial.
   const root = seedPair(t, { primaryDiff: diffFor('src/a.ts', ['+x']), challengerDiff: diffFor('src/b.ts', ['+y']) });
-  const result = runComparePrepare({ repoRoot: root, ref: 'pair0001' });
+  const result = runBakeoffPrepare({ repoRoot: root, ref: 'pair0001' });
 
   assert.equal(result.prepared, true);
   assert.equal(result.judgeArchetype, 'judge');
@@ -544,9 +544,9 @@ test('--prepare measures and writes the two blinded prompts, and writes no artif
   assert.ok(existsSync(join(root, result.adversarialPromptPath)));
   const comparisonPrompt = readFileSync(join(root, result.comparisonPromptPath), 'utf8');
   const adversarialPrompt = readFileSync(join(root, result.adversarialPromptPath), 'utf8');
-  assert.match(comparisonPrompt, /fadeno-compare-task: comparison/);
-  assert.match(adversarialPrompt, /fadeno-compare-task: adversarial/);
-  assert.equal(existsSync(join(root, '.fadeno', 'comparisons')), false, '--prepare must write no artifact');
+  assert.match(comparisonPrompt, /fadeno-bakeoff-task: comparison/);
+  assert.match(adversarialPrompt, /fadeno-bakeoff-task: adversarial/);
+  assert.equal(existsSync(join(root, '.fadeno', 'bakeoffs')), false, '--prepare must write no artifact');
 });
 
 test('--prepare refuses an incomplete pair before writing anything, same as the one-shot path', (t) => {
@@ -559,8 +559,8 @@ test('--prepare refuses an incomplete pair before writing anything, same as the 
     },
   });
   assert.throws(
-    () => runComparePrepare({ repoRoot: root, ref: 'pair0001' }),
-    (err: unknown) => err instanceof CompareCommandError && /cannot be adjudicated/.test((err as Error).message),
+    () => runBakeoffPrepare({ repoRoot: root, ref: 'pair0001' }),
+    (err: unknown) => err instanceof BakeoffCommandError && /cannot be adjudicated/.test((err as Error).message),
   );
   assert.equal(existsSync(join(root, '.fadeno', 'local', 'prompts')), false, 'a refused pair gets no prompts either');
 });
@@ -581,7 +581,7 @@ test('--record reconstructs the same blinding and writes an artifact byte-identi
     challengerDiff: diffFor('src/b.ts', ['+y']),
     judgeCommand: judgeCommand(judgment, adversarial),
   });
-  const oneShot = runCompare({ repoRoot: oneShotRoot, ref: 'pair0001' });
+  const oneShot = runBakeoff({ repoRoot: oneShotRoot, ref: 'pair0001' });
   const oneShotBody = readFileSync(join(oneShotRoot, oneShot.comparisonPath), 'utf8');
 
   // A SEPARATE, identically-seeded root — --prepare/--record need no judge
@@ -590,12 +590,12 @@ test('--record reconstructs the same blinding and writes an artifact byte-identi
     primaryDiff: diffFor('src/a.ts', ['+x']),
     challengerDiff: diffFor('src/b.ts', ['+y']),
   });
-  runComparePrepare({ repoRoot: recordRoot, ref: 'pair0001' });
+  runBakeoffPrepare({ repoRoot: recordRoot, ref: 'pair0001' });
   const comparisonFile = join(recordRoot, 'judge-comparison-result.json');
   const adversarialFile = join(recordRoot, 'judge-adversarial-result.json');
   writeFileSync(comparisonFile, JSON.stringify(judgment));
   writeFileSync(adversarialFile, JSON.stringify(adversarial));
-  const recorded = runCompareRecord({
+  const recorded = runBakeoffRecord({
     repoRoot: recordRoot,
     ref: 'pair0001',
     comparisonPath: comparisonFile,
@@ -621,15 +621,15 @@ test('--record reconstructs the same blinding and writes an artifact byte-identi
 
 test('--record refuses a fabricated or schema-invalid judgment file, and writes nothing', (t) => {
   const root = seedPair(t, { primaryDiff: diffFor('src/a.ts', ['+x']), challengerDiff: diffFor('src/b.ts', ['+y']) });
-  runComparePrepare({ repoRoot: root, ref: 'pair0001' });
+  runBakeoffPrepare({ repoRoot: root, ref: 'pair0001' });
 
   // The file does not exist at all.
   assert.throws(
-    () => runCompareRecord({
+    () => runBakeoffRecord({
       repoRoot: root, ref: 'pair0001',
       comparisonPath: join(root, 'missing.json'), adversarialPath: join(root, 'also-missing.json'),
     }),
-    CompareCommandError,
+    BakeoffCommandError,
   );
 
   // The file exists and is valid JSON, but not a shape the schema accepts —
@@ -641,13 +641,13 @@ test('--record refuses a fabricated or schema-invalid judgment file, and writes 
   const goodAdversarial = join(root, 'good-adversarial.json');
   writeFileSync(goodAdversarial, JSON.stringify(GOOD_ADVERSARIAL));
   assert.throws(
-    () => runCompareRecord({
+    () => runBakeoffRecord({
       repoRoot: root, ref: 'pair0001',
       comparisonPath: fabricated, adversarialPath: goodAdversarial,
     }),
-    CompareCommandError,
+    BakeoffCommandError,
   );
-  assert.equal(existsSync(join(root, '.fadeno', 'comparisons')), false, 'a refused record must write nothing');
+  assert.equal(existsSync(join(root, '.fadeno', 'bakeoffs')), false, 'a refused record must write nothing');
 });
 
 test('judge_delivery is command on the one-shot path and host on --record, and the scorecard can tell them apart', (t) => {
@@ -663,29 +663,29 @@ test('judge_delivery is command on the one-shot path and host on --record, and t
     challengerDiff: diffFor('src/b.ts', ['+y']),
     judgeCommand: judgeCommand(judgment, GOOD_ADVERSARIAL),
   });
-  const commandResult = runCompare({ repoRoot: commandRoot, ref: 'pair0001' });
+  const commandResult = runBakeoff({ repoRoot: commandRoot, ref: 'pair0001' });
   assert.equal(commandResult.judgeDelivery, 'command');
   assert.ok(commandResult.judgeDispatchIds != null, 'the command lane must name its two judge dispatches');
-  const commandArtifact = parseModelComparisonFile(commandRoot, commandResult.comparisonPath);
+  const commandArtifact = parseBakeoffFile(commandRoot, commandResult.comparisonPath);
   assert.equal(commandArtifact.judgeDelivery, 'command');
   assert.ok(!commandResult.confounds.some((c) => c.code === 'judge_delivery_unattested'));
 
   const hostRoot = seedPair(t, { primaryDiff: diffFor('src/a.ts', ['+x']), challengerDiff: diffFor('src/b.ts', ['+y']) });
-  runComparePrepare({ repoRoot: hostRoot, ref: 'pair0001' });
+  runBakeoffPrepare({ repoRoot: hostRoot, ref: 'pair0001' });
   const cmpFile = join(hostRoot, 'cmp.json');
   const advFile = join(hostRoot, 'adv.json');
   writeFileSync(cmpFile, JSON.stringify(judgment));
   writeFileSync(advFile, JSON.stringify(GOOD_ADVERSARIAL));
-  const hostResult = runCompareRecord({ repoRoot: hostRoot, ref: 'pair0001', comparisonPath: cmpFile, adversarialPath: advFile });
+  const hostResult = runBakeoffRecord({ repoRoot: hostRoot, ref: 'pair0001', comparisonPath: cmpFile, adversarialPath: advFile });
   assert.equal(hostResult.judgeDelivery, 'host');
   assert.equal(hostResult.judgeDispatchIds, null, 'nothing was dispatched, so there is no receipt to name');
   assert.ok(
     hostResult.confounds.some((c) => c.code === 'judge_delivery_unattested'),
     'a host-delivered judgment must be disclosed as a confound, not just a frontmatter field',
   );
-  const hostArtifact = parseModelComparisonFile(hostRoot, hostResult.comparisonPath);
+  const hostArtifact = parseBakeoffFile(hostRoot, hostResult.comparisonPath);
   assert.equal(hostArtifact.judgeDelivery, 'host');
 
-  const scorecard = runDispatchesComparisons({ repoRoot: hostRoot });
+  const scorecard = runDispatchesBakeoffs({ repoRoot: hostRoot });
   assert.match(scorecard.lines.join('\n'), /judge delivery: host/);
 });

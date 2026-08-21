@@ -33,10 +33,10 @@ function pluginSurfaceFinding(root: string, env: NodeJS.ProcessEnv, version: str
 
 test('a same-version plugin with a MISSING bundled template is reported, not called a match', (t) => {
   // Version equality is not content equality, and this check used to assert
-  // the stronger one. `model-comparison.schema.json` shipped in templates/ and
+  // the stronger one. `bakeoff.schema.json` shipped in templates/ and
   // was absent from both bundled snapshots for five commits at the SAME
-  // version, so `fadeno compare` from a managed runtime failed with "no
-  // model-comparison schema available" while doctor reported a match. A
+  // version, so `fadeno bakeoff` from a managed runtime failed with "no
+  // bakeoff schema available" while doctor reported a match. A
   // version bump does not rebuild the bundle; only `build:bin` does.
   const { root, pluginRoot, env } = seedSurface(t);
   // Match this CLI exactly, so the version halves agree and the ONLY thing
@@ -46,9 +46,9 @@ test('a same-version plugin with a MISSING bundled template is reported, not cal
   const complete = pluginSurfaceFinding(root, env, version);
   assert.equal(complete?.severity, 'ok', 'a complete bundle at the same version is fine');
 
-  rmSync(join(pluginRoot, 'bin', 'templates', 'common', 'fadeno', 'schemas', 'model-comparison.schema.json'), { force: true });
+  rmSync(join(pluginRoot, 'bin', 'templates', 'common', 'fadeno', 'schemas', 'bakeoff.schema.json'), { force: true });
   const stale = pluginSurfaceFinding(root, env, version);
   assert.equal(stale?.severity, 'warning', 'a missing bundled template must not read as a match');
   assert.match(stale!.detail, /bundled templates are stale/);
-  assert.match(stale!.detail, /model-comparison\.schema\.json/);
+  assert.match(stale!.detail, /bakeoff\.schema\.json/);
 });

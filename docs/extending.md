@@ -509,14 +509,14 @@ alive and has emitted no output for five minutes (since start or since
 `WARNING: no output observed for <duration> (non-gating)` — idle never signals,
 gates, or alters deadlines.
 
-**Comparisons.** `fadeno dispatches --comparisons [--json]` scans the ledger,
+**Comparisons.** `fadeno dispatches --bakeoffs [--json]` scans the ledger,
 pairs every shadow row with its primary via `primary_dispatch_id`, groups pairs
 by challenger executor, and renders per pair: both id8s, archetype,
 `primary executor (model) exit N, output B bytes` vs
 `shadow executor (model) exit N, output B bytes, diff D bytes`, with a loud
 `PROMPT SHA MISMATCH` flag if the two request rows ever disagree, and an
 `[orphan]` mark when the primary row is missing. It then scans
-`.fadeno/comparisons/*.md` (`kind: ModelComparison`) and renders one verdict
+`.fadeno/bakeoffs/*.md` (`kind: Bakeoff`) and renders one verdict
 line per artifact under its challenger, plus a per-challenger tally
 (`N pairs, M comparisons: X prefer_challenger / Y prefer_baseline / Z
 tie/inconclusive`). Missing dir or no pairs is a friendly empty output, exit 0.
@@ -551,12 +551,18 @@ shadow (challenger, zero risk) → override (trial primary, instant revert) → 
 
 **MANDATORY confound.** A shadow runs against a detached-HEAD worktree, so
 when the primary workspace was dirty the two saw **different trees despite
-byte-identical prompts**. Every `ModelComparison` must state which case it was
-in its `## Confounds` section (along with delivery transport, tool
-availability, effort pinning, and isolation differences). The `model-tryout`
-starter's judge prompt demands this, and the `judge-provider-differs`
-guidance: the judge's provider should differ from both candidates, or the
-conflict is recorded.
+byte-identical prompts**. Every `Bakeoff` artifact states which case it was in
+its `## Confounds` section, along with delivery transport, unattested effort,
+discarded gitignored output, a mutated carried path, an unshared baseline, and
+whether the judge's provider matched either arm.
+
+Those confounds are **stamped by the kernel from the ledger**, never written
+by the judge. A confound the ledger already knows is evidence; one a model
+recalls is prose, and asking the judge to disclose them would make the
+disclosure depend on what it happened to notice. A judge sharing a provider
+with an arm is a stamped confound rather than a refusal — a disclosure, not an
+error — and the judge never sees it, because it is a caveat about trusting the
+verdict rather than a fact about the pair.
 
 ### Cross-harness subagents (dispatch proxies and steering)
 

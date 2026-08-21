@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://fadeno.dev/schemas/model-comparison.schema.json",
-  "title": "Fadeno Model Comparison",
+  "$id": "https://fadeno.dev/schemas/bakeoff.schema.json",
+  "title": "Fadeno Bakeoff Judgment",
   "description": "A judge's structured judgment of one shadow pair. Written against BLINDED arms (arm_a / arm_b); the kernel unblinds when it renders the ModelComparison artifact, so a judgment can never see which arm was the primary. Deterministic measurements are supplied to the judge and are never restated here \u2014 the kernel already knows them, and a judge's recollection of a number is not evidence.",
   "type": "object",
   "required": [

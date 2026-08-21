@@ -387,7 +387,7 @@ scaffold differences contaminate form-level judgments. Guidance (not
 enforcement): the judge's provider should differ from both candidates, or
 the conflict is recorded in the artifact.
 
-**Reporting:** `fadeno dispatches --comparisons` renders paired
+**Reporting:** `fadeno dispatches --bakeoffs` renders paired
 primary/shadow rows and any `ModelComparison` artifacts as a running
 scorecard per challenger. Accumulation is the point; single comparisons are
 noise.
@@ -435,7 +435,7 @@ one base) while `set`/`clear` preserve them. `fadeno status` does not render
 attachments yet — the loadout tables (show/list, stale-attachment warnings
 included) are the visibility surface. `ModelComparison` artifacts are
 committable files under `.fadeno/comparisons/` with frozen frontmatter;
-`fadeno dispatches --comparisons` renders ledger pairs plus artifact tallies
+`fadeno dispatches --bakeoffs` renders ledger pairs plus artifact tallies
 per challenger, and the `model-tryout` starter ships the deliberate
 head-to-head. Ledger format stays 0.2 — every field is additive.
 

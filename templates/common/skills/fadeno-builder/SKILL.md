@@ -29,8 +29,7 @@ reliably than a sprawling graph.
      (independent mapped revision loops → final reduce), `parallel-workstreams`
      (freeze contract + ownership manifests → parallel workstreams → integrate →
      verify → gate), `pr-review` (review → merge →
-     gate → post behind a human gate), or `model-tryout` (same spec to two
-     candidates → judge comparison → ModelComparison); **or**
+     gate → post behind a human gate); **or**
    - author a new playbook from their description.
    Match it to the closest pattern in `references/playbook-authoring.md`.
 3. **Recommend the simplest version first.** Add loops/fan-out only when the task

@@ -184,12 +184,12 @@ const CLAIMS: Claim[] = [
     src: { files: ['src/commands/dispatches.ts', 'src/commands/dispatch.ts'], patterns: [/shadow/, /primary_dispatch_id/, /diff_snapshot/, /shadow_source/] },
   },
   {
-    id: 'shadow-comparisons-surface',
-    doc: { files: [DIALS, EXTENDING], patterns: [/--comparisons/, /ModelComparison/] },
-    src: { files: ['src/commands/dispatches.ts'], patterns: [/runDispatchesComparisons/, /ModelComparison/] },
+    id: 'shadow-bakeoffs-surface',
+    doc: { files: [DIALS, EXTENDING], patterns: [/--bakeoffs/, /Bakeoff/] },
+    src: { files: ['src/commands/dispatches.ts'], patterns: [/runDispatchesBakeoffs/, /BakeoffArtifact/] },
   },
   {
-    id: 'shadow-comparisons-tally',
+    id: 'shadow-bakeoffs-tally',
     doc: { files: [DIALS, EXTENDING], patterns: [/prefer_challenger/, /prefer_baseline/] },
     src: { files: ['src/commands/dispatches.ts'], patterns: [/preferChallenger/, /preferBaseline/] },
   },

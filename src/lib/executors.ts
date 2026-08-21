@@ -472,7 +472,7 @@ export interface ExecutorProfile {
    * and never added to that object is inert end to end, which is exactly what
    * shipped in shadow pair 89536181 with 1282 green tests.
    *
-   * Empty means undeclared, and `fadeno compare` then reports the reach
+   * Empty means undeclared, and `fadeno bakeoff` then reports the reach
    * signal as `null` rather than as an empty list of failures — absent a
    * declaration it cannot tell "reached nothing" from "nothing to reach".
    */
@@ -1195,7 +1195,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
   // project-only for the same reason. A malformed entry fails loudly rather
   // than collapsing to "no surfaces", because that silent state is
   // indistinguishable from an honest undeclared one — and the honest one
-  // makes `fadeno compare` withhold the signal rather than pass the arm.
+  // makes `fadeno bakeoff` withhold the signal rather than pass the arm.
   const surfaces: string[] = [];
   if (doc.surfaces !== undefined) {
     if (!Array.isArray(doc.surfaces)) {

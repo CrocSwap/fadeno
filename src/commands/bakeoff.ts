@@ -6,24 +6,24 @@ import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { schemaDirectories } from '../lib/definitions.ts';
 import { loadExecutorProfile } from '../lib/executors.ts';
 import {
-  MODEL_COMPARISON_REQUIRED_SECTIONS,
+  BAKEOFF_REQUIRED_SECTIONS,
   checkGraftCoherence,
   isJudgmentVerdict,
   unblindVerdict,
   type GraftStep,
   type JudgeDelivery,
-  type ModelComparisonFrontmatter,
-  type ModelComparisonVerdict,
-} from '../lib/model-comparison.ts';
+  type BakeoffFrontmatter,
+  type BakeoffVerdict,
+} from '../lib/bakeoff.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { SchemaSet, schemaErrorMessages } from '../lib/playbook-validate.ts';
 import { DispatchCommandError, runDispatch, type AdHocDispatchResult } from './dispatch.ts';
-import { COMPARISONS_DIR, parseModelComparisonFile, resolveDispatchPair, type DispatchEntry, type ResolvedDispatchPair } from './dispatches.ts';
+import { BAKEOFFS_DIR, parseBakeoffFile, resolveDispatchPair, type DispatchEntry, type ResolvedDispatchPair } from './dispatches.ts';
 import { stringify as stringifyYaml } from 'yaml';
 
-export class CompareCommandError extends Error {}
+export class BakeoffCommandError extends Error {}
 
-export type CompareArm = 'primary' | 'challenger';
+export type BakeoffArm = 'primary' | 'challenger';
 
 /**
  * A fact about the pair that could make its arms non-comparable, stamped by
@@ -36,7 +36,7 @@ export type CompareArm = 'primary' | 'challenger';
  * killed agent-reported carry-back for `ignored_output`. A confound the
  * ledger already knows is evidence; a confound a model recalls is prose.
  */
-export interface CompareConfound {
+export interface BakeoffConfound {
   /** Closed vocabulary, so a reader can GROUP on it. */
   code:
     | 'transport_differs'
@@ -50,11 +50,11 @@ export interface CompareConfound {
     | 'exit_code_differs'
     | 'judge_provider_shared'
     | 'judge_delivery_unattested';
-  arm: CompareArm | 'pair';
+  arm: BakeoffArm | 'pair';
   detail: string;
 }
 
-export interface CompareDiffstat {
+export interface BakeoffDiffstat {
   path: string;
   bytes: number;
   files: number;
@@ -77,7 +77,7 @@ export interface CompareDiffstat {
  * "these were identical" is evidence the judge needs — but never separated
  * them.
  */
-export interface CompareSignals {
+export interface BakeoffSignals {
   /** Identifiers this arm's diff introduces. */
   introduced: string[];
   /**
@@ -107,8 +107,8 @@ export interface CompareSignals {
   redefined: string[];
 }
 
-export interface CompareArmMeasurement {
-  arm: CompareArm;
+export interface BakeoffArmMeasurement {
+  arm: BakeoffArm;
   dispatchId: string | null;
   executor: string | null;
   /** The resolved delivery's provider, from the same evidence field a judge-provider confound compares against. */
@@ -120,8 +120,8 @@ export interface CompareArmMeasurement {
   durationMs: number | null;
   outputBytes: number | null;
   refused: { predicate: string; message: string } | null;
-  diff: CompareDiffstat | null;
-  signals: CompareSignals | null;
+  diff: BakeoffDiffstat | null;
+  signals: BakeoffSignals | null;
 }
 
 /**
@@ -136,21 +136,21 @@ export interface CompareArmMeasurement {
  * introduced, because that is the apples-to-apples case — one arm inventing a
  * symbol the other never had says nothing about wiring.
  */
-export interface CompareReachDifference {
+export interface BakeoffReachDifference {
   identifier: string;
-  reachedIn: CompareArm;
-  unreachedIn: CompareArm;
+  reachedIn: BakeoffArm;
+  unreachedIn: BakeoffArm;
 }
 
 /** The deterministic half of phase 6, shared by both a measure-only and a full-cycle result. */
-export interface CompareMeasurement {
+export interface BakeoffMeasurement {
   pairId: string;
   archetype: string | null;
   baselineCommit: string | null;
-  arms: CompareArmMeasurement[];
+  arms: BakeoffArmMeasurement[];
   /** Null when either arm produced no signals, or surfaces are undeclared. */
-  reachDifferential: CompareReachDifference[] | null;
-  confounds: CompareConfound[];
+  reachDifferential: BakeoffReachDifference[] | null;
+  confounds: BakeoffConfound[];
   /**
    * Repo-relative globs declaring where a value must appear to count as
    * having reached a consumer. Empty means undeclared — see `unreached`.
@@ -158,14 +158,14 @@ export interface CompareMeasurement {
   surfaces: string[];
 }
 
-export interface CompareMeasureOnlyResult extends CompareMeasurement {
+export interface BakeoffMeasureOnlyResult extends BakeoffMeasurement {
   /** True while the caller asked to measure only; nothing was judged or written. */
   measureOnly: true;
 }
 
-export interface CompareAdjudicatedResult extends CompareMeasurement {
+export interface BakeoffAdjudicatedResult extends BakeoffMeasurement {
   measureOnly: false;
-  verdict: ModelComparisonVerdict;
+  verdict: BakeoffVerdict;
   /** Repo-relative path of the `ModelComparison` artifact this run wrote. */
   comparisonPath: string;
   /**
@@ -195,9 +195,9 @@ export interface CompareAdjudicatedResult extends CompareMeasurement {
   graftPlan: GraftStep[] | null;
 }
 
-export type CompareResult = CompareMeasureOnlyResult | CompareAdjudicatedResult;
+export type BakeoffResult = BakeoffMeasureOnlyResult | BakeoffAdjudicatedResult;
 
-export interface CompareOptions {
+export interface BakeoffOptions {
   /** A `pair_id`, or either arm's `dispatch_id` (full, or an 8+ char prefix). */
   ref: string;
   measureOnly?: boolean;
@@ -218,7 +218,7 @@ export interface ComparePrepareOptions {
   repoRoot?: string;
 }
 
-export interface ComparePrepareResult extends CompareMeasurement {
+export interface BakeoffPrepareResult extends BakeoffMeasurement {
   prepared: true;
   /**
    * The host archetype a coordinator should spawn once per prompt path below
@@ -352,7 +352,7 @@ function declaredIn(diffText: string, sign: '+' | '-', patterns: RegExp[] = DECL
   return [...found].sort();
 }
 
-function parseDiffstat(repoRoot: string, relPath: string, bytes: number | null): CompareDiffstat | null {
+function parseDiffstat(repoRoot: string, relPath: string, bytes: number | null): BakeoffDiffstat | null {
   const abs = join(repoRoot, relPath);
   let text: string;
   try {
@@ -456,7 +456,7 @@ function unreachedAtSurfaces(
   return identifiers.filter((name) => !new RegExp(`\\b${name}\\b`).test(text));
 }
 
-function armOf(entry: DispatchEntry | null, arm: CompareArm, repoRoot: string, baseline: string | null, surfaces: string[]): CompareArmMeasurement {
+function armOf(entry: DispatchEntry | null, arm: BakeoffArm, repoRoot: string, baseline: string | null, surfaces: string[]): BakeoffArmMeasurement {
   if (entry == null) {
     return {
       arm, dispatchId: null, executor: null, provider: null, model: null, reasoningEffort: null, attestedEffort: null,
@@ -464,7 +464,7 @@ function armOf(entry: DispatchEntry | null, arm: CompareArm, repoRoot: string, b
     };
   }
   const diff = entry.diffSnapshot != null ? parseDiffstat(repoRoot, entry.diffSnapshot, entry.diffBytes) : null;
-  let signals: CompareSignals | null = null;
+  let signals: BakeoffSignals | null = null;
   if (diff != null && entry.diffSnapshot != null) {
     let diffText = '';
     try {
@@ -498,14 +498,14 @@ function armOf(entry: DispatchEntry | null, arm: CompareArm, repoRoot: string, b
 }
 
 function reachDifferentialOf(
-  primary: CompareArmMeasurement,
-  challenger: CompareArmMeasurement,
-): CompareReachDifference[] | null {
+  primary: BakeoffArmMeasurement,
+  challenger: BakeoffArmMeasurement,
+): BakeoffReachDifference[] | null {
   const a = primary.signals;
   const b = challenger.signals;
   if (a == null || b == null || a.unreached == null || b.unreached == null) return null;
   const shared = new Set(a.introduced.filter((name) => b.introduced.includes(name)));
-  const out: CompareReachDifference[] = [];
+  const out: BakeoffReachDifference[] = [];
   for (const name of [...shared].sort()) {
     const aMissed = a.unreached.includes(name);
     const bMissed = b.unreached.includes(name);
@@ -515,12 +515,12 @@ function reachDifferentialOf(
   return out;
 }
 
-function confoundsOf(primary: DispatchEntry | null, shadow: DispatchEntry | null): CompareConfound[] {
-  const out: CompareConfound[] = [];
-  const push = (code: CompareConfound['code'], arm: CompareConfound['arm'], detail: string): void => {
+function confoundsOf(primary: DispatchEntry | null, shadow: DispatchEntry | null): BakeoffConfound[] {
+  const out: BakeoffConfound[] = [];
+  const push = (code: BakeoffConfound['code'], arm: BakeoffConfound['arm'], detail: string): void => {
     out.push({ code, arm, detail });
   };
-  const pairs: Array<[CompareArm, DispatchEntry | null]> = [['primary', primary], ['challenger', shadow]];
+  const pairs: Array<[BakeoffArm, DispatchEntry | null]> = [['primary', primary], ['challenger', shadow]];
 
   for (const [arm, entry] of pairs) {
     if (entry == null) continue;
@@ -567,10 +567,10 @@ function confoundsOf(primary: DispatchEntry | null, shadow: DispatchEntry | null
  * first also means the judge receives facts it cannot get wrong instead of
  * being asked to eyeball two diffs and estimate them.
  */
-function measure(ref: string, cwd: string, repoRoot: string): { measurement: CompareMeasurement; pair: ResolvedDispatchPair } {
+function measure(ref: string, cwd: string, repoRoot: string): { measurement: BakeoffMeasurement; pair: ResolvedDispatchPair } {
   const pair = resolveDispatchPair(ref, { cwd, repoRoot });
   if (pair.primary == null && pair.shadow == null) {
-    throw new CompareCommandError(`pair "${pair.pairId}" has no recorded arms.`);
+    throw new BakeoffCommandError(`pair "${pair.pairId}" has no recorded arms.`);
   }
   const baseline = pair.primary?.baselineCommit ?? pair.shadow?.baselineCommit ?? null;
 
@@ -586,7 +586,7 @@ function measure(ref: string, cwd: string, repoRoot: string): { measurement: Com
     armOf(pair.shadow, 'challenger', repoRoot, baseline, surfaces),
   ];
 
-  const measurement: CompareMeasurement = {
+  const measurement: BakeoffMeasurement = {
     pairId: pair.pairId,
     archetype: pair.primary?.archetype ?? pair.shadow?.archetype ?? null,
     baselineCommit: baseline,
@@ -601,7 +601,7 @@ function measure(ref: string, cwd: string, repoRoot: string): { measurement: Com
 // ---------------------------------------------------------------------------
 // Stage 2 — adjudicate: two blinded `judge` dispatches, then a schema-checked
 // verdict. Stage 3 — render: unblind, and write the `ModelComparison`
-// artifact `dispatches.ts`'s `parseModelComparisonFile` already reads.
+// artifact `dispatches.ts`'s `parseBakeoffFile` already reads.
 // ---------------------------------------------------------------------------
 
 type BlindLabel = 'a' | 'b';
@@ -613,18 +613,18 @@ type BlindLabel = 'a' | 'b';
  * itself a label, and the ordering of the diffs must not reveal identity any
  * more than the label text does.
  */
-export function deriveBlinding(pairId: string): { a: CompareArm; b: CompareArm } {
+export function deriveBlinding(pairId: string): { a: BakeoffArm; b: BakeoffArm } {
   const firstByte = parseInt(sha256Hex(pairId).slice(0, 2), 16);
   return firstByte % 2 === 0
     ? { a: 'primary', b: 'challenger' }
     : { a: 'challenger', b: 'primary' };
 }
 
-function labelFor(arm: CompareArm, blinding: { a: CompareArm; b: CompareArm }): BlindLabel {
+function labelFor(arm: BakeoffArm, blinding: { a: BakeoffArm; b: BakeoffArm }): BlindLabel {
   return blinding.a === arm ? 'a' : 'b';
 }
 
-function armFor(label: BlindLabel, blinding: { a: CompareArm; b: CompareArm }): CompareArm {
+function armFor(label: BlindLabel, blinding: { a: BakeoffArm; b: BakeoffArm }): BakeoffArm {
   return blinding[label];
 }
 
@@ -674,7 +674,7 @@ interface BlindArmMaterial {
   /** `message` is dropped: boundary-refusal prose can name an executor (see `explainEligibilityConflict`), which is exactly the identity a blind judge must not see. */
   refused: { predicate: string } | null;
   diffstat: { files: number; insertions: number; deletions: number; bytes: number; generatedFiles: number } | null;
-  signals: CompareSignals | null;
+  signals: BakeoffSignals | null;
   diff: string;
 }
 
@@ -684,7 +684,7 @@ interface BlindArmMaterial {
  * verbatim — a git diff's file paths are repo-relative and shared by both
  * arms, never a worktree location.
  */
-function blindArm(m: CompareArmMeasurement, diffText: string): BlindArmMaterial {
+function blindArm(m: BakeoffArmMeasurement, diffText: string): BlindArmMaterial {
   return {
     exitCode: m.exitCode,
     durationMs: m.durationMs,
@@ -736,8 +736,8 @@ interface BlindReachDifference {
 }
 
 function blindReach(
-  diffs: CompareReachDifference[] | null,
-  blinding: { a: CompareArm; b: CompareArm },
+  diffs: BakeoffReachDifference[] | null,
+  blinding: { a: BakeoffArm; b: BakeoffArm },
 ): BlindReachDifference[] | null {
   if (diffs == null) return null;
   return diffs.map((d) => ({
@@ -754,7 +754,7 @@ function blindReach(
  * different channel. Every other confound code's `detail` is arm-neutral
  * prose (verified against `confoundsOf`) and passes through unchanged.
  */
-const GENERIC_CONFOUND_DETAIL: Partial<Record<CompareConfound['code'], string>> = {
+const GENERIC_CONFOUND_DETAIL: Partial<Record<BakeoffConfound['code'], string>> = {
   transport_differs: 'the two arms were dispatched over different transports.',
   baseline_not_shared: 'the two arms did not start from the same baseline commit — not a strictly fair comparison.',
   exit_code_differs: "the two arms' exit codes differ — see each arm's own measurements above.",
@@ -762,12 +762,12 @@ const GENERIC_CONFOUND_DETAIL: Partial<Record<CompareConfound['code'], string>> 
 };
 
 interface BlindConfound {
-  code: CompareConfound['code'];
+  code: BakeoffConfound['code'];
   arm: BlindLabel | 'pair';
   detail: string;
 }
 
-function blindConfoundForPrompt(c: CompareConfound, blinding: { a: CompareArm; b: CompareArm }): BlindConfound {
+function blindConfoundForPrompt(c: BakeoffConfound, blinding: { a: BakeoffArm; b: BakeoffArm }): BlindConfound {
   return {
     code: c.code,
     arm: c.arm === 'pair' ? 'pair' : labelFor(c.arm, blinding),
@@ -781,7 +781,7 @@ function blindConfoundForPrompt(c: CompareConfound, blinding: { a: CompareArm; b
  * a real catalog routing on prompt content) is looking at — everything else
  * about the two prompts is free prose that may be reworded.
  */
-export const COMPARE_PROMPT_MARKER = { comparison: 'fadeno-compare-task: comparison', adversarial: 'fadeno-compare-task: adversarial' } as const;
+export const BAKEOFF_PROMPT_MARKER = { comparison: 'fadeno-bakeoff-task: comparison', adversarial: 'fadeno-bakeoff-task: adversarial' } as const;
 
 function buildComparisonPrompt(
   schemaText: string,
@@ -801,7 +801,7 @@ function buildComparisonPrompt(
     ? `### Confounds (kernel-stamped facts, not judgment)\n\n${confounds.map((c) => `- [${c.code}] ${c.arm}: ${c.detail}`).join('\n')}`
     : '### Confounds\n\nnone recorded.';
   return [
-    `<!-- ${COMPARE_PROMPT_MARKER.comparison} -->`,
+    `<!-- ${BAKEOFF_PROMPT_MARKER.comparison} -->`,
     '# Blinded shadow-pair comparison',
     '',
     'You are comparing two AI-agent work products on the SAME task, from the SAME starting commit. They are ' +
@@ -845,7 +845,7 @@ function buildComparisonPrompt(
 
 function buildAdversarialPrompt(blindA: string, blindB: string): string {
   return [
-    `<!-- ${COMPARE_PROMPT_MARKER.adversarial} -->`,
+    `<!-- ${BAKEOFF_PROMPT_MARKER.adversarial} -->`,
     '# Blinded shadow-pair — shared blind spot search',
     '',
     'Two AI-agent work products on the SAME task, from the SAME starting commit, labeled `arm_a` / `arm_b` only. ' +
@@ -893,10 +893,10 @@ function extractJsonObject(text: string): unknown | null {
 
 function loadModelComparisonSchema(repoRoot: string): { text: string; parsed: Record<string, unknown>; schemas: SchemaSet } {
   const dirs = schemaDirectories(repoRoot);
-  const candidates = [join(dirs.project, 'model-comparison.schema.json'), join(dirs.builtin, 'model-comparison.schema.json')];
+  const candidates = [join(dirs.project, 'bakeoff.schema.json'), join(dirs.builtin, 'bakeoff.schema.json')];
   const schemaPath = candidates.find((p) => existsSync(p));
   if (schemaPath == null) {
-    throw new CompareCommandError(
+    throw new BakeoffCommandError(
       'no model-comparison schema available (missing .fadeno/schemas and the bundled template) — cannot validate a judge\'s output.',
     );
   }
@@ -962,7 +962,7 @@ interface RawAdversarialJudgment {
   shared_blind_spots: RawSharedBlindSpot[];
 }
 
-/** A judge dispatch that reports its own refusal/failure/invalid-output as a `CompareCommandError` — never a partial write. */
+/** A judge dispatch that reports its own refusal/failure/invalid-output as a `BakeoffCommandError` — never a partial write. */
 function dispatchJudge(
   prompt: string,
   opts: { repoRoot: string; cwd: string; judgeModel: string | null; judgeVia: string | null; now?: Date; tag: string },
@@ -985,11 +985,11 @@ function dispatchJudge(
       tag: opts.tag,
     });
   } catch (err) {
-    if (err instanceof DispatchCommandError) throw new CompareCommandError(err.message);
+    if (err instanceof DispatchCommandError) throw new BakeoffCommandError(err.message);
     throw err;
   }
   if (result.outcome !== 'ok') {
-    throw new CompareCommandError(
+    throw new BakeoffCommandError(
       `judge dispatch ${result.dispatchId.slice(0, 8)} did not produce usable output (outcome: ` +
         `${result.outcome ?? 'unknown'}, exit ${result.exitCode}) — writing nothing rather than a partial verdict. ` +
         `stderr: ${result.stderr.slice(0, 400)}`,
@@ -998,7 +998,7 @@ function dispatchJudge(
   return result;
 }
 
-function renderCriteria(criteria: RawCriterion[], blinding: { a: CompareArm; b: CompareArm }): string {
+function renderCriteria(criteria: RawCriterion[], blinding: { a: BakeoffArm; b: BakeoffArm }): string {
   if (criteria.length === 0) return '(none provided)';
   return criteria
     .map((c) => {
@@ -1027,13 +1027,13 @@ function renderCriteria(criteria: RawCriterion[], blinding: { a: CompareArm; b: 
  * Exact-token only. A judge writing `arm_a` means the label; nothing else in
  * this codebase spells that.
  */
-function unblindProse(text: string, blinding: { a: CompareArm; b: CompareArm }): string {
+function unblindProse(text: string, blinding: { a: BakeoffArm; b: BakeoffArm }): string {
   return text
     .replace(/\barm_a\b/gi, blinding.a)
     .replace(/\barm_b\b/gi, blinding.b);
 }
 
-function renderTraits(traits: RawTrait[], blinding: { a: CompareArm; b: CompareArm }): string {
+function renderTraits(traits: RawTrait[], blinding: { a: BakeoffArm; b: BakeoffArm }): string {
   if (traits.length === 0) return '(none reported)';
   return traits
     .map((t) => {
@@ -1043,7 +1043,7 @@ function renderTraits(traits: RawTrait[], blinding: { a: CompareArm; b: CompareA
     .join('\n');
 }
 
-function renderConfounds(confounds: CompareConfound[], judgeConfoundNotes: string | undefined): string {
+function renderConfounds(confounds: BakeoffConfound[], judgeConfoundNotes: string | undefined): string {
   const lines = confounds.length > 0
     ? confounds.map((c) => `- [${c.code}] ${c.arm}: ${c.detail}`)
     : ['none recorded.'];
@@ -1067,19 +1067,19 @@ function renderGraftPlan(plan: GraftStep[]): string {
 }
 
 /**
- * Content for each of `MODEL_COMPARISON_REQUIRED_SECTIONS`, keyed by that
+ * Content for each of `BAKEOFF_REQUIRED_SECTIONS`, keyed by that
  * same list rather than restated as separate literals — adding a required
  * section there is a type error here until this writer supplies it, instead
  * of a scorecard silently rejecting every artifact this command produces.
  */
-type RequiredSectionContent = Record<(typeof MODEL_COMPARISON_REQUIRED_SECTIONS)[number], string>;
+type RequiredSectionContent = Record<(typeof BAKEOFF_REQUIRED_SECTIONS)[number], string>;
 
 function renderComparisonArtifact(
-  frontmatter: ModelComparisonFrontmatter,
+  frontmatter: BakeoffFrontmatter,
   sections: RequiredSectionContent & { graftPlan: string | null },
 ): string {
   const parts = ['---', stringifyYaml(frontmatter).trimEnd(), '---'];
-  for (const name of MODEL_COMPARISON_REQUIRED_SECTIONS) {
+  for (const name of BAKEOFF_REQUIRED_SECTIONS) {
     parts.push('', `## ${name}`, '', sections[name]);
   }
   if (sections.graftPlan != null) {
@@ -1091,7 +1091,7 @@ function renderComparisonArtifact(
 
 /** Everything derivable from a measured, complete pair without consulting a model — the shared front half of `--prepare` and the one-shot path. */
 interface PreparedComparison {
-  blinding: { a: CompareArm; b: CompareArm };
+  blinding: { a: BakeoffArm; b: BakeoffArm };
   validateComparison: ValidateFunction;
   validateAdversarial: ValidateFunction;
   comparisonPrompt: string;
@@ -1103,14 +1103,14 @@ interface PreparedComparison {
  * judgment validators — the seam where a model becomes necessary. Everything
  * before this point is measurement; everything after it needs a judgment in
  * hand, whether that judgment arrives over the command lane (`adjudicateViaCommand`)
- * or is read back from a file a host subagent wrote (`runCompareRecord`).
+ * or is read back from a file a host subagent wrote (`runBakeoffRecord`).
  *
  * Pure given `measurement`/`pair`/`repoRoot`: `deriveBlinding` is a function
  * of the pair id alone, so calling this twice for the same pair (once from
  * `--prepare`, once from `--record`) reconstructs the identical mapping with
  * nothing persisted in between.
  */
-function preparePrompts(measurement: CompareMeasurement, pair: ResolvedDispatchPair, repoRoot: string): PreparedComparison {
+function preparePrompts(measurement: BakeoffMeasurement, pair: ResolvedDispatchPair, repoRoot: string): PreparedComparison {
   const blinding = deriveBlinding(measurement.pairId);
   const primaryArm = measurement.arms.find((a) => a.arm === 'primary')!;
   const challengerArm = measurement.arms.find((a) => a.arm === 'challenger')!;
@@ -1131,21 +1131,21 @@ function preparePrompts(measurement: CompareMeasurement, pair: ResolvedDispatchP
   // never reaches a prompt, so there is nothing left to redact.
   for (const arm of [primaryArm, challengerArm]) {
     if (arm.refused != null) {
-      throw new CompareCommandError(
+      throw new BakeoffCommandError(
         `pair ${measurement.pairId.slice(0, 8)} cannot be adjudicated: the ${arm.arm} arm was refused ` +
           `before it ran [${arm.refused.predicate}], so there is nothing to compare it against. ` +
           'Re-run the pair, or use --measure-only to see what was recorded.',
       );
     }
     if (arm.diff == null) {
-      throw new CompareCommandError(
+      throw new BakeoffCommandError(
         `pair ${measurement.pairId.slice(0, 8)} cannot be adjudicated: the ${arm.arm} arm recorded no diff ` +
           '(it may still be in flight, or have been killed). Use --measure-only to see what was recorded.',
       );
     }
   }
 
-  const material: Record<CompareArm, BlindArmMaterial> = {
+  const material: Record<BakeoffArm, BlindArmMaterial> = {
     primary: blindArm(primaryArm, readDiffText(repoRoot, pair.primary)),
     challenger: blindArm(challengerArm, readDiffText(repoRoot, pair.shadow)),
   };
@@ -1153,12 +1153,12 @@ function preparePrompts(measurement: CompareMeasurement, pair: ResolvedDispatchP
   const blindB = renderBlindArm('b', material[armFor('b', blinding)]);
 
   const { text: schemaText, parsed: schemaJson, schemas } = loadModelComparisonSchema(repoRoot);
-  if (!schemas.has('model-comparison')) {
-    throw new CompareCommandError(
+  if (!schemas.has('bakeoff')) {
+    throw new BakeoffCommandError(
       'no model-comparison schema available (missing .fadeno/schemas and the bundled template) — cannot validate a judge\'s output.',
     );
   }
-  const validateComparison = schemas.get('model-comparison');
+  const validateComparison = schemas.get('bakeoff');
   const validateAdversarial = compileSharedBlindSpotsValidator(schemaJson);
 
   const comparisonPrompt = buildComparisonPrompt(
@@ -1183,16 +1183,16 @@ function preparePrompts(measurement: CompareMeasurement, pair: ResolvedDispatchP
  */
 function unblindAndCheckCoherence(
   comparison: RawComparisonJudgment,
-  blinding: { a: CompareArm; b: CompareArm },
+  blinding: { a: BakeoffArm; b: BakeoffArm },
   errorLabel: string,
-): ModelComparisonVerdict {
+): BakeoffVerdict {
   if (!isJudgmentVerdict(comparison.verdict)) {
     // Structurally redundant with the schema's own `verdict` enum, but that
-    // enum and `MODEL_COMPARISON_VERDICTS` are two independently maintained
+    // enum and `BAKEOFF_VERDICTS` are two independently maintained
     // lists — the exact drift shape this module exists to close off. If they
     // ever disagree, refuse rather than write a verdict `VERDICT_BUCKET`
     // cannot count.
-    throw new CompareCommandError(`${errorLabel} emitted an unrecognized verdict "${comparison.verdict}" — writing nothing.`);
+    throw new BakeoffCommandError(`${errorLabel} emitted an unrecognized verdict "${comparison.verdict}" — writing nothing.`);
   }
   // Unblind the verdict HERE, with `graft_plan.from_arm`, and nowhere else.
   // The judge answers in `prefer_a` / `prefer_b`, the only frame it has; this
@@ -1200,7 +1200,7 @@ function unblindAndCheckCoherence(
   const verdict = unblindVerdict(comparison.verdict, blinding);
   const coherence = checkGraftCoherence(verdict, comparison.graft_plan as unknown as GraftStep[] | undefined);
   if (coherence != null) {
-    throw new CompareCommandError(`${errorLabel} produced an incoherent judgment (${coherence}) — writing nothing.`);
+    throw new BakeoffCommandError(`${errorLabel} produced an incoherent judgment (${coherence}) — writing nothing.`);
   }
   return verdict;
 }
@@ -1211,11 +1211,11 @@ function unblindAndCheckCoherence(
  * verdict and both judgments are in hand.
  */
 function writeComparisonArtifact(args: {
-  measurement: CompareMeasurement;
+  measurement: BakeoffMeasurement;
   pair: ResolvedDispatchPair;
   repoRoot: string;
-  blinding: { a: CompareArm; b: CompareArm };
-  verdict: ModelComparisonVerdict;
+  blinding: { a: BakeoffArm; b: BakeoffArm };
+  verdict: BakeoffVerdict;
   comparison: RawComparisonJudgment;
   adversarial: RawAdversarialJudgment;
   judgeDelivery: JudgeDelivery;
@@ -1223,7 +1223,7 @@ function writeComparisonArtifact(args: {
   judgeProvider: string | null;
   judgeDispatchIds: { comparison: string; adversarial: string } | null;
   now: Date;
-}): CompareAdjudicatedResult {
+}): BakeoffAdjudicatedResult {
   const { measurement, pair, repoRoot, blinding, verdict, comparison, adversarial, judgeDelivery, judgeProvider, judgeDispatchIds, now } = args;
   const primaryArm = measurement.arms.find((a) => a.arm === 'primary')!;
   const challengerArm = measurement.arms.find((a) => a.arm === 'challenger')!;
@@ -1234,7 +1234,7 @@ function writeComparisonArtifact(args: {
   // command lane: a host-delivered judgment names no provider to compare.
   const confounds = [...measurement.confounds];
   if (judgeProvider != null) {
-    const matches: CompareArm[] = [];
+    const matches: BakeoffArm[] = [];
     if (primaryArm.provider != null && primaryArm.provider === judgeProvider) matches.push('primary');
     if (challengerArm.provider != null && challengerArm.provider === judgeProvider) matches.push('challenger');
     if (matches.length > 0) {
@@ -1256,7 +1256,7 @@ function writeComparisonArtifact(args: {
       code: 'judge_delivery_unattested',
       arm: 'pair',
       detail:
-        'this judgment was recorded via `fadeno compare --record`, not dispatched by this command — there is no ' +
+        'this judgment was recorded via `fadeno bakeoff --record`, not dispatched by this command — there is no ' +
         'receipt for who or what produced the JSON, only that it validates against the schema.',
     });
   }
@@ -1273,8 +1273,8 @@ function writeComparisonArtifact(args: {
   const dispatchIds = [pair.primary?.dispatchId, pair.shadow?.dispatchId, judgeDispatchIds?.comparison, judgeDispatchIds?.adversarial]
     .filter((id): id is string => id != null);
 
-  const frontmatter: ModelComparisonFrontmatter = {
-    kind: 'ModelComparison',
+  const frontmatter: BakeoffFrontmatter = {
+    kind: 'Bakeoff',
     baseline: primaryArm.executor ?? 'unknown',
     challenger: challengerArm.executor ?? 'unknown',
     verdict,
@@ -1293,7 +1293,7 @@ function writeComparisonArtifact(args: {
     graftPlan: graftPlan != null ? renderGraftPlan(graftPlan) : null,
   });
 
-  const comparisonsRelDir = COMPARISONS_DIR.split('\\').join('/');
+  const comparisonsRelDir = BAKEOFFS_DIR.split('\\').join('/');
   // The FULL pair id, not the 8-char display prefix. Two pairs sharing eight
   // hex characters would silently overwrite each other's verdict — no error,
   // no arm-level difference, just one adjudication replacing another in the
@@ -1308,10 +1308,10 @@ function writeComparisonArtifact(args: {
   // by assumption. Grafted from pair 1880a960's challenger arm, which did this
   // and whose primary wrote blind; a rejected artifact is otherwise silent —
   // it is counted as skipped and its verdict is simply gone.
-  const roundTrip = parseModelComparisonFile(repoRoot, comparisonPath);
+  const roundTrip = parseBakeoffFile(repoRoot, comparisonPath);
   if (!roundTrip.valid) {
     rmSync(join(repoRoot, comparisonPath), { force: true });
-    throw new CompareCommandError(
+    throw new BakeoffCommandError(
       `the rendered artifact for pair ${measurement.pairId.slice(0, 8)} is not readable by the scorecard ` +
         `(${roundTrip.error ?? 'unknown'}) — removed it rather than leave a verdict the reader silently skips.`,
     );
@@ -1331,12 +1331,12 @@ function writeComparisonArtifact(args: {
 
 /** The one-shot path: dispatch both judges over the command lane, then render. Unchanged behaviour from before the `--prepare`/`--record` split. */
 function adjudicateViaCommand(
-  measurement: CompareMeasurement,
+  measurement: BakeoffMeasurement,
   pair: ResolvedDispatchPair,
   repoRoot: string,
   cwd: string,
-  opts: CompareOptions,
-): CompareAdjudicatedResult {
+  opts: BakeoffOptions,
+): BakeoffAdjudicatedResult {
   const prepared = preparePrompts(measurement, pair, repoRoot);
   const pairId8 = measurement.pairId.slice(0, 8);
   const judgeCallOpts = { repoRoot, cwd, judgeModel: opts.judgeModel ?? null, judgeVia: opts.judgeVia ?? null, now: opts.now };
@@ -1347,9 +1347,9 @@ function adjudicateViaCommand(
     const errors = comparisonParsed == null
       ? ["could not find a JSON object in the judge's output"]
       : schemaErrorMessages(prepared.validateComparison);
-    throw new CompareCommandError(
+    throw new BakeoffCommandError(
       `comparison judge dispatch ${comparisonResult.dispatchId.slice(0, 8)} did not return a judgment that validates ` +
-        `against model-comparison.schema.json — writing nothing. ${errors.join('; ')}`,
+        `against bakeoff.schema.json — writing nothing. ${errors.join('; ')}`,
     );
   }
   const comparison = comparisonParsed as RawComparisonJudgment;
@@ -1361,7 +1361,7 @@ function adjudicateViaCommand(
     const errors = adversarialParsed == null
       ? ["could not find a JSON object in the judge's output"]
       : schemaErrorMessages(prepared.validateAdversarial);
-    throw new CompareCommandError(
+    throw new BakeoffCommandError(
       `adversarial judge dispatch ${adversarialResult.dispatchId.slice(0, 8)} did not return a judgment that validates ` +
         `— writing nothing. ${errors.join('; ')}`,
     );
@@ -1384,10 +1384,10 @@ function adjudicateViaCommand(
 }
 
 /** Common front matter for `--prepare` and `--record`: resolve the ref, measure, and refuse an incomplete pair before doing anything else. */
-function measureCompletePair(ref: string, cwd: string, repoRoot: string): { measurement: CompareMeasurement; pair: ResolvedDispatchPair } {
+function measureCompletePair(ref: string, cwd: string, repoRoot: string): { measurement: BakeoffMeasurement; pair: ResolvedDispatchPair } {
   const { measurement, pair } = measure(ref, cwd, repoRoot);
   if (pair.primary == null || pair.shadow == null) {
-    throw new CompareCommandError(
+    throw new BakeoffCommandError(
       `pair "${measurement.pairId.slice(0, 8)}" is missing an arm (primary: ${pair.primary != null}, ` +
         `challenger: ${pair.shadow != null}) — adjudication needs both to compare.`,
     );
@@ -1406,10 +1406,10 @@ function measureCompletePair(ref: string, cwd: string, repoRoot: string): { meas
  * see the `fadeno-judge` skill for why folding the adversarial pass into the
  * comparison spawn defeats its purpose.
  */
-export function runComparePrepare(opts: ComparePrepareOptions): ComparePrepareResult {
+export function runBakeoffPrepare(opts: ComparePrepareOptions): BakeoffPrepareResult {
   const ref = (opts.ref ?? '').trim();
   if (ref === '') {
-    throw new CompareCommandError('name a pair id or dispatch id (fadeno compare <pair-id|dispatch-id> --prepare).');
+    throw new BakeoffCommandError('name a pair id or dispatch id (fadeno bakeoff <pair-id|dispatch-id> --prepare).');
   }
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
@@ -1437,15 +1437,15 @@ export function runComparePrepare(opts: ComparePrepareOptions): ComparePrepareRe
 function readJudgmentFile(cwd: string, path: string, label: 'comparison' | 'adversarial'): string {
   const abs = resolve(cwd, path);
   if (!existsSync(abs)) {
-    throw new CompareCommandError(
-      `no ${label} judgment file at "${path}" — fadeno compare --record needs the file the judge subagent ` +
+    throw new BakeoffCommandError(
+      `no ${label} judgment file at "${path}" — fadeno bakeoff --record needs the file the judge subagent ` +
         '--prepare told you to spawn actually wrote.',
     );
   }
   try {
     return readFileSync(abs, 'utf8');
   } catch (err) {
-    throw new CompareCommandError(`could not read ${label} judgment file "${path}": ${(err as Error).message}`);
+    throw new BakeoffCommandError(`could not read ${label} judgment file "${path}": ${(err as Error).message}`);
   }
 }
 
@@ -1460,10 +1460,10 @@ function readJudgmentFile(cwd: string, path: string, label: 'comparison' | 'adve
  * unchanged, this reconstructs byte-identical blinding and measurement with
  * no state carried over.
  */
-export function runCompareRecord(opts: CompareRecordOptions): CompareAdjudicatedResult {
+export function runBakeoffRecord(opts: CompareRecordOptions): BakeoffAdjudicatedResult {
   const ref = (opts.ref ?? '').trim();
   if (ref === '') {
-    throw new CompareCommandError('name a pair id or dispatch id (fadeno compare <pair-id|dispatch-id> --record).');
+    throw new BakeoffCommandError('name a pair id or dispatch id (fadeno bakeoff <pair-id|dispatch-id> --record).');
   }
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
@@ -1476,9 +1476,9 @@ export function runCompareRecord(opts: CompareRecordOptions): CompareAdjudicated
     const errors = comparisonParsed == null
       ? ['could not find a JSON object in the recorded comparison judgment']
       : schemaErrorMessages(prepared.validateComparison);
-    throw new CompareCommandError(
+    throw new BakeoffCommandError(
       `the recorded comparison judgment (${opts.comparisonPath}) did not validate against ` +
-        `model-comparison.schema.json — writing nothing. ${errors.join('; ')}`,
+        `bakeoff.schema.json — writing nothing. ${errors.join('; ')}`,
     );
   }
   const comparison = comparisonParsed as RawComparisonJudgment;
@@ -1490,7 +1490,7 @@ export function runCompareRecord(opts: CompareRecordOptions): CompareAdjudicated
     const errors = adversarialParsed == null
       ? ['could not find a JSON object in the recorded adversarial judgment']
       : schemaErrorMessages(prepared.validateAdversarial);
-    throw new CompareCommandError(
+    throw new BakeoffCommandError(
       `the recorded adversarial judgment (${opts.adversarialPath}) did not validate — writing nothing. ${errors.join('; ')}`,
     );
   }
@@ -1515,12 +1515,12 @@ export function runCompareRecord(opts: CompareRecordOptions): CompareAdjudicated
  * Measure a shadow pair and, unless `--measure-only`, adjudicate it: two
  * blinded `judge` dispatches (a comparison and a shared-blind-spot
  * adversarial pass) and a `ModelComparison` artifact written to
- * `.fadeno/comparisons/<pair-id-8>.md`.
+ * `.fadeno/bakeoffs/<pair-id-8>.md`.
  */
-export function runCompare(opts: CompareOptions): CompareResult {
+export function runBakeoff(opts: BakeoffOptions): BakeoffResult {
   const ref = (opts.ref ?? '').trim();
   if (ref === '') {
-    throw new CompareCommandError('name a pair id or dispatch id (fadeno compare <pair-id|dispatch-id>).');
+    throw new BakeoffCommandError('name a pair id or dispatch id (fadeno bakeoff <pair-id|dispatch-id>).');
   }
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
@@ -1530,7 +1530,7 @@ export function runCompare(opts: CompareOptions): CompareResult {
     return { ...measurement, measureOnly: true };
   }
   if (pair.primary == null || pair.shadow == null) {
-    throw new CompareCommandError(
+    throw new BakeoffCommandError(
       `pair "${measurement.pairId.slice(0, 8)}" is missing an arm (primary: ${pair.primary != null}, ` +
         `challenger: ${pair.shadow != null}) — adjudication needs both to compare.`,
     );

@@ -1,6 +1,6 @@
 ---
 name: judge
-description: Evaluator role for Fadeno playbooks — scores competing attempts and emits a structured judgment. Use when a Fadeno playbook delegates judging/evaluation to a subagent.
+description: Evaluator role — scores competing attempts and emits a structured judgment. Use when a Fadeno playbook delegates a judging/evaluation step, and when the bakeoff skill asks for a verdict on a shadow pair.
 ---
 
 You are an **evaluator** in a Fadeno playbook run.

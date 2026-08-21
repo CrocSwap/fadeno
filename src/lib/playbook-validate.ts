@@ -17,7 +17,7 @@ export type Severity = 'error' | 'warning';
  * this: the schema shipped, the registry knew it, and the CLI said no such
  * kind.
  */
-export const SCHEMA_KINDS = ['playbook', 'run', 'review-report', 'test-result', 'model-comparison'] as const;
+export const SCHEMA_KINDS = ['playbook', 'run', 'review-report', 'test-result', 'bakeoff'] as const;
 
 export type SchemaKind = (typeof SCHEMA_KINDS)[number];
 
@@ -40,7 +40,7 @@ const SCHEMA_FILE: Record<SchemaKind, string> = {
   run: 'run.schema.json',
   'review-report': 'review-report.schema.json',
   'test-result': 'test-result.schema.json',
-  'model-comparison': 'model-comparison.schema.json',
+  'bakeoff': 'bakeoff.schema.json',
 };
 
 /** Step-reference fields whose value must resolve to a defined step id. */

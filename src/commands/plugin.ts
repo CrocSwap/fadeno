@@ -32,7 +32,7 @@ const SKILLS = [
   // behind one name across two tool surfaces. Named for the command it drives,
   // like the four above are named for their workflow rather than a role — so
   // the rule stays "strip the prefix", with no entry needing an exception.
-  { src: 'fadeno-compare', dst: 'compare' },
+  { src: 'fadeno-bakeoff', dst: 'bakeoff' },
 ] as const;
 
 /**
@@ -149,7 +149,7 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
     // Assert before replacing: `String.replace` with a needle that does not
     // occur is a SILENT no-op, so a template whose frontmatter name disagrees
     // with its directory ships the WRONG name and nothing says so. Observed
-    // when `fadeno-judge/` was renamed to `fadeno-compare/` and the
+    // when `fadeno-judge/` was renamed to `fadeno-bakeoff/` and the
     // frontmatter inside was not — the generator emitted `name: fadeno-judge`
     // into a directory called `compare`, and only a test asserting the
     // rendered name caught it.
@@ -236,7 +236,7 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
 // `$fadeno-runner` / `$fadeno-builder` / `$fadeno-driver` (the openai.yaml
 // policies reference those handles), unlike the Claude plugin which shortens to
 // the `fadeno:runner` namespace form.
-const CODEX_SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-setup', 'fadeno-compare'] as const;
+const CODEX_SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-setup', 'fadeno-bakeoff'] as const;
 
 /**
  * Emit a Codex CLI plugin (`.codex-plugin/plugin.json` + `skills/`) from the

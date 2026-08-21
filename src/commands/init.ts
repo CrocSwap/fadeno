@@ -38,12 +38,12 @@ export interface InitResult {
  * project-work distinction, not a curated shortlist — anything a person does
  * IN a repo belongs here.
  *
- * `fadeno-compare` is project work by that rule: it judges shadow pairs from
+ * `fadeno-bakeoff` is project work by that rule: it judges shadow pairs from
  * evidence in this repo's own `.fadeno/`. Step 3 below already installs the
  * `judge` subagent the skill spawns, so omitting it shipped the actor without
  * the instructions for using it.
  */
-const SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-compare'] as const;
+const SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-bakeoff'] as const;
 
 /**
  * Scaffold a Fadeno setup for the given target into the repository.
@@ -118,7 +118,7 @@ export function runInit(opts: InitOptions): InitResult {
       results.push({ path: skillMdPath, status: emitFile(skillMdPath, skillMd, force) });
 
       // Guarded, exactly as the plugin generator guards it: `references/` is
-      // optional and `fadeno-compare` has none. Two readers of one template
+      // optional and `fadeno-bakeoff` has none. Two readers of one template
       // layout, and only one of them checked — so adding the first skill
       // without references broke `init` while the generator was fine.
       const references = join(skillSrc, 'references');
