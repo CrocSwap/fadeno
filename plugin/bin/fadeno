@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.40";
+  if (true) return "0.6.0-rc.41";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -14308,6 +14308,15 @@ function substitutePromptFile(argv, promptPath) {
   return argv.map((part) => part.split(PROMPT_FILE_PLACEHOLDER).join(promptPath));
 }
 var ARCHETYPE_DISPLAY_ORDER = ["director", "judge", "reviewer", "generator", "worker"];
+var ROLE_ARCHETYPES = ["worker", "reviewer", "judge"];
+function knownArchetypes(archetypes, ...extra) {
+  const names = new Set(ROLE_ARCHETYPES);
+  for (const key of Object.keys(archetypes)) names.add(key);
+  for (const layer of extra) {
+    if (layer != null) for (const key of Object.keys(layer)) names.add(key);
+  }
+  return names;
+}
 function archetypeDisplaySort(names) {
   const rank = new Map(ARCHETYPE_DISPLAY_ORDER.map((name, index) => [name, index]));
   return [...names].sort((a, b) => {
@@ -30094,9 +30103,9 @@ function runLockedSteeringResolve(opts, archetype, role, hostExecutor) {
     );
   }
   const profile = snapshotProfileForRequest(lookup);
-  if (!Object.hasOwn(profile.archetypes, archetype)) {
+  if (request.agentType === "*" && !knownArchetypes(profile.archetypes).has(archetype)) {
     throw new SteeringError(
-      `host dispatch "${dispatchId}" cannot specialize wildcard identity to undeclared archetype "${archetype}".`
+      `host dispatch "${dispatchId}" cannot specialize wildcard identity to unknown archetype "${archetype}".`
     );
   }
   const executor = profile.executors[request.executor];
@@ -31195,11 +31204,7 @@ function providerNoveltyNote(params) {
   const provider = compiled.provider;
   if (provider == null || provider === "current-host") return null;
   const inUse = /* @__PURE__ */ new Set();
-  const archetypes = /* @__PURE__ */ new Set(["worker", "reviewer", "judge"]);
-  for (const key of Object.keys(profile.archetypes)) archetypes.add(key);
-  for (const key of Object.keys(layers.session)) archetypes.add(key);
-  for (const key of Object.keys(layers.repo)) archetypes.add(key);
-  for (const key of Object.keys(layers.user)) archetypes.add(key);
+  const archetypes = knownArchetypes(profile.archetypes, layers.session, layers.repo, layers.user);
   const providerOf = (ref) => {
     try {
       const other = compileDialRef(ref, profile);
@@ -31710,12 +31715,7 @@ function runDialShow(opts = {}) {
   const shadows = dialState.shadows;
   const legacy_pin_note = dialState.legacyNote;
   const { suppressed_canon_archetypes, note } = canonSurfacing(layered);
-  const archetypesSet = /* @__PURE__ */ new Set(["worker", "reviewer", "judge"]);
-  for (const k of Object.keys(profile.archetypes)) archetypesSet.add(k);
-  for (const k of Object.keys(sessionDials)) archetypesSet.add(k);
-  for (const k of Object.keys(repoDials)) archetypesSet.add(k);
-  for (const k of Object.keys(userDials)) archetypesSet.add(k);
-  for (const k of Object.keys(shadows)) archetypesSet.add(k);
+  const archetypesSet = knownArchetypes(profile.archetypes, sessionDials, repoDials, userDials, shadows);
   const allArchetypes = archetypeDisplaySort(archetypesSet);
   const layers = { session: sessionDials, repo: repoDials, user: userDials };
   const rows = [];
