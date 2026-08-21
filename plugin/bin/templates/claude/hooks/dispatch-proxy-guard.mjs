@@ -164,7 +164,14 @@ for (const statement of statements) {
  */
 function markProxyDispatch() {
   if (heredocBody.length === 0) return;
-  const cwd = typeof event.cwd === 'string' && event.cwd.length > 0 ? event.cwd : process.cwd();
+  // No inferred cwd. This is a WRITE, and a caller that does not say which
+  // repo it is in has not earned a guess — `process.cwd()` would be whatever
+  // directory the harness happened to launch from. That fallback appended 22
+  // marker rows into the developer's own repo from the test suite on
+  // 2026-08-20. Claude Code always sends `cwd`; anything that does not simply
+  // goes unattested, which is the honest outcome.
+  const cwd = typeof event.cwd === 'string' && event.cwd.length > 0 ? event.cwd : null;
+  if (cwd == null) return;
   if (!existsSync(join(cwd, '.fadeno'))) return; // not a Fadeno repo
   try {
     const dir = join(cwd, '.fadeno', 'local');

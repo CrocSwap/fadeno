@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import './helpers.ts';
@@ -20,10 +23,21 @@ interface HookDecision {
   };
 }
 
-function runGuard(event: unknown): HookDecision | null {
+/**
+ * Always spawned with an explicit, throwaway cwd.
+ *
+ * The guard WRITES (a proxy-dispatch marker) and resolves its target from
+ * `event.cwd`, falling back to `process.cwd()`. A spawn that declares neither
+ * inherits this repo — and on 2026-08-20 that appended 22 marker rows into the
+ * developer's own `.fadeno/local/`. Same rule `codexUserAgentDir` documents for
+ * env injection: declaring a hermetic environment means declaring all of it,
+ * not the parts you happened to think about.
+ */
+function runGuard(event: unknown, cwd = mkdtempSync(join(tmpdir(), 'fadeno-guard-'))): HookDecision | null {
   const spawned = spawnSync(process.execPath, [GUARD], {
     input: JSON.stringify(event),
     encoding: 'utf8',
+    cwd,
   });
   assert.equal(spawned.status, 0, `guard must always exit 0 (stderr: ${spawned.stderr})`);
   const out = (spawned.stdout ?? '').trim();
@@ -178,4 +192,52 @@ test('guard: reviewer and judge proxies enforce their own archetype', () => {
     const decision = runGuard(bashEvent(`fadeno:dispatch-${archetype}`, call));
     assert.deepEqual(decision!.hookSpecificOutput?.updatedInput, { timeout: 600000 });
   }
+});
+
+/**
+ * The marker is the dispatch-side half of relay attestation: without it the
+ * kernel cannot tell an un-relayed dispatch from a relay that altered the
+ * prompt, and `relay_attested: false` means nothing (see
+ * `consumeRelayAttestation`).
+ */
+test('guard records a proxy-dispatch marker for the bytes it is about to send', () => {
+  const root = mkdtempSync(join(tmpdir(), 'fadeno-guard-repo-'));
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  const body = 'do the thing\nwith care\n';
+  const command = `fadeno dispatch --archetype worker --tag worker-a-thing <<'FADENO_PROMPT'\n${body}FADENO_PROMPT`;
+
+  runGuard({ ...(bashEvent('dispatch-worker', command) as object), cwd: root });
+
+  const rows = readFileSync(join(root, '.fadeno', 'local', 'proxy-dispatches.jsonl'), 'utf8')
+    .trim().split('\n').map((line) => JSON.parse(line) as { archetype: string; prompt_sha256: string });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.archetype, 'worker');
+  // The digest is of what the kernel will RECEIVE on stdin — body lines plus
+  // the heredoc's trailing newline — not of the surrounding shell.
+  assert.equal(rows[0]!.prompt_sha256, createHash('sha256').update(body).digest('hex'));
+});
+
+test('guard writes no marker outside a Fadeno repo, and none for a denied call', () => {
+  const bare = mkdtempSync(join(tmpdir(), 'fadeno-guard-bare-'));
+  const command = `fadeno dispatch --archetype worker <<'FADENO_PROMPT'\nhi\nFADENO_PROMPT`;
+  runGuard({ ...(bashEvent('dispatch-worker', command) as object), cwd: bare });
+  assert.ok(!existsSync(join(bare, '.fadeno', 'local', 'proxy-dispatches.jsonl')));
+
+  const repo = mkdtempSync(join(tmpdir(), 'fadeno-guard-denied-'));
+  mkdirSync(join(repo, '.fadeno'), { recursive: true });
+  // Outside the relay contract: denied, and nothing is dispatched, so nothing
+  // may claim a dispatch is imminent.
+  runGuard({ ...(bashEvent('dispatch-worker', 'rm -rf /tmp/whatever') as object), cwd: repo });
+  assert.ok(!existsSync(join(repo, '.fadeno', 'local', 'proxy-dispatches.jsonl')));
+});
+
+test('guard writes no marker when the event declares no cwd', () => {
+  // Belt and braces on top of the hermetic spawn cwd above: the hook must not
+  // infer a repo for a WRITE. Spawned FROM a real-looking repo, with no
+  // `event.cwd` — nothing may be written there.
+  const root = mkdtempSync(join(tmpdir(), 'fadeno-guard-nocwd-'));
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  const command = `fadeno dispatch --archetype worker <<'FADENO_PROMPT'\nhi\nFADENO_PROMPT`;
+  runGuard(bashEvent('dispatch-worker', command), root);
+  assert.ok(!existsSync(join(root, '.fadeno', 'local', 'proxy-dispatches.jsonl')));
 });
