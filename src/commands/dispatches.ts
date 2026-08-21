@@ -319,6 +319,23 @@ export interface DispatchEntry {
    * the caller's own tree, where an ignored `dist/` simply stays put.
    */
   ignoredOutputDiscarded: DispatchIgnoredOutputDiscarded | null;
+  /**
+   * Why an isolated delivery ran shared after all (`workspace_mode_degraded`
+   * on the completion row). Kernel-written since isolation became
+   * candidacy-not-capability: a pair that MATERIALIZED isolates, and every
+   * later failure degrades to "no pair, primary runs normally" rather than
+   * killing the dispatch. Null means no degradation was recorded.
+   *
+   * Read by `fadeno compare` as a confound: a degraded arm did not run in the
+   * conditions the other one did.
+   */
+  workspaceModeDegraded: string | null;
+  /**
+   * Set when a hardlink-carried path was written THROUGH (`carry_mutated`) —
+   * one inode in two trees, so an arm may have altered the other's inputs.
+   * The single most comparability-destroying thing a pair can record.
+   */
+  carryMutated: boolean | null;
   outputBytes: number | null;
   diagnosticsSnapshot: string | null;
   diagnosticsBytes: number | null;
@@ -654,6 +671,8 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     // knowable once it has finished building it. Folded in by
     // `applyCompletion`.
     ignoredOutputDiscarded: null,
+    workspaceModeDegraded: null,
+    carryMutated: null,
     outputBytes: num(row.output_bytes),
     diagnosticsSnapshot: str(row.diagnostics_snapshot),
     diagnosticsBytes: num(row.diagnostics_bytes),
@@ -728,6 +747,8 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     // a host subagent writes into the caller's own tree, where a gitignored
     // build directory stays exactly where it was written.
     ignoredOutputDiscarded: null,
+    workspaceModeDegraded: null,
+    carryMutated: null,
     outputBytes: null,
     diagnosticsSnapshot: null,
     diagnosticsBytes: null,
@@ -847,6 +868,13 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
   // moment and for the same reason as the merge result above.
   entry.ignoredOutputDiscarded =
     entry.ignoredOutputDiscarded ?? ignoredOutputDiscardedOf(row.ignored_output_discarded);
+  // Both written by the kernel at completion and, until `fadeno compare`,
+  // read by nobody — the reader-drops-the-next-field pattern this codebase
+  // keeps re-committing (roadmap item 2). They are confounds, so a comparison
+  // that cannot see them silently judges arms that never ran alike.
+  entry.workspaceModeDegraded = entry.workspaceModeDegraded ?? str(row.workspace_mode_degraded);
+  if (typeof row.carry_mutated === 'boolean') entry.carryMutated = row.carry_mutated;
+  else if (row.carry_mutated != null && entry.carryMutated == null) entry.carryMutated = true;
   const ob = num(row.output_bytes);
   if (ob != null) entry.outputBytes = ob;
   entry.diagnosticsSnapshot = entry.diagnosticsSnapshot ?? str(row.diagnostics_snapshot);

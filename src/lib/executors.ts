@@ -461,6 +461,23 @@ export interface ExecutorProfile {
    */
   worktreeCarry: string[];
   /**
+   * Repo-relative files where a value must appear to count as having REACHED
+   * a consumer. Project-only, for the same reason as `worktree_carry`: it
+   * describes this repo's shape, and a builtin guess would be wrong
+   * everywhere.
+   *
+   * For Fadeno the surface is `src/cli.ts`, which builds its printed JSON
+   * field by field — an agent reads that stdout and nothing else. A field
+   * computed in a command, documented as the thing a coordinator MUST check,
+   * and never added to that object is inert end to end, which is exactly what
+   * shipped in shadow pair 89536181 with 1282 green tests.
+   *
+   * Empty means undeclared, and `fadeno compare` then reports the reach
+   * signal as `null` rather than as an empty list of failures — absent a
+   * declaration it cannot tell "reached nothing" from "nothing to reach".
+   */
+  surfaces: string[];
+  /**
    * Per-harness identity of the *relay* — the cheap model that reads a
    * resolver answer and forwards a delivery, doing none of the role work
    * itself (Codex's command broker, Claude's dispatch proxies).
@@ -572,6 +589,7 @@ export const CATALOG_TOP_LEVEL_KEYS = [
   'unregistered_model_driver',
   'tools',
   'worktree_carry',
+  'surfaces',
   'relay',
 ] as const;
 
@@ -1171,6 +1189,34 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
     }
   }
 
+  // surfaces
+  //
+  // Same shape and same rejections as `worktree_carry` above, and declared
+  // project-only for the same reason. A malformed entry fails loudly rather
+  // than collapsing to "no surfaces", because that silent state is
+  // indistinguishable from an honest undeclared one — and the honest one
+  // makes `fadeno compare` withhold the signal rather than pass the arm.
+  const surfaces: string[] = [];
+  if (doc.surfaces !== undefined) {
+    if (!Array.isArray(doc.surfaces)) {
+      throw new ExecutorProfileError(`${source}: \`surfaces\` must be an array of repo-relative path strings.`);
+    }
+    for (const raw of doc.surfaces) {
+      if (typeof raw !== 'string' || raw.trim().length === 0) {
+        throw new ExecutorProfileError(`${source}: \`surfaces\` entries must be non-empty strings; found ${JSON.stringify(raw)}.`);
+      }
+      const trimmed = raw.trim();
+      if (isAbsolute(trimmed)) {
+        throw new ExecutorProfileError(`${source}: \`surfaces\` entry "${trimmed}" must be repo-relative, not absolute.`);
+      }
+      const normalized = trimmed.split('\\').join('/');
+      if (normalized.split('/').includes('..')) {
+        throw new ExecutorProfileError(`${source}: \`surfaces\` entry "${trimmed}" may not contain a ".." segment.`);
+      }
+      surfaces.push(normalized);
+    }
+  }
+
   // relay
   //
   // The relay identity used to live in source literals — `gpt-5.6-luna` in
@@ -1230,6 +1276,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
     notes,
     tools,
     worktreeCarry,
+    surfaces,
     relay,
   };
 }

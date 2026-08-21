@@ -210,6 +210,10 @@ const SURVIVES_THE_MERGE: Record<string, { declare: Record<string, unknown>; che
     declare: { worktree_carry: ['node_modules'] },
     check: (p) => assert.deepEqual(p.worktreeCarry, ['node_modules']),
   },
+  surfaces: {
+    declare: { surfaces: ['src/cli.ts'] },
+    check: (p) => assert.deepEqual(p.surfaces, ['src/cli.ts']),
+  },
   relay: {
     declare: { relay: { claude: 'sonnet', codex: 'luna@low' } },
     check: (p) => {

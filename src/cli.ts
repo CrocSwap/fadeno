@@ -48,6 +48,7 @@ import { runValidate } from './commands/validate.ts';
 import { runVerify, type VerifyResult } from './commands/verify.ts';
 import { knownFlagsFor, runCompletion, runCompletionCandidates, suggestFlag, unknownFlagsFor } from './commands/completion.ts';
 import { runShadowApply } from './commands/shadow-apply.ts';
+import { runCompare, type CompareArmMeasurement, type CompareResult } from './commands/compare.ts';
 import { runSteeringApply, runSteeringApplyClaude, runSteeringResolve } from './commands/steering.ts';
 import { runDispatchPrompt } from './commands/dispatch-prompt.ts';
 import { runDispatchPrepare } from './commands/dispatch-prepare.ts';
@@ -127,6 +128,8 @@ Usage:
   fadeno dispatches --comparisons       Paired primary/shadow scorecard per challenger
   fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]
                                         Port a shadow pair's diff into your workspace (git apply --3way)
+  fadeno compare <pair-id|dispatch-id> --measure-only
+                                        Measure a shadow pair's arms (deterministic; no model is consulted)
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic claims (or --latest)
   fadeno plugin [dir] [--codex]         Generate a Claude Code (default) or Codex plugin
@@ -186,6 +189,8 @@ Options:
   --json                  (dispatches) Emit structured entries on stdout for scripting
   --arm <arm>             (shadow-apply) challenger (default) | primary
   --check                 (shadow-apply) Report applicability only (git apply --check --3way); changes nothing
+  --measure-only          (compare) Report the pair's measured facts and write nothing. Currently required:
+                          adjudication (the blinded judge dispatch and the ModelComparison artifact) is not built
   --isolate               (dispatch-prepare) Create isolated worktree at .fadeno/local/host-worktrees/<run>/<id> (workspace_mode: isolated)
   --agent-id <id>         (dispatch-start) Host agent identity
   --workspace <path>      (dispatch-start) Host workspace provenance
@@ -245,7 +250,7 @@ export const KNOWN_CLI_COMMANDS = new Set([
   'tool-run', 'tool-complete', 'plugin', 'completion', 'gate', 'prompt', 'next', 'drive',
   'cancel', 'models', 'dial', 'shadow', 'dispatch', 'dispatch-fallback', 'dispatch-start',
   'dispatch-prompt', 'dispatch-complete', 'dispatch-progress', 'dispatch-prepare',
-  'dispatch-fail', 'decide', 'runs', 'attest', 'dispatches', 'shadow-apply', 'show', 'verify',
+  'dispatch-fail', 'decide', 'runs', 'attest', 'dispatches', 'shadow-apply', 'compare', 'show', 'verify',
 ]);
 
 export function shouldRunPreflight(command: string | undefined): boolean {
@@ -1153,6 +1158,56 @@ const DIAL_SOURCE_TEXT: Record<string, string> = {
   base: 'base',
 };
 
+function printCompareArm(arm: CompareArmMeasurement): void {
+  const id = arm.dispatchId != null ? arm.dispatchId.slice(0, 8) : '(missing)';
+  const identity = `${arm.executor ?? '(unresolved)'} (${arm.model ?? '?'}${arm.reasoningEffort != null ? `@${arm.reasoningEffort}` : ''})`;
+  console.log(`  ${arm.arm.padEnd(10)} ${id}  ${identity}`);
+  if (arm.refused != null) {
+    console.log(`    refused [${arm.refused.predicate}] ${arm.refused.message}`);
+    return;
+  }
+  const secs = arm.durationMs != null ? `${Math.round(arm.durationMs / 1000)}s` : '?';
+  console.log(`    exit ${arm.exitCode ?? '?'} in ${secs}, output ${arm.outputBytes ?? '?'} bytes`);
+  if (arm.diff != null) {
+    const gen = arm.diff.generatedFiles.length > 0
+      ? `  [${arm.diff.generatedFiles.length} generated: ${arm.diff.generatedFiles.slice(0, 3).join(', ')}]`
+      : '';
+    console.log(`    diff ${arm.diff.files} files +${arm.diff.insertions}/-${arm.diff.deletions} (${arm.diff.bytes} bytes)${gen}`);
+  }
+  if (arm.signals != null) {
+    console.log(`    introduced ${arm.signals.introduced.length} identifier(s)`);
+    if (arm.signals.unreached == null) {
+      console.log('    reach:      undeclared — no `surfaces:` in .fadeno/executors.yaml, so this is not claimed either way');
+    } else if (arm.signals.unreached.length === 0) {
+      console.log('    reach:      every introduced identifier appears on a declared surface');
+    } else {
+      console.log(`    reach:      ${arm.signals.unreached.length} never reach a surface: ${arm.signals.unreached.join(', ')}`);
+    }
+    if (arm.signals.redefined.length > 0) {
+      console.log(`    redefined:  already defined at baseline: ${arm.signals.redefined.join(', ')}`);
+    }
+  }
+}
+
+function printCompare(result: CompareResult): void {
+  const base = result.baselineCommit != null ? result.baselineCommit.slice(0, 8) : '(none)';
+  console.log(`pair ${result.pairId.slice(0, 8)}  archetype ${result.archetype ?? '?'}  baseline ${base}`);
+  for (const arm of result.arms) printCompareArm(arm);
+  if (result.reachDifferential != null && result.reachDifferential.length > 0) {
+    console.log('  reach differential — both arms introduced these; only one wired them to a surface:');
+    for (const d of result.reachDifferential) {
+      console.log(`    ${d.identifier}: reached in ${d.reachedIn}, NEVER reached in ${d.unreachedIn}`);
+    }
+  }
+  if (result.confounds.length === 0) {
+    console.log('  confounds: none recorded');
+  } else {
+    console.log(`  confounds (${result.confounds.length}) — kernel-stamped, not judged:`);
+    for (const c of result.confounds) console.log(`    [${c.code}] ${c.arm}: ${c.detail}`);
+  }
+  console.log('  measured only — no verdict was formed and nothing was written.');
+}
+
 function printStaleShadows(stale: Array<{ archetype: string; target: string }>): void {
   for (const item of stale) {
     console.error(
@@ -1491,6 +1546,7 @@ function main(argv: string[]): number {
         wait: { type: 'string' },
         arm: { type: 'string' },
         check: { type: 'boolean' },
+        'measure-only': { type: 'boolean' },
         json: { type: 'boolean' },
         'agent-id': { type: 'string' },
         workspace: { type: 'string' },
@@ -2578,6 +2634,17 @@ function main(argv: string[]): number {
         `applied pair ${pairId8}'s ${result.arm} diff (dispatch ${dispatchId8})${bytes} from ${result.artifact} ` +
           '— evidence recorded.',
       );
+      return 0;
+    }
+    case 'compare': {
+      const ref = positionals[1];
+      if (!ref) throw new Error('Usage: fadeno compare <pair-id|dispatch-id> --measure-only');
+      const result = runCompare({ ref, measureOnly: Boolean(values['measure-only']) });
+      if (values.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      printCompare(result);
       return 0;
     }
     case 'show': {

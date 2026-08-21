@@ -132,6 +132,9 @@ function mergeLayer(target: Record<string, unknown>, source: Record<string, unkn
   // name paths that make sense in whatever repo happens to load that
   // layer. Project-only keeps the declaration co-located with the repo it
   // describes.
+  if (layer !== 'project' && Array.isArray(source.surfaces) && source.surfaces.length > 0) {
+    throw new ExecutorProfileError('surfaces describes this repo\'s shape; it is project-only — declare it in .fadeno/executors.yaml, not the user or builtin catalog.');
+  }
   if (layer !== 'project' && Array.isArray(source.worktree_carry) && source.worktree_carry.length > 0) {
     throw new ExecutorProfileError('worktree_carry describes this repo\'s build state; it is project-only — declare it in .fadeno/executors.yaml, not the user or builtin catalog.');
   }

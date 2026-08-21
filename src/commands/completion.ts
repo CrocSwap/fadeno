@@ -189,6 +189,7 @@ const COMMANDS: Record<string, CommandSpec> = {
     '--cancel': { kind: 'free' },
   }),
   'shadow-apply': command({ '--arm': { kind: 'enum', values: ['challenger', 'primary'] }, '--check': NONE }, ['free']),
+  compare: command({ '--measure-only': NONE, '--json': NONE }, ['free']),
   show: command({ '--legacy': NONE, '--events': NONE }, ['run']),
   verify: command({ '--latest': NONE, '--allow-failed': NONE, '--legacy': NONE }, ['run']),
   plugin: command({ '--codex': NONE, '--grok': NONE, '--force': NONE }, ['path']),
