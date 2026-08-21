@@ -15375,10 +15375,10 @@ function eligibilityFor(spec, archetype) {
   const state = map[archetype];
   return state === "shadow_only" || state === "forbidden" || state === "eligible" ? state : "eligible";
 }
-var ON_DEMAND_HOST_HARNESSES = /* @__PURE__ */ new Set(["claude"]);
+var IN_SESSION_ONLY_HOST_HARNESSES = /* @__PURE__ */ new Set(["claude"]);
 function dispatchability(spec, harness) {
   if (spec.adapter !== "host") return { supported: true };
-  if (ON_DEMAND_HOST_HARNESSES.has(harness)) return { supported: false, reason: "host_in_session" };
+  if (IN_SESSION_ONLY_HOST_HARNESSES.has(harness)) return { supported: false, reason: "host_in_session" };
   if (spec.fallbackCommand == null) return { supported: false, reason: "host_without_fallback" };
   return { supported: true };
 }

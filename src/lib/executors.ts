@@ -1722,14 +1722,41 @@ export function eligibilityFor(spec: ExecutorSpec, archetype: string | null): El
   return state === 'shadow_only' || state === 'forbidden' || state === 'eligible' ? state : 'eligible';
 }
 
-export const ON_DEMAND_HOST_HARNESSES: ReadonlySet<string> = new Set(['claude']);
+/**
+ * Harnesses where a host executor must be delivered IN-SESSION and may not be
+ * shelled out to its own `fallback_command`.
+ *
+ * The rule is about RE-ENTRANCY, not about which harnesses can materialize an
+ * agent on demand. Under `claude`, a host route's fallback is `claude -p …` —
+ * a subprocess of the harness already running, one level down — so dispatching
+ * it re-enters this dispatch instead of delivering it. `dispatchability`
+ * refuses, and the caller is told to spawn the in-session role agent.
+ *
+ * **This is deliberately NOT a capability claim, and was misnamed
+ * `ON_DEMAND_HOST_HARNESSES` until 2026-08-20.** That name implied Claude is
+ * the only harness that can spawn a host agent on demand, which is false:
+ * Codex resolves a spawned subagent's settings "from an explicit spawn value,
+ * then the corresponding `[agents]` default, then the parent's value" before
+ * applying the agent file, so it too can spawn any model it names. The old
+ * name led directly to a wrong diagnosis of why Codex coordinators shell out.
+ *
+ * The asymmetry that remains is real and unresolved: the codex `openai` host
+ * route's fallback is `codex exec …`, equally re-entrant, yet permitted —
+ * because Codex host requests are delivered through the `dispatch-fallback`
+ * protocol, which needs that path. Adding `codex` here would make ad-hoc
+ * `fadeno dispatch` refuse a host spec, which is what a host agent whose dial
+ * moved since `steering apply` is instructed to run. So the fix is not this
+ * set alone; it wants the ambient lane path moving with it. Left as-is
+ * deliberately rather than renamed into a promise it does not keep.
+ */
+export const IN_SESSION_ONLY_HOST_HARNESSES: ReadonlySet<string> = new Set(['claude']);
 
 export function dispatchability(
   spec: ExecutorSpec,
   harness: string,
 ): { supported: true } | { supported: false; reason: 'host_in_session' | 'host_without_fallback' } {
   if (spec.adapter !== 'host') return { supported: true };
-  if (ON_DEMAND_HOST_HARNESSES.has(harness)) return { supported: false, reason: 'host_in_session' };
+  if (IN_SESSION_ONLY_HOST_HARNESSES.has(harness)) return { supported: false, reason: 'host_in_session' };
   if (spec.fallbackCommand == null) return { supported: false, reason: 'host_without_fallback' };
   return { supported: true };
 }
