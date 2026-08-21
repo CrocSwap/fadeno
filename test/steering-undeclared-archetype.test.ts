@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stringify as stringifyYaml } from 'yaml';
@@ -76,6 +77,25 @@ test('a locked reviewer resolves natively even though the catalog declares no re
   });
   assert.equal(resolved.mode, 'host');
   assert.equal(resolved.source, 'host-request');
+
+  // Again through the BUNDLED CJS, which is what a managed Codex agent
+  // actually executes (`~/.local/share/fadeno/runtime/fadeno`). The in-process
+  // ESM path proves the logic; only this proves the artifact. `host-dispatch`
+  // already drives locked steering through the bundle, but solely for a
+  // DECLARED archetype — the reviewer path was unproven here.
+  const bundled = spawnSync(
+    join(import.meta.dirname, '..', 'plugin', 'bin', 'fadeno'),
+    ['steering', 'resolve', '--archetype', 'reviewer', '--host-executor', 'luna', '--run', runId, '--dispatch-id', dispatchId],
+    { cwd: root, encoding: 'utf8' },
+  );
+  assert.equal(bundled.status, 0, bundled.stderr);
+  const parsed = JSON.parse(bundled.stdout) as Record<string, unknown>;
+  assert.equal(parsed.mode, 'host');
+  assert.equal(parsed.requested_agent_type, 'reviewer');
+  // Null, and that is the point: `delivered_archetype` records what a WILDCARD
+  // was specialized to. A concrete request is not a specialization at all,
+  // which is why the guard above it has no business running here.
+  assert.equal(parsed.delivered_archetype, null);
 });
 
 test('a concrete agent_type is still matched exactly, and an unknown wildcard specialization is still refused', (t) => {
