@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.47";
+  if (true) return "0.6.0-rc.48";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -15393,16 +15393,17 @@ function applyWritePosture(spec, archetype, archetypes) {
 function hasWriteVariant(spec) {
   return spec.adapter === "command" && spec.writeVariant != null;
 }
-function explainWriteConflict(delivery, archetype, profile) {
+function explainWriteConflict(delivery, archetype, profile, opts = {}) {
+  const includeOverrideAdvice = opts.includeOverrideAdvice ?? true;
   if (archetype == null) return null;
   if (!Object.hasOwn(profile.archetypes, archetype)) return null;
   const posture = profile.archetypes[archetype].requiresWrite;
   const host = delivery.spec.adapter === "host";
   if (posture === "required" && delivery.spec.writeAccess === false && !hasWriteVariant(delivery.spec)) {
-    return `archetype "${archetype}" declares \`requires_write: required\`, but executor "${delivery.executor}" ` + (host ? "delivers through a host route whose command lane (`fallback_command`) is declared `write_access: false`, and a host route cannot declare a `write_variant` \u2014 in-session delivery carries the host's own permissions and the fallback lane replays the base argv byte-for-byte. " : "delivers through a command route declared `write_access: false`. ") + `It cannot mutate the workspace, so the dispatch would burn a run and end in a refusal. Fix: bind "${archetype}" to a write-capable executor` + (host ? " \u2014 `fadeno dial " + archetype + " <model> --via <driver>`, where an *-exec route is the command-lane counterpart of a host one \u2014 " : ", declare a `write_variant` on the route (a write-capable argv selected automatically for write-requiring archetypes), ") + `or run this ${archetype}-shaped task with the in-session ${archetype} agent. You can override this guard by rerunning the dial with \`--force\`, but doing so is not suggested because the executor may be unable to complete the work.`;
+    return `archetype "${archetype}" declares \`requires_write: required\`, but executor "${delivery.executor}" ` + (host ? "delivers through a host route whose command lane (`fallback_command`) is declared `write_access: false`, and a host route cannot declare a `write_variant` \u2014 in-session delivery carries the host's own permissions and the fallback lane replays the base argv byte-for-byte. " : "delivers through a command route declared `write_access: false`. ") + `It cannot mutate the workspace, so the dispatch would burn a run and end in a refusal. Fix: bind "${archetype}" to a write-capable executor` + (host ? " \u2014 `fadeno dial " + archetype + " <model> --via <driver>`, where an *-exec route is the command-lane counterpart of a host one \u2014 " : ", declare a `write_variant` on the route (a write-capable argv selected automatically for write-requiring archetypes), ") + `or run this ${archetype}-shaped task with the in-session ${archetype} agent.` + (includeOverrideAdvice ? " You can override this guard by rerunning the dial with `--force`, but doing so is not suggested because the executor may be unable to complete the work." : "");
   }
   if (posture === "forbidden" && delivery.spec.writeAccess === true) {
-    return `archetype "${archetype}" declares \`requires_write: forbidden\`, but executor "${delivery.executor}" delivers through a ${host ? "host" : "command"} route declared \`write_access: true\` \u2014 the dispatch would hand a mutating toolchain to work that must not mutate the workspace. Fix: bind "${archetype}" to a read-only route, clear the session dial (\`fadeno dial clear ${archetype}\`), or declare \`requires_write: none\`. You can override this guard by rerunning the dial with \`--force\`, but doing so is not suggested because it hands mutating capability to write-forbidden work.`;
+    return `archetype "${archetype}" declares \`requires_write: forbidden\`, but executor "${delivery.executor}" delivers through a ${host ? "host" : "command"} route declared \`write_access: true\` \u2014 the dispatch would hand a mutating toolchain to work that must not mutate the workspace. Fix: bind "${archetype}" to a read-only route, clear the session dial (\`fadeno dial clear ${archetype}\`), or declare \`requires_write: none\`.` + (includeOverrideAdvice ? " You can override this guard by rerunning the dial with `--force`, but doing so is not suggested because it hands mutating capability to write-forbidden work." : "");
   }
   return null;
 }
@@ -15423,9 +15424,19 @@ function explainPairRoutability(spec, executorName, archetype, profile) {
       reason: `executor "${executorName}" has no command lane \u2014 a host delivery with no fallback_command has nothing for a pair to force both arms onto.`
     };
   }
-  const conflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile);
-  if (conflict != null) return { routable: false, reason: conflict };
+  const conflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile, {
+    includeOverrideAdvice: false
+  });
+  if (conflict != null) {
+    return {
+      routable: false,
+      reason: `${conflict} No pair forms here, and \`--force\` does not change that: forcing lets the PRIMARY proceed on that lane, but the challenger resolves its own lane and is not confined to it, so the two arms would not be equally able to do the work. The pair would measure the lanes rather than the models, and an empty diff from a crippled arm is not evidence about the model that produced it.`
+    };
+  }
   return { routable: true };
+}
+function pairRoutabilityFields(answer) {
+  return answer.routable ? { routable: true, routable_reason: null } : { routable: false, routable_reason: answer.reason };
 }
 function explainEligibilityConflict(delivery, archetype) {
   if (eligibilityFor(delivery.spec, archetype) !== "forbidden") return null;
@@ -30442,7 +30453,7 @@ function runSteeringResolve(opts) {
       // also satisfy the archetype's write posture on that lane, not just
       // have one: `commandRoutable` alone says a lane exists, not that
       // forcing both arms onto it would actually work.
-      routable: explainPairRoutability(spec, refString, archetype, profile).routable
+      ...pairRoutabilityFields(explainPairRoutability(spec, refString, archetype, profile))
     };
   }
   const pinnedEffort = compiled?.pinnedEffort ?? cascade.ref.effort ?? null;
@@ -31383,9 +31394,15 @@ function unroutablePrimaryNote(params) {
     return null;
   }
   const postured = applyWritePosture(resolved.delivery.spec, archetype, profile.archetypes);
-  if (commandRoutable(postured.spec)) return null;
-  return `WARNING: NO PAIR POSSIBLE \u2014 ${archetype}'s primary (${resolved.delivery.refString}) resolves to a host executor with no fallback_command, so this shadow attachment can never be sampled: a selected pair has no command lane to force both arms onto, and an unroutable pair always degrades to no pair.
-Dial the primary to a command-capable executor to make this attachment take effect: \`fadeno dial ${archetype} <model>\`.`;
+  const routability = explainPairRoutability(
+    postured.spec,
+    resolved.delivery.refString,
+    archetype,
+    profile
+  );
+  if (routability.routable) return null;
+  return `WARNING: NO PAIR POSSIBLE \u2014 ${archetype}'s primary (${resolved.delivery.refString}) cannot carry a pair, so this shadow attachment can never be sampled and every dispatch will silently run unpaired.
+${routability.reason}`;
 }
 function runDialSet(opts) {
   const repoRoot = repoRootOf(opts);
@@ -32032,7 +32049,9 @@ function runDialResolve(opts) {
       // not the challenger's. This is what a selected pair would have to
       // reuse to reach the command lane, and that lane must also satisfy the
       // archetype's write posture, not merely exist.
-      routable: explainPairRoutability(spec, resolved.delivery.refString, archetype, profile).routable
+      ...pairRoutabilityFields(
+        explainPairRoutability(spec, resolved.delivery.refString, archetype, profile)
+      )
     };
   }
   const relay = (() => {

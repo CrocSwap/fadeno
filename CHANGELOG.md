@@ -6,6 +6,16 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed — a refused pair now says why, at every surface (0.6.0-rc.48)
+
+- **Refusing a pair stays narrow, and stops being silent.** `explainPairRoutability` refuses a pair when the primary's command lane cannot satisfy the archetype's declared write posture. That refusal is right and is deliberately the only asymmetry that earns one: only the *primary* is moved onto its command lane, while the challenger resolves its own delivery and carries its own posture guard — so running the pair anyway would compare a crippled arm against an uncrippled one and measure the lanes rather than the models. An empty diff from an arm that could not write is not evidence about the model that produced it. What was wrong is that a step this serious happened in silence: a user attached a shadow, was told nothing, and simply never got pairs.
+- **`fadeno dial shadow` warns at attach time.** `unroutablePrimaryNote` asked `commandRoutable` alone — "does a lane exist" — so it fired only for a host executor with no `fallback_command` and stayed mute for every write-posture refusal. It now answers with `explainPairRoutability`, the same predicate the resolve previews and the dispatch kernel use, which was the third copy of the question that helper exists to consolidate.
+- **`shadow.routable_reason` travels beside `shadow.routable`** in both `dial resolve` and `steering resolve`. The predicate always computed the explanation; both surfaces spread `...routable` alone and dropped it on the floor. `pairRoutabilityFields` now publishes the pair, so the two cannot drift on whether the reason survives, and it is `null` exactly when `routable` is true.
+- **The reason no longer offers `--force`.** `explainWriteConflict` takes `includeOverrideAdvice`, and pair context passes `false`: forcing lets the *primary* proceed and cannot make a pair form, so suggesting it there is advice that does nothing. A direct dial keeps the advice, where it is true — a test pins both halves. Reverting any of these fails `test/shadow-write-posture.test.ts`.
+- **Fixed two comments that misdescribed the mechanism**, both pointing at `pairCommandFallback`, a symbol that no longer exists: a pair does not confine *both* arms to the primary's lane, only the primary.
+
+*Found by the blinded adversarial judge pass on pair `49a1f92a`, then verified against `main` by measurement rather than by reading.*
+
 ### Added — `fadeno bakeoff --evidence explored` (0.6.0-rc.47)
 
 - **The judge can read the code instead of a diff of it.** `--evidence explored` reconstructs each arm's post-work tree from its `baseline_commit` and `diff_snapshot` into `.fadeno/local/judge/<pair-id-8>/arm_a/` and `arm_b/`, writes each arm's diff beside it, and puts PATHS in the prompt. On this repo's pair `49a1f92a` the comparison prompt goes from 54,912 bytes to 10,823 while the judge gets strictly more to look at: a diff shows changed hunks and hides the file they landed in, so "does this fit the code around it?" — the question a reviewer most wants answered — is the one the old prompt structurally could not support. `inlined` remains the default, and is the right trade for a small pair: the prompt file stays a complete record of what was judged.

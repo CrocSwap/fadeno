@@ -441,9 +441,18 @@ yields a diff-as-artifact and never touches the workspace. Evidence fields:
 `diff_snapshot: ".fadeno/local/outputs/shadow-<shadowId8>.diff"`, and
 `diff_bytes: <int>` (0 = clean). Shadow completions omit `workspace_changed`;
 the diff is the change record. A `dispatch_refused` shadow carries
-`shadow: true` + `primary_dispatch_id` and predicate `shadow_isolation` or
-`shadow_resolution` (or the usual `eligibility`/`write_posture`/
-`constraint_command`).
+`shadow: true` + `primary_dispatch_id` and predicate `shadow_isolation`,
+`shadow_resolution`, `shadow_containment`, or `shadow_write_posture` (or the
+usual `eligibility`/`write_posture`/`constraint_command`).
+
+`shadow_write_posture` is the pair-capability refusal: the primary's command
+lane cannot satisfy the archetype's declared write posture, so the pair is
+refused rather than run. Only the primary is moved onto its command lane — the
+challenger resolves its own delivery — so running the pair anyway would compare
+a crippled arm against an uncrippled one and measure the lanes instead of the
+models. It is deliberately the only asymmetry that refuses a pair, and it is
+never silent: `fadeno dial shadow` warns at attach time, and both `dial resolve`
+and `steering resolve` carry `shadow.routable_reason` beside `shadow.routable`.
 
 **Cancelling a running dispatch.** `fadeno dispatches --cancel tag:<handle>`
 (or an id / 8+ character prefix) sends SIGTERM to that dispatch's supervisor,

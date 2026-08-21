@@ -1789,9 +1789,14 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       return null;
     }
 
-    // A pair forces BOTH arms onto the PRIMARY's command lane (see
-    // `pairCommandFallback` above), so the pair is only as capable as that
-    // lane is — independent of how capable the challenger's own target is.
+    // A pair moves the PRIMARY off in-session delivery onto its own command
+    // lane (`spec.fallbackCommand`, selected above), so the pair is only as
+    // capable as that lane is — independent of how capable the challenger's
+    // own target is, because the challenger resolves its own delivery below
+    // and is not confined to the primary's argv. That asymmetry is the whole
+    // reason this refuses: a primary stuck on an unwritable lane compared
+    // against a challenger that is not stuck on it measures the lanes, not
+    // the models.
     // Checked here, not folded into `decidePairCandidate`: candidacy says a
     // pair is WANTED, this is a capability question decided after, and a
     // refusal row here is what lets a user who attached a shadow at

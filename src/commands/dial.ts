@@ -16,6 +16,7 @@ import {
   ExecutorProfileError,
   explainEligibilityConflict,
   explainPairRoutability,
+  pairRoutabilityFields,
   explainWriteConflict,
   formatDialRef,
   forcesWritePosture,
@@ -507,13 +508,23 @@ function unroutablePrimaryNote(params: {
     return null; // unresolvable primary vouches for nothing here either
   }
   const postured = applyWritePosture(resolved.delivery.spec, archetype, profile.archetypes);
-  if (commandRoutable(postured.spec)) return null;
+  // The SAME predicate the resolve previews and the dispatch kernel answer
+  // with. This used to ask `commandRoutable` alone — "does a lane exist" —
+  // which left attach time silent for every write-posture refusal: the user
+  // attached a shadow, saw no warning, and then simply never got pairs. A
+  // refusal nobody is told about is how refusing becomes a habit instead of
+  // the deliberate, rare step it is meant to be.
+  const routability = explainPairRoutability(
+    postured.spec,
+    resolved.delivery.refString,
+    archetype,
+    profile,
+  );
+  if (routability.routable) return null;
   return (
-    `WARNING: NO PAIR POSSIBLE — ${archetype}'s primary (${resolved.delivery.refString}) resolves to a host ` +
-    'executor with no fallback_command, so this shadow attachment can never be sampled: a selected pair has no ' +
-    'command lane to force both arms onto, and an unroutable pair always degrades to no pair.\n' +
-    `Dial the primary to a command-capable executor to make this attachment take effect: ` +
-    `\`fadeno dial ${archetype} <model>\`.`
+    `WARNING: NO PAIR POSSIBLE — ${archetype}'s primary (${resolved.delivery.refString}) cannot carry a pair, ` +
+    'so this shadow attachment can never be sampled and every dispatch will silently run unpaired.\n' +
+    `${routability.reason}`
   );
 }
 
@@ -1357,13 +1368,16 @@ export interface DialResolveResult {
    * `selected` is null when no prompt digest was supplied — the caller asked a
    * question the roll cannot answer, and must not read that as "no".
    *
-   * `routable` is independent of the roll: it says whether the PRIMARY's
-   * resolved spec can take the command lane at all (a command adapter, or a
-   * host adapter with a `fallback_command`). It is exactly the condition the
-   * kernel's `pairCommandFallback` tests at dispatch time, computed here so
-   * the two agree by construction. A caller must force command delivery only
-   * when `selected && routable` — a selected-but-unroutable pair degrades to
-   * no pair, never to a dispatch the kernel would refuse.
+   * `routable` is independent of the roll: it is `explainPairRoutability`,
+   * the same predicate the kernel answers before forming a pair, so the two
+   * agree by construction. It asks TWO things, not one — that the primary's
+   * resolved spec can take a command lane at all (a command adapter, or a
+   * host adapter with a `fallback_command`), AND that the lane satisfies the
+   * archetype's declared write posture. `routable_reason` carries the second
+   * answer's explanation; it is `null` exactly when `routable` is true.
+   * A caller must force command delivery only when `selected && routable` —
+   * a selected-but-unroutable pair degrades to no pair, never to a dispatch
+   * the kernel would refuse.
    */
   shadow?: {
     attached: true;
@@ -1371,6 +1385,13 @@ export interface DialResolveResult {
     rate: number | null;
     selected: boolean | null;
     routable: boolean;
+    /**
+     * Why not, when `routable` is false — `null` when it is true. Present
+     * because the predicate always computed this string and both preview
+     * surfaces used to drop it on the floor, which is how a user at
+     * `--rate 1.0` got no pairs and no explanation anywhere.
+     */
+    routable_reason: string | null;
   };
 }
 
@@ -1489,7 +1510,9 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
       // not the challenger's. This is what a selected pair would have to
       // reuse to reach the command lane, and that lane must also satisfy the
       // archetype's write posture, not merely exist.
-      routable: explainPairRoutability(spec, resolved.delivery.refString, archetype, profile).routable,
+      ...pairRoutabilityFields(
+        explainPairRoutability(spec, resolved.delivery.refString, archetype, profile),
+      ),
     };
   }
 

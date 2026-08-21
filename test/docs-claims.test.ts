@@ -249,6 +249,20 @@ const CLAIMS: Claim[] = [
     },
   },
   {
+    // A refusal this serious must not be silent — silence is how it becomes a
+    // habit. Both preview surfaces once spread `...routable` alone and dropped
+    // the reason the predicate had already written, and attach time asked the
+    // old lane-exists-only question, so a user at `--rate 1.0` got no pairs
+    // and no explanation at any surface. The doc states the standard; these
+    // literals are what keep it true.
+    id: 'pair-refusal-is-visible',
+    doc: { files: [SLOTS], patterns: [/routable_reason/, /pairRoutabilityFields/] },
+    src: {
+      files: ['src/lib/executors.ts', 'src/commands/dial.ts', 'src/commands/steering.ts'],
+      patterns: [/routable_reason/, /pairRoutabilityFields/],
+    },
+  },
+  {
     // The reconstruction trap, recorded because it is invisible: `git apply`
     // from inside the destination exits 0 and applies NOTHING, leaving a
     // baseline tree wearing an arm's label. The doc says why the applier uses

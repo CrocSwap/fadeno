@@ -1791,7 +1791,14 @@ export function explainWriteConflict(
   delivery: DeliveryChoice,
   archetype: string | null,
   profile: ExecutorProfile,
+  opts: { includeOverrideAdvice?: boolean } = {},
 ): string | null {
+  // `--force` is real advice for a DIRECT dial — it lets the primary proceed
+  // anyway. It is wrong advice in pair context, where forcing changes nothing
+  // about whether a pair forms, so `explainPairRoutability` suppresses it
+  // rather than restating this conflict in its own words: one conflict, one
+  // author, two framings.
+  const includeOverrideAdvice = opts.includeOverrideAdvice ?? true;
   if (archetype == null) return null;
   if (!Object.hasOwn(profile.archetypes, archetype)) return null;
   const posture = profile.archetypes[archetype]!.requiresWrite;
@@ -1818,8 +1825,10 @@ export function explainWriteConflict(
         ? ' — `fadeno dial ' + archetype + ' <model> --via <driver>`, where an *-exec route is the ' +
           'command-lane counterpart of a host one — '
         : ', declare a `write_variant` on the route (a write-capable argv selected automatically for write-requiring archetypes), ') +
-      `or run this ${archetype}-shaped task with the in-session ${archetype} agent. ` +
-      'You can override this guard by rerunning the dial with `--force`, but doing so is not suggested because the executor may be unable to complete the work.'
+      `or run this ${archetype}-shaped task with the in-session ${archetype} agent.` +
+      (includeOverrideAdvice
+        ? ' You can override this guard by rerunning the dial with `--force`, but doing so is not suggested because the executor may be unable to complete the work.'
+        : '')
     );
   }
   if (posture === 'forbidden' && delivery.spec.writeAccess === true) {
@@ -1829,8 +1838,10 @@ export function explainWriteConflict(
       'mutating toolchain to work that must not mutate the workspace. ' +
       `Fix: bind "${archetype}" to a read-only route, ` +
       `clear the session dial (\`fadeno dial clear ${archetype}\`), ` +
-      'or declare `requires_write: none`. ' +
-      'You can override this guard by rerunning the dial with `--force`, but doing so is not suggested because it hands mutating capability to write-forbidden work.'
+      'or declare `requires_write: none`.' +
+      (includeOverrideAdvice
+        ? ' You can override this guard by rerunning the dial with `--force`, but doing so is not suggested because it hands mutating capability to write-forbidden work.'
+        : '')
     );
   }
   return null;
@@ -1884,15 +1895,27 @@ export function commandRoutable(spec: ExecutorSpec): boolean {
 
 /**
  * Whether a selected pair can actually reach this spec's command lane: a
- * lane must exist (`commandRoutable`) AND, once both arms are forced onto
+ * lane must exist (`commandRoutable`) AND, once the PRIMARY is confined to
  * it, that lane must satisfy the archetype's declared write posture
  * (`explainWriteConflict` — the same predicate a direct dial resolution is
  * judged by, since forcing the command lane is exactly what a pair does to
- * a host spec). One shared answer for both the `steering`/`dial` resolve
- * previews (which decide whether to *announce* a pair) and the dispatch
- * kernel (which decides whether to actually *form* one): two independent
- * copies of this question is the drift shape this catalog keeps getting
- * bitten by (see the `CATALOG_TOP_LEVEL_KEYS` comment above).
+ * a host spec).
+ *
+ * Only the primary is confined. The challenger resolves its OWN delivery
+ * (`compileDialRef(shadowDial)` in `startShadow`) and carries its own
+ * write-posture guard, so a primary stuck on an unwritable lane would be
+ * compared against a challenger that is not stuck on it — the arms would
+ * differ in capability, and the diff would measure the lanes rather than
+ * the models. That asymmetry, not mere untidiness, is why this refuses:
+ * refusing a pair is a serious step and is reserved for the case where no
+ * meaningful comparison exists to be had.
+ *
+ * One shared answer for the `steering`/`dial` resolve previews (which decide
+ * whether to *announce* a pair), the attach-time note in `fadeno dial
+ * shadow` (which decides whether to *warn*), and the dispatch kernel (which
+ * decides whether to actually *form* one): independent copies of this
+ * question is the drift shape this catalog keeps getting bitten by (see the
+ * `CATALOG_TOP_LEVEL_KEYS` comment above).
  */
 export function explainPairRoutability(
   spec: ExecutorSpec,
@@ -1906,9 +1929,35 @@ export function explainPairRoutability(
       reason: `executor "${executorName}" has no command lane — a host delivery with no fallback_command has nothing for a pair to force both arms onto.`,
     };
   }
-  const conflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile);
-  if (conflict != null) return { routable: false, reason: conflict };
+  const conflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile, {
+    includeOverrideAdvice: false,
+  });
+  if (conflict != null) {
+    return {
+      routable: false,
+      reason:
+        `${conflict} No pair forms here, and \`--force\` does not change that: forcing lets the PRIMARY ` +
+        'proceed on that lane, but the challenger resolves its own lane and is not confined to it, so the two ' +
+        'arms would not be equally able to do the work. The pair would measure the lanes rather than the ' +
+        'models, and an empty diff from a crippled arm is not evidence about the model that produced it.',
+    };
+  }
   return { routable: true };
+}
+
+/**
+ * The two fields a preview surface publishes for a pair-routability answer.
+ * Defined once so `dial resolve` and `steering resolve` cannot drift on
+ * whether the reason travels with the verdict: both surfaces used to spread
+ * `...routable` alone and drop the string the predicate had already written,
+ * leaving a user at `--rate 1.0` with no pairs and nothing to read.
+ */
+export function pairRoutabilityFields(
+  answer: ReturnType<typeof explainPairRoutability>,
+): { routable: boolean; routable_reason: string | null } {
+  return answer.routable
+    ? { routable: true, routable_reason: null }
+    : { routable: false, routable_reason: answer.reason };
 }
 
 export function explainEligibilityConflict(

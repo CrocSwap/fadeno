@@ -1,6 +1,6 @@
 ---
 name: bakeoff
-description: Adjudicate a Fadeno shadow pair (two arms of the same task) using host `judge` subagents instead of a second command-lane vendor. Use when asked to assess, judge, compare, or adjudicate a shadow pair, or when handed a pair id and asked to form a verdict. [fadeno 0.6.0-rc.47]
+description: Adjudicate a Fadeno shadow pair (two arms of the same task) using host `judge` subagents instead of a second command-lane vendor. Use when asked to assess, judge, compare, or adjudicate a shadow pair, or when handed a pair id and asked to form a verdict. [fadeno 0.6.0-rc.48]
 ---
 
 # Fadeno shadow-pair comparison

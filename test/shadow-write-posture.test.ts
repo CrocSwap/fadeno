@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
-import { runDialResolve } from '../src/commands/dial.ts';
+import { runDialResolve, runDialSet, runDialShadow } from '../src/commands/dial.ts';
 import { DISPATCHES_FILE, runDispatch } from '../src/commands/dispatch.ts';
 import { runSteeringResolve } from '../src/commands/steering.ts';
 import { writeLocalDialState } from '../src/lib/executors.ts';
@@ -193,4 +193,92 @@ test('a refusal row is written when a selected shadow cannot pair for write post
   assert.equal(shadowRefusal.refusal.predicate, 'shadow_write_posture');
   assert.match(shadowRefusal.refusal.message, /requires_write.*required/s);
   assert.equal(shadowRefusal.primary_dispatch_id, primaryCompleted.dispatch_id);
+});
+
+// --- The refusal must be VISIBLE ---------------------------------------
+//
+// Refusing a pair is defensible: only the PRIMARY is confined to its command
+// lane, while the challenger resolves its own delivery, so a write-required
+// primary stuck on a `write_access: false` lane would be compared against a
+// challenger that is not stuck on it — the diff would measure the lanes, not
+// the models. But that makes it a serious step, reserved for the case where
+// no meaningful comparison exists, and a serious step taken silently is how
+// refusing becomes a habit. These pin the three surfaces that were mute:
+// attach time said nothing at all, and both resolve previews computed the
+// explanation and dropped it.
+
+test('attach time WARNS for the write-posture case, not only the no-lane case', (t) => {
+  const root = seedRoot(t);
+  const result = runDialShadow({
+    archetype: 'worker', model: 'grok', repoRoot: root,
+    userPathOptions: isolatedUser(root, 'codex'),
+  });
+  const warning = result.notes.find((n: string) => n.includes('NO PAIR POSSIBLE'));
+  assert.ok(warning, 'attaching a shadow to an unpairable primary must warn at attach time');
+  assert.match(warning, /requires_write.*required/s);
+  // The old note only ever fired for "host executor with no fallback_command".
+  // This primary HAS a fallback_command; it is the write posture that refuses.
+  assert.doesNotMatch(warning, /no fallback_command/);
+});
+
+test('the pair refusal explains itself on both preview surfaces, and agrees', (t) => {
+  const root = seedRoot(t);
+  writeLocalDialState(root, { dials: {}, shadows: { worker: { model: 'grok', rate: 1 } }, legacyNote: null });
+  const opts = { archetype: 'worker', repoRoot: root, userPathOptions: isolatedUser(root, 'codex') };
+  const dial = runDialResolve({ ...opts, promptSha256: sha256Hex('do the thing') });
+  const steering = runSteeringResolve({ ...opts, promptSha256: sha256Hex('do the thing') });
+
+  assert.equal(dial.shadow?.routable, false);
+  assert.equal(steering.shadow?.routable, false);
+  assert.ok(dial.shadow?.routable_reason, 'dial resolve must say why no pair forms');
+  assert.ok(steering.shadow?.routable_reason, 'steering resolve must say why no pair forms');
+  assert.equal(dial.shadow?.routable_reason, steering.shadow?.routable_reason);
+});
+
+test('the pair refusal does NOT advise `--force`, which cannot make a pair form', (t) => {
+  const root = seedRoot(t);
+  writeLocalDialState(root, { dials: {}, shadows: { worker: { model: 'grok', rate: 1 } }, legacyNote: null });
+  const resolved = runDialResolve({
+    archetype: 'worker', repoRoot: root, userPathOptions: isolatedUser(root, 'codex'),
+    promptSha256: sha256Hex('do the thing'),
+  });
+  const reason = resolved.shadow?.routable_reason ?? '';
+  assert.doesNotMatch(reason, /override this guard by rerunning the dial/);
+  assert.match(reason, /`--force` does not change that/);
+});
+
+test('the DIRECT dial keeps the `--force` advice — it is true there, and only there', (t) => {
+  // The control for the test above: suppressing the override advice must be
+  // scoped to pair context. On a direct dial `--force` genuinely does let the
+  // binding through, so removing it there would be a real loss of guidance.
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    schema_version: 3,
+    models: { ro: { provider: 'rop', id: 'ro-model' } },
+    routes: { codex: { rop: { command: ECHO('RO:'), write_access: false } } },
+    archetypes: { worker: { requires_write: 'required' } },
+  }));
+  assert.throws(
+    () => runDialSet({
+      archetype: 'worker', model: 'ro', repoRoot: root,
+      userPathOptions: isolatedUser(root, 'codex'), session: true,
+    }),
+    /override this guard by rerunning the dial with `--force`/,
+  );
+});
+
+test('routable_reason is null exactly when the pair IS routable', (t) => {
+  const root = seedRoot(t);
+  writeLocalDialState(root, {
+    dials: { worker: { model: 'variant' } },
+    shadows: { worker: { model: 'grok', rate: 1 } },
+    legacyNote: null,
+  });
+  const resolved = runDialResolve({
+    archetype: 'worker', repoRoot: root, userPathOptions: isolatedUser(root, 'codex'),
+    promptSha256: sha256Hex('do the thing'),
+  });
+  assert.equal(resolved.shadow?.routable, true);
+  assert.equal(resolved.shadow?.routable_reason, null);
 });

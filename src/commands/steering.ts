@@ -8,6 +8,7 @@ import {
   applyWritePosture,
   commandRoutable,
   explainPairRoutability,
+  pairRoutabilityFields,
   explainWriteConflict,
   eligibilityFor,
   formatDialRef,
@@ -177,6 +178,8 @@ export interface SteeringResolution extends LaneDecision {
     rate: number | null;
     selected: boolean | null;
     routable: boolean;
+    /** Why not, when `routable` is false; `null` when it is true. */
+    routable_reason: string | null;
   };
 }
 
@@ -668,7 +671,7 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
       // also satisfy the archetype's write posture on that lane, not just
       // have one: `commandRoutable` alone says a lane exists, not that
       // forcing both arms onto it would actually work.
-      routable: explainPairRoutability(spec, refString, archetype, profile).routable,
+      ...pairRoutabilityFields(explainPairRoutability(spec, refString, archetype, profile)),
     };
   }
 

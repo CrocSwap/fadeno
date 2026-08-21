@@ -643,7 +643,22 @@ task outright; `shadow.routable` gates that — lane exists *and* the command
 lane can satisfy the archetype's write posture (`explainPairRoutability`) —
 and an unroutable pair degrades to no pair rather than to no work. A
 selected pair whose command lane cannot write still writes a
-`shadow_write_posture` refusal row so `fadeno dispatches` can say why. A
+`shadow_write_posture` refusal row so `fadeno dispatches` can say why.
+
+Refusing a pair is a serious step and is deliberately narrow. Only the
+*primary* is moved onto its command lane; the challenger resolves its own
+delivery and carries its own write-posture guard, so a write-required primary
+stuck on a `write_access: false` lane would be compared against a challenger
+that is not stuck on it — the diff would measure the lanes rather than the
+models, and an empty diff from a crippled arm is not evidence about the model
+that produced it. That asymmetry is the whole justification, and it is the only
+thing this refuses for. Because it is serious, it must never be silent:
+`explainPairRoutability` returns the reason alongside the verdict,
+`pairRoutabilityFields` publishes both as `routable` and `routable_reason` at
+every preview surface, and `fadeno dial shadow` warns at attach time rather
+than letting a user discover it as pairs that never happen. `--force` is
+suppressed from that reason — it lets the *primary* proceed and cannot make a
+pair form, so offering it there would be advice that does nothing. A
 challenger's worktree lacked everything gitignored, so any task gated on
 building or testing was unwinnable for one arm alone; `worktree_carry:`
 carries declared paths by reflink, hardlink, or
