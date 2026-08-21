@@ -99,7 +99,53 @@ export const VERDICT_BUCKET: Record<ModelComparisonVerdict, 'challenger' | 'base
  * have surfaced it. A section that is sometimes present is a section a judge
  * learns to skip.
  */
-export const MODEL_COMPARISON_REQUIRED_SECTIONS = ['Criteria', 'Confounds', 'Shared blind spots'] as const;
+/**
+ * Model-level dispositions, as GROUPABLE tokens.
+ *
+ * `criteria` judges this artifact; these describe how the model WORKED, and
+ * the two are not the same claim. "Writes more defensively" may be right on
+ * this task and wrong on the next one — a trait is not a score, and recording
+ * it as one destroys the thing shadow pairs exist to accumulate.
+ *
+ * Tokens rather than prose because accumulation is the whole point: three
+ * pairs of sonnet-vs-grok should compose into a picture of the two models, and
+ * sentences cannot be tallied. Same reason `refusal.predicate` is a token
+ * while its message is not.
+ */
+export const TRAIT_DIMENSIONS = [
+  /** Volume of change relative to what the task required. */
+  'output_volume',
+  /** Guards, validation, and error paths the task did not explicitly ask for. */
+  'defensiveness',
+  /** Extracting shared helpers vs. writing it inline where it is used. */
+  'abstraction',
+  /** Following the surrounding codebase's established patterns. */
+  'convention_adherence',
+  /** Staying inside the task boundary vs. improving adjacent things. */
+  'scope_discipline',
+  /** Checking its own work — tests, round-trips, tripwires against its own claims. */
+  'self_verification',
+  /** Restating existing behaviour instead of reusing the rule that owns it. */
+  'duplication',
+  /** Explaining WHY in comments and commit-adjacent prose. */
+  'rationale_density',
+] as const;
+
+export type TraitDimension = (typeof TRAIT_DIMENSIONS)[number];
+
+/**
+ * One observed disposition. `favors` names the arm that exhibited MORE of the
+ * dimension — deliberately not "better", because more is not better: pair
+ * 49a1f92a's challenger wrote 65% more and the surplus was the worse artifact.
+ */
+export interface ModelTrait {
+  dimension: TraitDimension;
+  /** The arm exhibiting more of it, in the artifact's frame after unblinding. */
+  more: 'primary' | 'challenger' | 'neither';
+  note: string;
+}
+
+export const MODEL_COMPARISON_REQUIRED_SECTIONS = ['Criteria', 'Model traits', 'Confounds', 'Shared blind spots'] as const;
 
 /**
  * One instruction in a graft plan: take THIS from THAT arm, for a stated

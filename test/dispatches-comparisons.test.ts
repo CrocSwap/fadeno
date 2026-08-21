@@ -198,6 +198,9 @@ scope discipline: ok
 instruction adherence: ok
 style fit: ok
 
+## Model traits
+- **output_volume** (more: challenger): the challenger wrote more for the same task.
+
 ## Confounds
 delivery transport: command vs command
 tool availability: same
@@ -217,6 +220,9 @@ date: 2026-08-13
 ## Criteria
 correctness: baseline better
 
+## Model traits
+- **output_volume** (more: challenger): the challenger wrote more for the same task.
+
 ## Confounds
 delivery transport: same
 tool availability: same
@@ -235,6 +241,9 @@ date: 2026-08-13
 ---
 ## Criteria
 tie
+
+## Model traits
+- **output_volume** (more: challenger): the challenger wrote more for the same task.
 
 ## Confounds
 confounds here

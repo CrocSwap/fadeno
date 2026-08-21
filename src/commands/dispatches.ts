@@ -1664,6 +1664,8 @@ export interface DispatchComparisonPair {
 }
 
 export interface ModelComparisonArtifact {
+  /** Model-level dispositions this comparison observed, for cross-pair accumulation. */
+  traits?: Array<{ dimension: string; more: string }>;
   file: string;
   baseline: string | null;
   challenger: string | null;
@@ -1686,6 +1688,12 @@ export interface DispatchComparisonGroup {
     graft: number;
     tieOrInconclusive: number;
   };
+  /**
+   * Model-level dispositions accumulated across every valid comparison in this
+   * group, most-distinguishing first. Verdicts say who won; this says what the
+   * two models are LIKE, which is the reading a single pair cannot give.
+   */
+  traitTally: Array<{ dimension: string; challenger: number; baseline: number; neither: number }>;
 }
 
 export interface DispatchesComparisonsOptions {
@@ -1987,13 +1995,36 @@ export function parseModelComparisonFile(repoRoot: string, relPath: string): Mod
   if (!isModelComparisonVerdict(verdict)) {
     return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: 'invalid verdict' };
   }
+  // Traits accumulate; verdicts alone do not tell you what the two models are
+  // LIKE. Parsed back out of the rendered section because the artifact is the
+  // record — re-reading it is what lets a scorecard built weeks later still
+  // compose a picture of a challenger across every pair it ran.
+  const traits = parseTraitSection(body);
   const planRaw = data.graft_plan;
   const plan = Array.isArray(planRaw) ? (planRaw as GraftStep[]) : undefined;
   const incoherent = checkGraftCoherence(verdict, plan);
   if (incoherent != null) {
     return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: incoherent };
   }
-  return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: true };
+  return { file: relPath, baseline, challenger, verdict, date, dispatchIds, traits, valid: true };
+}
+
+/**
+ * Read the `## Model traits` section back into tokens.
+ *
+ * The rendered line is `- **<dimension>** (more: <arm>): <note>`; only the two
+ * tokens are recovered, never the prose. Prose cannot be tallied, which is the
+ * entire reason the dimension is a closed vocabulary.
+ */
+function parseTraitSection(body: string): Array<{ dimension: string; more: string }> {
+  const section = /^##\s+Model traits\s*$([\s\S]*?)(?=^##\s|\Z)/m.exec(body);
+  if (section == null) return [];
+  const out: Array<{ dimension: string; more: string }> = [];
+  for (const line of section[1]!.split('\n')) {
+    const m = /^-\s+\*\*([a-z_]+)\*\*\s+\(more:\s*([a-z]+)\)/.exec(line.trim());
+    if (m != null) out.push({ dimension: m[1]!, more: m[2]! });
+  }
+  return out;
 }
 
 function scanComparisons(repoRoot: string, dirRel: string): { artifacts: ModelComparisonArtifact[]; skipped: number } {
@@ -2147,6 +2178,32 @@ export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}
   for (const challenger of sortedChallengers) {
     const groupPairs = pairs.filter((p) => (p.shadow.executor ?? '(unknown)') === challenger);
     const groupComparisons = artifacts.filter((a) => a.challenger === challenger);
+
+    // Traits accumulated across the group. This is the reading a single
+    // comparison cannot give: one artifact says "arm_b validated its own
+    // output", ten say "this challenger is consistently more self-verifying
+    // and consistently writes more" — a fact about the MODEL rather than about
+    // any one task, which is what shadow pairs are collected FOR.
+    //
+    // Counts are kept separately rather than netted, because 5-5 and 0-0 are
+    // different findings: one is a model that varies by task, the other a
+    // dimension that never distinguishes these two at all.
+    const traitCounts = new Map<string, { dimension: string; challenger: number; baseline: number; neither: number }>();
+    for (const artifact of groupComparisons) {
+      if (!artifact.valid) continue;
+      for (const trait of artifact.traits ?? []) {
+        const row = traitCounts.get(trait.dimension)
+          ?? { dimension: trait.dimension, challenger: 0, baseline: 0, neither: 0 };
+        if (trait.more === 'challenger') row.challenger += 1;
+        else if (trait.more === 'primary' || trait.more === 'baseline') row.baseline += 1;
+        else row.neither += 1;
+        traitCounts.set(trait.dimension, row);
+      }
+    }
+    const traitTally = [...traitCounts.values()].sort(
+      (x, y) => (y.challenger + y.baseline) - (x.challenger + x.baseline) || x.dimension.localeCompare(y.dimension),
+    );
+
     // Bucketed through VERDICT_BUCKET rather than by comparing to literals.
     // The literal form silently dropped any verdict it did not name: `graft`
     // would have parsed as valid, counted toward `comparisons`, and landed in
@@ -2170,6 +2227,7 @@ export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}
         graft,
         tieOrInconclusive,
       },
+      traitTally,
     });
   }
 
@@ -2187,6 +2245,16 @@ export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}
   } else {
     for (const group of groups) {
       lines.push(`challenger ${group.challenger}: ${group.tally.pairs} pairs, ${group.tally.comparisons} comparisons: ${group.tally.preferChallenger} prefer_challenger / ${group.tally.preferBaseline} prefer_baseline / ${group.tally.graft} graft / ${group.tally.tieOrInconclusive} tie/inconclusive`);
+      // The model-level reading, printed only once there is something to
+      // accumulate — a trait line off ONE comparison is an anecdote wearing a
+      // tally's clothes, and the design's own rule is that single comparisons
+      // are noise.
+      if (group.tally.comparisons > 1 && group.traitTally.length > 0) {
+        lines.push('  model traits across these comparisons (who exhibited MORE — not who was better):');
+        for (const t of group.traitTally) {
+          lines.push(`    ${t.dimension.padEnd(22)} challenger ${t.challenger} / baseline ${t.baseline} / neither ${t.neither}`);
+        }
+      }
       for (const pair of group.pairs) {
         lines.push(`  ${formatComparisonPair(pair)}`);
       }

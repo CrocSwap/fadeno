@@ -276,6 +276,7 @@ test('a graft judgment round-trips through render, unblinds from_arm, and is acc
       { criterion: 'repo_convention', assessment: 'arm_b better follows the drift-tripwire convention', favors: 'b' },
     ],
     shared_blind_spots: [],
+    traits: [{ dimension: 'self_verification', more: 'b', note: 'arm_b checked its own output; arm_a did not.' }],
     graft_plan: [{ from_arm: 'b', what: 'the drift tripwire in cli.ts', why: 'the other arm never wired the field to the printed object' }],
     confound_notes: 'both arms ran unusually slowly, which the ledger did not otherwise explain.',
   };
@@ -357,6 +358,7 @@ test('the graft plan reaches the returned result, not only the written file', (t
         verdict: 'graft',
         criteria: [{ criterion: 'correctness', assessment: 'both fine', favors: 'neither' }],
         shared_blind_spots: [],
+        traits: [{ dimension: 'output_volume', more: 'b', note: 'arm_b wrote noticeably more for the same task.' }],
         graft_plan: [{ from_arm: 'b', what: 'the tripwire', why: 'the other arm never wired it' }],
       },
       { shared_blind_spots: [] },
@@ -395,6 +397,7 @@ test('the verdict is unblinded, so a swapped mapping cannot invert the recorded 
         verdict: 'prefer_a',
         criteria: [{ criterion: 'correctness', assessment: 'arm_a is better', favors: 'a' }],
         shared_blind_spots: [],
+        traits: [{ dimension: 'output_volume', more: 'b', note: 'arm_b wrote noticeably more for the same task.' }],
       },
       { shared_blind_spots: [] },
     ),
@@ -421,6 +424,7 @@ test('a judgment using the artifact vocabulary is refused, not silently reinterp
         verdict: 'prefer_baseline',
         criteria: [{ criterion: 'correctness', assessment: 'x', favors: 'a' }],
         shared_blind_spots: [],
+        traits: [{ dimension: 'output_volume', more: 'b', note: 'arm_b wrote noticeably more for the same task.' }],
       },
       { shared_blind_spots: [] },
     ),
@@ -446,6 +450,7 @@ test('two pairs sharing eight hex characters do not overwrite each other', (t) =
     verdict: 'prefer_a',
     criteria: [{ criterion: 'correctness', assessment: 'x', favors: 'a' }],
     shared_blind_spots: [],
+    traits: [{ dimension: 'abstraction', more: 'a', note: 'arm_a extracted a helper where arm_b inlined.' }],
   };
   const root = seedPair(t, {
     secondPairId: b,
@@ -472,7 +477,12 @@ test('an artifact the scorecard cannot read is removed, not left to be silently 
     primaryDiff: diffFor('src/a.ts', ['+x']),
     challengerDiff: diffFor('src/b.ts', ['+y']),
     judgeCommand: judgeCommand(
-      { verdict: 'prefer_a', criteria: [{ criterion: 'correctness', assessment: 'x', favors: 'a' }], shared_blind_spots: [] },
+      {
+        verdict: 'prefer_a',
+        criteria: [{ criterion: 'correctness', assessment: 'x', favors: 'a' }],
+        shared_blind_spots: [],
+        traits: [{ dimension: 'convention_adherence', more: 'a', note: 'arm_a matched the surrounding style.' }],
+      },
       { shared_blind_spots: [] },
     ),
   });

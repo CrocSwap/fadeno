@@ -12,9 +12,15 @@ import {
 import { SCHEMA_KINDS } from '../src/lib/playbook-validate.ts';
 import { tempRepo } from './helpers.ts';
 
-function writeComparison(root: string, name: string, frontmatter: string, sections = MODEL_COMPARISON_REQUIRED_SECTIONS): void {
+function writeComparison(
+  root: string,
+  name: string,
+  frontmatter: string,
+  sections = MODEL_COMPARISON_REQUIRED_SECTIONS,
+  bodies: Record<string, string> = {},
+): void {
   mkdirSync(join(root, COMPARISONS_DIR), { recursive: true });
-  const body = sections.map((s) => `## ${s}\n\nprose.\n`).join('\n');
+  const body = sections.map((s) => `## ${s}\n\n${bodies[s] ?? 'prose.'}\n`).join('\n');
   writeFileSync(join(root, COMPARISONS_DIR, name), `---\n${frontmatter}\n---\n\n${body}`);
 }
 
@@ -86,4 +92,34 @@ test('the schema kind registry is one list, so --schema cannot reject a shipped 
   // and the CLI said no such kind.
   assert.ok(SCHEMA_KINDS.includes('model-comparison'));
   assert.ok(SCHEMA_KINDS.includes('review-report'));
+});
+
+test('traits accumulate across a challenger\'s comparisons, which one comparison cannot show', (t: TestContext) => {
+  // The reading shadow pairs are collected FOR. One artifact says "arm_b
+  // validated its own output"; three say "this challenger is consistently more
+  // self-verifying and consistently writes more" — a fact about the MODEL, not
+  // about any one task. Verdicts alone never give that.
+  const root = tempRepo(t);
+  const traits = (selfVerification: string) => [
+    '- **output_volume** (more: challenger): wrote more for the same task.',
+    `- **self_verification** (more: ${selfVerification}): checked its own work.`,
+    '- **abstraction** (more: neither): indistinguishable here.',
+  ].join('\n');
+  for (const [name, who] of [['a.md', 'challenger'], ['b.md', 'challenger'], ['c.md', 'primary']] as const) {
+    writeComparison(root, name, base('tie'), MODEL_COMPARISON_REQUIRED_SECTIONS, { 'Model traits': traits(who) });
+  }
+
+  const group = runDispatchesComparisons({ repoRoot: root }).groups[0]!;
+  const byDim = new Map(group.traitTally.map((row) => [row.dimension, row]));
+
+  assert.deepEqual(byDim.get('output_volume'), { dimension: 'output_volume', challenger: 3, baseline: 0, neither: 0 });
+  // 2-1 is a model that mostly does this, and must NOT be netted to "1" — a
+  // dimension that varies and one that never distinguishes the two are
+  // different findings, and netting collapses them into the same number.
+  assert.deepEqual(byDim.get('self_verification'), { dimension: 'self_verification', challenger: 2, baseline: 1, neither: 0 });
+  assert.deepEqual(byDim.get('abstraction'), { dimension: 'abstraction', challenger: 0, baseline: 0, neither: 3 });
+
+  // Most-distinguishing first: a dimension where the arms are always the same
+  // tells you least, so it sorts last.
+  assert.equal(group.traitTally.at(-1)?.dimension, 'abstraction');
 });

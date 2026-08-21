@@ -7,7 +7,8 @@
   "required": [
     "verdict",
     "criteria",
-    "shared_blind_spots"
+    "shared_blind_spots",
+    "traits"
   ],
   "additionalProperties": false,
   "properties": {
@@ -123,6 +124,46 @@
     "confound_notes": {
       "type": "string",
       "description": "Optional. The kernel stamps the confounds it can prove from the ledger; this is only for one a judge observed that the ledger cannot see."
+    },
+    "traits": {
+      "type": "array",
+      "description": "How each model WORKED, as opposed to whether this artifact is good. A trait is NOT a score: 'writes more defensively' may be right here and wrong on the next task, and recording it as a score destroys what accumulating pairs is for. Report the dimension even when it did not affect the verdict. Use `neither` freely \u2014 a dimension where the two arms are indistinguishable is a real and useful observation.",
+      "items": {
+        "type": "object",
+        "required": [
+          "dimension",
+          "more",
+          "note"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "dimension": {
+            "enum": [
+              "output_volume",
+              "defensiveness",
+              "abstraction",
+              "convention_adherence",
+              "scope_discipline",
+              "self_verification",
+              "duplication",
+              "rationale_density"
+            ]
+          },
+          "more": {
+            "enum": [
+              "a",
+              "b",
+              "neither"
+            ],
+            "description": "Which blinded arm exhibited MORE of this dimension. Not which is better \u2014 more is not better."
+          },
+          "note": {
+            "type": "string",
+            "minLength": 1,
+            "description": "One sentence of evidence, about the model's approach rather than about this task's requirements."
+          }
+        }
+      }
     }
   },
   "allOf": [

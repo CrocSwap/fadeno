@@ -786,6 +786,12 @@ function buildComparisonPrompt(
       'the baseline and must not guess: answer `prefer_a` / `prefer_b`, and the kernel translates it once.',
     "- A separate adversarial pass already searches for defects both arms share; emit an empty array for `shared_blind_spots` here.",
     '- `inconclusive` is a valid, honest verdict when the evidence does not support a call — do not guess to avoid it.',
+    '- `traits` describes how each MODEL worked, not whether this artifact is good — that is what `criteria` is ' +
+      'for. A trait is not a score: "more defensive" may be right on this task and wrong on the next one, and ' +
+      '`more` names the arm exhibiting MORE of the dimension, never the better one. Report a dimension even ' +
+      'when it did not affect the verdict, and use `neither` freely — two arms being indistinguishable on a ' +
+      'dimension is a real observation. These accumulate across many pairs into a picture of the two models, ' +
+      'which is what a single comparison cannot give.',
   ].join('\n');
 }
 
@@ -889,9 +895,16 @@ interface RawSharedBlindSpot {
   config_that_breaks_it?: string;
 }
 
+interface RawTrait {
+  dimension: string;
+  more: string;
+  note: string;
+}
+
 interface RawComparisonJudgment {
   verdict: string;
   criteria: RawCriterion[];
+  traits: RawTrait[];
   shared_blind_spots: RawSharedBlindSpot[];
   graft_plan?: RawGraftStep[];
   confound_notes?: string;
@@ -943,6 +956,23 @@ function renderCriteria(criteria: RawCriterion[], blinding: { a: CompareArm; b: 
     .map((c) => {
       const favors = c.favors === 'a' || c.favors === 'b' ? armFor(c.favors, blinding) : (c.favors ?? 'neither');
       return `- **${c.criterion}** (favors: ${favors}): ${c.assessment}`;
+    })
+    .join('\n');
+}
+
+/**
+ * Traits, unblinded. Rendered as its own section rather than folded into
+ * Criteria because they answer different questions: Criteria says whether this
+ * artifact is good, this says how each model worked. `more` is deliberately
+ * not `better` — pair 49a1f92a's challenger exhibited more `output_volume` and
+ * that surplus was the worse artifact.
+ */
+function renderTraits(traits: RawTrait[], blinding: { a: CompareArm; b: CompareArm }): string {
+  if (traits.length === 0) return '(none reported)';
+  return traits
+    .map((t) => {
+      const more = t.more === 'a' || t.more === 'b' ? armFor(t.more, blinding) : 'neither';
+      return `- **${t.dimension}** (more: ${more}): ${t.note}`;
     })
     .join('\n');
 }
@@ -1154,6 +1184,7 @@ function adjudicate(
 
   const body = renderComparisonArtifact(frontmatter, {
     Criteria: renderCriteria(comparison.criteria, blinding),
+    'Model traits': renderTraits(comparison.traits ?? [], blinding),
     Confounds: renderConfounds(confounds, comparison.confound_notes),
     'Shared blind spots': renderSharedBlindSpots(adversarial.shared_blind_spots),
     graftPlan: graftPlan != null ? renderGraftPlan(graftPlan) : null,
