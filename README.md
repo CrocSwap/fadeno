@@ -359,10 +359,10 @@ models:
 routes:
   codex:
     openai: { driver: codex, host: true, command: [codex, exec, --model, "{model}", "-"] }
-    anthropic: { driver: claude-cli, command: [claude, -p, --model, "{model}"] }
+    anthropic: { driver: claude, command: [claude, -p, --model, "{model}"] }
     xai: { driver: grok, command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve] }
   claude:
-    anthropic: { driver: claude-cli, host: true, command: [claude, -p, --model, "{model}"] }
+    anthropic: { driver: claude, host: true, command: [claude, -p, --model, "{model}"] }
     openai: { driver: codex, command: [codex, exec, --model, "{model}", "-"] }
 # per-repo pins (optional):
 dials:

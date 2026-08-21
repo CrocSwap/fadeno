@@ -387,17 +387,19 @@ test('dial: setting a write-requiring archetype to a variant-backed model succee
   assert.ok(result.notes.some((n) => /worker requires write — opus delivers through the anthropic route's write variant/.test(n)), JSON.stringify(result.notes));
 });
 
-test('dial: the table keeps harness identity neutral while variant state stays structured', (t) => {
+test('dial: the table keeps the driver neutral while variant state stays structured', (t) => {
   const { root, user } = seedVariantRepo(t);
   const shown = runDialShow({ repoRoot: root, userPathOptions: user });
   const worker = shown.rows.find((r) => r.archetype === 'worker')!;
   const reviewer = shown.rows.find((r) => r.archetype === 'reviewer')!;
   assert.equal(worker.write_variant, true);
-  assert.equal(worker.harness, 'anthropic');
-  assert.equal(worker.delivery, 'anthropic');
+  assert.equal(worker.driver, 'anthropic');
   assert.equal(reviewer.write_variant, undefined);
-  assert.equal(reviewer.harness, 'anthropic');
-  assert.equal(reviewer.delivery, 'anthropic');
+  assert.equal(reviewer.driver, 'anthropic');
+  // Two archetypes on the same route select different argv; the column the
+  // table prints as `via` says the same thing for both, because the variant
+  // is not a different driver.
+  assert.ok(!('harness' in worker) && !('delivery' in worker), 'one value, one field name');
 });
 
 test('dial resolve: the hook contract reports write_variant for the write-requiring archetype', (t) => {

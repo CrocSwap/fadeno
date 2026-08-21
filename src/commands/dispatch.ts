@@ -22,7 +22,6 @@ import {
   explainWriteConflict,
   loadExecutorProfile,
   readLocalDialState,
-  dispatchability,
   resolveRole,
   compileDialRef,
   parseDialRef,
@@ -1109,7 +1108,6 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     }
   }
 
-  const harness = profile.harness ?? 'standalone';
   // Write-posture delivery selection: a write-requiring archetype resolving
   // onto a read-only route that declares a write variant gets the variant
   // argv. The catalog authorized this when it declared both; the dial only
@@ -1118,59 +1116,19 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const spec = postured.spec;
   const usedWriteVariant = postured.usedWriteVariant;
   const executorName = delivery.refString;
-  /**
-   * Whether this dispatch is the primary arm of a selected pair.
-   *
-   * Re-derived, never handed over: the steering hook rolled the same function
-   * of (prompt digest, archetype, challenger) when it decided to route the
-   * spawn here, so the two cannot disagree and nothing has to be threaded
-   * through the relay.
-   */
-  const pairSelectedForPrompt = (): boolean => {
-    if (archetype == null) return false;
-    if (typeof opts.shadow === 'string' && opts.shadow.trim().length > 0) return true;
-    let attachment;
-    try {
-      attachment = readLocalDialState(repoRoot).shadows[archetype];
-    } catch {
-      return false;
-    }
-    if (attachment == null) return false;
-    if (attachment.rate == null) return true;
-    let text: string | null = null;
-    try {
-      text = opts.promptFile != null && opts.promptFile !== ''
-        ? readFileSync(resolve(cwd, opts.promptFile), 'utf8')
-        : opts.prompt ?? null;
-    } catch {
-      return false;
-    }
-    if (text == null) return false;
-    const challenger = formatDialRef({
-      model: attachment.model,
-      ...(attachment.effort ? { effort: attachment.effort } : {}),
-      ...(attachment.via ? { via: attachment.via } : {}),
-    });
-    return shadowSampleRoll(sha256Hex(text), archetype, challenger) < attachment.rate;
-  };
-
-  const deliverable = dispatchability(spec, harness);
-  // A selected pair is the one case where handing a host dial to its own
-  // command fallback is the point rather than an accident. Both arms have to
-  // be command-delivered to be comparable at all — same transport, same
-  // isolation, same measured duration — so the re-entrancy refusal below,
-  // which exists to stop a host slot from accidentally shelling out to a
-  // subprocess of its own harness, would refuse the thing the pair is for.
-  const pairCommandFallback = !deliverable.supported
-    && deliverable.reason === 'host_in_session'
-    && commandRoutable(spec)
-    && pairSelectedForPrompt();
-  if (pairCommandFallback) {
-    opts.onEcho?.(`pair selected: ${archetype} → ${executorName} moved to its command lane so both arms are comparable`);
-  }
-  if (!deliverable.supported && !pairCommandFallback) {
-    const hostOnDemand = deliverable.reason === 'host_in_session';
+  // The one delivery gate left. A host spec with a `fallback_command` is
+  // dispatched down that lane — the same lane a selected pair forces both arms
+  // onto, and the same lane the `*-exec` routes name explicitly — so the only
+  // spec ad-hoc dispatch has to refuse is one with nothing to invoke at all.
+  // The harness-dependent `host_in_session` refusal that used to sit here is
+  // gone; see `commandRoutable` for why it was a coin-flip rather than a
+  // safeguard, and note that the write posture it was incidentally enforcing
+  // is enforced for real a few lines below, by `explainWriteConflict`.
+  if (!commandRoutable(spec)) {
     const shape = archetype ?? role ?? 'role';
+    // `current-host` is a reference-frame sentinel, not a model you can route
+    // — suggesting `--via` on it would be advice that cannot be followed.
+    const dialModel = spec.model != null && spec.model !== 'current-host' ? spec.model : '<model>';
     // The in-session agent is a FALLBACK, not an equivalent, and saying so is
     // the point of this wording. A caller who reached for `fadeno dispatch`
     // wanted what only a dispatch gives: an isolated worktree, an evidence row
@@ -1190,26 +1148,17 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // `--output tag:` handle. Overstating the loss is the same failure as
     // understating it — this message exists because the previous one made a
     // claim it had not checked.
-    const lost =
-      'An in-session agent is NOT an equivalent substitute. It writes a host_delivery evidence row (with ' +
-      'the prompt snapshot), but that row carries no dispatch id and no terminal receipt — no exit code, ' +
-      'no duration, no captured output, and nothing to read back with `fadeno dispatches --output ' +
-      'tag:<tag>`. It also runs in this workspace with no isolated worktree, honours neither --timeout ' +
-      'nor --diagnostics, and forms no shadow pair. Take it only if you do not need those.';
-    // `current-host` is a reference-frame sentinel, not a model you can route
-    // — suggesting `--via` on it would be advice that cannot be followed.
-    const dialModel = spec.model != null && spec.model !== 'current-host' ? spec.model : '<model>';
-    const remedy =
-      `To dispatch for real, give ${shape} a command lane: \`fadeno dial ${archetype ?? '<archetype>'} ` +
-      `${dialModel} --via <driver>\` (\`fadeno models\` lists the drivers; an *-exec route ` +
-      'is the command-lane counterpart of a host one).';
     throw new DispatchCommandError(
-      hostOnDemand
-        ? `resolved to host executor "${executorName}", which the ${harness} harness runs in-session in ` +
-          `this session; dispatching its fallback_command would hand the task to a subprocess of the ` +
-          `same harness and re-enter this dispatch one level down. ${remedy} ${lost}`
-        : `resolved to host executor "${executorName}", which declares no fallback_command, so ad-hoc ` +
-          `dispatch has nothing to invoke. ${remedy} ${lost}`,
+      `resolved to host executor "${executorName}", which declares no fallback_command, so ad-hoc ` +
+        'dispatch has nothing to invoke. ' +
+        `To dispatch for real, give ${shape} a command lane: \`fadeno dial ${archetype ?? '<archetype>'} ` +
+        `${dialModel} --via <driver>\` (\`fadeno models\` lists the drivers; an *-exec route ` +
+        'is the command-lane counterpart of a host one). ' +
+        'An in-session agent is NOT an equivalent substitute. It writes a host_delivery evidence row (with ' +
+        'the prompt snapshot), but that row carries no dispatch id and no terminal receipt — no exit code, ' +
+        'no duration, no captured output, and nothing to read back with `fadeno dispatches --output ' +
+        'tag:<tag>`. It also runs in this workspace with no isolated worktree, honours neither --timeout ' +
+        'nor --diagnostics, and forms no shadow pair. Take it only if you do not need those.',
     );
   }
   let command = spec.adapter === 'command' ? spec.command : spec.fallbackCommand!;

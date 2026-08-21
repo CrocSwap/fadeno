@@ -20,7 +20,7 @@ function seed(t: TestContext, dials: Record<string, string>): { root: string; us
     routes: {
       claude: {
         'current-host': { host: true },
-        anthropic: { driver: 'claude-cli', host: true, command: ['claude', '-p', '--model', '{model}'], write_access: false },
+        anthropic: { driver: 'claude', host: true, command: ['claude', '-p', '--model', '{model}'], write_access: false },
         openai: { driver: 'codex', command: ['codex', 'exec', '--model', '{model}', '-'], write_access: true },
       },
     },

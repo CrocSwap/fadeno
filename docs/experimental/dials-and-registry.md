@@ -304,7 +304,7 @@ The no-arg command prints the whole truth — with no preset layer, the table
 *is* the effective dial state:
 
 ```
-archetype  model          effort    harness        source
+archetype  model          effort    via            source
 judge      sol @ xhigh    xhigh     codex          session dial
 reviewer   current-host   high      current-host   base
 generator  current-host   default   current-host   base
@@ -324,7 +324,17 @@ The table is deliberately reference-frame neutral: `luna` says `codex`
 whether the caller is Codex, Claude, Grok, or the standalone CLI. The caller's
 route later decides whether Codex is reached as a host agent or through
 `codex exec`; that adapter is structured resolution/dispatch data, not part of
-the model's displayed harness identity.
+the model's displayed driver.
+
+That fourth column was headed `harness` until 2026-08-21, and it never held
+one. It holds the **driver** — the route's public name, the value `--via`
+takes — while `harness` in the same command's `--json` means the agent you
+are sitting inside. Two meanings, one word, printed a column apart from each
+other. The header is now `via`, so the table reads back the flag that sets
+it (`fadeno dial worker sonnet --via claude-exec` → `via: claude-exec`), the
+row field is `driver` alone (the `harness` and `delivery` synonyms are
+gone), and the inherited-dial marker that used to print `(via worker)` —
+an *archetype*, not a driver — now prints `(inherits worker)`.
 
 ## Unregistered models: fall-through with verification
 
@@ -370,8 +380,8 @@ surfaces at dial time too.
   dialed (`model`, optional `effort`, optional `via`), single-line sorted
   JSON as today. Shadows keep their attachment shape; the `use`-drops-
   shadows rule dies with `use` (shadows persist until cleared).
-- **Dispatch rows** record the resolved quadruple — `model` (canonical id),
-  `effort` (effective; `"inherited"` on native), `driver`, `delivery` —
+- **Dispatch rows** record the resolved triple — `model` (canonical id),
+  `effort` (effective; `"inherited"` on native), `driver` —
   plus `dial_source: session | repo | user | base | binding`, replacing the
   loadout-name fields. Strictly more informative than
   `resolution: "override"` + an opaque executor name. `resolved_via`

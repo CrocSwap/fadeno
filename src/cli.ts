@@ -107,7 +107,7 @@ Usage:
   fadeno shadow ...                            # alias for 'fadeno dial shadow ...' (same forms)
   fadeno dial clear-shadow [<archetype>]
   fadeno dial resolve --archetype <a>          # JSON, hook contract unchanged
-  fadeno models [<name>]                Model registry + frame-neutral harness identities
+  fadeno models [<name>]                Model registry + each model's home driver
   fadeno models --driver <alias>        Live backend model listing (routes with models_command)
   fadeno steering resolve|apply [...]   Resolve or materialize hybrid Codex steering
   fadeno dispatch [flags]               Resolve archetype → executor and invoke it once (ad hoc)
@@ -206,12 +206,12 @@ Options:
   --json                  (dispatches) Emit structured entries on stdout for scripting
   --arm <arm>             (shadow-apply) challenger (default) | primary
   --check                 (shadow-apply) Report applicability only (git apply --check --3way); changes nothing
-  --measure-only          (compare) Report the pair's measured facts and write nothing; skips adjudication
-  --prepare               (compare) Measure + write the two blinded judge prompts; write no artifact
-  --record                (compare) Validate --comparison/--adversarial judgment files and write the artifact
-  --comparison <path>     (compare --record) The comparison judge subagent's raw JSON output
-  --adversarial <path>    (compare --record) The adversarial judge subagent's raw JSON output
-  --judge <ref>           (compare) Override the judge archetype's dial model (bypasses catalog resolution)
+  --measure-only          (bakeoff) Report the pair's measured facts and write nothing; skips adjudication
+  --prepare               (bakeoff) Measure + write the two blinded judge prompts; write no artifact
+  --record                (bakeoff) Validate --comparison/--adversarial judgment files and write the artifact
+  --comparison <path>     (bakeoff --record) The comparison judge subagent's raw JSON output
+  --adversarial <path>    (bakeoff --record) The adversarial judge subagent's raw JSON output
+  --judge <ref>           (bakeoff) Override the judge archetype's dial model (bypasses catalog resolution)
   --isolate               (dispatch-prepare) Create isolated worktree at .fadeno/local/host-worktrees/<run>/<id> (workspace_mode: isolated)
   --agent-id <id>         (dispatch-start) Host agent identity
   --workspace <path>      (dispatch-start) Host workspace provenance
@@ -370,7 +370,7 @@ const COMMAND_HELP: Record<string, string> = {
   dial: `fadeno dial — per-archetype model selection
 
 Usage:
-  fadeno dial                                  Effective table (model, effort, harness, source)
+  fadeno dial                                  Effective table (model, effort, via, source)
   fadeno dial <archetype>                      One archetype's row (+ shadow; --json adds layers)
   fadeno dial <archetype>… <model>[@effort]    Set a dial (several archetypes at
                                                once: space, \`+\`, or \`,\` separated)
@@ -416,24 +416,26 @@ Examples:
   fadeno dial generator gemini --via agy --force
   fadeno dial clear worker --user
 `,
-  models: `fadeno models — the model registry and its harness identities
+  models: `fadeno models — the model registry and the driver each model rides
 
 Usage:
   fadeno models                    Frame-neutral registry table
-  fadeno models <name>             One model: harness, spellings, eligibility
+  fadeno models <name>             One model: via, alternates, spellings, eligibility
   fadeno models --driver <alias>   Live backend listing via the route's models_command
                                    (registered spellings marked with ←)
 
 Options:
   --json   Structured output
 
-The table is frame-neutral: harness is the model's home agent CLI and effort is
-the registry standard. Whether that harness is reached through a host agent or
-a CLI command is selected later from the caller's route and is not part of the
-model's identity. Names not in the registry route via the
-catalog's unregistered_model_driver with the id passed verbatim. The
-single-model view adds alternate --via harnesses. Probe-cache verification state stays in --json
-(verified_at per row).
+The table is frame-neutral: \`via\` is the model's home driver — the CLI its
+provider route names, and the value \`--via\` takes to pick a different one —
+and effort is the registry standard. Whether that driver is reached in-session
+through a host agent or spawned as a command is selected later from the
+caller's route and is not part of the model's identity, which is why the
+column says \`via\` and not \`harness\`: the harness is the agent asking. Names
+not in the registry route via the catalog's unregistered_model_driver with the
+id passed verbatim. The single-model view lists every alternate lane. Probe-cache
+verification state stays in --json (verified_at per row).
 
 Examples:
   fadeno models
@@ -1280,12 +1282,13 @@ function printStaleDials(stale: Array<{ archetype: string; target: string }>): v
 }
 
 function printModels(result: ModelsResult): void {
-  const header = `${'model'.padEnd(12)}  ${'provider'.padEnd(12)}  ${'id'.padEnd(26)}  ${'effort'.padEnd(8)}  harness`;
+  // `via`, not `harness`: the column holds the model's home DRIVER, which is
+  // the value `--via` takes. Renamed 2026-08-21 — see `printDialShow`.
+  const header = `${'model'.padEnd(12)}  ${'provider'.padEnd(12)}  ${'id'.padEnd(26)}  ${'effort'.padEnd(8)}  via`;
   console.log(header);
   for (const row of result.models) {
-    const harnessCell = row.harness ?? '—';
     console.log(
-      `${row.name.padEnd(12)}  ${(row.provider ?? '—').padEnd(12)}  ${row.id.padEnd(26)}  ${row.effort.padEnd(8)}  ${harnessCell}`,
+      `${row.name.padEnd(12)}  ${(row.provider ?? '—').padEnd(12)}  ${row.id.padEnd(26)}  ${row.effort.padEnd(8)}  ${row.home_via}`,
     );
   }
   for (const row of result.models) {
@@ -1309,9 +1312,9 @@ function printModelDetail(result: ModelsResult, name: string): void {
     return;
   }
   printModels({ ...result, models: [row] });
-  console.log(`  harness: ${row.harness ?? '—'}`);
+  console.log(`  via: ${row.home_via}`);
   for (const lane of row.lanes) {
-    console.log(`  alternate harness: --via ${lane.via} → ${lane.id}`);
+    console.log(`  alternate: --via ${lane.via} → ${lane.id}`);
   }
   for (const [driver, id] of Object.entries(row.spellings)) {
     console.log(`  spelling: --via ${driver} → ${id}`);
@@ -1385,7 +1388,12 @@ function printDialShow(result: DialShowResult, emptyMessage?: string): void {
     return;
   }
   // Header
-  const header = `${'archetype'.padEnd(12)}  ${'model'.padEnd(18)}  ${'effort'.padEnd(8)}  ${'harness'.padEnd(22)}  source`;
+  // `via`, not `harness`. The column always held the DRIVER — the value
+  // `--via <driver>` sets — while `harness` in the same command's JSON means
+  // the agent you are sitting inside. Two meanings, one word, printed a column
+  // apart. Renamed 2026-08-21 along with `claude-cli` → `claude`, which is
+  // what the column now says for an Anthropic model under any harness.
+  const header = `${'archetype'.padEnd(12)}  ${'model'.padEnd(18)}  ${'effort'.padEnd(8)}  ${'via'.padEnd(22)}  source`;
   console.log(header);
   for (const row of result.rows) {
     const arch = row.archetype.padEnd(12);
@@ -1401,11 +1409,16 @@ function printDialShow(result: DialShowResult, emptyMessage?: string): void {
     // is also the one word that cannot be mistaken for a value, unlike
     // `default`, which is a literal effort in the vocabulary.
     const effort = (row.resolvedVia != null ? '—' : row.pinned_effort ?? 'inherit').padEnd(8);
-    const harness = row.harness.padEnd(22);
+    const via = row.driver.padEnd(22);
     const elig = row.eligibility === 'shadow_only' ? '  SHADOW-ONLY (never gates)' : row.eligibility === 'forbidden' ? '  FORBIDDEN (refused at dispatch)' : '';
     const forced = row.write_posture_forced ? '  WARNING: FORCED WRITE-POSTURE MISMATCH' : '';
-    const via = row.resolvedVia ? ` (via ${row.resolvedVia})` : '';
-    console.log(`${arch}  ${model}  ${effort}  ${harness}  ${DIAL_SOURCE_TEXT[row.source] ?? row.source}${via}${elig}${forced}`);
+    // `inherits`, not `via`: `resolvedVia` is the ARCHETYPE this row borrowed
+    // its dial from (`reviewer` with no dial of its own falling back to
+    // `worker`), which has nothing to do with the `via` column two cells left
+    // — that one is the driver. Printing both as "via" on one line was the
+    // collision that kept the column named `harness`.
+    const inherits = row.resolvedVia ? ` (inherits ${row.resolvedVia})` : '';
+    console.log(`${arch}  ${model}  ${effort}  ${via}  ${DIAL_SOURCE_TEXT[row.source] ?? row.source}${inherits}${elig}${forced}`);
     if (row.shadow) console.log(formatShadowLine(row.shadow, '  '));
   }
   if (result.note) console.log(result.note);

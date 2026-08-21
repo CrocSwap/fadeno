@@ -1,6 +1,6 @@
 ---
 name: runner
-description: Execute or resume Fadeno playbooks from the bundled catalog or project `.fadeno/playbooks` for complex coding, review, research, or multi-step agent workflows. Use when the user says “Use Fadeno”, asks to run a playbook, names one, or provides a run id. [fadeno 0.6.0-rc.41]
+description: Execute or resume Fadeno playbooks from the bundled catalog or project `.fadeno/playbooks` for complex coding, review, research, or multi-step agent workflows. Use when the user says “Use Fadeno”, asks to run a playbook, names one, or provides a run id. [fadeno 0.6.0-rc.42]
 ---
 
 # Fadeno Runner

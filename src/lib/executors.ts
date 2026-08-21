@@ -1774,13 +1774,29 @@ export function explainWriteConflict(
   if (archetype == null) return null;
   if (!Object.hasOwn(profile.archetypes, archetype)) return null;
   const posture = profile.archetypes[archetype]!.requiresWrite;
+  // Host and command specs both reach this predicate, and since the delivery
+  // gate collapsed into `commandRoutable` a host spec reaches it far more
+  // often: a write-requiring archetype dialed onto a read-only host route is
+  // now refused HERE rather than earlier by `host_in_session`. So the remedy
+  // has to be one the reader can actually follow. Telling them to "declare a
+  // `write_variant` on the route" is sound advice for a command route and
+  // impossible for a host one — the parser rejects the key there — and advice
+  // that cannot be followed reads as a bug in the tool.
+  const host = delivery.spec.adapter === 'host';
   if (posture === 'required' && delivery.spec.writeAccess === false && !hasWriteVariant(delivery.spec)) {
     return (
       `archetype "${archetype}" declares \`requires_write: required\`, but executor "${delivery.executor}" ` +
-      'delivers through a command route declared `write_access: false` — it cannot mutate the ' +
-      'workspace, so the dispatch would burn a run and end in a refusal. ' +
-      `Fix: bind "${archetype}" to a write-capable executor, ` +
-      "declare a `write_variant` on the route (a write-capable argv selected automatically for write-requiring archetypes), " +
+      (host
+        ? 'delivers through a host route whose command lane (`fallback_command`) is declared ' +
+          '`write_access: false`, and a host route cannot declare a `write_variant` — in-session delivery ' +
+          "carries the host's own permissions and the fallback lane replays the base argv byte-for-byte. "
+        : 'delivers through a command route declared `write_access: false`. ') +
+      'It cannot mutate the workspace, so the dispatch would burn a run and end in a refusal. ' +
+      `Fix: bind "${archetype}" to a write-capable executor` +
+      (host
+        ? ' — `fadeno dial ' + archetype + ' <model> --via <driver>`, where an *-exec route is the ' +
+          'command-lane counterpart of a host one — '
+        : ', declare a `write_variant` on the route (a write-capable argv selected automatically for write-requiring archetypes), ') +
       `or run this ${archetype}-shaped task with the in-session ${archetype} agent. ` +
       'You can override this guard by rerunning the dial with `--force`, but doing so is not suggested because the executor may be unable to complete the work.'
     );
@@ -1788,7 +1804,7 @@ export function explainWriteConflict(
   if (posture === 'forbidden' && delivery.spec.writeAccess === true) {
     return (
       `archetype "${archetype}" declares \`requires_write: forbidden\`, but executor "${delivery.executor}" ` +
-      'delivers through a command route declared `write_access: true` — the dispatch would hand a ' +
+      `delivers through a ${host ? 'host' : 'command'} route declared \`write_access: true\` — the dispatch would hand a ` +
       'mutating toolchain to work that must not mutate the workspace. ' +
       `Fix: bind "${archetype}" to a read-only route, ` +
       `clear the session dial (\`fadeno dial clear ${archetype}\`), ` +
@@ -1808,69 +1824,38 @@ export function eligibilityFor(spec: ExecutorSpec, archetype: string | null): El
 }
 
 /**
- * Harnesses where a host executor must be delivered IN-SESSION and may not be
- * shelled out to its own `fallback_command`.
+ * Whether a resolved spec has a command lane at all — and, since 2026-08-21,
+ * the ONLY question ad-hoc `fadeno dispatch` asks about delivery. A command
+ * adapter always qualifies; a host adapter qualifies only when it declares a
+ * `fallback_command` to shell out to.
  *
- * The rule is about RE-ENTRANCY, not about which harnesses can materialize an
- * agent on demand. Under `claude`, a host route's fallback is `claude -p …` —
- * a subprocess of the harness already running, one level down — so dispatching
- * it re-enters this dispatch instead of delivering it. `dispatchability`
- * refuses, and the caller is told to spawn the in-session role agent.
+ * **This used to be two predicates and they disagreed.** A separate
+ * `dispatchability(spec, harness)` also refused a *command-capable* host spec
+ * whenever the harness was in `IN_SESSION_ONLY_HOST_HARNESSES` (`claude`),
+ * with reason `host_in_session`, on the theory that shelling out to `claude -p
+ * …` from inside a Claude session "re-enters this dispatch one level down".
+ * That theory does not survive contact with the catalog: the `anthropic-exec`
+ * route spawns exactly that subprocess **on purpose** under every harness
+ * including `claude`, so the argv the gate refused was one the gate next door
+ * recommended. `codex` was never in the set for the same fallback shape, which
+ * made the refusal a coin-flip on which host you happened to be sitting in.
  *
- * **This is deliberately NOT a capability claim, and was misnamed
- * `ON_DEMAND_HOST_HARNESSES` until 2026-08-20.** That name implied Claude is
- * the only harness that can spawn a host agent on demand, which is false:
- * Codex resolves a spawned subagent's settings "from an explicit spawn value,
- * then the corresponding `[agents]` default, then the parent's value" before
- * applying the agent file, so it too can spawn any model it names. The old
- * name led directly to a wrong diagnosis of why Codex coordinators shell out.
+ * What it cost: a coordinator that reached for `fadeno dispatch --archetype
+ * reviewer` under Claude got a hard refusal, and on 2026-08-21 one answered it
+ * by spawning an in-session subagent and reporting that as "equivalent role,
+ * no recursion" — while the instructions it was following asked it to read the
+ * result back by dispatch id, which by then could not exist. A gate that
+ * refuses a capability the caller has is not a safe default; it is a prompt to
+ * route around it.
  *
- * The asymmetry that remains is real and unresolved: the codex `openai` host
- * route's fallback is `codex exec …`, equally re-entrant, yet permitted —
- * because Codex host requests are delivered through the `dispatch-fallback`
- * protocol, which needs that path. Adding `codex` here would make ad-hoc
- * `fadeno dispatch` refuse a host spec, which is what a host agent whose dial
- * moved since `steering apply` is instructed to run. So the fix is not this
- * set alone; it wants the ambient lane path moving with it. Left as-is
- * deliberately rather than renamed into a promise it does not keep.
- */
-export const IN_SESSION_ONLY_HOST_HARNESSES: ReadonlySet<string> = new Set(['claude']);
-
-export function dispatchability(
-  spec: ExecutorSpec,
-  harness: string,
-): { supported: true } | { supported: false; reason: 'host_in_session' | 'host_without_fallback' } {
-  if (spec.adapter !== 'host') return { supported: true };
-  // Order matters, and it used to be wrong. `host_in_session` claims that
-  // dispatching would shell out to this spec's `fallback_command` and re-enter
-  // the harness — a claim that is FALSE when the spec declares no
-  // fallback_command at all. Checking the harness first reported re-entrancy
-  // for a spec with no command lane whatsoever, sending a reader looking for a
-  // fallback that does not exist. Observed 2026-08-21 in polymarket-quoter,
-  // where `worker` is a user dial to `sonnet` on `claude-cli` with
-  // `fallback_command: null`.
-  //
-  // No reordering risk for the pair path: `pairCommandFallback` requires
-  // `host_in_session` AND `commandRoutable(spec)`, and a host spec without a
-  // fallbackCommand is never commandRoutable, so a spec whose reason changes
-  // here could not have taken that branch anyway.
-  if (spec.fallbackCommand == null) return { supported: false, reason: 'host_without_fallback' };
-  if (IN_SESSION_ONLY_HOST_HARNESSES.has(harness)) return { supported: false, reason: 'host_in_session' };
-  return { supported: true };
-}
-
-/**
- * Whether a resolved spec can take the command lane at all, independent of
- * harness. `dispatchability` answers "can THIS harness dispatch it" (a
- * command-capable host spec is still refused on an on-demand harness, to stop
- * it shelling out to a subprocess of itself); this answers the narrower,
- * harness-free question a symmetric pair needs — is there a command lane
- * here for the pair's forced-command exception to use at all. A command
- * adapter always qualifies; a host adapter qualifies only with a
- * `fallbackCommand` to fall back to. This is exactly the condition the
- * kernel's `pairCommandFallback` tests before it lets a selected pair reuse a
- * host slot's fallback — computed here once so every caller (the dial/
- * steering resolvers, the kernel) agrees by construction.
+ * The honest refusals survive and are both spec-shaped, not harness-shaped:
+ * a host spec with no `fallback_command` has nothing to invoke (`current-host`,
+ * the base dial), and a lane that cannot satisfy the archetype's declared
+ * write posture is refused by `explainWriteConflict` — which is what the
+ * `host_in_session` refusal was standing in front of and getting credit for.
+ *
+ * One predicate, three consumers by construction: the dispatch kernel, the
+ * `dial`/`steering` resolve previews, and `explainPairRoutability`.
  */
 export function commandRoutable(spec: ExecutorSpec): boolean {
   return spec.adapter === 'command' || (spec.adapter === 'host' && spec.fallbackCommand != null);

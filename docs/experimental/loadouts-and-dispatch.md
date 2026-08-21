@@ -556,7 +556,7 @@ policy language.
   archetype to a command-delivered target.
 - `fadeno dispatches [--tail <N>] [--json] [--bakeoffs]` — read the evidence back; see
   *Evidence*. `--bakeoffs` groups shadow pairs by challenger, attests
-  prompt-sha pairing, and scans `.fadeno/comparisons/*.md` (`kind: ModelComparison`)
+  prompt-sha pairing, and scans `.fadeno/bakeoffs/*.md` (`kind: Bakeoff`)
   for verdict tallies.
 
 **Resolution echo:** every run start (`new-run`/`drive`) and every dispatch
@@ -665,8 +665,8 @@ part of it; `[source]` is the cascade layer that won
   `shadow executor (model) exit N in <duration>, output B bytes, diff D bytes`
   — the durations are each side's own runtime, part of the scorecard — with
   `PROMPT SHA MISMATCH` when the prompt digests disagree and `[orphan]` when
-  the primary row is missing), plus any `ModelComparison` artifacts under
-  `.fadeno/comparisons/*.md` (`kind: ModelComparison`, `baseline`, `challenger`,
+  the primary row is missing), plus any `Bakeoff` artifacts under
+  `.fadeno/bakeoffs/*.md` (`kind: Bakeoff`, `baseline`, `challenger`,
   `verdict: prefer_baseline | prefer_challenger | tie | inconclusive`, `date`,
   `dispatch_ids` plus mandatory `## Criteria` and `## Confounds` sections) and
   a per-challenger tally (`N pairs, M comparisons: X prefer_challenger / Y

@@ -90,9 +90,10 @@ export interface LaneDecision {
    * emitted only when a command lane actually exists (`commandRoutable`).
    * A consumer may route to the dispatch proxy on this value alone. Violating
    * it sends a spawn to `fadeno dispatch` for a delivery the kernel has
-   * nothing to invoke, where it dies on the `host_in_session` refusal — the
-   * precise failure `shadow.routable` exists to prevent. When there is no
-   * command lane the answer is `'restart_required'`, never `'command'`.
+   * nothing to invoke, where it dies on the kernel's `commandRoutable`
+   * refusal — the precise failure `shadow.routable` exists to prevent. When
+   * there is no command lane the answer is `'restart_required'`, never
+   * `'command'`.
    */
   lane: DeliveryLane;
   lane_reason: LaneReason;

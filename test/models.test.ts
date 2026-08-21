@@ -37,7 +37,7 @@ function seed(t: TestContext): { root: string; user: UserPathOptions } {
           models_command: ['echo', 'gpt-5.6-sol gpt-5.6-luna'],
         },
         anthropic: {
-          driver: 'claude-cli',
+          driver: 'claude',
           command: ['claude', '-p', '--model', '{model}'],
           write_access: false,
           write_variant: { command: ['claude', '-p', '--model', '{model}', '--permission-mode', 'acceptEdits', '--allowedTools', 'Bash(fadeno:*)'] },
@@ -71,20 +71,18 @@ test('models: registry table — deliveries, lane marks, stale providers, verifi
   assert.ok(names.includes('sol') && names.includes('opus') && names.includes('ghost'));
 
   const sol = result.models.find((r) => r.name === 'sol')!;
-  assert.equal(sol.delivery, 'openai');
-  assert.equal(sol.harness, 'openai');
+  assert.equal(sol.home_via, 'openai');
   assert.equal(sol.native, false);
   assert.equal(sol.effort, 'high');
   assert.equal(sol.verified_at, '2026-08-16T00:00:00Z');
 
-  // Adapter state remains structured resolution data; the displayed harness
+  // Adapter state remains structured resolution data; the displayed `via`
   // and effort are frame-neutral model identity.
   const host = result.models.find((r) => r.name === 'current-host');
   if (host != null) assert.equal(host.native, true);
 
   const opus = result.models.find((r) => r.name === 'opus')!;
-  assert.equal(opus.delivery, 'claude-cli');
-  assert.equal(opus.harness, 'claude-cli');
+  assert.equal(opus.home_via, 'claude');
   assert.equal(opus.write_variant, true);
   assert.equal(opus.fadeno_capable, true);
   // The openrouter lane is visible with its spelling-substituted id.
@@ -93,8 +91,7 @@ test('models: registry table — deliveries, lane marks, stale providers, verifi
   assert.equal(orLane!.id, 'anthropic/claude-opus');
 
   const ghost = result.models.find((r) => r.name === 'ghost')!;
-  assert.equal(ghost.delivery, 'nowhere');
-  assert.equal(ghost.harness, 'nowhere');
+  assert.equal(ghost.home_via, 'nowhere');
   assert.match(ghost.stale ?? '', /no route for provider "nowhere"/);
 });
 
@@ -119,12 +116,12 @@ test('models --driver: unknown driver and probe-less driver refuse with guidance
     (err: unknown) => err instanceof ModelsError && /unknown driver "nope" — declared drivers:/.test((err as Error).message),
   );
   assert.throws(
-    () => runModelsDriver({ repoRoot: root, userPathOptions: user, driver: 'claude-cli' }),
+    () => runModelsDriver({ repoRoot: root, userPathOptions: user, driver: 'claude' }),
     (err: unknown) => err instanceof ModelsError && /declares no models_command/.test((err as Error).message),
   );
 });
 
-test('models: harness identity is stable while the caller-specific adapter changes', (t) => {
+test('models: home `via` is stable while the caller-specific adapter changes', (t) => {
   const root = tempRepo(t);
   const rows = new Map<string, ReturnType<typeof runModels>['models'][number]>();
   for (const harness of ['codex', 'claude', 'grok', 'standalone']) {
@@ -142,8 +139,11 @@ test('models: harness identity is stable while the caller-specific adapter chang
     rows.set(harness, result.models.find((row) => row.name === 'luna')!);
   }
   for (const row of rows.values()) {
-    assert.equal(row.harness, 'codex');
-    assert.equal(row.delivery, 'codex');
+    // `home_via`, the model's own driver — not `harness`, which in this same
+    // command means the agent asking and differs on every iteration of the
+    // loop above. The two used to share a field name.
+    assert.equal(row.home_via, 'codex');
+    assert.ok(!('harness' in row), 'the misleading synonym is gone, not deprecated');
   }
   assert.equal(rows.get('codex')!.adapter, 'host');
   assert.equal(rows.get('claude')!.adapter, 'command');

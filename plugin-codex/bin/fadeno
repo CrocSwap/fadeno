@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.41";
+  if (true) return "0.6.0-rc.42";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -15394,11 +15394,12 @@ function explainWriteConflict(delivery, archetype, profile) {
   if (archetype == null) return null;
   if (!Object.hasOwn(profile.archetypes, archetype)) return null;
   const posture = profile.archetypes[archetype].requiresWrite;
+  const host = delivery.spec.adapter === "host";
   if (posture === "required" && delivery.spec.writeAccess === false && !hasWriteVariant(delivery.spec)) {
-    return `archetype "${archetype}" declares \`requires_write: required\`, but executor "${delivery.executor}" delivers through a command route declared \`write_access: false\` \u2014 it cannot mutate the workspace, so the dispatch would burn a run and end in a refusal. Fix: bind "${archetype}" to a write-capable executor, declare a \`write_variant\` on the route (a write-capable argv selected automatically for write-requiring archetypes), or run this ${archetype}-shaped task with the in-session ${archetype} agent. You can override this guard by rerunning the dial with \`--force\`, but doing so is not suggested because the executor may be unable to complete the work.`;
+    return `archetype "${archetype}" declares \`requires_write: required\`, but executor "${delivery.executor}" ` + (host ? "delivers through a host route whose command lane (`fallback_command`) is declared `write_access: false`, and a host route cannot declare a `write_variant` \u2014 in-session delivery carries the host's own permissions and the fallback lane replays the base argv byte-for-byte. " : "delivers through a command route declared `write_access: false`. ") + `It cannot mutate the workspace, so the dispatch would burn a run and end in a refusal. Fix: bind "${archetype}" to a write-capable executor` + (host ? " \u2014 `fadeno dial " + archetype + " <model> --via <driver>`, where an *-exec route is the command-lane counterpart of a host one \u2014 " : ", declare a `write_variant` on the route (a write-capable argv selected automatically for write-requiring archetypes), ") + `or run this ${archetype}-shaped task with the in-session ${archetype} agent. You can override this guard by rerunning the dial with \`--force\`, but doing so is not suggested because the executor may be unable to complete the work.`;
   }
   if (posture === "forbidden" && delivery.spec.writeAccess === true) {
-    return `archetype "${archetype}" declares \`requires_write: forbidden\`, but executor "${delivery.executor}" delivers through a command route declared \`write_access: true\` \u2014 the dispatch would hand a mutating toolchain to work that must not mutate the workspace. Fix: bind "${archetype}" to a read-only route, clear the session dial (\`fadeno dial clear ${archetype}\`), or declare \`requires_write: none\`. You can override this guard by rerunning the dial with \`--force\`, but doing so is not suggested because it hands mutating capability to write-forbidden work.`;
+    return `archetype "${archetype}" declares \`requires_write: forbidden\`, but executor "${delivery.executor}" delivers through a ${host ? "host" : "command"} route declared \`write_access: true\` \u2014 the dispatch would hand a mutating toolchain to work that must not mutate the workspace. Fix: bind "${archetype}" to a read-only route, clear the session dial (\`fadeno dial clear ${archetype}\`), or declare \`requires_write: none\`. You can override this guard by rerunning the dial with \`--force\`, but doing so is not suggested because it hands mutating capability to write-forbidden work.`;
   }
   return null;
 }
@@ -15408,13 +15409,6 @@ function eligibilityFor(spec, archetype) {
   if (map == null || !Object.hasOwn(map, archetype)) return "eligible";
   const state = map[archetype];
   return state === "shadow_only" || state === "forbidden" || state === "eligible" ? state : "eligible";
-}
-var IN_SESSION_ONLY_HOST_HARNESSES = /* @__PURE__ */ new Set(["claude"]);
-function dispatchability(spec, harness) {
-  if (spec.adapter !== "host") return { supported: true };
-  if (spec.fallbackCommand == null) return { supported: false, reason: "host_without_fallback" };
-  if (IN_SESSION_ONLY_HOST_HARNESSES.has(harness)) return { supported: false, reason: "host_in_session" };
-  return { supported: true };
 }
 function commandRoutable(spec) {
   return spec.adapter === "command" || spec.adapter === "host" && spec.fallbackCommand != null;
@@ -21264,49 +21258,15 @@ function runDispatch(opts) {
       throw err;
     }
   }
-  const harness = profile.harness ?? "standalone";
   const postured = applyWritePosture(delivery.spec, archetype, profile.archetypes);
   const spec = postured.spec;
   const usedWriteVariant = postured.usedWriteVariant;
   const executorName = delivery.refString;
-  const pairSelectedForPrompt = () => {
-    if (archetype == null) return false;
-    if (typeof opts.shadow === "string" && opts.shadow.trim().length > 0) return true;
-    let attachment;
-    try {
-      attachment = readLocalDialState(repoRoot).shadows[archetype];
-    } catch {
-      return false;
-    }
-    if (attachment == null) return false;
-    if (attachment.rate == null) return true;
-    let text = null;
-    try {
-      text = opts.promptFile != null && opts.promptFile !== "" ? (0, import_node_fs15.readFileSync)((0, import_node_path15.resolve)(cwd, opts.promptFile), "utf8") : opts.prompt ?? null;
-    } catch {
-      return false;
-    }
-    if (text == null) return false;
-    const challenger = formatDialRef({
-      model: attachment.model,
-      ...attachment.effort ? { effort: attachment.effort } : {},
-      ...attachment.via ? { via: attachment.via } : {}
-    });
-    return shadowSampleRoll(sha256Hex(text), archetype, challenger) < attachment.rate;
-  };
-  const deliverable = dispatchability(spec, harness);
-  const pairCommandFallback = !deliverable.supported && deliverable.reason === "host_in_session" && commandRoutable(spec) && pairSelectedForPrompt();
-  if (pairCommandFallback) {
-    opts.onEcho?.(`pair selected: ${archetype} \u2192 ${executorName} moved to its command lane so both arms are comparable`);
-  }
-  if (!deliverable.supported && !pairCommandFallback) {
-    const hostOnDemand = deliverable.reason === "host_in_session";
+  if (!commandRoutable(spec)) {
     const shape = archetype ?? role ?? "role";
-    const lost = "An in-session agent is NOT an equivalent substitute. It writes a host_delivery evidence row (with the prompt snapshot), but that row carries no dispatch id and no terminal receipt \u2014 no exit code, no duration, no captured output, and nothing to read back with `fadeno dispatches --output tag:<tag>`. It also runs in this workspace with no isolated worktree, honours neither --timeout nor --diagnostics, and forms no shadow pair. Take it only if you do not need those.";
     const dialModel = spec.model != null && spec.model !== "current-host" ? spec.model : "<model>";
-    const remedy = `To dispatch for real, give ${shape} a command lane: \`fadeno dial ${archetype ?? "<archetype>"} ${dialModel} --via <driver>\` (\`fadeno models\` lists the drivers; an *-exec route is the command-lane counterpart of a host one).`;
     throw new DispatchCommandError(
-      hostOnDemand ? `resolved to host executor "${executorName}", which the ${harness} harness runs in-session in this session; dispatching its fallback_command would hand the task to a subprocess of the same harness and re-enter this dispatch one level down. ${remedy} ${lost}` : `resolved to host executor "${executorName}", which declares no fallback_command, so ad-hoc dispatch has nothing to invoke. ${remedy} ${lost}`
+      `resolved to host executor "${executorName}", which declares no fallback_command, so ad-hoc dispatch has nothing to invoke. To dispatch for real, give ${shape} a command lane: \`fadeno dial ${archetype ?? "<archetype>"} ${dialModel} --via <driver>\` (\`fadeno models\` lists the drivers; an *-exec route is the command-lane counterpart of a host one). An in-session agent is NOT an equivalent substitute. It writes a host_delivery evidence row (with the prompt snapshot), but that row carries no dispatch id and no terminal receipt \u2014 no exit code, no duration, no captured output, and nothing to read back with \`fadeno dispatches --output tag:<tag>\`. It also runs in this workspace with no isolated worktree, honours neither --timeout nor --diagnostics, and forms no shadow pair. Take it only if you do not need those.`
     );
   }
   let command2 = spec.adapter === "command" ? spec.command : spec.fallbackCommand;
@@ -31505,7 +31465,6 @@ The override is persisted with this dial and applies at dispatch time. Clear or 
   } else if (layer === "repo" && repoPinned != null) {
     previous = { layer: "repo", dial: repoPinned };
   }
-  const delivery = compiled.driver;
   let narrative = "";
   const modelDisplay = refString;
   if (layer === "user") {
@@ -31554,8 +31513,6 @@ The override is persisted with this dial and applies at dispatch time. Clear or 
     pinned_effort: compiled.pinnedEffort,
     effective_effort: compiled.effectiveEffort,
     driver: compiled.driver,
-    harness: compiled.driver,
-    delivery,
     layer,
     adaptive,
     repo_pinned: repoPinned,
@@ -31883,7 +31840,6 @@ function runDialShow(opts = {}) {
     const adapter = compiled.spec.adapter;
     const postured = applyWritePosture(compiled.spec, archetype, profile.archetypes);
     const writePostureForced = forcesWritePosture(cascade.ref, cascade.resolvedVia);
-    const delivery = compiled.driver;
     const effort = compiled.effectiveEffort;
     let modelDisplay = compiled.model;
     if (compiled.pinnedEffort != null) {
@@ -31900,8 +31856,6 @@ function runDialShow(opts = {}) {
       pinned_effort: compiled.pinnedEffort,
       effective_effort: compiled.effectiveEffort,
       driver: compiled.driver,
-      harness: compiled.driver,
-      delivery,
       source: cascade.source,
       resolvedVia: cascade.resolvedVia,
       dial: cascade.ref,
@@ -31936,13 +31890,13 @@ function runShadowShow(opts = {}) {
   const result = runDialShow(opts);
   return { ...result, rows: result.rows.filter((row) => row.shadow != null) };
 }
-function deliveryGuidance(archetype, executorName, spec, harness) {
-  const deliverable = dispatchability(spec, harness);
-  if (deliverable.supported) {
+function deliveryGuidance(archetype, executorName, spec) {
+  if (commandRoutable(spec)) {
+    const lane = spec.adapter === "host" ? `Host executor "${executorName}" has a command lane (\`fallback_command\`), and the dispatch delivers there rather than in-session \u2014 an isolated worktree, a dispatch id, and a terminal receipt.` : `Executor "${executorName}" runs outside this harness.`;
     return {
       dispatchable: true,
       dispatch_command: `fadeno dispatch --archetype ${archetype}`,
-      action: `Dispatch it: \`fadeno dispatch --archetype ${archetype}\` with the task prompt on stdin. Executor "${executorName}" runs outside this harness.`
+      action: `Dispatch it: \`fadeno dispatch --archetype ${archetype}\` with the task prompt on stdin. ${lane}`
     };
   }
   return {
@@ -31953,7 +31907,7 @@ function deliveryGuidance(archetype, executorName, spec, harness) {
     // equal. It writes a host_delivery row, but that row carries no dispatch
     // id and no terminal receipt, so there is nothing to read back; it also
     // has no isolated worktree and forms no shadow pair.
-    action: deliverable.reason === "host_in_session" ? `Do NOT dispatch. Host executor "${executorName}" is delivered in-session by the ${harness} harness; dispatching would hand the task to a subprocess of this same harness and be refused. Either spawn the in-session ${archetype} agent \u2014 which writes a host_delivery row but no dispatch id or terminal receipt, has no isolated worktree, and forms no shadow pair \u2014 or give it a command lane: \`fadeno dial ${archetype} ${executorName} --via <driver>\`.` : `Do NOT dispatch. Host executor "${executorName}" declares no fallback_command, so ad-hoc dispatch has nothing to invoke. Either spawn the in-session ${archetype} agent \u2014 which writes a host_delivery row but no dispatch id or terminal receipt, has no isolated worktree, and forms no shadow pair \u2014 or give it a command lane: \`fadeno dial ${archetype} ${executorName} --via <driver>\`.`
+    action: `Do NOT dispatch. Host executor "${executorName}" declares no fallback_command, so ad-hoc dispatch has nothing to invoke. Either spawn the in-session ${archetype} agent \u2014 which writes a host_delivery row but no dispatch id or terminal receipt, has no isolated worktree, and forms no shadow pair \u2014 or give it a command lane: \`fadeno dial ${archetype} ${executorName} --via <driver>\`.`
   };
 }
 function runDialResolve(opts) {
@@ -32045,7 +31999,7 @@ function runDialResolve(opts) {
     ...forcesWritePosture(resolved.delivery.ref, resolved.resolvedVia) ? { write_posture_forced: true } : {},
     ...eligibility !== "eligible" ? { eligibility } : {},
     dial: resolved.delivery.ref,
-    delivery: deliveryGuidance(archetype, resolved.delivery.refString, spec, harness),
+    delivery: deliveryGuidance(archetype, resolved.delivery.refString, spec),
     relay: relay != null ? { ref: relay.refString, model_id: relay.modelId, effort: relay.effort } : null,
     ...shadow != null ? { shadow } : {}
   };
@@ -32119,7 +32073,7 @@ function routeByDriver(profile, driver) {
   }
   return null;
 }
-function homeHarness(profile, provider) {
+function homeVia(profile, provider) {
   for (const routes of Object.values(profile.routes)) {
     const route = routes[provider];
     if (route != null) return route.driver ?? provider;
@@ -32137,7 +32091,7 @@ function runModels(opts = {}) {
   const rows = [];
   for (const name of Object.keys(profile.models).sort()) {
     const entry = profile.models[name];
-    const modelHarness = name === "current-host" ? "current-host" : homeHarness(profile, entry.provider);
+    const modelVia = name === "current-host" ? "current-host" : homeVia(profile, entry.provider);
     const lanes = [];
     let homeDriver = null;
     let row;
@@ -32146,7 +32100,6 @@ function runModels(opts = {}) {
       const adapter = compiled.spec.adapter;
       const writeVariant = adapter === "command" && compiled.spec.writeVariant != null;
       const fadenoCapable = writeVariant && compiled.spec.writeVariant.command.some((part) => part.includes("Bash(fadeno:"));
-      const delivery = modelHarness;
       const verified = verifications.find((v) => v.driver === compiled.driver && v.model === compiled.modelId);
       homeDriver = compiled.driver;
       row = {
@@ -32156,10 +32109,9 @@ function runModels(opts = {}) {
         model_id: compiled.modelId,
         effort: compiled.effectiveEffort,
         driver: compiled.driver,
-        harness: modelHarness,
+        home_via: modelVia,
         adapter,
         native: adapter === "host",
-        delivery,
         write_variant: writeVariant,
         fadeno_capable: fadenoCapable,
         eligibility: { ...entry.eligibility },
@@ -32176,10 +32128,9 @@ function runModels(opts = {}) {
         model_id: null,
         effort: entry.effort,
         driver: null,
-        harness: modelHarness,
+        home_via: modelVia,
         adapter: null,
         native: false,
-        delivery: modelHarness,
         write_variant: false,
         fadeno_capable: false,
         eligibility: { ...entry.eligibility },
@@ -38683,7 +38634,7 @@ Usage:
   fadeno shadow ...                            # alias for 'fadeno dial shadow ...' (same forms)
   fadeno dial clear-shadow [<archetype>]
   fadeno dial resolve --archetype <a>          # JSON, hook contract unchanged
-  fadeno models [<name>]                Model registry + frame-neutral harness identities
+  fadeno models [<name>]                Model registry + each model's home driver
   fadeno models --driver <alias>        Live backend model listing (routes with models_command)
   fadeno steering resolve|apply [...]   Resolve or materialize hybrid Codex steering
   fadeno dispatch [flags]               Resolve archetype \u2192 executor and invoke it once (ad hoc)
@@ -38782,12 +38733,12 @@ Options:
   --json                  (dispatches) Emit structured entries on stdout for scripting
   --arm <arm>             (shadow-apply) challenger (default) | primary
   --check                 (shadow-apply) Report applicability only (git apply --check --3way); changes nothing
-  --measure-only          (compare) Report the pair's measured facts and write nothing; skips adjudication
-  --prepare               (compare) Measure + write the two blinded judge prompts; write no artifact
-  --record                (compare) Validate --comparison/--adversarial judgment files and write the artifact
-  --comparison <path>     (compare --record) The comparison judge subagent's raw JSON output
-  --adversarial <path>    (compare --record) The adversarial judge subagent's raw JSON output
-  --judge <ref>           (compare) Override the judge archetype's dial model (bypasses catalog resolution)
+  --measure-only          (bakeoff) Report the pair's measured facts and write nothing; skips adjudication
+  --prepare               (bakeoff) Measure + write the two blinded judge prompts; write no artifact
+  --record                (bakeoff) Validate --comparison/--adversarial judgment files and write the artifact
+  --comparison <path>     (bakeoff --record) The comparison judge subagent's raw JSON output
+  --adversarial <path>    (bakeoff --record) The adversarial judge subagent's raw JSON output
+  --judge <ref>           (bakeoff) Override the judge archetype's dial model (bypasses catalog resolution)
   --isolate               (dispatch-prepare) Create isolated worktree at .fadeno/local/host-worktrees/<run>/<id> (workspace_mode: isolated)
   --agent-id <id>         (dispatch-start) Host agent identity
   --workspace <path>      (dispatch-start) Host workspace provenance
@@ -38966,7 +38917,7 @@ var COMMAND_HELP = {
   dial: `fadeno dial \u2014 per-archetype model selection
 
 Usage:
-  fadeno dial                                  Effective table (model, effort, harness, source)
+  fadeno dial                                  Effective table (model, effort, via, source)
   fadeno dial <archetype>                      One archetype's row (+ shadow; --json adds layers)
   fadeno dial <archetype>\u2026 <model>[@effort]    Set a dial (several archetypes at
                                                once: space, \`+\`, or \`,\` separated)
@@ -39012,24 +38963,26 @@ Examples:
   fadeno dial generator gemini --via agy --force
   fadeno dial clear worker --user
 `,
-  models: `fadeno models \u2014 the model registry and its harness identities
+  models: `fadeno models \u2014 the model registry and the driver each model rides
 
 Usage:
   fadeno models                    Frame-neutral registry table
-  fadeno models <name>             One model: harness, spellings, eligibility
+  fadeno models <name>             One model: via, alternates, spellings, eligibility
   fadeno models --driver <alias>   Live backend listing via the route's models_command
                                    (registered spellings marked with \u2190)
 
 Options:
   --json   Structured output
 
-The table is frame-neutral: harness is the model's home agent CLI and effort is
-the registry standard. Whether that harness is reached through a host agent or
-a CLI command is selected later from the caller's route and is not part of the
-model's identity. Names not in the registry route via the
-catalog's unregistered_model_driver with the id passed verbatim. The
-single-model view adds alternate --via harnesses. Probe-cache verification state stays in --json
-(verified_at per row).
+The table is frame-neutral: \`via\` is the model's home driver \u2014 the CLI its
+provider route names, and the value \`--via\` takes to pick a different one \u2014
+and effort is the registry standard. Whether that driver is reached in-session
+through a host agent or spawned as a command is selected later from the
+caller's route and is not part of the model's identity, which is why the
+column says \`via\` and not \`harness\`: the harness is the agent asking. Names
+not in the registry route via the catalog's unregistered_model_driver with the
+id passed verbatim. The single-model view lists every alternate lane. Probe-cache
+verification state stays in --json (verified_at per row).
 
 Examples:
   fadeno models
@@ -39817,12 +39770,11 @@ function printStaleDials(stale) {
   }
 }
 function printModels(result) {
-  const header2 = `${"model".padEnd(12)}  ${"provider".padEnd(12)}  ${"id".padEnd(26)}  ${"effort".padEnd(8)}  harness`;
+  const header2 = `${"model".padEnd(12)}  ${"provider".padEnd(12)}  ${"id".padEnd(26)}  ${"effort".padEnd(8)}  via`;
   console.log(header2);
   for (const row of result.models) {
-    const harnessCell = row.harness ?? "\u2014";
     console.log(
-      `${row.name.padEnd(12)}  ${(row.provider ?? "\u2014").padEnd(12)}  ${row.id.padEnd(26)}  ${row.effort.padEnd(8)}  ${harnessCell}`
+      `${row.name.padEnd(12)}  ${(row.provider ?? "\u2014").padEnd(12)}  ${row.id.padEnd(26)}  ${row.effort.padEnd(8)}  ${row.home_via}`
     );
   }
   for (const row of result.models) {
@@ -39845,9 +39797,9 @@ function printModelDetail(result, name) {
     return;
   }
   printModels({ ...result, models: [row] });
-  console.log(`  harness: ${row.harness ?? "\u2014"}`);
+  console.log(`  via: ${row.home_via}`);
   for (const lane of row.lanes) {
-    console.log(`  alternate harness: --via ${lane.via} \u2192 ${lane.id}`);
+    console.log(`  alternate: --via ${lane.via} \u2192 ${lane.id}`);
   }
   for (const [driver, id] of Object.entries(row.spellings)) {
     console.log(`  spelling: --via ${driver} \u2192 ${id}`);
@@ -39883,17 +39835,17 @@ function printDialShow(result, emptyMessage) {
     if (result.note) console.log(result.note);
     return;
   }
-  const header2 = `${"archetype".padEnd(12)}  ${"model".padEnd(18)}  ${"effort".padEnd(8)}  ${"harness".padEnd(22)}  source`;
+  const header2 = `${"archetype".padEnd(12)}  ${"model".padEnd(18)}  ${"effort".padEnd(8)}  ${"via".padEnd(22)}  source`;
   console.log(header2);
   for (const row of result.rows) {
     const arch = row.archetype.padEnd(12);
     const model = row.modelDisplay.padEnd(18);
     const effort = (row.resolvedVia != null ? "\u2014" : row.pinned_effort ?? "inherit").padEnd(8);
-    const harness = row.harness.padEnd(22);
+    const via = row.driver.padEnd(22);
     const elig = row.eligibility === "shadow_only" ? "  SHADOW-ONLY (never gates)" : row.eligibility === "forbidden" ? "  FORBIDDEN (refused at dispatch)" : "";
     const forced = row.write_posture_forced ? "  WARNING: FORCED WRITE-POSTURE MISMATCH" : "";
-    const via = row.resolvedVia ? ` (via ${row.resolvedVia})` : "";
-    console.log(`${arch}  ${model}  ${effort}  ${harness}  ${DIAL_SOURCE_TEXT[row.source] ?? row.source}${via}${elig}${forced}`);
+    const inherits = row.resolvedVia ? ` (inherits ${row.resolvedVia})` : "";
+    console.log(`${arch}  ${model}  ${effort}  ${via}  ${DIAL_SOURCE_TEXT[row.source] ?? row.source}${inherits}${elig}${forced}`);
     if (row.shadow) console.log(formatShadowLine(row.shadow, "  "));
   }
   if (result.note) console.log(result.note);

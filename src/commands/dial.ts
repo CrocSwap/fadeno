@@ -12,7 +12,6 @@ import {
   commandRoutable,
   compileDialRef,
   deliveryIsHost,
-  dispatchability,
   eligibilityFor,
   ExecutorProfileError,
   explainEligibilityConflict,
@@ -75,11 +74,15 @@ export interface EffectiveRow {
   pinned_effort: string | null;
   /** The effort this delivery runs at: the pin, else the registry default. */
   effective_effort: string;
+  /**
+   * The route's public name — what `--via` takes and what the table prints in
+   * its `via` column. This field used to have two synonyms, `harness` and
+   * `delivery`, both carrying this same value; both are gone. `harness` was
+   * the actively harmful one: `DialShowResult.harness` in the SAME payload
+   * means the actual harness (`claude`, `codex`), so a reader who found
+   * `harness: "codex"` on a row had no way to know it meant the driver.
+   */
   driver: string;
-  /** Frame-neutral model harness identity. */
-  harness: string;
-  /** Backward-compatible alias for `harness`. */
-  delivery: string;
   source: RoleResolutionSource;
   resolvedVia: string | null;
   dial: DialRef;
@@ -312,9 +315,8 @@ export interface DialSetResult {
   pinned_effort: string | null;
   /** The effort this dial runs at: the pin, else the registry default. */
   effective_effort: string;
+  /** The route's public name — the value `--via` takes. See `EffectiveRow.driver`. */
   driver: string;
-  harness: string;
-  delivery: string;
   layer: 'session' | 'repo' | 'user';
   adaptive: boolean;
   repo_pinned: DialRef | null;
@@ -664,9 +666,6 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
     previous = { layer: 'repo', dial: repoPinned };
   }
 
-  // Frame-neutral model harness. Adapter mechanics remain separate on the
-  // compiled delivery and are selected by the caller's host at dispatch.
-  const delivery = compiled.driver;
   let narrative = '';
   const modelDisplay = refString;
   if (layer === 'user') {
@@ -725,8 +724,6 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
     pinned_effort: compiled.pinnedEffort,
     effective_effort: compiled.effectiveEffort,
     driver: compiled.driver,
-    harness: compiled.driver,
-    delivery,
     layer,
     adaptive,
     repo_pinned: repoPinned,
@@ -1182,7 +1179,6 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
     const adapter = compiled.spec.adapter;
     const postured = applyWritePosture(compiled.spec, archetype, profile.archetypes);
     const writePostureForced = forcesWritePosture(cascade.ref, cascade.resolvedVia);
-    const delivery = compiled.driver;
     const effort = compiled.effectiveEffort;
     // Model display: canonical name, plus `@ effort` exactly when the user
     // pinned one. Keying on the PIN rather than on "differs from the registry
@@ -1207,8 +1203,6 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
       pinned_effort: compiled.pinnedEffort,
       effective_effort: compiled.effectiveEffort,
       driver: compiled.driver,
-      harness: compiled.driver,
-      delivery,
       source: cascade.source,
       resolvedVia: cascade.resolvedVia,
       dial: cascade.ref,
@@ -1346,13 +1340,16 @@ export interface DialResolveResult {
   };
 }
 
-function deliveryGuidance(archetype: string, executorName: string, spec: ExecutorSpec, harness: string): DialResolveResult['delivery'] {
-  const deliverable = dispatchability(spec, harness);
-  if (deliverable.supported) {
+function deliveryGuidance(archetype: string, executorName: string, spec: ExecutorSpec): DialResolveResult['delivery'] {
+  if (commandRoutable(spec)) {
+    const lane = spec.adapter === 'host'
+      ? `Host executor "${executorName}" has a command lane (\`fallback_command\`), and the dispatch delivers ` +
+        'there rather than in-session — an isolated worktree, a dispatch id, and a terminal receipt.'
+      : `Executor "${executorName}" runs outside this harness.`;
     return {
       dispatchable: true,
       dispatch_command: `fadeno dispatch --archetype ${archetype}`,
-      action: `Dispatch it: \`fadeno dispatch --archetype ${archetype}\` with the task prompt on stdin. Executor "${executorName}" runs outside this harness.`,
+      action: `Dispatch it: \`fadeno dispatch --archetype ${archetype}\` with the task prompt on stdin. ${lane}`,
     };
   }
   return {
@@ -1363,9 +1360,11 @@ function deliveryGuidance(archetype: string, executorName: string, spec: Executo
     // equal. It writes a host_delivery row, but that row carries no dispatch
     // id and no terminal receipt, so there is nothing to read back; it also
     // has no isolated worktree and forms no shadow pair.
-    action: deliverable.reason === 'host_in_session'
-      ? `Do NOT dispatch. Host executor "${executorName}" is delivered in-session by the ${harness} harness; dispatching would hand the task to a subprocess of this same harness and be refused. Either spawn the in-session ${archetype} agent — which writes a host_delivery row but no dispatch id or terminal receipt, has no isolated worktree, and forms no shadow pair — or give it a command lane: \`fadeno dial ${archetype} ${executorName} --via <driver>\`.`
-      : `Do NOT dispatch. Host executor "${executorName}" declares no fallback_command, so ad-hoc dispatch has nothing to invoke. Either spawn the in-session ${archetype} agent — which writes a host_delivery row but no dispatch id or terminal receipt, has no isolated worktree, and forms no shadow pair — or give it a command lane: \`fadeno dial ${archetype} ${executorName} --via <driver>\`.`,
+    action:
+      `Do NOT dispatch. Host executor "${executorName}" declares no fallback_command, so ad-hoc dispatch has ` +
+      `nothing to invoke. Either spawn the in-session ${archetype} agent — which writes a host_delivery row but ` +
+      'no dispatch id or terminal receipt, has no isolated worktree, and forms no shadow pair — or give it a ' +
+      `command lane: \`fadeno dial ${archetype} ${executorName} --via <driver>\`.`,
   };
 }
 
@@ -1473,7 +1472,7 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
     ...(forcesWritePosture(resolved.delivery.ref, resolved.resolvedVia) ? { write_posture_forced: true } : {}),
     ...(eligibility !== 'eligible' ? { eligibility } : {}),
     dial: resolved.delivery.ref,
-    delivery: deliveryGuidance(archetype, resolved.delivery.refString, spec, harness),
+    delivery: deliveryGuidance(archetype, resolved.delivery.refString, spec),
     relay: relay != null
       ? { ref: relay.refString, model_id: relay.modelId, effort: relay.effort }
       : null,

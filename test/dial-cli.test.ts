@@ -138,8 +138,10 @@ test('dial show: luna stays in codex while adapter selection follows the caller'
     rows.set(harness, runDialShow({ repoRoot: root, userPathOptions }).rows.find((row) => row.archetype === 'reviewer')!);
   }
   for (const row of rows.values()) {
-    assert.equal(row.harness, 'codex');
-    assert.equal(row.delivery, 'codex');
+    // `driver`, the route's public name — printed as the `via` column. Not
+    // `harness`: that word means the agent asking, which is what the loop
+    // above varies, and it used to name this field too.
+    assert.equal(row.driver, 'codex');
   }
   assert.equal(rows.get('codex')!.adapter, 'host');
   assert.equal(rows.get('claude')!.adapter, 'command');

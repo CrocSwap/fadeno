@@ -769,11 +769,16 @@ test('a declared-but-uncarriable worktree_carry path refuses the whole isolated 
   }
 });
 
-test('a selected pair moves a host-dialed primary onto its own command lane', (t) => {
-  // The claude harness delivers this dial in-session, so an ordinary dispatch
-  // is refused to stop a host slot shelling out to a subprocess of its own
-  // harness. A selected pair is the exception: both arms must be
-  // command-delivered or there is nothing to compare.
+test('a host-dialed primary rides its own command lane — alone, and as half of a pair', (t) => {
+  // Until 2026-08-21 an ordinary dispatch of this dial was REFUSED under the
+  // claude harness (`host_in_session`), and a selected pair was carved out as
+  // the sole exception so both arms could be command-delivered. The refusal is
+  // gone — it was a coin-flip on which harness you sat in, not a safety
+  // property — so the exception is no longer an exception: a host dial with a
+  // `fallback_command` takes that lane whether or not a shadow is attached.
+  // What the pair still guarantees is what it always guaranteed and what this
+  // test is really for: BOTH arms on the same transport, or there is nothing
+  // to compare.
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
@@ -782,7 +787,7 @@ test('a selected pair moves a host-dialed primary onto its own command lane', (t
     routes: {
       claude: {
         'current-host': { host: true },
-        anthropic: { driver: 'claude-cli', host: true, command: ECHO('HOST-FALLBACK:'), write_access: true },
+        anthropic: { driver: 'claude', host: true, command: ECHO('HOST-FALLBACK:'), write_access: true },
         xai: { driver: 'grok', command: ECHO('CHALLENGER:'), write_access: true },
       },
     },
@@ -791,38 +796,17 @@ test('a selected pair moves a host-dialed primary onto its own command lane', (t
   }));
   initGit(root);
 
-  // No attachment: the refusal stands, and says why.
-  assert.throws(
-    () => runDispatch({ archetype: 'worker', prompt: 'solo', repoRoot: root, userPathOptions: onHarness('claude') }),
-    /runs in-session/,
-  );
-  // ...and it must not present the in-session agent as an equivalent. A
-  // caller reached for `fadeno dispatch` to get isolation, an evidence row
-  // with a readable dispatch id, --timeout/--diagnostics and shadow pairing;
-  // an in-session agent supplies none of that and looks like it succeeded. It
-  // does write a host_delivery row — the message must not overstate the loss
-  // either, which an earlier version of it did.
-  // On 2026-08-21 a coordinator took this advice and reported it as
-  // "equivalent role, no recursion" while under instructions to read the
-  // result back by tag — which by then could not exist. It must also name the
-  // remedy that restores a real dispatch, not just say "bind a command
-  // executor".
-  assert.throws(
-    () => runDispatch({ archetype: 'worker', prompt: 'solo', repoRoot: root, userPathOptions: onHarness('claude') }),
-    /no dispatch id and no terminal receipt/,
-  );
-  assert.throws(
-    () => runDispatch({ archetype: 'worker', prompt: 'solo', repoRoot: root, userPathOptions: onHarness('claude') }),
-    /fadeno dial worker opus --via/,
-  );
+  // No attachment: it dispatches, down the host route's own fallback.
+  const solo = runDispatch({ archetype: 'worker', prompt: 'solo', repoRoot: root, userPathOptions: onHarness('claude') });
+  assert.equal(solo.exitCode, 0);
+  const soloRow = evidenceRows(root).find((r) => r.event === 'dispatch_completed')!;
+  assert.equal(soloRow.transport, 'host-command-fallback');
 
   writeLocalDialState(root, { dials: {}, shadows: { worker: { model: 'grok' } }, legacyNote: null });
-  const echoes: string[] = [];
-  const result = runDispatch({ archetype: 'worker', prompt: 'pair me', repoRoot: root, onEcho: (l) => echoes.push(l), userPathOptions: onHarness('claude') });
+  const result = runDispatch({ archetype: 'worker', prompt: 'pair me', repoRoot: root, userPathOptions: onHarness('claude') });
 
   assert.equal(result.exitCode, 0);
-  assert.ok(echoes.some((l) => l.includes('pair selected')), echoes.join('\n'));
-  const rows = evidenceRows(root);
+  const rows = evidenceRows(root).filter((r) => r.prompt_sha256 !== soloRow.prompt_sha256);
   const primary = rows.find((r) => r.event === 'dispatch_completed' && r.shadow !== true)!;
   const shadow = rows.find((r) => r.event === 'dispatch_completed' && r.shadow === true)!;
   // Same transport on both arms — the confound the pair exists to remove.
@@ -833,16 +817,17 @@ test('a selected pair moves a host-dialed primary onto its own command lane', (t
 });
 
 test('an unroutable selected pair leaves the spawn untouched — no pair, never a failed dispatch', (t) => {
-  // Regression: `dispatchability` refuses ANY host spec under an on-demand
-  // host harness, with or without a fallback_command — the kernel's
-  // `pairCommandFallback` correctly requires `fallbackCommand != null` too.
-  // But the hook used to force command delivery on `shadow.selected` alone.
-  // An archetype whose primary is the bare `current-host` base (no dial, no
-  // fallback) with a shadow attached would then get routed to the dispatch
-  // proxy, which runs `fadeno dispatch` and hits the kernel's ordinary
-  // `host_in_session` refusal — turning a selected pair into a failed task
+  // Regression: the hook used to force command delivery on `shadow.selected`
+  // alone. An archetype whose primary is the bare `current-host` base (no
+  // dial, no fallback) with a shadow attached would then get routed to the
+  // dispatch proxy, which runs `fadeno dispatch` and hits the kernel's
+  // `commandRoutable` refusal — turning a selected pair into a failed task
   // instead of the in-session work it would otherwise have done. An
   // unroutable pair must degrade to "no pair", never to "no work".
+  //
+  // Unaffected by the 2026-08-21 relaxation, and that is the point of keeping
+  // it: `current-host` declares no command at all, so it is refused for the
+  // one reason that was always true rather than for the harness it ran under.
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
@@ -905,6 +890,24 @@ test('an unroutable selected pair leaves the spawn untouched — no pair, never 
   assert.throws(
     () => runDispatch({ archetype: 'worker', prompt: 'do the thing', repoRoot: root, userPathOptions: isolated }),
     /declares no fallback_command/,
+  );
+  // The wording tripwires, on the one refusal that still fires. A caller
+  // reached for `fadeno dispatch` to get isolation, an evidence row with a
+  // readable dispatch id, --timeout/--diagnostics and shadow pairing; an
+  // in-session agent supplies none of that and looks like it succeeded. It
+  // does write a host_delivery row — the message must not overstate the loss
+  // either, which an earlier version of it did. On 2026-08-21 a coordinator
+  // took the in-session path and reported it as "equivalent role, no
+  // recursion" while under instructions to read the result back by tag, which
+  // by then could not exist. The message must also name the remedy that
+  // restores a real dispatch, not merely say "bind a command executor".
+  assert.throws(
+    () => runDispatch({ archetype: 'worker', prompt: 'do the thing', repoRoot: root, userPathOptions: isolated }),
+    /no dispatch id and no terminal receipt/,
+  );
+  assert.throws(
+    () => runDispatch({ archetype: 'worker', prompt: 'do the thing', repoRoot: root, userPathOptions: isolated }),
+    /fadeno dial worker <model> --via <driver>/,
   );
 });
 

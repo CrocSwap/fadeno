@@ -266,15 +266,17 @@ The dispatch kernel's full horizon is implemented and in daily dogfood.
      recomputes gate-eligibility from the snapshot.
   3. **Shadow dispatches and model tryouts** — per-slot shadow attachments
      with sha-identical paired prompts and `--rate` sampling, isolated
-     worktree delivery with diff-as-artifact, `fadeno dispatches
-     --bakeoffs`, and the model-tryout starter with its
-     mandatory-confounds ModelComparison contract.
+     worktree delivery with diff-as-artifact, and `fadeno dispatches
+     --bakeoffs`. (The `model-tryout` starter playbook and its
+     `ModelComparison` artifact contract shipped here and were retired in
+     phase 6 — adjudication is `fadeno bakeoff`, whose `Bakeoff` artifact
+     carries the mandatory-confounds sections the playbook used to ask for.)
 
 - **Horizon-7 — dials and the model registry (implemented, `experimental/dials-and-registry.md`; hardened post-0.6 with no compat):**
   named loadout presets retire in favor of per-archetype dials on a layered
   cascade (`binding → session → repo → user → base`) with a uniform model
   registry (`provider` + `id` + standard `effort`, `spellings:` per driver),
-  driver display aliases (`openai→codex`, `anthropic→claude-cli`, `xai→grok`; `google→agy`, `openrouter→opencode` already), driver fields `driver:` / `models_command:` / `effort_encoding:` on routes,
+  driver display aliases (`openai→codex`, `anthropic→claude`, `xai→grok`; `google→agy`, `openrouter→opencode` already), driver fields `driver:` / `models_command:` / `effort_encoding:` on routes,
   `unregistered_model_driver` fall-through for unknown ids, and dial-time
   backend verification (`models_command` probe, positives cached in
   `model-verifications.json`, fail-open). Dispatch rows now carry

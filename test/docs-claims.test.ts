@@ -248,6 +248,15 @@ const CLAIMS: Claim[] = [
     },
   },
   {
+    // The `harness`-headed column that never held a harness. The doc records
+    // the rename and the `(inherits …)` half that had to move with it; the
+    // source must actually print both, or the design record is describing a
+    // table nobody sees.
+    id: 'dial-via-column',
+    doc: { files: [DIALS], patterns: [/effort {4}via/, /inherits worker/] },
+    src: { files: ['src/cli.ts'], patterns: [/'via'\.padEnd\(22\)/, /\(inherits \$\{row\.resolvedVia\}\)/] },
+  },
+  {
     id: 'models-command-probe',
     doc: { files: [DIALS], patterns: [/models_command/] },
     src: { files: ['src/lib/executors.ts'], patterns: [/models_command/] },

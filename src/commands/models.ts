@@ -31,14 +31,22 @@ export interface ModelRow {
    * the argv; host lanes carry it as the request, applied by the materialized
    * agent surface. */
   effort: string;
+  /**
+   * The route's public name — what `--via` takes and what the table prints in
+   * its `via` column. Null when this model has no route under the active
+   * harness (see `stale`); `home_via` still names where it would land.
+   */
   driver: string | null;
-  /** Stable harness/driver identity for the model, independent of caller. */
-  harness: string | null;
+  /**
+   * The model's home driver, independent of the caller and of whether it
+   * compiles here. Two synonyms for this value — `harness` and `delivery` —
+   * were dropped on 2026-08-21; `harness` in particular collided with the
+   * real harness this command resolves under.
+   */
+  home_via: string;
   adapter: 'command' | 'host' | null;
   /** Resolution detail retained for structured consumers; not model identity. */
   native: boolean;
-  /** Backward-compatible neutral display value; equals `harness` when known. */
-  delivery: string;
   /** The home route declares a write variant (a `+write` lane exists). */
   write_variant: boolean;
   /** That variant's argv grants the fadeno command family (director-capable). */
@@ -108,10 +116,15 @@ function routeByDriver(profile: ExecutorProfile, driver: string): { key: string;
   return null;
 }
 
-/** The model's home harness is declared by its provider route, not by which
- * host happens to be asking. Route families are required to keep this alias
- * stable; use the first declared family so the view remains frame-neutral. */
-function homeHarness(profile: ExecutorProfile, provider: string): string {
+/** The model's home DRIVER — the `--via` value it takes without being asked
+ * — is declared by its provider route, not by which host happens to be
+ * asking. Route families are required to keep this alias stable; use the
+ * first declared family so the view remains frame-neutral.
+ *
+ * Named `homeHarness` until 2026-08-21, which was wrong twice over: it
+ * returns `route.driver` (a CLI), and `harness` in this same command means
+ * the agent asking. */
+function homeVia(profile: ExecutorProfile, provider: string): string {
   for (const routes of Object.values(profile.routes)) {
     const route = routes[provider];
     if (route != null) return route.driver ?? provider;
@@ -132,7 +145,7 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
   const rows: ModelRow[] = [];
   for (const name of Object.keys(profile.models).sort()) {
     const entry = profile.models[name]!;
-    const modelHarness = name === 'current-host' ? 'current-host' : homeHarness(profile, entry.provider);
+    const modelVia = name === 'current-host' ? 'current-host' : homeVia(profile, entry.provider);
     const lanes: ModelRow['lanes'] = [];
     let homeDriver: string | null = null;
     let row: ModelRow;
@@ -143,7 +156,6 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
       const fadenoCapable =
         writeVariant &&
         (compiled.spec as CommandExecutorSpec).writeVariant!.command.some((part) => part.includes('Bash(fadeno:'));
-      const delivery = modelHarness;
       const verified = verifications.find((v) => v.driver === compiled.driver && v.model === compiled.modelId);
       homeDriver = compiled.driver;
       row = {
@@ -153,10 +165,9 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
         model_id: compiled.modelId,
         effort: compiled.effectiveEffort,
         driver: compiled.driver,
-        harness: modelHarness,
+        home_via: modelVia,
         adapter,
         native: adapter === 'host',
-        delivery,
         write_variant: writeVariant,
         fadeno_capable: fadenoCapable,
         eligibility: { ...entry.eligibility },
@@ -175,10 +186,9 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
         model_id: null,
         effort: entry.effort,
         driver: null,
-        harness: modelHarness,
+        home_via: modelVia,
         adapter: null,
         native: false,
-        delivery: modelHarness,
         write_variant: false,
         fadeno_capable: false,
         eligibility: { ...entry.eligibility },

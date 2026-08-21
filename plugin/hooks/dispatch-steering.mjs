@@ -12,7 +12,7 @@ import { join } from 'node:path';
 // emitters (`fadeno plugin` and `fadeno init --claude`) replace this literal
 // with the package version; the template keeps 'dev', so a row reading 'dev'
 // means the template was executed directly rather than an installed copy.
-const HOOK_VERSION = '0.6.0-rc.41';
+const HOOK_VERSION = '0.6.0-rc.42';
 
 function finish(value) {
   if (value != null) process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -355,7 +355,7 @@ if (lane === 'restart_required') {
 // a primary with none (a bare `current-host` dial, most commonly) has no
 // command lane to force. Routing it here anyway would hand the spawn to the
 // dispatch proxy, which would run `fadeno dispatch` and hit the kernel's
-// ordinary `host_in_session` refusal — turning a selected pair into a failed
+// ordinary `commandRoutable` refusal — turning a selected pair into a failed
 // task instead of the in-session work it would otherwise have done. An
 // unroutable selected pair therefore degrades to "no pair": `pairSelected`
 // stays false and the spawn takes the path it would have taken anyway.
