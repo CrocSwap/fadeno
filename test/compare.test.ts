@@ -360,3 +360,66 @@ test('the graft plan reaches the returned result, not only the written file', (t
   assert.equal(result.graftPlan![0]!.from_arm, blinding.b, 'the returned plan must be unblinded too');
   assert.equal(result.graftPlan![0]!.what, 'the tripwire');
 });
+
+test('the verdict is unblinded, so a swapped mapping cannot invert the recorded result', (t) => {
+  // The judge answers in the only frame it has (`prefer_a`/`prefer_b`) and the
+  // kernel translates once. The original contract reused
+  // `prefer_baseline`/`prefer_challenger` in the JUDGMENT schema while the
+  // prompt told the judge it does not know which arm is which — so the single
+  // field that decides the outcome was the one field the judge could not
+  // answer. It answered anyway, and the kernel passed it through verbatim.
+  //
+  // `pair0001` blinds a→challenger, b→primary — the swapped case. A judge that
+  // prefers arm_a is preferring the CHALLENGER, so anything that records
+  // `prefer_baseline` here has inverted the result. The first real adjudication
+  // was correct only because that pair's mapping happened to be the identity.
+  const pairId = 'pair0001-aaaa-bbbb-cccc-dddddddddddd';
+  const blinding = deriveBlinding(pairId);
+  assert.equal(blinding.a, 'challenger', 'fixture precondition: this pair id must blind a→challenger');
+
+  const root = seedPair(t, {
+    primaryDiff: diffFor('src/a.ts', ['+x']),
+    challengerDiff: diffFor('src/b.ts', ['+y']),
+    judgeCommand: judgeCommand(
+      {
+        verdict: 'prefer_a',
+        criteria: [{ criterion: 'correctness', assessment: 'arm_a is better', favors: 'a' }],
+        shared_blind_spots: [],
+      },
+      { shared_blind_spots: [] },
+    ),
+  });
+
+  const result = runCompare({ repoRoot: root, ref: pairId });
+  assert.equal(result.measureOnly, false);
+  assert.equal(result.verdict, 'prefer_challenger', 'prefer_a under a swapped mapping is the CHALLENGER');
+
+  const written = readFileSync(join(root, result.comparisonPath), 'utf8');
+  assert.match(written, /verdict: prefer_challenger/);
+  // And the artifact must never carry the blinded vocabulary out to a reader.
+  assert.doesNotMatch(written, /verdict: prefer_[ab]\b/);
+});
+
+test('a judgment using the artifact vocabulary is refused, not silently reinterpreted', (t) => {
+  // `prefer_baseline` is not a frame the judge has. Accepting it would mean
+  // guessing what the judge meant by a word it was told it could not evaluate.
+  const root = seedPair(t, {
+    primaryDiff: diffFor('src/a.ts', ['+x']),
+    challengerDiff: diffFor('src/b.ts', ['+y']),
+    judgeCommand: judgeCommand(
+      {
+        verdict: 'prefer_baseline',
+        criteria: [{ criterion: 'correctness', assessment: 'x', favors: 'a' }],
+        shared_blind_spots: [],
+      },
+      { shared_blind_spots: [] },
+    ),
+  });
+  assert.throws(
+    () => runCompare({ repoRoot: root, ref: 'pair0001' }),
+    (err: unknown) => err instanceof CompareCommandError
+      && /does not validate|did not return a judgment that validates/.test((err as Error).message)
+      && /prefer_a/.test((err as Error).message),
+  );
+  assert.equal(existsSync(join(root, '.fadeno', 'comparisons')), false);
+});

@@ -31,6 +31,44 @@ export const MODEL_COMPARISON_VERDICTS = [
 
 export type ModelComparisonVerdict = (typeof MODEL_COMPARISON_VERDICTS)[number];
 
+/**
+ * What a BLINDED judge may emit. The artifact vocabulary above is the frame
+ * the judge does not have.
+ *
+ * These must be different lists, and conflating them shipped a real defect.
+ * The judgment schema originally reused `prefer_baseline` / `prefer_challenger`
+ * while the prompt told the judge it sees only `arm_a` / `arm_b` and does "not
+ * know" which is which — so the one field that decides the outcome was the one
+ * field the judge was structurally unable to answer. It answered anyway (a
+ * judge reading "baseline" reasons about baselines), and the kernel passed the
+ * value through verbatim, so a blinding that swapped the arms would have
+ * recorded the exact inverse of the judge's own reasoning.
+ *
+ * Caught on the first real adjudication — by the judge, about the code being
+ * judged. Its verdict was correct only because that pair's blinding happened
+ * to be the identity mapping.
+ */
+export const JUDGMENT_VERDICTS = ['prefer_a', 'prefer_b', 'graft', 'tie', 'inconclusive'] as const;
+
+export type JudgmentVerdict = (typeof JUDGMENT_VERDICTS)[number];
+
+export function isJudgmentVerdict(value: unknown): value is JudgmentVerdict {
+  return typeof value === 'string' && (JUDGMENT_VERDICTS as readonly string[]).includes(value);
+}
+
+/**
+ * Translate a blinded judgment verdict into the artifact's frame. The single
+ * place a verdict is unblinded, alongside `graft_plan.from_arm`.
+ */
+export function unblindVerdict(
+  verdict: JudgmentVerdict,
+  blinding: { a: 'primary' | 'challenger'; b: 'primary' | 'challenger' },
+): ModelComparisonVerdict {
+  if (verdict !== 'prefer_a' && verdict !== 'prefer_b') return verdict;
+  const preferred = verdict === 'prefer_a' ? blinding.a : blinding.b;
+  return preferred === 'primary' ? 'prefer_baseline' : 'prefer_challenger';
+}
+
 export function isModelComparisonVerdict(value: unknown): value is ModelComparisonVerdict {
   return typeof value === 'string' && (MODEL_COMPARISON_VERDICTS as readonly string[]).includes(value);
 }

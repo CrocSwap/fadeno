@@ -8,7 +8,8 @@ import { loadExecutorProfile } from '../lib/executors.ts';
 import {
   MODEL_COMPARISON_REQUIRED_SECTIONS,
   checkGraftCoherence,
-  isModelComparisonVerdict,
+  isJudgmentVerdict,
+  unblindVerdict,
   type GraftStep,
   type ModelComparisonFrontmatter,
   type ModelComparisonVerdict,
@@ -781,7 +782,8 @@ function buildComparisonPrompt(
     schemaText,
     '',
     'Notes:',
-    '- `favors` and `from_arm` must use the blinded labels `a` / `b` — never "primary"/"challenger", which you do not know.',
+    '- `verdict`, `favors` and `from_arm` all use the blinded labels `a` / `b`. You do not know which arm is ' +
+      'the baseline and must not guess: answer `prefer_a` / `prefer_b`, and the kernel translates it once.',
     "- A separate adversarial pass already searches for defects both arms share; emit an empty array for `shared_blind_spots` here.",
     '- `inconclusive` is a valid, honest verdict when the evidence does not support a call — do not guess to avoid it.',
   ].join('\n');
@@ -1071,7 +1073,7 @@ function adjudicate(
     );
   }
   const comparison = comparisonParsed as RawComparisonJudgment;
-  if (!isModelComparisonVerdict(comparison.verdict)) {
+  if (!isJudgmentVerdict(comparison.verdict)) {
     // Structurally redundant with the schema's own `verdict` enum, but that
     // enum and `MODEL_COMPARISON_VERDICTS` are two independently maintained
     // lists — the exact drift shape this module exists to close off. If they
@@ -1082,7 +1084,10 @@ function adjudicate(
         `"${comparison.verdict}" — writing nothing.`,
     );
   }
-  const verdict = comparison.verdict;
+  // Unblind the verdict HERE, with `graft_plan.from_arm`, and nowhere else.
+  // The judge answers in `prefer_a` / `prefer_b`, the only frame it has; this
+  // is the single translation into the artifact's primary/challenger frame.
+  const verdict = unblindVerdict(comparison.verdict, blinding);
   const coherence = checkGraftCoherence(verdict, comparison.graft_plan as unknown as GraftStep[] | undefined);
   if (coherence != null) {
     throw new CompareCommandError(

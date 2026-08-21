@@ -13,13 +13,13 @@
   "properties": {
     "verdict": {
       "enum": [
-        "prefer_baseline",
-        "prefer_challenger",
+        "prefer_a",
+        "prefer_b",
         "graft",
         "tie",
         "inconclusive"
       ],
-      "description": "prefer_* names an arm as better AS SHIPPED. `graft` means neither arm should be taken whole \u2014 the honest answer for both pairs judged so far \u2014 and requires a non-empty graft_plan. `tie` means genuinely equivalent; `inconclusive` means the evidence does not support a call, which is a valid outcome and must not be avoided by guessing."
+      "description": "prefer_a / prefer_b name the BLINDED arm that is better as shipped. You see only arm_a and arm_b and must never guess which is the baseline \u2014 the kernel translates your answer once, after you return it. `graft` means neither arm should be taken whole (the honest answer for the pairs judged so far) and requires a non-empty graft_plan. `tie` means genuinely equivalent; `inconclusive` means the evidence does not support a call, which is a valid outcome and must not be avoided by guessing."
     },
     "graft_plan": {
       "type": "array",
