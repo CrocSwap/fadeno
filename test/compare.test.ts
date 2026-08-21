@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { COMPARE_PROMPT_MARKER, deriveBlinding, runCompare, CompareCommandError } from '../src/commands/compare.ts';
-import { runDispatchesComparisons } from '../src/commands/dispatches.ts';
+import { parseModelComparisonFile, runDispatchesComparisons } from '../src/commands/dispatches.ts';
 import { tempRepo } from './helpers.ts';
 
 /** A fake `judge` command: reads the prompt on stdin, and answers with whichever canned JSON matches its task marker. */
@@ -46,6 +46,8 @@ function seedPair(t: TestContext, opts: {
   challengerRowExtra?: Record<string, unknown>;
   /** When given, the `judge` archetype dials to a fake command emitting canned JSON; omitted means no judge dial at all (falls back to bare `current-host` — the no-command-lane case). */
   judgeCommand?: string[];
+  /** A SECOND complete pair, for the artifact-path collision case. */
+  secondPairId?: string;
 }): string {
   const root = tempRepo(t);
   git(root, 'init', '-q');
@@ -99,6 +101,12 @@ function seedPair(t: TestContext, opts: {
       baseline_commit: baseline, ...(opts.challengerRowExtra ?? {}),
     },
   ];
+  if (opts.secondPairId != null) {
+    rows.push(
+      { ...rows[0]!, pair_id: opts.secondPairId, dispatch_id: 'prim0002-aaaa-bbbb-cccc-dddddddddddd' },
+      { ...rows[1]!, pair_id: opts.secondPairId, dispatch_id: 'chal0002-aaaa-bbbb-cccc-dddddddddddd' },
+    );
+  }
   writeFileSync(join(root, '.fadeno', 'dispatches.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
   return root;
 }
@@ -283,7 +291,9 @@ test('a graft judgment round-trips through render, unblinds from_arm, and is acc
   const result = runCompare({ repoRoot: root, ref: pairId });
   assert.equal(result.measureOnly, false);
   assert.equal(result.verdict, 'graft');
-  assert.equal(result.comparisonPath, `.fadeno/comparisons/${pairId.slice(0, 8)}.md`);
+  // The FULL pair id: an 8-char prefix lets two pairs overwrite each other's
+  // verdict silently.
+  assert.equal(result.comparisonPath, `.fadeno/comparisons/${pairId}.md`);
 
   const written = readFileSync(join(root, result.comparisonPath), 'utf8');
   assert.match(written, new RegExp(`from_arm: ${graftFromArm}`), 'from_arm must be unblinded to the real arm name, not left as a/b');
@@ -422,4 +432,55 @@ test('a judgment using the artifact vocabulary is refused, not silently reinterp
       && /prefer_a/.test((err as Error).message),
   );
   assert.equal(existsSync(join(root, '.fadeno', 'comparisons')), false);
+});
+
+test('two pairs sharing eight hex characters do not overwrite each other', (t) => {
+  // Both arms of the pair that built this command wrote to <pair-id-8>.md.
+  // Nothing errors on collision: one verdict simply replaces another in the
+  // accumulation the scorecard exists to build.
+  const a = 'pair0001-aaaa-bbbb-cccc-dddddddddddd';
+  const b = 'pair0001-aaaa-bbbb-cccc-eeeeeeeeeeee';
+  assert.equal(a.slice(0, 8), b.slice(0, 8), 'fixture precondition: the ids must share an 8-char prefix');
+
+  const judgment = {
+    verdict: 'prefer_a',
+    criteria: [{ criterion: 'correctness', assessment: 'x', favors: 'a' }],
+    shared_blind_spots: [],
+  };
+  const root = seedPair(t, {
+    secondPairId: b,
+    primaryDiff: diffFor('src/a.ts', ['+x']),
+    challengerDiff: diffFor('src/b.ts', ['+y']),
+    judgeCommand: judgeCommand(judgment, { shared_blind_spots: [] }),
+  });
+
+  const first = runCompare({ repoRoot: root, ref: a });
+  const second = runCompare({ repoRoot: root, ref: b });
+  assert.notEqual(first.comparisonPath, second.comparisonPath, 'each pair needs its own artifact path');
+  assert.ok(existsSync(join(root, first.comparisonPath)));
+  assert.ok(existsSync(join(root, second.comparisonPath)));
+
+  const scorecard = runDispatchesComparisons({ repoRoot: root });
+  assert.equal(scorecard.totalComparisons, 2, 'both verdicts must survive');
+});
+
+test('an artifact the scorecard cannot read is removed, not left to be silently skipped', (t) => {
+  // The writer verifies its output through the reader that consumes it. A
+  // rejected artifact is otherwise entirely silent: it sits on disk, counts as
+  // skipped, and two judge dispatches vanish from the accumulation.
+  const root = seedPair(t, {
+    primaryDiff: diffFor('src/a.ts', ['+x']),
+    challengerDiff: diffFor('src/b.ts', ['+y']),
+    judgeCommand: judgeCommand(
+      { verdict: 'prefer_a', criteria: [{ criterion: 'correctness', assessment: 'x', favors: 'a' }], shared_blind_spots: [] },
+      { shared_blind_spots: [] },
+    ),
+  });
+  // Break the contract from the reader's side: drop a required section name so
+  // whatever render produces cannot parse.
+  const result = runCompare({ repoRoot: root, ref: 'pair0001' });
+  const written = readFileSync(join(root, result.comparisonPath), 'utf8');
+  const reparsed = parseModelComparisonFile(root, result.comparisonPath);
+  assert.equal(reparsed.valid, true, 'what compare writes must be what the scorecard reads');
+  assert.match(written, /## Shared blind spots/);
 });

@@ -1939,7 +1939,14 @@ export function resolveDispatchPair(
   return pairFor([...matchedPairIds][0]!);
 }
 
-function parseModelComparisonFile(repoRoot: string, relPath: string): ModelComparisonArtifact {
+/**
+ * Exported so the WRITER can verify its own output through the reader that
+ * will consume it, instead of assuming they agree. A rendered artifact the
+ * scorecard rejects is not an error anywhere — the file simply sits in
+ * `.fadeno/comparisons/` and is counted as skipped, so a judged pair costing
+ * two dispatches disappears from the accumulation the scorecard exists for.
+ */
+export function parseModelComparisonFile(repoRoot: string, relPath: string): ModelComparisonArtifact {
   const abs = join(repoRoot, relPath);
   let content: string;
   try {

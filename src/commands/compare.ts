@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Ajv, type ValidateFunction } from 'ajv';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
@@ -17,7 +17,7 @@ import {
 import { findRepoRoot } from '../lib/paths.ts';
 import { SchemaSet, schemaErrorMessages } from '../lib/playbook-validate.ts';
 import { DispatchCommandError, runDispatch, type AdHocDispatchResult } from './dispatch.ts';
-import { COMPARISONS_DIR, resolveDispatchPair, type DispatchEntry, type ResolvedDispatchPair } from './dispatches.ts';
+import { COMPARISONS_DIR, parseModelComparisonFile, resolveDispatchPair, type DispatchEntry, type ResolvedDispatchPair } from './dispatches.ts';
 import { stringify as stringifyYaml } from 'yaml';
 
 export class CompareCommandError extends Error {}
@@ -1160,9 +1160,28 @@ function adjudicate(
   });
 
   const comparisonsRelDir = COMPARISONS_DIR.split('\\').join('/');
-  const comparisonPath = `${comparisonsRelDir}/${pairId8}.md`;
+  // The FULL pair id, not the 8-char display prefix. Two pairs sharing eight
+  // hex characters would silently overwrite each other's verdict — no error,
+  // no arm-level difference, just one adjudication replacing another in the
+  // accumulation the scorecard exists to build. Found by the adversarial pass
+  // on the pair that built this command; both arms had it.
+  const comparisonPath = `${comparisonsRelDir}/${measurement.pairId}.md`;
   mkdirSync(join(repoRoot, comparisonsRelDir), { recursive: true });
   writeFileSync(join(repoRoot, comparisonPath), body, 'utf8');
+  // Read back what was just written, through the SAME parser the scorecard
+  // uses. The writer and the reader are two consumers of one contract, and
+  // this is the only thing that makes them agree by construction rather than
+  // by assumption. Grafted from pair 1880a960's challenger arm, which did this
+  // and whose primary wrote blind; a rejected artifact is otherwise silent —
+  // it is counted as skipped and its verdict is simply gone.
+  const roundTrip = parseModelComparisonFile(repoRoot, comparisonPath);
+  if (!roundTrip.valid) {
+    rmSync(join(repoRoot, comparisonPath), { force: true });
+    throw new CompareCommandError(
+      `the rendered artifact for pair ${measurement.pairId.slice(0, 8)} is not readable by the scorecard ` +
+        `(${roundTrip.error ?? 'unknown'}) — removed it rather than leave a verdict the reader silently skips.`,
+    );
+  }
 
   return {
     ...measurement,
