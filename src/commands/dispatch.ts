@@ -544,6 +544,8 @@ export interface AdHocDispatchResult {
   executor: string;
   model: string | null;
   modelId: string | null;
+  /** The resolved delivery's provider, or null when the catalog states none. */
+  provider: string | null;
   driver: string | null;
   reasoningEffort: string | null;
   source: DispatchResolutionSource;
@@ -1179,11 +1181,21 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // recursion" — while the instructions it was following asked it to read
     // the result back by tag and verify a dispatch id, which by then could
     // not exist.
+    // Precise about what is actually lost. An earlier version of this said the
+    // in-session path "writes no evidence row", which is FALSE — the steering
+    // hook writes a `host_delivery` / `native_delivery` row carrying the
+    // archetype, executor, model, effort, driver and a prompt snapshot. What
+    // it has no way to write is a terminal receipt: those rows carry no
+    // dispatch id, so there is no exit code, duration, captured output, or
+    // `--output tag:` handle. Overstating the loss is the same failure as
+    // understating it — this message exists because the previous one made a
+    // claim it had not checked.
     const lost =
-      'An in-session agent is NOT an equivalent substitute: it runs in this workspace with no isolated ' +
-      'worktree, writes no evidence row (so there is no dispatch id and nothing to read back with ' +
-      '`fadeno dispatches --output tag:<tag>`), honours neither --timeout nor --diagnostics, and forms ' +
-      'no shadow pair. Take it only if you do not need those.';
+      'An in-session agent is NOT an equivalent substitute. It writes a host_delivery evidence row (with ' +
+      'the prompt snapshot), but that row carries no dispatch id and no terminal receipt — no exit code, ' +
+      'no duration, no captured output, and nothing to read back with `fadeno dispatches --output ' +
+      'tag:<tag>`. It also runs in this workspace with no isolated worktree, honours neither --timeout ' +
+      'nor --diagnostics, and forms no shadow pair. Take it only if you do not need those.';
     // `current-host` is a reference-frame sentinel, not a model you can route
     // — suggesting `--via` on it would be advice that cannot be followed.
     const dialModel = spec.model != null && spec.model !== 'current-host' ? spec.model : '<model>';
@@ -2679,6 +2691,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     executor: executorName,
     model: delivery.model,
     modelId: delivery.modelId,
+    provider: delivery.provider ?? null,
     driver: delivery.driver,
     reasoningEffort: delivery.effectiveEffort,
     source,

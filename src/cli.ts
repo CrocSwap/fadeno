@@ -129,8 +129,11 @@ Usage:
   fadeno dispatches --comparisons       Paired primary/shadow scorecard per challenger
   fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]
                                         Port a shadow pair's diff into your workspace (git apply --3way)
+  fadeno compare <pair-id|dispatch-id> [--judge <ref>] [--via <driver>]
+                                        Measure + adjudicate a shadow pair: two blinded judge dispatches, then
+                                        write .fadeno/comparisons/<pair-id-8>.md
   fadeno compare <pair-id|dispatch-id> --measure-only
-                                        Measure a shadow pair's arms (deterministic; no model is consulted)
+                                        Measure a shadow pair's arms only (deterministic; no model is consulted)
   fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
   fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic claims (or --latest)
   fadeno plugin [dir] [--codex]         Generate a Claude Code (default) or Codex plugin
@@ -190,8 +193,8 @@ Options:
   --json                  (dispatches) Emit structured entries on stdout for scripting
   --arm <arm>             (shadow-apply) challenger (default) | primary
   --check                 (shadow-apply) Report applicability only (git apply --check --3way); changes nothing
-  --measure-only          (compare) Report the pair's measured facts and write nothing. Currently required:
-                          adjudication (the blinded judge dispatch and the ModelComparison artifact) is not built
+  --measure-only          (compare) Report the pair's measured facts and write nothing; skips adjudication
+  --judge <ref>           (compare) Override the judge archetype's dial model (bypasses catalog resolution)
   --isolate               (dispatch-prepare) Create isolated worktree at .fadeno/local/host-worktrees/<run>/<id> (workspace_mode: isolated)
   --agent-id <id>         (dispatch-start) Host agent identity
   --workspace <path>      (dispatch-start) Host workspace provenance
@@ -1206,7 +1209,26 @@ function printCompare(result: CompareResult): void {
     console.log(`  confounds (${result.confounds.length}) — kernel-stamped, not judged:`);
     for (const c of result.confounds) console.log(`    [${c.code}] ${c.arm}: ${c.detail}`);
   }
-  console.log('  measured only — no verdict was formed and nothing was written.');
+  if (result.measureOnly) {
+    console.log('  measured only — no verdict was formed and nothing was written.');
+    return;
+  }
+  console.log(`  verdict: ${result.verdict}`);
+  // The plan, not just the fact that there is one. `graft` means neither arm
+  // should be taken whole; printing only the verdict and a path says that and
+  // then withholds what to take.
+  if (result.graftPlan != null && result.graftPlan.length > 0) {
+    console.log('  graft plan:');
+    for (const step of result.graftPlan) {
+      const paths = step.paths != null && step.paths.length > 0 ? ` [${step.paths.join(', ')}]` : '';
+      console.log(`    from ${step.from_arm}: ${step.what} — ${step.why}${paths}`);
+    }
+  }
+  console.log(`  written: ${result.comparisonPath}`);
+  console.log(
+    `  judge dispatches: comparison ${result.judgeDispatchIds.comparison.slice(0, 8)}, ` +
+      `adversarial ${result.judgeDispatchIds.adversarial.slice(0, 8)}`,
+  );
 }
 
 function printStaleShadows(stale: Array<{ archetype: string; target: string }>): void {
@@ -1548,6 +1570,7 @@ function main(argv: string[]): number {
         arm: { type: 'string' },
         check: { type: 'boolean' },
         'measure-only': { type: 'boolean' },
+        judge: { type: 'string' },
         json: { type: 'boolean' },
         'agent-id': { type: 'string' },
         workspace: { type: 'string' },
@@ -2639,8 +2662,13 @@ function main(argv: string[]): number {
     }
     case 'compare': {
       const ref = positionals[1];
-      if (!ref) throw new Error('Usage: fadeno compare <pair-id|dispatch-id> --measure-only');
-      const result = runCompare({ ref, measureOnly: Boolean(values['measure-only']) });
+      if (!ref) throw new Error('Usage: fadeno compare <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--via <driver>]');
+      const result = runCompare({
+        ref,
+        measureOnly: Boolean(values['measure-only']),
+        judgeModel: values.judge ?? null,
+        judgeVia: values.via ?? null,
+      });
       if (values.json) {
         console.log(JSON.stringify(result, null, 2));
         return 0;

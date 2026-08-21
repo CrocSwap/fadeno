@@ -799,7 +799,9 @@ test('a selected pair moves a host-dialed primary onto its own command lane', (t
   // ...and it must not present the in-session agent as an equivalent. A
   // caller reached for `fadeno dispatch` to get isolation, an evidence row
   // with a readable dispatch id, --timeout/--diagnostics and shadow pairing;
-  // an in-session agent supplies none of that and looks like it succeeded.
+  // an in-session agent supplies none of that and looks like it succeeded. It
+  // does write a host_delivery row — the message must not overstate the loss
+  // either, which an earlier version of it did.
   // On 2026-08-21 a coordinator took this advice and reported it as
   // "equivalent role, no recursion" while under instructions to read the
   // result back by tag — which by then could not exist. It must also name the
@@ -807,7 +809,7 @@ test('a selected pair moves a host-dialed primary onto its own command lane', (t
   // executor".
   assert.throws(
     () => runDispatch({ archetype: 'worker', prompt: 'solo', repoRoot: root, userPathOptions: onHarness('claude') }),
-    /no evidence row/,
+    /no dispatch id and no terminal receipt/,
   );
   assert.throws(
     () => runDispatch({ archetype: 'worker', prompt: 'solo', repoRoot: root, userPathOptions: onHarness('claude') }),
