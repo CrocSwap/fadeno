@@ -494,3 +494,30 @@ test('an artifact the scorecard cannot read is removed, not left to be silently 
   assert.equal(reparsed.valid, true, 'what compare writes must be what the scorecard reads');
   assert.match(written, /## Shared blind spots/);
 });
+
+test("the judge's own prose is unblinded too, so the artifact never names one arm twice", (t) => {
+  // Structured fields translate by lookup; free text does not. Without this
+  // the artifact reads "(more: challenger): Arm_b produces a larger
+  // implementation" — two names for one arm on a single line, leaving a reader
+  // to carry the mapping the blinding exists to hide.
+  const root = seedPair(t, {
+    primaryDiff: diffFor('src/a.ts', ['+x']),
+    challengerDiff: diffFor('src/b.ts', ['+y']),
+    judgeCommand: judgeCommand(
+      {
+        verdict: 'prefer_a',
+        criteria: [{ criterion: 'correctness', assessment: 'arm_a is tighter than arm_b here.', favors: 'a' }],
+        shared_blind_spots: [],
+        traits: [{ dimension: 'output_volume', more: 'b', note: 'Arm_b wrote more than arm_a.' }],
+      },
+      { shared_blind_spots: [] },
+    ),
+  });
+  const result = runCompare({ repoRoot: root, ref: 'pair0001' });
+  const written = readFileSync(join(root, result.comparisonPath), 'utf8');
+  const blinding = deriveBlinding('pair0001-aaaa-bbbb-cccc-dddddddddddd');
+
+  assert.doesNotMatch(written, /\barm_[ab]\b/i, 'no blinded label may survive into the artifact');
+  assert.match(written, new RegExp(`${blinding.a} is tighter than ${blinding.b}`));
+  assert.match(written, new RegExp(`${blinding.b} wrote more than ${blinding.a}`));
+});

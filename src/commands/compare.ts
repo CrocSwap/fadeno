@@ -955,7 +955,7 @@ function renderCriteria(criteria: RawCriterion[], blinding: { a: CompareArm; b: 
   return criteria
     .map((c) => {
       const favors = c.favors === 'a' || c.favors === 'b' ? armFor(c.favors, blinding) : (c.favors ?? 'neither');
-      return `- **${c.criterion}** (favors: ${favors}): ${c.assessment}`;
+      return `- **${c.criterion}** (favors: ${favors}): ${unblindProse(c.assessment, blinding)}`;
     })
     .join('\n');
 }
@@ -967,12 +967,30 @@ function renderCriteria(criteria: RawCriterion[], blinding: { a: CompareArm; b: 
  * not `better` — pair 49a1f92a's challenger exhibited more `output_volume` and
  * that surplus was the worse artifact.
  */
+/**
+ * Unblind the judge's own prose.
+ *
+ * The structured fields are translated by lookup; free text is not, so an
+ * artifact rendered without this says `(more: challenger): Arm_b produces...`
+ * — two names for one arm on a single line, leaving the reader to hold the
+ * mapping. The artifact is the human-facing deliverable and the blinding is a
+ * detail of how it was produced, not something a reader should have to undo.
+ *
+ * Exact-token only. A judge writing `arm_a` means the label; nothing else in
+ * this codebase spells that.
+ */
+function unblindProse(text: string, blinding: { a: CompareArm; b: CompareArm }): string {
+  return text
+    .replace(/\barm_a\b/gi, blinding.a)
+    .replace(/\barm_b\b/gi, blinding.b);
+}
+
 function renderTraits(traits: RawTrait[], blinding: { a: CompareArm; b: CompareArm }): string {
   if (traits.length === 0) return '(none reported)';
   return traits
     .map((t) => {
       const more = t.more === 'a' || t.more === 'b' ? armFor(t.more, blinding) : 'neither';
-      return `- **${t.dimension}** (more: ${more}): ${t.note}`;
+      return `- **${t.dimension}** (more: ${more}): ${unblindProse(t.note, blinding)}`;
     })
     .join('\n');
 }
