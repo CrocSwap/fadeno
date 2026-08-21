@@ -17,6 +17,7 @@ import {
   eligibilityFor,
   substitutePromptFile,
   explainEligibilityConflict,
+  explainUnverifiedWritePosture,
   explainProviderConflict,
   applyWritePosture,
   explainPairRoutability,
@@ -1468,6 +1469,15 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     transport,
     workspace_mode: workspaceMode,
     ...(spec.writeAccess != null ? { write_access: spec.writeAccess } : {}),
+    // Recorded as an explicit TRUE-only flag rather than inferred later from a
+    // missing `write_access` key: absence of that key is ambiguous — it means
+    // "undeclared" on a new row and "written before the field existed" on an
+    // old one, and a bakeoff confound derived from an ambiguous absence would
+    // over-claim on historical pairs. A flag only ever written when we know it
+    // can only under-report, which is the safe direction.
+    ...(explainUnverifiedWritePosture({ executor: executorName, spec }, archetype, profile) != null
+      ? { write_posture_unverified: true }
+      : {}),
     ...(usedWriteVariant ? { write_variant: true } : {}),
     ...(writePostureForced ? { write_posture_forced: true } : {}),
     ...(briefApplied != null ? { brief: briefApplied } : {}),
@@ -2034,6 +2044,9 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       ...(shadowDelivery.provider != null ? { provider: shadowDelivery.provider } : {}),
       transport: 'command',
       ...(shadowSpec.writeAccess != null ? { write_access: shadowSpec.writeAccess } : {}),
+      ...(explainUnverifiedWritePosture({ executor: shadowRefString, spec: shadowSpec }, archetype, profile) != null
+        ? { write_posture_unverified: true }
+        : {}),
       ...(shadowUsedWriteVariant ? { write_variant: true } : {}),
       delivery_transport: 'command',
       prompt_source: promptSource,

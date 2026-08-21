@@ -52,6 +52,7 @@ export interface BakeoffConfound {
     | 'arm_refused'
     | 'exit_code_differs'
     | 'judge_provider_shared'
+    | 'write_posture_unverified'
     | 'judge_delivery_unattested';
   arm: BakeoffArm | 'pair';
   detail: string;
@@ -566,6 +567,14 @@ function confoundsOf(primary: DispatchEntry | null, shadow: DispatchEntry | null
     }
     if (entry.workspaceModeDegraded != null) {
       push('workspace_mode_degraded', arm, String(entry.workspaceModeDegraded));
+    }
+    if (entry.writePostureUnverified) {
+      push(
+        'write_posture_unverified',
+        arm,
+        'this arm ran on a lane that never declared `write_access:`, so its archetype\'s write posture ' +
+          'was never checked — an empty or thin diff here is NOT evidence the model chose to change little.',
+      );
     }
     if (entry.carryMutated != null) {
       push('carry_mutated', arm, 'a carried path was written through — one inode, two trees; the arms may have contaminated each other.');

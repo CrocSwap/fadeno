@@ -1946,6 +1946,45 @@ export function explainPairRoutability(
 }
 
 /**
+ * A declared write posture that CANNOT be checked against the lane it will
+ * run on: the archetype declares `requires_write: required` (or `forbidden`)
+ * and the route never declared `write_access:`, so `explainWriteConflict`
+ * sees `null` and passes it — `null` satisfies every posture.
+ *
+ * `null` means UNKNOWN, not "fine". Refusing on unknown would break every
+ * catalog that simply omits the key, so this reports instead: a refusal is
+ * reserved for the case where no meaningful delivery or comparison exists at
+ * all, and "we never asked" is not that case. But staying silent has a
+ * specific cost worth naming — a write-required arm on a lane that turns out
+ * to be read-only produces an EMPTY DIFF, and a bakeoff reads an empty diff
+ * as "this model chose to change nothing" rather than "this model could not
+ * write". That is a confident wrong verdict, which is worse than no verdict.
+ *
+ * Scoped to specs that actually have a command lane: a host delivery with no
+ * `fallback_command` runs in-session with the host's own permissions, so an
+ * undeclared `write_access` says nothing about it and warning there is noise.
+ */
+export function explainUnverifiedWritePosture(
+  delivery: DeliveryChoice,
+  archetype: string | null,
+  profile: ExecutorProfile,
+): string | null {
+  if (archetype == null) return null;
+  if (!Object.hasOwn(profile.archetypes, archetype)) return null;
+  const posture = profile.archetypes[archetype]!.requiresWrite;
+  if (posture !== 'required' && posture !== 'forbidden') return null;
+  if (delivery.spec.writeAccess != null) return null;
+  if (!commandRoutable(delivery.spec)) return null;
+  return (
+    `archetype "${archetype}" declares \`requires_write: ${posture}\`, but executor ` +
+    `"${delivery.executor}" delivers through a route that does not declare \`write_access:\` — ` +
+    'so the posture is UNENFORCED here, not satisfied: nothing has checked whether that lane can ' +
+    'write. If it cannot, this produces an empty diff that reads like a deliberate choice to change ' +
+    `nothing. Fix: declare \`write_access: true\` or \`false\` on the route.`
+  );
+}
+
+/**
  * The two fields a preview surface publishes for a pair-routability answer.
  * Defined once so `dial resolve` and `steering resolve` cannot drift on
  * whether the reason travels with the verdict: both surfaces used to spread

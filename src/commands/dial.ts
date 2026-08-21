@@ -15,6 +15,7 @@ import {
   eligibilityFor,
   ExecutorProfileError,
   explainEligibilityConflict,
+  explainUnverifiedWritePosture,
   explainPairRoutability,
   pairRoutabilityFields,
   explainWriteConflict,
@@ -495,6 +496,38 @@ function providerNoveltyNote(params: {
  * warning, not a refusal: the primary can be redialed afterwards to make the
  * attachment take effect.
  */
+/**
+ * Every arm of a would-be pair whose declared write posture cannot be checked
+ * against the lane it will run on. Resolves the PRIMARY the same way
+ * `unroutablePrimaryNote` does — at attach time the only ref in scope is the
+ * challenger's, and the primary is the arm more likely to be sitting on an
+ * undeclared lane, since a challenger is usually dialed deliberately.
+ */
+function unverifiedPostureNotes(params: {
+  profile: ExecutorProfile;
+  layers: DialLayers;
+  archetype: string;
+  challenger: { executor: string; spec: ExecutorSpec };
+}): string[] {
+  const { profile, layers, archetype, challenger } = params;
+  const out: string[] = [];
+  try {
+    const resolved = resolveRole(archetype, archetype, profile, layers);
+    const postured = applyWritePosture(resolved.delivery.spec, archetype, profile.archetypes);
+    const primary = explainUnverifiedWritePosture(
+      { executor: resolved.delivery.refString, spec: postured.spec },
+      archetype,
+      profile,
+    );
+    if (primary != null) out.push(primary);
+  } catch {
+    // an unresolvable primary is reported by its own note, not this one
+  }
+  const chall = explainUnverifiedWritePosture(challenger, archetype, profile);
+  if (chall != null) out.push(chall);
+  return out;
+}
+
 function unroutablePrimaryNote(params: {
   profile: ExecutorProfile;
   layers: DialLayers;
@@ -572,11 +605,17 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
   if (writeConflict != null) dial.force_write_posture = true;
   const eligibilityConflict = explainEligibilityConflict({ executor: refString, spec: compiled.spec }, archetype);
   if (eligibilityConflict != null) throw new DialError(eligibilityConflict);
+  // Not a conflict — the absence of one that could never be evaluated. A
+  // declared posture the route never gave `explainWriteConflict` anything to
+  // check against passes silently today, which is the quiet half of the same
+  // question the throw above answers loudly.
+  const unverifiedPosture = explainUnverifiedWritePosture({ executor: refString, spec: compiled.spec }, archetype, profile);
 
   // c. Verification probe
   let verification: VerificationStatus = null;
   let probeNote: string | null = null;
   const notes: string[] = [];
+  if (unverifiedPosture != null) notes.push(`WARNING: WRITE POSTURE UNENFORCED — ${unverifiedPosture}`);
   if (writeConflict != null) {
     notes.push(
       `WARNING: FORCED WRITE-POSTURE MISMATCH — ${archetype} → ${refString}\n` +
@@ -1071,6 +1110,21 @@ export function runDialShadow(opts: DialShadowOptions): DialShadowResult {
     const unroutable = unroutablePrimaryNote({ profile, layers: shadowLayers, archetype });
     if (unroutable != null) notes.push(unroutable);
   }
+  {
+    // A pair is exactly where an unenforced posture does its damage: the arm
+    // that cannot write returns an empty diff and the bakeoff reads it as a
+    // deliberate choice. Both arms are checked — the PRIMARY through the same
+    // resolution `unroutablePrimaryNote` performs, because the challenger's
+    // ref is the only one in scope here and it is not the arm most likely to
+    // be silently unwritable.
+    const unverified = unverifiedPostureNotes({
+      profile,
+      layers: shadowLayers,
+      archetype,
+      challenger: { executor: refString, spec: compiled.spec },
+    });
+    for (const note of unverified) notes.push(`WARNING: WRITE POSTURE UNENFORCED — ${note}`);
+  }
   const previous = state.shadows[archetype] ?? null;
   const nextShadows: Record<string, ShadowAttachment> = { ...state.shadows, [archetype]: rate == null ? { model: dial.model, ...(dial.effort ? { effort: dial.effort } : {}), ...(dial.via ? { via: dial.via } : {}) } : { model: dial.model, ...(dial.effort ? { effort: dial.effort } : {}), ...(dial.via ? { via: dial.via } : {}), rate } };
   const path = writeLocalDialState(repoRoot, { dials: state.dials, shadows: nextShadows, legacyNote: null });
@@ -1560,12 +1614,19 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
       archetype,
       resolved.delivery.refString,
       spec,
-      // Same guard the kernel and `steering resolve` apply: a dial set with
-      // `--force` has already overridden this posture on purpose, and
+      // Eligibility FIRST, and never force-overridable: the kernel refuses it
+      // outright (`explainEligibilityConflict`, no force branch), so a resolve
+      // that answers "Dispatch it" for a forbidden pairing is guidance walking
+      // straight into that refusal — the same defect this argument was added
+      // to fix for write posture, which eligibility never got.
+      //
+      // Then the same guard the kernel and `steering resolve` apply: a dial
+      // set with `--force` has already overridden the POSTURE on purpose, and
       // re-asserting it here would refuse what the user explicitly forced.
-      forcesWritePosture(resolved.delivery.ref, resolved.resolvedVia)
-        ? null
-        : explainWriteConflict({ executor: resolved.delivery.refString, spec }, archetype, profile),
+      explainEligibilityConflict({ executor: resolved.delivery.refString, spec }, archetype)
+        ?? (forcesWritePosture(resolved.delivery.ref, resolved.resolvedVia)
+          ? null
+          : explainWriteConflict({ executor: resolved.delivery.refString, spec }, archetype, profile)),
     ),
     relay: relay != null
       ? { ref: relay.refString, model_id: relay.modelId, effort: relay.effort }

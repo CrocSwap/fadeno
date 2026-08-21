@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.48";
+  if (true) return "0.6.0-rc.49";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -15434,6 +15434,15 @@ function explainPairRoutability(spec, executorName, archetype, profile) {
     };
   }
   return { routable: true };
+}
+function explainUnverifiedWritePosture(delivery, archetype, profile) {
+  if (archetype == null) return null;
+  if (!Object.hasOwn(profile.archetypes, archetype)) return null;
+  const posture = profile.archetypes[archetype].requiresWrite;
+  if (posture !== "required" && posture !== "forbidden") return null;
+  if (delivery.spec.writeAccess != null) return null;
+  if (!commandRoutable(delivery.spec)) return null;
+  return `archetype "${archetype}" declares \`requires_write: ${posture}\`, but executor "${delivery.executor}" delivers through a route that does not declare \`write_access:\` \u2014 so the posture is UNENFORCED here, not satisfied: nothing has checked whether that lane can write. If it cannot, this produces an empty diff that reads like a deliberate choice to change nothing. Fix: declare \`write_access: true\` or \`false\` on the route.`;
 }
 function pairRoutabilityFields(answer) {
   return answer.routable ? { routable: true, routable_reason: null } : { routable: false, routable_reason: answer.reason };
@@ -21486,6 +21495,13 @@ ${prompt}`;
     transport,
     workspace_mode: workspaceMode,
     ...spec.writeAccess != null ? { write_access: spec.writeAccess } : {},
+    // Recorded as an explicit TRUE-only flag rather than inferred later from a
+    // missing `write_access` key: absence of that key is ambiguous — it means
+    // "undeclared" on a new row and "written before the field existed" on an
+    // old one, and a bakeoff confound derived from an ambiguous absence would
+    // over-claim on historical pairs. A flag only ever written when we know it
+    // can only under-report, which is the safe direction.
+    ...explainUnverifiedWritePosture({ executor: executorName, spec }, archetype, profile) != null ? { write_posture_unverified: true } : {},
     ...usedWriteVariant ? { write_variant: true } : {},
     ...writePostureForced ? { write_posture_forced: true } : {},
     ...briefApplied != null ? { brief: briefApplied } : {},
@@ -21899,6 +21915,7 @@ ${writeConflict}` : writeConflict,
       ...shadowDelivery.provider != null ? { provider: shadowDelivery.provider } : {},
       transport: "command",
       ...shadowSpec.writeAccess != null ? { write_access: shadowSpec.writeAccess } : {},
+      ...explainUnverifiedWritePosture({ executor: shadowRefString, spec: shadowSpec }, archetype, profile) != null ? { write_posture_unverified: true } : {},
       ...shadowUsedWriteVariant ? { write_variant: true } : {},
       delivery_transport: "command",
       prompt_source: promptSource,
@@ -22953,6 +22970,7 @@ function requestedEntry(row) {
     // `applyCompletion`.
     ignoredOutputDiscarded: null,
     workspaceModeDegraded: null,
+    writePostureUnverified: false,
     carryMutated: null,
     outputBytes: num(row.output_bytes),
     diagnosticsSnapshot: str(row.diagnostics_snapshot),
@@ -23028,6 +23046,7 @@ function hostEntry(row) {
     // build directory stays exactly where it was written.
     ignoredOutputDiscarded: null,
     workspaceModeDegraded: null,
+    writePostureUnverified: false,
     carryMutated: null,
     outputBytes: null,
     diagnosticsSnapshot: null,
@@ -23096,6 +23115,7 @@ function applyCompletion(entry, row) {
   entry.primaryMerge = entry.primaryMerge ?? primaryMergeOf(row.primary_merge);
   entry.ignoredOutputDiscarded = entry.ignoredOutputDiscarded ?? ignoredOutputDiscardedOf(row.ignored_output_discarded);
   entry.workspaceModeDegraded = entry.workspaceModeDegraded ?? str(row.workspace_mode_degraded);
+  if (row.write_posture_unverified === true) entry.writePostureUnverified = true;
   if (typeof row.carry_mutated === "boolean") entry.carryMutated = row.carry_mutated;
   else if (row.carry_mutated != null && entry.carryMutated == null) entry.carryMutated = true;
   const ob = num(row.output_bytes);
@@ -31385,6 +31405,24 @@ function providerNoveltyNote(params) {
 ${consequence}
 ${undo}`;
 }
+function unverifiedPostureNotes(params) {
+  const { profile, layers, archetype, challenger } = params;
+  const out = [];
+  try {
+    const resolved = resolveRole(archetype, archetype, profile, layers);
+    const postured = applyWritePosture(resolved.delivery.spec, archetype, profile.archetypes);
+    const primary = explainUnverifiedWritePosture(
+      { executor: resolved.delivery.refString, spec: postured.spec },
+      archetype,
+      profile
+    );
+    if (primary != null) out.push(primary);
+  } catch {
+  }
+  const chall = explainUnverifiedWritePosture(challenger, archetype, profile);
+  if (chall != null) out.push(chall);
+  return out;
+}
 function unroutablePrimaryNote(params) {
   const { profile, layers, archetype } = params;
   let resolved;
@@ -31440,9 +31478,11 @@ function runDialSet(opts) {
   if (writeConflict != null) dial.force_write_posture = true;
   const eligibilityConflict = explainEligibilityConflict({ executor: refString, spec: compiled.spec }, archetype);
   if (eligibilityConflict != null) throw new DialError(eligibilityConflict);
+  const unverifiedPosture = explainUnverifiedWritePosture({ executor: refString, spec: compiled.spec }, archetype, profile);
   let verification = null;
   let probeNote = null;
   const notes = [];
+  if (unverifiedPosture != null) notes.push(`WARNING: WRITE POSTURE UNENFORCED \u2014 ${unverifiedPosture}`);
   if (writeConflict != null) {
     notes.push(
       `WARNING: FORCED WRITE-POSTURE MISMATCH \u2014 ${archetype} \u2192 ${refString}
@@ -31796,6 +31836,15 @@ function runDialShadow(opts) {
     const unroutable = unroutablePrimaryNote({ profile, layers: shadowLayers, archetype });
     if (unroutable != null) notes.push(unroutable);
   }
+  {
+    const unverified = unverifiedPostureNotes({
+      profile,
+      layers: shadowLayers,
+      archetype,
+      challenger: { executor: refString, spec: compiled.spec }
+    });
+    for (const note of unverified) notes.push(`WARNING: WRITE POSTURE UNENFORCED \u2014 ${note}`);
+  }
   const previous = state.shadows[archetype] ?? null;
   const nextShadows = { ...state.shadows, [archetype]: rate == null ? { model: dial.model, ...dial.effort ? { effort: dial.effort } : {}, ...dial.via ? { via: dial.via } : {} } : { model: dial.model, ...dial.effort ? { effort: dial.effort } : {}, ...dial.via ? { via: dial.via } : {}, rate } };
   const path = writeLocalDialState(repoRoot, { dials: state.dials, shadows: nextShadows, legacyNote: null });
@@ -32091,10 +32140,16 @@ function runDialResolve(opts) {
       archetype,
       resolved.delivery.refString,
       spec,
-      // Same guard the kernel and `steering resolve` apply: a dial set with
-      // `--force` has already overridden this posture on purpose, and
+      // Eligibility FIRST, and never force-overridable: the kernel refuses it
+      // outright (`explainEligibilityConflict`, no force branch), so a resolve
+      // that answers "Dispatch it" for a forbidden pairing is guidance walking
+      // straight into that refusal — the same defect this argument was added
+      // to fix for write posture, which eligibility never got.
+      //
+      // Then the same guard the kernel and `steering resolve` apply: a dial
+      // set with `--force` has already overridden the POSTURE on purpose, and
       // re-asserting it here would refuse what the user explicitly forced.
-      forcesWritePosture(resolved.delivery.ref, resolved.resolvedVia) ? null : explainWriteConflict({ executor: resolved.delivery.refString, spec }, archetype, profile)
+      explainEligibilityConflict({ executor: resolved.delivery.refString, spec }, archetype) ?? (forcesWritePosture(resolved.delivery.ref, resolved.resolvedVia) ? null : explainWriteConflict({ executor: resolved.delivery.refString, spec }, archetype, profile))
     ),
     relay: relay != null ? { ref: relay.refString, model_id: relay.modelId, effort: relay.effort } : null,
     ...shadow != null ? { shadow } : {}
@@ -35867,6 +35922,13 @@ function confoundsOf(primary, shadow) {
     if (entry.workspaceModeDegraded != null) {
       push("workspace_mode_degraded", arm, String(entry.workspaceModeDegraded));
     }
+    if (entry.writePostureUnverified) {
+      push(
+        "write_posture_unverified",
+        arm,
+        "this arm ran on a lane that never declared `write_access:`, so its archetype's write posture was never checked \u2014 an empty or thin diff here is NOT evidence the model chose to change little."
+      );
+    }
     if (entry.carryMutated != null) {
       push("carry_mutated", arm, "a carried path was written through \u2014 one inode, two trees; the arms may have contaminated each other.");
     }
@@ -38019,6 +38081,28 @@ function runDoctor(opts = {}) {
     const detail2 = `${sessionCount} session dial(s), ${userCount} user dial(s)${repoCount ? `, ${repoCount} repo pin(s)` : ""}`;
     findings.push(finding("dials", "ok", detail2));
     if (legacyNote) findings.push(finding("dials", "warning", `legacy pin: ${legacyNote}`, "Run `fadeno dial clear` then re-dial with `fadeno dial`"));
+    try {
+      const { profile } = loadLayeredProfile(repoRoot, opts.userPathOptions ?? {});
+      const referenced = /* @__PURE__ */ new Set([
+        "worker",
+        "reviewer",
+        "judge",
+        ...Object.keys(profile.dials ?? {}),
+        ...Object.keys(dials.session),
+        ...Object.keys(dials.user),
+        ...Object.keys(dials.repo)
+      ]);
+      const orphans = Object.keys(profile.archetypes).filter((a) => !referenced.has(a)).sort();
+      if (orphans.length > 0) {
+        findings.push(finding(
+          "archetype-policy-unreferenced",
+          "warning",
+          `catalog declares archetype policy for ${orphans.map((o) => `"${o}"`).join(", ")}, which nothing dials \u2014 if that is a typo, the archetype it was meant for has NO declared write posture and its guard is silently off`,
+          `Check the \`archetypes:\` keys in .fadeno/executors.yaml against the archetypes you actually dispatch.`
+        ));
+      }
+    } catch {
+    }
   } else if (status.activeLoadout == null) {
     findings.push(finding("dials", "error", "no dials resolved", "Run `fadeno dial <archetype> <model>`"));
   } else {

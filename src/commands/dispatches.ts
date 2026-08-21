@@ -340,6 +340,16 @@ export interface DispatchEntry {
    */
   workspaceModeDegraded: string | null;
   /**
+   * True when this arm's declared write posture could not be checked against
+   * the lane it ran on — the route never declared `write_access:`, so nothing
+   * verified whether it could write. Kernel-stamped as a TRUE-only flag, so
+   * `false` here means "not flagged", never "verified writable": a row from
+   * before the flag existed also reads false. Read by `fadeno bakeoff` as a
+   * confound, because an arm that silently could not write returns an empty
+   * diff that reads exactly like choosing to change nothing.
+   */
+  writePostureUnverified: boolean;
+  /**
    * Set when a hardlink-carried path was written THROUGH (`carry_mutated`) —
    * one inode in two trees, so an arm may have altered the other's inputs.
    * The single most comparability-destroying thing a pair can record.
@@ -681,6 +691,7 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     // `applyCompletion`.
     ignoredOutputDiscarded: null,
     workspaceModeDegraded: null,
+    writePostureUnverified: false,
     carryMutated: null,
     outputBytes: num(row.output_bytes),
     diagnosticsSnapshot: str(row.diagnostics_snapshot),
@@ -757,6 +768,7 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     // build directory stays exactly where it was written.
     ignoredOutputDiscarded: null,
     workspaceModeDegraded: null,
+    writePostureUnverified: false,
     carryMutated: null,
     outputBytes: null,
     diagnosticsSnapshot: null,
@@ -882,6 +894,7 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
   // keeps re-committing (roadmap item 2). They are confounds, so a comparison
   // that cannot see them silently judges arms that never ran alike.
   entry.workspaceModeDegraded = entry.workspaceModeDegraded ?? str(row.workspace_mode_degraded);
+  if (row.write_posture_unverified === true) entry.writePostureUnverified = true;
   if (typeof row.carry_mutated === 'boolean') entry.carryMutated = row.carry_mutated;
   else if (row.carry_mutated != null && entry.carryMutated == null) entry.carryMutated = true;
   const ob = num(row.output_bytes);

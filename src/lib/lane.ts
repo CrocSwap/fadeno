@@ -86,14 +86,22 @@ export interface LaneDecision {
   /** The session's own resolved effort; `null` when unobservable. */
   session_effort: string | null;
   /**
-   * **Contract guarantee, relied on without re-checking:** `'command'` is
-   * emitted only when a command lane actually exists (`commandRoutable`).
-   * A consumer may route to the dispatch proxy on this value alone. Violating
-   * it sends a spawn to `fadeno dispatch` for a delivery the kernel has
-   * nothing to invoke, where it dies on the kernel's `commandRoutable`
-   * refusal — the precise failure `shadow.routable` exists to prevent. When
-   * there is no command lane the answer is `'restart_required'`, never
-   * `'command'`.
+   * **Scope — narrower than it reads.** `'command'` means a command lane
+   * EXISTS (`commandRoutable`), and nothing more. It is emitted only when one
+   * does: when there is no command lane the answer is `'restart_required'`,
+   * never `'command'`. That guarantee is real and consumers may rely on it.
+   *
+   * It is NOT a promise the dispatch would be accepted. Write posture and
+   * eligibility are separate questions answered by separate predicates, and
+   * both can refuse a delivery whose lane exists — so `lane: 'command'` and a
+   * kernel refusal coexist perfectly well. This comment used to say "a
+   * consumer may route to the dispatch proxy on this value alone", which was
+   * an overpromise: route on `delivery.dispatchable` (dial resolve) or `mode`
+   * (steering resolve), each of which folds in every conflict knowable at
+   * resolve time. Two of the kernel's four refusal predicates are not knowable
+   * here at all — `constraint_command` has to execute a policy, and
+   * `provider_distinctness` needs input provenance a resolver never sees — so
+   * no field on this object can promise a dispatch will be accepted.
    */
   lane: DeliveryLane;
   lane_reason: LaneReason;

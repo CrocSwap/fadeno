@@ -445,6 +445,24 @@ the diff is the change record. A `dispatch_refused` shadow carries
 `shadow_resolution`, `shadow_containment`, or `shadow_write_posture` (or the
 usual `eligibility`/`write_posture`/`constraint_command`).
 
+**A posture nothing could check.** `write_access:` is optional on a route, and
+an undeclared value is `null` — which satisfies *every* posture, so a
+`requires_write: required` archetype dialed onto such a route passes silently.
+`null` means UNKNOWN, not "fine", and the cost of staying quiet is specific: an
+arm that turns out to be read-only produces an empty diff, and a bakeoff reads
+an empty diff as "this model chose to change nothing" rather than "this model
+could not write" — a confident wrong verdict, which is worse than no verdict.
+
+Fadeno reports this rather than refusing it: refusing would break every catalog
+that simply omits the key, and "we never asked" is not the same as "no
+meaningful delivery exists". `explainUnverifiedWritePosture` produces the
+warning at `fadeno dial` and at `fadeno dial shadow` (for both arms), the
+kernel stamps `write_posture_unverified: true` on the dispatch row, and
+`fadeno bakeoff` surfaces it as a `write_posture_unverified` confound. It is a
+TRUE-only flag: its absence never asserts a lane *was* verified, because a row
+written before the flag existed also lacks it. Declare `write_access: true` or
+`false` on the route to make the posture enforceable.
+
 `shadow_write_posture` is the pair-capability refusal: the primary's command
 lane cannot satisfy the archetype's declared write posture, so the pair is
 refused rather than run. Only the primary is moved onto its command lane — the

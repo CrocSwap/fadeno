@@ -249,6 +249,18 @@ const CLAIMS: Claim[] = [
     },
   },
   {
+    // `null` write_access satisfied every posture, silently. Not refused —
+    // that would break every catalog omitting the key — so the guarantee is
+    // that it is SAID, at dial, at attach, and as a bakeoff confound. The
+    // literals are what keep the three in step.
+    id: 'write-posture-unverified',
+    doc: { files: [EXTENDING], patterns: [/write_posture_unverified/, /explainUnverifiedWritePosture/] },
+    src: {
+      files: ['src/lib/executors.ts', 'src/commands/dial.ts', 'src/commands/dispatch.ts', 'src/commands/bakeoff.ts'],
+      patterns: [/explainUnverifiedWritePosture|write_posture_unverified/],
+    },
+  },
+  {
     // A refusal this serious must not be silent — silence is how it becomes a
     // habit. Both preview surfaces once spread `...routable` alone and dropped
     // the reason the predicate had already written, and attach time asked the

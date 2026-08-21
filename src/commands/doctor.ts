@@ -3,6 +3,7 @@ import { basename, delimiter, dirname, isAbsolute, join, sep } from 'node:path';
 import { runStatus, type StatusOptions } from './status.ts';
 import { listRetiredClaudeGridCells } from './steering.ts';
 import { detectAmbientHarness } from '../lib/executors.ts';
+import { loadLayeredProfile } from '../lib/config-layers.ts';
 import { findRepoRoot, templatesDir } from '../lib/paths.ts';
 import { isFadenoPathIgnored } from '../lib/source-control.ts';
 import {
@@ -219,6 +220,35 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
     const detail = `${sessionCount} session dial(s), ${userCount} user dial(s)${repoCount ? `, ${repoCount} repo pin(s)` : ''}`;
     findings.push(finding('dials', 'ok', detail));
     if (legacyNote) findings.push(finding('dials', 'warning', `legacy pin: ${legacyNote}`, 'Run `fadeno dial clear` then re-dial with `fadeno dial`'));
+    // A misspelled `archetypes:` key is invisible everywhere else: the posture
+    // it declares attaches to an archetype nothing dispatches, and the REAL
+    // archetype silently has no posture at all — `explainWriteConflict`
+    // returns null for an archetype the catalog never declares, so a
+    // write-required task runs on a read-only lane and exits 0. It cannot be
+    // refused (an archetype with no declared posture is perfectly legal), so
+    // it is linted: a declared archetype that nothing dials and that is not
+    // one of the built-in three is almost always a typo for one that is.
+    try {
+      const { profile } = loadLayeredProfile(repoRoot, (opts as { userPathOptions?: Parameters<typeof loadLayeredProfile>[1] }).userPathOptions ?? {});
+      const referenced = new Set<string>([
+        'worker', 'reviewer', 'judge',
+        ...Object.keys(profile.dials ?? {}),
+        ...Object.keys(dials.session), ...Object.keys(dials.user), ...Object.keys(dials.repo),
+      ]);
+      const orphans = Object.keys(profile.archetypes).filter((a) => !referenced.has(a)).sort();
+      if (orphans.length > 0) {
+        findings.push(finding(
+          'archetype-policy-unreferenced',
+          'warning',
+          `catalog declares archetype policy for ${orphans.map((o) => `"${o}"`).join(', ')}, which nothing dials — ` +
+            'if that is a typo, the archetype it was meant for has NO declared write posture and its guard is silently off',
+          `Check the \`archetypes:\` keys in .fadeno/executors.yaml against the archetypes you actually dispatch.`,
+        ));
+      }
+    } catch {
+      // A catalog that will not load is already reported by other findings;
+      // this lint must never be the thing that fails doctor.
+    }
   } else if ((status as any).activeLoadout == null) {
     findings.push(finding('dials', 'error', 'no dials resolved', 'Run `fadeno dial <archetype> <model>`'));
   } else {
