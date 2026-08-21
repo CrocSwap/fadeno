@@ -149,6 +149,44 @@ export function substitutePromptFile(argv: string[], promptPath: string): string
  */
 export const ARCHETYPE_DISPLAY_ORDER = ['director', 'judge', 'reviewer', 'generator', 'worker'] as const;
 
+/**
+ * The three role archetypes every profile has whether or not it says so:
+ * `fadeno init` scaffolds a role subagent and a dispatch proxy for each, and
+ * the plugins ship them.
+ */
+export const ROLE_ARCHETYPES = ['worker', 'reviewer', 'judge'] as const;
+
+/**
+ * Every archetype name a profile KNOWS, as opposed to every name it DECLARES.
+ *
+ * `profile.archetypes` is a policy overlay: an archetype earns an entry by
+ * having something non-default to say (`requires_write`, `brief`, `fallback`).
+ * The builtin catalog therefore declares `worker`, `director` and `generator`
+ * and stays silent about `reviewer` and `judge`, whose posture is entirely
+ * default — they are no less real for it.
+ *
+ * Reading the overlay as the registry is a live bug this codebase has already
+ * shipped: `runLockedSteeringResolve` refused every locked host dispatch for
+ * `reviewer` and `judge` with "undeclared archetype", so a Codex reviewer
+ * agent that correctly consulted steering was pushed onto the command lane
+ * (2026-08-21, polymarket-quoter). Every OTHER reader — `dispatch.ts`,
+ * `drive.ts`, the fallback walk — already treats absence as "no declared
+ * policy, use defaults", which is the correct reading.
+ *
+ * Pass dial layers as `extra` where a name may exist only by being dialed.
+ */
+export function knownArchetypes(
+  archetypes: Record<string, unknown>,
+  ...extra: Array<Record<string, unknown> | undefined | null>
+): Set<string> {
+  const names = new Set<string>(ROLE_ARCHETYPES);
+  for (const key of Object.keys(archetypes)) names.add(key);
+  for (const layer of extra) {
+    if (layer != null) for (const key of Object.keys(layer)) names.add(key);
+  }
+  return names;
+}
+
 export function archetypeDisplaySort(names: Iterable<string>): string[] {
   const rank = new Map<string, number>(ARCHETYPE_DISPLAY_ORDER.map((name, index) => [name, index]));
   return [...names].sort((a, b) => {

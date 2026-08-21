@@ -685,9 +685,13 @@ test('locked wildcard steering reports requested_agent_type "*" and delivered_ar
   assert.equal(bundledResolution.requested_agent_type, '*');
   assert.equal(bundledResolution.delivered_archetype, 'director');
   assert.equal(bundledResolution.identity_evidence, 'requested_only');
+  // "unknown", not "undeclared": an archetype with no entry in the policy
+  // overlay is perfectly real (the builtin catalog declares nothing about
+  // `reviewer` or `judge`). `banana` is refused for being a name no layer
+  // knows — see test/steering-undeclared-archetype.test.ts.
   assert.throws(
     () => runSteeringResolve({ repoRoot: root, archetype: 'banana', run: created.runId, dispatchId: req.dispatchId }),
-    /undeclared archetype/,
+    /unknown archetype "banana"/,
   );
   // identity_evidence must stay requested_only, never upgraded to verified
   const start = runDispatchStart({ repoRoot: root, run: created.runId, dispatchId: req.dispatchId, agentId: 'host-wildcard-agent' });

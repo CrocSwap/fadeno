@@ -8,6 +8,7 @@ import {
   BARE_IDENTIFIER_RE,
   applyWritePosture,
   archetypeDisplaySort,
+  knownArchetypes,
   commandRoutable,
   compileDialRef,
   deliveryIsHost,
@@ -439,11 +440,7 @@ function providerNoveltyNote(params: {
   const provider = compiled.provider;
   if (provider == null || provider === 'current-host') return null;
   const inUse = new Set<string>();
-  const archetypes = new Set<string>(['worker', 'reviewer', 'judge']);
-  for (const key of Object.keys(profile.archetypes)) archetypes.add(key);
-  for (const key of Object.keys(layers.session)) archetypes.add(key);
-  for (const key of Object.keys(layers.repo)) archetypes.add(key);
-  for (const key of Object.keys(layers.user)) archetypes.add(key);
+  const archetypes = knownArchetypes(profile.archetypes, layers.session, layers.repo, layers.user);
   const providerOf = (ref: DialRef): void => {
     try {
       const other = compileDialRef(ref, profile);
@@ -1140,12 +1137,7 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
   const { suppressed_canon_archetypes, note } = canonSurfacing(layered);
 
   // All archetypes to show: triad + declared + any carrying dial/shadow
-  const archetypesSet = new Set<string>(['worker', 'reviewer', 'judge']);
-  for (const k of Object.keys(profile.archetypes)) archetypesSet.add(k);
-  for (const k of Object.keys(sessionDials)) archetypesSet.add(k);
-  for (const k of Object.keys(repoDials)) archetypesSet.add(k);
-  for (const k of Object.keys(userDials)) archetypesSet.add(k);
-  for (const k of Object.keys(shadows)) archetypesSet.add(k);
+  const archetypesSet = knownArchetypes(profile.archetypes, sessionDials, repoDials, userDials, shadows);
   // Also include bindings keys that are archetype-like? bindings are role->dial, but effective table is per archetype
   // Include binding archetypes? Not needed.
 

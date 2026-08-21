@@ -12,6 +12,7 @@ import {
   eligibilityFor,
   formatDialRef,
   forcesWritePosture,
+  knownArchetypes,
   loadExecutorProfile,
   parseDialRef,
   parseSnapshotDocument,
@@ -380,9 +381,25 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
     );
   }
   const profile = snapshotProfileForRequest(lookup);
-  if (!Object.hasOwn(profile.archetypes, archetype)) {
+  // Specialization is a WILDCARD-only concern, and it asks whether the claimed
+  // name is an archetype this profile knows — never whether the policy overlay
+  // happens to carry an entry for it. Both halves of that were wrong here:
+  //
+  // The check ran on every request, so a CONCRETE `agent_type` was re-validated
+  // after the equality check above had already settled it, against a map that
+  // cannot answer the question. And `profile.archetypes` lists only archetypes
+  // with non-default posture, so `reviewer` and `judge` — silent in the builtin
+  // catalog precisely because they need nothing said — were refused as
+  // "undeclared". A managed Codex reviewer agent that correctly consulted
+  // steering was thrown to the command lane with `host_attested: false`
+  // (2026-08-21, polymarket-quoter, hd-ac-review-g1-*-a1).
+  //
+  // Every fixture in the suite writes `archetypes: { worker: {}, reviewer: {},
+  // judge: {} }` — enumerating the roster the way a test author would rather
+  // than the way the catalog does — so the bug was unreachable from the tests.
+  if (request.agentType === '*' && !knownArchetypes(profile.archetypes).has(archetype)) {
     throw new SteeringError(
-      `host dispatch "${dispatchId}" cannot specialize wildcard identity to undeclared archetype "${archetype}".`,
+      `host dispatch "${dispatchId}" cannot specialize wildcard identity to unknown archetype "${archetype}".`,
     );
   }
   const executor = profile.executors[request.executor];
