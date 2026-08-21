@@ -187,6 +187,21 @@ export function normalizeDispatchOutcome(
  */
 export const PENDING_RELAYS_FILE = join('.fadeno', 'local', 'pending-relays.jsonl');
 
+/**
+ * Dispatch-side proof that a DISPATCH PROXY is the caller — rows of
+ * `{timestamp, archetype, prompt_sha256}` written by the proxy-guard hook for
+ * the exact bytes it is about to send.
+ *
+ * `PENDING_RELAYS_FILE` proves a relay-bound SPAWN happened; it cannot prove
+ * that a given dispatch IS that spawn. Without this file the kernel read
+ * "fresh spawn-side entries exist but none match" as a fidelity failure, which
+ * an ordinary un-relayed `fadeno dispatch` colliding with an unrelated entry
+ * inside the freshness window produces identically. This repo's ledger carries
+ * two such `relay_attested: false` rows from 2026-08-17 that nothing can now
+ * explain — the field recorded a finding it had not earned.
+ */
+export const PROXY_DISPATCHES_FILE = join('.fadeno', 'local', 'proxy-dispatches.jsonl');
+
 const PENDING_RELAY_MAX_AGE_MS = 60 * 60 * 1000;
 
 /**
@@ -196,7 +211,7 @@ const PENDING_RELAY_MAX_AGE_MS = 60 * 60 * 1000;
  * relay altered the prompt (`false`); no fresh entries — non-hook flows —
  * record nothing (`null`). Evidence-only: never blocks the dispatch.
  */
-function consumePendingRelay(repoRoot: string, prompt: string, now: Date): boolean | null {
+function consumeSpawnSideRelay(repoRoot: string, prompt: string, now: Date): boolean | null {
   const path = join(repoRoot, PENDING_RELAYS_FILE);
   if (!existsSync(path)) return null;
   let rows: Array<{ timestamp?: unknown; prompt_sha256?: unknown }>;
@@ -227,6 +242,70 @@ function consumePendingRelay(repoRoot: string, prompt: string, now: Date): boole
   }
   if (hit !== -1) return true;
   return fresh.length > 0 ? false : null;
+}
+
+/**
+ * Consume a proxy-dispatch marker matching these prompt bytes. True means a
+ * dispatch proxy sent this exact prompt.
+ *
+ * Note it matches the bytes the kernel RECEIVED, not the bytes the parent
+ * handed the proxy — so a proxy that altered the prompt still marks itself,
+ * which is exactly what makes the alteration detectable below rather than
+ * indistinguishable from silence.
+ */
+function consumeProxyDispatchMarker(repoRoot: string, prompt: string, now: Date): boolean {
+  const path = join(repoRoot, PROXY_DISPATCHES_FILE);
+  if (!existsSync(path)) return false;
+  let rows: Array<{ timestamp?: unknown; prompt_sha256?: unknown }>;
+  try {
+    rows = readFileSync(path, 'utf8')
+      .split('\n')
+      .filter((line) => line.trim() !== '')
+      .map((line) => JSON.parse(line) as { timestamp?: unknown; prompt_sha256?: unknown });
+  } catch {
+    return false; // malformed marker file — claim nothing rather than guess
+  }
+  const fresh = rows.filter((row) => {
+    const ts = typeof row.timestamp === 'string' ? Date.parse(row.timestamp) : NaN;
+    return (
+      Number.isFinite(ts) &&
+      now.getTime() - ts <= PENDING_RELAY_MAX_AGE_MS &&
+      typeof row.prompt_sha256 === 'string'
+    );
+  });
+  const digests = new Set([sha256Hex(prompt), sha256Hex(prompt.replace(/\n$/, ''))]);
+  const hit = fresh.findIndex((row) => digests.has(row.prompt_sha256 as string));
+  const remaining = hit === -1 ? fresh : fresh.filter((_, index) => index !== hit);
+  try {
+    if (remaining.length === 0) rmSync(path, { force: true });
+    else writeFileSync(path, `${remaining.map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8');
+  } catch {
+    // best-effort pruning; the verdict stands either way
+  }
+  return hit !== -1;
+}
+
+/**
+ * The `relay_attested` verdict, and the one place its three values are decided.
+ *
+ * - `null`  — no dispatch proxy sent this, or nothing to attest against. NOT a
+ *             judgement about fidelity; the absence of a claim.
+ * - `true`  — a proxy sent it AND the bytes match what the parent handed that
+ *             proxy. Fidelity verified end to end.
+ * - `false` — a proxy sent it, spawn-side attestations are in flight, and none
+ *             match these bytes. The relay altered the prompt.
+ *
+ * The proxy marker is what makes `false` load-bearing. Before it, `false` also
+ * fired for an un-relayed dispatch that happened to run while someone else's
+ * spawn attestation was fresh — so the value could not be acted on, and was
+ * recorded anyway.
+ */
+function consumeRelayAttestation(repoRoot: string, prompt: string, now: Date): boolean | null {
+  if (!consumeProxyDispatchMarker(repoRoot, prompt, now)) return null;
+  // A proxy sent this. `null` here means no spawn-side attestation exists to
+  // check against (the spawn did not route through the steering hook), which
+  // is still "cannot say", never "defected".
+  return consumeSpawnSideRelay(repoRoot, prompt, now);
 }
 
 const SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
@@ -1207,7 +1286,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const outputAbs = join(repoRoot, outputRel);
   const outputSnapshot = outputRel.split('\\').join('/');
 
-  const relayAttested = consumePendingRelay(repoRoot, prompt, now);
+  const relayAttested = consumeRelayAttestation(repoRoot, prompt, now);
 
   const promptSha256 = sha256Hex(prompt);
 

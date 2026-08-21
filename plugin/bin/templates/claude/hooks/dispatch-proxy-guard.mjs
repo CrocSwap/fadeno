@@ -14,7 +14,9 @@
 // `agent_type` is one of the dispatch proxies. The heredoc BODY is the user's
 // task prompt — arbitrary bytes, never inspected; only the surrounding shell
 // statements are validated.
-import { readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 
 function finish(value) {
   if (value != null) process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -62,10 +64,12 @@ if (command == null) deny('the Bash call carries no command string.');
 // delimiter form is a valid opener — an unquoted <<FADENO_PROMPT would let
 // the shell expand $/backticks inside the relayed prompt.
 const controlLines = [];
+const heredocBody = [];
 let inHeredoc = false;
 for (const line of command.split('\n')) {
   if (inHeredoc) {
-    if (line === 'FADENO_PROMPT') inHeredoc = false;
+    if (line === 'FADENO_PROMPT') { inHeredoc = false; continue; }
+    heredocBody.push(line); // collected for its DIGEST only, never inspected
     continue; // prompt body — arbitrary bytes, deliberately uninspected
   }
   if (/<<-?\s*FADENO_PROMPT/.test(line)) {
@@ -133,6 +137,54 @@ for (const statement of statements) {
   }
   if (/ dispatch --archetype /.test(` ${statement}`)) hasDispatch = true;
 }
+
+/**
+ * Record that a DISPATCH PROXY is the caller, keyed by the digest of the exact
+ * bytes it is about to send.
+ *
+ * This is what lets `relay_attested: false` mean something. The spawn-side
+ * stash (`pending-relays.jsonl`, written by dispatch-steering.mjs) proves a
+ * relay-bound spawn happened; it cannot prove that any GIVEN dispatch is that
+ * spawn. Without this marker the kernel read "fresh spawn-side entries exist
+ * but none match" as a fidelity failure, when an ordinary un-relayed
+ * `fadeno dispatch` colliding with someone else's entry inside the (1 hour)
+ * freshness window produces exactly the same reading. Two such rows sit in
+ * this repo's own ledger, and nothing can now say which case they were.
+ *
+ * With the marker the kernel can separate them: no marker means no proxy sent
+ * this, so the verdict is `null` (not attested) rather than `false`.
+ *
+ * Digest only, never content — the prompt is the user's task text and this
+ * hook does not read it. Best-effort: attestation is evidence, never a gate,
+ * so a write failure must not block a contract-conforming dispatch.
+ *
+ * Only the heredoc form is marked. The `--prompt-file` retry spelling carries
+ * no bytes here (and its path may be a shell variable), so those dispatches
+ * report `null`. Honest, and the rarer path.
+ */
+function markProxyDispatch() {
+  if (heredocBody.length === 0) return;
+  const cwd = typeof event.cwd === 'string' && event.cwd.length > 0 ? event.cwd : process.cwd();
+  if (!existsSync(join(cwd, '.fadeno'))) return; // not a Fadeno repo
+  try {
+    const dir = join(cwd, '.fadeno', 'local');
+    mkdirSync(dir, { recursive: true });
+    // The shell feeds a quoted heredoc as each body line plus a trailing
+    // newline; the kernel tolerates the stripped-newline variant too.
+    const body = `${heredocBody.join('\n')}\n`;
+    appendFileSync(
+      join(dir, 'proxy-dispatches.jsonl'),
+      `${JSON.stringify({
+        timestamp: new Date().toISOString(),
+        archetype,
+        prompt_sha256: createHash('sha256').update(body).digest('hex'),
+      })}\n`,
+    );
+  } catch {
+    // best-effort: never block the dispatch over evidence
+  }
+}
+if (hasDispatch) markProxyDispatch();
 
 // Contract-conforming call: force the long tool timeout on the dispatch leg.
 // External executors routinely exceed the 2-minute Bash default, and a

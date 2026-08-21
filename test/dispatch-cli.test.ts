@@ -9,6 +9,7 @@ import {
   DISPATCHES_FILE,
   DISPATCHES_FORMAT,
   PENDING_RELAYS_FILE,
+  PROXY_DISPATCHES_FILE,
   runDispatch,
 } from '../src/commands/dispatch.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
@@ -109,10 +110,25 @@ test('dispatch: request-before-spawn pairing with 1.0 row shape', (t) => {
   assert.equal(evidenceRows(root).length, 4);
 });
 
+/**
+ * The proxy-guard hook's half of the attestation: proof that a dispatch proxy
+ * is the caller, keyed by the bytes it is about to send. Without it the kernel
+ * cannot tell an un-relayed dispatch from a relay that altered the prompt, and
+ * `relay_attested: false` means nothing.
+ */
+function markProxyDispatch(root: string, prompts: string[], timestamp = '2026-08-12T11:59:45Z'): void {
+  mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
+  writeFileSync(
+    join(root, PROXY_DISPATCHES_FILE),
+    `${prompts.map((p) => JSON.stringify({ timestamp, archetype: 'worker', prompt_sha256: sha256Hex(p) })).join('\n')}\n`,
+  );
+}
+
 test('dispatch: relay attestation consumes a matching spawn-side stash', (t) => {
   const root = seedV3(t, { dials: { worker: 'echo-worker' } });
   const now = new Date('2026-08-12T12:00:00Z');
   mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
+  markProxyDispatch(root, ['hello\n', 'ello\n']);
   writeFileSync(
     join(root, PENDING_RELAYS_FILE),
     `${[
@@ -144,6 +160,7 @@ test('dispatch: pending relay stale-pruned and trailing-newline tolerance', (t) 
     join(root, PENDING_RELAYS_FILE),
     `${JSON.stringify({ timestamp: '2026-08-12T11:59:00Z', prompt_sha256: sha256Hex('hello') })}\n`,
   );
+  markProxyDispatch(root, ['hello\n']);
   const r = runDispatch({ archetype: 'worker', prompt: 'hello\n', repoRoot: root, now, userPathOptions: onHarness('standalone') });
   assert.equal(r.relayAttested, true);
   // after consumption file should be removed (no remaining fresh entries)
@@ -161,10 +178,67 @@ test('dispatch: concurrent pending relay survives', (t) => {
       JSON.stringify({ timestamp: '2026-08-12T11:59:30Z', prompt_sha256: sha256Hex('second') }),
     ].join('\n')}\n`,
   );
+  markProxyDispatch(root, ['first\n']);
   runDispatch({ archetype: 'worker', prompt: 'first\n', repoRoot: root, now, userPathOptions: onHarness('standalone') });
   const remaining = readFileSync(join(root, PENDING_RELAYS_FILE), 'utf8').trim().split('\n').map(l=>JSON.parse(l) as any);
   assert.equal(remaining.length, 1);
   assert.equal(remaining[0].prompt_sha256, sha256Hex('second'));
+});
+
+/**
+ * The reason this fix exists. An un-relayed `fadeno dispatch` that happens to
+ * run while someone else's spawn attestation is still fresh used to be
+ * reported `relay_attested: false` — indistinguishable from a relay that
+ * altered the prompt. Two such rows sit in this repo's own ledger from
+ * 2026-08-17 and nothing can now say which case they were. No proxy marker
+ * means no proxy sent it, so the honest verdict is `null`.
+ */
+test('dispatch: an un-relayed dispatch colliding with a fresh stash attests null, not false', (t) => {
+  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const now = new Date('2026-08-12T12:00:00Z');
+  mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
+  // Someone else's relay is in flight, and it is fresh.
+  writeFileSync(
+    join(root, PENDING_RELAYS_FILE),
+    `${JSON.stringify({ timestamp: '2026-08-12T11:59:00Z', prompt_sha256: sha256Hex('someone-elses-prompt') })}\n`,
+  );
+  // No proxy marker: this dispatch was typed directly, not relayed.
+  const result = runDispatch({ archetype: 'worker', prompt: 'mine\n', repoRoot: root, now, userPathOptions: onHarness('standalone') });
+  assert.equal(result.relayAttested, null);
+  assert.ok(!('relay_attested' in evidenceRows(root).at(-1)!));
+  // And the unrelated attestation is left untouched, still waiting for the
+  // dispatch it actually belongs to.
+  const stash = readFileSync(join(root, PENDING_RELAYS_FILE), 'utf8').trim().split('\n')
+    .map((line) => JSON.parse(line) as { prompt_sha256: string });
+  assert.deepEqual(stash.map((row) => row.prompt_sha256), [sha256Hex('someone-elses-prompt')]);
+});
+
+test('dispatch: a proxy that altered the prompt attests false', (t) => {
+  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const now = new Date('2026-08-12T12:00:00Z');
+  mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
+  // The parent handed the proxy these bytes...
+  writeFileSync(
+    join(root, PENDING_RELAYS_FILE),
+    `${JSON.stringify({ timestamp: '2026-08-12T11:59:00Z', prompt_sha256: sha256Hex('the original task text\n') })}\n`,
+  );
+  // ...and the proxy is dispatching DIFFERENT bytes. It still marks itself,
+  // which is precisely what makes the alteration visible.
+  markProxyDispatch(root, ['a summary of the task\n']);
+  const result = runDispatch({ archetype: 'worker', prompt: 'a summary of the task\n', repoRoot: root, now, userPathOptions: onHarness('standalone') });
+  assert.equal(result.relayAttested, false);
+  assert.equal(evidenceRows(root).at(-1)!.relay_attested, false);
+});
+
+test('dispatch: a proxy dispatch with no spawn-side stash attests null, never false', (t) => {
+  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const now = new Date('2026-08-12T12:00:00Z');
+  markProxyDispatch(root, ['hello\n']);
+  // No pending-relays file at all: the spawn did not route through the
+  // steering hook, so there is nothing to check fidelity against. "Cannot
+  // say" is not "defected".
+  const result = runDispatch({ archetype: 'worker', prompt: 'hello\n', repoRoot: root, now, userPathOptions: onHarness('standalone') });
+  assert.equal(result.relayAttested, null);
 });
 
 test('dispatch: --prompt-file rows record the given file as the snapshot', (t) => {

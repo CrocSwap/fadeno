@@ -20812,8 +20812,9 @@ function normalizeDispatchOutcome(stated, row) {
   return deriveDispatchOutcome(row);
 }
 var PENDING_RELAYS_FILE = (0, import_node_path15.join)(".fadeno", "local", "pending-relays.jsonl");
+var PROXY_DISPATCHES_FILE = (0, import_node_path15.join)(".fadeno", "local", "proxy-dispatches.jsonl");
 var PENDING_RELAY_MAX_AGE_MS = 60 * 60 * 1e3;
-function consumePendingRelay(repoRoot, prompt, now) {
+function consumeSpawnSideRelay(repoRoot, prompt, now) {
   const path = (0, import_node_path15.join)(repoRoot, PENDING_RELAYS_FILE);
   if (!(0, import_node_fs15.existsSync)(path)) return null;
   let rows;
@@ -20837,6 +20838,34 @@ function consumePendingRelay(repoRoot, prompt, now) {
   }
   if (hit !== -1) return true;
   return fresh.length > 0 ? false : null;
+}
+function consumeProxyDispatchMarker(repoRoot, prompt, now) {
+  const path = (0, import_node_path15.join)(repoRoot, PROXY_DISPATCHES_FILE);
+  if (!(0, import_node_fs15.existsSync)(path)) return false;
+  let rows;
+  try {
+    rows = (0, import_node_fs15.readFileSync)(path, "utf8").split("\n").filter((line) => line.trim() !== "").map((line) => JSON.parse(line));
+  } catch {
+    return false;
+  }
+  const fresh = rows.filter((row) => {
+    const ts = typeof row.timestamp === "string" ? Date.parse(row.timestamp) : NaN;
+    return Number.isFinite(ts) && now.getTime() - ts <= PENDING_RELAY_MAX_AGE_MS && typeof row.prompt_sha256 === "string";
+  });
+  const digests = /* @__PURE__ */ new Set([sha256Hex(prompt), sha256Hex(prompt.replace(/\n$/, ""))]);
+  const hit = fresh.findIndex((row) => digests.has(row.prompt_sha256));
+  const remaining = hit === -1 ? fresh : fresh.filter((_, index) => index !== hit);
+  try {
+    if (remaining.length === 0) (0, import_node_fs15.rmSync)(path, { force: true });
+    else (0, import_node_fs15.writeFileSync)(path, `${remaining.map((row) => JSON.stringify(row)).join("\n")}
+`, "utf8");
+  } catch {
+  }
+  return hit !== -1;
+}
+function consumeRelayAttestation(repoRoot, prompt, now) {
+  if (!consumeProxyDispatchMarker(repoRoot, prompt, now)) return null;
+  return consumeSpawnSideRelay(repoRoot, prompt, now);
 }
 var SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
 function producedByIds(opts) {
@@ -21313,7 +21342,7 @@ ${prompt}`;
   );
   const outputAbs = (0, import_node_path15.join)(repoRoot, outputRel);
   const outputSnapshot = outputRel.split("\\").join("/");
-  const relayAttested = consumePendingRelay(repoRoot, prompt, now);
+  const relayAttested = consumeRelayAttestation(repoRoot, prompt, now);
   const promptSha256 = sha256Hex(prompt);
   const decidePairCandidate = () => {
     if (process.env.FADENO_IN_SHADOW === "1") return null;
