@@ -8,6 +8,8 @@ import { loadExecutorProfile } from '../lib/executors.ts';
 import {
   BAKEOFF_REQUIRED_SECTIONS,
   checkGraftCoherence,
+  fenceFor,
+  formatBakeoffDuration,
   isJudgmentVerdict,
   unblindVerdict,
   type GraftStep,
@@ -664,7 +666,14 @@ const MAX_DIFF_PROMPT_BYTES = 200_000;
 function capDiffText(diffText: string): string {
   const bytes = Buffer.byteLength(diffText, 'utf8');
   if (bytes <= MAX_DIFF_PROMPT_BYTES) return diffText;
-  return `${diffText.slice(0, MAX_DIFF_PROMPT_BYTES)}\n… [diff truncated at ${MAX_DIFF_PROMPT_BYTES} bytes of ${bytes} total — see the diffstat for the full shape]\n`;
+  // Cut in BYTES, which is the unit the cap is stated in. `String.slice`
+  // counts UTF-16 code units, so a diff of CJK or emoji passed the check at
+  // up to three or four times the budget the constant promises — the exact
+  // overrun the cap exists to prevent. Decoding a buffer cut mid-sequence
+  // yields a replacement character, which is correct here: the tail is being
+  // discarded anyway and the note below says so.
+  const head = Buffer.from(diffText, 'utf8').subarray(0, MAX_DIFF_PROMPT_BYTES).toString('utf8');
+  return `${head}\n… [diff truncated at ${MAX_DIFF_PROMPT_BYTES} bytes of ${bytes} total — see the diffstat for the full shape]\n`;
 }
 
 interface BlindArmMaterial {
@@ -705,7 +714,7 @@ function blindArm(m: BakeoffArmMeasurement, diffText: string): BlindArmMaterial 
 function renderBlindArm(label: BlindLabel, m: BlindArmMaterial): string {
   const lines: string[] = [`### arm_${label}`, ''];
   lines.push(`- exit code: ${m.exitCode ?? '(none)'}`);
-  lines.push(`- duration: ${m.durationMs != null ? `${m.durationMs}ms` : '(unknown)'}`);
+  lines.push(`- duration: ${m.durationMs != null ? formatBakeoffDuration(m.durationMs) : '(unknown)'}`);
   lines.push(`- output: ${m.outputBytes != null ? `${m.outputBytes} bytes` : '(unknown)'}`);
   if (m.refused != null) lines.push(`- REFUSED before it ran: [${m.refused.predicate}]`);
   if (m.diffstat != null) {
@@ -725,7 +734,12 @@ function renderBlindArm(label: BlindLabel, m: BlindArmMaterial): string {
     );
     lines.push(`- redefined identifiers (already defined at baseline): ${m.signals.redefined.length > 0 ? m.signals.redefined.join(', ') : '(none)'}`);
   }
-  lines.push('', '```diff', m.diff.trim().length > 0 ? m.diff : '(empty diff)', '```');
+  // The one span of this prompt an arm authored. Fence it with a delimiter it
+  // cannot contain, so no diff content can end the quote and continue as
+  // instructions — see `fenceFor`.
+  const body = m.diff.trim().length > 0 ? m.diff : '(empty diff)';
+  const fence = fenceFor(body);
+  lines.push('', `${fence}diff`, body, fence);
   return lines.join('\n');
 }
 

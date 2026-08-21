@@ -21,6 +21,55 @@
  * judge to name a winner it does not believe in, and the cost is concrete —
  * you lose either the tripwire or you ship the duplication.
  */
+/**
+ * A duration as a human quantity, for the two places that COMPARE two arms'
+ * time-to-complete: the scorecard a person reads, and the prompt the judge
+ * reads. It lived only in `dispatches.ts` while the judge prompt printed raw
+ * milliseconds — `duration: 2195108ms`, which a reader has to divide by 60000
+ * before it means anything, in the one document whose entire job is holding
+ * two numbers side by side.
+ *
+ * Sub-second precision is kept because it is a comparison: two arms that
+ * differ by 400ms differ, and rounding both to `0s` erases that. This is NOT
+ * the same function as `cli.ts`'s `formatDuration`, which reports live
+ * progress at second granularity and would call both arms `36m 35s`.
+ */
+export function formatBakeoffDuration(ms: number | null): string {
+  if (ms == null) return '?';
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.round((ms % 60_000) / 1000);
+  return `${minutes}m${String(seconds).padStart(2, '0')}s`;
+}
+
+/**
+ * A code fence long enough that nothing inside the block can close it.
+ *
+ * An arm's diff is written by a model working on an attacker-influenceable
+ * task, and it is embedded in the judge prompt inside a ```diff block. A
+ * content line that is itself a bare fence ends the block early, and every
+ * byte after it stops being quoted evidence and becomes prompt: a crafted
+ * diff could close the fence and then write its own `### arm_b` section, its
+ * own `## Your task`, or an instruction to prefer one arm. Opening with a
+ * fence longer than the longest run inside makes that unrepresentable rather
+ * than merely unlikely — CommonMark closes a fence only with one at least as
+ * long as the opener.
+ *
+ * Real `git diff` output prefixes content lines with `+`/`-`/space, which
+ * already defeats the naive case. This does not rely on that: the text
+ * reaching here has been through hunk-stripping and byte truncation, and
+ * "the input is still well-formed" is the assumption that makes injection
+ * bugs.
+ */
+export function fenceFor(content: string): string {
+  let longest = 0;
+  for (const match of content.matchAll(/^ {0,3}(`{3,})/gm)) {
+    longest = Math.max(longest, match[1]!.length);
+  }
+  return '`'.repeat(Math.max(3, longest + 1));
+}
+
 export const BAKEOFF_VERDICTS = [
   'prefer_baseline',
   'prefer_challenger',

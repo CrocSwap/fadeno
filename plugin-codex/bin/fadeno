@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.45";
+  if (true) return "0.6.0-rc.46";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -22721,6 +22721,21 @@ var import_node_path16 = require("node:path");
 var import_yaml6 = __toESM(require_dist(), 1);
 
 // src/lib/bakeoff.ts
+function formatBakeoffDuration(ms) {
+  if (ms == null) return "?";
+  if (ms < 1e3) return `${ms}ms`;
+  if (ms < 6e4) return `${(ms / 1e3).toFixed(1)}s`;
+  const minutes = Math.floor(ms / 6e4);
+  const seconds = Math.round(ms % 6e4 / 1e3);
+  return `${minutes}m${String(seconds).padStart(2, "0")}s`;
+}
+function fenceFor(content) {
+  let longest = 0;
+  for (const match of content.matchAll(/^ {0,3}(`{3,})/gm)) {
+    longest = Math.max(longest, match[1].length);
+  }
+  return "`".repeat(Math.max(3, longest + 1));
+}
 var BAKEOFF_VERDICTS = [
   "prefer_baseline",
   "prefer_challenger",
@@ -23684,14 +23699,6 @@ function scanBakeoffs(repoRoot, dirRel) {
     artifacts.push(artifact);
   }
   return { artifacts, skipped };
-}
-function formatBakeoffDuration(ms) {
-  if (ms == null) return "?";
-  if (ms < 1e3) return `${ms}ms`;
-  if (ms < 6e4) return `${(ms / 1e3).toFixed(1)}s`;
-  const minutes = Math.floor(ms / 6e4);
-  const seconds = Math.round(ms % 6e4 / 1e3);
-  return `${minutes}m${String(seconds).padStart(2, "0")}s`;
 }
 function formatBakeoffPair(pair) {
   const primaryId8 = pair.primaryId ? pair.primaryId.slice(0, 8) : "?";
@@ -25429,7 +25436,7 @@ ${pad}}`;
   }
   return JSON.stringify(value);
 }
-function fenceFor(content) {
+function fenceFor2(content) {
   let longest = 0;
   const runs = content.match(/`+/g);
   if (runs) for (const run of runs) longest = Math.max(longest, run.length);
@@ -25469,7 +25476,7 @@ function renderInputs(ctx) {
     for (const file of input.files) {
       lines.push(`   - \`${file.path}\` \u2014 ${file.bytes} bytes, sha256 ${file.sha256}${attribution(file)}`);
       if (file.content != null) {
-        const fence = fenceFor(file.content);
+        const fence = fenceFor2(file.content);
         lines.push(`${fence}`, file.content.replace(/\n$/, ""), `${fence}`);
       }
     }
@@ -35923,7 +35930,8 @@ var MAX_DIFF_PROMPT_BYTES = 2e5;
 function capDiffText(diffText) {
   const bytes = Buffer.byteLength(diffText, "utf8");
   if (bytes <= MAX_DIFF_PROMPT_BYTES) return diffText;
-  return `${diffText.slice(0, MAX_DIFF_PROMPT_BYTES)}
+  const head = Buffer.from(diffText, "utf8").subarray(0, MAX_DIFF_PROMPT_BYTES).toString("utf8");
+  return `${head}
 \u2026 [diff truncated at ${MAX_DIFF_PROMPT_BYTES} bytes of ${bytes} total \u2014 see the diffstat for the full shape]
 `;
 }
@@ -35947,7 +35955,7 @@ function blindArm(m, diffText) {
 function renderBlindArm(label, m) {
   const lines = [`### arm_${label}`, ""];
   lines.push(`- exit code: ${m.exitCode ?? "(none)"}`);
-  lines.push(`- duration: ${m.durationMs != null ? `${m.durationMs}ms` : "(unknown)"}`);
+  lines.push(`- duration: ${m.durationMs != null ? formatBakeoffDuration(m.durationMs) : "(unknown)"}`);
   lines.push(`- output: ${m.outputBytes != null ? `${m.outputBytes} bytes` : "(unknown)"}`);
   if (m.refused != null) lines.push(`- REFUSED before it ran: [${m.refused.predicate}]`);
   if (m.diffstat != null) {
@@ -35961,7 +35969,9 @@ function renderBlindArm(label, m) {
     );
     lines.push(`- redefined identifiers (already defined at baseline): ${m.signals.redefined.length > 0 ? m.signals.redefined.join(", ") : "(none)"}`);
   }
-  lines.push("", "```diff", m.diff.trim().length > 0 ? m.diff : "(empty diff)", "```");
+  const body = m.diff.trim().length > 0 ? m.diff : "(empty diff)";
+  const fence = fenceFor(body);
+  lines.push("", `${fence}diff`, body, fence);
   return lines.join("\n");
 }
 function blindReach(diffs, blinding) {

@@ -5,6 +5,7 @@ import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import {
   checkGraftCoherence,
+  formatBakeoffDuration,
   isBakeoffVerdict,
   BAKEOFF_REQUIRED_SECTIONS,
   VERDICT_BUCKET,
@@ -2057,20 +2058,6 @@ function scanBakeoffs(repoRoot: string, dirRel: string): { artifacts: BakeoffArt
     artifacts.push(artifact);
   }
   return { artifacts, skipped };
-}
-
-/**
- * Runtime for the comparison scorecard. Time-to-complete is itself a point of
- * comparison between baseline and challenger, so it reads as a human quantity
- * (`42.3s`, `5m12s`) rather than the raw ms the rows carry.
- */
-function formatBakeoffDuration(ms: number | null): string {
-  if (ms == null) return '?';
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const minutes = Math.floor(ms / 60_000);
-  const seconds = Math.round((ms % 60_000) / 1000);
-  return `${minutes}m${String(seconds).padStart(2, '0')}s`;
 }
 
 function formatBakeoffPair(pair: DispatchBakeoffPair): string {
