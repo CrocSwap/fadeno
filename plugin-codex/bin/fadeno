@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.42";
+  if (true) return "0.6.0-rc.43";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -17151,6 +17151,32 @@ function evaluateConstraint(profile, context, opts) {
   throw new ConstraintError(
     `constraint command ${commandLabel(command2)} exited ${result.status ?? "?"}`
   );
+}
+
+// src/lib/lane.ts
+function readSessionEffort(env = process.env) {
+  const raw = typeof env.CLAUDE_EFFORT === "string" ? env.CLAUDE_EFFORT.trim() : "";
+  return raw !== "" ? raw : null;
+}
+function decideLane(input) {
+  const { pinnedEffort, effectiveEffort, sessionEffort: sessionEffort2, hostModel, commandLane } = input;
+  const base = {
+    effort_pinned: pinnedEffort != null,
+    effective_effort: effectiveEffort,
+    session_effort: sessionEffort2
+  };
+  const offHost = (why) => commandLane ? { ...base, lane: "command", lane_reason: why } : { ...base, lane: "restart_required", lane_reason: "no command fallback" };
+  if (!hostModel) return offHost("model not deliverable in-host");
+  if (pinnedEffort == null) {
+    return { ...base, lane: "host", lane_reason: "effort unpinned" };
+  }
+  if (sessionEffort2 == null) {
+    return input.hostEffortProven === true ? { ...base, lane: "host", lane_reason: "host agent pins the same effort" } : offHost("session effort unobserved");
+  }
+  if (sessionEffort2 === pinnedEffort) {
+    return { ...base, lane: "host", lane_reason: "session effort matches the pin" };
+  }
+  return offHost(`session effort is ${sessionEffort2}, dial pins ${pinnedEffort}`);
 }
 
 // src/lib/host-dispatch.ts
@@ -21253,6 +21279,16 @@ function runDispatch(opts) {
       source = resolved.source;
       resolvedVia = resolved.resolvedVia;
       dial = resolved.delivery.ref;
+      if (viaOverride != null) {
+        const overridden = { ...resolved.delivery.ref, via: viaOverride };
+        try {
+          delivery = compileDialRef(overridden, profile);
+        } catch (err) {
+          if (err instanceof ExecutorProfileError) throw new DispatchCommandError(err.message);
+          throw err;
+        }
+        dial = overridden;
+      }
     } catch (err) {
       if (err instanceof ExecutorProfileError) throw new DispatchCommandError(err.message);
       throw err;
@@ -21262,11 +21298,22 @@ function runDispatch(opts) {
   const spec = postured.spec;
   const usedWriteVariant = postured.usedWriteVariant;
   const executorName = delivery.refString;
+  const laneDecision = decideLane({
+    pinnedEffort: delivery.pinnedEffort,
+    effectiveEffort: delivery.effectiveEffort,
+    sessionEffort: readSessionEffort(opts.userPathOptions?.env ?? process.env),
+    hostModel: deliveryIsHost(delivery),
+    commandLane: commandRoutable(spec)
+  });
+  const hostLanePreferred = laneDecision.lane === "host";
+  const shape = archetype ?? role ?? "role";
+  const hostLaneNote = hostLanePreferred ? `NOTE: ${shape} resolves to the HOST lane here (${laneDecision.lane_reason}), so the resolver's own choice for this task is the in-session ${shape} agent \u2014 spawn it and you are done; it is not a downgrade, it is the delivery every other caller gets. Dispatch it only when you specifically need what in-session cannot give: an isolated worktree, a dispatch id, a terminal receipt, --timeout/--diagnostics, or a shadow pair. To do that for THIS call without moving the dial, add \`--via <driver>\` (an *-exec route is the command-lane counterpart of a host one).` : null;
   if (!commandRoutable(spec)) {
-    const shape = archetype ?? role ?? "role";
     const dialModel = spec.model != null && spec.model !== "current-host" ? spec.model : "<model>";
     throw new DispatchCommandError(
-      `resolved to host executor "${executorName}", which declares no fallback_command, so ad-hoc dispatch has nothing to invoke. To dispatch for real, give ${shape} a command lane: \`fadeno dial ${archetype ?? "<archetype>"} ${dialModel} --via <driver>\` (\`fadeno models\` lists the drivers; an *-exec route is the command-lane counterpart of a host one). An in-session agent is NOT an equivalent substitute. It writes a host_delivery evidence row (with the prompt snapshot), but that row carries no dispatch id and no terminal receipt \u2014 no exit code, no duration, no captured output, and nothing to read back with \`fadeno dispatches --output tag:<tag>\`. It also runs in this workspace with no isolated worktree, honours neither --timeout nor --diagnostics, and forms no shadow pair. Take it only if you do not need those.`
+      (hostLaneNote != null ? `${hostLaneNote}
+
+` : "") + `resolved to host executor "${executorName}", which declares no fallback_command, so ad-hoc dispatch has nothing to invoke. To dispatch for real, give ${shape} a command lane: \`fadeno dial ${archetype ?? "<archetype>"} ${dialModel} --via <driver>\` (\`fadeno models\` lists the drivers; an *-exec route is the command-lane counterpart of a host one). An in-session agent is NOT an equivalent substitute. It writes a host_delivery evidence row (with the prompt snapshot), but that row carries no dispatch id and no terminal receipt \u2014 no exit code, no duration, no captured output, and nothing to read back with \`fadeno dispatches --output tag:<tag>\`. It also runs in this workspace with no isolated worktree, honours neither --timeout nor --diagnostics, and forms no shadow pair. Take it only if you do not need those.`
     );
   }
   let command2 = spec.adapter === "command" ? spec.command : spec.fallbackCommand;
@@ -21440,7 +21487,15 @@ ${prompt}`;
   const deliveryChoice = { executor: executorName, spec };
   const writeConflict = explainWriteConflict(deliveryChoice, archetype, profile);
   if (writeConflict != null && !writePostureForced) {
-    refuseDispatch(repoRoot, identity, "write_posture", writeConflict, now);
+    refuseDispatch(
+      repoRoot,
+      identity,
+      "write_posture",
+      hostLaneNote != null ? `${hostLaneNote}
+
+${writeConflict}` : writeConflict,
+      now
+    );
   }
   if (writeConflict != null && writePostureForced) {
     opts.onEcho?.(
@@ -21510,6 +21565,7 @@ ${prompt}`;
   const echo = `${role ?? archetype ?? executorName} \u2192 ${executorName}${delivery.model != null ? ` (${delivery.model})` : ""} [${sourceLabel}]` + (usedWriteVariant ? " [write variant]" : "") + (spec.writeAccess === false ? " [write_access: none]" : "");
   opts.onEcho?.(echo);
   opts.onEcho?.(`external sandbox: ${executorName} (${command2.join(" ")}) runs outside the current harness via ${transport}; evidence \u2192 ${DISPATCHES_FILE}`);
+  if (hostLaneNote != null) opts.onEcho?.(hostLaneNote);
   opts.onEcho?.(
     `dispatch id: ${dispatchId}${tag != null ? ` (tag: ${tag})` : ""} \u2014 recover its output with \`fadeno dispatches --output ${tag != null ? `tag:${tag}` : dispatchId.slice(0, 8)}\``
   );
@@ -30029,32 +30085,6 @@ function findSpawnableCodexAgent(candidates, archetype) {
   return candidates.find(
     (candidate) => (archetype == null || archetype === "*" || candidate.archetype === archetype) && candidate.state.managed
   ) ?? null;
-}
-
-// src/lib/lane.ts
-function readSessionEffort(env = process.env) {
-  const raw = typeof env.CLAUDE_EFFORT === "string" ? env.CLAUDE_EFFORT.trim() : "";
-  return raw !== "" ? raw : null;
-}
-function decideLane(input) {
-  const { pinnedEffort, effectiveEffort, sessionEffort: sessionEffort2, hostModel, commandLane } = input;
-  const base = {
-    effort_pinned: pinnedEffort != null,
-    effective_effort: effectiveEffort,
-    session_effort: sessionEffort2
-  };
-  const offHost = (why) => commandLane ? { ...base, lane: "command", lane_reason: why } : { ...base, lane: "restart_required", lane_reason: "no command fallback" };
-  if (!hostModel) return offHost("model not deliverable in-host");
-  if (pinnedEffort == null) {
-    return { ...base, lane: "host", lane_reason: "effort unpinned" };
-  }
-  if (sessionEffort2 == null) {
-    return input.hostEffortProven === true ? { ...base, lane: "host", lane_reason: "host agent pins the same effort" } : offHost("session effort unobserved");
-  }
-  if (sessionEffort2 === pinnedEffort) {
-    return { ...base, lane: "host", lane_reason: "session effort matches the pin" };
-  }
-  return offHost(`session effort is ${sessionEffort2}, dial pins ${pinnedEffort}`);
 }
 
 // src/commands/steering.ts
@@ -38710,7 +38740,8 @@ Options:
   --parallel <n>          (drive) Max concurrent command deliveries per wave (1\u201316, default 1)
   --timeout <seconds>     (drive/dispatch) Hard deadline seconds; 0 disables route default (20 min)
   --input <Name=path>     (new-run) Supply a declared input (repeatable)
-  --via <driver>          (dial/dispatch) Driver alias that delivers the model
+  --via <driver>          (dial/dispatch) Driver alias that delivers the model; on dispatch it
+                          escalates one call onto that lane without moving the dial
   --session               (dial) Write/clear this checkout's session dial
   --user                  (dial) Write/clear the user default
   --repo                  (dial) Write/clear the repo pin (committed)

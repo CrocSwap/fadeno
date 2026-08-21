@@ -13,6 +13,7 @@ import {
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
   commandRoutable,
+  deliveryIsHost,
   eligibilityFor,
   substitutePromptFile,
   explainEligibilityConflict,
@@ -38,6 +39,7 @@ import {
   type WritePosture,
   shadowSampleRoll,
 } from '../lib/executors.ts';
+import { decideLane, readSessionEffort } from '../lib/lane.ts';
 import { readUserDials } from '../lib/user-paths.ts';
 import {
   completeHostDispatch,
@@ -1102,6 +1104,26 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       source = resolved.source;
       resolvedVia = resolved.resolvedVia;
       dial = resolved.delivery.ref;
+      // `--via` without `--model`: escalate THIS dispatch onto another driver
+      // without touching the dial. Until 2026-08-21 the override was read only
+      // inside the `--model` branch above, so `fadeno dispatch --archetype
+      // worker --via claude-exec` accepted the flag, ignored it, and delivered
+      // on the dial's own route — while `--help` advertised `--via` as
+      // `(dial/dispatch)`. A flag that is parsed and dropped is the silent
+      // no-op this repo keeps paying for, and it sits directly on the
+      // escalation path the host-lane guidance below points at: telling a
+      // caller to escalate with a flag that does nothing is worse than not
+      // offering one.
+      if (viaOverride != null) {
+        const overridden: DialRef = { ...resolved.delivery.ref, via: viaOverride };
+        try {
+          delivery = compileDialRef(overridden, profile);
+        } catch (err) {
+          if (err instanceof ExecutorProfileError) throw new DispatchCommandError(err.message);
+          throw err;
+        }
+        dial = overridden;
+      }
     } catch (err) {
       if (err instanceof ExecutorProfileError) throw new DispatchCommandError(err.message);
       throw err;
@@ -1116,6 +1138,48 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const spec = postured.spec;
   const usedWriteVariant = postured.usedWriteVariant;
   const executorName = delivery.refString;
+  /**
+   * The lane the RESOLVER would have chosen for this archetype — the same
+   * `decideLane` the Claude hook and `fadeno dial resolve` route on, asked
+   * with the same inputs so the three cannot disagree.
+   *
+   * The kernel does not route on this and must not: `fadeno dispatch` is an
+   * explicit request for command delivery, and legitimate machine callers ask
+   * for it on host-lane archetypes (`fadeno bakeoff` dispatches two judges
+   * this way, and a judge is host-lane under Claude with the default dial).
+   * What the lane changes is what the kernel SAYS.
+   *
+   * Without it the write-posture refusal reads its remedies in the wrong
+   * order: it calls the in-session agent a non-equivalent substitute and leads
+   * with `--via`, which is right for a genuinely command-lane archetype and
+   * backwards when the resolver already chose in-session. An agent following
+   * that advice re-dials a host-lane archetype onto an exec route and moves it
+   * out of the session permanently — the opposite of what the resolver
+   * decided, produced by the message rather than by any gate.
+   */
+  const laneDecision = decideLane({
+    pinnedEffort: delivery.pinnedEffort,
+    effectiveEffort: delivery.effectiveEffort,
+    sessionEffort: readSessionEffort(opts.userPathOptions?.env ?? process.env),
+    hostModel: deliveryIsHost(delivery),
+    commandLane: commandRoutable(spec),
+  });
+  const hostLanePreferred = laneDecision.lane === 'host';
+  const shape = archetype ?? role ?? 'role';
+  /**
+   * Prepended to every refusal and echoed on the delivering path. Leads with
+   * the resolver's own choice, names the in-session agent as that choice
+   * rather than as a downgrade, and keeps a real escalation open — per
+   * invocation, so taking it cannot silently relocate the archetype.
+   */
+  const hostLaneNote = hostLanePreferred
+    ? `NOTE: ${shape} resolves to the HOST lane here (${laneDecision.lane_reason}), so the resolver's own ` +
+      `choice for this task is the in-session ${shape} agent — spawn it and you are done; it is not a ` +
+      'downgrade, it is the delivery every other caller gets. Dispatch it only when you specifically need ' +
+      'what in-session cannot give: an isolated worktree, a dispatch id, a terminal receipt, --timeout/' +
+      `--diagnostics, or a shadow pair. To do that for THIS call without moving the dial, add \`--via ` +
+      '<driver>\` (an *-exec route is the command-lane counterpart of a host one).'
+    : null;
   // The one delivery gate left. A host spec with a `fallback_command` is
   // dispatched down that lane — the same lane a selected pair forces both arms
   // onto, and the same lane the `*-exec` routes name explicitly — so the only
@@ -1125,7 +1189,6 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // safeguard, and note that the write posture it was incidentally enforcing
   // is enforced for real a few lines below, by `explainWriteConflict`.
   if (!commandRoutable(spec)) {
-    const shape = archetype ?? role ?? 'role';
     // `current-host` is a reference-frame sentinel, not a model you can route
     // — suggesting `--via` on it would be advice that cannot be followed.
     const dialModel = spec.model != null && spec.model !== 'current-host' ? spec.model : '<model>';
@@ -1149,7 +1212,8 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // understating it — this message exists because the previous one made a
     // claim it had not checked.
     throw new DispatchCommandError(
-      `resolved to host executor "${executorName}", which declares no fallback_command, so ad-hoc ` +
+      (hostLaneNote != null ? `${hostLaneNote}\n\n` : '') +
+        `resolved to host executor "${executorName}", which declares no fallback_command, so ad-hoc ` +
         'dispatch has nothing to invoke. ' +
         `To dispatch for real, give ${shape} a command lane: \`fadeno dial ${archetype ?? '<archetype>'} ` +
         `${dialModel} --via <driver>\` (\`fadeno models\` lists the drivers; an *-exec route ` +
@@ -1423,7 +1487,16 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const deliveryChoice = { executor: executorName, spec };
   const writeConflict = explainWriteConflict(deliveryChoice, archetype, profile);
   if (writeConflict != null && !writePostureForced) {
-    refuseDispatch(repoRoot, identity, 'write_posture', writeConflict, now);
+    // Host-lane note FIRST. This is the refusal a Claude coordinator actually
+    // hits for a write-requiring archetype, and read without it the message
+    // sends them to re-dial an archetype the resolver wanted in-session.
+    refuseDispatch(
+      repoRoot,
+      identity,
+      'write_posture',
+      hostLaneNote != null ? `${hostLaneNote}\n\n${writeConflict}` : writeConflict,
+      now,
+    );
   }
   if (writeConflict != null && writePostureForced) {
     opts.onEcho?.(
@@ -1506,6 +1579,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     (spec.writeAccess === false ? ' [write_access: none]' : '');
   opts.onEcho?.(echo);
   opts.onEcho?.(`external sandbox: ${executorName} (${command.join(' ')}) runs outside the current harness via ${transport}; evidence → ${DISPATCHES_FILE}`);
+  // Delivering, not refusing — but say that this deliberately leaves a session
+  // that would have handled the task in-house. Silence here is how a caller
+  // ends up paying for a second session without ever deciding to.
+  if (hostLaneNote != null) opts.onEcho?.(hostLaneNote);
   // Name the dispatch before it runs. Recovery after a kill used to have only
   // `--output last` to go on, which is a guess about the whole repo's log
   // rather than a handle on this call: a 2026-08-13 dogfood ran two dispatches

@@ -183,7 +183,8 @@ Options:
   --parallel <n>          (drive) Max concurrent command deliveries per wave (1–16, default 1)
   --timeout <seconds>     (drive/dispatch) Hard deadline seconds; 0 disables route default (20 min)
   --input <Name=path>     (new-run) Supply a declared input (repeatable)
-  --via <driver>          (dial/dispatch) Driver alias that delivers the model
+  --via <driver>          (dial/dispatch) Driver alias that delivers the model; on dispatch it
+                          escalates one call onto that lane without moving the dial
   --session               (dial) Write/clear this checkout's session dial
   --user                  (dial) Write/clear the user default
   --repo                  (dial) Write/clear the repo pin (committed)
