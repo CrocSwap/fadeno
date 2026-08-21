@@ -1287,6 +1287,19 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const outputSnapshot = outputRel.split('\\').join('/');
 
   const relayAttested = consumeRelayAttestation(repoRoot, prompt, now);
+  if (relayAttested === false) {
+    // Contemporaneous, because retrospective is the wrong shape for this. A
+    // defecting relay means the executor is about to work from bytes the
+    // caller never wrote, and the person who can tell whether that matters is
+    // watching this command right now. The row is written either way; this is
+    // the part that gets read.
+    opts.onEcho?.(
+      'RELAY FIDELITY FAILED: a dispatch proxy sent bytes that do not match what it was handed. ' +
+      'The executor below is working from an altered prompt — treat its output as answering a ' +
+      'different question. Check the relay identity (`relay.claude` / `relay.codex` in ' +
+      'executors.yaml); a model too small for the relay contract summarizes instead of forwarding.',
+    );
+  }
 
   const promptSha256 = sha256Hex(prompt);
 

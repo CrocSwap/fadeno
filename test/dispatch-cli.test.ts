@@ -225,9 +225,16 @@ test('dispatch: a proxy that altered the prompt attests false', (t) => {
   // ...and the proxy is dispatching DIFFERENT bytes. It still marks itself,
   // which is precisely what makes the alteration visible.
   markProxyDispatch(root, ['a summary of the task\n']);
-  const result = runDispatch({ archetype: 'worker', prompt: 'a summary of the task\n', repoRoot: root, now, userPathOptions: onHarness('standalone') });
+  const echoed: string[] = [];
+  const result = runDispatch({
+    archetype: 'worker', prompt: 'a summary of the task\n', repoRoot: root, now,
+    userPathOptions: onHarness('standalone'), onEcho: (line: string) => echoed.push(line),
+  });
   assert.equal(result.relayAttested, false);
   assert.equal(evidenceRows(root).at(-1)!.relay_attested, false);
+  // The row alone is not the deliverable: a defection has to reach the person
+  // running the command, while the output it taints is still in front of them.
+  assert.ok(echoed.some((line) => line.startsWith('RELAY FIDELITY FAILED:')), echoed.join(' | '));
 });
 
 test('dispatch: a proxy dispatch with no spawn-side stash attests null, never false', (t) => {

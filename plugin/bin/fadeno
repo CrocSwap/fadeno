@@ -21343,6 +21343,11 @@ ${prompt}`;
   const outputAbs = (0, import_node_path15.join)(repoRoot, outputRel);
   const outputSnapshot = outputRel.split("\\").join("/");
   const relayAttested = consumeRelayAttestation(repoRoot, prompt, now);
+  if (relayAttested === false) {
+    opts.onEcho?.(
+      "RELAY FIDELITY FAILED: a dispatch proxy sent bytes that do not match what it was handed. The executor below is working from an altered prompt \u2014 treat its output as answering a different question. Check the relay identity (`relay.claude` / `relay.codex` in executors.yaml); a model too small for the relay contract summarizes instead of forwarding."
+    );
+  }
   const promptSha256 = sha256Hex(prompt);
   const decidePairCandidate = () => {
     if (process.env.FADENO_IN_SHADOW === "1") return null;
