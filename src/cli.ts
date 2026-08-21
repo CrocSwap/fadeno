@@ -739,12 +739,12 @@ Usage:
   fadeno steering apply --codex|--claude [--scope project|user] [--force]
 
 resolve emits the routing JSON hooks consume (exit 2 = restart required or
-write conflict — not runnable in this session). apply materializes agent
-definitions for the worker/reviewer/judge slots from the current dials:
-Codex TOMLs (model + model_reasoning_effort), or local Claude subagents
-(.claude/agents/<archetype>.md with model + effort frontmatter) so an
-in-session model runs at ITS effort, not the session's. Re-run after
-re-dialing; host slots load on a fresh session.
+write conflict — not runnable in this session). apply materializes the
+worker/reviewer/judge slots from the current dials, where the harness's agent
+format can carry one: Codex TOMLs (model + model_reasoning_effort), loaded on
+a fresh session. Under --claude it writes nothing and only cleans up retired
+managed files — the Agent tool has no effort channel, so a dialed @effort
+selects the delivery lane instead of an identity. Re-run after re-dialing.
 --prompt-file (or --prompt-sha256) lets resolve see this exact prompt's
 digest, so a shadow-attached archetype's reply carries the pair decision
 (shadow.selected/shadow.routable) and, on a selected routable pair, resolves

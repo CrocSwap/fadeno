@@ -12,7 +12,7 @@ import { join } from 'node:path';
 // emitters (`fadeno plugin` and `fadeno init --claude`) replace this literal
 // with the package version; the template keeps 'dev', so a row reading 'dev'
 // means the template was executed directly rather than an installed copy.
-const HOOK_VERSION = '0.6.0-rc.44';
+const HOOK_VERSION = '0.6.0-rc.45';
 
 function finish(value) {
   if (value != null) process.stdout.write(`${JSON.stringify(value)}\n`);

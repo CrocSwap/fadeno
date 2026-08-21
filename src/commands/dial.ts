@@ -19,6 +19,7 @@ import {
   explainWriteConflict,
   formatDialRef,
   forcesWritePosture,
+  hostEffortIsMaterializable,
   parseDialRef,
   readLocalDialState,
   resolveDialCascade,
@@ -572,13 +573,46 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
       'The override is persisted with this dial and applies at dispatch time. Clear or replace the dial to remove it.',
     );
   }
-  // @effort on host delivery is a request, not a live setting: it travels on
-  // the compiled spec and is applied by the materialized agent surface (codex
-  // TOMLs, .claude agent frontmatter). Say so instead of refusing.
+  // `@effort` on a host delivery is a request, not a live setting — but what
+  // happens to that request splits by harness, and saying only the Codex half
+  // sent Claude users to a command that does nothing. Where the agent format
+  // carries an effort (Codex TOML), apply materializes the slot and a fresh
+  // session delivers it in-session. Where it does not (Claude's Agent tool has
+  // no effort channel), apply writes nothing and the pin instead moves the
+  // delivery to the command lane — which for a write-required archetype on a
+  // host route means no deliverable lane at all, so name that here rather than
+  // letting it surface as a refusal at dispatch time.
   if (dial.effort != null && deliveryIsHost(compiled)) {
-    notes.push(
-      `note: ${compiled.driver} host route — effort ${compiled.effectiveEffort} is recorded as the request; run \`fadeno steering apply\` to pin it into the host agent slots`,
-    );
+    if (hostEffortIsMaterializable(profile.harness ?? 'standalone')) {
+      notes.push(
+        `note: ${compiled.driver} host route — effort ${compiled.effectiveEffort} is recorded as the request; run \`fadeno steering apply\` to pin it into the host agent slots, then start a fresh session`,
+      );
+    } else if (!commandRoutable(compiled.spec)) {
+      // No lane to move to either: `current-host` and any host route with no
+      // `fallback_command`. The pin is simply inert — worth saying plainly,
+      // because silence here reads as "recorded", which is what the old note
+      // claimed for every harness.
+      notes.push(
+        `note: ${compiled.driver} host route — a ${profile.harness ?? 'host'} agent carries no effort and this ` +
+        `route has no command lane, so ${archetype} runs in-session at the session's own effort and the ` +
+        `${compiled.effectiveEffort} pin has no effect. \`fadeno steering apply\` writes nothing here.`,
+      );
+    } else {
+      const stranded = explainWriteConflict(
+        { executor: refString, spec: applyWritePosture(compiled.spec, archetype, profile.archetypes).spec },
+        archetype,
+        profile,
+      );
+      notes.push(
+        `note: ${compiled.driver} host route — a ${profile.harness ?? 'host'} agent carries no effort, so pinning ` +
+        `${compiled.effectiveEffort} selects the DELIVERY LANE instead: ${archetype} leaves the session for this ` +
+        'route\'s command lane whenever the session is running at a different effort. `fadeno steering apply` ' +
+        'writes nothing here.' +
+        (stranded != null
+          ? `\nWARNING: that command lane cannot deliver ${archetype} — ${stranded}`
+          : ''),
+      );
+    }
   }
   {
     const postured = applyWritePosture(compiled.spec, archetype, profile.archetypes);

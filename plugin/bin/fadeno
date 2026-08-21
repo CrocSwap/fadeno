@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.44";
+  if (true) return "0.6.0-rc.45";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -14437,6 +14437,9 @@ function deliveryIsHost(compiled) {
   return compiled.spec.adapter === "host";
 }
 var RELAY_HARNESSES = ["claude", "codex", "grok"];
+function hostEffortIsMaterializable(harness) {
+  return harness === "codex";
+}
 function activeHarness(explicit, options = {}) {
   if (explicit != null) return explicit;
   const raw = (options.env ?? process.env).FADENO_HARNESS?.trim();
@@ -31420,9 +31423,25 @@ The override is persisted with this dial and applies at dispatch time. Clear or 
     );
   }
   if (dial.effort != null && deliveryIsHost(compiled)) {
-    notes.push(
-      `note: ${compiled.driver} host route \u2014 effort ${compiled.effectiveEffort} is recorded as the request; run \`fadeno steering apply\` to pin it into the host agent slots`
-    );
+    if (hostEffortIsMaterializable(profile.harness ?? "standalone")) {
+      notes.push(
+        `note: ${compiled.driver} host route \u2014 effort ${compiled.effectiveEffort} is recorded as the request; run \`fadeno steering apply\` to pin it into the host agent slots, then start a fresh session`
+      );
+    } else if (!commandRoutable(compiled.spec)) {
+      notes.push(
+        `note: ${compiled.driver} host route \u2014 a ${profile.harness ?? "host"} agent carries no effort and this route has no command lane, so ${archetype} runs in-session at the session's own effort and the ${compiled.effectiveEffort} pin has no effect. \`fadeno steering apply\` writes nothing here.`
+      );
+    } else {
+      const stranded = explainWriteConflict(
+        { executor: refString, spec: applyWritePosture(compiled.spec, archetype, profile.archetypes).spec },
+        archetype,
+        profile
+      );
+      notes.push(
+        `note: ${compiled.driver} host route \u2014 a ${profile.harness ?? "host"} agent carries no effort, so pinning ${compiled.effectiveEffort} selects the DELIVERY LANE instead: ${archetype} leaves the session for this route's command lane whenever the session is running at a different effort. \`fadeno steering apply\` writes nothing here.` + (stranded != null ? `
+WARNING: that command lane cannot deliver ${archetype} \u2014 ${stranded}` : "")
+      );
+    }
   }
   {
     const postured = applyWritePosture(compiled.spec, archetype, profile.archetypes);
@@ -39333,12 +39352,12 @@ Usage:
   fadeno steering apply --codex|--claude [--scope project|user] [--force]
 
 resolve emits the routing JSON hooks consume (exit 2 = restart required or
-write conflict \u2014 not runnable in this session). apply materializes agent
-definitions for the worker/reviewer/judge slots from the current dials:
-Codex TOMLs (model + model_reasoning_effort), or local Claude subagents
-(.claude/agents/<archetype>.md with model + effort frontmatter) so an
-in-session model runs at ITS effort, not the session's. Re-run after
-re-dialing; host slots load on a fresh session.
+write conflict \u2014 not runnable in this session). apply materializes the
+worker/reviewer/judge slots from the current dials, where the harness's agent
+format can carry one: Codex TOMLs (model + model_reasoning_effort), loaded on
+a fresh session. Under --claude it writes nothing and only cleans up retired
+managed files \u2014 the Agent tool has no effort channel, so a dialed @effort
+selects the delivery lane instead of an identity. Re-run after re-dialing.
 --prompt-file (or --prompt-sha256) lets resolve see this exact prompt's
 digest, so a shadow-attached archetype's reply carries the pair decision
 (shadow.selected/shadow.routable) and, on a selected routable pair, resolves

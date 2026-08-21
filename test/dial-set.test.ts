@@ -223,11 +223,15 @@ test('set-time refusals: @effort on host, write posture, forbidden eligibility',
       worker: { requires_write: 'required' },
     },
   });
-  // @effort on host: no longer refused — it travels as the request, with a
-  // note pointing at the materialized agent surface. (worker requires_write
-  // would bite here, so pin a posture-free archetype.)
+  // @effort on host: no longer refused — but what the pin DOES splits by
+  // harness, and `current-host` on standalone is the inert case: no agent
+  // format to carry an effort, and no command lane to divert to either. The
+  // note must say that rather than send the user to a `steering apply` that
+  // writes nothing. (worker requires_write would bite here, so pin a
+  // posture-free archetype.)
   const hostEffort = runDialSet({ repoRoot: root, userPathOptions: isolatedUser(root), archetype: 'scout', model: 'current-host@high' });
-  assert.ok(hostEffort.notes.some((n) => /current-host host route — effort high is recorded as the request/.test(n)), JSON.stringify(hostEffort.notes));
+  assert.ok(hostEffort.notes.some((n) => /has no command lane, so scout runs in-session at the session's own effort/.test(n)), JSON.stringify(hostEffort.notes));
+  assert.ok(hostEffort.notes.every((n) => !/run `fadeno steering apply`/.test(n)), JSON.stringify(hostEffort.notes));
   // write posture: worker requires_write but route is write_access false
   assert.throws(() => runDialSet({ repoRoot: root, userPathOptions: onHarness('standalone'), archetype: 'worker', model: 'sol' }), (err: unknown) => err instanceof DialError && /requires_write: required/.test((err as Error).message));
   // forbidden eligibility (need a write-compatible route for this test, so use different root)

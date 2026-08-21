@@ -506,6 +506,27 @@ export type HarnessId = 'codex' | 'claude' | 'grok' | 'standalone';
  */
 export const RELAY_HARNESSES = ['claude', 'codex', 'grok'] as const;
 
+/**
+ * Harnesses whose agent-definition format can carry a reasoning effort, so
+ * `fadeno steering apply` can materialize a host slot AT a dialed `@effort`.
+ *
+ * This is a property of the FORMAT, not a preference: a Codex agent TOML has
+ * a `model_reasoning_effort` key, and Claude's Agent tool has no effort
+ * channel at all — the same fact the catalog states in prose above
+ * `relay.claude`. Where it is false, `steering apply` writes no host agent
+ * file (it has nothing to write that would change delivery), a pinned effort
+ * instead selects the LANE via `decideLane`, and telling the user to run
+ * apply would send them to a command that does nothing.
+ *
+ * Keep this beside `RELAY_HARNESSES` rather than inside `dial.ts`: the note
+ * that reads it and the apply that implements it live in different files, and
+ * `test/host-effort-materialization.test.ts` pins the two together by running
+ * both applies and asserting what they actually write.
+ */
+export function hostEffortIsMaterializable(harness: HarnessId): boolean {
+  return harness === 'codex';
+}
+
 export function activeHarness(explicit?: HarnessId, options: UserPathOptions = {}): HarnessId {
   if (explicit != null) return explicit;
   const raw = (options.env ?? process.env).FADENO_HARNESS?.trim();
