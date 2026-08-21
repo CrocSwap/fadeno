@@ -1841,8 +1841,21 @@ export function dispatchability(
   harness: string,
 ): { supported: true } | { supported: false; reason: 'host_in_session' | 'host_without_fallback' } {
   if (spec.adapter !== 'host') return { supported: true };
-  if (IN_SESSION_ONLY_HOST_HARNESSES.has(harness)) return { supported: false, reason: 'host_in_session' };
+  // Order matters, and it used to be wrong. `host_in_session` claims that
+  // dispatching would shell out to this spec's `fallback_command` and re-enter
+  // the harness — a claim that is FALSE when the spec declares no
+  // fallback_command at all. Checking the harness first reported re-entrancy
+  // for a spec with no command lane whatsoever, sending a reader looking for a
+  // fallback that does not exist. Observed 2026-08-21 in polymarket-quoter,
+  // where `worker` is a user dial to `sonnet` on `claude-cli` with
+  // `fallback_command: null`.
+  //
+  // No reordering risk for the pair path: `pairCommandFallback` requires
+  // `host_in_session` AND `commandRoutable(spec)`, and a host spec without a
+  // fallbackCommand is never commandRoutable, so a spec whose reason changes
+  // here could not have taken that branch anyway.
   if (spec.fallbackCommand == null) return { supported: false, reason: 'host_without_fallback' };
+  if (IN_SESSION_ONLY_HOST_HARNESSES.has(harness)) return { supported: false, reason: 'host_in_session' };
   return { supported: true };
 }
 

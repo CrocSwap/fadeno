@@ -1358,9 +1358,13 @@ function deliveryGuidance(archetype: string, executorName: string, spec: Executo
   return {
     dispatchable: false,
     dispatch_command: null,
+    // Same wording discipline as the kernel's refusal: name the remedy that
+    // restores a real dispatch, and never present the in-session agent as an
+    // equal. It has no isolated worktree, no evidence row, no dispatch id to
+    // read back, and forms no shadow pair.
     action: deliverable.reason === 'host_in_session'
-      ? `Do NOT dispatch. Host executor "${executorName}" is delivered in-session by the ${harness} harness — spawn the in-session ${archetype} agent instead. Dispatching would hand the task to a subprocess of this same harness and be refused.`
-      : `Do NOT dispatch. Host executor "${executorName}" declares no fallback_command, so ad-hoc dispatch has nothing to invoke — spawn the in-session ${archetype} agent instead.`,
+      ? `Do NOT dispatch. Host executor "${executorName}" is delivered in-session by the ${harness} harness; dispatching would hand the task to a subprocess of this same harness and be refused. Either spawn the in-session ${archetype} agent — which has no isolated worktree, no evidence row and no dispatch id, and forms no shadow pair — or give it a command lane: \`fadeno dial ${archetype} ${executorName} --via <driver>\`.`
+      : `Do NOT dispatch. Host executor "${executorName}" declares no fallback_command, so ad-hoc dispatch has nothing to invoke. Either spawn the in-session ${archetype} agent — which has no isolated worktree, no evidence row and no dispatch id, and forms no shadow pair — or give it a command lane: \`fadeno dial ${archetype} ${executorName} --via <driver>\`.`,
   };
 }
 

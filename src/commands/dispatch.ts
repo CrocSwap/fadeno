@@ -1169,16 +1169,35 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   if (!deliverable.supported && !pairCommandFallback) {
     const hostOnDemand = deliverable.reason === 'host_in_session';
     const shape = archetype ?? role ?? 'role';
+    // The in-session agent is a FALLBACK, not an equivalent, and saying so is
+    // the point of this wording. A caller who reached for `fadeno dispatch`
+    // wanted what only a dispatch gives: an isolated worktree, an evidence row
+    // with a dispatch id readable by `--tag`, `--timeout`/`--diagnostics`, and
+    // shadow pairing. An in-session agent provides none of those and looks
+    // like it succeeded. On 2026-08-21 a coordinator hit this refusal, spawned
+    // the in-session agent, and reported it as "equivalent role, no
+    // recursion" — while the instructions it was following asked it to read
+    // the result back by tag and verify a dispatch id, which by then could
+    // not exist.
+    const lost =
+      'An in-session agent is NOT an equivalent substitute: it runs in this workspace with no isolated ' +
+      'worktree, writes no evidence row (so there is no dispatch id and nothing to read back with ' +
+      '`fadeno dispatches --output tag:<tag>`), honours neither --timeout nor --diagnostics, and forms ' +
+      'no shadow pair. Take it only if you do not need those.';
+    // `current-host` is a reference-frame sentinel, not a model you can route
+    // — suggesting `--via` on it would be advice that cannot be followed.
+    const dialModel = spec.model != null && spec.model !== 'current-host' ? spec.model : '<model>';
+    const remedy =
+      `To dispatch for real, give ${shape} a command lane: \`fadeno dial ${archetype ?? '<archetype>'} ` +
+      `${dialModel} --via <driver>\` (\`fadeno models\` lists the drivers; an *-exec route ` +
+      'is the command-lane counterpart of a host one).';
     throw new DispatchCommandError(
       hostOnDemand
         ? `resolved to host executor "${executorName}", which the ${harness} harness runs in-session in ` +
           `this session; dispatching its fallback_command would hand the task to a subprocess of the ` +
-          `same harness and re-enter this dispatch one level down. Run this ${shape}-shaped task with ` +
-          `the in-session ${archetype ?? 'role'} agent, or bind a command executor.`
-        : `resolved to host executor "${executorName}"; ad-hoc dispatch invokes command adapters only — ` +
-          `run this ${shape}-shaped task with the in-session ` +
-          `${archetype ?? 'role'} agent instead, declare fallback_command on the executor, or bind a ` +
-          'command executor.',
+          `same harness and re-enter this dispatch one level down. ${remedy} ${lost}`
+        : `resolved to host executor "${executorName}", which declares no fallback_command, so ad-hoc ` +
+          `dispatch has nothing to invoke. ${remedy} ${lost}`,
     );
   }
   let command = spec.adapter === 'command' ? spec.command : spec.fallbackCommand!;

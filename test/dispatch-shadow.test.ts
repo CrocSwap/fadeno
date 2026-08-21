@@ -796,6 +796,23 @@ test('a selected pair moves a host-dialed primary onto its own command lane', (t
     () => runDispatch({ archetype: 'worker', prompt: 'solo', repoRoot: root, userPathOptions: onHarness('claude') }),
     /runs in-session/,
   );
+  // ...and it must not present the in-session agent as an equivalent. A
+  // caller reached for `fadeno dispatch` to get isolation, an evidence row
+  // with a readable dispatch id, --timeout/--diagnostics and shadow pairing;
+  // an in-session agent supplies none of that and looks like it succeeded.
+  // On 2026-08-21 a coordinator took this advice and reported it as
+  // "equivalent role, no recursion" while under instructions to read the
+  // result back by tag — which by then could not exist. It must also name the
+  // remedy that restores a real dispatch, not just say "bind a command
+  // executor".
+  assert.throws(
+    () => runDispatch({ archetype: 'worker', prompt: 'solo', repoRoot: root, userPathOptions: onHarness('claude') }),
+    /no evidence row/,
+  );
+  assert.throws(
+    () => runDispatch({ archetype: 'worker', prompt: 'solo', repoRoot: root, userPathOptions: onHarness('claude') }),
+    /fadeno dial worker opus --via/,
+  );
 
   writeLocalDialState(root, { dials: {}, shadows: { worker: { model: 'grok' } }, legacyNote: null });
   const echoes: string[] = [];
@@ -874,11 +891,18 @@ test('an unroutable selected pair leaves the spawn untouched — no pair, never 
   assert.equal(hookResult.stdout.trim(), '');
 
   // The kernel is unchanged: `fadeno dispatch` for this archetype still
-  // throws its ordinary host_in_session refusal, exactly as it would with no
-  // shadow attached at all — only the hook stops sending work it cannot take.
+  // refuses, exactly as it would with no shadow attached at all — only the
+  // hook stops sending work it cannot take.
+  //
+  // The reason is `host_without_fallback`, not `host_in_session`, and that is
+  // the point of the fixture: this dial resolves to `current-host`, which
+  // declares no fallback_command — the very reason `shadow.routable` is false
+  // three assertions above. The refusal used to claim that dispatching "its
+  // fallback_command" would re-enter the harness, naming a command that does
+  // not exist and sending a reader to look for it.
   assert.throws(
     () => runDispatch({ archetype: 'worker', prompt: 'do the thing', repoRoot: root, userPathOptions: isolated }),
-    /runs in-session/,
+    /declares no fallback_command/,
   );
 });
 
