@@ -15,6 +15,14 @@ import { describeWorkspaceLeaseLiveness } from '../lib/supervisor.ts';
 import { explainSuppressedBuiltin } from '../lib/config-layers.ts';
 import { compareFadenoVersions, readInstallationManifest } from '../lib/installations.ts';
 import { codexUserAgentDir, userPaths } from '../lib/user-paths.ts';
+import {
+  effectiveCodexAgentCandidates,
+  findSpawnableCodexAgent,
+  readCodexAgentFile,
+  CODEX_STEERING_ARCHETYPES,
+} from '../lib/codex-agent-file.ts';
+import { listRuns, readEvents } from '../lib/run-ledger.ts';
+import { normalizeDeliveryTransport } from '../lib/host-dispatch.ts';
 
 // Same literal `steering.ts` writes into every managed Claude agent file
 // (retired grid cell or legacy per-dial); not exported there, so duplicated
@@ -24,59 +32,6 @@ import { codexUserAgentDir, userPaths } from '../lib/user-paths.ts';
 // (Grid cells carry a narrower marker, and `listRetiredClaudeGridCells` —
 // which steering.ts DOES export — is the single definition of that one.)
 const CLAUDE_MANAGED_MARK = '<!-- fadeno:managed';
-
-// The Codex equivalent: `steering apply --codex --scope user` stamps
-// `# fadeno:managed version=<pkg version> digest=<sha256>` as the FIRST line of
-// every user-scope role agent, and its `managedAgentEmit` gates overwriting on
-// exactly this prefix. `steering.ts` keeps that literal private, and that
-// module is not this one's to change, so the convention is replicated
-// read-only here — the same way `CLAUDE_MANAGED_MARK` above is.
-const CODEX_MANAGED_MARK = '# fadeno:managed';
-const CODEX_MANAGED_VERSION_RE = /^# fadeno:managed\b[^\n]*?\bversion=(\S+)/;
-
-/**
- * Flags a current broker passes to `steering resolve`. Their absence is the
- * concrete damage a frozen broker does, so it is read off the file rather
- * than inferred from the file being old:
- *
- * `--prompt-file` is how the resolver sees the prompt bytes it hashes to
- * decide whether a spawn is paired with a shadow challenger; without it that
- * repo silently stops participating in shadow pairing. `--host-executor` is
- * how a Codex broker proves the effort its agent was materialized at, which
- * is what mismatch detection reads.
- */
-const CODEX_RESOLVE_FLAGS = ['--prompt-file', '--host-executor'] as const;
-
-interface CodexBrokerState {
-  /** The file's first line carries the managed header `steering apply` writes. */
-  managed: boolean;
-  /** `version=` off that header, when it carries one. */
-  version: string | null;
-  /**
-   * Which of `CODEX_RESOLVE_FLAGS` this file's text never mentions. Empty
-   * means it is current on the resolver contract, whatever stamped it.
-   */
-  missingFlags: string[];
-}
-
-/**
- * Read one Codex role-agent file's provenance. `null` means "no such file" —
- * as does an unreadable one, which is not provably Fadeno's and so is never
- * claimed (the same rule `listRetiredClaudeGridCells` applies).
- */
-function readCodexBroker(path: string): CodexBrokerState | null {
-  let text: string;
-  try {
-    if (!existsSync(path)) return null;
-    text = readFileSync(path, 'utf8');
-  } catch {
-    return null;
-  }
-  const missingFlags = CODEX_RESOLVE_FLAGS.filter((flag) => !text.includes(flag));
-  if (!text.startsWith(CODEX_MANAGED_MARK)) return { managed: false, version: null, missingFlags };
-  const match = CODEX_MANAGED_VERSION_RE.exec(text);
-  return { managed: true, version: match ? match[1]! : null, missingFlags };
-}
 
 /**
  * What a frozen broker's own text proves about its resolver contract.
@@ -379,11 +334,11 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
     const soleProject: string[] = [];
     const unmanagedShadow: Array<{ name: string; missingFlags: string[] }> = [];
     const staleShadow: Array<{ name: string; label: string }> = [];
-    for (const archetype of ['worker', 'reviewer', 'judge']) {
+    for (const archetype of CODEX_STEERING_ARCHETYPES) {
       const name = `${archetype}.toml`;
-      const project = readCodexBroker(join(projectDir, name));
+      const project = readCodexAgentFile(join(projectDir, name));
       if (project == null) continue;
-      const user = readCodexBroker(join(userDir, `fadeno-${archetype}.toml`));
+      const user = readCodexAgentFile(join(userDir, `fadeno-${archetype}.toml`));
       if (user == null) {
         soleProject.push(name);
       } else if (!project.managed) {
@@ -420,6 +375,57 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
         `Delete ${absolute(staleShadow.map((item) => item.name))} so the current user-scope broker takes over, or run \`fadeno steering apply --codex --scope project\` to bring the project copy up to this build — a managed project file is refreshed in place.`,
       ));
     }
+  }
+  // --- Command-fallback dispatches a native agent could have delivered ---
+  //
+  // A top-level coordinator session is not itself a materialized Codex role
+  // agent, so its own `steering resolve` call always passes no
+  // `--host-executor` and can only ever land on `mode=command` or
+  // `mode=restart_required` for a locked engine request — never `mode=host`,
+  // even when a role agent cut for that exact executor/model/effort sits
+  // right there in `.codex/agents/`. The resolver now says so via
+  // `delegate_to`, but an advisory nobody reads is invisible; this check is
+  // the tripwire that makes the drift visible after the fact, scanning the
+  // one most recent run rather than the whole `.fadeno/runs/` history to stay
+  // cheap.
+  try {
+    const latestRun = listRuns(repoRoot)[0];
+    if (latestRun != null) {
+      const { events } = readEvents(latestRun.dir);
+      const fallbackRows = events.filter((event) =>
+        event.type === 'actor_dispatched' &&
+        normalizeDeliveryTransport(event.extra.delivery_transport) === 'command-fallback',
+      );
+      if (fallbackRows.length > 0) {
+        const candidates = effectiveCodexAgentCandidates(repoRoot, opts.userPathOptions);
+        const avoidableExecutors = new Set<string>();
+        let avoidableCount = 0;
+        for (const row of fallbackRows) {
+          const executor = typeof row.extra.executor === 'string' ? row.extra.executor : null;
+          if (executor == null) continue;
+          // `agent_type` is the role slot the row had to be claimed as; `*` is
+          // the immutable wildcard, where any declared role surface could have
+          // taken it. The agent's own model/effort are NOT compared: Codex
+          // applies an agent file only after an explicit spawn value, so any
+          // managed agent for the role could have carried this row's
+          // snapshotted identity.
+          const agentType = typeof row.extra.agent_type === 'string' ? row.extra.agent_type : null;
+          if (findSpawnableCodexAgent(candidates, agentType) == null) continue;
+          avoidableCount += 1;
+          avoidableExecutors.add(executor);
+        }
+        if (avoidableCount > 0) {
+          findings.push(finding(
+            'codex-agents-fallback-avoidable',
+            'warning',
+            `${avoidableCount} engine dispatch(es) in the most recent run (${latestRun.runId}) took the command fallback for executor(s) ${[...avoidableExecutors].sort().join(', ')}, even though a managed Codex role agent for that role is installed and could have delivered them in-host`,
+            'The coordinator resolved without --host-executor (it is not itself a materialized role agent), so `steering resolve` reported mode=command. Spawn the role agent named in the resolver\'s `delegate_to`, passing its `model` and `reasoning_effort` as EXPLICIT spawn values — Codex applies an agent file only after an explicit spawn value, so the file\'s own identity neither constrains nor delivers the snapshotted one. Use `fadeno dispatch-fallback` only when no managed role agent exists.',
+          ));
+        }
+      }
+    }
+  } catch {
+    // Read-only advisory: a malformed or unreadable run must not fail doctor.
   }
   // --- Retired Claude managed agents ---
   //

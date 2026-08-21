@@ -42,9 +42,13 @@ bodies at canonical run paths; workers never invoke Fadeno ledger commands.
 8. Execute each step in `flow` using available host capabilities. When
    `fadeno drive` returns `awaiting_host_dispatch`, deliver the immutable actor
    prompt with an envelope beginning `# Fadeno engine step assignment` and containing
-   both `run: <run-id>` and `dispatch_id: <dispatch-id>`. The delivered Codex
-   agent must resolve that pair before doing work; it must not fall back to an
-   ambient dial. Start each request with the host facility, attach its
+   both `run: <run-id>` and `dispatch_id: <dispatch-id>`. Prefer spawning
+   the Codex role agent named by the resolver's `delegate_to`, passing its
+   `model` and `reasoning_effort` as explicit spawn values (see
+   `references/runtime.md`) — one level only, same as any other host subagent
+   handoff — and fall back to a command executor only when none is named. The
+   delivered Codex agent must resolve that pair before doing work; it must not
+   fall back to an ambient dial. Start each request with the host facility, attach its
    host agent id, and submit exactly one terminal receipt serially with
    `dispatch-complete` or `dispatch-fail` before driving again. The immutable
    prompt names an ephemeral progress sidecar. Poll it without interrupting the

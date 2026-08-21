@@ -1753,6 +1753,7 @@ function main(argv: string[]): number {
           detail: result.detail,
           writeConflict: result.writeConflict ?? null,
           shadow: result.shadow ?? null,
+          delegate_to: result.delegate_to ?? null,
         };
         console.log(JSON.stringify(steeringOut, null, 2));
         // A refused slot is not runnable here, same as a restart: non-zero, so

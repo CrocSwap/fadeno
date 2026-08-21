@@ -118,12 +118,6 @@ fadeno dispatch-complete <run> <dispatch-id> --output <temporary-file> [--commit
 fadeno dispatch-fail <run> <dispatch-id> --reason <text>
 ```
 
-If resolution returns `mode=command` for this immutable engine request, run
-`fadeno dispatch-fallback <run> <dispatch-id>` instead. It authenticates the
-snapshotted executor and prompt, invokes the executor's declared fallback, and
-owns both lifecycle receipts. Do not use ordinary `fadeno dispatch` for a
-locked request.
-
 The host delivery envelope is part of the routing contract. Prefix an engine
 assignment with `# Fadeno engine step assignment` and include the exact `run` and
 `dispatch_id` above. A Codex role agent resolves the immutable request before
@@ -133,6 +127,37 @@ working:
 fadeno steering resolve --archetype <archetype> [--host-executor <embedded-host>] \
   --run <run-id> --dispatch-id <dispatch-id>
 ```
+
+A materialized role agent supplies its own baked `--host-executor`
+automatically. The top-level coordinator has none to supply, so its own
+resolve call can only ever land on `mode=command` or `mode=restart_required`
+for a locked request — never `mode=host`. That is a statement about the
+CALLER, not about what this session can deliver.
+
+Before treating a `mode=command` answer as final, check the resolution for
+`delegate_to`. When present it names a managed Codex role agent for this
+request's archetype, together with the `model` and `reasoning_effort` from the
+run snapshot. (`mode=restart_required` never carries it: that answer means
+there is no command lane at all, and the CLI exits non-zero on it.) Spawn that agent and hand it the engine assignment envelope
+unmodified, with its exact `run` and `dispatch_id`.
+
+**Pass `model` and `reasoning_effort` as EXPLICIT spawn values.** Codex
+resolves a subagent's settings from an explicit spawn value first, then the
+`[agents]` default, then the parent's value, and applies the agent file last —
+so the file's own `model` / `model_reasoning_effort` neither constrain nor
+deliver the locked identity. Spawning the agent without them runs whatever
+that file happens to say, which is a silent identity substitution against a
+snapshot that froze the identity on purpose. The spawned agent supplies its
+own `--host-executor`, matches, and resolves `mode=host`, delivering the work
+in-host.
+
+Run `fadeno dispatch-fallback <run> <dispatch-id>` only when resolution
+returns `mode=command` with **no** `delegate_to` — no managed role agent
+exists to spawn, or the model is one this harness cannot host at all (a
+cross-provider executor has no `host: true` route here, and no spawn can
+deliver it). It authenticates the snapshotted executor and prompt, invokes the
+executor's declared fallback, and owns both lifecycle receipts. Do not use
+ordinary `fadeno dispatch` for a locked request.
 
 Both identities are required. Missing or invalid identity is fail-closed; an
 engine assignment never falls back to ambient dials, sticky local dials, or a

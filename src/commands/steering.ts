@@ -35,6 +35,12 @@ import { HostDispatchError, readHostDispatchRequest, type HostDispatchRequest, t
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { codexUserAgentDir, userPaths, type UserPathOptions } from '../lib/user-paths.ts';
+import {
+  CODEX_MANAGED_MARK,
+  CODEX_STEERING_ARCHETYPES,
+  effectiveCodexAgentCandidates,
+  findSpawnableCodexAgent,
+} from '../lib/codex-agent-file.ts';
 
 export class SteeringError extends Error {}
 
@@ -129,6 +135,27 @@ export interface SteeringResolution extends LaneDecision {
   surface_archetype?: string;
   /** Advisory-only write-forbidden instruction for host delivery. */
   advisory?: string;
+  /**
+   * A native spawn that would deliver this locked request in-host, present
+   * only when the CALLER could not prove a host identity of its own.
+   *
+   * `model` / `reasoning_effort` are the run snapshot's, and must be passed as
+   * EXPLICIT spawn values — Codex resolves a subagent's settings from the
+   * explicit spawn value first and the agent file last, so the file's own
+   * identity neither constrains nor delivers this one. Spawning `archetype`'s
+   * agent without them runs whatever that file happens to say.
+   */
+  delegate_to?: {
+    archetype: string;
+    /** Pass as the spawn's `model`. From the run snapshot, not from the file. */
+    model: string;
+    /** Pass as the spawn's `model_reasoning_effort`. From the run snapshot. */
+    reasoning_effort: string;
+    executor: string;
+    /** The managed agent file that would carry the spawn. Informational. */
+    agent_file: string;
+    scope: 'project' | 'user';
+  };
   /** Wildcard specialization: the immutable requested agent type (may be "*"), present on locked resolves. */
   requested_agent_type?: string;
   /** Wildcard specialization: the concrete archetype delivered when the request was wildcard, present when requested_agent_type is "*". */
@@ -308,6 +335,7 @@ function snapshotProfileForRequest(lookup: HostDispatchRequestLookup): SnapshotD
 // an immutable dispatch with its own receipts contract, and changing its
 // delivery mode out from under that contract is out of scope for phase 5.
 function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: string, role: string | null, hostExecutor: string | null): SteeringResolution {
+  const repoRoot = rootOf(opts);
   const run = opts.run?.trim() ?? '';
   const dispatchId = opts.dispatchId?.trim() ?? '';
   if (run === '' || dispatchId === '') {
@@ -315,7 +343,7 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
   }
   let lookup: HostDispatchRequestLookup;
   try {
-    lookup = readHostDispatchRequest({ repoRoot: rootOf(opts), cwd: opts.cwd, run, dispatchId });
+    lookup = readHostDispatchRequest({ repoRoot, cwd: opts.cwd, run, dispatchId });
   } catch (err) {
     if (err instanceof HostDispatchError) throw new SteeringError(err.message);
     throw err;
@@ -390,12 +418,60 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
   const matchesHost = hostExecutor === request.executor;
   const hasFallback = executor.fallbackCommand != null;
   const neutral = isReferenceFrameNeutralHostRequest(request, executor);
+  // Advisory, and only for a caller that could not prove a host identity of
+  // its own. `hostExecutor == null` is what distinguishes an unidentified
+  // caller from a materialized agent that asked and did not match.
+  //
+  // Gated on `hasFallback`, i.e. only where the resolution is `mode: command`.
+  // A spawn would also help when there is NO fallback — that resolution is
+  // `restart_required`, whose advice ("start a matching session") is needless
+  // if the caller can just spawn one — but `cli.ts` exits 2 on that mode, so a
+  // shell-driven coordinator would abort while being told to proceed. Advice
+  // that contradicts the process's own exit status is worse than none. Making
+  // it useful there means changing the mode vocabulary, which frozen brokers
+  // (they STOP on `restart_required`) do not permit today.
+  //
+  // Never for the reference-frame-neutral sentinel: `current-host` is not a
+  // model id, so it cannot be passed as an explicit spawn value. Such a
+  // request is deliverable by whatever session is running and needs no
+  // model-specific spawn to begin with.
+  //
+  // Nor gated on the agent file's identity. Codex applies a subagent's file
+  // AFTER an explicit spawn value, so any managed agent for the right role can
+  // carry the snapshot's model and effort. Requiring the file to already say
+  // them made this silent in the common case.
+  //
+  // The mode is deliberately NOT changed to `host` here. A command broker also
+  // passes no `--host-executor` (`renderCodexCommandBroker`), is frozen on
+  // disk, and STOPS on `mode: host` — so an unidentified caller must keep
+  // seeing the mode it sees today, and the new capability rides on the
+  // payload. Only a caller that can spawn acts on `delegate_to`.
+  let delegateTo: SteeringResolution['delegate_to'];
+  if (
+    !matchesHost && !neutral && hasFallback && hostExecutor == null
+    && executor.adapter === 'host' && request.model !== NEUTRAL_HOST_EXECUTOR
+  ) {
+    const candidates = effectiveCodexAgentCandidates(repoRoot, opts.userPathOptions);
+    const target = findSpawnableCodexAgent(candidates, archetype);
+    if (target != null) {
+      delegateTo = {
+        archetype: target.state.name ?? target.archetype,
+        model: request.model,
+        reasoning_effort: request.reasoningEffort,
+        executor: request.executor,
+        agent_file: target.path,
+        scope: target.scope,
+      };
+    }
+  }
   const detail = matchesHost
     ? `host request ${dispatchId} is locked to run-snapshotted executor ${request.executor}; execute in-host`
     : neutral
       ? `host request ${dispatchId} is locked to the reference-frame-neutral executor current-host; execute in-host`
       : hasFallback
-        ? `host request ${dispatchId} is locked to ${request.executor}; deliver it through that executor's declared command fallback`
+        ? delegateTo != null
+          ? `host request ${dispatchId} is locked to ${request.executor}; spawn the ${delegateTo.archetype} Codex agent (${delegateTo.agent_file}) with explicit model ${delegateTo.model} and model_reasoning_effort ${delegateTo.reasoning_effort} and hand it this engine assignment envelope — it delivers the locked identity in-host, which is preferable to that executor's declared command fallback`
+          : `host request ${dispatchId} is locked to ${request.executor}; deliver it through that executor's declared command fallback`
         : `host request ${dispatchId} requires host executor ${request.executor}; this session is materialized for ${hostExecutor ?? 'no host executor'}, so start a matching Codex session`;
   // For locked, dial is the executor ref itself
   let dial: DialRef;
@@ -436,6 +512,7 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
     requested_agent_type: requestedAgentType,
     identity_evidence: 'requested_only',
     ...(deliveredArchetype != null ? { delivered_archetype: deliveredArchetype } : {}),
+    ...(delegateTo != null ? { delegate_to: delegateTo } : {}),
   };
   // A wildcard request is already assigned to a concrete host agent. That
   // agent may claim the locked request as `director` (or another declared,
@@ -914,9 +991,6 @@ export interface SteeringApplyResult {
   ignoredLocalDials?: string[];
 }
 
-/** The three Codex role slots that get a session-static agent file. */
-const CODEX_STEERING_ARCHETYPES = ['worker', 'reviewer', 'judge'] as const;
-
 function codexAgentDir(scope: 'project' | 'user', repoRoot: string, userPathOptions?: UserPathOptions): string {
   if (scope === 'project') return join(repoRoot, '.codex', 'agents');
   // One definition of "$CODEX_HOME/agents", shared with status/doctor/uninstall.
@@ -926,14 +1000,6 @@ function codexAgentDir(scope: 'project' | 'user', repoRoot: string, userPathOpti
   // developer's real `~/.codex`.
   return codexUserAgentDir(userPathOptions);
 }
-
-/**
- * The header that makes a Codex agent file provably Fadeno's. Both scopes
- * carry it: it is the only thing that lets a later emit tell a file Fadeno
- * wrote from one a human did, and the only thing that lets `doctor` tell a
- * current project broker from a frozen legacy one.
- */
-const CODEX_MANAGED_MARK = '# fadeno:managed';
 
 /**
  * Prepend the managed header to a rendered agent body.
