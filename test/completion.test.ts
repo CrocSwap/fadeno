@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { SCHEMA_KINDS } from '../src/lib/playbook-validate.ts';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -24,12 +25,11 @@ test('completion script is sourceable Bash and covers commands/options', () => {
   assert.ok(complete('/tmp', ['fadeno', 'd']).includes('diagram'));
   assert.deepEqual(complete('/tmp', ['fadeno', 'dial', '']), ['clear', 'clear-shadow', 'resolve', 'shadow']);
   assert.deepEqual(complete('/tmp', ['fadeno', 'steering', '']), ['apply', 'resolve']);
-  assert.deepEqual(complete('/tmp', ['fadeno', 'validate', '--schema', '']), [
-    'playbook',
-    'review-report',
-    'run',
-    'test-result',
-  ]);
+  // Derived, not restated: this list was a sixth copy of the schema-kind
+  // vocabulary, and a literal here would have to be edited in lockstep with
+  // the registry forever — which is exactly how `model-comparison` came to be
+  // known to the registry and rejected by `--schema`.
+  assert.deepEqual(complete('/tmp', ['fadeno', 'validate', '--schema', '']), [...SCHEMA_KINDS].sort());
   assert.deepEqual(complete('/tmp', ['fadeno', 'diagram', '--format=']), ['--format=ascii', '--format=mermaid']);
   assert.deepEqual(complete('/tmp', ['fadeno', 'gate', 'run', '']), ['all_reviews_approved', 'no_blocking_issues', 'tests_pass']);
   // new flags: --via, --model, --session, --user, --repo exist; old --executor gone

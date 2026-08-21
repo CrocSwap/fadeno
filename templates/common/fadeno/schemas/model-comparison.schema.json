@@ -1,0 +1,161 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://fadeno.dev/schemas/model-comparison.schema.json",
+  "title": "Fadeno Model Comparison",
+  "description": "A judge's structured judgment of one shadow pair. Written against BLINDED arms (arm_a / arm_b); the kernel unblinds when it renders the ModelComparison artifact, so a judgment can never see which arm was the primary. Deterministic measurements are supplied to the judge and are never restated here \u2014 the kernel already knows them, and a judge's recollection of a number is not evidence.",
+  "type": "object",
+  "required": [
+    "verdict",
+    "criteria",
+    "shared_blind_spots"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "verdict": {
+      "enum": [
+        "prefer_baseline",
+        "prefer_challenger",
+        "graft",
+        "tie",
+        "inconclusive"
+      ],
+      "description": "prefer_* names an arm as better AS SHIPPED. `graft` means neither arm should be taken whole \u2014 the honest answer for both pairs judged so far \u2014 and requires a non-empty graft_plan. `tie` means genuinely equivalent; `inconclusive` means the evidence does not support a call, which is a valid outcome and must not be avoided by guessing."
+    },
+    "graft_plan": {
+      "type": "array",
+      "description": "Required when verdict is `graft`, forbidden otherwise. Prose instructions a person acts on, not hunks to apply blindly.",
+      "items": {
+        "type": "object",
+        "required": [
+          "from_arm",
+          "what",
+          "why"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "from_arm": {
+            "enum": [
+              "a",
+              "b"
+            ],
+            "description": "Blinded arm label. The kernel translates to primary/challenger at render time."
+          },
+          "what": {
+            "type": "string",
+            "minLength": 1
+          },
+          "why": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The reason this material wins. Repo convention counts here: what separated the first two pairs was convention adherence, not general code quality."
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Advisory. Where the material lives, when known."
+          }
+        }
+      }
+    },
+    "criteria": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Per-criterion assessment. Qualitative by design: the deterministic signals are measured by the kernel, and asking a judge to re-derive them invites a confident wrong number.",
+      "items": {
+        "type": "object",
+        "required": [
+          "criterion",
+          "assessment"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "criterion": {
+            "enum": [
+              "correctness",
+              "scope_discipline",
+              "instruction_adherence",
+              "repo_convention",
+              "style_fit"
+            ]
+          },
+          "assessment": {
+            "type": "string",
+            "minLength": 1
+          },
+          "favors": {
+            "enum": [
+              "a",
+              "b",
+              "neither"
+            ]
+          }
+        }
+      }
+    },
+    "shared_blind_spots": {
+      "type": "array",
+      "description": "Defects present in BOTH arms. Required, and may be empty only after actually looking \u2014 agreement between two arms is not evidence they are right. Pair 89536181's arms both matched a Codex agent on model and effort while neither checked the role slot, and both arms' tests used a fixture where the case could not arise.",
+      "items": {
+        "type": "object",
+        "required": [
+          "issue",
+          "why_invisible"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "issue": {
+            "type": "string",
+            "minLength": 1
+          },
+          "why_invisible": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What made this survive both arms \u2014 usually a fixture or config both assumed."
+          },
+          "config_that_breaks_it": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "confound_notes": {
+      "type": "string",
+      "description": "Optional. The kernel stamps the confounds it can prove from the ledger; this is only for one a judge observed that the ledger cannot see."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "verdict": {
+            "const": "graft"
+          }
+        },
+        "required": [
+          "verdict"
+        ]
+      },
+      "then": {
+        "required": [
+          "graft_plan"
+        ],
+        "properties": {
+          "graft_plan": {
+            "minItems": 1
+          }
+        },
+        "description": "A graft verdict that names nothing is unactionable, and reads in a scorecard exactly like a considered one."
+      },
+      "else": {
+        "not": {
+          "required": [
+            "graft_plan"
+          ]
+        },
+        "description": "A plan under any other verdict is a judge contradicting itself; accepting either half quietly is how a wrong answer looks right."
+      }
+    }
+  ]
+}

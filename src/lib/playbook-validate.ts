@@ -7,7 +7,19 @@ import { BARE_IDENTIFIER_RE } from './executors.ts';
 
 export type Severity = 'error' | 'warning';
 
-export type SchemaKind = 'playbook' | 'run' | 'review-report' | 'test-result';
+/**
+ * Every schema kind, as one list.
+ *
+ * This existed as five separate literals — the type here, `SCHEMA_FILE` below,
+ * `SCHEMA_KINDS` in cli.ts, two spellings in completion.ts, and a Set in
+ * tool-complete.ts. Adding a kind to the type alone left `--schema` rejecting
+ * it with a message listing the OLD four, which is the failure that revealed
+ * this: the schema shipped, the registry knew it, and the CLI said no such
+ * kind.
+ */
+export const SCHEMA_KINDS = ['playbook', 'run', 'review-report', 'test-result', 'model-comparison'] as const;
+
+export type SchemaKind = (typeof SCHEMA_KINDS)[number];
 
 export interface ValidationIssue {
   file: string;
@@ -28,6 +40,7 @@ const SCHEMA_FILE: Record<SchemaKind, string> = {
   run: 'run.schema.json',
   'review-report': 'review-report.schema.json',
   'test-result': 'test-result.schema.json',
+  'model-comparison': 'model-comparison.schema.json',
 };
 
 /** Step-reference fields whose value must resolve to a defined step id. */

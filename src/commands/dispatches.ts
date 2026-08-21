@@ -4,6 +4,14 @@ import { parse as parseYaml } from 'yaml';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import {
+  checkGraftCoherence,
+  isModelComparisonVerdict,
+  MODEL_COMPARISON_REQUIRED_SECTIONS,
+  VERDICT_BUCKET,
+  type GraftStep,
+  type ModelComparisonVerdict,
+} from '../lib/model-comparison.ts';
+import {
   DISPATCHES_FILE,
   DISPATCHES_FORMAT,
   appendEvidenceRow,
@@ -1675,6 +1683,7 @@ export interface DispatchComparisonGroup {
     comparisons: number;
     preferChallenger: number;
     preferBaseline: number;
+    graft: number;
     tieOrInconclusive: number;
   };
 }
@@ -1961,15 +1970,21 @@ function parseModelComparisonFile(repoRoot: string, relPath: string): ModelCompa
   if (Array.isArray(dispatchIdsRaw)) dispatchIds = dispatchIdsRaw.filter((v): v is string => typeof v === 'string' && v !== '');
   const valid = kind === 'ModelComparison' && baseline != null && challenger != null && verdict != null && date != null;
   const body = content.slice(match[0].length);
-  const hasCriteria = /^##\s+Criteria/m.test(body);
-  const hasConfounds = /^##\s+Confounds/m.test(body);
-  if (!hasCriteria || !hasConfounds) {
+  const missingSection = MODEL_COMPARISON_REQUIRED_SECTIONS.find(
+    (section) => !new RegExp(`^##\\s+${section}`, 'm').test(body),
+  );
+  if (missingSection != null) {
     return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: 'missing required sections' };
   }
   if (!valid) return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: 'invalid frontmatter' };
-  const allowedVerdicts = new Set(['prefer_baseline', 'prefer_challenger', 'tie', 'inconclusive']);
-  if (!allowedVerdicts.has(verdict!)) {
+  if (!isModelComparisonVerdict(verdict)) {
     return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: 'invalid verdict' };
+  }
+  const planRaw = data.graft_plan;
+  const plan = Array.isArray(planRaw) ? (planRaw as GraftStep[]) : undefined;
+  const incoherent = checkGraftCoherence(verdict, plan);
+  if (incoherent != null) {
+    return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: false, error: incoherent };
   }
   return { file: relPath, baseline, challenger, verdict, date, dispatchIds, valid: true };
 }
@@ -2125,9 +2140,17 @@ export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}
   for (const challenger of sortedChallengers) {
     const groupPairs = pairs.filter((p) => (p.shadow.executor ?? '(unknown)') === challenger);
     const groupComparisons = artifacts.filter((a) => a.challenger === challenger);
-    const preferChallenger = groupComparisons.filter((a) => a.valid && a.verdict === 'prefer_challenger').length;
-    const preferBaseline = groupComparisons.filter((a) => a.valid && a.verdict === 'prefer_baseline').length;
-    const tieOrInconclusive = groupComparisons.filter((a) => a.valid && (a.verdict === 'tie' || a.verdict === 'inconclusive')).length;
+    // Bucketed through VERDICT_BUCKET rather than by comparing to literals.
+    // The literal form silently dropped any verdict it did not name: `graft`
+    // would have parsed as valid, counted toward `comparisons`, and landed in
+    // none of the buckets, so the row's own numbers would stop adding up with
+    // nothing to say so — and `graft` is the COMMON case, not an edge one.
+    const bucketed = groupComparisons.filter((a) => a.valid && isModelComparisonVerdict(a.verdict))
+      .map((a) => VERDICT_BUCKET[a.verdict as ModelComparisonVerdict]);
+    const preferChallenger = bucketed.filter((b) => b === 'challenger').length;
+    const preferBaseline = bucketed.filter((b) => b === 'baseline').length;
+    const graft = bucketed.filter((b) => b === 'graft').length;
+    const tieOrInconclusive = bucketed.filter((b) => b === 'neither').length;
     groups.push({
       challenger,
       pairs: groupPairs,
@@ -2137,6 +2160,7 @@ export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}
         comparisons: groupComparisons.filter((a) => a.valid).length,
         preferChallenger,
         preferBaseline,
+        graft,
         tieOrInconclusive,
       },
     });
@@ -2155,7 +2179,7 @@ export function runDispatchesComparisons(opts: DispatchesComparisonsOptions = {}
     }
   } else {
     for (const group of groups) {
-      lines.push(`challenger ${group.challenger}: ${group.tally.pairs} pairs, ${group.tally.comparisons} comparisons: ${group.tally.preferChallenger} prefer_challenger / ${group.tally.preferBaseline} prefer_baseline / ${group.tally.tieOrInconclusive} tie/inconclusive`);
+      lines.push(`challenger ${group.challenger}: ${group.tally.pairs} pairs, ${group.tally.comparisons} comparisons: ${group.tally.preferChallenger} prefer_challenger / ${group.tally.preferBaseline} prefer_baseline / ${group.tally.graft} graft / ${group.tally.tieOrInconclusive} tie/inconclusive`);
       for (const pair of group.pairs) {
         lines.push(`  ${formatComparisonPair(pair)}`);
       }

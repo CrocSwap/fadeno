@@ -66,6 +66,7 @@ import { runCancel, CancelError } from './commands/cancel.ts';
 import type { DiagramFormat } from './lib/diagram.ts';
 import { progressSidecarPath } from './lib/prompt.ts';
 import type { EmitResult } from './lib/fsutil.ts';
+import { SCHEMA_KINDS as SCHEMA_KIND_LIST } from './lib/playbook-validate.ts';
 import type { SchemaKind, ValidationIssue } from './lib/playbook-validate.ts';
 import { findRepoRoot, packageVersion } from './lib/paths.ts';
 import type { RunEvent, RunSummary } from './lib/run-ledger.ts';
@@ -774,7 +775,7 @@ Options:
 };
 
 const SIGIL: Record<Target, string> = { codex: '$', claude: '/', grok: '/' };
-const SCHEMA_KINDS: SchemaKind[] = ['playbook', 'run', 'review-report', 'test-result'];
+const SCHEMA_KINDS: readonly SchemaKind[] = SCHEMA_KIND_LIST;
 
 function printInitSummary(
   target: Target,

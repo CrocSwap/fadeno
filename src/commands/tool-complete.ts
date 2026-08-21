@@ -6,7 +6,7 @@ import { runRun, RunError, type RunResult } from './run.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { runSchemaDirectories } from '../lib/definitions.ts';
 import { resolveRun, RunLedgerError } from '../lib/run-ledger.ts';
-import { SchemaSet, validateFile, type SchemaKind } from '../lib/playbook-validate.ts';
+import { SchemaSet, SCHEMA_KINDS, validateFile, type SchemaKind } from '../lib/playbook-validate.ts';
 import { readEventsStrict } from '../lib/run-ledger.ts';
 import { INFLIGHT_DIR, inflightClaimIsAlive, readInflightClaim } from '../lib/supervisor.ts';
 import { toolAttemptIds, plannedGenerationAttributed } from '../lib/tool-exec.ts';
@@ -44,7 +44,7 @@ export function runToolComplete(opts: ToolCompleteOptions): ToolCompleteResult {
     );
   }
   if (next.step.artifact_type != null) {
-    const schemaKinds = new Set<SchemaKind>(['playbook', 'run', 'review-report', 'test-result']);
+    const schemaKinds = new Set<SchemaKind>(SCHEMA_KINDS);
     if (!schemaKinds.has(next.step.artifact_type as SchemaKind)) {
       throw new ToolCompleteError(`tool step "${next.step.id}" declares unsupported artifact schema "${next.step.artifact_type}".`);
     }

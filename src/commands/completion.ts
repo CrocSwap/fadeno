@@ -1,3 +1,4 @@
+import { SCHEMA_KINDS } from '../lib/playbook-validate.ts';
 import { readdirSync, readFileSync, type Dirent } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -87,7 +88,7 @@ const COMMANDS: Record<string, CommandSpec> = {
     '--no-steering': NONE,
     '--data-only': NONE,
   }),
-  validate: command({ '--schema': { kind: 'enum', values: ['playbook', 'run', 'review-report', 'test-result'] } }, ['path']),
+  validate: command({ '--schema': { kind: 'enum', values: [...SCHEMA_KINDS] } }, ['path']),
   diagram: command({ '--format': { kind: 'enum', values: ['ascii', 'mermaid'] } }, ['playbook']),
   'new-run': command({ '--input': { kind: 'input' } }, ['playbook', 'free']),
   models: command({ '--driver': { kind: 'free' }, '--json': NONE }, ['executor']),
@@ -467,7 +468,7 @@ function dynamicValues(
   switch (kind) {
     case 'enum':
       values = optionToken === '--schema'
-        ? ['playbook', 'run', 'review-report', 'test-result']
+        ? [...SCHEMA_KINDS]
         : optionToken === '--format'
           ? ['ascii', 'mermaid', 'text', 'json']
           : optionToken === '--status'

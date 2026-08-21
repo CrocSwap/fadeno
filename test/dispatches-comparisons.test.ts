@@ -203,6 +203,9 @@ delivery transport: command vs command
 tool availability: same
 effort pinning: same
 isolation: detached-HEAD worktree vs dirty workspace — dirty case
+## Shared blind spots
+none identified
+
 `, 'utf8');
   writeFileSync(join(root, '.fadeno', 'comparisons', 'run-02.md'), `---
 kind: ModelComparison
@@ -219,6 +222,9 @@ delivery transport: same
 tool availability: same
 effort pinning: same
 isolation: clean worktree
+## Shared blind spots
+none identified
+
 `, 'utf8');
   writeFileSync(join(root, '.fadeno', 'comparisons', 'run-03.md'), `---
 kind: ModelComparison
@@ -232,6 +238,9 @@ tie
 
 ## Confounds
 confounds here
+## Shared blind spots
+none identified
+
 `, 'utf8');
   const comps = runDispatchesComparisons({ repoRoot: root });
   assert.equal(comps.totalComparisons, 3);
@@ -244,7 +253,7 @@ confounds here
   const lines = comps.lines.join('\n');
   assert.match(lines, /prefer_challenger/);
   assert.match(lines, /prefer_baseline/);
-  assert.match(lines, /1 prefer_challenger \/ 1 prefer_baseline \/ 1 tie\/inconclusive/);
+  assert.match(lines, /1 prefer_challenger \/ 1 prefer_baseline \/ 0 graft \/ 1 tie\/inconclusive/);
   const json = JSON.parse(JSON.stringify(comps)) as typeof comps;
   assert.equal(json.groups[0]!.tally.preferChallenger, 1);
 });
