@@ -1,6 +1,6 @@
 ---
 name: driver
-description: Drive a Fadeno run ledger end-to-end — engine-first via `fadeno drive`, with a manual `fadeno next` loop for steps the engine can't execute. Use when the host hands you a run id to drive or resume, or when coordinating multi-harness roles without host nested subagents. [fadeno 0.6.0-rc.60]
+description: Drive a Fadeno run ledger end-to-end — engine-first via `fadeno drive`, with a manual `fadeno next` loop for steps the engine can't execute. Use when the host hands you a run id to drive or resume, or when coordinating multi-harness roles without host nested subagents. [fadeno 0.6.0-rc.61]
 ---
 
 # Fadeno Driver
@@ -115,6 +115,7 @@ loop:
         for other tool_call (Diff/PostResult or unregistered): invoke the tool manually, write its output, then run
           fadeno tool-complete <run> --output <artifact-path>
           # typed output is validated atomically before step/artifact events append; manual and automated are mutually exclusive per generation
+          # records the manifest and then a tool_recorded receipt (recorded_by: host) — never tool_completed, which means the kernel ran it
         handle join / … per runtime.md; record; continue
 ```
 

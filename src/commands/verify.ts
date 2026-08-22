@@ -2,6 +2,7 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { resolveActiveArtifacts, sha256Hex, type ActiveResolution } from '../lib/artifact-manifest.ts';
+import { reduceCollective } from '../lib/collective.ts';
 import { eligibilityFor, formatDialRef, parseDialRef, parseSnapshotDocument, resolveDialCascade, type DialRef, type SnapshotDocument } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { normalizeDeliveryTransport } from '../lib/host-dispatch.ts';
@@ -248,6 +249,12 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
   findings.push(
     legacy ? skip('artifact-digests', 'no recorded digests (legacy ledger)') : checkArtifactDigests(run, events),
   );
+
+  // 9b. collective-provenance — a map's collective reduces from its receipted parts.
+  findings.push(legacy ? skip('collective-provenance', 'no receipts recorded (legacy ledger)') : checkCollectiveProvenance(run, events));
+
+  // 9c. tool-artifact-receipts — every tool step's artifact is claimed by a receipt.
+  findings.push(legacy ? skip('tool-artifact-receipts', 'no receipts recorded (legacy ledger)') : checkToolArtifactReceipts(run, events));
 
   // 10. artifact-validation
   findings.push(
@@ -1594,6 +1601,17 @@ function checkEventVocabulary(events: RunEvent[]): Finding {
  * A vocabulary can go stale; the `output` on a completion receipt cannot be
  * dropped without breaking the receipt itself.
  */
+/**
+ * Every event that claims a delivered `output`. Four receipts, four
+ * provenances: the executor delivered it (`actor_completed`), the kernel ran
+ * the tool (`tool_completed`), the host recorded the tool's result by hand
+ * (`tool_recorded`, rc.61), the engine reduced a map's parts into it
+ * (`collective_assembled`, rc.61). Before rc.61 the last two artifact classes
+ * had no receipt at all, so nothing anchored them and either could be renamed
+ * out of the audit — the `unreceipted-artifact-renamed` tamper fixture.
+ */
+const RECEIPT_EVENT_TYPES: ReadonlySet<string> = new Set(['actor_completed', 'tool_completed', 'tool_recorded', 'collective_assembled']);
+
 function checkReceiptOutputManifests(events: RunEvent[]): Finding {
   const check = 'receipt-output-manifests';
   const manifested = new Set<string>();
@@ -1618,7 +1636,7 @@ function checkReceiptOutputManifests(events: RunEvent[]): Finding {
   let checked = 0;
   let superseded = 0;
   for (const event of events) {
-    if (event.type !== 'actor_completed' && event.type !== 'tool_completed') continue;
+    if (!RECEIPT_EVENT_TYPES.has(event.type)) continue;
     const output = event.extra.output;
     if (typeof output !== 'string' || output === '') continue;
 
@@ -1672,6 +1690,229 @@ function checkReceiptOutputManifests(events: RunEvent[]): Finding {
   const shown = missing.slice(0, 5).join('; ');
   const more = missing.length > 5 ? `; …(+${missing.length - 5} more)` : '';
   return { check, status: 'fail', detail: `${shown}${more}` };
+}
+
+interface SnapshotStep {
+  id: string;
+  kind: string;
+  output: string | null;
+}
+
+/**
+ * The steps of the run's immutable playbook snapshot, or null when the run
+ * predates snapshots or the snapshot does not parse (`playbook-provenance`
+ * reports those; the checks below skip rather than guess).
+ */
+function snapshotSteps(run: RunSummary): SnapshotStep[] | null {
+  const path = join(run.dir, 'definitions', 'playbook.yaml');
+  if (!existsSync(path)) return null;
+  let doc: unknown;
+  try {
+    doc = parseYaml(readFileSync(path, 'utf8'));
+  } catch {
+    return null;
+  }
+  const flow = doc != null && typeof doc === 'object' ? (doc as { flow?: unknown }).flow : null;
+  if (!Array.isArray(flow)) return null;
+  const steps: SnapshotStep[] = [];
+  for (const step of flow) {
+    if (step == null || typeof step !== 'object') continue;
+    const { id, kind, output } = step as { id?: unknown; kind?: unknown; output?: unknown };
+    if (typeof id !== 'string' || typeof kind !== 'string') continue;
+    steps.push({ id, kind, output: typeof output === 'string' ? output : null });
+  }
+  return steps;
+}
+
+/**
+ * A map step's collective must reduce from its receipted parts.
+ *
+ * The collective is what a gate reads, and until rc.61 it was the artifact
+ * with the weakest provenance in the ledger: a manifest with a digest and
+ * nothing saying where the bytes came from. `collective_assembled` names the
+ * parts in order; this check parses those parts from disk, reduces them
+ * through the same `reduceCollective` the engine used, and holds the
+ * receipt's digest, the manifest's digest, and the bytes on disk to that
+ * result. A collective that was edited — even with its manifest and receipt
+ * digests "fixed" to match — no longer reduces from its parts.
+ *
+ * Presence is checked from the playbook snapshot with the rule the flow
+ * cursor itself uses: an artifact on a map step that no member produced
+ * (no `member`, no `actor_call_id`) is the collective, and it must carry
+ * the receipt — so deleting the receipt is not a way back to the unanchored
+ * state. A ledger written before rc.61 fails here by design; regenerate the
+ * trace.
+ */
+function checkCollectiveProvenance(run: RunSummary, events: RunEvent[]): Finding {
+  const check = 'collective-provenance';
+  const manifests = new Map<string, string | null>();
+  const receipts = events.filter((e) => e.type === 'collective_assembled');
+  const receiptedOutputs = new Set(receipts.map((r) => r.extra.output).filter((o): o is string => typeof o === 'string'));
+  const problems: string[] = [];
+  const steps = snapshotSteps(run);
+  const mapSteps = new Set((steps ?? []).filter((s) => s.kind === 'map').map((s) => s.id));
+  let planned = 0;
+  for (const event of events) {
+    if (event.type !== 'artifact_created' || typeof event.extra.artifact !== 'string') continue;
+    const rel = event.extra.artifact;
+    manifests.set(rel, typeof event.extra.sha256 === 'string' ? event.extra.sha256 : null);
+    if (event.step == null || !mapSteps.has(event.step)) continue;
+    if (event.extra.member != null || event.extra.actor_call_id != null) continue; // a member's part
+    planned += 1;
+    if (!receiptedOutputs.has(rel)) {
+      problems.push(
+        `${rel} is the collective of map step "${event.step}" but no collective_assembled receipt claims it ` +
+          '(a ledger written before 0.6.0-rc.61 carries none — regenerate the trace)',
+      );
+    }
+  }
+
+  let recomputed = 0;
+  for (const receipt of receipts) {
+    const output = receipt.extra.output;
+    const parts = receipt.extra.parts;
+    if (typeof output !== 'string' || !Array.isArray(parts) || !parts.every((p) => typeof p === 'string')) {
+      problems.push(`seq ${receipt.seq ?? '?'}: collective_assembled receipt is malformed (needs output and parts[])`);
+      continue;
+    }
+    if (parts.length === 0) {
+      problems.push(`${output}: the receipt names no parts`);
+      continue;
+    }
+    const bodies: unknown[] = [];
+    let broken = false;
+    for (const rel of parts as string[]) {
+      if (!manifests.has(rel)) {
+        problems.push(`${output}: part ${rel} was never manifested`);
+        broken = true;
+        continue;
+      }
+      if (!isInsideRun(run.dir, rel)) {
+        problems.push(`${output}: part ${rel} escapes the run directory`);
+        broken = true;
+        continue;
+      }
+      const abs = resolveArtifact(run.dir, rel);
+      if (!existsSync(abs)) {
+        problems.push(`${output}: part ${rel} is missing on disk`);
+        broken = true;
+        continue;
+      }
+      try {
+        bodies.push(JSON.parse(readFileSync(abs, 'utf8')));
+      } catch {
+        problems.push(`${output}: part ${rel} is not valid JSON`);
+        broken = true;
+      }
+    }
+    if (broken) continue;
+    const expectedSha = sha256Hex(reduceCollective(bodies));
+    const n = `${parts.length} part(s)`;
+    if (typeof receipt.extra.output_sha256 === 'string' && receipt.extra.output_sha256 !== expectedSha) {
+      problems.push(`${output}: the receipt's output_sha256 is not the reduction of its ${n}`);
+    }
+    const manifestSha = manifests.get(output);
+    if (manifestSha != null && manifestSha !== expectedSha) {
+      problems.push(`${output}: the manifest digest is not the reduction of its ${n}`);
+    }
+    if (isInsideRun(run.dir, output)) {
+      const abs = resolveArtifact(run.dir, output);
+      if (existsSync(abs) && sha256Hex(readFileSync(abs)) !== expectedSha) {
+        problems.push(`${output}: the bytes on disk are not the reduction of its ${n}`);
+      }
+    }
+    recomputed += 1;
+  }
+
+  if (problems.length > 0) {
+    const shown = problems.slice(0, 5).join('; ');
+    const more = problems.length > 5 ? `; …(+${problems.length - 5} more)` : '';
+    return { check, status: 'fail', detail: `${shown}${more}` };
+  }
+  if (recomputed === 0 && planned === 0) {
+    return skip(check, steps == null ? 'no playbook snapshot to name map steps and no collective receipts' : 'no map step assembled a collective');
+  }
+  return { check, status: 'ok', detail: `${recomputed} collective(s) reduce from their receipted parts` };
+}
+
+/**
+ * Every artifact that completes a tool_call step is claimed by a receipt —
+ * `tool_completed` when the kernel ran the tool, `tool_recorded` when the
+ * host recorded the result by hand — and a recorded receipt attests the bytes
+ * it names.
+ *
+ * Before rc.61 `fadeno tool-complete` emitted only the manifest, so a manual
+ * tool result was the other artifact class nothing anchored. The measured
+ * lifecycle (`tool-lifecycle`, `tool-command-digest`,
+ * `tool-result-coherence`) is not claimed for a recorded result: there is no
+ * command or exit code to recompute, and the receipt says so by its name.
+ */
+function checkToolArtifactReceipts(run: RunSummary, events: RunEvent[]): Finding {
+  const check = 'tool-artifact-receipts';
+  const steps = snapshotSteps(run);
+  if (steps == null) return skip(check, 'no playbook snapshot to name tool_call steps');
+  const toolSteps = new Set(steps.filter((s) => s.kind === 'tool_call').map((s) => s.id));
+  if (toolSteps.size === 0) return skip(check, 'playbook has no tool_call step');
+
+  const claimed = new Map<string, string>();
+  for (const event of events) {
+    if (event.type !== 'tool_completed' && event.type !== 'tool_recorded') continue;
+    if (typeof event.extra.output === 'string') claimed.set(event.extra.output, event.type);
+  }
+  const problems: string[] = [];
+  let checked = 0;
+  let recorded = 0;
+  const manifests = new Map<string, string | null>();
+  for (const event of events) {
+    if (event.type !== 'artifact_created' || typeof event.extra.artifact !== 'string') continue;
+    manifests.set(event.extra.artifact, typeof event.extra.sha256 === 'string' ? event.extra.sha256 : null);
+    if (event.step == null || !toolSteps.has(event.step)) continue;
+    checked += 1;
+    if (!claimed.has(event.extra.artifact)) {
+      problems.push(
+        `${event.extra.artifact} completes tool step "${event.step}" but no tool_completed or tool_recorded receipt claims it ` +
+          '(a ledger written before 0.6.0-rc.61 carries none for a manual result — regenerate the trace)',
+      );
+    }
+  }
+  for (const receipt of events) {
+    if (receipt.type !== 'tool_recorded') continue;
+    const output = receipt.extra.output;
+    const who = typeof receipt.extra.tool_call_id === 'string' ? receipt.extra.tool_call_id : `seq ${receipt.seq ?? '?'}`;
+    if (typeof output !== 'string') {
+      problems.push(`${who}: tool_recorded receipt names no output`);
+      continue;
+    }
+    if (receipt.extra.recorded_by !== 'host') {
+      problems.push(`${who}: tool_recorded must say recorded_by: host (found ${JSON.stringify(receipt.extra.recorded_by ?? null)})`);
+    }
+    recorded += 1;
+    const sha = typeof receipt.extra.output_sha256 === 'string' ? receipt.extra.output_sha256 : null;
+    if (sha == null) {
+      problems.push(`${who}: tool_recorded receipt for ${output} carries no output_sha256`);
+      continue;
+    }
+    const manifestSha = manifests.get(output);
+    if (manifestSha != null && manifestSha !== sha) {
+      problems.push(`${who}: the receipt's output_sha256 for ${output} disagrees with its manifest`);
+    }
+    if (!isInsideRun(run.dir, output)) {
+      problems.push(`${who}: output ${output} escapes the run directory`);
+      continue;
+    }
+    const abs = resolveArtifact(run.dir, output);
+    if (existsSync(abs) && sha256Hex(readFileSync(abs)) !== sha) {
+      problems.push(`${who}: the bytes on disk at ${output} are not what the receipt attested`);
+    }
+  }
+  if (problems.length > 0) {
+    const shown = problems.slice(0, 5).join('; ');
+    const more = problems.length > 5 ? `; …(+${problems.length - 5} more)` : '';
+    return { check, status: 'fail', detail: `${shown}${more}` };
+  }
+  if (checked === 0) return skip(check, 'no tool step completed with an artifact');
+  const byHand = recorded > 0 ? `, ${recorded} recorded by the host` : '';
+  return { check, status: 'ok', detail: `${checked} tool artifact(s) claimed by a receipt${byHand}` };
 }
 
 function checkTerminalStatus(run: RunSummary, allowFailed: boolean): Finding {

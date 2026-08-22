@@ -448,7 +448,9 @@ All three runs are done in `fadeno-demo` and verify clean. The tamper pass is
 `scripts/tamper-matrix.mjs` (`npm run tamper -- <run-dir>…`), which copies a real
 trace, applies one mutation per fixture, and asserts both that `verify` fails
 and that the check which should have caught it is among the failures. **47
-caught, 0 uncaught, 3 known gaps, 2 not applicable** across four traces.
+caught, 0 uncaught, 3 known gaps, 2 not applicable** across four traces. (The
+gaps are closed as of rc.61 — see below; the matrix now also refuses to run
+fixtures on a trace that fails `verify` untouched.)
 
 Two checks were added because the tamper pass found them missing, and both were
 found by fixtures that verified *clean* before the fix:
@@ -472,23 +474,45 @@ supersedes the failed one — an escape hatch nobody can claim is not an escape
 hatch, and without that condition one field would have excused any missing
 artifact.
 
-**Known gaps, deliberately left visible rather than closed quietly.** Two
-classes of artifact carry no completion receipt, so `receipt-output-manifests`
-has nothing to anchor on and either can be renamed out of the audit. The
-`unreceipted-artifact-renamed` fixture measures this on every run and reports it
-as a tracked gap rather than a pass:
+**Known gaps — held open until rc.61, then closed.** Two classes of artifact
+carried no completion receipt, so `receipt-output-manifests` had nothing to
+anchor on and either could be renamed out of the audit. The
+`unreceipted-artifact-renamed` fixture measured this on every run and reported
+it as a tracked gap rather than a pass:
 
-1. **A tool result recorded by hand** with `fadeno tool-complete`, which emits
-   only `artifact_created` — no `tool_dispatched`, no `tool_completed` — so
-   three tool checks skip as well.
+1. **A tool result recorded by hand** with `fadeno tool-complete`, which
+   emitted only `artifact_created` — no `tool_dispatched`, no
+   `tool_completed` — so three tool checks skipped as well.
 2. **An engine-assembled collective** (`artifacts/parts/<step>.json`). Each
-   member's own part is receipted; the collective a gate then reads is not,
-   which makes the artifact a gate depends on the one with the weakest
+   member's own part was receipted; the collective a gate then read was not,
+   which made the artifact a gate depends on the one with the weakest
    provenance in the ledger.
 
-Closing either means emitting a receipt where none exists today — a change to
-what a command writes, and so a decision to make deliberately **before** the
-freeze rather than after it.
+Closing either meant emitting a receipt where none existed — a change to what
+a command writes, and so a decision made deliberately **before** the freeze
+rather than after it. Made in rc.61:
+
+- **`tool_recorded`** (`recorded_by: host`) follows the manifest
+  `fadeno tool-complete` writes. It is not `tool_completed` — that word
+  means the kernel ran the tool and carries a command, exit code, and
+  duration, none of which a hand-recorded result has — so the measured tool
+  checks still skip for it, by the receipt's own name. `verify`'s
+  **`tool-artifact-receipts`** requires every artifact on a `tool_call` step
+  to be claimed by one of the two, and holds a recorded receipt's digest to
+  the manifest and the bytes.
+- **`collective_assembled`** (`assembled_by: engine`) names the parts in
+  order. `verify`'s **`collective-provenance`** reduces those parts again
+  through the one `reduceCollective` both sides share and refuses a
+  collective that does not come out identical — bytes, manifest digest, and
+  receipt digest all held to the recomputation, which is what a gate's input
+  needs. Presence is read from the playbook snapshot by the flow cursor's
+  rule (an artifact on a map step that no member produced is the collective),
+  so dropping the receipt is not a way back.
+
+On a trace written since, `unreceipted-artifact-renamed` finds nothing to
+mutate, and six fixtures that attack the receipts directly are all caught. A
+ledger written before rc.61 fails `verify` wherever it has either artifact
+class; the message says so and asks for the trace to be regenerated.
 
 **The schema-repair path has no live coverage.** Item 2 above asks for a run
 that proves the attempt ordinal and reason are distinct from the workflow
@@ -549,6 +573,12 @@ was every surface the proxy could reach. Three defects, two fixed (rc.58):
   carry the kernel's pid, which closed the immortal-lease bug behind the
   `kill-drive mid-wave` failures. Shared mode (`--shared`, tools, non-git)
   still holds the real lease for a run's duration and is opt-in.
+- **Every artifact has a receipt (rc.61), and two receipt events are in the
+  ledger vocabulary before the freeze:** `tool_recorded` (a host recorded a
+  tool result by hand; `recorded_by: host`) and `collective_assembled` (the
+  engine reduced a map's parts; `assembled_by: engine`). `verify` holds both
+  (`tool-artifact-receipts`, `collective-provenance`), and the tamper matrix's
+  last known gap is closed. See §Result above.
 - **Merge-back is a pull request now (rc.60), and two attempt reasons are
   in the ledger vocabulary before the freeze:** `merge_conflict` (the executor
   re-invoked in its retained worktree to resolve markers) and `host_resolved`

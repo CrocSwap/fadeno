@@ -22,12 +22,13 @@
 
 import { execFileSync } from 'node:child_process';
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
-const CLI = join(REPO, 'dist', 'cli.js');
+const CLI = join(REPO, 'src', 'cli.ts');
 
 // ---------------------------------------------------------------- helpers
 
@@ -60,14 +61,36 @@ function mutateEvent(dir, pick, mutate) {
   return true;
 }
 
-/** Paths that a completion receipt claims as its output. */
+/**
+ * Paths that a completion receipt claims as its output. Four receipts since
+ * rc.61: the executor delivered it, the kernel ran the tool, the host recorded
+ * the tool's result by hand, the engine reduced a map's parts into it.
+ */
+const RECEIPT_TYPES = new Set(['actor_completed', 'tool_completed', 'tool_recorded', 'collective_assembled']);
 function receiptedOutputs(events) {
   return new Set(
     events
-      .filter((e) => e.type === 'actor_completed' || e.type === 'tool_completed')
+      .filter((e) => RECEIPT_TYPES.has(e.type))
       .map((e) => e.output)
       .filter((o) => typeof o === 'string' && o !== ''),
   );
+}
+
+const sha256 = (data) => createHash('sha256').update(data).digest('hex');
+
+/** Replace an artifact's bytes AND fix every digest the ledger holds for it. */
+function forgeArtifact(dir, events, rel, bytes) {
+  writeFileSync(join(dir, rel), bytes);
+  for (const e of events) {
+    if (e.type === 'artifact_created' && e.artifact === rel) {
+      e.sha256 = sha256(bytes);
+      e.bytes = Buffer.byteLength(bytes);
+    }
+    if (RECEIPT_TYPES.has(e.type) && e.output === rel && typeof e.output_sha256 === 'string') {
+      e.output_sha256 = sha256(bytes);
+      if (typeof e.output_bytes === 'number') e.output_bytes = Buffer.byteLength(bytes);
+    }
+  }
 }
 
 /**
@@ -282,36 +305,128 @@ const FIXTURES = [
   {
     id: 'unreceipted-artifact-renamed',
     what: 'the same rename, on an artifact no completion receipt claims',
-    // KNOWN GAP, and a structural one rather than a missing check. Two classes
-    // of artifact carry no completion receipt at all, so there is nothing for
-    // `receipt-output-manifests` to anchor on and either can be renamed out of
-    // the audit:
-    //
-    //   1. A tool result recorded by hand with `fadeno tool-complete`, which
-    //      emits ONLY artifact_created — no tool_dispatched, no tool_completed
-    //      — so three tool checks skip as well. The manual path produces a
-    //      materially weaker trace than `fadeno tool-run`.
-    //   2. An engine-ASSEMBLED collective (`artifacts/parts/<step>.json`),
-    //      built by reducing a map's member parts. Each member's own part is
-    //      receipted; the collective the gate then reads is not.
-    //
-    // (2) is the sharper one: `gate no_blocking_issues` evaluates the
-    // collective, so the artifact a gate depends on is the artifact with the
-    // weakest provenance in the ledger.
-    //
-    // Closing either means emitting a receipt where none exists today, which
-    // changes what a command writes — a call to make deliberately before the
-    // schema freeze, not as a side effect of a fixture.
-    knownGap: true,
+    // Was a KNOWN GAP until rc.61. Two classes of artifact carried no
+    // completion receipt, so nothing anchored them and either could be renamed
+    // out of the audit: a tool result recorded by hand with
+    // `fadeno tool-complete` (only `artifact_created`), and an engine-assembled
+    // collective — the artifact a gate reads. Both are receipted now
+    // (`tool_recorded`, `collective_assembled`), and on a trace written since,
+    // this fixture finds nothing to mutate: that "n/a" is the closure, measured.
+    // A trace that still carries an unreceipted artifact is a trace whose
+    // writer predates the receipts; verify refuses it outright
+    // (`collective-provenance` / `tool-artifact-receipts`), so the baseline
+    // guard in the runner reports it before any fixture runs.
     expect: ['receipt-output-manifests'],
     apply(dir) {
       const target = pickArtifact(dir, { receipted: false });
-      if (!target) return null;
+      if (!target) return { na: 'every artifact on this trace is claimed by a receipt' };
       const events = readEvents(dir);
       const at = events.findIndex((e) => e.type === 'artifact_created' && e.artifact === target.artifact);
       events[at].type = 'artifact_kreated';
       writeEvents(dir, events);
       return `${target.artifact} (no receipt claims it): artifact_created → artifact_kreated`;
+    },
+  },
+  {
+    id: 'collective-renamed',
+    what: 'the manifest of an assembled collective renamed out of the vocabulary',
+    // The receipt is what anchors the collective: whatever the manifest event
+    // is called, the output the receipt claims must be manifested.
+    expect: ['receipt-output-manifests'],
+    apply(dir) {
+      const events = readEvents(dir);
+      const receipt = events.find((e) => e.type === 'collective_assembled');
+      if (!receipt) return null;
+      const at = events.findIndex((e) => e.type === 'artifact_created' && e.artifact === receipt.output);
+      if (at === -1) return null;
+      events[at].type = 'artifact_kreated';
+      writeEvents(dir, events);
+      return `${receipt.output}: artifact_created → artifact_kreated`;
+    },
+  },
+  {
+    id: 'collective-receipt-dropped',
+    what: 'the collective_assembled receipt deleted, leaving the pre-rc.61 shape',
+    // Deleting the receipt must not be a way back to the unanchored state:
+    // presence is checked from the playbook snapshot, so a collective on a map
+    // step with no receipt is refused.
+    expect: ['collective-provenance'],
+    apply(dir) {
+      const events = readEvents(dir);
+      const at = events.findIndex((e) => e.type === 'collective_assembled');
+      if (at === -1) return null;
+      const [receipt] = events.splice(at, 1);
+      writeEvents(dir, events);
+      return `removed the collective_assembled receipt for ${receipt.output}`;
+    },
+  },
+  {
+    id: 'collective-forged',
+    what: 'a collective rewritten with one part dropped, every digest fixed to match',
+    // The sharpest one. The bytes, the manifest digest, and the receipt digest
+    // all agree with each other after this — only the reduction from the
+    // receipted parts disagrees, which is the thing a gate's input needs to be
+    // held to. `artifact-digests` cannot see it; `collective-provenance` can.
+    expect: ['collective-provenance'],
+    apply(dir) {
+      const events = readEvents(dir);
+      const receipt = events.find((e) => e.type === 'collective_assembled');
+      if (!receipt || !Array.isArray(receipt.parts) || receipt.parts.length === 0) return null;
+      if (!existsSync(join(dir, receipt.output))) return null;
+      let parts;
+      try { parts = JSON.parse(readFileSync(join(dir, receipt.output), 'utf8')); } catch { return null; }
+      if (!Array.isArray(parts) || parts.length === 0) return null;
+      const forged = `${JSON.stringify(parts.slice(0, -1), null, 2)}\n`;
+      forgeArtifact(dir, events, receipt.output, forged);
+      writeEvents(dir, events);
+      return `${receipt.output}: dropped the last of ${parts.length} part(s); manifest and receipt digests updated to match`;
+    },
+  },
+  {
+    id: 'recorded-tool-renamed',
+    what: 'the manifest of a host-recorded tool result renamed out of the vocabulary',
+    expect: ['receipt-output-manifests'],
+    apply(dir) {
+      const events = readEvents(dir);
+      const receipt = events.find((e) => e.type === 'tool_recorded');
+      if (!receipt) return null;
+      const at = events.findIndex((e) => e.type === 'artifact_created' && e.artifact === receipt.output);
+      if (at === -1) return null;
+      events[at].type = 'artifact_kreated';
+      writeEvents(dir, events);
+      return `${receipt.output}: artifact_created → artifact_kreated`;
+    },
+  },
+  {
+    id: 'recorded-tool-receipt-dropped',
+    what: 'the tool_recorded receipt deleted, leaving the pre-rc.61 shape',
+    expect: ['tool-artifact-receipts'],
+    apply(dir) {
+      const events = readEvents(dir);
+      const at = events.findIndex((e) => e.type === 'tool_recorded');
+      if (at === -1) return null;
+      const [receipt] = events.splice(at, 1);
+      writeEvents(dir, events);
+      return `removed the tool_recorded receipt for ${receipt.output}`;
+    },
+  },
+  {
+    id: 'recorded-tool-forged',
+    what: 'a host-recorded tool result rewritten with its manifest digest fixed, receipt left alone',
+    // The manifest can be made to agree with forged bytes; the receipt the host
+    // signed when it recorded the result still names the original digest.
+    expect: ['tool-artifact-receipts'],
+    apply(dir) {
+      const events = readEvents(dir);
+      const receipt = events.find((e) => e.type === 'tool_recorded');
+      if (!receipt || !existsSync(join(dir, receipt.output))) return null;
+      const forged = readFileSync(join(dir, receipt.output), 'utf8') + ' ';
+      writeFileSync(join(dir, receipt.output), forged);
+      for (const e of events) {
+        if (e.type === 'artifact_created' && e.artifact === receipt.output) { e.sha256 = sha256(forged); e.bytes = Buffer.byteLength(forged); }
+      }
+      writeEvents(dir, events);
+      return `${receipt.output}: appended one space, manifest digest updated, receipt untouched`;
     },
   },
   {
@@ -377,8 +492,10 @@ function runFixture(sourceDir, runId, fixture) {
   try {
     const dest = join(root, '.fadeno', 'runs', runId);
     cpSync(sourceDir, dest, { recursive: true });
-    const note = fixture.apply(dest);
-    if (note == null) return { status: 'n/a', note: 'run carries no material for this fixture' };
+    const applied = fixture.apply(dest);
+    if (applied == null) return { status: 'n/a', note: 'run carries no material for this fixture' };
+    if (typeof applied === 'object') return { status: 'n/a', note: applied.na };
+    const note = applied;
 
     const { code, out } = verify(root, runId);
     const failed = failedChecks(out);
@@ -390,14 +507,7 @@ function runFixture(sourceDir, runId, fixture) {
         : { status: code === 0 ? 'UNCAUGHT' : 'caught', note, by: refused ? '' : failed.join(', ') || 'non-zero exit' };
     }
 
-    if (code === 0) {
-      return fixture.knownGap
-        ? { status: 'gap', note, by: 'verify reported no failures (known, tracked above)' }
-        : { status: 'UNCAUGHT', note, by: 'verify reported no failures' };
-    }
-    if (fixture.knownGap) {
-      return { status: 'gap-closed', note, by: `${failed.join(', ')} — this fixture is marked knownGap; drop the marker` };
-    }
+    if (code === 0) return { status: 'UNCAUGHT', note, by: 'verify reported no failures' };
 
     const matched = fixture.matches ? fixture.matches(failed) : failed.some((id) => fixture.expect.includes(id));
     return matched
@@ -418,13 +528,21 @@ if (runDirs.length === 0) {
   console.error('Usage: node scripts/tamper-matrix.mjs [--json] <run-dir> [<run-dir> ...]');
   process.exit(2);
 }
-if (!existsSync(CLI)) {
-  console.error(`No build at ${CLI}. Run \`npm run build\` first.`);
-  process.exit(2);
-}
 
 const results = [];
 let uncaught = 0;
+let baselineFailures = 0;
+
+function baselineVerify(sourceDir, runId) {
+  const root = mkdtempSync(join(tmpdir(), 'fadeno-tamper-'));
+  try {
+    cpSync(sourceDir, join(root, '.fadeno', 'runs', runId), { recursive: true });
+    const { code, out } = verify(root, runId);
+    return { code, failed: failedChecks(out) };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
 
 for (const dir of runDirs) {
   const runId = basename(dir);
@@ -433,12 +551,21 @@ for (const dir of runDirs) {
     continue;
   }
   if (!asJson) console.log(`\n=== ${runId} ===`);
+  // A trace that fails verify untouched proves nothing tampered: every fixture
+  // would be "caught" by a failure that was already there. Say so instead.
+  const baseline = baselineVerify(dir, runId);
+  if (baseline.code !== 0) {
+    results.push({ run: runId, fixture: '(baseline)', status: 'BASELINE', note: `untampered trace fails verify: ${baseline.failed.join(', ') || 'non-zero exit'}` });
+    baselineFailures += 1;
+    if (!asJson) console.log(`  SKIP baseline                       untampered trace fails verify: ${baseline.failed.join(', ') || 'non-zero exit'} — fixtures not run`);
+    continue;
+  }
   for (const fixture of FIXTURES) {
     const res = runFixture(dir, runId, fixture);
     results.push({ run: runId, fixture: fixture.id, ...res });
     if (res.status === 'UNCAUGHT') uncaught += 1;
     if (!asJson) {
-      const mark = { caught: 'ok  ', 'caught-elsewhere': 'ok? ', 'n/a': 'n/a ', gap: 'GAP ', 'gap-closed': 'NEW ', UNCAUGHT: 'MISS' }[res.status];
+      const mark = { caught: 'ok  ', 'caught-elsewhere': 'ok? ', 'n/a': 'n/a ', UNCAUGHT: 'MISS' }[res.status];
       console.log(`  ${mark} ${fixture.id.padEnd(30)} ${res.note ?? ''}`);
       if (res.by) console.log(`       caught by: ${res.by}`);
     }
@@ -446,17 +573,16 @@ for (const dir of runDirs) {
 }
 
 if (asJson) {
-  console.log(JSON.stringify({ uncaught, results }, null, 2));
+  console.log(JSON.stringify({ uncaught, baselineFailures, results }, null, 2));
 } else {
   const caught = results.filter((r) => r.status === 'caught').length;
   const elsewhere = results.filter((r) => r.status === 'caught-elsewhere').length;
   const na = results.filter((r) => r.status === 'n/a').length;
-  const gaps = results.filter((r) => r.status === 'gap').length;
-  const closed = results.filter((r) => r.status === 'gap-closed').length;
+  const skipped = baselineFailures > 0 ? `, ${baselineFailures} trace(s) skipped because they fail verify untampered` : '';
   console.log(
     `\ntamper matrix: ${caught} caught by the expected check, ${elsewhere} caught by another check, ` +
-      `${na} not applicable, ${gaps} known gap(s), ${closed} known gap(s) now closed, ${uncaught} UNCAUGHT`,
+      `${na} not applicable, ${uncaught} UNCAUGHT${skipped}`,
   );
 }
 
-process.exit(uncaught > 0 ? 1 : 0);
+process.exit(uncaught > 0 || baselineFailures > 0 ? 1 : 0);

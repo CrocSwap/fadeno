@@ -115,6 +115,7 @@ loop:
         for other tool_call (Diff/PostResult or unregistered): invoke the tool manually, write its output, then run
           fadeno tool-complete <run> --output <artifact-path>
           # typed output is validated atomically before step/artifact events append; manual and automated are mutually exclusive per generation
+          # records the manifest and then a tool_recorded receipt (recorded_by: host) — never tool_completed, which means the kernel ran it
         handle join / … per runtime.md; record; continue
 ```
 

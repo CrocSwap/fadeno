@@ -216,7 +216,7 @@ function pathNamedByLedger(events: RunEvent[], rel: string): boolean {
   for (const event of events) {
     if (event.type === 'artifact_created' && event.extra.artifact === rel) return true;
     if (event.extra.details_path === rel) return true;
-    if ((event.type === 'tool_completed' || event.type === 'tool_failed') && event.extra.output === rel) return true;
+    if ((event.type === 'tool_completed' || event.type === 'tool_failed' || event.type === 'tool_recorded') && event.extra.output === rel) return true;
   }
   return false;
 }

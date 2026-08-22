@@ -3,6 +3,7 @@ import { isAbsolute, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { runNext, NextError } from './next.ts';
 import { runRun, RunError, type RunResult } from './run.ts';
+import { LedgerWriteError, LedgerWriter } from '../lib/run-ledger-write.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { runSchemaDirectories } from '../lib/definitions.ts';
 import { resolveRun, RunLedgerError } from '../lib/run-ledger.ts';
@@ -163,7 +164,37 @@ export function runToolComplete(opts: ToolCompleteOptions): ToolCompleteResult {
       repoRoot,
       now: opts.now,
     });
-    return { ...result, step: next.step.id };
+    // The receipt. A result recorded by hand has no command, exit code, or
+    // duration to measure — `tool_completed` means the kernel ran it, and
+    // this path must never say so — but the delivery is still a claim the
+    // ledger has to own: which tool call, which attempt, which bytes, and who
+    // vouched for them. Without it the manual path emitted only the manifest,
+    // so nothing anchored the artifact and renaming its manifest removed it
+    // from the audit (`receipt-output-manifests` had nothing to hold). Same
+    // word for the same fact as `resolved_by`/`merged_by`: the host did it.
+    const manifest = result.manifest!;
+    try {
+      new LedgerWriter(runDirForClaim).append(
+        {
+          type: 'tool_recorded',
+          step: next.step.id,
+          tool: next.step.tool ?? null,
+          step_execution_id: ids.stepExecutionId,
+          tool_call_id: ids.toolCallId,
+          attempt,
+          generation,
+          output: manifest.artifact,
+          output_bytes: manifest.bytes,
+          output_sha256: manifest.sha256,
+          recorded_by: 'host',
+        },
+        opts.now ?? new Date(),
+      );
+    } catch (err) {
+      if (err instanceof LedgerWriteError) throw new ToolCompleteError(err.message);
+      throw err;
+    }
+    return { ...result, appendedEvents: [...result.appendedEvents, 'tool_recorded'], step: next.step.id };
   } catch (err) {
     if (err instanceof RunError) throw new ToolCompleteError(err.message);
     throw err;

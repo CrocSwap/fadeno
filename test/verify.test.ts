@@ -142,6 +142,8 @@ test('happy path: a completed run with a recomputable passing gate verifies clea
       'artifact-manifests',
       'artifacts-exist',
       'artifact-digests',
+      'collective-provenance',
+      'tool-artifact-receipts',
       'artifact-validation',
       'artifact-immutability',
       'artifact-resolution',
@@ -905,4 +907,187 @@ test('an invalid attempt superseded by a repair passes receipt-output-manifests'
   const receipts = finding(result, 'receipt-output-manifests');
   assert.equal(receipts.status, 'ok');
   assert.match(receipts.detail, /1 superseded by a later attempt/);
+});
+
+// 26. collective-provenance and tool-artifact-receipts — the two artifact
+//     classes that carried no receipt before rc.61. Presence is read from the
+//     playbook snapshot; the reduction is recomputed from the receipted parts.
+const RECEIPTS_SNAPSHOT = `kind: AgentPlaybook
+schema_version: "0.1"
+name: receipts
+description: snapshot for receipt checks
+roles:
+  reviewer_a: { purpose: a }
+flow:
+  - id: load_diff
+    kind: tool_call
+    tool: diff_loader
+    output: Diff
+  - id: review
+    kind: map
+    over: [reviewer_a]
+    output: ReviewReport[]
+`;
+
+const PART = JSON.stringify({ reviewer: 'reviewer_a', summary: 'clean', issues: [], verdict: 'approve' });
+const reduce = (parts: unknown[]): string => `${JSON.stringify(parts, null, 2)}\n`;
+
+function collectiveRun(root: string, id: string, collectiveBytes: string, receipt: Record<string, unknown> | null): void {
+  writeRun(root, id, baseRun(id, { playbook: 'receipts' }));
+  writeArtifact(root, id, 'definitions/playbook.yaml', RECEIPTS_SNAPSHOT);
+  const events: unknown[] = [
+    runStarted(1),
+    artifactEvent(root, id, 'artifacts/parts/review/reviewer_a.json', PART, 2, { step: 'review', member: 'reviewer_a', actor_call_id: 'ac-review-g1-reviewer_a', attempt: 1 }),
+    {
+      type: 'actor_completed', step: 'review', actor: 'reviewer_a', actor_call_id: 'ac-review-g1-reviewer_a', attempt: 1, executor: 'sol',
+      output: 'artifacts/parts/review/reviewer_a.json', output_valid: true, seq: 3, timestamp: '2026-07-10T12:06:00Z',
+    },
+    artifactEvent(root, id, 'artifacts/parts/review.json', collectiveBytes, 4, { step: 'review', step_execution_id: 'se-review-g1' }),
+  ];
+  if (receipt != null) {
+    events.push({
+      type: 'collective_assembled', step: 'review', step_execution_id: 'se-review-g1', output: 'artifacts/parts/review.json',
+      parts: ['artifacts/parts/review/reviewer_a.json'], members: ['reviewer_a'],
+      output_bytes: Buffer.byteLength(collectiveBytes), output_sha256: sha(collectiveBytes), assembled_by: 'engine',
+      seq: 5, timestamp: '2026-07-10T12:06:30Z', ...receipt,
+    });
+  }
+  events.push(runCompleted(6));
+  writeEvents(root, id, events);
+}
+
+test('a collective with no receipt fails collective-provenance and says the ledger predates rc.61', (t) => {
+  const root = seedRepo(t);
+  const id = '2026-07-10-2212-collective-unreceipted';
+  collectiveRun(root, id, reduce([JSON.parse(PART)]), null);
+  const result = runVerify({ repoRoot: root, run: id });
+  const provenance = finding(result, 'collective-provenance');
+  assert.equal(provenance.status, 'fail');
+  assert.match(provenance.detail, /artifacts\/parts\/review\.json is the collective of map step "review"/);
+  assert.match(provenance.detail, /regenerate the trace/);
+  assert.equal(result.ok, false);
+});
+
+test('a receipted collective that reduces from its parts passes collective-provenance', (t) => {
+  const root = seedRepo(t);
+  const id = '2026-07-10-2212-collective-honest';
+  collectiveRun(root, id, reduce([JSON.parse(PART)]), {});
+  const result = runVerify({ repoRoot: root, run: id });
+  const provenance = finding(result, 'collective-provenance');
+  assert.equal(provenance.status, 'ok', provenance.detail);
+  assert.match(provenance.detail, /1 collective\(s\) reduce from their receipted parts/);
+  assert.equal(finding(result, 'receipt-output-manifests').status, 'ok');
+  assert.equal(result.ok, true, JSON.stringify(result.findings.filter((f) => f.status === 'fail')));
+});
+
+test('a collective whose bytes, manifest and receipt agree but do not reduce from its parts fails collective-provenance', (t) => {
+  const root = seedRepo(t);
+  const id = '2026-07-10-2212-collective-forged';
+  // Every digest is "right" for the forged bytes; only the reduction is wrong.
+  collectiveRun(root, id, reduce([]), {});
+  const result = runVerify({ repoRoot: root, run: id });
+  assert.equal(finding(result, 'artifact-digests').status, 'ok');
+  const provenance = finding(result, 'collective-provenance');
+  assert.equal(provenance.status, 'fail');
+  assert.match(provenance.detail, /receipt's output_sha256 is not the reduction of its 1 part\(s\)/);
+  assert.match(provenance.detail, /manifest digest is not the reduction/);
+  assert.match(provenance.detail, /bytes on disk are not the reduction/);
+});
+
+test('a collective receipt naming a part that was never manifested fails collective-provenance', (t) => {
+  const root = seedRepo(t);
+  const id = '2026-07-10-2212-collective-phantom-part';
+  collectiveRun(root, id, reduce([JSON.parse(PART)]), { parts: ['artifacts/parts/review/reviewer_b.json'] });
+  const result = runVerify({ repoRoot: root, run: id });
+  const provenance = finding(result, 'collective-provenance');
+  assert.equal(provenance.status, 'fail');
+  assert.match(provenance.detail, /part artifacts\/parts\/review\/reviewer_b\.json was never manifested/);
+});
+
+function toolRun(root: string, id: string, receipt: Record<string, unknown> | null | 'kernel'): void {
+  writeRun(root, id, baseRun(id, { playbook: 'receipts' }));
+  writeArtifact(root, id, 'definitions/playbook.yaml', RECEIPTS_SNAPSHOT);
+  const diff = '--- a\n+++ b\n';
+  const events: unknown[] = [runStarted(1), artifactEvent(root, id, 'artifacts/diff.md', diff, 2, { step: 'load_diff' })];
+  if (receipt === 'kernel') {
+    events.push({
+      type: 'tool_dispatched', step: 'load_diff', tool: 'diff_loader', tool_call_id: 'tc-load_diff-g1', attempt: 1, generation: 1,
+      command: ['true'], command_sha256: sha('["true"]'), seq: 3, timestamp: '2026-07-10T12:05:30Z',
+    });
+    events.push({
+      type: 'tool_completed', step: 'load_diff', tool: 'diff_loader', tool_call_id: 'tc-load_diff-g1', attempt: 1, generation: 1,
+      command: ['true'], command_sha256: sha('["true"]'), exit_code: 0, signal: null, timed_out: false, duration_ms: 1,
+      output: 'artifacts/diff.md', output_bytes: Buffer.byteLength(diff), output_sha256: sha(diff), status: 'passed',
+      seq: 4, timestamp: '2026-07-10T12:06:00Z',
+    });
+  } else if (receipt != null) {
+    events.push({
+      type: 'tool_recorded', step: 'load_diff', tool: 'diff_loader', step_execution_id: 'se-load_diff-g1', tool_call_id: 'tc-load_diff-g1',
+      attempt: 1, generation: 1, output: 'artifacts/diff.md', output_bytes: Buffer.byteLength(diff), output_sha256: sha(diff),
+      recorded_by: 'host', seq: 3, timestamp: '2026-07-10T12:06:00Z', ...receipt,
+    });
+  }
+  events.push(runCompleted(events.length + 1));
+  writeEvents(root, id, events);
+}
+
+test('a tool artifact with no receipt fails tool-artifact-receipts and says the ledger predates rc.61', (t) => {
+  const root = seedRepo(t);
+  const id = '2026-07-10-2212-tool-unreceipted';
+  toolRun(root, id, null);
+  const result = runVerify({ repoRoot: root, run: id });
+  const receipts = finding(result, 'tool-artifact-receipts');
+  assert.equal(receipts.status, 'fail');
+  assert.match(receipts.detail, /artifacts\/diff\.md completes tool step "load_diff" but no tool_completed or tool_recorded receipt claims it/);
+  assert.match(receipts.detail, /regenerate the trace/);
+});
+
+test('a host-recorded tool artifact whose receipt attests its bytes passes tool-artifact-receipts', (t) => {
+  const root = seedRepo(t);
+  const id = '2026-07-10-2212-tool-recorded';
+  toolRun(root, id, {});
+  const result = runVerify({ repoRoot: root, run: id });
+  const receipts = finding(result, 'tool-artifact-receipts');
+  assert.equal(receipts.status, 'ok', receipts.detail);
+  assert.match(receipts.detail, /1 tool artifact\(s\) claimed by a receipt, 1 recorded by the host/);
+  // A recorded result claims nothing about the measured lifecycle.
+  assert.equal(finding(result, 'tool-lifecycle').status, 'skip');
+  assert.equal(finding(result, 'tool-command-digest').status, 'skip');
+  assert.equal(result.ok, true, JSON.stringify(result.findings.filter((f) => f.status === 'fail')));
+});
+
+test('a kernel-run tool artifact is claimed by its tool_completed receipt', (t) => {
+  const root = seedRepo(t);
+  const id = '2026-07-10-2212-tool-measured';
+  toolRun(root, id, 'kernel');
+  const result = runVerify({ repoRoot: root, run: id });
+  const receipts = finding(result, 'tool-artifact-receipts');
+  assert.equal(receipts.status, 'ok', receipts.detail);
+  assert.match(receipts.detail, /1 tool artifact\(s\) claimed by a receipt$/);
+});
+
+test('a tool_recorded receipt that does not say recorded_by: host, or attests other bytes, fails tool-artifact-receipts', (t) => {
+  const root = seedRepo(t);
+  const id = '2026-07-10-2212-tool-misrecorded';
+  toolRun(root, id, { recorded_by: 'kernel', output_sha256: sha('something else') });
+  const result = runVerify({ repoRoot: root, run: id });
+  const receipts = finding(result, 'tool-artifact-receipts');
+  assert.equal(receipts.status, 'fail');
+  assert.match(receipts.detail, /tool_recorded must say recorded_by: host \(found "kernel"\)/);
+  assert.match(receipts.detail, /output_sha256 for artifacts\/diff\.md disagrees with its manifest/);
+  assert.match(receipts.detail, /bytes on disk at artifacts\/diff\.md are not what the receipt attested/);
+});
+
+test('a collective or recorded-tool receipt whose output has no manifest fails receipt-output-manifests', (t) => {
+  const root = seedRepo(t);
+  const id = '2026-07-10-2212-orphan-new-receipts';
+  collectiveRun(root, id, reduce([JSON.parse(PART)]), {});
+  const dir = runDirOf(root, id);
+  const lines = readFileSync(join(dir, 'events.jsonl'), 'utf8').split('\n').filter((l) => l !== '').map((l) => JSON.parse(l) as Record<string, unknown>);
+  for (const e of lines) if (e.type === 'artifact_created' && e.artifact === 'artifacts/parts/review.json') e.type = 'artifact_kreated';
+  writeEvents(root, id, lines);
+  const result = runVerify({ repoRoot: root, run: id });
+  const receipts = finding(result, 'receipt-output-manifests');
+  assert.equal(receipts.status, 'fail');
+  assert.match(receipts.detail, /review completed with output "artifacts\/parts\/review\.json", but no artifact manifest records that path/);
 });

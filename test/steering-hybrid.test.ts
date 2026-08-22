@@ -483,7 +483,7 @@ test('tool-complete starts and attributes the exact next tool_call atomically', 
 
   const result = runToolComplete({ repoRoot: root, run: created.runId, output });
   assert.equal(result.step, 'test');
-  assert.deepEqual(result.appendedEvents, ['step_started', 'artifact_created']);
+  assert.deepEqual(result.appendedEvents, ['step_started', 'artifact_created', 'tool_recorded']);
   const next = runNext({ repoRoot: root, run: created.runId });
   assert.equal(next.status, 'terminal');
 });

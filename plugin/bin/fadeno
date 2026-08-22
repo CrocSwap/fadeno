@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.60";
+  if (true) return "0.6.0-rc.61";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -25393,6 +25393,12 @@ function computeNext(playbook, events) {
   return resolveAt(ctx, entry);
 }
 
+// src/lib/collective.ts
+function reduceCollective(parts) {
+  return `${JSON.stringify(parts, null, 2)}
+`;
+}
+
 // src/commands/gate.ts
 var import_node_fs19 = require("node:fs");
 var import_node_path19 = require("node:path");
@@ -26258,7 +26264,7 @@ function pathNamedByLedger(events, rel) {
   for (const event of events) {
     if (event.type === "artifact_created" && event.extra.artifact === rel) return true;
     if (event.extra.details_path === rel) return true;
-    if ((event.type === "tool_completed" || event.type === "tool_failed") && event.extra.output === rel) return true;
+    if ((event.type === "tool_completed" || event.type === "tool_failed" || event.type === "tool_recorded") && event.extra.output === rel) return true;
   }
   return false;
 }
@@ -27756,6 +27762,44 @@ function recordResolutionSnapshot(ctx) {
 function artifactRecorded(events, path) {
   return events.some((e) => e.type === "artifact_created" && e.extra.artifact === path);
 }
+function assembleCollective(ctx, stepId, collective, actors, outputs, stepExecutionId) {
+  if (artifactRecorded(freshEvents(ctx.runDir), collective)) return;
+  const parts = actors.map((role, i) => {
+    const rel = outputs[i];
+    const abs2 = (0, import_node_path23.join)(ctx.runDir, rel);
+    try {
+      return JSON.parse((0, import_node_fs23.readFileSync)(abs2, "utf8"));
+    } catch (err) {
+      throw new DriveError(`cannot assemble ${collective}: member output ${rel}${role ? ` (${role})` : ""} is not valid JSON: ${err.message}`);
+    }
+  });
+  const body = reduceCollective(parts);
+  const abs = (0, import_node_path23.join)(ctx.runDir, collective);
+  (0, import_node_fs23.mkdirSync)((0, import_node_path23.dirname)(abs), { recursive: true });
+  (0, import_node_fs23.writeFileSync)(abs, body, "utf8");
+  try {
+    runRun({ run: ctx.runId, event: "artifact_created", artifact: collective, fields: [`step_execution_id=${stepExecutionId}`], repoRoot: ctx.repoRoot, now: ctx.now });
+  } catch (err) {
+    if (err instanceof RunError) throw new DriveError(err.message);
+    throw err;
+  }
+  appendEvent(
+    ctx.runDir,
+    {
+      type: "collective_assembled",
+      step: stepId,
+      step_execution_id: stepExecutionId,
+      output: collective,
+      parts: [...outputs],
+      members: actors.map((role) => role ?? null),
+      output_bytes: Buffer.byteLength(body),
+      output_sha256: sha256Hex(body),
+      assembled_by: "engine"
+    },
+    ctx.now
+  );
+  ctx.act(`assembled collective ${collective} from ${outputs.length} part(s)`);
+}
 function priorAttempts(events, actorCallId) {
   let count = 0;
   let lastExecutor = null;
@@ -29103,31 +29147,7 @@ function drivePromptable(ctx, comp) {
     if (hostRequests2.length > 0) {
       return { kind: "awaiting_host_dispatch", requests: hostRequests2, notes: hostNotes2 };
     }
-    if (step.collective != null) {
-      events = freshEvents(ctx.runDir);
-      if (!artifactRecorded(events, step.collective)) {
-        const parts = actors.map((role, i) => {
-          const rel = outputs[i];
-          const abs2 = (0, import_node_path23.join)(ctx.runDir, rel);
-          try {
-            return JSON.parse((0, import_node_fs23.readFileSync)(abs2, "utf8"));
-          } catch (err) {
-            throw new DriveError(`cannot assemble ${step.collective}: member output ${rel}${role ? ` (${role})` : ""} is not valid JSON: ${err.message}`);
-          }
-        });
-        const abs = (0, import_node_path23.join)(ctx.runDir, step.collective);
-        (0, import_node_fs23.mkdirSync)((0, import_node_path23.dirname)(abs), { recursive: true });
-        (0, import_node_fs23.writeFileSync)(abs, `${JSON.stringify(parts, null, 2)}
-`, "utf8");
-        try {
-          runRun({ run: ctx.runId, event: "artifact_created", artifact: step.collective, fields: [`step_execution_id=${stepExecutionId}`], repoRoot: ctx.repoRoot, now: ctx.now });
-        } catch (err) {
-          if (err instanceof RunError) throw new DriveError(err.message);
-          throw err;
-        }
-        ctx.act(`assembled collective ${step.collective}`);
-      }
-    }
+    if (step.collective != null) assembleCollective(ctx, stepId, step.collective, actors, outputs, stepExecutionId);
     return null;
   }
   if (!repoHasGit(ctx.repoRoot)) {
@@ -29182,31 +29202,7 @@ function drivePromptable(ctx, comp) {
         return { kind: "exit_nonzero", detail: f.detail };
       }
     }
-    if (step.collective != null) {
-      events = freshEvents(ctx.runDir);
-      if (!artifactRecorded(events, step.collective)) {
-        const parts = actors.map((role, i) => {
-          const rel = outputs[i];
-          const abs2 = (0, import_node_path23.join)(ctx.runDir, rel);
-          try {
-            return JSON.parse((0, import_node_fs23.readFileSync)(abs2, "utf8"));
-          } catch (err) {
-            throw new DriveError(`cannot assemble ${step.collective}: member output ${rel}${role ? ` (${role})` : ""} is not valid JSON: ${err.message}`);
-          }
-        });
-        const abs = (0, import_node_path23.join)(ctx.runDir, step.collective);
-        (0, import_node_fs23.mkdirSync)((0, import_node_path23.dirname)(abs), { recursive: true });
-        (0, import_node_fs23.writeFileSync)(abs, `${JSON.stringify(parts, null, 2)}
-`, "utf8");
-        try {
-          runRun({ run: ctx.runId, event: "artifact_created", artifact: step.collective, fields: [`step_execution_id=${stepExecutionId}`], repoRoot: ctx.repoRoot, now: ctx.now });
-        } catch (err) {
-          if (err instanceof RunError) throw new DriveError(err.message);
-          throw err;
-        }
-        ctx.act(`assembled collective ${step.collective}`);
-      }
-    }
+    if (step.collective != null) assembleCollective(ctx, stepId, step.collective, actors, outputs, stepExecutionId);
     return null;
   }
   const mixedQueue = [...queue];
@@ -29349,31 +29345,7 @@ function drivePromptable(ctx, comp) {
   if (hostRequests.length > 0) {
     return { kind: "awaiting_host_dispatch", requests: hostRequests, notes: hostNotes };
   }
-  if (step.collective != null) {
-    events = freshEvents(ctx.runDir);
-    if (!artifactRecorded(events, step.collective)) {
-      const parts = actors.map((role, i) => {
-        const rel = outputs[i];
-        const abs2 = (0, import_node_path23.join)(ctx.runDir, rel);
-        try {
-          return JSON.parse((0, import_node_fs23.readFileSync)(abs2, "utf8"));
-        } catch (err) {
-          throw new DriveError(`cannot assemble ${step.collective}: member output ${rel}${role ? ` (${role})` : ""} is not valid JSON: ${err.message}`);
-        }
-      });
-      const abs = (0, import_node_path23.join)(ctx.runDir, step.collective);
-      (0, import_node_fs23.mkdirSync)((0, import_node_path23.dirname)(abs), { recursive: true });
-      (0, import_node_fs23.writeFileSync)(abs, `${JSON.stringify(parts, null, 2)}
-`, "utf8");
-      try {
-        runRun({ run: ctx.runId, event: "artifact_created", artifact: step.collective, fields: [`step_execution_id=${stepExecutionId}`], repoRoot: ctx.repoRoot, now: ctx.now });
-      } catch (err) {
-        if (err instanceof RunError) throw new DriveError(err.message);
-        throw err;
-      }
-      ctx.act(`assembled collective ${step.collective}`);
-    }
-  }
+  if (step.collective != null) assembleCollective(ctx, stepId, step.collective, actors, outputs, stepExecutionId);
   return null;
 }
 function recoverInterruptedToolDispatches(ctx) {
@@ -33753,6 +33725,8 @@ function runVerify(opts) {
   findings.push(
     legacy ? skip("artifact-digests", "no recorded digests (legacy ledger)") : checkArtifactDigests(run, events)
   );
+  findings.push(legacy ? skip("collective-provenance", "no receipts recorded (legacy ledger)") : checkCollectiveProvenance(run, events));
+  findings.push(legacy ? skip("tool-artifact-receipts", "no receipts recorded (legacy ledger)") : checkToolArtifactReceipts(run, events));
   findings.push(
     legacy ? skip("artifact-validation", "no recorded validation (legacy ledger)") : checkArtifactValidation(run, schemas, events)
   );
@@ -34879,6 +34853,7 @@ function checkEventVocabulary(events) {
     detail: `${found.length} pre-0.3 event name(s) in a schema_version ${RUN_LEDGER_SCHEMA_VERSION} ledger: ${shown}${more}. Read the ledger with --legacy to interpret these names explicitly; a current-format ledger must not carry them.`
   };
 }
+var RECEIPT_EVENT_TYPES = /* @__PURE__ */ new Set(["actor_completed", "tool_completed", "tool_recorded", "collective_assembled"]);
 function checkReceiptOutputManifests(events) {
   const check = "receipt-output-manifests";
   const manifested = /* @__PURE__ */ new Set();
@@ -34899,7 +34874,7 @@ function checkReceiptOutputManifests(events) {
   let checked = 0;
   let superseded = 0;
   for (const event of events) {
-    if (event.type !== "actor_completed" && event.type !== "tool_completed") continue;
+    if (!RECEIPT_EVENT_TYPES.has(event.type)) continue;
     const output = event.extra.output;
     if (typeof output !== "string" || output === "") continue;
     if (event.extra.output_valid === false) {
@@ -34934,6 +34909,179 @@ function checkReceiptOutputManifests(events) {
   const shown = missing.slice(0, 5).join("; ");
   const more = missing.length > 5 ? `; \u2026(+${missing.length - 5} more)` : "";
   return { check, status: "fail", detail: `${shown}${more}` };
+}
+function snapshotSteps(run) {
+  const path = (0, import_node_path34.join)(run.dir, "definitions", "playbook.yaml");
+  if (!(0, import_node_fs34.existsSync)(path)) return null;
+  let doc;
+  try {
+    doc = (0, import_yaml16.parse)((0, import_node_fs34.readFileSync)(path, "utf8"));
+  } catch {
+    return null;
+  }
+  const flow = doc != null && typeof doc === "object" ? doc.flow : null;
+  if (!Array.isArray(flow)) return null;
+  const steps2 = [];
+  for (const step of flow) {
+    if (step == null || typeof step !== "object") continue;
+    const { id, kind, output } = step;
+    if (typeof id !== "string" || typeof kind !== "string") continue;
+    steps2.push({ id, kind, output: typeof output === "string" ? output : null });
+  }
+  return steps2;
+}
+function checkCollectiveProvenance(run, events) {
+  const check = "collective-provenance";
+  const manifests = /* @__PURE__ */ new Map();
+  const receipts = events.filter((e) => e.type === "collective_assembled");
+  const receiptedOutputs = new Set(receipts.map((r) => r.extra.output).filter((o) => typeof o === "string"));
+  const problems = [];
+  const steps2 = snapshotSteps(run);
+  const mapSteps = new Set((steps2 ?? []).filter((s) => s.kind === "map").map((s) => s.id));
+  let planned = 0;
+  for (const event of events) {
+    if (event.type !== "artifact_created" || typeof event.extra.artifact !== "string") continue;
+    const rel = event.extra.artifact;
+    manifests.set(rel, typeof event.extra.sha256 === "string" ? event.extra.sha256 : null);
+    if (event.step == null || !mapSteps.has(event.step)) continue;
+    if (event.extra.member != null || event.extra.actor_call_id != null) continue;
+    planned += 1;
+    if (!receiptedOutputs.has(rel)) {
+      problems.push(
+        `${rel} is the collective of map step "${event.step}" but no collective_assembled receipt claims it (a ledger written before 0.6.0-rc.61 carries none \u2014 regenerate the trace)`
+      );
+    }
+  }
+  let recomputed = 0;
+  for (const receipt of receipts) {
+    const output = receipt.extra.output;
+    const parts = receipt.extra.parts;
+    if (typeof output !== "string" || !Array.isArray(parts) || !parts.every((p) => typeof p === "string")) {
+      problems.push(`seq ${receipt.seq ?? "?"}: collective_assembled receipt is malformed (needs output and parts[])`);
+      continue;
+    }
+    if (parts.length === 0) {
+      problems.push(`${output}: the receipt names no parts`);
+      continue;
+    }
+    const bodies = [];
+    let broken = false;
+    for (const rel of parts) {
+      if (!manifests.has(rel)) {
+        problems.push(`${output}: part ${rel} was never manifested`);
+        broken = true;
+        continue;
+      }
+      if (!isInsideRun(run.dir, rel)) {
+        problems.push(`${output}: part ${rel} escapes the run directory`);
+        broken = true;
+        continue;
+      }
+      const abs = resolveArtifact(run.dir, rel);
+      if (!(0, import_node_fs34.existsSync)(abs)) {
+        problems.push(`${output}: part ${rel} is missing on disk`);
+        broken = true;
+        continue;
+      }
+      try {
+        bodies.push(JSON.parse((0, import_node_fs34.readFileSync)(abs, "utf8")));
+      } catch {
+        problems.push(`${output}: part ${rel} is not valid JSON`);
+        broken = true;
+      }
+    }
+    if (broken) continue;
+    const expectedSha = sha256Hex(reduceCollective(bodies));
+    const n = `${parts.length} part(s)`;
+    if (typeof receipt.extra.output_sha256 === "string" && receipt.extra.output_sha256 !== expectedSha) {
+      problems.push(`${output}: the receipt's output_sha256 is not the reduction of its ${n}`);
+    }
+    const manifestSha = manifests.get(output);
+    if (manifestSha != null && manifestSha !== expectedSha) {
+      problems.push(`${output}: the manifest digest is not the reduction of its ${n}`);
+    }
+    if (isInsideRun(run.dir, output)) {
+      const abs = resolveArtifact(run.dir, output);
+      if ((0, import_node_fs34.existsSync)(abs) && sha256Hex((0, import_node_fs34.readFileSync)(abs)) !== expectedSha) {
+        problems.push(`${output}: the bytes on disk are not the reduction of its ${n}`);
+      }
+    }
+    recomputed += 1;
+  }
+  if (problems.length > 0) {
+    const shown = problems.slice(0, 5).join("; ");
+    const more = problems.length > 5 ? `; \u2026(+${problems.length - 5} more)` : "";
+    return { check, status: "fail", detail: `${shown}${more}` };
+  }
+  if (recomputed === 0 && planned === 0) {
+    return skip(check, steps2 == null ? "no playbook snapshot to name map steps and no collective receipts" : "no map step assembled a collective");
+  }
+  return { check, status: "ok", detail: `${recomputed} collective(s) reduce from their receipted parts` };
+}
+function checkToolArtifactReceipts(run, events) {
+  const check = "tool-artifact-receipts";
+  const steps2 = snapshotSteps(run);
+  if (steps2 == null) return skip(check, "no playbook snapshot to name tool_call steps");
+  const toolSteps = new Set(steps2.filter((s) => s.kind === "tool_call").map((s) => s.id));
+  if (toolSteps.size === 0) return skip(check, "playbook has no tool_call step");
+  const claimed = /* @__PURE__ */ new Map();
+  for (const event of events) {
+    if (event.type !== "tool_completed" && event.type !== "tool_recorded") continue;
+    if (typeof event.extra.output === "string") claimed.set(event.extra.output, event.type);
+  }
+  const problems = [];
+  let checked = 0;
+  let recorded = 0;
+  const manifests = /* @__PURE__ */ new Map();
+  for (const event of events) {
+    if (event.type !== "artifact_created" || typeof event.extra.artifact !== "string") continue;
+    manifests.set(event.extra.artifact, typeof event.extra.sha256 === "string" ? event.extra.sha256 : null);
+    if (event.step == null || !toolSteps.has(event.step)) continue;
+    checked += 1;
+    if (!claimed.has(event.extra.artifact)) {
+      problems.push(
+        `${event.extra.artifact} completes tool step "${event.step}" but no tool_completed or tool_recorded receipt claims it (a ledger written before 0.6.0-rc.61 carries none for a manual result \u2014 regenerate the trace)`
+      );
+    }
+  }
+  for (const receipt of events) {
+    if (receipt.type !== "tool_recorded") continue;
+    const output = receipt.extra.output;
+    const who = typeof receipt.extra.tool_call_id === "string" ? receipt.extra.tool_call_id : `seq ${receipt.seq ?? "?"}`;
+    if (typeof output !== "string") {
+      problems.push(`${who}: tool_recorded receipt names no output`);
+      continue;
+    }
+    if (receipt.extra.recorded_by !== "host") {
+      problems.push(`${who}: tool_recorded must say recorded_by: host (found ${JSON.stringify(receipt.extra.recorded_by ?? null)})`);
+    }
+    recorded += 1;
+    const sha = typeof receipt.extra.output_sha256 === "string" ? receipt.extra.output_sha256 : null;
+    if (sha == null) {
+      problems.push(`${who}: tool_recorded receipt for ${output} carries no output_sha256`);
+      continue;
+    }
+    const manifestSha = manifests.get(output);
+    if (manifestSha != null && manifestSha !== sha) {
+      problems.push(`${who}: the receipt's output_sha256 for ${output} disagrees with its manifest`);
+    }
+    if (!isInsideRun(run.dir, output)) {
+      problems.push(`${who}: output ${output} escapes the run directory`);
+      continue;
+    }
+    const abs = resolveArtifact(run.dir, output);
+    if ((0, import_node_fs34.existsSync)(abs) && sha256Hex((0, import_node_fs34.readFileSync)(abs)) !== sha) {
+      problems.push(`${who}: the bytes on disk at ${output} are not what the receipt attested`);
+    }
+  }
+  if (problems.length > 0) {
+    const shown = problems.slice(0, 5).join("; ");
+    const more = problems.length > 5 ? `; \u2026(+${problems.length - 5} more)` : "";
+    return { check, status: "fail", detail: `${shown}${more}` };
+  }
+  if (checked === 0) return skip(check, "no tool step completed with an artifact");
+  const byHand = recorded > 0 ? `, ${recorded} recorded by the host` : "";
+  return { check, status: "ok", detail: `${checked} tool artifact(s) claimed by a receipt${byHand}` };
 }
 function checkTerminalStatus(run, allowFailed) {
   const check = "terminal-status";
@@ -37288,7 +37436,29 @@ function runToolComplete(opts) {
       repoRoot,
       now: opts.now
     });
-    return { ...result, step: next.step.id };
+    const manifest = result.manifest;
+    try {
+      new LedgerWriter(runDirForClaim).append(
+        {
+          type: "tool_recorded",
+          step: next.step.id,
+          tool: next.step.tool ?? null,
+          step_execution_id: ids.stepExecutionId,
+          tool_call_id: ids.toolCallId,
+          attempt,
+          generation,
+          output: manifest.artifact,
+          output_bytes: manifest.bytes,
+          output_sha256: manifest.sha256,
+          recorded_by: "host"
+        },
+        opts.now ?? /* @__PURE__ */ new Date()
+      );
+    } catch (err) {
+      if (err instanceof LedgerWriteError) throw new ToolCompleteError(err.message);
+      throw err;
+    }
+    return { ...result, appendedEvents: [...result.appendedEvents, "tool_recorded"], step: next.step.id };
   } catch (err) {
     if (err instanceof RunError) throw new ToolCompleteError(err.message);
     throw err;

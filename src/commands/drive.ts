@@ -65,6 +65,7 @@ import {
   type RunEvent,
 } from '../lib/run-ledger.ts';
 import { LedgerWriteError, LedgerWriter } from '../lib/run-ledger-write.ts';
+import { reduceCollective } from '../lib/collective.ts';
 import {
   INFLIGHT_DIR,
   inflightClaimIsAlive,
@@ -785,6 +786,58 @@ function recordResolutionSnapshot(ctx: EngineCtx): void {
 
 function artifactRecorded(events: RunEvent[], path: string): boolean {
   return events.some((e) => e.type === 'artifact_created' && e.extra.artifact === path);
+}
+
+/**
+ * Reduce a map step's member parts into its collective, record it, and
+ * receipt the reduction.
+ *
+ * The collective is the artifact a gate reads, and until rc.61 it was the
+ * artifact with the weakest provenance in the ledger: a manifest with a digest
+ * and nothing that said where the bytes came from, so no receipt anchored it
+ * and renaming its manifest removed it from the audit. `collective_assembled`
+ * names every part in order; `fadeno verify` (`collective-provenance`)
+ * rebuilds the collective from those receipted parts through the same
+ * `reduceCollective` and refuses one that does not reduce from them.
+ *
+ * Manifest first, receipt second — the same order `tool-exec` uses — so a
+ * receipt can never attest bytes the ledger does not manifest.
+ */
+function assembleCollective(
+  ctx: EngineCtx,
+  stepId: string,
+  collective: string,
+  actors: ReadonlyArray<string | null>,
+  outputs: ReadonlyArray<string>,
+  stepExecutionId: string,
+): void {
+  if (artifactRecorded(freshEvents(ctx.runDir), collective)) return;
+  const parts = actors.map((role, i) => {
+    const rel = outputs[i]!;
+    const abs = join(ctx.runDir, rel);
+    try { return JSON.parse(readFileSync(abs, 'utf8')) as unknown; } catch (err) { throw new DriveError(`cannot assemble ${collective}: member output ${rel}${role ? ` (${role})` : ''} is not valid JSON: ${(err as Error).message}`); }
+  });
+  const body = reduceCollective(parts);
+  const abs = join(ctx.runDir, collective);
+  mkdirSync(dirname(abs), { recursive: true });
+  writeFileSync(abs, body, 'utf8');
+  try { runRun({ run: ctx.runId, event: 'artifact_created', artifact: collective, fields: [`step_execution_id=${stepExecutionId}`], repoRoot: ctx.repoRoot, now: ctx.now }); } catch (err) { if (err instanceof RunError) throw new DriveError(err.message); throw err; }
+  appendEvent(
+    ctx.runDir,
+    {
+      type: 'collective_assembled',
+      step: stepId,
+      step_execution_id: stepExecutionId,
+      output: collective,
+      parts: [...outputs],
+      members: actors.map((role) => role ?? null),
+      output_bytes: Buffer.byteLength(body),
+      output_sha256: sha256Hex(body),
+      assembled_by: 'engine',
+    },
+    ctx.now,
+  );
+  ctx.act(`assembled collective ${collective} from ${outputs.length} part(s)`);
 }
 
 interface PriorAttempts {
@@ -2556,21 +2609,7 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
       return { kind: 'awaiting_host_dispatch', requests: hostRequests, notes: hostNotes };
     }
     // Collective assembly for serial path
-    if (step.collective != null) {
-      events = freshEvents(ctx.runDir);
-      if (!artifactRecorded(events, step.collective)) {
-        const parts = actors.map((role, i) => {
-          const rel = outputs[i]!;
-          const abs = join(ctx.runDir, rel);
-          try { return JSON.parse(readFileSync(abs, 'utf8')) as unknown; } catch (err) { throw new DriveError(`cannot assemble ${step.collective}: member output ${rel}${role ? ` (${role})` : ''} is not valid JSON: ${(err as Error).message}`); }
-        });
-        const abs = join(ctx.runDir, step.collective);
-        mkdirSync(dirname(abs), { recursive: true });
-        writeFileSync(abs, `${JSON.stringify(parts, null, 2)}\n`, 'utf8');
-        try { runRun({ run: ctx.runId, event: 'artifact_created', artifact: step.collective, fields: [`step_execution_id=${stepExecutionId}`], repoRoot: ctx.repoRoot, now: ctx.now }); } catch (err) { if (err instanceof RunError) throw new DriveError(err.message); throw err; }
-        ctx.act(`assembled collective ${step.collective}`);
-      }
-    }
+    if (step.collective != null) assembleCollective(ctx, stepId, step.collective, actors, outputs, stepExecutionId);
     return null;
   }
 
@@ -2655,21 +2694,7 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
         return { kind: 'exit_nonzero', detail: (f as { detail: string }).detail } as unknown as PromptableOutcome;
       }
     }
-    if (step.collective != null) {
-      events = freshEvents(ctx.runDir);
-      if (!artifactRecorded(events, step.collective)) {
-        const parts = actors.map((role, i) => {
-          const rel = outputs[i]!;
-          const abs = join(ctx.runDir, rel);
-          try { return JSON.parse(readFileSync(abs, 'utf8')) as unknown; } catch (err) { throw new DriveError(`cannot assemble ${step.collective}: member output ${rel}${role ? ` (${role})` : ''} is not valid JSON: ${(err as Error).message}`); }
-        });
-        const abs = join(ctx.runDir, step.collective);
-        mkdirSync(dirname(abs), { recursive: true });
-        writeFileSync(abs, `${JSON.stringify(parts, null, 2)}\n`, 'utf8');
-        try { runRun({ run: ctx.runId, event: 'artifact_created', artifact: step.collective, fields: [`step_execution_id=${stepExecutionId}`], repoRoot: ctx.repoRoot, now: ctx.now }); } catch (err) { if (err instanceof RunError) throw new DriveError(err.message); throw err; }
-        ctx.act(`assembled collective ${step.collective}`);
-      }
-    }
+    if (step.collective != null) assembleCollective(ctx, stepId, step.collective, actors, outputs, stepExecutionId);
     return null;
   }
 
@@ -2813,21 +2838,7 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
     return { kind: 'awaiting_host_dispatch', requests: hostRequests, notes: hostNotes };
   }
 
-  if (step.collective != null) {
-    events = freshEvents(ctx.runDir);
-    if (!artifactRecorded(events, step.collective)) {
-      const parts = actors.map((role, i) => {
-        const rel = outputs[i]!;
-        const abs = join(ctx.runDir, rel);
-        try { return JSON.parse(readFileSync(abs, 'utf8')) as unknown; } catch (err) { throw new DriveError(`cannot assemble ${step.collective}: member output ${rel}${role ? ` (${role})` : ''} is not valid JSON: ${(err as Error).message}`); }
-      });
-      const abs = join(ctx.runDir, step.collective);
-      mkdirSync(dirname(abs), { recursive: true });
-      writeFileSync(abs, `${JSON.stringify(parts, null, 2)}\n`, 'utf8');
-      try { runRun({ run: ctx.runId, event: 'artifact_created', artifact: step.collective, fields: [`step_execution_id=${stepExecutionId}`], repoRoot: ctx.repoRoot, now: ctx.now }); } catch (err) { if (err instanceof RunError) throw new DriveError(err.message); throw err; }
-      ctx.act(`assembled collective ${step.collective}`);
-    }
-  }
+  if (step.collective != null) assembleCollective(ctx, stepId, step.collective, actors, outputs, stepExecutionId);
   return null;
 }
 

@@ -305,6 +305,19 @@ const CLAIMS: Claim[] = [
     src: { files: ['src/commands/drive.ts', 'src/commands/dispatch.ts'], patterns: [/executor_timeout/] },
   },
   {
+    // The two artifact classes that carried no receipt before rc.61. The docs
+    // that describe the ledger name both receipts and the checks that hold
+    // them; the kernel emits the words they name.
+    id: 'collective-provenance',
+    doc: { files: ['docs/experimental/next-protocol.md', 'CHANGELOG.md', 'docs/architecture.md'], patterns: [/collective_assembled/, /collective-provenance/] },
+    src: { files: ['src/commands/drive.ts', 'src/commands/verify.ts', 'scripts/tamper-matrix.mjs'], patterns: [/collective_assembled/, /collective-provenance/] },
+  },
+  {
+    id: 'tool-recorded-receipt',
+    doc: { files: ['docs/experimental/next-protocol.md', 'CHANGELOG.md', EXTENDING, 'templates/common/skills/fadeno-runner/references/runtime.md'], patterns: [/tool_recorded/] },
+    src: { files: ['src/commands/tool-complete.ts', 'src/commands/verify.ts', 'scripts/tamper-matrix.mjs'], patterns: [/tool_recorded/, /recorded_by/] },
+  },
+  {
     id: 'timeout-cli-override',
     doc: { files: [EXTENDING, 'README.md'], patterns: [/--timeout <seconds>/] },
     src: { files: ['src/cli.ts'], patterns: [/--timeout/] },
@@ -347,7 +360,7 @@ const CLAIMS: Claim[] = [
   {
     id: 'tamper-matrix',
     doc: { files: ['docs/experimental/next-protocol.md'], patterns: [/scripts\/tamper-matrix\.mjs/] },
-    src: { files: ['scripts/tamper-matrix.mjs', 'package.json'], patterns: [/knownGap/, /tamper-matrix/] },
+    src: { files: ['scripts/tamper-matrix.mjs', 'package.json'], patterns: [/baselineVerify/, /tamper-matrix/] },
   },
   {
     // The recovery reader's verdict line. A proxy relayed a deadline-killed

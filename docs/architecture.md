@@ -177,7 +177,7 @@ assert on return values and filesystem effects instead of scraping stdout.
 | `runDispatches` | correlated dispatch rows | Read-only projection of `.fadeno/dispatches.jsonl`: pairs `dispatch_requested`/`dispatch_completed` by `dispatch_id`, keeps `host_delivery` rows inline, and marks a request with no completion as killed-or-in-flight rather than dropping it. Pre-format legacy rows render as `[legacy]`; newer-format rows get a separate count. `--tail <N>` (default 10) / `--json`. |
 | `runSteeringResolve` / `runSteeringApply` | hybrid mode / emitted Codex agents | Resolves host vs command vs restart-required vs write-conflict per invocation; materializes per-slot host agents or cheap command brokers, declining brokers for write-conflicted slots. |
 | `runToolRun` | `ToolRunResult` + `artifact` | Executes a registered `tool_call` (`test-result` only) deterministically: strict registry, supervisor/process-group, writer lease, bounded TestResult synthesis, exclusive placement, and `tool_dispatched`/`tool_completed`/`tool_failed` lifecycle. Thin adapter over `lib/tool-exec.ts`. |
-| `runToolComplete` | run update + artifact manifest | Validates a typed tool result before atomically starting the exact next `tool_call` and recording its result. Shares claim/lease/concurrency discipline with `tool-run` (generation-scoped, one attempt wins). |
+| `runToolComplete` | run update + artifact manifest + `tool_recorded` receipt | Validates a typed tool result before atomically starting the exact next `tool_call` and recording its result. Shares claim/lease/concurrency discipline with `tool-run` (generation-scoped, one attempt wins). Writes the manifest, then a `tool_recorded` receipt (`recorded_by: host`) — never `tool_completed`, which means the kernel ran it. |
 | `runCancel` | `CancelResult` | SIGTERM to the live supervisor/process-group for `engine-*` or `tool-*` claims (run-scoped, `ESRCH`-checked before retry). |
 | `runPlugin` | `EmitResult[]` + `outDir` | Generates `plugin/` from templates. |
 | `runSetup` | user paths, probes, dial state, restart notices | Safe host-default setup and dial-backed steering; no longer seeds a user dial pin. |
@@ -251,6 +251,12 @@ back to ordinary file completion when no specialized candidates apply.
   group is gone. Idle output is never a termination signal — `show`
   surfaces `WARNING: no output observed for <duration> (non-gating)` after
   five minutes via `OUTPUT_IDLE_WARNING_MS` and `HarnessObservedProcessView.outputIdleWarning`.
+- **`collective.ts`** — `reduceCollective`, the one reduction of a map's member
+  parts into its collective. `drive` writes a collective through it and
+  receipts the reduction (`collective_assembled`: parts in order, digest,
+  `assembled_by: engine`); `verify` (`collective-provenance`) reduces the
+  receipted parts again and refuses a collective that does not come out
+  identical.
 - **`tool-exec.ts`** — deterministic `tool_call` execution core: strict `tools:` registry parsing (static argv, timeout), `tool_dispatched` → supervisor spawn (shared writer lease, `readdirSync` live-claim scan with `ESRCH` group reclaim) → bounded `TestResult` synthesis → exclusive `linkSync` placement (never clobbering) → `artifact_created` + `tool_completed`/`tool_failed` lifecycle (one attempt wins, `tool-generation` scoped, crash-safe attribution preserving already-attributed bytes). Used by both `fadeno tool-run` and `fadeno drive`; recovery via shared `recoverInterruptedToolDispatchesShared`.
 - **`executors.ts`** — the executor profile (`.fadeno/executors.yaml`): v3 registry
   `models:` plus per-harness `routes:` (with `driver:`, `models_command:`,

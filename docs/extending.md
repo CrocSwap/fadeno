@@ -304,7 +304,7 @@ Rules enforced identically at catalog and snapshot parse boundaries:
 
 Layering follows existing profile precedence: `builtin` → `user` → `project`; a self-contained project catalog (`models:` + `routes:`) suppresses builtin/user. `tools:` merges by key like `bindings:`/`models:`.
 
-`fadeno tool-run <run> [--tool <name>] [--timeout <seconds>]` then executes the ready `tool_call` only when its `tool` is registered and its artifact schema is `test-result`; `--tool` is a race guard. `Diff`/`PostResult` stay manual via `fadeno tool-complete <run> --output <path>` (which shares the same generation-scoped claim/lease discipline, so one attempt wins). `fadeno drive` auto-executes registered `test-result` tools inline and otherwise returns `needs_decision`.
+`fadeno tool-run <run> [--tool <name>] [--timeout <seconds>]` then executes the ready `tool_call` only when its `tool` is registered and its artifact schema is `test-result`; `--tool` is a race guard. `Diff`/`PostResult` stay manual via `fadeno tool-complete <run> --output <path>` (which shares the same generation-scoped claim/lease discipline, so one attempt wins, and writes a `tool_recorded` receipt — `recorded_by: host` — after the manifest; `verify`'s `tool-artifact-receipts` requires every tool step's artifact to be claimed by `tool_completed` or `tool_recorded`). `fadeno drive` auto-executes registered `test-result` tools inline and otherwise returns `needs_decision`.
 
 Every model name and dial ref must use bare lowercase identifiers
 (`[a-z][a-z0-9_-]*` for archetype/dial keys; model ids may contain slashes for
