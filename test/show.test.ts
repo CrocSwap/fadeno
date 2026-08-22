@@ -376,6 +376,9 @@ test('projection separates correlated harness process facts from attested semant
     '{"type":"host_dispatch_requested","step":"implement","timestamp":"2026-07-11T02:12:35.000Z","dispatch_id":"dispatch-xyz","actor":"worker","executor":"codex"}',
     '{"type":"actor_dispatched","step":"implement","timestamp":"2026-07-11T02:12:36.000Z","dispatch_id":"dispatch-xyz","actor":"worker","agent_id":"agent-1"}',
     '{"type":"host_dispatch_progress","step":"implement","dispatch_id":"dispatch-xyz","progress_state":"running","phase":"writing","observation_source":"agent","reported_at":"2026-07-11T02:12:50.000Z"}',
+    // The live claim belongs to an ISOLATED engine attempt: the ledger row that
+    // named the claim says so, and the projection must say the same.
+    `{"type":"actor_dispatched","step":"review","actor":"reviewer_a","actor_call_id":"ac-review-g1-reviewer_a","attempt":1,"executor":"luna","supervisor_claim":".fadeno/local/inflight/engine-${runId}-live-a1.json","workspace_mode":"isolated","workspace":".fadeno/local/engine/${runId}/ac-review-g1-reviewer_a-a1","timestamp":"2026-07-11T02:12:40.000Z"}`,
     '',
   ].join('\n'));
 
@@ -417,6 +420,8 @@ test('projection separates correlated harness process facts from attested semant
   assert.equal(live.runtimeMs, 20_000);
   assert.equal(live.runId, runId);
   assert.match(live.claimPath, new RegExp(`engine-${runId}-live-a1\\.json$`));
+  assert.equal(live.workspaceMode, 'isolated', 'the dispatched row names the claim and says isolated; show must not call it shared');
+  assert.equal(p.harnessObserved.find((f) => f.supervisorPid === 6001)?.workspaceMode, 'shared', 'a claim no ledger row names defaults to shared');
   assert.equal(p.harnessObserved.find((f) => f.supervisorPid === 6001)?.processState, 'dead');
   const unknown = p.harnessObserved.find((f) => f.supervisorPid === 7001);
   assert.equal(unknown?.processState, 'unknown');

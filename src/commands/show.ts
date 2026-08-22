@@ -357,8 +357,22 @@ export function collectHarnessObserved(
   runId: string,
   now: Date,
   probe: (pid: number, signal: 0) => void = (pid, signal) => { process.kill(pid, signal); },
+  events: RunEvent[] = [],
 ): HarnessObservedProcessView[] {
   const out: HarnessObservedProcessView[] = [];
+
+  // An inflight claim says nothing about where its executor is working; the
+  // `actor_dispatched` row that named the claim does. Until rc.62 every engine
+  // claim was projected as `shared` regardless, so `fadeno show` called an
+  // isolated attempt shared while the ledger said otherwise.
+  const claimWorkspaceMode = new Map<string, 'shared' | 'isolated'>();
+  for (const event of events) {
+    if (event.type !== 'actor_dispatched' && event.type !== 'tool_dispatched') continue;
+    const claim = event.extra.supervisor_claim;
+    if (typeof claim !== 'string') continue;
+    claimWorkspaceMode.set(claim, event.extra.workspace_mode === 'isolated' ? 'isolated' : 'shared');
+  }
+  const modeOf = (claimPath: string): 'shared' | 'isolated' => claimWorkspaceMode.get(claimPath) ?? 'shared';
 
   // Inflight claims — per-engine and per-ad-hoc.
   const inflightDir = join(repoRoot, ...INFLIGHT_DIR.split('/'));
@@ -387,7 +401,7 @@ export function collectHarnessObserved(
             runId,
             dispatchId: null,
             claimPath,
-            workspaceMode: 'shared',
+            workspaceMode: modeOf(claimPath),
             processState: 'dead',
             observationError: status.spawnFailed == null ? null : `spawn failed: ${status.spawnFailed}`,
             supervisorPid: status.supervisorPid,
@@ -428,7 +442,7 @@ export function collectHarnessObserved(
             runId,
             dispatchId: null,
             claimPath,
-            workspaceMode: 'shared',
+            workspaceMode: modeOf(claimPath),
             processState: observed.state,
             observationError: observed.error,
             supervisorPid: claim.supervisorPid,
@@ -864,7 +878,7 @@ function projectRun(
   }
 
   const { active } = resolveActiveArtifacts(events);
-  const harnessObserved = collectHarnessObserved(repoRoot, run.runId, now, processProbe);
+  const harnessObserved = collectHarnessObserved(repoRoot, run.runId, now, processProbe, events);
   return {
     playbook: run.playbook,
     runtimeMs: elapsed(run.startedAt, run.endedAt, now),

@@ -6,6 +6,10 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — `fadeno show` no longer calls an isolated engine attempt shared (0.6.0-rc.62)
+
+The live-holder line under `fadeno show` projected every inflight engine claim as `workspace_mode=shared`, hard-coded, while the `actor_dispatched` row for the same attempt said `isolated` and named its worktree. Found watching a real isolated implementer in the regenerated 0.6 exhibit. The projection now reads the mode from the ledger row that named the claim (`supervisor_claim`), and a claim no row names still reads `shared`. Harness-observed and non-gating either way — but a watcher deciding whether a hung attempt holds the shared tree should not be told the wrong thing.
+
 ### Added — every artifact has a receipt (0.6.0-rc.61)
 
 Two artifact classes carried no completion receipt, so nothing anchored them and either could be renamed out of the audit — the tamper matrix had measured this as a known gap on every run since rc.57. Both are receipted now, and both gaps are closed rather than tracked.

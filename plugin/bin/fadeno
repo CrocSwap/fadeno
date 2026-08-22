@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.61";
+  if (true) return "0.6.0-rc.62";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -32984,8 +32984,16 @@ function blankHarnessFact(claimPath, holderId, holderKind, runId, error) {
 }
 function collectHarnessObserved(repoRoot, runId, now, probe2 = (pid, signal) => {
   process.kill(pid, signal);
-}) {
+}, events = []) {
   const out = [];
+  const claimWorkspaceMode = /* @__PURE__ */ new Map();
+  for (const event of events) {
+    if (event.type !== "actor_dispatched" && event.type !== "tool_dispatched") continue;
+    const claim = event.extra.supervisor_claim;
+    if (typeof claim !== "string") continue;
+    claimWorkspaceMode.set(claim, event.extra.workspace_mode === "isolated" ? "isolated" : "shared");
+  }
+  const modeOf = (claimPath) => claimWorkspaceMode.get(claimPath) ?? "shared";
   const inflightDir = (0, import_node_path32.join)(repoRoot, ...INFLIGHT_DIR.split("/"));
   if ((0, import_node_fs32.existsSync)(inflightDir)) {
     try {
@@ -33012,7 +33020,7 @@ function collectHarnessObserved(repoRoot, runId, now, probe2 = (pid, signal) => 
             runId,
             dispatchId: null,
             claimPath: claimPath2,
-            workspaceMode: "shared",
+            workspaceMode: modeOf(claimPath2),
             processState: "dead",
             observationError: status.spawnFailed == null ? null : `spawn failed: ${status.spawnFailed}`,
             supervisorPid: status.supervisorPid,
@@ -33053,7 +33061,7 @@ function collectHarnessObserved(repoRoot, runId, now, probe2 = (pid, signal) => 
             runId,
             dispatchId: null,
             claimPath,
-            workspaceMode: "shared",
+            workspaceMode: modeOf(claimPath),
             processState: observed.state,
             observationError: observed.error,
             supervisorPid: claim.supervisorPid,
@@ -33446,7 +33454,7 @@ function projectRun(repoRoot, run, events, now, processProbe) {
     else if (body.some((candidate) => candidate.state === "waiting")) step.state = "waiting";
   }
   const { active } = resolveActiveArtifacts(events);
-  const harnessObserved = collectHarnessObserved(repoRoot, run.runId, now, processProbe);
+  const harnessObserved = collectHarnessObserved(repoRoot, run.runId, now, processProbe, events);
   return {
     playbook: run.playbook,
     runtimeMs: elapsed(run.startedAt, run.endedAt, now),
