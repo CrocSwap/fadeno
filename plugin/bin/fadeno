@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.50";
+  if (true) return "0.6.0-rc.51";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -20966,7 +20966,7 @@ function captureWorkspaceBaseline(repoRoot) {
     untrackedFiles: String(untrackedRes.stdout ?? "").split("\0").filter((p) => p.length > 0).filter((p) => !isUnderShadowHome(p))
   };
 }
-function applyWorkspaceBaseline(repoRoot, worktreeAbs, captured, pairId, armLabel) {
+function applyWorkspaceBaseline(repoRoot, worktreeAbs, captured, baselineRef, armLabel) {
   const patch = captured.patch;
   if (patch.length > 0) {
     const applyRes = (0, import_node_child_process5.spawnSync)("git", ["-C", worktreeAbs, "apply", "--index"], {
@@ -21014,7 +21014,7 @@ function applyWorkspaceBaseline(repoRoot, worktreeAbs, captured, pairId, armLabe
     "--no-verify",
     "--no-gpg-sign",
     "-m",
-    `fadeno pair baseline ${pairId}`
+    `fadeno workspace baseline ${baselineRef}`
   ], {
     encoding: "utf8",
     env: {
@@ -21267,8 +21267,19 @@ ${prompt}`;
     const probe2 = (0, import_node_child_process5.spawnSync)("git", ["-C", repoRoot, "rev-parse", "--git-dir"], { encoding: "utf8" });
     return probe2.error == null && probe2.status === 0;
   })();
-  const workspaceMode = opts.shared === true ? "shared" : (opts.isolate || gitAvailable) && gitAvailable ? "isolated" : "shared";
-  const needsLease = workspaceMode === "shared";
+  const ignoredOutputPolicy = opts.ignoredOutput ?? (profile.archetypes[archetype ?? ""]?.ignoredOutput ?? "discardable");
+  let isolationWithheld = null;
+  if (opts.shared !== true && opts.isolate !== true && ignoredOutputPolicy === "kept") {
+    isolationWithheld = "this dispatch declares `ignored_output: kept`, and an isolated worktree merges back through `git add -A`, which respects .gitignore \u2014 so gitignored output would not survive it";
+  }
+  if (opts.isolate === true && opts.shared !== true && !gitAvailable) {
+    throw new DispatchCommandError(
+      "--isolate needs a git repository: an isolated worktree is cut with `git worktree add`, and this directory is not one. Refusing rather than running in your tree, which is what --isolate exists to prevent. Run `git init` first, or drop --isolate to accept a shared-tree dispatch."
+    );
+  }
+  const isolationOrigin = opts.shared === true ? null : opts.isolate === true ? "requested" : gitAvailable && isolationWithheld == null ? "kernel" : null;
+  const workspaceMode = isolationOrigin == null ? "shared" : "isolated";
+  let needsLease = workspaceMode === "shared";
   const commandSha256 = sha256Hex(JSON.stringify(command2));
   const producers = lookupInputProducers(repoRoot, producedByIds(opts));
   const dialField = { model: dial.model };
@@ -21383,7 +21394,7 @@ ${prompt}`;
     return null;
   };
   const effectiveTimeoutMs2 = timeoutFor(spec);
-  const leaseHolder = needsLease ? { id: `ad-hoc:${dispatchId}`, kind: "ad-hoc", dispatchId } : null;
+  let leaseHolder = needsLease ? { id: `ad-hoc:${dispatchId}`, kind: "ad-hoc", dispatchId } : null;
   let dispatchLeaseExistingBefore = null;
   let dispatchLeaseAliveBefore = false;
   if (leaseHolder != null) {
@@ -21585,11 +21596,10 @@ ${prompt}`;
       writeShadowRefusal("constraint_command", shadowConstraintVerdict.reason, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: "command" });
       return null;
     }
-    const ignoredOutputPolicy = opts.ignoredOutput ?? (profile.archetypes[archetype ?? ""]?.ignoredOutput ?? "discardable");
     if (ignoredOutputPolicy === "kept") {
       writeShadowRefusal(
         "ignored_output_kept",
-        `this dispatch declares \`ignored_output: kept\`, and a pair cannot preserve it: both arms run in worktrees and the primary is merged back through \`git add -A\`, which respects .gitignore \u2014 so any gitignored output would be discarded. No pair was formed and the primary runs normally in the shared tree. This is a trade, not a fault: a comparison was given up to protect the work. Set \`ignored_output: discardable\` on the archetype, or pass \`--ignored-output discardable\`, if this task's gitignored output is intermediate and safe to lose.`,
+        `this dispatch declares \`ignored_output: kept\`, and a pair cannot preserve it: both arms run in worktrees and the primary is merged back through \`git add -A\`, which respects .gitignore \u2014 so any gitignored output would be discarded. No pair was formed, and for the same reason this dispatch also runs in the shared tree rather than the isolated worktree that is otherwise the default. This is a trade, not a fault: a comparison AND containment were given up to protect the work. Set \`ignored_output: discardable\` on the archetype, or pass \`--ignored-output discardable\`, if this task's gitignored output is intermediate and safe to lose.`,
         { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: "command" }
       );
       return null;
@@ -21890,8 +21900,11 @@ ${prompt}`;
     let isolatedCarryFingerprint = null;
     let isolatedIgnoredOutput = null;
     const takeIsolatedIgnoredOutput = () => isolatedIgnoredOutput;
+    let isolatedBaselineCommit = null;
+    const takeIsolatedBaselineCommit = () => isolatedBaselineCommit;
     let effectiveWorkspaceMode = workspaceMode;
     let isolationDegraded = null;
+    let executorRanInWorktree = false;
     let primaryMerge = null;
     const inflightAbs = (0, import_node_path15.join)(repoRoot, ...INFLIGHT_DIR.split("/"), `${dispatchId}.json`);
     const statusAbs = inflightAbs.replace(/\.json$/, ".status.json");
@@ -21905,7 +21918,7 @@ ${prompt}`;
       (0, import_node_fs15.mkdirSync)((0, import_node_path15.join)(repoRoot, ".fadeno", "local", "outputs"), { recursive: true });
       (0, import_node_fs15.mkdirSync)((0, import_node_path15.join)(repoRoot, ...INFLIGHT_DIR.split("/")), { recursive: true });
       outputFd = (0, import_node_fs15.openSync)(outputAbs, "w");
-      const leaseRelease = leaseHolder == null ? void 0 : {
+      const leaseRelease = () => leaseHolder == null ? void 0 : {
         leasePath: (0, import_node_path15.join)(repoRoot, WORKSPACE_LEASE_FILE),
         lockPath: (0, import_node_path15.join)(repoRoot, WORKSPACE_LEASE_LOCK),
         holder: leaseHolder
@@ -21914,7 +21927,7 @@ ${prompt}`;
         supervisorAttempted = true;
         const result = (0, import_node_child_process5.spawnSync)(
           process.execPath,
-          superviseArgv(command2, inflightAbs, statusAbs, leaseRelease, effectiveTimeoutMs2),
+          superviseArgv(command2, inflightAbs, statusAbs, leaseRelease(), effectiveTimeoutMs2),
           {
             input: prompt,
             encoding: "utf8",
@@ -21930,11 +21943,7 @@ ${prompt}`;
         supervisorTerminalObserved = result.error != null || readSupervisorStatus(statusAbs, (path) => (0, import_node_fs15.readFileSync)(path, "utf8")) != null;
         return result;
       };
-      if (effectiveWorkspaceMode === "isolated" && pendingShadow == null && !opts.isolate) {
-        effectiveWorkspaceMode = "shared";
-        isolationDegraded = "the pair did not materialize, so there was nothing to stay symmetric with";
-      }
-      if (effectiveWorkspaceMode === "isolated") {
+      const runIsolated = () => {
         const id8 = dispatchId.slice(0, 8);
         const diffRel = (0, import_node_path15.join)(".fadeno", "local", "outputs", `isolated-${id8}.diff`).split("\\").join("/");
         const pairedWorktree = pendingShadow != null ? (0, import_node_path15.join)(repoRoot, ".fadeno", "local", "pair", pendingShadow.pairId.slice(0, 8), id8) : (0, import_node_path15.join)(repoRoot, ".fadeno", "local", "isolated", id8);
@@ -21953,29 +21962,29 @@ ${prompt}`;
           }
           isolatedCarryRecords = isolatedCarry.records;
           isolatedCarryFingerprint = isolatedCarry.fingerprint;
-          if (pendingShadow != null) {
-            const primaryBaseline = applyWorkspaceBaseline(
-              repoRoot,
-              worktreeAbs,
-              capturedBaseline(),
-              pendingShadow.pairId,
-              "primary"
+          const baselineRef = pendingShadow?.pairId ?? dispatchId;
+          const primaryBaseline = applyWorkspaceBaseline(
+            repoRoot,
+            worktreeAbs,
+            capturedBaseline(),
+            baselineRef,
+            pendingShadow != null ? "primary" : "isolated"
+          );
+          isolatedBaselineCommit = primaryBaseline;
+          if (pendingShadow != null && primaryBaseline !== pendingShadow.baselineCommit) {
+            throw new WorkspaceLeaseError(
+              `the pair's two arms produced different baseline commits (${primaryBaseline.slice(0, 12)} vs ${pendingShadow.baselineCommit.slice(0, 12)}) \u2014 they did not start from the same state, so the comparison would be meaningless. Refusing rather than recording a baseline only one arm has.`
             );
-            if (primaryBaseline !== pendingShadow.baselineCommit) {
-              throw new WorkspaceLeaseError(
-                `the pair's two arms produced different baseline commits (${primaryBaseline.slice(0, 12)} vs ${pendingShadow.baselineCommit.slice(0, 12)}) \u2014 they did not start from the same state, so the comparison would be meaningless. Refusing rather than recording a baseline only one arm has.`
-              );
-            }
           }
           const spawnedInWorktree = invoke(worktreeAbs);
+          executorRanInWorktree = true;
           isolatedIgnoredOutput = scanIgnoredOutput(worktreeAbs, profile.worktreeCarry);
           return spawnedInWorktree;
         });
-        spawned = isolated.result;
         isolatedDiffRel = isolated.diff.diffRel;
         isolatedDiffBytes = isolated.diff.diffBytes;
         opts.onEcho?.(`isolated diff: ${isolated.diff.diffBytes} bytes \u2192 ${isolated.diff.diffRel}`);
-        if (pendingShadow != null) {
+        if (isolationOrigin === "kernel") {
           const mergeHolder = { id: `merge-back:${dispatchId}`, kind: "ad-hoc", dispatchId };
           let leaseTaken = false;
           try {
@@ -22007,8 +22016,9 @@ ${prompt}`;
                   status: "conflicted",
                   detail: stderrText.length > 0 ? stderrText : `git apply --3way exited ${applyRes.status ?? "unknown"}`
                 };
+                const recovery = pendingShadow != null ? `Resolve with \`fadeno shadow-apply ${pendingShadow.pairId.slice(0, 8)} --arm primary\`` : `Resolve with \`git apply --3way ${isolated.diff.diffRel}\``;
                 opts.onEcho?.(
-                  `merge-back CONFLICTED \u2014 the primary's work is kept at ${isolated.diff.diffRel}. Resolve with \`fadeno shadow-apply ${pendingShadow.pairId.slice(0, 8)} --arm primary\` once the tree settles; inspect \`git status\` first, some hunks may already be staged.`
+                  `merge-back CONFLICTED \u2014 the dispatch's work is kept at ${isolated.diff.diffRel}. ${recovery} once the tree settles; inspect \`git status\` first, some hunks may already be staged.`
                 );
               }
             } finally {
@@ -22019,11 +22029,43 @@ ${prompt}`;
             }
           }
         }
+        return isolated.result;
+      };
+      if (effectiveWorkspaceMode === "isolated") {
+        try {
+          spawned = runIsolated();
+        } catch (isolationError) {
+          if (executorRanInWorktree || isolationOrigin !== "kernel") throw isolationError;
+          const reason = isolationError instanceof Error ? isolationError.message : String(isolationError);
+          leaseHolder = { id: `ad-hoc:${dispatchId}`, kind: "ad-hoc", dispatchId };
+          try {
+            acquireWorkspaceLease({
+              repoRoot,
+              workspaceMode: "shared",
+              holder: leaseHolder,
+              supervisorPid: null,
+              executorPid: null,
+              processGroupId: null,
+              startedAt: now,
+              heartbeatAt: now,
+              stdoutBytes: 0,
+              stderrBytes: 0,
+              now
+            });
+            needsLease = true;
+          } catch {
+            leaseHolder = null;
+            throw isolationError;
+          }
+          effectiveWorkspaceMode = "shared";
+          isolationDegraded = `the isolated worktree could not be prepared (${reason})`;
+          spawned = invoke(repoRoot);
+        }
       } else {
         spawned = invoke(repoRoot);
       }
       if (isolationDegraded != null) {
-        opts.onEcho?.(`primary isolation degraded to shared: ${isolationDegraded}`);
+        opts.onEcho?.(`isolation degraded to shared: ${isolationDegraded}`);
       }
     } catch (error) {
       if (error instanceof WorkspaceLeaseError) throw new DispatchCommandError(error.message);
@@ -22118,6 +22160,10 @@ ${truncatedStderr}
       // written before the roll, so this is the first row that can carry it.
       ...pendingShadow != null ? { pair_id: pendingShadow.pairId, baseline_commit: pendingShadow.baselineCommit } : {}
     };
+    if (pendingShadow == null && effectiveWorkspaceMode === "isolated") {
+      const soloBaseline = takeIsolatedBaselineCommit();
+      if (soloBaseline != null) row.baseline_commit = soloBaseline;
+    }
     if (workspaceBefore != null && workspaceAfter != null) {
       row.workspace_changed = workspaceBefore !== workspaceAfter;
     }
@@ -35201,7 +35247,12 @@ function runShadowApply(opts) {
   const target = armEntry(pair, arm);
   if (arm === "primary" && (target == null || target.diffSnapshot == null)) {
     throw new ShadowApplyCommandError(
-      `the primary arm of pair ${pairId8} ran in the shared workspace, not an isolated worktree \u2014 its work is already in your workspace, so there is nothing to apply. (A primary only records a diff_snapshot \u2014 and so only has something for shadow-apply to port back \u2014 when it ran under \`--isolate\`.)`
+      `the primary arm of pair ${pairId8} ran in the shared workspace, not an isolated worktree \u2014 its work is already in your workspace, so there is nothing to apply. (A primary records a diff_snapshot only when it ran in a worktree; \`--shared\`, and an isolation that degraded, both write your tree directly.)`
+    );
+  }
+  if (arm === "primary" && target?.primaryMerge?.status === "clean") {
+    throw new ShadowApplyCommandError(
+      `the primary arm of pair ${pairId8} already merged back cleanly \u2014 its work is in your workspace already, and applying the same diff a second time would either do nothing or corrupt a tree that has moved since. Re-apply only when the recorded primary_merge is \`conflicted\` or \`blocked\`; if you meant to inspect the patch, it is at ${target.diffSnapshot}.`
     );
   }
   if (target == null) {
@@ -38624,9 +38675,9 @@ Options:
   --tag <t>               (dispatch) Label the dispatch for recovery (dispatches --output tag:<t>)
   --shadow <ref>          (dispatch) Duplicate the prompt to a one-shot shadow challenger
                           (FADENO_SHADOW_MAX_LIVE caps concurrent challengers; default 4)
-  --isolate               (dispatch) Force a detached worktree (already the default where git allows)
+  --isolate               (dispatch) Keep the work OUT of your tree: detached worktree, no merge-back
   --shared                (dispatch) Opt OUT of isolation and run in this tree (nothing contains the executor)
-  --ignored-output <kept|discardable>  (dispatch) Whether this task's gitignored output must survive; kept forgoes a shadow pair
+  --ignored-output <kept|discardable>  (dispatch) Whether this task's gitignored output must survive; kept forgoes the pair AND the worktree
   --diagnostics           (dispatch/drive) Persist bounded process output (32 KiB / 500 lines) to diagnostics log
   --no-brief              (dispatch) Skip the archetype's declared brief preamble
   --tail <n>              (dispatches) Logical entries to show, newest last (default 10)
@@ -38910,13 +38961,19 @@ Options:
                         run concurrently, capped by FADENO_SHADOW_MAX_LIVE (default 4), and
                         their worktrees are retained under .fadeno/local/shadow for review
   --timeout <seconds>   Hard executor deadline seconds; 0 disables route default (20 min)
-  --isolate             Force a detached worktree (already the default wherever git allows it)
+  --isolate             HOLD THE WORK OUT of your tree. A detached worktree, like the default, but
+                        the diff is never applied back \u2014 it is left at the recorded diff_snapshot for
+                        you to inspect or apply yourself. This is the flag's entire purpose now that
+                        a worktree is the default: the default isolates for containment and merges
+                        back, --isolate isolates to withhold. Refuses outside a git repository rather
+                        than running in your tree, which is what it exists to prevent.
   --shared              Opt OUT of isolation and run in THIS tree. Nothing stands between the executor
                         and your files \u2014 Fadeno enforces no write permissions of its own
   --ignored-output <kept|discardable>
-                        Whether this task's gitignored output must survive. A shadow pair merges the
-                        primary back through git add -A, which respects .gitignore, so "kept" forgoes
-                        the pair rather than discard the output. Overrides the archetype's
+                        Whether this task's gitignored output must survive. A worktree is merged back
+                        through git add -A, which respects .gitignore, so "kept" forgoes BOTH the
+                        shadow pair and the worktree itself: the dispatch runs in your tree, where
+                        nothing discards its gitignored output. Overrides the archetype's
                         ignored_output policy. Default: discardable.
   --diagnostics         Persist bounded process output (32 KiB / 500 lines per stream) to diagnostics log
   --no-brief            Skip the archetype's declared brief preamble
@@ -39007,9 +39064,11 @@ full, or an 8+ character prefix. Applies the arm's diff_snapshot with
 survives the main tree moving on while the pair ran. Conflict-aware from the
 first version: on any conflict it stops, keeps the diff artifact exactly where
 it was, records the attempt in .fadeno/dispatches.jsonl, and exits non-zero \u2014
-it never auto-resolves. --arm primary refuses on an ordinary paired primary
-(it already shares your workspace, so there is nothing to apply) unless that
-primary itself carries a diff_snapshot (it ran under --isolate). A baseline
+it never auto-resolves. --arm primary refuses twice over: on a primary that
+ran in the shared tree (nothing to apply \u2014 its work is already there), and on
+one whose recorded primary_merge is \`clean\` (already applied; a second apply
+would either do nothing or corrupt a tree that has moved). It is meant for a
+primary whose merge-back came back \`conflicted\` or \`blocked\`. A baseline
 commit that is no longer in the object database (for example, garbage
 collected after \`fadeno clean --force\` removed its retained shadow worktree)
 is diagnosed precisely rather than surfacing raw git output.

@@ -390,35 +390,100 @@ test('dispatch: unknown --model and empty prompt handling', (t) => {
   assert.equal(evidenceRows(root).length, 0);
 });
 
-test('dispatch: isolation is REQUESTED by default but still degrades when unpaired', (t) => {
-  // Reads BOTH rows on purpose. The request row carries the intent; the
-  // completion row carries what actually happened, and for an unpaired
-  // dispatch those disagree — `dispatch.ts` degrades isolation back to shared
-  // whenever no pair materializes and the caller did not pass `--isolate`.
-  //
-  // So the permissions cut's central claim — that the worktree is the
-  // boundary now that no write guard remains — is NOT yet delivered for an
-  // unpaired dispatch. Delivering it means letting unpaired isolation merge
-  // back the way a paired primary does, which is a real change to what
-  // `fadeno dispatch` does to your tree. Pinned here so the gap is visible
-  // rather than implied by a green test.
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+/** A repo with git, and an executor that writes one file into its cwd. The
+ * file is what proves where the executor actually ran and whether its work
+ * reached the caller's tree — a `workspace_mode` string proves neither, which
+ * is how isolation stayed declared-but-not-delivered through a green suite. */
+function seedIsolationRepo(t: TestContext, opts: { command?: string[] } = {}): string {
+  const write = opts.command ?? ['node', '-e', "require('node:fs').writeFileSync('made-by-executor.txt','x');process.stdout.write('REPORT:done')"];
+  const root = seedV3(t, {
+    dials: { worker: 'echo-worker' },
+    routes: { standalone: { openai: { command: write } } },
+  });
   const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@invalid' };
   spawnSync('git', ['init'], { cwd: root, env });
   spawnSync('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: root, env });
+  return root;
+}
 
+test('dispatch: kernel isolation is delivered, not just declared — unpaired work merges back', (t) => {
+  // The claim this test exists to make is NOT "the row says isolated". Rows
+  // said that before and the dispatch ran in the shared tree anyway; the
+  // request row carried an intent the completion row quietly broke. So this
+  // asserts the two facts a string cannot fake: the executor's file is absent
+  // from the tree WHILE it runs somewhere else, and present afterwards
+  // because the merge-back put it there.
+  const root = seedIsolationRepo(t);
   runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, userPathOptions: onHarness('standalone') });
+
   const requested = evidenceRows(root).find((r) => r.event === 'dispatch_requested')!;
   const completed = evidenceRows(root).find((r) => r.event === 'dispatch_completed')!;
   assert.equal(requested.workspace_mode, 'isolated', 'the default INTENT is isolation');
-  assert.equal(completed.workspace_mode, 'shared', 'but an unpaired dispatch still degrades to shared');
-  assert.match(
-    String(completed.workspace_mode_degraded ?? ''),
-    /pair did not materialize/,
-    'the degradation must be stamped, never silent',
-  );
+  assert.equal(completed.workspace_mode ?? 'isolated', 'isolated', 'and it is now what actually happened');
+  assert.equal(completed.workspace_mode_degraded, undefined, 'no degradation to stamp');
 
+  // The executor ran in a worktree: its output is a diff, not a direct write.
+  assert.equal(typeof completed.diff_snapshot, 'string');
+  assert.ok(Number(completed.diff_bytes) > 0, 'the worktree produced a real patch');
+  // And the diff is anchored, so it stays appliable after the worktree is gone.
+  assert.match(String(completed.baseline_commit ?? ''), /^[0-9a-f]{40}$/);
+
+  // Merge-back is what makes isolation invisible to the caller: the work
+  // lands, exactly as a shared-tree dispatch's would have.
+  assert.deepEqual(completed.primary_merge, { status: 'clean' });
+  assert.ok(existsSync(join(root, 'made-by-executor.txt')), 'the executor\'s work reached the caller\'s tree');
+});
+
+test('dispatch: --isolate holds the work OUT of the tree — the one case that never merges back', (t) => {
+  // The whole reason merge-back keys on WHO asked. `--isolate` is a caller
+  // saying "keep this out of my tree"; honouring the letter of isolation and
+  // then applying the diff anyway would be the exact opposite of the request.
+  const root = seedIsolationRepo(t);
+  runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, isolate: true, userPathOptions: onHarness('standalone') });
+
+  const completed = evidenceRows(root).find((r) => r.event === 'dispatch_completed')!;
+  assert.equal(completed.workspace_mode ?? 'isolated', 'isolated');
+  assert.equal(completed.primary_merge, undefined, 'absence means nothing was attempted — no "skipped" status');
+  assert.ok(Number(completed.diff_bytes) > 0, 'the work is still captured, just not applied');
+  assert.ok(!existsSync(join(root, 'made-by-executor.txt')), 'and the tree is untouched');
+});
+
+test('dispatch: --isolate without git refuses rather than silently running in the tree', (t) => {
+  // A downgrade here is not a fallback, it is the opposite of what was asked
+  // for. Kernel isolation may degrade — nobody asked for it — but an explicit
+  // containment request that lands in the caller's tree anyway is the silent
+  // wrong answer this codebase keeps paying for.
+  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  assert.throws(
+    () => runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, isolate: true, userPathOptions: onHarness('standalone') }),
+    (err: unknown) => err instanceof DispatchCommandError && /--isolate needs a git repository/.test(err.message),
+  );
+});
+
+test('dispatch: --shared opts out of isolation deliberately, with no degradation stamp', (t) => {
+  const root = seedIsolationRepo(t);
   runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
-  const shared = evidenceRows(root).filter((r) => r.event === 'dispatch_requested').at(-1)!;
-  assert.equal(shared.workspace_mode, 'shared', '--shared opts out deliberately, with no degradation stamp');
+  const requested = evidenceRows(root).find((r) => r.event === 'dispatch_requested')!;
+  const completed = evidenceRows(root).find((r) => r.event === 'dispatch_completed')!;
+  assert.equal(requested.workspace_mode, 'shared');
+  assert.equal(completed.workspace_mode_degraded, undefined, 'a choice is not a degradation');
+  assert.equal(completed.diff_snapshot, undefined, 'a shared dispatch writes the tree directly');
+  assert.ok(existsSync(join(root, 'made-by-executor.txt')));
+});
+
+test('dispatch: `ignored_output: kept` keeps the dispatch shared — the worktree would eat the output', (t) => {
+  // `git add -A` respects .gitignore, so a merged-back worktree discards
+  // exactly what this policy exists to preserve. Isolation is withheld rather
+  // than the policy being honoured in name only.
+  const root = seedIsolationRepo(t, {
+    command: ['node', '-e', "require('node:fs').writeFileSync('build-output.bin','x');process.stdout.write('REPORT:done')"],
+  });
+  writeFileSync(join(root, '.gitignore'), 'build-output.bin\n');
+  runDispatch({
+    archetype: 'worker', prompt: 'hello', repoRoot: root, ignoredOutput: 'kept',
+    userPathOptions: onHarness('standalone'),
+  });
+  const requested = evidenceRows(root).find((r) => r.event === 'dispatch_requested')!;
+  assert.equal(requested.workspace_mode, 'shared', 'declared shared up front, not degraded after the fact');
+  assert.ok(existsSync(join(root, 'build-output.bin')), 'the gitignored output survived');
 });

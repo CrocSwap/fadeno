@@ -411,6 +411,64 @@ test('shadow-apply --arm primary applies when the primary itself ran --isolate (
   assert.match(readFileSync(join(root, 'f.txt'), 'utf8'), /line2-primary-isolated/);
 });
 
+test('shadow-apply --arm primary refuses to re-apply a primary that already merged back cleanly', (t) => {
+  // The hazard default isolation introduces. A kernel-isolated primary merges
+  // its own diff back on the way out, so it now records BOTH a diff_snapshot
+  // and a clean primary_merge — a combination that could not occur before,
+  // because the only primaries with a diff were `--isolate` ones and those
+  // never merged. Without this guard the diff would be applied a second time:
+  // a no-op on a still tree, a corruption on one that has moved.
+  //
+  // `conflicted` is the mirror case, and it must NOT refuse: re-running this
+  // command once the tree settles is exactly what the conflict message tells
+  // the caller to do.
+  const root = tempRepo(t);
+  initGit(root);
+  const primaryDiff = makeDiffArtifact(
+    root,
+    '.fadeno/local/host-worktrees/merged-primary',
+    '.fadeno/local/outputs/primary-22220000.diff',
+    (worktreeAbs) => {
+      const p = join(worktreeAbs, 'f.txt');
+      writeFileSync(p, readFileSync(p, 'utf8').replace('line2', 'line2-already-merged'));
+    },
+  );
+  const seedMerged = (pairId: string, primaryId: string, merge: Record<string, unknown>): void => {
+    appendRows(root, [
+      row({ timestamp: ts(0), event: 'dispatch_requested', dispatch_id: primaryId, resolution: 'repo', executor: 'echo-worker', model: 'echo-worker' }),
+      row({
+        timestamp: ts(5),
+        event: 'dispatch_completed',
+        dispatch_id: primaryId,
+        resolution: 'repo',
+        executor: 'echo-worker',
+        model: 'echo-worker',
+        exit_code: 0,
+        duration_ms: 10,
+        output_sha256: 'a'.repeat(64),
+        output_bytes: 3,
+        pair_id: pairId,
+        baseline_commit: primaryDiff.baselineCommit,
+        diff_snapshot: primaryDiff.diffRel,
+        diff_bytes: primaryDiff.diffBytes,
+        primary_merge: merge,
+      }),
+    ]);
+  };
+
+  seedMerged('pair-22220000', 'primary-22220000', { status: 'clean' });
+  assert.throws(
+    () => runShadowApply({ ref: 'pair-22220000', arm: 'primary', repoRoot: root }),
+    (err: unknown) => err instanceof ShadowApplyCommandError && /already merged back cleanly/.test((err as Error).message),
+  );
+  assert.equal(git(root, ['status', '--porcelain']), '', 'a refusal touches nothing');
+
+  seedMerged('pair-33330000', 'primary-33330000', { status: 'conflicted', detail: 'patch does not apply' });
+  const retried = runShadowApply({ ref: 'pair-33330000', arm: 'primary', repoRoot: root });
+  assert.equal(retried.applied, true, 'a conflicted merge-back is exactly what this command is for');
+  assert.match(readFileSync(join(root, 'f.txt'), 'utf8'), /line2-already-merged/);
+});
+
 // The design's own framing: a retained worktree's baseline commit is
 // reachable only as long as something keeps it referenced. Once `fadeno
 // clean --force` deregisters and removes the worktree AND a real `git gc`

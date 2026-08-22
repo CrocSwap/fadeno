@@ -89,19 +89,34 @@ export function runShadowApply(opts: ShadowApplyOptions): ShadowApplyResult {
   const pairId8 = pair.pairId.slice(0, 8);
   const target = armEntry(pair, arm);
 
-  // The primary of a shadow pair runs in the SHARED workspace by default —
-  // write-shaped primaries getting their own worktree is explicitly deferred
-  // (slots-and-archetypes.md, "Deliberately out of scope"). Its work is
-  // therefore already in the caller's tree, and there is nothing to port
-  // back — UNLESS it happened to run under `--isolate`, in which case its own
-  // completion row carries a `diff_snapshot` exactly like a challenger's
-  // (see dispatch.ts's `workspaceMode === 'isolated'` branch), and this falls
-  // through to the ordinary path below rather than refusing.
+  // A primary with no diff_snapshot ran in the shared tree — `--shared`, or a
+  // kernel isolation that could not be built and degraded. Its work is
+  // already in the caller's tree and there is nothing to port.
   if (arm === 'primary' && (target == null || target.diffSnapshot == null)) {
     throw new ShadowApplyCommandError(
       `the primary arm of pair ${pairId8} ran in the shared workspace, not an isolated worktree — its work ` +
-        'is already in your workspace, so there is nothing to apply. (A primary only records a diff_snapshot ' +
-        '— and so only has something for shadow-apply to port back — when it ran under `--isolate`.)',
+        'is already in your workspace, so there is nothing to apply. (A primary records a diff_snapshot only ' +
+        'when it ran in a worktree; `--shared`, and an isolation that degraded, both write your tree directly.)',
+    );
+  }
+
+  // Already merged back. A kernel-isolated primary applies its own diff on the
+  // way out, so re-applying here would be a SECOND application of the same
+  // patch — either a no-op or, on a tree that has since moved, a corruption.
+  // This refuses only on `clean`: `conflicted` and `blocked` are precisely the
+  // outcomes whose recovery advice is to run this command once the tree
+  // settles, and a re-run is the whole point there.
+  //
+  // Load-bearing since default isolation began delivering. Before that, a
+  // paired primary was the only kind that merged back, and the flag that
+  // produced a primary diff (`--isolate`) never merged; the two facts could
+  // not coexist, so nothing had to check.
+  if (arm === 'primary' && target?.primaryMerge?.status === 'clean') {
+    throw new ShadowApplyCommandError(
+      `the primary arm of pair ${pairId8} already merged back cleanly — its work is in your workspace ` +
+        'already, and applying the same diff a second time would either do nothing or corrupt a tree that ' +
+        'has moved since. Re-apply only when the recorded primary_merge is `conflicted` or `blocked`; ' +
+        `if you meant to inspect the patch, it is at ${target.diffSnapshot}.`,
     );
   }
 

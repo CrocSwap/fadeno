@@ -353,7 +353,15 @@ test('primary rows byte-stable when a shadow fires', (t) => {
   // test is that attaching a shadow leaves the primary's IDENTITY alone
   // (executor, dial, model, archetype, resolution, prompt), and that is
   // unchanged.
-  const ignore = new Set(['timestamp', 'dispatch_id', 'duration_ms', 'output_snapshot', 'prompt_snapshot', 'command_sha256', 'prompt_sha256', 'workspace_mode']);
+  // `baseline_commit` and `diff_snapshot` join the ignore set for the same
+  // reason `workspace_mode` is in it: delivery facts, not identity. Both
+  // primaries now record both — an unpaired isolated dispatch needs an anchor
+  // and a patch exactly as a paired one does — and both are per-dispatch by
+  // construction (the baseline's commit subject names the pair when there is
+  // one and the dispatch when there is not; the snapshot path embeds the
+  // dispatch id). The positive assertions below say what each must be rather
+  // than leaving that to a field-by-field sweep.
+  const ignore = new Set(['timestamp', 'dispatch_id', 'duration_ms', 'output_snapshot', 'prompt_snapshot', 'command_sha256', 'prompt_sha256', 'workspace_mode', 'baseline_commit', 'diff_snapshot']);
   for (let i = 0; i < 2; i++) {
     const a = primaryShadow[i]!;
     const b = primaryNo[i]!;
@@ -377,6 +385,13 @@ test('primary rows byte-stable when a shadow fires', (t) => {
   // identity, which is what this test is actually about.
   assert.equal(primaryShadow[0]!.workspace_mode, 'isolated', 'a paired primary runs in its own worktree');
   assert.equal(primaryNo[0]!.workspace_mode, 'isolated', 'an unpaired primary isolates too, by default');
+  // Both anchor their diff. Asserted positively because the ignore set above
+  // would otherwise hide an unpaired dispatch losing its baseline entirely —
+  // `if (!(key in b)) continue` skips absent fields, so a missing anchor
+  // reads as agreement.
+  for (const row of [primaryShadow[1]!, primaryNo[1]!]) {
+    assert.match(String(row.baseline_commit ?? ''), /^[0-9a-f]{40}$/, 'every isolated completion row anchors its diff');
+  }
 });
 
 test('shadow identity re-spell: dial/model/model_id/driver/reasoning_effort', (t) => {
@@ -980,7 +995,7 @@ test("a dirty primary workspace replays into the shadow worktree as one commit, 
   assert.equal(show.status, 0);
   const lines = show.stdout.trim().split('\n').filter((l) => l.length > 0);
   const [subject, ...files] = lines;
-  assert.equal(subject, `fadeno pair baseline ${sReq.pair_id as string}`);
+  assert.equal(subject, `fadeno workspace baseline ${sReq.pair_id as string}`);
   assert.deepEqual(files.sort(), ['tracked.txt', 'untracked.txt']);
 
   // The diff measured after the challenger ran is against that baseline
@@ -1046,11 +1061,11 @@ test('a clean primary workspace commits no baseline — the recorded baseline_co
   assert.equal(sReq.baseline_commit, headBefore);
 
   // Nothing to replay means nothing was committed: the worktree's HEAD is
-  // still exactly the commit it was cut from, never a "fadeno pair baseline"
+  // still exactly the commit it was cut from, never a "fadeno workspace baseline"
   // commit made over an empty diff.
   const worktreeAbs = join(root, sReq.workspace as string);
   const log = spawnSync('git', ['-C', worktreeAbs, 'log', '--format=%s', '-1'], { encoding: 'utf8' });
-  assert.doesNotMatch(log.stdout.trim(), /^fadeno pair baseline/);
+  assert.doesNotMatch(log.stdout.trim(), /^fadeno workspace baseline/);
   const headAfter = spawnSync('git', ['-C', worktreeAbs, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
   assert.equal(headAfter, headBefore);
 });

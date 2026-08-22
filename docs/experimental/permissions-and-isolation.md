@@ -176,15 +176,61 @@ model carried, since `write_access: false` was never enforced — a reviewer on 
 bare `claude -p` could write the shared tree while holding no lease, precisely
 because it had declared itself a reader.
 
-Note what that work is NOT: it is not plumbing. "Isolated" already means two
-incompatible things — `--isolate` means *keep this work out of my tree* (no
-merge-back), while a paired primary means *the kernel isolated you, so merge
-back*. Default isolation is a third case that needs paired semantics without a
-pair, which is why `dispatch.ts` currently degrades an unpaired isolated
-dispatch straight back to shared. Until that is resolved, **isolation is the
-declared default but not the delivered one**, and the ledger says so: the
-request row reads `isolated`, the completion row reads `shared` with a
-`workspace_mode_degraded` stamp.
+## Delivering isolation: what "isolated" actually means
+
+The blocker on that follow-up was never plumbing. "Isolated" meant two
+incompatible things at once, and the ambiguity had a cost: `dispatch.ts`
+resolved it by degrading an unpaired isolated dispatch straight back to shared,
+so the request row read `isolated` and the completion row read `shared`. The
+default was declared and not delivered.
+
+The resolution is that the axis was misidentified. It is not *is there a pair?*
+— that is a probabilistic sampling roll, which is no basis for deciding what
+happens to someone's work. It is **who asked for the worktree**:
+
+| origin | who chose it | merge-back |
+|---|---|---|
+| `requested` | the caller passed `--isolate` | **never** — the contract is *hold this out of my tree* |
+| `kernel` | Fadeno, by default, pair or no pair | **always** — the caller asked for a dispatch, not a quarantine |
+
+Under that split, kernel isolation with no pair stops being a third case
+needing special handling and becomes the ordinary one. Isolation buys
+containment during the run and concurrency against other dispatches; it was
+never meant to change where the work ends up.
+
+Four consequences worth stating, because each was a decision:
+
+- **Every isolated worktree replays the caller's uncommitted state**, not just
+  a paired one. `git worktree add` cuts a clean checkout of HEAD, so without
+  the replay the executor solves a *different problem* than the one in the
+  tree, and its diff then conflicts on work it never saw. Making `--isolate`
+  differ here would also mean a flag documented as "already the default"
+  silently handed the executor a different checkout — the shape of trap this
+  codebase keeps paying for.
+- **`ignored_output: kept` now withholds the worktree, not just the pair.** A
+  merge-back is built by `git add -A`, which respects `.gitignore`. Isolating a
+  `kept` dispatch would destroy exactly the output the policy exists to
+  protect, so the dispatch stays shared and the refusal row says both things
+  were given up.
+- **`--isolate` outside a git repository refuses instead of degrading.** Kernel
+  isolation may fall back to shared — nobody asked for it, and hard-failing
+  would break dispatches that work today. An explicit containment request that
+  quietly lands in the caller's tree is the opposite of what was asked for.
+- **`shadow-apply --arm primary` refuses on a `clean` merge-back.** A primary
+  can now carry both a `diff_snapshot` and an applied merge, a combination that
+  could not previously exist, and re-applying is a no-op at best and a
+  corruption on a tree that has moved.
+
+A kernel isolation that cannot be built — `git worktree add` refused, an
+uncarriable `worktree_carry:` path, a baseline that will not replay — still
+degrades to shared, but only when the failure happened **before the spawn**
+(nothing has run, so nothing is lost by re-running elsewhere) and only after
+acquiring the workspace lease it now needs. If that lease cannot be taken, the
+original isolation failure is raised rather than an unleased write performed.
+
+**Still outstanding: the engine.** `drive`'s attempts remain shared-tree, so
+`--parallel` still serializes. The semantics above are the prerequisite that
+was missing, not the whole of the work.
 
 **A widened hazard, recorded because it now bites more often.** The workspace
 lease is guarded by a `mkdir` lock reclaimed only after 120s. A hard-killed

@@ -200,9 +200,9 @@ Options:
   --tag <t>               (dispatch) Label the dispatch for recovery (dispatches --output tag:<t>)
   --shadow <ref>          (dispatch) Duplicate the prompt to a one-shot shadow challenger
                           (FADENO_SHADOW_MAX_LIVE caps concurrent challengers; default 4)
-  --isolate               (dispatch) Force a detached worktree (already the default where git allows)
+  --isolate               (dispatch) Keep the work OUT of your tree: detached worktree, no merge-back
   --shared                (dispatch) Opt OUT of isolation and run in this tree (nothing contains the executor)
-  --ignored-output <kept|discardable>  (dispatch) Whether this task's gitignored output must survive; kept forgoes a shadow pair
+  --ignored-output <kept|discardable>  (dispatch) Whether this task's gitignored output must survive; kept forgoes the pair AND the worktree
   --diagnostics           (dispatch/drive) Persist bounded process output (32 KiB / 500 lines) to diagnostics log
   --no-brief              (dispatch) Skip the archetype's declared brief preamble
   --tail <n>              (dispatches) Logical entries to show, newest last (default 10)
@@ -466,13 +466,19 @@ Options:
                         run concurrently, capped by FADENO_SHADOW_MAX_LIVE (default 4), and
                         their worktrees are retained under .fadeno/local/shadow for review
   --timeout <seconds>   Hard executor deadline seconds; 0 disables route default (20 min)
-  --isolate             Force a detached worktree (already the default wherever git allows it)
+  --isolate             HOLD THE WORK OUT of your tree. A detached worktree, like the default, but
+                        the diff is never applied back — it is left at the recorded diff_snapshot for
+                        you to inspect or apply yourself. This is the flag's entire purpose now that
+                        a worktree is the default: the default isolates for containment and merges
+                        back, --isolate isolates to withhold. Refuses outside a git repository rather
+                        than running in your tree, which is what it exists to prevent.
   --shared              Opt OUT of isolation and run in THIS tree. Nothing stands between the executor
                         and your files — Fadeno enforces no write permissions of its own
   --ignored-output <kept|discardable>
-                        Whether this task's gitignored output must survive. A shadow pair merges the
-                        primary back through git add -A, which respects .gitignore, so "kept" forgoes
-                        the pair rather than discard the output. Overrides the archetype's
+                        Whether this task's gitignored output must survive. A worktree is merged back
+                        through git add -A, which respects .gitignore, so "kept" forgoes BOTH the
+                        shadow pair and the worktree itself: the dispatch runs in your tree, where
+                        nothing discards its gitignored output. Overrides the archetype's
                         ignored_output policy. Default: discardable.
   --diagnostics         Persist bounded process output (32 KiB / 500 lines per stream) to diagnostics log
   --no-brief            Skip the archetype's declared brief preamble
@@ -563,9 +569,11 @@ full, or an 8+ character prefix. Applies the arm's diff_snapshot with
 survives the main tree moving on while the pair ran. Conflict-aware from the
 first version: on any conflict it stops, keeps the diff artifact exactly where
 it was, records the attempt in .fadeno/dispatches.jsonl, and exits non-zero —
-it never auto-resolves. --arm primary refuses on an ordinary paired primary
-(it already shares your workspace, so there is nothing to apply) unless that
-primary itself carries a diff_snapshot (it ran under --isolate). A baseline
+it never auto-resolves. --arm primary refuses twice over: on a primary that
+ran in the shared tree (nothing to apply — its work is already there), and on
+one whose recorded primary_merge is \`clean\` (already applied; a second apply
+would either do nothing or corrupt a tree that has moved). It is meant for a
+primary whose merge-back came back \`conflicted\` or \`blocked\`. A baseline
 commit that is no longer in the object database (for example, garbage
 collected after \`fadeno clean --force\` removed its retained shadow worktree)
 is diagnosed precisely rather than surfacing raw git output.

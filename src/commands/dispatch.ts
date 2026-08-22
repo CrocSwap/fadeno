@@ -935,7 +935,11 @@ function applyWorkspaceBaseline(
   repoRoot: string,
   worktreeAbs: string,
   captured: CapturedWorkspaceBaseline,
-  pairId: string,
+  /** Names the baseline in its commit subject. A pair passes its `pairId` so
+   * both arms produce the byte-identical commit object the shared
+   * `baseline_commit` depends on; an unpaired isolated delivery passes its
+   * dispatch id, which has no counterpart to match. */
+  baselineRef: string,
   armLabel: string,
 ): string {
   const patch = captured.patch;
@@ -997,7 +1001,7 @@ function applyWorkspaceBaseline(
     '-C', worktreeAbs,
     '-c', 'user.name=fadeno',
     '-c', 'user.email=fadeno@localhost',
-    'commit', '--no-verify', '--no-gpg-sign', '-m', `fadeno pair baseline ${pairId}`,
+    'commit', '--no-verify', '--no-gpg-sign', '-m', `fadeno workspace baseline ${baselineRef}`,
   ], {
     encoding: 'utf8',
     env: {
@@ -1441,17 +1445,71 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     const probe = spawnSync('git', ['-C', repoRoot, 'rev-parse', '--git-dir'], { encoding: 'utf8' });
     return probe.error == null && probe.status === 0;
   })();
-  const workspaceMode: WorkspaceMode =
-    opts.shared === true ? 'shared' : (opts.isolate || gitAvailable) && gitAvailable ? 'isolated' : 'shared';
+  // Resolved once, here, because it now decides two things rather than one:
+  // whether a pair may form, and whether KERNEL-chosen isolation may happen at
+  // all. Both for the identical reason — a worktree is merged back through
+  // `git add -A`, which respects .gitignore, so gitignored output does not
+  // survive it. While default isolation was declared but not delivered only
+  // the first mattered; now that it delivers, isolating a `kept` dispatch
+  // would destroy the very output the policy exists to protect.
+  const ignoredOutputPolicy: 'kept' | 'discardable' = opts.ignoredOutput
+    ?? (profile.archetypes[archetype ?? '']?.ignoredOutput ?? 'discardable');
+
+  // WHO asked for the worktree. This is the axis that decides what happens to
+  // the work inside it, and conflating it with "is there a pair?" is exactly
+  // what kept default isolation from ever being delivered:
+  //
+  //   'requested' — the caller passed `--isolate`. The contract is HOLD OUT:
+  //                 keep this work out of my tree. Never merged back.
+  //   'kernel'    — Fadeno isolated it, with or without a pair. The caller
+  //                 asked for a dispatch, not for a quarantine, so the work
+  //                 merges back. Isolation buys containment during the run and
+  //                 concurrency against other dispatches; it was never meant
+  //                 to change where the work ends up.
+  //
+  // `--shared` opts out of both. The old code asked "is there a pair?" and so
+  // had no answer for a third case — kernel isolation without a pair — which
+  // it resolved by degrading straight back to shared. Under this split that
+  // case is not special: it merges back like any other kernel isolation.
+  let isolationWithheld: string | null = null;
+  if (opts.shared !== true && opts.isolate !== true && ignoredOutputPolicy === 'kept') {
+    isolationWithheld =
+      'this dispatch declares `ignored_output: kept`, and an isolated worktree merges back through ' +
+      '`git add -A`, which respects .gitignore — so gitignored output would not survive it';
+  }
+  // An explicit `--isolate` that cannot be honoured is refused, never
+  // downgraded. The caller asked for containment; running in their tree
+  // instead is the opposite of what they asked for, and doing it quietly is
+  // the failure mode this project exists to prevent. Kernel isolation is the
+  // opposite case — nobody asked, so shared is a fallback rather than a
+  // betrayal, and refusing would turn working dispatches into hard errors.
+  if (opts.isolate === true && opts.shared !== true && !gitAvailable) {
+    throw new DispatchCommandError(
+      '--isolate needs a git repository: an isolated worktree is cut with `git worktree add`, and this ' +
+        'directory is not one. Refusing rather than running in your tree, which is what --isolate exists ' +
+        'to prevent. Run `git init` first, or drop --isolate to accept a shared-tree dispatch.',
+    );
+  }
+  const isolationOrigin: 'requested' | 'kernel' | null =
+    opts.shared === true ? null
+      : opts.isolate === true ? 'requested'
+        : gitAvailable && isolationWithheld == null ? 'kernel'
+          : null;
+  const workspaceMode: WorkspaceMode = isolationOrigin == null ? 'shared' : 'isolated';
   // An isolated primary cannot touch the shared tree while it works, so it
-  // takes no lease for the duration — it takes one only across its merge-back
-  // (see `mergePrimaryBack`). Net effect is MORE concurrency than a shared
-  // primary, which holds the repo-wide lease for its entire run.
+  // takes no lease for the duration — it takes one only across its merge-back.
+  // Net effect is MORE concurrency than a shared primary, which holds the
+  // repo-wide lease for its entire run.
   //
   // Every shared dispatch now takes the lease: nothing declares itself a
   // non-writer any more, and the honest reading without that claim is that we
   // do not know.
-  const needsLease = workspaceMode === 'shared';
+  //
+  // `let`, not `const`: kernel isolation can fail before the spawn (no
+  // worktree, an uncarriable declared path, a baseline that will not replay)
+  // and degrade to shared, and the shared tree may not be written unleased.
+  // See the degradation path below, which acquires one at that point.
+  let needsLease = workspaceMode === 'shared';
   const commandSha256 = sha256Hex(JSON.stringify(command));
   const producers = lookupInputProducers(repoRoot, producedByIds(opts));
   const dialField: Record<string, unknown> = { model: dial.model };
@@ -1614,7 +1672,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   };
   const effectiveTimeoutMs = timeoutFor(spec);
 
-  const leaseHolder: LeaseHolder | null = needsLease
+  // `let` for the same reason `needsLease` is: a kernel-isolated dispatch
+  // starts with no lease and acquires one only if isolation fails before the
+  // spawn and it has to fall back into the shared tree.
+  let leaseHolder: LeaseHolder | null = needsLease
     ? { id: `ad-hoc:${dispatchId}`, kind: 'ad-hoc', dispatchId }
     : null;
   let dispatchLeaseExistingBefore: WorkspaceLeaseRecord | null = null;
@@ -1887,15 +1948,14 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // `decidePairCandidate` — suppressing candidacy writes no row at all, and
     // "no pair, and here is why" is the entire value. The primary stays
     // shared exactly as an unpaired dispatch's does.
-    const ignoredOutputPolicy = opts.ignoredOutput
-      ?? (profile.archetypes[archetype ?? '']?.ignoredOutput ?? 'discardable');
     if (ignoredOutputPolicy === 'kept') {
       writeShadowRefusal(
         'ignored_output_kept',
         `this dispatch declares \`ignored_output: kept\`, and a pair cannot preserve it: both arms run in ` +
           `worktrees and the primary is merged back through \`git add -A\`, which respects .gitignore — so any ` +
-          `gitignored output would be discarded. No pair was formed and the primary runs normally in the ` +
-          `shared tree. This is a trade, not a fault: a comparison was given up to protect the work. Set ` +
+          `gitignored output would be discarded. No pair was formed, and for the same reason this dispatch ` +
+          `also runs in the shared tree rather than the isolated worktree that is otherwise the default. ` +
+          `This is a trade, not a fault: a comparison AND containment were given up to protect the work. Set ` +
           `\`ignored_output: discardable\` on the archetype, or pass \`--ignored-output discardable\`, if this ` +
           `task's gitignored output is intermediate and safe to lose.`,
         { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: 'command' },
@@ -2277,12 +2337,25 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // site below, so a direct `!= null` there narrows to `never`.
   let isolatedIgnoredOutput: IgnoredOutputScan | null = null;
   const takeIsolatedIgnoredOutput = (): IgnoredOutputScan | null => isolatedIgnoredOutput;
+  // The commit the isolated worktree's diff is relative to, for an UNPAIRED
+  // isolated delivery. A pair's copy of this lives on `pendingShadow` and is
+  // shared by both arms; this is the same fact for a dispatch that has no
+  // second arm to share it with, and it is what makes the recorded diff
+  // re-appliable with `git apply --3way` after the worktree is gone.
+  let isolatedBaselineCommit: string | null = null;
+  const takeIsolatedBaselineCommit = (): string | null => isolatedBaselineCommit;
   // The mode actually used. `workspaceMode` is the INTENT recorded on the
-  // request row; this is what happened. They differ only when a paired
-  // primary's own worktree could not be built (see the degradation below).
+  // request row; this is what happened. They differ only when kernel-chosen
+  // isolation could not be prepared before the spawn (see the degradation
+  // below) — an explicit `--isolate` refuses instead of degrading.
   let effectiveWorkspaceMode: WorkspaceMode = workspaceMode;
   let isolationDegraded: string | null = null;
-  /** Merge-back outcome for a paired, isolated primary; absent otherwise. */
+  /** True once the executor has actually run inside the worktree. Gates the
+   * degradation below: a failure BEFORE the spawn can fall back into the
+   * shared tree because nothing has happened yet, while a failure after it
+   * must not — re-invoking would run the executor twice. */
+  let executorRanInWorktree = false;
+  /** Merge-back outcome for a kernel-isolated delivery; absent otherwise. */
   // `diff_snapshot` is deliberately NOT repeated here: the completion row
   // already carries it, and two spellings of one fact is the same defect that
   // rules out a `skipped` status.
@@ -2311,16 +2384,23 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     mkdirSync(join(repoRoot, '.fadeno', 'local', 'outputs'), { recursive: true });
     mkdirSync(join(repoRoot, ...INFLIGHT_DIR.split('/')), { recursive: true });
     outputFd = openSync(outputAbs, 'w');
-    const leaseRelease = leaseHolder == null ? undefined : {
-      leasePath: join(repoRoot, WORKSPACE_LEASE_FILE),
-      lockPath: join(repoRoot, WORKSPACE_LEASE_LOCK),
-      holder: leaseHolder,
-    };
+    // Read at spawn time, not hoisted: a kernel-isolated dispatch whose
+    // worktree could not be prepared acquires a lease on its way into the
+    // shared tree, and the supervisor is what releases it once the executor's
+    // process group closes. A `const` captured before that fallback would hand
+    // the supervisor `undefined` and leak the lease for its full staleness
+    // window.
+    const leaseRelease = (): { leasePath: string; lockPath: string; holder: LeaseHolder } | undefined =>
+      leaseHolder == null ? undefined : {
+        leasePath: join(repoRoot, WORKSPACE_LEASE_FILE),
+        lockPath: join(repoRoot, WORKSPACE_LEASE_LOCK),
+        holder: leaseHolder,
+      };
     const invoke = (spawnCwd: string): SpawnSyncReturns<string> => {
       supervisorAttempted = true;
       const result = spawnSync(
         process.execPath,
-        superviseArgv(command, inflightAbs, statusAbs, leaseRelease, effectiveTimeoutMs),
+        superviseArgv(command, inflightAbs, statusAbs, leaseRelease(), effectiveTimeoutMs),
         {
         input: prompt,
         encoding: 'utf8',
@@ -2339,17 +2419,19 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // Through the supervisor, never directly: `spawnSync` blocks the event
     // loop, so a killed kernel runs no cleanup and leaves the executor writing
     // the tree unattended. See src/lib/supervisor.ts.
-    // Candidacy moved the primary toward isolation; materialization is what
-    // confirms it. Every way a pair can fail after candidacy — cap,
-    // resolution, eligibility, write posture, constraint, containment,
-    // worktree, carry, baseline — lands here as `pendingShadow == null`, and
-    // an unpaired primary has no reason to be isolated unless the caller
-    // asked with `--isolate`.
-    if (effectiveWorkspaceMode === 'isolated' && pendingShadow == null && !opts.isolate) {
-      effectiveWorkspaceMode = 'shared';
-      isolationDegraded = 'the pair did not materialize, so there was nothing to stay symmetric with';
-    }
-    if (effectiveWorkspaceMode === 'isolated') {
+    // No pair-materialization check here any more. It used to read: if the
+    // challenger fell through for any reason (cap, resolution, eligibility,
+    // constraint, containment, worktree, carry, baseline) and the caller did
+    // not pass `--isolate`, drop the primary back to shared. That made the
+    // request row's `workspace_mode: isolated` a promise the completion row
+    // routinely broke, and it was the single reason default isolation was
+    // declared but never delivered. An unpaired kernel-isolated primary is
+    // now an ordinary case: it runs in a worktree and merges back.
+    // Returns the spawn result rather than assigning `spawned`, so TypeScript
+    // can still see `spawned` as definitely assigned — a closure write would
+    // defeat that, and the fallback below depends on the compiler proving one
+    // of the two paths ran.
+    const runIsolated = (): SpawnSyncReturns<string> => {
       const id8 = dispatchId.slice(0, 8);
       const diffRel = join('.fadeno', 'local', 'outputs', `isolated-${id8}.diff`).split('\\').join('/');
       // Neutral worktree naming when paired. Blinding was advisory before
@@ -2381,30 +2463,45 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         }
         isolatedCarryRecords = isolatedCarry.records;
         isolatedCarryFingerprint = isolatedCarry.fingerprint;
-        // Replay the SAME captured baseline the challenger got. Without this
-        // the primary would start from a clean checkout of HEAD while its
-        // challenger starts from HEAD plus the caller's work-in-progress —
-        // the very asymmetry this whole change exists to remove, merely
-        // pointing the other way. `capturedBaseline()` is memoized, so this
-        // is the identical bytes the challenger replayed, not a second read
-        // of a tree that may have moved since.
-        if (pendingShadow != null) {
-          const primaryBaseline = applyWorkspaceBaseline(
-            repoRoot, worktreeAbs, capturedBaseline(), pendingShadow.pairId, 'primary',
+        // Replay the caller's pre-spawn state. `git worktree add` cuts a clean
+        // checkout of HEAD, so without this the executor works against a tree
+        // that is missing every uncommitted change the caller has — and then
+        // its diff gets applied back onto a tree that HAS them. That is not a
+        // near-miss; it is the executor solving a different problem and the
+        // merge-back conflicting on work it never saw.
+        //
+        // Applied to EVERY isolated delivery, not just a paired one. For a
+        // pair it removes an asymmetry (the challenger already replays it, so
+        // a clean-HEAD primary would be the arm reading a different tree). For
+        // an unpaired one it is plain correctness. Making the two cases differ
+        // would also mean `--isolate` — documented as "already the default" —
+        // silently handed the executor a different checkout than the default
+        // did, which is the shape of trap this codebase keeps paying for.
+        //
+        // `capturedBaseline()` is memoized, so a paired primary replays the
+        // identical bytes the challenger did, not a second read of a tree that
+        // may have moved since.
+        const baselineRef = pendingShadow?.pairId ?? dispatchId;
+        const primaryBaseline = applyWorkspaceBaseline(
+          repoRoot, worktreeAbs, capturedBaseline(), baselineRef, pendingShadow != null ? 'primary' : 'isolated',
+        );
+        isolatedBaselineCommit = primaryBaseline;
+        // Same content, same fixed dates, same parent — so the same sha.
+        // If these ever diverge the arms did not start from the same state
+        // and the pair is not a fair test, which is worth failing over
+        // rather than recording a `baseline_commit` that only one arm has.
+        if (pendingShadow != null && primaryBaseline !== pendingShadow.baselineCommit) {
+          throw new WorkspaceLeaseError(
+            `the pair's two arms produced different baseline commits (${primaryBaseline.slice(0, 12)} vs ` +
+              `${pendingShadow.baselineCommit.slice(0, 12)}) — they did not start from the same state, so the ` +
+              'comparison would be meaningless. Refusing rather than recording a baseline only one arm has.',
           );
-          // Same content, same fixed dates, same parent — so the same sha.
-          // If these ever diverge the arms did not start from the same state
-          // and the pair is not a fair test, which is worth failing over
-          // rather than recording a `baseline_commit` that only one arm has.
-          if (primaryBaseline !== pendingShadow.baselineCommit) {
-            throw new WorkspaceLeaseError(
-              `the pair's two arms produced different baseline commits (${primaryBaseline.slice(0, 12)} vs ` +
-                `${pendingShadow.baselineCommit.slice(0, 12)}) — they did not start from the same state, so the ` +
-                'comparison would be meaningless. Refusing rather than recording a baseline only one arm has.',
-            );
-          }
         }
         const spawnedInWorktree = invoke(worktreeAbs);
+        // Set the instant the executor has run, and never reset. Everything
+        // above this line is recoverable by falling back to a shared-tree
+        // dispatch; nothing below it is.
+        executorRanInWorktree = true;
         // Scanned here, inside the callback, because `withIsolatedWorktree`
         // removes the worktree on its way out — and after the executor has
         // run, because before it there is nothing but the carry to find.
@@ -2413,24 +2510,28 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         isolatedIgnoredOutput = scanIgnoredOutput(worktreeAbs, profile.worktreeCarry);
         return spawnedInWorktree;
       });
-      spawned = isolated.result;
       isolatedDiffRel = isolated.diff.diffRel;
       isolatedDiffBytes = isolated.diff.diffBytes;
       opts.onEcho?.(`isolated diff: ${isolated.diff.diffBytes} bytes → ${isolated.diff.diffRel}`);
       // ---- Merge-back -----------------------------------------------------
-      // Only for a PAIRED primary. A bare `--isolate` is an explicit request
-      // to keep the work out of the tree, and auto-applying it would break
-      // that contract; a paired primary, by contrast, was isolated by the
-      // kernel's choice rather than the caller's, so leaving its work stranded
-      // in a discarded worktree would silently change what `fadeno dispatch
-      // --archetype worker` does.
-      if (pendingShadow != null) {
+      // Keyed on WHO asked for the worktree, not on whether a pair exists.
+      //
+      // `--isolate` is an explicit request to keep the work out of the tree,
+      // and auto-applying it would break that contract. Every other isolated
+      // delivery was isolated by the kernel's choice rather than the
+      // caller's — the caller asked for a dispatch, and leaving its work
+      // stranded in a discarded worktree would silently change what `fadeno
+      // dispatch --archetype worker` does to the repo.
+      //
+      // This used to read `pendingShadow != null`, which answered the wrong
+      // question: it made merge-back depend on a probabilistic shadow roll, so
+      // the one case it could not describe — kernel isolation with no pair —
+      // was resolved by refusing to isolate at all.
+      if (isolationOrigin === 'kernel') {
         // The lease, held across the apply and nothing else. An isolated
         // primary takes none while it works — it cannot reach the shared tree
         // — but the apply is exactly the moment it can, so it must not race a
-        // concurrent shared-mode writer. Sampling is prompt-digest-keyed, so a
-        // paired dispatch and an unpaired one coexist routinely; the unpaired
-        // one holds this same repo-wide lease for its whole run.
+        // concurrent shared-mode writer.
         const mergeHolder: LeaseHolder = { id: `merge-back:${dispatchId}`, kind: 'ad-hoc', dispatchId };
         let leaseTaken = false;
         try {
@@ -2443,9 +2544,11 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
           });
           leaseTaken = true;
         } catch (err) {
-          // Could not serialize, so do not apply. The diff is durable and
-          // `shadow-apply` can port it once the tree settles; applying
-          // anyway is the one outcome that could corrupt another writer.
+          // Could not serialize, so do not apply. The diff is durable and can
+          // be ported once the tree settles — `fadeno shadow-apply` for a
+          // pair, `git apply --3way <diff_snapshot>` for an unpaired
+          // dispatch; applying anyway is the one outcome that could corrupt
+          // another writer.
           // NOT `conflicted`. A conflict means git tried and left the tree
           // partly applied; this means nothing was attempted and the
           // workspace is untouched. Collapsing the two would make a reader
@@ -2477,10 +2580,20 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
                 status: 'conflicted',
                 detail: stderrText.length > 0 ? stderrText : `git apply --3way exited ${applyRes.status ?? 'unknown'}`,
               };
+              // Two recovery pointers, because there are two shapes of
+              // isolated delivery now. A pair has a `shadow-apply` entry
+              // point that knows both arms and their baselines; an unpaired
+              // dispatch has no pair id to name, so it gets the raw
+              // equivalent — the same `--3way` against the same baseline
+              // commit, which is exactly what `shadow-apply` would run.
+              // Naming a command that cannot resolve would be worse than
+              // naming none.
+              const recovery = pendingShadow != null
+                ? `Resolve with \`fadeno shadow-apply ${pendingShadow.pairId.slice(0, 8)} --arm primary\``
+                : `Resolve with \`git apply --3way ${isolated.diff.diffRel}\``;
               opts.onEcho?.(
-                `merge-back CONFLICTED — the primary's work is kept at ${isolated.diff.diffRel}. ` +
-                  `Resolve with \`fadeno shadow-apply ${pendingShadow.pairId.slice(0, 8)} --arm primary\` ` +
-                  'once the tree settles; inspect `git status` first, some hunks may already be staged.',
+                `merge-back CONFLICTED — the dispatch's work is kept at ${isolated.diff.diffRel}. ` +
+                  `${recovery} once the tree settles; inspect \`git status\` first, some hunks may already be staged.`,
               );
             }
           } finally {
@@ -2491,23 +2604,75 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
           }
         }
       }
+      return isolated.result;
+    };
+
+    if (effectiveWorkspaceMode === 'isolated') {
+      try {
+        spawned = runIsolated();
+      } catch (isolationError) {
+        // Nothing below the spawn is recoverable: re-invoking would run the
+        // executor a second time, and an executor that has already written a
+        // worktree is not a thing to retry. Nor is an explicit `--isolate`
+        // recoverable at all — the caller asked for containment, so silently
+        // supplying none is the one answer that is worse than failing.
+        if (executorRanInWorktree || isolationOrigin !== 'kernel') throw isolationError;
+
+        // A kernel-isolated dispatch that could not build its worktree
+        // (`git worktree add` refused, a declared `worktree_carry:` path would
+        // not carry, the baseline would not replay) falls back to the shared
+        // tree rather than failing. Nobody asked for isolation here, and the
+        // permissions cut's own design note is explicit that making isolation
+        // mandatory would turn dispatches that work today into hard errors.
+        const reason = isolationError instanceof Error ? isolationError.message : String(isolationError);
+
+        // The lease is the part that must not be waved through. A shared-tree
+        // dispatch holds the repo-wide writer lease for its whole run, and
+        // this one is about to become exactly that — with nothing left to
+        // contain it, since the worktree is what failed. If the lease cannot
+        // be taken, another writer holds the tree, and the honest outcome is
+        // the original isolation failure rather than an unleased write.
+        leaseHolder = { id: `ad-hoc:${dispatchId}`, kind: 'ad-hoc', dispatchId };
+        try {
+          acquireWorkspaceLease({
+            repoRoot,
+            workspaceMode: 'shared',
+            holder: leaseHolder,
+            supervisorPid: null,
+            executorPid: null,
+            processGroupId: null,
+            startedAt: now,
+            heartbeatAt: now,
+            stdoutBytes: 0,
+            stderrBytes: 0,
+            now,
+          });
+          needsLease = true;
+        } catch {
+          leaseHolder = null;
+          throw isolationError;
+        }
+
+        effectiveWorkspaceMode = 'shared';
+        isolationDegraded = `the isolated worktree could not be prepared (${reason})`;
+        spawned = invoke(repoRoot);
+      }
     } else {
       spawned = invoke(repoRoot);
     }
     if (isolationDegraded != null) {
-      // The pair was selected and the primary's own worktree could not be
-      // built — an uncarriable declared path is the realistic case. Before
-      // this change the identical condition refused the CHALLENGER and left
-      // the primary running normally; isolating the primary turned that
-      // graceful degradation into a hard failure of the whole dispatch.
-      //
-      // So it degrades the same way the pair does: no isolation, no
-      // merge-back, the primary runs exactly as an unpaired one would. The
+      // Kernel-chosen isolation that could not be built. The realistic causes
+      // are an uncarriable declared path and a `git worktree add` that git
+      // itself refused. The dispatch runs in the shared tree instead — the
       // request row's `workspace_mode` said `isolated` because that was the
-      // intent when it was written; the completion row records what actually
-      // happened, and `workspace_mode_degraded` names why the two differ
-      // rather than leaving a reader to notice the discrepancy alone.
-      opts.onEcho?.(`primary isolation degraded to shared: ${isolationDegraded}`);
+      // intent when it was written, and the completion row records what
+      // actually happened with `workspace_mode_degraded` naming why the two
+      // differ, rather than leaving a reader to notice the discrepancy alone.
+      //
+      // Loud on purpose. This is the one path where nothing stands between
+      // the executor and this tree, and it is reached by accident rather than
+      // by anyone's choice.
+      opts.onEcho?.(`isolation degraded to shared: ${isolationDegraded}`);
     }
   } catch (error) {
     if (error instanceof WorkspaceLeaseError) throw new DispatchCommandError(error.message);
@@ -2610,6 +2775,17 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // written before the roll, so this is the first row that can carry it.
     ...(pendingShadow != null ? { pair_id: pendingShadow.pairId, baseline_commit: pendingShadow.baselineCommit } : {}),
   };
+  // An unpaired isolated delivery records its baseline too. `diff_snapshot`
+  // below is a patch relative to this commit and nothing else, so without it
+  // the diff is only re-appliable by luck: `git apply --3way` needs the blob
+  // SHAs the patch names to be findable, and after the worktree is torn down
+  // this commit is the one place they still are. A pair already carried this
+  // field for exactly that reason; there was never a reason it should be a
+  // pair-only fact.
+  if (pendingShadow == null && effectiveWorkspaceMode === 'isolated') {
+    const soloBaseline = takeIsolatedBaselineCommit();
+    if (soloBaseline != null) row.baseline_commit = soloBaseline;
+  }
   // Concurrent writers make this attestation, not judgment.
   if (workspaceBefore != null && workspaceAfter != null) {
     row.workspace_changed = workspaceBefore !== workspaceAfter;
