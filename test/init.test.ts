@@ -98,6 +98,68 @@ test('init --grok creates the Grok target tree without other host artifacts', (t
   assert.ok(results.every((r) => r.status === 'created'));
 });
 
+test('init --opencode creates the OpenCode target tree without other host artifacts', (t) => {
+  const root = tempRepo(t);
+  const { results } = runInit({ target: 'opencode', repoRoot: root });
+
+  for (const f of SHARED_FILES) assert.ok(exists(root, f), `missing ${f}`);
+
+  assert.ok(exists(root, 'AGENTS.md'));
+  // OpenCode reads the cross-harness `.agents/skills` directory (shared with Codex).
+  for (const skill of ['fadeno-runner', 'fadeno-builder', 'fadeno-driver']) {
+    assert.ok(exists(root, `.agents/skills/${skill}/SKILL.md`));
+    assert.ok(!exists(root, `.agents/skills/${skill}/agents/openai.yaml`));
+  }
+  assert.ok(exists(root, '.agents/skills/fadeno-runner/references/runtime.md'));
+  assert.ok(exists(root, '.agents/skills/fadeno-runner/references/playbook-format.md'));
+  // Role subagents in OpenCode's agent format, beside the always-emitted read-only lane.
+  for (const role of ['worker', 'reviewer', 'judge']) {
+    const body = read(root, `.opencode/agents/${role}.md`);
+    assert.match(body, /^description: /m);
+    assert.match(body, /^mode: subagent$/m);
+  }
+
+  assert.ok(!exists(root, '.grok/agents/worker.md'));
+  assert.ok(!exists(root, '.codex/agents/worker.toml'));
+  assert.ok(!exists(root, '.claude/skills/fadeno-runner/SKILL.md'));
+  assert.ok(!exists(root, '.claude/agents/worker.md'));
+  assert.ok(!exists(root, 'CLAUDE.md'));
+  assert.ok(!exists(root, '.claude/settings.local.json'));
+
+  assert.ok(results.every((r) => r.status === 'created'));
+});
+
+test('OpenCode receives shared skill bodies and a sigil-free bootstrap', (t) => {
+  const opencodeRoot = tempRepo(t);
+  const codexRoot = tempRepo(t);
+  runInit({ target: 'opencode', repoRoot: opencodeRoot });
+  runInit({ target: 'codex', repoRoot: codexRoot });
+
+  for (const skill of ['fadeno-runner', 'fadeno-builder', 'fadeno-driver']) {
+    const opencodeBody = read(opencodeRoot, `.agents/skills/${skill}/SKILL.md`);
+    const codexBody = read(codexRoot, `.agents/skills/${skill}/SKILL.md`);
+    assert.equal(opencodeBody, codexBody, `${skill}/SKILL.md differs between OpenCode and Codex`);
+    assert.doesNotMatch(opencodeBody, /\$fadeno-(runner|builder|driver)/);
+    assert.doesNotMatch(opencodeBody, /\/fadeno-(runner|builder|driver)/);
+  }
+
+  const bootstrap = read(opencodeRoot, 'AGENTS.md');
+  assert.match(bootstrap, /fadeno-runner/);
+  assert.doesNotMatch(bootstrap, /\$fadeno-runner/);
+});
+
+test('OpenCode init preserves and refreshes one managed AGENTS.md section', (t) => {
+  const root = tempRepo(t);
+  writeFileSync(join(root, 'AGENTS.md'), '# My Project\n\nExisting instructions.\n');
+
+  const first = runInit({ target: 'opencode', repoRoot: root });
+  const agents1 = read(root, 'AGENTS.md');
+  assert.match(agents1, /Existing instructions\./);
+  assert.match(agents1, /# Fadeno/);
+  assert.equal((agents1.match(/fadeno:begin/g) ?? []).length, 1);
+  assert.equal(first.results.find((r) => r.path.endsWith('AGENTS.md'))?.status, 'appended');
+});
+
 test('Grok receives shared skill bodies and slash handles only in its bootstrap', (t) => {
   const grokRoot = tempRepo(t);
   const codexRoot = tempRepo(t);

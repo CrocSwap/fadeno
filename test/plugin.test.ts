@@ -151,6 +151,21 @@ test('the bundled CLI carries the Grok adapter templates', () => {
   assert.match(readFileSync(join(grokDir, 'AGENTS.md'), 'utf8'), /\/fadeno-runner/);
 });
 
+test('the bundled CLI carries the OpenCode adapter templates', () => {
+  const opencodeDir = join(import.meta.dirname, '..', 'plugin', 'bin', 'templates', 'opencode');
+  assert.ok(existsSync(join(opencodeDir, 'AGENTS.md')), 'bundled OpenCode bootstrap template missing');
+  for (const role of ['worker', 'reviewer', 'judge']) {
+    const agent = join(opencodeDir, 'opencode-agents', `${role}.md`);
+    assert.ok(existsSync(agent), `bundled OpenCode ${role} agent template missing`);
+    const body = readFileSync(agent, 'utf8');
+    assert.match(body, /^mode: subagent$/m, `bundled OpenCode ${role} agent must be a subagent`);
+  }
+  // OpenCode has no invocation sigil — its bootstrap names skills bare.
+  const bootstrap = readFileSync(join(opencodeDir, 'AGENTS.md'), 'utf8');
+  assert.match(bootstrap, /fadeno-runner/);
+  assert.doesNotMatch(bootstrap, /\$fadeno-runner/);
+});
+
 test('every skill template declares the name of the directory it lives in', () => {
   // The generator renames a skill by replacing `name: <src>` with `name: <dst>`,
   // and `String.replace` with a needle that does not occur is a SILENT no-op —

@@ -625,6 +625,15 @@ test('Grok rejects --with-steering before scaffolding anything', (t) => {
   assert.ok(!exists(root, '.fadeno/vocabulary.md'));
 });
 
+test('OpenCode rejects --with-steering before scaffolding anything', (t) => {
+  const root = tempRepo(t);
+  assert.throws(
+    () => runInit({ target: 'opencode', repoRoot: root, withSteering: true }),
+    /supported for Codex and Claude Code, not Grok Build or OpenCode/,
+  );
+  assert.ok(!exists(root, '.fadeno/vocabulary.md'));
+});
+
 test('bundled CLI parses --with-steering and carries its templates', (t) => {
   const root = tempRepo(t);
   const result = spawnSync(BIN, ['init', '--codex', '--with-steering'], {

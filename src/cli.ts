@@ -88,11 +88,11 @@ import { userPaths } from './lib/user-paths.ts';
 const HELP = `fadeno — the playbook layer for AI coding agents
 
 Usage:
-  fadeno init --codex|--claude|--grok [opts]   Explicitly scaffold project-owned capability
+  fadeno init --codex|--claude|--grok|--opencode [opts]   Explicitly scaffold project-owned capability
   fadeno setup [--codex|--claude] [--from <bin-dir>] [--reset-runtime]  Install safe user-scoped integration
   fadeno status [--verbose]                   Show effective definitions, routing, and state
   fadeno doctor [--codex|--claude]            Run read-only diagnostics
-  fadeno vendor --codex|--claude|--grok       Vendor capability and definitions into a project
+  fadeno vendor --codex|--claude|--grok|--opencode   Vendor capability and definitions into a project
   fadeno evidence promote <run>               Promote a verified run receipt
   fadeno uninstall --codex|--claude|--all     Remove managed user integration
   fadeno clean [--force]                      Preview/remove ignored repo runtime state
@@ -243,7 +243,7 @@ Options:
   -v, --version           Show version
 
 Environment:
-  FADENO_HARNESS          Select the harness for route compilation (codex|claude|standalone)
+  FADENO_HARNESS          Select the harness for route compilation (codex|claude|grok|opencode|standalone)
 Examples:
   fadeno validate
   fadeno new-run code-change-review "Add CSV export for reports"
@@ -749,7 +749,7 @@ Options:
   init: `fadeno init — scaffold project-owned Fadeno capability
 
 Usage:
-  fadeno init --codex|--claude|--grok [flags]
+  fadeno init --codex|--claude|--grok|--opencode [flags]
 
 Options:
   --with-hooks    Also scaffold tier-2 enforcement hooks
@@ -854,7 +854,7 @@ Options:
 `,
 };
 
-const SIGIL: Record<Target, string> = { codex: '$', claude: '/', grok: '/' };
+const SIGIL: Record<Target, string> = { codex: '$', claude: '/', grok: '/', opencode: '' };
 const SCHEMA_KINDS: readonly SchemaKind[] = SCHEMA_KIND_LIST;
 
 function printInitSummary(
@@ -897,7 +897,9 @@ function printInitSummary(
     console.log(
         target === 'codex'
           ? '  3. Use the $fadeno-runner skill (from the installed Fadeno plugin)'
-          : '  3. Use the /fadeno:runner skill (from the installed Fadeno plugin)',
+          : target === 'opencode'
+            ? '  3. Use the fadeno-runner skill (installed under .agents/skills)'
+            : '  3. Use the /fadeno:runner skill (from the installed Fadeno plugin)',
     );
   } else {
     console.log(`  3. Ask your agent to use the ${SIGIL[target]}fadeno-runner skill on a complex task`);
@@ -1590,26 +1592,30 @@ function printVerify(result: VerifyResult): void {
   else console.error(summary);
 }
 
-function requireTarget(values: { codex?: boolean; claude?: boolean; grok?: boolean }): Target {
+type TargetFlags = { codex?: boolean; claude?: boolean; grok?: boolean; opencode?: boolean };
+
+function requireTarget(values: TargetFlags): Target {
   const selected: Target[] = [];
   if (values.codex) selected.push('codex');
   if (values.claude) selected.push('claude');
   if (values.grok) selected.push('grok');
+  if (values.opencode) selected.push('opencode');
   if (selected.length > 1) {
-    throw new Error('Choose exactly one target: --codex, --claude, or --grok.');
+    throw new Error('Choose exactly one target: --codex, --claude, --grok, or --opencode.');
   }
   if (selected.length === 1) return selected[0];
   throw new Error(
-    'Specify a target: `fadeno init --codex`, `fadeno init --claude`, or `fadeno init --grok`.',
+    'Specify a target: `fadeno init --codex`, `fadeno init --claude`, `fadeno init --grok`, or `fadeno init --opencode`.',
   );
 }
 
-function optionalTarget(values: { codex?: boolean; claude?: boolean; grok?: boolean }): Target | undefined {
+function optionalTarget(values: TargetFlags): Target | undefined {
   const selected: Target[] = [];
   if (values.codex) selected.push('codex');
   if (values.claude) selected.push('claude');
   if (values.grok) selected.push('grok');
-  if (selected.length > 1) throw new Error('Choose at most one target: --codex, --claude, or --grok.');
+  if (values.opencode) selected.push('opencode');
+  if (selected.length > 1) throw new Error('Choose at most one target: --codex, --claude, --grok, or --opencode.');
   return selected[0];
 }
 
@@ -1639,6 +1645,7 @@ function main(argv: string[]): number {
         codex: { type: 'boolean' },
         claude: { type: 'boolean' },
         grok: { type: 'boolean' },
+        opencode: { type: 'boolean' },
         force: { type: 'boolean' },
         'with-hooks': { type: 'boolean' },
         'with-steering': { type: 'boolean' },
@@ -1791,7 +1798,7 @@ function main(argv: string[]): number {
   switch (command) {
     case 'setup': {
       const target = optionalTarget(values);
-      if (target === 'grok') throw new Error('`fadeno setup` supports --codex or --claude; Grok has no steering setup.');
+      if (target === 'grok' || target === 'opencode') throw new Error('`fadeno setup` supports --codex or --claude; Grok and OpenCode have no user-scoped setup.');
       const runtimeSource = values.from != null ? String(values.from) : undefined;
       const result = runSetup({ target: target ?? null, nonInteractive: values['non-interactive'], runtimeSource: runtimeSource as any, resetRuntime: Boolean(values['reset-runtime']) });
       console.log(`Fadeno setup (${result.target ?? 'standalone'})`);
@@ -1803,7 +1810,7 @@ function main(argv: string[]): number {
     }
     case 'status': {
       const target = optionalTarget(values);
-      if (target === 'grok') throw new Error('Use `fadeno status` without --grok; Grok steering is intentionally unsupported.');
+      if (target === 'grok' || target === 'opencode') throw new Error('Use `fadeno status` without --grok/--opencode; steering for those hosts is intentionally unsupported.');
       const result = runStatus({ verbose: values.verbose, target: target ?? null } as any);
       console.log(`Fadeno ${(result as any).version} · harness ${(result as any).harness ?? 'unknown'}`);
       console.log(`runtime: ${(result as any).runtime.invocationSource}; managed ${(result as any).runtime.managedVersion ?? 'not installed'}${(result as any).runtime.managedPath ? ` at ${(result as any).runtime.managedPath}` : ''}${(result as any).runtime.versionCurrent ? '' : ' (version skew)'}`);
@@ -1842,7 +1849,7 @@ function main(argv: string[]): number {
     }
     case 'doctor': {
       const target = optionalTarget(values);
-      if (target === 'grok') throw new Error('Use `fadeno doctor` without --grok; Grok steering is intentionally unsupported.');
+      if (target === 'grok' || target === 'opencode') throw new Error('Use `fadeno doctor` without --grok/--opencode; steering for those hosts is intentionally unsupported.');
       const result = runDoctor({ target: target ?? null });
       for (const item of result.findings) console.log(`${item.severity.padEnd(7)} ${item.check}: ${item.detail}${item.remediation ? ` — ${item.remediation}` : ''}`);
       return result.ok ? 0 : 1;
@@ -1852,7 +1859,7 @@ function main(argv: string[]): number {
       const result = runVendor({
         target,
         withHooks: values['with-hooks'],
-        withSteering: target !== 'grok' && !values['no-steering'],
+        withSteering: target !== 'grok' && target !== 'opencode' && !values['no-steering'],
         force: values.force,
       });
       console.log(`Fadeno vendored for ${result.target} in ${result.repoRoot}`);
@@ -1887,7 +1894,7 @@ function main(argv: string[]): number {
     }
     case 'uninstall': {
       const target = optionalTarget(values);
-      if (target === 'grok') throw new Error('Grok has no user-scoped Fadeno integration to uninstall.');
+      if (target === 'grok' || target === 'opencode') throw new Error('Grok and OpenCode have no user-scoped Fadeno integration to uninstall.');
       const result = runUninstall({
         target: target ?? null,
         all: values.all,
@@ -1921,7 +1928,7 @@ function main(argv: string[]): number {
         repoRoot,
         results,
         Boolean(values['with-hooks']),
-        Boolean(values['with-steering'] || (target !== 'grok' && !values['no-steering'])),
+        Boolean(values['with-steering'] || (target !== 'grok' && target !== 'opencode' && !values['no-steering'])),
         Boolean(values['data-only']),
       );
       return 0;
@@ -1979,7 +1986,7 @@ function main(argv: string[]): number {
       }
       if (sub === 'apply') {
         const applyTarget = values.claude && !values.codex ? 'claude' : values.codex && !values.claude ? 'codex' : null;
-        if (applyTarget == null || values.grok || positionals[2] != null) {
+        if (applyTarget == null || values.grok || values.opencode || positionals[2] != null) {
           throw new Error('Usage: fadeno steering apply --codex|--claude [--scope project|user] [--force]');
         }
         if (values.scope && values.scope !== 'project' && values.scope !== 'user') throw new Error('Invalid --scope. Use project or user.');
@@ -2155,8 +2162,8 @@ function main(argv: string[]): number {
       return 0;
     }
     case 'plugin': {
-      if (values.grok) {
-        throw new Error('The --grok target is supported by init only; no Grok plugin generator exists.');
+      if (values.grok || values.opencode) {
+        throw new Error('The --grok and --opencode targets are supported by init only; no plugin generator exists for them.');
       }
       const codex = Boolean(values.codex);
       const { outDir, results } = codex

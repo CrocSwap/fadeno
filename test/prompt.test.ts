@@ -245,7 +245,8 @@ flow:
 test('reviewer template surfaces state all_reviews_approved verdict and blocking requirement', (t) => {
   const claudeReviewer = readFileSync(join(import.meta.dirname, '..', 'templates', 'claude', 'claude-agents', 'reviewer.md'), 'utf8');
   const grokReviewer = readFileSync(join(import.meta.dirname, '..', 'templates', 'grok', 'grok-agents', 'reviewer.md'), 'utf8');
-  for (const [name, body] of [['claude', claudeReviewer] as const, ['grok', grokReviewer] as const]) {
+  const opencodeReviewer = readFileSync(join(import.meta.dirname, '..', 'templates', 'opencode', 'opencode-agents', 'reviewer.md'), 'utf8');
+  for (const [name, body] of [['claude', claudeReviewer] as const, ['grok', grokReviewer] as const, ['opencode', opencodeReviewer] as const]) {
     assert.match(body, /all_reviews_approved/, `${name} reviewer must mention all_reviews_approved`);
     assert.match(body, /verdict.*approve/, `${name} reviewer must state approve verdict requirement`);
     assert.match(body, /blocking/, `${name} reviewer must mention blocking`);
@@ -255,13 +256,16 @@ test('reviewer template surfaces state all_reviews_approved verdict and blocking
   const codexRoot = tempRepo(t);
   const claudeRoot = tempRepo(t);
   const grokRoot = tempRepo(t);
+  const opencodeRoot = tempRepo(t);
   runInit({ target: 'codex', repoRoot: codexRoot });
   runInit({ target: 'claude', repoRoot: claudeRoot });
   runInit({ target: 'grok', repoRoot: grokRoot });
+  runInit({ target: 'opencode', repoRoot: opencodeRoot });
   // Codex does not have reviewer.md as file? But plugin does; check template existence
-  // For claude and grok, the emitted reviewer must match template
+  // For claude, grok, and opencode, the emitted reviewer must match template
   assert.equal(readFileSync(join(claudeRoot, '.claude', 'agents', 'reviewer.md'), 'utf8'), claudeReviewer);
   assert.equal(readFileSync(join(grokRoot, '.grok', 'agents', 'reviewer.md'), 'utf8'), grokReviewer);
+  assert.equal(readFileSync(join(opencodeRoot, '.opencode', 'agents', 'reviewer.md'), 'utf8'), opencodeReviewer);
 });
 
 test('loop-body output is generation-scoped .v<G> with G = N + 1', (t) => {

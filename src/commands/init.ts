@@ -6,7 +6,7 @@ import { FADENO_IGNORE_PATTERNS } from '../lib/source-control.ts';
 import { relayModelForClaude, stampHookVersion, stampRelayModel } from './plugin.ts';
 import { emitCodexSteeringBrokers } from './steering.ts';
 
-export type Target = 'codex' | 'claude' | 'grok';
+export type Target = 'codex' | 'claude' | 'grok' | 'opencode';
 
 export interface InitOptions {
   target: Target;
@@ -57,11 +57,11 @@ export function runInit(opts: InitOptions): InitResult {
   const force = opts.force ?? false;
   const withSteering = opts.noSteering === true
     ? false
-    : opts.withSteering ?? opts.target !== 'grok';
+    : opts.withSteering ?? (opts.target !== 'grok' && opts.target !== 'opencode');
   const results: EmitResult[] = [];
 
-  if (withSteering && opts.target === 'grok') {
-    throw new Error('Loadout steering is currently supported for Codex and Claude Code, not Grok Build.');
+  if (withSteering && (opts.target === 'grok' || opts.target === 'opencode')) {
+    throw new Error('Loadout steering is currently supported for Codex and Claude Code, not Grok Build or OpenCode.');
   }
 
   // 1. Shared `.fadeno/` tree (vocabulary, playbooks, schemas, runs, enforcement).
@@ -101,6 +101,12 @@ export function runInit(opts: InitOptions): InitResult {
         break;
       case 'grok':
         skillsBase = join(repoRoot, '.grok', 'skills');
+        break;
+      case 'opencode':
+        // OpenCode reads the cross-harness `.agents/skills` directory (the same
+        // one Codex uses), so a repo scaffolded for both hosts shares one
+        // skill tree; `emitFile` keeps repeated installs non-destructive.
+        skillsBase = join(repoRoot, '.agents', 'skills');
         break;
     }
 
@@ -164,6 +170,14 @@ export function runInit(opts: InitOptions): InitResult {
       case 'grok':
         copyTree(join(tpl, 'grok', 'grok-agents'), join(repoRoot, '.grok', 'agents'), force, results);
         break;
+      case 'opencode':
+        copyTree(
+          join(tpl, 'opencode', 'opencode-agents'),
+          join(repoRoot, '.opencode', 'agents'),
+          force,
+          results,
+        );
+        break;
     }
 
     // 4. Bootstrap instruction file (append-or-create, never clobber).
@@ -174,6 +188,8 @@ export function runInit(opts: InitOptions): InitResult {
         break;
       case 'codex':
       case 'grok':
+      case 'opencode':
+        // OpenCode reads AGENTS.md natively, like Codex and Grok.
         bootstrapName = 'AGENTS.md';
         break;
     }
