@@ -2,7 +2,6 @@ import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
   activeHarness,
-  applyWritePosture,
   archetypeDisplaySort,
   resolveRole,
   readLocalDialState,
@@ -121,7 +120,7 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
   for (const archetype of archetypes) {
     try {
       const resolved = resolveRole(archetype, archetype, profile, layers);
-      const spec = applyWritePosture(resolved.delivery.spec, archetype, profile.archetypes).spec;
+      const spec = resolved.delivery.spec;
       roles.push({
         archetype,
         executor: resolved.delivery.refString,

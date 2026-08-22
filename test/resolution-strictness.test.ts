@@ -30,13 +30,13 @@ const V3_BASE = {
   },
   routes: {
     standalone: {
-      dummy: { command: ['node', '-e', '0'], write_access: true },
+      dummy: { command: ['node', '-e', '0'], },
       'current-host': { host: true },
     },
   },
   archetypes: {
-    worker: { requires_write: 'none' },
-    reviewer: { requires_write: 'none' },
+    worker: { },
+    reviewer: { },
   },
   dials: {
     worker: 'sol',
@@ -174,7 +174,7 @@ test('suppressedCanonArchetypes: computed only when a self-contained project sup
   assert.ok(suppressed.includes('generator'));
   assert.ok(suppressed.includes('worker'));
 
-  const withWorker = seedProject(t, { ...V3_BASE, archetypes: { worker: { requires_write: 'required' } } });
+  const withWorker = seedProject(t, { ...V3_BASE, archetypes: { worker: { } } });
   const suppressed2 = loadLayeredProfile(withWorker.root, withWorker.paths).suppressedCanonArchetypes;
   assert.ok(!suppressed2.includes('worker'));
 

@@ -46,9 +46,9 @@ function seedExecutor(t: TestContext, command: string[]): string {
         probe: { provider: 'openai', id: 'probe', effort: 'default' },
       },
       routes: {
-        standalone: { openai: { command, write_access: true } },
-        codex: { openai: { command, write_access: true } },
-        claude: { openai: { command, write_access: true } },
+        standalone: { openai: { command, } },
+        codex: { openai: { command, } },
+        claude: { openai: { command, } },
       },
       archetypes: { worker: {} },
       dials: { worker: 'probe' },
@@ -385,12 +385,11 @@ test('drive supervises command attempts and refuses a retry while the first writ
             '-e',
             "let i=0;const f=require('node:fs');const t=setInterval(()=>{i++;f.writeFileSync('drive-tick-'+i+'.txt','x');if(i>=60)clearInterval(t)},200)",
           ],
-          write_access: true,
-        },
+          },
         'current-host': { host: true },
       },
     },
-    archetypes: { worker: { requires_write: 'required' } },
+    archetypes: { worker: { } },
     dials: { worker: 'slow' },
   }));
   writeFileSync(join(root, '.fadeno', 'playbooks', 'slow-drive.yaml'), stringifyYaml({
@@ -446,12 +445,11 @@ test('drive supervises read-only command attempts and refuses a retry while the 
             '-e',
             "let i=0;const f=require('node:fs');const t=setInterval(()=>{i++;f.writeFileSync('drive-tick-'+i+'.txt','x');if(i>=60)clearInterval(t)},200)",
           ],
-          write_access: false,
-        },
+          },
         'current-host': { host: true },
       },
     },
-    archetypes: { worker: { requires_write: 'forbidden' } },
+    archetypes: { worker: { } },
     dials: { worker: 'slow' },
   }));
   writeFileSync(join(root, '.fadeno', 'playbooks', 'slow-drive.yaml'), stringifyYaml({

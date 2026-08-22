@@ -61,7 +61,7 @@ function thrown(fn: () => unknown): ExecutorProfileError {
 
 test('ignored_output: absent is discardable, so no existing archetype changes meaning', () => {
   const profile = parseDoc({
-    archetypes: { worker: { requires_write: 'required' }, reviewer: {}, scribe: { brief: 'director' } },
+    archetypes: { worker: { }, reviewer: {}, scribe: { brief: 'director' } },
   });
   for (const name of ['worker', 'reviewer', 'scribe']) {
     assert.equal(profile.archetypes[name]!.ignoredOutput, 'discardable', name);
@@ -69,7 +69,6 @@ test('ignored_output: absent is discardable, so no existing archetype changes me
   // Pinned as a whole-shape assertion: the default has to be a real value on
   // the policy, not an absent key a consumer has to remember to coalesce.
   assert.deepEqual(profile.archetypes.reviewer, {
-    requiresWrite: 'none',
     ignoredOutput: 'discardable',
     fallback: null,
     distinctProviderFromInputs: null,
@@ -80,9 +79,9 @@ test('ignored_output: absent is discardable, so no existing archetype changes me
 test('ignored_output: both values parse, independently of requires_write', () => {
   const profile = parseDoc({
     archetypes: {
-      worker: { requires_write: 'required', ignored_output: 'kept' },
+      worker: { ignored_output: 'kept' },
       builder: { ignored_output: 'kept' },
-      scribe: { requires_write: 'required', ignored_output: 'discardable' },
+      scribe: { ignored_output: 'discardable' },
     },
   });
   assert.equal(profile.archetypes.worker!.ignoredOutput, 'kept');
@@ -91,9 +90,6 @@ test('ignored_output: both values parse, independently of requires_write', () =>
   // The two fields are read at different stages and neither derives from the
   // other: `kept` does not imply a write posture, and `required` does not
   // imply the output survives.
-  assert.equal(profile.archetypes.worker!.requiresWrite, 'required');
-  assert.equal(profile.archetypes.builder!.requiresWrite, 'none');
-  assert.equal(profile.archetypes.scribe!.requiresWrite, 'required');
 });
 
 test('ignored_output: a misspelled value fails loudly and names both legal values', () => {
@@ -108,7 +104,7 @@ test('ignored_output: a misspelled value fails loudly and names both legal value
 });
 
 test('ignored_output: booleans are refused even though requires_write accepts them', () => {
-  // `requires_write: true` is legal shorthand for `required`. There is no
+  // `` is legal shorthand for `required`. There is no
   // corresponding reading here — "true" names neither value — so the
   // shorthand must not be inherited by copy-paste from the line above it.
   for (const bad of [true, false]) {
@@ -119,7 +115,6 @@ test('ignored_output: booleans are refused even though requires_write accepts th
     );
   }
   // ...while the neighbouring shorthand is untouched.
-  assert.equal(parseDoc({ archetypes: { worker: { requires_write: true } } }).archetypes.worker!.requiresWrite, 'required');
 });
 
 test('ignored_output: a typo in the KEY is an unknown key that names the legal set', () => {
@@ -128,7 +123,7 @@ test('ignored_output: a typo in the KEY is an unknown key that names the legal s
   // that was meant.
   const err = thrown(() => parseDoc({ archetypes: { worker: { ignored_ouput: 'kept' } } }));
   assert.match(err.message, /`archetypes\.worker` has unknown key\(s\) ignored_ouput;/);
-  assert.match(err.message, /only `requires_write`, `ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief` are allowed\./);
+  assert.match(err.message, /only `ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief` are allowed\./);
 });
 
 // --- both parse sites ---
@@ -151,7 +146,7 @@ test('ignored_output: the snapshot reader accepts and validates exactly like the
   };
 
   const doc = parseSnapshotDocument(
-    snapshotWith({ worker: { requires_write: 'required', ignored_output: 'kept' }, scribe: { ignored_output: 'discardable' } }),
+    snapshotWith({ worker: { ignored_output: 'kept' }, scribe: { ignored_output: 'discardable' } }),
     'snap.yaml',
   );
   assert.equal(doc.archetypes.worker!.ignoredOutput, 'kept');
@@ -173,9 +168,9 @@ test('ignored_output: the snapshot reader accepts and validates exactly like the
 test('ignored_output: kept survives a snapshot round-trip', () => {
   const profile = parseDoc({
     archetypes: {
-      worker: { requires_write: 'required', ignored_output: 'kept' },
+      worker: { ignored_output: 'kept' },
       builder: { ignored_output: 'kept', fallback: 'worker' },
-      scribe: { requires_write: 'required' },
+      scribe: { },
     },
   });
   const text = serializeSnapshot(profile);
@@ -192,15 +187,17 @@ test('ignored_output: kept survives a snapshot round-trip', () => {
 });
 
 test('ignored_output: discardable is added, never defaulted — no stored snapshot moves a byte', () => {
-  // `requires_write: none` is omitted the same way. A snapshot of a catalog
-  // that declares nothing new has to be byte-for-byte what it was before this
-  // key existed, or every ledger on disk stops verifying.
+  // A snapshot of a catalog that declares nothing new has to be byte-for-byte
+  // what it was before this key existed, or every ledger on disk stops
+  // verifying. With the write posture removed, an archetype declaring nothing
+  // else serializes as an empty map.
   const text = serializeSnapshot(parseDoc({
-    archetypes: { worker: { requires_write: 'required' }, reviewer: {} },
+    archetypes: { worker: {}, reviewer: {} },
   }));
   assert.doesNotMatch(text, /ignored_output/);
+  assert.doesNotMatch(text, /requires_write/);
   assert.ok(
-    text.includes('archetypes:\n  reviewer: {}\n  worker:\n    requires_write: required\n'),
+    text.includes('archetypes:\n  reviewer: {}\n  worker: {}\n'),
     `archetypes block must be unchanged; got:\n${text.slice(text.indexOf('archetypes:'))}`,
   );
 });
@@ -251,8 +248,10 @@ test('ignored_output: an archetype policy declared in one layer is not dropped b
   assert.equal(profile.archetypes.scribe!.ignoredOutput, 'kept', 'user layer');
   assert.equal(profile.archetypes.courier!.ignoredOutput, 'discardable', 'user layer, defaulted');
   // The builtin layer's archetypes still compose in beside them, defaulted.
-  assert.equal(profile.archetypes.worker!.requiresWrite, 'required');
-  assert.equal(profile.archetypes.worker!.ignoredOutput, 'discardable', 'builtin layer, defaulted');
+  // `director` rather than `worker`: with the write posture removed, `worker`
+  // declares nothing at all and the shipped catalog no longer lists it, while
+  // `director` still carries a `brief`.
+  assert.equal(profile.archetypes.director!.ignoredOutput, 'discardable', 'builtin layer, defaulted');
 });
 
 test('ignored_output: the innermost layer that declares an archetype wins outright', (t) => {

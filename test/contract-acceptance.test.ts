@@ -30,7 +30,7 @@ function seedParallelWorkstreamsRun(t: TestContext): { root: string; runId: stri
   for (const [name, spec] of Object.entries(execSpecs)) {
     const provider = name.replace(/-/g, '_') + '_p';
     models[name] = { provider, id: name, effort: 'high' };
-    routesStandalone[provider] = { command: spec.command, write_access: true };
+    routesStandalone[provider] = { command: spec.command, };
   }
   routesStandalone['current-host'] = { host: true };
   const v3 = {

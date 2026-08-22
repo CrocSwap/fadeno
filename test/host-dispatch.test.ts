@@ -718,35 +718,3 @@ test('locked wildcard steering reports requested_agent_type "*" and delivered_ar
   assert.equal((res2 as unknown as Record<string, unknown>).delivered_archetype, undefined);
 });
 
-test('locked wildcard steering rejects a write-posture-incompatible concrete archetype', async (t) => {
-  const { runSteeringResolve } = await import('../src/commands/steering.ts');
-  const root = tempRepo(t);
-  const userPathOptions = { env: { FADENO_HARNESS: 'standalone' } };
-  runInit({ target: 'codex', repoRoot: root, dataOnly: true });
-  writeFileSync(join(root, '.fadeno', 'playbooks', 'wildcard-posture.yaml'), stringifyYaml({
-    kind: 'AgentPlaybook',
-    schema_version: '0.1',
-    name: 'wildcard-posture',
-    description: 'Wildcard posture fixture.',
-    roles: { coordinator: { purpose: 'Coordinate without a declared archetype.' } },
-    flow: [{ id: 'coordinate', kind: 'actor_call', actor: 'coordinator', output: 'Notes', terminal_status: 'completed' }],
-  }));
-  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
-    models: { luna: { provider: 'dummy', id: 'luna' } },
-    routes: {
-      standalone: { dummy: { host: true, write_access: true }, 'current-host': { host: true } },
-      codex: { dummy: { host: true, write_access: true }, 'current-host': { host: true } },
-    },
-    archetypes: { generator: { requires_write: 'forbidden' } },
-    bindings: { coordinator: 'luna' },
-  }));
-  const created = runNewRun({ repoRoot: root, playbook: 'wildcard-posture', task: 'posture', userPathOptions });
-  const driven = runDrive({ repoRoot: root, run: created.runId, userPathOptions });
-  assert.equal(driven.outcome, 'awaiting_host_dispatch');
-  assert.equal(driven.requests[0]!.agentType, '*');
-  assert.throws(
-    () => runSteeringResolve({ repoRoot: root, archetype: 'generator', run: created.runId, dispatchId: driven.requests[0]!.dispatchId, userPathOptions }),
-    /write posture is incompatible.*requires_write: forbidden/s,
-  );
-});

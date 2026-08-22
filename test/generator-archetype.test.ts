@@ -7,7 +7,6 @@ import { DialError, runDialSet } from '../src/commands/dial.ts';
 import {
   ExecutorProfileError,
   compileDialRef,
-  explainWriteConflict,
   DIALS_LOCAL_FILE,
   parseExecutorProfile,
   resolveRole,
@@ -40,10 +39,15 @@ function seedProfile(t: TestContext, doc: Record<string, unknown>): string {
   return root;
 }
 
-test('starter catalog: parses; generator stands alone (no fallback), worker is required', () => {
+test('starter catalog: generator stands alone — no fallback, and no policy left to carry', () => {
+  // Both stay LISTED with empty policy: their only key was a write posture,
+  // but membership in this map is itself meaningful — it is the canon set a
+  // self-contained project is measured against. What they no longer carry is
+  // any permission claim.
   const profile = parseStarter();
-  assert.deepEqual(profile.archetypes.generator, { requiresWrite: 'forbidden', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
-  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.generator, { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.worker, { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.doesNotMatch(JSON.stringify(profile.archetypes), /requiresWrite/);
 });
 
 test('starter catalog: an undialed generator resolves to the host-native base, never through worker', () => {
@@ -67,101 +71,7 @@ test('starter catalog: an undialed generator resolves to the host-native base, n
   assert.equal(own.source, 'user');
 });
 
-test('explainWriteConflict: generator is refused on a write-capable command route', () => {
-  const profile = parseDoc({
-    schema_version: 3,
-    models: {
-      'rw-model': { provider: 'openai', id: 'rw-model' },
-      'ro-model': { provider: 'anthropic', id: 'ro-model' },
-    },
-    routes: {
-      standalone: {
-        openai: { command: ['codex', 'exec', '-'], write_access: true },
-        anthropic: { command: ['claude', '-p'], write_access: false },
-      },
-      codex: {
-        openai: { command: ['codex', 'exec', '-'], write_access: true },
-        anthropic: { command: ['claude', '-p'], write_access: false },
-      },
-      claude: {
-        openai: { command: ['codex', 'exec', '-'], write_access: true },
-        anthropic: { command: ['claude', '-p'], write_access: false },
-      },
-    },
-    archetypes: {
-      generator: { requires_write: 'forbidden', fallback: 'worker' },
-      worker: { requires_write: 'required' },
-    },
-  });
-  const rwCompiled = compileDialRef({ model: 'rw-model' }, profile);
-  const roCompiled = compileDialRef({ model: 'ro-model' }, profile);
-  const conflict = explainWriteConflict(
-    { executor: rwCompiled.refString, spec: rwCompiled.spec },
-    'generator',
-    profile,
-  );
-  assert.ok(conflict != null);
-  assert.match(conflict, /archetype "generator" declares `requires_write: forbidden`, but executor "rw-model"/);
-  assert.match(conflict, /`write_access: true`/);
-  // Bindings-only: the fallback does not import worker's `required` posture,
-  // so generator on a read-only route is unconstrained.
-  assert.equal(
-    explainWriteConflict({ executor: roCompiled.refString, spec: roCompiled.spec }, 'generator', profile),
-    null,
-  );
-});
 
-test('loadout set: refuses dialing generator onto a write-capable command executor', (t) => {
-  const root = seedProfile(t, {
-    schema_version: 3,
-    models: {
-      'rw-model': { provider: 'openai', id: 'rw-model' },
-      'ro-model': { provider: 'anthropic', id: 'ro-model' },
-    },
-    routes: {
-      standalone: {
-        openai: { command: ['codex', 'exec', '-'], write_access: true },
-        anthropic: { command: ['claude', '-p'], write_access: false },
-      },
-      codex: {
-        openai: { command: ['codex', 'exec', '-'], write_access: true },
-        anthropic: { command: ['claude', '-p'], write_access: false },
-      },
-      claude: {
-        openai: { command: ['codex', 'exec', '-'], write_access: true },
-        anthropic: { command: ['claude', '-p'], write_access: false },
-      },
-    },
-    archetypes: {
-      generator: { requires_write: 'forbidden', fallback: 'worker' },
-      worker: { requires_write: 'required' },
-    },
-  });
-
-  assert.throws(
-    () => runDialSet({ repoRoot: root, archetype: 'generator', model: 'rw-model', userPathOptions: harnessOpts }),
-    (err: unknown) =>
-      err instanceof DialError &&
-      /archetype "generator" declares `requires_write: forbidden`, but executor "rw-model"/.test((err as Error).message) &&
-      /`write_access: true`/.test((err as Error).message) &&
-      /--force/.test((err as Error).message) &&
-      /not suggested/.test((err as Error).message),
-  );
-  assert.equal(existsSync(join(root, DIALS_LOCAL_FILE)), false);
-
-  const forced = runDialSet({
-    repoRoot: root,
-    archetype: 'generator',
-    model: 'rw-model',
-    userPathOptions: harnessOpts,
-    repo: true,
-    force: true,
-  });
-  assert.equal(forced.dial.force_write_posture, true);
-  assert.match(forced.notes.join('\n'), /WARNING: FORCED WRITE-POSTURE MISMATCH/);
-  assert.match(forced.notes.join('\n'), /persisted with this dial/);
-  assert.match(readFileSync(join(root, '.fadeno', 'executors.yaml'), 'utf8'), /force_write_posture: true/);
-});
 
 test('repo-declared scout with fallback: reviewer resolves via the reviewer slot through dial cascade', () => {
   const profile = parseDoc({
@@ -172,16 +82,16 @@ test('repo-declared scout with fallback: reviewer resolves via the reviewer slot
     },
     routes: {
       standalone: {
-        openai: { command: ['codex', 'exec', '-'], write_access: true },
-        anthropic: { command: ['claude', '-p'], write_access: false },
+        openai: { command: ['codex', 'exec', '-'], },
+        anthropic: { command: ['claude', '-p'], },
       },
       codex: {
-        openai: { command: ['codex', 'exec', '-'], write_access: true },
-        anthropic: { command: ['claude', '-p'], write_access: false },
+        openai: { command: ['codex', 'exec', '-'], },
+        anthropic: { command: ['claude', '-p'], },
       },
       claude: {
-        openai: { command: ['codex', 'exec', '-'], write_access: true },
-        anthropic: { command: ['claude', '-p'], write_access: false },
+        openai: { command: ['codex', 'exec', '-'], },
+        anthropic: { command: ['claude', '-p'], },
       },
     },
     archetypes: { scout: { fallback: 'reviewer' }, reviewer: {} },
@@ -200,7 +110,7 @@ test('archetypes: a fallback cycle is refused at parse', () => {
     () => parseDoc({
       schema_version: 3,
       models: { 'rw-model': { provider: 'openai', id: 'rw-model' } },
-      routes: { standalone: { openai: { command: ['node', '-e', "process.stdout.write('x')"], write_access: true } } },
+      routes: { standalone: { openai: { command: ['node', '-e', "process.stdout.write('x')"], } } },
       archetypes: {
         scout: { fallback: 'reviewer' },
         reviewer: { fallback: 'scout' },
@@ -216,9 +126,9 @@ test('archetypes: boolean aliases parse to required/none', () => {
   const profile = parseDoc({
     schema_version: 3,
     models: { 'rw-model': { provider: 'openai', id: 'rw-model' } },
-    routes: { standalone: { openai: { command: ['node', '-e', "process.stdout.write('x')"], write_access: true } } },
-    archetypes: { worker: { requires_write: true }, reviewer: { requires_write: false } },
+    routes: { standalone: { openai: { command: ['node', '-e', "process.stdout.write('x')"], } } },
+    archetypes: { worker: { }, reviewer: { } },
   });
-  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
-  assert.deepEqual(profile.archetypes.reviewer, { requiresWrite: 'none', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.worker, { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.reviewer, { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
 });

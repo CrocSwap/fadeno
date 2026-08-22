@@ -33,24 +33,23 @@ function seed(t: TestContext): { root: string; user: UserPathOptions } {
       standalone: {
         openai: {
           command: ['node', '-e', '0'],
-          write_access: true,
           models_command: ['echo', 'gpt-5.6-sol gpt-5.6-luna'],
         },
         anthropic: {
           driver: 'claude',
-          command: ['claude', '-p', '--model', '{model}'],
-          write_access: false,
-          write_variant: { command: ['claude', '-p', '--model', '{model}', '--permission-mode', 'acceptEdits', '--allowedTools', 'Bash(fadeno:*)'] },
+          // `fadeno_capable` is now read off the argv that will actually run,
+          // so the flag has to be IN it — there is no second "variant" argv to
+          // look inside any more.
+          command: ['claude', '-p', '--model', '{model}', '--allowedTools', 'Bash(fadeno:*)'],
         },
         openrouter: {
           command: ['opencode', 'run', '-m', '{model}'],
-          write_access: true,
           models_command: ['echo', 'anthropic/claude-opus qwen-max'],
         },
         'current-host': { host: true },
       },
     },
-    archetypes: { worker: { requires_write: 'required' } },
+    archetypes: { worker: { } },
     unregistered_model_driver: 'openrouter',
   }));
   return { root, user: isolated(root) };
@@ -83,7 +82,6 @@ test('models: registry table — deliveries, lane marks, stale providers, verifi
 
   const opus = result.models.find((r) => r.name === 'opus')!;
   assert.equal(opus.home_via, 'claude');
-  assert.equal(opus.write_variant, true);
   assert.equal(opus.fadeno_capable, true);
   // The openrouter lane is visible with its spelling-substituted id.
   const orLane = opus.lanes.find((l) => l.via === 'openrouter');

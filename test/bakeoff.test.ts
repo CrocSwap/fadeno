@@ -83,7 +83,7 @@ function seedPair(t: TestContext, opts: {
       // the same redundancy `dispatch-shadow.test.ts`'s own fixtures use,
       // since which harness is active is real ambient state a command has no
       // business overriding.
-      const route = { judgeprov: { command: opts.judgeCommand, write_access: false } };
+      const route = { judgeprov: { command: opts.judgeCommand, } };
       catalog.routes = { standalone: route, claude: route, codex: route, grok: route };
       catalog.dials = { judge: 'judge-model' };
     }
@@ -690,25 +690,37 @@ test('judge_delivery is command on the one-shot path and host on --record, and t
   assert.match(scorecard.lines.join('\n'), /judge delivery: host/);
 });
 
-test('an arm whose write posture was never checked is stamped as a confound', (t) => {
-  // The kernel stamps `write_posture_unverified` when an archetype declares a
-  // posture and the route never declared `write_access:`, so nothing verified
-  // the lane could write. It matters HERE more than anywhere: an arm that
-  // silently could not write returns an empty or thin diff, and a judge reads
-  // that as the model choosing to change little. A confound is the honest
-  // label — the measurement is real, the interpretation is not available.
-  //
-  // Stamped as a TRUE-only flag, so its absence never asserts the opposite:
-  // rows written before the flag existed simply do not carry it.
+
+test('two arms that ran different argvs are stamped with capability skew', (t) => {
+  // Replaces the write-posture confound. Measured, not declared: comparing
+  // the argvs that actually ran catches ANY capability difference — sandbox
+  // flags, tool allowlists, agent selection — where the old confound saw only
+  // whether a catalog claimed a write posture, and only when it was declared.
   const root = seedPair(t, {
     surfaces: [],
     primaryDiff: diffFor('src/a.ts', ['  const x = 1;']),
     challengerDiff: diffFor('src/a.ts', ['  const x = 2;']),
-    primaryRowExtra: { write_posture_unverified: true },
+    primaryRowExtra: { command: ['claude', '-p', '--sandbox', 'read-only'] },
+    challengerRowExtra: { command: ['claude', '-p', '--permission-mode', 'acceptEdits'] },
   });
   const result = runBakeoff({ repoRoot: root, ref: 'pair0001-aaaa-bbbb-cccc-dddddddddddd', measureOnly: true });
-  const stamped = result.confounds.filter((c) => c.code === 'write_posture_unverified');
-  assert.equal(stamped.length, 1, 'exactly the arm the ledger flagged');
-  assert.equal(stamped[0]!.arm, 'primary');
-  assert.match(stamped[0]!.detail, /empty or thin diff/);
+  const skew = result.confounds.filter((c) => c.code === 'capability_skew');
+  assert.equal(skew.length, 1);
+  assert.equal(skew[0]!.arm, 'pair');
+  assert.match(skew[0]!.detail, /read-only/);
+  assert.match(skew[0]!.detail, /acceptEdits/);
+});
+
+test('two arms on the same argv are NOT stamped, even at different models', (t) => {
+  // Model and effort are SUPPOSED to differ — that is the whole point of a
+  // pair — so tokens carrying either are excluded before the comparison.
+  const root = seedPair(t, {
+    surfaces: [],
+    primaryDiff: diffFor('src/a.ts', ['  const x = 1;']),
+    challengerDiff: diffFor('src/a.ts', ['  const x = 2;']),
+    primaryRowExtra: { command: ['claude', '-p', '--model', 'sonnet'] },
+    challengerRowExtra: { command: ['claude', '-p', '--model', 'grok'] },
+  });
+  const result = runBakeoff({ repoRoot: root, ref: 'pair0001-aaaa-bbbb-cccc-dddddddddddd', measureOnly: true });
+  assert.equal(result.confounds.filter((c) => c.code === 'capability_skew').length, 0);
 });

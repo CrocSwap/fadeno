@@ -99,9 +99,9 @@ test('dispatches: shadow rows render with [shadow of <primaryId8>] and json fiel
   const root = tempRepo(t);
   seedLog(root, [
     requested({ dispatch_id: PRIMARY_ID, prompt_sha256: 'a'.repeat(64) }),
-    completed({ dispatch_id: PRIMARY_ID, prompt_sha256: 'a'.repeat(64), output_bytes: 123, workspace_changed: false, write_access: true }),
+    completed({ dispatch_id: PRIMARY_ID, prompt_sha256: 'a'.repeat(64), output_bytes: 123, workspace_changed: false, }),
     shadowRequested(PRIMARY_ID, { dispatch_id: SHADOW_ID, prompt_sha256: 'a'.repeat(64) }),
-    shadowCompleted(PRIMARY_ID, { dispatch_id: SHADOW_ID, prompt_sha256: 'a'.repeat(64), output_bytes: 99, diff_bytes: 45, write_access: true, workspace_changed: false }),
+    shadowCompleted(PRIMARY_ID, { dispatch_id: SHADOW_ID, prompt_sha256: 'a'.repeat(64), output_bytes: 99, diff_bytes: 45, workspace_changed: false }),
   ]);
   const result = runDispatches({ repoRoot: root });
   assert.equal(result.total, 2);

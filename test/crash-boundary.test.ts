@@ -52,9 +52,9 @@ function seedV3(root: string, extra: Record<string, unknown> = {}): void {
     },
     routes: {
       standalone: {
-        openai: { command: ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(d))"], write_access: true },
+        openai: { command: ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(d))"], },
       },
-      codex: { openai: { command: ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(d))"], write_access: true } },
+      codex: { openai: { command: ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(d))"], } },
     },
     archetypes: { worker: {} },
     dials: { worker: 'echo-worker' },
@@ -107,7 +107,7 @@ test('diagnostics: opt-in via --diagnostics writes bounded snapshot with head+ta
   const big = Array.from({ length: 600 }, (_, i) => `line-${String(i).padStart(4, '0')}-${'x'.repeat(80)}`).join('\n');
   seedV3(root, {
     models: { 'echo-worker': { provider: 'openai', id: 'echo-worker' } },
-    routes: { standalone: { openai: { command: ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(d))"], write_access: true } } },
+    routes: { standalone: { openai: { command: ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(d))"], } } },
   });
   const result = runDispatch({
     archetype: 'worker',
@@ -193,7 +193,7 @@ test('diagnostics: never gates control flow, bounded buffers', (t) => {
   const root = tempRepo(t);
   seedV3(root, {
     models: { 'echo-worker': { provider: 'openai', id: 'echo-worker' } },
-    routes: { standalone: { openai: { command: ['node', '-e', 'process.exit(0)'], write_access: true } } },
+    routes: { standalone: { openai: { command: ['node', '-e', 'process.exit(0)'], } } },
   });
   const result = runDispatch({ archetype: 'worker', prompt: 'ok', diagnostics: true, repoRoot: root, userPathOptions: { env: { FADENO_HARNESS: 'standalone' } } });
   assert.equal(result.exitCode, 0);
@@ -211,7 +211,7 @@ test('isolated dispatch: creates diff, omits workspace_changed, bypasses lease',
   initGit(root);
   seedV3(root, {
     models: { 'echo-worker': { provider: 'openai', id: 'echo-worker' } },
-    routes: { standalone: { openai: { command: ['node', '-e', "require('node:fs').writeFileSync('isolated.txt','hello');"], write_access: true } } },
+    routes: { standalone: { openai: { command: ['node', '-e', "require('node:fs').writeFileSync('isolated.txt','hello');"], } } },
   });
   // hold shared lease to prove bypass
   acquireWorkspaceLease({ repoRoot: root, workspaceMode: 'shared', holder: { id: 'blocker', kind: 'ad-hoc' }, supervisorPid: 99999, probe: aliveProbe });
@@ -262,7 +262,7 @@ test('isolated dispatch: empty diff is 0 bytes and preserved', (t) => {
   const root = tempRepo(t);
   initGit(root);
   seedV3(root, {
-    routes: { standalone: { openai: { command: ['node', '-e', 'process.exit(0)'], write_access: true } } },
+    routes: { standalone: { openai: { command: ['node', '-e', 'process.exit(0)'], } } },
   });
   const result = runDispatch({ archetype: 'worker', prompt: 'no-change', isolate: true, repoRoot: root, userPathOptions: { env: { FADENO_HARNESS: 'standalone' } } });
   const completed = evidenceRows(root).find((r) => r.event === 'dispatch_completed')!;

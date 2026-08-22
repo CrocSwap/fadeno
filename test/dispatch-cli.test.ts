@@ -38,18 +38,18 @@ function seedV3(t: TestContext, extra: Record<string, unknown> = {}): string {
     },
     routes: {
       standalone: {
-        openai: { command: STDIN_ECHO('REPORT:'), write_access: true },
+        openai: { command: STDIN_ECHO('REPORT:'), },
       },
       codex: {
-        openai: { command: STDIN_ECHO('REPORT:'), write_access: true },
+        openai: { command: STDIN_ECHO('REPORT:'), },
       },
       'test-harness': {
-        openai: { command: STDIN_ECHO('REPORT:'), write_access: true },
+        openai: { command: STDIN_ECHO('REPORT:'), },
       },
     },
     archetypes: {
       worker: {},
-      reviewer: { requires_write: 'required' },
+      reviewer: { },
     },
     dials: {},
     ...extra,
@@ -305,8 +305,8 @@ test('dispatch: propagates the executor exit code and records it as evidence', (
       'echo-worker': { provider: 'openai', id: 'echo-worker' },
     },
     routes: {
-      standalone: { openai: { command: ['node', '-e', 'process.exit(7)'], write_access: true } },
-      codex: { openai: { command: ['node', '-e', 'process.exit(7)'], write_access: true } },
+      standalone: { openai: { command: ['node', '-e', 'process.exit(7)'], } },
+      codex: { openai: { command: ['node', '-e', 'process.exit(7)'], } },
     },
     dials: { worker: 'fail-7' },
   });
@@ -330,87 +330,15 @@ test('dispatch: requires --archetype unless --model bypasses', (t) => {
   );
 });
 
-test('dispatch: a write-needing archetype is refused on a delivery that cannot write', (t) => {
-  const root = seedV3(t, {
-    models: {
-      'ro-model': { provider: 'openai', id: 'ro-model' },
-      'rw-model': { provider: 'openai', id: 'rw-model' },
-    },
-    routes: {
-      standalone: { openai: { command: STDIN_ECHO('RO:'), write_access: false } },
-      codex: { openai: { command: STDIN_ECHO('RO:'), write_access: false } },
-    },
-    archetypes: { worker: { requires_write: 'required' } },
-    dials: { worker: 'ro-model' },
-  });
-  let message = '';
-  assert.throws(
-    () => runDispatch({ archetype: 'worker', prompt: 'ship the fix', repoRoot: root, userPathOptions: onHarness('standalone') }),
-    (err: unknown) => {
-      if (!(err instanceof DispatchCommandError) || !/requires_write/.test(err.message)) return false;
-      message = err.message;
-      return true;
-    },
-  );
-  const rows = evidenceRows(root);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0]!.event, 'dispatch_refused');
-  assert.equal(rows[0]!.format, DISPATCHES_FORMAT);
-  assert.deepEqual(rows[0]!.refusal, { predicate: 'write_posture', message });
-  assert.ok(!rows.some((row) => row.event === 'dispatch_requested'));
-});
 
-test('dispatch: a write-capable delivery serves the same archetype', (t) => {
-  const root = seedV3(t, {
-    models: {
-      'rw-model': { provider: 'openai', id: 'rw-model' },
-    },
-    routes: {
-      standalone: { openai: { command: STDIN_ECHO('RW:'), write_access: true } },
-      codex: { openai: { command: STDIN_ECHO('RW:'), write_access: true } },
-    },
-    archetypes: { worker: { requires_write: 'required' } },
-    dials: { worker: 'rw-model' },
-  });
-  const result = runDispatch({ archetype: 'worker', prompt: 'ship the fix', repoRoot: root, userPathOptions: onHarness('standalone') });
-  assert.equal(result.stdout, 'RW:ship the fix');
-  const rows = evidenceRows(root);
-  // both rows have write_access true in completion? Request may not have but completion does
-  const comp = rows.find(r=>r.event==='dispatch_completed')!;
-  assert.equal(comp.write_access, true);
-});
 
-test('dispatch: a forced direct dial proceeds across its recorded write-posture mismatch', (t) => {
-  const root = seedV3(t, {
-    models: { 'rw-model': { provider: 'openai', id: 'rw-model' } },
-    routes: {
-      standalone: { openai: { command: STDIN_ECHO('FORCED:'), write_access: true } },
-      codex: { openai: { command: STDIN_ECHO('FORCED:'), write_access: true } },
-    },
-    archetypes: { generator: { requires_write: 'forbidden' } },
-    dials: { generator: { model: 'rw-model', force_write_posture: true } },
-  });
-  const warnings: string[] = [];
-  const result = runDispatch({
-    archetype: 'generator',
-    prompt: 'make a report',
-    repoRoot: root,
-    userPathOptions: onHarness('standalone'),
-    onEcho: (line) => warnings.push(line),
-  });
-  assert.equal(result.stdout, 'FORCED:make a report');
-  assert.match(warnings.join('\n'), /WARNING: FORCED WRITE-POSTURE MISMATCH/);
-  const requested = evidenceRows(root).find((row) => row.event === 'dispatch_requested')!;
-  assert.equal(requested.write_posture_forced, true);
-  assert.equal((requested.dial as Record<string, unknown>).force_write_posture, true);
-});
 
 test('dispatch: exit-code propagation row.exit_code ===7 + sha256("") pinned', (t) => {
   const root = seedV3(t, {
     models: { 'fail-7': { provider: 'openai', id: 'fail-7' } },
     routes: {
-      standalone: { openai: { command: ['node', '-e', 'process.exit(7)'], write_access: true } },
-      codex: { openai: { command: ['node', '-e', 'process.exit(7)'], write_access: true } },
+      standalone: { openai: { command: ['node', '-e', 'process.exit(7)'], } },
+      codex: { openai: { command: ['node', '-e', 'process.exit(7)'], } },
     },
     dials: { worker: 'fail-7' },
   });
@@ -439,7 +367,10 @@ test('dispatch: output snapshot agreement and workspace_changed false case', (t)
   const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@invalid' };
   spawnSync('git', ['init'], { cwd: root, env });
   spawnSync('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: root, env });
-  runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, userPathOptions: onHarness('standalone') });
+  // `--shared` explicitly: isolation is the DEFAULT now, and an isolated
+  // dispatch records its change as a diff rather than as `workspace_changed`.
+  // This test is about the shared path's tri-state, so it asks for it.
+  runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
   const comp = evidenceRows(root).find((r) => r.event === 'dispatch_completed')!;
   // tri-state: with git and pure-echo, workspace_changed must be false (not truthy)
   assert.equal(comp.workspace_changed, false);
@@ -457,4 +388,37 @@ test('dispatch: unknown --model and empty prompt handling', (t) => {
   const root = seedV3(t, { dials: { worker: 'echo-worker' } });
   assert.throws(() => runDispatch({ archetype: 'worker', prompt: '   ', repoRoot: root, userPathOptions: onHarness('standalone') }), /empty prompt/);
   assert.equal(evidenceRows(root).length, 0);
+});
+
+test('dispatch: isolation is REQUESTED by default but still degrades when unpaired', (t) => {
+  // Reads BOTH rows on purpose. The request row carries the intent; the
+  // completion row carries what actually happened, and for an unpaired
+  // dispatch those disagree — `dispatch.ts` degrades isolation back to shared
+  // whenever no pair materializes and the caller did not pass `--isolate`.
+  //
+  // So the permissions cut's central claim — that the worktree is the
+  // boundary now that no write guard remains — is NOT yet delivered for an
+  // unpaired dispatch. Delivering it means letting unpaired isolation merge
+  // back the way a paired primary does, which is a real change to what
+  // `fadeno dispatch` does to your tree. Pinned here so the gap is visible
+  // rather than implied by a green test.
+  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@invalid' };
+  spawnSync('git', ['init'], { cwd: root, env });
+  spawnSync('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: root, env });
+
+  runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, userPathOptions: onHarness('standalone') });
+  const requested = evidenceRows(root).find((r) => r.event === 'dispatch_requested')!;
+  const completed = evidenceRows(root).find((r) => r.event === 'dispatch_completed')!;
+  assert.equal(requested.workspace_mode, 'isolated', 'the default INTENT is isolation');
+  assert.equal(completed.workspace_mode, 'shared', 'but an unpaired dispatch still degrades to shared');
+  assert.match(
+    String(completed.workspace_mode_degraded ?? ''),
+    /pair did not materialize/,
+    'the degradation must be stamped, never silent',
+  );
+
+  runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
+  const shared = evidenceRows(root).filter((r) => r.event === 'dispatch_requested').at(-1)!;
+  assert.equal(shared.workspace_mode, 'shared', '--shared opts out deliberately, with no degradation stamp');
 });

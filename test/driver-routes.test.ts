@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
+import { parse as parseYaml } from 'yaml';
 import { compileDialRef, parseDialRef, parseExecutorProfile, type HarnessId } from '../src/lib/executors.ts';
 import './helpers.ts';
 
@@ -126,39 +127,37 @@ test('no route command carries an empty argv element', () => {
   }
 });
 
-test('driver routes expose every write posture they can honestly deliver', () => {
-  for (const harness of HOSTS) {
-    const profile = catalogFor(harness);
-    const agy = profile.routes[harness]?.google;
-    assert.equal(agy?.write_access, true, `${harness}: Antigravity must retain its verified write lane`);
-    assert.equal(agy?.write_variant ?? null, null, `${harness}: Antigravity must not claim an unverified read base`);
 
-    const opencode = profile.routes[harness]?.openrouter;
-    assert.equal(opencode?.write_access, false, `${harness}: OpenCode base must be read-only`);
-    assert.ok(opencode?.write_variant, `${harness}: OpenCode must retain a worker-capable write variant`);
-    assert.ok(opencode?.command?.includes('fadeno-readonly'), `${harness}: OpenCode base must select Fadeno's deny-policy agent`);
-    assert.ok(!opencode?.write_variant?.command.includes('fadeno-readonly'), `${harness}: OpenCode write variant must drop the deny-policy agent`);
-  }
-});
 
-test('every non-host command route except Antigravity has a read base and write variant', () => {
-  for (const harness of HOSTS) {
-    const profile = catalogFor(harness);
-    for (const [routeKey, route] of Object.entries(profile.routes[harness] ?? {})) {
-      if (route.host || routeKey === 'current-host' || routeKey === 'google') continue;
-      assert.equal(route.write_access, false, `${harness}: ${routeKey} base is not read-only`);
-      assert.ok(route.write_variant, `${harness}: ${routeKey} has no write variant`);
+
+// Replaces the three route-posture tests deleted with the permissions cut.
+// The shipped catalog now carries the PERMISSIVE argv for each vendor, and a
+// restriction is expressed as a separate route with its own name rather than
+// as metadata beside the command. See
+// docs/experimental/permissions-and-isolation.md.
+test('no shipped route declares a removed permissions key', () => {
+  const raw = readFileSync(CATALOG, 'utf8');
+  const doc = parseYaml(raw) as { routes: Record<string, Record<string, Record<string, unknown>>> };
+  for (const [harness, drivers] of Object.entries(doc.routes)) {
+    for (const [name, route] of Object.entries(drivers)) {
+      assert.ok(!('write_access' in route), `${harness}/${name} still declares write_access`);
+      assert.ok(!('write_variant' in route), `${harness}/${name} still declares write_variant`);
     }
   }
 });
 
-test('verified read bases carry the driver-specific physical restriction', () => {
-  for (const harness of HOSTS) {
-    const routes = catalogFor(harness).routes[harness] ?? {};
-    if (!routes.openai?.host) assert.ok(routes.openai?.command?.includes('read-only'), `${harness}: Codex lacks read-only sandbox`);
-    if (!routes.xai?.host) assert.ok(routes.xai?.command?.includes('read-only'), `${harness}: Grok lacks read-only sandbox`);
-    assert.ok(routes.openrouter?.command?.includes('fadeno-readonly'), `${harness}: OpenCode lacks read-only agent`);
-    assert.ok(routes.muse?.command?.includes('--disable-write'), `${harness}: Muse write tool remains enabled`);
-    assert.ok(routes.muse?.command?.includes('--disable-shell'), `${harness}: Muse shell escape remains enabled`);
-  }
+test('the claude harness can escalate its own models — the asymmetry that motivated the cut', () => {
+  // Under `claude`, `anthropic` is a host route, and host routes were refused
+  // a write_variant at parse. That made Claude-as-harness uniquely unable to
+  // deliver write-requiring work on its own command lane while codex and grok
+  // escalated the identical argv fine. With variants gone, the fallback lane
+  // simply carries the permissive flags directly.
+  const raw = readFileSync(CATALOG, 'utf8');
+  const doc = parseYaml(raw) as { routes: Record<string, Record<string, { command?: string[] }>> };
+  const anthropic = doc.routes.claude!.anthropic!;
+  assert.ok(anthropic.command, 'the host route keeps a fallback command lane');
+  assert.ok(
+    anthropic.command!.includes('acceptEdits'),
+    'the claude host fallback lane must be able to write without a variant to escalate through',
+  );
 });

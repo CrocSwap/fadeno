@@ -2,7 +2,7 @@ import { accessSync, constants, existsSync, lstatSync, readdirSync, readFileSync
 import { basename, delimiter, dirname, isAbsolute, join, sep } from 'node:path';
 import { runStatus, type StatusOptions } from './status.ts';
 import { listRetiredClaudeGridCells } from './steering.ts';
-import { detectAmbientHarness } from '../lib/executors.ts';
+import { ARCHETYPE_DISPLAY_ORDER, detectAmbientHarness } from '../lib/executors.ts';
 import { loadLayeredProfile } from '../lib/config-layers.ts';
 import { findRepoRoot, templatesDir } from '../lib/paths.ts';
 import { isFadenoPathIgnored } from '../lib/source-control.ts';
@@ -231,7 +231,11 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
     try {
       const { profile } = loadLayeredProfile(repoRoot, (opts as { userPathOptions?: Parameters<typeof loadLayeredProfile>[1] }).userPathOptions ?? {});
       const referenced = new Set<string>([
-        'worker', 'reviewer', 'judge',
+        // Every archetype Fadeno itself ships. A typo lands in a project or
+        // user layer, never in the built-in catalog, so treating the shipped
+        // names as referenced is what keeps this lint from firing on Fadeno's
+        // own `director` policy.
+        ...ARCHETYPE_DISPLAY_ORDER,
         ...Object.keys(profile.dials ?? {}),
         ...Object.keys(dials.session), ...Object.keys(dials.user), ...Object.keys(dials.repo),
       ]);

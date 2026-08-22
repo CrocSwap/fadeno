@@ -147,15 +147,15 @@ test('bundled CLI dial shows effective table and resolves via dials', (t) => {
     },
     routes: {
       standalone: {
-        openai: { command: ['node', '-e', '0'], write_access: true },
-        xai: { command: ['node', '-e', '0'], write_access: true },
+        openai: { command: ['node', '-e', '0'], },
+        xai: { command: ['node', '-e', '0'], },
         'current-host': { host: true },
       },
     },
     archetypes: {
-      worker: { requires_write: 'required' },
-      reviewer: { requires_write: 'none' },
-      judge: { requires_write: 'none' },
+      worker: { },
+      reviewer: { },
+      judge: { },
     },
   }));
 
@@ -272,7 +272,7 @@ test('dial resolve hook emits stable keys for agent', (t) => {
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
     schema_version: 3,
     models: { sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' } },
-    routes: { standalone: { openai: { command: ['node', '-e', '0'], write_access: true }, 'current-host': { host: true } } },
+    routes: { standalone: { openai: { command: ['node', '-e', '0'], }, 'current-host': { host: true } } },
     archetypes: { worker: {} },
   }));
   // Clear any prior user dial that may have leaked from previous test's global state

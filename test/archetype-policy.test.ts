@@ -5,7 +5,6 @@ import {
   BARE_IDENTIFIER_RE,
   compileDialRef,
   ExecutorProfileError,
-  explainWriteConflict,
   parseExecutorProfile,
   parseSnapshotDocument,
   serializeSnapshot,
@@ -20,57 +19,49 @@ function specForModel(profile: ExecutorProfile, model: string) {
   return compileDialRef({ model }, profile).spec;
 }
 
-// --- parse: postures ---
+// --- parse: the removed write posture ---
 
-test('archetypes: boolean aliases map to required/none', () => {
-  const profile = parseDoc({
-    schema_version: 3,
-    models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
-    archetypes: { worker: { requires_write: true }, reviewer: { requires_write: false } },
-  });
-  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
-  assert.deepEqual(profile.archetypes.reviewer, { requiresWrite: 'none', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
-});
-
-test('archetypes: the three string postures parse', () => {
-  const profile = parseDoc({
-    schema_version: 3,
-    models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
-    archetypes: {
-      worker: { requires_write: 'required' },
-      generator: { requires_write: 'forbidden' },
-      reviewer: { requires_write: 'none' },
-    },
-  });
-  assert.equal(profile.archetypes.worker!.requiresWrite, 'required');
-  assert.equal(profile.archetypes.generator!.requiresWrite, 'forbidden');
-  assert.equal(profile.archetypes.reviewer!.requiresWrite, 'none');
-  assert.equal(profile.archetypes.worker!.fallback, null);
-});
-
-test('archetypes: a bad requires_write value lists the accepted forms', () => {
-  for (const bad of ['yes', 'true', 'Required', 1, null]) {
+// `requires_write` is refused, never ignored. Quietly dropping a key someone
+// wrote in order to RESTRICT something is the failure mode the permissions cut
+// exists to end, and it would be a poor way to land a change whose premise is
+// that unenforced claims are dangerous.
+test('archetypes: requires_write is refused with a pointer, not silently ignored', () => {
+  for (const value of [true, false, 'required', 'forbidden', 'none']) {
     assert.throws(
       () => parseDoc({
         schema_version: 3,
         models: { sol: { provider: 'openai' } },
         routes: { standalone: { openai: { command: ['codex'] } } },
-        archetypes: { worker: { requires_write: bad } },
+        archetypes: { worker: { requires_write: value } },
       }),
       (err: unknown) =>
         err instanceof ExecutorProfileError &&
-        /`archetypes\.worker\.requires_write` must be /.test(err.message) &&
-        /true/.test(err.message) &&
-        /false/.test(err.message) &&
-        /required/.test(err.message) &&
-        /forbidden/.test(err.message) &&
-        /none/.test(err.message),
-      String(bad),
+        /`archetypes\.worker\.requires_write` is no longer supported/.test(err.message) &&
+        /permissions-and-isolation\.md/.test(err.message),
+      `requires_write: ${JSON.stringify(value)} must be refused`,
     );
   }
 });
+
+test('routes: write_access and write_variant are refused with a pointer', () => {
+  for (const route of [{ command: ['codex'], write_access: false }, { command: ['codex'], write_variant: { command: ['codex', '--yolo'] } }]) {
+    assert.throws(
+      () => parseDoc({
+        schema_version: 3,
+        models: { sol: { provider: 'openai' } },
+        routes: { standalone: { openai: route } },
+      }),
+      (err: unknown) =>
+        err instanceof ExecutorProfileError &&
+        /is no longer supported/.test(err.message) &&
+        /permissions-and-isolation\.md/.test(err.message),
+    );
+  }
+});
+
+
+
+
 
 test('archetypes: an empty policy is legal (all-default)', () => {
   const profile = parseDoc({
@@ -79,7 +70,7 @@ test('archetypes: an empty policy is legal (all-default)', () => {
     routes: { standalone: { openai: { command: ['codex'] } } },
     archetypes: { scout: {} },
   });
-  assert.deepEqual(profile.archetypes.scout, { requiresWrite: 'none', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.scout, { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
 });
 
 test('archetypes: unknown keys name the new allowed set', () => {
@@ -88,11 +79,11 @@ test('archetypes: unknown keys name the new allowed set', () => {
       schema_version: 3,
       models: { sol: { provider: 'openai' } },
       routes: { standalone: { openai: { command: ['codex'] } } },
-      archetypes: { worker: { requires_write: true, requires_network: true } },
+      archetypes: { worker: { requires_network: true } },
     }),
     (err: unknown) =>
       err instanceof ExecutorProfileError &&
-      /`archetypes\.worker` has unknown key\(s\) requires_network; only `requires_write`, `ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief` are allowed/
+      /`archetypes\.worker` has unknown key\(s\) requires_network; only `ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief` are allowed/
         .test(err.message),
   );
 });
@@ -105,7 +96,7 @@ test('archetypes: keys and fallback values must be bare identifiers', () => {
       schema_version: 3,
       models: { sol: { provider: 'openai' } },
       routes: { standalone: { openai: { command: ['codex'] } } },
-      archetypes: { Worker: { requires_write: 'none' } },
+      archetypes: { Worker: { } },
     }),
     /archetype name "Worker" is not a bare lowercase identifier/,
   );
@@ -177,55 +168,12 @@ test('archetypes: fallback to an undeclared archetype is allowed', () => {
     routes: { standalone: { openai: { command: ['codex'] } } },
     archetypes: { scout: { fallback: 'reviewer' } },
   });
-  assert.deepEqual(profile.archetypes.scout, { requiresWrite: 'none', ignoredOutput: 'discardable', fallback: 'reviewer', distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.scout, { ignoredOutput: 'discardable', fallback: 'reviewer', distinctProviderFromInputs: null, brief: null });
   assert.equal(profile.archetypes.reviewer, undefined);
 });
 
 // --- explainWriteConflict ---
 
-test('explainWriteConflict: forbidden×write refuses; required×no-write still refuses; none never does', () => {
-  const roProfile = parseDoc({
-    schema_version: 3,
-    models: { ro: { provider: 'anthropic' }, rw: { provider: 'openai' } },
-    routes: {
-      standalone: {
-        anthropic: { command: ['claude', '-p'], write_access: false },
-        openai: { command: ['codex', 'exec', '-'], write_access: true },
-      },
-    },
-    archetypes: {
-      worker: { requires_write: 'required' },
-      generator: { requires_write: 'forbidden', fallback: 'worker' },
-      reviewer: { requires_write: 'none' },
-      scout: { fallback: 'worker' },
-    },
-  });
-
-  const roSpec = specForModel(roProfile, 'ro');
-  const rwSpec = specForModel(roProfile, 'rw');
-
-  const required = explainWriteConflict({ executor: 'ro', spec: roSpec }, 'worker', roProfile);
-  assert.ok(required != null);
-  assert.match(required, /archetype "worker" declares `requires_write: required`, but executor "ro"/);
-  assert.match(required, /`write_access: false`/);
-
-  const forbidden = explainWriteConflict({ executor: 'rw', spec: rwSpec }, 'generator', roProfile);
-  assert.ok(forbidden != null);
-  assert.match(forbidden, /archetype "generator" declares `requires_write: forbidden`, but executor "rw"/);
-  assert.match(forbidden, /`write_access: true`/);
-  assert.match(forbidden, /mutating toolchain/);
-  assert.match(forbidden, /read-only route/);
-  assert.match(forbidden, /fadeno dial clear generator/);
-  assert.match(forbidden, /`requires_write: none`/);
-
-  assert.equal(explainWriteConflict({ executor: 'ro', spec: roSpec }, 'reviewer', roProfile), null);
-  assert.equal(explainWriteConflict({ executor: 'rw', spec: rwSpec }, 'reviewer', roProfile), null);
-  assert.equal(explainWriteConflict({ executor: 'ro', spec: roSpec }, 'generator', roProfile), null);
-  assert.equal(explainWriteConflict({ executor: 'rw', spec: rwSpec }, 'worker', roProfile), null);
-  assert.equal(explainWriteConflict({ executor: 'ro', spec: roSpec }, 'scout', roProfile), null);
-  assert.equal(explainWriteConflict({ executor: 'ro', spec: roSpec }, 'judge', roProfile), null);
-  assert.equal(explainWriteConflict({ executor: 'ro', spec: roSpec }, null, roProfile), null);
-});
 
 // --- serialize snapshot ---
 
@@ -235,26 +183,25 @@ test('serializeSnapshot: canonical strings, omits none, emits fallback, round-tr
     models: { sol: { provider: 'openai' } },
     routes: { standalone: { openai: { command: ['codex'] } } },
     archetypes: {
-      worker: { requires_write: true },
-      reviewer: { requires_write: false },
-      generator: { requires_write: 'forbidden', fallback: 'worker' },
+      worker: { },
+      reviewer: { },
+      generator: { fallback: 'worker' },
       scout: { fallback: 'reviewer' },
       extra: {},
     },
   });
   assert.deepEqual(profile.archetypes, {
-    worker: { requiresWrite: 'required', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null },
-    reviewer: { requiresWrite: 'none', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null },
-    generator: { requiresWrite: 'forbidden', ignoredOutput: 'discardable', fallback: 'worker', distinctProviderFromInputs: null, brief: null },
-    scout: { requiresWrite: 'none', ignoredOutput: 'discardable', fallback: 'reviewer', distinctProviderFromInputs: null, brief: null },
-    extra: { requiresWrite: 'none', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null },
+    worker: { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null },
+    reviewer: { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null },
+    generator: { ignoredOutput: 'discardable', fallback: 'worker', distinctProviderFromInputs: null, brief: null },
+    scout: { ignoredOutput: 'discardable', fallback: 'reviewer', distinctProviderFromInputs: null, brief: null },
+    extra: { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null },
   });
 
   const text = serializeSnapshot(profile);
-  assert.match(text, /requires_write: required/);
-  assert.match(text, /requires_write: forbidden/);
-  assert.doesNotMatch(text, /requires_write: none/);
-  assert.doesNotMatch(text, /requires_write: (true|false)/);
+  // A snapshot can no longer carry a write posture at all — the key is gone
+  // from the policy it serializes, so nothing can round-trip one back in.
+  assert.doesNotMatch(text, /requires_write/);
   assert.match(text, /fallback: worker/);
   assert.match(text, /fallback: reviewer/);
   assert.match(text, /extra: \{\}/);

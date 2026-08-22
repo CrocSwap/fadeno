@@ -18,14 +18,11 @@ import {
   ExecutorProfileError,
   activeHarness,
   formatDialRef,
-  forcesWritePosture,
   parseDialRef,
   parseSnapshotDocument,
   eligibilityFor,
   explainEligibilityConflict,
   explainProviderConflict,
-  applyWritePosture,
-  explainWriteConflict,
   loadExecutorProfile,
   readLocalDialState,
   resolveDialCascade,
@@ -44,7 +41,6 @@ import {
   type InputProducer,
   type RoleResolutionSource,
   type SnapshotDocument,
-  type WritePosture,
   atCwd,
   withoutHarnessIdentity,
 } from '../lib/executors.ts';
@@ -507,7 +503,7 @@ function ensureProfileSnapshot(
 function resolveChain(
   ctx: EngineCtx,
   role: string | null,
-): { executor: string; spec: ExecutorSpec; source: RoleResolutionSource; resolvedVia: string | null; ref: DialRef; usedWriteVariant: boolean; writePostureForced: boolean } {
+): { executor: string; spec: ExecutorSpec; source: RoleResolutionSource; resolvedVia: string | null; ref: DialRef } {
   const archetype = role == null ? null : roleArchetype(ctx.playbook, role);
   const cascade = resolveDialCascade(role ?? '*', archetype, { bindings: ctx.profile.bindings, archetypes: ctx.profile.archetypes }, ctx.dialLayers);
   const refString = formatDialRef(cascade.ref);
@@ -519,8 +515,6 @@ function resolveChain(
   if (spec.adapter === 'host' && (spec as any).agentType === '*' && archetype != null) {
     spec = { ...spec, agentType: archetype } as ExecutorSpec;
   }
-  const postured = applyWritePosture(spec, archetype, ctx.profile.archetypes);
-  spec = postured.spec;
   const source = role == null && cascade.source === 'binding' ? 'base' as RoleResolutionSource : cascade.source;
   return {
     executor: refString,
@@ -528,8 +522,6 @@ function resolveChain(
     source,
     resolvedVia: cascade.resolvedVia,
     ref: cascade.ref,
-    usedWriteVariant: postured.usedWriteVariant,
-    writePostureForced: forcesWritePosture(cascade.ref, cascade.resolvedVia),
   };
 }
 
@@ -559,7 +551,7 @@ function recordOverrides(ctx: EngineCtx, binds: Map<string, string>): void {
   }
 }
 
-function effectiveBinding(ctx: EngineCtx, role: string | null): { executor: string; spec: ExecutorSpec; usedWriteVariant: boolean; writePostureForced: boolean } {
+function effectiveBinding(ctx: EngineCtx, role: string | null): { executor: string; spec: ExecutorSpec } {
   const key = role ?? '*';
   const overridden = ctx.overrides.get(key);
   if (overridden != null) {
@@ -568,12 +560,11 @@ function effectiveBinding(ctx: EngineCtx, role: string | null): { executor: stri
     const archetype = key !== '*' ? roleArchetype(ctx.playbook, key) : null;
     let spec: ExecutorSpec = spec0;
     if (spec.adapter === 'host' && (spec as any).agentType === '*' && archetype != null) spec = { ...spec, agentType: archetype } as ExecutorSpec;
-    const postured = applyWritePosture(spec, archetype, ctx.profile.archetypes);
-    return { executor: overridden, spec: postured.spec, usedWriteVariant: postured.usedWriteVariant, writePostureForced: false };
+    return { executor: overridden, spec };
   }
   try {
-    const { executor, spec, usedWriteVariant, writePostureForced } = resolveChain(ctx, role);
-    return { executor, spec, usedWriteVariant, writePostureForced };
+    const { executor, spec } = resolveChain(ctx, role);
+    return { executor, spec };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new DriveError(err.message);
     throw err;
@@ -624,7 +615,7 @@ function recordResolutionSnapshot(ctx: EngineCtx): void {
       continue;
     }
     try {
-      const { executor, spec, source, resolvedVia, usedWriteVariant, writePostureForced } = resolveChain(ctx, role);
+      const { executor, spec, source, resolvedVia } = resolveChain(ctx, role);
       const label = roleResolutionEchoLabel(source);
       const model = (spec as any).model ?? (spec.adapter === 'host' ? (spec as any).model : null);
       const effort = (spec as any).reasoningEffort ?? 'default';
@@ -642,13 +633,10 @@ function recordResolutionSnapshot(ctx: EngineCtx): void {
         delivery,
         source,
         resolved_via: resolvedVia,
-        ...(usedWriteVariant ? { write_variant: true } : {}),
-        ...(writePostureForced ? { write_posture_forced: true } : {}),
       });
       const modelStr = model != null ? ` (${model})` : '';
       ctx.act(
-        `${role} → ${executor}${modelStr} [${label}]${usedWriteVariant ? ' [write variant]' : ''}` +
-        `${writePostureForced ? ' [FORCED write posture]' : ''}`,
+        `${role} → ${executor}${modelStr} [${label}]`,
       );
     } catch (err) {
       if (!(err instanceof ExecutorProfileError)) throw err;
@@ -712,13 +700,6 @@ type DispatchFailure =
   | { kind: 'constraint_refused'; detail: string }
   | { kind: 'invalid_output'; detail: string; errors: string[] };
 
-function declaredWritePosture(
-  profile: SnapshotDocument,
-  archetype: string | null,
-): WritePosture | null {
-  if (archetype == null || !Object.hasOwn(profile.archetypes, archetype)) return null;
-  return profile.archetypes[archetype]!.requiresWrite;
-}
 
 function playbookFlow(playbook: Playbook): PlaybookStep[] {
   return Array.isArray(playbook.flow) ? (playbook.flow as PlaybookStep[]) : [];
@@ -888,7 +869,6 @@ interface PendingAttempt {
   sessionId: string | null;
   executor: string;
   spec: import('../lib/executors.ts').ExecutorSpec;
-  usedWriteVariant: boolean;
   leaseHolder: LeaseHolder | null;
   claimRel: string;
   claimAbs: string;
@@ -949,7 +929,7 @@ function beginCommandAttempt(
     throw err;
   }
 
-  const { executor, spec, usedWriteVariant } = effectiveBinding(ctx, role);
+  const { executor, spec } = effectiveBinding(ctx, role);
   if (spec.adapter !== 'command') {
     throw new DriveError(`host executor "${executor}" must be handled by the host dispatch protocol.`);
   }
@@ -1059,8 +1039,6 @@ function beginCommandAttempt(
     }
   }
   dispatched.supervisor_claim = claimRel;
-  if (spec.writeAccess != null) dispatched.write_access = spec.writeAccess;
-  if (usedWriteVariant) dispatched.write_variant = true;
   if (session != null) dispatched.session = session;
   if (sessionId != null) dispatched.session_id = sessionId;
   dispatched.engine_pid = process.pid;
@@ -1070,7 +1048,7 @@ function beginCommandAttempt(
     dispatched.repair_appendix = session === 'resumed' ? repairCore : `\n\n---\n${repairCore}`;
   }
   const workspaceMode = 'shared' as const;
-  const needsLease = spec.writeAccess !== false;
+  const needsLease = true;
   const leaseHolder: LeaseHolder | null = needsLease
     ? {
         id: `engine:${ctx.runId}:${ids.actorCallId}:a${attempt}`,
@@ -1242,7 +1220,6 @@ function beginCommandAttempt(
     sessionId,
     executor,
     spec,
-    usedWriteVariant,
     leaseHolder,
     claimRel,
     claimAbs,
@@ -1615,13 +1592,6 @@ function evaluateMemberPreflight(
   binding: ReturnType<typeof effectiveBinding>,
 ): { ok: true; providerWarned: boolean; shadowOnly: boolean } | { ok: false; outcome: DispatchOutcome; reason: string; error: string; archetype: string | null; executor: string } {
   const archetype = role == null ? null : roleArchetype(ctx.playbook, role);
-  const writeConflict = explainWriteConflict({ executor: binding.executor, spec: binding.spec }, archetype, ctx.profile as unknown as import('../lib/executors.ts').ExecutorProfile);
-  if (writeConflict != null && !binding.writePostureForced) {
-    return { ok: false, outcome: { kind: 'write_conflict', detail: `${stepId}${role ? ` (${role})` : ''} was not dispatched: ${writeConflict}` }, reason: 'write_access_denied', error: writeConflict, archetype, executor: binding.executor };
-  }
-  if (writeConflict != null && binding.writePostureForced) {
-    ctx.act(`WARNING: FORCED WRITE-POSTURE MISMATCH — ${stepId}${role ? ` (${role})` : ''} is proceeding because its dial was set with --force. ${writeConflict}`);
-  }
   const delivery = { executor: binding.executor, spec: binding.spec };
   const eligibilityConflict = explainEligibilityConflict(delivery, archetype);
   if (eligibilityConflict != null) {
@@ -1641,7 +1611,7 @@ function evaluateMemberPreflight(
   const toRefStr = (m: Record<string, import('../lib/executors.ts').DialRef>) => { const o: Record<string, string> = {}; for (const [k, v] of Object.entries(m)) o[k] = formatDialRef(v); return o; };
   const modelId = (binding.spec as any).model ?? null;
   const constraintContext: ConstraintContext = {
-    archetype, role, executor: binding.executor, driver: (binding.spec as any).driver ?? null, provider: (binding.spec as any).provider ?? null, model: (binding.spec as any).model ?? null, model_id: modelId, transport: 'command', write_access: binding.spec.writeAccess, write_variant: binding.usedWriteVariant, write_posture: declaredWritePosture(ctx.profile, archetype), dial: dialRef, dial_source: dialSource, dials: { session: toRefStr(ctx.dialLayers.session), repo: toRefStr(ctx.dialLayers.repo), user: toRefStr(ctx.dialLayers.user) }, resolved_via: chainInfo?.resolvedVia ?? null, input_provenance: producers.map((producer) => ({ dispatch_id: producer.dispatchId, executor: producer.executor, provider: producer.provider })), harness: ctx.harness,
+    archetype, role, executor: binding.executor, driver: (binding.spec as any).driver ?? null, provider: (binding.spec as any).provider ?? null, model: (binding.spec as any).model ?? null, model_id: modelId, transport: 'command', command: binding.spec.adapter === 'command' ? binding.spec.command : null, dial: dialRef, dial_source: dialSource, dials: { session: toRefStr(ctx.dialLayers.session), repo: toRefStr(ctx.dialLayers.repo), user: toRefStr(ctx.dialLayers.user) }, resolved_via: chainInfo?.resolvedVia ?? null, input_provenance: producers.map((producer) => ({ dispatch_id: producer.dispatchId, executor: producer.executor, provider: producer.provider })), harness: ctx.harness,
   };
   let constraintVerdict;
   try { constraintVerdict = evaluateConstraint(ctx.profile, constraintContext, { cwd: ctx.repoRoot }); } catch (err) { if (err instanceof ConstraintError) throw new DriveError(`constraint system error: ${(err as Error).message}`); throw err; }
@@ -1681,7 +1651,7 @@ function runCommandWave(
         // A prior preflight refusal stops further admission; inflight siblings run to receipt.
         // Binding failures propagate as DriveError to preserve the true resolution error (matching serial path).
         const binding = effectiveBinding(ctx, head.role);
-        const needsLease = binding.spec.writeAccess !== false;
+        const needsLease = true;
         if (needsLease && inflight.some((p) => p.leaseHolder != null)) {
           break;
         }
@@ -2100,12 +2070,32 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
     return null;
   }
 
-  // Parallel path (parallel >1): admit members in canonical order, executing
-  // read-only command members concurrently up to --parallel, serializing shared
-  // writers, and interleaving durable host requests in the same canonical order.
-  // A preflight refusal stops further admission; inflight command siblings run
-  // to receipt. Host requests that appear after a refused command are never
-  // created, preserving the serial durability invariant.
+  // Parallel path (parallel >1): admit members in canonical order, interleaving
+  // durable host requests in the same canonical order. A preflight refusal
+  // stops further admission; inflight command siblings run to receipt. Host
+  // requests that appear after a refused command are never created, preserving
+  // the serial durability invariant.
+  //
+  // COMMAND MEMBERS CURRENTLY SERIALIZE, whatever `--parallel` says. They used
+  // to overlap when their route declared `write_access: false`, which let them
+  // skip the repo-wide writer lease — and that declaration is exactly what the
+  // permissions cut removed. Nothing can claim to be a non-writer now, so
+  // every shared delivery takes the lease and waits its turn.
+  //
+  // This is not a bug to route around: the speedup and the write posture were
+  // one mechanism, and trading the posture away spends the speedup with it.
+  // The fix is isolation with merge-back for engine attempts, which restores
+  // concurrency as a FACT (separate worktrees) rather than as a promise nobody
+  // verified — and which is safest in precisely the case that used to
+  // parallelize, since a member that writes nothing merges back empty. Until
+  // that lands, say so out loud rather than quietly running serially at a
+  // caller's request for concurrency.
+  // See docs/experimental/permissions-and-isolation.md.
+  ctx.act(
+    `NOTE: --parallel ${ctx.parallel} currently serializes command members. Shared deliveries take the ` +
+      'repo-wide writer lease, and since the permissions cut nothing can declare itself a non-writer. ' +
+      'Host requests still interleave. Isolation with merge-back is what restores real concurrency.',
+  );
   type PendingQueueEntry = { role: string | null; outputRel: string; ids: { stepExecutionId: string; actorCallId: string }; kind: 'host_pending'; pending: HostDispatchRequest } | { role: string | null; outputRel: string; ids: { stepExecutionId: string; actorCallId: string }; kind: 'host'; } | { role: string | null; outputRel: string; artifactType: string | null; ids: { stepExecutionId: string; actorCallId: string }; kind: 'command'; };
   const queue: PendingQueueEntry[] = [];
   const hostRequests: HostDispatchRequest[] = [];
@@ -2231,7 +2221,7 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
         }
         // Command head
         const binding = effectiveBinding(ctx, head.role);
-        const needsLease = binding.spec.writeAccess !== false;
+        const needsLease = true;
         if (needsLease && inflight.some((p) => p.leaseHolder != null)) break;
         if (needsLease) {
           const effectiveLease = (() => { try { return readEffectiveLease(ctx.repoRoot); } catch { return null; } })();

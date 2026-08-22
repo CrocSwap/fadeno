@@ -119,7 +119,7 @@ test('dispatch_completed outcome timeout carries timeout_ms and deadline_at', (t
   runInit({ target: 'codex', repoRoot: root });
   // route with short deadline, executor sleeps longer than deadline
   const sleepCmd = ['node', '-e', 'setTimeout(()=>{}, 10000)'];
-  const sleepyRoute = { command: sleepCmd, timeout_ms: 800, write_access: true };
+  const sleepyRoute = { command: sleepCmd, timeout_ms: 800, };
   const v3 = {
     schema_version: 3,
     models: { sleepy: { provider: 'sleep_p', id: 'sleepy', effort: 'high' } },
@@ -171,7 +171,7 @@ test('dispatch --timeout 0 disables route deadline', (t) => {
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
   // same sleepy route but override with 0
-  const fastRoute = { command: ['node', '-e', "process.stdout.write('ok')"], timeout_ms: 100, write_access: true };
+  const fastRoute = { command: ['node', '-e', "process.stdout.write('ok')"], timeout_ms: 100, };
   const v3 = {
     schema_version: 3,
     models: { fast: { provider: 'fast_p', id: 'fast', effort: 'high' } },
@@ -202,7 +202,7 @@ test('dispatch --timeout 0 disables route deadline', (t) => {
 test('dispatch --timeout positive overrides route deadline', (t) => {
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
-  const fastRoute = { command: ['node', '-e', "process.stdout.write('override')"], write_access: true };
+  const fastRoute = { command: ['node', '-e', "process.stdout.write('override')"], };
   const v3 = {
     schema_version: 3,
     models: { fast: { provider: 'fast_p', id: 'fast', effort: 'high' } },
@@ -226,7 +226,7 @@ test('dispatch --timeout positive overrides route deadline', (t) => {
   });
   assert.equal(result.outcome, 'ok');
   // Now test override that triggers timeout: fast_route sleeps, CLI timeout short
-  const sleepyRoute = { command: ['node', '-e', 'setTimeout(()=>{}, 10000)'], timeout_ms: 60000, write_access: true };
+  const sleepyRoute = { command: ['node', '-e', 'setTimeout(()=>{}, 10000)'], timeout_ms: 60000, };
   const v3sleep = {
     schema_version: 3,
     models: { sleepy: { provider: 'sleep_p', id: 'sleepy', effort: 'high' } },
@@ -274,7 +274,7 @@ flow:
   writeFileSync(join(root, '.fadeno', 'playbooks', 'timeout-engine.yaml'), playbook);
   // sleep executor with short timeout via route, then drive with no CLI override
   const sleepCmd = ['node', '-e', 'setTimeout(()=>{}, 10000)'];
-  const slowRoute = { command: sleepCmd, timeout_ms: 700, write_access: true };
+  const slowRoute = { command: sleepCmd, timeout_ms: 700, };
   const v3 = {
     schema_version: 3,
     models: { slow: { provider: 'slow_p', id: 'slow', effort: 'high' } },
@@ -328,8 +328,8 @@ test('shadow route default produces an independently classified timeout receipt'
     },
     routes: {
       standalone: {
-        fast: { command: ['node', '-e', "process.stdout.write('primary')"], write_access: true, timeout_ms: 5000 },
-        slow: { command: ['node', '-e', 'setTimeout(()=>{}, 10000)'], write_access: true, timeout_ms: 500 },
+        fast: { command: ['node', '-e', "process.stdout.write('primary')"], timeout_ms: 5000 },
+        slow: { command: ['node', '-e', 'setTimeout(()=>{}, 10000)'], timeout_ms: 500 },
       },
     },
     archetypes: { worker: {} },

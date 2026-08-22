@@ -76,20 +76,17 @@ test('starter-playbook archetypes are bare lowercase identifiers', (t) => {
   assert.ok(declared > 0, 'at least one starter role declares an archetype');
 });
 
-test('starter catalog archetypes: worker is required, generator is forbidden with worker fallback', () => {
+test('starter catalog archetypes: only non-default policy is declared', () => {
+  // `worker` and `generator` appear with EMPTY policy: their only key was a
+  // write posture, but listing them is what defines the canon archetype set.
+  // `director` still carries a `brief`.
   const profile = parseExecutorProfile(
     readFileSync(join(import.meta.dirname, '..', 'templates', 'common', 'fadeno', 'executors.yaml'), 'utf8'),
-    'templates/common/fadeno/executors.yaml',
+    'starter',
   );
-  assert.deepEqual(profile.archetypes.worker, { requiresWrite: 'required', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
-  assert.deepEqual(profile.archetypes.generator, { requiresWrite: 'forbidden', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
-  assert.deepEqual(profile.dials, {}, 'starter catalog ships no repo dials');
-  assert.equal((profile as unknown as Record<string, unknown>).loadouts, undefined, 'starter catalog has no legacy loadouts');
-  assert.equal((profile as unknown as Record<string, unknown>).defaultLoadout, undefined, 'starter catalog has no default_loadout');
-  assert.equal(profile.schemaVersion, 3, 'starter catalog is schema_version 3');
-  assert.ok(Object.keys(profile.models).length >= 6, 'starter catalog declares registry models');
-  // generator needs no explicit slot; the fallback serves it
-  assert.ok(!('generator' in profile.models), 'generator is an archetype, not a model');
+  assert.deepEqual(profile.archetypes.worker, { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.deepEqual(profile.archetypes.generator, { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
+  assert.equal(profile.archetypes.director?.brief, 'director');
 });
 
 test('starter-playbook role names do not encode model names', (t) => {

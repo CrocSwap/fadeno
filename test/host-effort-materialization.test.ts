@@ -35,11 +35,11 @@ function seed(t: TestContext, harness: 'claude' | 'codex'): { root: string; env:
     routes: {
       claude: {
         'current-host': { host: true },
-        anthropic: { driver: 'claude', host: true, command: ['claude', '-p', '--model', '{model}'], write_access: true },
+        anthropic: { driver: 'claude', host: true, command: ['claude', '-p', '--model', '{model}'], },
       },
       codex: {
         'current-host': { host: true },
-        openai: { driver: 'codex', host: true, command: ['codex', 'exec'], write_access: true },
+        openai: { driver: 'codex', host: true, command: ['codex', 'exec'], },
       },
     },
     archetypes: {},
@@ -100,35 +100,3 @@ test('the dial note tells each harness the truth about its own pin', (t) => {
   assert.match(claudeNote, /`fadeno steering apply` writes nothing here/);
 });
 
-test('a pin that strands a write-required archetype says so at SET time', (t) => {
-  const root = tempRepo(t);
-  mkdirSync(join(root, '.fadeno'), { recursive: true });
-  // The shipped shape: the host route's command lane cannot write, and being
-  // a host route it may not declare a `write_variant` to fix that.
-  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
-    models: { sonnet: { provider: 'anthropic', id: 'sonnet', effort: 'xhigh' } },
-    routes: {
-      claude: {
-        'current-host': { host: true },
-        anthropic: { driver: 'claude', host: true, command: ['claude', '-p', '--model', '{model}'], write_access: false },
-      },
-    },
-    archetypes: { worker: { requires_write: 'required' } },
-    dials: {},
-  }));
-  const env = {
-    ...process.env,
-    FADENO_CONFIG_HOME: join(root, 'user-config'),
-    FADENO_STATE_HOME: join(root, 'user-state'),
-    FADENO_HARNESS: 'claude',
-    HOME: join(root, 'home'),
-  };
-  const out = execFileSync(
-    process.execPath, [CLI, 'dial', 'worker', 'sonnet@medium', '--session'],
-    { cwd: root, env, encoding: 'utf8' },
-  );
-  // Set time, not dispatch time: the dial is what created the dead end.
-  assert.match(out, /WARNING: that command lane cannot deliver worker/);
-  assert.match(out, /requires_write: required/);
-});

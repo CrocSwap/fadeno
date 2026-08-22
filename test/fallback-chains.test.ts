@@ -87,7 +87,7 @@ function seedDispatchProfile(t: TestContext, extra: Record<string, unknown> = {}
     },
     routes: {
       standalone: {
-        dummy: { command: STDIN_ECHO('W:'), write_access: true },
+        dummy: { command: STDIN_ECHO('W:'), },
         'current-host': { host: true },
       },
     },
@@ -194,7 +194,7 @@ test('verify: a chain-resolved run passes, and a tampered resolved_via fails', (
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
   writeFileSync(join(root, '.fadeno', 'playbooks', 'chain-e2e.yaml'), PLAYBOOK);
-  const dummyRoute = { dummy: { command: NOTES_CMD, write_access: true }, 'current-host': { host: true } };
+  const dummyRoute = { dummy: { command: NOTES_CMD, }, 'current-host': { host: true } };
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
     schema_version: 3,
     models: {
@@ -246,65 +246,4 @@ test('verify: a chain-resolved run passes, and a tampered resolved_via fails', (
   );
 });
 
-test('steering: native delivery of a forbidden-posture archetype surfaces the chain and advisory', (t) => {
-  const root = tempRepo(t);
-  mkdirSync(join(root, '.fadeno'), { recursive: true });
-  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
-    models: {
-      'host-worker': { provider: 'dummy', id: 'opus', effort: 'high' },
-    },
-    routes: {
-      standalone: { dummy: { host: true }, 'current-host': { host: true } },
-      codex: { dummy: { host: true }, 'current-host': { host: true } },
-      claude: { dummy: { host: true }, 'current-host': { host: true } },
-      grok: { dummy: { host: true }, 'current-host': { host: true } },
-    },
-    archetypes: { generator: { requires_write: 'forbidden', fallback: 'worker' }, worker: {} },
-    dials: { worker: 'host-worker' },
-  }));
 
-  const result = runSteeringResolve({
-    repoRoot: root, archetype: 'generator', hostExecutor: 'host-worker', env: null,
-  });
-  assert.equal(result.mode, 'host');
-  assert.equal(result.executor, 'host-worker');
-  assert.equal(result.resolved_via, 'worker');
-  assert.equal(result.surface_archetype, 'worker');
-  assert.equal(
-    result.advisory,
-    'This work is write-forbidden (requires_write: forbidden): produce artifacts in your reply only — do not edit, create, or commit workspace files.',
-  );
-});
-
-test('steering: forbidden × write_access:true refuses on the command route', (t) => {
-  const root = tempRepo(t);
-  mkdirSync(join(root, '.fadeno'), { recursive: true });
-  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
-    models: {
-      'rw-cmd': { provider: 'dummy', id: 'rw-cmd', effort: 'high' },
-    },
-    routes: {
-      standalone: { dummy: { command: ['node', '-e', '0'], write_access: true }, 'current-host': { host: true } },
-      codex: { dummy: { command: ['node', '-e', '0'], write_access: true }, 'current-host': { host: true } },
-      claude: { dummy: { command: ['node', '-e', '0'], write_access: true }, 'current-host': { host: true } },
-      grok: { dummy: { command: ['node', '-e', '0'], write_access: true }, 'current-host': { host: true } },
-    },
-    archetypes: { generator: { requires_write: 'forbidden', fallback: 'worker' }, worker: {} },
-    dials: { worker: 'rw-cmd' },
-  }));
-
-  const result = runSteeringResolve({ repoRoot: root, archetype: 'generator', env: null });
-  assert.equal(result.mode, 'write_conflict');
-  assert.ok(result.writeConflict);
-  assert.match(
-    result.writeConflict!,
-    /archetype "generator" declares `requires_write: forbidden`, but executor "rw-cmd"/,
-  );
-  assert.match(result.writeConflict!, /`write_access: true`/);
-  assert.equal(result.detail, result.writeConflict);
-  assert.equal(result.resolved_via, 'worker');
-  assert.equal(result.advisory, undefined);
-  assert.equal(result.surface_archetype, undefined);
-});

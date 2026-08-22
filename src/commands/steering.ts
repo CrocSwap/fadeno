@@ -5,14 +5,11 @@ import {
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
   compileDialRef,
-  applyWritePosture,
   commandRoutable,
   explainPairRoutability,
   pairRoutabilityFields,
-  explainWriteConflict,
   eligibilityFor,
   formatDialRef,
-  forcesWritePosture,
   knownArchetypes,
   loadExecutorProfile,
   parseDialRef,
@@ -76,8 +73,6 @@ export function isReferenceFrameNeutralHostRequest(
   );
 }
 
-const FORBIDDEN_HOST_ADVISORY =
-  'This work is write-forbidden (requires_write: forbidden): produce artifacts in your reply only — do not edit, create, or commit workspace files.';
 
 /**
  * `write_conflict` is a command slot the resolver refuses to present as
@@ -260,12 +255,6 @@ function decorateSteering(
       result.surface_archetype = surface;
     }
   }
-  if (
-    Object.hasOwn(profile.archetypes, result.archetype) &&
-    profile.archetypes[result.archetype]!.requiresWrite === 'forbidden'
-  ) {
-    result.advisory = FORBIDDEN_HOST_ADVISORY;
-  }
   return result;
 }
 
@@ -423,16 +412,6 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
   if (eligibilityFor(executor, archetype) === 'forbidden') {
     throw new SteeringError(
       `host dispatch "${dispatchId}" cannot specialize to archetype "${archetype}": executor "${request.executor}" declares it eligibility: forbidden.`,
-    );
-  }
-  const writeConflict = explainWriteConflict(
-    { executor: request.executor, spec: executor },
-    archetype,
-    profile as unknown as ExecutorProfile,
-  );
-  if (writeConflict != null) {
-    throw new SteeringError(
-      `host dispatch "${dispatchId}" cannot specialize to archetype "${archetype}" because its snapshotted write posture is incompatible: ${writeConflict}`,
     );
   }
   const matchesHost = hostExecutor === request.executor;
@@ -641,7 +620,6 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
   // Bind neutral host agentType
   if (spec.adapter === 'host' && (spec as any).agentType === '*' && archetype != null) spec = { ...spec, agentType: archetype } as ExecutorSpec;
   // Write-posture delivery selection, same rule as dispatch/drive.
-  spec = applyWritePosture(spec, archetype, profile.archetypes).spec;
 
   // The pair decision — computed identically to `runDialResolve`'s `shadow`
   // field (same attachment lookup, same challenger string, same roll) so a
@@ -667,11 +645,8 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
       // be told, and must not read the silence as a "no".
       selected: rate == null ? true : digest ? shadowSampleRoll(digest, archetype, challenger) < rate : null,
       // The PRIMARY's own resolved spec, after write-posture — what a
-      // selected pair would have to reuse to reach the command lane. Must
-      // also satisfy the archetype's write posture on that lane, not just
-      // have one: `commandRoutable` alone says a lane exists, not that
-      // forcing both arms onto it would actually work.
-      ...pairRoutabilityFields(explainPairRoutability(spec, refString, archetype, profile)),
+      // selected pair would have to reuse to reach the command lane.
+      ...pairRoutabilityFields(explainPairRoutability(spec, refString)),
     };
   }
 
@@ -715,24 +690,9 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
   ): SteeringResolution =>
     decorateSteering({ ...lane, ...(shadow != null ? { shadow } : {}), ...base } as any, profile, cascade.resolvedVia);
 
-  const refusal = (spec: ExecutorSpec, executorName: string): SteeringResolution | null => {
-    const conflict = forcesWritePosture(cascade.ref, cascade.resolvedVia)
-      ? null
-      : explainWriteConflict({ executor: executorName, spec }, archetype, profile);
-    if (conflict == null) return null;
-    return finish({
-      mode: 'write_conflict', archetype, role,
-      executor: executorName, adapter: spec.adapter, model: (spec as any).model ?? compiled?.model ?? null,
-      effort: compiled?.effectiveEffort ?? (spec.adapter === 'host' ? (spec as any).reasoningEffort : null),
-      driver: (spec as any).driver ?? compiled?.driver ?? null,
-      source: cascade.source, dial: cascade.ref, hostExecutor,
-      detail: conflict + detailNote,
-      writeConflict: conflict,
-    } as any);
-  };
 
   if (spec.adapter === 'command') {
-    return refusal(spec, refString) ?? finish({
+    return finish({
       mode: 'command', archetype, role,
       executor: refString, adapter: 'command', model: (spec as any).model ?? compiled?.model ?? null,
       effort: compiled?.effectiveEffort ?? null, driver: (spec as any).driver ?? compiled?.driver ?? null,
@@ -776,7 +736,7 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     } as any);
   }
   if (lane.lane === 'command') {
-    return refusal(spec, refString) ?? finish({
+    return finish({
       mode: 'command', archetype, role,
       executor: refString, adapter: 'host', model: (spec as any).model,
       effort: (spec as any).reasoningEffort ?? compiled?.effectiveEffort ?? null,
@@ -1162,8 +1122,7 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
     // bind neutral host agentType
     if (spec.adapter === 'host' && (spec as any).agentType === '*' ) spec = { ...spec, agentType: archetype } as ExecutorSpec;
     // Write-posture delivery selection, same rule as dispatch/drive.
-    spec = applyWritePosture(spec, archetype, profile.archetypes).spec;
-    const filename = scope === 'user' ? `fadeno-${archetype}.toml` : `${archetype}.toml`;
+      const filename = scope === 'user' ? `fadeno-${archetype}.toml` : `${archetype}.toml`;
     const path = join(agentDir, filename);
     let body: string;
     if (spec.adapter === 'host') {
@@ -1179,19 +1138,6 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
       };
       body = renderCodexHostAgent(archetype, executorName, spec, cliPath);
     } else {
-      // Materializing a broker for a slot whose command cannot write would
-      // hand this archetype's work to a delivery that must refuse it. Skip the
-      // slot — no agent file, no half-truth — and let the rest materialize.
-      const conflict = forcesWritePosture(cascade.ref, cascade.resolvedVia)
-        ? null
-        : explainWriteConflict({ executor: executorName, spec }, archetype, profile);
-      if (conflict != null) {
-        materialization[archetype] = {
-          kind: 'write-conflict', adapter: 'command', executor: executorName, model: spec.model,
-          writeConflict: conflict,
-        };
-        continue;
-      }
       materialization[archetype] = {
         kind: 'command-broker', adapter: 'command', executor: executorName, model: spec.model,
       };
@@ -1415,8 +1361,7 @@ export function runSteeringApplyClaude(opts: SteeringApplyOptions): SteeringAppl
       throw new SteeringError(`archetype "${archetype}" resolved to "${executorName}" but no executor exists in profile`);
     }
     if (spec.adapter === 'host' && (spec as { agentType?: string }).agentType === '*') spec = { ...spec, agentType: archetype } as ExecutorSpec;
-    spec = applyWritePosture(spec, archetype, profile.archetypes).spec;
-    // Every slot reaches the same conclusion now — report the delivery, keep
+      // Every slot reaches the same conclusion now — report the delivery, keep
     // no file — so the three branches differ only in what they report.
     if (spec.adapter !== 'host') {
       materialization[archetype] = {

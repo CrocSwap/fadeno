@@ -233,45 +233,18 @@ const CLAIMS: Claim[] = [
     src: { files: ['src/cli.ts'], patterns: [/fadeno models/] },
   },
   {
-    id: 'write-variant',
-    doc: { files: [DIALS], patterns: [/write_variant/, /applyWritePosture/] },
-    src: { files: ['src/lib/executors.ts'], patterns: [/write_variant/, /applyWritePosture/] },
-  },
-  {
-    // Two independent `commandRoutable(spec)` literals at dial/steering
-    // resolve is how `shadow.routable` promised pairs the kernel then
-    // refused. One helper, named in the design record and at every caller.
-    id: 'pair-routability-write-posture',
-    doc: { files: [SLOTS], patterns: [/explainPairRoutability/, /shadow_write_posture/] },
-    src: {
-      files: ['src/lib/executors.ts', 'src/commands/dispatch.ts', 'src/commands/dial.ts', 'src/commands/steering.ts'],
-      patterns: [/explainPairRoutability/, /shadow_write_posture/],
+    // The permissions cut is the largest deliberate REMOVAL this project has
+    // made, and a removal drifts the same way a feature does — by creeping
+    // back one helper at a time. The doc states the rule; these literals are
+    // what keep the source honest about having followed it.
+    id: 'permissions-cut',
+    doc: {
+      files: ['docs/experimental/permissions-and-isolation.md'],
+      patterns: [/no longer supported/, /capability_skew|argv-diff/, /isolation/i],
     },
-  },
-  {
-    // `null` write_access satisfied every posture, silently. Not refused —
-    // that would break every catalog omitting the key — so the guarantee is
-    // that it is SAID, at dial, at attach, and as a bakeoff confound. The
-    // literals are what keep the three in step.
-    id: 'write-posture-unverified',
-    doc: { files: [EXTENDING], patterns: [/write_posture_unverified/, /explainUnverifiedWritePosture/] },
     src: {
-      files: ['src/lib/executors.ts', 'src/commands/dial.ts', 'src/commands/dispatch.ts', 'src/commands/bakeoff.ts'],
-      patterns: [/explainUnverifiedWritePosture|write_posture_unverified/],
-    },
-  },
-  {
-    // A refusal this serious must not be silent — silence is how it becomes a
-    // habit. Both preview surfaces once spread `...routable` alone and dropped
-    // the reason the predicate had already written, and attach time asked the
-    // old lane-exists-only question, so a user at `--rate 1.0` got no pairs
-    // and no explanation at any surface. The doc states the standard; these
-    // literals are what keep it true.
-    id: 'pair-refusal-is-visible',
-    doc: { files: [SLOTS], patterns: [/routable_reason/, /pairRoutabilityFields/] },
-    src: {
-      files: ['src/lib/executors.ts', 'src/commands/dial.ts', 'src/commands/steering.ts'],
-      patterns: [/routable_reason/, /pairRoutabilityFields/],
+      files: ['src/lib/executors.ts', 'src/commands/bakeoff.ts', 'src/commands/dispatch.ts'],
+      patterns: [/is no longer supported/, /capability_skew/, /permissions-and-isolation\.md/],
     },
   },
   {

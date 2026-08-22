@@ -112,8 +112,7 @@ function seedDirectorRepo(t: TestContext, opts: { brief?: boolean } = {}): { roo
       standalone: {
         openai: {
           command: ['node', '-e', "let d='';process.stdin.on('data',(c)=>{d+=c});process.stdin.on('end',()=>{process.stdout.write(d)})"],
-          write_access: true,
-        },
+          },
         'current-host': { host: true },
       },
     },
@@ -164,7 +163,7 @@ test('dispatch: --no-brief sends the bare task; a declared-but-missing brief ref
     models: { boss: { provider: 'openai', id: 'boss-1', effort: 'high' } },
     routes: {
       standalone: {
-        openai: { command: ['node', '-e', '0'], write_access: true },
+        openai: { command: ['node', '-e', '0'], },
         'current-host': { host: true },
       },
     },
@@ -217,11 +216,11 @@ test('dial: setting director onto a forbidden lane refuses at set time', (t) => 
     models: { grok: { provider: 'xai', id: 'grok-4.6', effort: 'high' } },
     routes: {
       standalone: {
-        xai: { command: ['node', '-e', '0'], write_access: true, eligibility: { director: 'forbidden' } },
+        xai: { command: ['node', '-e', '0'], eligibility: { director: 'forbidden' } },
         'current-host': { host: true },
       },
     },
-    archetypes: { director: { requires_write: 'required' } },
+    archetypes: { director: { } },
   }));
   const user: UserPathOptions = {
     home: join(root, 'home'),

@@ -41,15 +41,15 @@ function seedV3(t: TestContext, extra: Record<string, unknown> = {}): string {
     },
     routes: {
       standalone: {
-        openai: { command: ['node', '-e', '0'], write_access: true },
-        xai: { command: ['node', '-e', '0'], write_access: true },
+        openai: { command: ['node', '-e', '0'], },
+        xai: { command: ['node', '-e', '0'], },
         'current-host': { host: true },
       },
     },
     archetypes: {
-      worker: { requires_write: 'required' },
-      reviewer: { requires_write: 'none' },
-      judge: { requires_write: 'none' },
+      worker: { },
+      reviewer: { },
+      judge: { },
     },
     ...extra,
   };
@@ -77,11 +77,11 @@ test('dial show: effective table with triad and source base', (t) => {
 test('dial show: rows follow the canon power order, extras alphabetical after', (t) => {
   const root = seedV3(t, {
     archetypes: {
-      worker: { requires_write: 'required' },
-      reviewer: { requires_write: 'none' },
-      judge: { requires_write: 'none' },
-      director: { requires_write: 'required' },
-      generator: { requires_write: 'forbidden' },
+      worker: { },
+      reviewer: { },
+      judge: { },
+      director: { },
+      generator: { },
       scout: {},
     },
   });

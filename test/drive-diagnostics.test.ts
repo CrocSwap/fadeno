@@ -19,7 +19,7 @@ function seedDriveRepo(root: string, command: string): void {
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
     schema_version: 3,
     models: { writer: { provider: 'writerp', id: 'writer', effort: 'default' } },
-    routes: { standalone: { writerp: { command: ['node', '-e', command], write_access: true } } },
+    routes: { standalone: { writerp: { command: ['node', '-e', command], } } },
     archetypes: { worker: {} },
     dials: { worker: 'writer' },
   }));

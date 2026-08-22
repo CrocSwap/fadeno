@@ -23,9 +23,9 @@ function seedV3(t: import('node:test').TestContext, extra: Record<string, unknow
       gated: { provider: 'openai', id: 'gated', eligibility: { worker: 'forbidden' } },
     },
     routes: {
-      standalone: { openai: { command: ['node', '-e', "process.stdout.write('report')"], write_access: true } },
-      codex: { openai: { command: ['node', '-e', "process.stdout.write('report')"], write_access: true } },
-      claude: { openai: { command: ['node', '-e', "process.stdout.write('report')"], write_access: true } },
+      standalone: { openai: { command: ['node', '-e', "process.stdout.write('report')"], } },
+      codex: { openai: { command: ['node', '-e', "process.stdout.write('report')"], } },
+      claude: { openai: { command: ['node', '-e', "process.stdout.write('report')"], } },
     },
     archetypes: { worker: {} },
     dials: { worker: 'probe' },
@@ -72,10 +72,10 @@ test('host base row records inherited effort', (t) => {
     routes: {
       standalone: {
         'current-host': { host: true },
-        openai: { command: ['node', '-e', "process.stdout.write('x')"], write_access: true },
+        openai: { command: ['node', '-e', "process.stdout.write('x')"], },
       },
-      codex: { 'current-host': { host: true }, openai: { command: ['node', '-e', "process.stdout.write('x')"], write_access: true } },
-      claude: { 'current-host': { host: true }, openai: { command: ['node', '-e', "process.stdout.write('x')"], write_access: true } },
+      codex: { 'current-host': { host: true }, openai: { command: ['node', '-e', "process.stdout.write('x')"], } },
+      claude: { 'current-host': { host: true }, openai: { command: ['node', '-e', "process.stdout.write('x')"], } },
     },
     archetypes: { worker: {} },
   } as any));

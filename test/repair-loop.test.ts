@@ -46,7 +46,7 @@ function seedCodeChangeReviewWithFailingReviews(t: TestContext): { root: string;
   for (const [name, spec] of Object.entries(execSpecs)) {
     const provider = name.replace(/-/g, '_') + '_p';
     models[name] = { provider, id: name, effort: 'high' };
-    routesStandalone[provider] = { command: spec.command, write_access: true };
+    routesStandalone[provider] = { command: spec.command, };
   }
   routesStandalone['current-host'] = { host: true };
   const v3 = {
@@ -161,7 +161,7 @@ test('engine: approval gate diverges from blocking-only — zero-blocking reques
   for (const [name, spec] of Object.entries(execSpecs)) {
     const provider = name.replace(/-/g, '_') + '_p';
     models[name] = { provider, id: name, effort: 'high' };
-    routesStandalone[provider] = { command: spec.command, write_access: true };
+    routesStandalone[provider] = { command: spec.command, };
   }
   routesStandalone['current-host'] = { host: true };
   const v3 = {

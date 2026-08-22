@@ -53,25 +53,22 @@ test('a shadow sees PWD inside its worktree, not the workspace it must not touch
       },
       routes: {
         claude: {
-          noop: { command: ['node', '-e', "process.stdout.write('primary')"], write_access: true },
+          noop: { command: ['node', '-e', "process.stdout.write('primary')"], },
           probe: {
             command: ['node', '-e', 'process.stdout.write(JSON.stringify({pwd:process.env.PWD,cwd:process.cwd()}))'],
-            write_access: true,
-          },
+            },
         },
         standalone: {
-          noop: { command: ['node', '-e', "process.stdout.write('primary')"], write_access: true },
+          noop: { command: ['node', '-e', "process.stdout.write('primary')"], },
           probe: {
             command: ['node', '-e', 'process.stdout.write(JSON.stringify({pwd:process.env.PWD,cwd:process.cwd()}))'],
-            write_access: true,
-          },
+            },
         },
         codex: {
-          noop: { command: ['node', '-e', "process.stdout.write('primary')"], write_access: true },
+          noop: { command: ['node', '-e', "process.stdout.write('primary')"], },
           probe: {
             command: ['node', '-e', 'process.stdout.write(JSON.stringify({pwd:process.env.PWD,cwd:process.cwd()}))'],
-            write_access: true,
-          },
+            },
         },
       },
       archetypes: { worker: {} },

@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { atCwd } from './executors.ts';
-import type { ExecutorProfile, SnapshotDocument, WritePosture } from './executors.ts';
+import type { ExecutorProfile, SnapshotDocument } from './executors.ts';
 
 /**
  * Tier-2 constraint command: a profile-declared argv run at the dispatch
@@ -18,11 +18,22 @@ export interface ConstraintContext {
   model: string | null;
   model_id: string | null;
   transport: 'command' | 'host';
-  write_access: boolean | null;
-  /** True when the delivery is the route's write variant, selected because a
-   * `requires_write: required` archetype resolved onto a read-only base. */
-  write_variant?: boolean;
-  write_posture: WritePosture | null;
+  /**
+   * The argv that will actually run, fully substituted — `null` for an
+   * in-session host delivery, which has no command.
+   *
+   * This replaces the old `write_access` / `write_variant` / `write_posture`
+   * triple, and is strictly more useful than all three were. Those fields
+   * reported what the CATALOG CLAIMED about a delivery; Fadeno never verified
+   * any of it, and the machinery that matched those claims against archetype
+   * demands produced four separate silent-wrong-answer defects before it was
+   * removed. This field reports what will be EXECUTED, so a policy can gate on
+   * `--sandbox`, `--permission-mode`, `--allowedTools`, `--disable-shell`, or
+   * anything else it cares about — including capabilities the old triple could
+   * not express. A constraint policy is now the only Fadeno-layer gate there
+   * is; see docs/experimental/permissions-and-isolation.md.
+   */
+  command: string[] | null;
   dial: { model: string; effort?: string; via?: string } | null;
   dial_source: string | null;
   dials: {

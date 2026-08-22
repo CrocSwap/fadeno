@@ -45,7 +45,7 @@ function seedSelfContainedCatalog(root: string, relay?: Record<string, string>):
         codex: {
           'current-host': { host: true },
           openai: { host: true },
-          xai: { command: ['grok', '--model', '{model}'], write_access: true },
+          xai: { command: ['grok', '--model', '{model}'], },
         },
       },
       ...(relay ? { relay } : {}),

@@ -52,7 +52,7 @@ export interface BakeoffConfound {
     | 'arm_refused'
     | 'exit_code_differs'
     | 'judge_provider_shared'
-    | 'write_posture_unverified'
+    | 'capability_skew'
     | 'judge_delivery_unattested';
   arm: BakeoffArm | 'pair';
   detail: string;
@@ -553,6 +553,42 @@ function confoundsOf(primary: DispatchEntry | null, shadow: DispatchEntry | null
   };
   const pairs: Array<[BakeoffArm, DispatchEntry | null]> = [['primary', primary], ['challenger', shadow]];
 
+  // Capability skew, MEASURED rather than declared. This replaces the old
+  // write-posture machinery, which asked whether the catalog CLAIMED each arm
+  // could write and refused the pair when the claim looked wrong. Comparing
+  // the argvs that actually ran is strictly better on three counts: it cannot
+  // be wrong about the configuration, it catches any capability difference
+  // (sandbox flags, tool allowlists, agent selection) rather than only the
+  // write bit, and it cannot produce a false refusal because it does not
+  // refuse. See docs/experimental/permissions-and-isolation.md.
+  //
+  // Model and effort are expected to differ — that is the whole point of a
+  // pair — so tokens carrying either are excluded before comparing.
+  if (primary?.command != null && shadow?.command != null) {
+    const scrub = (argv: string[], e: DispatchEntry): string[] => {
+      const vary = new Set(
+        [e.model, e.modelId, e.reasoningEffort, e.attestedEffort].filter(
+          (v): v is string => typeof v === 'string' && v.length > 0,
+        ),
+      );
+      return argv.filter((tok) => !vary.has(tok) && ![...vary].some((v) => tok.includes(v)));
+    };
+    const a = scrub(primary.command, primary);
+    const b = scrub(shadow.command, shadow);
+    if (JSON.stringify(a) !== JSON.stringify(b)) {
+      const onlyPrimary = a.filter((t) => !b.includes(t));
+      const onlyChallenger = b.filter((t) => !a.includes(t));
+      push(
+        'capability_skew',
+        'pair',
+        'the two arms ran DIFFERENT argvs beyond model and effort, so this comparison may measure the ' +
+          'commands rather than the models' +
+          (onlyPrimary.length > 0 ? ` — only primary: ${onlyPrimary.join(' ')}` : '') +
+          (onlyChallenger.length > 0 ? ` — only challenger: ${onlyChallenger.join(' ')}` : ''),
+      );
+    }
+  }
+
   for (const [arm, entry] of pairs) {
     if (entry == null) continue;
     if (entry.refusal != null) push('arm_refused', arm, `${entry.refusal.predicate}: ${entry.refusal.message}`);
@@ -567,14 +603,6 @@ function confoundsOf(primary: DispatchEntry | null, shadow: DispatchEntry | null
     }
     if (entry.workspaceModeDegraded != null) {
       push('workspace_mode_degraded', arm, String(entry.workspaceModeDegraded));
-    }
-    if (entry.writePostureUnverified) {
-      push(
-        'write_posture_unverified',
-        arm,
-        'this arm ran on a lane that never declared `write_access:`, so its archetype\'s write posture ' +
-          'was never checked — an empty or thin diff here is NOT evidence the model chose to change little.',
-      );
     }
     if (entry.carryMutated != null) {
       push('carry_mutated', arm, 'a carried path was written through — one inode, two trees; the arms may have contaminated each other.');

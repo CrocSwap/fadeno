@@ -17,18 +17,14 @@ import {
   eligibilityFor,
   substitutePromptFile,
   explainEligibilityConflict,
-  explainUnverifiedWritePosture,
   explainProviderConflict,
-  applyWritePosture,
   explainPairRoutability,
-  explainWriteConflict,
   loadExecutorProfile,
   readLocalDialState,
   resolveRole,
   compileDialRef,
   parseDialRef,
   formatDialRef,
-  forcesWritePosture,
   roleResolutionEchoLabel,
   withoutHarnessIdentity,
   atCwd,
@@ -37,7 +33,6 @@ import {
   type InputProducer,
   type DialRef,
   type RoleResolutionSource,
-  type WritePosture,
   shadowSampleRoll,
 } from '../lib/executors.ts';
 import { decideLane, readSessionEffort } from '../lib/lane.ts';
@@ -332,7 +327,7 @@ export type DispatchRefusalPredicate =
   | 'shadow_baseline'
   | 'shadow_carry'
   | 'shadow_containment'
-  | 'shadow_write_posture'
+  | 'shadow_no_command_lane'
   | 'ignored_output_kept'
   | 'workspace_lease';
 
@@ -395,13 +390,6 @@ function provenanceFields(producers: InputProducer[]): Array<{
   }));
 }
 
-function declaredWritePosture(
-  profile: ExecutorProfile,
-  archetype: string | null,
-): WritePosture | null {
-  if (archetype == null || !Object.hasOwn(profile.archetypes, archetype)) return null;
-  return profile.archetypes[archetype]!.requiresWrite;
-}
 
 /**
  * Append one evidence row, stamped with the build that wrote it.
@@ -507,7 +495,19 @@ export interface AdHocDispatchOptions {
   /** One-shot shadow target; integrator wires --shadow. */
   shadow?: string | null;
   /** Isolated worktree delivery: opt-in via --isolate, bypasses shared-writer lease. */
+  /**
+   * Force an isolated worktree. Largely redundant now that isolation is the
+   * default wherever git allows it; kept because it is an explicit statement
+   * of intent and because callers pass it.
+   */
   isolate?: boolean;
+  /**
+   * Opt OUT of isolation and run in the caller's tree. The deliberate escape
+   * hatch for work that must land in place — and the one shape where nothing
+   * stands between the executor and this repo, since write posture no longer
+   * exists to pretend otherwise.
+   */
+  shared?: boolean;
   /**
    * Whether THIS dispatch's gitignored output has to survive, overriding the
    * archetype's `ignored_output` policy.
@@ -1131,13 +1131,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     }
   }
 
-  // Write-posture delivery selection: a write-requiring archetype resolving
-  // onto a read-only route that declares a write variant gets the variant
-  // argv. The catalog authorized this when it declared both; the dial only
-  // named the model.
-  const postured = applyWritePosture(delivery.spec, archetype, profile.archetypes);
-  const spec = postured.spec;
-  const usedWriteVariant = postured.usedWriteVariant;
+  const spec = delivery.spec;
   const executorName = delivery.refString;
   /**
    * The lane the RESOLVER would have chosen for this archetype — the same
@@ -1435,23 +1429,34 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // So the correction to a tempting piece of reasoning: isolation is NOT
   // simply the safe direction to be wrong in. Isolating can itself fail, and
   // when it does it turns a dispatch that used to work into a hard error.
-  const canIsolate = pairCandidate != null && (() => {
+  //
+  // That correction is why isolation is the default only WHERE GIT ALLOWS IT.
+  // With write posture gone, the worktree is the sole thing standing between
+  // a dispatched executor and this tree, so every command dispatch takes one
+  // by default rather than only pair candidates — but a repo without git
+  // still degrades to shared instead of failing, and that degraded path is
+  // exactly where nothing contains a writer. `--shared` opts out deliberately
+  // (docs/experimental/permissions-and-isolation.md).
+  const gitAvailable = (() => {
     const probe = spawnSync('git', ['-C', repoRoot, 'rev-parse', '--git-dir'], { encoding: 'utf8' });
     return probe.error == null && probe.status === 0;
   })();
-  const workspaceMode: WorkspaceMode = opts.isolate || canIsolate ? 'isolated' : 'shared';
+  const workspaceMode: WorkspaceMode =
+    opts.shared === true ? 'shared' : (opts.isolate || gitAvailable) && gitAvailable ? 'isolated' : 'shared';
   // An isolated primary cannot touch the shared tree while it works, so it
   // takes no lease for the duration — it takes one only across its merge-back
   // (see `mergePrimaryBack`). Net effect is MORE concurrency than a shared
   // primary, which holds the repo-wide lease for its entire run.
-  const needsLease = workspaceMode === 'shared' && spec.writeAccess !== false;
+  //
+  // Every shared dispatch now takes the lease: nothing declares itself a
+  // non-writer any more, and the honest reading without that claim is that we
+  // do not know.
+  const needsLease = workspaceMode === 'shared';
   const commandSha256 = sha256Hex(JSON.stringify(command));
   const producers = lookupInputProducers(repoRoot, producedByIds(opts));
   const dialField: Record<string, unknown> = { model: dial.model };
   if (dial.effort != null) dialField.effort = dial.effort;
   if (dial.via != null) dialField.via = dial.via;
-  const writePostureForced = forcesWritePosture(dial, resolvedVia);
-  if (writePostureForced) dialField.force_write_posture = true;
   const identity: Record<string, unknown> = {
     dispatch_id: dispatchId,
     ...(tag != null ? { tag } : {}),
@@ -1468,18 +1473,6 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     ...(delivery.provider != null ? { provider: delivery.provider } : {}),
     transport,
     workspace_mode: workspaceMode,
-    ...(spec.writeAccess != null ? { write_access: spec.writeAccess } : {}),
-    // Recorded as an explicit TRUE-only flag rather than inferred later from a
-    // missing `write_access` key: absence of that key is ambiguous — it means
-    // "undeclared" on a new row and "written before the field existed" on an
-    // old one, and a bakeoff confound derived from an ambiguous absence would
-    // over-claim on historical pairs. A flag only ever written when we know it
-    // can only under-report, which is the safe direction.
-    ...(explainUnverifiedWritePosture({ executor: executorName, spec }, archetype, profile) != null
-      ? { write_posture_unverified: true }
-      : {}),
-    ...(usedWriteVariant ? { write_variant: true } : {}),
-    ...(writePostureForced ? { write_posture_forced: true } : {}),
     ...(briefApplied != null ? { brief: briefApplied } : {}),
     delivery_transport: deliveryTransport,
     prompt_source: promptSource,
@@ -1491,28 +1484,12 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     ...(producers.length > 0 ? { input_provenance: provenanceFields(producers) } : {}),
   };
 
-  // Boundary predicates, after write posture, before the spawn. Each hard
-  // refusal appends one `dispatch_refused` row (the request-point evidence)
-  // and throws; an advisory provider clash warns and continues.
+  // Boundary predicates, before the spawn. Each hard refusal appends one
+  // `dispatch_refused` row (the request-point evidence) and throws; an
+  // advisory provider clash warns and continues. There is no write-posture
+  // predicate here any more: a route is an argv, and what it may do is the
+  // vendor's business and the worktree's, not a claim for Fadeno to check.
   const deliveryChoice = { executor: executorName, spec };
-  const writeConflict = explainWriteConflict(deliveryChoice, archetype, profile);
-  if (writeConflict != null && !writePostureForced) {
-    // Host-lane note FIRST. This is the refusal a Claude coordinator actually
-    // hits for a write-requiring archetype, and read without it the message
-    // sends them to re-dial an archetype the resolver wanted in-session.
-    refuseDispatch(
-      repoRoot,
-      identity,
-      'write_posture',
-      hostLaneNote != null ? `${hostLaneNote}\n\n${writeConflict}` : writeConflict,
-      now,
-    );
-  }
-  if (writeConflict != null && writePostureForced) {
-    opts.onEcho?.(
-      `WARNING: FORCED WRITE-POSTURE MISMATCH — dispatch is proceeding because this dial was set with --force. ${writeConflict}`,
-    );
-  }
   const eligibilityConflict = explainEligibilityConflict(deliveryChoice, archetype);
   if (eligibilityConflict != null) {
     refuseDispatch(repoRoot, identity, 'eligibility', eligibilityConflict, now);
@@ -1544,9 +1521,8 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     model: delivery.model,
     model_id: delivery.modelId,
     transport: 'command' as const,
-    write_access: spec.writeAccess,
-    ...(usedWriteVariant ? { write_variant: true } : {}),
-    write_posture: declaredWritePosture(profile, archetype),
+    // What will actually run, not what the catalog claimed about it.
+    command,
     dial: dialField as unknown as DialRef,
     dial_source: ROW_RESOLUTION[source],
     dials: { session: sessionMap, repo: repoMap, user: userMap },
@@ -1585,8 +1561,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const echo =
     `${role ?? archetype ?? executorName} → ${executorName}` +
     `${delivery.model != null ? ` (${delivery.model})` : ''} [${sourceLabel}]` +
-    (usedWriteVariant ? ' [write variant]' : '') +
-    (spec.writeAccess === false ? ' [write_access: none]' : '');
+    '';
   opts.onEcho?.(echo);
   opts.onEcho?.(`external sandbox: ${executorName} (${command.join(' ')}) runs outside the current harness via ${transport}; evidence → ${DISPATCHES_FILE}`);
   // Delivering, not refusing — but say that this deliberately leaves a session
@@ -1811,9 +1786,9 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // pair is WANTED, this is a capability question decided after, and a
     // refusal row here is what lets a user who attached a shadow at
     // `--rate 1.0` and sees no pairs find out why from `fadeno dispatches`.
-    const primaryRoutability = explainPairRoutability(spec, executorName, archetype, profile);
+    const primaryRoutability = explainPairRoutability(spec, executorName);
     if (!primaryRoutability.routable) {
-      writeShadowRefusal('shadow_write_posture', primaryRoutability.reason);
+      writeShadowRefusal('shadow_no_command_lane', primaryRoutability.reason);
       return null;
     }
 
@@ -1841,22 +1816,13 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       });
       return null;
     }
-    // Shadows duplicate the primary's shape, so a write-requiring
-    // archetype's challenger gets the same posture selection.
-    const shadowPostured = applyWritePosture(shadowDelivery.spec, archetype, profile.archetypes);
-    const shadowSpec = shadowPostured.spec;
-    const shadowUsedWriteVariant = shadowPostured.usedWriteVariant;
+    const shadowSpec = shadowDelivery.spec;
     const shadowRefString = shadowDelivery.refString;
     // Eligibility: forbidden refuses, shadow_only allowed
     const eligibilityState = eligibilityFor(shadowSpec, archetype);
     if (eligibilityState === 'forbidden') {
       const msg = explainEligibilityConflict({ executor: shadowRefString, spec: shadowSpec }, archetype) ?? `archetype "${archetype}" is forbidden on executor "${shadowRefString}".`;
       writeShadowRefusal('eligibility', msg, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: 'command' });
-      return null;
-    }
-    const shadowWriteConflict = explainWriteConflict({ executor: shadowRefString, spec: shadowSpec }, archetype, profile);
-    if (shadowWriteConflict != null) {
-      writeShadowRefusal('write_posture', shadowWriteConflict, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: 'command' });
       return null;
     }
     // Constraint check with shadow:true
@@ -1876,9 +1842,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       model: shadowDelivery.model,
       model_id: shadowDelivery.modelId,
       transport: 'command' as const,
-      write_access: shadowSpec.writeAccess,
-      ...(shadowUsedWriteVariant ? { write_variant: true } : {}),
-      write_posture: declaredWritePosture(profile, archetype),
+      command: shadowSpec.adapter === 'command' ? shadowSpec.command : null,
       dial: sDialField as DialRef,
       dial_source: 'shadow',
       dials: { session: sSessionMap, repo: sRepoMap, user: sUserMap },
@@ -2043,11 +2007,6 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       driver: shadowDelivery.driver,
       ...(shadowDelivery.provider != null ? { provider: shadowDelivery.provider } : {}),
       transport: 'command',
-      ...(shadowSpec.writeAccess != null ? { write_access: shadowSpec.writeAccess } : {}),
-      ...(explainUnverifiedWritePosture({ executor: shadowRefString, spec: shadowSpec }, archetype, profile) != null
-        ? { write_posture_unverified: true }
-        : {}),
-      ...(shadowUsedWriteVariant ? { write_variant: true } : {}),
       delivery_transport: 'command',
       prompt_source: promptSource,
       prompt_snapshot: promptSnapshot,

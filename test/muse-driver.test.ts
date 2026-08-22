@@ -45,7 +45,7 @@ test('dispatch: a file-reading driver receives the attested snapshot via {prompt
     models: { musey: { provider: 'muse', id: 'musey-1', effort: 'xhigh' } },
     routes: {
       standalone: {
-        muse: { command: ['node', '-e', FILE_READER, '{prompt_file}'], write_access: true },
+        muse: { command: ['node', '-e', FILE_READER, '{prompt_file}'], },
         'current-host': { host: true },
       },
     },
@@ -89,7 +89,7 @@ test('drive: a file-reading actor gets the run-recorded prompt artifact', (t) =>
     '',
   ].join('\n'));
   const perHarness = {
-    muse: { command: ['node', '-e', FILE_READER, '{prompt_file}'], write_access: true },
+    muse: { command: ['node', '-e', FILE_READER, '{prompt_file}'], },
     'current-host': { host: true },
   };
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({

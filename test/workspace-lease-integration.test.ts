@@ -36,18 +36,16 @@ function seedDispatch(t: TestContext): string {
       standalone: {
         writerp: {
           command: ['node', '-e', "require('node:fs').writeFileSync('executor-write.txt','isolated');process.stdout.write('written')"],
-          write_access: true,
-        },
+          },
         readerp: {
           command: ['node', '-e', "process.stdout.write('read-only report')"],
-          write_access: false,
-        },
+          },
         unknownp: {
           command: ['node', '-e', "process.stdout.write('unknown posture')"],
         },
       },
     },
-    archetypes: { worker: {}, reviewer: { requires_write: 'forbidden' } },
+    archetypes: { worker: {}, reviewer: { } },
     dials: { worker: 'writer', reviewer: 'reader' },
   }));
   return root;
@@ -81,24 +79,28 @@ function initGit(root: string): void {
   git(['commit', '-m', 'fixture']);
 }
 
-test('shared write dispatch is blocked while read-only dispatch bypasses a durable host lease', (t) => {
+test('shared dispatch is blocked by a durable host lease; an ISOLATED one bypasses it', (t) => {
+  // What changed: the bypass used to be granted to a delivery that DECLARED
+  // itself read-only. Nothing declares that any more — `write_access` was a
+  // claim Fadeno never verified — so every shared dispatch takes the lease.
+  // The bypass now belongs to isolation, which is a fact about where the work
+  // happens rather than a promise about what it will do, and isolation is the
+  // default. See docs/experimental/permissions-and-isolation.md.
   const root = seedDispatch(t);
   const holder = durableHostLease(root);
   assert.throws(
-    () => runDispatch({ archetype: 'worker', prompt: 'write', repoRoot: root, userPathOptions: user }),
+    () => runDispatch({ archetype: 'worker', prompt: 'write', repoRoot: root, shared: true, userPathOptions: user }),
     (error: unknown) => error instanceof DispatchCommandError && /shared workspace is already held/.test(error.message),
   );
   assert.throws(
-    () => runDispatch({ archetype: 'worker', model: 'unknown', prompt: 'unknown', repoRoot: root, userPathOptions: user }),
+    () => runDispatch({ archetype: 'reviewer', prompt: 'inspect', repoRoot: root, shared: true, userPathOptions: user }),
     (error: unknown) => error instanceof DispatchCommandError && /shared workspace is already held/.test(error.message),
-    'an undeclared write posture is physically mutable until proven read-only',
+    'no delivery can claim to be a non-writer any more, so a shared reviewer waits too',
   );
-  const readOnly = runDispatch({ archetype: 'reviewer', prompt: 'inspect', repoRoot: root, userPathOptions: user });
-  assert.equal(readOnly.stdout, 'read-only report');
   const denied = evidence(root).filter((row) => row.event === 'workspace_lease_reclaim_denied');
-  assert.equal(denied.length, 2, 'each refused mutable dispatch must leave a recovery-denial audit row');
+  assert.equal(denied.length, 2, 'each refused shared dispatch must leave a recovery-denial audit row');
   assert.ok(denied.every((row) => row.reason === 'abandoned_host' && row.previous_holder != null));
-  assert.deepEqual(readWorkspaceLease(root)?.holder, holder, 'read-only delivery must not disturb the writer lease');
+  assert.deepEqual(readWorkspaceLease(root)?.holder, holder, 'a refused dispatch must not disturb the writer lease');
   releaseWorkspaceLease({ repoRoot: root, holder });
 });
 
@@ -150,8 +152,8 @@ test('drive refuses a write-capable attempt before actor_dispatched while anothe
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
     schema_version: 3,
     models: { writer: { provider: 'writerp', id: 'writer', effort: 'default' } },
-    routes: { standalone: { writerp: { command: ['node', '-e', "process.stdout.write('notes')"], write_access: true } } },
-    archetypes: { worker: { requires_write: 'required' } },
+    routes: { standalone: { writerp: { command: ['node', '-e', "process.stdout.write('notes')"], } } },
+    archetypes: { worker: { } },
     dials: { worker: 'writer' },
   }));
   writeFileSync(join(root, '.fadeno', 'playbooks', 'lease-drive.yaml'), stringifyYaml({
@@ -182,8 +184,8 @@ function seedDanglingDrive(t: TestContext): { root: string; runId: string; runDi
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
     schema_version: 3,
     models: { writer: { provider: 'writerp', id: 'writer', effort: 'default' } },
-    routes: { standalone: { writerp: { command: ['node', '-e', "process.stdout.write('notes')"], write_access: true } } },
-    archetypes: { worker: { requires_write: 'required' } },
+    routes: { standalone: { writerp: { command: ['node', '-e', "process.stdout.write('notes')"], } } },
+    archetypes: { worker: { } },
     dials: { worker: 'writer' },
   }));
   writeFileSync(join(root, '.fadeno', 'playbooks', 'lease-recovery.yaml'), stringifyYaml({

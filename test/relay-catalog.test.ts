@@ -45,19 +45,19 @@ const V3_BASE = {
   },
   routes: {
     standalone: {
-      dummy: { command: ['node', '-e', '0'], write_access: true },
+      dummy: { command: ['node', '-e', '0'], },
       'current-host': { host: true },
     },
     claude: {
-      dummy: { command: ['node', '-e', '0'], write_access: true },
+      dummy: { command: ['node', '-e', '0'], },
       'current-host': { host: true },
     },
     codex: {
-      dummy: { command: ['node', '-e', '0'], write_access: true },
+      dummy: { command: ['node', '-e', '0'], },
       'current-host': { host: true },
     },
   },
-  archetypes: { worker: { requires_write: 'none' } },
+  archetypes: { worker: { } },
 };
 
 function isolatedUser(root: string): UserPathOptions {

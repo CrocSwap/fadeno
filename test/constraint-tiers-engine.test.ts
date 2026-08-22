@@ -174,7 +174,7 @@ function drive(root: string, runId: string) {
 }
 
 function dummyRoutes(command: string[]): Record<string, unknown> {
-  const route = { command, write_access: true };
+  const route = { command, };
   const perHarness = { dummy: route, 'current-host': { host: true } as Record<string, unknown> };
   return {
     standalone: { ...perHarness },
@@ -187,8 +187,8 @@ function dummyRoutes(command: string[]): Record<string, unknown> {
 function familyRoutes(): Record<string, unknown> {
   const cmdArr = ['node', '-e', NOTES];
   const perHarness = {
-    moonshot: { command: cmdArr, write_access: true },
-    openai: { command: cmdArr, write_access: true },
+    moonshot: { command: cmdArr, },
+    openai: { command: cmdArr, },
     'current-host': { host: true },
   };
   return {

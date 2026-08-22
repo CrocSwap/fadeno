@@ -5,15 +5,12 @@ import test from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import {
   BARE_IDENTIFIER_RE,
-  applyWritePosture,
   compileDialRef,
   deliveryIsHost,
   DIALS_LOCAL_FILE,
   eligibilityFor,
   ExecutorProfileError,
-  explainWriteConflict,
   formatDialRef,
-  forcesWritePosture,
   parseDialRef,
   parseExecutorProfile,
   parseSnapshotDocument,
@@ -69,14 +66,14 @@ test('v3 models registry happy path', () => {
     },
     routes: {
       standalone: {
-        openai: { command: ['codex', 'exec', '--model', '{model}'], write_access: true },
-        anthropic: { command: ['claude', '-p', '--model', '{model}'], write_access: false },
-        xai: { command: ['grok', '--model', '{model}'], write_access: true },
-        openrouter: { driver: 'opencode', command: ['opencode','run','-m','{model}'], write_access: true },
+        openai: { command: ['codex', 'exec', '--model', '{model}'], },
+        anthropic: { command: ['claude', '-p', '--model', '{model}'], },
+        xai: { command: ['grok', '--model', '{model}'], },
+        openrouter: { driver: 'opencode', command: ['opencode','run','-m','{model}'], },
         'current-host': { host: true },
       },
     },
-    archetypes: { worker: { requires_write: 'required' }, judge: {} },
+    archetypes: { worker: { }, judge: {} },
     dials: { judge: 'opus' },
     bindings: { my_role: 'sol@high' },
     unregistered_model_driver: 'opencode',
@@ -111,7 +108,7 @@ test('v3 routes driver fields and effort_encoding', () => {
     models: { gem: { provider: 'google', id: 'gemini-3.1-pro', effort: 'high' } },
     routes: {
       standalone: {
-        google: { driver: 'agy', command: ['agy','--model','{model}'], write_access: true, effort_encoding: 'model-suffix' },
+        google: { driver: 'agy', command: ['agy','--model','{model}'], effort_encoding: 'model-suffix' },
         openai: { command: ['codex','exec','{model}'] },
       },
     },
@@ -145,8 +142,8 @@ test('DialRef parse/format', () => {
   assert.deepEqual(parseDialRef({ model: 'sol', effort: 'high', via: 'opencode' }, 'test'), { model: 'sol', effort: 'high', via: 'opencode' });
   assert.deepEqual(parseDialRef({ model: 'gem', via: 'agy' }, 'test'), { model: 'gem', via: 'agy' });
   assert.deepEqual(
-    parseDialRef({ model: 'gem', via: 'agy', force_write_posture: true }, 'test'),
-    { model: 'gem', via: 'agy', force_write_posture: true },
+    parseDialRef({ model: 'gem', via: 'agy' }, 'test'),
+    { model: 'gem', via: 'agy' },
   );
   assert.equal(formatDialRef({ model: 'sol' }), 'sol');
   assert.equal(formatDialRef({ model: 'sol', effort: 'xhigh' }), 'sol@xhigh');
@@ -157,7 +154,11 @@ test('DialRef parse/format', () => {
   assert.throws(() => parseDialRef('sol@', 'dials.judge'), /valid dial ref/);
   assert.throws(() => parseDialRef({ model: '' }, 'dials.judge'), /non-empty "model"/);
   assert.throws(() => parseDialRef({ model: 'sol', effort: '' }, 'x'), /"effort" must be a non-empty string/);
-  assert.throws(() => parseDialRef({ model: 'sol', force_write_posture: false }, 'x'), /"force_write_posture" must be true/);
+  assert.throws(
+    () => parseDialRef({ model: 'sol', force_write_posture: true }, 'x'),
+    /"force_write_posture" is no longer supported/,
+    'a forced dial refuses rather than silently losing its override',
+  );
   assert.throws(() => parseDialRef(42, 'x'), /must be a string/);
 });
 
@@ -165,7 +166,7 @@ test('compileDialRef: registered home driver', () => {
   const profile = parseDoc({
     schema_version: 3,
     models: { sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' } },
-    routes: { standalone: { openai: { command: ['codex','exec','-m','{model}','--effort','{reasoning_effort}'], write_access: true } } },
+    routes: { standalone: { openai: { command: ['codex','exec','-m','{model}','--effort','{reasoning_effort}'], } } },
   });
   const compiled = compileDialRef({ model: 'sol' }, profile);
   assert.equal(compiled.registered, true);
@@ -191,8 +192,8 @@ test('compileDialRef: spellings via', () => {
     models: { opus: { provider: 'anthropic', id: 'opus', effort: 'default', spellings: { opencode: 'anthropic/claude-opus-4.8' } } },
     routes: {
       standalone: {
-        anthropic: { command: ['claude','-p','--model','{model}'], write_access: false },
-        openrouter: { driver: 'opencode', command: ['opencode','run','-m','{model}'], write_access: true },
+        anthropic: { command: ['claude','-p','--model','{model}'], },
+        openrouter: { driver: 'opencode', command: ['opencode','run','-m','{model}'], },
       },
     },
   });
@@ -209,7 +210,7 @@ test('compileDialRef: effort_encoding model-suffix', () => {
   const profile = parseDoc({
     schema_version: 3,
     models: { gem: { provider: 'google', id: 'gemini-3.1-pro', effort: 'high' } },
-    routes: { standalone: { google: { driver: 'agy', command: ['agy','--model','{model}'], effort_encoding: 'model-suffix', write_access: true } } },
+    routes: { standalone: { google: { driver: 'agy', command: ['agy','--model','{model}'], effort_encoding: 'model-suffix', } } },
   });
   const base = compileDialRef({ model: 'gem' }, profile);
   assert.equal(base.modelId, 'gemini-3.1-pro-high');
@@ -228,7 +229,7 @@ test('compileDialRef: unregistered fall-through via default driver', () => {
   const profile = parseDoc({
     schema_version: 3,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openrouter: { driver: 'opencode', command: ['opencode','run','-m','{model}'], write_access: true } } },
+    routes: { standalone: { openrouter: { driver: 'opencode', command: ['opencode','run','-m','{model}'], } } },
     unregistered_model_driver: 'opencode',
   });
   const compiled = compileDialRef({ model: 'kimi-k3' }, profile);
@@ -304,11 +305,11 @@ test('archetypes: requires_write parses; an absent block is an empty map', () =>
     schema_version: 3,
     models: { sol: { provider: 'openai' } },
     routes: { standalone: { openai: { command: ['codex'] } } },
-    archetypes: { worker: { requires_write: true }, reviewer: { requires_write: false } },
+    archetypes: { worker: { }, reviewer: { } },
   });
   assert.deepEqual(profile.archetypes, {
-    worker: { requiresWrite: 'required', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null },
-    reviewer: { requiresWrite: 'none', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null },
+    worker: { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null },
+    reviewer: { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null },
   });
   assert.deepEqual(parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { openai: { command: ['x'] } } } }).archetypes, {});
 });
@@ -324,63 +325,18 @@ test('archetypes: strict validation names the offending path', () => {
   );
 });
 
-test('explainWriteConflict: one refusal, spoken identically by every enforcement point', () => {
-  const roProfile = parseDoc({
-    schema_version: 3,
-    models: { ro: { provider: 'anthropic' }, rw: { provider: 'openai' }, silent: { provider: 'openai' } },
-    routes: {
-      standalone: {
-        anthropic: { command: ['claude','-p'], write_access: false },
-        openai: { command: ['codex','exec'], write_access: true },
-      },
-    },
-    archetypes: { worker: { requires_write: 'required' }, reviewer: { requires_write: 'forbidden' } },
-  });
-  const roSpec = compileDialRef({ model: 'ro' }, roProfile).spec;
-  const rwSpec = compileDialRef({ model: 'rw' }, roProfile).spec;
-  const silentSpec = (() => {
-    const p = parseDoc({
-      schema_version: 3,
-      models: { silent: { provider: 'openai' } },
-      routes: { standalone: { openai: { command: ['codex'] } } },
-      archetypes: { worker: { requires_write: 'required' } },
-    });
-    return compileDialRef({ model: 'silent' }, p).spec;
-  })();
-  const conflict = explainWriteConflict({ executor: 'ro', spec: roSpec }, 'worker', roProfile);
-  assert.ok(conflict != null);
-  assert.match(conflict, /archetype "worker" declares `requires_write: required`, but executor "ro"/);
-  assert.match(conflict, /`write_access: false`/);
-  const hostProfile = parseDoc({
-    schema_version: 3,
-    models: { sol: { provider: 'openai' } },
-    routes: { standalone: { 'current-host': { host: true, command: ['claude','-p'], write_access: false } } },
-    archetypes: { worker: { requires_write: 'required' } },
-  });
-  const hostSpec = compileDialRef({ model: 'current-host' }, hostProfile).spec;
-  assert.ok(explainWriteConflict({ executor: 'current-host', spec: hostSpec }, 'worker', hostProfile) != null);
-
-  assert.equal(explainWriteConflict({ executor: 'rw', spec: rwSpec }, 'worker', roProfile), null);
-  assert.equal(explainWriteConflict({ executor: 'ro', spec: roSpec }, 'reviewer', roProfile), null);
-  assert.equal(explainWriteConflict({ executor: 'silent', spec: silentSpec }, 'worker', roProfile), null);
-  // forbidden × write
-  const forbidden = explainWriteConflict({ executor: 'rw', spec: rwSpec }, 'reviewer', roProfile);
-  assert.ok(forbidden != null);
-  assert.match(forbidden, /archetype "reviewer" declares `requires_write: forbidden`, but executor "rw"/);
-  assert.match(forbidden, /`write_access: true`/);
-});
 
 // --- pin v3 ---
 
 test('pin v3: write and read round-trip (dial keys sorted)', (t) => {
   const root = tempRepo(t);
   assert.deepEqual(readLocalDialState(root), { dials: {}, shadows: {}, legacyNote: null });
-  const state: LocalDialState = { dials: { generator: { model: 'gem', force_write_posture: true }, worker: { model: 'sol', effort: 'high' }, reviewer: { model: 'opus' } }, shadows: { worker: { model: 'kimi-k3', rate: 0.25 } }, legacyNote: null };
+  const state: LocalDialState = { dials: { generator: { model: 'gem' }, worker: { model: 'sol', effort: 'high' }, reviewer: { model: 'opus' } }, shadows: { worker: { model: 'kimi-k3', rate: 0.25 } }, legacyNote: null };
   const path = writeLocalDialState(root, state);
   assert.equal(path, join(root, DIALS_LOCAL_FILE));
   const text = read(root, DIALS_LOCAL_FILE);
-  assert.equal(text, '{"dials":{"generator":{"model":"gem","force_write_posture":true},"reviewer":"opus","worker":"sol@high"},"shadows":{"worker":{"model":"kimi-k3","rate":0.25}}}\n');
-  assert.deepEqual(readLocalDialState(root), { dials: { generator: { model: 'gem', force_write_posture: true }, worker: { model: 'sol', effort: 'high' }, reviewer: { model: 'opus' } }, shadows: { worker: { model: 'kimi-k3', rate: 0.25 } }, legacyNote: null });
+  assert.equal(text, '{"dials":{"generator":"gem","reviewer":"opus","worker":"sol@high"},"shadows":{"worker":{"model":"kimi-k3","rate":0.25}}}\n');
+  assert.deepEqual(readLocalDialState(root), { dials: { generator: { model: 'gem' }, worker: { model: 'sol', effort: 'high' }, reviewer: { model: 'opus' } }, shadows: { worker: { model: 'kimi-k3', rate: 0.25 } }, legacyNote: null });
   writeLocalDialState(root, { dials: {}, shadows: {}, legacyNote: null });
   assert.equal(exists(root, DIALS_LOCAL_FILE), false);
 });
@@ -471,30 +427,6 @@ test('cascade: fallback chain via archetypes', () => {
   assert.equal(direct.resolvedVia, null);
 });
 
-test('cascade: a forced posture marker stays scoped to its directly dialed archetype', () => {
-  const profile = parseDoc({
-    schema_version: 3,
-    models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['x'], write_access: true } } },
-    archetypes: {
-      generator: { requires_write: 'forbidden', fallback: 'worker' },
-      worker: { requires_write: 'required' },
-    },
-  });
-  const layers = {
-    session: {},
-    repo: {},
-    user: { worker: { model: 'sol', force_write_posture: true as const } },
-  };
-  const direct = resolveDialCascade('worker', 'worker', { bindings: {}, archetypes: profile.archetypes }, layers);
-  assert.equal(direct.ref.force_write_posture, true);
-  assert.equal(direct.resolvedVia, null);
-  const fallback = resolveDialCascade('generator', 'generator', { bindings: {}, archetypes: profile.archetypes }, layers);
-  assert.equal(fallback.ref.force_write_posture, true);
-  assert.equal(fallback.resolvedVia, 'worker');
-  assert.equal(forcesWritePosture(direct.ref, direct.resolvedVia), true);
-  assert.equal(forcesWritePosture(fallback.ref, fallback.resolvedVia), false);
-});
 
 test('cascade: prototype hardening (hasOwn)', () => {
   const profile = parseDoc({
@@ -541,7 +473,7 @@ test('serializeSnapshot v3 byte-stable and includes current-host always', () => 
     schema_version: 3,
     models: { sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' }, grok: { provider: 'xai', id: 'grok-4.6', effort: 'high' } },
     routes: { standalone: { openai: { command: ['codex','{model}'] }, xai: { command: ['grok','{model}'] } } },
-    archetypes: { worker: { requires_write: true } },
+    archetypes: { worker: { } },
     bindings: { my_role: 'sol@high' },
   });
   const t1 = serializeSnapshot(profile, [{ model: 'sol', effort: 'low' }]);
@@ -627,80 +559,3 @@ test('roleArchetype accessor', () => {
   assert.equal(roleArchetype(pb, 'ghost'), null);
 });
 
-test('route timeout_ms: parses, host rejection, snapshot preservation, and write-variant inheritance', () => {
-  const withTimeout = parseDoc({
-    schema_version: 3,
-    models: { sol: { provider: 'openai' }, grok: { provider: 'xai' } },
-    routes: {
-      standalone: {
-        openai: { command: ['codex'], timeout_ms: 1200000 },
-        xai: { command: ['grok'], timeout_ms: 600000 },
-      },
-    },
-  });
-  const solSpec = compileDialRef({ model: 'sol' }, withTimeout).spec as unknown as Record<string, unknown>;
-  const grokSpec = compileDialRef({ model: 'grok' }, withTimeout).spec as unknown as Record<string, unknown>;
-  assert.equal(solSpec.timeoutMs, 1200000);
-  assert.equal(grokSpec.timeoutMs, 600000);
-  // absent by default
-  const noTimeout = parseDoc({
-    schema_version: 3,
-    models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
-  });
-  const none = compileDialRef({ model: 'sol' }, noTimeout).spec as unknown as Record<string, unknown>;
-  assert.equal(none.timeoutMs, undefined);
-  // host route may not declare timeout_ms
-  assert.throws(
-    () => parseDoc({
-      schema_version: 3,
-      models: { sol: { provider: 'openai' } },
-      routes: { standalone: { 'current-host': { host: true, timeout_ms: 1000 } } },
-    }),
-    (err: unknown) => err instanceof ExecutorProfileError && /host route.*may not declare.*timeout_ms/.test(err.message),
-  );
-  // positive integer only
-  for (const bad of [0, -1, 1.5, '1000' as unknown as number, NaN, Infinity]) {
-    assert.throws(
-      () => parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { openai: { command: ['x'], timeout_ms: bad as unknown as number } } } }),
-      (err: unknown) => err instanceof ExecutorProfileError && /timeout_ms.*positive integer/.test(err.message),
-    );
-  }
-  // snapshot preserves timeout_ms and omits when absent
-  const snap = serializeSnapshot(withTimeout);
-  assert.match(snap, /timeout_ms: 1200000/);
-  assert.match(snap, /timeout_ms: 600000/);
-  const parsed = parseSnapshotDocument(snap, 'snap.yaml');
-  assert.equal((parsed.executors['sol'] as unknown as Record<string, unknown>).timeoutMs, 1200000);
-  assert.equal((parsed.executors['grok'] as unknown as Record<string, unknown>).timeoutMs, 600000);
-  const snap2 = serializeSnapshot(noTimeout);
-  assert.doesNotMatch(snap2, /timeout_ms/);
-  const parsed2 = parseSnapshotDocument(snap2, 'snap.yaml');
-  assert.equal((parsed2.executors['sol'] as unknown as Record<string, unknown>).timeoutMs, undefined);
-  // snapshot host rejection
-  assert.throws(
-    () => parseSnapshotDocument('snapshot_version: 3\nexecutors:\n  h:\n    adapter: host\n    model: m\n    reasoning_effort: high\n    agent_type: "*"\n    timeout_ms: 100\n', 'snap.yaml'),
-    (err: unknown) => err instanceof ExecutorProfileError && /host executor rejects.*timeout_ms/.test(err.message),
-  );
-  assert.throws(
-    () => parseSnapshotDocument('snapshot_version: 3\nexecutors:\n  c:\n    adapter: command\n    command: [x]\n    timeout_ms: 0\n', 'snap.yaml'),
-    /positive integer/,
-  );
-  // write-variant inherits timeoutMs via spread (checked via compile, not parseSnapshot)
-  const variantProfile = parseDoc({
-    schema_version: 3,
-    models: { sol: { provider: 'anthropic' } },
-    routes: {
-      standalone: {
-        anthropic: { command: ['claude', '-p'], write_access: false, timeout_ms: 900000, write_variant: { command: ['claude', '-p', '--permission-mode', 'acceptEdits'] } },
-      },
-    },
-    archetypes: { worker: { requires_write: 'required' } },
-  });
-  const variantSpec = compileDialRef({ model: 'sol' }, variantProfile).spec as unknown as Record<string, unknown>;
-  assert.equal(variantSpec.timeoutMs, 900000);
-  // applyWritePosture preserves timeoutMs across variant switch
-  const postured = applyWritePosture(variantSpec as unknown as import('../src/lib/executors.ts').ExecutorSpec, 'worker', variantProfile.archetypes);
-  assert.equal((postured.spec as unknown as Record<string, unknown>).timeoutMs, 900000);
-  assert.equal(postured.usedWriteVariant, true);
-});

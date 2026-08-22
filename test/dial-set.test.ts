@@ -27,15 +27,15 @@ function seedV3(t: TestContext, extra: Record<string, unknown> = {}): string {
     },
     routes: {
       standalone: {
-        openai: { command: ['node', '-e', '0'], write_access: true, models_command: ['echo', 'gpt-5.6-sol gpt-5.6-luna grok-4.6'] },
-        xai: { command: ['node', '-e', '0'], write_access: true, models_command: ['echo', 'grok-4.6 gpt-5.6-sol'] },
+        openai: { command: ['node', '-e', '0'], models_command: ['echo', 'gpt-5.6-sol gpt-5.6-luna grok-4.6'] },
+        xai: { command: ['node', '-e', '0'], models_command: ['echo', 'grok-4.6 gpt-5.6-sol'] },
         'current-host': { host: true },
       },
     },
     archetypes: {
-      worker: { requires_write: 'required' },
-      reviewer: { requires_write: 'none' },
-      judge: { requires_write: 'none' },
+      worker: { },
+      reviewer: { },
+      judge: { },
     },
     ...extra,
   };
@@ -207,7 +207,7 @@ test('repo pin: --repo writes via parseDocument preserving comments', (t) => {
   assert.match(text, /dials:/);
 });
 
-test('set-time refusals: @effort on host, write posture, forbidden eligibility', (t) => {
+test('set-time refusals: @effort on host, forbidden eligibility', (t) => {
   const root = seedV3(t, {
     models: {
       sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' },
@@ -215,12 +215,12 @@ test('set-time refusals: @effort on host, write posture, forbidden eligibility',
     },
     routes: {
       standalone: {
-        openai: { command: ['node', '-e', '0'], write_access: false },
+        openai: { command: ['node', '-e', '0'], },
         'current-host': { host: true },
       },
     },
     archetypes: {
-      worker: { requires_write: 'required' },
+      worker: { },
     },
   });
   // @effort on host: no longer refused — but what the pin DOES splits by
@@ -232,8 +232,9 @@ test('set-time refusals: @effort on host, write posture, forbidden eligibility',
   const hostEffort = runDialSet({ repoRoot: root, userPathOptions: isolatedUser(root), archetype: 'scout', model: 'current-host@high' });
   assert.ok(hostEffort.notes.some((n) => /has no command lane, so scout runs in-session at the session's own effort/.test(n)), JSON.stringify(hostEffort.notes));
   assert.ok(hostEffort.notes.every((n) => !/run `fadeno steering apply`/.test(n)), JSON.stringify(hostEffort.notes));
-  // write posture: worker requires_write but route is write_access false
-  assert.throws(() => runDialSet({ repoRoot: root, userPathOptions: onHarness('standalone'), archetype: 'worker', model: 'sol' }), (err: unknown) => err instanceof DialError && /requires_write: required/.test((err as Error).message));
+  // Write posture used to refuse here too. It no longer exists: a route is an
+  // argv, so dialing onto one is never a permissions question.
+  assert.doesNotThrow(() => runDialSet({ repoRoot: root, userPathOptions: onHarness('standalone'), archetype: 'worker', model: 'sol' }));
   // forbidden eligibility (need a write-compatible route for this test, so use different root)
   const root2 = seedV3(t, {
     models: {
@@ -242,7 +243,7 @@ test('set-time refusals: @effort on host, write posture, forbidden eligibility',
     },
     routes: {
       standalone: {
-        openai: { command: ['node', '-e', '0'], write_access: true },
+        openai: { command: ['node', '-e', '0'], },
         'current-host': { host: true },
       },
     },
@@ -284,11 +285,14 @@ test('set many: one model lands on several archetypes atomically', (t) => {
 });
 
 test('set many: one refused archetype refuses the whole command — nothing written', (t) => {
-  // grok's route is write-capable; generator forbids write. worker is fine.
+  // The all-or-nothing invariant, re-pinned on ELIGIBILITY. It used to be
+  // triggered by a write posture; that refusal no longer exists, but the
+  // property under test — a partial multi-set must write nothing — is
+  // unrelated to which predicate did the refusing.
   const root = seedV3(t, {
-    archetypes: {
-      worker: { requires_write: 'required' },
-      generator: { requires_write: 'forbidden' },
+    models: {
+      sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' },
+      grok: { provider: 'xai', id: 'grok-4.6', effort: 'high', eligibility: { generator: 'forbidden' } },
     },
   });
   const user = isolatedUser(root);
@@ -297,7 +301,7 @@ test('set many: one refused archetype refuses the whole command — nothing writ
     (err: unknown) =>
       err instanceof DialError &&
       /nothing was dialed — 1 of 2 archetype\(s\) refused/.test((err as Error).message) &&
-      /requires_write: forbidden/.test((err as Error).message),
+      /forbidden/.test((err as Error).message),
   );
   const shown = runDialShow({ repoRoot: root, userPathOptions: user });
   assert.equal(shown.dials.user.worker, undefined);

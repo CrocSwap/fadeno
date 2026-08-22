@@ -238,7 +238,6 @@ export interface DispatchEntry {
   promptSnapshot: string | null;
   promptSha256: string | null;
   relayAttested: boolean | null;
-  writeAccess: boolean | null;
   writeVariant: boolean | null;
   /**
    * Present on a kernel `dispatch_refused` row and on the steering hook's
@@ -340,15 +339,16 @@ export interface DispatchEntry {
    */
   workspaceModeDegraded: string | null;
   /**
-   * True when this arm's declared write posture could not be checked against
-   * the lane it ran on — the route never declared `write_access:`, so nothing
-   * verified whether it could write. Kernel-stamped as a TRUE-only flag, so
-   * `false` here means "not flagged", never "verified writable": a row from
-   * before the flag existed also reads false. Read by `fadeno bakeoff` as a
-   * confound, because an arm that silently could not write returns an empty
-   * diff that reads exactly like choosing to change nothing.
+   * The argv this dispatch actually ran, as recorded on its request row.
+   *
+   * Replaces the old `write_posture_unverified` flag, and answers a strictly
+   * larger question. That flag reported one bit about a CLAIM in the catalog;
+   * this is what was EXECUTED, so a bakeoff can compare two arms and see any
+   * capability skew between them — sandbox flags, tool allowlists, agent
+   * selection — rather than only whether someone declared a write posture.
+   * Null when the row predates the field or carried no command.
    */
-  writePostureUnverified: boolean;
+  command: string[] | null;
   /**
    * Set when a hardlink-carried path was written THROUGH (`carry_mutated`) —
    * one inode in two trees, so an arm may have altered the other's inputs.
@@ -662,7 +662,6 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     promptSnapshot: str(row.prompt_snapshot),
     promptSha256: str(row.prompt_sha256),
     relayAttested: bool(row.relay_attested),
-    writeAccess: bool(row.write_access),
     writeVariant: bool(row.write_variant),
     refusal: refusalOf(row.refusal),
     gateEligible: row.gate_eligible === false ? false : null,
@@ -691,7 +690,7 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     // `applyCompletion`.
     ignoredOutputDiscarded: null,
     workspaceModeDegraded: null,
-    writePostureUnverified: false,
+    command: null,
     carryMutated: null,
     outputBytes: num(row.output_bytes),
     diagnosticsSnapshot: str(row.diagnostics_snapshot),
@@ -739,7 +738,6 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     promptSnapshot: str(row.prompt_snapshot),
     promptSha256: str(row.prompt_sha256),
     relayAttested: null,
-    writeAccess: null,
     writeVariant: null,
     refusal: null,
     gateEligible: null,
@@ -768,7 +766,7 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     // build directory stays exactly where it was written.
     ignoredOutputDiscarded: null,
     workspaceModeDegraded: null,
-    writePostureUnverified: false,
+    command: null,
     carryMutated: null,
     outputBytes: null,
     diagnosticsSnapshot: null,
@@ -858,7 +856,6 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
     entry.workspaceChanged = row.workspace_changed;
   }
   entry.relayAttested = entry.relayAttested ?? bool(row.relay_attested);
-  entry.writeAccess = entry.writeAccess ?? bool(row.write_access);
   entry.writeVariant = entry.writeVariant ?? bool(row.write_variant);
   entry.model = entry.model ?? str(row.model);
   entry.modelId = entry.modelId ?? str(row.model_id);
@@ -894,7 +891,9 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
   // keeps re-committing (roadmap item 2). They are confounds, so a comparison
   // that cannot see them silently judges arms that never ran alike.
   entry.workspaceModeDegraded = entry.workspaceModeDegraded ?? str(row.workspace_mode_degraded);
-  if (row.write_posture_unverified === true) entry.writePostureUnverified = true;
+  if (Array.isArray(row.command) && row.command.every((c: unknown) => typeof c === 'string')) {
+    entry.command = entry.command ?? (row.command as string[]);
+  }
   if (typeof row.carry_mutated === 'boolean') entry.carryMutated = row.carry_mutated;
   else if (row.carry_mutated != null && entry.carryMutated == null) entry.carryMutated = true;
   const ob = num(row.output_bytes);
@@ -1000,12 +999,15 @@ export function renderDispatchLine(entry: DispatchEntry): string {
       else if (entry.outcome === 'empty') parts.push('NO OUTPUT');
       const code = `exit ${entry.exitCode ?? '?'}${entry.signal != null ? ` (${entry.signal})` : ''}`;
       parts.push(entry.durationMs != null ? `${code} in ${entry.durationMs}ms` : code);
-      // Exit-0 + write-capable + an explicit "nothing changed" attestation:
-      // the legible face of the exit-0 no-op. Rows that omit any of the
-      // three fields render unchanged — absent is not a claim.
+      // Exit-0 plus an explicit "nothing changed" attestation: the legible
+      // face of the exit-0 no-op. The old third term — "and the route claimed
+      // write_access: true" — is gone with the permissions system; a row that
+      // attests no change is making that claim itself, and `workspace_changed`
+      // is only ever written for a SHARED delivery that could have changed
+      // something. Rows omitting either field render unchanged: absent is not
+      // a claim.
       if (
         entry.exitCode === 0 &&
-        entry.writeAccess === true &&
         entry.workspaceChanged === false &&
         !entry.shadow
       ) {
@@ -1148,7 +1150,6 @@ export function renderDispatchLine(entry: DispatchEntry): string {
 
   if (entry.relayAttested != null) parts.push(`[relay_attested: ${entry.relayAttested}]`);
   if (entry.writeVariant === true) parts.push('[write variant]');
-  if (entry.writeAccess === false) parts.push('[write_access: none]');
   if (entry.gateEligible === false) parts.push('[shadow-only]');
   if (entry.error != null) parts.push(`[error: ${excerpt(entry.error, ERROR_EXCERPT)}]`);
   if (entry.promptSnapshot != null) parts.push(entry.promptSnapshot);

@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.49";
+  if (true) return "0.6.0-rc.50";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -14402,18 +14402,17 @@ function parseDialRef(raw, label) {
       out.via = map.via.trim();
     }
     if (map.force_write_posture !== void 0) {
-      if (map.force_write_posture !== true) {
-        throw new ExecutorProfileError(`${label} "force_write_posture" must be true when present.`);
-      }
-      out.force_write_posture = true;
+      throw new ExecutorProfileError(
+        `${label} "force_write_posture" is no longer supported \u2014 there is no write-posture guard left to override. See docs/experimental/permissions-and-isolation.md.`
+      );
     }
-    const unknown = Object.keys(map).filter((k) => k !== "model" && k !== "effort" && k !== "via" && k !== "force_write_posture");
+    const unknown = Object.keys(map).filter((k) => k !== "model" && k !== "effort" && k !== "via");
     if (unknown.length > 0) {
-      throw new ExecutorProfileError(`${label} has unknown key(s) ${unknown.join(", ")}; only model, effort, via, force_write_posture are allowed.`);
+      throw new ExecutorProfileError(`${label} has unknown key(s) ${unknown.join(", ")}; only model, effort, via are allowed.`);
     }
     return out;
   }
-  throw new ExecutorProfileError(`${label} must be a string "model[@effort]" or a mapping {model, effort?, via?, force_write_posture?}.`);
+  throw new ExecutorProfileError(`${label} must be a string "model[@effort]" or a mapping {model, effort?, via?}.`);
 }
 function formatDialRef(ref) {
   let base = ref.model;
@@ -14422,16 +14421,7 @@ function formatDialRef(ref) {
   return base;
 }
 function serializeDialRef(ref) {
-  if (ref.force_write_posture !== true) return formatDialRef(ref);
-  return {
-    model: ref.model,
-    ...ref.effort != null ? { effort: ref.effort } : {},
-    ...ref.via != null ? { via: ref.via } : {},
-    force_write_posture: true
-  };
-}
-function forcesWritePosture(ref, resolvedVia) {
-  return ref.force_write_posture === true && resolvedVia == null;
+  return formatDialRef(ref);
 }
 function deliveryIsHost(compiled) {
   return compiled.spec.adapter === "host";
@@ -14526,18 +14516,18 @@ function suggestCatalogKey(key) {
 function isMapping(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
-var WRITE_POSTURE_FORMS = 'true, false, "required", "forbidden", or "none"';
-function isWritePosture(value) {
-  return value === "required" || value === "forbidden" || value === "none";
-}
 var ARCHETYPE_POLICY_KEYS = [
+  // Deliberately still "known" so the tailored migration error below is the
+  // one a reader sees, instead of a generic unknown-key message that says
+  // nothing about WHY the key went away or what replaced it. It is refused
+  // either way; this only decides which explanation they get.
   "requires_write",
   "ignored_output",
   "fallback",
   "distinct_provider_from_inputs",
   "brief"
 ];
-var ARCHETYPE_POLICY_KEY_FORMS = "`requires_write`, `ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief`";
+var ARCHETYPE_POLICY_KEY_FORMS = "`ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief`";
 function unknownArchetypeKeys(rawPolicy) {
   return Object.keys(rawPolicy).filter((key) => !ARCHETYPE_POLICY_KEYS.includes(key));
 }
@@ -14652,38 +14642,11 @@ function parseExecutorProfile(text, source, harness = "standalone") {
           }
           route.command = cmd;
         }
-        if (rawRoute.write_access !== void 0) {
-          if (typeof rawRoute.write_access !== "boolean") {
-            throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}.write_access\` must be boolean.`);
-          }
-          route.write_access = rawRoute.write_access;
-        }
-        if (rawRoute.write_variant !== void 0 && rawRoute.write_variant !== null) {
-          const label = `routes.${harnessKey}.${routeKey}.write_variant`;
-          const rawVariant = rawRoute.write_variant;
-          if (!isMapping(rawVariant)) {
-            throw new ExecutorProfileError(`${source}: \`${label}\` must be a mapping with \`command\` (and optional \`resume\`).`);
-          }
-          const unknownVariantKeys = Object.keys(rawVariant).filter((k) => k !== "command" && k !== "resume");
-          if (unknownVariantKeys.length > 0) {
-            throw new ExecutorProfileError(`${source}: \`${label}\` has unknown key(s) ${unknownVariantKeys.join(", ")}; only \`command\` and \`resume\` are allowed.`);
-          }
-          const vcmd = rawVariant.command;
-          if (!Array.isArray(vcmd) || vcmd.length === 0 || !vcmd.every((p) => typeof p === "string" && p.length > 0)) {
-            throw new ExecutorProfileError(`${source}: \`${label}.command\` must be a non-empty string array.`);
-          }
-          const variant = { command: vcmd };
-          if (rawVariant.resume !== void 0 && rawVariant.resume !== null) {
-            const vrs = rawVariant.resume;
-            if (!Array.isArray(vrs) || vrs.length === 0 || !vrs.every((p) => typeof p === "string" && p.length > 0)) {
-              throw new ExecutorProfileError(`${source}: \`${label}.resume\` must be a non-empty string array.`);
-            }
-            if (!vrs.some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
-              throw new ExecutorProfileError(`${source}: \`${label}.resume\` must contain ${SESSION_ID_PLACEHOLDER}.`);
-            }
-            variant.resume = vrs;
-          }
-          route.write_variant = variant;
+        if (rawRoute.write_variant !== void 0 || rawRoute.write_access !== void 0) {
+          const key = rawRoute.write_variant !== void 0 ? "write_variant" : "write_access";
+          throw new ExecutorProfileError(
+            `${source}: \`routes.${harnessKey}.${routeKey}.${key}\` is no longer supported. A route is an argv and nothing more: declare the command you want to run, and express any restriction as a SEPARATE route with its own name so it is visible in the argv rather than in metadata. Containment is isolated worktrees, now the default for command dispatches \u2014 see docs/experimental/permissions-and-isolation.md.`
+          );
         }
         if (rawRoute.host !== void 0) {
           if (typeof rawRoute.host !== "boolean") {
@@ -14722,48 +14685,6 @@ function parseExecutorProfile(text, source, harness = "standalone") {
             throw new ExecutorProfileError(`${source}: host route \`routes.${harnessKey}.${routeKey}\` rejects command-session fields.`);
           }
         }
-        if (route.write_variant != null) {
-          if (route.host === true) {
-            throw new ExecutorProfileError(
-              `${source}: \`routes.${harnessKey}.${routeKey}\` declares \`write_variant\` on a \`host: true\` route \u2014 in-session delivery carries the host's own permissions, and the locked fallback lane replays the snapshotted base argv byte-for-byte, so no host lane can deliver a variant. Declare it on a command route.`
-            );
-          }
-          if (route.write_access !== false) {
-            throw new ExecutorProfileError(
-              `${source}: \`routes.${harnessKey}.${routeKey}\` declares \`write_variant\` but not \`write_access: false\` \u2014 a write variant exists to escalate a read-only delivery for \`requires_write: required\` archetypes; a route that can already write does not need one.`
-            );
-          }
-          if (route.command == null) {
-            throw new ExecutorProfileError(
-              `${source}: \`routes.${harnessKey}.${routeKey}\` declares \`write_variant\` but no \`command\` \u2014 the variant escalates a command delivery, so the base route must have one.`
-            );
-          }
-          if (JSON.stringify(route.write_variant.command) === JSON.stringify(route.command)) {
-            throw new ExecutorProfileError(
-              `${source}: \`routes.${harnessKey}.${routeKey}.write_variant.command\` is identical to the base command \u2014 the variant exists to change the delivery; an identical argv would stamp write_access: true onto a delivery that cannot write.`
-            );
-          }
-          const variantMintsId = route.write_variant.command.some((part) => part.includes(SESSION_ID_PLACEHOLDER));
-          if (route.write_variant.resume == null) {
-            if (variantMintsId) {
-              throw new ExecutorProfileError(
-                `${source}: \`routes.${harnessKey}.${routeKey}.write_variant.command\` contains ${SESSION_ID_PLACEHOLDER} but the variant declares no \`resume\` \u2014 the postured delivery would spawn the literal placeholder. Declare \`write_variant.resume\` or drop the placeholder from the variant command.`
-              );
-            }
-          } else {
-            const hasPattern = route.session_id_pattern != null;
-            if (variantMintsId && hasPattern) {
-              throw new ExecutorProfileError(
-                `${source}: \`routes.${harnessKey}.${routeKey}.write_variant\` declares both a ${SESSION_ID_PLACEHOLDER} placeholder in its command and inherits \`session_id_pattern\` \u2014 use one id source, not both.`
-              );
-            }
-            if (!variantMintsId && !hasPattern) {
-              throw new ExecutorProfileError(
-                `${source}: \`routes.${harnessKey}.${routeKey}.write_variant\` declares \`resume\` but no session id source \u2014 put ${SESSION_ID_PLACEHOLDER} in the variant command (engine-minted) or declare \`session_id_pattern\` on the route.`
-              );
-            }
-          }
-        }
         if (rawRoute.timeout_ms !== void 0) {
           const tm = rawRoute.timeout_ms;
           if (typeof tm !== "number" || !Number.isInteger(tm) || tm <= 0) {
@@ -14776,7 +14697,7 @@ function parseExecutorProfile(text, source, harness = "standalone") {
         if (route.host === true && route.timeout_ms != null) {
           throw new ExecutorProfileError(`${source}: host route \`routes.${harnessKey}.${routeKey}\` may not declare \`timeout_ms\` \u2014 host dispatch is not supervised.`);
         }
-        const unknownRouteKeys = Object.keys(rawRoute).filter((k) => !["driver", "models_command", "effort_encoding", "command", "write_access", "write_variant", "host", "resume", "session_id_pattern", "eligibility", "timeout_ms"].includes(k));
+        const unknownRouteKeys = Object.keys(rawRoute).filter((k) => !["driver", "models_command", "effort_encoding", "command", "host", "resume", "session_id_pattern", "eligibility", "timeout_ms"].includes(k));
         if (unknownRouteKeys.length > 0) {
           throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}\` has unknown key(s) ${unknownRouteKeys.join(", ")}.`);
         }
@@ -14836,12 +14757,10 @@ function parseExecutorProfile(text, source, harness = "standalone") {
       if (unknown.length > 0) {
         throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(", ")}; only ${ARCHETYPE_POLICY_KEY_FORMS} are allowed.`);
       }
-      let requiresWrite = "none";
       if (rawPolicy.requires_write !== void 0) {
-        if (rawPolicy.requires_write === true) requiresWrite = "required";
-        else if (rawPolicy.requires_write === false) requiresWrite = "none";
-        else if (isWritePosture(rawPolicy.requires_write)) requiresWrite = rawPolicy.requires_write;
-        else throw new ExecutorProfileError(`${source}: \`archetypes.${name}.requires_write\` must be ${WRITE_POSTURE_FORMS}.`);
+        throw new ExecutorProfileError(
+          `${source}: \`archetypes.${name}.requires_write\` is no longer supported. Fadeno does not enforce write permissions: a route is an argv, and a restriction belongs IN that argv \u2014 a separate route with its own name (e.g. \`--sandbox read-only\`) that a reader can see. Containment is isolated worktrees, now the default for command dispatches \u2014 see docs/experimental/permissions-and-isolation.md.`
+        );
       }
       const ignoredOutput = parseIgnoredOutput(rawPolicy.ignored_output, source, name);
       let fallback = null;
@@ -14868,7 +14787,7 @@ function parseExecutorProfile(text, source, harness = "standalone") {
         }
         brief = rawPolicy.brief;
       }
-      archetypes[name] = { requiresWrite, ignoredOutput, fallback, distinctProviderFromInputs, brief };
+      archetypes[name] = { ignoredOutput, fallback, distinctProviderFromInputs, brief };
     }
     for (const start of Object.keys(archetypes)) {
       const path = [];
@@ -15289,7 +15208,6 @@ function compileDialRef(ref, profile) {
         reasoningEffort: effectiveEffort2,
         agentType: "*",
         fallbackCommand: fallback,
-        writeAccess: route2?.write_access ?? null,
         eligibility: { ...eligibility },
         ...provider != null ? { provider } : {},
         ...driver2 ? { driver: driver2 } : {}
@@ -15309,9 +15227,7 @@ function compileDialRef(ref, profile) {
         model: modelId2,
         resume,
         sessionIdPattern: route2.session_id_pattern ?? null,
-        writeAccess: route2.write_access ?? null,
         ...route2.timeout_ms != null ? { timeoutMs: route2.timeout_ms } : {},
-        ...route2.write_variant != null ? { writeVariant: { command: subst(route2.write_variant.command), resume: route2.write_variant.resume != null ? subst(route2.write_variant.resume) : null } } : {},
         eligibility: { ...eligibility },
         ...provider != null ? { provider } : {},
         ...driver2 ? { driver: driver2 } : {}
@@ -15371,42 +15287,6 @@ function compileDialRef(ref, profile) {
   if (route.effort_encoding === "model-suffix" && effectiveEffort !== "default") modelId = `${ref.model}-${effectiveEffort}`;
   return buildDelivery(ref.model, modelId, effectiveEffort, null, driver, false, route, {});
 }
-function applyWritePosture(spec, archetype, archetypes) {
-  if (archetype == null || !Object.hasOwn(archetypes, archetype)) return { spec, usedWriteVariant: false };
-  if (archetypes[archetype].requiresWrite !== "required") return { spec, usedWriteVariant: false };
-  if (spec.writeAccess !== false) return { spec, usedWriteVariant: false };
-  if (spec.adapter !== "command") return { spec, usedWriteVariant: false };
-  const variant = spec.writeVariant;
-  if (variant == null) return { spec, usedWriteVariant: false };
-  const next = {
-    ...spec,
-    command: variant.command,
-    // A variant without its own resume does not advertise resumption: the
-    // base resume argv carries the base (read-only) permission mode.
-    resume: variant.resume ?? null,
-    sessionIdPattern: variant.resume != null ? spec.sessionIdPattern : null,
-    writeAccess: true
-  };
-  delete next.writeVariant;
-  return { spec: next, usedWriteVariant: true };
-}
-function hasWriteVariant(spec) {
-  return spec.adapter === "command" && spec.writeVariant != null;
-}
-function explainWriteConflict(delivery, archetype, profile, opts = {}) {
-  const includeOverrideAdvice = opts.includeOverrideAdvice ?? true;
-  if (archetype == null) return null;
-  if (!Object.hasOwn(profile.archetypes, archetype)) return null;
-  const posture = profile.archetypes[archetype].requiresWrite;
-  const host = delivery.spec.adapter === "host";
-  if (posture === "required" && delivery.spec.writeAccess === false && !hasWriteVariant(delivery.spec)) {
-    return `archetype "${archetype}" declares \`requires_write: required\`, but executor "${delivery.executor}" ` + (host ? "delivers through a host route whose command lane (`fallback_command`) is declared `write_access: false`, and a host route cannot declare a `write_variant` \u2014 in-session delivery carries the host's own permissions and the fallback lane replays the base argv byte-for-byte. " : "delivers through a command route declared `write_access: false`. ") + `It cannot mutate the workspace, so the dispatch would burn a run and end in a refusal. Fix: bind "${archetype}" to a write-capable executor` + (host ? " \u2014 `fadeno dial " + archetype + " <model> --via <driver>`, where an *-exec route is the command-lane counterpart of a host one \u2014 " : ", declare a `write_variant` on the route (a write-capable argv selected automatically for write-requiring archetypes), ") + `or run this ${archetype}-shaped task with the in-session ${archetype} agent.` + (includeOverrideAdvice ? " You can override this guard by rerunning the dial with `--force`, but doing so is not suggested because the executor may be unable to complete the work." : "");
-  }
-  if (posture === "forbidden" && delivery.spec.writeAccess === true) {
-    return `archetype "${archetype}" declares \`requires_write: forbidden\`, but executor "${delivery.executor}" delivers through a ${host ? "host" : "command"} route declared \`write_access: true\` \u2014 the dispatch would hand a mutating toolchain to work that must not mutate the workspace. Fix: bind "${archetype}" to a read-only route, clear the session dial (\`fadeno dial clear ${archetype}\`), or declare \`requires_write: none\`.` + (includeOverrideAdvice ? " You can override this guard by rerunning the dial with `--force`, but doing so is not suggested because it hands mutating capability to write-forbidden work." : "");
-  }
-  return null;
-}
 function eligibilityFor(spec, archetype) {
   if (typeof archetype !== "string") return "eligible";
   const map = spec.eligibility;
@@ -15417,32 +15297,14 @@ function eligibilityFor(spec, archetype) {
 function commandRoutable(spec) {
   return spec.adapter === "command" || spec.adapter === "host" && spec.fallbackCommand != null;
 }
-function explainPairRoutability(spec, executorName, archetype, profile) {
+function explainPairRoutability(spec, executorName) {
   if (!commandRoutable(spec)) {
     return {
       routable: false,
-      reason: `executor "${executorName}" has no command lane \u2014 a host delivery with no fallback_command has nothing for a pair to force both arms onto.`
-    };
-  }
-  const conflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile, {
-    includeOverrideAdvice: false
-  });
-  if (conflict != null) {
-    return {
-      routable: false,
-      reason: `${conflict} No pair forms here, and \`--force\` does not change that: forcing lets the PRIMARY proceed on that lane, but the challenger resolves its own lane and is not confined to it, so the two arms would not be equally able to do the work. The pair would measure the lanes rather than the models, and an empty diff from a crippled arm is not evidence about the model that produced it.`
+      reason: `executor "${executorName}" has no command lane \u2014 a host delivery with no fallback_command has nothing for a pair to move the primary onto.`
     };
   }
   return { routable: true };
-}
-function explainUnverifiedWritePosture(delivery, archetype, profile) {
-  if (archetype == null) return null;
-  if (!Object.hasOwn(profile.archetypes, archetype)) return null;
-  const posture = profile.archetypes[archetype].requiresWrite;
-  if (posture !== "required" && posture !== "forbidden") return null;
-  if (delivery.spec.writeAccess != null) return null;
-  if (!commandRoutable(delivery.spec)) return null;
-  return `archetype "${archetype}" declares \`requires_write: ${posture}\`, but executor "${delivery.executor}" delivers through a route that does not declare \`write_access:\` \u2014 so the posture is UNENFORCED here, not satisfied: nothing has checked whether that lane can write. If it cannot, this produces an empty diff that reads like a deliberate choice to change nothing. Fix: declare \`write_access: true\` or \`false\` on the route.`;
 }
 function pairRoutabilityFields(answer) {
   return answer.routable ? { routable: true, routable_reason: null } : { routable: false, routable_reason: answer.reason };
@@ -15515,11 +15377,6 @@ function parseExecutorSpecEntry(raw, label, source) {
     const target = typeof raw.target === "string" ? raw.target : void 0;
     const provider = typeof raw.provider === "string" ? raw.provider : void 0;
     const driver = typeof raw.driver === "string" ? raw.driver : void 0;
-    let writeAccess2 = null;
-    if (raw.write_access !== void 0) {
-      if (typeof raw.write_access !== "boolean") throw new ExecutorProfileError(`${source}: ${label} host executor has a non-boolean \`write_access\`.`);
-      writeAccess2 = raw.write_access;
-    }
     let eligibility2 = {};
     if (raw.eligibility !== void 0) {
       if (!isMapping(raw.eligibility)) throw new ExecutorProfileError(`${source}: ${label} host executor \`eligibility\` is not a mapping.`);
@@ -15528,9 +15385,6 @@ function parseExecutorSpecEntry(raw, label, source) {
         if (v !== "eligible" && v !== "shadow_only" && v !== "forbidden") throw new ExecutorProfileError(`${source}: ${label} host executor \`eligibility.${k}\` must be "eligible", "shadow_only", or "forbidden".`);
         eligibility2[k] = v;
       }
-    }
-    if (raw.write_variant !== void 0) {
-      throw new ExecutorProfileError(`${source}: ${label} host executor rejects \`write_variant\` \u2014 write variants are command-delivery only.`);
     }
     if (raw.timeout_ms !== void 0) {
       throw new ExecutorProfileError(`${source}: ${label} host executor rejects \`timeout_ms\` \u2014 host dispatch is not supervised.`);
@@ -15541,7 +15395,6 @@ function parseExecutorSpecEntry(raw, label, source) {
       reasoningEffort,
       agentType,
       fallbackCommand,
-      writeAccess: writeAccess2,
       eligibility: eligibility2,
       ...target != null ? { target } : {},
       ...provider != null ? { provider } : {},
@@ -15596,11 +15449,6 @@ function parseExecutorSpecEntry(raw, label, source) {
   } else if (sessionIdPattern != null || mintsId) {
     throw new ExecutorProfileError(`${source}: ${label} has a session id source but no \`resume\` \u2014 session-capable executors must declare how to resume.`);
   }
-  let writeAccess = null;
-  if (raw.write_access !== void 0) {
-    if (typeof raw.write_access !== "boolean") throw new ExecutorProfileError(`${source}: ${label} has a non-boolean \`write_access\`.`);
-    writeAccess = raw.write_access;
-  }
   let eligibility = {};
   if (raw.eligibility !== void 0) {
     if (!isMapping(raw.eligibility)) throw new ExecutorProfileError(`${source}: ${label} \`eligibility\` is not a mapping.`);
@@ -15618,40 +15466,10 @@ function parseExecutorSpecEntry(raw, label, source) {
     }
     timeoutMs = tm;
   }
-  let writeVariant = null;
   if (raw.write_variant != null) {
-    if (!isMapping(raw.write_variant)) {
-      throw new ExecutorProfileError(`${source}: ${label} \`write_variant\` is not a mapping.`);
-    }
-    const vcmd = raw.write_variant.command;
-    if (!Array.isArray(vcmd) || vcmd.length === 0 || !vcmd.every((part) => typeof part === "string" && part.length > 0)) {
-      throw new ExecutorProfileError(`${source}: ${label} \`write_variant.command\` must be a non-empty array of strings.`);
-    }
-    let vresume = null;
-    if (raw.write_variant.resume != null) {
-      const vrs = raw.write_variant.resume;
-      if (!Array.isArray(vrs) || vrs.length === 0 || !vrs.every((part) => typeof part === "string" && part.length > 0)) {
-        throw new ExecutorProfileError(`${source}: ${label} \`write_variant.resume\` must be a non-empty array of strings.`);
-      }
-      if (!vrs.some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
-        throw new ExecutorProfileError(`${source}: ${label} \`write_variant.resume\` must contain ${SESSION_ID_PLACEHOLDER}.`);
-      }
-      vresume = vrs;
-    }
-    const variantMintsId = vcmd.some((part) => part.includes(SESSION_ID_PLACEHOLDER));
-    if (vresume == null && variantMintsId) {
-      throw new ExecutorProfileError(`${source}: ${label} \`write_variant.command\` contains ${SESSION_ID_PLACEHOLDER} but the variant declares no \`resume\` \u2014 the postured delivery would spawn the literal placeholder.`);
-    }
-    if (vresume != null) {
-      const hasPattern = sessionIdPattern != null;
-      if (variantMintsId && hasPattern) {
-        throw new ExecutorProfileError(`${source}: ${label} \`write_variant\` declares both a ${SESSION_ID_PLACEHOLDER} placeholder and inherits \`session_id_pattern\` \u2014 one id source only.`);
-      }
-      if (!variantMintsId && !hasPattern) {
-        throw new ExecutorProfileError(`${source}: ${label} \`write_variant\` declares \`resume\` but no session id source.`);
-      }
-    }
-    writeVariant = { command: vcmd, resume: vresume };
+    throw new ExecutorProfileError(
+      `${source}: ${label} carries \`write_variant\`, which is no longer supported \u2014 this snapshot predates the permissions cut. Re-snapshot from the current catalog.`
+    );
   }
   const spec = {
     adapter: "command",
@@ -15659,9 +15477,7 @@ function parseExecutorSpecEntry(raw, label, source) {
     model: typeof raw.model === "string" ? raw.model : null,
     resume,
     sessionIdPattern,
-    writeAccess,
     ...timeoutMs != null ? { timeoutMs } : {},
-    ...writeVariant != null ? { writeVariant } : {},
     eligibility,
     ...typeof raw.target === "string" ? { target: raw.target } : {},
     ...typeof raw.provider === "string" ? { provider: raw.provider } : {},
@@ -15704,13 +15520,6 @@ function serializeSnapshot(profile, extraRefs = []) {
     if (spec.provider != null) entry.provider = spec.provider;
     if (spec.driver != null) entry.driver = spec.driver;
     if (spec.adapter === "command" && spec.model != null) entry.model = spec.model;
-    if (spec.writeAccess != null) entry.write_access = spec.writeAccess;
-    if (spec.adapter === "command" && spec.writeVariant != null) {
-      entry.write_variant = {
-        command: spec.writeVariant.command,
-        ...spec.writeVariant.resume != null ? { resume: spec.writeVariant.resume } : {}
-      };
-    }
     if (spec.eligibility != null && Object.keys(spec.eligibility).length > 0) {
       const sortedEligibility = {};
       for (const key of Object.keys(spec.eligibility).sort()) {
@@ -15739,7 +15548,6 @@ function serializeSnapshot(profile, extraRefs = []) {
     for (const name of Object.keys(profile.archetypes).sort()) {
       const policy = profile.archetypes[name];
       const entry = {};
-      if (policy.requiresWrite !== "none") entry.requires_write = policy.requiresWrite;
       if (policy.ignoredOutput !== "discardable") entry.ignored_output = policy.ignoredOutput;
       if (typeof policy.fallback === "string") entry.fallback = policy.fallback;
       if (policy.distinctProviderFromInputs != null) entry.distinct_provider_from_inputs = policy.distinctProviderFromInputs;
@@ -15797,12 +15605,10 @@ function parseSnapshotDocument(text, source) {
       if (!isMapping(rawPolicy)) throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` is not a mapping.`);
       const unknown = unknownArchetypeKeys(rawPolicy);
       if (unknown.length > 0) throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(", ")}.`);
-      let requiresWrite = "none";
       if (rawPolicy.requires_write !== void 0) {
-        if (rawPolicy.requires_write === true) requiresWrite = "required";
-        else if (rawPolicy.requires_write === false) requiresWrite = "none";
-        else if (isWritePosture(rawPolicy.requires_write)) requiresWrite = rawPolicy.requires_write;
-        else throw new ExecutorProfileError(`${source}: \`archetypes.${name}.requires_write\` must be ${WRITE_POSTURE_FORMS}.`);
+        throw new ExecutorProfileError(
+          `${source}: \`archetypes.${name}.requires_write\` is no longer supported. Fadeno does not enforce write permissions: a route is an argv, and a restriction belongs IN that argv \u2014 a separate route with its own name (e.g. \`--sandbox read-only\`) that a reader can see. Containment is isolated worktrees, now the default for command dispatches \u2014 see docs/experimental/permissions-and-isolation.md.`
+        );
       }
       const ignoredOutput = parseIgnoredOutput(rawPolicy.ignored_output, source, name);
       let fallback = null;
@@ -15821,7 +15627,7 @@ function parseSnapshotDocument(text, source) {
         if (typeof rawPolicy.brief !== "string" || !BARE_IDENTIFIER_RE.test(rawPolicy.brief)) throw new ExecutorProfileError(`${source}: \`archetypes.${name}.brief\` must be a bare lowercase identifier.`);
         brief = rawPolicy.brief;
       }
-      archetypes[name] = { requiresWrite, ignoredOutput, fallback, distinctProviderFromInputs, brief };
+      archetypes[name] = { ignoredOutput, fallback, distinctProviderFromInputs, brief };
     }
     for (const start of Object.keys(archetypes)) {
       const path = [];
@@ -19850,10 +19656,8 @@ function attemptPath(request) {
 function hostLeaseHolder(runId, dispatchId) {
   return { id: dispatchId, kind: "host-dispatch", runId, dispatchId };
 }
-function hostRequestNeedsLease(lookup) {
-  const profile = hostRequestProfile(lookup);
-  const spec = profile.executors[lookup.request.executor];
-  return spec?.writeAccess !== false;
+function hostRequestNeedsLease(_lookup) {
+  return true;
 }
 function releaseHostLease(repoRoot, runId, dispatchId) {
   try {
@@ -20994,10 +20798,6 @@ function provenanceFields(producers) {
     provider: producer.provider
   }));
 }
-function declaredWritePosture(profile, archetype) {
-  if (archetype == null || !Object.hasOwn(profile.archetypes, archetype)) return null;
-  return profile.archetypes[archetype].requiresWrite;
-}
 function appendEvidenceRow(repoRoot, row) {
   ensureFadenoIgnore(repoRoot);
   (0, import_node_fs15.mkdirSync)((0, import_node_path15.join)(repoRoot, ".fadeno"), { recursive: true });
@@ -21317,9 +21117,7 @@ function runDispatch(opts) {
       throw err;
     }
   }
-  const postured = applyWritePosture(delivery.spec, archetype, profile.archetypes);
-  const spec = postured.spec;
-  const usedWriteVariant = postured.usedWriteVariant;
+  const spec = delivery.spec;
   const executorName = delivery.refString;
   const laneDecision = decideLane({
     pinnedEffort: delivery.pinnedEffort,
@@ -21465,19 +21263,17 @@ ${prompt}`;
     return capturedBaselineMemo;
   };
   const pairCandidate = decidePairCandidate();
-  const canIsolate = pairCandidate != null && (() => {
+  const gitAvailable = (() => {
     const probe2 = (0, import_node_child_process5.spawnSync)("git", ["-C", repoRoot, "rev-parse", "--git-dir"], { encoding: "utf8" });
     return probe2.error == null && probe2.status === 0;
   })();
-  const workspaceMode = opts.isolate || canIsolate ? "isolated" : "shared";
-  const needsLease = workspaceMode === "shared" && spec.writeAccess !== false;
+  const workspaceMode = opts.shared === true ? "shared" : (opts.isolate || gitAvailable) && gitAvailable ? "isolated" : "shared";
+  const needsLease = workspaceMode === "shared";
   const commandSha256 = sha256Hex(JSON.stringify(command2));
   const producers = lookupInputProducers(repoRoot, producedByIds(opts));
   const dialField = { model: dial.model };
   if (dial.effort != null) dialField.effort = dial.effort;
   if (dial.via != null) dialField.via = dial.via;
-  const writePostureForced = forcesWritePosture(dial, resolvedVia);
-  if (writePostureForced) dialField.force_write_posture = true;
   const identity = {
     dispatch_id: dispatchId,
     ...tag != null ? { tag } : {},
@@ -21494,16 +21290,6 @@ ${prompt}`;
     ...delivery.provider != null ? { provider: delivery.provider } : {},
     transport,
     workspace_mode: workspaceMode,
-    ...spec.writeAccess != null ? { write_access: spec.writeAccess } : {},
-    // Recorded as an explicit TRUE-only flag rather than inferred later from a
-    // missing `write_access` key: absence of that key is ambiguous — it means
-    // "undeclared" on a new row and "written before the field existed" on an
-    // old one, and a bakeoff confound derived from an ambiguous absence would
-    // over-claim on historical pairs. A flag only ever written when we know it
-    // can only under-report, which is the safe direction.
-    ...explainUnverifiedWritePosture({ executor: executorName, spec }, archetype, profile) != null ? { write_posture_unverified: true } : {},
-    ...usedWriteVariant ? { write_variant: true } : {},
-    ...writePostureForced ? { write_posture_forced: true } : {},
     ...briefApplied != null ? { brief: briefApplied } : {},
     delivery_transport: deliveryTransport,
     prompt_source: promptSource,
@@ -21515,23 +21301,6 @@ ${prompt}`;
     ...producers.length > 0 ? { input_provenance: provenanceFields(producers) } : {}
   };
   const deliveryChoice = { executor: executorName, spec };
-  const writeConflict = explainWriteConflict(deliveryChoice, archetype, profile);
-  if (writeConflict != null && !writePostureForced) {
-    refuseDispatch(
-      repoRoot,
-      identity,
-      "write_posture",
-      hostLaneNote != null ? `${hostLaneNote}
-
-${writeConflict}` : writeConflict,
-      now
-    );
-  }
-  if (writeConflict != null && writePostureForced) {
-    opts.onEcho?.(
-      `WARNING: FORCED WRITE-POSTURE MISMATCH \u2014 dispatch is proceeding because this dial was set with --force. ${writeConflict}`
-    );
-  }
   const eligibilityConflict = explainEligibilityConflict(deliveryChoice, archetype);
   if (eligibilityConflict != null) {
     refuseDispatch(repoRoot, identity, "eligibility", eligibilityConflict, now);
@@ -21560,9 +21329,8 @@ ${writeConflict}` : writeConflict,
     model: delivery.model,
     model_id: delivery.modelId,
     transport: "command",
-    write_access: spec.writeAccess,
-    ...usedWriteVariant ? { write_variant: true } : {},
-    write_posture: declaredWritePosture(profile, archetype),
+    // What will actually run, not what the catalog claimed about it.
+    command: command2,
     dial: dialField,
     dial_source: ROW_RESOLUTION[source],
     dials: { session: sessionMap, repo: repoMap, user: userMap },
@@ -21592,7 +21360,7 @@ ${writeConflict}` : writeConflict,
     identity.gate_eligible = false;
   }
   const sourceLabel = source === "model-flag" ? "--model" : roleResolutionEchoLabel(source);
-  const echo = `${role ?? archetype ?? executorName} \u2192 ${executorName}${delivery.model != null ? ` (${delivery.model})` : ""} [${sourceLabel}]` + (usedWriteVariant ? " [write variant]" : "") + (spec.writeAccess === false ? " [write_access: none]" : "");
+  const echo = `${role ?? archetype ?? executorName} \u2192 ${executorName}${delivery.model != null ? ` (${delivery.model})` : ""} [${sourceLabel}]`;
   opts.onEcho?.(echo);
   opts.onEcho?.(`external sandbox: ${executorName} (${command2.join(" ")}) runs outside the current harness via ${transport}; evidence \u2192 ${DISPATCHES_FILE}`);
   if (hostLaneNote != null) opts.onEcho?.(hostLaneNote);
@@ -21742,9 +21510,9 @@ ${writeConflict}` : writeConflict,
       writeShadowRefusal("shadow_cap", `${live} shadow${live === 1 ? " is" : "s are"} already running and the live cap is ${cap} \u2014 raise FADENO_SHADOW_MAX_LIVE or let one finish.`);
       return null;
     }
-    const primaryRoutability = explainPairRoutability(spec, executorName, archetype, profile);
+    const primaryRoutability = explainPairRoutability(spec, executorName);
     if (!primaryRoutability.routable) {
-      writeShadowRefusal("shadow_write_posture", primaryRoutability.reason);
+      writeShadowRefusal("shadow_no_command_lane", primaryRoutability.reason);
       return null;
     }
     let shadowDelivery;
@@ -21770,19 +21538,12 @@ ${writeConflict}` : writeConflict,
       });
       return null;
     }
-    const shadowPostured = applyWritePosture(shadowDelivery.spec, archetype, profile.archetypes);
-    const shadowSpec = shadowPostured.spec;
-    const shadowUsedWriteVariant = shadowPostured.usedWriteVariant;
+    const shadowSpec = shadowDelivery.spec;
     const shadowRefString = shadowDelivery.refString;
     const eligibilityState = eligibilityFor(shadowSpec, archetype);
     if (eligibilityState === "forbidden") {
       const msg = explainEligibilityConflict({ executor: shadowRefString, spec: shadowSpec }, archetype) ?? `archetype "${archetype}" is forbidden on executor "${shadowRefString}".`;
       writeShadowRefusal("eligibility", msg, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: "command" });
-      return null;
-    }
-    const shadowWriteConflict = explainWriteConflict({ executor: shadowRefString, spec: shadowSpec }, archetype, profile);
-    if (shadowWriteConflict != null) {
-      writeShadowRefusal("write_posture", shadowWriteConflict, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: "command" });
       return null;
     }
     const sSessionMap = {};
@@ -21801,9 +21562,7 @@ ${writeConflict}` : writeConflict,
       model: shadowDelivery.model,
       model_id: shadowDelivery.modelId,
       transport: "command",
-      write_access: shadowSpec.writeAccess,
-      ...shadowUsedWriteVariant ? { write_variant: true } : {},
-      write_posture: declaredWritePosture(profile, archetype),
+      command: shadowSpec.adapter === "command" ? shadowSpec.command : null,
       dial: sDialField,
       dial_source: "shadow",
       dials: { session: sSessionMap, repo: sRepoMap, user: sUserMap },
@@ -21914,9 +21673,6 @@ ${writeConflict}` : writeConflict,
       driver: shadowDelivery.driver,
       ...shadowDelivery.provider != null ? { provider: shadowDelivery.provider } : {},
       transport: "command",
-      ...shadowSpec.writeAccess != null ? { write_access: shadowSpec.writeAccess } : {},
-      ...explainUnverifiedWritePosture({ executor: shadowRefString, spec: shadowSpec }, archetype, profile) != null ? { write_posture_unverified: true } : {},
-      ...shadowUsedWriteVariant ? { write_variant: true } : {},
       delivery_transport: "command",
       prompt_source: promptSource,
       prompt_snapshot: promptSnapshot,
@@ -22941,7 +22697,6 @@ function requestedEntry(row) {
     promptSnapshot: str(row.prompt_snapshot),
     promptSha256: str(row.prompt_sha256),
     relayAttested: bool(row.relay_attested),
-    writeAccess: bool(row.write_access),
     writeVariant: bool(row.write_variant),
     refusal: refusalOf(row.refusal),
     gateEligible: row.gate_eligible === false ? false : null,
@@ -22970,7 +22725,7 @@ function requestedEntry(row) {
     // `applyCompletion`.
     ignoredOutputDiscarded: null,
     workspaceModeDegraded: null,
-    writePostureUnverified: false,
+    command: null,
     carryMutated: null,
     outputBytes: num(row.output_bytes),
     diagnosticsSnapshot: str(row.diagnostics_snapshot),
@@ -23017,7 +22772,6 @@ function hostEntry(row) {
     promptSnapshot: str(row.prompt_snapshot),
     promptSha256: str(row.prompt_sha256),
     relayAttested: null,
-    writeAccess: null,
     writeVariant: null,
     refusal: null,
     gateEligible: null,
@@ -23046,7 +22800,7 @@ function hostEntry(row) {
     // build directory stays exactly where it was written.
     ignoredOutputDiscarded: null,
     workspaceModeDegraded: null,
-    writePostureUnverified: false,
+    command: null,
     carryMutated: null,
     outputBytes: null,
     diagnosticsSnapshot: null,
@@ -23090,7 +22844,6 @@ function applyCompletion(entry, row) {
     entry.workspaceChanged = row.workspace_changed;
   }
   entry.relayAttested = entry.relayAttested ?? bool(row.relay_attested);
-  entry.writeAccess = entry.writeAccess ?? bool(row.write_access);
   entry.writeVariant = entry.writeVariant ?? bool(row.write_variant);
   entry.model = entry.model ?? str(row.model);
   entry.modelId = entry.modelId ?? str(row.model_id);
@@ -23115,7 +22868,9 @@ function applyCompletion(entry, row) {
   entry.primaryMerge = entry.primaryMerge ?? primaryMergeOf(row.primary_merge);
   entry.ignoredOutputDiscarded = entry.ignoredOutputDiscarded ?? ignoredOutputDiscardedOf(row.ignored_output_discarded);
   entry.workspaceModeDegraded = entry.workspaceModeDegraded ?? str(row.workspace_mode_degraded);
-  if (row.write_posture_unverified === true) entry.writePostureUnverified = true;
+  if (Array.isArray(row.command) && row.command.every((c) => typeof c === "string")) {
+    entry.command = entry.command ?? row.command;
+  }
   if (typeof row.carry_mutated === "boolean") entry.carryMutated = row.carry_mutated;
   else if (row.carry_mutated != null && entry.carryMutated == null) entry.carryMutated = true;
   const ob = num(row.output_bytes);
@@ -23166,7 +22921,7 @@ function renderDispatchLine(entry) {
       else if (entry.outcome === "empty") parts.push("NO OUTPUT");
       const code = `exit ${entry.exitCode ?? "?"}${entry.signal != null ? ` (${entry.signal})` : ""}`;
       parts.push(entry.durationMs != null ? `${code} in ${entry.durationMs}ms` : code);
-      if (entry.exitCode === 0 && entry.writeAccess === true && entry.workspaceChanged === false && !entry.shadow) {
+      if (entry.exitCode === 0 && entry.workspaceChanged === false && !entry.shadow) {
         parts.push("[no workspace change]");
       }
     } else {
@@ -23228,7 +22983,6 @@ function renderDispatchLine(entry) {
   }
   if (entry.relayAttested != null) parts.push(`[relay_attested: ${entry.relayAttested}]`);
   if (entry.writeVariant === true) parts.push("[write variant]");
-  if (entry.writeAccess === false) parts.push("[write_access: none]");
   if (entry.gateEligible === false) parts.push("[shadow-only]");
   if (entry.error != null) parts.push(`[error: ${excerpt(entry.error, ERROR_EXCERPT)}]`);
   if (entry.promptSnapshot != null) parts.push(entry.promptSnapshot);
@@ -27440,17 +27194,13 @@ function resolveChain(ctx, role) {
   if (spec.adapter === "host" && spec.agentType === "*" && archetype != null) {
     spec = { ...spec, agentType: archetype };
   }
-  const postured = applyWritePosture(spec, archetype, ctx.profile.archetypes);
-  spec = postured.spec;
   const source = role == null && cascade.source === "binding" ? "base" : cascade.source;
   return {
     executor: refString,
     spec,
     source,
     resolvedVia: cascade.resolvedVia,
-    ref: cascade.ref,
-    usedWriteVariant: postured.usedWriteVariant,
-    writePostureForced: forcesWritePosture(cascade.ref, cascade.resolvedVia)
+    ref: cascade.ref
   };
 }
 function recordOverrides(ctx, binds) {
@@ -27485,12 +27235,11 @@ function effectiveBinding(ctx, role) {
     const archetype = key !== "*" ? roleArchetype(ctx.playbook, key) : null;
     let spec = spec0;
     if (spec.adapter === "host" && spec.agentType === "*" && archetype != null) spec = { ...spec, agentType: archetype };
-    const postured = applyWritePosture(spec, archetype, ctx.profile.archetypes);
-    return { executor: overridden, spec: postured.spec, usedWriteVariant: postured.usedWriteVariant, writePostureForced: false };
+    return { executor: overridden, spec };
   }
   try {
-    const { executor, spec, usedWriteVariant, writePostureForced } = resolveChain(ctx, role);
-    return { executor, spec, usedWriteVariant, writePostureForced };
+    const { executor, spec } = resolveChain(ctx, role);
+    return { executor, spec };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new DriveError(err.message);
     throw err;
@@ -27528,7 +27277,7 @@ function recordResolutionSnapshot(ctx) {
       continue;
     }
     try {
-      const { executor, spec, source, resolvedVia, usedWriteVariant, writePostureForced } = resolveChain(ctx, role);
+      const { executor, spec, source, resolvedVia } = resolveChain(ctx, role);
       const label = roleResolutionEchoLabel(source);
       const model = spec.model ?? (spec.adapter === "host" ? spec.model : null);
       const effort = spec.reasoningEffort ?? "default";
@@ -27545,13 +27294,11 @@ function recordResolutionSnapshot(ctx) {
         provider: provider ?? null,
         delivery,
         source,
-        resolved_via: resolvedVia,
-        ...usedWriteVariant ? { write_variant: true } : {},
-        ...writePostureForced ? { write_posture_forced: true } : {}
+        resolved_via: resolvedVia
       });
       const modelStr = model != null ? ` (${model})` : "";
       ctx.act(
-        `${role} \u2192 ${executor}${modelStr} [${label}]${usedWriteVariant ? " [write variant]" : ""}${writePostureForced ? " [FORCED write posture]" : ""}`
+        `${role} \u2192 ${executor}${modelStr} [${label}]`
       );
     } catch (err) {
       if (!(err instanceof ExecutorProfileError)) throw err;
@@ -27590,10 +27337,6 @@ function priorAttempts(events, actorCallId) {
     lastExecutor = typeof event.extra.executor === "string" ? event.extra.executor : null;
   }
   return { count, lastExecutor };
-}
-function declaredWritePosture2(profile, archetype) {
-  if (archetype == null || !Object.hasOwn(profile.archetypes, archetype)) return null;
-  return profile.archetypes[archetype].requiresWrite;
 }
 function playbookFlow(playbook) {
   return Array.isArray(playbook.flow) ? playbook.flow : [];
@@ -27719,7 +27462,7 @@ function beginCommandAttempt(ctx, stepId, role, generation, inBody, outputRel, a
     if (err instanceof PromptError) throw new DriveError(err.message);
     throw err;
   }
-  const { executor, spec, usedWriteVariant } = effectiveBinding(ctx, role);
+  const { executor, spec } = effectiveBinding(ctx, role);
   if (spec.adapter !== "command") {
     throw new DriveError(`host executor "${executor}" must be handled by the host dispatch protocol.`);
   }
@@ -27820,8 +27563,6 @@ ${repairCore}`;
     }
   }
   dispatched.supervisor_claim = claimRel;
-  if (spec.writeAccess != null) dispatched.write_access = spec.writeAccess;
-  if (usedWriteVariant) dispatched.write_variant = true;
   if (session != null) dispatched.session = session;
   if (sessionId != null) dispatched.session_id = sessionId;
   dispatched.engine_pid = process.pid;
@@ -27834,7 +27575,7 @@ ${repairCore}`;
 ${repairCore}`;
   }
   const workspaceMode = "shared";
-  const needsLease = spec.writeAccess !== false;
+  const needsLease = true;
   const leaseHolder = needsLease ? {
     id: `engine:${ctx.runId}:${ids.actorCallId}:a${attempt}`,
     kind: "engine",
@@ -28037,7 +27778,6 @@ ${repairCore}`;
     sessionId,
     executor,
     spec,
-    usedWriteVariant,
     leaseHolder,
     claimRel,
     claimAbs,
@@ -28548,13 +28288,6 @@ function dispatchOnce(ctx, stepId, role, generation, inBody, outputRel, artifact
 }
 function evaluateMemberPreflight(ctx, stepId, role, binding) {
   const archetype = role == null ? null : roleArchetype(ctx.playbook, role);
-  const writeConflict = explainWriteConflict({ executor: binding.executor, spec: binding.spec }, archetype, ctx.profile);
-  if (writeConflict != null && !binding.writePostureForced) {
-    return { ok: false, outcome: { kind: "write_conflict", detail: `${stepId}${role ? ` (${role})` : ""} was not dispatched: ${writeConflict}` }, reason: "write_access_denied", error: writeConflict, archetype, executor: binding.executor };
-  }
-  if (writeConflict != null && binding.writePostureForced) {
-    ctx.act(`WARNING: FORCED WRITE-POSTURE MISMATCH \u2014 ${stepId}${role ? ` (${role})` : ""} is proceeding because its dial was set with --force. ${writeConflict}`);
-  }
   const delivery = { executor: binding.executor, spec: binding.spec };
   const eligibilityConflict = explainEligibilityConflict(delivery, archetype);
   if (eligibilityConflict != null) {
@@ -28591,9 +28324,7 @@ function evaluateMemberPreflight(ctx, stepId, role, binding) {
     model: binding.spec.model ?? null,
     model_id: modelId,
     transport: "command",
-    write_access: binding.spec.writeAccess,
-    write_variant: binding.usedWriteVariant,
-    write_posture: declaredWritePosture2(ctx.profile, archetype),
+    command: binding.spec.adapter === "command" ? binding.spec.command : null,
     dial: dialRef,
     dial_source: dialSource,
     dials: { session: toRefStr(ctx.dialLayers.session), repo: toRefStr(ctx.dialLayers.repo), user: toRefStr(ctx.dialLayers.user) },
@@ -28625,7 +28356,7 @@ function runCommandWave(ctx, stepId, generation, inBody, members, parallel) {
       while (!stopAdmitting && inflight.length < parallel && queue.length > 0) {
         const head = queue[0];
         const binding = effectiveBinding(ctx, head.role);
-        const needsLease = binding.spec.writeAccess !== false;
+        const needsLease = true;
         if (needsLease && inflight.some((p) => p.leaseHolder != null)) {
           break;
         }
@@ -28977,6 +28708,9 @@ function drivePromptable(ctx, comp) {
     }
     return null;
   }
+  ctx.act(
+    `NOTE: --parallel ${ctx.parallel} currently serializes command members. Shared deliveries take the repo-wide writer lease, and since the permissions cut nothing can declare itself a non-writer. Host requests still interleave. Isolation with merge-back is what restores real concurrency.`
+  );
   const queue = [];
   const hostRequests = [];
   const hostNotes = [];
@@ -29113,7 +28847,7 @@ function drivePromptable(ctx, comp) {
           continue;
         }
         const binding = effectiveBinding(ctx, head.role);
-        const needsLease = binding.spec.writeAccess !== false;
+        const needsLease = true;
         if (needsLease && inflight.some((p) => p.leaseHolder != null)) break;
         if (needsLease) {
           const effectiveLease = (() => {
@@ -30140,7 +29874,6 @@ var NEUTRAL_HOST_EXECUTOR = "current-host";
 function isReferenceFrameNeutralHostRequest(request, spec) {
   return request.executor === NEUTRAL_HOST_EXECUTOR && request.agentType === "*" && spec.adapter === "host" && spec.agentType === "*" && spec.model === NEUTRAL_HOST_EXECUTOR;
 }
-var FORBIDDEN_HOST_ADVISORY = "This work is write-forbidden (requires_write: forbidden): produce artifacts in your reply only \u2014 do not edit, create, or commit workspace files.";
 function rootOf(opts) {
   return opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
 }
@@ -30192,9 +29925,6 @@ function decorateSteering(base, profile, resolvedVia, allowHostWithoutSurface = 
     } else {
       result.surface_archetype = surface;
     }
-  }
-  if (Object.hasOwn(profile.archetypes, result.archetype) && profile.archetypes[result.archetype].requiresWrite === "forbidden") {
-    result.advisory = FORBIDDEN_HOST_ADVISORY;
   }
   return result;
 }
@@ -30290,16 +30020,6 @@ function runLockedSteeringResolve(opts, archetype, role, hostExecutor) {
   if (eligibilityFor(executor, archetype) === "forbidden") {
     throw new SteeringError(
       `host dispatch "${dispatchId}" cannot specialize to archetype "${archetype}": executor "${request.executor}" declares it eligibility: forbidden.`
-    );
-  }
-  const writeConflict = explainWriteConflict(
-    { executor: request.executor, spec: executor },
-    archetype,
-    profile
-  );
-  if (writeConflict != null) {
-    throw new SteeringError(
-      `host dispatch "${dispatchId}" cannot specialize to archetype "${archetype}" because its snapshotted write posture is incompatible: ${writeConflict}`
     );
   }
   const matchesHost = hostExecutor === request.executor;
@@ -30450,7 +30170,6 @@ function runSteeringResolve(opts) {
   if (spec == null && compiled != null) spec = compiled.spec;
   if (spec == null) throw new SteeringError(`resolved dial "${refString}" has no compiled executor in profile`);
   if (spec.adapter === "host" && spec.agentType === "*" && archetype != null) spec = { ...spec, agentType: archetype };
-  spec = applyWritePosture(spec, archetype, profile.archetypes).spec;
   const attachment = shadows[archetype];
   let shadow;
   if (attachment != null) {
@@ -30469,11 +30188,8 @@ function runSteeringResolve(opts) {
       // be told, and must not read the silence as a "no".
       selected: rate == null ? true : digest2 ? shadowSampleRoll(digest2, archetype, challenger) < rate : null,
       // The PRIMARY's own resolved spec, after write-posture — what a
-      // selected pair would have to reuse to reach the command lane. Must
-      // also satisfy the archetype's write posture on that lane, not just
-      // have one: `commandRoutable` alone says a lane exists, not that
-      // forcing both arms onto it would actually work.
-      ...pairRoutabilityFields(explainPairRoutability(spec, refString, archetype, profile))
+      // selected pair would have to reuse to reach the command lane.
+      ...pairRoutabilityFields(explainPairRoutability(spec, refString))
     };
   }
   const pinnedEffort = compiled?.pinnedEffort ?? cascade.ref.effort ?? null;
@@ -30494,27 +30210,8 @@ function runSteeringResolve(opts) {
     commandLane: commandRoutable(spec)
   });
   const finish = (base) => decorateSteering({ ...lane, ...shadow != null ? { shadow } : {}, ...base }, profile, cascade.resolvedVia);
-  const refusal = (spec2, executorName) => {
-    const conflict = forcesWritePosture(cascade.ref, cascade.resolvedVia) ? null : explainWriteConflict({ executor: executorName, spec: spec2 }, archetype, profile);
-    if (conflict == null) return null;
-    return finish({
-      mode: "write_conflict",
-      archetype,
-      role,
-      executor: executorName,
-      adapter: spec2.adapter,
-      model: spec2.model ?? compiled?.model ?? null,
-      effort: compiled?.effectiveEffort ?? (spec2.adapter === "host" ? spec2.reasoningEffort : null),
-      driver: spec2.driver ?? compiled?.driver ?? null,
-      source: cascade.source,
-      dial: cascade.ref,
-      hostExecutor,
-      detail: conflict + detailNote,
-      writeConflict: conflict
-    });
-  };
   if (spec.adapter === "command") {
-    return refusal(spec, refString) ?? finish({
+    return finish({
       mode: "command",
       archetype,
       role,
@@ -30568,7 +30265,7 @@ function runSteeringResolve(opts) {
     });
   }
   if (lane.lane === "command") {
-    return refusal(spec, refString) ?? finish({
+    return finish({
       mode: "command",
       archetype,
       role,
@@ -30793,7 +30490,6 @@ function runSteeringApply(opts) {
       throw new SteeringError(`archetype "${archetype}" resolved to "${executorName}" but no executor exists in profile`);
     }
     if (spec.adapter === "host" && spec.agentType === "*") spec = { ...spec, agentType: archetype };
-    spec = applyWritePosture(spec, archetype, profile.archetypes).spec;
     const filename = scope === "user" ? `fadeno-${archetype}.toml` : `${archetype}.toml`;
     const path = (0, import_node_path26.join)(agentDir, filename);
     let body;
@@ -30812,17 +30508,6 @@ function runSteeringApply(opts) {
       };
       body = renderCodexHostAgent(archetype, executorName, spec, cliPath);
     } else {
-      const conflict = forcesWritePosture(cascade.ref, cascade.resolvedVia) ? null : explainWriteConflict({ executor: executorName, spec }, archetype, profile);
-      if (conflict != null) {
-        materialization2[archetype] = {
-          kind: "write-conflict",
-          adapter: "command",
-          executor: executorName,
-          model: spec.model,
-          writeConflict: conflict
-        };
-        continue;
-      }
       materialization2[archetype] = {
         kind: "command-broker",
         adapter: "command",
@@ -30940,7 +30625,6 @@ function runSteeringApplyClaude(opts) {
       throw new SteeringError(`archetype "${archetype}" resolved to "${executorName}" but no executor exists in profile`);
     }
     if (spec.adapter === "host" && spec.agentType === "*") spec = { ...spec, agentType: archetype };
-    spec = applyWritePosture(spec, archetype, profile.archetypes).spec;
     if (spec.adapter !== "host") {
       materialization2[archetype] = {
         kind: "command-broker",
@@ -31350,13 +31034,6 @@ function runDialSetMany(opts) {
       failures.push(`archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
       continue;
     }
-    if (compiled.spec.adapter === "command") {
-      const conflict = explainWriteConflict({ executor: refString, spec: compiled.spec }, archetype, profile);
-      if (conflict != null && opts.force !== true) {
-        failures.push(conflict);
-        continue;
-      }
-    }
     const eligibilityConflict = explainEligibilityConflict({ executor: refString, spec: compiled.spec }, archetype);
     if (eligibilityConflict != null) failures.push(eligibilityConflict);
   }
@@ -31405,24 +31082,6 @@ function providerNoveltyNote(params) {
 ${consequence}
 ${undo}`;
 }
-function unverifiedPostureNotes(params) {
-  const { profile, layers, archetype, challenger } = params;
-  const out = [];
-  try {
-    const resolved = resolveRole(archetype, archetype, profile, layers);
-    const postured = applyWritePosture(resolved.delivery.spec, archetype, profile.archetypes);
-    const primary = explainUnverifiedWritePosture(
-      { executor: resolved.delivery.refString, spec: postured.spec },
-      archetype,
-      profile
-    );
-    if (primary != null) out.push(primary);
-  } catch {
-  }
-  const chall = explainUnverifiedWritePosture(challenger, archetype, profile);
-  if (chall != null) out.push(chall);
-  return out;
-}
 function unroutablePrimaryNote(params) {
   const { profile, layers, archetype } = params;
   let resolved;
@@ -31431,13 +31090,7 @@ function unroutablePrimaryNote(params) {
   } catch {
     return null;
   }
-  const postured = applyWritePosture(resolved.delivery.spec, archetype, profile.archetypes);
-  const routability = explainPairRoutability(
-    postured.spec,
-    resolved.delivery.refString,
-    archetype,
-    profile
-  );
+  const routability = explainPairRoutability(resolved.delivery.spec, resolved.delivery.refString);
   if (routability.routable) return null;
   return `WARNING: NO PAIR POSSIBLE \u2014 ${archetype}'s primary (${resolved.delivery.refString}) cannot carry a pair, so this shadow attachment can never be sampled and every dispatch will silently run unpaired.
 ${routability.reason}`;
@@ -31473,23 +31126,11 @@ function runDialSet(opts) {
     throw err;
   }
   const refString = formatDialRef(dial);
-  const writeConflict = compiled.spec.adapter === "command" ? explainWriteConflict({ executor: refString, spec: compiled.spec }, archetype, profile) : null;
-  if (writeConflict != null && opts.force !== true) throw new DialError(writeConflict);
-  if (writeConflict != null) dial.force_write_posture = true;
   const eligibilityConflict = explainEligibilityConflict({ executor: refString, spec: compiled.spec }, archetype);
   if (eligibilityConflict != null) throw new DialError(eligibilityConflict);
-  const unverifiedPosture = explainUnverifiedWritePosture({ executor: refString, spec: compiled.spec }, archetype, profile);
   let verification = null;
   let probeNote = null;
   const notes = [];
-  if (unverifiedPosture != null) notes.push(`WARNING: WRITE POSTURE UNENFORCED \u2014 ${unverifiedPosture}`);
-  if (writeConflict != null) {
-    notes.push(
-      `WARNING: FORCED WRITE-POSTURE MISMATCH \u2014 ${archetype} \u2192 ${refString}
-${writeConflict}
-The override is persisted with this dial and applies at dispatch time. Clear or replace the dial to remove it.`
-    );
-  }
   if (dial.effort != null && deliveryIsHost(compiled)) {
     if (hostEffortIsMaterializable(profile.harness ?? "standalone")) {
       notes.push(
@@ -31500,22 +31141,8 @@ The override is persisted with this dial and applies at dispatch time. Clear or 
         `note: ${compiled.driver} host route \u2014 a ${profile.harness ?? "host"} agent carries no effort and this route has no command lane, so ${archetype} runs in-session at the session's own effort and the ${compiled.effectiveEffort} pin has no effect. \`fadeno steering apply\` writes nothing here.`
       );
     } else {
-      const stranded = explainWriteConflict(
-        { executor: refString, spec: applyWritePosture(compiled.spec, archetype, profile.archetypes).spec },
-        archetype,
-        profile
-      );
       notes.push(
-        `note: ${compiled.driver} host route \u2014 a ${profile.harness ?? "host"} agent carries no effort, so pinning ${compiled.effectiveEffort} selects the DELIVERY LANE instead: ${archetype} leaves the session for this route's command lane whenever the session is running at a different effort. \`fadeno steering apply\` writes nothing here.` + (stranded != null ? `
-WARNING: that command lane cannot deliver ${archetype} \u2014 ${stranded}` : "")
-      );
-    }
-  }
-  {
-    const postured = applyWritePosture(compiled.spec, archetype, profile.archetypes);
-    if (postured.usedWriteVariant) {
-      notes.push(
-        `note: ${archetype} requires write \u2014 ${refString} delivers through the ${compiled.driver} route's write variant`
+        `note: ${compiled.driver} host route \u2014 a ${profile.harness ?? "host"} agent carries no effort, so pinning ${compiled.effectiveEffort} selects the DELIVERY LANE instead: ${archetype} leaves the session for this route's command lane whenever the session is running at a different effort. \`fadeno steering apply\` writes nothing here.`
       );
     }
   }
@@ -31795,10 +31422,6 @@ function runDialShadow(opts) {
     throw new DialError(`shadow for "${archetype}" must be a command delivery \u2014 host shadows are not dispatchable`);
   }
   const refString = formatDialRef(dial);
-  if (compiled.spec.adapter === "command") {
-    const conflict = explainWriteConflict({ executor: refString, spec: compiled.spec }, archetype, profile);
-    if (conflict != null) throw new DialError(conflict);
-  }
   const eligibility = eligibilityFor(compiled.spec, archetype);
   if (eligibility === "forbidden") {
     const conflict = explainEligibilityConflict({ executor: refString, spec: compiled.spec }, archetype);
@@ -31835,15 +31458,6 @@ function runDialShadow(opts) {
   {
     const unroutable = unroutablePrimaryNote({ profile, layers: shadowLayers, archetype });
     if (unroutable != null) notes.push(unroutable);
-  }
-  {
-    const unverified = unverifiedPostureNotes({
-      profile,
-      layers: shadowLayers,
-      archetype,
-      challenger: { executor: refString, spec: compiled.spec }
-    });
-    for (const note of unverified) notes.push(`WARNING: WRITE POSTURE UNENFORCED \u2014 ${note}`);
   }
   const previous = state.shadows[archetype] ?? null;
   const nextShadows = { ...state.shadows, [archetype]: rate == null ? { model: dial.model, ...dial.effort ? { effort: dial.effort } : {}, ...dial.via ? { via: dial.via } : {} } : { model: dial.model, ...dial.effort ? { effort: dial.effort } : {}, ...dial.via ? { via: dial.via } : {}, rate } };
@@ -31964,8 +31578,6 @@ function runDialShow(opts = {}) {
       continue;
     }
     const adapter = compiled.spec.adapter;
-    const postured = applyWritePosture(compiled.spec, archetype, profile.archetypes);
-    const writePostureForced = forcesWritePosture(cascade.ref, cascade.resolvedVia);
     const effort = compiled.effectiveEffort;
     let modelDisplay = compiled.model;
     if (compiled.pinnedEffort != null) {
@@ -31987,8 +31599,6 @@ function runDialShow(opts = {}) {
       dial: cascade.ref,
       refString: compiled.refString,
       adapter,
-      ...postured.usedWriteVariant ? { write_variant: true } : {},
-      ...writePostureForced ? { write_posture_forced: true } : {},
       modelDisplay
     };
     const elig = eligibilityFor(compiled.spec, archetype);
@@ -32074,8 +31684,7 @@ function runDialResolve(opts) {
     if (err instanceof ExecutorProfileError) throw new DialError(err.message);
     throw err;
   }
-  const postured = applyWritePosture(resolved.delivery.spec, archetype, profile.archetypes);
-  const spec = postured.spec;
+  const spec = resolved.delivery.spec;
   const eligibility = eligibilityFor(spec, archetype);
   const attachment = dialState.shadows[archetype];
   let shadow;
@@ -32095,12 +31704,9 @@ function runDialResolve(opts) {
       // be told, and must not read the silence as a "no".
       selected: rate == null ? true : digest2 ? shadowSampleRoll(digest2, archetype, challenger) < rate : null,
       // The PRIMARY's own resolved spec — `spec` above, after write-posture —
-      // not the challenger's. This is what a selected pair would have to
-      // reuse to reach the command lane, and that lane must also satisfy the
-      // archetype's write posture, not merely exist.
-      ...pairRoutabilityFields(
-        explainPairRoutability(spec, resolved.delivery.refString, archetype, profile)
-      )
+      // not the challenger's: this is what a selected pair would have to reuse
+      // to reach the command lane.
+      ...pairRoutabilityFields(explainPairRoutability(spec, resolved.delivery.refString))
     };
   }
   const relay = (() => {
@@ -32132,24 +31738,17 @@ function runDialResolve(opts) {
     harness,
     source: resolved.source,
     ...resolved.resolvedVia != null ? { resolved_via: resolved.resolvedVia } : {},
-    ...postured.usedWriteVariant ? { write_variant: true } : {},
-    ...forcesWritePosture(resolved.delivery.ref, resolved.resolvedVia) ? { write_posture_forced: true } : {},
     ...eligibility !== "eligible" ? { eligibility } : {},
     dial: resolved.delivery.ref,
     delivery: deliveryGuidance(
       archetype,
       resolved.delivery.refString,
       spec,
-      // Eligibility FIRST, and never force-overridable: the kernel refuses it
-      // outright (`explainEligibilityConflict`, no force branch), so a resolve
-      // that answers "Dispatch it" for a forbidden pairing is guidance walking
-      // straight into that refusal — the same defect this argument was added
-      // to fix for write posture, which eligibility never got.
-      //
-      // Then the same guard the kernel and `steering resolve` apply: a dial
-      // set with `--force` has already overridden the POSTURE on purpose, and
-      // re-asserting it here would refuse what the user explicitly forced.
-      explainEligibilityConflict({ executor: resolved.delivery.refString, spec }, archetype) ?? (forcesWritePosture(resolved.delivery.ref, resolved.resolvedVia) ? null : explainWriteConflict({ executor: resolved.delivery.refString, spec }, archetype, profile))
+      // The kernel refuses a forbidden pairing outright, so a resolve that
+      // answers "Dispatch it" here would be guidance walking into that
+      // refusal. Eligibility is the only conflict left that is knowable at
+      // resolve time — permissions are no longer Fadeno's to judge.
+      explainEligibilityConflict({ executor: resolved.delivery.refString, spec }, archetype)
     ),
     relay: relay != null ? { ref: relay.refString, model_id: relay.modelId, effort: relay.effort } : null,
     ...shadow != null ? { shadow } : {}
@@ -32249,8 +31848,7 @@ function runModels(opts = {}) {
     try {
       const compiled = compileDialRef({ model: name }, profile);
       const adapter = compiled.spec.adapter;
-      const writeVariant = adapter === "command" && compiled.spec.writeVariant != null;
-      const fadenoCapable = writeVariant && compiled.spec.writeVariant.command.some((part) => part.includes("Bash(fadeno:"));
+      const fadenoCapable = adapter === "command" && compiled.spec.command.some((part) => part.includes("Bash(fadeno:"));
       const verified = verifications.find((v) => v.driver === compiled.driver && v.model === compiled.modelId);
       homeDriver = compiled.driver;
       row = {
@@ -32263,7 +31861,6 @@ function runModels(opts = {}) {
         home_via: modelVia,
         adapter,
         native: adapter === "host",
-        write_variant: writeVariant,
         fadeno_capable: fadenoCapable,
         eligibility: { ...entry.eligibility },
         spellings: { ...entry.spellings },
@@ -32282,7 +31879,6 @@ function runModels(opts = {}) {
         home_via: modelVia,
         adapter: null,
         native: false,
-        write_variant: false,
         fadeno_capable: false,
         eligibility: { ...entry.eligibility },
         spellings: { ...entry.spellings },
@@ -32296,14 +31892,12 @@ function runModels(opts = {}) {
       try {
         const laneCompiled = compileDialRef({ model: name, via: alias }, profile);
         const laneAdapter = laneCompiled.spec.adapter;
-        const laneWrite = laneAdapter === "command" && laneCompiled.spec.writeVariant != null;
-        const laneFadeno = laneWrite && laneCompiled.spec.writeVariant.command.some((part) => part.includes("Bash(fadeno:"));
+        const laneFadeno = laneAdapter === "command" && laneCompiled.spec.command.some((part) => part.includes("Bash(fadeno:"));
         lanes.push({
           via: alias,
           id: laneCompiled.modelId,
           adapter: laneAdapter,
           delivery: alias,
-          write_variant: laneWrite,
           fadeno_capable: laneFadeno
         });
       } catch {
@@ -35112,7 +34706,7 @@ var COMMANDS = {
   "new-run": command({ "--input": { kind: "input" } }, ["playbook", "free"]),
   models: command({ "--driver": { kind: "free" }, "--json": NONE }, ["executor"]),
   dial: command(
-    { "--via": { kind: "free" }, "--session": NONE, "--user": NONE, "--repo": NONE, "--force": NONE, "--rate": { kind: "free" }, "--archetype": { kind: "archetype" }, "--json": NONE },
+    { "--via": { kind: "free" }, "--session": NONE, "--user": NONE, "--repo": NONE, "--rate": { kind: "free" }, "--archetype": { kind: "archetype" }, "--json": NONE },
     ["archetype", "free"],
     {
       clear: command({ "--session": NONE, "--user": NONE, "--repo": NONE }, ["archetype"]),
@@ -35154,6 +34748,7 @@ var COMMANDS = {
       "--shadow": { kind: "free" },
       "--timeout": { kind: "free" },
       "--isolate": NONE,
+      "--shared": NONE,
       "--ignored-output": { kind: "enum", values: ["kept", "discardable"] },
       "--no-brief": NONE,
       "--diagnostics": NONE
@@ -35907,6 +35502,27 @@ function confoundsOf(primary, shadow) {
     out.push({ code, arm, detail: detail2 });
   };
   const pairs = [["primary", primary], ["challenger", shadow]];
+  if (primary?.command != null && shadow?.command != null) {
+    const scrub = (argv, e) => {
+      const vary = new Set(
+        [e.model, e.modelId, e.reasoningEffort, e.attestedEffort].filter(
+          (v) => typeof v === "string" && v.length > 0
+        )
+      );
+      return argv.filter((tok) => !vary.has(tok) && ![...vary].some((v) => tok.includes(v)));
+    };
+    const a = scrub(primary.command, primary);
+    const b = scrub(shadow.command, shadow);
+    if (JSON.stringify(a) !== JSON.stringify(b)) {
+      const onlyPrimary = a.filter((t) => !b.includes(t));
+      const onlyChallenger = b.filter((t) => !a.includes(t));
+      push(
+        "capability_skew",
+        "pair",
+        "the two arms ran DIFFERENT argvs beyond model and effort, so this comparison may measure the commands rather than the models" + (onlyPrimary.length > 0 ? ` \u2014 only primary: ${onlyPrimary.join(" ")}` : "") + (onlyChallenger.length > 0 ? ` \u2014 only challenger: ${onlyChallenger.join(" ")}` : "")
+      );
+    }
+  }
   for (const [arm, entry] of pairs) {
     if (entry == null) continue;
     if (entry.refusal != null) push("arm_refused", arm, `${entry.refusal.predicate}: ${entry.refusal.message}`);
@@ -35921,13 +35537,6 @@ function confoundsOf(primary, shadow) {
     }
     if (entry.workspaceModeDegraded != null) {
       push("workspace_mode_degraded", arm, String(entry.workspaceModeDegraded));
-    }
-    if (entry.writePostureUnverified) {
-      push(
-        "write_posture_unverified",
-        arm,
-        "this arm ran on a lane that never declared `write_access:`, so its archetype's write posture was never checked \u2014 an empty or thin diff here is NOT evidence the model chose to change little."
-      );
     }
     if (entry.carryMutated != null) {
       push("carry_mutated", arm, "a carried path was written through \u2014 one inode, two trees; the arms may have contaminated each other.");
@@ -37846,7 +37455,7 @@ function runStatus(opts = {}) {
   for (const archetype of archetypes) {
     try {
       const resolved = resolveRole(archetype, archetype, profile, layers);
-      const spec = applyWritePosture(resolved.delivery.spec, archetype, profile.archetypes).spec;
+      const spec = resolved.delivery.spec;
       roles.push({
         archetype,
         executor: resolved.delivery.refString,
@@ -38084,9 +37693,11 @@ function runDoctor(opts = {}) {
     try {
       const { profile } = loadLayeredProfile(repoRoot, opts.userPathOptions ?? {});
       const referenced = /* @__PURE__ */ new Set([
-        "worker",
-        "reviewer",
-        "judge",
+        // Every archetype Fadeno itself ships. A typo lands in a project or
+        // user layer, never in the built-in catalog, so treating the shipped
+        // names as referenced is what keeps this lint from firing on Fadeno's
+        // own `director` policy.
+        ...ARCHETYPE_DISPLAY_ORDER,
         ...Object.keys(profile.dials ?? {}),
         ...Object.keys(dials.session),
         ...Object.keys(dials.user),
@@ -38914,7 +38525,7 @@ Usage:
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
   fadeno dial                                  # effective table
   fadeno dial <archetype>                      # one archetype's row (+shadow)
-  fadeno dial <archetype>[+<archetype>\u2026] <model>[@effort] [--via <driver>] [--session|--user|--repo] [--force]   # set (multi: a+b, a,b, or a b c)
+  fadeno dial <archetype>[+<archetype>\u2026] <model>[@effort] [--via <driver>] [--session|--user|--repo]   # set (multi: a+b, a,b, or a b c)
   fadeno dial clear [<archetype>] [--session|--user|--repo]
   fadeno dial shadow <archetype> <model>[@effort] [--via <driver>] [--rate <r>]
   fadeno dial shadow                           # show mode: archetypes with an active shadow
@@ -38994,7 +38605,8 @@ Options:
   --no-record             (prompt) Preview only: write no snapshot or event
   --bind <role=executor>  (drive) Session executor override for a role (repeatable; recorded)
   --max-transitions <n>   (drive) Engine transition cap per invocation (default 50)
-  --parallel <n>          (drive) Max concurrent command deliveries per wave (1\u201316, default 1)
+  --parallel <n>          (drive) Max concurrent deliveries per wave (1\u201316, default 1). Command members
+                          currently SERIALIZE regardless \u2014 see fadeno drive --help
   --timeout <seconds>     (drive/dispatch) Hard deadline seconds; 0 disables route default (20 min)
   --input <Name=path>     (new-run) Supply a declared input (repeatable)
   --via <driver>          (dial/dispatch) Driver alias that delivers the model; on dispatch it
@@ -39002,7 +38614,6 @@ Options:
   --session               (dial) Write/clear this checkout's session dial
   --user                  (dial) Write/clear the user default
   --repo                  (dial) Write/clear the repo pin (committed)
-  --force                 (dial set) Persist a discouraged write-posture mismatch override
   --archetype <a>         (dispatch) Archetype to resolve (required unless --model)
   --role <name>           (dispatch) Role name: enables binding pins + evidence attribution
   --model <ref>           (dispatch) Bypass resolution and invoke a dial ref directly (debugging)
@@ -39013,7 +38624,8 @@ Options:
   --tag <t>               (dispatch) Label the dispatch for recovery (dispatches --output tag:<t>)
   --shadow <ref>          (dispatch) Duplicate the prompt to a one-shot shadow challenger
                           (FADENO_SHADOW_MAX_LIVE caps concurrent challengers; default 4)
-  --isolate               (dispatch) Run in a detached worktree (preserves diff, bypasses shared-writer lease)
+  --isolate               (dispatch) Force a detached worktree (already the default where git allows)
+  --shared                (dispatch) Opt OUT of isolation and run in this tree (nothing contains the executor)
   --ignored-output <kept|discardable>  (dispatch) Whether this task's gitignored output must survive; kept forgoes a shadow pair
   --diagnostics           (dispatch/drive) Persist bounded process output (32 KiB / 500 lines) to diagnostics log
   --no-brief              (dispatch) Skip the archetype's declared brief preamble
@@ -39229,7 +38841,6 @@ Options:
   --session        Write/clear the local session dial (this checkout only)
   --user           Write/clear the user default (applies across your repos)
   --repo           Write/clear the repo pin (committed to .fadeno/executors.yaml)
-  --force          Set despite a write-posture mismatch (persisted, discouraged)
   --rate <r>       (shadow) Sampling rate in [0,1]
   --prompt-sha256 <hex>
                    (resolve) Prompt digest, so the reply carries the pair decision
@@ -39241,18 +38852,18 @@ The cascade: role binding \u2192 session dial \u2192 repo pin \u2192 user dial \
 A plain set updates the highest existing dial (session \u2192 repo \u2192 user), or creates
 a user default when none exists. --session, --user, or --repo makes scope explicit.
 Unregistered models fall through to the catalog's unregistered_model_driver.
-A write-requiring archetype resolving onto a read-only route delivers through the
-route's declared write_variant automatically; adapter selection stays internal.
-Write-posture mismatches refuse by default. A deliberate \`--force\` persists an
-override on that dial, prints a prominent warning, and is honored at dispatch;
-eligibility and other constraints are not bypassed.
+A route is an argv: what you dial is what runs. Fadeno does not enforce write
+permissions \u2014 that belongs to the vendor flags in the command and to isolated
+worktrees, which are the default for command dispatches. To run something
+restricted, dial a route whose argv restricts it. Eligibility and constraint
+policies still refuse.
 
 Examples:
   fadeno dial worker sol
   fadeno dial judge fable@high --session
   fadeno dial judge fable@high
   fadeno dial worker qwen-3.5-coder --via opencode
-  fadeno dial generator gemini --via agy --force
+  fadeno dial generator gemini --via agy
   fadeno dial clear worker --user
 `,
   models: `fadeno models \u2014 the model registry and the driver each model rides
@@ -39299,7 +38910,9 @@ Options:
                         run concurrently, capped by FADENO_SHADOW_MAX_LIVE (default 4), and
                         their worktrees are retained under .fadeno/local/shadow for review
   --timeout <seconds>   Hard executor deadline seconds; 0 disables route default (20 min)
-  --isolate             Run in a detached worktree (opt-in, preserves diff, bypasses shared-writer lease)
+  --isolate             Force a detached worktree (already the default wherever git allows it)
+  --shared              Opt OUT of isolation and run in THIS tree. Nothing stands between the executor
+                        and your files \u2014 Fadeno enforces no write permissions of its own
   --ignored-output <kept|discardable>
                         Whether this task's gitignored output must survive. A shadow pair merges the
                         primary back through git add -A, which respects .gitignore, so "kept" forgoes
@@ -39414,7 +39027,14 @@ Usage:
 Options:
   --bind <role=executor>   Session executor override for a role (repeatable; recorded)
   --max-transitions <n>    Engine transition cap per invocation (default 50)
-  --parallel <n>           Max concurrent command deliveries per wave (1\u201316, default 1)
+  --parallel <n>           Max concurrent deliveries per wave (1\u201316, default 1).
+                           NOTE: command members currently serialize whatever you pass. They
+                           overlapped only while a route could declare write_access: false and
+                           skip the repo-wide writer lease; the permissions cut removed that
+                           declaration, so every shared delivery now waits its turn. Host
+                           requests still interleave. Restoring real concurrency means isolating
+                           engine attempts with merge-back \u2014 concurrency as a fact rather than an
+                           unverified promise. See docs/experimental/permissions-and-isolation.md
   --timeout <seconds>      Hard executor deadline seconds; 0 disables route default (20 min)
   --diagnostics            Persist bounded process output (32 KiB / 500 lines per stream) to diagnostics log
 
@@ -40308,6 +39928,7 @@ function main(argv) {
         "prompt-file": { type: "string" },
         "no-brief": { type: "boolean" },
         isolate: { type: "boolean" },
+        shared: { type: "boolean" },
         "ignored-output": { type: "string" },
         diagnostics: { type: "boolean" },
         tail: { type: "string" },
@@ -41018,7 +40639,7 @@ Or advance manually with the playbook cursor:`);
       if (positionals.length >= 3) {
         const model = positionals[positionals.length - 1];
         const archetypes = positionals.slice(1, -1).flatMap((token) => token.split(/[+,]/)).map((name) => name.trim()).filter((name) => name.length > 0);
-        const results = runDialSetMany({ archetypes, model, via: values.via ?? null, session: Boolean(values.session), user: Boolean(values.user), repo: Boolean(values.repo), force: Boolean(values.force) });
+        const results = runDialSetMany({ archetypes, model, via: values.via ?? null, session: Boolean(values.session), user: Boolean(values.user), repo: Boolean(values.repo) });
         if (values.json) {
           console.log(JSON.stringify(results.length === 1 ? results[0] : results, null, 2));
           return 0;
@@ -41032,7 +40653,7 @@ Or advance manually with the playbook cursor:`);
         }
         return 0;
       }
-      throw new Error("Usage: fadeno dial [<archetype> [<model>[@effort] [--via <driver>] [--session|--user|--repo] [--force]] | clear [<archetype>] [--session|--user|--repo] | shadow [<archetype> <model>[@effort] [--via <driver>] [--rate <n>]] | clear-shadow [<archetype>] | resolve --archetype <name>]");
+      throw new Error("Usage: fadeno dial [<archetype> [<model>[@effort] [--via <driver>] [--session|--user|--repo]] | clear [<archetype>] [--session|--user|--repo] | shadow [<archetype> <model>[@effort] [--via <driver>] [--rate <n>]] | clear-shadow [<archetype>] | resolve --archetype <name>]");
     }
     // Top-level alias for `fadeno dial shadow ...` — same handler
     // (`runShadowCommand`) as the `dial` subcommand above, so the two
@@ -41067,6 +40688,7 @@ Or advance manually with the playbook cursor:`);
         shadow: values.shadow,
         timeoutMs: dispatchTimeoutMs,
         isolate: Boolean(values.isolate),
+        shared: Boolean(values.shared),
         ignoredOutput: (() => {
           const raw = values["ignored-output"];
           if (typeof raw !== "string") return null;

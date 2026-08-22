@@ -5,7 +5,6 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
   commandRoutable,
-  explainWriteConflict,
   parseExecutorProfile,
   type ExecutorSpec,
 } from '../src/lib/executors.ts';
@@ -53,44 +52,4 @@ test('the shipped claude-harness anthropic route is the case that was refused', 
   assert.equal(route.driver, 'claude', 'dialed as `--via claude`, not `--via claude-cli`');
 });
 
-test('write posture is the refusal that survives, and it names a remedy a host route can take', () => {
-  // What the delivery gate was standing in front of. A write-requiring
-  // archetype on a read-only host route is refused HERE now, and the message
-  // must not tell the reader to add a `write_variant` — the parser rejects
-  // that key on a host route, so it is advice that cannot be followed.
-  const profile = parseExecutorProfile(readFileSync(CATALOG, 'utf8'), CATALOG, 'claude');
-  const conflict = explainWriteConflict(
-    { executor: 'sonnet', spec: hostSpec(['claude', '-p'], false) },
-    'worker',
-    profile,
-  );
-  assert.ok(conflict != null, 'a write-requiring archetype on a read-only host lane is refused');
-  // Substring, precisely chosen: the host wording legitimately contains
-  // "cannot declare a `write_variant`". What must never appear is the ADVICE
-  // form the command-route branch gives.
-  assert.ok(
-    !/declare a `write_variant` on the route/.test(conflict),
-    'never suggests a key host routes reject',
-  );
-  assert.match(conflict, /cannot declare a `write_variant`/, 'says why the variant remedy is unavailable');
-  assert.match(conflict, /--via <driver>/, 'points at the lane that can actually write');
-  assert.match(conflict, /host route/, 'says which kind of route it is talking about');
 
-  // The command-route wording is unchanged, variant advice included.
-  const commandConflict = explainWriteConflict(
-    { executor: 'sonnet', spec: { adapter: 'command', model: 'sonnet', writeAccess: false } as unknown as ExecutorSpec },
-    'worker',
-    profile,
-  );
-  assert.ok(commandConflict != null);
-  assert.match(commandConflict, /declare a `write_variant` on the route/);
-});
-
-test('a read-only archetype on that same host route is NOT refused', () => {
-  // The whole point of the relaxation: `reviewer` needs no write access, so
-  // nothing about its dispatch is unsafe, and it used to be refused anyway.
-  const profile = parseExecutorProfile(readFileSync(CATALOG, 'utf8'), CATALOG, 'claude');
-  const spec = hostSpec(['claude', '-p'], false);
-  assert.equal(commandRoutable(spec), true);
-  assert.equal(explainWriteConflict({ executor: 'sonnet', spec }, 'reviewer', profile), null);
-});

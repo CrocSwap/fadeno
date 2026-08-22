@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
@@ -52,11 +52,11 @@ function seed(t: TestContext): { root: string; user: UserPathOptions } {
     routes: {
       claude: {
         'current-host': { host: true },
-        anthropic: { driver: 'claude', host: true, command: ECHO('HOST-FALLBACK:'), write_access: false },
-        'anthropic-exec': { driver: 'claude-exec', command: ECHO('EXEC:'), write_access: true },
+        anthropic: { driver: 'claude', host: true, command: ECHO('HOST-FALLBACK:'), },
+        'anthropic-exec': { driver: 'claude-exec', command: ECHO('EXEC:'), },
       },
     },
-    archetypes: { worker: { requires_write: 'required' }, reviewer: {} },
+    archetypes: { worker: { }, reviewer: {} },
     dials: { worker: 'sonnet', reviewer: 'sonnet' },
   }));
   initGit(root);
@@ -73,33 +73,6 @@ function seed(t: TestContext): { root: string; user: UserPathOptions } {
   };
 }
 
-test('a host-lane refusal leads with the resolver\'s own choice, not with --via', (t) => {
-  const { root, user } = seed(t);
-  let message = '';
-  try {
-    runDispatch({ archetype: 'worker', prompt: 'do it', repoRoot: root, userPathOptions: user });
-    assert.fail('a write-requiring archetype on a read-only host lane must refuse');
-  } catch (err) {
-    message = (err as Error).message;
-  }
-  // The note comes first, and says in-session is the choice rather than a
-  // consolation prize. An agent that reads only the first sentence must still
-  // land on the right action.
-  const note = message.slice(0, message.indexOf('\n\n'));
-  assert.match(note, /resolves to the HOST lane/);
-  assert.match(note, /in-session worker agent/);
-  assert.match(note, /not a downgrade/);
-  // And the escalation it offers is per-call, so taking it cannot silently
-  // relocate the archetype the way a re-dial does.
-  assert.match(note, /for THIS call without moving the dial/);
-  assert.ok(
-    note.indexOf('in-session worker agent') < note.indexOf('--via'),
-    'the in-session remedy must be stated before the escalation, not after it',
-  );
-  // The write-posture explanation still follows in full — the note adds
-  // context, it does not replace the reason.
-  assert.match(message, /requires_write: required/);
-});
 
 test('the note also fires on the delivering path — leaving the session is announced', (t) => {
   const { root, user } = seed(t);
@@ -148,13 +121,20 @@ test('`--via` without `--model` escalates this one dispatch off the host lane', 
 });
 
 test('the escalation does not move the dial', (t) => {
+  // Asserted on the RECORDED EXECUTOR rather than on a refusal. It used to
+  // lean on the write-posture guard rejecting the unescalated second call;
+  // that guard is gone, so the invariant is now checked directly — which is
+  // what it always meant anyway: a per-call `--via` must not persist.
   const { root, user } = seed(t);
   runDispatch({ archetype: 'worker', via: 'claude-exec', prompt: 'do it', repoRoot: root, userPathOptions: user });
-  // The next dispatch, with no flag, is refused exactly as before: a per-call
-  // escalation that quietly persisted would be the relocation this whole
-  // change exists to prevent.
-  assert.throws(
-    () => runDispatch({ archetype: 'worker', prompt: 'again', repoRoot: root, userPathOptions: user }),
-    /resolves to the HOST lane/,
+  runDispatch({ archetype: 'worker', prompt: 'again', repoRoot: root, userPathOptions: user });
+  const requested = readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8')
+    .split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l))
+    .filter((r: { event: string }) => r.event === 'dispatch_requested');
+  assert.equal(requested.length, 2);
+  assert.notEqual(
+    requested[1]!.executor,
+    requested[0]!.executor,
+    'the second dispatch must resolve through the dial, not through the first call\'s --via',
   );
 });

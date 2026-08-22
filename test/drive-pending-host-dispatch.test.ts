@@ -47,22 +47,22 @@ const EXECUTORS = {
   routes: {
     standalone: {
       luna_p: { host: true },
-      ok_p: { command: ['node', '-e', "process.stdout.write('COMMAND NOTES')"], write_access: true },
+      ok_p: { command: ['node', '-e', "process.stdout.write('COMMAND NOTES')"], },
       'current-host': { host: true },
     },
     codex: {
       luna_p: { host: true },
-      ok_p: { command: ['node', '-e', "process.stdout.write('COMMAND NOTES')"], write_access: true },
+      ok_p: { command: ['node', '-e', "process.stdout.write('COMMAND NOTES')"], },
       'current-host': { host: true },
     },
     claude: {
       luna_p: { host: true },
-      ok_p: { command: ['node', '-e', "process.stdout.write('COMMAND NOTES')"], write_access: true },
+      ok_p: { command: ['node', '-e', "process.stdout.write('COMMAND NOTES')"], },
       'current-host': { host: true },
     },
     grok: {
       luna_p: { host: true },
-      ok_p: { command: ['node', '-e', "process.stdout.write('COMMAND NOTES')"], write_access: true },
+      ok_p: { command: ['node', '-e', "process.stdout.write('COMMAND NOTES')"], },
       'current-host': { host: true },
     },
   },

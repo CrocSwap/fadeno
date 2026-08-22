@@ -57,7 +57,7 @@ test('completion discovers repo-local playbooks, runs, steps, and paths', (t) =>
       '  standalone:',
       '    openai:',
       '      command: [alpha]',
-      '      write_access: true',
+      '      ',
       'archetypes:',
       '  worker: {}',
       '  reviewer: {}',

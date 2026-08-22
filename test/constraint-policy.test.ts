@@ -41,7 +41,6 @@ const CONTEXT: ConstraintContext = {
   provider: 'openai',
   model: 'gpt-5.6-luna',
   transport: 'command',
-  write_access: null,
   write_posture: 'none',
   active_loadout: 'main',
   overrides: {},
@@ -78,14 +77,14 @@ test('archetypes: advisory and required distinct_provider_from_inputs parse; abs
     archetypes: {
       reviewer: { distinct_provider_from_inputs: 'advisory' },
       judge: { distinct_provider_from_inputs: 'required' },
-      worker: { requires_write: 'required' },
+      worker: { },
     },
   });
   assert.equal(profile.archetypes.reviewer!.distinctProviderFromInputs, 'advisory');
   assert.equal(profile.archetypes.judge!.distinctProviderFromInputs, 'required');
   assert.equal(profile.archetypes.worker!.distinctProviderFromInputs, null);
   assert.deepEqual(profile.archetypes.reviewer, {
-    requiresWrite: 'none', ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: 'advisory', brief: null,
+    ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: 'advisory', brief: null,
   });
 });
 
@@ -114,11 +113,11 @@ test('archetypes: unknown keys name the whole allowed set', () => {
       schema_version: 3,
       models: { sol: { provider: 'openai' } },
       routes: { standalone: { openai: { command: ['codex'] } } },
-      archetypes: { worker: { requires_write: true, requires_network: true } },
+      archetypes: { worker: { requires_network: true } },
     }),
     (err: unknown) =>
       err instanceof ExecutorProfileError &&
-      /`archetypes\.worker` has unknown key\(s\) requires_network; only `requires_write`, `ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief` are allowed/
+      /`archetypes\.worker` has unknown key\(s\) requires_network; only `ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief` are allowed/
         .test(err.message),
   );
   assert.throws(
@@ -128,7 +127,7 @@ test('archetypes: unknown keys name the whole allowed set', () => {
       routes: { standalone: { openai: { command: ['codex'] } } },
       archetypes: { worker: 'yes' },
     }),
-    /`archetypes\.worker` is not a mapping \(only `requires_write`, `ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief` are allowed\)/,
+    /`archetypes\.worker` is not a mapping \(only `ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief` are allowed\)/,
   );
 });
 
@@ -301,7 +300,7 @@ test('explainProviderConflict: null policy or empty producers is no check', () =
     routes: { standalone: { openai: { command: ['codex'] } } },
     archetypes: {
       reviewer: { distinct_provider_from_inputs: 'required' },
-      worker: { requires_write: 'required' },
+      worker: { },
     },
   });
   const clash = [producer({ provider: 'openai' })];
@@ -439,7 +438,7 @@ test('serializeSnapshot: eligibility, distinct_provider, and constraints round-t
     archetypes: {
       reviewer: { distinct_provider_from_inputs: 'advisory' },
       judge: { distinct_provider_from_inputs: 'required', fallback: 'reviewer' },
-      worker: { requires_write: 'required' },
+      worker: { },
     },
     constraints: { command: ['node', '.fadeno/constraints.mjs'] },
   });
@@ -463,7 +462,7 @@ test('serializeSnapshot: eligibility, distinct_provider, and constraints round-t
     schema_version: 3,
     models: { sol: { provider: 'openai' } },
     routes: { standalone: { openai: { command: ['codex'] } } },
-    archetypes: { worker: { requires_write: 'required' } },
+    archetypes: { worker: { } },
   }));
   assert.match(omitted, /snapshot_version: 3/);
   const docOmitted = parseSnapshotDocument(omitted, 'snap.yaml');

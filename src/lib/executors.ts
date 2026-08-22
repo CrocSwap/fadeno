@@ -43,23 +43,6 @@ export interface CommandExecutorSpec {
    */
   sessionIdPattern: string | null;
   /**
-   * Whether this delivery's command can mutate the workspace. `null` =
-   * undeclared (no constraint). A headless CLI in a read-only permission mode
-   * is `false`: it can read and reason, but a `git commit`/Bash write ends in
-   * refusal, so a mutating archetype must not be dispatched onto it.
-   */
-  writeAccess: boolean | null;
-  /**
-   * Alternative write-capable argv for this same delivery, selected
-   * automatically when a `requires_write: required` archetype resolves here.
-   * The dial names the who; the archetype's declared policy picks this how —
-   * no capability-suffixed model spellings. A variant that declares no
-   * `resume` does not advertise session resumption (the base route's resume
-   * argv carries the base permission mode, which a write session must not
-   * inherit).
-   */
-  writeVariant?: { command: string[]; resume: string[] | null } | null;
-  /**
    * Per-archetype eligibility of this delivery. Absent YAML is `{}`
    * (every archetype `eligible`).
    */
@@ -86,12 +69,6 @@ export interface HostExecutorSpec {
    * explicit delivery fallback, never an executor/provider substitution.
    */
   fallbackCommand?: string[] | null;
-  /**
-   * Write capability of the **command delivery** (`fallbackCommand`), not of
-   * the host facility — the in-session agent's permissions are the host's
-   * business. `null` = undeclared.
-   */
-  writeAccess: boolean | null;
   /**
    * Per-archetype eligibility of this delivery. Absent YAML is `{}`
    * (every archetype `eligible`).
@@ -196,24 +173,19 @@ export function archetypeDisplaySort(names: Iterable<string>): string[] {
   });
 }
 
-/** Write constraint an archetype imposes on whatever delivers it. */
-export type WritePosture = 'required' | 'forbidden' | 'none';
-
 /** Whether an archetype's delivery provider must differ from every input producer. */
 export type ProviderDistinctness = 'advisory' | 'required';
 
 /**
  * Whether an archetype's *gitignored* output has to survive the dispatch.
  *
- * Not a write posture. `requiresWrite` gates executor selection — whether a
- * delivery may write at all — and is consumed during resolution. This is
- * consumed much later, at pair materialization, and says only whether the
- * files `.gitignore` excludes are load-bearing product: a shadow pair runs
- * each arm in its own worktree and merges the primary's work back through a
+ * Consumed at pair materialization, and says only whether the files
+ * `.gitignore` excludes are load-bearing product: a shadow pair runs each arm
+ * in its own worktree and merges the primary's work back through a
  * `git add -A` diff, which drops every ignored path. `kept` therefore means
  * "a pair would destroy this dispatch's output" — lose the comparison, never
- * the work. Also not `worktree_carry`, which is the opposite direction:
- * ignored files copied *into* a worktree before the arm runs.
+ * the work. Not `worktree_carry`, which is the opposite direction: ignored
+ * files copied *into* a worktree before the arm runs.
  */
 export type IgnoredOutputPolicy = 'kept' | 'discardable';
 
@@ -221,10 +193,13 @@ export type IgnoredOutputPolicy = 'kept' | 'discardable';
  * What an archetype needs from whatever delivers it. Declared once per
  * archetype, independent of which executor a dial binds today.
  * `fallback` selects another archetype's *binding* only — never its policy.
+ *
+ * Note what is NOT here: a write posture. Fadeno does not enforce write
+ * permissions, so an archetype does not declare a demand for the resolver to
+ * match against a route's claimed capability — that negotiation is removed.
+ * See docs/experimental/permissions-and-isolation.md.
  */
 export interface ArchetypePolicy {
-  /** The archetype's write constraint. Absent YAML is `'none'`. */
-  requiresWrite: WritePosture;
   /**
    * Whether this archetype's gitignored output must survive. Absent YAML is
    * `'discardable'`. Read at pair formation, never at resolution.
@@ -251,8 +226,6 @@ export interface DialRef {
   model: string;
   effort?: string;
   via?: string;
-  /** Explicit, persisted override for this binding's write-posture mismatch. */
-  force_write_posture?: true;
 }
 
 export function parseDialRef(raw: unknown, label: string): DialRef {
@@ -329,18 +302,18 @@ export function parseDialRef(raw: unknown, label: string): DialRef {
       out.via = map.via.trim();
     }
     if (map.force_write_posture !== undefined) {
-      if (map.force_write_posture !== true) {
-        throw new ExecutorProfileError(`${label} "force_write_posture" must be true when present.`);
-      }
-      out.force_write_posture = true;
+      throw new ExecutorProfileError(
+        `${label} "force_write_posture" is no longer supported — there is no write-posture guard left to ` +
+          'override. See docs/experimental/permissions-and-isolation.md.',
+      );
     }
-    const unknown = Object.keys(map).filter((k) => k !== 'model' && k !== 'effort' && k !== 'via' && k !== 'force_write_posture');
+    const unknown = Object.keys(map).filter((k) => k !== 'model' && k !== 'effort' && k !== 'via');
     if (unknown.length > 0) {
-      throw new ExecutorProfileError(`${label} has unknown key(s) ${unknown.join(', ')}; only model, effort, via, force_write_posture are allowed.`);
+      throw new ExecutorProfileError(`${label} has unknown key(s) ${unknown.join(', ')}; only model, effort, via are allowed.`);
     }
     return out;
   }
-  throw new ExecutorProfileError(`${label} must be a string "model[@effort]" or a mapping {model, effort?, via?, force_write_posture?}.`);
+  throw new ExecutorProfileError(`${label} must be a string "model[@effort]" or a mapping {model, effort?, via?}.`);
 }
 
 export function formatDialRef(ref: DialRef): string {
@@ -350,20 +323,9 @@ export function formatDialRef(ref: DialRef): string {
   return base;
 }
 
-/** Compact scalars remain the normal storage form; forced refs stay explicit. */
+/** Every ref is a compact scalar now that nothing needs an explicit override form. */
 export function serializeDialRef(ref: DialRef): string | Record<string, unknown> {
-  if (ref.force_write_posture !== true) return formatDialRef(ref);
-  return {
-    model: ref.model,
-    ...(ref.effort != null ? { effort: ref.effort } : {}),
-    ...(ref.via != null ? { via: ref.via } : {}),
-    force_write_posture: true,
-  };
-}
-
-/** A force marker is scoped to the archetype dial that owns it, not a fallback. */
-export function forcesWritePosture(ref: DialRef, resolvedVia: string | null): boolean {
-  return ref.force_write_posture === true && resolvedVia == null;
+  return formatDialRef(ref);
 }
 
 export interface ModelEntry {
@@ -379,15 +341,7 @@ export interface RouteRaw {
   models_command?: string[] | null;
   effort_encoding?: 'flag' | 'model-suffix';
   command?: string[] | null;
-  write_access?: boolean | null;
   timeout_ms?: number | null;
-  /**
-   * Write-capable argv variant of this route, applied when a
-   * `requires_write: required` archetype resolves onto it. Only meaningful on
-   * a route declared `write_access: false` — a variant exists to escalate a
-   * read-only delivery, nothing else.
-   */
-  write_variant?: { command: string[]; resume?: string[] | null } | null;
   host?: boolean;
   resume?: string[] | null;
   session_id_pattern?: string | null;
@@ -678,18 +632,16 @@ function isMapping(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-const WRITE_POSTURE_FORMS = 'true, false, "required", "forbidden", or "none"';
-
-function isWritePosture(value: unknown): value is WritePosture {
-  return value === 'required' || value === 'forbidden' || value === 'none';
-}
-
 /**
  * Keys an `archetypes.<name>` mapping may declare. Both parse sites — the
  * catalog parser and the snapshot reader — filter against this one list, so a
  * key added here can never be accepted by one and rejected by the other.
  */
 const ARCHETYPE_POLICY_KEYS: readonly string[] = [
+  // Deliberately still "known" so the tailored migration error below is the
+  // one a reader sees, instead of a generic unknown-key message that says
+  // nothing about WHY the key went away or what replaced it. It is refused
+  // either way; this only decides which explanation they get.
   'requires_write',
   'ignored_output',
   'fallback',
@@ -699,7 +651,7 @@ const ARCHETYPE_POLICY_KEYS: readonly string[] = [
 
 /** The same list as prose, for the catalog parser's messages. */
 const ARCHETYPE_POLICY_KEY_FORMS =
-  '`requires_write`, `ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief`';
+  '`ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief`';
 
 function unknownArchetypeKeys(rawPolicy: Record<string, unknown>): string[] {
   return Object.keys(rawPolicy).filter((key) => !ARCHETYPE_POLICY_KEYS.includes(key));
@@ -834,38 +786,22 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
           }
           route.command = cmd as string[];
         }
-        if (rawRoute.write_access !== undefined) {
-          if (typeof rawRoute.write_access !== 'boolean') {
-            throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}.write_access\` must be boolean.`);
-          }
-          route.write_access = rawRoute.write_access;
-        }
-        if (rawRoute.write_variant !== undefined && rawRoute.write_variant !== null) {
-          const label = `routes.${harnessKey}.${routeKey}.write_variant`;
-          const rawVariant = rawRoute.write_variant;
-          if (!isMapping(rawVariant)) {
-            throw new ExecutorProfileError(`${source}: \`${label}\` must be a mapping with \`command\` (and optional \`resume\`).`);
-          }
-          const unknownVariantKeys = Object.keys(rawVariant).filter((k) => k !== 'command' && k !== 'resume');
-          if (unknownVariantKeys.length > 0) {
-            throw new ExecutorProfileError(`${source}: \`${label}\` has unknown key(s) ${unknownVariantKeys.join(', ')}; only \`command\` and \`resume\` are allowed.`);
-          }
-          const vcmd = rawVariant.command;
-          if (!Array.isArray(vcmd) || vcmd.length === 0 || !vcmd.every((p) => typeof p === 'string' && p.length > 0)) {
-            throw new ExecutorProfileError(`${source}: \`${label}.command\` must be a non-empty string array.`);
-          }
-          const variant: { command: string[]; resume?: string[] | null } = { command: vcmd as string[] };
-          if (rawVariant.resume !== undefined && rawVariant.resume !== null) {
-            const vrs = rawVariant.resume;
-            if (!Array.isArray(vrs) || vrs.length === 0 || !vrs.every((p) => typeof p === 'string' && p.length > 0)) {
-              throw new ExecutorProfileError(`${source}: \`${label}.resume\` must be a non-empty string array.`);
-            }
-            if (!(vrs as string[]).some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
-              throw new ExecutorProfileError(`${source}: \`${label}.resume\` must contain ${SESSION_ID_PLACEHOLDER}.`);
-            }
-            variant.resume = vrs as string[];
-          }
-          route.write_variant = variant;
+
+        // REMOVED. Refused rather than ignored — quietly dropping a key
+        // someone wrote to restrict something is the failure mode this whole
+        // change exists to end. `write_variant` also never did what its name
+        // said: it swapped the entire argv, so in the shipped catalog it
+        // silently dropped `--sandbox read-only`, `--agent fadeno-readonly`,
+        // and `--disable-shell` along with granting writes.
+        if (rawRoute.write_variant !== undefined || rawRoute.write_access !== undefined) {
+          const key = rawRoute.write_variant !== undefined ? 'write_variant' : 'write_access';
+          throw new ExecutorProfileError(
+            `${source}: \`routes.${harnessKey}.${routeKey}.${key}\` is no longer supported. A route is an argv ` +
+              'and nothing more: declare the command you want to run, and express any restriction as a SEPARATE ' +
+              'route with its own name so it is visible in the argv rather than in metadata. Containment is ' +
+              'isolated worktrees, now the default for command dispatches — see ' +
+              'docs/experimental/permissions-and-isolation.md.',
+          );
         }
         // host only (native alias removed)
         if (rawRoute.host !== undefined) {
@@ -903,63 +839,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
             throw new ExecutorProfileError(`${source}: host route \`routes.${harnessKey}.${routeKey}\` rejects command-session fields.`);
           }
         }
-        if (route.write_variant != null) {
-          if (route.host === true) {
-            throw new ExecutorProfileError(
-              `${source}: \`routes.${harnessKey}.${routeKey}\` declares \`write_variant\` on a \`host: true\` route — ` +
-                "in-session delivery carries the host's own permissions, and the locked fallback lane replays the " +
-                'snapshotted base argv byte-for-byte, so no host lane can deliver a variant. Declare it on a command route.',
-            );
-          }
-          if (route.write_access !== false) {
-            throw new ExecutorProfileError(
-              `${source}: \`routes.${harnessKey}.${routeKey}\` declares \`write_variant\` but not \`write_access: false\` — ` +
-                'a write variant exists to escalate a read-only delivery for `requires_write: required` archetypes; ' +
-                'a route that can already write does not need one.',
-            );
-          }
-          if (route.command == null) {
-            throw new ExecutorProfileError(
-              `${source}: \`routes.${harnessKey}.${routeKey}\` declares \`write_variant\` but no \`command\` — ` +
-                'the variant escalates a command delivery, so the base route must have one.',
-            );
-          }
-          if (JSON.stringify(route.write_variant.command) === JSON.stringify(route.command)) {
-            throw new ExecutorProfileError(
-              `${source}: \`routes.${harnessKey}.${routeKey}.write_variant.command\` is identical to the base command — ` +
-                'the variant exists to change the delivery; an identical argv would stamp write_access: true onto a ' +
-                'delivery that cannot write.',
-            );
-          }
-          // The postured spec must satisfy the same `resume ⟺ id source`
-          // invariant the base parse enforces: posture swaps in
-          // {command: variant.command, resume: variant.resume ?? null,
-          //  sessionIdPattern: variant.resume != null ? base pattern : null}.
-          const variantMintsId = route.write_variant.command.some((part) => part.includes(SESSION_ID_PLACEHOLDER));
-          if (route.write_variant.resume == null) {
-            if (variantMintsId) {
-              throw new ExecutorProfileError(
-                `${source}: \`routes.${harnessKey}.${routeKey}.write_variant.command\` contains ${SESSION_ID_PLACEHOLDER} ` +
-                  'but the variant declares no `resume` — the postured delivery would spawn the literal placeholder. ' +
-                  'Declare `write_variant.resume` or drop the placeholder from the variant command.',
-              );
-            }
-          } else {
-            const hasPattern = route.session_id_pattern != null;
-            if (variantMintsId && hasPattern) {
-              throw new ExecutorProfileError(
-                `${source}: \`routes.${harnessKey}.${routeKey}.write_variant\` declares both a ${SESSION_ID_PLACEHOLDER} ` +
-                  'placeholder in its command and inherits `session_id_pattern` — use one id source, not both.',
-              );
-            }
-            if (!variantMintsId && !hasPattern) {
-              throw new ExecutorProfileError(
-                `${source}: \`routes.${harnessKey}.${routeKey}.write_variant\` declares \`resume\` but no session id source — ` +
-                  `put ${SESSION_ID_PLACEHOLDER} in the variant command (engine-minted) or declare \`session_id_pattern\` on the route.`,
-              );
-            }
-          }
-        }
+
         if (rawRoute.timeout_ms !== undefined) {
           const tm = rawRoute.timeout_ms;
           if (typeof tm !== 'number' || !Number.isInteger(tm) || tm <= 0) {
@@ -972,7 +852,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
         if (route.host === true && route.timeout_ms != null) {
           throw new ExecutorProfileError(`${source}: host route \`routes.${harnessKey}.${routeKey}\` may not declare \`timeout_ms\` — host dispatch is not supervised.`);
         }
-        const unknownRouteKeys = Object.keys(rawRoute).filter((k) => !['driver','models_command','effort_encoding','command','write_access','write_variant','host','resume','session_id_pattern','eligibility','timeout_ms'].includes(k));
+        const unknownRouteKeys = Object.keys(rawRoute).filter((k) => !['driver','models_command','effort_encoding','command','host','resume','session_id_pattern','eligibility','timeout_ms'].includes(k));
         if (unknownRouteKeys.length > 0) {
           throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}\` has unknown key(s) ${unknownRouteKeys.join(', ')}.`);
         }
@@ -1040,12 +920,17 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
       if (unknown.length > 0) {
         throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(', ')}; only ${ARCHETYPE_POLICY_KEY_FORMS} are allowed.`);
       }
-      let requiresWrite: WritePosture = 'none';
+      // Removed, and REFUSED rather than ignored: silently dropping a key
+      // someone wrote in order to restrict something is the exact failure this
+      // project exists to prevent, and it would be a poor way to land a change
+      // whose whole premise is that unenforced claims are dangerous.
       if (rawPolicy.requires_write !== undefined) {
-        if (rawPolicy.requires_write === true) requiresWrite = 'required';
-        else if (rawPolicy.requires_write === false) requiresWrite = 'none';
-        else if (isWritePosture(rawPolicy.requires_write)) requiresWrite = rawPolicy.requires_write;
-        else throw new ExecutorProfileError(`${source}: \`archetypes.${name}.requires_write\` must be ${WRITE_POSTURE_FORMS}.`);
+        throw new ExecutorProfileError(
+          `${source}: \`archetypes.${name}.requires_write\` is no longer supported. Fadeno does not enforce ` +
+            'write permissions: a route is an argv, and a restriction belongs IN that argv — a separate route ' +
+            'with its own name (e.g. `--sandbox read-only`) that a reader can see. Containment is isolated ' +
+            'worktrees, now the default for command dispatches — see docs/experimental/permissions-and-isolation.md.',
+        );
       }
       const ignoredOutput = parseIgnoredOutput(rawPolicy.ignored_output, source, name);
       let fallback: string | null = null;
@@ -1072,7 +957,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
         }
         brief = rawPolicy.brief;
       }
-      archetypes[name] = { requiresWrite, ignoredOutput, fallback, distinctProviderFromInputs, brief };
+      archetypes[name] = { ignoredOutput, fallback, distinctProviderFromInputs, brief };
     }
     for (const start of Object.keys(archetypes)) {
       const path: string[] = [];
@@ -1649,7 +1534,6 @@ export function compileDialRef(ref: DialRef, profile: ExecutorProfile): Compiled
         reasoningEffort: effectiveEffort,
         agentType: '*',
         fallbackCommand: fallback,
-        writeAccess: route?.write_access ?? null,
         eligibility: { ...eligibility },
         ...(provider != null ? { provider } : {}),
         ...(driver ? { driver } : {}),
@@ -1669,11 +1553,7 @@ export function compileDialRef(ref: DialRef, profile: ExecutorProfile): Compiled
         model: modelId,
         resume,
         sessionIdPattern: route.session_id_pattern ?? null,
-        writeAccess: route.write_access ?? null,
         ...(route.timeout_ms != null ? { timeoutMs: route.timeout_ms } : {}),
-        ...(route.write_variant != null
-          ? { writeVariant: { command: subst(route.write_variant.command), resume: route.write_variant.resume != null ? subst(route.write_variant.resume) : null } }
-          : {}),
         eligibility: { ...eligibility },
         ...(provider != null ? { provider } : {}),
         ...(driver ? { driver } : {}),
@@ -1745,108 +1625,6 @@ export interface DeliveryChoice {
   spec: ExecutorSpec;
 }
 
-/**
- * Select the delivery a write posture actually gets. A `requires_write:
- * required` archetype resolving onto a read-only spec that declares a write
- * variant receives the variant argv (writeAccess true); every other posture
- * receives the spec unchanged. The dial names the who; the archetype's
- * declared policy — made once, in the catalog — authorizes the escalation.
- */
-export function applyWritePosture(
-  spec: ExecutorSpec,
-  archetype: string | null,
-  archetypes: Record<string, ArchetypePolicy>,
-): { spec: ExecutorSpec; usedWriteVariant: boolean } {
-  if (archetype == null || !Object.hasOwn(archetypes, archetype)) return { spec, usedWriteVariant: false };
-  if (archetypes[archetype]!.requiresWrite !== 'required') return { spec, usedWriteVariant: false };
-  if (spec.writeAccess !== false) return { spec, usedWriteVariant: false };
-  // Command adapter only: in-session host delivery carries the host's own
-  // permissions, and the locked fallback lane replays the snapshotted base
-  // argv byte-for-byte — host routes refuse the write_variant key at parse.
-  if (spec.adapter !== 'command') return { spec, usedWriteVariant: false };
-  const variant = spec.writeVariant;
-  if (variant == null) return { spec, usedWriteVariant: false };
-  const next: CommandExecutorSpec = {
-    ...spec,
-    command: variant.command,
-    // A variant without its own resume does not advertise resumption: the
-    // base resume argv carries the base (read-only) permission mode.
-    resume: variant.resume ?? null,
-    sessionIdPattern: variant.resume != null ? spec.sessionIdPattern : null,
-    writeAccess: true,
-  };
-  delete next.writeVariant;
-  return { spec: next, usedWriteVariant: true };
-}
-
-// Belt-and-braces only: every in-tree caller of explainWriteConflict passes an
-// already-postured spec (writeAccess true, writeVariant deleted when a variant
-// applied), so this guard fires only for a caller that skipped posture. Kept so
-// a raw compiled spec still reads as satisfiable rather than conflicted.
-function hasWriteVariant(spec: ExecutorSpec): boolean {
-  return spec.adapter === 'command' && spec.writeVariant != null;
-}
-
-export function explainWriteConflict(
-  delivery: DeliveryChoice,
-  archetype: string | null,
-  profile: ExecutorProfile,
-  opts: { includeOverrideAdvice?: boolean } = {},
-): string | null {
-  // `--force` is real advice for a DIRECT dial — it lets the primary proceed
-  // anyway. It is wrong advice in pair context, where forcing changes nothing
-  // about whether a pair forms, so `explainPairRoutability` suppresses it
-  // rather than restating this conflict in its own words: one conflict, one
-  // author, two framings.
-  const includeOverrideAdvice = opts.includeOverrideAdvice ?? true;
-  if (archetype == null) return null;
-  if (!Object.hasOwn(profile.archetypes, archetype)) return null;
-  const posture = profile.archetypes[archetype]!.requiresWrite;
-  // Host and command specs both reach this predicate, and since the delivery
-  // gate collapsed into `commandRoutable` a host spec reaches it far more
-  // often: a write-requiring archetype dialed onto a read-only host route is
-  // now refused HERE rather than earlier by `host_in_session`. So the remedy
-  // has to be one the reader can actually follow. Telling them to "declare a
-  // `write_variant` on the route" is sound advice for a command route and
-  // impossible for a host one — the parser rejects the key there — and advice
-  // that cannot be followed reads as a bug in the tool.
-  const host = delivery.spec.adapter === 'host';
-  if (posture === 'required' && delivery.spec.writeAccess === false && !hasWriteVariant(delivery.spec)) {
-    return (
-      `archetype "${archetype}" declares \`requires_write: required\`, but executor "${delivery.executor}" ` +
-      (host
-        ? 'delivers through a host route whose command lane (`fallback_command`) is declared ' +
-          '`write_access: false`, and a host route cannot declare a `write_variant` — in-session delivery ' +
-          "carries the host's own permissions and the fallback lane replays the base argv byte-for-byte. "
-        : 'delivers through a command route declared `write_access: false`. ') +
-      'It cannot mutate the workspace, so the dispatch would burn a run and end in a refusal. ' +
-      `Fix: bind "${archetype}" to a write-capable executor` +
-      (host
-        ? ' — `fadeno dial ' + archetype + ' <model> --via <driver>`, where an *-exec route is the ' +
-          'command-lane counterpart of a host one — '
-        : ', declare a `write_variant` on the route (a write-capable argv selected automatically for write-requiring archetypes), ') +
-      `or run this ${archetype}-shaped task with the in-session ${archetype} agent.` +
-      (includeOverrideAdvice
-        ? ' You can override this guard by rerunning the dial with `--force`, but doing so is not suggested because the executor may be unable to complete the work.'
-        : '')
-    );
-  }
-  if (posture === 'forbidden' && delivery.spec.writeAccess === true) {
-    return (
-      `archetype "${archetype}" declares \`requires_write: forbidden\`, but executor "${delivery.executor}" ` +
-      `delivers through a ${host ? 'host' : 'command'} route declared \`write_access: true\` — the dispatch would hand a ` +
-      'mutating toolchain to work that must not mutate the workspace. ' +
-      `Fix: bind "${archetype}" to a read-only route, ` +
-      `clear the session dial (\`fadeno dial clear ${archetype}\`), ` +
-      'or declare `requires_write: none`.' +
-      (includeOverrideAdvice
-        ? ' You can override this guard by rerunning the dial with `--force`, but doing so is not suggested because it hands mutating capability to write-forbidden work.'
-        : '')
-    );
-  }
-  return null;
-}
-
 export function eligibilityFor(spec: ExecutorSpec, archetype: string | null): EligibilityState {
   if (typeof archetype !== 'string') return 'eligible';
   const map = spec.eligibility;
@@ -1880,11 +1658,11 @@ export function eligibilityFor(spec: ExecutorSpec, archetype: string | null): El
  * refuses a capability the caller has is not a safe default; it is a prompt to
  * route around it.
  *
- * The honest refusals survive and are both spec-shaped, not harness-shaped:
- * a host spec with no `fallback_command` has nothing to invoke (`current-host`,
- * the base dial), and a lane that cannot satisfy the archetype's declared
- * write posture is refused by `explainWriteConflict` — which is what the
- * `host_in_session` refusal was standing in front of and getting credit for.
+ * The one honest refusal is spec-shaped, not harness-shaped: a host spec with
+ * no `fallback_command` has nothing to invoke (`current-host`, the base dial).
+ * There is no longer a second, permission-shaped refusal beside it — routes
+ * are argvs and Fadeno does not judge what they may do
+ * (docs/experimental/permissions-and-isolation.md).
  *
  * One predicate, three consumers by construction: the dispatch kernel, the
  * `dial`/`steering` resolve previews, and `explainPairRoutability`.
@@ -1894,94 +1672,34 @@ export function commandRoutable(spec: ExecutorSpec): boolean {
 }
 
 /**
- * Whether a selected pair can actually reach this spec's command lane: a
- * lane must exist (`commandRoutable`) AND, once the PRIMARY is confined to
- * it, that lane must satisfy the archetype's declared write posture
- * (`explainWriteConflict` — the same predicate a direct dial resolution is
- * judged by, since forcing the command lane is exactly what a pair does to
- * a host spec).
+ * Whether a selected pair can actually reach this spec's command lane. One
+ * question now: does a lane EXIST. A pair moves the primary off in-session
+ * delivery onto `spec.fallbackCommand`, and a host spec that declares none has
+ * nothing to move it to.
  *
- * Only the primary is confined. The challenger resolves its OWN delivery
- * (`compileDialRef(shadowDial)` in `startShadow`) and carries its own
- * write-posture guard, so a primary stuck on an unwritable lane would be
- * compared against a challenger that is not stuck on it — the arms would
- * differ in capability, and the diff would measure the lanes rather than
- * the models. That asymmetry, not mere untidiness, is why this refuses:
- * refusing a pair is a serious step and is reserved for the case where no
- * meaningful comparison exists to be had.
+ * This used to ask a second question — whether that lane satisfied the
+ * archetype's declared write posture — and refuse the pair when it did not.
+ * That refusal is gone with the posture system it depended on. Capability
+ * skew between the two arms is now MEASURED at bakeoff time by comparing the
+ * argvs that actually ran, which catches sandbox flags and tool allowlists as
+ * well as writes, and reports instead of refusing.
  *
  * One shared answer for the `steering`/`dial` resolve previews (which decide
- * whether to *announce* a pair), the attach-time note in `fadeno dial
- * shadow` (which decides whether to *warn*), and the dispatch kernel (which
- * decides whether to actually *form* one): independent copies of this
- * question is the drift shape this catalog keeps getting bitten by (see the
- * `CATALOG_TOP_LEVEL_KEYS` comment above).
+ * whether to *announce* a pair), the attach-time note in `fadeno dial shadow`
+ * (which decides whether to *warn*), and the dispatch kernel (which decides
+ * whether to actually *form* one).
  */
 export function explainPairRoutability(
   spec: ExecutorSpec,
   executorName: string,
-  archetype: string | null,
-  profile: ExecutorProfile,
 ): { routable: true } | { routable: false; reason: string } {
   if (!commandRoutable(spec)) {
     return {
       routable: false,
-      reason: `executor "${executorName}" has no command lane — a host delivery with no fallback_command has nothing for a pair to force both arms onto.`,
-    };
-  }
-  const conflict = explainWriteConflict({ executor: executorName, spec }, archetype, profile, {
-    includeOverrideAdvice: false,
-  });
-  if (conflict != null) {
-    return {
-      routable: false,
-      reason:
-        `${conflict} No pair forms here, and \`--force\` does not change that: forcing lets the PRIMARY ` +
-        'proceed on that lane, but the challenger resolves its own lane and is not confined to it, so the two ' +
-        'arms would not be equally able to do the work. The pair would measure the lanes rather than the ' +
-        'models, and an empty diff from a crippled arm is not evidence about the model that produced it.',
+      reason: `executor "${executorName}" has no command lane — a host delivery with no fallback_command has nothing for a pair to move the primary onto.`,
     };
   }
   return { routable: true };
-}
-
-/**
- * A declared write posture that CANNOT be checked against the lane it will
- * run on: the archetype declares `requires_write: required` (or `forbidden`)
- * and the route never declared `write_access:`, so `explainWriteConflict`
- * sees `null` and passes it — `null` satisfies every posture.
- *
- * `null` means UNKNOWN, not "fine". Refusing on unknown would break every
- * catalog that simply omits the key, so this reports instead: a refusal is
- * reserved for the case where no meaningful delivery or comparison exists at
- * all, and "we never asked" is not that case. But staying silent has a
- * specific cost worth naming — a write-required arm on a lane that turns out
- * to be read-only produces an EMPTY DIFF, and a bakeoff reads an empty diff
- * as "this model chose to change nothing" rather than "this model could not
- * write". That is a confident wrong verdict, which is worse than no verdict.
- *
- * Scoped to specs that actually have a command lane: a host delivery with no
- * `fallback_command` runs in-session with the host's own permissions, so an
- * undeclared `write_access` says nothing about it and warning there is noise.
- */
-export function explainUnverifiedWritePosture(
-  delivery: DeliveryChoice,
-  archetype: string | null,
-  profile: ExecutorProfile,
-): string | null {
-  if (archetype == null) return null;
-  if (!Object.hasOwn(profile.archetypes, archetype)) return null;
-  const posture = profile.archetypes[archetype]!.requiresWrite;
-  if (posture !== 'required' && posture !== 'forbidden') return null;
-  if (delivery.spec.writeAccess != null) return null;
-  if (!commandRoutable(delivery.spec)) return null;
-  return (
-    `archetype "${archetype}" declares \`requires_write: ${posture}\`, but executor ` +
-    `"${delivery.executor}" delivers through a route that does not declare \`write_access:\` — ` +
-    'so the posture is UNENFORCED here, not satisfied: nothing has checked whether that lane can ' +
-    'write. If it cannot, this produces an empty diff that reads like a deliberate choice to change ' +
-    `nothing. Fix: declare \`write_access: true\` or \`false\` on the route.`
-  );
 }
 
 /**
@@ -2074,7 +1792,7 @@ export function executorForArchetype(
   void _profile;
   void _executorName;
   void _archetype;
-  return { adapter: 'command', command: [], model: null, resume: null, sessionIdPattern: null, writeAccess: null, eligibility: {} } as ExecutorSpec;
+  return { adapter: 'command', command: [], model: null, resume: null, sessionIdPattern: null, eligibility: {} } as ExecutorSpec;
 }
 
 // --- Snapshot format v3 ---
@@ -2122,11 +1840,6 @@ function parseExecutorSpecEntry(raw: unknown, label: string, source: string): Ex
     const target = typeof raw.target === 'string' ? raw.target : undefined;
     const provider = typeof raw.provider === 'string' ? raw.provider : undefined;
     const driver = typeof raw.driver === 'string' ? raw.driver : undefined;
-    let writeAccess: boolean | null = null;
-    if (raw.write_access !== undefined) {
-      if (typeof raw.write_access !== 'boolean') throw new ExecutorProfileError(`${source}: ${label} host executor has a non-boolean \`write_access\`.`);
-      writeAccess = raw.write_access;
-    }
     let eligibility: Record<string, EligibilityState> = {};
     if (raw.eligibility !== undefined) {
       if (!isMapping(raw.eligibility)) throw new ExecutorProfileError(`${source}: ${label} host executor \`eligibility\` is not a mapping.`);
@@ -2136,14 +1849,11 @@ function parseExecutorSpecEntry(raw: unknown, label: string, source: string): Ex
         eligibility[k] = v;
       }
     }
-    if (raw.write_variant !== undefined) {
-      throw new ExecutorProfileError(`${source}: ${label} host executor rejects \`write_variant\` — write variants are command-delivery only.`);
-    }
     if (raw.timeout_ms !== undefined) {
       throw new ExecutorProfileError(`${source}: ${label} host executor rejects \`timeout_ms\` — host dispatch is not supervised.`);
     }
     const spec: HostExecutorSpec = {
-      adapter: 'host', model, reasoningEffort, agentType, fallbackCommand, writeAccess, eligibility,
+      adapter: 'host', model, reasoningEffort, agentType, fallbackCommand, eligibility,
       ...(target != null ? { target } : {}),
       ...(provider != null ? { provider } : {}),
       ...(driver != null ? { driver } : {}),
@@ -2194,11 +1904,6 @@ function parseExecutorSpecEntry(raw: unknown, label: string, source: string): Ex
   } else if (sessionIdPattern != null || mintsId) {
     throw new ExecutorProfileError(`${source}: ${label} has a session id source but no \`resume\` — session-capable executors must declare how to resume.`);
   }
-  let writeAccess: boolean | null = null;
-  if (raw.write_access !== undefined) {
-    if (typeof raw.write_access !== 'boolean') throw new ExecutorProfileError(`${source}: ${label} has a non-boolean \`write_access\`.`);
-    writeAccess = raw.write_access;
-  }
   let eligibility: Record<string, EligibilityState> = {};
   if (raw.eligibility !== undefined) {
     if (!isMapping(raw.eligibility)) throw new ExecutorProfileError(`${source}: ${label} \`eligibility\` is not a mapping.`);
@@ -2218,40 +1923,14 @@ function parseExecutorSpecEntry(raw: unknown, label: string, source: string): Ex
   }
   // The snapshot is the replay trust boundary: re-assert the same variant
   // invariants the catalog parse enforces, never fewer.
-  let writeVariant: { command: string[]; resume: string[] | null } | null = null;
+  // `write_variant` in a stored snapshot means the snapshot predates the
+  // permissions cut. Refuse rather than ignore, exactly as the catalog parser
+  // does — see docs/experimental/permissions-and-isolation.md.
   if (raw.write_variant != null) {
-    if (!isMapping(raw.write_variant)) {
-      throw new ExecutorProfileError(`${source}: ${label} \`write_variant\` is not a mapping.`);
-    }
-    const vcmd = raw.write_variant.command;
-    if (!Array.isArray(vcmd) || vcmd.length === 0 || !vcmd.every((part) => typeof part === 'string' && part.length > 0)) {
-      throw new ExecutorProfileError(`${source}: ${label} \`write_variant.command\` must be a non-empty array of strings.`);
-    }
-    let vresume: string[] | null = null;
-    if (raw.write_variant.resume != null) {
-      const vrs = raw.write_variant.resume;
-      if (!Array.isArray(vrs) || vrs.length === 0 || !vrs.every((part) => typeof part === 'string' && part.length > 0)) {
-        throw new ExecutorProfileError(`${source}: ${label} \`write_variant.resume\` must be a non-empty array of strings.`);
-      }
-      if (!(vrs as string[]).some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
-        throw new ExecutorProfileError(`${source}: ${label} \`write_variant.resume\` must contain ${SESSION_ID_PLACEHOLDER}.`);
-      }
-      vresume = vrs as string[];
-    }
-    const variantMintsId = (vcmd as string[]).some((part) => part.includes(SESSION_ID_PLACEHOLDER));
-    if (vresume == null && variantMintsId) {
-      throw new ExecutorProfileError(`${source}: ${label} \`write_variant.command\` contains ${SESSION_ID_PLACEHOLDER} but the variant declares no \`resume\` — the postured delivery would spawn the literal placeholder.`);
-    }
-    if (vresume != null) {
-      const hasPattern = sessionIdPattern != null;
-      if (variantMintsId && hasPattern) {
-        throw new ExecutorProfileError(`${source}: ${label} \`write_variant\` declares both a ${SESSION_ID_PLACEHOLDER} placeholder and inherits \`session_id_pattern\` — one id source only.`);
-      }
-      if (!variantMintsId && !hasPattern) {
-        throw new ExecutorProfileError(`${source}: ${label} \`write_variant\` declares \`resume\` but no session id source.`);
-      }
-    }
-    writeVariant = { command: vcmd as string[], resume: vresume };
+    throw new ExecutorProfileError(
+      `${source}: ${label} carries \`write_variant\`, which is no longer supported — this snapshot predates the ` +
+        'permissions cut. Re-snapshot from the current catalog.',
+    );
   }
   const spec: CommandExecutorSpec = {
     adapter: 'command',
@@ -2259,9 +1938,7 @@ function parseExecutorSpecEntry(raw: unknown, label: string, source: string): Ex
     model: typeof raw.model === 'string' ? raw.model : null,
     resume,
     sessionIdPattern,
-    writeAccess,
     ...(timeoutMs != null ? { timeoutMs } : {}),
-    ...(writeVariant != null ? { writeVariant } : {}),
     eligibility,
     ...(typeof raw.target === 'string' ? { target: raw.target } : {}),
     ...(typeof raw.provider === 'string' ? { provider: raw.provider } : {}),
@@ -2310,13 +1987,6 @@ export function serializeSnapshot(profile: ExecutorProfile, extraRefs: DialRef[]
     if (spec.provider != null) entry.provider = spec.provider;
     if ((spec as CommandExecutorSpec).driver != null) entry.driver = (spec as unknown as Record<string, unknown>).driver;
     if (spec.adapter === 'command' && (spec as CommandExecutorSpec).model != null) entry.model = (spec as CommandExecutorSpec).model;
-    if (spec.writeAccess != null) entry.write_access = spec.writeAccess;
-    if (spec.adapter === 'command' && spec.writeVariant != null) {
-      entry.write_variant = {
-        command: spec.writeVariant.command,
-        ...(spec.writeVariant.resume != null ? { resume: spec.writeVariant.resume } : {}),
-      };
-    }
     if (spec.eligibility != null && Object.keys(spec.eligibility).length > 0) {
       const sortedEligibility: Record<string, EligibilityState> = {};
       for (const key of Object.keys(spec.eligibility).sort()) {
@@ -2345,7 +2015,6 @@ export function serializeSnapshot(profile: ExecutorProfile, extraRefs: DialRef[]
     for (const name of Object.keys(profile.archetypes).sort()) {
       const policy = profile.archetypes[name]!;
       const entry: Record<string, unknown> = {};
-      if (policy.requiresWrite !== 'none') entry.requires_write = policy.requiresWrite;
       // Added, never defaulted: a `discardable` archetype serializes exactly
       // as it did before this key existed, so no stored snapshot moves a byte.
       if (policy.ignoredOutput !== 'discardable') entry.ignored_output = policy.ignoredOutput;
@@ -2406,12 +2075,17 @@ export function parseSnapshotDocument(text: string, source: string): SnapshotDoc
       if (!isMapping(rawPolicy)) throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` is not a mapping.`);
       const unknown = unknownArchetypeKeys(rawPolicy);
       if (unknown.length > 0) throw new ExecutorProfileError(`${source}: \`archetypes.${name}\` has unknown key(s) ${unknown.join(', ')}.`);
-      let requiresWrite: WritePosture = 'none';
+      // Removed, and REFUSED rather than ignored: silently dropping a key
+      // someone wrote in order to restrict something is the exact failure this
+      // project exists to prevent, and it would be a poor way to land a change
+      // whose whole premise is that unenforced claims are dangerous.
       if (rawPolicy.requires_write !== undefined) {
-        if (rawPolicy.requires_write === true) requiresWrite = 'required';
-        else if (rawPolicy.requires_write === false) requiresWrite = 'none';
-        else if (isWritePosture(rawPolicy.requires_write)) requiresWrite = rawPolicy.requires_write;
-        else throw new ExecutorProfileError(`${source}: \`archetypes.${name}.requires_write\` must be ${WRITE_POSTURE_FORMS}.`);
+        throw new ExecutorProfileError(
+          `${source}: \`archetypes.${name}.requires_write\` is no longer supported. Fadeno does not enforce ` +
+            'write permissions: a route is an argv, and a restriction belongs IN that argv — a separate route ' +
+            'with its own name (e.g. `--sandbox read-only`) that a reader can see. Containment is isolated ' +
+            'worktrees, now the default for command dispatches — see docs/experimental/permissions-and-isolation.md.',
+        );
       }
       const ignoredOutput = parseIgnoredOutput(rawPolicy.ignored_output, source, name);
       let fallback: string | null = null;
@@ -2430,7 +2104,7 @@ export function parseSnapshotDocument(text: string, source: string): SnapshotDoc
         if (typeof rawPolicy.brief !== 'string' || !BARE_IDENTIFIER_RE.test(rawPolicy.brief)) throw new ExecutorProfileError(`${source}: \`archetypes.${name}.brief\` must be a bare lowercase identifier.`);
         brief = rawPolicy.brief;
       }
-      archetypes[name] = { requiresWrite, ignoredOutput, fallback, distinctProviderFromInputs, brief };
+      archetypes[name] = { ignoredOutput, fallback, distinctProviderFromInputs, brief };
     }
     for (const start of Object.keys(archetypes)) {
       const path: string[] = [];

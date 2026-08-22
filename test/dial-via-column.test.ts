@@ -34,8 +34,8 @@ function seed(t: TestContext): { root: string; env: NodeJS.ProcessEnv } {
     routes: {
       standalone: {
         'current-host': { host: true },
-        anthropic: { driver: 'claude', command: ['claude', '-p', '--model', '{model}'], write_access: true },
-        openai: { driver: 'codex', command: ['codex', 'exec'], write_access: true },
+        anthropic: { driver: 'claude', command: ['claude', '-p', '--model', '{model}'], },
+        openai: { driver: 'codex', command: ['codex', 'exec'], },
       },
     },
     // `scout` has no dial of its own and borrows worker's.

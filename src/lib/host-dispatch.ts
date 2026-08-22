@@ -644,13 +644,13 @@ function hostLeaseHolder(runId: string, dispatchId: string): LeaseHolder {
   return { id: dispatchId, kind: 'host-dispatch', runId, dispatchId };
 }
 
-function hostRequestNeedsLease(lookup: HostDispatchRequestLookup): boolean {
-  const profile = hostRequestProfile(lookup);
-  const spec = profile.executors[lookup.request.executor];
-  // Physical route capability controls the lease. Unknown/null host posture is
-  // conservatively write-capable; only an explicitly read-only delivery may
-  // bypass it. This also keeps forced posture mismatches mechanically safe.
-  return spec?.writeAccess !== false;
+function hostRequestNeedsLease(_lookup: HostDispatchRequestLookup): boolean {
+  // Every SHARED host delivery takes the lease. Nothing declares itself a
+  // non-writer any more: `write_access` was a claim Fadeno never verified, and
+  // the honest reading without it is that we do not know. Isolated deliveries
+  // skip the lease by not being shared, which is a fact rather than a promise.
+  // See docs/experimental/permissions-and-isolation.md.
+  return true;
 }
 
 function releaseHostLease(repoRoot: string, runId: string, dispatchId: string): void {

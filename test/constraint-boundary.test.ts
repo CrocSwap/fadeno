@@ -40,12 +40,12 @@ function seedV3(t: import('node:test').TestContext, extra: Record<string, unknow
     },
     routes: {
       standalone: {
-        anthropic: { command: STDIN_ECHO('A:'), write_access: true },
-        openai: { command: STDIN_ECHO('C:'), write_access: true },
+        anthropic: { command: STDIN_ECHO('A:'), },
+        openai: { command: STDIN_ECHO('C:'), },
       },
       codex: {
-        anthropic: { command: STDIN_ECHO('A:'), write_access: true },
-        openai: { command: STDIN_ECHO('C:'), write_access: true },
+        anthropic: { command: STDIN_ECHO('A:'), },
+        openai: { command: STDIN_ECHO('C:'), },
       },
     },
     archetypes: { worker: {}, reviewer: {} },

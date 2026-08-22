@@ -51,8 +51,8 @@ function seedV3(t: import('node:test').TestContext, extra: Record<string, unknow
       'write-worker': { provider: 'openai', id: 'write-worker' },
     },
     routes: {
-      standalone: { openai: { command: ECHO('REPORT:'), write_access: true } },
-      codex: { openai: { command: ECHO('REPORT:'), write_access: true } },
+      standalone: { openai: { command: ECHO('REPORT:'), } },
+      codex: { openai: { command: ECHO('REPORT:'), } },
     },
     archetypes: { worker: {} },
     dials: { worker: 'echo-worker' },
@@ -268,8 +268,8 @@ test('shadow diff artifact contains change a writing fake executor made in workt
   const root = seedV3(t, {
     models: { 'write-worker': { provider: 'openai', id: 'write-worker' } },
     routes: {
-      standalone: { openai: { command: WRITE_SHADOW, write_access: true } },
-      codex: { openai: { command: WRITE_SHADOW, write_access: true } },
+      standalone: { openai: { command: WRITE_SHADOW, } },
+      codex: { openai: { command: WRITE_SHADOW, } },
     },
   } as any);
   // Need to ensure write-worker route has WRITE_SHADOW - we set routes per provider so all models share it, but we want echo for primary and write for shadow.
@@ -289,12 +289,12 @@ test('shadow diff artifact contains change a writing fake executor made in workt
     },
     routes: {
       standalone: {
-        openai: { command: ECHO('REPORT:'), write_access: true },
-        openai2: { command: WRITE_SHADOW, write_access: true },
+        openai: { command: ECHO('REPORT:'), },
+        openai2: { command: WRITE_SHADOW, },
       },
       codex: {
-        openai: { command: ECHO('REPORT:'), write_access: true },
-        openai2: { command: WRITE_SHADOW, write_access: true },
+        openai: { command: ECHO('REPORT:'), },
+        openai2: { command: WRITE_SHADOW, },
       },
     },
     archetypes: { worker: {} },
@@ -346,9 +346,9 @@ test('primary rows byte-stable when a shadow fires', (t) => {
     assert.equal(a.archetype, b.archetype);
   }
   // Also verify primary rows compared field-by-field: prompt_snapshot, dial, etc. should be equal ignoring timestamps/dispatch_id and snapshot paths
-  // `workspace_mode` is now an INTENDED difference, not drift: a selected pair
-  // puts the primary in its own worktree so both arms produce comparable
-  // diffs, where an unpaired dispatch still runs in the shared tree. Asserted
+  // `workspace_mode` is kept out of the byte-comparison because it is a
+  // delivery fact rather than identity. Both paired and unpaired primaries
+  // isolate now; the field is asserted
   // explicitly below rather than merely tolerated here — the point of this
   // test is that attaching a shadow leaves the primary's IDENTITY alone
   // (executor, dial, model, archetype, resolution, prompt), and that is
@@ -369,8 +369,14 @@ test('primary rows byte-stable when a shadow fires', (t) => {
   assert.equal(primaryShadow[0]!.prompt_sha256, primaryNo[0]!.prompt_sha256);
   // The one difference, stated positively so it cannot silently regress in
   // either direction: paired means isolated, unpaired means shared.
+  // Both isolate now. Isolation stopped being a pair-only behaviour when the
+  // permissions cut removed every Fadeno-level write guard: the worktree is
+  // the only thing left standing between a dispatched executor and this tree,
+  // so every command dispatch takes one. `workspace_mode` stays in the ignore
+  // set above because it is a delivery fact rather than part of the primary's
+  // identity, which is what this test is actually about.
   assert.equal(primaryShadow[0]!.workspace_mode, 'isolated', 'a paired primary runs in its own worktree');
-  assert.equal(primaryNo[0]!.workspace_mode, 'shared', 'an unpaired primary still runs in the shared tree');
+  assert.equal(primaryNo[0]!.workspace_mode, 'isolated', 'an unpaired primary isolates too, by default');
 });
 
 test('shadow identity re-spell: dial/model/model_id/driver/reasoning_effort', (t) => {
@@ -397,12 +403,12 @@ function seedTwoProviders(t: import('node:test').TestContext, primaryCmd: string
     },
     routes: {
       standalone: {
-        openai: { command: primaryCmd, write_access: true },
-        openai2: { command: shadowCmd, write_access: true },
+        openai: { command: primaryCmd, },
+        openai2: { command: shadowCmd, },
       },
       codex: {
-        openai: { command: primaryCmd, write_access: true },
-        openai2: { command: shadowCmd, write_access: true },
+        openai: { command: primaryCmd, },
+        openai2: { command: shadowCmd, },
       },
     },
     archetypes: { worker: {} },
@@ -434,12 +440,12 @@ test('shadow runs concurrently with the primary, not after it', (t) => {
     },
     routes: {
       standalone: {
-        openai: { command: primary, write_access: true },
-        openai2: { command: shadow, write_access: true },
+        openai: { command: primary, },
+        openai2: { command: shadow, },
       },
       codex: {
-        openai: { command: primary, write_access: true },
-        openai2: { command: shadow, write_access: true },
+        openai: { command: primary, },
+        openai2: { command: shadow, },
       },
     },
     archetypes: { worker: {} },
@@ -787,8 +793,8 @@ test('a host-dialed primary rides its own command lane — alone, and as half of
     routes: {
       claude: {
         'current-host': { host: true },
-        anthropic: { driver: 'claude', host: true, command: ECHO('HOST-FALLBACK:'), write_access: true },
-        xai: { driver: 'grok', command: ECHO('CHALLENGER:'), write_access: true },
+        anthropic: { driver: 'claude', host: true, command: ECHO('HOST-FALLBACK:'), },
+        xai: { driver: 'grok', command: ECHO('CHALLENGER:'), },
       },
     },
     archetypes: { worker: {} },
@@ -835,7 +841,7 @@ test('an unroutable selected pair leaves the spawn untouched — no pair, never 
     models: { grok: { provider: 'xai', id: 'grok' } },
     routes: {
       claude: {
-        xai: { driver: 'grok', command: ECHO('CHALLENGER:'), write_access: true },
+        xai: { driver: 'grok', command: ECHO('CHALLENGER:'), },
       },
     },
     archetypes: { worker: {} },
@@ -1171,7 +1177,7 @@ test('worktree_carry declared in the user or builtin layer is refused — it is 
   writeFileSync(join(userConfigDir, 'executors.yaml'), stringifyYaml({
     schema_version: 3,
     models: { 'echo-worker': { provider: 'openai', id: 'echo-worker' } },
-    routes: { standalone: { openai: { command: ECHO('REPORT:'), write_access: true } } },
+    routes: { standalone: { openai: { command: ECHO('REPORT:'), } } },
     worktree_carry: ['built'],
   }));
   initGit(root);

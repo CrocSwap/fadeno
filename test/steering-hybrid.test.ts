@@ -344,17 +344,16 @@ function seedWriteGuardProfile(root: string): void {
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
     executors: {
-      'ro-cli': { adapter: 'command', command: ['claude', '-p'], model: 'opus', write_access: false },
-      'rw-cli': { adapter: 'command', command: ['codex', 'exec', '-'], model: 'gpt-5.6-sol', write_access: true },
+      'ro-cli': { adapter: 'command', command: ['claude', '-p'], model: 'opus', },
+      'rw-cli': { adapter: 'command', command: ['codex', 'exec', '-'], model: 'gpt-5.6-sol', },
       'ro-host': {
         adapter: 'host', model: 'opus', reasoning_effort: 'high', agent_type: 'worker',
-        fallback_command: ['claude', '-p'], write_access: false,
-      },
+        fallback_command: ['claude', '-p'], },
       native: { adapter: 'host', model: 'gpt-5.6-luna', reasoning_effort: 'xhigh', agent_type: 'worker' },
       reviewer: { adapter: 'host', model: 'gpt-5.6-terra', reasoning_effort: 'high', agent_type: 'reviewer' },
       judge: { adapter: 'host', model: 'gpt-5.6-sol', reasoning_effort: 'medium', agent_type: 'judge' },
     },
-    archetypes: { worker: { requires_write: true }, reviewer: { requires_write: false } },
+    archetypes: { worker: { }, reviewer: { } },
     loadouts: {
       'ro-worker': { worker: 'ro-cli', reviewer: 'ro-cli', judge: 'judge' },
       'ro-fallback': { worker: 'ro-host', reviewer: 'reviewer', judge: 'judge' },
@@ -378,18 +377,18 @@ function seedWriteGuardProfileV3(root: string): void {
     },
     routes: {
       standalone: {
-        roclip: { command: ['claude', '-p'], write_access: false },
-        rwclip: { command: ['codex', 'exec', '-'], write_access: true },
-        rohostp: { host: true, command: ['claude', '-p'], write_access: false },
+        roclip: { command: ['claude', '-p'], },
+        rwclip: { command: ['codex', 'exec', '-'], },
+        rohostp: { host: true, command: ['claude', '-p'], },
         nativep: { host: true },
         reviewerp: { host: true },
         judgep: { host: true },
         'current-host': { host: true },
       },
       codex: {
-        roclip: { command: ['claude', '-p'], write_access: false },
-        rwclip: { command: ['codex', 'exec', '-'], write_access: true },
-        rohostp: { host: true, command: ['claude', '-p'], write_access: false },
+        roclip: { command: ['claude', '-p'], },
+        rwclip: { command: ['codex', 'exec', '-'], },
+        rohostp: { host: true, command: ['claude', '-p'], },
         nativep: { host: true },
         reviewerp: { host: true },
         judgep: { host: true },
@@ -397,8 +396,8 @@ function seedWriteGuardProfileV3(root: string): void {
       },
     },
     archetypes: {
-      worker: { requires_write: 'required' },
-      reviewer: { requires_write: 'none' },
+      worker: { },
+      reviewer: { },
     },
     dials: {
       worker: 'native',
@@ -449,40 +448,6 @@ test.skip('steering resolve refuses a command slot whose delivery cannot do the 
   assert.equal(reader.writeConflict, undefined);
 });
 
-test('steering apply refuses to materialize a broker for a conflicted slot; other slots proceed', (t) => {
-  const root = tempRepo(t);
-  seedWriteGuardProfileV3(root);
-
-  // ro-worker: worker dial -> ro-cli (write conflict), reviewer ro-cli (ok), judge host
-  writeLocalDialState(root, { dials: { worker: { model: 'ro-cli' }, reviewer: { model: 'ro-cli' } }, shadows: {}, legacyNote: null });
-  const applied = runSteeringApply({ repoRoot: root, target: 'codex' });
-  assert.equal(applied.materialization.worker?.kind, 'write-conflict');
-  assert.equal(applied.materialization.worker?.executor, 'ro-cli');
-  assert.match(
-    applied.materialization.worker!.writeConflict!,
-    /archetype "worker" declares `requires_write: required`, but executor "ro-cli"/,
-  );
-  // No broker file at all for the refused slot — nothing can route to it.
-  assert.equal(exists(root, '.codex/agents/worker.toml'), false);
-
-  // The read-only reviewer slot (same executor, no write need) still lands, as
-  // does the native judge slot.
-  assert.equal(applied.materialization.reviewer?.kind, 'command-broker');
-  assert.equal(applied.materialization.judge?.kind, 'host');
-  assert.ok(exists(root, '.codex/agents/reviewer.toml'));
-  assert.ok(exists(root, '.codex/agents/judge.toml'));
-  assert.deepEqual(
-    applied.results.map((item) => item.path.endsWith('worker.toml')),
-    [false, false],
-  );
-
-  // A write-capable worker slot materializes normally, and the materialized
-  // agents know to stop on a refusal rather than dispatch or substitute.
-  writeLocalDialState(root, { dials: { worker: { model: 'rw-cli' } }, shadows: {}, legacyNote: null });
-  const capable = runSteeringApply({ repoRoot: root, target: 'codex', force: true });
-  assert.equal(capable.materialization.worker?.kind, 'command-broker');
-  assert.match(read(root, '.codex/agents/worker.toml'), /mode=write_conflict/);
-});
 
 test('tool-complete starts and attributes the exact next tool_call atomically', (t) => {
   const root = tempRepo(t);

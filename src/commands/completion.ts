@@ -93,7 +93,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   'new-run': command({ '--input': { kind: 'input' } }, ['playbook', 'free']),
   models: command({ '--driver': { kind: 'free' }, '--json': NONE }, ['executor']),
   dial: command(
-    { '--via': { kind: 'free' }, '--session': NONE, '--user': NONE, '--repo': NONE, '--force': NONE, '--rate': { kind: 'free' }, '--archetype': { kind: 'archetype' }, '--json': NONE },
+    { '--via': { kind: 'free' }, '--session': NONE, '--user': NONE, '--repo': NONE, '--rate': { kind: 'free' }, '--archetype': { kind: 'archetype' }, '--json': NONE },
     ['archetype', 'free'],
     {
       clear: command({ '--session': NONE, '--user': NONE, '--repo': NONE }, ['archetype']),
@@ -134,7 +134,7 @@ const COMMANDS: Record<string, CommandSpec> = {
       '--tag': { kind: 'free' },
       '--shadow': { kind: 'free' },
       '--timeout': { kind: 'free' },
-      '--isolate': NONE,
+      '--isolate': NONE, '--shared': NONE,
       '--ignored-output': { kind: 'enum', values: ['kept', 'discardable'] },
       '--no-brief': NONE,
       '--diagnostics': NONE,

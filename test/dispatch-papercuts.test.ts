@@ -33,9 +33,9 @@ const STDIN_ECHO = (prefix: string): string[] => [
 ];
 
 const v3RoutesFor = (cmd: string[]) => ({
-  standalone: { openai: { command: cmd, write_access: true }, 'current-host': { host: true } },
-  codex: { openai: { command: cmd, write_access: true }, 'current-host': { host: true } },
-  claude: { openai: { command: cmd, write_access: true }, 'current-host': { host: true } },
+  standalone: { openai: { command: cmd, }, 'current-host': { host: true } },
+  codex: { openai: { command: cmd, }, 'current-host': { host: true } },
+  claude: { openai: { command: cmd, }, 'current-host': { host: true } },
 });
 
 function seedProfile(t: TestContext, doc: Record<string, unknown>): string {
@@ -228,9 +228,9 @@ test('cli: a nonzero executor exit gets a stderr diagnosis line; stdout stays pu
     schema_version: 3,
     models: { probe: { provider: 'openai', id: 'probe' }, 'fail-model': { provider: 'openai', id: 'fail-model' } },
     routes: {
-      standalone: { openai: { command: ['node', '-e', 'process.exit(7)'], write_access: true } },
-      codex: { openai: { command: ['node', '-e', 'process.exit(7)'], write_access: true } },
-      claude: { openai: { command: ['node', '-e', 'process.exit(7)'], write_access: true } },
+      standalone: { openai: { command: ['node', '-e', 'process.exit(7)'], } },
+      codex: { openai: { command: ['node', '-e', 'process.exit(7)'], } },
+      claude: { openai: { command: ['node', '-e', 'process.exit(7)'], } },
     },
     archetypes: { worker: {} },
     dials: { worker: 'fail-model' },

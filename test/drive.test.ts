@@ -162,7 +162,7 @@ function seed(t: TestContext, opts: SeedOpts = {}): { root: string; runId: strin
   for (const [name, spec] of Object.entries(EXECUTORS as Record<string, Record<string, unknown>>)) {
     const provider = name.replace(/-/g, '_') + '_p';
     models[name] = { provider, id: name, effort: 'high' };
-    const route: Record<string, unknown> = { write_access: true };
+    const route: Record<string, unknown> = { };
     if (spec.command) route.command = spec.command;
     if (spec.resume) route.resume = spec.resume;
     if (spec.session_id_pattern) route.session_id_pattern = spec.session_id_pattern;
@@ -420,85 +420,6 @@ flow:
     terminal_status: completed
 `;
 
-test('engine: a write-needing role is refused before the spawn on a read-only delivery', (t) => {
-  const root = tempRepo(t);
-  runInit({ target: 'codex', repoRoot: root });
-  writeFileSync(join(root, '.fadeno', 'playbooks', 'write-guard.yaml'), WRITE_GUARD_PLAYBOOK);
-  writeFileSync(
-    join(root, '.fadeno', 'executors.yaml'),
-    stringifyYaml({
-      schema_version: 3,
-      models: {
-        'ro-worker': { provider: 'ro_p', id: 'ro-worker', effort: 'high' },
-        'rw-worker': { provider: 'rw_p', id: 'rw-worker', effort: 'high' },
-      },
-      routes: {
-        standalone: {
-          ro_p: { command: ['node', '-e', "require('fs').writeFileSync('ran.tmp','1');process.stdout.write('NOTES')"], write_access: false },
-          rw_p: { command: ['node', '-e', "process.stdout.write('NOTES')"], write_access: true },
-          'current-host': { host: true },
-        },
-        codex: {
-          ro_p: { command: ['node', '-e', "require('fs').writeFileSync('ran.tmp','1');process.stdout.write('NOTES')"], write_access: false },
-          rw_p: { command: ['node', '-e', "process.stdout.write('NOTES')"], write_access: true },
-          'current-host': { host: true },
-        },
-        claude: {
-          ro_p: { command: ['node', '-e', "require('fs').writeFileSync('ran.tmp','1');process.stdout.write('NOTES')"], write_access: false },
-          rw_p: { command: ['node', '-e', "process.stdout.write('NOTES')"], write_access: true },
-          'current-host': { host: true },
-        },
-        grok: {
-          ro_p: { command: ['node', '-e', "require('fs').writeFileSync('ran.tmp','1');process.stdout.write('NOTES')"], write_access: false },
-          rw_p: { command: ['node', '-e', "process.stdout.write('NOTES')"], write_access: true },
-          'current-host': { host: true },
-        },
-      },
-      archetypes: { worker: { requires_write: 'required' } },
-      dials: { worker: 'ro-worker' },
-    }),
-  );
-  const { runId } = runNewRun({ playbook: 'write-guard', task: 'Ship the fix', repoRoot: root });
-
-  const refused = runDrive({ run: runId, repoRoot: root, env: null });
-  assert.equal(refused.outcome, 'executor_failed');
-  assert.match(refused.detail, /implement \(builder\) was not dispatched/);
-  assert.match(refused.detail, /archetype "worker" declares `requires_write: required`, but executor "ro-worker"/);
-  assert.match(refused.detail, /in-session worker agent/);
-
-  // Nothing was spawned, nothing was assembled, nothing was produced.
-  assert.equal(existsSync(join(root, 'ran.tmp')), false);
-  const all = events(root, runId);
-  assert.equal(ofType(all, 'actor_dispatched').length, 0);
-  assert.equal(ofType(all, 'prompt_assembled').length, 0);
-  assert.equal(ofType(all, 'artifact_created').length, 0);
-
-  // The failure is recorded like any other failed dispatch, with the delivery's
-  // declared (in)capability on the row.
-  const failures = ofType(all, 'actor_failed');
-  assert.equal(failures.length, 1);
-  assert.equal(failures[0]!.extra.reason, 'write_access_denied');
-  assert.equal(failures[0]!.extra.executor, 'ro-worker');
-  assert.equal(failures[0]!.extra.actor, 'builder');
-  assert.equal(failures[0]!.extra.archetype, 'worker');
-  assert.equal(failures[0]!.extra.write_access, false);
-  assert.equal(failures[0]!.extra.attempt, 1);
-  assert.match(String(failures[0]!.extra.error), /requires_write: required/);
-
-  // The run is paused, not terminal: re-driving repeats the refusal.
-  assert.equal(runDrive({ run: runId, repoRoot: root, env: null }).outcome, 'executor_failed');
-  assert.equal(ofType(events(root, runId), 'actor_failed').length, 2);
-
-  // Rebinding to a write-capable delivery is one of the fixes the message
-  // names, and it clears the guard without any special case.
-  const recovered = runDrive({ run: runId, repoRoot: root, env: null, bind: ['builder=rw-worker'] });
-  assert.equal(recovered.outcome, 'terminal');
-  assert.equal(recovered.status, 'completed');
-  assert.equal(
-    ofType(events(root, runId), 'actor_dispatched').map((e) => e.extra.executor).join(),
-    'rw-worker',
-  );
-});
 
 test('verify: tampered profile snapshot fails executor-bindings', (t) => {
   const { root, runId } = completeHappyRun(t);

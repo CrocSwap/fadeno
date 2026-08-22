@@ -48,7 +48,6 @@ export interface ModelRow {
   /** Resolution detail retained for structured consumers; not model identity. */
   native: boolean;
   /** The home route declares a write variant (a `+write` lane exists). */
-  write_variant: boolean;
   /** That variant's argv grants the fadeno command family (director-capable). */
   fadeno_capable: boolean;
   eligibility: Record<string, EligibilityState>;
@@ -67,7 +66,6 @@ export interface ModelRow {
     id: string;
     adapter: 'command' | 'host';
     delivery: string;
-    write_variant: boolean;
     fadeno_capable: boolean;
   }>;
 }
@@ -152,10 +150,11 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
     try {
       const compiled = compileDialRef({ model: name }, profile);
       const adapter = compiled.spec.adapter;
-      const writeVariant = adapter === 'command' && (compiled.spec as CommandExecutorSpec).writeVariant != null;
+      // Read straight off the argv that will actually run: there is no longer
+      // a second "variant" argv to look inside — a route is one command.
       const fadenoCapable =
-        writeVariant &&
-        (compiled.spec as CommandExecutorSpec).writeVariant!.command.some((part) => part.includes('Bash(fadeno:'));
+        adapter === 'command' &&
+        (compiled.spec as CommandExecutorSpec).command.some((part: string) => part.includes('Bash(fadeno:'));
       const verified = verifications.find((v) => v.driver === compiled.driver && v.model === compiled.modelId);
       homeDriver = compiled.driver;
       row = {
@@ -168,7 +167,6 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
         home_via: modelVia,
         adapter,
         native: adapter === 'host',
-        write_variant: writeVariant,
         fadeno_capable: fadenoCapable,
         eligibility: { ...entry.eligibility },
         spellings: { ...entry.spellings },
@@ -189,7 +187,6 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
         home_via: modelVia,
         adapter: null,
         native: false,
-        write_variant: false,
         fadeno_capable: false,
         eligibility: { ...entry.eligibility },
         spellings: { ...entry.spellings },
@@ -203,16 +200,14 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
       try {
         const laneCompiled = compileDialRef({ model: name, via: alias }, profile);
         const laneAdapter = laneCompiled.spec.adapter;
-        const laneWrite = laneAdapter === 'command' && (laneCompiled.spec as CommandExecutorSpec).writeVariant != null;
         const laneFadeno =
-          laneWrite &&
-          (laneCompiled.spec as CommandExecutorSpec).writeVariant!.command.some((part) => part.includes('Bash(fadeno:'));
+          laneAdapter === 'command' &&
+          (laneCompiled.spec as CommandExecutorSpec).command.some((part: string) => part.includes('Bash(fadeno:'));
         lanes.push({
           via: alias,
           id: laneCompiled.modelId,
           adapter: laneAdapter,
           delivery: alias,
-          write_variant: laneWrite,
           fadeno_capable: laneFadeno,
         });
       } catch {

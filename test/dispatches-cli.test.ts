@@ -122,7 +122,6 @@ test('dispatches: correlates a requested/completed pair into one logical entry',
   assert.equal(entry.resolution, 'repo');
   assert.equal(entry.promptSnapshot, SNAPSHOT);
   assert.equal(entry.relayAttested, null);
-  assert.equal(entry.writeAccess, null);
 });
 
 test('dispatches: reads what the kernel actually writes (round trip)', (t) => {
@@ -135,7 +134,7 @@ test('dispatches: reads what the kernel actually writes (round trip)', (t) => {
     archetypes: { worker: {} },
     dials: { worker: 'echo-worker' },
   }));
-  const dispatched = runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, now: new Date('2026-08-12T12:00:00Z'), userPathOptions: onHarness('standalone') });
+  const dispatched = runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, shared: true, now: new Date('2026-08-12T12:00:00Z'), userPathOptions: onHarness('standalone') });
   const result = runDispatches({ repoRoot: root });
   assert.equal(result.total, 1);
   const entry = result.entries[0]!;
@@ -161,7 +160,6 @@ test('dispatches: a requested row with no completion is marked, not silently dro
       model: 'gpt-5.6-terra',
       transport: 'host-command-fallback',
       relay_attested: true,
-      write_access: false,
       prompt_snapshot: '.fadeno/local/prompts/reviewer-9f8e7d6c.md',
       output_snapshot: '.fadeno/local/outputs/reviewer-9f8e7d6c.md',
     }),
@@ -170,13 +168,11 @@ test('dispatches: a requested row with no completion is marked, not silently dro
   assert.equal(result.total, 1);
   assert.ok(result.lines[0]!.includes('no completion recorded (killed or in flight)'));
   assert.ok(result.lines[0]!.includes('[relay_attested: true]'));
-  assert.ok(result.lines[0]!.includes('[write_access: none]'));
   const entry = result.entries[0]!;
   assert.equal(entry.completed, false);
   assert.equal(entry.exitCode, null);
   assert.equal(entry.durationMs, null);
   assert.equal(entry.relayAttested, true);
-  assert.equal(entry.writeAccess, false);
 });
 
 test('dispatches: a pre-0.6 native_delivery row still renders as a host entry', (t) => {
@@ -379,7 +375,6 @@ test('dispatches: entries are structured data (what --json prints) — 1.0 shape
   assert.equal(e.promptSnapshot, SNAPSHOT);
   assert.equal(e.promptSha256, 'a'.repeat(64));
   assert.equal(e.relayAttested, null);
-  assert.equal(e.writeAccess, null);
   assert.equal(e.refusal, null);
   assert.equal(e.gateEligible, null);
   assert.equal(e.completed, true);
@@ -644,25 +639,26 @@ test('dispatches: a completion that records a spawn error surfaces it', (t) => {
 
 test('dispatches: [no workspace change] marks an exit-0 write-capable no-op', (t) => {
   const root = seedLog(t, [
-    requested({ write_access: true, output_snapshot: OUTPUT_SNAP }),
-    completed({ write_access: true, output_snapshot: OUTPUT_SNAP, output_bytes: Buffer.byteLength(OUTPUT_BODY), workspace_changed: false }),
+    requested({ output_snapshot: OUTPUT_SNAP }),
+    completed({ output_snapshot: OUTPUT_SNAP, output_bytes: Buffer.byteLength(OUTPUT_BODY), workspace_changed: false }),
   ]);
   const result = runDispatches({ repoRoot: root });
   assert.equal(result.entries[0]!.workspaceChanged, false);
-  assert.equal(result.entries[0]!.writeAccess, true);
   assert.match(result.lines[0]!, /\[no workspace change]/);
 });
 
 test('dispatches: [no workspace change] stays off unless every frozen field agrees', (t) => {
+  // The frozen set is now exit_code + workspace_changed. The third term used
+  // to be "and the route claimed write_access: true"; with the permissions
+  // system gone, a row that attests no change is making that claim itself.
   const cases: Array<Record<string, unknown>> = [
-    { write_access: true, workspace_changed: true },
-    { write_access: true },
-    { write_access: false, workspace_changed: false },
-    { write_access: true, workspace_changed: false, exit_code: 1 },
+    { workspace_changed: true },
+    { },
+    { workspace_changed: false, exit_code: 1 },
   ];
   for (const over of cases) {
     const root = seedLog(t, [
-      requested({ write_access: over.write_access }),
+      requested({}),
       completed(over),
     ]);
     const line = runDispatches({ repoRoot: root }).lines[0]!;
@@ -672,15 +668,15 @@ test('dispatches: [no workspace change] stays off unless every frozen field agre
 
 test('dispatches: shadow rows never get [no workspace change]', (t) => {
   const root = seedLog(t, [
-    requested({ write_access: true, output_snapshot: OUTPUT_SNAP }),
-    completed({ write_access: true, output_snapshot: OUTPUT_SNAP, workspace_changed: false, shadow: true, primary_dispatch_id: 'd1', output_bytes: 10 }),
+    requested({ output_snapshot: OUTPUT_SNAP }),
+    completed({ output_snapshot: OUTPUT_SNAP, workspace_changed: false, shadow: true, primary_dispatch_id: 'd1', output_bytes: 10 }),
   ]);
   // need to make entry shadow true via request row as well? We'll seed shadow request directly
   const root2 = seedLog(t, [
-    requested({ dispatch_id: 'd1', write_access: true, output_snapshot: OUTPUT_SNAP }),
-    completed({ dispatch_id: 'd1', write_access: true, output_snapshot: OUTPUT_SNAP, workspace_changed: false, output_bytes: 10 }),
-    { ...requested({ dispatch_id: 's1', shadow: true, primary_dispatch_id: 'd1', write_access: true, output_snapshot: '.fadeno/local/outputs/shadow-aaa.md' }) },
-    { ...completed({ dispatch_id: 's1', shadow: true, primary_dispatch_id: 'd1', write_access: true, workspace_changed: false, output_bytes: 5, output_snapshot: '.fadeno/local/outputs/shadow-aaa.md', diff_snapshot: '.fadeno/local/outputs/shadow-aaa.diff', diff_bytes: 1 }) },
+    requested({ dispatch_id: 'd1', output_snapshot: OUTPUT_SNAP }),
+    completed({ dispatch_id: 'd1', output_snapshot: OUTPUT_SNAP, workspace_changed: false, output_bytes: 10 }),
+    { ...requested({ dispatch_id: 's1', shadow: true, primary_dispatch_id: 'd1', output_snapshot: '.fadeno/local/outputs/shadow-aaa.md' }) },
+    { ...completed({ dispatch_id: 's1', shadow: true, primary_dispatch_id: 'd1', workspace_changed: false, output_bytes: 5, output_snapshot: '.fadeno/local/outputs/shadow-aaa.md', diff_snapshot: '.fadeno/local/outputs/shadow-aaa.diff', diff_bytes: 1 }) },
   ]);
   const result = runDispatches({ repoRoot: root2 });
   const shadowLine = result.lines.find(l=>l.includes('[shadow of'))!;
@@ -779,7 +775,7 @@ test('dispatches: a nonzero exit is stamped and rendered as FAILED, not complete
     return root;
   }
   const root = dispatchWith(['node', '-e', 'process.exit(1)']);
-  const dispatched = runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, now: new Date('2026-08-12T12:00:00Z'), userPathOptions: onHarness('standalone') });
+  const dispatched = runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, shared: true, now: new Date('2026-08-12T12:00:00Z'), userPathOptions: onHarness('standalone') });
   assert.equal(dispatched.exitCode, 1);
   assert.equal(dispatched.outcome, 'failed');
   assert.equal(dispatched.outputBytes, 0);
@@ -800,7 +796,7 @@ test('dispatches: exit 0 with no output is stamped `empty`, not success', (t) =>
     archetypes: { worker: {} },
     dials: { worker: 'probe' },
   }));
-  const dispatched = runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, now: new Date('2026-08-12T12:00:00Z'), userPathOptions: onHarness('standalone') });
+  const dispatched = runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, shared: true, now: new Date('2026-08-12T12:00:00Z'), userPathOptions: onHarness('standalone') });
   assert.equal(dispatched.exitCode, 0);
   assert.equal(dispatched.outputBytes, 0);
   assert.equal(dispatched.outcome, 'empty');

@@ -39,15 +39,15 @@ function seedV3(t: TestContext): string {
     },
     routes: {
       standalone: {
-        openai: { command: ['node', '-e', '0'], write_access: true },
-        xai: { command: ['node', '-e', '0'], write_access: true },
+        openai: { command: ['node', '-e', '0'], },
+        xai: { command: ['node', '-e', '0'], },
         'current-host': { host: true },
       },
     },
     archetypes: {
-      worker: { requires_write: 'required' },
-      reviewer: { requires_write: 'none' },
-      judge: { requires_write: 'none' },
+      worker: { },
+      reviewer: { },
+      judge: { },
     },
   }));
   return root;

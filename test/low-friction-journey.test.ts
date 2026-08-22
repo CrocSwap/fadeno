@@ -80,10 +80,9 @@ test('setup is idempotent and writes no dial/pin state', (t) => {
     '  standalone:',
     '    xai:',
     '      command: [legacy, run]',
-    '      write_access: true',
+    '      ',
     'archetypes:',
-    '  worker:',
-    '    requires_write: required',
+    '  worker: {}',
     '',
   ].join('\n'));
 
@@ -261,21 +260,21 @@ test('drive recovers a command start left without a terminal receipt', (t) => {
     },
     routes: {
       standalone: {
-        failp: { command: [process.execPath, '-e', 'process.exit(7)'], write_access: true },
+        failp: { command: [process.execPath, '-e', 'process.exit(7)'], },
         'current-host': { host: true },
       },
       codex: {
-        failp: { command: [process.execPath, '-e', 'process.exit(7)'], write_access: true },
+        failp: { command: [process.execPath, '-e', 'process.exit(7)'], },
         'current-host': { host: true },
       },
       claude: {
-        failp: { command: [process.execPath, '-e', 'process.exit(7)'], write_access: true },
+        failp: { command: [process.execPath, '-e', 'process.exit(7)'], },
         'current-host': { host: true },
       },
     },
     archetypes: {
-      worker: { requires_write: 'required' },
-      reviewer: { requires_write: 'none' },
+      worker: { },
+      reviewer: { },
     },
     bindings: {
       coordinator: 'fail-model',
@@ -332,20 +331,20 @@ test('doctor checks a repo-selected executable without executing it', (t) => {
     },
     routes: {
       standalone: {
-        repo: { command: [command], write_access: true },
+        repo: { command: [command], },
         'current-host': { host: true },
       },
       codex: {
-        repo: { command: [command], write_access: true },
+        repo: { command: [command], },
         'current-host': { host: true },
       },
       claude: {
-        repo: { command: [command], write_access: true },
+        repo: { command: [command], },
         'current-host': { host: true },
       },
     },
     archetypes: {
-      worker: { requires_write: 'required' },
+      worker: { },
     },
     dials: {
       worker: 'repo-model',

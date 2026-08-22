@@ -33,11 +33,11 @@ const V3_BASE = {
   models: { sol: { provider: 'dummy', id: 'sol', effort: 'high' } },
   routes: {
     standalone: {
-      dummy: { command: ['node', '-e', '0'], write_access: true },
+      dummy: { command: ['node', '-e', '0'], },
       'current-host': { host: true },
     },
   },
-  archetypes: { worker: { requires_write: 'none' } },
+  archetypes: { worker: { } },
 };
 
 function isolatedUser(root: string): UserPathOptions {
@@ -193,7 +193,7 @@ const SURVIVES_THE_MERGE: Record<string, { declare: Record<string, unknown>; che
   routes: { declare: {}, check: (p) => assert.ok(p.routes.standalone?.dummy) },
   bindings: { declare: { bindings: { reviewer: 'sol' } }, check: (p) => assert.equal(p.bindings.reviewer?.model, 'sol') },
   dials: { declare: { dials: { worker: 'sol' } }, check: (p) => assert.equal(p.dials.worker?.model, 'sol') },
-  archetypes: { declare: {}, check: (p) => assert.equal(p.archetypes.worker?.requiresWrite, 'none') },
+  archetypes: { declare: { archetypes: { auditor: { ignored_output: 'kept' } } }, check: (p) => assert.equal(p.archetypes.auditor?.ignoredOutput, 'kept') },
   constraints: {
     declare: { constraints: { command: ['node', '-e', '0'] } },
     check: (p) => assert.deepEqual(p.constraints?.command, ['node', '-e', '0']),

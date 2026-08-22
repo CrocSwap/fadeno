@@ -42,18 +42,18 @@ const DISPATCH_PROFILE = {
   },
   routes: {
     standalone: {
-      basep: { command: STDIN_ECHO('BASE:'), write_access: true },
-      overp: { command: STDIN_ECHO('OVER:'), write_access: true },
+      basep: { command: STDIN_ECHO('BASE:'), },
+      overp: { command: STDIN_ECHO('OVER:'), },
       'current-host': { host: true },
     },
     codex: {
-      basep: { command: STDIN_ECHO('BASE:'), write_access: true },
-      overp: { command: STDIN_ECHO('OVER:'), write_access: true },
+      basep: { command: STDIN_ECHO('BASE:'), },
+      overp: { command: STDIN_ECHO('OVER:'), },
       'current-host': { host: true },
     },
   },
   archetypes: {
-    worker: { requires_write: 'none' },
+    worker: { },
   },
 };
 
@@ -65,18 +65,18 @@ const DRIVE_PROFILE = {
   },
   routes: {
     standalone: {
-      basep: { command: BASE_CMD, write_access: true },
-      overp: { command: OVER_CMD, write_access: true },
+      basep: { command: BASE_CMD, },
+      overp: { command: OVER_CMD, },
       'current-host': { host: true },
     },
     codex: {
-      basep: { command: BASE_CMD, write_access: true },
-      overp: { command: OVER_CMD, write_access: true },
+      basep: { command: BASE_CMD, },
+      overp: { command: OVER_CMD, },
       'current-host': { host: true },
     },
   },
   archetypes: {
-    worker: { requires_write: 'none' },
+    worker: { },
   },
   dials: {
     worker: 'base-model',
@@ -171,9 +171,9 @@ test('dispatch: no session dial means no session source, and a session dial for 
     },
     routes: {
       standalone: {
-        basep: { command: STDIN_ECHO('BASE:'), write_access: true },
-        overp: { command: STDIN_ECHO('OVER:'), write_access: true },
-        otherp: { command: STDIN_ECHO('OTHER:'), write_access: true },
+        basep: { command: STDIN_ECHO('BASE:'), },
+        overp: { command: STDIN_ECHO('OVER:'), },
+        otherp: { command: STDIN_ECHO('OTHER:'), },
         'current-host': { host: true },
       },
     },

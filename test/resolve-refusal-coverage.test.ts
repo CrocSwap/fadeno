@@ -3,10 +3,10 @@
 // fixed here. They share one shape: a surface answering a question it could
 // not actually answer, and answering it optimistically.
 //
-// The standard these encode: a REFUSAL is reserved for the case where no
-// meaningful delivery or comparison exists at all. Everything else must be
-// visible instead — which means the optimistic silent answer is the bug, not
-// the absence of a new refusal.
+// What survives the permissions cut: eligibility is still a real refusal the
+// kernel makes, so a resolve that recommends dispatching into it is still a
+// defect. The write-posture halves of this file are gone with the system they
+// tested — see docs/experimental/permissions-and-isolation.md.
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -39,7 +39,7 @@ test('dial resolve refuses to recommend a dispatch the kernel forbids on eligibi
   const root = seed(t, {
     schema_version: 3,
     models: { ro: { provider: 'rop', id: 'ro-m' } },
-    routes: { codex: { rop: { command: ECHO('RO'), write_access: true, eligibility: { worker: 'forbidden' } } } },
+    routes: { codex: { rop: { command: ECHO('RO'), eligibility: { worker: 'forbidden' } } } },
     archetypes: { worker: {} },
     dials: { worker: 'ro' },
   });
@@ -53,34 +53,7 @@ test('dial resolve refuses to recommend a dispatch the kernel forbids on eligibi
 // decision recorded with this change is to make that visible rather than
 // refuse it: refusing would break every catalog that omits the key, and
 // "we never asked" is not the same as "no meaningful delivery exists".
-test('an unverifiable write posture warns at dial time rather than passing silently', (t) => {
-  const root = seed(t, {
-    schema_version: 3,
-    models: { und: { provider: 'up', id: 'u-m' } },
-    routes: { codex: { up: { command: ECHO('U') } } },
-    archetypes: { worker: { requires_write: 'required' } },
-  });
-  const r = runDialSet({ archetype: 'worker', model: 'und', repoRoot: root, userPathOptions: iso(root), session: true });
-  const warn = r.notes.find((n: string) => n.includes('WRITE POSTURE UNENFORCED'));
-  assert.ok(warn, 'a posture that cannot be checked must say so');
-  assert.match(warn, /does not declare `write_access:`/);
-  assert.match(warn, /empty diff/);
-});
 
-test('an unverifiable write posture also warns where a shadow is attached', (t) => {
-  const root = seed(t, {
-    schema_version: 3,
-    models: { und: { provider: 'up', id: 'u-m' }, grok: { provider: 'xai', id: 'grok' } },
-    routes: { codex: { up: { command: ECHO('U') }, xai: { command: ECHO('C'), write_access: true } } },
-    archetypes: { worker: { requires_write: 'required' } },
-    dials: { worker: 'und' },
-  });
-  const r = runDialShadow({ archetype: 'worker', model: 'grok', repoRoot: root, userPathOptions: iso(root) });
-  assert.ok(
-    r.notes.some((n: string) => n.includes('WRITE POSTURE UNENFORCED')),
-    'a pair is exactly where an unenforced posture produces a confident wrong verdict',
-  );
-});
 
 // A misspelled `archetypes:` key cannot be refused — an archetype with no
 // declared posture is legal — so it is linted. The damage is indirect: the
@@ -89,8 +62,8 @@ test('doctor lints an archetype policy that nothing dials', (t) => {
   const root = seed(t, {
     schema_version: 3,
     models: { ro: { provider: 'rop', id: 'ro-m' } },
-    routes: { codex: { rop: { command: ECHO('RO'), write_access: false } } },
-    archetypes: { wroker: { requires_write: 'required' } },
+    routes: { codex: { rop: { command: ECHO('RO'), } } },
+    archetypes: { wroker: { } },
     dials: { worker: 'ro' },
   });
   const r = runDoctor({ repoRoot: root, userPathOptions: iso(root) } as Parameters<typeof runDoctor>[0]);
@@ -104,21 +77,11 @@ test('doctor stays quiet when every declared archetype is actually dialed', (t) 
   const root = seed(t, {
     schema_version: 3,
     models: { ro: { provider: 'rop', id: 'ro-m' } },
-    routes: { codex: { rop: { command: ECHO('RO'), write_access: false } } },
-    archetypes: { worker: { requires_write: 'none' } },
+    routes: { codex: { rop: { command: ECHO('RO'), } } },
+    archetypes: { worker: { } },
     dials: { worker: 'ro' },
   });
   const r = runDoctor({ repoRoot: root, userPathOptions: iso(root) } as Parameters<typeof runDoctor>[0]);
   assert.equal(r.findings.find((x) => x.check === 'archetype-policy-unreferenced'), undefined);
 });
 
-test('a posture that CAN be checked produces no unenforced warning', (t) => {
-  const root = seed(t, {
-    schema_version: 3,
-    models: { rw: { provider: 'rwp', id: 'rw-m' } },
-    routes: { codex: { rwp: { command: ECHO('RW'), write_access: true } } },
-    archetypes: { worker: { requires_write: 'required' } },
-  });
-  const r = runDialSet({ archetype: 'worker', model: 'rw', repoRoot: root, userPathOptions: iso(root), session: true });
-  assert.ok(!r.notes.some((n: string) => n.includes('WRITE POSTURE UNENFORCED')));
-});

@@ -6,6 +6,23 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
+### Removed — the write-permission system (0.6.0-rc.50)
+
+**Fadeno no longer models write permissions.** It selects an argv and records what ran; enforcement belongs to the vendor flags you can read in the command (`--sandbox`, `--permission-mode`, `--disable-shell`), and containment belongs to isolated worktrees. Every Fadeno-level "permission" was a claim in YAML that nothing checked — and in one day that layer produced four distinct silent-wrong-answer defects. The design record is `docs/experimental/permissions-and-isolation.md`, written before the change and kept as the anti-drift artifact.
+
+- **Gone:** `requires_write` on archetypes, `write_access` and `write_variant` on routes, `--force`/`force_write_posture` on dials, `applyWritePosture`, `explainWriteConflict`, the `shadow_write_posture` refusal, and the write half of `explainPairRoutability`. Net −2,200 lines.
+- **The inversion:** routes are argvs, permissive by default. A restriction is now a *separate route with its own name*, visible by reading its command rather than carried in metadata beside it. 21 write-variants were promoted to be their route's own command.
+- **Refused, never ignored.** A catalog still carrying any removed key fails to load with `is no longer supported` and a pointer to the design record. Silently dropping a key someone wrote in order to *restrict* something is the failure mode this whole change exists to end.
+- **`write_variant` never meant what it said.** It swapped the entire argv, so in the shipped catalog it silently dropped `--sandbox read-only` (xai), `--agent fadeno-readonly` (openrouter), and both `--disable-write` *and* `--disable-shell` (muse) along with granting writes. The posture layer could not see this, because every variant is correctly write-capable once applied.
+- **Claude-as-harness is no longer uniquely restricted.** Under `claude`, `anthropic` is a `host: true` route, and host routes were refused a `write_variant` at parse — so the same driver escalated fine under `codex` and `grok` but never under Claude. Its fallback lane now carries the permissive flags directly.
+- **Posture is replaced by measurement.** `fadeno bakeoff` compares the two arms' *recorded argvs* and stamps a `capability_skew` confound when they differ beyond model and effort. Observed rather than declared, catches any capability difference rather than only the write bit, and cannot produce a false refusal.
+- **Constraint policies get the argv** in place of the `write_access`/`write_variant`/`write_posture` triple — they can now gate on what will actually run, which makes them the one real gate at the Fadeno layer.
+- **`fadeno doctor` lints an `archetypes:` policy nothing dials**, which is how a misspelled key (`wroker:`) used to leave the real archetype silently unguarded.
+
+**Known consequence — `--parallel` currently serializes command members.** The lease bypass keyed on a route declaring `write_access: false`, so what actually parallelized was read-only reviewer/judge fan-out; `worker` always took the lease and always serialized. That speedup was paid for by the read-only base argvs this change removes — the parallelism and the posture were one mechanism. `fadeno drive --parallel n` now says so rather than accepting a request it will not honor. The follow-up is isolation with merge-back for engine attempts, which restores concurrency as a fact (separate worktrees) instead of an unverified promise.
+
+**Isolation is the declared default, not yet the delivered one.** An unpaired dispatch still degrades to shared, and the ledger stamps `workspace_mode_degraded` saying so. Delivering it needs the same merge-back work, because "isolated" already means two incompatible things: `--isolate` means *keep this out of my tree*, a paired primary means *merge back*.
+
 ### Fixed — four ways a resolve answered a question it could not answer (0.6.0-rc.49)
 
 All four found by the blinded adversarial judge pass on pairs `49a1f92a` and `89536181`, then verified against `main` by measurement before being touched. They share a shape: a surface answering optimistically where it had no basis to answer at all.

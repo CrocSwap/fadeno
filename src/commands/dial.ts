@@ -6,7 +6,6 @@ import { loadLayeredProfile, type LayeredProfile } from '../lib/config-layers.ts
 import {
   activeHarness,
   BARE_IDENTIFIER_RE,
-  applyWritePosture,
   archetypeDisplaySort,
   knownArchetypes,
   commandRoutable,
@@ -15,12 +14,9 @@ import {
   eligibilityFor,
   ExecutorProfileError,
   explainEligibilityConflict,
-  explainUnverifiedWritePosture,
   explainPairRoutability,
   pairRoutabilityFields,
-  explainWriteConflict,
   formatDialRef,
-  forcesWritePosture,
   hostEffortIsMaterializable,
   parseDialRef,
   readLocalDialState,
@@ -299,8 +295,6 @@ export interface DialSetOptions extends DialCommonOptions {
   session?: boolean;
   user?: boolean;
   repo?: boolean;
-  /** Persist an explicit override when this binding mismatches write posture. */
-  force?: boolean;
   /** injectable spawn for probe */
   spawn?: ProbeOptions['spawn'];
 }
@@ -338,7 +332,6 @@ export interface DialSetManyOptions extends DialCommonOptions {
   session?: boolean;
   user?: boolean;
   repo?: boolean;
-  force?: boolean;
   spawn?: ProbeOptions['spawn'];
 }
 
@@ -394,13 +387,6 @@ export function runDialSetMany(opts: DialSetManyOptions): DialSetResult[] {
     if (!BARE_IDENTIFIER_RE.test(archetype)) {
       failures.push(`archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
       continue;
-    }
-    if (compiled.spec.adapter === 'command') {
-      const conflict = explainWriteConflict({ executor: refString, spec: compiled.spec }, archetype, profile);
-      if (conflict != null && opts.force !== true) {
-        failures.push(conflict);
-        continue;
-      }
     }
     const eligibilityConflict = explainEligibilityConflict({ executor: refString, spec: compiled.spec }, archetype);
     if (eligibilityConflict != null) failures.push(eligibilityConflict);
@@ -496,37 +482,6 @@ function providerNoveltyNote(params: {
  * warning, not a refusal: the primary can be redialed afterwards to make the
  * attachment take effect.
  */
-/**
- * Every arm of a would-be pair whose declared write posture cannot be checked
- * against the lane it will run on. Resolves the PRIMARY the same way
- * `unroutablePrimaryNote` does — at attach time the only ref in scope is the
- * challenger's, and the primary is the arm more likely to be sitting on an
- * undeclared lane, since a challenger is usually dialed deliberately.
- */
-function unverifiedPostureNotes(params: {
-  profile: ExecutorProfile;
-  layers: DialLayers;
-  archetype: string;
-  challenger: { executor: string; spec: ExecutorSpec };
-}): string[] {
-  const { profile, layers, archetype, challenger } = params;
-  const out: string[] = [];
-  try {
-    const resolved = resolveRole(archetype, archetype, profile, layers);
-    const postured = applyWritePosture(resolved.delivery.spec, archetype, profile.archetypes);
-    const primary = explainUnverifiedWritePosture(
-      { executor: resolved.delivery.refString, spec: postured.spec },
-      archetype,
-      profile,
-    );
-    if (primary != null) out.push(primary);
-  } catch {
-    // an unresolvable primary is reported by its own note, not this one
-  }
-  const chall = explainUnverifiedWritePosture(challenger, archetype, profile);
-  if (chall != null) out.push(chall);
-  return out;
-}
 
 function unroutablePrimaryNote(params: {
   profile: ExecutorProfile;
@@ -540,19 +495,10 @@ function unroutablePrimaryNote(params: {
   } catch {
     return null; // unresolvable primary vouches for nothing here either
   }
-  const postured = applyWritePosture(resolved.delivery.spec, archetype, profile.archetypes);
   // The SAME predicate the resolve previews and the dispatch kernel answer
-  // with. This used to ask `commandRoutable` alone — "does a lane exist" —
-  // which left attach time silent for every write-posture refusal: the user
-  // attached a shadow, saw no warning, and then simply never got pairs. A
-  // refusal nobody is told about is how refusing becomes a habit instead of
-  // the deliberate, rare step it is meant to be.
-  const routability = explainPairRoutability(
-    postured.spec,
-    resolved.delivery.refString,
-    archetype,
-    profile,
-  );
+  // with, so attach time cannot promise a pair the kernel then declines to
+  // form. One question now: does a command lane exist to move the primary to.
+  const routability = explainPairRoutability(resolved.delivery.spec, resolved.delivery.refString);
   if (routability.routable) return null;
   return (
     `WARNING: NO PAIR POSSIBLE — ${archetype}'s primary (${resolved.delivery.refString}) cannot carry a pair, ` +
@@ -594,35 +540,15 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
     throw err;
   }
   const refString = formatDialRef(dial);
-  // Set-time checks
-  // b. Write posture and eligibility. Host deliveries are exempt from the
-  // write check: the in-session agent's permissions are the host's business,
-  // and a host spec's write_access describes only its command fallback.
-  const writeConflict = compiled.spec.adapter === 'command'
-    ? explainWriteConflict({ executor: refString, spec: compiled.spec }, archetype, profile)
-    : null;
-  if (writeConflict != null && opts.force !== true) throw new DialError(writeConflict);
-  if (writeConflict != null) dial.force_write_posture = true;
+  // Set-time checks. Eligibility only: a route's permissions are whatever its
+  // argv grants, and Fadeno no longer holds an opinion about that.
   const eligibilityConflict = explainEligibilityConflict({ executor: refString, spec: compiled.spec }, archetype);
   if (eligibilityConflict != null) throw new DialError(eligibilityConflict);
-  // Not a conflict — the absence of one that could never be evaluated. A
-  // declared posture the route never gave `explainWriteConflict` anything to
-  // check against passes silently today, which is the quiet half of the same
-  // question the throw above answers loudly.
-  const unverifiedPosture = explainUnverifiedWritePosture({ executor: refString, spec: compiled.spec }, archetype, profile);
 
   // c. Verification probe
   let verification: VerificationStatus = null;
   let probeNote: string | null = null;
   const notes: string[] = [];
-  if (unverifiedPosture != null) notes.push(`WARNING: WRITE POSTURE UNENFORCED — ${unverifiedPosture}`);
-  if (writeConflict != null) {
-    notes.push(
-      `WARNING: FORCED WRITE-POSTURE MISMATCH — ${archetype} → ${refString}\n` +
-      `${writeConflict}\n` +
-      'The override is persisted with this dial and applies at dispatch time. Clear or replace the dial to remove it.',
-    );
-  }
   // `@effort` on a host delivery is a request, not a live setting — but what
   // happens to that request splits by harness, and saying only the Codex half
   // sent Claude users to a command that does nothing. Where the agent format
@@ -648,27 +574,11 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
         `${compiled.effectiveEffort} pin has no effect. \`fadeno steering apply\` writes nothing here.`,
       );
     } else {
-      const stranded = explainWriteConflict(
-        { executor: refString, spec: applyWritePosture(compiled.spec, archetype, profile.archetypes).spec },
-        archetype,
-        profile,
-      );
       notes.push(
         `note: ${compiled.driver} host route — a ${profile.harness ?? 'host'} agent carries no effort, so pinning ` +
         `${compiled.effectiveEffort} selects the DELIVERY LANE instead: ${archetype} leaves the session for this ` +
         'route\'s command lane whenever the session is running at a different effort. `fadeno steering apply` ' +
-        'writes nothing here.' +
-        (stranded != null
-          ? `\nWARNING: that command lane cannot deliver ${archetype} — ${stranded}`
-          : ''),
-      );
-    }
-  }
-  {
-    const postured = applyWritePosture(compiled.spec, archetype, profile.archetypes);
-    if (postured.usedWriteVariant) {
-      notes.push(
-        `note: ${archetype} requires write — ${refString} delivers through the ${compiled.driver} route's write variant`,
+        'writes nothing here.',
       );
     }
   }
@@ -1063,12 +973,8 @@ export function runDialShadow(opts: DialShadowOptions): DialShadowResult {
   if (deliveryIsHost(compiled)) {
     throw new DialError(`shadow for "${archetype}" must be a command delivery — host shadows are not dispatchable`);
   }
-  // Write posture / eligibility checks same as set
+  // Eligibility check, same as set.
   const refString = formatDialRef(dial);
-  if (compiled.spec.adapter === 'command') {
-    const conflict = explainWriteConflict({ executor: refString, spec: compiled.spec }, archetype, profile);
-    if (conflict != null) throw new DialError(conflict);
-  }
   const eligibility = eligibilityFor(compiled.spec, archetype);
   if (eligibility === 'forbidden') {
     const conflict = explainEligibilityConflict({ executor: refString, spec: compiled.spec }, archetype);
@@ -1109,21 +1015,6 @@ export function runDialShadow(opts: DialShadowOptions): DialShadowResult {
   {
     const unroutable = unroutablePrimaryNote({ profile, layers: shadowLayers, archetype });
     if (unroutable != null) notes.push(unroutable);
-  }
-  {
-    // A pair is exactly where an unenforced posture does its damage: the arm
-    // that cannot write returns an empty diff and the bakeoff reads it as a
-    // deliberate choice. Both arms are checked — the PRIMARY through the same
-    // resolution `unroutablePrimaryNote` performs, because the challenger's
-    // ref is the only one in scope here and it is not the arm most likely to
-    // be silently unwritable.
-    const unverified = unverifiedPostureNotes({
-      profile,
-      layers: shadowLayers,
-      archetype,
-      challenger: { executor: refString, spec: compiled.spec },
-    });
-    for (const note of unverified) notes.push(`WARNING: WRITE POSTURE UNENFORCED — ${note}`);
   }
   const previous = state.shadows[archetype] ?? null;
   const nextShadows: Record<string, ShadowAttachment> = { ...state.shadows, [archetype]: rate == null ? { model: dial.model, ...(dial.effort ? { effort: dial.effort } : {}), ...(dial.via ? { via: dial.via } : {}) } : { model: dial.model, ...(dial.effort ? { effort: dial.effort } : {}), ...(dial.via ? { via: dial.via } : {}), rate } };
@@ -1276,8 +1167,6 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
       continue;
     }
     const adapter = compiled.spec.adapter;
-    const postured = applyWritePosture(compiled.spec, archetype, profile.archetypes);
-    const writePostureForced = forcesWritePosture(cascade.ref, cascade.resolvedVia);
     const effort = compiled.effectiveEffort;
     // Model display: canonical name, plus `@ effort` exactly when the user
     // pinned one. Keying on the PIN rather than on "differs from the registry
@@ -1307,8 +1196,6 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
       dial: cascade.ref,
       refString: compiled.refString,
       adapter,
-      ...(postured.usedWriteVariant ? { write_variant: true } : {}),
-      ...(writePostureForced ? { write_posture_forced: true } : {}),
       modelDisplay,
     };
     // Eligibility mark
@@ -1536,8 +1423,7 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
     if (err instanceof ExecutorProfileError) throw new DialError(err.message);
     throw err;
   }
-  const postured = applyWritePosture(resolved.delivery.spec, archetype, profile.archetypes);
-  const spec = postured.spec;
+  const spec = resolved.delivery.spec;
   const eligibility = eligibilityFor(spec, archetype);
 
   // The pair decision. Re-derived rather than remembered: the same roll runs
@@ -1561,12 +1447,9 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
       // be told, and must not read the silence as a "no".
       selected: rate == null ? true : digest ? shadowSampleRoll(digest, archetype, challenger) < rate : null,
       // The PRIMARY's own resolved spec — `spec` above, after write-posture —
-      // not the challenger's. This is what a selected pair would have to
-      // reuse to reach the command lane, and that lane must also satisfy the
-      // archetype's write posture, not merely exist.
-      ...pairRoutabilityFields(
-        explainPairRoutability(spec, resolved.delivery.refString, archetype, profile),
-      ),
+      // not the challenger's: this is what a selected pair would have to reuse
+      // to reach the command lane.
+      ...pairRoutabilityFields(explainPairRoutability(spec, resolved.delivery.refString)),
     };
   }
 
@@ -1606,27 +1489,17 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
     harness,
     source: resolved.source,
     ...(resolved.resolvedVia != null ? { resolved_via: resolved.resolvedVia } : {}),
-    ...(postured.usedWriteVariant ? { write_variant: true } : {}),
-    ...(forcesWritePosture(resolved.delivery.ref, resolved.resolvedVia) ? { write_posture_forced: true } : {}),
     ...(eligibility !== 'eligible' ? { eligibility } : {}),
     dial: resolved.delivery.ref,
     delivery: deliveryGuidance(
       archetype,
       resolved.delivery.refString,
       spec,
-      // Eligibility FIRST, and never force-overridable: the kernel refuses it
-      // outright (`explainEligibilityConflict`, no force branch), so a resolve
-      // that answers "Dispatch it" for a forbidden pairing is guidance walking
-      // straight into that refusal — the same defect this argument was added
-      // to fix for write posture, which eligibility never got.
-      //
-      // Then the same guard the kernel and `steering resolve` apply: a dial
-      // set with `--force` has already overridden the POSTURE on purpose, and
-      // re-asserting it here would refuse what the user explicitly forced.
-      explainEligibilityConflict({ executor: resolved.delivery.refString, spec }, archetype)
-        ?? (forcesWritePosture(resolved.delivery.ref, resolved.resolvedVia)
-          ? null
-          : explainWriteConflict({ executor: resolved.delivery.refString, spec }, archetype, profile)),
+      // The kernel refuses a forbidden pairing outright, so a resolve that
+      // answers "Dispatch it" here would be guidance walking into that
+      // refusal. Eligibility is the only conflict left that is knowable at
+      // resolve time — permissions are no longer Fadeno's to judge.
+      explainEligibilityConflict({ executor: resolved.delivery.refString, spec }, archetype),
     ),
     relay: relay != null
       ? { ref: relay.refString, model_id: relay.modelId, effort: relay.effort }

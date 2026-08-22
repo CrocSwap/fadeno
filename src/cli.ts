@@ -101,7 +101,7 @@ Usage:
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
   fadeno dial                                  # effective table
   fadeno dial <archetype>                      # one archetype's row (+shadow)
-  fadeno dial <archetype>[+<archetype>…] <model>[@effort] [--via <driver>] [--session|--user|--repo] [--force]   # set (multi: a+b, a,b, or a b c)
+  fadeno dial <archetype>[+<archetype>…] <model>[@effort] [--via <driver>] [--session|--user|--repo]   # set (multi: a+b, a,b, or a b c)
   fadeno dial clear [<archetype>] [--session|--user|--repo]
   fadeno dial shadow <archetype> <model>[@effort] [--via <driver>] [--rate <r>]
   fadeno dial shadow                           # show mode: archetypes with an active shadow
@@ -181,7 +181,8 @@ Options:
   --no-record             (prompt) Preview only: write no snapshot or event
   --bind <role=executor>  (drive) Session executor override for a role (repeatable; recorded)
   --max-transitions <n>   (drive) Engine transition cap per invocation (default 50)
-  --parallel <n>          (drive) Max concurrent command deliveries per wave (1–16, default 1)
+  --parallel <n>          (drive) Max concurrent deliveries per wave (1–16, default 1). Command members
+                          currently SERIALIZE regardless — see fadeno drive --help
   --timeout <seconds>     (drive/dispatch) Hard deadline seconds; 0 disables route default (20 min)
   --input <Name=path>     (new-run) Supply a declared input (repeatable)
   --via <driver>          (dial/dispatch) Driver alias that delivers the model; on dispatch it
@@ -189,7 +190,6 @@ Options:
   --session               (dial) Write/clear this checkout's session dial
   --user                  (dial) Write/clear the user default
   --repo                  (dial) Write/clear the repo pin (committed)
-  --force                 (dial set) Persist a discouraged write-posture mismatch override
   --archetype <a>         (dispatch) Archetype to resolve (required unless --model)
   --role <name>           (dispatch) Role name: enables binding pins + evidence attribution
   --model <ref>           (dispatch) Bypass resolution and invoke a dial ref directly (debugging)
@@ -200,7 +200,8 @@ Options:
   --tag <t>               (dispatch) Label the dispatch for recovery (dispatches --output tag:<t>)
   --shadow <ref>          (dispatch) Duplicate the prompt to a one-shot shadow challenger
                           (FADENO_SHADOW_MAX_LIVE caps concurrent challengers; default 4)
-  --isolate               (dispatch) Run in a detached worktree (preserves diff, bypasses shared-writer lease)
+  --isolate               (dispatch) Force a detached worktree (already the default where git allows)
+  --shared                (dispatch) Opt OUT of isolation and run in this tree (nothing contains the executor)
   --ignored-output <kept|discardable>  (dispatch) Whether this task's gitignored output must survive; kept forgoes a shadow pair
   --diagnostics           (dispatch/drive) Persist bounded process output (32 KiB / 500 lines) to diagnostics log
   --no-brief              (dispatch) Skip the archetype's declared brief preamble
@@ -396,7 +397,6 @@ Options:
   --session        Write/clear the local session dial (this checkout only)
   --user           Write/clear the user default (applies across your repos)
   --repo           Write/clear the repo pin (committed to .fadeno/executors.yaml)
-  --force          Set despite a write-posture mismatch (persisted, discouraged)
   --rate <r>       (shadow) Sampling rate in [0,1]
   --prompt-sha256 <hex>
                    (resolve) Prompt digest, so the reply carries the pair decision
@@ -408,18 +408,18 @@ The cascade: role binding → session dial → repo pin → user dial → host-n
 A plain set updates the highest existing dial (session → repo → user), or creates
 a user default when none exists. --session, --user, or --repo makes scope explicit.
 Unregistered models fall through to the catalog's unregistered_model_driver.
-A write-requiring archetype resolving onto a read-only route delivers through the
-route's declared write_variant automatically; adapter selection stays internal.
-Write-posture mismatches refuse by default. A deliberate \`--force\` persists an
-override on that dial, prints a prominent warning, and is honored at dispatch;
-eligibility and other constraints are not bypassed.
+A route is an argv: what you dial is what runs. Fadeno does not enforce write
+permissions — that belongs to the vendor flags in the command and to isolated
+worktrees, which are the default for command dispatches. To run something
+restricted, dial a route whose argv restricts it. Eligibility and constraint
+policies still refuse.
 
 Examples:
   fadeno dial worker sol
   fadeno dial judge fable@high --session
   fadeno dial judge fable@high
   fadeno dial worker qwen-3.5-coder --via opencode
-  fadeno dial generator gemini --via agy --force
+  fadeno dial generator gemini --via agy
   fadeno dial clear worker --user
 `,
   models: `fadeno models — the model registry and the driver each model rides
@@ -466,7 +466,9 @@ Options:
                         run concurrently, capped by FADENO_SHADOW_MAX_LIVE (default 4), and
                         their worktrees are retained under .fadeno/local/shadow for review
   --timeout <seconds>   Hard executor deadline seconds; 0 disables route default (20 min)
-  --isolate             Run in a detached worktree (opt-in, preserves diff, bypasses shared-writer lease)
+  --isolate             Force a detached worktree (already the default wherever git allows it)
+  --shared              Opt OUT of isolation and run in THIS tree. Nothing stands between the executor
+                        and your files — Fadeno enforces no write permissions of its own
   --ignored-output <kept|discardable>
                         Whether this task's gitignored output must survive. A shadow pair merges the
                         primary back through git add -A, which respects .gitignore, so "kept" forgoes
@@ -581,7 +583,14 @@ Usage:
 Options:
   --bind <role=executor>   Session executor override for a role (repeatable; recorded)
   --max-transitions <n>    Engine transition cap per invocation (default 50)
-  --parallel <n>           Max concurrent command deliveries per wave (1–16, default 1)
+  --parallel <n>           Max concurrent deliveries per wave (1–16, default 1).
+                           NOTE: command members currently serialize whatever you pass. They
+                           overlapped only while a route could declare write_access: false and
+                           skip the repo-wide writer lease; the permissions cut removed that
+                           declaration, so every shared delivery now waits its turn. Host
+                           requests still interleave. Restoring real concurrency means isolating
+                           engine attempts with merge-back — concurrency as a fact rather than an
+                           unverified promise. See docs/experimental/permissions-and-isolation.md
   --timeout <seconds>      Hard executor deadline seconds; 0 disables route default (20 min)
   --diagnostics            Persist bounded process output (32 KiB / 500 lines per stream) to diagnostics log
 
@@ -1621,6 +1630,7 @@ function main(argv: string[]): number {
         'prompt-file': { type: 'string' },
         'no-brief': { type: 'boolean' },
         isolate: { type: 'boolean' },
+        shared: { type: 'boolean' },
         'ignored-output': { type: 'string' },
         diagnostics: { type: 'boolean' },
         tail: { type: 'string' },
@@ -2396,7 +2406,7 @@ function main(argv: string[]): number {
           .flatMap((token) => token.split(/[+,]/))
           .map((name) => name.trim())
           .filter((name) => name.length > 0);
-        const results = runDialSetMany({ archetypes, model, via: values.via ?? null, session: Boolean(values.session), user: Boolean(values.user), repo: Boolean(values.repo), force: Boolean(values.force) });
+        const results = runDialSetMany({ archetypes, model, via: values.via ?? null, session: Boolean(values.session), user: Boolean(values.user), repo: Boolean(values.repo) });
         if (values.json) {
           console.log(JSON.stringify(results.length === 1 ? results[0] : results, null, 2));
           return 0;
@@ -2410,7 +2420,7 @@ function main(argv: string[]): number {
         }
         return 0;
       }
-      throw new Error('Usage: fadeno dial [<archetype> [<model>[@effort] [--via <driver>] [--session|--user|--repo] [--force]] | clear [<archetype>] [--session|--user|--repo] | shadow [<archetype> <model>[@effort] [--via <driver>] [--rate <n>]] | clear-shadow [<archetype>] | resolve --archetype <name>]');
+      throw new Error('Usage: fadeno dial [<archetype> [<model>[@effort] [--via <driver>] [--session|--user|--repo]] | clear [<archetype>] [--session|--user|--repo] | shadow [<archetype> <model>[@effort] [--via <driver>] [--rate <n>]] | clear-shadow [<archetype>] | resolve --archetype <name>]');
     }
     // Top-level alias for `fadeno dial shadow ...` — same handler
     // (`runShadowCommand`) as the `dial` subcommand above, so the two
@@ -2445,6 +2455,7 @@ function main(argv: string[]): number {
         shadow: values.shadow,
         timeoutMs: dispatchTimeoutMs,
         isolate: Boolean(values.isolate),
+        shared: Boolean(values.shared),
         ignoredOutput: ((): 'kept' | 'discardable' | null => {
           const raw = values['ignored-output'];
           if (typeof raw !== 'string') return null;

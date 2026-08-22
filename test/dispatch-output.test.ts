@@ -32,10 +32,10 @@ function seedV3(t: TestContext, extra: Record<string, unknown> = {}): string {
     },
     routes: {
       standalone: {
-        openai: { command: STDIN_ECHO('REPORT:'), write_access: true },
+        openai: { command: STDIN_ECHO('REPORT:'), },
       },
       codex: {
-        openai: { command: STDIN_ECHO('REPORT:'), write_access: true },
+        openai: { command: STDIN_ECHO('REPORT:'), },
       },
     },
     archetypes: { worker: {} },
@@ -62,7 +62,7 @@ function initGit(root: string): void {
 
 test('dispatch output: snapshot file exists and row fields match the executor bytes', (t) => {
   const root = seedV3(t);
-  const result = runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, userPathOptions: onHarness('standalone') });
+  const result = runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
   const rows = evidenceRows(root);
   const req = rows.find((r) => r.event === 'dispatch_requested')!;
   const comp = rows.find((r) => r.event === 'dispatch_completed')!;
@@ -73,7 +73,7 @@ test('dispatch output: snapshot file exists and row fields match the executor by
   assert.ok(!('output_bytes' in req));
   // file prompt variant
   writeFileSync(join(root, 'task.md'), 'from-a-file');
-  const fromFile = runDispatch({ archetype: 'worker', promptFile: 'task.md', cwd: root, repoRoot: root, userPathOptions: onHarness('standalone') });
+  const fromFile = runDispatch({ archetype: 'worker', promptFile: 'task.md', cwd: root, repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
   const fileRow = evidenceRows(root).at(-1)!;
   assert.equal(fileRow.prompt_source, 'file');
   assert.match(fileRow.output_snapshot as string, /^\.fadeno\/local\/outputs\/worker-[0-9a-f]{8}\.md$/);
@@ -86,8 +86,8 @@ test('dispatch output: request row names the snapshot even when spawn fails', (t
   const root = seedV3(t, {
     models: { 'ghost-bin': { provider: 'openai', id: 'ghost-bin' } },
     routes: {
-      standalone: { openai: { command: ['no-such-fadeno-dispatch-bin'], write_access: true } },
-      codex: { openai: { command: ['no-such-fadeno-dispatch-bin'], write_access: true } },
+      standalone: { openai: { command: ['no-such-fadeno-dispatch-bin'], } },
+      codex: { openai: { command: ['no-such-fadeno-dispatch-bin'], } },
     },
     dials: { worker: 'ghost-bin' },
   });
@@ -108,7 +108,7 @@ test('dispatch output: request row names the snapshot even when spawn fails', (t
   }));
   let threw = false;
   try {
-    runDispatch({ archetype: 'worker', prompt: 'p', repoRoot: root2, userPathOptions: onHarness('standalone') });
+    runDispatch({ archetype: 'worker', prompt: 'p', repoRoot: root2, shared: true, userPathOptions: onHarness('standalone') });
   } catch (err) {
     threw = true;
     assert.ok(err instanceof DispatchCommandError);
@@ -143,13 +143,13 @@ test('dispatch output: workspace_changed is true after a mutating executor', (t)
       'echo-worker': { provider: 'openai', id: 'echo-worker' },
     },
     routes: {
-      standalone: { openai: { command: MUTATE, write_access: true } },
-      codex: { openai: { command: MUTATE, write_access: true } },
+      standalone: { openai: { command: MUTATE, } },
+      codex: { openai: { command: MUTATE, } },
     },
     dials: { worker: 'mutate-worker' },
   } as any);
   initGit(root);
-  const result = runDispatch({ archetype: 'worker', prompt: 'p', repoRoot: root, userPathOptions: onHarness('standalone') });
+  const result = runDispatch({ archetype: 'worker', prompt: 'p', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
   assert.equal(result.stdout, 'MUTATED');
   assert.equal(readFileSync(join(root, 'mutated.txt'), 'utf8'), 'x');
   const completed = evidenceRows(root).find(r=>r.event==='dispatch_completed')!;
@@ -159,14 +159,14 @@ test('dispatch output: workspace_changed is true after a mutating executor', (t)
 test('dispatch output: workspace_changed is false after a pure-echo executor', (t) => {
   const root = seedV3(t, { dials: { worker: 'echo-worker' } });
   initGit(root);
-  runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, userPathOptions: onHarness('standalone') });
+  runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
   const completed = evidenceRows(root).find(r=>r.event==='dispatch_completed')!;
   assert.equal(completed.workspace_changed, false);
 });
 
 test('dispatch output: workspace_changed is omitted outside a git repo', (t) => {
   const root = seedV3(t, { dials: { worker: 'echo-worker' } });
-  runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, userPathOptions: onHarness('standalone') });
+  runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
   const [requested, completed] = evidenceRows(root) as [Record<string, unknown>, Record<string, unknown>];
   assert.ok(!('workspace_changed' in requested));
   assert.ok(!('workspace_changed' in completed));
@@ -186,7 +186,7 @@ test('dispatch output: output snapshot on spawn failure empty file', (t) => {
     archetypes: { worker: {} },
     dials: { worker: 'ghost-bin' },
   }));
-  try { runDispatch({ archetype: 'worker', prompt: 'p', repoRoot: root, userPathOptions: onHarness('standalone') }); } catch {}
+  try { runDispatch({ archetype: 'worker', prompt: 'p', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') }); } catch {}
   const rows = evidenceRows(root);
   if (rows.length >= 1) {
     const req = rows.find(r=>r.event==='dispatch_requested');
