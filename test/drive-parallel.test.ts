@@ -965,3 +965,33 @@ test('supervisor_lost classifier is correctly isolated and survives reportless s
   const v = (await import('../src/lib/supervisor.ts'));
   assert.ok(typeof v.supervisorCanStillReport === 'function');
 });
+
+test('parallel: a member that edits a file the caller holds untracked still merges back, and the receipt says how', (t) => {
+  // The 2026-08-22 shape on the engine path: the baseline carries the
+  // caller's untracked file into the member's worktree, the member edits it,
+  // and `git apply --3way` in the caller's repo has no index entry for it.
+  // Before the working-tree fallback this dropped the whole diff and failed
+  // the attempt as `merge_back_failed` over a tree nothing had touched.
+  const editor = ['node', '-e',
+    "require('node:fs').writeFileSync('pmcap/a.txt','edited by reviewer_a\\n');" +
+    "require('node:fs').writeFileSync('by-reviewer-a.txt','x');" +
+    `process.stdout.write(JSON.stringify(${VALID_REVIEW}))`];
+  const { root, runId } = seedMap(t, {
+    'ro-a': { command: editor },
+    'ro-b': { command: ['node', '-e', `process.stdout.write(JSON.stringify(${VALID_REVIEW}))`] },
+  }, MAP_PLAYBOOK, { git: true });
+  mkdirSync(join(root, 'pmcap'));
+  writeFileSync(join(root, 'pmcap', 'a.txt'), 'original untracked\n');
+
+  assert.equal(runDrive({ run: runId, repoRoot: root, parallel: 2 }).outcome, 'terminal');
+
+  assert.equal(readFileSync(join(root, 'pmcap', 'a.txt'), 'utf8'), 'edited by reviewer_a\n', 'the untracked edit reached the tree');
+  assert.ok(existsSync(join(root, 'by-reviewer-a.txt')), 'the tracked-side hunk beside it reached the tree too');
+  const all = events(root, runId);
+  assert.equal(ofType(all, 'actor_failed').length, 0, 'no merge_back_failed');
+  const a = ofType(all, 'actor_completed').find((e) => e.extra.actor === 'reviewer_a')!;
+  const stamp = a.extra.merge_back as { status: string; detail?: string };
+  assert.equal(stamp.status, 'clean');
+  assert.match(stamp.detail ?? '', /pmcap\/a\.txt is untracked in the workspace/);
+  assert.equal(runVerify({ run: runId, repoRoot: root }).ok, true);
+});

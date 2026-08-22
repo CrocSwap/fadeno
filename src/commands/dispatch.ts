@@ -62,6 +62,8 @@ import {
   isWorkspaceLeaseAlive,
   readWorkspaceLease,
   releaseWorkspaceLease,
+  applyMergeBackDiff,
+  mergeBackReapplyCommand,
   scanIgnoredOutput,
   verifyCarriedPaths,
   withIsolatedWorktree,
@@ -552,7 +554,17 @@ export interface AdHocDispatchResult {
   source: DispatchResolutionSource;
   /** The resolution echo line (`<role-or-archetype> → <executor> (<model>) [<source>]`). */
   echo: string;
+  /**
+   * The executor's exit status, or 1 when it had none — a process ended by a
+   * signal exits with nothing. Read `signal` and `outcome` before calling
+   * that 1 an "exit 1": the kernel killing the executor at its deadline is
+   * exactly the case this field cannot express on its own.
+   */
   exitCode: number;
+  /** The signal that ended the executor, when one did. */
+  signal: string | null;
+  /** The deadline that killed it, when `outcome` is `timeout`. */
+  timeoutMs: number | null;
   /** The executor's report — cli.ts relays it verbatim to stdout. */
   stdout: string;
   stderr: string;
@@ -2561,39 +2573,43 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         }
         if (leaseTaken) {
           try {
-            // Real `--3way`, never `--check`: it exits non-zero the moment any
-            // file is left carrying conflict markers, which is the signal we
-            // need. `--check` would exit 0 on a patch that WOULD conflict.
-            const applyRes = spawnSync('git', ['-C', repoRoot, 'apply', '--3way', join(repoRoot, isolated.diff.diffRel)], { encoding: 'utf8' });
-            const stderrText = String(applyRes.stderr ?? '').trim();
             if (isolated.diff.diffBytes === 0) {
               primaryMerge = { status: 'clean', detail: 'nothing to apply: the primary made no changes' };
-            } else if (applyRes.status === 0) {
-              primaryMerge = { status: 'clean' };
-              opts.onEcho?.(`merged back: ${isolated.diff.diffBytes} bytes applied to the workspace`);
             } else {
-              // Nothing is reverted. `--3way` may have staged some hunks
-              // cleanly while leaving others unmerged, and guessing which is
-              // which is exactly the judgment this kernel does not make.
-              primaryMerge = {
-                status: 'conflicted',
-                detail: stderrText.length > 0 ? stderrText : `git apply --3way exited ${applyRes.status ?? 'unknown'}`,
-              };
-              // Two recovery pointers, because there are two shapes of
-              // isolated delivery now. A pair has a `shadow-apply` entry
-              // point that knows both arms and their baselines; an unpaired
-              // dispatch has no pair id to name, so it gets the raw
-              // equivalent — the same `--3way` against the same baseline
-              // commit, which is exactly what `shadow-apply` would run.
-              // Naming a command that cannot resolve would be worse than
-              // naming none.
-              const recovery = pendingShadow != null
-                ? `Resolve with \`fadeno shadow-apply ${pendingShadow.pairId.slice(0, 8)} --arm primary\``
-                : `Resolve with \`git apply --3way ${isolated.diff.diffRel}\``;
-              opts.onEcho?.(
-                `merge-back CONFLICTED — the dispatch's work is kept at ${isolated.diff.diffRel}. ` +
-                  `${recovery} once the tree settles; inspect \`git status\` first, some hunks may already be staged.`,
-              );
+              // `--3way` first, working-tree apply when the only refusal is
+              // a path the workspace holds untracked, nothing reverted on a
+              // conflict: the rules live with the helper so the engine's
+              // merge-back cannot drift from this one.
+              const merged = applyMergeBackDiff({ repoRoot, diffAbs: join(repoRoot, isolated.diff.diffRel) });
+              primaryMerge = merged.stamp;
+              if (merged.stamp.status === 'clean') {
+                opts.onEcho?.(
+                  `merged back: ${isolated.diff.diffBytes} bytes applied to the workspace` +
+                    (merged.stamp.detail != null ? ` (${merged.stamp.detail})` : ''),
+                );
+              } else {
+                // Two recovery pointers, because there are two shapes of
+                // isolated delivery now. A pair has a `shadow-apply` entry
+                // point that knows both arms and their baselines; an unpaired
+                // dispatch has no pair id to name, so it gets the raw
+                // equivalent — the same apply against the same baseline
+                // commit, which is exactly what `shadow-apply` would run.
+                // Naming a command that cannot resolve would be worse than
+                // naming none.
+                const recovery = pendingShadow != null
+                  ? `Resolve with \`fadeno shadow-apply ${pendingShadow.pairId.slice(0, 8)} --arm primary\``
+                  : `Resolve with \`${mergeBackReapplyCommand(isolated.diff.diffRel, merged.untracked)}\``;
+                // `conflicted` may have left staged hunks and markers behind;
+                // `blocked` touched nothing. Say which, because the first
+                // sends the reader to `git status` and the second must not.
+                opts.onEcho?.(
+                  merged.stamp.status === 'conflicted'
+                    ? `merge-back CONFLICTED — the dispatch's work is kept at ${isolated.diff.diffRel}. ` +
+                      `${recovery} once the tree settles; inspect \`git status\` first, some hunks may already be staged.`
+                    : `merge-back BLOCKED — nothing was applied, the workspace is untouched, and the dispatch's work is kept at ` +
+                      `${isolated.diff.diffRel} (${merged.stamp.detail ?? 'no detail'}). ${recovery} once the tree settles.`,
+                );
+              }
             }
           } finally {
             // Released whatever happened, including on a conflict: the lease
@@ -2875,6 +2891,8 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     source,
     echo,
     exitCode: spawned.status ?? 1,
+    signal: spawned.signal ?? null,
+    timeoutMs: isTimeout ? (supervisorStatus?.timeoutMs ?? null) : null,
     stdout,
     stderr: spawned.stderr ?? '',
     durationMs,

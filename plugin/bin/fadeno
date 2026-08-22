@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.57";
+  if (true) return "0.6.0-rc.58";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -17952,6 +17952,48 @@ function isRegisteredWorktree(repoRoot, candidateAbs) {
   } catch {
     return false;
   }
+}
+var NOT_IN_INDEX = /^error: (.+?): does not exist in index$/gm;
+function firstLine(text) {
+  const line = text.split("\n").find((l) => l.trim().length > 0);
+  return line == null ? "" : line.trim();
+}
+function applyMergeBackDiff(opts) {
+  const threeWay = (0, import_node_child_process2.spawnSync)("git", ["-C", opts.repoRoot, "apply", "--3way", opts.diffAbs], { encoding: "utf8" });
+  if (threeWay.error == null && threeWay.status === 0) return { stamp: { status: "clean" }, untracked: [] };
+  const threeWayErr = threeWay.error?.message ?? String(threeWay.stderr ?? "").trim();
+  const untracked = [...threeWayErr.matchAll(NOT_IN_INDEX)].map((m) => m[1]);
+  if (untracked.length === 0) {
+    return {
+      stamp: {
+        status: "conflicted",
+        detail: threeWayErr.length > 0 ? threeWayErr : `git apply --3way exited ${threeWay.status ?? "unknown"}`
+      },
+      untracked
+    };
+  }
+  const named = `${untracked.join(", ")} ${untracked.length === 1 ? "is" : "are"} untracked in the workspace`;
+  const plain = (0, import_node_child_process2.spawnSync)("git", ["-C", opts.repoRoot, "apply", opts.diffAbs], { encoding: "utf8" });
+  if (plain.error == null && plain.status === 0) {
+    return {
+      stamp: {
+        status: "clean",
+        detail: `applied to the working tree without 3-way merge and left unstaged: ${named}, so git had no index entry to merge against`
+      },
+      untracked
+    };
+  }
+  const plainErr = plain.error?.message ?? String(plain.stderr ?? "").trim();
+  return {
+    stamp: {
+      status: "blocked",
+      detail: `nothing was applied: ${named}, so 3-way merge was unavailable (${firstLine(threeWayErr)}), and a plain working-tree apply refused too (${plainErr.length > 0 ? firstLine(plainErr) : `git apply exited ${plain.status ?? "unknown"}`})`
+    },
+    untracked
+  };
+}
+function mergeBackReapplyCommand(diffRel, untracked) {
+  return untracked.length > 0 ? `git apply ${diffRel}` : `git apply --3way ${diffRel}`;
 }
 function removeIsolatedWorktree(repoRoot, worktreeAbs) {
   try {
@@ -22005,22 +22047,21 @@ ${prompt}`;
           }
           if (leaseTaken) {
             try {
-              const applyRes = (0, import_node_child_process5.spawnSync)("git", ["-C", repoRoot, "apply", "--3way", (0, import_node_path15.join)(repoRoot, isolated.diff.diffRel)], { encoding: "utf8" });
-              const stderrText = String(applyRes.stderr ?? "").trim();
               if (isolated.diff.diffBytes === 0) {
                 primaryMerge = { status: "clean", detail: "nothing to apply: the primary made no changes" };
-              } else if (applyRes.status === 0) {
-                primaryMerge = { status: "clean" };
-                opts.onEcho?.(`merged back: ${isolated.diff.diffBytes} bytes applied to the workspace`);
               } else {
-                primaryMerge = {
-                  status: "conflicted",
-                  detail: stderrText.length > 0 ? stderrText : `git apply --3way exited ${applyRes.status ?? "unknown"}`
-                };
-                const recovery = pendingShadow != null ? `Resolve with \`fadeno shadow-apply ${pendingShadow.pairId.slice(0, 8)} --arm primary\`` : `Resolve with \`git apply --3way ${isolated.diff.diffRel}\``;
-                opts.onEcho?.(
-                  `merge-back CONFLICTED \u2014 the dispatch's work is kept at ${isolated.diff.diffRel}. ${recovery} once the tree settles; inspect \`git status\` first, some hunks may already be staged.`
-                );
+                const merged = applyMergeBackDiff({ repoRoot, diffAbs: (0, import_node_path15.join)(repoRoot, isolated.diff.diffRel) });
+                primaryMerge = merged.stamp;
+                if (merged.stamp.status === "clean") {
+                  opts.onEcho?.(
+                    `merged back: ${isolated.diff.diffBytes} bytes applied to the workspace` + (merged.stamp.detail != null ? ` (${merged.stamp.detail})` : "")
+                  );
+                } else {
+                  const recovery = pendingShadow != null ? `Resolve with \`fadeno shadow-apply ${pendingShadow.pairId.slice(0, 8)} --arm primary\`` : `Resolve with \`${mergeBackReapplyCommand(isolated.diff.diffRel, merged.untracked)}\``;
+                  opts.onEcho?.(
+                    merged.stamp.status === "conflicted" ? `merge-back CONFLICTED \u2014 the dispatch's work is kept at ${isolated.diff.diffRel}. ${recovery} once the tree settles; inspect \`git status\` first, some hunks may already be staged.` : `merge-back BLOCKED \u2014 nothing was applied, the workspace is untouched, and the dispatch's work is kept at ${isolated.diff.diffRel} (${merged.stamp.detail ?? "no detail"}). ${recovery} once the tree settles.`
+                  );
+                }
               }
             } finally {
               try {
@@ -22227,6 +22268,8 @@ ${truncatedStderr}
       source,
       echo,
       exitCode: spawned.status ?? 1,
+      signal: spawned.signal ?? null,
+      timeoutMs: isTimeout ? supervisorStatus?.timeoutMs ?? null : null,
       stdout,
       stderr: spawned.stderr ?? "",
       durationMs,
@@ -23178,6 +23221,12 @@ function loadOutputRecords(absolute) {
         snapshot: null,
         outputSha256: null,
         completed: false,
+        outcome: null,
+        exitCode: null,
+        signal: null,
+        outputBytes: null,
+        timeoutMs: null,
+        primaryMerge: null,
         shadow: false,
         tag: null,
         requestedAt: null,
@@ -23202,6 +23251,23 @@ function loadOutputRecords(absolute) {
     if (event === "dispatch_completed") {
       rec.completed = true;
       rec.outputSha256 = str(row.output_sha256);
+      rec.exitCode = typeof row.exit_code === "number" ? row.exit_code : null;
+      rec.signal = str(row.signal);
+      rec.outputBytes = typeof row.output_bytes === "number" ? row.output_bytes : null;
+      rec.timeoutMs = typeof row.timeout_ms === "number" ? row.timeout_ms : null;
+      rec.outcome = normalizeDispatchOutcome(row.outcome, {
+        exitCode: rec.exitCode,
+        signal: rec.signal,
+        error: str(row.error),
+        outputBytes: rec.outputBytes,
+        timedOut: rec.timeoutMs != null ? true : null
+      });
+      const merge = row.primary_merge;
+      if (merge != null && typeof merge === "object" && !Array.isArray(merge)) {
+        const status = str(merge.status);
+        const detail2 = str(merge.detail);
+        if (status != null) rec.primaryMerge = detail2 != null ? { status, detail: detail2 } : { status };
+      }
       const duration = typeof row.duration_ms === "number" ? row.duration_ms : null;
       rec.completedAt = rec.requestedAt != null && duration != null ? rec.requestedAt + duration : Number.isNaN(at) ? null : at;
     }
@@ -23301,7 +23367,19 @@ function runDispatchesOutput(opts) {
   }
   const bytes = (0, import_node_fs16.readFileSync)(snapshotAbs, "utf8");
   const attested = !rec.completed ? "incomplete" : sha256Hex(bytes) === rec.outputSha256 ? "match" : "mismatch";
-  return { dispatchId: rec.dispatchId, path: snapshotRel, bytes, attested, resolvedBy };
+  return {
+    dispatchId: rec.dispatchId,
+    path: snapshotRel,
+    bytes,
+    attested,
+    outcome: rec.completed ? rec.outcome : null,
+    exitCode: rec.completed ? rec.exitCode : null,
+    signal: rec.completed ? rec.signal : null,
+    outputBytes: rec.completed ? rec.outputBytes : null,
+    timeoutMs: rec.completed ? rec.timeoutMs : null,
+    primaryMerge: rec.completed ? rec.primaryMerge : null,
+    resolvedBy
+  };
 }
 var BAKEOFFS_DIR = (0, import_node_path16.join)(".fadeno", "bakeoffs");
 function loadAllEntries(absolute) {
@@ -28019,6 +28097,7 @@ function collectCommandAttempt(ctx, pending) {
   const { stepId, role, outputRel, artifactType, ids, attempt, executor, leaseHolder, statusAbs, claimAbs, outputSnapshotAbs, stderrSnapshotAbs, effectiveTimeout } = pending;
   let workspaceSettled = false;
   let mergeStamp = null;
+  let mergeUntracked = [];
   let mergeDiff = null;
   let mergeIgnored = null;
   const settleWorkspace = () => {
@@ -28035,15 +28114,9 @@ function collectCommandAttempt(ctx, pending) {
         mergeStamp = { status: "clean", detail: "nothing to apply: the attempt changed no tracked files" };
       } else {
         mergeStamp = withEngineTreeLease(ctx, `merge:${ids.actorCallId}:a${attempt}`, () => {
-          const applyRes = (0, import_node_child_process7.spawnSync)("git", ["-C", ctx.repoRoot, "apply", "--3way", wt.diffAbs], { encoding: "utf8" });
-          if (applyRes.error == null && applyRes.status === 0) {
-            return { status: "clean" };
-          }
-          const stderrText = String(applyRes.stderr ?? "").trim();
-          return {
-            status: "conflicted",
-            detail: stderrText.length > 0 ? stderrText : `git apply --3way exited ${applyRes.status ?? "unknown"}`
-          };
+          const merged = applyMergeBackDiff({ repoRoot: ctx.repoRoot, diffAbs: wt.diffAbs });
+          mergeUntracked = merged.untracked;
+          return merged.stamp;
         });
       }
     } catch (err) {
@@ -28306,7 +28379,7 @@ ${truncatedStderr}
   const settled = takeMergeStamp();
   if (settled != null && settled.status !== "clean") {
     const settledDiff = takeMergeDiff();
-    const recovery = settledDiff == null ? "the diff could not be collected, so there is nothing to re-apply" : `re-apply with \`git apply --3way ${settledDiff.rel}\` once the tree settles`;
+    const recovery = settledDiff == null ? "the diff could not be collected, so there is nothing to re-apply" : `re-apply with \`${mergeBackReapplyCommand(settledDiff.rel, mergeUntracked)}\` once the tree settles`;
     const error = `${executor} completed, but its work could not be merged back into the workspace (${settled.status}${settled.detail != null ? `: ${settled.detail}` : ""}). ${settled.status === "conflicted" ? "The tree may be PARTLY applied \u2014 inspect `git status` first. " : "The tree is untouched. "}${recovery}.`;
     appendEvent(ctx.runDir, { type: "actor_failed", ...base, ...evidenceTiming, reason: "merge_back_failed", exit_code: 0, error }, ctx.now);
     ctx.act(`  merge-back ${settled.status} for ${stepId}${role ? ` (${role})` : ""} \u2014 ${recovery}`);
@@ -40897,8 +40970,15 @@ Or advance manually with the playbook cursor:`);
       });
       if (result.stdout.length > 0) process.stdout.write(result.stdout);
       if (result.stderr.length > 0) process.stderr.write(result.stderr);
-      if (result.exitCode !== 0) {
-        console.error(`dispatch: executor ${result.executor} exited ${result.exitCode}`);
+      if (result.outcome === "timeout") {
+        const deadline = result.timeoutMs != null ? `${Math.round(result.timeoutMs / 1e3)}s ` : "";
+        console.error(
+          `dispatch: executor ${result.executor} TIMED OUT \u2014 the kernel killed it at its ${deadline}deadline${result.signal != null ? ` (${result.signal})` : ""}; the work did NOT finish. ${result.outputBytes} bytes of output were captured before the kill. Re-dispatch with --timeout <seconds> or --timeout 0 rather than into the same wall.`
+        );
+      } else if (result.exitCode !== 0) {
+        console.error(
+          result.signal != null ? `dispatch: executor ${result.executor} was killed by ${result.signal}` : `dispatch: executor ${result.executor} exited ${result.exitCode}`
+        );
       } else if (result.outcome === "empty") {
         console.error(
           `dispatch: executor ${result.executor} exited 0 but produced no output \u2014 nothing was relayed. Check the executor's own stderr above, and that its model id resolves (fadeno dial resolve --archetype <archetype>).`
@@ -41063,7 +41143,25 @@ Or advance manually with the playbook cursor:`);
           waitMs
         });
         process.stdout.write(result2.bytes);
-        const note = result2.attested === "match" ? "output attested: sha matches the completion row" : result2.attested === "mismatch" ? "WARNING: snapshot sha does not match the completion row (file changed after the dispatch?)" : waitMs > 0 ? `STILL RUNNING: no completion row after waiting ${Math.round(waitMs / 1e3)}s. The executor has not exited; this is its output so far. Not a failure \u2014 re-run this command to check again.` : "no completion row recorded YET: the executor may still be running, and the kernel writes that row only when it exits. This is its output so far, not a failure. Re-run with --wait <seconds> to wait for the real answer.";
+        const verdict = (() => {
+          switch (result2.outcome) {
+            case "timeout": {
+              const deadline = result2.timeoutMs != null ? `${Math.round(result2.timeoutMs / 1e3)}s ` : "";
+              return `TIMED OUT: the kernel killed the executor at its ${deadline}deadline${result2.signal != null ? ` (${result2.signal})` : ""}; the work did NOT finish. ${result2.outputBytes ?? 0} bytes of output were captured before the kill. Re-dispatch with --timeout <seconds> or --timeout 0 rather than into the same wall.`;
+            }
+            case "failed":
+              return result2.signal != null ? `FAILED: the executor was killed by ${result2.signal}` : `FAILED: exit ${result2.exitCode ?? "?"}`;
+            case "empty":
+              return "NO OUTPUT: exit 0 with 0 bytes \u2014 nothing to relay";
+            case "ok":
+              return `ok: exit 0, ${result2.outputBytes ?? "?"} bytes`;
+            default:
+              return null;
+          }
+        })();
+        const merge = result2.primaryMerge == null ? null : result2.primaryMerge.status === "conflicted" ? `merge-back CONFLICTED: the tree MAY be partly applied \u2014 inspect \`git status\`${result2.primaryMerge.detail != null ? ` (${result2.primaryMerge.detail})` : ""}` : result2.primaryMerge.status === "blocked" ? `merge-back BLOCKED: nothing was applied, the workspace is untouched${result2.primaryMerge.detail != null ? ` (${result2.primaryMerge.detail})` : ""}` : result2.primaryMerge.detail != null ? `merge-back clean: ${result2.primaryMerge.detail}` : null;
+        const attestation = result2.attested === "match" ? "output attested: sha matches the completion row" : result2.attested === "mismatch" ? "WARNING: snapshot sha does not match the completion row (file changed after the dispatch?)" : waitMs > 0 ? `STILL RUNNING: no completion row after waiting ${Math.round(waitMs / 1e3)}s. The executor has not exited; this is its output so far. Not a failure \u2014 re-run this command to check again.` : "no completion row recorded YET: the executor may still be running, and the kernel writes that row only when it exits. This is its output so far, not a failure. Re-run with --wait <seconds> to wait for the real answer.";
+        const note = [verdict, merge, attestation].filter((part) => part != null).join("; ");
         const how = result2.resolvedBy === "recency" ? " [resolved by recency: nothing was open and nothing overlapped it, so this is the only candidate \u2014 launch with `--tag <handle>` to name it outright]" : result2.resolvedBy === "tag" ? " [resolved by tag]" : "";
         console.error(`[${result2.dispatchId}] ${result2.path} \u2014 ${note}${how}`);
         return 0;

@@ -93,8 +93,16 @@ Then:
    the whole time. The read was early.
 
    If the wait returns a completed dispatch, that IS the result: relay its
-   output verbatim and report the exit code recorded. The harness timing out
-   says nothing about whether the work succeeded.
+   output verbatim, and relay the verdict the command prints on stderr with
+   it — `ok`, `FAILED`, `NO OUTPUT`, or `TIMED OUT`, plus any merge-back
+   line. The harness timing out says nothing about whether the work
+   succeeded; the verdict line does. `output attested` is NOT a verdict: it
+   only says these are the bytes the kernel recorded, and an executor the
+   kernel killed attests perfectly with zero bytes. `TIMED OUT` means the
+   kernel killed the executor at its own deadline: the work did not finish,
+   whatever the output says — report it in those words, with the byte count,
+   and never as completed. A `merge-back CONFLICTED` or `BLOCKED` line means
+   the executor's changes did not (fully) reach the workspace; relay it.
 
    Only if the wait expires with still no completion row, report in exactly
    these terms: the dispatch timed out, the executor MAY STILL BE RUNNING,

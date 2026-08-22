@@ -6,6 +6,7 @@ import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { DISPATCHES_FILE, runDispatch } from '../src/commands/dispatch.ts';
 import { DispatchCommandError } from '../src/commands/dispatch.ts';
+import { runDispatchesOutput } from '../src/commands/dispatches.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
 import { tempRepo } from './helpers.ts';
@@ -202,4 +203,87 @@ test('dispatch output: output snapshot on spawn failure empty file', (t) => {
       }
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// The recovery reader carries the verdict, not just the bytes.
+//
+// On 2026-08-22 a worker dispatch was killed at its 20-minute deadline with
+// nothing written, and `fadeno dispatches --output tag:…` — the exact command
+// the proxy is told to run after its own Bash call dies — reported `output
+// attested: sha matches the completion row`. True (empty hashes to empty) and
+// worthless: the proxy relayed a kernel-killed executor as completed. The
+// verdict on the completion row has to ride along with the snapshot bytes.
+// ---------------------------------------------------------------------------
+
+
+const REPO_ROOT = join(import.meta.dirname, '..');
+
+function outputNote(root: string, tag: string): { status: number | null; stdout: string; stderr: string } {
+  const cli = spawnSync('node', [join(REPO_ROOT, 'src', 'cli.ts'), 'dispatches', '--output', `tag:${tag}`], { cwd: root, encoding: 'utf8' });
+  return { status: cli.status, stdout: cli.stdout, stderr: cli.stderr };
+}
+
+test('dispatch output: a dispatch the kernel killed at its deadline is reported as TIMED OUT before anything about attestation', (t) => {
+  const root = seedV3(t, { routes: { standalone: { openai: { command: ['node', '-e', "setTimeout(()=>process.stdout.write('LATE'),6000)"] } } } });
+  const result = runDispatch({ archetype: 'worker', prompt: 'slow', tag: 'worker-slow', repoRoot: root, shared: true, timeoutMs: 1000, userPathOptions: onHarness('standalone') });
+  assert.equal(result.outcome, 'timeout');
+  assert.equal(result.signal, 'SIGTERM');
+  assert.equal(result.timeoutMs, 1000);
+
+  const rec = runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'worker-slow' });
+  assert.equal(rec.attested, 'match', 'empty bytes hash to the empty row — attestation alone cannot tell this apart from success');
+  assert.equal(rec.outcome, 'timeout');
+  assert.equal(rec.exitCode, null);
+  assert.equal(rec.signal, 'SIGTERM');
+  assert.equal(rec.outputBytes, 0);
+  assert.equal(rec.timeoutMs, 1000);
+
+  const { stdout, stderr } = outputNote(root, 'worker-slow');
+  assert.equal(stdout, '');
+  assert.match(stderr, /— TIMED OUT: the kernel killed the executor at its 1s deadline \(SIGTERM\); the work did NOT finish\. 0 bytes of output were captured before the kill\./);
+  assert.match(stderr, /Re-dispatch with --timeout <seconds> or --timeout 0/);
+  assert.ok(stderr.indexOf('TIMED OUT') < stderr.indexOf('output attested'), 'the verdict leads; attestation follows');
+});
+
+test('dispatch output: the direct call names the deadline kill too, rather than a fabricated "exited 1"', (t) => {
+  const root = seedV3(t, { routes: { standalone: { openai: { command: ['node', '-e', "setTimeout(()=>process.stdout.write('LATE'),6000)"] } } } });
+  const cli = spawnSync('node', [join(REPO_ROOT, 'src', 'cli.ts'), 'dispatch', '--archetype', 'worker', '--tag', 'worker-direct', '--shared', '--timeout', '1'], { cwd: root, encoding: 'utf8', input: 'slow', env: { ...process.env, FADENO_HARNESS: 'standalone' } });
+  assert.equal(cli.status, 1);
+  assert.match(cli.stderr, /dispatch: executor \S+ TIMED OUT — the kernel killed it at its 1s deadline \(SIGTERM\); the work did NOT finish\. 0 bytes/);
+  assert.doesNotMatch(cli.stderr, /exited 1/);
+});
+
+test('dispatch output: FAILED, NO OUTPUT and ok verdicts each lead the note', (t) => {
+  const cases: Array<{ tag: string; cmd: string[]; outcome: string; note: RegExp }> = [
+    { tag: 'worker-fails', cmd: ['node', '-e', "process.stdout.write('partial');process.exit(2)"], outcome: 'failed', note: /— FAILED: exit 2; output attested/ },
+    { tag: 'worker-empty', cmd: ['node', '-e', '0'], outcome: 'empty', note: /— NO OUTPUT: exit 0 with 0 bytes — nothing to relay; output attested/ },
+    { tag: 'worker-ok', cmd: ['node', '-e', "process.stdout.write('report')"], outcome: 'ok', note: /— ok: exit 0, 6 bytes; output attested/ },
+  ];
+  for (const c of cases) {
+    const root = seedV3(t, { routes: { standalone: { openai: { command: c.cmd } } } });
+    runDispatch({ archetype: 'worker', prompt: 'p', tag: c.tag, repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
+    const rec = runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: c.tag });
+    assert.equal(rec.outcome, c.outcome, c.tag);
+    assert.match(outputNote(root, c.tag).stderr, c.note, c.tag);
+  }
+});
+
+test('dispatch output: an open dispatch carries no verdict — the facts are null until the completion row lands', (t) => {
+  const root = seedV3(t);
+  // A request row with no completion: the killed-mid-flight shape.
+  mkdirSync(join(root, '.fadeno', 'local', 'outputs'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'local', 'outputs', 'worker-open.md'), 'so far');
+  writeFileSync(join(root, DISPATCHES_FILE), JSON.stringify({
+    format: '0.2', timestamp: '2026-08-22T12:00:00.000Z', event: 'dispatch_requested', dispatch_id: 'open-0000-0000-0000-000000000000',
+    tag: 'worker-open', output_snapshot: '.fadeno/local/outputs/worker-open.md',
+  }) + '\n');
+  const rec = runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'worker-open' });
+  assert.equal(rec.attested, 'incomplete');
+  assert.equal(rec.outcome, null);
+  assert.equal(rec.exitCode, null);
+  assert.equal(rec.outputBytes, null);
+  const { stderr } = outputNote(root, 'worker-open');
+  assert.match(stderr, /— no completion row recorded YET/);
+  assert.doesNotMatch(stderr, /TIMED OUT|FAILED|NO OUTPUT|ok: exit/);
 });

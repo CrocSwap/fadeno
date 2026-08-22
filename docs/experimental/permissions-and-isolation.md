@@ -258,6 +258,22 @@ Four points where the engine differs from a dispatch, each for a reason:
   half-applied patch. `acquireWorkspaceLease` refuses immediately when held,
   which is wrong here — contention is the normal case once members run
   concurrently, not an error — so the engine waits.
+- **A path the workspace holds untracked merges back through the working
+  tree.** The baseline copies the caller's untracked files into the worktree
+  and commits them, so an attempt's edit to one of them arrives as a
+  modification of a *tracked* file — and `git apply --3way` implies `--index`,
+  which refuses the whole patch with `does not exist in index` because the
+  caller's index has no such entry. The refusal is atomic: the tracked hunks
+  beside it are dropped too, and a receipt that called this `conflicted` sent
+  the reader to inspect a tree nothing had touched (seen live 2026-08-22, a
+  worker editing a file in an untracked directory). Adding the path to the
+  caller's index would mutate an index nobody asked to have mutated — the
+  baseline capture avoids `git add` in the caller's repo for that reason — so
+  `applyMergeBackDiff` re-applies to the working tree alone, stamps `clean`
+  with a detail naming the paths and saying they landed unstaged and without
+  3-way reconciliation, and stamps `blocked` (tree untouched) rather than
+  `conflicted` if even that refuses. Both merge-backs, ad-hoc dispatch and
+  engine attempt, go through that one helper.
 - **A merge-back that is not `clean` FAILS the attempt** (`merge_back_failed`),
   where a dispatch merely stamps it. The next step of a run reads the
   workspace, so an `actor_completed` over a diff that never applied would tell

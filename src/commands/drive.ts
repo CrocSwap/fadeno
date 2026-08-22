@@ -81,8 +81,10 @@ import {
   acquireWorkspaceLease,
   carryDeclaredPaths,
   collectIsolatedDiff,
+  applyMergeBackDiff,
   createIsolatedWorktree,
   isWorkspaceLeaseAlive,
+  mergeBackReapplyCommand,
   readEffectiveLease,
   readWorkspaceLease,
   releaseWorkspaceLease,
@@ -1538,6 +1540,9 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
    */
   let workspaceSettled = false;
   let mergeStamp: { status: 'clean' | 'conflicted' | 'blocked'; detail?: string } | null = null;
+  /** Paths the merge-back found untracked in the workspace — shapes the
+   * recovery pointer only, never the ledger. */
+  let mergeUntracked: string[] = [];
   let mergeDiff: { rel: string; bytes: number } | null = null;
   let mergeIgnored: string[] | null = null;
   const settleWorkspace = (): void => {
@@ -1558,18 +1563,13 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
         mergeStamp = { status: 'clean', detail: 'nothing to apply: the attempt changed no tracked files' };
       } else {
         mergeStamp = withEngineTreeLease(ctx, `merge:${ids.actorCallId}:a${attempt}`, () => {
-          // `--3way`, never `--check`: a sibling member may have merged back
-          // while this one ran, so context lines drift routinely and a plain
-          // apply would refuse work that reconciles fine.
-          const applyRes = spawnSync('git', ['-C', ctx.repoRoot, 'apply', '--3way', wt.diffAbs], { encoding: 'utf8' });
-          if (applyRes.error == null && applyRes.status === 0) {
-            return { status: 'clean' as const };
-          }
-          const stderrText = String(applyRes.stderr ?? '').trim();
-          return {
-            status: 'conflicted' as const,
-            detail: stderrText.length > 0 ? stderrText : `git apply --3way exited ${applyRes.status ?? 'unknown'}`,
-          };
+          // `--3way` first, working-tree apply when the only refusal is a
+          // path the workspace holds untracked: the rules live with the
+          // helper, shared with the ad-hoc dispatch merge-back, so the two
+          // cannot drift.
+          const merged = applyMergeBackDiff({ repoRoot: ctx.repoRoot, diffAbs: wt.diffAbs });
+          mergeUntracked = merged.untracked;
+          return merged.stamp;
         });
       }
     } catch (err) {
@@ -1831,7 +1831,7 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
     const settledDiff = takeMergeDiff();
     const recovery = settledDiff == null
       ? 'the diff could not be collected, so there is nothing to re-apply'
-      : `re-apply with \`git apply --3way ${settledDiff.rel}\` once the tree settles`;
+      : `re-apply with \`${mergeBackReapplyCommand(settledDiff.rel, mergeUntracked)}\` once the tree settles`;
     const error =
       `${executor} completed, but its work could not be merged back into the workspace ` +
       `(${settled.status}${settled.detail != null ? `: ${settled.detail}` : ''}). ` +

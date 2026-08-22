@@ -2496,10 +2496,25 @@ function main(argv: string[]): number {
       });
       if (result.stdout.length > 0) process.stdout.write(result.stdout);
       if (result.stderr.length > 0) process.stderr.write(result.stderr);
-      if (result.exitCode !== 0) {
+      if (result.outcome === 'timeout') {
+        // A signal-killed process has no exit status; `exitCode` is a stand-in
+        // 1, and "exited 1" would hide the one fact that matters: the kernel
+        // killed this executor at its own deadline, so the work did not finish.
+        const deadline = result.timeoutMs != null ? `${Math.round(result.timeoutMs / 1000)}s ` : '';
+        console.error(
+          `dispatch: executor ${result.executor} TIMED OUT — the kernel killed it at its ${deadline}deadline` +
+            `${result.signal != null ? ` (${result.signal})` : ''}; the work did NOT finish. ` +
+            `${result.outputBytes} bytes of output were captured before the kill. ` +
+            'Re-dispatch with --timeout <seconds> or --timeout 0 rather than into the same wall.',
+        );
+      } else if (result.exitCode !== 0) {
         // CLI-level diagnosis on stderr — a quiet executor otherwise leaves
         // only a bare exit code. stdout stays the executor's pure report.
-        console.error(`dispatch: executor ${result.executor} exited ${result.exitCode}`);
+        console.error(
+          result.signal != null
+            ? `dispatch: executor ${result.executor} was killed by ${result.signal}`
+            : `dispatch: executor ${result.executor} exited ${result.exitCode}`,
+        );
       } else if (result.outcome === 'empty') {
         // Exit 0 and nothing written is not a success anyone can use: it is
         // what an unusable model id, or a worker that stopped after
@@ -2686,7 +2701,45 @@ function main(argv: string[]): number {
         // stdout carries the snapshot bytes verbatim (relay-safe); the
         // attestation verdict goes to stderr so piping stays clean.
         process.stdout.write(result.bytes);
-        const note =
+        // The verdict leads. "attested" only says these are the bytes the
+        // completion row hashed — a dispatch the kernel killed at its
+        // deadline attests perfectly, zero bytes to zero bytes, and on
+        // 2026-08-22 a proxy relayed exactly that as "completed". The bytes
+        // are worthless without the verdict, so the verdict is what a relay
+        // must carry, and it is spelled in capitals a reader cannot miss.
+        const verdict = ((): string | null => {
+          switch (result.outcome) {
+            case 'timeout': {
+              const deadline = result.timeoutMs != null ? `${Math.round(result.timeoutMs / 1000)}s ` : '';
+              return (
+                `TIMED OUT: the kernel killed the executor at its ${deadline}deadline` +
+                `${result.signal != null ? ` (${result.signal})` : ''}; the work did NOT finish. ` +
+                `${result.outputBytes ?? 0} bytes of output were captured before the kill. ` +
+                'Re-dispatch with --timeout <seconds> or --timeout 0 rather than into the same wall.'
+              );
+            }
+            case 'failed':
+              return result.signal != null
+                ? `FAILED: the executor was killed by ${result.signal}`
+                : `FAILED: exit ${result.exitCode ?? '?'}`;
+            case 'empty':
+              return 'NO OUTPUT: exit 0 with 0 bytes — nothing to relay';
+            case 'ok':
+              return `ok: exit 0, ${result.outputBytes ?? '?'} bytes`;
+            default:
+              return null;
+          }
+        })();
+        const merge = result.primaryMerge == null
+          ? null
+          : result.primaryMerge.status === 'conflicted'
+            ? `merge-back CONFLICTED: the tree MAY be partly applied — inspect \`git status\`${result.primaryMerge.detail != null ? ` (${result.primaryMerge.detail})` : ''}`
+            : result.primaryMerge.status === 'blocked'
+              ? `merge-back BLOCKED: nothing was applied, the workspace is untouched${result.primaryMerge.detail != null ? ` (${result.primaryMerge.detail})` : ''}`
+              : result.primaryMerge.detail != null
+                ? `merge-back clean: ${result.primaryMerge.detail}`
+                : null;
+        const attestation =
           result.attested === 'match'
             ? 'output attested: sha matches the completion row'
             : result.attested === 'mismatch'
@@ -2698,6 +2751,7 @@ function main(argv: string[]): number {
                 : 'no completion row recorded YET: the executor may still be running, and the ' +
                   'kernel writes that row only when it exits. This is its output so far, not a ' +
                   'failure. Re-run with --wait <seconds> to wait for the real answer.';
+        const note = [verdict, merge, attestation].filter((part) => part != null).join('; ');
         // Say how `last` landed. Recency now only survives when nothing
         // overlapped this dispatch — concurrent-and-finished refuses outright —
         // so the note reports that narrowed claim rather than a bare warning.

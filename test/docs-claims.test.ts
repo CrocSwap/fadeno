@@ -341,6 +341,33 @@ const CLAIMS: Claim[] = [
     src: { files: ['scripts/tamper-matrix.mjs', 'package.json'], patterns: [/knownGap/, /tamper-matrix/] },
   },
   {
+    // The recovery reader's verdict line. A proxy relayed a deadline-killed
+    // executor as "completed" because `--output` printed only the attestation;
+    // the skill doc and the four proxy templates now describe the verdict,
+    // and the CLI has to keep printing it in those words.
+    id: 'dispatch-output-verdict',
+    doc: {
+      files: [
+        'templates/common/skills/fadeno-driver/SKILL.md',
+        'templates/claude/claude-agents/dispatch-worker.md',
+        'templates/claude/claude-agents/dispatch-reviewer.md',
+        'templates/claude/claude-agents/dispatch-judge.md',
+        'templates/claude/claude-agents/dispatch-director.md',
+        'CHANGELOG.md',
+      ],
+      patterns: [/TIMED OUT/],
+    },
+    src: { files: ['src/cli.ts'], patterns: [/TIMED OUT: the kernel killed the executor/, /NO OUTPUT: exit 0/] },
+  },
+  {
+    // Merge-back of a path the workspace holds untracked. The isolation doc
+    // and changelog describe the working-tree fallback; the helper is the one
+    // place both merge-backs get it from.
+    id: 'merge-back-untracked-paths',
+    doc: { files: ['docs/experimental/permissions-and-isolation.md', 'CHANGELOG.md'], patterns: [/does not exist in index/] },
+    src: { files: ['src/lib/workspace-lease.ts'], patterns: [/does not exist in index/, /applyMergeBackDiff/] },
+  },
+  {
     id: 'schema-envelope-extraction',
     doc: { files: ['docs/experimental/next-protocol.md'], patterns: [/output_extraction/] },
     src: { files: ['src/lib/schema-envelope.ts'], patterns: [/extractSchemaEnvelope/, /EnvelopeKind/] },

@@ -152,3 +152,19 @@ test('plugin surface descriptions carry the version stamp', (t) => {
     assert.ok(description?.endsWith(stamp), `${rel} description must end with "${stamp}"`);
   }
 });
+
+test('every dispatch proxy is told the recovery verdict is the result, and that attestation is not one', () => {
+  // The proxy's recovery command now leads its stderr note with the
+  // completion row's verdict. A proxy that still reads "output attested" as
+  // success relays a kernel-killed executor as completed — which is what
+  // happened on 2026-08-22 — so the instruction has to name the verdicts and
+  // say in so many words what attestation does not mean.
+  for (const archetype of ['worker', 'reviewer', 'judge', 'director']) {
+    const body = agentSource(archetype);
+    assert.match(body, /`ok`, `FAILED`, `NO OUTPUT`, or `TIMED OUT`/, `dispatch-${archetype} names the verdicts`);
+    assert.match(body, /`output attested` is NOT a verdict/, `dispatch-${archetype} says what attestation is not`);
+    assert.match(body, /`TIMED OUT` means the\s+kernel killed the executor at its own deadline/, `dispatch-${archetype} explains TIMED OUT`);
+    assert.match(body, /merge-back CONFLICTED` or `BLOCKED`/, `dispatch-${archetype} relays the merge-back line`);
+    assert.doesNotMatch(body, /report the exit code recorded/, `dispatch-${archetype} no longer asks for a fact the recovery never printed`);
+  }
+});

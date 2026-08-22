@@ -183,7 +183,13 @@ planned artifact path.
   with `timeout_ms`/`deadline_at` (engine) or `dispatch_completed.outcome =
   "timeout"` (ad-hoc) and outranks the exit signal. If you hit the 20-minute wall
   on a legitimately long step, re-dispatch with `--timeout 0` or a larger value
-  rather than retrying into the same wall.
+  rather than retrying into the same wall. The recovery reader carries the
+  verdict with the bytes: `fadeno dispatches --output <id|tag:handle>` leads
+  its stderr note with `ok`, `FAILED`, `NO OUTPUT`, or `TIMED OUT` (and any
+  merge-back that did not land) *before* the attestation line. `output
+  attested` only says the snapshot's bytes are the ones the completion row
+  hashed — a deadline-killed executor attests perfectly with zero bytes, and
+  is not a result.
 
 - **Safe cancellation.** `fadeno cancel <run>` (or a unique run prefix) targets the
   single live engine command claim for that run, sends `SIGTERM` to its supervisor

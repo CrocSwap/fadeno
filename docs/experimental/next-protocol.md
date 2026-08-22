@@ -502,3 +502,54 @@ valid JSON *wrapped* in prose or a fence, and envelope extraction absorbs that
 one layer earlier. That probe is the first trace where `envelope-extraction`
 verified a real extraction rather than skipping. The repair loop should be
 described as synthetic-test-covered, not field-proven.
+
+#### Field finding (2026-08-22): a dispatch proxy relayed a deadline kill as "completed"
+
+Not from the dogfood runs — from a second harness session using the dispatch
+proxies on its own work, reported the same day. One `fadeno:worker` dispatch
+(worker → an external executor via codex) was SIGTERMed at the 20-minute route
+deadline; its merge-back then refused because the directory it had edited was
+untracked in the caller's workspace; and the proxy reported "completed" with a
+0-byte attested output. Six reviewer dispatches ran through the same proxies,
+two of which also hit the deadline — one still delivered a full report.
+
+The kernel's row was right the whole time: `outcome: timeout`, `signal:
+SIGTERM`, `output_bytes: 0`, `primary_merge.status: conflicted`. What was wrong
+was every surface the proxy could reach. Three defects, two fixed (rc.58):
+
+- **`fadeno dispatches --output` did not carry the verdict.** The recovery
+  reader loaded only `completed` and `output_sha256` and printed `output
+  attested: sha matches the completion row` — true of a killed executor, since
+  empty bytes hash to an empty row. The proxy template then asked it to
+  "report the exit code recorded", a fact the command never printed. The
+  verdict (`TIMED OUT` / `FAILED` / `NO OUTPUT` / `ok`) now leads the note,
+  followed by any merge-back that did not land, then the attestation; the
+  templates name those words and say that attestation is not one of them. The
+  same silent-wrong-answer shape as every other finding in this file: one fact
+  recorded correctly, the consumer that mattered reading a different one.
+- **One untracked path dropped the whole merge-back.** The baseline commits
+  the caller's untracked files into the worktree, so the attempt's edit to one
+  is a tracked-file modification in the diff; `git apply --3way` implies
+  `--index`, has no entry, and refuses the entire patch — tracked hunks
+  included — while the receipt said `conflicted` about an untouched tree. See
+  `permissions-and-isolation.md` for the working-tree fallback; both
+  merge-backs now share one helper.
+- **The 20-minute ceiling, left open.** `timeout_ms: 1200000` on every command
+  route, `--timeout 0` lifts it, and the proxy contract call cannot pass it.
+  So the worker dial, through the proxy, cannot run a pass longer than 20
+  minutes, and that session's conclusion was that this makes it unusable for a
+  real implementation pass. Options, all policy: raise the route default;
+  give `worker` its own default (reviewers and judges rarely need more, a
+  worker routinely does); let the proxy pass `--timeout` (the guard would need
+  to admit one more flag); or keep 20 minutes and say so on the proxy. The
+  underlying question is how long an unattended external executor may hold a
+  worktree with nobody watching, which is not a question a bug fix should
+  answer. **Decide with the freeze**, alongside the two unreceipted artifact
+  classes above.
+
+One more observation from that loop worth keeping: the external reviewer's
+sandbox could not open loopback listeners, so it never ran the socket tests,
+and every "gate green" in that loop rested on the caller's own test runs. A
+reviewer that cannot run the tests it is reviewing is a known limitation of
+routing review outward; nothing in Fadeno claims otherwise, but nothing
+surfaces it either.

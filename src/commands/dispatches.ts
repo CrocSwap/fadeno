@@ -464,6 +464,21 @@ export interface DispatchesOutputResult {
    */
   attested: DispatchOutputAttestation;
   /**
+   * The completion row's verdict and the facts behind it; all null while the
+   * dispatch is still open. `attested` says the bytes are the ones the row
+   * hashed — it says nothing about whether the executor finished, and a
+   * kernel-killed executor attests perfectly. A caller relaying `bytes` has to
+   * relay this too.
+   */
+  outcome: DispatchOutcome | null;
+  exitCode: number | null;
+  signal: string | null;
+  outputBytes: number | null;
+  /** The deadline that killed it, when `outcome` is `timeout`. */
+  timeoutMs: number | null;
+  /** The merge-back stamp, when the dispatch ran isolated and one was attempted. */
+  primaryMerge: { status: string; detail?: string } | null;
+  /**
    * How the query landed on this record. `recency` means `last` fell back to
    * "newest in the log" because nothing was open — a guess worth surfacing
    * when concurrent dispatches share one evidence file.
@@ -1334,6 +1349,21 @@ interface OutputRecord {
   outputSha256: string | null;
   completed: boolean;
   /**
+   * What the completion row says happened, and the facts behind it. A
+   * snapshot whose bytes hash to the row is *attested*, not *successful*: a
+   * dispatch the kernel killed at its deadline attests perfectly — zero bytes
+   * in, zero bytes hashed — and on 2026-08-22 that is exactly what a proxy
+   * relayed as "completed". The verdict has to ride along with the bytes.
+   */
+  outcome: DispatchOutcome | null;
+  exitCode: number | null;
+  signal: string | null;
+  outputBytes: number | null;
+  /** The deadline that killed it, when `outcome` is `timeout`. */
+  timeoutMs: number | null;
+  /** The merge-back stamp, when the dispatch ran isolated and one was attempted. */
+  primaryMerge: { status: string; detail?: string } | null;
+  /**
    * Whether this is a shadow duplication. Shadows stay recoverable and
    * cancellable by explicit id, but are never candidates for `last`: the
    * caller asking "which dispatch was mine?" launched the primary — the
@@ -1409,6 +1439,12 @@ function loadOutputRecords(absolute: string): {
         snapshot: null,
         outputSha256: null,
         completed: false,
+        outcome: null,
+        exitCode: null,
+        signal: null,
+        outputBytes: null,
+        timeoutMs: null,
+        primaryMerge: null,
         shadow: false,
         tag: null,
         requestedAt: null,
@@ -1433,6 +1469,25 @@ function loadOutputRecords(absolute: string): {
     if (event === 'dispatch_completed') {
       rec.completed = true;
       rec.outputSha256 = str(row.output_sha256);
+      rec.exitCode = typeof row.exit_code === 'number' ? row.exit_code : null;
+      rec.signal = str(row.signal);
+      rec.outputBytes = typeof row.output_bytes === 'number' ? row.output_bytes : null;
+      rec.timeoutMs = typeof row.timeout_ms === 'number' ? row.timeout_ms : null;
+      // Stated outcome first, derived from the row's facts for rows written
+      // before the field — the same rule the listing applies.
+      rec.outcome = normalizeDispatchOutcome(row.outcome, {
+        exitCode: rec.exitCode,
+        signal: rec.signal,
+        error: str(row.error),
+        outputBytes: rec.outputBytes,
+        timedOut: rec.timeoutMs != null ? true : null,
+      });
+      const merge = row.primary_merge;
+      if (merge != null && typeof merge === 'object' && !Array.isArray(merge)) {
+        const status = str((merge as Record<string, unknown>).status);
+        const detail = str((merge as Record<string, unknown>).detail);
+        if (status != null) rec.primaryMerge = detail != null ? { status, detail } : { status };
+      }
       const duration = typeof row.duration_ms === 'number' ? row.duration_ms : null;
       // Prefer start + duration; fall back to the row's own stamp for legacy
       // rows written before `duration_ms`, where it is the best available.
@@ -1619,7 +1674,19 @@ export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOu
     : sha256Hex(bytes) === rec.outputSha256
       ? 'match'
       : 'mismatch';
-  return { dispatchId: rec.dispatchId, path: snapshotRel, bytes, attested, resolvedBy };
+  return {
+    dispatchId: rec.dispatchId,
+    path: snapshotRel,
+    bytes,
+    attested,
+    outcome: rec.completed ? rec.outcome : null,
+    exitCode: rec.completed ? rec.exitCode : null,
+    signal: rec.completed ? rec.signal : null,
+    outputBytes: rec.completed ? rec.outputBytes : null,
+    timeoutMs: rec.completed ? rec.timeoutMs : null,
+    primaryMerge: rec.completed ? rec.primaryMerge : null,
+    resolvedBy,
+  };
 }
 
 // ---------------------------------------------------------------------------
