@@ -11,18 +11,23 @@ import './helpers.ts';
  * `templates/<host>/` adapter tree and owns a `routes.<host>` table. A
  * **driver** is a harness Fadeno spawns as a subprocess; it needs nothing but
  * argv. The distinction is documented in architecture.md → "Glossary:
- * harnesses, hosts, and drivers", and these pin it for the two drivers added
- * 2026-08-13 (Antigravity and OpenCode), which shipped with zero host-side
- * surface precisely because a driver never earns one.
+ * harnesses, hosts, and drivers". Antigravity (`agy`) shipped 2026-08-13 with
+ * zero host-side surface precisely because a driver never earns one.
+ * OpenCode was promoted from driver to host on 2026-08-22 and is pinned over
+ * in template-archetype/init tests; only pure drivers are pinned here.
  */
 
 const CATALOG = join(import.meta.dirname, '..', 'templates', 'common', 'fadeno', 'executors.yaml');
-const HOSTS: HarnessId[] = ['codex', 'claude', 'grok', 'standalone'];
-// v3 registry models whose home provider route is driver-backed
+const HOSTS: HarnessId[] = ['codex', 'claude', 'grok', 'opencode', 'standalone'];
+// v3 registry models whose home provider route is driver-backed.
+// `agy` is the only harness that must remain driver-only; `opencode` names a
+// driver AND a host (the same binary plays both roles).
 const DRIVERS = [
   { model: 'gemini', provider: 'google', binary: 'agy', routeKey: 'google' },
   { model: 'opencode-driver', provider: 'openrouter', binary: 'opencode', routeKey: 'openrouter' },
 ] as const;
+/** Drivers with no host surface — the tree/table prohibitions apply to these. */
+const PURE_DRIVERS = [DRIVERS[0]] as const;
 
 function catalogFor(harness: HarnessId) {
   return parseExecutorProfile(readFileSync(CATALOG, 'utf8'), 'templates/common/fadeno/executors.yaml', harness);
@@ -56,14 +61,19 @@ test('each driver is reachable as a command delivery from every host', () => {
 
 test('a driver never becomes a host: no adapter tree and no route table of its own', () => {
   const trees = readdirSync(join(import.meta.dirname, '..', 'templates'));
-  for (const { binary } of DRIVERS) {
+  for (const { binary } of PURE_DRIVERS) {
     assert.ok(!trees.includes(binary), `templates/${binary}/ exists — that would make it a host, not a driver`);
   }
-  // A catalog declares routes keyed by host, never by driver — a driver must not own a route table.
+  // A catalog declares routes keyed by host, never by driver — a pure driver
+  // must not own a route table. (opencode now owns `routes.opencode` as a
+  // HOST lane; the openrouter ROUTE naming it as a driver is unaffected.)
   const profile = catalogFor('standalone');
-  for (const { binary } of DRIVERS) {
+  for (const { binary } of PURE_DRIVERS) {
     assert.ok(!(binary in profile.routes), `routes.${binary} exists — a driver must not own a route table`);
   }
+  // The promotion is pinned from the other side: opencode must have BOTH.
+  assert.ok(trees.includes('opencode'), 'templates/opencode/ missing — the OpenCode host promotion regressed');
+  assert.ok('opencode' in catalogFor('standalone').routes, 'routes.opencode host lane missing');
 });
 
 test('driver routes keep the provider honest', () => {

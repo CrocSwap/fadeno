@@ -36,7 +36,7 @@ export interface StatusRole {
 export interface StatusResult {
   repoRoot: string;
   version: string;
-  harness: 'codex' | 'claude' | 'grok' | 'standalone' | null;
+  harness: 'codex' | 'claude' | 'grok' | 'opencode' | 'standalone' | null;
   definitions: ReturnType<typeof definitionSourceSummary>;
   dials: { session: Record<string, DialRef>; repo: Record<string, DialRef>; user: Record<string, DialRef> };
   legacy_pin_note: string | null;

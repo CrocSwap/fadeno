@@ -450,7 +450,7 @@ export interface ExecutorProfile {
   relay: Record<string, DialRef>;
 }
 
-export type HarnessId = 'codex' | 'claude' | 'grok' | 'standalone';
+export type HarnessId = 'codex' | 'claude' | 'grok' | 'opencode' | 'standalone';
 
 /**
  * Harnesses that HAVE a relay, and so may key `relay:` in the catalog.
@@ -484,7 +484,7 @@ export function hostEffortIsMaterializable(harness: HarnessId): boolean {
 export function activeHarness(explicit?: HarnessId, options: UserPathOptions = {}): HarnessId {
   if (explicit != null) return explicit;
   const raw = (options.env ?? process.env).FADENO_HARNESS?.trim();
-  if (raw === 'codex' || raw === 'claude' || raw === 'grok' || raw === 'standalone') return raw;
+  if (raw === 'codex' || raw === 'claude' || raw === 'grok' || raw === 'opencode' || raw === 'standalone') return raw;
   return detectAmbientHarness(options).harness ?? readUserHarness(options) ?? 'standalone';
 }
 

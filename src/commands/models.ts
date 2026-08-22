@@ -83,7 +83,7 @@ export interface ModelsResult {
 function harnessSource(userPathOptions: UserPathOptions = {}): ModelsResult['harness_source'] {
   const env = userPathOptions.env ?? process.env;
   const explicit = env.FADENO_HARNESS?.trim();
-  if (explicit === 'codex' || explicit === 'claude' || explicit === 'grok' || explicit === 'standalone') return 'FADENO_HARNESS';
+  if (explicit === 'codex' || explicit === 'claude' || explicit === 'grok' || explicit === 'opencode' || explicit === 'standalone') return 'FADENO_HARNESS';
   if (detectAmbientHarness(userPathOptions).harness != null) return 'ambient';
   if (readUserHarness(userPathOptions) != null) return 'user default';
   return 'fallback';
