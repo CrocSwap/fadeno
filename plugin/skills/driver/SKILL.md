@@ -1,6 +1,6 @@
 ---
 name: driver
-description: Drive a Fadeno run ledger end-to-end — engine-first via `fadeno drive`, with a manual `fadeno next` loop for steps the engine can't execute. Use when the host hands you a run id to drive or resume, or when coordinating multi-harness roles without host nested subagents. [fadeno 0.6.0-rc.55]
+description: Drive a Fadeno run ledger end-to-end — engine-first via `fadeno drive`, with a manual `fadeno next` loop for steps the engine can't execute. Use when the host hands you a run id to drive or resume, or when coordinating multi-harness roles without host nested subagents. [fadeno 0.6.0-rc.56]
 ---
 
 # Fadeno Driver
@@ -58,8 +58,10 @@ fadeno drive <run>
 
 Independent command-delivered `map` members need not serialize: `fadeno drive
 <run> --parallel <n>` (1-16, default 1) runs eligible members concurrently
-within one ready wave. Read-only members overlap; shared writers stay
-serialized by the workspace lease; receipts keep canonical member order.
+within one ready wave. In a git repo each member runs in its own detached
+worktree and merges back on success, so members overlap whatever they write;
+without git they share the tree and serialize on the repo-wide writer lease.
+Receipts keep canonical member order either way.
 
 For compositional maps, one drive result may contain ready leaves from different
 members or loop generations. Dispatch every returned request and preserve its

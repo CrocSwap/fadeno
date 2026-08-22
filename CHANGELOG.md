@@ -6,6 +6,16 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — every surface that explains `--parallel` described a mechanism that no longer exists (0.6.0-rc.56)
+
+Four surfaces tell you how `--parallel` obtains concurrency, and all four were wrong, in two directions from two different releases. `fadeno --help` and `fadeno drive --help` said command members "currently SERIALIZE regardless" and named worktree isolation as future work — in the release that ships it. The `fadeno-driver` and `fadeno-runner` skill docs were older still: "read-only members overlap; shared writers stay serialized by the workspace lease", explaining concurrency through `write_access: false`, a declaration deleted in rc.50. Those two are the surfaces an *agent* reads.
+
+`drive.ts` itself was correct throughout, and correctly conditional — its runtime NOTE fires only under `!repoHasGit`, the one case where members still serialize. The truth simply never reached the four places that repeat it.
+
+All four now say the same thing: in a git repo each member runs in its own detached worktree and merges back, so members overlap whatever they write; without git they share the tree and serialize on the repo-wide writer lease.
+
+- **The tripwire pins the named mechanism, not the token.** Presence-pairing could not catch this class — every file still said `--parallel`, they just said something false about it. `every --parallel surface names the mechanism that is actually implemented` requires passages that discuss interleaving to name the worktree and forbids the deleted read-only/shared-writer vocabulary. It found the `fadeno --help` line that a manual sweep had missed.
+
 ### Removed — the write-permission system (0.6.0-rc.50)
 
 **Fadeno no longer models write permissions.** It selects an argv and records what ran; enforcement belongs to the vendor flags you can read in the command (`--sandbox`, `--permission-mode`, `--disable-shell`), and containment belongs to isolated worktrees. Every Fadeno-level "permission" was a claim in YAML that nothing checked — and in one day that layer produced four distinct silent-wrong-answer defects. The design record is `docs/experimental/permissions-and-isolation.md`, written before the change and kept as the anti-drift artifact.

@@ -181,8 +181,8 @@ Options:
   --no-record             (prompt) Preview only: write no snapshot or event
   --bind <role=executor>  (drive) Session executor override for a role (repeatable; recorded)
   --max-transitions <n>   (drive) Engine transition cap per invocation (default 50)
-  --parallel <n>          (drive) Max concurrent deliveries per wave (1–16, default 1). Command members
-                          currently SERIALIZE regardless — see fadeno drive --help
+  --parallel <n>          (drive) Max concurrent deliveries per wave (1–16, default 1). Members overlap
+                          via one git worktree each; without git they share the tree and serialize
   --timeout <seconds>     (drive/dispatch) Hard deadline seconds; 0 disables route default (20 min)
   --input <Name=path>     (new-run) Supply a declared input (repeatable)
   --via <driver>          (dial/dispatch) Driver alias that delivers the model; on dispatch it
@@ -592,13 +592,12 @@ Options:
   --bind <role=executor>   Session executor override for a role (repeatable; recorded)
   --max-transitions <n>    Engine transition cap per invocation (default 50)
   --parallel <n>           Max concurrent deliveries per wave (1–16, default 1).
-                           NOTE: command members currently serialize whatever you pass. They
-                           overlapped only while a route could declare write_access: false and
-                           skip the repo-wide writer lease; the permissions cut removed that
-                           declaration, so every shared delivery now waits its turn. Host
-                           requests still interleave. Restoring real concurrency means isolating
-                           engine attempts with merge-back — concurrency as a fact rather than an
-                           unverified promise. See docs/experimental/permissions-and-isolation.md
+                           In a git repo each engine attempt runs in its own detached worktree
+                           and its diff is merged back on success, so command members genuinely
+                           overlap. Without git there is no worktree to isolate into: deliveries
+                           fall back to the shared tree and serialize on the repo-wide writer
+                           lease whatever you pass. Host requests interleave either way.
+                           See docs/experimental/permissions-and-isolation.md
   --timeout <seconds>      Hard executor deadline seconds; 0 disables route default (20 min)
   --diagnostics            Persist bounded process output (32 KiB / 500 lines per stream) to diagnostics log
 

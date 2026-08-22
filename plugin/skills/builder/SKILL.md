@@ -1,6 +1,6 @@
 ---
 name: builder
-description: Create or modify Fadeno playbooks from natural-language workflow descriptions, show them back as a diagram, and hand off to the runner. Use ONLY when the user explicitly wants to create, modify, simplify, or review a playbook. Do NOT trigger merely because a task mentions a playbook. [fadeno 0.6.0-rc.55]
+description: Create or modify Fadeno playbooks from natural-language workflow descriptions, show them back as a diagram, and hand off to the runner. Use ONLY when the user explicitly wants to create, modify, simplify, or review a playbook. Do NOT trigger merely because a task mentions a playbook. [fadeno 0.6.0-rc.56]
 ---
 
 # Fadeno Builder

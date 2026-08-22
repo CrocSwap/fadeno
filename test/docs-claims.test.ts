@@ -445,3 +445,58 @@ test('the claims registry is well-formed', () => {
     }
   }
 });
+
+/**
+ * The `--parallel` mechanism is described on three surfaces a human or an
+ * agent actually reads: the CLI help and the two runner/driver skill docs.
+ * They drifted independently — the help kept asserting that command members
+ * "serialize whatever you pass", and both skills still explained concurrency
+ * as "read-only members overlap, shared writers stay serialized", a mechanism
+ * the permissions cut deleted two releases before worktree isolation replaced
+ * it. Presence-pairing could not catch that: every file still said
+ * `--parallel`, they just said something untrue about it.
+ *
+ * So this pins the *named mechanism* instead. Every surface must name the one
+ * that is implemented (a worktree per member) and must not name the deleted
+ * one. Change how concurrency is obtained and all three fail together, which
+ * is the point: one truth, three consumers.
+ */
+const PARALLEL_SURFACES = [
+  'src/cli.ts',
+  'templates/common/skills/fadeno-driver/SKILL.md',
+  'templates/common/skills/fadeno-runner/references/runtime.md',
+];
+
+test('every --parallel surface names the mechanism that is actually implemented', () => {
+  const failures: string[] = [];
+  for (const rel of PARALLEL_SURFACES) {
+    const lines = readFileSync(join(REPO, rel), 'utf8').split('\n');
+    const hits = lines.flatMap((line, i) => (line.includes('--parallel') ? [i] : []));
+    if (hits.length === 0) {
+      failures.push(`[${rel}] no --parallel passage found; the surface moved or the flag was renamed`);
+      continue;
+    }
+    let explained = 0;
+    for (const at of hits) {
+      // The passage that explains the flag: the option's own block, or the
+      // prose paragraph around the mention. Mentions that make no claim about
+      // interleaving — the usage line, the range validator — have nothing to
+      // go stale, so only passages that actually discuss it are held to this.
+      const window = lines.slice(Math.max(0, at - 2), at + 12).join('\n');
+      if (!/concurrent|serializ|overlap/i.test(window)) continue;
+      explained += 1;
+      if (!/worktree/i.test(window)) {
+        failures.push(`[${rel}:${at + 1}] describes --parallel without naming the worktree that provides the concurrency`);
+      }
+      for (const stale of [/read-only members/i, /shared writers/i, /serializes? whatever you pass/i]) {
+        if (stale.test(window)) {
+          failures.push(`[${rel}:${at + 1}] still explains --parallel via the deleted read-only/write_access model: ${stale}`);
+        }
+      }
+    }
+    if (explained === 0) {
+      failures.push(`[${rel}] mentions --parallel but no longer explains how members interleave`);
+    }
+  }
+  assert.deepEqual(failures, [], `--parallel drift:\n${failures.join('\n')}`);
+});

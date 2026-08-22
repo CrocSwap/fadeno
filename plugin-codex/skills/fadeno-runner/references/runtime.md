@@ -100,10 +100,12 @@ not fabricate them. `verify` checks that attempt ordinals are contiguous per
 actor call, every redispatch carries an allowed reason (`schema_repair`,
 `executor_override`, `user_retry`), and every engine command receipt follows
 its own dispatch row. `fadeno drive --parallel <n>` (1-16, default 1) runs
-eligible command-delivered map members concurrently within one ready wave:
-read-only members overlap, shared writers stay serialized by the workspace
-lease, and dispatch/receipt rows keep canonical member order, so the ledger
-reads identically regardless of wall-clock interleaving.
+eligible command-delivered map members concurrently within one ready wave: in
+a git repo each member runs in its own detached worktree and merges back on
+success, so members overlap whatever they write; without git they share the
+tree and serialize on the repo-wide writer lease. Dispatch/receipt rows keep
+canonical member order either way, so the ledger reads identically regardless
+of wall-clock interleaving.
 
 **Host dispatches pause the engine durably.** A host executor profile
 uses `adapter: host` plus `model`, `reasoning_effort`, and `agent_type`. Drive
