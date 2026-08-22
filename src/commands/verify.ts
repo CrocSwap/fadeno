@@ -16,6 +16,7 @@ import {
 import { SchemaSet, schemaErrorMessages, type SchemaKind } from '../lib/playbook-validate.ts';
 import {
   ledgerMode,
+  LEGACY_EVENT_RENAMES,
   listRuns,
   normalizeLegacyEvents,
   readEvents,
@@ -214,11 +215,26 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
     legacy ? skip('events-seq', 'no sequence numbers recorded (legacy ledger)') : checkEventsSeq(events),
   );
 
+  // 4b. event-vocabulary — a pre-0.3 event name inside a current-format ledger.
+  findings.push(
+    legacy || compatibility
+      ? skip('event-vocabulary', 'pre-0.3 event names are expected and normalized in compatibility mode')
+      : checkEventVocabulary(raw.events),
+  );
+
   // 5. terminal-status — the run must be finalized (and honestly so).
   findings.push(checkTerminalStatus(run, opts.allowFailed === true));
 
   // 6. terminal-events — run.yaml status must agree with the recorded terminal event.
   findings.push(checkTerminalEvents(run, events));
+
+  // 6b. receipt-output-manifests — a completion receipt naming an output must
+  //     have the manifest that accounts for it.
+  findings.push(
+    legacy
+      ? skip('receipt-output-manifests', 'no manifests recorded (legacy ledger)')
+      : checkReceiptOutputManifests(events),
+  );
 
   // 7. artifact-manifests
   findings.push(
@@ -1439,6 +1455,141 @@ function checkEventsSeq(events: RunEvent[]): Finding {
   }
   const shown = problems.slice(0, 5).join('; ');
   const more = problems.length > 5 ? `; …(+${problems.length - 5} more)` : '';
+  return { check, status: 'fail', detail: `${shown}${more}` };
+}
+
+/**
+ * A current-format ledger must not carry a pre-0.3 event name.
+ *
+ * This closes a laundering path found by `scripts/tamper-matrix.mjs`: renaming
+ * `artifact_created` to its pre-0.3 spelling `artifact_written` in a 0.3
+ * ledger made every artifact check stop seeing that artifact — no manifest to
+ * check, no digest to compare, no file required to exist — and verify reported
+ * zero failures. An unrecognized event is dropped from consideration rather
+ * than refused, so the old name is not merely unread, it is a way to remove an
+ * artifact from the audit while leaving the ledger looking intact.
+ *
+ * `--legacy` remains the way to read such a ledger, which is the whole point of
+ * the flag: compatibility is something a reader opts into, never something a
+ * writer's old vocabulary obtains by default.
+ */
+function checkEventVocabulary(events: RunEvent[]): Finding {
+  const check = 'event-vocabulary';
+  const found: string[] = [];
+  for (const event of events) {
+    const canonical = LEGACY_EVENT_RENAMES[event.type];
+    if (canonical != null) {
+      found.push(`seq ${event.seq ?? '?'}: "${event.type}" (pre-0.3 name for "${canonical}")`);
+    }
+  }
+  if (found.length === 0) {
+    return { check, status: 'ok', detail: `${events.length} event(s), no pre-0.3 names` };
+  }
+  const shown = found.slice(0, 5).join('; ');
+  const more = found.length > 5 ? `; …(+${found.length - 5} more)` : '';
+  return {
+    check,
+    status: 'fail',
+    detail:
+      `${found.length} pre-0.3 event name(s) in a schema_version ${RUN_LEDGER_SCHEMA_VERSION} ledger: ${shown}${more}. ` +
+      'Read the ledger with --legacy to interpret these names explicitly; a current-format ledger must not carry them.',
+  };
+}
+
+/**
+ * Every completion receipt that names an output must have a manifest for it.
+ *
+ * The host lane already had this cross-check (`host-dispatch-artifacts`); the
+ * command and tool lanes did not, and `scripts/tamper-matrix.mjs` found what
+ * that asymmetry costs. Rename a command delivery's or a tool's
+ * `artifact_created` event to anything a reader does not recognize and the
+ * artifact drops out of every artifact check at once — no manifest to validate,
+ * no digest to compare, no file required to exist — while the receipt still
+ * says the work was delivered and verify still reports zero failures.
+ *
+ * Anchoring on the RECEIPT rather than on a list of event names is what makes
+ * this robust: the check does not need to know what an artifact event is
+ * called, only that a delivery which claims an output is accounted for by one.
+ * A vocabulary can go stale; the `output` on a completion receipt cannot be
+ * dropped without breaking the receipt itself.
+ */
+function checkReceiptOutputManifests(events: RunEvent[]): Finding {
+  const check = 'receipt-output-manifests';
+  const manifested = new Set<string>();
+  for (const event of events) {
+    if (event.type !== 'artifact_created') continue;
+    const path = event.extra.artifact;
+    if (typeof path === 'string') manifested.add(path);
+  }
+
+  // The highest attempt ordinal dispatched per actor call, so an invalid
+  // attempt can be checked for the retry that supersedes it.
+  const lastAttempt = new Map<string, number>();
+  for (const event of events) {
+    if (event.type !== 'actor_dispatched' && event.type !== 'host_dispatch_requested') continue;
+    const call = event.extra.actor_call_id;
+    const attempt = event.extra.attempt;
+    if (typeof call !== 'string' || typeof attempt !== 'number') continue;
+    lastAttempt.set(call, Math.max(lastAttempt.get(call) ?? 0, attempt));
+  }
+
+  const missing: string[] = [];
+  let checked = 0;
+  let superseded = 0;
+  for (const event of events) {
+    if (event.type !== 'actor_completed' && event.type !== 'tool_completed') continue;
+    const output = event.extra.output;
+    if (typeof output !== 'string' || output === '') continue;
+
+    // An attempt whose output failed schema validation names the path it was
+    // ASKED for, not a path it produced — the bytes are parked as evidence
+    // under `artifacts/attempts/` and the declared path stays unwritten until a
+    // repair succeeds. Requiring a manifest there would fail every repaired
+    // run, which is backwards: the repair is the ledger working.
+    //
+    // But the exemption is only real if the repair HAPPENED. An invalid
+    // attempt that nothing supersedes is a delivery that never landed, and
+    // without this branch `output_valid: false` would be a one-field way to
+    // excuse any missing artifact — the escape hatch is the vulnerability.
+    if (event.extra.output_valid === false) {
+      const call = event.extra.actor_call_id;
+      const attempt = event.extra.attempt;
+      if (typeof call === 'string' && typeof attempt === 'number') {
+        if ((lastAttempt.get(call) ?? 0) > attempt) {
+          superseded += 1;
+          continue;
+        }
+        missing.push(
+          `${call} attempt ${attempt} completed with output_valid: false and no later attempt supersedes it, ` +
+            `so "${output}" was never delivered`,
+        );
+        continue;
+      }
+      missing.push(`a receipt for "${output}" is output_valid: false but names no actor call and attempt to supersede`);
+      continue;
+    }
+
+    checked += 1;
+    if (!manifested.has(output)) {
+      const who =
+        typeof event.extra.actor_call_id === 'string'
+          ? event.extra.actor_call_id
+          : typeof event.extra.tool_call_id === 'string'
+            ? event.extra.tool_call_id
+            : (event.step ?? 'unknown');
+      missing.push(`${who} completed with output "${output}", but no artifact manifest records that path`);
+    }
+  }
+
+  const repaired = superseded > 0 ? `, ${superseded} superseded by a later attempt` : '';
+  if (checked === 0 && missing.length === 0) {
+    return { check, status: 'ok', detail: `no completion receipt names a delivered output${repaired}` };
+  }
+  if (missing.length === 0) {
+    return { check, status: 'ok', detail: `${checked} receipt output(s) all have manifests${repaired}` };
+  }
+  const shown = missing.slice(0, 5).join('; ');
+  const more = missing.length > 5 ? `; …(+${missing.length - 5} more)` : '';
   return { check, status: 'fail', detail: `${shown}${more}` };
 }
 

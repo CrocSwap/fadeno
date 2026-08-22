@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.56";
+  if (true) return "0.6.0-rc.57";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -18015,10 +18015,14 @@ function ledgerMode(run, allowLegacy) {
     `run "${run.runId}" has ledger schema_version "${run.schemaVersion}"; this fadeno reads "${RUN_LEDGER_SCHEMA_VERSION}".`
   );
 }
+var LEGACY_EVENT_RENAMES = Object.freeze({
+  artifact_written: "artifact_created"
+});
 function normalizeLegacyEvents(events) {
-  return events.map(
-    (event) => event.type === "artifact_written" ? { ...event, type: "artifact_created" } : event
-  );
+  return events.map((event) => {
+    const canonical2 = LEGACY_EVENT_RENAMES[event.type];
+    return canonical2 == null ? event : { ...event, type: canonical2 };
+  });
 }
 function stringOrNull(value) {
   return typeof value === "string" ? value : null;
@@ -33255,8 +33259,14 @@ function runVerify(opts) {
   findings.push(
     legacy ? skip("events-seq", "no sequence numbers recorded (legacy ledger)") : checkEventsSeq(events)
   );
+  findings.push(
+    legacy || compatibility ? skip("event-vocabulary", "pre-0.3 event names are expected and normalized in compatibility mode") : checkEventVocabulary(raw.events)
+  );
   findings.push(checkTerminalStatus(run, opts.allowFailed === true));
   findings.push(checkTerminalEvents(run, events));
+  findings.push(
+    legacy ? skip("receipt-output-manifests", "no manifests recorded (legacy ledger)") : checkReceiptOutputManifests(events)
+  );
   findings.push(
     legacy ? skip("artifact-manifests", "no manifests recorded (legacy ledger)") : checkArtifactManifests(events)
   );
@@ -34303,6 +34313,82 @@ function checkEventsSeq(events) {
   }
   const shown = problems.slice(0, 5).join("; ");
   const more = problems.length > 5 ? `; \u2026(+${problems.length - 5} more)` : "";
+  return { check, status: "fail", detail: `${shown}${more}` };
+}
+function checkEventVocabulary(events) {
+  const check = "event-vocabulary";
+  const found = [];
+  for (const event of events) {
+    const canonical2 = LEGACY_EVENT_RENAMES[event.type];
+    if (canonical2 != null) {
+      found.push(`seq ${event.seq ?? "?"}: "${event.type}" (pre-0.3 name for "${canonical2}")`);
+    }
+  }
+  if (found.length === 0) {
+    return { check, status: "ok", detail: `${events.length} event(s), no pre-0.3 names` };
+  }
+  const shown = found.slice(0, 5).join("; ");
+  const more = found.length > 5 ? `; \u2026(+${found.length - 5} more)` : "";
+  return {
+    check,
+    status: "fail",
+    detail: `${found.length} pre-0.3 event name(s) in a schema_version ${RUN_LEDGER_SCHEMA_VERSION} ledger: ${shown}${more}. Read the ledger with --legacy to interpret these names explicitly; a current-format ledger must not carry them.`
+  };
+}
+function checkReceiptOutputManifests(events) {
+  const check = "receipt-output-manifests";
+  const manifested = /* @__PURE__ */ new Set();
+  for (const event of events) {
+    if (event.type !== "artifact_created") continue;
+    const path = event.extra.artifact;
+    if (typeof path === "string") manifested.add(path);
+  }
+  const lastAttempt = /* @__PURE__ */ new Map();
+  for (const event of events) {
+    if (event.type !== "actor_dispatched" && event.type !== "host_dispatch_requested") continue;
+    const call = event.extra.actor_call_id;
+    const attempt = event.extra.attempt;
+    if (typeof call !== "string" || typeof attempt !== "number") continue;
+    lastAttempt.set(call, Math.max(lastAttempt.get(call) ?? 0, attempt));
+  }
+  const missing = [];
+  let checked = 0;
+  let superseded = 0;
+  for (const event of events) {
+    if (event.type !== "actor_completed" && event.type !== "tool_completed") continue;
+    const output = event.extra.output;
+    if (typeof output !== "string" || output === "") continue;
+    if (event.extra.output_valid === false) {
+      const call = event.extra.actor_call_id;
+      const attempt = event.extra.attempt;
+      if (typeof call === "string" && typeof attempt === "number") {
+        if ((lastAttempt.get(call) ?? 0) > attempt) {
+          superseded += 1;
+          continue;
+        }
+        missing.push(
+          `${call} attempt ${attempt} completed with output_valid: false and no later attempt supersedes it, so "${output}" was never delivered`
+        );
+        continue;
+      }
+      missing.push(`a receipt for "${output}" is output_valid: false but names no actor call and attempt to supersede`);
+      continue;
+    }
+    checked += 1;
+    if (!manifested.has(output)) {
+      const who = typeof event.extra.actor_call_id === "string" ? event.extra.actor_call_id : typeof event.extra.tool_call_id === "string" ? event.extra.tool_call_id : event.step ?? "unknown";
+      missing.push(`${who} completed with output "${output}", but no artifact manifest records that path`);
+    }
+  }
+  const repaired = superseded > 0 ? `, ${superseded} superseded by a later attempt` : "";
+  if (checked === 0 && missing.length === 0) {
+    return { check, status: "ok", detail: `no completion receipt names a delivered output${repaired}` };
+  }
+  if (missing.length === 0) {
+    return { check, status: "ok", detail: `${checked} receipt output(s) all have manifests${repaired}` };
+  }
+  const shown = missing.slice(0, 5).join("; ");
+  const more = missing.length > 5 ? `; \u2026(+${missing.length - 5} more)` : "";
   return { check, status: "fail", detail: `${shown}${more}` };
 }
 function checkTerminalStatus(run, allowFailed) {

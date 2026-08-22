@@ -61,14 +61,30 @@ export function ledgerMode(run: RunSummary, allowLegacy: boolean): LedgerMode {
 }
 
 /**
+ * Pre-0.3 event names and what they are called now.
+ *
+ * Two consumers read this one list: `normalizeLegacyEvents` rewrites these
+ * names under `--legacy`, and `verify`'s `event-vocabulary` check REFUSES them
+ * in a current-format ledger. Both directions matter, and they have to agree —
+ * a name this map forgets is a name the reader silently ignores, and an
+ * unrecognized event is dropped from every downstream check rather than
+ * rejected, which is laundering rather than verification.
+ */
+export const LEGACY_EVENT_RENAMES: Readonly<Record<string, string>> = Object.freeze({
+  artifact_written: 'artifact_created',
+});
+
+/**
  * The explicit compatibility reader: normalize pre-0.3 event names to the canonical
  * vocabulary so downstream logic handles one name per fact. Only ever applied
- * under `--legacy` — a current-format ledger must not need it.
+ * under `--legacy` — a current-format ledger must not need it, and
+ * `event-vocabulary` fails rather than guessing if one does.
  */
 export function normalizeLegacyEvents(events: RunEvent[]): RunEvent[] {
-  return events.map((event) =>
-    event.type === 'artifact_written' ? { ...event, type: 'artifact_created' } : event,
-  );
+  return events.map((event) => {
+    const canonical = LEGACY_EVENT_RENAMES[event.type];
+    return canonical == null ? event : { ...event, type: canonical };
+  });
 }
 
 function stringOrNull(value: unknown): string | null {

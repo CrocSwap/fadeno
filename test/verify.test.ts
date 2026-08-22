@@ -135,8 +135,10 @@ test('happy path: a completed run with a recomputable passing gate verifies clea
       'run-schema',
       'events-parseable',
       'events-seq',
+      'event-vocabulary',
       'terminal-status',
       'terminal-events',
+      'receipt-output-manifests',
       'artifact-manifests',
       'artifacts-exist',
       'artifact-digests',
@@ -671,4 +673,235 @@ test('gate-all_reviews_approved verifies and mismatch against zero-blocking requ
   ]);
   const arrayMismatch = runVerify({ repoRoot: root, run: id4 });
   assert.equal(finding(arrayMismatch, 'gate-all_reviews_approved').status, 'fail');
+});
+
+// 24. A pre-0.3 event name inside a current-format ledger is refused, not read.
+//     Found by scripts/tamper-matrix.mjs: renaming artifact_created to its
+//     pre-0.3 spelling made every artifact check stop seeing the artifact and
+//     verify report zero failures — laundering, not compatibility.
+test('a pre-0.3 event name in a 0.3 ledger fails event-vocabulary', (t) => {
+  const root = seedRepo(t);
+  const id = '2026-07-10-2212-oldname';
+  writeRun(root, id, baseRun(id));
+  const created = artifactEvent(root, id, 'artifacts/review-report.json', cleanReport(), 2, REVIEW_VALIDATION) as Record<string, unknown>;
+  writeEvents(root, id, [runStarted(1), { ...created, type: 'artifact_written' }, runCompleted(3)]);
+
+  const result = runVerify({ repoRoot: root, run: id });
+  const vocab = finding(result, 'event-vocabulary');
+  assert.equal(vocab.status, 'fail');
+  assert.match(vocab.detail, /artifact_written/);
+  assert.match(vocab.detail, /--legacy/, 'the failure must name the flag that reads such a ledger deliberately');
+  assert.equal(result.ok, false);
+});
+
+test('a current-format ledger with no legacy names passes event-vocabulary', (t) => {
+  const root = seedRepo(t);
+  const id = '2026-07-10-2212-newnames';
+  writeRun(root, id, baseRun(id));
+  writeEvents(root, id, [
+    runStarted(1),
+    artifactEvent(root, id, 'artifacts/review-report.json', cleanReport(), 2, REVIEW_VALIDATION),
+    runCompleted(3),
+  ]);
+
+  const result = runVerify({ repoRoot: root, run: id });
+  assert.equal(finding(result, 'event-vocabulary').status, 'ok');
+});
+
+// 25. receipt-output-manifests — the check that does not need a vocabulary.
+//     A completion receipt naming an output is the anchor: whatever the
+//     artifact event is called, the delivery it claims must be manifested.
+test('a completion receipt whose output has no manifest fails receipt-output-manifests', (t) => {
+  const root = seedRepo(t);
+  const id = '2026-07-10-2212-orphan-receipt';
+  writeRun(root, id, baseRun(id));
+  const created = artifactEvent(root, id, 'artifacts/review-report.json', cleanReport(), 2, REVIEW_VALIDATION) as Record<string, unknown>;
+  writeEvents(root, id, [
+    runStarted(1),
+    // The artifact file is on disk and the event is present, but under a name
+    // no reader knows — so nothing manifests the path the receipt claims.
+    { ...created, type: 'artifact_kreated' },
+    {
+      type: 'actor_completed',
+      step: 'review',
+      actor: 'reviewer',
+      actor_call_id: 'ac-review-g1-reviewer',
+      attempt: 1,
+      executor: 'sol',
+      output: 'artifacts/review-report.json',
+      output_valid: true,
+      seq: 3,
+      timestamp: '2026-07-10T12:06:00Z',
+    },
+    runCompleted(4),
+  ]);
+
+  const result = runVerify({ repoRoot: root, run: id });
+  const receipts = finding(result, 'receipt-output-manifests');
+  assert.equal(receipts.status, 'fail');
+  assert.match(receipts.detail, /ac-review-g1-reviewer/);
+  assert.match(receipts.detail, /artifacts\/review-report\.json/);
+  assert.equal(result.ok, false);
+});
+
+test('a tool receipt whose output has no manifest fails receipt-output-manifests', (t) => {
+  const root = seedRepo(t);
+  const id = '2026-07-10-2212-orphan-tool';
+  writeRun(root, id, baseRun(id));
+  const created = artifactEvent(root, id, 'artifacts/diff.md', 'a diff', 2) as Record<string, unknown>;
+  writeEvents(root, id, [
+    runStarted(1),
+    { ...created, type: 'artifact_kreated' },
+    {
+      type: 'tool_completed',
+      step: 'load_diff',
+      tool: 'diff_loader',
+      tool_call_id: 'tc-load_diff-g1',
+      attempt: 1,
+      exit_code: 0,
+      output: 'artifacts/diff.md',
+      status: 'passed',
+      seq: 3,
+      timestamp: '2026-07-10T12:06:00Z',
+    },
+    runCompleted(4),
+  ]);
+
+  const result = runVerify({ repoRoot: root, run: id });
+  const receipts = finding(result, 'receipt-output-manifests');
+  assert.equal(receipts.status, 'fail');
+  assert.match(receipts.detail, /tc-load_diff-g1/);
+});
+
+test('a receipt whose output is manifested passes receipt-output-manifests', (t) => {
+  const root = seedRepo(t);
+  const id = '2026-07-10-2212-receipted';
+  writeRun(root, id, baseRun(id));
+  writeEvents(root, id, [
+    runStarted(1),
+    artifactEvent(root, id, 'artifacts/review-report.json', cleanReport(), 2, REVIEW_VALIDATION),
+    {
+      type: 'actor_completed',
+      step: 'review',
+      actor: 'reviewer',
+      actor_call_id: 'ac-review-g1-reviewer',
+      attempt: 1,
+      executor: 'sol',
+      output: 'artifacts/review-report.json',
+      output_valid: true,
+      seq: 3,
+      timestamp: '2026-07-10T12:06:00Z',
+    },
+    runCompleted(4),
+  ]);
+
+  const result = runVerify({ repoRoot: root, run: id });
+  const receipts = finding(result, 'receipt-output-manifests');
+  assert.equal(receipts.status, 'ok');
+  assert.match(receipts.detail, /1 receipt output/);
+});
+
+// 26. `output_valid: false` is an exemption from the manifest requirement, so
+//     it has to be an exemption you can only claim honestly. An invalid attempt
+//     that nothing supersedes is a delivery that never landed; without this,
+//     one field would excuse any missing artifact.
+test('an invalid attempt with no later attempt fails receipt-output-manifests', (t) => {
+  const root = seedRepo(t);
+  const id = '2026-07-10-2212-unrepaired';
+  writeRun(root, id, baseRun(id));
+  writeEvents(root, id, [
+    runStarted(1),
+    {
+      type: 'actor_dispatched',
+      step: 'review',
+      actor: 'reviewer',
+      actor_call_id: 'ac-review-g1-reviewer',
+      attempt: 1,
+      attempt_reason: 'initial',
+      executor: 'sol',
+      seq: 2,
+      timestamp: '2026-07-10T12:05:00Z',
+    },
+    {
+      type: 'actor_completed',
+      step: 'review',
+      actor: 'reviewer',
+      actor_call_id: 'ac-review-g1-reviewer',
+      attempt: 1,
+      executor: 'sol',
+      output: 'artifacts/review-report.json',
+      output_valid: false,
+      seq: 3,
+      timestamp: '2026-07-10T12:06:00Z',
+    },
+    runCompleted(4),
+  ]);
+
+  const result = runVerify({ repoRoot: root, run: id });
+  const receipts = finding(result, 'receipt-output-manifests');
+  assert.equal(receipts.status, 'fail');
+  assert.match(receipts.detail, /never delivered/);
+  assert.equal(result.ok, false);
+});
+
+test('an invalid attempt superseded by a repair passes receipt-output-manifests', (t) => {
+  const root = seedRepo(t);
+  const id = '2026-07-10-2212-repaired';
+  writeRun(root, id, baseRun(id));
+  writeEvents(root, id, [
+    runStarted(1),
+    {
+      type: 'actor_dispatched',
+      step: 'review',
+      actor: 'reviewer',
+      actor_call_id: 'ac-review-g1-reviewer',
+      attempt: 1,
+      attempt_reason: 'initial',
+      executor: 'sol',
+      seq: 2,
+      timestamp: '2026-07-10T12:05:00Z',
+    },
+    {
+      type: 'actor_completed',
+      step: 'review',
+      actor: 'reviewer',
+      actor_call_id: 'ac-review-g1-reviewer',
+      attempt: 1,
+      executor: 'sol',
+      output: 'artifacts/review-report.json',
+      output_valid: false,
+      seq: 3,
+      timestamp: '2026-07-10T12:06:00Z',
+    },
+    {
+      type: 'actor_dispatched',
+      step: 'review',
+      actor: 'reviewer',
+      actor_call_id: 'ac-review-g1-reviewer',
+      attempt: 2,
+      attempt_reason: 'schema_repair',
+      executor: 'sol',
+      seq: 4,
+      timestamp: '2026-07-10T12:07:00Z',
+    },
+    artifactEvent(root, id, 'artifacts/review-report.json', cleanReport(), 5, REVIEW_VALIDATION),
+    {
+      type: 'actor_completed',
+      step: 'review',
+      actor: 'reviewer',
+      actor_call_id: 'ac-review-g1-reviewer',
+      attempt: 2,
+      executor: 'sol',
+      output: 'artifacts/review-report.json',
+      output_valid: true,
+      seq: 6,
+      timestamp: '2026-07-10T12:08:00Z',
+    },
+    runCompleted(7),
+  ]);
+
+  const result = runVerify({ repoRoot: root, run: id });
+  const receipts = finding(result, 'receipt-output-manifests');
+  assert.equal(receipts.status, 'ok');
+  assert.match(receipts.detail, /1 superseded by a later attempt/);
 });

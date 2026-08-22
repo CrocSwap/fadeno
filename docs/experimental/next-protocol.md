@@ -441,3 +441,64 @@ For each run, verify both the happy trace and tampered fixtures:
 
 Do not freeze schemas until the default `show` output remains readable and
 `verify` catches every consequential inconsistency above.
+
+### Result (2026-08-22, fadeno 0.6.0-rc.57)
+
+All three runs are done in `fadeno-demo` and verify clean. The tamper pass is
+`scripts/tamper-matrix.mjs` (`npm run tamper -- <run-dir>…`), which copies a real
+trace, applies one mutation per fixture, and asserts both that `verify` fails
+and that the check which should have caught it is among the failures. **47
+caught, 0 uncaught, 3 known gaps, 2 not applicable** across four traces.
+
+Two checks were added because the tamper pass found them missing, and both were
+found by fixtures that verified *clean* before the fix:
+
+- **`event-vocabulary`** — renaming `artifact_created` to its pre-0.3 spelling
+  `artifact_written` inside a 0.3 ledger made every artifact check stop seeing
+  the artifact and `verify` report zero failures. An unrecognized event was
+  dropped from consideration rather than refused, so an old name was a way to
+  remove an artifact from the audit. `--legacy` remains how such a ledger is
+  read: compatibility is opted into, never obtained by default.
+- **`receipt-output-manifests`** — the same trick with a name in *no*
+  vocabulary at all, which no list of names can catch. Anchors on the receipt
+  instead: a delivery that claims an `output` must be accounted for by a
+  manifest. The host lane already had this cross-check
+  (`host-dispatch-artifacts`); the command and tool lanes did not.
+
+`output_valid: false` exempts a receipt from that requirement, because a failed
+attempt names the path it was *asked* for and the bytes are parked under
+`artifacts/attempts/`. The exemption is only granted when a later attempt
+supersedes the failed one — an escape hatch nobody can claim is not an escape
+hatch, and without that condition one field would have excused any missing
+artifact.
+
+**Known gaps, deliberately left visible rather than closed quietly.** Two
+classes of artifact carry no completion receipt, so `receipt-output-manifests`
+has nothing to anchor on and either can be renamed out of the audit. The
+`unreceipted-artifact-renamed` fixture measures this on every run and reports it
+as a tracked gap rather than a pass:
+
+1. **A tool result recorded by hand** with `fadeno tool-complete`, which emits
+   only `artifact_created` — no `tool_dispatched`, no `tool_completed` — so
+   three tool checks skip as well.
+2. **An engine-assembled collective** (`artifacts/parts/<step>.json`). Each
+   member's own part is receipted; the collective a gate then reads is not,
+   which makes the artifact a gate depends on the one with the weakest
+   provenance in the ledger.
+
+Closing either means emitting a receipt where none exists today — a change to
+what a command writes, and so a decision to make deliberately **before** the
+freeze rather than after it.
+
+**The schema-repair path has no live coverage.** Item 2 above asks for a run
+that proves the attempt ordinal and reason are distinct from the workflow
+iteration. That is proven: real traces carry `attempt 2 [executor_override]`
+(a substitution after a genuine executor failure) and `attempt 2 [user_retry]`
+(after a provider capacity limit). But no run produced a `schema_repair`, and
+one probe was built specifically to try: four dispatches at `gemini@low`, the
+weakest model the backend publishes, on schema-typed evaluator steps. All four
+returned valid reports. The reason is structural — the realistic failure mode is
+valid JSON *wrapped* in prose or a fence, and envelope extraction absorbs that
+one layer earlier. That probe is the first trace where `envelope-extraction`
+verified a real extraction rather than skipping. The repair loop should be
+described as synthetic-test-covered, not field-proven.

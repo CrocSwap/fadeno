@@ -326,6 +326,21 @@ const CLAIMS: Claim[] = [
     src: { files: ['templates/common/fadeno/playbooks/parallel-workstreams.yaml'], patterns: [/accept_contract/, /reaccept_contract/] },
   },
   {
+    id: 'event-vocabulary-check',
+    doc: { files: ['docs/experimental/next-protocol.md', 'CHANGELOG.md'], patterns: [/event-vocabulary/] },
+    src: { files: ['src/commands/verify.ts', 'src/lib/run-ledger.ts'], patterns: [/event-vocabulary/, /LEGACY_EVENT_RENAMES/] },
+  },
+  {
+    id: 'receipt-output-manifests-check',
+    doc: { files: ['docs/experimental/next-protocol.md', 'CHANGELOG.md'], patterns: [/receipt-output-manifests/] },
+    src: { files: ['src/commands/verify.ts'], patterns: [/receipt-output-manifests/, /output_valid/] },
+  },
+  {
+    id: 'tamper-matrix',
+    doc: { files: ['docs/experimental/next-protocol.md'], patterns: [/scripts\/tamper-matrix\.mjs/] },
+    src: { files: ['scripts/tamper-matrix.mjs', 'package.json'], patterns: [/knownGap/, /tamper-matrix/] },
+  },
+  {
     id: 'schema-envelope-extraction',
     doc: { files: ['docs/experimental/next-protocol.md'], patterns: [/output_extraction/] },
     src: { files: ['src/lib/schema-envelope.ts'], patterns: [/extractSchemaEnvelope/, /EnvelopeKind/] },
