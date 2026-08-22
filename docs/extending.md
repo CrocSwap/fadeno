@@ -779,6 +779,8 @@ degrades to separate role-passes (and says so in the ledger).
    changes when the version changes — shipping template/skill edits to plugin
    users *requires* a bump.
 5. `npm test` (includes the no-drift + binary guards).
+6. Commit, then `git tag v<version>` on that commit (annotated, like `v0.5.0`)
+   and push the tag with it. Publish from the tagged commit.
 
 The version is single-sourced from `package.json`: `packageVersion()` reads it in
 the ESM build, and `build-bin.mjs` bakes it into the bundle as

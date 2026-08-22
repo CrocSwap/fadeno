@@ -617,13 +617,14 @@ categories map to concrete, detectable actions. Two ways to make that real:
   from its named artifact and exits 0/1 — drop it into CI, a git hook, or a
   Claude Code `Stop` hook.
 - **`fadeno verify <run>`** (or `--latest`) re-audits a whole run ledger
-  read-only against 26 checks — artifact digests recomputed from bytes,
+  read-only against 37 checks — artifact digests recomputed from bytes,
   typed-artifact schemas, artifact immutability, prompt-snapshot integrity,
   event-sequence contiguity, every deterministic gate result recomputed from
   its artifact, attempt ordinals with allowed retry reasons, executor
   bindings against the run's snapshotted profile, human-decision integrity
   (declared options, at-most-once), supersede references, harness-session
-  continuity, and host-dispatch lifecycle/request consistency — so a trace
+  continuity, host-dispatch lifecycle/request consistency, and a receipt
+  behind every artifact (collectives recomputed from their parts) — so a trace
   can't claim what its evidence doesn't support. The "no valid trace, no
   merge" check; anything unrecomputable is reported as skipped, never
   silently treated as valid.

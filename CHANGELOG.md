@@ -6,6 +6,29 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-08-22
+
+The engine release. `fadeno drive` advances a run deterministically until it
+is terminal or paused on a human decision (`fadeno decide`), dispatching each
+actor call to an executor profile from `.fadeno/executors.yaml` — a command
+harness (Codex, Claude Code, Antigravity, OpenCode) or the host session itself
+— and recording every assignment as an immutable, digest-pinned request
+envelope with a receipt. Around it: per-archetype **dials** replace named
+loadouts (catalog `schema_version: 3`, snapshot `snapshot_version: 3`, no
+compatibility for the pre-dials shapes); **shadow pairs** and `fadeno bakeoff`
+put two arms of one task in evidence; **isolation** — members run in worktrees
+under a repo-wide writer lease and merge back like a pull request, and the
+write-permission system is gone; `--parallel` waves for map members; a
+compositional map/loop runtime; and `fadeno verify` grows from 16 to 37
+checks, with a receipt behind every artifact and a tamper matrix in the repo
+that proves what each check catches. **Breaking: run-ledger format 0.3.**
+Unversioned (pre-0.2) ledgers are refused unless `--legacy` is passed;
+pre-dials catalogs and snapshots are refused outright. The Codex CLI plugin
+(`fadeno plugin --codex`) ships alongside the Claude Code one.
+
+Subsections stamped with a release candidate name the candidate that shipped
+them.
+
 ### Fixed — `fadeno show` no longer calls an isolated engine attempt shared (0.6.0-rc.62)
 
 The live-holder line under `fadeno show` projected every inflight engine claim as `workspace_mode=shared`, hard-coded, while the `actor_dispatched` row for the same attempt said `isolated` and named its worktree. Found watching a real isolated implementer in the regenerated 0.6 exhibit. The projection now reads the mode from the ledger row that named the claim (`supervisor_claim`), and a claim no row names still reads `shared`. Harness-observed and non-gating either way — but a watcher deciding whether a hung attempt holds the shared tree should not be told the wrong thing.

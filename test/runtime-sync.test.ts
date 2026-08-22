@@ -500,8 +500,13 @@ test('status detects managed-newer and prefers invoking CLI with update PATH gui
   const root = tempRepo(t);
   const paths = isolatedUser(root);
   const up = userPaths(paths);
-  // Install a newer version than invoking (0.6.0-rc.33). Use 0.6.0-rc.99 as newer? Actually invoking is 0.6.0-rc.33, so 0.6.0-rc.99 is newer.
-  const newer = createSourceDir(root, 'newer-than-invoking', '0.6.0-rc.99', 'newer-bytes');
+  // Install a version strictly newer than the invoking one, whatever it is:
+  // the next patch of the invoking triple, no prerelease (a release outranks
+  // every rc of its own triple, so a hard-coded rc would stop being "newer"
+  // the moment the package version became a release).
+  const [major, minor, patch] = packageVersion().split('-')[0].split('.').map(Number);
+  const newerVersion = `${major}.${minor}.${patch + 1}`;
+  const newer = createSourceDir(root, 'newer-than-invoking', newerVersion, 'newer-bytes');
   let manifest = readInstallationManifest(paths);
   syncManagedRuntime(up, newer, manifest, { allowInstall: true, trustSource: true });
   const status = runStatus({ repoRoot: root, userPathOptions: paths });

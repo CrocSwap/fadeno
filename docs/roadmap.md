@@ -301,7 +301,7 @@ The dispatch kernel's full horizon is implemented and in daily dogfood.
 
 ## Shadow pairs (horizon 8 shipped — symmetric pairs, isolation, measured identity)
 
-Implemented on `feat/symmetric-shadow-pairs` (unmerged as of 0.6.0-rc.34);
+Implemented on `feat/symmetric-shadow-pairs`, merged to `main` for 0.6.0;
 the design record is `experimental/slots-and-archetypes.md`, phases 5 and 5.5.
 
 - **Symmetric pairs.** A shadow-selected spawn routes BOTH arms through the
