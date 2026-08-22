@@ -56,12 +56,12 @@ Fadeno relates to an agentic coding environment in exactly two ways, and the
 codebase names one of them much better than the other. This section fixes the
 vocabulary so the two can be said apart.
 
-**Harness** — an agentic coding environment: Codex, Claude Code, Grok Build.
-A harness is not a role; it takes one of the two roles below, and the same
-harness can take both.
+**Harness** — an agentic coding environment: Codex, Claude Code, Grok Build,
+OpenCode. A harness is not a role; it takes one of the two roles below, and the
+same harness can take both.
 
 **Host** — the harness Fadeno is *running inside*. This is a typed axis:
-`HarnessId = 'codex' | 'claude' | 'grok' | 'standalone'`
+`HarnessId = 'codex' | 'claude' | 'grok' | 'opencode' | 'standalone'`
 (`src/lib/executors.ts`), resolved by `activeHarness()` as `FADENO_HARNESS` →
 the harness recorded by `fadeno setup` → `standalone`. A host needs an
 **adapter** — a `templates/<host>/` tree emitted by `fadeno init --<host>` —
@@ -69,7 +69,9 @@ because Fadeno has to install skills, subagents, bootstrap files, and hooks
 into it. The active host also selects which `routes:` sub-table compiles; a v2
 catalog with no `routes.<active host>` mapping is a hard error, not a
 silent no-op. `standalone` is the *no host* value: Fadeno invoked from a plain
-shell, with no adapter tree.
+shell, with no adapter tree. OpenCode is the one harness that is both a first-
+class host and a driver: its binary plays both roles (see kickoff-memo →
+*Post-v0 OpenCode adapter note*).
 
 **Driver** — a harness Fadeno *invokes as a subprocess* to do work. A driver
 needs nothing from Fadeno but argv: no `HarnessId`, no `templates/` tree, no
@@ -451,7 +453,8 @@ templates/
     hooks/                # pre-commit, CI workflow, README (tier-2 scaffold)
   codex/                  # Codex adapter: AGENTS.md, host + steering agent TOML, openai/*.yaml
   claude/                 # Claude adapter: CLAUDE.md, agents, enforcement + steering hooks
-  grok/                   # Grok Build adapter: AGENTS.md, grok-agents/*.md
+   grok/                   # Grok Build adapter: AGENTS.md, grok-agents/*.md
+   opencode/               # OpenCode adapter: AGENTS.md, opencode-agents/*.md
 ```
 
 `runInit` (`src/commands/init.ts`) composes these: always copy `common/fadeno` →

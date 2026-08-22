@@ -464,6 +464,30 @@ repo-local form is `/fadeno-runner`.
 
 Implementation guidance: a single template core with per-target emit. The `init` command takes the target flag and chooses (a) skill dir, (b) bootstrap filename + sigil, (c) subagent def format, (d) whether to scaffold a hooks/CI enforcement stub. **Do not fork the SKILL.md bodies per target** — keep one source and substitute the sigil/path tokens at emit time, or keep the bodies sigil-free and put sigils only in the bootstrap file.
 
+### Post-v0 OpenCode adapter note (2026-08-22)
+
+OpenCode shipped 2026-08-13 as a pure *driver* (the `openrouter` route names
+`opencode run` as its argv) with zero host-side surface, on the rule that a
+driver never earns one. It was promoted to a *host* once observed use showed the
+same binary playing both roles. `fadeno init --opencode` now adds native support
+while keeping the shared playbooks, schemas, vocabulary, and sigil-free skill
+bodies unchanged:
+
+| Concern | OpenCode (`--opencode`) |
+|---|---|
+| Skill dir | `.agents/skills/<name>/` — the cross-harness standard dir, shared with Codex |
+| Bootstrap file | `AGENTS.md` (read natively by OpenCode) |
+| Invocation | description-invoked skills; no sigil |
+| Subagent defs | `.opencode/agents/{worker,reviewer,judge}.md` (`mode: subagent`) |
+| Enforcement | common CI/pre-commit scaffold; no OpenCode-specific hook scaffold |
+| Route lane | `routes.opencode:` in the catalog mirrors `standalone:` command delivery |
+
+Steering is intentionally unsupported at this tier: OpenCode's plugin API
+(`tool.execute.before`) is the eventual seam for Claude-style dispatch steering,
+and that remains deferred pending dogfood evidence. The driver role is
+unaffected — spawning a nested headless `opencode run` as a command executor is
+still valid under any host, with harness identity stripped like any subprocess.
+
 ### Tier-2 enforcement scaffold (forward-looking, optional in v0)
 
 Because the long-term goal includes harnesses with deterministic hooks for sub-agent handling and gate enforcement, design the run ledger and gate conditions so a hook can read them. Concretely:

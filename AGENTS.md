@@ -22,8 +22,9 @@ adapters, plus a small deterministic, repo-local **engine** (`fadeno drive`,
 per the next-protocol boundary) that exists in service of verification — it
 dispatches configured executor commands, mints runtime identity, and pauses at
 human decisions. It is **not** a daemon, cloud service, or general
-orchestration platform. Targets today: **Codex**, **Claude Code**, and **Grok
-Build** (Claude Code is also packaged as a Claude Code **plugin**).
+orchestration platform. Targets today: **Codex**, **Claude Code**, **Grok
+Build**, and **OpenCode** (Claude Code is also packaged as a Claude Code
+**plugin**).
 
 These docs frame the rest:
 
@@ -70,7 +71,9 @@ Fadeno is organized around **one split** and **one rule**:
     `builder`), the role **subagents** (`worker`/`reviewer`/`judge`), and the
     **CLI**. Delivered by `fadeno init` (copied into a repo) **or** by the Claude
     plugin (installed once, globally). Grok uses the native `.grok/` adapter
-    emitted by `fadeno init --grok`; there is no separate Grok plugin generator.
+    emitted by `fadeno init --grok`; OpenCode uses the native `.opencode/`
+    adapter (plus the shared `.agents/skills/` tree) emitted by
+    `fadeno init --opencode`; neither has a separate plugin generator.
   - *Definitions* = which playbooks: the per-repo **`.fadeno/`** tree
     (`vocabulary.md`, `playbooks/`, `schemas/`, `enforcement.md`). Seeded by
     `fadeno init` (or `init --data-only` for plugin users).
