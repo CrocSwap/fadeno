@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import {
   BARE_IDENTIFIER_RE,
@@ -24,6 +24,7 @@ import {
   type LocalDialState,
 } from '../src/lib/executors.ts';
 import { roleArchetype, semanticChecks } from '../src/lib/playbook-validate.ts';
+import { readUserDials, userPaths, UserDialsError, writeUserDials, type UserPathOptions } from '../src/lib/user-paths.ts';
 import { exists, read, tempRepo } from './helpers.ts';
 
 function parseDoc(doc: Record<string, unknown>, harness: 'standalone' | 'codex' | 'claude' = 'standalone'): ExecutorProfile {
@@ -160,6 +161,41 @@ test('DialRef parse/format', () => {
     'a forced dial refuses rather than silently losing its override',
   );
   assert.throws(() => parseDialRef(42, 'x'), /must be a string/);
+});
+
+test('user dials: force_write_posture is refused there too, not just in the catalog', (t) => {
+  // The gap this closes. `parseDialRef` above already refused the key, but a
+  // USER dial never reaches that parser — `drive` reads the user dials file
+  // with `readUserDials` and casts the result straight to `DialRef`. So the
+  // flag rode along invisibly, satisfying nothing and overriding a guard that
+  // no longer exists. Two parsers for one vocabulary, agreeing on everything
+  // except the one key that was removed.
+  const root = tempRepo(t);
+  const user: UserPathOptions = { home: join(root, 'home'), env: { FADENO_CONFIG_HOME: join(root, 'cfg'), FADENO_STATE_HOME: join(root, 'state') } };
+
+  // A plain dial still round-trips, and now writes the string form: the object
+  // form existed only to carry this key.
+  writeUserDials(user, { worker: { model: 'sol', effort: 'high', via: 'opencode' } });
+  assert.deepEqual(readUserDials(user), { worker: { model: 'sol', effort: 'high', via: 'opencode' } });
+  assert.match(readFileSync(userPaths(user).dialsFile, 'utf8'), /"worker":\s*"sol@high via opencode"/);
+
+  // A file written by an older version still carries the key. It refuses with
+  // a pointer and names the remedy, rather than being read as an ordinary dial
+  // with one key quietly dropped.
+  writeFileSync(userPaths(user).dialsFile, JSON.stringify({ worker: { model: 'sol', force_write_posture: true } }), 'utf8');
+  assert.throws(
+    () => readUserDials(user),
+    (err: unknown) =>
+      err instanceof UserDialsError &&
+      /"force_write_posture", which is no longer supported/.test((err as Error).message) &&
+      /permissions-and-isolation\.md/.test((err as Error).message),
+  );
+
+  // An unreadable dials file still degrades to {}. That is deliberate and must
+  // not be swept up by the refusal above: a corrupt personal config should not
+  // stop every command, while a config stating something untrue should.
+  writeFileSync(userPaths(user).dialsFile, '{ not json', 'utf8');
+  assert.deepEqual(readUserDials(user), {});
 });
 
 test('compileDialRef: registered home driver', () => {

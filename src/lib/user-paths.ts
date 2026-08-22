@@ -81,7 +81,13 @@ export function readUserHarness(options: UserPathOptions = {}): FadenoHarness | 
 
 // --- dials file ---
 
-export function readUserDials(options: UserPathOptions = {}): Record<string, { model: string; effort?: string; via?: string; force_write_posture?: true }> {
+/** Thrown when a user dial file carries a key the dial vocabulary no longer
+ * has. Its own class so a caller can tell a stale personal config from an
+ * unreadable one — an unreadable dials file degrades to `{}` on purpose, and a
+ * removed-key file must NOT. */
+export class UserDialsError extends Error {}
+
+export function readUserDials(options: UserPathOptions = {}): Record<string, { model: string; effort?: string; via?: string }> {
   const path = userPaths(options).dialsFile;
   if (!existsSync(path)) return {};
   const text = readFileSync(path, 'utf8').trim();
@@ -89,7 +95,7 @@ export function readUserDials(options: UserPathOptions = {}): Record<string, { m
   let doc: unknown;
   try { doc = JSON.parse(text); } catch { return {}; }
   if (doc == null || typeof doc !== 'object' || Array.isArray(doc)) return {};
-  const out: Record<string, { model: string; effort?: string; via?: string; force_write_posture?: true }> = {};
+  const out: Record<string, { model: string; effort?: string; via?: string }> = {};
   for (const [k, v] of Object.entries(doc as Record<string, unknown>)) {
     if (typeof v === 'string') {
       const trimmed = v.trim();
@@ -113,17 +119,31 @@ export function readUserDials(options: UserPathOptions = {}): Record<string, { m
       const map = v as Record<string, unknown>;
       const model = typeof map.model === 'string' ? map.model.trim() : '';
       if (model.length === 0) continue;
-      const entry: { model: string; effort?: string; via?: string; force_write_posture?: true } = { model };
+      // Refused, not dropped, and refused HERE rather than left to the profile
+      // parser. `parseExecutorProfile` rejects this key with the same pointer,
+      // but a user dial never reaches it: `drive` casts this map straight to
+      // `DialRef`, so the flag used to ride along invisibly and mean nothing.
+      // Silently ignoring a key someone wrote in order to override a guard is
+      // the failure the permissions cut exists to end — and the guard it named
+      // does not exist any more, so the file is stating something untrue.
+      if (map.force_write_posture !== undefined) {
+        throw new UserDialsError(
+          `user dial "${k}" in ${path} carries "force_write_posture", which is no longer supported — there ` +
+            'is no write-posture guard left to override. Remove the key (the dial\'s model/effort/via are ' +
+            'still valid) or re-set the dial with `fadeno dial`. ' +
+            'See docs/experimental/permissions-and-isolation.md.',
+        );
+      }
+      const entry: { model: string; effort?: string; via?: string } = { model };
       if (typeof map.effort === 'string' && map.effort.trim().length > 0) entry.effort = map.effort.trim();
       if (typeof map.via === 'string' && map.via.trim().length > 0) entry.via = map.via.trim();
-      if (map.force_write_posture === true) entry.force_write_posture = true;
       out[k] = entry;
     }
   }
   return out;
 }
 
-export function writeUserDials(options: UserPathOptions, dials: Record<string, { model: string; effort?: string; via?: string; force_write_posture?: true }>): string {
+export function writeUserDials(options: UserPathOptions, dials: Record<string, { model: string; effort?: string; via?: string }>): string {
   const path = userPaths(options).dialsFile;
   const keys = Object.keys(dials).sort();
   if (keys.length === 0) {
@@ -133,20 +153,14 @@ export function writeUserDials(options: UserPathOptions, dials: Record<string, {
   mkdirSync(join(path, '..'), { recursive: true });
   const sorted: Record<string, unknown> = {};
   for (const k of keys) {
+    // One shape now. The object form existed only to carry
+    // `force_write_posture`, and with that gone every dial is expressible as the
+    // `model[@effort][ via driver]` string.
     const ref = dials[k]!;
-    if (ref.force_write_posture === true) {
-      sorted[k] = {
-        model: ref.model,
-        ...(ref.effort ? { effort: ref.effort } : {}),
-        ...(ref.via ? { via: ref.via } : {}),
-        force_write_posture: true,
-      };
-    } else {
-      let str = ref.model;
-      if (ref.effort) str += `@${ref.effort}`;
-      if (ref.via) str += ` via ${ref.via}`;
-      sorted[k] = str;
-    }
+    let str = ref.model;
+    if (ref.effort) str += `@${ref.effort}`;
+    if (ref.via) str += ` via ${ref.via}`;
+    sorted[k] = str;
   }
   const ordered: Record<string, unknown> = {};
   for (const k of Object.keys(sorted).sort()) ordered[k] = sorted[k];

@@ -102,12 +102,12 @@ function loadLayered(repoRoot: string, userPathOptions?: UserPathOptions): Layer
   }
 }
 
-function routesForHarness(profile: ExecutorProfile): Record<string, { driver?: string; models_command?: string[] | null; write_variant?: { command: string[] } | null }> {
+function routesForHarness(profile: ExecutorProfile): Record<string, { driver?: string; models_command?: string[] | null }> {
   const harness = profile.harness ?? 'standalone';
-  return (profile.routes as Record<string, Record<string, { driver?: string; models_command?: string[] | null; write_variant?: { command: string[] } | null }>>)[harness] ?? {};
+  return (profile.routes as Record<string, Record<string, { driver?: string; models_command?: string[] | null }>>)[harness] ?? {};
 }
 
-function routeByDriver(profile: ExecutorProfile, driver: string): { key: string; route: { driver?: string; models_command?: string[] | null; write_variant?: { command: string[] } | null } } | null {
+function routeByDriver(profile: ExecutorProfile, driver: string): { key: string; route: { driver?: string; models_command?: string[] | null } } | null {
   for (const [key, route] of Object.entries(routesForHarness(profile))) {
     if ((route.driver ?? key) === driver) return { key, route };
   }

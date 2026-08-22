@@ -5,7 +5,7 @@ chat.
 
 ## Design status and precedence
 
-Fadeno now has seven intentionally different design horizons:
+Fadeno now has eight intentionally different design horizons:
 
 1. [`kickoff-memo.md`](kickoff-memo.md) records the rationale and scope of the
    shipped v0 advisory protocol. It remains historical design context.
@@ -43,6 +43,19 @@ Fadeno now has seven intentionally different design horizons:
    downstream of resolution (archetype policy, constraints, shadows,
    evidence) carries forward unchanged. It does not reintroduce presets as a
    resolution layer or authorize auto-fallback across providers.
+8. [`experimental/permissions-and-isolation.md`](experimental/permissions-and-isolation.md)
+   is the binding boundary for anything permission- or containment-shaped, and
+   it takes precedence over every earlier document on that subject. Fadeno does
+   not model write permissions: it selects an argv and records what ran.
+   Enforcement belongs to the vendor CLI and is visible **in the command**;
+   containment belongs to git worktrees, which are the default wherever git
+   allows and merge back unless the caller asked to hold work out. It forbids
+   reintroducing a posture negotiation layer in any form — no archetype demand
+   matched against a route capability, no automatic argv substitution from that
+   match, no refusal derived from a claim Fadeno cannot verify, no tri-state
+   field where "undeclared" has to mean something. This one is written as a
+   prohibition rather than a proposal because the system it replaces was rebuilt
+   three times and produced four silent-wrong-answer defects in a single day.
 
 The next-protocol engine decision deliberately supersedes v0's "no runtime"
 constraint for forward work. It does not authorize a daemon, cloud service,
@@ -312,11 +325,23 @@ the design record is `experimental/slots-and-archetypes.md`, phases 5 and 5.5.
   Unattested deliveries and effort/dial disagreement both render.
 - **Port-back.** `fadeno shadow-apply` applies a retained arm's diff with
   `git apply --3way`, stopping and keeping the artifact on conflict.
-- **Honest limits, stated in the design doc rather than discovered later:**
-  blinding is advisory (the challenger's cwd names it; real blinding needs
-  both arms in neutrally-named worktrees), write-shaped primaries are still
-  deferred, and nobody judges accumulated pairs yet — that is the next
-  horizon, and judging untrustworthy pairs would be worse than not judging.
+- **Limits that were stated up front and have since been closed.** All three
+  were written into the design doc rather than discovered later, which is why
+  each had a named successor rather than being found by a user:
+  - *Blinding was advisory* — the challenger's cwd named it. Closed in phase
+    5.5: both arms live at `.fadeno/local/pair/<pair-id8>/<own-dispatch-id8>`,
+    same depth, same shape, so a path says only that this is one arm of some
+    pair.
+  - *Write-shaped primaries were deferred* — a shared-tree primary emitted a
+    `workspace_changed` boolean while its challenger emitted a diff, and a
+    boolean cannot be compared to a diff. Closed by isolating both arms and
+    merging the primary back; superseded outright by the permissions-and-
+    isolation horizon, where isolation is the default for every dispatch and
+    not a pair-only behaviour.
+  - *Nobody judged accumulated pairs* — closed in phase 6: both pending pairs
+    were adjudicated by blinded judges (2/2 `graft`), four model traits
+    replicated across pairs, and the reach differential was independently
+    confirmed.
 
 ## Effort decides the lane (horizon 9 shipped — Claude half; Codex designed)
 
@@ -484,6 +509,58 @@ spawned.
     `emitCodexSteeringBrokers` refuses to bake a personal dial into a shared,
     tracked surface. The same sentence read backwards is this fix — a dial may
     only be materialized into a surface whose reach it already has.
+
+## Permissions and isolation (horizon 10 shipped — the cut, then the delivery)
+
+Landed 0.6.0-rc.50 through rc.52. The design record is
+[`permissions-and-isolation.md`](experimental/permissions-and-isolation.md),
+which is binding rather than descriptive — see precedence item 8 above.
+
+- **The write-permission system is gone.** `requires_write` (archetype demand)
+  × `write_access` (route capability) × `write_variant` (escalation) was a
+  negotiation layer over claims nothing verified. A catalog still carrying any
+  of them fails to load with a pointer to the design record; they are never
+  silently ignored, because quietly dropping a key someone wrote in order to
+  RESTRICT something is the exact failure this horizon exists to end.
+- **Two findings decided it, and are worth not re-deriving.** `write_variant`
+  swapped the *whole* argv, so "escalate to write" silently also dropped
+  `--sandbox read-only`, `--agent fadeno-readonly`, and `--disable-shell` —
+  invisible to the posture layer, since every variant is correctly
+  write-capable once applied. And Claude-as-harness alone could never escalate:
+  under `claude` the anthropic route is `host: true`, and host routes were
+  refused a variant at parse time for a rule that protects the replay path, not
+  the pair path.
+- **Posture is replaced by measurement.** `fadeno bakeoff` diffs the two arms'
+  *recorded argvs* and stamps a `capability_skew` confound when they differ
+  beyond model and effort. Observed rather than declared, catches any
+  capability skew rather than only the write bit, and cannot falsely refuse.
+- **Isolation is delivered, not just declared.** The cut made a worktree the
+  default and then degraded every unpaired dispatch back to shared, so the
+  request row said `isolated` and the completion row said `shared`. The fix was
+  identifying the right axis: merge-back keys on **who asked for the worktree**,
+  not on whether a pair happened to roll. `--isolate` means *hold this out of my
+  tree* and never merges back; everything else is kernel-chosen and always does.
+- **`--parallel` overlaps command members again, by a different mechanism.** It
+  originally overlapped them because a route could declare `write_access: false`
+  and skip the writer lease — a claim nothing enforced, so a "reader" on a bare
+  `claude -p` could write the shared tree unleased. Each engine member now runs
+  in its own worktree and merges back at collection: same speed, plus the
+  guarantee that was previously only asserted.
+- **Honest limits, stated here rather than discovered later:**
+  - Where git cannot cut a worktree there is nothing to isolate into. Every
+    delivery runs in the shared tree, members serialize, and the engine says so.
+    Kernel isolation degrades there; an explicit `--isolate` refuses instead,
+    because silently supplying no containment is the opposite of the request.
+  - `ignored_output: kept` gives up both the pair and the worktree. A
+    merge-back is built by `git add -A`, which respects `.gitignore`.
+  - The workspace lease's `mkdir` lock is reclaimed only after 120s, so a
+    hard-killed process can block the repo for two minutes. Isolation narrowed
+    the window — the lease is held only across baseline capture and merge-back,
+    not a whole run — but narrowing is not closing.
+  - Engine attempts take a worktree per *attempt*, not per actor call. A
+    resumed vendor session whose history names absolute paths into a torn-down
+    worktree would break; the failure is visible rather than silent, and it is
+    untested.
 
 ## Low-friction release boundary
 

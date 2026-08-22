@@ -317,7 +317,6 @@ export {
 
 /** Predicate name recorded on a `dispatch_refused` row. */
 export type DispatchRefusalPredicate =
-  | 'write_posture'
   | 'eligibility'
   | 'provider_distinctness'
   | 'constraint_command'

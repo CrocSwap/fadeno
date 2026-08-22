@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.52";
+  if (true) return "0.6.0-rc.53";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -14017,6 +14017,8 @@ function readUserHarness(options = {}) {
     return null;
   }
 }
+var UserDialsError = class extends Error {
+};
 function readUserDials(options = {}) {
   const path = userPaths(options).dialsFile;
   if (!(0, import_node_fs2.existsSync)(path)) return {};
@@ -14053,10 +14055,14 @@ function readUserDials(options = {}) {
       const map = v;
       const model = typeof map.model === "string" ? map.model.trim() : "";
       if (model.length === 0) continue;
+      if (map.force_write_posture !== void 0) {
+        throw new UserDialsError(
+          `user dial "${k}" in ${path} carries "force_write_posture", which is no longer supported \u2014 there is no write-posture guard left to override. Remove the key (the dial's model/effort/via are still valid) or re-set the dial with \`fadeno dial\`. See docs/experimental/permissions-and-isolation.md.`
+        );
+      }
       const entry = { model };
       if (typeof map.effort === "string" && map.effort.trim().length > 0) entry.effort = map.effort.trim();
       if (typeof map.via === "string" && map.via.trim().length > 0) entry.via = map.via.trim();
-      if (map.force_write_posture === true) entry.force_write_posture = true;
       out[k] = entry;
     }
   }
@@ -14073,19 +14079,10 @@ function writeUserDials(options, dials) {
   const sorted = {};
   for (const k of keys) {
     const ref = dials[k];
-    if (ref.force_write_posture === true) {
-      sorted[k] = {
-        model: ref.model,
-        ...ref.effort ? { effort: ref.effort } : {},
-        ...ref.via ? { via: ref.via } : {},
-        force_write_posture: true
-      };
-    } else {
-      let str3 = ref.model;
-      if (ref.effort) str3 += `@${ref.effort}`;
-      if (ref.via) str3 += ` via ${ref.via}`;
-      sorted[k] = str3;
-    }
+    let str3 = ref.model;
+    if (ref.effort) str3 += `@${ref.effort}`;
+    if (ref.via) str3 += ` via ${ref.via}`;
+    sorted[k] = str3;
   }
   const ordered = {};
   for (const k of Object.keys(sorted).sort()) ordered[k] = sorted[k];
@@ -39795,9 +39792,8 @@ function printDialShow(result, emptyMessage) {
     const effort = (row.resolvedVia != null ? "\u2014" : row.pinned_effort ?? "inherit").padEnd(8);
     const via = row.driver.padEnd(22);
     const elig = row.eligibility === "shadow_only" ? "  SHADOW-ONLY (never gates)" : row.eligibility === "forbidden" ? "  FORBIDDEN (refused at dispatch)" : "";
-    const forced = row.write_posture_forced ? "  WARNING: FORCED WRITE-POSTURE MISMATCH" : "";
     const inherits = row.resolvedVia ? ` (inherits ${row.resolvedVia})` : "";
-    console.log(`${arch}  ${model}  ${effort}  ${via}  ${DIAL_SOURCE_TEXT[row.source] ?? row.source}${inherits}${elig}${forced}`);
+    console.log(`${arch}  ${model}  ${effort}  ${via}  ${DIAL_SOURCE_TEXT[row.source] ?? row.source}${inherits}${elig}`);
     if (row.shadow) console.log(formatShadowLine(row.shadow, "  "));
   }
   if (result.note) console.log(result.note);

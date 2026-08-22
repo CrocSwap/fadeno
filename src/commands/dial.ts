@@ -87,10 +87,7 @@ export interface EffectiveRow {
   dial: DialRef;
   refString: string;
   adapter: 'command' | 'host';
-  /** True when a write-requiring archetype gets this route's write variant. */
-  write_variant?: boolean;
-  /** True when this direct dial explicitly overrides a write-posture mismatch. */
-  write_posture_forced?: boolean;
+
   eligibility?: string;
   shadow?: ShadowAttachmentView;
   // display helpers
@@ -1272,9 +1269,7 @@ export interface DialResolveResult {
   harness: string;
   source: RoleResolutionSource;
   resolved_via?: string;
-  /** True when the write-requiring archetype gets the route's write variant. */
-  write_variant?: boolean;
-  write_posture_forced?: boolean;
+
   eligibility?: string;
   dial: DialRef;
   delivery: { dispatchable: boolean; dispatch_command: string | null; action: string };
@@ -1339,15 +1334,21 @@ export interface DialResolveResult {
 /**
  * The dispatch advice this resolution hands its reader.
  *
- * `conflict` is the kernel's OWN write-posture refusal for this delivery,
- * computed by the caller and passed in — not re-derived here. A lane that
- * exists is not a lane that can do the work: an effort-pinned host dial
- * (`worker sonnet@medium`) leaves the session for its route's
- * `fallback_command`, and that lane is `write_access: false` with no
- * `write_variant` available to a host route. `commandRoutable` alone says
- * true there, so advising a dispatch on it would tell the reader to run a
- * command that this same binary refuses — the guidance and the kernel must
- * answer from one predicate, not two that agree only by coincidence.
+ * `conflict` is the kernel's OWN refusal for this delivery, computed by the
+ * caller and passed in — not re-derived here. The guidance and the kernel must
+ * answer from one predicate, not two that agree only by coincidence: advising
+ * a dispatch that this same binary would refuse is worse than advising
+ * nothing.
+ *
+ * Exactly one predicate reaches here, and that is the whole list rather than a
+ * simplification: eligibility. Write posture used to be the other, and its
+ * example was instructive — an effort-pinned host dial left the session for a
+ * `fallback_command` lane that `commandRoutable` called routable and the
+ * kernel then refused. Permissions are no longer Fadeno's to judge, so that
+ * disagreement cannot recur. The remaining two kernel predicates are not
+ * knowable at resolve time at all: `constraint_command` must execute a policy,
+ * and `provider_distinctness` needs input provenance a resolver never
+ * receives.
  */
 function deliveryGuidance(
   archetype: string,

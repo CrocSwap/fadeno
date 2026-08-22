@@ -1443,14 +1443,13 @@ function printDialShow(result: DialShowResult, emptyMessage?: string): void {
     const effort = (row.resolvedVia != null ? '—' : row.pinned_effort ?? 'inherit').padEnd(8);
     const via = row.driver.padEnd(22);
     const elig = row.eligibility === 'shadow_only' ? '  SHADOW-ONLY (never gates)' : row.eligibility === 'forbidden' ? '  FORBIDDEN (refused at dispatch)' : '';
-    const forced = row.write_posture_forced ? '  WARNING: FORCED WRITE-POSTURE MISMATCH' : '';
     // `inherits`, not `via`: `resolvedVia` is the ARCHETYPE this row borrowed
     // its dial from (`reviewer` with no dial of its own falling back to
     // `worker`), which has nothing to do with the `via` column two cells left
     // — that one is the driver. Printing both as "via" on one line was the
     // collision that kept the column named `harness`.
     const inherits = row.resolvedVia ? ` (inherits ${row.resolvedVia})` : '';
-    console.log(`${arch}  ${model}  ${effort}  ${via}  ${DIAL_SOURCE_TEXT[row.source] ?? row.source}${inherits}${elig}${forced}`);
+    console.log(`${arch}  ${model}  ${effort}  ${via}  ${DIAL_SOURCE_TEXT[row.source] ?? row.source}${inherits}${elig}`);
     if (row.shadow) console.log(formatShadowLine(row.shadow, '  '));
   }
   if (result.note) console.log(result.note);
