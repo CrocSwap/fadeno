@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.58";
+  if (true) return "0.6.0-rc.59";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -17416,7 +17416,13 @@ function readWorkspaceLease(repoRoot) {
 function isWorkspaceLeaseAlive(record2, probe2 = defaultProbe) {
   if (record2 == null) return false;
   if (record2.workspace_mode !== "shared") return false;
-  if (record2.supervisor_pid == null) return true;
+  if (record2.supervisor_pid == null) {
+    if (isWindowHolder(record2.holder)) {
+      const heartbeat = Date.parse(record2.heartbeat_at);
+      if (Number.isFinite(heartbeat) && Date.now() - heartbeat > WINDOW_LEASE_STALE_MS) return false;
+    }
+    return true;
+  }
   if (probeIsAlive(record2.supervisor_pid, probe2)) return true;
   if (record2.process_group_id != null && probeIsAlive(-record2.process_group_id, probe2)) return true;
   if (record2.executor_pid != null && probeIsAlive(record2.executor_pid, probe2)) return true;
@@ -17951,6 +17957,52 @@ function isRegisteredWorktree(repoRoot, candidateAbs) {
     return true;
   } catch {
     return false;
+  }
+}
+var WINDOW_HOLDER_PREFIXES = Object.freeze(["engine-tree:", "merge-back:", "baseline:"]);
+function isWindowHolder(holder) {
+  return holder != null && typeof holder.id === "string" && WINDOW_HOLDER_PREFIXES.some((p) => holder.id.startsWith(p));
+}
+var WINDOW_LEASE_WAIT_MS = 3e4;
+var WINDOW_LEASE_STALE_MS = 12e4;
+var WINDOW_LEASE_POLL_MS = 50;
+function sleepWindow(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function withWorkspaceWindowLease(opts, action) {
+  if (!isWindowHolder(opts.holder)) {
+    throw new WorkspaceLeaseError(`window lease holder "${opts.holder.id}" must use one of the window prefixes (${WINDOW_HOLDER_PREFIXES.join(", ")})`);
+  }
+  const deadline = Date.now() + (opts.waitMs ?? WINDOW_LEASE_WAIT_MS);
+  for (; ; ) {
+    try {
+      acquireWorkspaceLease({
+        repoRoot: opts.repoRoot,
+        workspaceMode: "shared",
+        holder: opts.holder,
+        supervisorPid: process.pid,
+        executorPid: null,
+        processGroupId: null,
+        ...opts.now != null ? { startedAt: opts.now, heartbeatAt: opts.now } : {}
+      });
+      break;
+    } catch (err) {
+      if (!(err instanceof WorkspaceLeaseError)) throw err;
+      if (opts.mode === "read") {
+        const live = readEffectiveLease(opts.repoRoot);
+        if (live != null && !isWindowHolder(live.holder)) return action();
+      }
+      if (Date.now() >= deadline) throw err;
+      sleepWindow(WINDOW_LEASE_POLL_MS);
+    }
+  }
+  try {
+    return action();
+  } finally {
+    try {
+      releaseWorkspaceLease({ repoRoot: opts.repoRoot, holder: opts.holder });
+    } catch {
+    }
   }
 }
 var NOT_IN_INDEX = /^error: (.+?): does not exist in index$/gm;
@@ -21302,7 +21354,12 @@ ${prompt}`;
   };
   let capturedBaselineMemo = null;
   const capturedBaseline = () => {
-    if (capturedBaselineMemo == null) capturedBaselineMemo = captureWorkspaceBaseline(repoRoot);
+    if (capturedBaselineMemo == null) {
+      capturedBaselineMemo = withWorkspaceWindowLease(
+        { repoRoot, holder: { id: `baseline:${dispatchId}`, kind: "ad-hoc", dispatchId }, mode: "read" },
+        () => captureWorkspaceBaseline(repoRoot)
+      );
+    }
     return capturedBaselineMemo;
   };
   const pairCandidate = decidePairCandidate();
@@ -22029,24 +22086,8 @@ ${prompt}`;
         opts.onEcho?.(`isolated diff: ${isolated.diff.diffBytes} bytes \u2192 ${isolated.diff.diffRel}`);
         if (isolationOrigin === "kernel") {
           const mergeHolder = { id: `merge-back:${dispatchId}`, kind: "ad-hoc", dispatchId };
-          let leaseTaken = false;
           try {
-            acquireWorkspaceLease({
-              repoRoot,
-              workspaceMode: "shared",
-              holder: mergeHolder,
-              supervisorPid: null,
-              executorPid: null
-            });
-            leaseTaken = true;
-          } catch (err) {
-            primaryMerge = {
-              status: "blocked",
-              detail: `nothing was applied: could not acquire the workspace lease for merge-back (${err instanceof Error ? err.message : String(err)})`
-            };
-          }
-          if (leaseTaken) {
-            try {
+            withWorkspaceWindowLease({ repoRoot, holder: mergeHolder }, () => {
               if (isolated.diff.diffBytes === 0) {
                 primaryMerge = { status: "clean", detail: "nothing to apply: the primary made no changes" };
               } else {
@@ -22063,12 +22104,13 @@ ${prompt}`;
                   );
                 }
               }
-            } finally {
-              try {
-                releaseWorkspaceLease({ repoRoot, holder: mergeHolder });
-              } catch {
-              }
-            }
+            });
+          } catch (err) {
+            if (!(err instanceof WorkspaceLeaseError)) throw err;
+            primaryMerge = {
+              status: "blocked",
+              detail: `nothing was applied: could not acquire the workspace lease for merge-back (${err.message})`
+            };
           }
         }
         return isolated.result;
@@ -27644,7 +27686,6 @@ function latestSessionForRole(events, role, executor) {
   }
   return null;
 }
-var ENGINE_TREE_LEASE_WAIT_MS = 3e4;
 var GIT_AVAILABILITY = /* @__PURE__ */ new Map();
 function repoHasGit(repoRoot) {
   const cached = GIT_AVAILABILITY.get(repoRoot);
@@ -27654,32 +27695,9 @@ function repoHasGit(repoRoot) {
   GIT_AVAILABILITY.set(repoRoot, available);
   return available;
 }
-function withEngineTreeLease(ctx, label, action) {
+function withEngineTreeLease(ctx, label, action, mode = "write") {
   const holder = { id: `engine-tree:${ctx.runId}:${label}`, kind: "engine", runId: ctx.runId };
-  const deadline = Date.now() + ENGINE_TREE_LEASE_WAIT_MS;
-  for (; ; ) {
-    try {
-      acquireWorkspaceLease({
-        repoRoot: ctx.repoRoot,
-        workspaceMode: "shared",
-        holder,
-        supervisorPid: null,
-        executorPid: null
-      });
-      break;
-    } catch (err) {
-      if (!(err instanceof WorkspaceLeaseError) || Date.now() >= deadline) throw err;
-      sleepSync(POLL_MS2);
-    }
-  }
-  try {
-    return action();
-  } finally {
-    try {
-      releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder });
-    } catch {
-    }
-  }
+  return withWorkspaceWindowLease({ repoRoot: ctx.repoRoot, holder, mode }, action);
 }
 function parseParallelOption(value) {
   if (value == null) return DRIVE_PARALLEL_DEFAULT;
@@ -27845,7 +27863,8 @@ ${repairCore}`;
             captureWorkspaceBaseline(ctx.repoRoot),
             `${ctx.runId}:${id8}`,
             "engine attempt"
-          )
+          ),
+          "read"
         );
         worktree = { abs: created.worktreeAbs, rel: created.worktreeRel, baselineCommit, diffRel, diffAbs: (0, import_node_path22.join)(ctx.repoRoot, diffRel) };
       } catch (inner) {
@@ -38859,7 +38878,7 @@ Options:
   --max-transitions <n>   (drive) Engine transition cap per invocation (default 50)
   --parallel <n>          (drive) Max concurrent deliveries per wave (1\u201316, default 1). Members overlap
                           via one git worktree each; without git they share the tree and serialize
-  --timeout <seconds>     (drive/dispatch) Hard deadline seconds; 0 disables route default (20 min)
+  --timeout <seconds>     (drive/dispatch) Hard executor deadline in seconds; none by default
   --input <Name=path>     (new-run) Supply a declared input (repeatable)
   --via <driver>          (dial/dispatch) Driver alias that delivers the model; on dispatch it
                           escalates one call onto that lane without moving the dial
@@ -39161,7 +39180,7 @@ Options:
                         keyed on the prompt digest, so a retry never re-rolls; challengers
                         run concurrently, capped by FADENO_SHADOW_MAX_LIVE (default 4), and
                         their worktrees are retained under .fadeno/local/shadow for review
-  --timeout <seconds>   Hard executor deadline seconds; 0 disables route default (20 min)
+  --timeout <seconds>   Hard executor deadline in seconds; none by default (0 also means none)
   --isolate             HOLD THE WORK OUT of your tree. A detached worktree, like the default, but
                         the diff is never applied back \u2014 it is left at the recorded diff_snapshot for
                         you to inspect or apply yourself. This is the flag's entire purpose now that
@@ -39294,14 +39313,17 @@ Options:
                            fall back to the shared tree and serialize on the repo-wide writer
                            lease whatever you pass. Host requests interleave either way.
                            See docs/experimental/permissions-and-isolation.md
-  --timeout <seconds>      Hard executor deadline seconds; 0 disables route default (20 min)
+  --timeout <seconds>      Hard executor deadline in seconds; none by default (0 also means none)
   --diagnostics            Persist bounded process output (32 KiB / 500 lines per stream) to diagnostics log
 
 Drive executes command-delivered steps itself and pauses for host dispatches and
 human gates. Resolve pauses with \`fadeno decide\` (decisions) or the dispatch-*
 host protocol, then re-run drive. Executor identity is snapshotted on first
-contact; resumed runs keep resolving against their recorded snapshot. Command routes
-default to a 20-minute deadline (timeout_ms: 1200000); --timeout 0 disables it.
+contact; resumed runs keep resolving against their recorded snapshot. Executors run
+with no deadline unless a route declares timeout_ms or --timeout sets one: an
+agent's work has a long tail, and a clock cannot tell slow from stuck. Watch a
+long attempt with \`fadeno show\` (idle output is reported, never acted on) and end
+one yourself with \`fadeno cancel\`.
 `,
   cancel: `fadeno cancel \u2014 cancel the active engine attempt for a run
 
@@ -40973,7 +40995,7 @@ Or advance manually with the playbook cursor:`);
       if (result.outcome === "timeout") {
         const deadline = result.timeoutMs != null ? `${Math.round(result.timeoutMs / 1e3)}s ` : "";
         console.error(
-          `dispatch: executor ${result.executor} TIMED OUT \u2014 the kernel killed it at its ${deadline}deadline${result.signal != null ? ` (${result.signal})` : ""}; the work did NOT finish. ${result.outputBytes} bytes of output were captured before the kill. Re-dispatch with --timeout <seconds> or --timeout 0 rather than into the same wall.`
+          `dispatch: executor ${result.executor} TIMED OUT \u2014 the kernel killed it at its ${deadline}deadline${result.signal != null ? ` (${result.signal})` : ""}; the work did NOT finish. ${result.outputBytes} bytes of output were captured before the kill. Re-dispatch with a larger --timeout, or none, rather than into the same wall.`
         );
       } else if (result.exitCode !== 0) {
         console.error(
@@ -41147,7 +41169,7 @@ Or advance manually with the playbook cursor:`);
           switch (result2.outcome) {
             case "timeout": {
               const deadline = result2.timeoutMs != null ? `${Math.round(result2.timeoutMs / 1e3)}s ` : "";
-              return `TIMED OUT: the kernel killed the executor at its ${deadline}deadline${result2.signal != null ? ` (${result2.signal})` : ""}; the work did NOT finish. ${result2.outputBytes ?? 0} bytes of output were captured before the kill. Re-dispatch with --timeout <seconds> or --timeout 0 rather than into the same wall.`;
+              return `TIMED OUT: the kernel killed the executor at its ${deadline}deadline${result2.signal != null ? ` (${result2.signal})` : ""}; the work did NOT finish. ${result2.outputBytes ?? 0} bytes of output were captured before the kill. Re-dispatch with a larger --timeout, or none, rather than into the same wall.`;
             }
             case "failed":
               return result2.signal != null ? `FAILED: the executor was killed by ${result2.signal}` : `FAILED: exit ${result2.exitCode ?? "?"}`;

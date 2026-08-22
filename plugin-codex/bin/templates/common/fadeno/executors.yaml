@@ -121,35 +121,29 @@ routes:
     anthropic:
       driver: claude
       command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits ]
-      timeout_ms: 1200000
       eligibility: { director: forbidden }
     anthropic-exec:
       driver: claude-exec
       command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, "Bash(fadeno:*)" ]
-      timeout_ms: 1200000
     xai:
       driver: grok
       command: [ grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve ]
-      timeout_ms: 1200000
       models_command: [ grok, models ]
       eligibility: { director: forbidden }
     google:
       driver: agy
       command: [ agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text ]
-      timeout_ms: 1200000
       models_command: [ agy, models ]
       effort_encoding: model-suffix
       eligibility: { director: forbidden }
     openrouter:
       driver: opencode
       command: [ opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto ]
-      timeout_ms: 1200000
       models_command: [ opencode, models ]
       eligibility: { director: forbidden }
     muse:
       driver: muse-code
       command: [ muse, exec, --provider, meta, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --prompt-file, "{prompt_file}", --workspace, ".", --trust-workspace, --disable-approval, --user-input-auto-resolve, --no-session-log ]
-      timeout_ms: 1200000
       eligibility: { director: forbidden }
   claude:
     current-host:
@@ -178,34 +172,28 @@ routes:
     anthropic-exec:
       driver: claude-exec
       command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, "Bash(fadeno:*)" ]
-      timeout_ms: 1200000
     openai:
       driver: codex
       command: [ codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-" ]
-      timeout_ms: 1200000
     xai:
       driver: grok
       command: [ grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve ]
-      timeout_ms: 1200000
       models_command: [ grok, models ]
       eligibility: { director: forbidden }
     google:
       driver: agy
       command: [ agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text ]
-      timeout_ms: 1200000
       models_command: [ agy, models ]
       effort_encoding: model-suffix
       eligibility: { director: forbidden }
     openrouter:
       driver: opencode
       command: [ opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto ]
-      timeout_ms: 1200000
       models_command: [ opencode, models ]
       eligibility: { director: forbidden }
     muse:
       driver: muse-code
       command: [ muse, exec, --provider, meta, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --prompt-file, "{prompt_file}", --workspace, ".", --trust-workspace, --disable-approval, --user-input-auto-resolve, --no-session-log ]
-      timeout_ms: 1200000
       eligibility: { director: forbidden }
   grok:
     current-host:
@@ -219,33 +207,27 @@ routes:
     openai:
       driver: codex
       command: [ codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-" ]
-      timeout_ms: 1200000
     anthropic:
       driver: claude
       command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits ]
-      timeout_ms: 1200000
       eligibility: { director: forbidden }
     anthropic-exec:
       driver: claude-exec
       command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, "Bash(fadeno:*)" ]
-      timeout_ms: 1200000
     google:
       driver: agy
       command: [ agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text ]
-      timeout_ms: 1200000
       models_command: [ agy, models ]
       effort_encoding: model-suffix
       eligibility: { director: forbidden }
     openrouter:
       driver: opencode
       command: [ opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto ]
-      timeout_ms: 1200000
       models_command: [ opencode, models ]
       eligibility: { director: forbidden }
     muse:
       driver: muse-code
       command: [ muse, exec, --provider, meta, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --prompt-file, "{prompt_file}", --workspace, ".", --trust-workspace, --disable-approval, --user-input-auto-resolve, --no-session-log ]
-      timeout_ms: 1200000
       eligibility: { director: forbidden }
   standalone:
     current-host:
@@ -253,39 +235,32 @@ routes:
     openai:
       driver: codex
       command: [ codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-" ]
-      timeout_ms: 1200000
     anthropic:
       driver: claude
       command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits ]
-      timeout_ms: 1200000
       eligibility: { director: forbidden }
     anthropic-exec:
       driver: claude-exec
       command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, "Bash(fadeno:*)" ]
-      timeout_ms: 1200000
     xai:
       driver: grok
       command: [ grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve ]
-      timeout_ms: 1200000
       models_command: [ grok, models ]
       eligibility: { director: forbidden }
     google:
       driver: agy
       command: [ agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text ]
-      timeout_ms: 1200000
       models_command: [ agy, models ]
       effort_encoding: model-suffix
       eligibility: { director: forbidden }
     openrouter:
       driver: opencode
       command: [ opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto ]
-      timeout_ms: 1200000
       models_command: [ opencode, models ]
       eligibility: { director: forbidden }
     muse:
       driver: muse-code
       command: [ muse, exec, --provider, meta, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --prompt-file, "{prompt_file}", --workspace, ".", --trust-workspace, --disable-approval, --user-input-auto-resolve, --no-session-log ]
-      timeout_ms: 1200000
       eligibility: { director: forbidden }
 
 # Driver routes (harnesses Fadeno spawns, never runs inside — see

@@ -90,6 +90,7 @@ import {
   releaseWorkspaceLease,
   removeIsolatedWorktree,
   scanIgnoredOutput,
+  withWorkspaceWindowLease,
   WorkspaceLeaseError,
   type LeaseHolder,
   type WorkspaceLeaseRecord,
@@ -1009,7 +1010,6 @@ interface PendingAttempt {
  * writer lease before giving up. Generous relative to what it guards — both
  * operations are a couple of git invocations — but a wave now admits members
  * concurrently, so several can queue behind one merge-back at once. */
-const ENGINE_TREE_LEASE_WAIT_MS = 30_000;
 
 /**
  * Whether this repo can be isolated into, memoized per process.
@@ -1045,29 +1045,11 @@ function repoHasGit(repoRoot: string): boolean {
  * be wrong here: contention is the NORMAL case once members run concurrently,
  * not an error condition.
  */
-function withEngineTreeLease<T>(ctx: EngineCtx, label: string, action: () => T): T {
+function withEngineTreeLease<T>(ctx: EngineCtx, label: string, action: () => T, mode: 'read' | 'write' = 'write'): T {
   const holder: LeaseHolder = { id: `engine-tree:${ctx.runId}:${label}`, kind: 'engine', runId: ctx.runId };
-  const deadline = Date.now() + ENGINE_TREE_LEASE_WAIT_MS;
-  for (;;) {
-    try {
-      acquireWorkspaceLease({
-        repoRoot: ctx.repoRoot,
-        workspaceMode: 'shared',
-        holder,
-        supervisorPid: null,
-        executorPid: null,
-      });
-      break;
-    } catch (err) {
-      if (!(err instanceof WorkspaceLeaseError) || Date.now() >= deadline) throw err;
-      sleepSync(POLL_MS);
-    }
-  }
-  try {
-    return action();
-  } finally {
-    try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder }); } catch {}
-  }
+  // The wait, the kernel-pid stamp, and the release live with the lease so
+  // the ad-hoc dispatch's windows cannot drift from the engine's.
+  return withWorkspaceWindowLease({ repoRoot: ctx.repoRoot, holder, mode }, action);
 }
 
 function parseParallelOption(value: unknown): number {
@@ -1292,6 +1274,7 @@ function beginCommandAttempt(
           () => applyWorkspaceBaseline(
             ctx.repoRoot, created.worktreeAbs, captureWorkspaceBaseline(ctx.repoRoot), `${ctx.runId}:${id8}`, 'engine attempt',
           ),
+          'read',
         );
         worktree = { abs: created.worktreeAbs, rel: created.worktreeRel, baselineCommit, diffRel, diffAbs: join(ctx.repoRoot, diffRel) };
       } catch (inner) {

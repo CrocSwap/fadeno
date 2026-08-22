@@ -534,18 +534,21 @@ was every surface the proxy could reach. Three defects, two fixed (rc.58):
   included — while the receipt said `conflicted` about an untouched tree. See
   `permissions-and-isolation.md` for the working-tree fallback; both
   merge-backs now share one helper.
-- **The 20-minute ceiling, left open.** `timeout_ms: 1200000` on every command
-  route, `--timeout 0` lifts it, and the proxy contract call cannot pass it.
-  So the worker dial, through the proxy, cannot run a pass longer than 20
-  minutes, and that session's conclusion was that this makes it unusable for a
-  real implementation pass. Options, all policy: raise the route default;
-  give `worker` its own default (reviewers and judges rarely need more, a
-  worker routinely does); let the proxy pass `--timeout` (the guard would need
-  to admit one more flag); or keep 20 minutes and say so on the proxy. The
-  underlying question is how long an unattended external executor may hold a
-  worktree with nobody watching, which is not a question a bug fix should
-  answer. **Decide with the freeze**, alongside the two unreceipted artifact
-  classes above.
+- **The 20-minute ceiling — decided: there is no default deadline (rc.59).**
+  `timeout_ms: 1200000` was on every command route and the proxy contract call
+  could not lift it, so a worker pass through the proxy could not exceed 20
+  minutes. Talked through rather than patched: agent work has a long tail and
+  a clock cannot tell slow from stuck, and the only thing the deadline ever
+  protected was what a hung executor *holds*. An isolated executor holds its
+  own worktree and nothing else — no lease, no shared tree — so the cost of a
+  hung one is a directory and a provider bill, both visible in `fadeno show`,
+  both ended by `fadeno cancel`. The template declares no `timeout_ms`;
+  `--timeout` is opt-in. The kernel's own brief holds on the shared tree (a
+  baseline capture, a merge-back) are the only place a clock remains, and it
+  bounds *waiting for a turn* (30 s), never anyone's work; those windows now
+  carry the kernel's pid, which closed the immortal-lease bug behind the
+  `kill-drive mid-wave` failures. Shared mode (`--shared`, tools, non-git)
+  still holds the real lease for a run's duration and is opt-in.
 
 One more observation from that loop worth keeping: the external reviewer's
 sandbox could not open loopback listeners, so it never ran the socket tests,

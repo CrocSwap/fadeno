@@ -1,6 +1,6 @@
 ---
 name: driver
-description: Drive a Fadeno run ledger end-to-end — engine-first via `fadeno drive`, with a manual `fadeno next` loop for steps the engine can't execute. Use when the host hands you a run id to drive or resume, or when coordinating multi-harness roles without host nested subagents. [fadeno 0.6.0-rc.58]
+description: Drive a Fadeno run ledger end-to-end — engine-first via `fadeno drive`, with a manual `fadeno next` loop for steps the engine can't execute. Use when the host hands you a run id to drive or resume, or when coordinating multi-harness roles without host nested subagents. [fadeno 0.6.0-rc.59]
 ---
 
 # Fadeno Driver
@@ -172,24 +172,30 @@ planned artifact path.
 
 ## Executor deadlines and cancellation
 
-- **Hard deadlines.** Every command route in the committed catalog defaults to
-  `timeout_ms: 1200000` (20 minutes). The supervisor owns the deadline: at
-  `deadline_at = started_at + timeout_ms` it sends `SIGTERM` to the executor
-  process group and escalates to `SIGKILL` after 5 s. Lease and claim release
-  still waits for `close`, so a timeout is not proven until the group is gone.
-  Override per invocation with `fadeno drive <run> --timeout <seconds>` or
-  `fadeno dispatch --archetype <a> --timeout <seconds>`; `0` disables the route
-  deadline. A timed-out attempt records `actor_failed.reason = "executor_timeout"`
-  with `timeout_ms`/`deadline_at` (engine) or `dispatch_completed.outcome =
-  "timeout"` (ad-hoc) and outranks the exit signal. If you hit the 20-minute wall
-  on a legitimately long step, re-dispatch with `--timeout 0` or a larger value
-  rather than retrying into the same wall. The recovery reader carries the
+- **No deadline by default.** An executor runs until it exits. Agent work has
+  a long tail, and a clock cannot tell slow from stuck — the committed catalog
+  used to kill every command route at 20 minutes, and on 2026-08-22 that
+  killed a legitimate implementation pass and two of six reviews. What an
+  isolated executor holds while it runs is its own worktree and nothing else
+  (no lease, no shared tree), so the cost of a hung one is a directory and the
+  provider's bill, and the decision to end it belongs to whoever can look at
+  the work: watch it with `fadeno show` (the `WARNING: no output observed for
+  <duration> (non-gating)` line is a report, never a trigger) and end it with
+  `fadeno cancel <run>` or `fadeno dispatches --cancel <id|tag>`. A `drive`
+  wave waits for every member, so a hung member holds the run until you act.
+  A deadline is opt-in: `timeout_ms` on a route, or `--timeout <seconds>` on
+  `fadeno drive` / `fadeno dispatch` (`0` also means none). When one is set
+  the supervisor owns it — `SIGTERM` to the executor group at `deadline_at =
+  started_at + timeout_ms`, `SIGKILL` after 5 s, lease and claim released only
+  on `close` — and the attempt records `actor_failed.reason =
+  "executor_timeout"` (engine) or `dispatch_completed.outcome = "timeout"`
+  (ad-hoc), which outranks the exit signal. The recovery reader carries the
   verdict with the bytes: `fadeno dispatches --output <id|tag:handle>` leads
   its stderr note with `ok`, `FAILED`, `NO OUTPUT`, or `TIMED OUT` (and any
   merge-back that did not land) *before* the attestation line. `output
   attested` only says the snapshot's bytes are the ones the completion row
-  hashed — a deadline-killed executor attests perfectly with zero bytes, and
-  is not a result.
+  hashed — a killed executor attests perfectly with zero bytes, and is not a
+  result.
 
 - **Safe cancellation.** `fadeno cancel <run>` (or a unique run prefix) targets the
   single live engine command claim for that run, sends `SIGTERM` to its supervisor

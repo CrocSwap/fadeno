@@ -87,7 +87,7 @@ test('cli drive and dispatch --timeout help documents 0 disables', (t) => {
     out = e.stdout ?? '';
   }
   assert.match(out, /--timeout <seconds>/);
-  assert.match(out, /0 disables/);
+  assert.match(out, /none by default/);
   try {
     out = execFileSync(BIN, ['dispatch', '--help'], { cwd: root, encoding: 'utf8', stdio: 'pipe' });
   } catch (e: any) {
@@ -485,25 +485,16 @@ test('fadeno cancel --help uses COMMAND_HELP and completion includes cancel', (t
   assert.match(driveComp, /--timeout/);
 });
 
-test('built-in executors.yaml has timeout_ms on command routes only', (t) => {
+test('built-in executors.yaml declares no deadline on any route', (t) => {
+  // Deadlines are opt-in. The committed catalog used to pin every command
+  // route at `timeout_ms: 1200000`, and on 2026-08-22 that killed a
+  // legitimate implementation pass and two of six reviews: agent work has a
+  // long tail, and a clock cannot tell slow from stuck. A route that wants a
+  // deadline declares one; the template declares none, and this is the one
+  // place that absence is asserted (presence-pairing cannot).
   const yamlText = readFileSync(join(import.meta.dirname, '..', 'templates', 'common', 'fadeno', 'executors.yaml'), 'utf8');
-  const count = (yamlText.match(/timeout_ms: 1200000/g) ?? []).length;
-  // 25 command routes per integration result
-  assert.equal(
-    count,
-    25,
-    `every non-host command route must declare timeout_ms: 1200000 — new routes must opt in or be host: true (found ${count})`,
-  );
-  assert.ok(yamlText.includes('timeout_ms: 1200000'));
-  // host routes must not have timeout
-  // crude check: ensure no host: true line is followed soon by timeout_ms in same block — easier to parse
-  const lines = yamlText.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].trim() === 'host: true') {
-      const window = lines.slice(i, i + 4).join('\n');
-      assert.doesNotMatch(window, /timeout_ms/);
-    }
-  }
+  const declared = yamlText.split('\n').filter((line) => /^\s*timeout_ms:/.test(line));
+  assert.deepEqual(declared, [], `the template catalog must not pin a deadline on any route; found: ${declared.join(' | ')}`);
 });
 
 test('executor handles timeout_ms: absent default, host rejection, positive integer', async (t) => {

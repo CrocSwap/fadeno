@@ -287,8 +287,17 @@ const CLAIMS: Claim[] = [
   },
   {
     id: 'executor-timeout-route',
-    doc: { files: [EXTENDING, 'docs/architecture.md'], patterns: [/timeout_ms: 1200000/] },
+    doc: { files: [EXTENDING, 'docs/architecture.md'], patterns: [/timeout_ms/] },
     src: { files: ['src/lib/executors.ts', 'src/lib/supervisor.ts'], patterns: [/timeout_ms/] },
+  },
+  {
+    // Deadlines are opt-in. The doc surfaces an agent reads say "no deadline
+    // by default" in those words; the template catalog is checked for the
+    // absence separately (cancel-timeout-integration), since presence-pairing
+    // cannot assert that something is NOT there.
+    id: 'no-default-deadline',
+    doc: { files: [EXTENDING, 'templates/common/skills/fadeno-driver/SKILL.md', 'src/cli.ts'], patterns: [/no deadline|none by default/i] },
+    src: { files: ['src/lib/supervisor.ts'], patterns: [/deadline_at/] },
   },
   {
     id: 'executor-timeout-receipt',

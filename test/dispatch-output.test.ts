@@ -242,7 +242,7 @@ test('dispatch output: a dispatch the kernel killed at its deadline is reported 
   const { stdout, stderr } = outputNote(root, 'worker-slow');
   assert.equal(stdout, '');
   assert.match(stderr, /— TIMED OUT: the kernel killed the executor at its 1s deadline \(SIGTERM\); the work did NOT finish\. 0 bytes of output were captured before the kill\./);
-  assert.match(stderr, /Re-dispatch with --timeout <seconds> or --timeout 0/);
+  assert.match(stderr, /Re-dispatch with a larger --timeout, or none/);
   assert.ok(stderr.indexOf('TIMED OUT') < stderr.indexOf('output attested'), 'the verdict leads; attestation follows');
 });
 

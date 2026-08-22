@@ -338,7 +338,24 @@ export function isWorkspaceLeaseAlive(
 ): boolean {
   if (record == null) return false;
   if (record.workspace_mode !== 'shared') return false;
-  if (record.supervisor_pid == null) return true;
+  if (record.supervisor_pid == null) {
+    // A holder with no pid used to be alive forever: nothing could prove it
+    // dead, so nothing ever reclaimed it. That was survivable for a shared
+    // executor lease, which the supervisor re-stamps with its own pid within
+    // milliseconds of spawning. It was not survivable for a WINDOW lease —
+    // the kernel's own brief hold for a baseline capture or a merge-back —
+    // because the kernel never recorded itself, and a kernel killed inside
+    // the window (harness timeout, ctrl-C, a SIGKILLed drive) left a lease
+    // that refused every later writer, including the recovery of the very
+    // run that took it. Window leases now carry the kernel's pid; this
+    // clause is for leases written before they did, and it only ever applies
+    // to holders whose work is seconds of git, never to an executor's run.
+    if (isWindowHolder(record.holder)) {
+      const heartbeat = Date.parse(record.heartbeat_at);
+      if (Number.isFinite(heartbeat) && Date.now() - heartbeat > WINDOW_LEASE_STALE_MS) return false;
+    }
+    return true;
+  }
   if (probeIsAlive(record.supervisor_pid, probe)) return true;
   // A SIGKILLed supervisor cannot reap its detached executor group. Keep the
   // lease blocking until every published process identity is proven absent;
@@ -1523,6 +1540,97 @@ export function isRegisteredWorktree(repoRoot: string, candidateAbs: string): bo
     if (insideCommonReal !== repoCommonReal) return false;
     return true;
   } catch { return false; }
+}
+
+/**
+ * Holder-id prefixes of the kernel's own brief holds on the shared tree: a
+ * baseline capture or a merge-back. One list, two consumers — the staleness
+ * clause in `isWorkspaceLeaseAlive` and `withWorkspaceWindowLease`, which
+ * stamps the kernel's pid on exactly these. An executor's run never uses
+ * one of these prefixes, so nothing here can ever time out an agent.
+ */
+export const WINDOW_HOLDER_PREFIXES: readonly string[] = Object.freeze(['engine-tree:', 'merge-back:', 'baseline:']);
+
+export function isWindowHolder(holder: LeaseHolder | null | undefined): boolean {
+  return holder != null && typeof holder.id === 'string' && WINDOW_HOLDER_PREFIXES.some((p) => holder.id.startsWith(p));
+}
+
+/** How long a member waits for its turn at a window before giving up. */
+export const WINDOW_LEASE_WAIT_MS = 30_000;
+/** A pid-less window lease older than this is dead: its work was seconds of git. */
+export const WINDOW_LEASE_STALE_MS = 120_000;
+const WINDOW_LEASE_POLL_MS = 50;
+
+function sleepWindow(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Hold the shared-tree lease for one deterministic git window — a baseline
+ * capture or a merge-back — and release it whatever happens inside.
+ *
+ * Waits rather than refusing: once members run concurrently, contention at
+ * the windows is the normal case, not an error, and the wait is bounded by
+ * `WINDOW_LEASE_WAIT_MS` — the only clock in the system, and it bounds how
+ * long anyone waits for a turn, never how long anyone's work may take.
+ *
+ * Records the KERNEL's pid as the holder's liveness pid, because the kernel
+ * is the holder. Every other lease is probed by a pid; these used to have
+ * none, and a kernel killed mid-window left a lease nothing could prove
+ * dead. Now a dead kernel's window is reclaimed on the next acquire by the
+ * same probe as everything else, no timer involved.
+ */
+export function withWorkspaceWindowLease<T>(
+  opts: {
+    repoRoot: string;
+    holder: LeaseHolder;
+    /**
+     * `write` (the default) is a merge-back: it must never interleave with
+     * any other writer, so it waits out windows AND executors, and gives up
+     * at the bound. `read` is a baseline capture: it excludes other WINDOWS —
+     * a capture mid-merge-back is a torn baseline — but not a shared-mode
+     * EXECUTOR, which holds the lease for its whole run. An isolated delivery
+     * must not queue behind a writer that may run for hours; that it does not
+     * is the tested contract of isolation. A capture behind an executor reads
+     * unleased, exactly as every capture did before windows had a lease.
+     */
+    mode?: 'read' | 'write';
+    waitMs?: number;
+    now?: Date;
+  },
+  action: () => T,
+): T {
+  if (!isWindowHolder(opts.holder)) {
+    throw new WorkspaceLeaseError(`window lease holder "${opts.holder.id}" must use one of the window prefixes (${WINDOW_HOLDER_PREFIXES.join(', ')})`);
+  }
+  const deadline = Date.now() + (opts.waitMs ?? WINDOW_LEASE_WAIT_MS);
+  for (;;) {
+    try {
+      acquireWorkspaceLease({
+        repoRoot: opts.repoRoot,
+        workspaceMode: 'shared',
+        holder: opts.holder,
+        supervisorPid: process.pid,
+        executorPid: null,
+        processGroupId: null,
+        ...(opts.now != null ? { startedAt: opts.now, heartbeatAt: opts.now } : {}),
+      });
+      break;
+    } catch (err) {
+      if (!(err instanceof WorkspaceLeaseError)) throw err;
+      if (opts.mode === 'read') {
+        const live = readEffectiveLease(opts.repoRoot);
+        if (live != null && !isWindowHolder(live.holder)) return action();
+      }
+      if (Date.now() >= deadline) throw err;
+      sleepWindow(WINDOW_LEASE_POLL_MS);
+    }
+  }
+  try {
+    return action();
+  } finally {
+    try { releaseWorkspaceLease({ repoRoot: opts.repoRoot, holder: opts.holder }); } catch { /* released by teardown otherwise */ }
+  }
 }
 
 /**

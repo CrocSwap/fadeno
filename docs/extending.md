@@ -515,10 +515,13 @@ than guessing, preserves the workspace lease and inflight claim until
 child-group termination is proven (`close`), and is safe against adversarial
 process-group races. See `src/commands/cancel.ts`.
 
-**Executor deadlines and idle observability.** Every command route in the
-built-in catalog declares `timeout_ms: 1200000` (20 minutes); host routes may
-not declare it. Arbitrary user catalogs may omit it (no deadline). The
-supervisor owns the deadline: it sends SIGTERM to the executor process group
+**Executor deadlines and idle observability.** No route in the built-in
+catalog declares a deadline, and none is applied by default: an executor runs
+until it exits. Agent work has a long tail and a clock cannot tell slow from
+stuck, so ending a long attempt is a decision for whoever can look at it
+(`fadeno show`, then `fadeno cancel`). A deadline is opt-in — `timeout_ms` on a
+command route (host routes may not declare it) or `--timeout` per invocation.
+When one is set the supervisor owns it: it sends SIGTERM to the executor process group
 at `deadline_at = started_at + timeout_ms` and escalates to SIGKILL after the
 5-second grace. Lease and claim release still waits for `close`, so a timeout
 is not proven until the group is gone. CLI overrides: `--timeout <seconds>` on

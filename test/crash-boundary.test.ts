@@ -214,7 +214,11 @@ test('isolated dispatch: creates diff, omits workspace_changed, bypasses lease',
     routes: { standalone: { openai: { command: ['node', '-e', "require('node:fs').writeFileSync('isolated.txt','hello');"], } } },
   });
   // hold shared lease to prove bypass
-  acquireWorkspaceLease({ repoRoot: root, workspaceMode: 'shared', holder: { id: 'blocker', kind: 'ad-hoc' }, supervisorPid: 99999, probe: aliveProbe });
+  // A LIVE holder: pid 99999 was dead by the kernel's own probe, and a dead
+  // lease is reclaimed by the next window — which is not a bypass failure,
+  // it is liveness working. Bypass means not waiting on a writer that is
+  // really there.
+  acquireWorkspaceLease({ repoRoot: root, workspaceMode: 'shared', holder: { id: 'blocker', kind: 'ad-hoc' }, supervisorPid: process.pid, probe: aliveProbe });
   const result = runDispatch({ archetype: 'worker', prompt: 'isolated-task', isolate: true, repoRoot: root, userPathOptions: { env: { FADENO_HARNESS: 'standalone' } } });
   // diff must be present
   const rows = evidenceRows(root);

@@ -67,6 +67,7 @@ import {
   scanIgnoredOutput,
   verifyCarriedPaths,
   withIsolatedWorktree,
+  withWorkspaceWindowLease,
   WorkspaceLeaseError,
   type CarryFingerprint,
   type IgnoredOutputScan,
@@ -1415,7 +1416,17 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // `CapturedWorkspaceBaseline` for why capturing per-arm would be wrong.
   let capturedBaselineMemo: CapturedWorkspaceBaseline | null = null;
   const capturedBaseline = (): CapturedWorkspaceBaseline => {
-    if (capturedBaselineMemo == null) capturedBaselineMemo = captureWorkspaceBaseline(repoRoot);
+    // Under the window lease: an engine member's merge-back may be writing
+    // this tree right now, and a capture that reads it mid-apply hands the
+    // executor a baseline no state ever had — a file copied mid-write lands
+    // truncated in the baseline commit. The engine's capture already waited
+    // its turn; this one read unleased.
+    if (capturedBaselineMemo == null) {
+      capturedBaselineMemo = withWorkspaceWindowLease(
+        { repoRoot, holder: { id: `baseline:${dispatchId}`, kind: 'ad-hoc', dispatchId }, mode: 'read' },
+        () => captureWorkspaceBaseline(repoRoot),
+      );
+    }
     return capturedBaselineMemo;
   };
 
@@ -2544,35 +2555,11 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         // — but the apply is exactly the moment it can, so it must not race a
         // concurrent shared-mode writer.
         const mergeHolder: LeaseHolder = { id: `merge-back:${dispatchId}`, kind: 'ad-hoc', dispatchId };
-        let leaseTaken = false;
         try {
-          acquireWorkspaceLease({
-            repoRoot,
-            workspaceMode: 'shared',
-            holder: mergeHolder,
-            supervisorPid: null,
-            executorPid: null,
-          });
-          leaseTaken = true;
-        } catch (err) {
-          // Could not serialize, so do not apply. The diff is durable and can
-          // be ported once the tree settles — `fadeno shadow-apply` for a
-          // pair, `git apply --3way <diff_snapshot>` for an unpaired
-          // dispatch; applying anyway is the one outcome that could corrupt
-          // another writer.
-          // NOT `conflicted`. A conflict means git tried and left the tree
-          // partly applied; this means nothing was attempted and the
-          // workspace is untouched. Collapsing the two would make a reader
-          // go inspect `git status` after a run that never wrote anything,
-          // and the only thing distinguishing them would be `detail`, which
-          // is free-form human text nothing should parse.
-          primaryMerge = {
-            status: 'blocked',
-            detail: `nothing was applied: could not acquire the workspace lease for merge-back (${err instanceof Error ? err.message : String(err)})`,
-          };
-        }
-        if (leaseTaken) {
-          try {
+          // Waits its turn (bounded), stamps the kernel's pid, releases in a
+          // finally whatever the apply did — the same window the engine's
+          // merge-back uses, so the two cannot drift.
+          withWorkspaceWindowLease({ repoRoot, holder: mergeHolder }, () => {
             if (isolated.diff.diffBytes === 0) {
               primaryMerge = { status: 'clean', detail: 'nothing to apply: the primary made no changes' };
             } else {
@@ -2611,12 +2598,24 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
                 );
               }
             }
-          } finally {
-            // Released whatever happened, including on a conflict: the lease
-            // exists to serialize writers, not to hold the repo hostage while
-            // a human resolves markers.
-            try { releaseWorkspaceLease({ repoRoot, holder: mergeHolder }); } catch {}
-          }
+          });
+        } catch (err) {
+          // No turn at the window within its bound, so nothing was applied.
+          // The diff is durable and can be ported once the tree settles —
+          // `fadeno shadow-apply` for a pair, `git apply` for an unpaired
+          // dispatch; applying anyway is the one outcome that could corrupt
+          // another writer.
+          // NOT `conflicted`. A conflict means git tried and left the tree
+          // partly applied; this means nothing was attempted and the
+          // workspace is untouched. Collapsing the two would make a reader
+          // go inspect `git status` after a run that never wrote anything,
+          // and the only thing distinguishing them would be `detail`, which
+          // is free-form human text nothing should parse.
+          if (!(err instanceof WorkspaceLeaseError)) throw err;
+          primaryMerge = {
+            status: 'blocked',
+            detail: `nothing was applied: could not acquire the workspace lease for merge-back (${err.message})`,
+          };
         }
       }
       return isolated.result;

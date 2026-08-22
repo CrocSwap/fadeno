@@ -183,7 +183,7 @@ Options:
   --max-transitions <n>   (drive) Engine transition cap per invocation (default 50)
   --parallel <n>          (drive) Max concurrent deliveries per wave (1–16, default 1). Members overlap
                           via one git worktree each; without git they share the tree and serialize
-  --timeout <seconds>     (drive/dispatch) Hard deadline seconds; 0 disables route default (20 min)
+  --timeout <seconds>     (drive/dispatch) Hard executor deadline in seconds; none by default
   --input <Name=path>     (new-run) Supply a declared input (repeatable)
   --via <driver>          (dial/dispatch) Driver alias that delivers the model; on dispatch it
                           escalates one call onto that lane without moving the dial
@@ -465,7 +465,7 @@ Options:
                         keyed on the prompt digest, so a retry never re-rolls; challengers
                         run concurrently, capped by FADENO_SHADOW_MAX_LIVE (default 4), and
                         their worktrees are retained under .fadeno/local/shadow for review
-  --timeout <seconds>   Hard executor deadline seconds; 0 disables route default (20 min)
+  --timeout <seconds>   Hard executor deadline in seconds; none by default (0 also means none)
   --isolate             HOLD THE WORK OUT of your tree. A detached worktree, like the default, but
                         the diff is never applied back — it is left at the recorded diff_snapshot for
                         you to inspect or apply yourself. This is the flag's entire purpose now that
@@ -598,14 +598,17 @@ Options:
                            fall back to the shared tree and serialize on the repo-wide writer
                            lease whatever you pass. Host requests interleave either way.
                            See docs/experimental/permissions-and-isolation.md
-  --timeout <seconds>      Hard executor deadline seconds; 0 disables route default (20 min)
+  --timeout <seconds>      Hard executor deadline in seconds; none by default (0 also means none)
   --diagnostics            Persist bounded process output (32 KiB / 500 lines per stream) to diagnostics log
 
 Drive executes command-delivered steps itself and pauses for host dispatches and
 human gates. Resolve pauses with \`fadeno decide\` (decisions) or the dispatch-*
 host protocol, then re-run drive. Executor identity is snapshotted on first
-contact; resumed runs keep resolving against their recorded snapshot. Command routes
-default to a 20-minute deadline (timeout_ms: 1200000); --timeout 0 disables it.
+contact; resumed runs keep resolving against their recorded snapshot. Executors run
+with no deadline unless a route declares timeout_ms or --timeout sets one: an
+agent's work has a long tail, and a clock cannot tell slow from stuck. Watch a
+long attempt with \`fadeno show\` (idle output is reported, never acted on) and end
+one yourself with \`fadeno cancel\`.
 `,
   cancel: `fadeno cancel — cancel the active engine attempt for a run
 
@@ -2505,7 +2508,7 @@ function main(argv: string[]): number {
           `dispatch: executor ${result.executor} TIMED OUT — the kernel killed it at its ${deadline}deadline` +
             `${result.signal != null ? ` (${result.signal})` : ''}; the work did NOT finish. ` +
             `${result.outputBytes} bytes of output were captured before the kill. ` +
-            'Re-dispatch with --timeout <seconds> or --timeout 0 rather than into the same wall.',
+            'Re-dispatch with a larger --timeout, or none, rather than into the same wall.',
         );
       } else if (result.exitCode !== 0) {
         // CLI-level diagnosis on stderr — a quiet executor otherwise leaves
@@ -2715,7 +2718,7 @@ function main(argv: string[]): number {
                 `TIMED OUT: the kernel killed the executor at its ${deadline}deadline` +
                 `${result.signal != null ? ` (${result.signal})` : ''}; the work did NOT finish. ` +
                 `${result.outputBytes ?? 0} bytes of output were captured before the kill. ` +
-                'Re-dispatch with --timeout <seconds> or --timeout 0 rather than into the same wall.'
+                'Re-dispatch with a larger --timeout, or none, rather than into the same wall.'
               );
             }
             case 'failed':
