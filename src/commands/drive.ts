@@ -581,13 +581,37 @@ function recordOverrides(ctx: EngineCtx, binds: Map<string, string>): void {
       prior = null; // an unresolvable role is simply "unbound" before override
     }
     ctx.overrides.set(role, executor);
-    if (prior === executor) continue; // no-op override, no evidence needed
+    // Recorded even when the binding names the executor the role already
+    // resolved to. It used to `continue` here as a "no-op override, no
+    // evidence needed", and that reasoning had the purpose of the event
+    // backwards: it does not exist to explain a CHANGE of executor, it exists
+    // to explain the recorded SOURCE.
+    //
+    // `ctx.overrides` has one writer and two readers. The resolution snapshot
+    // reads it and stamps `source: binding`; this event is what lets `verify`
+    // recompute that. Suppressing the event left the snapshot asserting a
+    // provenance nothing could prove, so `verify` recomputed `repo` against a
+    // recorded `binding` and failed — permanently, on an append-only ledger.
+    // A run driven with `--bind role=<what it already resolves to>` could
+    // never verify again.
+    //
+    // Found by dogfood 2026-08-21, on a run whose three reviewers were bound
+    // explicitly and one of which happened to match its repo pin.
+    //
+    // A no-op binding is also not a nothing: pinning a role to its current
+    // executor is how a caller protects a run against a later dial change,
+    // which is a fact about the run worth carrying.
+    const changed = prior !== executor;
     appendEvent(
       ctx.runDir,
       { type: 'executor_override', step: null, role, executor, prior },
       ctx.now,
     );
-    ctx.act(`executor override: ${role} → ${executor} (was ${prior ?? 'unbound'})`);
+    ctx.act(
+      changed
+        ? `executor override: ${role} → ${executor} (was ${prior ?? 'unbound'})`
+        : `executor binding: ${role} → ${executor} (pinned to what it already resolved to)`,
+    );
   }
 }
 

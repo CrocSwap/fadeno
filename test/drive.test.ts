@@ -356,6 +356,44 @@ test('engine: schema repair — invalid output is parked as evidence, attempt 2 
   assert.match(finding(verify, 'actor-attempts').detail, /4 dispatch\(es\) across 3 actor call\(s\)/);
 });
 
+test('engine: a --bind that names the current executor is still recorded, and the run still verifies', (t) => {
+  // The dogfood bug, pinned. `recordOverrides` used to skip the
+  // `executor_override` event when the binding named the executor the role
+  // already resolved to — "no-op override, no evidence needed".
+  //
+  // It was needed. `ctx.overrides` has one writer and two readers: the
+  // resolution snapshot reads it and stamps `source: binding`, and `verify`
+  // recomputes that stamp from the events. With the event suppressed the
+  // snapshot asserted a provenance nothing could prove, so verify recomputed
+  // `binding` as the cascade source and failed — permanently, because the
+  // ledger is append-only. A run bound this way could never verify again.
+  //
+  // Caught on a real multi-executor run whose three reviewers were bound
+  // explicitly and one of which happened to match its repo pin. The binding
+  // that broke the run was the one that changed nothing.
+  const { root, runId } = seed(t, {
+    bindings: { worker: 'ok-worker', reviewer: 'ok-reviewer', '*': 'ok-worker' },
+  });
+
+  // Binds reviewer to exactly what it already resolves to.
+  runDrive({ run: runId, repoRoot: root, bind: ['reviewer=ok-reviewer'] });
+
+  const overrides = ofType(events(root, runId), 'executor_override');
+  const reviewerOverrides = overrides.filter((e) => e.extra.role === 'reviewer');
+  assert.ok(reviewerOverrides.length >= 1, 'a binding that changes nothing is still a binding, and still evidence');
+  assert.equal(reviewerOverrides[0]!.extra.executor, 'ok-reviewer');
+  assert.equal(reviewerOverrides[0]!.extra.prior, 'ok-reviewer', 'prior === executor is the whole point of this case');
+
+  runDecide({ run: runId, option: 'approve', repoRoot: root });
+  runDrive({ run: runId, repoRoot: root });
+  const verify = runVerify({ run: runId, repoRoot: root });
+  assert.equal(
+    verify.ok,
+    true,
+    `a no-op binding must not make a run unverifiable: ${verify.findings.filter((f) => f.status === 'fail').map((f) => f.detail).join('; ')}`,
+  );
+});
+
 test('engine: a dead executor pauses the run; explicit --bind substitution is the recorded recovery', (t) => {
   const { root, runId } = seed(t, {
     bindings: { worker: 'ok-worker', reviewer: 'dead', '*': 'ok-worker' },

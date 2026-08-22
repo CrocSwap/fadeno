@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.53";
+  if (true) return "0.6.0-rc.54";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -27269,13 +27269,15 @@ function recordOverrides(ctx, binds) {
       prior = null;
     }
     ctx.overrides.set(role, executor);
-    if (prior === executor) continue;
+    const changed = prior !== executor;
     appendEvent(
       ctx.runDir,
       { type: "executor_override", step: null, role, executor, prior },
       ctx.now
     );
-    ctx.act(`executor override: ${role} \u2192 ${executor} (was ${prior ?? "unbound"})`);
+    ctx.act(
+      changed ? `executor override: ${role} \u2192 ${executor} (was ${prior ?? "unbound"})` : `executor binding: ${role} \u2192 ${executor} (pinned to what it already resolved to)`
+    );
   }
 }
 function effectiveBinding(ctx, role) {

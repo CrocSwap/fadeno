@@ -50,8 +50,14 @@ models:
     effort: xhigh
   gemini:
     provider: google
+    # `high`, not `xhigh`, and this is a correctness fix rather than a taste
+    # one. The google route sets `effort_encoding: model-suffix`, so the dial's
+    # effort is appended to the id — and Antigravity publishes only
+    # `-high|-medium|-low`. A bare `fadeno dial judge gemini` therefore built
+    # `gemini-3.7-flash-xhigh`, which agy rejects with exit 1 after printing
+    # its model list. Found by dogfood 2026-08-21: the default was unusable.
     id: gemini-3.7-flash
-    effort: xhigh
+    effort: high
   muse:
     provider: muse
     id: muse-spark-1.2-contributor
@@ -165,9 +171,10 @@ routes:
     # claude-exec` spawns a fresh headless claude instead of delivering
     # in-session. This is how an expensive host session hands a whole side
     # task — planning included — to a cheaper claude (`fadeno dial director
-    # opus --via claude-exec`): the write variant can edit AND run the fadeno
-    # command family (scoped Bash grant, nothing wider), so a dispatched
-    # director can coordinate workers/reviewers itself.
+    # opus --via claude-exec`): this argv can edit AND run the fadeno command
+    # family (scoped Bash grant, nothing wider), so a dispatched director can
+    # coordinate workers/reviewers itself. Read the command to see that — the
+    # grant is IN the argv, not in metadata beside it.
     anthropic-exec:
       driver: claude-exec
       command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, "Bash(fadeno:*)" ]
@@ -332,9 +339,11 @@ routes:
 # to stderr. No models listing subcommand — no dial-time probe. Engine
 # repair re-asks travel on stdin, which file-reading drivers ignore — a
 # muse-dialed actor re-runs its recorded prompt instead (known limitation).
-# The base additionally uses `--disable-write --disable-shell`; a live probe
-# read the workspace, physically denied the write tool, and returned a report.
-# The write variant drops only those two denies.
+# A live probe with `--disable-write --disable-shell` read the workspace,
+# was physically denied the write tool, and still returned a report — so a
+# restricted muse lane genuinely works. It is not the default: a restriction
+# is its own named route, spelled out in its own command, never a second argv
+# hidden beside this one.
 #
 # openrouter → opencode. `--variant` is OpenCode's reasoning-effort dial and
 # accepts `default` as well as high/max/minimal, so {reasoning_effort}
@@ -365,10 +374,10 @@ routes:
 # policy.)
 # `director` is high-level planning/orchestration delegated to a (usually
 # cheaper) model: it decomposes a side task and coordinates workers/reviewers
-# itself, via the fadeno CLI. It mutates run ledgers and dispatch evidence, so
-# it requires write; dial it onto a command delivery whose write variant can
-# run fadeno (claude models: `--via claude-exec`; codex/grok/agy/opencode
-# routes already run shell-capable).
+# itself, via the fadeno CLI. That means it needs an argv that can actually run
+# `fadeno` — for claude models, `--via claude-exec` (the in-session host lane
+# cannot spawn one); codex/grok/agy/opencode routes are already shell-capable.
+# Nothing enforces this: check the command, not a declaration.
 archetypes:
   # `worker` and `generator` declare no policy — their only key was a write
   # posture, which no longer exists. They stay listed because membership in
