@@ -150,6 +150,7 @@ test('happy path: a completed run with a recomputable passing gate verifies clea
       'gate-coherence',
       'human-decisions',
       'actor-attempts',
+      'merge-conflict-rounds',
       'executor-bindings',
       'gate-eligible',
       'named-decisions',

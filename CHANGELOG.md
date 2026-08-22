@@ -6,6 +6,18 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed — merge-back works like a pull request (0.6.0-rc.60)
+
+The worktree is the branch, your working tree is main, and main moves while members run — sibling members merge back, you edit. The branch reconciles; main only ever receives a plain `git apply`, which lands every hunk or touches nothing. Your tree never carries a conflict marker from a merge-back again.
+
+- **Rebase before apply.** When the tree moved, the kernel commits the attempt's work, moves the worktree to your HEAD, replays your current uncommitted state as a fresh baseline (`rebased_onto` on the stamp), and cherry-picks the work on top — all in the worktree, all under the one write window, so a clean rebase's re-apply cannot refuse. Two members editing different lines of one file both land; neither knew about the other.
+- **`unresolved` replaces `conflicted`.** A rebase that conflicts stops with the worktree *retained* and the markers in it; the stamp names `conflicts`, the receipt names the worktree (`workspace`, `workspace_retained: true`). `conflicted` meant "your tree MAY be partly applied, go look" — nothing can produce it now, and the word is retired rather than reused with a different meaning.
+- **The branch owner resolves.** An engine attempt whose merge-back is unresolved fails as `merge_conflict` and the executor is re-invoked *in that worktree* as a new attempt with `attempt_reason: merge_conflict` — the request carries the conflict list, the rebased `baseline_commit`, and a `conflict_appendix`; a resumed session keeps its context, like a PR owner would. Two rounds. A round that leaves markers in the named files is unresolved again, because git would have applied them as content. Past the cap: `merge_back_failed`, worktree still retained.
+- **`fadeno attempt-accept <run> <actor-call-id>`** is the human's half. Resolve the markers in the retained worktree; it validates the executor's parked report (`attempt_output` on the failure) against the step's schema, merges — rebasing first if the tree moved again — writes the artifact, and records a `host_resolved` attempt with its `actor_completed`. The next `fadeno drive` continues; no executor re-runs. Refuses, touching nothing, while markers remain.
+- **`fadeno dispatches --merge <id|tag:…>`** is the same for an ad-hoc dispatch, which has no engine to re-invoke its executor: `unresolved` there means retained for whoever launched it. Records a `dispatch_merged` row; `--output` reads the later fact.
+- **`verify` gains `merge-conflict-rounds`:** every `merge_conflict` / `host_resolved` request must follow an `unresolved` failure of the previous attempt on the same call, retained worktree and all, naming the same conflicts and the same rebased baseline. A tamper fixture (`conflict-round-relabelled`) keeps it honest. Engine dispatch rows now carry `output_path` and `artifact_type` so an acceptance never recomputes them from a playbook that may have moved on.
+- **Retired with it:** the `does not exist in index` working-tree fallback from rc.58 — a plain apply handles an untracked path natively, so the case it worked around no longer exists.
+
 ### Changed — no executor deadline by default, and the kernel's window leases can die (0.6.0-rc.59)
 
 Two decisions from talking the 20-minute ceiling through, instead of the fix the previous entry deferred.

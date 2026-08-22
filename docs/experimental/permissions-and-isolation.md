@@ -254,31 +254,66 @@ Four points where the engine differs from a dispatch, each for a reason:
   Engine members are not being compared, and a member admitted after an earlier
   one merged back must see that work rather than a snapshot predating it.
 - **Capture and merge-back hold the writer lease, and wait for it.** Both touch
-  the shared tree, and reading a tree mid-`git apply --3way` yields a
-  half-applied patch. `acquireWorkspaceLease` refuses immediately when held,
+  the shared tree, and a capture that reads a file mid-apply lands a truncated
+  copy in the baseline. `acquireWorkspaceLease` refuses immediately when held,
   which is wrong here — contention is the normal case once members run
-  concurrently, not an error — so the engine waits.
-- **A path the workspace holds untracked merges back through the working
-  tree.** The baseline copies the caller's untracked files into the worktree
-  and commits them, so an attempt's edit to one of them arrives as a
-  modification of a *tracked* file — and `git apply --3way` implies `--index`,
-  which refuses the whole patch with `does not exist in index` because the
-  caller's index has no such entry. The refusal is atomic: the tracked hunks
-  beside it are dropped too, and a receipt that called this `conflicted` sent
-  the reader to inspect a tree nothing had touched (seen live 2026-08-22, a
-  worker editing a file in an untracked directory). Adding the path to the
-  caller's index would mutate an index nobody asked to have mutated — the
-  baseline capture avoids `git add` in the caller's repo for that reason — so
-  `applyMergeBackDiff` re-applies to the working tree alone, stamps `clean`
-  with a detail naming the paths and saying they landed unstaged and without
-  3-way reconciliation, and stamps `blocked` (tree untouched) rather than
-  `conflicted` if even that refuses. Both merge-backs, ad-hoc dispatch and
-  engine attempt, go through that one helper.
-- **A merge-back that is not `clean` FAILS the attempt** (`merge_back_failed`),
-  where a dispatch merely stamps it. The next step of a run reads the
-  workspace, so an `actor_completed` over a diff that never applied would tell
-  it the change is there. The diff artifact is durable and named on the
-  receipt, so this is recoverable rather than merely reported.
+  concurrently, not an error — so `withWorkspaceWindowLease` waits its turn
+  (30 s, the only clock in the system: it bounds waiting for a turn, never
+  anyone's work), stamps the kernel's pid so a kernel killed mid-window leaves
+  a lease the next acquire can prove dead, and releases in a `finally`. A
+  capture (`mode: 'read'`) waits only behind other windows, never behind a
+  shared-mode executor's lease — an isolated delivery must not queue behind a
+  writer that may run for hours.
+- **Merge-back works like a pull request.** The worktree is the branch, the
+  caller's working tree is main, and main moves while members run — sibling
+  members merge back, the human edits. The branch reconciles; main only ever
+  receives a plain `git apply`, which lands every hunk or touches nothing, with
+  no index involved and no conflict markers. One atomic turn under the write
+  window lease (`settleIsolatedWork`, shared by the engine and the ad-hoc
+  dispatch): apply; if the tree moved, rebase the worktree onto it — commit
+  the attempt's work, move the worktree to the caller's HEAD, replay the
+  caller's current uncommitted state as a fresh baseline (`rebased_onto` on
+  the stamp), cherry-pick the work on top; if that is clean, re-collect and
+  apply (which cannot refuse while the lease is held, because the caller's
+  tree *is* the new baseline); if it conflicts, stop with the worktree
+  **retained** and the markers in it. Three stamps: `clean`, `unresolved`
+  (conflicts in the retained worktree, caller's tree untouched), `blocked`
+  (nothing applied, no worktree work possible). There is no `conflicted` any
+  more — that meant "the caller's tree MAY be partly applied, go look", and
+  nothing can produce it now.
+
+  Two live failures this retired (2026-08-22). `git apply --3way` implies
+  `--index`, so an edit to a path the caller held untracked — carried into the
+  worktree by the baseline, hence tracked there — refused the whole patch with
+  `does not exist in index`, tracked hunks included; a plain apply handles
+  untracked paths natively. And `--3way` wrote markers into the *caller's*
+  tree on failure, which is why a receipt had to say `conflicted`.
+- **The branch owner resolves conflicts.** An engine attempt whose merge-back
+  is `unresolved` fails as `merge_conflict` (its report parked as
+  `attempt_output`, its worktree named by `workspace` + `workspace_retained`)
+  and the executor is re-invoked *in that worktree* as a new attempt with
+  `attempt_reason: merge_conflict` — the request names the `conflicts`, the
+  rebased `baseline_commit`, and a `conflict_appendix` telling the executor
+  where the markers are; a resumed session keeps its context, like a PR owner.
+  The worktree moves to the round's attempt name; its baseline is the rebase's,
+  never a fresh capture. Two rounds (`MAX_MERGE_CONFLICT_ROUNDS`); a round that
+  leaves markers in the named files is `unresolved` again, because git would
+  have applied them as content. Past the cap the attempt fails as
+  `merge_back_failed` with the worktree still retained, and
+  **`fadeno attempt-accept <run> <actor-call-id>`** is the human's half:
+  resolve the markers there, and it validates the parked report, merges
+  (rebasing first if needed), writes the artifact, and records a
+  `host_resolved` attempt with its receipt — no executor re-runs. An ad-hoc
+  dispatch has no engine to re-invoke, so `unresolved` there means *retained
+  for whoever launched it*: resolve, then `fadeno dispatches --merge <id|tag>`
+  applies and records a `dispatch_merged` row. `verify`'s
+  `merge-conflict-rounds` pairs every `merge_conflict` / `host_resolved`
+  request with the unresolved failure it follows and the same conflict list.
+- **A merge-back that is not `clean` never completes the attempt.** The next
+  step of a run reads the workspace, so an `actor_completed` over a diff that
+  never applied would tell it the change is there. The diff artifact is
+  durable and named on the receipt, so this is recoverable rather than merely
+  reported.
 - **An interrupted attempt's worktree is retained, not cleaned up.** A killed
   drive never collected the diff, so the worktree holds the member's work and
   nothing else does. The recovery receipt names it and leaves it alone.

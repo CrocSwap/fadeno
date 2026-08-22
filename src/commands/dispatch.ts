@@ -1,8 +1,8 @@
 import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import {
   ConstraintError,
@@ -62,8 +62,6 @@ import {
   isWorkspaceLeaseAlive,
   readWorkspaceLease,
   releaseWorkspaceLease,
-  applyMergeBackDiff,
-  mergeBackReapplyCommand,
   scanIgnoredOutput,
   verifyCarriedPaths,
   withIsolatedWorktree,
@@ -76,6 +74,16 @@ import {
   type WorkspaceMode,
   type WorktreeCarryMechanism,
 } from '../lib/workspace-lease.ts';
+import {
+  applyWorkspaceBaseline,
+  captureWorkspaceBaseline,
+  mergeBackReapplyCommand,
+  settleIsolatedWork,
+  type CapturedWorkspaceBaseline,
+  type MergeBackResult,
+} from '../lib/workspace-baseline.ts';
+// Re-exported for callers that learned these here before they moved to the lib.
+export { applyWorkspaceBaseline, captureWorkspaceBaseline, type CapturedWorkspaceBaseline } from '../lib/workspace-baseline.ts';
 import { ensureFadenoIgnore } from '../lib/source-control.ts';
 import type { UserPathOptions } from '../lib/user-paths.ts';
 import {
@@ -834,21 +842,6 @@ function workspaceFingerprint(repoRoot: string): string | null {
   return sha256Hex(`${status.stdout ?? ''}\0${head.stdout ?? ''}`);
 }
 
-/** Never copy the shadow worktree's own home into itself — recursive, and the
- * one path a repo's own `.gitignore` cannot be trusted to exclude, since a
- * user repo may commit `.fadeno/` definitions while ignoring only some
- * subpaths. Checked explicitly rather than delegated to `--exclude-standard`.
- */
-function isUnderShadowHome(repoRelPath: string): boolean {
-  return repoRelPath === '.fadeno/local' || repoRelPath.startsWith('.fadeno/local/');
-}
-
-function gitFailureReason(result: { error?: Error | null; status: number | null; stderr?: string | Buffer | null }): string {
-  if (result.error != null) return result.error.message;
-  const stderr = String(result.stderr ?? '').trim();
-  if (stderr.length > 0) return stderr;
-  return `exit ${result.status ?? 'unknown'}`;
-}
 
 // Declared `worktree_carry:` paths and the mechanism that carries them
 // (reflink → hardlink → copy) now live in `workspace-lease.ts`
@@ -883,155 +876,6 @@ function gitFailureReason(result: { error?: Error | null; status: number | null;
  * a refusal — a dirty tree that cannot be replayed must never silently
  * produce a skewed pair.
  */
-/**
- * Fixed author/committer date for every pair baseline commit.
- *
- * Not a timestamp — an identity. Both arms must hash to the same commit for
- * `baseline_commit` to mean what it claims, and a real clock would defeat
- * that. Never read this back as a time.
- */
-const BASELINE_COMMIT_DATE = '2000-01-01T00:00:00Z';
-
-/**
- * The caller's pre-spawn workspace, captured ONCE.
- *
- * Both arms of a pair replay this same capture. Capturing per-arm instead
- * would read the tree at two different moments — the challenger is
- * materialized before the primary's worktree is — so a file written between
- * the two reads would land in one arm's baseline and not the other's, which
- * is precisely the asymmetry the shared baseline exists to remove.
- */
-export interface CapturedWorkspaceBaseline {
-  /** `git diff HEAD --binary` over tracked content. Empty when clean. */
-  patch: Buffer;
-  /** Untracked-but-unignored paths; `git diff` has no notion of these. */
-  untrackedFiles: string[];
-}
-
-export function captureWorkspaceBaseline(repoRoot: string): CapturedWorkspaceBaseline {
-  const diffRes = spawnSync('git', ['-C', repoRoot, 'diff', 'HEAD', '--binary'], {
-    encoding: 'buffer',
-    maxBuffer: SPAWN_MAX_BUFFER,
-  });
-  if (diffRes.error != null || diffRes.status !== 0) {
-    throw new Error(`could not capture the primary workspace's pre-spawn state: ${gitFailureReason(diffRes)}`);
-  }
-  const untrackedRes = spawnSync('git', ['-C', repoRoot, 'ls-files', '--others', '--exclude-standard', '-z'], {
-    encoding: 'utf8',
-    maxBuffer: SPAWN_MAX_BUFFER,
-  });
-  if (untrackedRes.error != null || untrackedRes.status !== 0) {
-    throw new Error(`could not list the primary workspace's untracked files: ${gitFailureReason(untrackedRes)}`);
-  }
-  return {
-    patch: diffRes.stdout ?? Buffer.alloc(0),
-    untrackedFiles: String(untrackedRes.stdout ?? '')
-      .split('\0')
-      .filter((p) => p.length > 0)
-      .filter((p) => !isUnderShadowHome(p)),
-  };
-}
-
-/**
- * Replay one captured baseline into one worktree and commit it.
- *
- * The commit is made with a FIXED author/committer identity and date, so two
- * worktrees cut from the same HEAD and given the same capture produce the
- * byte-identical commit object — and therefore the same sha. That is what
- * lets `baseline_commit` be one value genuinely shared by both arms rather
- * than one arm's value copied onto the other's row. The caller asserts the
- * equality; a mismatch means the arms did not start from the same state and
- * the pair is not a fair test.
- */
-export function applyWorkspaceBaseline(
-  repoRoot: string,
-  worktreeAbs: string,
-  captured: CapturedWorkspaceBaseline,
-  /** Names the baseline in its commit subject. A pair passes its `pairId` so
-   * both arms produce the byte-identical commit object the shared
-   * `baseline_commit` depends on; an unpaired isolated delivery passes its
-   * dispatch id, which has no counterpart to match. */
-  baselineRef: string,
-  armLabel: string,
-): string {
-  const patch = captured.patch;
-
-  if (patch.length > 0) {
-    const applyRes = spawnSync('git', ['-C', worktreeAbs, 'apply', '--index'], {
-      input: patch,
-      encoding: 'utf8',
-      maxBuffer: SPAWN_MAX_BUFFER,
-    });
-    if (applyRes.error != null || applyRes.status !== 0) {
-      throw new Error(`could not replay the caller's pre-spawn changes into the ${armLabel} worktree: ${gitFailureReason(applyRes)}`);
-    }
-  }
-
-  let copiedAny = false;
-  for (const relPath of captured.untrackedFiles) {
-    try {
-      const srcAbs = join(repoRoot, relPath);
-      const destAbs = join(worktreeAbs, relPath);
-      mkdirSync(dirname(destAbs), { recursive: true });
-      copyFileSync(srcAbs, destAbs);
-      // copyFileSync does not preserve mode bits, notably the executable
-      // one: an untracked helper script (a repo's own build/test entry
-      // point is a common case) would otherwise land non-executable in the
-      // challenger's worktree, so the challenger could not run something
-      // the primary can — the same class of asymmetry `worktree_carry`
-      // exists to remove for gitignored paths. Match the source file's mode
-      // explicitly rather than trust the copy to carry it.
-      chmodSync(destAbs, statSync(srcAbs).mode);
-      copiedAny = true;
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      throw new Error(`could not copy untracked file "${relPath}" into the ${armLabel} worktree: ${reason}`);
-    }
-  }
-
-  if (patch.length === 0 && !copiedAny) {
-    // Nothing to replay: the primary's tree was clean, so the baseline is
-    // simply the commit the worktree was already cut from.
-    const headRes = spawnSync('git', ['-C', worktreeAbs, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
-    if (headRes.error != null || headRes.status !== 0) {
-      throw new Error(`could not resolve the ${armLabel} worktree's HEAD: ${gitFailureReason(headRes)}`);
-    }
-    return String(headRes.stdout ?? '').trim();
-  }
-
-  const addRes = spawnSync('git', ['-C', worktreeAbs, 'add', '-A'], { encoding: 'utf8' });
-  if (addRes.error != null || addRes.status !== 0) {
-    throw new Error(`could not stage the workspace baseline in the ${armLabel} worktree: ${gitFailureReason(addRes)}`);
-  }
-  // Fixed identity AND fixed dates. A commit object hashes its author and
-  // committer timestamps, so letting them default to "now" would give the two
-  // arms different baseline shas for identical content — and the shared
-  // `baseline_commit` would become a fiction maintained by copying one arm's
-  // value onto the other's row. The epoch constant is arbitrary but must stay
-  // stable: it is an identity, not a time, and nothing reads it as one.
-  const commitRes = spawnSync('git', [
-    '-C', worktreeAbs,
-    '-c', 'user.name=fadeno',
-    '-c', 'user.email=fadeno@localhost',
-    'commit', '--no-verify', '--no-gpg-sign', '-m', `fadeno workspace baseline ${baselineRef}`,
-  ], {
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      GIT_AUTHOR_DATE: BASELINE_COMMIT_DATE,
-      GIT_COMMITTER_DATE: BASELINE_COMMIT_DATE,
-    },
-  });
-  if (commitRes.error != null || commitRes.status !== 0) {
-    throw new Error(`could not commit the workspace baseline in the ${armLabel} worktree: ${gitFailureReason(commitRes)}`);
-  }
-
-  const shaRes = spawnSync('git', ['-C', worktreeAbs, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
-  if (shaRes.error != null || shaRes.status !== 0) {
-    throw new Error(`could not resolve the ${armLabel} worktree's baseline commit: ${gitFailureReason(shaRes)}`);
-  }
-  return String(shaRes.stdout ?? '').trim();
-}
 
 /**
  * One ad-hoc dispatch: resolve archetype → executor with the kernel chain
@@ -2385,10 +2229,9 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   //   clean      — applied, nothing left to do
   //   conflicted — git tried; the tree MAY be partially applied
   //   blocked    — never attempted; the tree is untouched
-  let primaryMerge: {
-    status: 'clean' | 'conflicted' | 'blocked';
-    detail?: string;
-  } | null = null;
+  let primaryMerge: MergeBackResult | null = null;
+  /** The primary's worktree, when a merge-back ended `unresolved` and kept it. */
+  let isolatedWorktreeRetained: string | null = null;
 
   // stdout is the snapshot fd so bytes survive a mid-flight SIGTERM;
   // encoding/maxBuffer then apply to stderr only. input still feeds stdin.
@@ -2473,6 +2316,73 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         diffRel,
         diffAbs: join(repoRoot, diffRel),
         onEcho: opts.onEcho,
+        // ---- Merge-back, inside the worktree's lifetime -------------------
+        // Keyed on WHO asked for the worktree, not on whether a pair exists.
+        // `--isolate` is an explicit request to keep the work out of the
+        // tree, and auto-applying it would break that contract. Every other
+        // isolated delivery was isolated by the kernel's choice rather than
+        // the caller's — the caller asked for a dispatch, and leaving its
+        // work stranded in a discarded worktree would silently change what
+        // `fadeno dispatch --archetype worker` does to the repo.
+        //
+        // Runs here, with the worktree intact, because a merge-back that
+        // finds the tree moved rebases IN the worktree, and one that ends
+        // `unresolved` keeps it for whoever resolves the markers.
+        settle: isolationOrigin !== 'kernel' ? undefined : (worktreeAbs, diff) => {
+          // The lease, held across the whole turn — apply, rebase, re-apply
+          // — and nothing else. An isolated primary takes none while it works.
+          const mergeHolder: LeaseHolder = { id: `merge-back:${dispatchId}`, kind: 'ad-hoc', dispatchId };
+          let finalDiff = diff;
+          try {
+            withWorkspaceWindowLease({ repoRoot, holder: mergeHolder }, () => {
+              const settled = settleIsolatedWork({
+                repoRoot,
+                worktreeAbs,
+                diff,
+                baselineRef: `${dispatchId}:rebase`,
+                armLabel: 'primary',
+              });
+              primaryMerge = settled.stamp;
+              finalDiff = settled.diff;
+            });
+          } catch (err) {
+            // No turn at the window within its bound, so nothing was
+            // applied. The diff is durable and can be ported once the tree
+            // settles; applying anyway is the one outcome that could corrupt
+            // another writer.
+            if (!(err instanceof WorkspaceLeaseError)) throw err;
+            primaryMerge = {
+              status: 'blocked',
+              detail: `nothing was applied: could not acquire the workspace lease for merge-back (${err.message})`,
+            };
+          }
+          const stamp = primaryMerge as MergeBackResult;
+          const worktreeRel = relative(repoRoot, worktreeAbs).split('\\').join('/');
+          if (stamp.status === 'clean') {
+            opts.onEcho?.(`merged back: ${finalDiff.diffBytes} bytes applied to the workspace${stamp.detail != null ? ` (${stamp.detail})` : ''}`);
+          } else if (stamp.status === 'unresolved') {
+            const conflicts = stamp.conflicts ?? [];
+            opts.onEcho?.(
+              `merge-back UNRESOLVED — the dispatch's work conflicts with the workspace in ${conflicts.length} file(s): ${conflicts.join(', ')}. ` +
+                `The worktree is retained at ${worktreeRel} with conflict markers; the workspace is untouched. Resolve the markers there, ` +
+                `then \`fadeno dispatches --merge ${dispatchId.slice(0, 8)}\` to apply the resolved work.`,
+            );
+          } else {
+            // Two recovery pointers, because there are two shapes of isolated
+            // delivery. A pair has a `shadow-apply` entry point that knows
+            // both arms and their baselines; an unpaired dispatch gets the raw
+            // equivalent. Naming a command that cannot resolve would be worse
+            // than naming none.
+            const recovery = pendingShadow != null
+              ? `Resolve with \`fadeno shadow-apply ${pendingShadow.pairId.slice(0, 8)} --arm primary\``
+              : `Resolve with \`${mergeBackReapplyCommand(finalDiff.diffRel)}\``;
+            opts.onEcho?.(
+              `merge-back BLOCKED — nothing was applied, the workspace is untouched, and the dispatch's work is kept at ` +
+                `${finalDiff.diffRel} (${stamp.detail ?? 'no detail'}). ${recovery} once the tree settles.`,
+            );
+          }
+          return { retain: stamp.status === 'unresolved', diff: finalDiff };
+        },
       }, (worktreeAbs) => {
         // Carry before the executor ever runs, same ordering reason as the
         // shadow side: a failed carry must refuse before the more expensive
@@ -2533,91 +2443,9 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         return spawnedInWorktree;
       });
       isolatedDiffRel = isolated.diff.diffRel;
+      if (isolated.retained) isolatedWorktreeRetained = isolated.worktreeRel;
       isolatedDiffBytes = isolated.diff.diffBytes;
       opts.onEcho?.(`isolated diff: ${isolated.diff.diffBytes} bytes → ${isolated.diff.diffRel}`);
-      // ---- Merge-back -----------------------------------------------------
-      // Keyed on WHO asked for the worktree, not on whether a pair exists.
-      //
-      // `--isolate` is an explicit request to keep the work out of the tree,
-      // and auto-applying it would break that contract. Every other isolated
-      // delivery was isolated by the kernel's choice rather than the
-      // caller's — the caller asked for a dispatch, and leaving its work
-      // stranded in a discarded worktree would silently change what `fadeno
-      // dispatch --archetype worker` does to the repo.
-      //
-      // This used to read `pendingShadow != null`, which answered the wrong
-      // question: it made merge-back depend on a probabilistic shadow roll, so
-      // the one case it could not describe — kernel isolation with no pair —
-      // was resolved by refusing to isolate at all.
-      if (isolationOrigin === 'kernel') {
-        // The lease, held across the apply and nothing else. An isolated
-        // primary takes none while it works — it cannot reach the shared tree
-        // — but the apply is exactly the moment it can, so it must not race a
-        // concurrent shared-mode writer.
-        const mergeHolder: LeaseHolder = { id: `merge-back:${dispatchId}`, kind: 'ad-hoc', dispatchId };
-        try {
-          // Waits its turn (bounded), stamps the kernel's pid, releases in a
-          // finally whatever the apply did — the same window the engine's
-          // merge-back uses, so the two cannot drift.
-          withWorkspaceWindowLease({ repoRoot, holder: mergeHolder }, () => {
-            if (isolated.diff.diffBytes === 0) {
-              primaryMerge = { status: 'clean', detail: 'nothing to apply: the primary made no changes' };
-            } else {
-              // `--3way` first, working-tree apply when the only refusal is
-              // a path the workspace holds untracked, nothing reverted on a
-              // conflict: the rules live with the helper so the engine's
-              // merge-back cannot drift from this one.
-              const merged = applyMergeBackDiff({ repoRoot, diffAbs: join(repoRoot, isolated.diff.diffRel) });
-              primaryMerge = merged.stamp;
-              if (merged.stamp.status === 'clean') {
-                opts.onEcho?.(
-                  `merged back: ${isolated.diff.diffBytes} bytes applied to the workspace` +
-                    (merged.stamp.detail != null ? ` (${merged.stamp.detail})` : ''),
-                );
-              } else {
-                // Two recovery pointers, because there are two shapes of
-                // isolated delivery now. A pair has a `shadow-apply` entry
-                // point that knows both arms and their baselines; an unpaired
-                // dispatch has no pair id to name, so it gets the raw
-                // equivalent — the same apply against the same baseline
-                // commit, which is exactly what `shadow-apply` would run.
-                // Naming a command that cannot resolve would be worse than
-                // naming none.
-                const recovery = pendingShadow != null
-                  ? `Resolve with \`fadeno shadow-apply ${pendingShadow.pairId.slice(0, 8)} --arm primary\``
-                  : `Resolve with \`${mergeBackReapplyCommand(isolated.diff.diffRel, merged.untracked)}\``;
-                // `conflicted` may have left staged hunks and markers behind;
-                // `blocked` touched nothing. Say which, because the first
-                // sends the reader to `git status` and the second must not.
-                opts.onEcho?.(
-                  merged.stamp.status === 'conflicted'
-                    ? `merge-back CONFLICTED — the dispatch's work is kept at ${isolated.diff.diffRel}. ` +
-                      `${recovery} once the tree settles; inspect \`git status\` first, some hunks may already be staged.`
-                    : `merge-back BLOCKED — nothing was applied, the workspace is untouched, and the dispatch's work is kept at ` +
-                      `${isolated.diff.diffRel} (${merged.stamp.detail ?? 'no detail'}). ${recovery} once the tree settles.`,
-                );
-              }
-            }
-          });
-        } catch (err) {
-          // No turn at the window within its bound, so nothing was applied.
-          // The diff is durable and can be ported once the tree settles —
-          // `fadeno shadow-apply` for a pair, `git apply` for an unpaired
-          // dispatch; applying anyway is the one outcome that could corrupt
-          // another writer.
-          // NOT `conflicted`. A conflict means git tried and left the tree
-          // partly applied; this means nothing was attempted and the
-          // workspace is untouched. Collapsing the two would make a reader
-          // go inspect `git status` after a run that never wrote anything,
-          // and the only thing distinguishing them would be `detail`, which
-          // is free-form human text nothing should parse.
-          if (!(err instanceof WorkspaceLeaseError)) throw err;
-          primaryMerge = {
-            status: 'blocked',
-            detail: `nothing was applied: could not acquire the workspace lease for merge-back (${err.message})`,
-          };
-        }
-      }
       return isolated.result;
     };
 
@@ -2814,6 +2642,12 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // meaning the same thing would give a reader two spellings for one fact.
   if (primaryMerge != null) {
     row.primary_merge = primaryMerge;
+  }
+  // Where the work still is, when it did not land. Absent otherwise: a
+  // torn-down worktree is not a place.
+  if (isolatedWorktreeRetained != null) {
+    row.workspace = isolatedWorktreeRetained;
+    row.workspace_retained = true;
   }
   // What actually happened, alongside the intent the request row recorded.
   // Written only when the two differ, so an ordinary dispatch's rows are

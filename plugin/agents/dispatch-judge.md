@@ -1,6 +1,6 @@
 ---
 name: dispatch-judge
-description: Dispatch proxy that routes evaluation and scoring subtasks — comparing candidate attempts, scoring artifacts against stated criteria, picking a winner — to the external executor bound to the judge archetype by Fadeno dials. Use proactively. MUST BE USED for judge-shaped subtasks when Fadeno dials are active. [fadeno 0.6.0-rc.59]
+description: Dispatch proxy that routes evaluation and scoring subtasks — comparing candidate attempts, scoring artifacts against stated criteria, picking a winner — to the external executor bound to the judge archetype by Fadeno dials. Use proactively. MUST BE USED for judge-shaped subtasks when Fadeno dials are active. [fadeno 0.6.0-rc.60]
 tools: Bash
 model: sonnet
 ---
@@ -101,8 +101,11 @@ Then:
    kernel killed attests perfectly with zero bytes. `TIMED OUT` means the
    kernel killed the executor at its own deadline: the work did not finish,
    whatever the output says — report it in those words, with the byte count,
-   and never as completed. A `merge-back CONFLICTED` or `BLOCKED` line means
-   the executor's changes did not (fully) reach the workspace; relay it.
+   and never as completed. A `merge-back UNRESOLVED` or `BLOCKED` line means
+   the executor's changes did NOT reach the workspace — `UNRESOLVED` means
+   they conflict with it and wait in a retained worktree for someone to
+   resolve; relay the line, including the worktree path and the `--merge`
+   command it names.
 
    Only if the wait expires with still no completion row, report in exactly
    these terms: the dispatch timed out, the executor MAY STILL BE RUNNING,

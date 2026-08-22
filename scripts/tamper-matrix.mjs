@@ -215,6 +215,23 @@ const FIXTURES = [
     },
   },
   {
+    id: 'conflict-round-relabelled',
+    what: 'a merge_conflict round whose prior failure no longer says merge_conflict',
+    expect: ['merge-conflict-rounds'],
+    apply(dir) {
+      let note = null;
+      const ok = mutateEvent(
+        dir,
+        (e) => e.type === 'actor_failed' && e.reason === 'merge_conflict',
+        (e) => {
+          e.reason = 'exit_nonzero';
+          note = `${e.actor_call_id} attempt ${e.attempt}: actor_failed reason merge_conflict → exit_nonzero`;
+        },
+      );
+      return ok ? note : null;
+    },
+  },
+  {
     id: 'terminal-projection-disagrees',
     what: 'run.yaml projects a status the events do not support',
     expect: ['terminal-status', 'terminal-events'],

@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
-import { runDrive } from '../src/commands/drive.ts';
+import { runAttemptAccept, runDrive } from '../src/commands/drive.ts';
 import { runInit } from '../src/commands/init.ts';
 import { runNewRun } from '../src/commands/new-run.ts';
 import { runVerify } from '../src/commands/verify.ts';
@@ -991,7 +991,208 @@ test('parallel: a member that edits a file the caller holds untracked still merg
   assert.equal(ofType(all, 'actor_failed').length, 0, 'no merge_back_failed');
   const a = ofType(all, 'actor_completed').find((e) => e.extra.actor === 'reviewer_a')!;
   const stamp = a.extra.merge_back as { status: string; detail?: string };
-  assert.equal(stamp.status, 'clean');
-  assert.match(stamp.detail ?? '', /pmcap\/a\.txt is untracked in the workspace/);
+  assert.deepEqual(stamp, { status: 'clean' }, 'a plain apply handles an untracked path natively — nothing to explain');
   assert.equal(runVerify({ run: runId, repoRoot: root }).ok, true);
+});
+
+// ---------------------------------------------------------------------------
+// Merge-back on the pull-request model: the member's worktree is the branch,
+// the caller's tree is main, and main moves while members run. The branch
+// reconciles. Main only ever receives a plain apply that lands whole.
+// ---------------------------------------------------------------------------
+
+const GIT_T_ENV = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+  GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@invalid',
+};
+function commitShared(root: string, content: string): void {
+  writeFileSync(join(root, 'shared.txt'), content);
+  spawnSync('git', ['add', '-A'], { cwd: root, env: GIT_T_ENV });
+  spawnSync('git', ['commit', '-m', 'shared'], { cwd: root, env: GIT_T_ENV });
+}
+/** A member that edits one line of shared.txt, and — when it finds conflict
+ * markers there — resolves them (or, with `resolve: false`, leaves them). */
+function editor(name: string, line: number, resolve: boolean): string[] {
+  return ['node', '-e',
+    "const fs=require('node:fs');const p='shared.txt';const cur=fs.readFileSync(p,'utf8');" +
+    `if(cur.includes('<<<<<<<')){if(${resolve}){const body=cur.split('\\n').filter(l=>!/^(<{7}|={7}|>{7})/.test(l)&&!l.startsWith('from '));body.unshift('resolved by ${name}');fs.writeFileSync(p,body.join('\\n'));}}` +
+    `else{const lines=cur.split('\\n');lines[${line - 1}]='from ${name}';fs.writeFileSync(p,lines.join('\\n'));}` +
+    `process.stdout.write(JSON.stringify(${VALID_REVIEW}))`];
+}
+
+test('merge-back: two members edit the same line — one lands, the other gets a conflict round in its retained worktree and resolves it', (t) => {
+  const { root, runId } = seedMap(t, {
+    'ro-a': { command: editor('a', 1, true) },
+    'ro-b': { command: editor('b', 1, true) },
+  }, MAP_PLAYBOOK, { git: true });
+  commitShared(root, 'original\nline2\nline3\n');
+
+  assert.equal(runDrive({ run: runId, repoRoot: root, parallel: 2 }).outcome, 'terminal');
+
+  const all = events(root, runId);
+  const conflictFails = ofType(all, 'actor_failed').filter((e) => e.extra.reason === 'merge_conflict');
+  assert.equal(conflictFails.length, 1, 'exactly one member lost the race');
+  assert.equal(ofType(all, 'actor_failed').filter((e) => e.extra.reason === 'merge_back_failed').length, 0);
+  const lost = conflictFails[0]!;
+  const loser = String(lost.extra.actor_call_id);
+  const mb = lost.extra.merge_back as { status: string; conflicts?: string[]; rebased_onto?: string };
+  assert.equal(mb.status, 'unresolved');
+  assert.deepEqual(mb.conflicts, ['shared.txt']);
+  assert.ok(typeof mb.rebased_onto === 'string' && mb.rebased_onto.length === 40, 'rebased onto a real commit');
+  assert.match(String(lost.extra.attempt_output), /^artifacts\/attempts\//, "the executor's report is parked, not discarded");
+  assert.match(String(lost.extra.error), /round 1 of 2/);
+
+  // The round: attempt 2, reason merge_conflict, in the SAME worktree moved to
+  // the new attempt's name, on the rebased baseline, with the conflict named
+  // on the request and in the appendix.
+  const round = ofType(all, 'actor_dispatched').find((e) => e.extra.actor_call_id === loser && e.extra.attempt === 2)!;
+  assert.ok(round, 'a conflict round was dispatched');
+  assert.equal(round.extra.attempt_reason, 'merge_conflict');
+  assert.deepEqual(round.extra.conflicts, ['shared.txt']);
+  assert.equal(round.extra.baseline_commit, mb.rebased_onto);
+  assert.match(String(round.extra.workspace), /-a2$/);
+  assert.match(String(round.extra.conflict_appendix), /attempt 1\) could not be merged[\s\S]*- shared\.txt[\s\S]*conflict markers/);
+  assert.ok(!('repair_appendix' in round.extra));
+
+  const done = ofType(all, 'actor_completed').find((e) => e.extra.actor_call_id === loser)!;
+  assert.equal(done.extra.attempt, 2);
+  assert.deepEqual(done.extra.merge_back, { status: 'clean' }, 'the resolved work applied without another rebase');
+  assert.match(readFileSync(join(root, 'shared.txt'), 'utf8'), /^resolved by [ab]\nline2\nline3\n$/);
+  assert.doesNotMatch(readFileSync(join(root, 'shared.txt'), 'utf8'), /<<<<<<<|>>>>>>>/);
+  // Nothing retained once it landed.
+  const engineDir = join(root, '.fadeno', 'local', 'engine', runId);
+  assert.equal(existsSync(engineDir) ? readdirSync(engineDir).length : 0, 0, 'no worktree left behind');
+  assert.equal(runVerify({ run: runId, repoRoot: root }).ok, true);
+});
+
+test('merge-back: a member whose context moved without overlapping is rebased and lands with no round', (t) => {
+  const { root, runId } = seedMap(t, {
+    'ro-a': { command: editor('a', 3, true) },
+    'ro-b': { command: editor('b', 5, true) },
+  }, MAP_PLAYBOOK, { git: true });
+  commitShared(root, 'line1\nline2\nline3\nline4\nline5\n');
+
+  assert.equal(runDrive({ run: runId, repoRoot: root, parallel: 2 }).outcome, 'terminal');
+
+  const all = events(root, runId);
+  assert.equal(ofType(all, 'actor_failed').length, 0, 'no round, no failure');
+  assert.equal(readFileSync(join(root, 'shared.txt'), 'utf8'), 'line1\nline2\nfrom a\nline4\nfrom b\n', 'both edits landed');
+  const completed = ofType(all, 'actor_completed').filter((e) => String(e.extra.actor ?? '').startsWith('reviewer_'));
+  const stamps = completed.map((e) => e.extra.merge_back as { status: string; rebased_onto?: string; detail?: string });
+  assert.ok(stamps.every((s) => s.status === 'clean'));
+  const rebased = stamps.filter((s) => s.rebased_onto != null);
+  assert.equal(rebased.length, 1, 'the second to land was rebased, the first was not');
+  assert.match(rebased[0]!.detail ?? '', /rebased onto it before applying/);
+  assert.equal(runVerify({ run: runId, repoRoot: root }).ok, true);
+});
+
+test('merge-back: a member that never resolves its markers is failed after the round cap, worktree retained, workspace untouched', (t) => {
+  const { root, runId } = seedMap(t, {
+    'ro-a': { command: editor('a', 1, false) },
+    'ro-b': { command: editor('b', 1, false) },
+  }, MAP_PLAYBOOK, { git: true });
+  commitShared(root, 'original\nline2\nline3\n');
+
+  assert.notEqual(runDrive({ run: runId, repoRoot: root, parallel: 2 }).outcome, 'terminal');
+
+  const all = events(root, runId);
+  const rounds = ofType(all, 'actor_failed').filter((e) => e.extra.reason === 'merge_conflict');
+  assert.equal(rounds.length, 2, 'two rounds were granted');
+  const loser = String(rounds[0]!.extra.actor_call_id);
+  assert.ok(rounds.every((e) => e.extra.actor_call_id === loser));
+  assert.match(String(rounds[1]!.extra.error), /round 2 of 2/);
+  assert.match(String((rounds[1]!.extra.merge_back as { detail?: string }).detail), /conflict markers remain/);
+  const gaveUp = ofType(all, 'actor_failed').filter((e) => e.extra.reason === 'merge_back_failed');
+  assert.equal(gaveUp.length, 1);
+  assert.equal(gaveUp[0]!.extra.attempt, 3);
+  assert.match(String(gaveUp[0]!.extra.error), /after 2 conflict round\(s\)[\s\S]*fadeno attempt-accept/);
+  assert.equal(gaveUp[0]!.extra.workspace_retained, true);
+  const retained = String(gaveUp[0]!.extra.workspace);
+  assert.ok(existsSync(join(root, retained)), `worktree retained at ${retained}`);
+  assert.match(readFileSync(join(root, retained, 'shared.txt'), 'utf8'), /<<<<<<<[\s\S]*>>>>>>>/);
+  // The winner landed; the loser's markers never reached the caller's tree.
+  assert.match(readFileSync(join(root, 'shared.txt'), 'utf8'), /^from [ab]\nline2\nline3\n$/);
+  const dispatched = ofType(all, 'actor_dispatched').filter((e) => e.extra.actor_call_id === loser);
+  assert.deepEqual(dispatched.map((e) => [e.extra.attempt, e.extra.attempt_reason]), [[1, 'initial'], [2, 'merge_conflict'], [3, 'merge_conflict']]);
+  // Not terminal — a member failed — so verify fails on exactly that and
+  // nothing else: the conflict rounds left a coherent ledger behind.
+  const verified = runVerify({ run: runId, repoRoot: root });
+  assert.deepEqual(verified.findings.filter((f) => f.status === 'fail').map((f) => f.check), ['terminal-status']);
+});
+
+test('merge-back: after the rounds are spent, a human resolves the worktree and attempt-accept completes the attempt without another executor run', (t) => {
+  const { root, runId } = seedMap(t, {
+    'ro-a': { command: editor('a', 1, false) },
+    'ro-b': { command: editor('b', 1, false) },
+  }, MAP_PLAYBOOK, { git: true });
+  commitShared(root, 'original\nline2\nline3\n');
+  assert.notEqual(runDrive({ run: runId, repoRoot: root, parallel: 2 }).outcome, 'terminal');
+  const gaveUp = ofType(events(root, runId), 'actor_failed').find((e) => e.extra.reason === 'merge_back_failed')!;
+  const loser = String(gaveUp.extra.actor_call_id);
+  const retained = String(gaveUp.extra.workspace);
+
+  // Markers still there: refused, nothing applied, worktree kept.
+  assert.throws(
+    () => runAttemptAccept({ run: runId, actorCallId: loser, repoRoot: root }),
+    (err: unknown) => err instanceof Error && /still conflicts with the workspace \(shared\.txt\)[\s\S]*conflict markers remain/.test(err.message),
+  );
+  assert.ok(existsSync(join(root, retained)));
+  assert.match(readFileSync(join(root, 'shared.txt'), 'utf8'), /^from [ab]\n/);
+
+  // The human resolves on the branch, then accepts.
+  writeFileSync(join(root, retained, 'shared.txt'), 'resolved by hand\nline2\nline3\n');
+  const accepted = runAttemptAccept({ run: runId, actorCallId: loser, repoRoot: root });
+  assert.equal(accepted.attempt, 4);
+  assert.equal(accepted.mergeBack.status, 'clean');
+  assert.equal(accepted.workspace, retained);
+  assert.equal(readFileSync(join(root, 'shared.txt'), 'utf8'), 'resolved by hand\nline2\nline3\n', 'the resolution landed in the workspace');
+  assert.equal(existsSync(join(root, retained)), false, 'the worktree is removed once merged');
+  assert.ok(existsSync(join(root, '.fadeno', 'runs', runId, accepted.output)), 'the artifact was written from the parked report');
+
+  const all = events(root, runId);
+  const req = ofType(all, 'actor_dispatched').find((e) => e.extra.actor_call_id === loser && e.extra.attempt === 4)!;
+  assert.equal(req.extra.attempt_reason, 'host_resolved');
+  assert.equal(req.extra.resolved_by, 'host');
+  assert.equal(req.extra.workspace, retained);
+  assert.equal(req.extra.output_path, accepted.output);
+  assert.ok(!('command' in req.extra), 'no executor ran');
+  const done = ofType(all, 'actor_completed').find((e) => e.extra.actor_call_id === loser)!;
+  assert.equal(done.extra.attempt, 4);
+  assert.equal(done.extra.output_valid, true);
+  assert.deepEqual(done.extra.merge_back, { status: 'clean' });
+
+  // Nothing to accept twice, and the drive continues from the accepted attempt.
+  assert.throws(() => runAttemptAccept({ run: runId, actorCallId: loser, repoRoot: root }), /latest attempt of .* is actor_completed/);
+  assert.equal(runDrive({ run: runId, repoRoot: root, parallel: 2 }).outcome, 'terminal');
+  const verified = runVerify({ run: runId, repoRoot: root });
+  assert.equal(verified.ok, true, JSON.stringify(verified.findings.filter((f) => f.status === 'fail')));
+  const rounds = verified.findings.find((f) => f.check === 'merge-conflict-rounds')!;
+  assert.equal(rounds.status, 'ok');
+  assert.match(rounds.detail, /2 merge_conflict round\(s\) and 1 host_resolved acceptance\(s\)/);
+});
+
+test('verify: a merge_conflict round whose prior failure was relabelled is refused by merge-conflict-rounds', (t) => {
+  const { root, runId } = seedMap(t, {
+    'ro-a': { command: editor('a', 1, true) },
+    'ro-b': { command: editor('b', 1, true) },
+  }, MAP_PLAYBOOK, { git: true });
+  commitShared(root, 'original\nline2\nline3\n');
+  assert.equal(runDrive({ run: runId, repoRoot: root, parallel: 2 }).outcome, 'terminal');
+  const before = runVerify({ run: runId, repoRoot: root });
+  assert.equal(before.findings.find((f) => f.check === 'merge-conflict-rounds')!.status, 'ok');
+  // A round is only a round because of what it follows. Relabel the failure
+  // it follows and the round becomes a retry wearing a different word.
+  const ledger = join(root, '.fadeno', 'runs', runId, 'events.jsonl');
+  const rewritten = readFileSync(ledger, 'utf8').split('\n').map((line) => {
+    if (line.trim() === '') return line;
+    const e = JSON.parse(line);
+    if (e.type === 'actor_failed' && e.reason === 'merge_conflict') e.reason = 'exit_nonzero';
+    return JSON.stringify(e);
+  }).join('\n');
+  writeFileSync(ledger, rewritten);
+  const after = runVerify({ run: runId, repoRoot: root });
+  const finding = after.findings.find((f) => f.check === 'merge-conflict-rounds')!;
+  assert.equal(finding.status, 'fail', JSON.stringify(after.findings.filter((f) => f.status !== 'ok')));
+  assert.match(finding.detail, /does not follow an actor_failed\(merge_conflict\) of attempt 1/);
 });

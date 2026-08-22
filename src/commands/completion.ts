@@ -178,6 +178,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   drive: command({ '--bind': { kind: 'bind' }, '--max-transitions': { kind: 'free' }, '--parallel': { kind: 'free' }, '--timeout': { kind: 'free' }, '--diagnostics': NONE }, ['run']),
   cancel: command({ '--actor-call': { kind: 'free' } }, ['run']),
   decide: command({ '--decision': { kind: 'free' }, '--feedback': { kind: 'free' } }, ['run', 'free']),
+  'attempt-accept': command({}, ['run', 'free']),
   runs: command({}),
   attest: command({ '--archetype': { kind: 'archetype' } }),
   dispatches: command({
@@ -188,6 +189,7 @@ const COMMANDS: Record<string, CommandSpec> = {
     '--wait': { kind: 'free' },
     '--tag': { kind: 'free' },
     '--cancel': { kind: 'free' },
+    '--merge': { kind: 'free' },
   }),
   'shadow-apply': command({ '--arm': { kind: 'enum', values: ['challenger', 'primary'] }, '--check': NONE }, ['free']),
   bakeoff: command(

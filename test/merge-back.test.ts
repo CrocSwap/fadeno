@@ -1,23 +1,27 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { DISPATCHES_FILE, runDispatch } from '../src/commands/dispatch.ts';
-import { runDispatchesOutput } from '../src/commands/dispatches.ts';
-import { applyMergeBackDiff, mergeBackReapplyCommand } from '../src/lib/workspace-lease.ts';
+import { runDispatchesMerge, runDispatchesOutput } from '../src/commands/dispatches.ts';
+import { applyDiffToWorkspace, hasConflictMarkers, rebaseWorktreeOntoWorkspace, settleIsolatedWork } from '../src/lib/workspace-baseline.ts';
+import { collectIsolatedDiff } from '../src/lib/workspace-lease.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
 import { tempRepo } from './helpers.ts';
 
-// The failure these tests pin, seen live on 2026-08-22: a worker dispatched
-// into an isolated worktree edited a file that lived in a directory the
-// caller's workspace held UNTRACKED. The baseline had copied that directory
-// into the worktree and committed it, so the diff described the edit as a
-// modification of a tracked file; `git apply --3way` in the caller's repo
-// then refused the WHOLE patch — `does not exist in index` — and the receipt
-// said `conflicted` about a tree nothing had touched. The tracked hunks in
-// the same diff were dropped with it.
+// Merge-back on the pull-request model. The worktree is the branch, the
+// caller's working tree is main, and main moves: sibling members merge back,
+// the human edits. The branch reconciles; main only ever receives a plain
+// `git apply` that lands whole or touches nothing. Conflict markers exist
+// only in a retained worktree.
+//
+// Two live failures this replaces, both 2026-08-22: `git apply --3way`
+// implied `--index` and refused a whole patch because one edited file lived
+// in an untracked directory (`does not exist in index`); and its failure
+// mode wrote markers into the CALLER's tree, so a receipt had to say
+// `conflicted` — "the tree may be partly applied, go look".
 
 const REPO = join(import.meta.dirname, '..');
 const onHarness = (harness: string): UserPathOptions => ({ env: { FADENO_HARNESS: harness } });
@@ -33,11 +37,13 @@ function git(root: string, args: string[]): string {
   return s.stdout;
 }
 
-/** A repo with one tracked file and one untracked directory, like the live case. */
+const FIVE_LINES = 'line1\nline2\nline3\nline4\nline5\n';
+
+/** A repo with one tracked five-line file and one untracked directory. */
 function seedRepo(t: TestContext): string {
   const root = tempRepo(t);
   git(root, ['init']);
-  writeFileSync(join(root, 'tracked.txt'), 'tracked\n');
+  writeFileSync(join(root, 'tracked.txt'), FIVE_LINES);
   git(root, ['add', '-A']);
   git(root, ['commit', '-m', 'init']);
   mkdirSync(join(root, 'pmcap'));
@@ -46,95 +52,127 @@ function seedRepo(t: TestContext): string {
 }
 
 /**
- * Build the diff exactly the way an isolated delivery does: a worktree cut
- * from HEAD, the caller's untracked file copied in and committed as the
- * baseline, the edit made on top, and the diff taken against that baseline.
+ * Cut a worktree the way an isolated delivery does — from HEAD, with the
+ * caller's untracked file copied in and committed as the baseline — then
+ * make the edit and collect the diff. Returns what the engine holds at
+ * settle time.
  */
-function diffFromWorktree(root: string, edit: (wt: string) => void): string {
-  const wt = join(root, '.fadeno', 'local', 'wt');
-  mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
+function worktreeWithEdit(root: string, name: string, edit: (wt: string) => void) {
+  const wt = join(root, '.fadeno', 'local', 'engine', name);
+  mkdirSync(join(root, '.fadeno', 'local', 'engine'), { recursive: true });
   git(root, ['worktree', 'add', '--detach', wt, 'HEAD']);
-  mkdirSync(join(wt, 'pmcap'));
+  mkdirSync(join(wt, 'pmcap'), { recursive: true });
   writeFileSync(join(wt, 'pmcap', 'a.txt'), readFileSync(join(root, 'pmcap', 'a.txt')));
   git(wt, ['add', '-A']);
   git(wt, ['commit', '-m', 'baseline']);
+  const baseline = git(wt, ['rev-parse', 'HEAD']).trim();
   edit(wt);
-  git(wt, ['add', '-A']);
-  const diff = git(wt, ['diff', '--binary', '--cached']);
-  const diffAbs = join(root, '.fadeno', 'local', 'merge.diff');
-  writeFileSync(diffAbs, diff);
-  git(root, ['worktree', 'remove', '--force', wt]);
-  return diffAbs;
+  const diffAbs = join(root, '.fadeno', 'local', 'outputs', `${name}.diff`);
+  const diff = collectIsolatedDiff({ repoRoot: root, worktreeAbs: wt, diffAbs, diffRel: `.fadeno/local/outputs/${name}.diff` });
+  return { wt, baseline, diff };
 }
 
-test('merge-back: an edit to a file the workspace holds untracked lands, with the tracked hunks beside it, and says how', (t) => {
+function edited(lines: Record<number, string>): string {
+  return FIVE_LINES.split('\n').map((l, i) => (lines[i + 1] ?? l)).join('\n');
+}
+
+test('plain apply: an edit to a file the workspace holds untracked lands beside tracked hunks, with no index involved', (t) => {
   const root = seedRepo(t);
-  const diffAbs = diffFromWorktree(root, (wt) => {
-    writeFileSync(join(wt, 'pmcap', 'a.txt'), 'edited\n');
-    writeFileSync(join(wt, 'pmcap', 'b.txt'), 'new\n');
-    writeFileSync(join(wt, 'tracked.txt'), 'tracked edited\n');
+  const { wt, diff } = worktreeWithEdit(root, 'w1', (w) => {
+    writeFileSync(join(w, 'pmcap', 'a.txt'), 'edited\n');
+    writeFileSync(join(w, 'pmcap', 'b.txt'), 'new\n');
+    writeFileSync(join(w, 'tracked.txt'), edited({ 3: 'line3 edited' }));
   });
-  const merged = applyMergeBackDiff({ repoRoot: root, diffAbs });
-  assert.equal(merged.stamp.status, 'clean');
-  assert.match(merged.stamp.detail ?? '', /pmcap\/a\.txt is untracked in the workspace/);
-  assert.match(merged.stamp.detail ?? '', /left unstaged/);
-  assert.deepEqual(merged.untracked, ['pmcap/a.txt']);
-  // Every hunk reached the tree — the untracked edit, the new file beside
-  // it, and the tracked file's hunk that used to be dropped with them.
+  const settled = settleIsolatedWork({ repoRoot: root, worktreeAbs: wt, diff, baselineRef: 'w1', armLabel: 'test' });
+  assert.deepEqual(settled.stamp, { status: 'clean' });
   assert.equal(readFileSync(join(root, 'pmcap', 'a.txt'), 'utf8'), 'edited\n');
   assert.equal(readFileSync(join(root, 'pmcap', 'b.txt'), 'utf8'), 'new\n');
-  assert.equal(readFileSync(join(root, 'tracked.txt'), 'utf8'), 'tracked edited\n');
-  // The recovery pointer for this shape is the plain apply, not `--3way`,
-  // which would reproduce the refusal.
-  assert.equal(mergeBackReapplyCommand('x.diff', merged.untracked), 'git apply x.diff');
-  assert.equal(mergeBackReapplyCommand('x.diff', []), 'git apply --3way x.diff');
+  assert.equal(readFileSync(join(root, 'tracked.txt'), 'utf8'), edited({ 3: 'line3 edited' }));
+  // Plain apply stages nothing: the caller's index is exactly as they left it.
+  assert.equal(git(root, ['diff', '--cached', '--name-only']).trim(), '');
+  assert.ok(existsSync(wt), 'the helper never tears down; the caller does');
 });
 
-test('merge-back: a diff touching only tracked files still goes through 3-way and stamps no detail', (t) => {
+test('the workspace moved without overlap: the worktree is rebased onto it and the work lands, stamped with the new baseline', (t) => {
   const root = seedRepo(t);
-  const diffAbs = diffFromWorktree(root, (wt) => {
-    writeFileSync(join(wt, 'tracked.txt'), 'tracked edited\n');
+  const { wt, baseline, diff } = worktreeWithEdit(root, 'w2', (w) => {
+    writeFileSync(join(w, 'tracked.txt'), edited({ 5: 'line5 by the attempt' }));
   });
-  const merged = applyMergeBackDiff({ repoRoot: root, diffAbs });
-  assert.deepEqual(merged, { stamp: { status: 'clean' }, untracked: [] });
-  assert.equal(readFileSync(join(root, 'tracked.txt'), 'utf8'), 'tracked edited\n');
+  // Main moves inside the attempt's context lines (line 3 is in the hunk's
+  // context for line 5), so a plain apply refuses — but nothing overlaps.
+  writeFileSync(join(root, 'tracked.txt'), edited({ 3: 'line3 by the caller' }));
+  assert.equal(applyDiffToWorkspace(root, diff.diffAbs).ok, false, 'precondition: the tree moved under the diff');
+
+  const settled = settleIsolatedWork({ repoRoot: root, worktreeAbs: wt, diff, baselineRef: 'w2', armLabel: 'test' });
+  assert.equal(settled.stamp.status, 'clean');
+  assert.match(settled.stamp.detail ?? '', /rebased onto it before applying/);
+  assert.ok(settled.stamp.rebased_onto != null && settled.stamp.rebased_onto !== baseline, 'a new baseline was committed');
+  assert.equal(readFileSync(join(root, 'tracked.txt'), 'utf8'), edited({ 3: 'line3 by the caller', 5: 'line5 by the attempt' }));
+  // The worktree's HEAD is the new baseline and its diff was re-collected against it.
+  assert.equal(git(wt, ['rev-parse', 'HEAD']).trim(), settled.stamp.rebased_onto);
+  assert.ok(settled.diff.diffBytes > 0);
+  assert.doesNotMatch(readFileSync(settled.diff.diffAbs, 'utf8'), /^\+line3 by the caller/m, 'the re-collected diff carries only the attempt\'s work — the caller\'s line is context, not a change');
 });
 
-test('merge-back: when the untracked file moved under the worktree, nothing is applied and the stamp says blocked, not conflicted', (t) => {
+test('the workspace moved on the same lines: unresolved, markers in the retained worktree only, the workspace untouched', (t) => {
   const root = seedRepo(t);
-  const diffAbs = diffFromWorktree(root, (wt) => {
-    writeFileSync(join(wt, 'pmcap', 'a.txt'), 'edited\n');
-    writeFileSync(join(wt, 'tracked.txt'), 'tracked edited\n');
+  const { wt, diff } = worktreeWithEdit(root, 'w3', (w) => {
+    writeFileSync(join(w, 'tracked.txt'), edited({ 3: 'line3 by the attempt' }));
+    writeFileSync(join(w, 'pmcap', 'a.txt'), 'also edited\n');
   });
-  // The caller changed the untracked file after the baseline was captured,
-  // so the plain apply's preimage no longer matches. `git apply` is atomic:
-  // the tracked hunk must not land either, and the reader must be told the
-  // tree is untouched rather than sent to inspect it.
-  writeFileSync(join(root, 'pmcap', 'a.txt'), 'changed by the caller meanwhile\n');
-  const merged = applyMergeBackDiff({ repoRoot: root, diffAbs });
-  assert.equal(merged.stamp.status, 'blocked');
-  assert.match(merged.stamp.detail ?? '', /^nothing was applied: pmcap\/a\.txt is untracked in the workspace/);
-  assert.match(merged.stamp.detail ?? '', /plain working-tree apply refused too/);
-  assert.equal(readFileSync(join(root, 'pmcap', 'a.txt'), 'utf8'), 'changed by the caller meanwhile\n');
-  assert.equal(readFileSync(join(root, 'tracked.txt'), 'utf8'), 'tracked\n');
-  assert.equal(git(root, ['status', '--porcelain']).includes('tracked.txt'), false);
+  writeFileSync(join(root, 'tracked.txt'), edited({ 3: 'line3 by the caller' }));
+
+  const settled = settleIsolatedWork({ repoRoot: root, worktreeAbs: wt, diff, baselineRef: 'w3', armLabel: 'test' });
+  assert.equal(settled.stamp.status, 'unresolved');
+  assert.deepEqual(settled.stamp.conflicts, ['tracked.txt']);
+  assert.ok(settled.stamp.rebased_onto);
+  assert.match(settled.stamp.detail ?? '', /1 file\(s\) conflict: tracked\.txt/);
+  // Markers in the worktree, as an ordinary dirty tree: no cherry-pick in
+  // progress, nothing unmerged in the index, HEAD at the new baseline.
+  const inWorktree = readFileSync(join(wt, 'tracked.txt'), 'utf8');
+  assert.ok(hasConflictMarkers(inWorktree), inWorktree);
+  assert.match(inWorktree, /line3 by the caller/);
+  assert.match(inWorktree, /line3 by the attempt/);
+  assert.equal(existsSync(join(git(root, ['rev-parse', '--git-common-dir']).trim(), 'worktrees', 'w3', 'CHERRY_PICK_HEAD')), false);
+  assert.equal(git(wt, ['diff', '--name-only', '--diff-filter=U']).trim(), '');
+  assert.equal(git(wt, ['rev-parse', 'HEAD']).trim(), settled.stamp.rebased_onto);
+  // The non-conflicting part of the work rode along into the worktree.
+  assert.equal(readFileSync(join(wt, 'pmcap', 'a.txt'), 'utf8'), 'also edited\n');
+  // The caller's tree never saw a marker.
+  assert.equal(readFileSync(join(root, 'tracked.txt'), 'utf8'), edited({ 3: 'line3 by the caller' }));
+  assert.equal(readFileSync(join(root, 'pmcap', 'a.txt'), 'utf8'), 'original untracked\n');
 });
 
-test('merge-back: a genuine 3-way conflict on a tracked file is still conflicted, and the 3-way markers are left for the reader', (t) => {
+test('a round that leaves markers in place is unresolved again — git would have applied them as content', (t) => {
   const root = seedRepo(t);
-  const diffAbs = diffFromWorktree(root, (wt) => {
-    writeFileSync(join(wt, 'tracked.txt'), 'tracked edited by the attempt\n');
+  const { wt, diff } = worktreeWithEdit(root, 'w4', (w) => {
+    writeFileSync(join(w, 'tracked.txt'), '<<<<<<< HEAD\nline1\n=======\nline1 other\n>>>>>>> theirs\nline2\nline3\nline4\nline5\n');
   });
-  writeFileSync(join(root, 'tracked.txt'), 'tracked edited by the caller\n');
-  git(root, ['commit', '-am', 'caller moved on']);
-  const merged = applyMergeBackDiff({ repoRoot: root, diffAbs });
-  assert.equal(merged.stamp.status, 'conflicted');
-  assert.deepEqual(merged.untracked, []);
-  assert.match(readFileSync(join(root, 'tracked.txt'), 'utf8'), /<<<<<<<|>>>>>>>/);
+  const settled = settleIsolatedWork({ repoRoot: root, worktreeAbs: wt, diff, baselineRef: 'w4', armLabel: 'test', priorConflicts: ['tracked.txt'] });
+  assert.equal(settled.stamp.status, 'unresolved');
+  assert.deepEqual(settled.stamp.conflicts, ['tracked.txt']);
+  assert.match(settled.stamp.detail ?? '', /conflict markers remain/);
+  assert.equal(readFileSync(join(root, 'tracked.txt'), 'utf8'), FIVE_LINES, 'nothing applied');
+  // Without the prior-conflict list there is nothing to check against, and
+  // the same bytes would apply: the list is what makes the check possible.
+  assert.equal(hasConflictMarkers('=======\nnot a conflict\n'), false);
+});
+
+test('rebase alone: a clean pick reports no conflicts and a new baseline', (t) => {
+  const root = seedRepo(t);
+  const { wt, baseline } = worktreeWithEdit(root, 'w5', (w) => {
+    writeFileSync(join(w, 'tracked.txt'), edited({ 5: 'line5 by the attempt' }));
+  });
+  writeFileSync(join(root, 'tracked.txt'), edited({ 1: 'line1 by the caller' }));
+  const rebased = rebaseWorktreeOntoWorkspace({ repoRoot: root, worktreeAbs: wt, baselineRef: 'w5', armLabel: 'test' });
+  assert.equal(rebased.status, 'clean');
+  assert.deepEqual(rebased.conflicts, []);
+  assert.notEqual(rebased.baselineCommit, baseline);
+  assert.equal(readFileSync(join(wt, 'tracked.txt'), 'utf8'), edited({ 1: 'line1 by the caller', 5: 'line5 by the attempt' }));
 });
 
 // ---------------------------------------------------------------------------
-// The same through a real kernel-isolated dispatch, receipt included.
+// Through a real kernel-isolated dispatch, receipt included.
 // ---------------------------------------------------------------------------
 
 function seedDispatch(t: TestContext, cmd: string[]): string {
@@ -154,60 +192,100 @@ function rows(root: string): Record<string, unknown>[] {
   return readFileSync(join(root, DISPATCHES_FILE), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 
-const EDIT_UNTRACKED = ['node', '-e',
-  "const fs=require('fs');" +
-  "fs.writeFileSync('pmcap/a.txt','edited by worker\\n');" +
-  "fs.writeFileSync('pmcap/b.txt','new by worker\\n');" +
-  "fs.writeFileSync('tracked.txt','tracked edited\\n');" +
-  "process.stdout.write('DONE')"];
-
-test('a kernel-isolated dispatch that edits an untracked file merges back clean, and the receipt and --output both say how', (t) => {
-  const root = seedDispatch(t, EDIT_UNTRACKED);
+test('a kernel-isolated dispatch that edits an untracked file merges back clean, with no detail to explain', (t) => {
+  const root = seedDispatch(t, ['node', '-e',
+    "const fs=require('fs');" +
+    "fs.writeFileSync('pmcap/a.txt','edited by worker\\n');" +
+    "fs.writeFileSync('pmcap/b.txt','new by worker\\n');" +
+    "fs.writeFileSync('tracked.txt','line1\\nline2\\nline3 edited\\nline4\\nline5\\n');" +
+    "process.stdout.write('DONE')"]);
   const echoes: string[] = [];
   const result = runDispatch({ archetype: 'worker', prompt: 'edit', tag: 'worker-edit', repoRoot: root, userPathOptions: onHarness('standalone'), onEcho: (l) => echoes.push(l) });
   assert.equal(result.outcome, 'ok');
   const comp = rows(root).find((r) => r.event === 'dispatch_completed')!;
   assert.equal(comp.workspace_mode, 'isolated');
-  const merge = comp.primary_merge as { status: string; detail?: string };
-  assert.equal(merge.status, 'clean');
-  assert.match(merge.detail ?? '', /pmcap\/a\.txt is untracked in the workspace/);
+  assert.deepEqual(comp.primary_merge, { status: 'clean' });
+  assert.ok(!('workspace_retained' in comp));
   assert.equal(readFileSync(join(root, 'pmcap', 'a.txt'), 'utf8'), 'edited by worker\n');
   assert.ok(existsSync(join(root, 'pmcap', 'b.txt')));
-  assert.equal(readFileSync(join(root, 'tracked.txt'), 'utf8'), 'tracked edited\n');
-  assert.ok(echoes.some((l) => /^merged back: \d+ bytes applied to the workspace \(applied to the working tree/.test(l)), echoes.join('\n'));
-
-  // The recovery reader carries the stamp too, so a proxy relaying the
-  // output relays the merge-back with it.
-  const out = runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'worker-edit' });
-  assert.equal(out.primaryMerge?.status, 'clean');
-  const cli = spawnSync('node', [join(REPO, 'src', 'cli.ts'), 'dispatches', '--output', 'tag:worker-edit'], { cwd: root, encoding: 'utf8' });
-  assert.equal(cli.status, 0);
-  assert.match(cli.stderr, /ok: exit 0, 4 bytes; merge-back clean: applied to the working tree/);
+  assert.equal(readFileSync(join(root, 'tracked.txt'), 'utf8'), edited({ 3: 'line3 edited' }));
+  assert.ok(echoes.some((l) => /^merged back: \d+ bytes applied to the workspace$/.test(l)), echoes.join('\n'));
+  const isolatedDir = join(root, '.fadeno', 'local', 'isolated');
+  assert.equal(existsSync(isolatedDir) ? readdirSync(isolatedDir).length : 0, 0, 'the worktree was torn down');
 });
 
-test('a kernel-isolated dispatch whose merge-back is blocked says so on the receipt, the echo, and --output — and the tree is untouched', (t) => {
+test('a kernel-isolated dispatch whose work conflicts with a workspace that moved: unresolved, worktree retained, every surface says so', (t) => {
   const root = seedDispatch(t, ['node', '-e',
     "const fs=require('fs');" +
-    // Edit the untracked file AND move the caller's copy out from under the
-    // merge, from inside the worktree: the merge-back runs after the
-    // executor exits, so the caller's tree has changed by then.
-    "fs.writeFileSync('pmcap/a.txt','edited by worker\\n');" +
-    "fs.writeFileSync(process.env.CALLER_ROOT+'/pmcap/a.txt','changed meanwhile\\n');" +
+    "fs.writeFileSync('tracked.txt','line1\\nline2\\nline3 by the worker\\nline4\\nline5\\n');" +
+    // Move the caller's tree on the same line from inside the worktree: the
+    // merge-back runs after the executor exits, so the tree has moved by then.
+    "fs.writeFileSync(process.env.CALLER_ROOT+'/tracked.txt','line1\\nline2\\nline3 by the caller\\nline4\\nline5\\n');" +
     "process.stdout.write('DONE')"]);
   process.env.CALLER_ROOT = root;
   t.after(() => { delete process.env.CALLER_ROOT; });
   const echoes: string[] = [];
-  runDispatch({ archetype: 'worker', prompt: 'edit', tag: 'worker-blocked', repoRoot: root, userPathOptions: onHarness('standalone'), onEcho: (l) => echoes.push(l) });
+  const result = runDispatch({ archetype: 'worker', prompt: 'edit', tag: 'worker-conflict', repoRoot: root, userPathOptions: onHarness('standalone'), onEcho: (l) => echoes.push(l) });
+  assert.equal(result.outcome, 'ok', 'the executor itself succeeded; the merge did not');
   const comp = rows(root).find((r) => r.event === 'dispatch_completed')!;
-  const merge = comp.primary_merge as { status: string; detail?: string };
-  assert.equal(merge.status, 'blocked');
-  assert.match(merge.detail ?? '', /^nothing was applied: pmcap\/a\.txt is untracked/);
-  assert.equal(readFileSync(join(root, 'pmcap', 'a.txt'), 'utf8'), 'changed meanwhile\n');
-  const blocked = echoes.find((l) => l.startsWith('merge-back BLOCKED'));
-  assert.ok(blocked, echoes.join('\n'));
-  assert.match(blocked!, /nothing was applied, the workspace is untouched/);
-  assert.match(blocked!, /Resolve with `git apply \.fadeno\/local\/outputs\/[^`]+\.diff`/);
-  assert.doesNotMatch(blocked!, /--3way/);
-  const cli = spawnSync('node', [join(REPO, 'src', 'cli.ts'), 'dispatches', '--output', 'tag:worker-blocked'], { cwd: root, encoding: 'utf8' });
-  assert.match(cli.stderr, /merge-back BLOCKED: nothing was applied, the workspace is untouched/);
+  const merge = comp.primary_merge as { status: string; detail?: string; conflicts?: string[]; rebased_onto?: string };
+  assert.equal(merge.status, 'unresolved');
+  assert.deepEqual(merge.conflicts, ['tracked.txt']);
+  assert.ok(merge.rebased_onto);
+  assert.equal(comp.workspace_retained, true);
+  const retained = comp.workspace as string;
+  assert.ok(typeof retained === 'string' && existsSync(join(root, retained)), `worktree retained at ${retained}`);
+  assert.ok(hasConflictMarkers(readFileSync(join(root, retained, 'tracked.txt'), 'utf8')));
+  assert.equal(readFileSync(join(root, 'tracked.txt'), 'utf8'), edited({ 3: 'line3 by the caller' }), 'the caller\'s tree is untouched');
+  const echo = echoes.find((l) => l.startsWith('merge-back UNRESOLVED'));
+  assert.ok(echo, echoes.join('\n'));
+  assert.match(echo!, /conflicts with the workspace in 1 file\(s\): tracked\.txt/);
+  assert.match(echo!, new RegExp(`retained at ${retained.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} with conflict markers`));
+  assert.match(echo!, /fadeno dispatches --merge [0-9a-f]{8}/);
+  const cli = spawnSync('node', [join(REPO, 'src', 'cli.ts'), 'dispatches', '--output', 'tag:worker-conflict'], { cwd: root, encoding: 'utf8' });
+  assert.match(cli.stderr, /merge-back UNRESOLVED: the work conflicts with the workspace and did NOT land; the worktree is retained with conflict markers/);
+});
+
+test('dispatches --merge: refuses while markers remain, merges once they are resolved, and records a dispatch_merged row', (t) => {
+  const root = seedDispatch(t, ['node', '-e',
+    "const fs=require('fs');" +
+    "fs.writeFileSync('tracked.txt','line1\\nline2\\nline3 by the worker\\nline4\\nline5\\n');" +
+    "fs.writeFileSync(process.env.CALLER_ROOT+'/tracked.txt','line1\\nline2\\nline3 by the caller\\nline4\\nline5\\n');" +
+    "process.stdout.write('DONE')"]);
+  process.env.CALLER_ROOT = root;
+  t.after(() => { delete process.env.CALLER_ROOT; });
+  runDispatch({ archetype: 'worker', prompt: 'edit', tag: 'worker-merge', repoRoot: root, userPathOptions: onHarness('standalone') });
+  const comp = rows(root).find((r) => r.event === 'dispatch_completed')!;
+  assert.equal((comp.primary_merge as { status: string }).status, 'unresolved');
+  const retained = comp.workspace as string;
+
+  assert.throws(
+    () => runDispatchesMerge({ repoRoot: root, tag: 'worker-merge' }),
+    (err: unknown) => err instanceof Error && /still conflicts with the workspace \(tracked\.txt\)[\s\S]*conflict markers remain/.test(err.message),
+  );
+  assert.ok(existsSync(join(root, retained)), 'refusal keeps the worktree');
+  assert.equal(readFileSync(join(root, 'tracked.txt'), 'utf8'), edited({ 3: 'line3 by the caller' }), 'refusal touches nothing');
+
+  writeFileSync(join(root, retained, 'tracked.txt'), edited({ 3: 'line3 resolved by hand' }));
+  const merged = runDispatchesMerge({ repoRoot: root, tag: 'worker-merge' });
+  assert.equal(merged.mergeBack.status, 'clean');
+  assert.match(merged.mergeBack.detail ?? '', /merged by hand/);
+  assert.equal(merged.workspace, retained);
+  assert.equal(readFileSync(join(root, 'tracked.txt'), 'utf8'), edited({ 3: 'line3 resolved by hand' }));
+  assert.equal(existsSync(join(root, retained)), false, 'the worktree is removed once merged');
+  const row = rows(root).find((r) => r.event === 'dispatch_merged')!;
+  assert.equal(row.dispatch_id, merged.dispatchId);
+  assert.equal(row.tag, 'worker-merge');
+  assert.equal(row.merged_by, 'host');
+  assert.deepEqual(row.merge, merged.mergeBack);
+  assert.ok(existsSync(join(root, row.diff_snapshot as string)));
+
+  // The reader carries the later fact.
+  const out = runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'worker-merge' });
+  assert.equal(out.primaryMerge?.status, 'clean');
+  assert.equal(out.workspace, null);
+  const cli = spawnSync('node', [join(REPO, 'src', 'cli.ts'), 'dispatches', '--output', 'tag:worker-merge'], { cwd: root, encoding: 'utf8' });
+  assert.match(cli.stderr, /merge-back clean: merged by hand/);
+  assert.doesNotMatch(cli.stderr, /UNRESOLVED/);
+  assert.throws(() => runDispatchesMerge({ repoRoot: root, tag: 'worker-merge' }), /was already merged/);
 });

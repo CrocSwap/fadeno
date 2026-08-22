@@ -374,7 +374,21 @@ const CLAIMS: Claim[] = [
     // place both merge-backs get it from.
     id: 'merge-back-untracked-paths',
     doc: { files: ['docs/experimental/permissions-and-isolation.md', 'CHANGELOG.md'], patterns: [/does not exist in index/] },
-    src: { files: ['src/lib/workspace-lease.ts'], patterns: [/does not exist in index/, /applyMergeBackDiff/] },
+    src: { files: ['src/lib/workspace-baseline.ts'], patterns: [/does not exist in index/, /settleIsolatedWork/] },
+  },
+  {
+    // The pull-request model's two ledger words. A conflict round and a
+    // human acceptance are attempt reasons the verifier pairs with the
+    // unresolved failure they follow; the docs an agent reads name both.
+    id: 'merge-conflict-rounds',
+    doc: {
+      files: ['docs/experimental/permissions-and-isolation.md', 'templates/common/skills/fadeno-driver/SKILL.md', 'CHANGELOG.md'],
+      patterns: [/merge_conflict/, /host_resolved/, /attempt-accept/, /dispatches --merge/],
+    },
+    src: {
+      files: ['src/commands/verify.ts', 'src/commands/drive.ts', 'src/commands/dispatches.ts'],
+      patterns: [/merge-conflict-rounds/, /'merge_conflict'/, /'host_resolved'/, /MAX_MERGE_CONFLICT_ROUNDS/, /dispatch_merged/],
+    },
   },
   {
     id: 'schema-envelope-extraction',

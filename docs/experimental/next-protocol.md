@@ -549,6 +549,14 @@ was every surface the proxy could reach. Three defects, two fixed (rc.58):
   carry the kernel's pid, which closed the immortal-lease bug behind the
   `kill-drive mid-wave` failures. Shared mode (`--shared`, tools, non-git)
   still holds the real lease for a run's duration and is opt-in.
+- **Merge-back is a pull request now (rc.60), and two attempt reasons are
+  in the ledger vocabulary before the freeze:** `merge_conflict` (the executor
+  re-invoked in its retained worktree to resolve markers) and `host_resolved`
+  (a human resolved them and `fadeno attempt-accept` merged the result). Both
+  pair with the `unresolved` failure they follow, and `verify`'s
+  `merge-conflict-rounds` holds them to it. The caller's tree never receives
+  anything but a plain, atomic `git apply`; `conflicted` is retired. See
+  `permissions-and-isolation.md`.
 
 One more observation from that loop worth keeping: the external reviewer's
 sandbox could not open loopback listeners, so it never ran the socket tests,

@@ -81,10 +81,8 @@ import {
   acquireWorkspaceLease,
   carryDeclaredPaths,
   collectIsolatedDiff,
-  applyMergeBackDiff,
   createIsolatedWorktree,
   isWorkspaceLeaseAlive,
-  mergeBackReapplyCommand,
   readEffectiveLease,
   readWorkspaceLease,
   releaseWorkspaceLease,
@@ -100,7 +98,7 @@ import {
 // the caller's uncommitted state rather than a clean checkout of it. Imported
 // from the dispatch command rather than reimplemented: two spellings of
 // "replay the workspace" is exactly how the two paths would drift.
-import { applyWorkspaceBaseline, captureWorkspaceBaseline } from './dispatch.ts';
+import { applyWorkspaceBaseline, captureWorkspaceBaseline, mergeBackReapplyCommand, settleIsolatedWork, type MergeBackResult } from '../lib/workspace-baseline.ts';
 import { CONDITION_REGISTRY, GateError, runGate, SUPPORTED_CONDITIONS, type GateCondition } from './gate.ts';
 import { requestHostDispatch, type HostDispatchRequest } from '../lib/host-dispatch.ts';
 import { PromptError, runPrompt } from './prompt.ts';
@@ -217,6 +215,8 @@ interface EngineCtx {
   overrides: Map<string, string>;
   /** Actor calls that already consumed their one bounded repair this invocation. */
   repaired: Set<string>;
+  /** Conflict rounds granted per actor call; see MAX_MERGE_CONFLICT_ROUNDS. */
+  conflictRounds: Map<string, number>;
   diagnostics?: boolean;
   timeoutMs?: number | null;
   parallel: number;
@@ -810,7 +810,56 @@ type DispatchFailure =
   | { kind: 'eligibility_forbidden'; detail: string }
   | { kind: 'provider_conflict'; detail: string }
   | { kind: 'constraint_refused'; detail: string }
-  | { kind: 'invalid_output'; detail: string; errors: string[] };
+  | { kind: 'invalid_output'; detail: string; errors: string[] }
+  | {
+      /**
+       * The attempt's work conflicts with what the workspace now holds, and a
+       * conflict round was granted: the worktree is retained with markers,
+       * and the next attempt re-invokes the executor in it. Not a terminal
+       * failure — the wave queues the round exactly as it queues a schema
+       * repair.
+       */
+      kind: 'merge_conflict';
+      detail: string;
+      conflicts: string[];
+      worktreeRel: string;
+      baselineCommit: string;
+      priorAttempt: number;
+    };
+
+/**
+ * What a conflict round needs from the attempt it follows. Carried on the
+ * queued member, never on the ledger: the ledger holds the same facts on the
+ * prior attempt's `merge_back` stamp and on this attempt's request row.
+ */
+interface ConflictRound {
+  worktreeRel: string;
+  baselineCommit: string;
+  conflicts: string[];
+  priorAttempt: number;
+}
+
+/**
+ * How many times the executor is re-invoked to resolve a merge conflict
+ * before the attempt is failed with the worktree retained for a human. The
+ * PR model's "abandon": two rounds is one honest retry past a first miss.
+ */
+const MAX_MERGE_CONFLICT_ROUNDS = 2;
+
+/**
+ * The appendix a conflict round appends to the prompt (or sends alone into a
+ * resumed session). Names the files, describes the worktree state as git
+ * left it, and asks for the same output as before.
+ */
+function conflictMessage(conflict: ConflictRound): string {
+  const files = conflict.conflicts.map((f) => `- ${f}`).join('\n');
+  return [
+    `Your previous attempt (attempt ${conflict.priorAttempt}) could not be merged into the workspace: other work landed while you were working, and these files conflict:`,
+    files,
+    '',
+    'Your worktree has been brought up to date. HEAD is now the current workspace; your changes have been re-applied on top of it; and the files listed above contain conflict markers (<<<<<<< / ======= / >>>>>>>). Resolve every marker so the tree is consistent, keep the intent of your change, re-run whatever checks you would normally run, and then produce the same output you were originally asked for.',
+  ].join('\n');
+}
 
 
 function playbookFlow(playbook: Playbook): PlaybookStep[] {
@@ -973,6 +1022,8 @@ interface PendingAttempt {
   attempt: number;
   reason: string;
   repairErrors: string[] | null;
+  /** The conflict this attempt was dispatched to resolve, when it is a conflict round. */
+  conflict: ConflictRound | null;
   stamps: { providerWarned?: boolean; shadowOnly?: boolean };
   promptRes: { prompt: string; promptPath: string | null; sha256: string };
   argv: string[];
@@ -1079,6 +1130,7 @@ function beginCommandAttempt(
   reason: string,
   repairErrors: string[] | null,
   stamps: { providerWarned?: boolean; shadowOnly?: boolean } = {},
+  conflict: ConflictRound | null = null,
 ): PendingAttempt {
   let promptRes;
   try {
@@ -1100,7 +1152,9 @@ function beginCommandAttempt(
   if (spec.adapter !== 'command') {
     throw new DriveError(`host executor "${executor}" must be handled by the host dispatch protocol.`);
   }
-  const repairCore = repairErrors != null ? repairMessage(repairErrors) : null;
+  // One appendix at most: a conflict round and a schema repair are never
+  // the same attempt, and the request row names which this is.
+  const repairCore = conflict != null ? conflictMessage(conflict) : repairErrors != null ? repairMessage(repairErrors) : null;
 
   let session: 'fresh' | 'resumed' | null = null;
   let sessionId: string | null = null;
@@ -1147,6 +1201,11 @@ function beginCommandAttempt(
     model: spec.model,
     prompt_path: promptRes.promptPath,
     prompt_sha256: promptRes.sha256,
+    // What the attempt is for, on the row that started it: a later acceptance
+    // of its work (`attempt-accept`) reads these rather than recomputing
+    // them from a playbook that may have moved on.
+    output_path: outputRel,
+    ...(artifactType != null ? { artifact_type: artifactType } : {}),
   };
   const claimRel = `${INFLIGHT_DIR}/engine-${ctx.runId}-${ids.actorCallId}-a${attempt}.json`;
   const claimAbs = join(ctx.repoRoot, ...claimRel.split('/'));
@@ -1211,8 +1270,14 @@ function beginCommandAttempt(
   dispatched.engine_pid = process.pid;
   if (stamps.providerWarned === true) dispatched.provider_distinctness = 'warned';
   if (stamps.shadowOnly === true) dispatched.gate_eligible = false;
-  if (repairCore != null) {
+  if (repairCore != null && conflict == null) {
     dispatched.repair_appendix = session === 'resumed' ? repairCore : `\n\n---\n${repairCore}`;
+  }
+  if (conflict != null) {
+    // The same facts the prior attempt's `merge_back` stamp carries, restated
+    // on the request so verify can pair the two without reading the prompt.
+    dispatched.conflicts = [...conflict.conflicts];
+    dispatched.conflict_appendix = session === 'resumed' ? repairCore : `\n\n---\n${repairCore}`;
   }
   // Isolation, on the same terms as an ad-hoc dispatch: kernel-chosen, so it
   // merges back. The engine never offers a hold-out mode — a run's members
@@ -1246,7 +1311,27 @@ function beginCommandAttempt(
     const worktreeRel = join('.fadeno', 'local', 'engine', ctx.runId, id8).split('\\').join('/');
     const worktreeAbs = join(ctx.repoRoot, worktreeRel);
     const diffRel = join('.fadeno', 'local', 'outputs', `engine-${ctx.runId}-${id8}.diff`).split('\\').join('/');
-    try {
+    if (conflict != null) {
+      // A conflict round does not get a fresh worktree: the one it follows
+      // IS the work — the attempt's changes on top of the current workspace,
+      // markers and all. Moved to this attempt's name so the `workspace` a
+      // receipt records still names the attempt that ran there; if git will
+      // not move it, it is used where it is, and the receipt records that
+      // path instead. Its baseline is the one the rebase produced, not a new
+      // capture: capturing again would hand the executor a tree that no
+      // longer matches the markers it is being asked to resolve. And a
+      // missing worktree is a refusal, never a degradation to shared —
+      // there is nothing to resolve in, so running "the same task" in the
+      // caller's tree would be a different task.
+      const priorAbs = join(ctx.repoRoot, ...conflict.worktreeRel.split('/'));
+      if (!existsSync(priorAbs)) {
+        throw new DriveError(`conflict round for ${ids.actorCallId}: the retained worktree ${conflict.worktreeRel} is gone, so there is nothing to resolve in.`);
+      }
+      const moved = spawnSync('git', ['-C', ctx.repoRoot, 'worktree', 'move', priorAbs, worktreeAbs], { encoding: 'utf8' });
+      const useAbs = moved.error == null && moved.status === 0 ? worktreeAbs : priorAbs;
+      const useRel = useAbs === worktreeAbs ? worktreeRel : conflict.worktreeRel;
+      worktree = { abs: useAbs, rel: useRel, baselineCommit: conflict.baselineCommit, diffRel, diffAbs: join(ctx.repoRoot, diffRel) };
+    } else try {
       // A retry re-uses the same identity, so a worktree left behind by a
       // killed prior attempt would collide. Remove it first: its work was
       // either already collected or already lost.
@@ -1466,6 +1551,7 @@ function beginCommandAttempt(
     attempt,
     reason,
     repairErrors,
+    conflict,
     stamps,
     promptRes,
     argv,
@@ -1515,17 +1601,16 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
    * cannot happen is a recorded outcome, not an exception, because the diff
    * artifact survives either way and is the thing worth protecting.
    *
-   * Three statuses, the same three an ad-hoc dispatch records, and the
-   * distinction between the last two is load-bearing:
-   *   clean      — applied; the work is in the tree
-   *   conflicted — git tried and left the tree PARTLY applied
-   *   blocked    — nothing was attempted; the tree is untouched
+   * Three statuses, the same three an ad-hoc dispatch records:
+   *   clean       — applied; the work is in the tree
+   *   unresolved  — the work conflicts with what the tree now holds; the
+   *                 worktree is RETAINED with markers and the tree is untouched
+   *   blocked     — nothing was attempted; the tree is untouched
+   * The caller's tree is never partly applied: the apply is a plain
+   * `git apply`, atomic, and all reconciliation happens in the worktree.
    */
   let workspaceSettled = false;
-  let mergeStamp: { status: 'clean' | 'conflicted' | 'blocked'; detail?: string } | null = null;
-  /** Paths the merge-back found untracked in the workspace — shapes the
-   * recovery pointer only, never the ledger. */
-  let mergeUntracked: string[] = [];
+  let mergeStamp: MergeBackResult | null = null;
   let mergeDiff: { rel: string; bytes: number } | null = null;
   let mergeIgnored: string[] | null = null;
   const settleWorkspace = (): void => {
@@ -1545,24 +1630,35 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
         // every member is cheap: nothing to apply, nothing to conflict with.
         mergeStamp = { status: 'clean', detail: 'nothing to apply: the attempt changed no tracked files' };
       } else {
-        mergeStamp = withEngineTreeLease(ctx, `merge:${ids.actorCallId}:a${attempt}`, () => {
-          // `--3way` first, working-tree apply when the only refusal is a
-          // path the workspace holds untracked: the rules live with the
-          // helper, shared with the ad-hoc dispatch merge-back, so the two
-          // cannot drift.
-          const merged = applyMergeBackDiff({ repoRoot: ctx.repoRoot, diffAbs: wt.diffAbs });
-          mergeUntracked = merged.untracked;
-          return merged.stamp;
-        });
+        // One atomic turn at the write window: apply; if the tree moved,
+        // rebase the worktree onto it; if that is clean, apply again; if it
+        // conflicts, stop with the worktree retained. The rules live with
+        // the helper, shared with the ad-hoc dispatch, so the two cannot
+        // drift.
+        const settled = withEngineTreeLease(ctx, `merge:${ids.actorCallId}:a${attempt}`, () =>
+          settleIsolatedWork({
+            repoRoot: ctx.repoRoot,
+            worktreeAbs: wt.abs,
+            diff,
+            baselineRef: `${ctx.runId}:${ids.actorCallId}-a${attempt}:rebase`,
+            armLabel: 'engine attempt',
+            priorConflicts: pending.conflict?.conflicts,
+          }));
+        mergeStamp = settled.stamp;
+        mergeDiff = { rel: settled.diff.diffRel, bytes: settled.diff.diffBytes };
       }
     } catch (err) {
       // Reached when the diff could not be collected or the lease never came
-      // free. Nothing was applied, so the tree is untouched — `blocked`, not
-      // `conflicted`, and the difference decides whether a reader has to go
-      // inspect `git status`.
+      // free. Nothing was applied, so the tree is untouched — `blocked`, and
+      // the diff (when it was collected) is kept.
       mergeStamp = { status: 'blocked', detail: err instanceof Error ? err.message : String(err) };
     } finally {
-      try { removeIsolatedWorktree(ctx.repoRoot, wt.abs); } catch {}
+      // Retained on `unresolved`: the markers in it are the next attempt's
+      // input, or a human's. Torn down on everything else — the diff is the
+      // durable artifact there, not the worktree.
+      if (mergeStamp?.status !== 'unresolved') {
+        try { removeIsolatedWorktree(ctx.repoRoot, wt.abs); } catch {}
+      }
     }
   };
   // Read through helpers, not directly: every assignment above happens inside
@@ -1570,7 +1666,7 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
   // to `null` at the read sites below, so a direct `!= null` narrows to
   // `never`. `dispatch.ts` reads its isolated scan the same way and for the
   // same reason.
-  const takeMergeStamp = (): { status: 'clean' | 'conflicted' | 'blocked'; detail?: string } | null => mergeStamp;
+  const takeMergeStamp = (): MergeBackResult | null => mergeStamp;
   const takeMergeDiff = (): { rel: string; bytes: number } | null => mergeDiff;
   /** Workspace facts for this attempt's receipt, in one place so a failure
    * event and a completion event cannot disagree about where it ran. */
@@ -1810,16 +1906,61 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
   // this engine exists to avoid — and unlike the shared-tree case, it is
   // recoverable, because the diff artifact is durable and named.
   const settled = takeMergeStamp();
+  if (settled != null && settled.status === 'unresolved' && pending.worktree != null) {
+    // The PR model: the branch owner resolves. The worktree was rebased onto
+    // the current workspace and retains the markers; the executor is
+    // re-invoked there, as a new attempt with reason `merge_conflict`, up to
+    // the round cap. Past the cap the attempt fails with the worktree still
+    // retained for a human. Either way the caller's tree is untouched.
+    //
+    // The executor's report is parked beside the invalid-output attempts: it
+    // is the output of work that has not landed, so it cannot be the step's
+    // artifact, but a human who resolves the markers by hand will want it.
+    const wt = pending.worktree;
+    const conflicts = settled.conflicts ?? [];
+    const ext = extname(outputRel) || '.out';
+    const attemptRel = `artifacts/attempts/${ids.actorCallId}-a${attempt}${ext}`;
+    const attemptAbs = join(ctx.runDir, attemptRel);
+    mkdirSync(dirname(attemptAbs), { recursive: true });
+    writeFileSync(attemptAbs, stdout, 'utf8');
+    const rounds = ctx.conflictRounds.get(ids.actorCallId) ?? 0;
+    const where = `${wt.rel} (rebased onto ${(settled.rebased_onto ?? wt.baselineCommit).slice(0, 12)})`;
+    if (rounds < MAX_MERGE_CONFLICT_ROUNDS) {
+      ctx.conflictRounds.set(ids.actorCallId, rounds + 1);
+      const error =
+        `${executor} completed, but its work conflicts with what the workspace now holds (${conflicts.join(', ')}). ` +
+        `The worktree ${where} is retained with the conflict markers; the workspace is untouched. ` +
+        `A merge_conflict attempt follows to resolve them (round ${rounds + 1} of ${MAX_MERGE_CONFLICT_ROUNDS}).`;
+      appendEvent(ctx.runDir, { type: 'actor_failed', ...base, ...evidenceTiming, reason: 'merge_conflict', exit_code: 0, attempt_output: attemptRel, workspace: wt.rel, workspace_retained: true, error }, ctx.now);
+      ctx.act(`  merge conflict for ${stepId}${role ? ` (${role})` : ''} in ${conflicts.length} file(s) — re-invoking ${executor} in ${wt.rel} (round ${rounds + 1} of ${MAX_MERGE_CONFLICT_ROUNDS})`);
+      releaseAttempt();
+      return {
+        kind: 'merge_conflict',
+        detail: error,
+        conflicts,
+        worktreeRel: wt.rel,
+        baselineCommit: settled.rebased_onto ?? wt.baselineCommit,
+        priorAttempt: attempt,
+      };
+    }
+    const error =
+      `${executor} completed, but its work still conflicts with the workspace after ${MAX_MERGE_CONFLICT_ROUNDS} conflict round(s) ` +
+      `(${conflicts.join(', ')}). The worktree ${where} is retained with the conflict markers and the workspace is untouched. ` +
+      `Resolve the markers there, then \`fadeno attempt-accept ${ctx.runId} ${ids.actorCallId}\` to merge the resolved work ` +
+      'and complete this attempt without another executor run.';
+    appendEvent(ctx.runDir, { type: 'actor_failed', ...base, ...evidenceTiming, reason: 'merge_back_failed', exit_code: 0, attempt_output: attemptRel, workspace: wt.rel, workspace_retained: true, error }, ctx.now);
+    ctx.act(`  merge-back unresolved for ${stepId}${role ? ` (${role})` : ''} after ${MAX_MERGE_CONFLICT_ROUNDS} round(s) — worktree retained at ${wt.rel}`);
+    releaseAttempt();
+    return { kind: 'exit_nonzero', detail: error };
+  }
   if (settled != null && settled.status !== 'clean') {
     const settledDiff = takeMergeDiff();
     const recovery = settledDiff == null
       ? 'the diff could not be collected, so there is nothing to re-apply'
-      : `re-apply with \`${mergeBackReapplyCommand(settledDiff.rel, mergeUntracked)}\` once the tree settles`;
+      : `re-apply with \`${mergeBackReapplyCommand(settledDiff.rel)}\` once the tree settles`;
     const error =
       `${executor} completed, but its work could not be merged back into the workspace ` +
-      `(${settled.status}${settled.detail != null ? `: ${settled.detail}` : ''}). ` +
-      `${settled.status === 'conflicted' ? 'The tree may be PARTLY applied — inspect `git status` first. ' : 'The tree is untouched. '}` +
-      `${recovery}.`;
+      `(${settled.status}${settled.detail != null ? `: ${settled.detail}` : ''}). The tree is untouched. ${recovery}.`;
     appendEvent(ctx.runDir, { type: 'actor_failed', ...base, ...evidenceTiming, reason: 'merge_back_failed', exit_code: 0, error }, ctx.now);
     ctx.act(`  merge-back ${settled.status} for ${stepId}${role ? ` (${role})` : ''} — ${recovery}`);
     releaseAttempt();
@@ -1897,9 +2038,38 @@ function dispatchOnce(
   reason: string,
   repairErrors: string[] | null,
   stamps: { providerWarned?: boolean; shadowOnly?: boolean } = {},
+  conflict: ConflictRound | null = null,
 ): DispatchOutcome {
-  const pending = beginCommandAttempt(ctx, stepId, role, generation, inBody, outputRel, artifactType, ids, attempt, reason, repairErrors, stamps);
+  const pending = beginCommandAttempt(ctx, stepId, role, generation, inBody, outputRel, artifactType, ids, attempt, reason, repairErrors, stamps, conflict);
   return collectCommandAttempt(ctx, pending);
+}
+
+/**
+ * The member to queue after an outcome that earns another attempt — a
+ * schema repair (once per actor call) or a conflict round (granted by
+ * collection, which holds the round budget) — or null when the outcome is
+ * final. One function for the four places a wave consumes an outcome, so a
+ * new kind of follow-up cannot be wired into three of them.
+ */
+function followUpMember(
+  ctx: EngineCtx,
+  outcome: DispatchOutcome,
+  member: Pick<WaveMember, 'role' | 'outputRel' | 'artifactType' | 'ids' | 'stamps' | 'generation' | 'inBody' | 'stepId'>,
+): WaveMember | null {
+  const base = { role: member.role, outputRel: member.outputRel, artifactType: member.artifactType, ids: member.ids, stamps: member.stamps, generation: member.generation, inBody: member.inBody, stepId: member.stepId };
+  if (outcome.kind === 'invalid_output' && !ctx.repaired.has(member.ids.actorCallId)) {
+    ctx.repaired.add(member.ids.actorCallId);
+    return { ...base, reason: 'schema_repair', repairErrors: outcome.errors, conflict: null };
+  }
+  if (outcome.kind === 'merge_conflict') {
+    return {
+      ...base,
+      reason: 'merge_conflict',
+      repairErrors: null,
+      conflict: { worktreeRel: outcome.worktreeRel, baselineCommit: outcome.baselineCommit, conflicts: outcome.conflicts, priorAttempt: outcome.priorAttempt },
+    };
+  }
+  return null;
 }
 
 interface WaveMember {
@@ -1909,6 +2079,8 @@ interface WaveMember {
   ids: { stepExecutionId: string; actorCallId: string };
   reason: string;
   repairErrors: string[] | null;
+  /** Set when this member is a conflict round; see `ConflictRound`. */
+  conflict: ConflictRound | null;
   stamps: { providerWarned?: boolean; shadowOnly?: boolean };
   // Per-member identity; stepId/generation/inBody are authoritative here, the
   // wave parameters are the common case for classic maps and are kept for
@@ -2035,12 +2207,13 @@ function runCommandWave(
         const priorAttemptsInfo = priorAttempts(freshEvents(ctx.runDir), head.ids.actorCallId);
         const attempt = priorAttemptsInfo.count + 1;
         let reason = 'initial';
-        if (head.repairErrors != null) reason = 'schema_repair';
+        if (head.conflict != null) reason = 'merge_conflict';
+        else if (head.repairErrors != null) reason = 'schema_repair';
         else if (priorAttemptsInfo.count > 0) {
           const { executor } = effectiveBinding(ctx, head.role);
           reason = executor !== priorAttemptsInfo.lastExecutor ? 'executor_override' : 'user_retry';
         }
-        const pending = beginCommandAttempt(ctx, stepId, head.role, generation, inBody, head.outputRel, head.artifactType, head.ids, attempt, reason, head.repairErrors, { providerWarned, shadowOnly });
+        const pending = beginCommandAttempt(ctx, stepId, head.role, generation, inBody, head.outputRel, head.artifactType, head.ids, attempt, reason, head.repairErrors, { providerWarned, shadowOnly }, head.conflict);
         queue.shift();
         inflight.push(pending);
       }
@@ -2048,22 +2221,9 @@ function runCommandWave(
         const headPending = inflight[0]!;
         const outcome = collectCommandAttempt(ctx, headPending);
         inflight.shift();
-        if (outcome.kind === 'invalid_output' && !ctx.repaired.has(headPending.ids.actorCallId)) {
-          ctx.repaired.add(headPending.ids.actorCallId);
-          // Requeue for repair wave: keep same member but with repairErrors
-          repairQueued.push({
-            role: headPending.role,
-            outputRel: headPending.outputRel,
-            artifactType: headPending.artifactType,
-            ids: headPending.ids,
-            reason: 'schema_repair',
-            repairErrors: outcome.errors,
-            stamps: headPending.stamps,
-            generation: headPending.generation,
-            inBody: headPending.inBody,
-            stepId: headPending.stepId,
-          });
-        } else if (outcome.kind !== 'valid') {
+        const follow = followUpMember(ctx, outcome, headPending);
+        if (follow != null) repairQueued.push(follow);
+        else if (outcome.kind !== 'valid') {
           if (failure == null) failure = outcome;
         }
         // On valid, continue to next collection; no sibling cancellation.
@@ -2081,21 +2241,9 @@ function runCommandWave(
         const hp = inflight[0]!;
         const out = collectCommandAttempt(ctx, hp);
         inflight.shift();
-        if (out.kind === 'invalid_output' && !ctx.repaired.has(hp.ids.actorCallId)) {
-          ctx.repaired.add(hp.ids.actorCallId);
-          repairQueued.push({
-            role: hp.role,
-            outputRel: hp.outputRel,
-            artifactType: hp.artifactType,
-            ids: hp.ids,
-            reason: 'schema_repair',
-            repairErrors: out.errors,
-            stamps: hp.stamps,
-            generation: hp.generation,
-            inBody: hp.inBody,
-            stepId: hp.stepId,
-          });
-        } else if (out.kind !== 'valid' && failure == null) {
+        const follow = followUpMember(ctx, out, hp);
+        if (follow != null) repairQueued.push(follow);
+        else if (out.kind !== 'valid' && failure == null) {
           failure = out;
         }
       } catch {
@@ -2373,21 +2521,25 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
         break;
       }
       let repairErrors: string[] | null = null;
+      let conflict: ConflictRound | null = null;
       for (;;) {
         events = freshEvents(ctx.runDir);
         const prior = priorAttempts(events, ids.actorCallId);
         const attempt = prior.count + 1;
         let reason: string = 'initial';
-        if (repairErrors != null) reason = 'schema_repair';
+        if (conflict != null) reason = 'merge_conflict';
+        else if (repairErrors != null) reason = 'schema_repair';
         else if (prior.count > 0) {
           const { executor } = effectiveBinding(ctx, role);
           reason = executor !== prior.lastExecutor ? 'executor_override' : 'user_retry';
         }
-        const outcome = dispatchOnce(ctx, stepId, role, generation, step.loop.in_body, outputRel, step.artifact_type, ids, attempt, reason, repairErrors, { providerWarned: preflight.providerWarned, shadowOnly: preflight.shadowOnly });
+        const outcome = dispatchOnce(ctx, stepId, role, generation, step.loop.in_body, outputRel, step.artifact_type, ids, attempt, reason, repairErrors, { providerWarned: preflight.providerWarned, shadowOnly: preflight.shadowOnly }, conflict);
         if (outcome.kind === 'valid') break;
-        if (outcome.kind === 'invalid_output' && !ctx.repaired.has(ids.actorCallId)) {
-          ctx.repaired.add(ids.actorCallId);
-          repairErrors = outcome.errors;
+        // The same two follow-ups the wave grants, through the same helper.
+        const follow = followUpMember(ctx, outcome, { role, outputRel, artifactType: step.artifact_type, ids, stamps: {}, generation, inBody: step.loop.in_body, stepId });
+        if (follow != null) {
+          repairErrors = follow.repairErrors;
+          conflict = follow.conflict;
           continue;
         }
         serialFailure = outcome;
@@ -2479,16 +2631,19 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
   if (!hasHosts) {
     const commandMembersInOrder: WaveMember[] = queue.filter((e) => e.kind === 'command').map((e) => {
       const ce = e as Extract<PendingQueueEntry, { kind: 'command' }>;
-      return { role: ce.role, outputRel: ce.outputRel, artifactType: ce.artifactType, ids: ce.ids, reason: 'initial', repairErrors: null, stamps: {}, generation, inBody: step.loop.in_body, stepId };
+      return { role: ce.role, outputRel: ce.outputRel, artifactType: ce.artifactType, ids: ce.ids, reason: 'initial', repairErrors: null, conflict: null, stamps: {}, generation, inBody: step.loop.in_body, stepId };
     });
     if (commandMembersInOrder.length > 0) {
       const waveResult = runCommandWave(ctx, stepId, generation, step.loop.in_body, commandMembersInOrder, ctx.parallel);
-      if (waveResult.repairQueued.length > 0) {
-        const repairWave = runCommandWave(ctx, stepId, generation, step.loop.in_body, waveResult.repairQueued, ctx.parallel);
-        waveResult.failure = waveResult.failure ?? repairWave.failure;
-        if (repairWave.repairQueued.length > 0 && waveResult.failure == null) {
-          waveResult.failure = { kind: 'invalid_output', detail: `${stepId}: output failed ${step.artifact_type} validation after the bounded repair`, errors: [] } as unknown as DispatchOutcome;
-        }
+      // Follow-up waves until none is queued. Bounded by construction: each
+      // actor call gets at most one schema repair (`ctx.repaired`) and
+      // MAX_MERGE_CONFLICT_ROUNDS conflict rounds (`ctx.conflictRounds`), and
+      // an outcome past either budget is a failure, not a follow-up.
+      let queued = waveResult.repairQueued;
+      while (queued.length > 0) {
+        const next = runCommandWave(ctx, stepId, generation, step.loop.in_body, queued, ctx.parallel);
+        waveResult.failure = waveResult.failure ?? next.failure;
+        queued = next.repairQueued;
       }
       if (waveResult.failure != null) {
         const f = waveResult.failure;
@@ -2532,10 +2687,9 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
         const hp = inflight[0]!;
         const out = collectCommandAttempt(ctx, hp);
         inflight.shift();
-        if (out.kind === 'invalid_output' && !ctx.repaired.has(hp.ids.actorCallId)) {
-          ctx.repaired.add(hp.ids.actorCallId);
-          repairQueued.push({ role: hp.role, outputRel: hp.outputRel, artifactType: hp.artifactType, ids: hp.ids, reason: 'schema_repair', repairErrors: out.errors, stamps: hp.stamps, generation: hp.generation, inBody: hp.inBody, stepId: hp.stepId });
-        } else if (out.kind !== 'valid' && failure == null) {
+        const follow = followUpMember(ctx, out, hp);
+        if (follow != null) repairQueued.push(follow);
+        else if (out.kind !== 'valid' && failure == null) {
           failure = out;
         }
       } catch { try { inflight.shift(); } catch {} }
@@ -2610,10 +2764,9 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
         const hp = inflight[0]!;
         const outcome = collectCommandAttempt(ctx, hp);
         inflight.shift();
-        if (outcome.kind === 'invalid_output' && !ctx.repaired.has(hp.ids.actorCallId)) {
-          ctx.repaired.add(hp.ids.actorCallId);
-          repairQueued.push({ role: hp.role, outputRel: hp.outputRel, artifactType: hp.artifactType, ids: hp.ids, reason: 'schema_repair', repairErrors: outcome.errors, stamps: hp.stamps, generation: hp.generation, inBody: hp.inBody, stepId: hp.stepId });
-        } else if (outcome.kind !== 'valid' && failure == null) {
+        const follow = followUpMember(ctx, outcome, hp);
+        if (follow != null) repairQueued.push(follow);
+        else if (outcome.kind !== 'valid' && failure == null) {
           failure = outcome;
         }
       } else if (mixedQueue.length === 0) {
@@ -2631,15 +2784,13 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
   // Bounded repair wave for invalid outputs (hosts never need repair). Align with no-host
   // path: run the repair wave even when a sibling command already failed, so each
   // invalid member gets its bounded retry regardless of sibling status.
-  if (repairQueued.length > 0) {
-    const repairResult = runCommandWave(ctx, stepId, generation, step.loop.in_body, repairQueued, ctx.parallel);
-    failure = failure ?? repairResult.failure;
-    if (repairResult.repairQueued.length > 0 && failure == null) {
-      failure = { kind: 'invalid_output', detail: `${stepId}: output failed ${step.artifact_type} validation after the bounded repair`, errors: [] } as unknown as DispatchOutcome;
-    } else if (repairResult.repairQueued.length > 0 && failure != null) {
-      // Preserve the original command failure but note that a repair also exceeded its bound;
-      // the original failure remains the authoritative terminal for this step.
-    }
+  // Follow-up waves until none is queued; bounded by the per-call repair and
+  // conflict-round budgets, exactly as on the no-host path.
+  let queued = repairQueued;
+  while (queued.length > 0) {
+    const next = runCommandWave(ctx, stepId, generation, step.loop.in_body, queued, ctx.parallel);
+    failure = failure ?? next.failure;
+    queued = next.repairQueued;
   }
 
   if (failure != null && hostRequests.length > 0) {
@@ -3169,10 +3320,21 @@ function driveComposite(ctx: EngineCtx, maxTransitions: number, actions: string[
  * something the engine cannot resolve. Deterministic: every consequential
  * effect is an event, an artifact, or a run.yaml update via existing writers.
  */
-export function runDrive(opts: DriveOptions): DriveResult {
-  const cwd = opts.cwd ?? process.cwd();
-  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+interface OpenedEngine {
+  ctx: EngineCtx;
+  run: ReturnType<typeof resolveRun>;
+  actions: string[];
+  bindMapEarly: Map<string, string>;
+}
 
+/**
+ * Resolve a run and build the engine context for it — the ledger, the
+ * playbook and schemas, the executor profile snapshot, the dial layers.
+ * `runDrive` and `runAttemptAccept` open the engine the same way, so an
+ * acceptance validates an attempt's output with the same schemas and
+ * resolves its bindings against the same snapshot the drive did.
+ */
+function openEngine(opts: DriveOptions, repoRoot: string): OpenedEngine {
   let run;
   try {
     run = resolveRun(repoRoot, opts.run);
@@ -3224,6 +3386,7 @@ export function runDrive(opts: DriveOptions): DriveResult {
     schemas,
     overrides: new Map<string, string>(),
     repaired: new Set<string>(),
+    conflictRounds: new Map<string, number>(),
     diagnostics: opts.diagnostics,
     timeoutMs: opts.timeoutMs,
     parallel,
@@ -3260,6 +3423,14 @@ export function runDrive(opts: DriveOptions): DriveResult {
     worktreeCarry,
     dialLayers,
   };
+  return { ctx, run, actions, bindMapEarly };
+}
+
+export function runDrive(opts: DriveOptions): DriveResult {
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+
+  const { ctx, run, actions, bindMapEarly } = openEngine(opts, repoRoot);
   // Handle recorded dialLayers for in-flight comparison? Load last snapshot's dials to detect change note (not needed)
   recoverInterruptedCommandDispatches(ctx);
   recoverInterruptedToolDispatches(ctx);
@@ -3269,7 +3440,7 @@ export function runDrive(opts: DriveOptions): DriveResult {
   recordResolutionSnapshot(ctx);
 
   const maxTransitions = opts.maxTransitions ?? MAX_TRANSITIONS_DEFAULT;
-  if (hasCompositeContainers(playbook)) return driveComposite(ctx, maxTransitions, actions);
+  if (hasCompositeContainers(ctx.playbook)) return driveComposite(ctx, maxTransitions, actions);
   let transitions = 0;
 
   const finish = (
@@ -3302,7 +3473,7 @@ export function runDrive(opts: DriveOptions): DriveResult {
     const events = freshEvents(ctx.runDir);
     let comp: NextComputation;
     try {
-      comp = computeNext(playbook, events);
+      comp = computeNext(ctx.playbook, events);
     } catch (err) {
       if (err instanceof FlowCursorError) throw new DriveError(err.message);
       throw err;
@@ -3321,7 +3492,7 @@ export function runDrive(opts: DriveOptions): DriveResult {
           `flow computes terminal (${status}) but ${outstanding.length} host dispatch(es) are still ` +
           `in requested state (${ids}); a run never terminates over an in-flight host dispatch — ` +
           'submit its receipts (dispatch-start, then dispatch-complete or dispatch-fail) and re-run drive.';
-        act(detail);
+        ctx.act(detail);
         return finish('awaiting_host_dispatch', detail, null, null, outstanding);
       }
       const current = parseYaml(readFileSync(join(ctx.runDir, 'run.yaml'), 'utf8')) as {
@@ -3334,7 +3505,7 @@ export function runDrive(opts: DriveOptions): DriveResult {
           if (err instanceof RunError) throw new DriveError(err.message);
           throw err;
         }
-        act(`run ${status}`);
+        ctx.act(`run ${status}`);
       }
       return finish('terminal', `run is terminal (${status}).`, status);
     }
@@ -3412,4 +3583,209 @@ export function runDrive(opts: DriveOptions): DriveResult {
       );
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// attempt-accept: the human half of the pull-request model
+// ---------------------------------------------------------------------------
+
+export interface AttemptAcceptOptions {
+  run: string;
+  actorCallId: string;
+  repoRoot?: string;
+  cwd?: string;
+  now?: Date;
+  userPathOptions?: UserPathOptions;
+  onAction?: (line: string) => void;
+}
+
+export interface AttemptAcceptResult {
+  runId: string;
+  actorCallId: string;
+  /** The attempt this acceptance recorded (the failed attempt's ordinal + 1). */
+  attempt: number;
+  /** Run-relative path of the artifact written. */
+  output: string;
+  mergeBack: MergeBackResult;
+  diffBytes: number;
+  /** The worktree that was merged and removed. */
+  workspace: string;
+  actions: string[];
+}
+
+/**
+ * Accept an attempt whose merge-back failed after the conflict rounds were
+ * spent, once a human has resolved the markers in its retained worktree.
+ *
+ * The engine could not land the work and gave up; nothing about the work
+ * itself changed, only who reconciled it. So this records a new attempt with
+ * reason `host_resolved` — no executor ran, the request row says `resolved_by:
+ * host` and carries no command — and then does exactly what collection would
+ * have done had the merge-back been clean: validates the executor's parked
+ * report against the step's schema, applies the worktree's diff to the
+ * workspace (rebasing first if the tree moved again, under the same window
+ * lease), writes the artifact, and receipts `actor_completed` with the
+ * merge-back stamp. The next `fadeno drive` sees a completed attempt and
+ * moves on; nothing re-runs.
+ *
+ * Refuses, with nothing applied and the worktree kept, when the markers are
+ * still there, when the report fails validation, or when the tree moved in a
+ * way that conflicts again — each of which is the human's to fix, not the
+ * kernel's to guess at.
+ */
+export function runAttemptAccept(opts: AttemptAcceptOptions): AttemptAcceptResult {
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const { ctx, actions } = openEngine({ run: opts.run, cwd, repoRoot, now: opts.now, userPathOptions: opts.userPathOptions, onAction: opts.onAction }, repoRoot);
+  const events = freshEvents(ctx.runDir);
+  const callId = opts.actorCallId;
+  const terminal = events.findLast((e) => (e.type === 'actor_failed' || e.type === 'actor_completed') && e.extra.actor_call_id === callId);
+  if (terminal == null) throw new DriveError(`no attempt of "${callId}" is recorded in run ${ctx.runId}.`);
+  const describe = `${terminal.type}${typeof terminal.extra.reason === 'string' ? `(${terminal.extra.reason})` : ''} at attempt ${String(terminal.extra.attempt ?? '?')}`;
+  if (
+    terminal.type !== 'actor_failed' ||
+    terminal.extra.reason !== 'merge_back_failed' ||
+    terminal.extra.workspace_retained !== true ||
+    typeof terminal.extra.workspace !== 'string' ||
+    typeof terminal.extra.attempt !== 'number'
+  ) {
+    throw new DriveError(
+      `attempt-accept applies to an attempt whose merge-back failed with its worktree retained; ` +
+        `the latest attempt of "${callId}" is ${describe}.`,
+    );
+  }
+  const attempt = terminal.extra.attempt;
+  if (events.some((e) => e.type === 'actor_dispatched' && e.extra.actor_call_id === callId && typeof e.extra.attempt === 'number' && e.extra.attempt > attempt)) {
+    throw new DriveError(`attempt ${attempt} of "${callId}" has already been followed by a later attempt; nothing to accept.`);
+  }
+  const dispatched = events.find((e) => e.type === 'actor_dispatched' && e.extra.actor_call_id === callId && e.extra.attempt === attempt);
+  if (dispatched == null) throw new DriveError(`attempt ${attempt} of "${callId}" has no actor_dispatched row.`);
+  const outputRel = typeof dispatched.extra.output_path === 'string' ? dispatched.extra.output_path : null;
+  if (outputRel == null) {
+    throw new DriveError(`attempt ${attempt} of "${callId}" recorded no output_path on its dispatch row (written by fadeno 0.6.0-rc.60 and later); accept it by re-driving instead.`);
+  }
+  const artifactType = typeof dispatched.extra.artifact_type === 'string' ? dispatched.extra.artifact_type : null;
+  const workspaceRel = terminal.extra.workspace;
+  const worktreeAbs = join(repoRoot, ...workspaceRel.split('/'));
+  if (!existsSync(worktreeAbs)) throw new DriveError(`the retained worktree ${workspaceRel} is gone; there is nothing to accept.`);
+  const parkedRel = typeof terminal.extra.attempt_output === 'string' ? terminal.extra.attempt_output : null;
+  if (parkedRel == null || !existsSync(join(ctx.runDir, parkedRel))) {
+    throw new DriveError(`attempt ${attempt} of "${callId}" has no parked report (attempt_output) to accept.`);
+  }
+  const stdout = readFileSync(join(ctx.runDir, parkedRel), 'utf8');
+  const priorStamp = terminal.extra.merge_back != null && typeof terminal.extra.merge_back === 'object' ? (terminal.extra.merge_back as MergeBackResult) : null;
+  const priorConflicts = priorStamp?.conflicts ?? [];
+
+  // Validate BEFORE touching the tree: a report that fails its schema is
+  // the human's to fix too, and applying the work first would leave a tree
+  // that changed and a step that did not.
+  const verdict = validateTyped(ctx, artifactType, stdout);
+  if (!verdict.ok) {
+    throw new DriveError(
+      `the parked report for attempt ${attempt} of "${callId}" fails ${artifactType} validation (${verdict.errors.slice(0, 3).join('; ')}); ` +
+        `nothing was applied. Fix ${parkedRel} under the run directory, then accept again.`,
+    );
+  }
+
+  const newAttempt = attempt + 1;
+  const id8 = `${callId}-a${newAttempt}`.replace(/[^A-Za-z0-9_-]/g, '-');
+  const diffRel = join('.fadeno', 'local', 'outputs', `engine-${ctx.runId}-${id8}.diff`).split('\\').join('/');
+  const headRes = spawnSync('git', ['-C', worktreeAbs, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+  const baselineBefore = headRes.error == null && headRes.status === 0 ? String(headRes.stdout ?? '').trim() : null;
+  const diff = collectIsolatedDiff({ repoRoot, worktreeAbs, diffAbs: join(repoRoot, diffRel), diffRel });
+  const settled = withEngineTreeLease(ctx, `merge:${callId}:a${newAttempt}`, () =>
+    settleIsolatedWork({ repoRoot, worktreeAbs, diff, baselineRef: `${ctx.runId}:${id8}:rebase`, armLabel: 'engine attempt', priorConflicts }));
+  if (settled.stamp.status === 'unresolved') {
+    throw new DriveError(
+      `the worktree ${workspaceRel} still conflicts with the workspace (${(settled.stamp.conflicts ?? []).join(', ')}): ` +
+        `${settled.stamp.detail ?? 'unresolved'}. Nothing was applied; resolve the markers there and accept again.`,
+    );
+  }
+  if (settled.stamp.status === 'blocked') {
+    throw new DriveError(`could not merge ${workspaceRel}: ${settled.stamp.detail ?? 'blocked'}. Nothing was applied; the worktree is kept.`);
+  }
+
+  const now = ctx.now ?? new Date();
+  const stepId = typeof terminal.extra.step === 'string' ? terminal.extra.step : typeof dispatched.step === 'string' ? dispatched.step : null;
+  const role = typeof terminal.extra.actor === 'string' ? terminal.extra.actor : null;
+  const stepExecutionId = typeof terminal.extra.step_execution_id === 'string' ? terminal.extra.step_execution_id : null;
+  const base: Record<string, unknown> = {
+    step: stepId,
+    actor: role,
+    step_execution_id: stepExecutionId,
+    actor_call_id: callId,
+    attempt: newAttempt,
+    executor: dispatched.extra.executor,
+  };
+  const baselineCommit = settled.stamp.rebased_onto ?? baselineBefore;
+  appendEvent(ctx.runDir, {
+    type: 'actor_dispatched',
+    ...base,
+    attempt_reason: 'host_resolved',
+    resolved_by: 'host',
+    model: dispatched.extra.model ?? null,
+    prompt_path: dispatched.extra.prompt_path ?? null,
+    prompt_sha256: dispatched.extra.prompt_sha256 ?? null,
+    output_path: outputRel,
+    ...(artifactType != null ? { artifact_type: artifactType } : {}),
+    workspace_mode: 'isolated',
+    workspace: workspaceRel,
+    ...(baselineCommit != null ? { baseline_commit: baselineCommit } : {}),
+    engine_pid: process.pid,
+  }, now);
+
+  const receipt: Record<string, unknown> = {
+    ...base,
+    duration_ms: 0,
+    ended_at: now.toISOString(),
+    exit_code: 0,
+    workspace_mode: 'isolated',
+    workspace: workspaceRel,
+    ...(baselineCommit != null ? { baseline_commit: baselineCommit } : {}),
+    diff_snapshot: settled.diff.diffRel,
+    diff_bytes: settled.diff.diffBytes,
+    merge_back: settled.stamp,
+  };
+  const artifactFields = [`step_execution_id=${stepExecutionId}`, `actor_call_id=${callId}`, `attempt=${newAttempt}`];
+  const extraction = verdict.extraction;
+  if (extraction) {
+    const ext = extname(outputRel) || '.out';
+    const rawRel = `artifacts/attempts/${callId}-a${newAttempt}.raw${ext}`;
+    const rawAbs = join(ctx.runDir, rawRel);
+    mkdirSync(dirname(rawAbs), { recursive: true });
+    writeFileSync(rawAbs, stdout, 'utf8');
+    const abs = join(ctx.runDir, outputRel);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, extraction.payload, 'utf8');
+    try {
+      runRun({ run: ctx.runId, event: 'artifact_created', artifact: outputRel, member: role ?? undefined, fields: artifactFields, repoRoot, now });
+    } catch (err) {
+      if (err instanceof RunError) throw new DriveError(err.message);
+      throw err;
+    }
+    appendEvent(ctx.runDir, { type: 'actor_completed', ...receipt, output: outputRel, output_valid: true, output_extraction: extraction.kind, envelope_candidates: extraction.candidates, raw_output: rawRel, raw_output_bytes: Buffer.byteLength(stdout), raw_output_sha256: sha256Hex(stdout) }, now);
+  } else {
+    const abs = join(ctx.runDir, outputRel);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, stdout, 'utf8');
+    try {
+      runRun({ run: ctx.runId, event: 'artifact_created', artifact: outputRel, member: role ?? undefined, fields: artifactFields, repoRoot, now });
+    } catch (err) {
+      if (err instanceof RunError) throw new DriveError(err.message);
+      throw err;
+    }
+    appendEvent(ctx.runDir, { type: 'actor_completed', ...receipt, output: outputRel, output_valid: true }, now);
+  }
+  try { removeIsolatedWorktree(repoRoot, worktreeAbs); } catch {}
+  ctx.act(`accepted ${callId}: attempt ${newAttempt} (host_resolved) merged ${settled.diff.diffBytes} bytes into the workspace and wrote ${outputRel}`);
+  return {
+    runId: ctx.runId,
+    actorCallId: callId,
+    attempt: newAttempt,
+    output: outputRel,
+    mergeBack: settled.stamp,
+    diffBytes: settled.diff.diffBytes,
+    workspace: workspaceRel,
+    actions,
+  };
 }

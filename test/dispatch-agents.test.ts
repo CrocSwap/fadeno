@@ -164,7 +164,7 @@ test('every dispatch proxy is told the recovery verdict is the result, and that 
     assert.match(body, /`ok`, `FAILED`, `NO OUTPUT`, or `TIMED OUT`/, `dispatch-${archetype} names the verdicts`);
     assert.match(body, /`output attested` is NOT a verdict/, `dispatch-${archetype} says what attestation is not`);
     assert.match(body, /`TIMED OUT` means the\s+kernel killed the executor at its own deadline/, `dispatch-${archetype} explains TIMED OUT`);
-    assert.match(body, /merge-back CONFLICTED` or `BLOCKED`/, `dispatch-${archetype} relays the merge-back line`);
+    assert.match(body, /merge-back UNRESOLVED` or `BLOCKED`/, `dispatch-${archetype} relays the merge-back line`);
     assert.doesNotMatch(body, /report the exit code recorded/, `dispatch-${archetype} no longer asks for a fact the recovery never printed`);
   }
 });

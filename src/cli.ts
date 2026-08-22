@@ -18,9 +18,10 @@ import {
   runDispatchesBakeoffs,
   runDispatchesOutput,
   type DispatchesResult,
+  runDispatchesMerge,
 } from './commands/dispatches.ts';
 import { runDiagram } from './commands/diagram.ts';
-import { DRIVE_PARALLEL_DEFAULT, DRIVE_PARALLEL_MAX, DRIVE_PARALLEL_MIN, runDrive, type DriveResult } from './commands/drive.ts';
+import { DRIVE_PARALLEL_DEFAULT, DRIVE_PARALLEL_MAX, DRIVE_PARALLEL_MIN, runAttemptAccept, runDrive, type DriveResult } from './commands/drive.ts';
 import { runGate } from './commands/gate.ts';
 import { runInit, type Target } from './commands/init.ts';
 import {
@@ -129,10 +130,12 @@ Usage:
   fadeno drive <run> [flags]            Engine: advance the run until terminal or paused
   fadeno cancel <run>                   Cancel the active engine attempt for a run (SIGTERM to its executor group)
   fadeno decide <run> <option> [flags]  Resolve a pending named human decision
+  fadeno attempt-accept <run> <call>    Merge a worktree you resolved by hand and complete its attempt
   fadeno runs                           List run ledgers under .fadeno/runs/
   fadeno attest --archetype <a>         Record this subagent's own measured delivery (run FROM inside it)
   fadeno dispatches [--tail n] [--json] Show which executor ran what (.fadeno/dispatches.jsonl)
   fadeno dispatches --cancel <id|tag:h> Stop a running dispatch (SIGTERM to its executor group)
+  fadeno dispatches --merge <id|tag:h>  Merge a retained worktree after resolving its conflicts by hand
   fadeno dispatches --output <id|last> [--wait <s>]  Print a dispatch's output snapshot verbatim
   fadeno dispatches --bakeoffs          Adjudicated bakeoff scorecard per challenger
   fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]
@@ -278,7 +281,7 @@ export const KNOWN_CLI_COMMANDS = new Set([
   'tool-run', 'tool-complete', 'plugin', 'completion', 'gate', 'prompt', 'next', 'drive',
   'cancel', 'models', 'dial', 'shadow', 'dispatch', 'dispatch-fallback', 'dispatch-start',
   'dispatch-prompt', 'dispatch-complete', 'dispatch-progress', 'dispatch-prepare',
-  'dispatch-fail', 'decide', 'runs', 'attest', 'dispatches', 'shadow-apply', 'bakeoff', 'show', 'verify',
+  'dispatch-fail', 'decide', 'attempt-accept', 'runs', 'attest', 'dispatches', 'shadow-apply', 'bakeoff', 'show', 'verify',
 ]);
 
 export function shouldRunPreflight(command: string | undefined): boolean {
@@ -544,6 +547,7 @@ Usage:
   fadeno dispatches --output <id|last|tag:<t>> [--wait [s]]
                                                Print a dispatch's output snapshot verbatim
   fadeno dispatches --cancel <id|tag:<t>>      Stop a running dispatch (SIGTERM to its group)
+  fadeno dispatches --merge <id|tag:<t>>       Merge a retained worktree after resolving its conflicts
   fadeno dispatches --bakeoffs                 Adjudicated bakeoff scorecard per challenger
 
 Options:
@@ -553,6 +557,33 @@ Options:
 
 Rows carry dial provenance: [session dial], [repo pin], [user dial]. Old-format
 ledger generations still render, marked [legacy] / [format 0.x].
+
+Merge-back works like a pull request. An isolated dispatch's worktree is the
+branch and your working tree is main; if main moved while the executor worked,
+the kernel rebases the worktree onto it and applies the result. When the rebase
+conflicts, the merge-back is \`unresolved\`: the worktree is retained with the
+conflict markers, your tree is untouched, and --output says so. Resolve the
+markers in that worktree (its path is on the completion row as \`workspace\`),
+then \`--merge\` applies the resolved work, records a dispatch_merged row, and
+removes the worktree. It refuses, touching nothing, while markers remain.
+`,
+  'attempt-accept': `fadeno attempt-accept — merge a worktree you resolved by hand and complete its attempt
+
+Usage:
+  fadeno attempt-accept <run> <actor-call-id>
+
+An engine attempt whose work conflicts with the workspace gets conflict rounds:
+the executor is re-invoked in its retained worktree (attempt_reason
+merge_conflict) to resolve the markers. When the rounds are spent the attempt
+fails as merge_back_failed with the worktree still retained — the receipt names
+it. Resolve the markers there yourself, then run this: it validates the
+executor's parked report against the step's schema, merges the worktree
+(rebasing first if the tree moved again), writes the artifact, and records a
+new attempt with reason host_resolved plus its actor_completed receipt. The
+next \`fadeno drive\` continues from there; no executor re-runs.
+
+Refuses, with nothing applied and the worktree kept, while markers remain,
+if the parked report fails validation, or if the rebase conflicts again.
 `,
   'shadow-apply': `fadeno shadow-apply — port a shadow pair's diff into your workspace
 
@@ -1684,6 +1715,7 @@ function main(argv: string[]): number {
         source: { type: 'string' },
         output: { type: 'string' },
         cancel: { type: 'string' },
+        merge: { type: 'string' },
         commit: { type: 'string' },
         reason: { type: 'string' },
         decision: { type: 'string' },
@@ -2620,6 +2652,18 @@ function main(argv: string[]): number {
       console.log(`${result.dispatchId} failed${result.idempotent ? ' (idempotent)' : ''}`);
       return 0;
     }
+    case 'attempt-accept': {
+      const [, run, actorCallId] = positionals;
+      if (!run || !actorCallId) throw new Error('Usage: fadeno attempt-accept <run> <actor-call-id>');
+      const result = runAttemptAccept({ run, actorCallId, onAction: (line) => console.error(line) });
+      console.log(
+        `accepted ${result.actorCallId}: attempt ${result.attempt} (host_resolved) merged ${result.diffBytes} bytes into the workspace` +
+          `${result.mergeBack.rebased_onto != null ? ` (rebased onto ${result.mergeBack.rebased_onto.slice(0, 12)} first)` : ''} and wrote ${result.output}; ` +
+          `the worktree ${result.workspace} is removed.`,
+      );
+      console.log(`Resume with \`fadeno drive ${result.runId}\`.`);
+      return 0;
+    }
     case 'decide': {
       const [, run, option] = positionals;
       if (!run || !option) {
@@ -2676,6 +2720,20 @@ function main(argv: string[]): number {
         // spawn returns, and only the workspace can say how far the work got.
         console.log('  the executor and its children are being reaped; the kernel records the completion row.');
         console.log('  check the workspace before re-dispatching — a cancelled executor may have written already.');
+        return 0;
+      }
+      if (values.merge != null) {
+        const inline = values.merge.startsWith('tag:') ? values.merge.slice(4) : null;
+        const result = runDispatchesMerge({
+          dispatchId: inline != null ? '' : values.merge,
+          tag: inline ?? values.tag,
+        });
+        const how = result.resolvedBy === 'tag' ? ` (tag: ${result.tag})` : '';
+        console.log(
+          `merged ${result.dispatchId.slice(0, 8)}${how}: ${result.diffBytes} bytes applied to the workspace from ${result.workspace}` +
+            `${result.mergeBack.rebased_onto != null ? ` (rebased onto ${result.mergeBack.rebased_onto.slice(0, 12)} first)` : ''}; the worktree is removed.`,
+        );
+        console.log(`  diff kept at ${result.diffSnapshot}; a dispatch_merged row records the merge.`);
         return 0;
       }
       if (values.output != null) {
@@ -2735,8 +2793,12 @@ function main(argv: string[]): number {
         })();
         const merge = result.primaryMerge == null
           ? null
-          : result.primaryMerge.status === 'conflicted'
-            ? `merge-back CONFLICTED: the tree MAY be partly applied — inspect \`git status\`${result.primaryMerge.detail != null ? ` (${result.primaryMerge.detail})` : ''}`
+          : result.primaryMerge.status === 'unresolved'
+            ? `merge-back UNRESOLVED: the work conflicts with the workspace and did NOT land; the worktree is retained with conflict markers` +
+              `${result.workspace != null ? ` at ${result.workspace}` : ''}${result.primaryMerge.detail != null ? ` (${result.primaryMerge.detail})` : ''}. ` +
+              `Resolve them there, then \`fadeno dispatches --merge ${result.dispatchId.slice(0, 8)}\``
+            : result.primaryMerge.status === 'conflicted'
+              ? `merge-back CONFLICTED: the tree MAY be partly applied — inspect \`git status\`${result.primaryMerge.detail != null ? ` (${result.primaryMerge.detail})` : ''}`
             : result.primaryMerge.status === 'blocked'
               ? `merge-back BLOCKED: nothing was applied, the workspace is untouched${result.primaryMerge.detail != null ? ` (${result.primaryMerge.detail})` : ''}`
               : result.primaryMerge.detail != null

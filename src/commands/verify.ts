@@ -295,6 +295,7 @@ export function runVerify(opts: VerifyOptions): VerifyResult {
   //     per actor call, redispatches carry an allowed reason, rejected-output
   //     bytes still match their recorded digests.
   findings.push(checkActorAttempts(run, events));
+  findings.push(checkMergeConflictRounds(run, events));
 
   // 18. executor-bindings — every dispatch used the resolution in force at its
   //     position: explicit override → per-role pin → the run's recorded session
@@ -994,7 +995,87 @@ function checkSessionContinuity(events: RunEvent[]): Finding {
 }
 
 const ATTEMPT_REASONS_FIRST = new Set(['initial']);
-const ATTEMPT_REASONS_RETRY = new Set(['schema_repair', 'executor_override', 'user_retry']);
+const ATTEMPT_REASONS_RETRY = new Set(['schema_repair', 'executor_override', 'user_retry', 'merge_conflict', 'host_resolved']);
+
+/**
+ * A merge conflict is resolved on the branch, never on the caller's tree, and
+ * the ledger has to show the branch: a `merge_conflict` attempt re-invokes
+ * the executor in the retained worktree of the attempt it follows, and a
+ * `host_resolved` attempt records that a human resolved it there instead.
+ * Either way the prior attempt must have failed with an `unresolved`
+ * merge-back that kept its worktree, and the request must name the same
+ * conflicts and the same rebased baseline — otherwise a round is a retry
+ * wearing a different word, and a human acceptance is a receipt for work
+ * nobody can trace to a conflict.
+ */
+function checkMergeConflictRounds(_run: RunSummary, events: RunEvent[]): Finding {
+  const check = 'merge-conflict-rounds';
+  const problems: string[] = [];
+  let rounds = 0;
+  let accepted = 0;
+  for (let i = 0; i < events.length; i += 1) {
+    const event = events[i]!;
+    if (event.type !== 'actor_dispatched') continue;
+    const reason = event.extra.attempt_reason;
+    if (reason !== 'merge_conflict' && reason !== 'host_resolved') continue;
+    const callId = typeof event.extra.actor_call_id === 'string' ? event.extra.actor_call_id : '(no actor_call_id)';
+    const attempt = typeof event.extra.attempt === 'number' ? event.extra.attempt : null;
+    const id = `${callId}#${attempt ?? '?'}`;
+    // Counted before any of the checks below can `continue`: a request that
+    // CLAIMS to be a round is what this check exists to examine, and a claim
+    // that fails the examination must be a failure, never a skip.
+    if (reason === 'merge_conflict') rounds += 1;
+    else accepted += 1;
+    if (attempt == null) { problems.push(`${id}: ${reason} request has no attempt ordinal`); continue; }
+    const prior = events
+      .slice(0, i)
+      .findLast((p) => p.type === 'actor_failed' && p.extra.actor_call_id === callId && p.extra.attempt === attempt - 1);
+    const expectedPrior = reason === 'merge_conflict' ? 'merge_conflict' : 'merge_back_failed';
+    if (prior == null || prior.extra.reason !== expectedPrior) {
+      problems.push(`${id}: ${reason} request does not follow an actor_failed(${expectedPrior}) of attempt ${attempt - 1}`);
+      continue;
+    }
+    const mergeBack = prior.extra.merge_back;
+    const stamp = mergeBack != null && typeof mergeBack === 'object' && !Array.isArray(mergeBack) ? (mergeBack as Record<string, unknown>) : null;
+    if (stamp?.status !== 'unresolved') problems.push(`${id}: the prior failure's merge_back is not "unresolved"`);
+    if (prior.extra.workspace_retained !== true || typeof prior.extra.workspace !== 'string') {
+      problems.push(`${id}: the prior failure did not retain its worktree`);
+    }
+    const priorConflicts = isStringArray(stamp?.conflicts) ? stamp!.conflicts as string[] : null;
+    if (reason === 'merge_conflict') {
+      const conflicts = event.extra.conflicts;
+      if (!isStringArray(conflicts) || conflicts.length === 0) problems.push(`${id}: merge_conflict request lacks the conflict list`);
+      else if (JSON.stringify(conflicts) !== JSON.stringify(priorConflicts)) problems.push(`${id}: request conflicts do not match the prior failure's merge_back.conflicts`);
+      const appendix = event.extra.conflict_appendix;
+      if (typeof appendix !== 'string' || (isStringArray(conflicts) && conflicts.some((c) => !appendix.includes(c)))) {
+        problems.push(`${id}: conflict_appendix does not name every conflicting file`);
+      }
+      if (typeof stamp?.rebased_onto === 'string' && event.extra.baseline_commit !== stamp.rebased_onto) {
+        problems.push(`${id}: request baseline_commit is not the rebased baseline the prior failure recorded`);
+      }
+      if (typeof prior.extra.workspace === 'string' && typeof event.extra.workspace === 'string') {
+        // The round runs in the retained worktree, moved to the round's
+        // name: same run, same actor call, only the attempt suffix differs.
+        const stem = (p: string): string => p.replace(/-a\d+$/, '');
+        if (stem(prior.extra.workspace) !== stem(event.extra.workspace)) {
+          problems.push(`${id}: round worktree "${event.extra.workspace}" is not the retained worktree "${prior.extra.workspace}"`);
+        }
+      }
+    } else {
+      if (event.extra.resolved_by !== 'host') problems.push(`${id}: host_resolved request lacks resolved_by: host`);
+      if (typeof prior.extra.workspace === 'string' && event.extra.workspace !== prior.extra.workspace) {
+        problems.push(`${id}: host_resolved request names a different worktree than the failure it accepts`);
+      }
+    }
+  }
+  if (rounds === 0 && accepted === 0) return skip(check, 'no merge_conflict rounds or host_resolved acceptances recorded');
+  if (problems.length > 0) return { check, status: 'fail', detail: problems.join('; ') };
+  return {
+    check,
+    status: 'ok',
+    detail: `${rounds} merge_conflict round(s) and ${accepted} host_resolved acceptance(s) each follow an unresolved merge-back that retained its worktree and names the same conflicts`,
+  };
+}
 
 function checkActorAttempts(run: RunSummary, events: RunEvent[]): Finding {
   const check = 'actor-attempts';

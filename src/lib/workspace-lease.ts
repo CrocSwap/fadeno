@@ -1634,121 +1634,6 @@ export function withWorkspaceWindowLease<T>(
 }
 
 /**
- * How a merge-back ended. `clean` means the whole diff is in the workspace.
- * `conflicted` means git tried and the tree MAY be partly applied — a 3-way
- * merge leaves conflict markers behind on the files it could not reconcile,
- * so the reader has to inspect `git status`. `blocked` means nothing was
- * applied and the tree is untouched: the diff is durable and can be ported
- * once whatever blocked it settles. The distinction decides whether a reader
- * has to go look at the tree, so the two must never be collapsed.
- */
-export interface MergeBackResult {
-  status: 'clean' | 'conflicted' | 'blocked';
-  detail?: string;
-}
-
-/** `git apply --3way` refusing a path the workspace holds untracked. */
-const NOT_IN_INDEX = /^error: (.+?): does not exist in index$/gm;
-
-function firstLine(text: string): string {
-  const line = text.split('\n').find((l) => l.trim().length > 0);
-  return line == null ? '' : line.trim();
-}
-
-/**
- * Apply an isolated attempt's diff to the caller's workspace.
- *
- * `--3way` first, never `--check`: a sibling member may have merged back
- * while this one ran, so context lines drift routinely and a plain apply
- * would refuse work that reconciles fine. It exits non-zero the moment any
- * file is left carrying conflict markers, which is the signal `conflicted`
- * needs; `--check` would exit 0 on a patch that WOULD conflict.
- *
- * The one failure `--3way` cannot express as a conflict is a path the
- * workspace holds UNTRACKED. The worktree was cut with the caller's untracked
- * files copied in and committed as its baseline, so to the worktree they are
- * tracked and the diff describes them as modifications of tracked files — but
- * `--3way` implies `--index`, and the caller's index has no entry for them, so
- * git refuses the whole patch with `does not exist in index` before writing
- * anything (the apply is atomic: it checks every hunk, then writes, and this
- * error is raised in the check). On 2026-08-22 that dropped a worker's entire
- * change set, tracked hunks included, because one edited file lived in an
- * untracked directory — and the row called it `conflicted`, which sent the
- * reader to inspect a tree nothing had touched.
- *
- * Adding those paths to the caller's index would make them apply, and would
- * also mutate an index the caller never asked to have mutated; the baseline
- * capture goes out of its way not to run `git add` in the caller's repo for
- * exactly that reason. So when `does not exist in index` is the failure, the
- * diff is re-applied to the working tree alone (`git apply` without
- * `--index`), which has no notion of tracking and is equally atomic. The
- * trade is stated on the result: those hunks land unstaged, and without the
- * 3-way fallback, so drift on them refuses instead of reconciling. A plain
- * apply that refuses leaves the tree untouched, so that outcome is `blocked`,
- * not `conflicted`.
- */
-export function applyMergeBackDiff(opts: { repoRoot: string; diffAbs: string }): MergeBackOutcome {
-  const threeWay = spawnSync('git', ['-C', opts.repoRoot, 'apply', '--3way', opts.diffAbs], { encoding: 'utf8' });
-  if (threeWay.error == null && threeWay.status === 0) return { stamp: { status: 'clean' }, untracked: [] };
-  const threeWayErr = threeWay.error?.message ?? String(threeWay.stderr ?? '').trim();
-  const untracked = [...threeWayErr.matchAll(NOT_IN_INDEX)].map((m) => m[1]!);
-  if (untracked.length === 0) {
-    return {
-      stamp: {
-        status: 'conflicted',
-        detail: threeWayErr.length > 0 ? threeWayErr : `git apply --3way exited ${threeWay.status ?? 'unknown'}`,
-      },
-      untracked,
-    };
-  }
-  const named = `${untracked.join(', ')} ${untracked.length === 1 ? 'is' : 'are'} untracked in the workspace`;
-  const plain = spawnSync('git', ['-C', opts.repoRoot, 'apply', opts.diffAbs], { encoding: 'utf8' });
-  if (plain.error == null && plain.status === 0) {
-    return {
-      stamp: {
-        status: 'clean',
-        detail:
-          `applied to the working tree without 3-way merge and left unstaged: ${named}, ` +
-          'so git had no index entry to merge against',
-      },
-      untracked,
-    };
-  }
-  const plainErr = plain.error?.message ?? String(plain.stderr ?? '').trim();
-  return {
-    stamp: {
-      status: 'blocked',
-      detail:
-        `nothing was applied: ${named}, so 3-way merge was unavailable ` +
-        `(${firstLine(threeWayErr)}), and a plain working-tree apply refused too ` +
-        `(${plainErr.length > 0 ? firstLine(plainErr) : `git apply exited ${plain.status ?? 'unknown'}`})`,
-    },
-    untracked,
-  };
-}
-
-/**
- * What `applyMergeBackDiff` learned, split into the part that goes on the
- * ledger (`stamp`, exactly `{status, detail?}` — its shape is frozen with the
- * rest of the receipt) and the part the caller needs only to phrase a
- * recovery pointer (`untracked`), which stays out of the ledger.
- */
-export interface MergeBackOutcome {
-  stamp: MergeBackResult;
-  untracked: string[];
-}
-
-/**
- * The command that would re-apply a kept diff by hand. `--3way` is the
- * right one whenever it was possible; when the diff names paths the
- * workspace holds untracked it never was, and pointing the reader at it
- * would reproduce the refusal they are recovering from.
- */
-export function mergeBackReapplyCommand(diffRel: string, untracked: readonly string[]): string {
-  return untracked.length > 0 ? `git apply ${diffRel}` : `git apply --3way ${diffRel}`;
-}
-
-/**
  * Best-effort removal of an isolated worktree. Failures are swallowed
  * because a killed delivery may have left the worktree in an unclean
  * state; the next `createIsolatedWorktree` prunes it.
@@ -1771,9 +1656,22 @@ export function removeIsolatedWorktree(repoRoot: string, worktreeAbs: string): v
  * and diff.
  */
 export function withIsolatedWorktree<T>(
-  opts: IsolatedWorktreeOptions & { diffRel: string; diffAbs: string },
+  opts: IsolatedWorktreeOptions & {
+    diffRel: string;
+    diffAbs: string;
+    /**
+     * Runs after the diff is collected and before the worktree is removed,
+     * with the worktree still intact — the merge-back lives here, because a
+     * merge-back that has to rebase needs the worktree, and one that ends
+     * `unresolved` needs it to survive. Return `retain: true` to keep the
+     * worktree; return a `diff` to replace the collected one (a rebase
+     * re-collects against the new baseline). Not called when the action
+     * threw: there is no work to settle, only a failure to report.
+     */
+    settle?: (worktreeAbs: string, diff: IsolatedDiffResult) => { retain: boolean; diff?: IsolatedDiffResult };
+  },
   action: (worktreeAbs: string) => T,
-): { result: T; diff: IsolatedDiffResult; worktreeRel: string } {
+): { result: T; diff: IsolatedDiffResult; worktreeRel: string; retained: boolean } {
   const created = createIsolatedWorktree(opts);
   let result: T | undefined;
   let actionError: unknown;
@@ -1796,7 +1694,13 @@ export function withIsolatedWorktree<T>(
     if (actionError != null) throw new AggregateError([actionError, diffError], 'isolated action and diff collection both failed');
     throw diffError;
   }
-  removeIsolatedWorktree(opts.repoRoot, created.worktreeAbs);
+  let retained = false;
+  if (actionError == null && opts.settle != null) {
+    const settled = opts.settle(created.worktreeAbs, diff);
+    retained = settled.retain;
+    if (settled.diff != null) diff = settled.diff;
+  }
+  if (!retained) removeIsolatedWorktree(opts.repoRoot, created.worktreeAbs);
   if (actionError != null) throw actionError;
-  return { result: result as T, diff, worktreeRel: created.worktreeRel };
+  return { result: result as T, diff, worktreeRel: created.worktreeRel, retained };
 }

@@ -1,6 +1,6 @@
 ---
 name: driver
-description: Drive a Fadeno run ledger end-to-end — engine-first via `fadeno drive`, with a manual `fadeno next` loop for steps the engine can't execute. Use when the host hands you a run id to drive or resume, or when coordinating multi-harness roles without host nested subagents. [fadeno 0.6.0-rc.59]
+description: Drive a Fadeno run ledger end-to-end — engine-first via `fadeno drive`, with a manual `fadeno next` loop for steps the engine can't execute. Use when the host hands you a run id to drive or resume, or when coordinating multi-harness roles without host nested subagents. [fadeno 0.6.0-rc.60]
 ---
 
 # Fadeno Driver
@@ -196,6 +196,21 @@ planned artifact path.
   attested` only says the snapshot's bytes are the ones the completion row
   hashed — a killed executor attests perfectly with zero bytes, and is not a
   result.
+
+- **Merge conflicts are resolved on the branch.** Each isolated attempt runs
+  in its own worktree and merges back with a plain `git apply`; if the
+  workspace moved meanwhile the kernel rebases the worktree onto it first.
+  When the rebase conflicts, the attempt fails as `merge_conflict` and the
+  executor is re-invoked in its *retained* worktree — a new attempt with
+  `attempt_reason: merge_conflict`, the conflicting files named on the request
+  and in a `conflict_appendix` — up to two rounds. A round that leaves markers
+  in place counts as unresolved. Past the cap the attempt fails as
+  `merge_back_failed` with the worktree still retained (`workspace` on the
+  receipt): resolve the markers there yourself, then
+  `fadeno attempt-accept <run> <actor-call-id>` merges the result, writes the
+  artifact from the parked report, and records a `host_resolved` attempt so
+  the next `fadeno drive` continues without re-running the executor. Your
+  working tree never carries conflict markers from a merge-back.
 
 - **Safe cancellation.** `fadeno cancel <run>` (or a unique run prefix) targets the
   single live engine command claim for that run, sends `SIGTERM` to its supervisor

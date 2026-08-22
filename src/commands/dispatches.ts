@@ -20,6 +20,8 @@ import {
   type DispatchOutcome,
 } from './dispatch.ts';
 import { INFLIGHT_DIR, readInflightClaim } from '../lib/supervisor.ts';
+import { collectIsolatedDiff, removeIsolatedWorktree, withWorkspaceWindowLease, WorkspaceLeaseError, type LeaseHolder } from '../lib/workspace-lease.ts';
+import { settleIsolatedWork, type MergeBackResult } from '../lib/workspace-baseline.ts';
 
 export class DispatchesCommandError extends Error {}
 
@@ -477,7 +479,9 @@ export interface DispatchesOutputResult {
   /** The deadline that killed it, when `outcome` is `timeout`. */
   timeoutMs: number | null;
   /** The merge-back stamp, when the dispatch ran isolated and one was attempted. */
-  primaryMerge: { status: string; detail?: string } | null;
+  primaryMerge: { status: string; detail?: string; conflicts?: string[]; rebased_onto?: string } | null;
+  /** The retained worktree, while the merge-back is `unresolved`. */
+  workspace: string | null;
   /**
    * How the query landed on this record. `recency` means `last` fell back to
    * "newest in the log" because nothing was open — a guess worth surfacing
@@ -1362,7 +1366,11 @@ interface OutputRecord {
   /** The deadline that killed it, when `outcome` is `timeout`. */
   timeoutMs: number | null;
   /** The merge-back stamp, when the dispatch ran isolated and one was attempted. */
-  primaryMerge: { status: string; detail?: string } | null;
+  primaryMerge: { status: string; detail?: string; conflicts?: string[]; rebased_onto?: string } | null;
+  /** The retained worktree, while a merge-back is `unresolved`; null once merged or torn down. */
+  workspace: string | null;
+  /** A `dispatch_merged` row landed: the retained worktree was merged by hand. */
+  merged: boolean;
   /**
    * Whether this is a shadow duplication. Shadows stay recoverable and
    * cancellable by explicit id, but are never candidates for `last`: the
@@ -1430,6 +1438,22 @@ function loadOutputRecords(absolute: string): {
     const event = str(row.event);
     const dispatchId = str(row.dispatch_id);
     if (dispatchId == null) continue;
+    if (event === 'dispatch_merged') {
+      // The later fact wins: a merge by hand supersedes the completion row's
+      // `unresolved` stamp, and the worktree it names is gone.
+      const merged = byId.get(dispatchId);
+      if (merged != null) {
+        merged.merged = true;
+        merged.workspace = null;
+        const stamp = row.merge;
+        if (stamp != null && typeof stamp === 'object' && !Array.isArray(stamp)) {
+          const s = stamp as Record<string, unknown>;
+          const status = str(s.status);
+          if (status != null) merged.primaryMerge = { status, ...(str(s.detail) != null ? { detail: str(s.detail)! } : {}), ...(typeof s.rebased_onto === 'string' ? { rebased_onto: s.rebased_onto } : {}) };
+        }
+      }
+      continue;
+    }
     if (event !== 'dispatch_requested' && event !== 'dispatch_completed') continue;
 
     let rec = byId.get(dispatchId);
@@ -1445,6 +1469,8 @@ function loadOutputRecords(absolute: string): {
         outputBytes: null,
         timeoutMs: null,
         primaryMerge: null,
+        workspace: null,
+        merged: false,
         shadow: false,
         tag: null,
         requestedAt: null,
@@ -1484,10 +1510,19 @@ function loadOutputRecords(absolute: string): {
       });
       const merge = row.primary_merge;
       if (merge != null && typeof merge === 'object' && !Array.isArray(merge)) {
-        const status = str((merge as Record<string, unknown>).status);
-        const detail = str((merge as Record<string, unknown>).detail);
-        if (status != null) rec.primaryMerge = detail != null ? { status, detail } : { status };
+        const m = merge as Record<string, unknown>;
+        const status = str(m.status);
+        const detail = str(m.detail);
+        if (status != null) {
+          rec.primaryMerge = {
+            status,
+            ...(detail != null ? { detail } : {}),
+            ...(Array.isArray(m.conflicts) && m.conflicts.every((c) => typeof c === 'string') ? { conflicts: m.conflicts as string[] } : {}),
+            ...(typeof m.rebased_onto === 'string' ? { rebased_onto: m.rebased_onto } : {}),
+          };
+        }
       }
+      if (row.workspace_retained === true && typeof row.workspace === 'string') rec.workspace = row.workspace;
       const duration = typeof row.duration_ms === 'number' ? row.duration_ms : null;
       // Prefer start + duration; fall back to the row's own stamp for legacy
       // rows written before `duration_ms`, where it is the best available.
@@ -1685,6 +1720,115 @@ export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOu
     outputBytes: rec.completed ? rec.outputBytes : null,
     timeoutMs: rec.completed ? rec.timeoutMs : null,
     primaryMerge: rec.completed ? rec.primaryMerge : null,
+    workspace: rec.completed ? rec.workspace : null,
+    resolvedBy,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// --merge: the human half of the pull-request model, for an ad-hoc dispatch
+// ---------------------------------------------------------------------------
+
+export interface DispatchesMergeOptions {
+  /** Full id or an 8+ character prefix; ignored when `tag` is given. */
+  dispatchId?: string;
+  tag?: string | null;
+  repoRoot?: string;
+  cwd?: string;
+  now?: Date;
+}
+
+export interface DispatchesMergeResult {
+  dispatchId: string;
+  tag: string | null;
+  mergeBack: MergeBackResult;
+  diffSnapshot: string;
+  diffBytes: number;
+  /** The worktree that was merged and removed. */
+  workspace: string;
+  resolvedBy: OutputResolution;
+}
+
+/**
+ * Merge a dispatch whose merge-back ended `unresolved`, once whoever launched
+ * it has resolved the markers in the retained worktree. An ad-hoc dispatch
+ * has no engine to re-invoke its executor, so the branch owner here is the
+ * caller — a human, or the session that ran the proxy.
+ *
+ * Same turn as the kernel's own merge-back, same window lease: apply, rebase
+ * if the tree moved again, re-apply; refuse with the files named if markers
+ * remain or the rebase conflicts, and leave the worktree where it is. On
+ * success a `dispatch_merged` row carries the stamp, and the worktree goes.
+ */
+export function runDispatchesMerge(opts: DispatchesMergeOptions = {}): DispatchesMergeResult {
+  const tag = opts.tag?.trim() ? opts.tag.trim() : null;
+  const query = (opts.dispatchId ?? '').trim();
+  if (tag == null && query === '') {
+    throw new DispatchesCommandError('dispatch id is required (full id, unique prefix of 8+ characters, or tag:<handle>).');
+  }
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
+  const ledger = join(repoRoot, DISPATCHES_FILE);
+  const { byId, lastWithSnapshot, requestOrder } = loadOutputRecords(ledger);
+  const { record, resolvedBy } = tag != null
+    ? resolveByTag(tag, byId, requestOrder)
+    : resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder);
+  const id8 = record.dispatchId.slice(0, 8);
+  if (!record.completed) throw new DispatchesCommandError(`dispatch ${id8} has not completed; there is nothing to merge yet.`);
+  if (record.merged) throw new DispatchesCommandError(`dispatch ${id8} was already merged.`);
+  if (record.primaryMerge?.status !== 'unresolved' || record.workspace == null) {
+    throw new DispatchesCommandError(
+      `dispatch ${id8} has no unresolved merge-back to finish (merge-back: ${record.primaryMerge?.status ?? 'none recorded'}).`,
+    );
+  }
+  const worktreeAbs = join(repoRoot, ...record.workspace.split('/'));
+  if (!existsSync(worktreeAbs)) {
+    throw new DispatchesCommandError(`the retained worktree ${record.workspace} is gone; there is nothing to merge.`);
+  }
+  const diffRel = join('.fadeno', 'local', 'outputs', `isolated-${id8}-merged.diff`).split('\\').join('/');
+  const diff = collectIsolatedDiff({ repoRoot, worktreeAbs, diffAbs: join(repoRoot, diffRel), diffRel });
+  const holder: LeaseHolder = { id: `merge-back:${record.dispatchId}`, kind: 'ad-hoc', dispatchId: record.dispatchId };
+  let settled: ReturnType<typeof settleIsolatedWork>;
+  try {
+    settled = withWorkspaceWindowLease({ repoRoot, holder, now: opts.now }, () =>
+      settleIsolatedWork({ repoRoot, worktreeAbs, diff, baselineRef: `${record.dispatchId}:merged`, armLabel: 'primary', priorConflicts: record.primaryMerge?.conflicts ?? [] }));
+  } catch (err) {
+    if (err instanceof WorkspaceLeaseError) throw new DispatchesCommandError(`could not take the workspace lease to merge ${id8}: ${err.message}. Nothing was applied.`);
+    throw err;
+  }
+  if (settled.stamp.status === 'unresolved') {
+    throw new DispatchesCommandError(
+      `the worktree ${record.workspace} still conflicts with the workspace (${(settled.stamp.conflicts ?? []).join(', ')}): ` +
+        `${settled.stamp.detail ?? 'unresolved'}. Nothing was applied; resolve the markers there and run --merge again.`,
+    );
+  }
+  if (settled.stamp.status === 'blocked') {
+    throw new DispatchesCommandError(`could not merge ${id8}: ${settled.stamp.detail ?? 'blocked'}. Nothing was applied; the worktree is kept.`);
+  }
+  const stamp: MergeBackResult = {
+    ...settled.stamp,
+    detail: settled.stamp.detail ?? 'merged by hand after the conflict was resolved in the retained worktree',
+  };
+  appendEvidenceRow(repoRoot, {
+    format: DISPATCHES_FORMAT,
+    timestamp: (opts.now ?? new Date()).toISOString(),
+    event: 'dispatch_merged',
+    dispatch_id: record.dispatchId,
+    ...(record.tag != null ? { tag: record.tag } : {}),
+    merged_by: 'host',
+    merge: stamp,
+    diff_snapshot: settled.diff.diffRel,
+    diff_bytes: settled.diff.diffBytes,
+    workspace: record.workspace,
+  });
+  removeIsolatedWorktree(repoRoot, worktreeAbs);
+  return {
+    dispatchId: record.dispatchId,
+    tag: record.tag,
+    mergeBack: stamp,
+    diffSnapshot: settled.diff.diffRel,
+    diffBytes: settled.diff.diffBytes,
+    workspace: record.workspace,
     resolvedBy,
   };
 }

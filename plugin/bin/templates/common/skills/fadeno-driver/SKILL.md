@@ -197,6 +197,21 @@ planned artifact path.
   hashed — a killed executor attests perfectly with zero bytes, and is not a
   result.
 
+- **Merge conflicts are resolved on the branch.** Each isolated attempt runs
+  in its own worktree and merges back with a plain `git apply`; if the
+  workspace moved meanwhile the kernel rebases the worktree onto it first.
+  When the rebase conflicts, the attempt fails as `merge_conflict` and the
+  executor is re-invoked in its *retained* worktree — a new attempt with
+  `attempt_reason: merge_conflict`, the conflicting files named on the request
+  and in a `conflict_appendix` — up to two rounds. A round that leaves markers
+  in place counts as unresolved. Past the cap the attempt fails as
+  `merge_back_failed` with the worktree still retained (`workspace` on the
+  receipt): resolve the markers there yourself, then
+  `fadeno attempt-accept <run> <actor-call-id>` merges the result, writes the
+  artifact from the parked report, and records a `host_resolved` attempt so
+  the next `fadeno drive` continues without re-running the executor. Your
+  working tree never carries conflict markers from a merge-back.
+
 - **Safe cancellation.** `fadeno cancel <run>` (or a unique run prefix) targets the
   single live engine command claim for that run, sends `SIGTERM` to its supervisor
   or negative process-group ID, never writes the ledger, and preserves the lease
