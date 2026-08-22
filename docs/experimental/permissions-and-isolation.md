@@ -150,9 +150,11 @@ write bit. And it cannot produce a false refusal, because it does not refuse.
 
 ## What this cost, and the follow-up it owes
 
-**`--parallel` currently serializes command members.** This is the one place
-the cut removed a capability rather than a liability, and it is worth being
-precise about why, because the two were never separable.
+**`--parallel` serialized command members for one release.** This was the one
+place the cut removed a capability rather than a liability, and it is worth
+being precise about why, because the two were never separable. It is restored —
+see "Delivering isolation" below — but by a different mechanism, and the
+difference is the point.
 
 The lease bypass keyed on the *route's* `write_access !== false`. So `worker`
 — `requires_write: required`, hence escalated to a write-capable argv — always
@@ -168,13 +170,17 @@ mechanism seen from two angles, so spending the posture spends the speedup with
 it. The engine now says so out loud rather than accepting a concurrency request
 it will not honor.
 
-**The follow-up is isolation with merge-back for engine attempts.** It restores
-concurrency as a *fact* — separate worktrees — rather than as an unverified
-promise, and it is safest in exactly the case that used to parallelize: a
-member that writes nothing merges back empty. It also closes a hazard the old
-model carried, since `write_access: false` was never enforced — a reviewer on a
-bare `claude -p` could write the shared tree while holding no lease, precisely
-because it had declared itself a reader.
+**The follow-up was isolation with merge-back for engine attempts,** and it has
+landed. It restores concurrency as a *fact* — separate worktrees — rather than
+as an unverified promise, and it is safest in exactly the case that used to
+parallelize: a member that writes nothing merges back empty. It also closes a
+hazard the old model carried, since `write_access: false` was never enforced —
+a reviewer on a bare `claude -p` could write the shared tree while holding no
+lease, precisely because it had declared itself a reader.
+
+The trade is worth stating plainly: what a route *declared* bought speed at the
+cost of a guarantee nothing checked. What a worktree *is* buys the same speed
+and the guarantee.
 
 ## Delivering isolation: what "isolated" actually means
 
@@ -228,15 +234,53 @@ degrades to shared, but only when the failure happened **before the spawn**
 acquiring the workspace lease it now needs. If that lease cannot be taken, the
 original isolation failure is raised rather than an unleased write performed.
 
-**Still outstanding: the engine.** `drive`'s attempts remain shared-tree, so
-`--parallel` still serializes. The semantics above are the prerequisite that
-was missing, not the whole of the work.
+### The engine
 
-**A widened hazard, recorded because it now bites more often.** The workspace
-lease is guarded by a `mkdir` lock reclaimed only after 120s. A hard-killed
-process can die holding it. That was always true for write deliveries; now that
-every shared delivery takes the lease, the window a kill can land in is much
-wider, so a killed run can block the repo for up to two minutes.
+`drive`'s command attempts isolate on the same terms, and the `origin` split
+above is what made that expressible: an engine attempt is always
+kernel-isolated. There is no hold-out mode, and there should not be — a run's
+members exist to produce work the run then consumes, so withholding a member's
+output would leave the next step reading a tree the previous step did not
+write.
+
+That is what restores `--parallel`. Members hold no repo-wide lease, so they
+overlap; where git cannot cut a worktree they all take the lease, serialize,
+and the engine says so.
+
+Four points where the engine differs from a dispatch, each for a reason:
+
+- **The baseline is captured per attempt, not once per wave.** A shadow pair
+  captures once because its two arms must start from byte-identical state.
+  Engine members are not being compared, and a member admitted after an earlier
+  one merged back must see that work rather than a snapshot predating it.
+- **Capture and merge-back hold the writer lease, and wait for it.** Both touch
+  the shared tree, and reading a tree mid-`git apply --3way` yields a
+  half-applied patch. `acquireWorkspaceLease` refuses immediately when held,
+  which is wrong here — contention is the normal case once members run
+  concurrently, not an error — so the engine waits.
+- **A merge-back that is not `clean` FAILS the attempt** (`merge_back_failed`),
+  where a dispatch merely stamps it. The next step of a run reads the
+  workspace, so an `actor_completed` over a diff that never applied would tell
+  it the change is there. The diff artifact is durable and named on the
+  receipt, so this is recoverable rather than merely reported.
+- **An interrupted attempt's worktree is retained, not cleaned up.** A killed
+  drive never collected the diff, so the worktree holds the member's work and
+  nothing else does. The recovery receipt names it and leaves it alone.
+
+The one remaining lease hazard is unchanged in kind and narrower in scope: the
+`mkdir` lock is reclaimed only after 120s, and a hard-killed process can die
+holding it. An isolated member now holds the lease only across its baseline
+capture and its merge-back rather than for its whole run, so the window a kill
+can land in is much smaller than it was — but smaller is not closed.
+
+**A hazard that widened and then narrowed again.** The workspace lease is
+guarded by a `mkdir` lock reclaimed only after 120s, and a hard-killed process
+can die holding it, blocking the repo for two minutes. That was always true for
+write deliveries. Making every *shared* delivery take the lease widened the
+window a kill could land in; delivering isolation narrowed it back, because an
+isolated delivery holds the lease only across its baseline capture and its
+merge-back rather than for its whole run. The residual window is small and
+real, and the 120s reclaim is still the only thing that closes it.
 
 ## What must not come back
 

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -8,6 +9,7 @@ import { runInit } from '../src/commands/init.ts';
 import { runNewRun } from '../src/commands/new-run.ts';
 import { runVerify } from '../src/commands/verify.ts';
 import { readEvents, type RunEvent } from '../src/lib/run-ledger.ts';
+import { FADENO_IGNORE_PATTERNS } from '../src/lib/source-control.ts';
 import { tempRepo } from './helpers.ts';
 
 function events(root: string, runId: string): RunEvent[] {
@@ -46,7 +48,29 @@ flow:
 
 const VALID_REVIEW = JSON.stringify({ reviewer: 'reviewer', summary: 'clean', issues: [], verdict: 'approve' });
 
-function seedMap(t: TestContext, executors: Record<string, any>, playbook: string = MAP_PLAYBOOK): { root: string; runId: string } {
+/** Whether the fixture repo gets a git repository.
+ *
+ * Load-bearing, not incidental. Engine members isolate into worktrees and so
+ * run concurrently; without git there is nothing to isolate into, every member
+ * takes the repo-wide writer lease, and they serialize. These are genuinely
+ * two different behaviours and the suite pins both — the whole reason this
+ * knob exists is that the pre-isolation version of this file tested only the
+ * git-less shape without saying so, and so could not have noticed the
+ * concurrency path at all.
+ */
+function initFixtureGit(root: string): void {
+  const env = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@invalid',
+  };
+  spawnSync('git', ['init'], { cwd: root, env });
+  writeFileSync(join(root, '.gitignore'), `${FADENO_IGNORE_PATTERNS.join('\n')}\n`, 'utf8');
+  spawnSync('git', ['add', '-A'], { cwd: root, env });
+  spawnSync('git', ['commit', '-m', 'init'], { cwd: root, env });
+}
+
+function seedMap(t: TestContext, executors: Record<string, any>, playbook: string = MAP_PLAYBOOK, opts: { git?: boolean } = {}): { root: string; runId: string } {
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
   writeFileSync(join(root, '.fadeno', 'playbooks', 'parallel-smoke.yaml'), playbook);
@@ -101,22 +125,107 @@ function seedMap(t: TestContext, executors: Record<string, any>, playbook: strin
     }
   }
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml(v3));
+  if (opts.git === true) initFixtureGit(root);
   const { runId } = runNewRun({ playbook: 'parallel-smoke', task: 'parallel smoke', repoRoot: root });
   return { root, runId };
 }
 
-// This suite used to pin `--parallel` making read-only members overlap. That
-// overlap existed because a route could declare `write_access: false` and skip
-// the repo-wide writer lease — the exact declaration the permissions cut
-// removed. Nothing can claim to be a non-writer now, so shared command members
-// serialize whatever `--parallel` says.
+// `--parallel` makes command members overlap again — but for a different
+// reason than it originally did, and the difference is the point.
 //
-// The tests are kept rather than deleted, inverted to pin the CURRENT truth
-// plus the notice that announces it. When engine attempts gain isolation with
-// merge-back, these are the tests that should flip back — and the ordering and
-// evidence assertions below still hold either way, which is why they stayed.
-// See docs/experimental/permissions-and-isolation.md.
-test('parallel: --parallel 2 serializes command members, and says so', (t) => {
+// Originally, overlap came from a route declaring `write_access: false` and
+// skipping the repo-wide writer lease. Nothing enforced that declaration: a
+// "reader" on a bare `claude -p` was free to write the shared tree while
+// holding no lease. The permissions cut removed the declaration and the
+// overlap with it, since the two were one mechanism.
+//
+// Now each member runs in its own git worktree and merges back at collection.
+// The concurrency is a fact rather than a claim, and the containment is real
+// rather than declared. Where git cannot cut a worktree there is nothing to
+// isolate into and members serialize — so this suite pins BOTH shapes, via
+// `seedMap(..., { git })`. See docs/experimental/permissions-and-isolation.md.
+test('parallel: with git, --parallel 2 genuinely overlaps command members in their own worktrees', (t) => {
+  // The delivery test. Two 1800ms members: serial costs ~3600ms, concurrent
+  // ~1800ms, and the gap is wide enough that a real subprocess suite can tell
+  // them apart without a flaky-tight band.
+  //
+  // Deliberately asserts the MECHANISM as well as the wall clock. A speedup
+  // alone would also be produced by silently skipping the lease, which is the
+  // unenforced arrangement this replaced — so the worktree, the baseline it is
+  // anchored to, and the merge-back that puts the work where the next step
+  // will look for it are all pinned individually.
+  const sleepCmd = (ms: number) => ['node', '-e', `setTimeout(()=>process.stdout.write(JSON.stringify(${VALID_REVIEW})), ${ms})`];
+  const executors = { 'ro-a': { command: sleepCmd(1800) }, 'ro-b': { command: sleepCmd(1800) } };
+
+  const { root: root1, runId: run1 } = seedMap(t, executors, MAP_PLAYBOOK, { git: true });
+  const startSerial = Date.now();
+  assert.equal(runDrive({ run: run1, repoRoot: root1, parallel: 1 }).outcome, 'terminal');
+  const elapsedSerial = Date.now() - startSerial;
+
+  const { root: root2, runId: run2 } = seedMap(t, executors, MAP_PLAYBOOK, { git: true });
+  const startPar = Date.now();
+  const resPar = runDrive({ run: run2, repoRoot: root2, parallel: 2 });
+  const elapsedPar = Date.now() - startPar;
+  assert.equal(resPar.outcome, 'terminal');
+
+  assert.ok(
+    elapsedPar < elapsedSerial - 900,
+    `--parallel 2 must actually overlap (parallel ${elapsedPar}ms vs serial ${elapsedSerial}ms)`,
+  );
+  // No serialization notice: it is only honest when there is nothing to
+  // isolate into, and firing it here would be the mirror-image lie.
+  assert.ok(!resPar.actions.some((a: string) => /serializes command members/.test(a)), JSON.stringify(resPar.actions));
+
+  const allPar = events(root2, run2);
+  const dispatched = ofType(allPar, 'actor_dispatched').filter((e) => String(e.extra.actor ?? '').startsWith('reviewer_'));
+  const completed = ofType(allPar, 'actor_completed').filter((e) => String(e.extra.actor ?? '').startsWith('reviewer_'));
+  assert.equal(dispatched.length, 2);
+  assert.equal(completed.length, 2);
+  // Receipts stay in canonical order regardless of wall-clock finish order.
+  assert.deepEqual(dispatched.map((e) => e.extra.actor), ['reviewer_a', 'reviewer_b']);
+  assert.deepEqual(completed.map((e) => e.extra.actor), ['reviewer_a', 'reviewer_b']);
+  for (const d of dispatched) {
+    assert.equal(d.extra.workspace_mode, 'isolated', 'each member got its own worktree');
+    assert.equal(d.extra.workspace_mode_degraded, undefined);
+    assert.match(String(d.extra.workspace ?? ''), /^\.fadeno\/local\/engine\//);
+    assert.match(String(d.extra.baseline_commit ?? ''), /^[0-9a-f]{40}$/, 'the diff is anchored to a real commit');
+  }
+  // Distinct worktrees, not one shared directory wearing two names — the
+  // single fact the whole concurrency claim rests on.
+  assert.notEqual(dispatched[0]!.extra.workspace, dispatched[1]!.extra.workspace);
+  for (const c of completed) {
+    assert.deepEqual(c.extra.merge_back, { status: 'clean', detail: 'nothing to apply: the attempt changed no tracked files' });
+    assert.ok(typeof c.extra.duration_ms === 'number' && c.extra.duration_ms >= 1500);
+  }
+  // Nothing left behind: every worktree is torn down at collection.
+  assert.ok(!existsSync(join(root2, '.fadeno', 'local', 'engine', run2, String(dispatched[0]!.extra.workspace ?? 'x').split('/').pop()!)));
+  assert.equal(runVerify({ run: run2, repoRoot: root2 }).ok, true);
+});
+
+test('parallel: a member that writes is merged back into the caller\'s tree', (t) => {
+  // Concurrency is only half the claim. The other half is that isolating a
+  // member does not change where its work ends up — the next step of the run
+  // reads the workspace, so a member whose file stayed in a discarded worktree
+  // would be an `actor_completed` over work that does not exist.
+  const writer = (name: string) => ['node', '-e',
+    `require('node:fs').writeFileSync(${JSON.stringify(name)},'x');process.stdout.write(JSON.stringify(${VALID_REVIEW}))`];
+  const { root, runId } = seedMap(t, {
+    'ro-a': { command: writer('by-reviewer-a.txt') },
+    'ro-b': { command: writer('by-reviewer-b.txt') },
+  }, MAP_PLAYBOOK, { git: true });
+
+  assert.equal(runDrive({ run: runId, repoRoot: root, parallel: 2 }).outcome, 'terminal');
+
+  assert.ok(existsSync(join(root, 'by-reviewer-a.txt')), "reviewer_a's file reached the tree");
+  assert.ok(existsSync(join(root, 'by-reviewer-b.txt')), "reviewer_b's file reached the tree");
+  const completed = ofType(events(root, runId), 'actor_completed').filter((e) => String(e.extra.actor ?? '').startsWith('reviewer_'));
+  for (const c of completed) {
+    assert.deepEqual(c.extra.merge_back, { status: 'clean' });
+    assert.ok(Number(c.extra.diff_bytes) > 0, 'a member that wrote produced a real patch');
+  }
+});
+
+test('parallel: without git, --parallel 2 serializes command members, and says so', (t) => {
   const sleepCmd = (ms: number) => ['node', '-e', `setTimeout(()=>process.stdout.write(JSON.stringify(${VALID_REVIEW})), ${ms})`];
   const executors = {
     'ro-a': { command: sleepCmd(1800), writeAccess: false },
@@ -148,9 +257,10 @@ test('parallel: --parallel 2 serializes command members, and says so', (t) => {
   assert.equal(dispatched[1]!.extra.actor, 'reviewer_b');
   assert.equal(completed[0]!.extra.actor, 'reviewer_a');
   assert.equal(completed[1]!.extra.actor, 'reviewer_b');
-  // No speedup: both members take the writer lease, so `--parallel 2` costs
-  // the same wall time as `--parallel 1`. Asserted as a band rather than an
-  // equality because these are real subprocesses.
+  // No speedup: with no git there is nothing to isolate into, so both members
+  // take the writer lease and `--parallel 2` costs the same wall time as
+  // `--parallel 1`. Asserted as a band rather than an equality because these
+  // are real subprocesses.
   assert.ok(
     elapsedPar > elapsedSerial - 1200,
     `--parallel must NOT be silently faster while it serializes (parallel ${elapsedPar}ms vs serial ${elapsedSerial}ms)`,
@@ -159,9 +269,11 @@ test('parallel: --parallel 2 serializes command members, and says so', (t) => {
   // flag. Read off `DriveResult.actions`, which is the engine's own narration
   // channel — the same one a caller sees.
   assert.ok(
-    resPar.actions.some((a: string) => /currently serializes command members/.test(a)),
-    `a caller who asked for concurrency must be told they are not getting it; got: ${JSON.stringify(resPar.actions)}`,
+    resPar.actions.some((a: string) => /serializes command members here/.test(a) && /not a git repository/.test(a)),
+    `a caller who asked for concurrency must be told they are not getting it, and why; got: ${JSON.stringify(resPar.actions)}`,
   );
+  // Every member ran in the caller's tree, and says so.
+  for (const d of dispatched) assert.equal(d.extra.workspace_mode, 'shared');
   // duration_ms evidence preserved
   for (const c of completed) {
     assert.ok(typeof c.extra.duration_ms === 'number' && c.extra.duration_ms >= 1500, 'duration_ms should be ~1800');
@@ -189,7 +301,7 @@ test('determinism: inverted sleep durations yield same normalized event ordering
   assert.equal(n1, n2, 'normalized ordering should be identical regardless of wall-clock');
 });
 
-test('writer and reader NO LONGER overlap — the reader lost its lease bypass', (t) => {
+test('a reviewer and a worker overlap in the same wave, and two workers do too', (t) => {
   const sleepCmd = (ms: number) => ['node', '-e', `setTimeout(()=>process.stdout.write(JSON.stringify(${VALID_REVIEW})), ${ms})`];
   // Reader is read-only, writer is write-capable. They should overlap (both complete in ~same time as max)
   // For this smoke we just verify that a writer + reader with parallel 2 both complete and lease is held correctly.
@@ -222,28 +334,29 @@ flow:
     'ro-a': { command: sleepCmd(1000), writeAccess: false },
     'rw-worker': { command: sleepCmd(1000), writeAccess: true },
   };
-  const { root, runId } = seedMap(t, execMixed, playbookMixed);
+  const { root, runId } = seedMap(t, execMixed, playbookMixed, { git: true });
   const start = Date.now();
   const res = runDrive({ run: runId, repoRoot: root, parallel: 2 });
   assert.equal(res.outcome, 'terminal');
   const elapsed = Date.now() - start;
-  // Both members now take the writer lease, so the wave costs the sum rather
-  // than the max. Loose bound only; the durable proof is the seq assertion.
+  // Wall clock is a loose bound only; the durable proof is the seq assertion
+  // below, which does not depend on how fast the machine is.
   void elapsed;
   const all = events(root, runId);
   // Verify both map members completed (filter reviewer_a + worker map step)
   const mapCompleted = ofType(all, 'actor_completed').filter((e) => e.step === 'review');
   assert.equal(mapCompleted.length, 2);
-  // Durable SERIALIZATION proof, wall-clock independent — the inverse of what
-  // this test used to assert. The worker is now admitted only AFTER the
-  // reviewer's receipt, because the reviewer holds the repo-wide writer lease
-  // for its whole run. It used to skip that lease by declaring
-  // `write_access: false`, which is the declaration the permissions cut
-  // removed. Flip this back when engine attempts isolate with merge-back.
+  // Durable OVERLAP proof, wall-clock independent: the worker is admitted
+  // before the reviewer's receipt lands, which can only happen if the two ran
+  // at once. Neither declares anything about writing — that is the point.
+  // Under the old model this same overlap existed but was bought by the
+  // reviewer declaring `write_access: false` and skipping the lease, a claim
+  // nothing enforced; now both members are contained in worktrees and neither
+  // holds the repo-wide lease at all.
   const dWorkerMap = ofType(all, 'actor_dispatched').find((e) => e.step === 'review' && e.extra.actor === 'worker')!;
   const cReviewerMap = ofType(all, 'actor_completed').find((e) => e.step === 'review' && e.extra.actor === 'reviewer_a')!;
   assert.ok(
-    (dWorkerMap.seq ?? 0) > (cReviewerMap.seq ?? Infinity),
+    (dWorkerMap.seq ?? Infinity) < (cReviewerMap.seq ?? 0),
     `writer dispatched (seq ${dWorkerMap.seq}) must precede reader receipt (seq ${cReviewerMap.seq}) - overlap, not serialization`,
   );
   // Two writers serialize: create playbook with two workers
@@ -288,13 +401,18 @@ flow:
     bindings: { worker_a: 'rw-writer', worker_b: 'rw-writer', '*': 'rw-writer' },
   };
   writeFileSync(join(root2, '.fadeno', 'executors.yaml'), stringifyYaml(v3two));
+  initFixtureGit(root2);
   const { runId: id2 } = runNewRun({ playbook: 'parallel-smoke', task: 'two writers', repoRoot: root2 });
   const start2 = Date.now();
   const res2 = runDrive({ run: id2, repoRoot: root2, parallel: 2 });
   const elapsed2 = Date.now() - start2;
   assert.equal(res2.outcome, 'terminal');
-  // Two writers must serialize: elapsed >= 1500 (800*2) minus margin
-  assert.ok(elapsed2 >= 1400, `two writers serialized ${elapsed2} >=1400`);
+  // Two writers overlap now. Nothing about "writer" implies the shared tree
+  // any more — each has its own worktree — so the wave costs one member's wall
+  // time rather than two. This is the assertion that would have been unsafe
+  // under the old model, where overlapping two write-capable members meant two
+  // unsynchronized processes in one directory.
+  void elapsed2;
   const all2 = events(root2, id2);
   const dispatched = ofType(all2, 'actor_dispatched');
   const completed = ofType(all2, 'actor_completed');
@@ -302,8 +420,10 @@ flow:
   const d1 = dispatched.find((e) => e.extra.actor === 'worker_a')!;
   const d2 = dispatched.find((e) => e.extra.actor === 'worker_b')!;
   const c1 = completed.find((e) => e.extra.actor === 'worker_a')!;
-  // Find seq ordering: dispatched seq order should be canonical, but writer serialization means d2 seq > c1 seq
-  assert.ok((d2.seq ?? 0) > (c1.seq ?? 0), 'second writer dispatched after first completed (serial)');
+  // Dispatch order stays canonical; the overlap shows as the second writer
+  // being admitted before the first one's receipt lands.
+  assert.ok((d1.seq ?? Infinity) < (d2.seq ?? 0), 'canonical admission order is preserved');
+  assert.ok((d2.seq ?? Infinity) < (c1.seq ?? 0), 'second writer admitted before the first completed (overlap)');
 });
 
 test('schema repair isolation: one invalid member gets exactly one repair without affecting sibling', (t) => {
@@ -392,7 +512,8 @@ test('--parallel parsing, help and completion (bundled CLI boundary)', async (t)
 
 test('kill-drive mid-wave reaps all groups and recovery records each dangling attempt', async (t) => {
   // Spawn drive with --parallel 2 and SIGKILL it mid-wave; supervisors reap via parent-gone watch, then recovery records engine_interrupted.
-  // Command members serialize now, so the wave has ONE member in flight rather than two.
+  // Git-backed on purpose: with worktrees the wave really does have TWO members
+  // in flight, and each holds a worktree the kill strands. Both are asserted.
   const { spawnSync } = await import('node:child_process');
   const { existsSync } = await import('node:fs');
   const playbookTwo = `kind: AgentPlaybook
@@ -430,27 +551,28 @@ flow:
     'ro-a': { command: ['node', '-e', `setTimeout(()=>process.stdout.write(JSON.stringify(${VALID_REVIEW})), 8000)`] },
     'ro-b': { command: ['node', '-e', `setTimeout(()=>process.stdout.write(JSON.stringify(${VALID_REVIEW})), 8000)`] },
   };
-  const { root, runId } = seedMap(t, exec, playbookTwo);
+  const { root, runId } = seedMap(t, exec, playbookTwo, { git: true });
   // Start drive in background with parallel 2 and kill it mid-wave
   const child = (await import('node:child_process')).spawn(process.execPath, [join(import.meta.dirname, '..', 'src', 'cli.ts'), 'drive', runId, '--parallel', '2'], { cwd: root, stdio: 'ignore', env: { ...process.env, FADENO_HARNESS: 'standalone' } });
-  // Wait a bit for both supervisors to start (inflight files appear)
-  const deadline = Date.now() + 5000;
+  // Wait for both supervisors to start (inflight files appear). 10s, not 5:
+  // admitting a member now costs a `git worktree add` plus a baseline replay
+  // before its supervisor exists, so the window this precondition needs is
+  // wider than it was when admission was just a spawn. A precondition that
+  // sometimes misses is a flake, not a finding.
+  const deadline = Date.now() + 10_000;
   let inflightCount = 0;
   while (Date.now() < deadline) {
     try {
       const files = (await import('node:fs')).readdirSync(join(root, '.fadeno', 'local', 'inflight'));
       inflightCount = files.filter((n: string) => n.startsWith(`engine-${runId}-`)).length;
-      if (inflightCount >= 1) break;
+      if (inflightCount >= 2) break;
     } catch {}
     await new Promise((r) => setTimeout(r, 100));
   }
-  // ONE inflight claim, not two. Command members serialize since the
-  // permissions cut removed the read-only lease bypass, so a wave never has
-  // two live at once. What this test is really about — that a killed engine
-  // leaves a live supervisor claim, that recovery refuses while it lives, and
-  // that no orphan claim survives — is unchanged, and all of that still runs
-  // below. Raise this back to 2 when engine attempts isolate with merge-back.
-  assert.ok(inflightCount >= 1, `expected an inflight claim, got ${inflightCount}`);
+  // TWO inflight claims. Members isolate into their own worktrees, so a wave
+  // genuinely has both live at once — which is also what makes the kill
+  // interesting: it strands two worktrees, not one.
+  assert.ok(inflightCount >= 2, `expected two inflight claims, got ${inflightCount}`);
   // Kill drive; the 2000ms executors are provably still running, so an immediate
   // recovery drive must refuse deterministically while their supervisors hold live claims.
   child.kill('SIGKILL');
@@ -491,22 +613,22 @@ flow:
     await new Promise((r) => setTimeout(r, 200));
   }
   // Clear a lock the SIGKILL may have left mid-acquire. This is not test
-  // hygiene — it is a real hazard the permissions cut WIDENED, recorded here
-  // because this is the only place it reproduces: the workspace lease is
-  // guarded by a `mkdir` lock reclaimed only after
-  // WORKSPACE_LEASE_LOCK_STALE_MS (120s), and a hard-killed engine can die
-  // holding it. That was always true for write deliveries; now that every
-  // delivery takes the lease, the window a kill can land in is much wider, so
-  // a killed run can block the repo for up to two minutes. The test cannot
-  // wait that out.
+  // hygiene — it is a real hazard, recorded here because this is the only
+  // place it reproduces: the workspace lease is guarded by a `mkdir` lock
+  // reclaimed only after WORKSPACE_LEASE_LOCK_STALE_MS (120s), and a
+  // hard-killed engine can die holding it, blocking the repo for two minutes.
+  //
+  // Isolation narrows the window it can land in — an isolated member holds the
+  // lease only across its baseline capture and its merge-back, not for its
+  // whole run — but narrowing is not closing, and the kill here can still land
+  // inside one of those. The test cannot wait it out.
   rmSync(join(root, '.fadeno', 'local', '.workspace-lease.lock'), { recursive: true, force: true });
   // Final drive must recover the dangling attempt honestly, then re-drive the
   // wave. Driven up to three times because recovery races the supervisor's own
   // reaping: whichever of them gets there first, the REQUIREMENT is that the
   // interruption ends up recorded rather than lost, and re-driving is
   // idempotent. Asserting after a single drive made this flake roughly one run
-  // in three — the test was already timing-sensitive before command members
-  // began serializing, and serializing narrowed the window further.
+  // in three.
   let all = events(root, runId);
   for (let attempt = 0; attempt < 3; attempt++) {
     if (ofType(all, 'actor_failed').some((e) => e.extra.reason === 'engine_interrupted')) break;
@@ -514,11 +636,22 @@ flow:
     all = events(root, runId);
   }
   const interrupted = ofType(all, 'actor_failed').filter((e) => e.extra.reason === 'engine_interrupted');
-  // One, for the same reason as the inflight count above: a serialized wave
-  // has one member in flight to interrupt. The property under test is that a
-  // dangling attempt is RECORDED rather than lost, which one proves as well
-  // as two.
+  // The property under test is that a dangling attempt is RECORDED rather than
+  // lost. A lower bound, not an equality: whichever of recovery and the
+  // supervisor's own reaping gets there first decides how many were still
+  // dangling when recovery ran.
   assert.ok(interrupted.length >= 1, `expected >=1 engine_interrupted, got ${interrupted.length}`);
+  // Every interrupted isolated attempt names its RETAINED worktree. Tearing
+  // one down as cleanup would destroy the only copy of whatever the member
+  // wrote before the kill — nothing merged it back — so the receipt points at
+  // it and leaves it alone.
+  for (const e of interrupted) {
+    const workspace = e.extra.workspace;
+    if (workspace == null) continue;
+    assert.equal(e.extra.workspace_retained, true, 'a retained worktree must say so');
+    assert.match(String(e.extra.error ?? ''), /retained at .*there and\s*nowhere else/s);
+    assert.ok(existsSync(join(root, String(workspace))), `retained worktree ${String(workspace)} must still be on disk`);
+  }
   const v = runVerify({ run: runId, repoRoot: root });
   assert.equal(v.ok, true, `verify should be clean after honest interruption recovery: ${v.findings.filter(f=>f.status==='fail').map(f=>f.detail).join('; ')}`);
   // No orphan process groups: inflight claims for this run must be gone

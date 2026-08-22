@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, extname, join } from 'node:path';
@@ -79,14 +79,25 @@ import {
   WORKSPACE_LEASE_FILE,
   WORKSPACE_LEASE_LOCK,
   acquireWorkspaceLease,
+  carryDeclaredPaths,
+  collectIsolatedDiff,
+  createIsolatedWorktree,
   isWorkspaceLeaseAlive,
   readEffectiveLease,
   readWorkspaceLease,
   releaseWorkspaceLease,
+  removeIsolatedWorktree,
+  scanIgnoredOutput,
   WorkspaceLeaseError,
   type LeaseHolder,
   type WorkspaceLeaseRecord,
 } from '../lib/workspace-lease.ts';
+// The engine's attempts isolate the same way an ad-hoc dispatch's do, from
+// the same primitives, so a member's worktree is cut from HEAD and then given
+// the caller's uncommitted state rather than a clean checkout of it. Imported
+// from the dispatch command rather than reimplemented: two spellings of
+// "replay the workspace" is exactly how the two paths would drift.
+import { applyWorkspaceBaseline, captureWorkspaceBaseline } from './dispatch.ts';
 import { CONDITION_REGISTRY, GateError, runGate, SUPPORTED_CONDITIONS, type GateCondition } from './gate.ts';
 import { requestHostDispatch, type HostDispatchRequest } from '../lib/host-dispatch.ts';
 import { PromptError, runPrompt } from './prompt.ts';
@@ -192,6 +203,11 @@ interface EngineCtx {
   task: string;
   schemas: SchemaSet;
   profile: SnapshotDocument;
+  /** Declared `worktree_carry:` paths, off the LIVE profile rather than the
+   * resolution snapshot. The snapshot records what was dialled; the carry list
+   * is a project fact about what a freshly cut worktree is missing, and it is
+   * not part of what a run pins. Resolved once per invocation. */
+  worktreeCarry: readonly string[];
   /** Dial layers in force for this invocation (recorded snapshot layers mid-run, live layers at invocation start). */
   dialLayers: DialLayers;
   /** Explicit `--bind` overrides: role key → refString (executor name). */
@@ -384,7 +400,20 @@ function recoverInterruptedCommandDispatches(ctx: EngineCtx): number {
       } catch {}
     }
   }
+  let retainedWorktrees = 0;
   for (const event of dangling) {
+    // An isolated attempt killed mid-flight leaves a worktree that was never
+    // collected. It is RETAINED, not removed, and named on the receipt.
+    //
+    // The temptation is to tear it down as cleanup, but its contents are the
+    // interrupted member's actual work, and a killed drive is exactly when
+    // someone wants that back. No diff is collected here and nothing is
+    // applied: the executor was killed at an arbitrary point, so the worktree
+    // may be mid-write and the shared tree's state is unknown. Naming it is
+    // the honest amount of help. `fadeno clean` removes it, deregistering the
+    // git admin entry first.
+    const workspace = typeof event.extra.workspace === 'string' ? event.extra.workspace : null;
+    if (workspace != null) retainedWorktrees += 1;
     appendEvent(ctx.runDir, {
       type: 'actor_failed',
       step: event.step,
@@ -394,12 +423,23 @@ function recoverInterruptedCommandDispatches(ctx: EngineCtx): number {
       attempt: event.extra.attempt,
       executor: event.extra.executor,
       reason: 'engine_interrupted',
-      error: 'the previous drive process ended before recording a terminal command receipt',
+      error: workspace == null
+        ? 'the previous drive process ended before recording a terminal command receipt'
+        : 'the previous drive process ended before recording a terminal command receipt; its isolated ' +
+          `worktree is retained at ${workspace} — nothing was merged back, so any work it holds is there and ` +
+          'nowhere else',
+      ...(workspace != null ? { workspace, workspace_retained: true } : {}),
       recovered: true,
     }, ctx.now);
   }
   if (dangling.length > 0) {
     ctx.act(`recovered ${dangling.length} interrupted command dispatch receipt(s)`);
+    if (retainedWorktrees > 0) {
+      ctx.act(
+        `${retainedWorktrees} isolated worktree(s) retained under .fadeno/local/engine/ — they hold whatever ` +
+          'the interrupted members wrote, and nothing merged it back. Inspect before `fadeno clean`.',
+      );
+    }
   }
   return dangling.length;
 }
@@ -455,7 +495,7 @@ function readLiveDialLayers(repoRoot: string, userPathOptions: UserPathOptions |
 }
 
 function ensureProfileSnapshot(
-  ctx: Omit<EngineCtx, 'profile' | 'dialLayers'>,
+  ctx: Omit<EngineCtx, 'profile' | 'dialLayers' | 'worktreeCarry'>,
   bindRefs: DialRef[],
 ): SnapshotDocument {
   const snapshotPath = join(ctx.runDir, 'profile.yaml');
@@ -878,11 +918,85 @@ interface PendingAttempt {
   promptSnapshotAbs: string | null;
   startedMs: number;
   startedAt: Date;
-  workspaceMode: 'shared';
+  workspaceMode: 'shared' | 'isolated';
+  /** The attempt's own worktree, when isolated. Null for a shared attempt and
+   * for an isolated one whose worktree could not be built (which degrades to
+   * shared and records why). Collection owns its diff, merge-back, and
+   * teardown — see `releaseAttempt`. */
+  worktree: { abs: string; rel: string; baselineCommit: string; diffRel: string; diffAbs: string } | null;
+  /** Why isolation was not delivered, when the request asked for it. Stamped
+   * on the attempt's receipt so a shared-tree engine attempt is never silently
+   * mistaken for an isolated one. */
+  isolationDegraded: string | null;
   effectiveTimeout: number | null;
   diagnosticsRel: string | null;
   diagnosticsBytes: number | null;
   child: import('node:child_process').ChildProcess | null;
+}
+
+/** How long a tree-touching step (baseline capture, merge-back) waits for the
+ * writer lease before giving up. Generous relative to what it guards — both
+ * operations are a couple of git invocations — but a wave now admits members
+ * concurrently, so several can queue behind one merge-back at once. */
+const ENGINE_TREE_LEASE_WAIT_MS = 30_000;
+
+/**
+ * Whether this repo can be isolated into, memoized per process.
+ *
+ * Asked both at admission (may members run concurrently?) and per attempt
+ * (build a worktree?), and it cannot change under a running drive — a repo
+ * does not stop being a git repo mid-wave. Memoized so a wave of ten members
+ * does not shell out ten times to learn the same thing.
+ */
+const GIT_AVAILABILITY = new Map<string, boolean>();
+function repoHasGit(repoRoot: string): boolean {
+  const cached = GIT_AVAILABILITY.get(repoRoot);
+  if (cached != null) return cached;
+  const probe = spawnSync('git', ['-C', repoRoot, 'rev-parse', '--git-dir'], { encoding: 'utf8' });
+  const available = probe.error == null && probe.status === 0;
+  GIT_AVAILABILITY.set(repoRoot, available);
+  return available;
+}
+
+/**
+ * Run `action` holding the repo-wide writer lease, waiting for it if another
+ * holder has it.
+ *
+ * Isolated engine attempts run unleased — that is what buys the concurrency —
+ * but two moments still touch the shared tree and must not interleave with
+ * each other or with an ad-hoc dispatch's merge-back: reading the tree to
+ * build an attempt's baseline, and applying an attempt's diff back into it.
+ * Reading a tree mid-`git apply --3way` yields a half-applied patch, and two
+ * concurrent applies can interleave hunks.
+ *
+ * The wait is what distinguishes this from `acquireWorkspaceLease` used
+ * directly, which refuses immediately when the lease is held. Refusing would
+ * be wrong here: contention is the NORMAL case once members run concurrently,
+ * not an error condition.
+ */
+function withEngineTreeLease<T>(ctx: EngineCtx, label: string, action: () => T): T {
+  const holder: LeaseHolder = { id: `engine-tree:${ctx.runId}:${label}`, kind: 'engine', runId: ctx.runId };
+  const deadline = Date.now() + ENGINE_TREE_LEASE_WAIT_MS;
+  for (;;) {
+    try {
+      acquireWorkspaceLease({
+        repoRoot: ctx.repoRoot,
+        workspaceMode: 'shared',
+        holder,
+        supervisorPid: null,
+        executorPid: null,
+      });
+      break;
+    } catch (err) {
+      if (!(err instanceof WorkspaceLeaseError) || Date.now() >= deadline) throw err;
+      sleepSync(POLL_MS);
+    }
+  }
+  try {
+    return action();
+  } finally {
+    try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder }); } catch {}
+  }
 }
 
 function parseParallelOption(value: unknown): number {
@@ -1047,8 +1161,82 @@ function beginCommandAttempt(
   if (repairCore != null) {
     dispatched.repair_appendix = session === 'resumed' ? repairCore : `\n\n---\n${repairCore}`;
   }
-  const workspaceMode = 'shared' as const;
-  const needsLease = true;
+  // Isolation, on the same terms as an ad-hoc dispatch: kernel-chosen, so it
+  // merges back. The engine never offers a hold-out mode — a run's members
+  // exist to produce work the run then consumes, so withholding it would make
+  // the following step read a tree the previous step did not write.
+  //
+  // This is what restores `--parallel`. Concurrency was previously paid for by
+  // read-only base argvs, and the permissions cut spent those; separate
+  // worktrees buy it back as a fact rather than as a declaration nothing
+  // checked. A shared member holds the repo-wide writer lease for its whole
+  // run, which is what forced members to serialize.
+  //
+  // Falls back to shared where git cannot cut a worktree, exactly as a
+  // dispatch does, and for the same reason: nobody asked for isolation here,
+  // so hard-failing would break runs that work today.
+  const workspaceMode: 'shared' | 'isolated' = repoHasGit(ctx.repoRoot) ? 'isolated' : 'shared';
+
+  // The attempt's worktree, built before anything is recorded so the
+  // `actor_dispatched` row states a fact rather than an intent. Every failure
+  // here degrades to a shared-tree attempt rather than failing the run:
+  // nothing has spawned yet, so falling back costs nothing, and hard-failing
+  // would turn runs that work today into errors on a repo whose declared
+  // carry paths happen not to carry.
+  //
+  // The degradation is stamped, never silent. A shared engine attempt is the
+  // one shape where nothing contains the executor.
+  let worktree: PendingAttempt['worktree'] = null;
+  let isolationDegraded: string | null = null;
+  if (workspaceMode === 'isolated') {
+    const id8 = `${ids.actorCallId}-a${attempt}`.replace(/[^A-Za-z0-9_-]/g, '-');
+    const worktreeRel = join('.fadeno', 'local', 'engine', ctx.runId, id8).split('\\').join('/');
+    const worktreeAbs = join(ctx.repoRoot, worktreeRel);
+    const diffRel = join('.fadeno', 'local', 'outputs', `engine-${ctx.runId}-${id8}.diff`).split('\\').join('/');
+    try {
+      // A retry re-uses the same identity, so a worktree left behind by a
+      // killed prior attempt would collide. Remove it first: its work was
+      // either already collected or already lost.
+      try { removeIsolatedWorktree(ctx.repoRoot, worktreeAbs); } catch {}
+      const created = createIsolatedWorktree({ repoRoot: ctx.repoRoot, worktreePath: worktreeAbs });
+      try {
+        const carry = carryDeclaredPaths(ctx.repoRoot, created.worktreeAbs, ctx.worktreeCarry, { fingerprint: false });
+        if (carry.failure != null) {
+          throw new Error(`declared worktree_carry path "${carry.failure.path}" could not be carried (${carry.failure.reason})`);
+        }
+        // Capture and replay under the writer lease. Not ceremony: a sibling
+        // member's merge-back is a `git apply --3way` against this same tree,
+        // and reading the tree mid-apply would hand this member a half-applied
+        // patch as its starting state. Held for the capture only, then
+        // released — the executor itself runs unleased, which is the entire
+        // point of isolating it.
+        //
+        // Captured PER ATTEMPT, unlike a shadow pair's single shared capture.
+        // A pair captures once because its two arms must start from identical
+        // state; engine members are not being compared, and a member admitted
+        // after an earlier one merged back must see that work, not a snapshot
+        // predating it.
+        const baselineCommit = withEngineTreeLease(
+          ctx, `baseline:${ids.actorCallId}:a${attempt}`,
+          () => applyWorkspaceBaseline(
+            ctx.repoRoot, created.worktreeAbs, captureWorkspaceBaseline(ctx.repoRoot), `${ctx.runId}:${id8}`, 'engine attempt',
+          ),
+        );
+        worktree = { abs: created.worktreeAbs, rel: created.worktreeRel, baselineCommit, diffRel, diffAbs: join(ctx.repoRoot, diffRel) };
+      } catch (inner) {
+        try { removeIsolatedWorktree(ctx.repoRoot, created.worktreeAbs); } catch {}
+        throw inner;
+      }
+    } catch (err) {
+      isolationDegraded = err instanceof Error ? err.message : String(err);
+      worktree = null;
+      ctx.act(`isolation degraded to shared for ${ids.actorCallId} attempt ${attempt}: ${isolationDegraded}`);
+    }
+  }
+  // What actually happened. A degraded attempt runs in the shared tree and so
+  // must hold the lease a shared attempt holds.
+  const effectiveWorkspaceMode: 'shared' | 'isolated' = worktree != null ? 'isolated' : 'shared';
+  const needsLease = effectiveWorkspaceMode === 'shared';
   const leaseHolder: LeaseHolder | null = needsLease
     ? {
         id: `engine:${ctx.runId}:${ids.actorCallId}:a${attempt}`,
@@ -1058,6 +1246,17 @@ function beginCommandAttempt(
       }
     : null;
   const withdrawClaim = (): void => { try { rmSync(claimAbs, { force: true }); } catch {} };
+  /** Everything the dispatch row says about where this attempt runs, written
+   * in one place so the isolated and shared branches cannot drift on it. */
+  const stampWorkspace = (): void => {
+    const row = dispatched as Record<string, unknown>;
+    row.workspace_mode = effectiveWorkspaceMode;
+    if (worktree != null) {
+      row.workspace = worktree.rel;
+      row.baseline_commit = worktree.baselineCommit;
+    }
+    if (isolationDegraded != null) row.workspace_mode_degraded = isolationDegraded;
+  };
   if (needsLease) {
     const existingBefore = (() => {
       try { return readWorkspaceLease(ctx.repoRoot); } catch { return null; }
@@ -1066,7 +1265,7 @@ function beginCommandAttempt(
     try {
       acquireWorkspaceLease({
         repoRoot: ctx.repoRoot,
-        workspaceMode,
+        workspaceMode: effectiveWorkspaceMode,
         holder: leaseHolder!,
         supervisorPid: null,
         executorPid: null,
@@ -1077,7 +1276,7 @@ function beginCommandAttempt(
         stderrBytes: 0,
         now: ctx.now,
       });
-      (dispatched as Record<string, unknown>).workspace_mode = workspaceMode;
+      stampWorkspace();
       if (existingBefore != null && !aliveBefore && existingBefore.supervisor_pid != null) {
         try {
           appendLeaseRecoveryAudit(ctx, 'workspace_lease_recovered', existingBefore, leaseHolder!, leaseHolder!, 'dead_supervisor');
@@ -1098,7 +1297,7 @@ function beginCommandAttempt(
       throw err;
     }
   } else {
-    (dispatched as Record<string, unknown>).workspace_mode = workspaceMode;
+    stampWorkspace();
   }
 
   try {
@@ -1166,6 +1365,7 @@ function beginCommandAttempt(
     lockPath: join(ctx.repoRoot, WORKSPACE_LEASE_LOCK),
     holder: leaseHolder,
   };
+  const spawnCwd = worktree?.abs ?? ctx.repoRoot;
   let promptFd: number | null = null;
   let outFd: number | null = null;
   let errFd: number | null = null;
@@ -1176,8 +1376,8 @@ function beginCommandAttempt(
     errFd = openSync(stderrSnapshotAbs, 'w');
     child = spawn(process.execPath, superviseArgv(argv, claimAbs, statusAbs, leaseRelease, effectiveTimeout), {
       stdio: [promptFd, outFd, errFd],
-      cwd: ctx.repoRoot,
-      env: atCwd(withoutHarnessIdentity(process.env), ctx.repoRoot),
+      cwd: spawnCwd,
+      env: atCwd(withoutHarnessIdentity(process.env), spawnCwd),
       detached: false,
     });
     child.unref();
@@ -1229,7 +1429,9 @@ function beginCommandAttempt(
     promptSnapshotAbs,
     startedMs: Date.now(),
     startedAt: new Date(),
-    workspaceMode,
+    workspaceMode: effectiveWorkspaceMode,
+    worktree,
+    isolationDegraded,
     effectiveTimeout,
     diagnosticsRel: null,
     diagnosticsBytes: null,
@@ -1243,6 +1445,105 @@ function beginCommandAttempt(
  */
 function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): DispatchOutcome {
   const { stepId, role, outputRel, artifactType, ids, attempt, executor, leaseHolder, statusAbs, claimAbs, outputSnapshotAbs, stderrSnapshotAbs, effectiveTimeout } = pending;
+  /**
+   * Every resource this attempt holds, released together.
+   *
+   * Was twelve byte-identical copies of the same five lines, one before each
+   * of this function's returns. That shape survives only while the list is
+   * short and never grows: the moment an attempt holds something else — a
+   * worktree, say — twelve sites have to learn about it at once, and the one
+   * that does not is a leak nothing reports. Idempotent, so calling it on a
+   * path that already released is a no-op rather than a double-free.
+   */
+  /**
+   * Collect this attempt's worktree diff, apply it to the shared tree, and
+   * tear the worktree down. Idempotent and never throws — a merge-back that
+   * cannot happen is a recorded outcome, not an exception, because the diff
+   * artifact survives either way and is the thing worth protecting.
+   *
+   * Three statuses, the same three an ad-hoc dispatch records, and the
+   * distinction between the last two is load-bearing:
+   *   clean      — applied; the work is in the tree
+   *   conflicted — git tried and left the tree PARTLY applied
+   *   blocked    — nothing was attempted; the tree is untouched
+   */
+  let workspaceSettled = false;
+  let mergeStamp: { status: 'clean' | 'conflicted' | 'blocked'; detail?: string } | null = null;
+  let mergeDiff: { rel: string; bytes: number } | null = null;
+  let mergeIgnored: string[] | null = null;
+  const settleWorkspace = (): void => {
+    if (workspaceSettled) return;
+    workspaceSettled = true;
+    const wt = pending.worktree;
+    if (wt == null) return;
+    try {
+      // Before the diff, because `git add -A` respects .gitignore and the
+      // teardown below is final: whatever this names is about to die.
+      const ignored = scanIgnoredOutput(wt.abs, ctx.worktreeCarry);
+      if (ignored.paths.length > 0 || ignored.truncated) mergeIgnored = ignored.paths;
+      const diff = collectIsolatedDiff({ repoRoot: ctx.repoRoot, worktreeAbs: wt.abs, diffAbs: wt.diffAbs, diffRel: wt.diffRel });
+      mergeDiff = { rel: diff.diffRel, bytes: diff.diffBytes };
+      if (diff.diffBytes === 0) {
+        // The common case for a reviewer or judge, and the reason isolating
+        // every member is cheap: nothing to apply, nothing to conflict with.
+        mergeStamp = { status: 'clean', detail: 'nothing to apply: the attempt changed no tracked files' };
+      } else {
+        mergeStamp = withEngineTreeLease(ctx, `merge:${ids.actorCallId}:a${attempt}`, () => {
+          // `--3way`, never `--check`: a sibling member may have merged back
+          // while this one ran, so context lines drift routinely and a plain
+          // apply would refuse work that reconciles fine.
+          const applyRes = spawnSync('git', ['-C', ctx.repoRoot, 'apply', '--3way', wt.diffAbs], { encoding: 'utf8' });
+          if (applyRes.error == null && applyRes.status === 0) {
+            return { status: 'clean' as const };
+          }
+          const stderrText = String(applyRes.stderr ?? '').trim();
+          return {
+            status: 'conflicted' as const,
+            detail: stderrText.length > 0 ? stderrText : `git apply --3way exited ${applyRes.status ?? 'unknown'}`,
+          };
+        });
+      }
+    } catch (err) {
+      // Reached when the diff could not be collected or the lease never came
+      // free. Nothing was applied, so the tree is untouched — `blocked`, not
+      // `conflicted`, and the difference decides whether a reader has to go
+      // inspect `git status`.
+      mergeStamp = { status: 'blocked', detail: err instanceof Error ? err.message : String(err) };
+    } finally {
+      try { removeIsolatedWorktree(ctx.repoRoot, wt.abs); } catch {}
+    }
+  };
+  // Read through helpers, not directly: every assignment above happens inside
+  // `settleWorkspace`, and TypeScript's control-flow analysis collapses these
+  // to `null` at the read sites below, so a direct `!= null` narrows to
+  // `never`. `dispatch.ts` reads its isolated scan the same way and for the
+  // same reason.
+  const takeMergeStamp = (): { status: 'clean' | 'conflicted' | 'blocked'; detail?: string } | null => mergeStamp;
+  const takeMergeDiff = (): { rel: string; bytes: number } | null => mergeDiff;
+  /** Workspace facts for this attempt's receipt, in one place so a failure
+   * event and a completion event cannot disagree about where it ran. */
+  const workspaceFields = (): Record<string, unknown> => {
+    const out: Record<string, unknown> = { workspace_mode: pending.workspaceMode };
+    if (pending.isolationDegraded != null) out.workspace_mode_degraded = pending.isolationDegraded;
+    if (pending.worktree != null) out.baseline_commit = pending.worktree.baselineCommit;
+    const diff = takeMergeDiff();
+    if (diff != null) { out.diff_snapshot = diff.rel; out.diff_bytes = diff.bytes; }
+    const stamp = takeMergeStamp();
+    if (stamp != null) out.merge_back = stamp;
+    if (mergeIgnored != null) out.ignored_output_discarded = mergeIgnored;
+    return out;
+  };
+  let released = false;
+  const releaseAttempt = (): void => {
+    if (released) return;
+    released = true;
+    settleWorkspace();
+    try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
+    try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
+    try { rmSync(statusAbs, { force: true }); } catch {}
+    try { rmSync(claimAbs, { force: true }); } catch {}
+    if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+  };
   let sessionId: string | null = pending.sessionId;
   const startedMs = pending.startedMs;
   // Poll for supervisor status file, with liveness probe. The supervisor measures duration/ended.
@@ -1270,11 +1571,7 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
       const evidenceTiming = { duration_ms: durationMs, ended_at: endedAt };
       const baseFail: Record<string, unknown> = { step: stepId, actor: role, step_execution_id: ids.stepExecutionId, actor_call_id: ids.actorCallId, attempt, executor, ...(sessionId != null ? { session_id: sessionId } : {}), ...(pending.session != null ? { session: pending.session } : {}) };
       appendEvent(ctx.runDir, { type: 'actor_failed', ...baseFail, ...evidenceTiming, reason: 'output_too_large', error: `output exceeded ${SPAWN_MAX_BUFFER} bytes` }, ctx.now);
-      try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
-      try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
-      try { rmSync(statusAbs, { force: true }); } catch {}
-      try { rmSync(claimAbs, { force: true }); } catch {}
-      if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+      releaseAttempt();
       return { kind: 'exit_nonzero', detail: `${executor} output too large on ${stepId}${role ? ` (${role})` : ''}` };
     }
   } catch (err) {
@@ -1285,11 +1582,7 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
       const evidenceTiming = { duration_ms: durationMs, ended_at: endedAt };
       const baseFail: Record<string, unknown> = { step: stepId, actor: role, step_execution_id: ids.stepExecutionId, actor_call_id: ids.actorCallId, attempt, executor, ...(sessionId != null ? { session_id: sessionId } : {}), ...(pending.session != null ? { session: pending.session } : {}) };
       appendEvent(ctx.runDir, { type: 'actor_failed', ...baseFail, ...evidenceTiming, reason: 'output_unreadable', error: `failed to stat output snapshot: ${(err as Error).message}` }, ctx.now);
-      try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
-      try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
-      try { rmSync(statusAbs, { force: true }); } catch {}
-      try { rmSync(claimAbs, { force: true }); } catch {}
-      if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+      releaseAttempt();
       return { kind: 'exit_nonzero', detail: `${executor} output unreadable on ${stepId}${role ? ` (${role})` : ''}: ${(err as Error).message}` };
     }
   }
@@ -1305,11 +1598,7 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
       const evidenceTiming = { duration_ms: durationMs, ended_at: endedAt };
       const baseFail: Record<string, unknown> = { step: stepId, actor: role, step_execution_id: ids.stepExecutionId, actor_call_id: ids.actorCallId, attempt, executor, ...(sessionId != null ? { session_id: sessionId } : {}), ...(pending.session != null ? { session: pending.session } : {}) };
       appendEvent(ctx.runDir, { type: 'actor_failed', ...baseFail, ...evidenceTiming, reason: 'output_unreadable', error: `failed to read output snapshot: ${(err as Error).message}` }, ctx.now);
-      try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
-      try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
-      try { rmSync(statusAbs, { force: true }); } catch {}
-      try { rmSync(claimAbs, { force: true }); } catch {}
-      if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+      releaseAttempt();
       return { kind: 'exit_nonzero', detail: `${executor} output unreadable on ${stepId}${role ? ` (${role})` : ''}: ${(err as Error).message}` };
     }
   }
@@ -1400,11 +1689,7 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
         const endedAt = new Date().toISOString();
         const evidenceTiming = { duration_ms: durationMs, ended_at: endedAt };
         appendEvent(ctx.runDir, { type: 'actor_failed', ...base, ...evidenceTiming, reason: 'supervisor_lost', error: 'supervisor ended without an exit report' }, ctx.now);
-        try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
-        try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
-        try { rmSync(statusAbs, { force: true }); } catch {}
-        try { rmSync(claimAbs, { force: true }); } catch {}
-        if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+        releaseAttempt();
         return { kind: 'exit_nonzero', detail: `${executor} supervisor lost on ${stepId}${role ? ` (${role})` : ''}` };
       }
     }
@@ -1421,11 +1706,7 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
       const endedAt = new Date().toISOString();
       const evidenceTiming = { duration_ms: durationMs, ended_at: endedAt };
       appendEvent(ctx.runDir, { type: 'actor_failed', ...base, ...evidenceTiming, reason: 'supervisor_lost', error: 'supervisor ended without an exit report' }, ctx.now);
-      try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
-      try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
-      try { rmSync(statusAbs, { force: true }); } catch {}
-      try { rmSync(claimAbs, { force: true }); } catch {}
-      if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+      releaseAttempt();
       return { kind: 'exit_nonzero', detail: `${executor} supervisor lost on ${stepId}${role ? ` (${role})` : ''}` };
     }
     supervisorStatus = retryStatus;
@@ -1435,45 +1716,62 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
   const endedAt = supervisorStatus.endedAt ?? new Date().toISOString();
   const evidenceTiming = { duration_ms: durationMs, ended_at: endedAt };
 
+  // The executor has stopped, so its worktree holds everything it is ever
+  // going to. Settled HERE — before any receipt is written — for two reasons.
+  // Every event below spreads `base`, so stamping it once puts the workspace
+  // facts on whichever receipt this attempt turns out to produce. And the work
+  // is merged back whatever the exit code: an executor that failed after
+  // writing real changes still wrote them, and discarding a worktree because
+  // the process exited badly would lose work the caller can see no trace of.
+  settleWorkspace();
+  Object.assign(base, workspaceFields());
+
   const spawnFailure = supervisorStatus.spawnFailed ?? supervisedSpawnError(supervisorStatus.exitCode ?? null, stderr);
   if (spawnFailure != null) {
     appendEvent(ctx.runDir, { type: 'actor_failed', ...base, ...evidenceTiming, reason: 'spawn_failed', error: spawnFailure }, ctx.now);
-    try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
-    try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
-    try { rmSync(statusAbs, { force: true }); } catch {}
-    try { rmSync(claimAbs, { force: true }); } catch {}
-    if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+    releaseAttempt();
     return { kind: 'spawn_failed', detail: `${executor}: ${spawnFailure}` };
   }
   if (supervisorStatus.timedOut === true) {
     const stderrTail = (stderr ?? '').slice(-STDERR_TAIL);
     appendEvent(ctx.runDir, { type: 'actor_failed', ...base, ...evidenceTiming, reason: 'executor_timeout', ...(supervisorStatus.timeoutMs != null ? { timeout_ms: supervisorStatus.timeoutMs } : {}), ...(supervisorStatus.deadlineAt != null ? { deadline_at: supervisorStatus.deadlineAt } : {}), ...(supervisorStatus.signal != null ? { signal: supervisorStatus.signal } : {}), ...(supervisorStatus.exitCode != null ? { exit_code: supervisorStatus.exitCode } : {}), stderr_tail: stderrTail }, ctx.now);
-    try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
-    try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
-    try { rmSync(statusAbs, { force: true }); } catch {}
-    try { rmSync(claimAbs, { force: true }); } catch {}
-    if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+    releaseAttempt();
     return { kind: 'exit_nonzero', detail: `${executor} timed out after ${supervisorStatus.timeoutMs ?? effectiveTimeout ?? '?'}ms on ${stepId}${role ? ` (${role})` : ''}` };
   }
   if (supervisorStatus.signal != null) {
     const stderrTail = (stderr ?? '').slice(-STDERR_TAIL);
     appendEvent(ctx.runDir, { type: 'actor_failed', ...base, ...evidenceTiming, reason: 'signal', signal: supervisorStatus.signal, stderr_tail: stderrTail }, ctx.now);
-    try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
-    try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
-    try { rmSync(statusAbs, { force: true }); } catch {}
-    try { rmSync(claimAbs, { force: true }); } catch {}
-    if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+    releaseAttempt();
     return { kind: 'exit_nonzero', detail: `${executor} was interrupted by ${supervisorStatus.signal} on ${stepId}${role ? ` (${role})` : ''}` };
   }
   if (supervisorStatus.exitCode != null && supervisorStatus.exitCode !== 0) {
     const stderrTail = (stderr ?? '').slice(-STDERR_TAIL);
     appendEvent(ctx.runDir, { type: 'actor_failed', ...base, ...evidenceTiming, reason: 'exit_nonzero', exit_code: supervisorStatus.exitCode, stderr_tail: stderrTail }, ctx.now);
-    try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
-    try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
-    try { rmSync(statusAbs, { force: true }); } catch {}
-    try { rmSync(claimAbs, { force: true }); } catch {}
-    if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+    releaseAttempt();
     return { kind: 'exit_nonzero', detail: `${executor} exited ${supervisorStatus.exitCode ?? '(signal)'} on ${stepId}${role ? ` (${role})` : ''}` };
+  }
+
+  // The executor succeeded but its work did not reach the tree. Failing here
+  // rather than completing is the whole point: the next step of the run reads
+  // the workspace, and an `actor_completed` over a diff that never applied
+  // would tell it the change is there. That is the silent-wrong-answer shape
+  // this engine exists to avoid — and unlike the shared-tree case, it is
+  // recoverable, because the diff artifact is durable and named.
+  const settled = takeMergeStamp();
+  if (settled != null && settled.status !== 'clean') {
+    const settledDiff = takeMergeDiff();
+    const recovery = settledDiff == null
+      ? 'the diff could not be collected, so there is nothing to re-apply'
+      : `re-apply with \`git apply --3way ${settledDiff.rel}\` once the tree settles`;
+    const error =
+      `${executor} completed, but its work could not be merged back into the workspace ` +
+      `(${settled.status}${settled.detail != null ? `: ${settled.detail}` : ''}). ` +
+      `${settled.status === 'conflicted' ? 'The tree may be PARTLY applied — inspect `git status` first. ' : 'The tree is untouched. '}` +
+      `${recovery}.`;
+    appendEvent(ctx.runDir, { type: 'actor_failed', ...base, ...evidenceTiming, reason: 'merge_back_failed', exit_code: 0, error }, ctx.now);
+    ctx.act(`  merge-back ${settled.status} for ${stepId}${role ? ` (${role})` : ''} — ${recovery}`);
+    releaseAttempt();
+    return { kind: 'exit_nonzero', detail: error };
   }
 
   const verdict = validateTyped(ctx, artifactType, stdout);
@@ -1486,11 +1784,7 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
     writeFileSync(abs, stdout, 'utf8');
     appendEvent(ctx.runDir, { type: 'actor_completed', ...base, ...evidenceTiming, exit_code: 0, output: attemptRel, output_bytes: Buffer.byteLength(stdout), output_sha256: sha256Hex(stdout), output_valid: false, validation_errors: verdict.errors.slice(0, 5) }, ctx.now);
     ctx.act(`  output failed ${artifactType} validation (attempt ${attempt})`);
-    try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
-    try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
-    try { rmSync(statusAbs, { force: true }); } catch {}
-    try { rmSync(claimAbs, { force: true }); } catch {}
-    if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+    releaseAttempt();
     return { kind: 'invalid_output', detail: `${stepId}${role ? ` (${role})` : ''}: output failed ${artifactType} validation`, errors: verdict.errors };
   }
 
@@ -1516,11 +1810,7 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
     }
     appendEvent(ctx.runDir, { type: 'actor_completed', ...base, ...evidenceTiming, exit_code: 0, output: outputRel, output_valid: true, output_extraction: extraction.kind, envelope_candidates: extraction.candidates, raw_output: rawRel, raw_output_bytes: Buffer.byteLength(stdout), raw_output_sha256: sha256Hex(stdout) }, ctx.now);
     ctx.act(`  output normalized (${extraction.kind} envelope) → wrote ${outputRel}`);
-    try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
-    try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
-    try { rmSync(statusAbs, { force: true }); } catch {}
-    try { rmSync(claimAbs, { force: true }); } catch {}
-    if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+    releaseAttempt();
     return { kind: 'valid' };
   }
 
@@ -1538,11 +1828,7 @@ function collectCommandAttempt(ctx: EngineCtx, pending: PendingAttempt): Dispatc
   }
   appendEvent(ctx.runDir, { type: 'actor_completed', ...base, ...evidenceTiming, exit_code: 0, output: outputRel, output_valid: true }, ctx.now);
   ctx.act(`  wrote ${outputRel}`);
-  try { rmSync(outputSnapshotAbs, { force: true }); } catch {}
-  try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
-  try { rmSync(statusAbs, { force: true }); } catch {}
-  try { rmSync(claimAbs, { force: true }); } catch {}
-  if (leaseHolder != null) try { releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder }); } catch {}
+  releaseAttempt();
   return { kind: 'valid' };
 }
 
@@ -1625,7 +1911,8 @@ function evaluateMemberPreflight(
 /**
  * Bounded wave scheduler for command-delivered actor calls.
  * - Admission in canonical member order, up to --parallel.
- * - At most one live shared writer; read-only lanes bypass the lease.
+ * - Isolated members hold no repo-wide lease and run concurrently; a member
+ *   that could not be isolated takes the lease and is admitted alone.
  * - Collection head-of-line in canonical order, independent of wall-clock.
  * - One bounded schema-repair requeue per actor call per invocation.
  * - No sibling cancellation.
@@ -1651,8 +1938,21 @@ function runCommandWave(
         // A prior preflight refusal stops further admission; inflight siblings run to receipt.
         // Binding failures propagate as DriveError to preserve the true resolution error (matching serial path).
         const binding = effectiveBinding(ctx, head.role);
-        const needsLease = true;
-        if (needsLease && inflight.some((p) => p.leaseHolder != null)) {
+        // Members that will isolate need no repo-wide lease and so do not
+        // serialize against each other — that is the concurrency this change
+        // buys back. Where git cannot cut a worktree they all run in the
+        // shared tree, and the old at-most-one-live-writer rule is exactly
+        // right again.
+        //
+        // This predicate used to be the constant `true`, which made the two
+        // checks below unreachable-in-effect: they would fire every time and
+        // admit exactly one member. They are meaningful now.
+        const needsLease = !repoHasGit(ctx.repoRoot);
+        // Still a real gate under isolation, because an isolated member can
+        // DEGRADE to shared and take the lease for its whole run. Its siblings
+        // must not be admitted behind it, or their merge-backs would sit
+        // waiting on a lease held until that member finishes.
+        if (inflight.some((p) => p.leaseHolder != null)) {
           break;
         }
         if (needsLease) {
@@ -1671,7 +1971,7 @@ function runCommandWave(
         const preflight = evaluateMemberPreflight(ctx, stepId, head.role, binding);
         if (!preflight.ok) {
           const prior = priorAttempts(freshEvents(ctx.runDir), head.ids.actorCallId);
-          appendEvent(ctx.runDir, { type: 'actor_failed', step: stepId, actor: head.role, step_execution_id: head.ids.stepExecutionId, actor_call_id: head.ids.actorCallId, attempt: prior.count + 1, executor: preflight.executor, archetype: preflight.archetype, ...(preflight.reason === 'write_access_denied' ? { write_access: false } : {}), reason: preflight.reason, error: preflight.error }, ctx.now);
+          appendEvent(ctx.runDir, { type: 'actor_failed', step: stepId, actor: head.role, step_execution_id: head.ids.stepExecutionId, actor_call_id: head.ids.actorCallId, attempt: prior.count + 1, executor: preflight.executor, archetype: preflight.archetype, reason: preflight.reason, error: preflight.error }, ctx.now);
           ctx.act(`dispatch refused ${stepId}${head.role ? ` (${head.role})` : ''}: ${preflight.error}`);
           if (failure == null) failure = preflight.outcome;
           queue.shift();
@@ -2015,7 +2315,7 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
       const preflight = evaluateMemberPreflight(ctx, stepId, role, binding);
       if (!preflight.ok) {
         events = freshEvents(ctx.runDir);
-        appendEvent(ctx.runDir, { type: 'actor_failed', step: stepId, actor: role, step_execution_id: ids.stepExecutionId, actor_call_id: ids.actorCallId, attempt: priorAttempts(events, ids.actorCallId).count + 1, executor: preflight.executor, archetype: preflight.archetype, ...(preflight.reason === 'write_access_denied' ? { write_access: false } : {}), reason: preflight.reason, error: preflight.error }, ctx.now);
+        appendEvent(ctx.runDir, { type: 'actor_failed', step: stepId, actor: role, step_execution_id: ids.stepExecutionId, actor_call_id: ids.actorCallId, attempt: priorAttempts(events, ids.actorCallId).count + 1, executor: preflight.executor, archetype: preflight.archetype, reason: preflight.reason, error: preflight.error }, ctx.now);
         ctx.act(`dispatch refused ${stepId}${role ? ` (${role})` : ''}: ${preflight.error}`);
         serialFailure = { kind: preflight.outcome.kind as DispatchFailure['kind'], detail: (preflight.outcome as { detail: string }).detail } as DispatchOutcome;
         break;
@@ -2076,26 +2376,26 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
   // requests that appear after a refused command are never created, preserving
   // the serial durability invariant.
   //
-  // COMMAND MEMBERS CURRENTLY SERIALIZE, whatever `--parallel` says. They used
-  // to overlap when their route declared `write_access: false`, which let them
-  // skip the repo-wide writer lease — and that declaration is exactly what the
-  // permissions cut removed. Nothing can claim to be a non-writer now, so
-  // every shared delivery takes the lease and waits its turn.
+  // Members overlap because each runs in its own worktree and merges back at
+  // collection. Concurrency used to be bought by routes declaring
+  // `write_access: false` — the permissions cut removed that declaration, and
+  // with it the speedup, because the two were one mechanism. Separate
+  // worktrees buy it back as a FACT rather than as a claim nothing verified,
+  // and the guarantee is now stronger than the one it replaces: a reviewer on
+  // a bare `claude -p` used to be free to write the shared tree unleased,
+  // precisely because it had declared itself a reader.
   //
-  // This is not a bug to route around: the speedup and the write posture were
-  // one mechanism, and trading the posture away spends the speedup with it.
-  // The fix is isolation with merge-back for engine attempts, which restores
-  // concurrency as a FACT (separate worktrees) rather than as a promise nobody
-  // verified — and which is safest in precisely the case that used to
-  // parallelize, since a member that writes nothing merges back empty. Until
-  // that lands, say so out loud rather than quietly running serially at a
-  // caller's request for concurrency.
+  // Where git cannot cut a worktree there is nothing to isolate into, every
+  // member takes the repo-wide writer lease, and they serialize. Said out loud
+  // rather than accepting a concurrency request that will not be honoured.
   // See docs/experimental/permissions-and-isolation.md.
-  ctx.act(
-    `NOTE: --parallel ${ctx.parallel} currently serializes command members. Shared deliveries take the ` +
-      'repo-wide writer lease, and since the permissions cut nothing can declare itself a non-writer. ' +
-      'Host requests still interleave. Isolation with merge-back is what restores real concurrency.',
-  );
+  if (!repoHasGit(ctx.repoRoot)) {
+    ctx.act(
+      `NOTE: --parallel ${ctx.parallel} serializes command members here. Concurrency comes from running ` +
+        'each member in its own git worktree, and this directory is not a git repository, so every member ' +
+        'runs in the shared tree and takes the repo-wide writer lease. Host requests still interleave.',
+    );
+  }
   type PendingQueueEntry = { role: string | null; outputRel: string; ids: { stepExecutionId: string; actorCallId: string }; kind: 'host_pending'; pending: HostDispatchRequest } | { role: string | null; outputRel: string; ids: { stepExecutionId: string; actorCallId: string }; kind: 'host'; } | { role: string | null; outputRel: string; artifactType: string | null; ids: { stepExecutionId: string; actorCallId: string }; kind: 'command'; };
   const queue: PendingQueueEntry[] = [];
   const hostRequests: HostDispatchRequest[] = [];
@@ -2234,7 +2534,7 @@ function drivePromptable(ctx: EngineCtx, comp: NextComputation): PromptableOutco
         const preflight = evaluateMemberPreflight(ctx, stepId, head.role, binding);
         if (!preflight.ok) {
           events = freshEvents(ctx.runDir);
-          appendEvent(ctx.runDir, { type: 'actor_failed', step: stepId, actor: head.role, step_execution_id: head.ids.stepExecutionId, actor_call_id: head.ids.actorCallId, attempt: priorAttempts(events, head.ids.actorCallId).count + 1, executor: preflight.executor, archetype: preflight.archetype, ...(preflight.reason === 'write_access_denied' ? { write_access: false } : {}), reason: preflight.reason, error: preflight.error }, ctx.now);
+          appendEvent(ctx.runDir, { type: 'actor_failed', step: stepId, actor: head.role, step_execution_id: head.ids.stepExecutionId, actor_call_id: head.ids.actorCallId, attempt: priorAttempts(events, head.ids.actorCallId).count + 1, executor: preflight.executor, archetype: preflight.archetype, reason: preflight.reason, error: preflight.error }, ctx.now);
           ctx.act(`dispatch refused ${stepId}${head.role ? ` (${head.role})` : ''}: ${preflight.error}`);
           if (failure == null) failure = preflight.outcome;
           mixedQueue.shift();
@@ -2857,7 +3157,7 @@ export function runDrive(opts: DriveOptions): DriveResult {
     try { bindRefsForSnapshot.push(parseDialRef(v, 'bind')); } catch {}
   }
   const parallel = parseParallelOption(opts.parallel);
-  const base: Omit<EngineCtx, 'profile' | 'dialLayers'> = {
+  const base: Omit<EngineCtx, 'profile' | 'dialLayers' | 'worktreeCarry'> = {
     runId: run.runId,
     runDir: run.dir,
     repoRoot,
@@ -2874,7 +3174,7 @@ export function runDrive(opts: DriveOptions): DriveResult {
     now: opts.now,
     act,
   };
-  const profile = ensureProfileSnapshot(base as Omit<EngineCtx, 'profile' | 'dialLayers'>, bindRefsForSnapshot);
+  const profile = ensureProfileSnapshot(base, bindRefsForSnapshot);
   let dialLayers: DialLayers;
   try {
     const state = readLocalDialState(repoRoot);
@@ -2892,9 +3192,16 @@ export function runDrive(opts: DriveOptions): DriveResult {
     if (err instanceof ExecutorProfileError) throw new DriveError(err.message);
     throw err;
   }
+  // Read off the live profile, not the snapshot: a missing or unreadable
+  // profile means no declared carry, which is the same answer an empty
+  // declaration gives. Never a reason to fail a run.
+  const worktreeCarry: readonly string[] = (() => {
+    try { return loadExecutorProfile(repoRoot, opts.userPathOptions, harness).profile.worktreeCarry; } catch { return []; }
+  })();
   const ctx: EngineCtx = {
     ...base,
     profile,
+    worktreeCarry,
     dialLayers,
   };
   // Handle recorded dialLayers for in-flight comparison? Load last snapshot's dials to detect change note (not needed)

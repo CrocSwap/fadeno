@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.51";
+  if (true) return "0.6.0-rc.52";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -27125,7 +27125,10 @@ function recoverInterruptedCommandDispatches(ctx) {
       }
     }
   }
+  let retainedWorktrees = 0;
   for (const event of dangling) {
+    const workspace = typeof event.extra.workspace === "string" ? event.extra.workspace : null;
+    if (workspace != null) retainedWorktrees += 1;
     appendEvent(ctx.runDir, {
       type: "actor_failed",
       step: event.step,
@@ -27135,12 +27138,18 @@ function recoverInterruptedCommandDispatches(ctx) {
       attempt: event.extra.attempt,
       executor: event.extra.executor,
       reason: "engine_interrupted",
-      error: "the previous drive process ended before recording a terminal command receipt",
+      error: workspace == null ? "the previous drive process ended before recording a terminal command receipt" : `the previous drive process ended before recording a terminal command receipt; its isolated worktree is retained at ${workspace} \u2014 nothing was merged back, so any work it holds is there and nowhere else`,
+      ...workspace != null ? { workspace, workspace_retained: true } : {},
       recovered: true
     }, ctx.now);
   }
   if (dangling.length > 0) {
     ctx.act(`recovered ${dangling.length} interrupted command dispatch receipt(s)`);
+    if (retainedWorktrees > 0) {
+      ctx.act(
+        `${retainedWorktrees} isolated worktree(s) retained under .fadeno/local/engine/ \u2014 they hold whatever the interrupted members wrote, and nothing merged it back. Inspect before \`fadeno clean\`.`
+      );
+    }
   }
   return dangling.length;
 }
@@ -27484,6 +27493,43 @@ function latestSessionForRole(events, role, executor) {
   }
   return null;
 }
+var ENGINE_TREE_LEASE_WAIT_MS = 3e4;
+var GIT_AVAILABILITY = /* @__PURE__ */ new Map();
+function repoHasGit(repoRoot) {
+  const cached = GIT_AVAILABILITY.get(repoRoot);
+  if (cached != null) return cached;
+  const probe2 = (0, import_node_child_process7.spawnSync)("git", ["-C", repoRoot, "rev-parse", "--git-dir"], { encoding: "utf8" });
+  const available = probe2.error == null && probe2.status === 0;
+  GIT_AVAILABILITY.set(repoRoot, available);
+  return available;
+}
+function withEngineTreeLease(ctx, label, action) {
+  const holder = { id: `engine-tree:${ctx.runId}:${label}`, kind: "engine", runId: ctx.runId };
+  const deadline = Date.now() + ENGINE_TREE_LEASE_WAIT_MS;
+  for (; ; ) {
+    try {
+      acquireWorkspaceLease({
+        repoRoot: ctx.repoRoot,
+        workspaceMode: "shared",
+        holder,
+        supervisorPid: null,
+        executorPid: null
+      });
+      break;
+    } catch (err) {
+      if (!(err instanceof WorkspaceLeaseError) || Date.now() >= deadline) throw err;
+      sleepSync(POLL_MS2);
+    }
+  }
+  try {
+    return action();
+  } finally {
+    try {
+      releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder });
+    } catch {
+    }
+  }
+}
 function parseParallelOption(value) {
   if (value == null) return DRIVE_PARALLEL_DEFAULT;
   const n = typeof value === "number" ? value : Number(String(value).trim());
@@ -27620,8 +27666,52 @@ ${repairCore}`;
 ---
 ${repairCore}`;
   }
-  const workspaceMode = "shared";
-  const needsLease = true;
+  const workspaceMode = repoHasGit(ctx.repoRoot) ? "isolated" : "shared";
+  let worktree = null;
+  let isolationDegraded = null;
+  if (workspaceMode === "isolated") {
+    const id8 = `${ids.actorCallId}-a${attempt}`.replace(/[^A-Za-z0-9_-]/g, "-");
+    const worktreeRel = (0, import_node_path22.join)(".fadeno", "local", "engine", ctx.runId, id8).split("\\").join("/");
+    const worktreeAbs = (0, import_node_path22.join)(ctx.repoRoot, worktreeRel);
+    const diffRel = (0, import_node_path22.join)(".fadeno", "local", "outputs", `engine-${ctx.runId}-${id8}.diff`).split("\\").join("/");
+    try {
+      try {
+        removeIsolatedWorktree(ctx.repoRoot, worktreeAbs);
+      } catch {
+      }
+      const created = createIsolatedWorktree({ repoRoot: ctx.repoRoot, worktreePath: worktreeAbs });
+      try {
+        const carry = carryDeclaredPaths(ctx.repoRoot, created.worktreeAbs, ctx.worktreeCarry, { fingerprint: false });
+        if (carry.failure != null) {
+          throw new Error(`declared worktree_carry path "${carry.failure.path}" could not be carried (${carry.failure.reason})`);
+        }
+        const baselineCommit = withEngineTreeLease(
+          ctx,
+          `baseline:${ids.actorCallId}:a${attempt}`,
+          () => applyWorkspaceBaseline(
+            ctx.repoRoot,
+            created.worktreeAbs,
+            captureWorkspaceBaseline(ctx.repoRoot),
+            `${ctx.runId}:${id8}`,
+            "engine attempt"
+          )
+        );
+        worktree = { abs: created.worktreeAbs, rel: created.worktreeRel, baselineCommit, diffRel, diffAbs: (0, import_node_path22.join)(ctx.repoRoot, diffRel) };
+      } catch (inner) {
+        try {
+          removeIsolatedWorktree(ctx.repoRoot, created.worktreeAbs);
+        } catch {
+        }
+        throw inner;
+      }
+    } catch (err) {
+      isolationDegraded = err instanceof Error ? err.message : String(err);
+      worktree = null;
+      ctx.act(`isolation degraded to shared for ${ids.actorCallId} attempt ${attempt}: ${isolationDegraded}`);
+    }
+  }
+  const effectiveWorkspaceMode = worktree != null ? "isolated" : "shared";
+  const needsLease = effectiveWorkspaceMode === "shared";
   const leaseHolder = needsLease ? {
     id: `engine:${ctx.runId}:${ids.actorCallId}:a${attempt}`,
     kind: "engine",
@@ -27633,6 +27723,15 @@ ${repairCore}`;
       (0, import_node_fs22.rmSync)(claimAbs, { force: true });
     } catch {
     }
+  };
+  const stampWorkspace = () => {
+    const row = dispatched;
+    row.workspace_mode = effectiveWorkspaceMode;
+    if (worktree != null) {
+      row.workspace = worktree.rel;
+      row.baseline_commit = worktree.baselineCommit;
+    }
+    if (isolationDegraded != null) row.workspace_mode_degraded = isolationDegraded;
   };
   if (needsLease) {
     const existingBefore = (() => {
@@ -27646,7 +27745,7 @@ ${repairCore}`;
     try {
       acquireWorkspaceLease({
         repoRoot: ctx.repoRoot,
-        workspaceMode,
+        workspaceMode: effectiveWorkspaceMode,
         holder: leaseHolder,
         supervisorPid: null,
         executorPid: null,
@@ -27657,7 +27756,7 @@ ${repairCore}`;
         stderrBytes: 0,
         now: ctx.now
       });
-      dispatched.workspace_mode = workspaceMode;
+      stampWorkspace();
       if (existingBefore != null && !aliveBefore && existingBefore.supervisor_pid != null) {
         try {
           appendLeaseRecoveryAudit(ctx, "workspace_lease_recovered", existingBefore, leaseHolder, leaseHolder, "dead_supervisor");
@@ -27680,7 +27779,7 @@ ${repairCore}`;
       throw err;
     }
   } else {
-    dispatched.workspace_mode = workspaceMode;
+    stampWorkspace();
   }
   try {
     appendEvent(ctx.runDir, dispatched, ctx.now);
@@ -27746,6 +27845,7 @@ ${repairCore}`;
     lockPath: (0, import_node_path22.join)(ctx.repoRoot, WORKSPACE_LEASE_LOCK),
     holder: leaseHolder
   };
+  const spawnCwd = worktree?.abs ?? ctx.repoRoot;
   let promptFd = null;
   let outFd = null;
   let errFd = null;
@@ -27756,8 +27856,8 @@ ${repairCore}`;
     errFd = (0, import_node_fs22.openSync)(stderrSnapshotAbs, "w");
     child = (0, import_node_child_process7.spawn)(process.execPath, superviseArgv(argv, claimAbs, statusAbs, leaseRelease, effectiveTimeout), {
       stdio: [promptFd, outFd, errFd],
-      cwd: ctx.repoRoot,
-      env: atCwd(withoutHarnessIdentity(process.env), ctx.repoRoot),
+      cwd: spawnCwd,
+      env: atCwd(withoutHarnessIdentity(process.env), spawnCwd),
       detached: false
     });
     child.unref();
@@ -27833,7 +27933,9 @@ ${repairCore}`;
     promptSnapshotAbs,
     startedMs: Date.now(),
     startedAt: /* @__PURE__ */ new Date(),
-    workspaceMode,
+    workspaceMode: effectiveWorkspaceMode,
+    worktree,
+    isolationDegraded,
     effectiveTimeout,
     diagnosticsRel: null,
     diagnosticsBytes: null,
@@ -27842,6 +27944,86 @@ ${repairCore}`;
 }
 function collectCommandAttempt(ctx, pending) {
   const { stepId, role, outputRel, artifactType, ids, attempt, executor, leaseHolder, statusAbs, claimAbs, outputSnapshotAbs, stderrSnapshotAbs, effectiveTimeout } = pending;
+  let workspaceSettled = false;
+  let mergeStamp = null;
+  let mergeDiff = null;
+  let mergeIgnored = null;
+  const settleWorkspace = () => {
+    if (workspaceSettled) return;
+    workspaceSettled = true;
+    const wt = pending.worktree;
+    if (wt == null) return;
+    try {
+      const ignored = scanIgnoredOutput(wt.abs, ctx.worktreeCarry);
+      if (ignored.paths.length > 0 || ignored.truncated) mergeIgnored = ignored.paths;
+      const diff = collectIsolatedDiff({ repoRoot: ctx.repoRoot, worktreeAbs: wt.abs, diffAbs: wt.diffAbs, diffRel: wt.diffRel });
+      mergeDiff = { rel: diff.diffRel, bytes: diff.diffBytes };
+      if (diff.diffBytes === 0) {
+        mergeStamp = { status: "clean", detail: "nothing to apply: the attempt changed no tracked files" };
+      } else {
+        mergeStamp = withEngineTreeLease(ctx, `merge:${ids.actorCallId}:a${attempt}`, () => {
+          const applyRes = (0, import_node_child_process7.spawnSync)("git", ["-C", ctx.repoRoot, "apply", "--3way", wt.diffAbs], { encoding: "utf8" });
+          if (applyRes.error == null && applyRes.status === 0) {
+            return { status: "clean" };
+          }
+          const stderrText = String(applyRes.stderr ?? "").trim();
+          return {
+            status: "conflicted",
+            detail: stderrText.length > 0 ? stderrText : `git apply --3way exited ${applyRes.status ?? "unknown"}`
+          };
+        });
+      }
+    } catch (err) {
+      mergeStamp = { status: "blocked", detail: err instanceof Error ? err.message : String(err) };
+    } finally {
+      try {
+        removeIsolatedWorktree(ctx.repoRoot, wt.abs);
+      } catch {
+      }
+    }
+  };
+  const takeMergeStamp = () => mergeStamp;
+  const takeMergeDiff = () => mergeDiff;
+  const workspaceFields = () => {
+    const out = { workspace_mode: pending.workspaceMode };
+    if (pending.isolationDegraded != null) out.workspace_mode_degraded = pending.isolationDegraded;
+    if (pending.worktree != null) out.baseline_commit = pending.worktree.baselineCommit;
+    const diff = takeMergeDiff();
+    if (diff != null) {
+      out.diff_snapshot = diff.rel;
+      out.diff_bytes = diff.bytes;
+    }
+    const stamp = takeMergeStamp();
+    if (stamp != null) out.merge_back = stamp;
+    if (mergeIgnored != null) out.ignored_output_discarded = mergeIgnored;
+    return out;
+  };
+  let released = false;
+  const releaseAttempt = () => {
+    if (released) return;
+    released = true;
+    settleWorkspace();
+    try {
+      (0, import_node_fs22.rmSync)(outputSnapshotAbs, { force: true });
+    } catch {
+    }
+    try {
+      (0, import_node_fs22.rmSync)(stderrSnapshotAbs, { force: true });
+    } catch {
+    }
+    try {
+      (0, import_node_fs22.rmSync)(statusAbs, { force: true });
+    } catch {
+    }
+    try {
+      (0, import_node_fs22.rmSync)(claimAbs, { force: true });
+    } catch {
+    }
+    if (leaseHolder != null) try {
+      releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder });
+    } catch {
+    }
+  };
   let sessionId = pending.sessionId;
   const startedMs = pending.startedMs;
   let polls = 0;
@@ -27867,26 +28049,7 @@ function collectCommandAttempt(ctx, pending) {
       const evidenceTiming2 = { duration_ms: durationMs2, ended_at: endedAt2 };
       const baseFail = { step: stepId, actor: role, step_execution_id: ids.stepExecutionId, actor_call_id: ids.actorCallId, attempt, executor, ...sessionId != null ? { session_id: sessionId } : {}, ...pending.session != null ? { session: pending.session } : {} };
       appendEvent(ctx.runDir, { type: "actor_failed", ...baseFail, ...evidenceTiming2, reason: "output_too_large", error: `output exceeded ${SPAWN_MAX_BUFFER3} bytes` }, ctx.now);
-      try {
-        (0, import_node_fs22.rmSync)(outputSnapshotAbs, { force: true });
-      } catch {
-      }
-      try {
-        (0, import_node_fs22.rmSync)(stderrSnapshotAbs, { force: true });
-      } catch {
-      }
-      try {
-        (0, import_node_fs22.rmSync)(statusAbs, { force: true });
-      } catch {
-      }
-      try {
-        (0, import_node_fs22.rmSync)(claimAbs, { force: true });
-      } catch {
-      }
-      if (leaseHolder != null) try {
-        releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder });
-      } catch {
-      }
+      releaseAttempt();
       return { kind: "exit_nonzero", detail: `${executor} output too large on ${stepId}${role ? ` (${role})` : ""}` };
     }
   } catch (err) {
@@ -27897,26 +28060,7 @@ function collectCommandAttempt(ctx, pending) {
       const evidenceTiming2 = { duration_ms: durationMs2, ended_at: endedAt2 };
       const baseFail = { step: stepId, actor: role, step_execution_id: ids.stepExecutionId, actor_call_id: ids.actorCallId, attempt, executor, ...sessionId != null ? { session_id: sessionId } : {}, ...pending.session != null ? { session: pending.session } : {} };
       appendEvent(ctx.runDir, { type: "actor_failed", ...baseFail, ...evidenceTiming2, reason: "output_unreadable", error: `failed to stat output snapshot: ${err.message}` }, ctx.now);
-      try {
-        (0, import_node_fs22.rmSync)(outputSnapshotAbs, { force: true });
-      } catch {
-      }
-      try {
-        (0, import_node_fs22.rmSync)(stderrSnapshotAbs, { force: true });
-      } catch {
-      }
-      try {
-        (0, import_node_fs22.rmSync)(statusAbs, { force: true });
-      } catch {
-      }
-      try {
-        (0, import_node_fs22.rmSync)(claimAbs, { force: true });
-      } catch {
-      }
-      if (leaseHolder != null) try {
-        releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder });
-      } catch {
-      }
+      releaseAttempt();
       return { kind: "exit_nonzero", detail: `${executor} output unreadable on ${stepId}${role ? ` (${role})` : ""}: ${err.message}` };
     }
   }
@@ -27932,26 +28076,7 @@ function collectCommandAttempt(ctx, pending) {
       const evidenceTiming2 = { duration_ms: durationMs2, ended_at: endedAt2 };
       const baseFail = { step: stepId, actor: role, step_execution_id: ids.stepExecutionId, actor_call_id: ids.actorCallId, attempt, executor, ...sessionId != null ? { session_id: sessionId } : {}, ...pending.session != null ? { session: pending.session } : {} };
       appendEvent(ctx.runDir, { type: "actor_failed", ...baseFail, ...evidenceTiming2, reason: "output_unreadable", error: `failed to read output snapshot: ${err.message}` }, ctx.now);
-      try {
-        (0, import_node_fs22.rmSync)(outputSnapshotAbs, { force: true });
-      } catch {
-      }
-      try {
-        (0, import_node_fs22.rmSync)(stderrSnapshotAbs, { force: true });
-      } catch {
-      }
-      try {
-        (0, import_node_fs22.rmSync)(statusAbs, { force: true });
-      } catch {
-      }
-      try {
-        (0, import_node_fs22.rmSync)(claimAbs, { force: true });
-      } catch {
-      }
-      if (leaseHolder != null) try {
-        releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder });
-      } catch {
-      }
+      releaseAttempt();
       return { kind: "exit_nonzero", detail: `${executor} output unreadable on ${stepId}${role ? ` (${role})` : ""}: ${err.message}` };
     }
   }
@@ -28049,26 +28174,7 @@ ${truncatedStderr}
         const endedAt2 = (/* @__PURE__ */ new Date()).toISOString();
         const evidenceTiming2 = { duration_ms: durationMs2, ended_at: endedAt2 };
         appendEvent(ctx.runDir, { type: "actor_failed", ...base, ...evidenceTiming2, reason: "supervisor_lost", error: "supervisor ended without an exit report" }, ctx.now);
-        try {
-          (0, import_node_fs22.rmSync)(outputSnapshotAbs, { force: true });
-        } catch {
-        }
-        try {
-          (0, import_node_fs22.rmSync)(stderrSnapshotAbs, { force: true });
-        } catch {
-        }
-        try {
-          (0, import_node_fs22.rmSync)(statusAbs, { force: true });
-        } catch {
-        }
-        try {
-          (0, import_node_fs22.rmSync)(claimAbs, { force: true });
-        } catch {
-        }
-        if (leaseHolder != null) try {
-          releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder });
-        } catch {
-        }
+        releaseAttempt();
         return { kind: "exit_nonzero", detail: `${executor} supervisor lost on ${stepId}${role ? ` (${role})` : ""}` };
       }
     }
@@ -28090,26 +28196,7 @@ ${truncatedStderr}
       const endedAt2 = (/* @__PURE__ */ new Date()).toISOString();
       const evidenceTiming2 = { duration_ms: durationMs2, ended_at: endedAt2 };
       appendEvent(ctx.runDir, { type: "actor_failed", ...base, ...evidenceTiming2, reason: "supervisor_lost", error: "supervisor ended without an exit report" }, ctx.now);
-      try {
-        (0, import_node_fs22.rmSync)(outputSnapshotAbs, { force: true });
-      } catch {
-      }
-      try {
-        (0, import_node_fs22.rmSync)(stderrSnapshotAbs, { force: true });
-      } catch {
-      }
-      try {
-        (0, import_node_fs22.rmSync)(statusAbs, { force: true });
-      } catch {
-      }
-      try {
-        (0, import_node_fs22.rmSync)(claimAbs, { force: true });
-      } catch {
-      }
-      if (leaseHolder != null) try {
-        releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder });
-      } catch {
-      }
+      releaseAttempt();
       return { kind: "exit_nonzero", detail: `${executor} supervisor lost on ${stepId}${role ? ` (${role})` : ""}` };
     }
     supervisorStatus = retryStatus;
@@ -28117,105 +28204,41 @@ ${truncatedStderr}
   const durationMs = supervisorStatus.durationMs ?? Date.now() - startedMs;
   const endedAt = supervisorStatus.endedAt ?? (/* @__PURE__ */ new Date()).toISOString();
   const evidenceTiming = { duration_ms: durationMs, ended_at: endedAt };
+  settleWorkspace();
+  Object.assign(base, workspaceFields());
   const spawnFailure = supervisorStatus.spawnFailed ?? supervisedSpawnError(supervisorStatus.exitCode ?? null, stderr);
   if (spawnFailure != null) {
     appendEvent(ctx.runDir, { type: "actor_failed", ...base, ...evidenceTiming, reason: "spawn_failed", error: spawnFailure }, ctx.now);
-    try {
-      (0, import_node_fs22.rmSync)(outputSnapshotAbs, { force: true });
-    } catch {
-    }
-    try {
-      (0, import_node_fs22.rmSync)(stderrSnapshotAbs, { force: true });
-    } catch {
-    }
-    try {
-      (0, import_node_fs22.rmSync)(statusAbs, { force: true });
-    } catch {
-    }
-    try {
-      (0, import_node_fs22.rmSync)(claimAbs, { force: true });
-    } catch {
-    }
-    if (leaseHolder != null) try {
-      releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder });
-    } catch {
-    }
+    releaseAttempt();
     return { kind: "spawn_failed", detail: `${executor}: ${spawnFailure}` };
   }
   if (supervisorStatus.timedOut === true) {
     const stderrTail = (stderr ?? "").slice(-STDERR_TAIL2);
     appendEvent(ctx.runDir, { type: "actor_failed", ...base, ...evidenceTiming, reason: "executor_timeout", ...supervisorStatus.timeoutMs != null ? { timeout_ms: supervisorStatus.timeoutMs } : {}, ...supervisorStatus.deadlineAt != null ? { deadline_at: supervisorStatus.deadlineAt } : {}, ...supervisorStatus.signal != null ? { signal: supervisorStatus.signal } : {}, ...supervisorStatus.exitCode != null ? { exit_code: supervisorStatus.exitCode } : {}, stderr_tail: stderrTail }, ctx.now);
-    try {
-      (0, import_node_fs22.rmSync)(outputSnapshotAbs, { force: true });
-    } catch {
-    }
-    try {
-      (0, import_node_fs22.rmSync)(stderrSnapshotAbs, { force: true });
-    } catch {
-    }
-    try {
-      (0, import_node_fs22.rmSync)(statusAbs, { force: true });
-    } catch {
-    }
-    try {
-      (0, import_node_fs22.rmSync)(claimAbs, { force: true });
-    } catch {
-    }
-    if (leaseHolder != null) try {
-      releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder });
-    } catch {
-    }
+    releaseAttempt();
     return { kind: "exit_nonzero", detail: `${executor} timed out after ${supervisorStatus.timeoutMs ?? effectiveTimeout ?? "?"}ms on ${stepId}${role ? ` (${role})` : ""}` };
   }
   if (supervisorStatus.signal != null) {
     const stderrTail = (stderr ?? "").slice(-STDERR_TAIL2);
     appendEvent(ctx.runDir, { type: "actor_failed", ...base, ...evidenceTiming, reason: "signal", signal: supervisorStatus.signal, stderr_tail: stderrTail }, ctx.now);
-    try {
-      (0, import_node_fs22.rmSync)(outputSnapshotAbs, { force: true });
-    } catch {
-    }
-    try {
-      (0, import_node_fs22.rmSync)(stderrSnapshotAbs, { force: true });
-    } catch {
-    }
-    try {
-      (0, import_node_fs22.rmSync)(statusAbs, { force: true });
-    } catch {
-    }
-    try {
-      (0, import_node_fs22.rmSync)(claimAbs, { force: true });
-    } catch {
-    }
-    if (leaseHolder != null) try {
-      releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder });
-    } catch {
-    }
+    releaseAttempt();
     return { kind: "exit_nonzero", detail: `${executor} was interrupted by ${supervisorStatus.signal} on ${stepId}${role ? ` (${role})` : ""}` };
   }
   if (supervisorStatus.exitCode != null && supervisorStatus.exitCode !== 0) {
     const stderrTail = (stderr ?? "").slice(-STDERR_TAIL2);
     appendEvent(ctx.runDir, { type: "actor_failed", ...base, ...evidenceTiming, reason: "exit_nonzero", exit_code: supervisorStatus.exitCode, stderr_tail: stderrTail }, ctx.now);
-    try {
-      (0, import_node_fs22.rmSync)(outputSnapshotAbs, { force: true });
-    } catch {
-    }
-    try {
-      (0, import_node_fs22.rmSync)(stderrSnapshotAbs, { force: true });
-    } catch {
-    }
-    try {
-      (0, import_node_fs22.rmSync)(statusAbs, { force: true });
-    } catch {
-    }
-    try {
-      (0, import_node_fs22.rmSync)(claimAbs, { force: true });
-    } catch {
-    }
-    if (leaseHolder != null) try {
-      releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder });
-    } catch {
-    }
+    releaseAttempt();
     return { kind: "exit_nonzero", detail: `${executor} exited ${supervisorStatus.exitCode ?? "(signal)"} on ${stepId}${role ? ` (${role})` : ""}` };
+  }
+  const settled = takeMergeStamp();
+  if (settled != null && settled.status !== "clean") {
+    const settledDiff = takeMergeDiff();
+    const recovery = settledDiff == null ? "the diff could not be collected, so there is nothing to re-apply" : `re-apply with \`git apply --3way ${settledDiff.rel}\` once the tree settles`;
+    const error = `${executor} completed, but its work could not be merged back into the workspace (${settled.status}${settled.detail != null ? `: ${settled.detail}` : ""}). ${settled.status === "conflicted" ? "The tree may be PARTLY applied \u2014 inspect `git status` first. " : "The tree is untouched. "}${recovery}.`;
+    appendEvent(ctx.runDir, { type: "actor_failed", ...base, ...evidenceTiming, reason: "merge_back_failed", exit_code: 0, error }, ctx.now);
+    ctx.act(`  merge-back ${settled.status} for ${stepId}${role ? ` (${role})` : ""} \u2014 ${recovery}`);
+    releaseAttempt();
+    return { kind: "exit_nonzero", detail: error };
   }
   const verdict = validateTyped(ctx, artifactType, stdout);
   if (!verdict.ok) {
@@ -28226,26 +28249,7 @@ ${truncatedStderr}
     (0, import_node_fs22.writeFileSync)(abs2, stdout, "utf8");
     appendEvent(ctx.runDir, { type: "actor_completed", ...base, ...evidenceTiming, exit_code: 0, output: attemptRel, output_bytes: Buffer.byteLength(stdout), output_sha256: sha256Hex(stdout), output_valid: false, validation_errors: verdict.errors.slice(0, 5) }, ctx.now);
     ctx.act(`  output failed ${artifactType} validation (attempt ${attempt})`);
-    try {
-      (0, import_node_fs22.rmSync)(outputSnapshotAbs, { force: true });
-    } catch {
-    }
-    try {
-      (0, import_node_fs22.rmSync)(stderrSnapshotAbs, { force: true });
-    } catch {
-    }
-    try {
-      (0, import_node_fs22.rmSync)(statusAbs, { force: true });
-    } catch {
-    }
-    try {
-      (0, import_node_fs22.rmSync)(claimAbs, { force: true });
-    } catch {
-    }
-    if (leaseHolder != null) try {
-      releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder });
-    } catch {
-    }
+    releaseAttempt();
     return { kind: "invalid_output", detail: `${stepId}${role ? ` (${role})` : ""}: output failed ${artifactType} validation`, errors: verdict.errors };
   }
   const extraction = verdict.ok ? verdict.extraction : void 0;
@@ -28270,26 +28274,7 @@ ${truncatedStderr}
     }
     appendEvent(ctx.runDir, { type: "actor_completed", ...base, ...evidenceTiming, exit_code: 0, output: outputRel, output_valid: true, output_extraction: extraction.kind, envelope_candidates: extraction.candidates, raw_output: rawRel, raw_output_bytes: Buffer.byteLength(stdout), raw_output_sha256: sha256Hex(stdout) }, ctx.now);
     ctx.act(`  output normalized (${extraction.kind} envelope) \u2192 wrote ${outputRel}`);
-    try {
-      (0, import_node_fs22.rmSync)(outputSnapshotAbs, { force: true });
-    } catch {
-    }
-    try {
-      (0, import_node_fs22.rmSync)(stderrSnapshotAbs, { force: true });
-    } catch {
-    }
-    try {
-      (0, import_node_fs22.rmSync)(statusAbs, { force: true });
-    } catch {
-    }
-    try {
-      (0, import_node_fs22.rmSync)(claimAbs, { force: true });
-    } catch {
-    }
-    if (leaseHolder != null) try {
-      releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder });
-    } catch {
-    }
+    releaseAttempt();
     return { kind: "valid" };
   }
   const abs = (0, import_node_path22.join)(ctx.runDir, outputRel);
@@ -28306,26 +28291,7 @@ ${truncatedStderr}
   }
   appendEvent(ctx.runDir, { type: "actor_completed", ...base, ...evidenceTiming, exit_code: 0, output: outputRel, output_valid: true }, ctx.now);
   ctx.act(`  wrote ${outputRel}`);
-  try {
-    (0, import_node_fs22.rmSync)(outputSnapshotAbs, { force: true });
-  } catch {
-  }
-  try {
-    (0, import_node_fs22.rmSync)(stderrSnapshotAbs, { force: true });
-  } catch {
-  }
-  try {
-    (0, import_node_fs22.rmSync)(statusAbs, { force: true });
-  } catch {
-  }
-  try {
-    (0, import_node_fs22.rmSync)(claimAbs, { force: true });
-  } catch {
-  }
-  if (leaseHolder != null) try {
-    releaseWorkspaceLease({ repoRoot: ctx.repoRoot, holder: leaseHolder });
-  } catch {
-  }
+  releaseAttempt();
   return { kind: "valid" };
 }
 function dispatchOnce(ctx, stepId, role, generation, inBody, outputRel, artifactType, ids, attempt, reason, repairErrors, stamps = {}) {
@@ -28402,8 +28368,8 @@ function runCommandWave(ctx, stepId, generation, inBody, members, parallel) {
       while (!stopAdmitting && inflight.length < parallel && queue.length > 0) {
         const head = queue[0];
         const binding = effectiveBinding(ctx, head.role);
-        const needsLease = true;
-        if (needsLease && inflight.some((p) => p.leaseHolder != null)) {
+        const needsLease = !repoHasGit(ctx.repoRoot);
+        if (inflight.some((p) => p.leaseHolder != null)) {
           break;
         }
         if (needsLease) {
@@ -28423,7 +28389,7 @@ function runCommandWave(ctx, stepId, generation, inBody, members, parallel) {
         const preflight = evaluateMemberPreflight(ctx, stepId, head.role, binding);
         if (!preflight.ok) {
           const prior = priorAttempts(freshEvents(ctx.runDir), head.ids.actorCallId);
-          appendEvent(ctx.runDir, { type: "actor_failed", step: stepId, actor: head.role, step_execution_id: head.ids.stepExecutionId, actor_call_id: head.ids.actorCallId, attempt: prior.count + 1, executor: preflight.executor, archetype: preflight.archetype, ...preflight.reason === "write_access_denied" ? { write_access: false } : {}, reason: preflight.reason, error: preflight.error }, ctx.now);
+          appendEvent(ctx.runDir, { type: "actor_failed", step: stepId, actor: head.role, step_execution_id: head.ids.stepExecutionId, actor_call_id: head.ids.actorCallId, attempt: prior.count + 1, executor: preflight.executor, archetype: preflight.archetype, reason: preflight.reason, error: preflight.error }, ctx.now);
           ctx.act(`dispatch refused ${stepId}${head.role ? ` (${head.role})` : ""}: ${preflight.error}`);
           if (failure == null) failure = preflight.outcome;
           queue.shift();
@@ -28691,7 +28657,7 @@ function drivePromptable(ctx, comp) {
       const preflight = evaluateMemberPreflight(ctx, stepId, role, binding);
       if (!preflight.ok) {
         events = freshEvents(ctx.runDir);
-        appendEvent(ctx.runDir, { type: "actor_failed", step: stepId, actor: role, step_execution_id: ids.stepExecutionId, actor_call_id: ids.actorCallId, attempt: priorAttempts(events, ids.actorCallId).count + 1, executor: preflight.executor, archetype: preflight.archetype, ...preflight.reason === "write_access_denied" ? { write_access: false } : {}, reason: preflight.reason, error: preflight.error }, ctx.now);
+        appendEvent(ctx.runDir, { type: "actor_failed", step: stepId, actor: role, step_execution_id: ids.stepExecutionId, actor_call_id: ids.actorCallId, attempt: priorAttempts(events, ids.actorCallId).count + 1, executor: preflight.executor, archetype: preflight.archetype, reason: preflight.reason, error: preflight.error }, ctx.now);
         ctx.act(`dispatch refused ${stepId}${role ? ` (${role})` : ""}: ${preflight.error}`);
         serialFailure = { kind: preflight.outcome.kind, detail: preflight.outcome.detail };
         break;
@@ -28754,9 +28720,11 @@ function drivePromptable(ctx, comp) {
     }
     return null;
   }
-  ctx.act(
-    `NOTE: --parallel ${ctx.parallel} currently serializes command members. Shared deliveries take the repo-wide writer lease, and since the permissions cut nothing can declare itself a non-writer. Host requests still interleave. Isolation with merge-back is what restores real concurrency.`
-  );
+  if (!repoHasGit(ctx.repoRoot)) {
+    ctx.act(
+      `NOTE: --parallel ${ctx.parallel} serializes command members here. Concurrency comes from running each member in its own git worktree, and this directory is not a git repository, so every member runs in the shared tree and takes the repo-wide writer lease. Host requests still interleave.`
+    );
+  }
   const queue = [];
   const hostRequests = [];
   const hostNotes = [];
@@ -28911,7 +28879,7 @@ function drivePromptable(ctx, comp) {
         const preflight = evaluateMemberPreflight(ctx, stepId, head.role, binding);
         if (!preflight.ok) {
           events = freshEvents(ctx.runDir);
-          appendEvent(ctx.runDir, { type: "actor_failed", step: stepId, actor: head.role, step_execution_id: head.ids.stepExecutionId, actor_call_id: head.ids.actorCallId, attempt: priorAttempts(events, head.ids.actorCallId).count + 1, executor: preflight.executor, archetype: preflight.archetype, ...preflight.reason === "write_access_denied" ? { write_access: false } : {}, reason: preflight.reason, error: preflight.error }, ctx.now);
+          appendEvent(ctx.runDir, { type: "actor_failed", step: stepId, actor: head.role, step_execution_id: head.ids.stepExecutionId, actor_call_id: head.ids.actorCallId, attempt: priorAttempts(events, head.ids.actorCallId).count + 1, executor: preflight.executor, archetype: preflight.archetype, reason: preflight.reason, error: preflight.error }, ctx.now);
           ctx.act(`dispatch refused ${stepId}${head.role ? ` (${head.role})` : ""}: ${preflight.error}`);
           if (failure == null) failure = preflight.outcome;
           mixedQueue.shift();
@@ -29473,9 +29441,17 @@ function runDrive(opts) {
     if (err instanceof ExecutorProfileError) throw new DriveError(err.message);
     throw err;
   }
+  const worktreeCarry = (() => {
+    try {
+      return loadExecutorProfile(repoRoot, opts.userPathOptions, harness).profile.worktreeCarry;
+    } catch {
+      return [];
+    }
+  })();
   const ctx = {
     ...base,
     profile,
+    worktreeCarry,
     dialLayers
   };
   recoverInterruptedCommandDispatches(ctx);

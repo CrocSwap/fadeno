@@ -896,7 +896,7 @@ export interface CapturedWorkspaceBaseline {
   untrackedFiles: string[];
 }
 
-function captureWorkspaceBaseline(repoRoot: string): CapturedWorkspaceBaseline {
+export function captureWorkspaceBaseline(repoRoot: string): CapturedWorkspaceBaseline {
   const diffRes = spawnSync('git', ['-C', repoRoot, 'diff', 'HEAD', '--binary'], {
     encoding: 'buffer',
     maxBuffer: SPAWN_MAX_BUFFER,
@@ -931,7 +931,7 @@ function captureWorkspaceBaseline(repoRoot: string): CapturedWorkspaceBaseline {
  * equality; a mismatch means the arms did not start from the same state and
  * the pair is not a fair test.
  */
-function applyWorkspaceBaseline(
+export function applyWorkspaceBaseline(
   repoRoot: string,
   worktreeAbs: string,
   captured: CapturedWorkspaceBaseline,
