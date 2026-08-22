@@ -12,7 +12,7 @@ import { countIterationStarts, scopeStartIndex, stepStartedInScope } from './run
 import { LedgerWriter, LedgerWriteError, withRunLock } from './run-ledger-write.ts';
 import { runRun, RunError } from '../commands/run.ts';
 import { runSchemaDirectories } from './definitions.ts';
-import { SchemaSet } from './playbook-validate.ts';
+import { SCHEMA_KINDS, SchemaSet, type SchemaKind } from './playbook-validate.ts';
 
 export class ToolExecError extends Error {}
 
@@ -140,8 +140,29 @@ export function synthesizeTestResult(opts: {
   return { result, detailsContent };
 }
 
-export function isToolEligible(artifactType: string | null): boolean {
-  return artifactType === 'test-result';
+/**
+ * How a tool step's artifact is produced from the process it ran.
+ *
+ * `test-result` is the special case, not the general one, and the distinction
+ * is about what the exit code MEANS:
+ *
+ * - `synthesized-test-result` — the exit code IS the finding. A test runner
+ *   exiting 1 has not failed to produce a result; it has produced the result
+ *   `failed`. The artifact is synthesized from the exit status.
+ * - `stdout-artifact` — the exit code is a PRECONDITION. A tool that exits
+ *   non-zero did not produce the thing it was asked for, so there is nothing
+ *   to record; its stdout is the artifact only when it succeeded.
+ *
+ * This used to be a yes/no eligibility gate — only `test-result` steps could
+ * be automated at all, and every other tool step stopped the engine and asked
+ * a human to write the artifact by hand. That made the shipped `pr-review`
+ * starter undriveable: its `diff_loader` and `pr_commenter` steps both stall.
+ * Found by dogfood 2026-08-21.
+ */
+export type ToolCaptureMode = 'synthesized-test-result' | 'stdout-artifact';
+
+export function toolCaptureMode(artifactType: string | null): ToolCaptureMode {
+  return artifactType === 'test-result' ? 'synthesized-test-result' : 'stdout-artifact';
 }
 
 export interface ToolProvenance {
@@ -836,7 +857,14 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
   // supervisor that could not observe how the child ended. There is no observed
   // exit behind it, so it can never become a `tool_completed` on the planned
   // path — it is infrastructure, and the attempt stays retryable.
-  const isInfraFailure = spawnFailed != null || timedOut || signal != null || exitCode == null;
+  const captureMode = toolCaptureMode(params.artifactType);
+  // A non-zero exit is infrastructure for a stdout-captured tool and evidence
+  // for a test runner. See `ToolCaptureMode`: recording stdout as the artifact
+  // after a non-zero exit would attribute whatever the tool printed on its way
+  // out — a usage message, a partial write, a stack trace — as the artifact the
+  // step promised, and the step would look done.
+  const failedByExit = captureMode === 'stdout-artifact' && exitCode != null && exitCode !== 0;
+  const isInfraFailure = spawnFailed != null || timedOut || signal != null || exitCode == null || failedByExit;
 
   if (isInfraFailure) {
     // Attempt-scoped infra handling
@@ -856,7 +884,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
       now: params.now,
       stdout,
       stderr,
-      exitCode: null,
+      exitCode: failedByExit ? exitCode : null,
       signal,
       timedOut,
       spawnFailed,
@@ -869,7 +897,11 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
       synthesizedResult: result,
       detailsContent,
     });
-    const msg = spawnFailed ?? (timedOut ? 'timed out' : signal ? `signal ${signal}` : 'ended without an observed exit code');
+    const msg = spawnFailed
+      ?? (timedOut ? 'timed out'
+        : signal ? `signal ${signal}`
+          : failedByExit ? `exited ${exitCode} without producing its artifact`
+            : 'ended without an observed exit code');
     throw new ToolExecError(`tool "${params.toolName}" failed: ${msg}; attempt recorded as error TestResult at artifacts/attempts/${ids.toolCallId}-a${attempt}${extname(params.outputRel) || '.json'} (retryable)`);
   }
 
@@ -1013,8 +1045,65 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
       ...(detailsRel ? { details_path: detailsRel } : {}),
     };
     const schemas = new SchemaSet(runSchemaDirectories(params.runDir, params.repoRoot).snapshot, runSchemaDirectories(params.runDir, params.repoRoot).project, runSchemaDirectories(params.runDir, params.repoRoot).builtin);
-    const validate = schemas.get('test-result');
-    if (!validate(finalResult)) {
+    // The artifact this step promised. For a test runner that is the
+    // synthesized result; for every other tool it is the bytes the tool
+    // printed. `finalResult` is still built either way — it is the provenance
+    // record (command, digest, exit status) that the parking and infra-failure
+    // paths record, and it stays useful even when it is not the artifact.
+    const artifactIsSynthesized = captureMode === 'synthesized-test-result';
+    const artifactBody = artifactIsSynthesized ? finalResult : stdout;
+    // Validated against whatever schema the step's artifact type names, which
+    // for an untyped artifact (`Diff`, `PostResult`) is none — those are the
+    // steps whose output is prose or a vendor's own JSON, and inventing a
+    // schema to check them against would be inventing a contract nobody wrote.
+    // `artifact_type` is only ever a SchemaKind or null — `schemaKindFor` maps
+    // exactly `ReviewReport` and `TestResult` and returns null otherwise — but
+    // it arrives here as a plain string, so the narrowing is done once, here,
+    // rather than asserted at the call.
+    const schemaKey: SchemaKind | null = artifactIsSynthesized
+      ? 'test-result'
+      : (SCHEMA_KINDS as readonly string[]).includes(params.artifactType ?? '')
+        ? (params.artifactType as SchemaKind)
+        : null;
+    const validate = schemaKey == null ? null : schemas.get(schemaKey);
+    const validationTarget = (() => {
+      if (validate == null) return null;
+      if (artifactIsSynthesized) return finalResult as unknown;
+      try { return JSON.parse(stdout) as unknown; } catch { return undefined; }
+    })();
+    if (validate != null && validationTarget === undefined) {
+      handleInfraFailure({
+        repoRoot: params.repoRoot,
+        runDir: params.runDir,
+        runId: params.runId,
+        stepId: params.stepId,
+        toolName: params.toolName,
+        command: params.command,
+        commandDigestValue,
+        outputRel: params.outputRel,
+        generation,
+        attempt,
+        ids,
+        durationMs,
+        now: params.now,
+        stdout,
+        stderr: `tool stdout is not JSON, but the step declares artifact type "${schemaKey}"`,
+        exitCode: null,
+        signal: null,
+        timedOut: false,
+        spawnFailed: `tool stdout is not JSON, but the step declares artifact type "${schemaKey}"`,
+        claimAbs,
+        statusAbs,
+        outputSnapshotAbs,
+        stderrSnapshotAbs,
+        holder,
+        claimRel,
+        synthesizedResult: result,
+        detailsContent,
+      });
+      throw new ToolExecError(`tool "${params.toolName}" printed non-JSON stdout but its step declares artifact type "${schemaKey}"`);
+    }
+    if (validate != null && !validate(validationTarget)) {
       const msg = validate.errors?.map((e: any) => `${e.instancePath || '/'} ${e.message}`).join('; ') ?? 'validation failed';
       handleInfraFailure({
         repoRoot: params.repoRoot,
@@ -1043,10 +1132,14 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
         holder,
         claimRel,
       });
-      throw new ToolExecError(`synthesized TestResult failed validation: ${msg}`);
+      throw new ToolExecError(
+        artifactIsSynthesized
+          ? `synthesized TestResult failed validation: ${msg}`
+          : `tool "${params.toolName}" stdout failed ${schemaKey} validation: ${msg}`,
+      );
     }
 
-    const finalBody = JSON.stringify(finalResult, null, 2);
+    const finalBody = artifactIsSynthesized ? JSON.stringify(artifactBody, null, 2) : String(artifactBody);
     if (placeBytesExclusive(params.runDir, params.outputRel, finalBody, () => readEventsStrict(params.runDir)) === 'conflict') {
       throw concurrentLoss('the planned artifact path is already named by another writer\'s ledger entry');
     }

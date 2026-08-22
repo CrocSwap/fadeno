@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0-rc.54";
+  if (true) return "0.6.0-rc.55";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -24791,9 +24791,9 @@ function adviceFor(info, gate) {
     const output = info.outputs?.[0] ?? "<artifact-path>";
     const tool = info.tool ? ` ${info.tool}` : "";
     if (info.artifact_type === "test-result") {
-      return `tool step "${info.id}" produces test-result at ${output}. If tool${tool} is registered in executors.yaml, run \`fadeno tool-run <run> [--tool${tool}] [--timeout <seconds>]\` to execute and synthesize the artifact; otherwise, or for any non-test-result output, write the artifact manually and attribute with \`fadeno tool-complete <run> --output ${output}\`. Then re-call \`fadeno next\`.`;
+      return `tool step "${info.id}" produces test-result at ${output}. If tool${tool} is registered in executors.yaml, run \`fadeno tool-run <run> [--tool${tool}] [--timeout <seconds>]\` to execute it; otherwise write the artifact manually and attribute with \`fadeno tool-complete <run> --output ${output}\`. Then re-call \`fadeno next\`.`;
     }
-    return `tool step "${info.id}" produces ${info.artifact_type ?? "unknown"} at ${output}; write the artifact manually and attribute with \`fadeno tool-complete <run> --output ${output}\`. Automated execution via \`fadeno tool-run\` only supports test-result. Then re-call \`fadeno next\`.`;
+    return `tool step "${info.id}" produces ${info.artifact_type ?? "unknown"} at ${output}; register its tool in executors.yaml to run it with \`fadeno tool-run\`, or write the artifact manually and attribute it with \`fadeno tool-complete <run> --output ${output}\`. Then re-call \`fadeno next\`.`;
   }
   return `handle kind \`${kind}\` per runtime.md; record the outcome; then re-call \`fadeno next\`.`;
 }
@@ -25933,8 +25933,8 @@ function synthesizeTestResult(opts) {
   };
   return { result, detailsContent };
 }
-function isToolEligible(artifactType) {
-  return artifactType === "test-result";
+function toolCaptureMode(artifactType) {
+  return artifactType === "test-result" ? "synthesized-test-result" : "stdout-artifact";
 }
 var POLL_MS = 50;
 var LIVENESS_EVERY = 20;
@@ -26489,7 +26489,9 @@ function executeToolCore(params) {
     timedOut,
     spawnFailed
   });
-  const isInfraFailure = spawnFailed != null || timedOut || signal != null || exitCode == null;
+  const captureMode = toolCaptureMode(params.artifactType);
+  const failedByExit = captureMode === "stdout-artifact" && exitCode != null && exitCode !== 0;
+  const isInfraFailure = spawnFailed != null || timedOut || signal != null || exitCode == null || failedByExit;
   if (isInfraFailure) {
     handleInfraFailure({
       repoRoot: params.repoRoot,
@@ -26507,7 +26509,7 @@ function executeToolCore(params) {
       now: params.now,
       stdout,
       stderr,
-      exitCode: null,
+      exitCode: failedByExit ? exitCode : null,
       signal,
       timedOut,
       spawnFailed,
@@ -26520,7 +26522,7 @@ function executeToolCore(params) {
       synthesizedResult: result,
       detailsContent
     });
-    const msg = spawnFailed ?? (timedOut ? "timed out" : signal ? `signal ${signal}` : "ended without an observed exit code");
+    const msg = spawnFailed ?? (timedOut ? "timed out" : signal ? `signal ${signal}` : failedByExit ? `exited ${exitCode} without producing its artifact` : "ended without an observed exit code");
     throw new ToolExecError(`tool "${params.toolName}" failed: ${msg}; attempt recorded as error TestResult at artifacts/attempts/${ids.toolCallId}-a${attempt}${(0, import_node_path21.extname)(params.outputRel) || ".json"} (retryable)`);
   }
   const ext = (0, import_node_path21.extname)(params.outputRel) || ".json";
@@ -26644,8 +26646,52 @@ function executeToolCore(params) {
       ...detailsRel ? { details_path: detailsRel } : {}
     };
     const schemas = new SchemaSet(runSchemaDirectories(params.runDir, params.repoRoot).snapshot, runSchemaDirectories(params.runDir, params.repoRoot).project, runSchemaDirectories(params.runDir, params.repoRoot).builtin);
-    const validate = schemas.get("test-result");
-    if (!validate(finalResult)) {
+    const artifactIsSynthesized = captureMode === "synthesized-test-result";
+    const artifactBody = artifactIsSynthesized ? finalResult : stdout;
+    const schemaKey = artifactIsSynthesized ? "test-result" : SCHEMA_KINDS.includes(params.artifactType ?? "") ? params.artifactType : null;
+    const validate = schemaKey == null ? null : schemas.get(schemaKey);
+    const validationTarget = (() => {
+      if (validate == null) return null;
+      if (artifactIsSynthesized) return finalResult;
+      try {
+        return JSON.parse(stdout);
+      } catch {
+        return void 0;
+      }
+    })();
+    if (validate != null && validationTarget === void 0) {
+      handleInfraFailure({
+        repoRoot: params.repoRoot,
+        runDir: params.runDir,
+        runId: params.runId,
+        stepId: params.stepId,
+        toolName: params.toolName,
+        command: params.command,
+        commandDigestValue,
+        outputRel: params.outputRel,
+        generation,
+        attempt,
+        ids,
+        durationMs,
+        now: params.now,
+        stdout,
+        stderr: `tool stdout is not JSON, but the step declares artifact type "${schemaKey}"`,
+        exitCode: null,
+        signal: null,
+        timedOut: false,
+        spawnFailed: `tool stdout is not JSON, but the step declares artifact type "${schemaKey}"`,
+        claimAbs,
+        statusAbs,
+        outputSnapshotAbs,
+        stderrSnapshotAbs,
+        holder,
+        claimRel,
+        synthesizedResult: result,
+        detailsContent
+      });
+      throw new ToolExecError(`tool "${params.toolName}" printed non-JSON stdout but its step declares artifact type "${schemaKey}"`);
+    }
+    if (validate != null && !validate(validationTarget)) {
       const msg = validate.errors?.map((e) => `${e.instancePath || "/"} ${e.message}`).join("; ") ?? "validation failed";
       handleInfraFailure({
         repoRoot: params.repoRoot,
@@ -26674,9 +26720,11 @@ function executeToolCore(params) {
         holder,
         claimRel
       });
-      throw new ToolExecError(`synthesized TestResult failed validation: ${msg}`);
+      throw new ToolExecError(
+        artifactIsSynthesized ? `synthesized TestResult failed validation: ${msg}` : `tool "${params.toolName}" stdout failed ${schemaKey} validation: ${msg}`
+      );
     }
-    const finalBody = JSON.stringify(finalResult, null, 2);
+    const finalBody = artifactIsSynthesized ? JSON.stringify(artifactBody, null, 2) : String(artifactBody);
     if (placeBytesExclusive(params.runDir, params.outputRel, finalBody, () => readEventsStrict(params.runDir)) === "conflict") {
       throw concurrentLoss("the planned artifact path is already named by another writer's ledger entry");
     }
@@ -27254,6 +27302,28 @@ function resolveChain(ctx, role) {
     resolvedVia: cascade.resolvedVia,
     ref: cascade.ref
   };
+}
+function warnDroppedBindings(ctx, binds) {
+  const boundEarlier = /* @__PURE__ */ new Map();
+  for (const event of freshEvents(ctx.runDir)) {
+    if (event.type !== "executor_override") continue;
+    const role = typeof event.extra.role === "string" ? event.extra.role : null;
+    const executor = typeof event.extra.executor === "string" ? event.extra.executor : null;
+    if (role != null && executor != null) boundEarlier.set(role, executor);
+  }
+  for (const [role, executor] of boundEarlier) {
+    if (binds.has(role)) continue;
+    let now = null;
+    try {
+      now = resolveChain(ctx, role).executor;
+    } catch {
+      now = null;
+    }
+    if (now === executor) continue;
+    ctx.act(
+      `NOTE: role "${role}" was bound to "${executor}" earlier in this run, but this invocation did not pass --bind ${role}=${executor}, so it resolves to "${now ?? "nothing"}". --bind applies to one drive invocation, not to the run \u2014 repeat it to keep the binding.`
+    );
+  }
 }
 function recordOverrides(ctx, binds) {
   for (const [role, executor] of binds) {
@@ -28978,7 +29048,6 @@ function recoverInterruptedToolDispatches(ctx) {
 function driveTool(ctx, step) {
   const toolName = step.tool;
   if (toolName == null || toolName.length === 0) return "needs_decision";
-  if (!isToolEligible(step.artifact_type)) return "needs_decision";
   const spec = ctx.profile.tools?.[toolName];
   if (spec == null) return "needs_decision";
   const outputRel = step.outputs?.[0];
@@ -29456,6 +29525,7 @@ function runDrive(opts) {
   recoverInterruptedCommandDispatches(ctx);
   recoverInterruptedToolDispatches(ctx);
   recordOverrides(ctx, bindMapEarly);
+  warnDroppedBindings(ctx, bindMapEarly);
   recordResolutionSnapshot(ctx);
   const maxTransitions = opts.maxTransitions ?? MAX_TRANSITIONS_DEFAULT;
   if (hasCompositeContainers(playbook)) return driveComposite(ctx, maxTransitions, actions);
@@ -31966,7 +32036,7 @@ function runModelsDriver(opts) {
   if (result.error != null) throw new ModelsError(`models_command failed for ${driver}: ${result.error.message}`);
   if (result.status !== 0) throw new ModelsError(`models_command for ${driver} exited ${result.status}.`);
   const stdout = typeof result.stdout === "string" ? result.stdout : result.stdout.toString("utf8");
-  const tokens = stdout.split(/[\s,]+/).map((t) => t.trim()).filter((t) => t.length > 0);
+  const tokens = stdout.split(/\r?\n/).map((line) => line.split("	")[0].trim()).filter((id) => id.length > 0 && !/\s/.test(id));
   const registeredBy = /* @__PURE__ */ new Map();
   for (const [name, entry] of Object.entries(profile.models)) {
     const ids = [];
@@ -32305,7 +32375,7 @@ function runNext(opts) {
     const toolName = step.tool;
     const artifactType = step.artifact_type;
     const outputPath = step.outputs?.[0] ?? null;
-    if (toolName && artifactType === "test-result" && outputPath) {
+    if (toolName && outputPath) {
       let isRegistered = false;
       try {
         const snapshotPath = (0, import_node_path30.join)(run.dir, "profile.yaml");
@@ -32323,13 +32393,13 @@ function runNext(opts) {
       } catch {
       }
       if (isRegistered) {
-        computation.advice = `tool "${toolName}" is registered \u2014 run \`fadeno tool-run ${run.runId} --tool ${toolName}\` to execute (writes ${outputPath}, validates test-result, synthesizes status); or manually \`fadeno tool-complete ${run.runId} --output ${outputPath}\` (Diff/PostResult remain manual).`;
+        computation.advice = `tool "${toolName}" is registered \u2014 run \`fadeno tool-run ${run.runId} --tool ${toolName}\` to execute it (writes ${outputPath}${artifactType === "test-result" ? ", synthesizing the result from the exit status" : ", capturing stdout as the artifact"}); or record it manually with \`fadeno tool-complete ${run.runId} --output ${outputPath}\`.`;
       } else {
-        computation.advice = `tool "${toolName}" is not registered (produces ${artifactType}, planned artifact ${outputPath}) \u2014 automated tool-run is only for registered test-result tools; use manual \`fadeno tool-complete ${run.runId} --output ${outputPath}\` (no execution).`;
+        computation.advice = `tool "${toolName}" is not registered (produces ${artifactType ?? "unknown"}, planned artifact ${outputPath}) \u2014 declare it under \`tools:\` in executors.yaml to run it automatically, or record the result manually with \`fadeno tool-complete ${run.runId} --output ${outputPath}\` (no execution).`;
       }
     } else if (step.tool) {
       const outputPath2 = step.outputs?.[0] ?? "the planned artifact";
-      computation.advice = `tool "${step.tool}" produces ${artifactType ?? "unknown"} \u2014 automated execution only supports test-result; save structured result at ${outputPath2} then \`fadeno tool-complete ${run.runId} --output ${outputPath2}\`.`;
+      computation.advice = `tool "${step.tool}" produces ${artifactType ?? "unknown"} \u2014 declare it under \`tools:\` in executors.yaml to run it automatically, or save the result at ${outputPath2} and attribute it with \`fadeno tool-complete ${run.runId} --output ${outputPath2}\`.`;
     }
   }
   return {
@@ -36703,9 +36773,6 @@ function runToolRun(opts) {
     throw new ToolRunError(`run "${opts.run}" is not waiting at a tool_call step` + (next.step == null ? ` (status ${next.status}).` : `; next is ${next.step.id} (${next.step.kind}).`));
   }
   const step = next.step;
-  if (!isToolEligible(step.artifact_type)) {
-    throw new ToolRunError(`tool step "${step.id}" produces "${step.artifact_type ?? "unknown"}" \u2014 automated execution only supports test-result; use \`fadeno tool-complete <run> --output <artifact-path>\` for manual result (Diff/PostResult remain manual).`);
-  }
   const toolName = step.tool;
   if (toolName == null || toolName.length === 0) {
     throw new ToolRunError(`tool step "${step.id}" has no declared tool.`);
@@ -39265,8 +39332,10 @@ Options:
 
 The tool must be registered in the layered executors.yaml tools registry as a static argv
 array with optional timeout_ms. The playbook's tool name is a logical capability, never shell.
-Only ready tool_call steps whose artifact schema is test-result are automated; other outputs
-(Diff/PostResult) remain manual via tool-complete. Executes without a shell under the
+Every ready tool_call step whose tool is registered can be executed. A step whose artifact
+type is test-result has its result SYNTHESIZED from the exit status (the exit code is the
+finding); every other step captures the tool's STDOUT as the artifact, and a non-zero exit
+is a failure rather than a result. Executes without a shell under the
 supervisor, strips harness identity, acquires the shared writer lease, and synthesizes a
 schema-valid TestResult (exit 0 => passed, nonzero => failed, spawn/timeout/signal => error).
 `,
@@ -39798,6 +39867,9 @@ function printDialShow(result, emptyMessage) {
     console.log(`${arch}  ${model}  ${effort}  ${via}  ${DIAL_SOURCE_TEXT[row.source] ?? row.source}${inherits}${elig}`);
     if (row.shadow) console.log(formatShadowLine(row.shadow, "  "));
   }
+  if (result.rows.some((row) => row.shadow)) {
+    console.log("  (shadows roll on ad-hoc `fadeno dispatch` only; `fadeno drive` runs are unpaired)");
+  }
   if (result.note) console.log(result.note);
 }
 var SHADOW_EMPTY_MESSAGE = "no active shadow attachments \u2014 attach one with `fadeno shadow <archetype> <model> [--rate <r>]`";
@@ -39820,6 +39892,9 @@ function runShadowCommand(archetype, model, opts) {
   const rate = result.rate != null ? ` [rate ${result.rate}]` : "";
   console.log(`shadow attached: ${result.archetype} ~ ${result.refString} via ${result.driver}${rate}`);
   if (result.previous) console.log(`  (was ${result.previous.model}${result.previous.rate ? ` rate ${result.previous.rate}` : ""})`);
+  console.log(
+    `  scope: ad-hoc \`fadeno dispatch\` only. Engine runs (\`fadeno drive\`) do not roll shadow pairs, so ${result.archetype} steps inside a playbook run are unpaired.`
+  );
   return 0;
 }
 function printDrive(result) {

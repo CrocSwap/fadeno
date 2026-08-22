@@ -33,7 +33,12 @@ function seed(t: TestContext): { root: string; user: UserPathOptions } {
       standalone: {
         openai: {
           command: ['node', '-e', '0'],
-          models_command: ['echo', 'gpt-5.6-sol gpt-5.6-luna'],
+          // One id per LINE, which is what every shipped backend actually
+          // emits. This fixture used to put both ids on one space-separated
+          // line — a shape no real backend produces, and one that only
+          // "worked" because the listing tokenized on whitespace and so also
+          // turned agy's `id<TAB>Description` rows into four models each.
+          models_command: ['printf', 'gpt-5.6-sol\\ngpt-5.6-luna\\n'],
         },
         anthropic: {
           driver: 'claude',
@@ -44,7 +49,7 @@ function seed(t: TestContext): { root: string; user: UserPathOptions } {
         },
         openrouter: {
           command: ['opencode', 'run', '-m', '{model}'],
-          models_command: ['echo', 'anthropic/claude-opus qwen-max'],
+          models_command: ['printf', 'anthropic/claude-opus\\nqwen-max\\n'],
         },
         'current-host': { host: true },
       },
@@ -96,7 +101,7 @@ test('models: registry table — deliveries, lane marks, stale providers, verifi
 test('models --driver: live listing via models_command with registered spellings marked', (t) => {
   const { root, user } = seed(t);
   const result = runModelsDriver({ repoRoot: root, userPathOptions: user, driver: 'openrouter' });
-  assert.deepEqual(result.models_command, ['echo', 'anthropic/claude-opus qwen-max']);
+  assert.deepEqual(result.models_command, ['printf', 'anthropic/claude-opus\\nqwen-max\\n']);
   assert.deepEqual(result.models, [
     { id: 'anthropic/claude-opus', registered_as: ['opus'] },
     { id: 'qwen-max', registered_as: [] },
@@ -105,6 +110,49 @@ test('models --driver: live listing via models_command with registered spellings
   const openai = runModelsDriver({ repoRoot: root, userPathOptions: user, driver: 'openai' });
   assert.deepEqual(openai.models[0], { id: 'gpt-5.6-sol', registered_as: ['sol'] });
   assert.deepEqual(openai.models[1], { id: 'gpt-5.6-luna', registered_as: [] });
+});
+
+test('models --driver: a listing is parsed per line, not per whitespace token', (t) => {
+  // The three shapes the shipped backends actually emit, pinned together
+  // because the bug was that one parse was serving two different questions.
+  // `agy` is the one that broke: `id<TAB>Description` after a progress
+  // preamble became `gemini-3.7-flash-high`, `Gemini`, `3.7`, `Flash`,
+  // `(High)` — five "models" from one, and 31 real models became 100-odd.
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    schema_version: 3,
+    models: { flash: { provider: 'google', id: 'gemini-3.7-flash-high', effort: 'high' } },
+    routes: {
+      standalone: {
+        // agy: a preamble line, then tab-separated id + human label.
+        google: {
+          driver: 'agy',
+          command: ['agy'],
+          models_command: ['printf', 'Fetching available models...\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\ngemini-3.7-flash-low\tGemini 3.7 Flash (Low)\n'],
+        },
+        // opencode: one bare id per line, nothing else.
+        openrouter: { command: ['opencode'], models_command: ['printf', 'opencode/big-pickle\nopencode/hy3-free\n'] },
+        // grok: prose, and no listing at all. The honest answer is an empty
+        // list, not a set of models named after the words in its login banner.
+        xai: { driver: 'grok', command: ['grok'], models_command: ['printf', 'You are logged in with grok.com.\n\nDefault model: grok-4.6\n'] },
+      },
+    },
+    archetypes: { worker: {} },
+  }));
+  const user = isolated(root);
+
+  const agy = runModelsDriver({ repoRoot: root, userPathOptions: user, driver: 'agy' });
+  assert.deepEqual(agy.models, [
+    { id: 'gemini-3.7-flash-high', registered_as: ['flash'] },
+    { id: 'gemini-3.7-flash-low', registered_as: [] },
+  ], 'the tab-separated label is not a model, and the preamble is not a model');
+
+  const oc = runModelsDriver({ repoRoot: root, userPathOptions: user, driver: 'openrouter' });
+  assert.deepEqual(oc.models.map((m) => m.id), ['opencode/big-pickle', 'opencode/hy3-free']);
+
+  const grok = runModelsDriver({ repoRoot: root, userPathOptions: user, driver: 'grok' });
+  assert.deepEqual(grok.models, [], 'prose yields no models rather than one per word');
 });
 
 test('models --driver: unknown driver and probe-less driver refuse with guidance', (t) => {

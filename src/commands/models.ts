@@ -285,8 +285,31 @@ export function runModelsDriver(opts: DriverListingOptions): DriverListingResult
   if (result.error != null) throw new ModelsError(`models_command failed for ${driver}: ${result.error.message}`);
   if (result.status !== 0) throw new ModelsError(`models_command for ${driver} exited ${result.status}.`);
   const stdout = typeof result.stdout === 'string' ? result.stdout : result.stdout.toString('utf8');
-  // Same membership tokenization the dial-time probe uses.
-  const tokens = stdout.split(/[\s,]+/).map((t) => t.trim()).filter((t) => t.length > 0);
+  // LISTING is not MEMBERSHIP, and they need different parses.
+  //
+  // The dial-time probe asks "does this exact id appear anywhere in the
+  // output?", and splitting on every run of whitespace is the right, robust
+  // answer to that: it cannot miss an id whatever surrounds it. This function
+  // asks a different question — "what ids exist?" — and the same tokenization
+  // answers it wrongly. Verified against the three shipped backends:
+  //
+  //   agy       `gemini-3.7-flash-high\tGemini 3.7 Flash (High)`, after a
+  //             `Fetching available models...` preamble line
+  //   opencode  `opencode/big-pickle`, one bare id per line
+  //   grok      prose — `You are logged in with grok.com.` — and no listing
+  //
+  // Whitespace tokenization turned agy's 31 models into 100-odd "models"
+  // including `Gemini`, `3.7`, `Flash` and `(High)`, and would have turned
+  // grok's login banner into models named `You`, `are`, and `logged`. Found by
+  // dogfood 2026-08-21.
+  //
+  // The rule: one entry per LINE, id is the text before the first tab, and a
+  // candidate that contains whitespace is not an id — which is what drops
+  // agy's preamble and grok's prose without either needing a special case.
+  const tokens = stdout
+    .split(/\r?\n/)
+    .map((line) => line.split('\t')[0]!.trim())
+    .filter((id) => id.length > 0 && !/\s/.test(id));
 
   // Which registry names deliver a given id through this driver: the home
   // route's alias matching (delivered id = entry.id), or an explicit

@@ -597,15 +597,15 @@ function adviceFor(info: NextStepInfo, gate: NextGateInfo | null): string {
     if (info.artifact_type === 'test-result') {
       return (
         `tool step "${info.id}" produces test-result at ${output}. ` +
-        `If tool${tool} is registered in executors.yaml, run \`fadeno tool-run <run> [--tool${tool}] [--timeout <seconds>]\` to execute and synthesize the artifact; ` +
-        `otherwise, or for any non-test-result output, write the artifact manually and attribute with \`fadeno tool-complete <run> --output ${output}\`. ` +
+        `If tool${tool} is registered in executors.yaml, run \`fadeno tool-run <run> [--tool${tool}] [--timeout <seconds>]\` to execute it; ` +
+        `otherwise write the artifact manually and attribute with \`fadeno tool-complete <run> --output ${output}\`. ` +
         `Then re-call \`fadeno next\`.`
       );
     }
     return (
       `tool step "${info.id}" produces ${info.artifact_type ?? 'unknown'} at ${output}; ` +
-      `write the artifact manually and attribute with \`fadeno tool-complete <run> --output ${output}\`. ` +
-      `Automated execution via \`fadeno tool-run\` only supports test-result. Then re-call \`fadeno next\`.`
+      `register its tool in executors.yaml to run it with \`fadeno tool-run\`, or write the artifact ` +
+      `manually and attribute it with \`fadeno tool-complete <run> --output ${output}\`. Then re-call \`fadeno next\`.`
     );
   }
   return `handle kind \`${kind}\` per runtime.md; record the outcome; then re-call \`fadeno next\`.`;

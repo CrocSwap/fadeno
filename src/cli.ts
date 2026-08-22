@@ -795,8 +795,10 @@ Options:
 
 The tool must be registered in the layered executors.yaml tools registry as a static argv
 array with optional timeout_ms. The playbook's tool name is a logical capability, never shell.
-Only ready tool_call steps whose artifact schema is test-result are automated; other outputs
-(Diff/PostResult) remain manual via tool-complete. Executes without a shell under the
+Every ready tool_call step whose tool is registered can be executed. A step whose artifact
+type is test-result has its result SYNTHESIZED from the exit status (the exit code is the
+finding); every other step captures the tool's STDOUT as the artifact, and a non-zero exit
+is a failure rather than a result. Executes without a shell under the
 supervisor, strips harness identity, acquires the shared writer lease, and synthesizes a
 schema-valid TestResult (exit 0 => passed, nonzero => failed, spawn/timeout/signal => error).
 `,
@@ -1452,6 +1454,13 @@ function printDialShow(result: DialShowResult, emptyMessage?: string): void {
     console.log(`${arch}  ${model}  ${effort}  ${via}  ${DIAL_SOURCE_TEXT[row.source] ?? row.source}${inherits}${elig}`);
     if (row.shadow) console.log(formatShadowLine(row.shadow, '  '));
   }
+  // One line, once, when any shadow is shown. The shadow row reads as a
+  // property of the archetype; its scope is narrower than that, and a reader
+  // of this table is exactly the person who would otherwise assume a playbook
+  // run pairs too. See the same note at attach time.
+  if (result.rows.some((row) => row.shadow)) {
+    console.log('  (shadows roll on ad-hoc `fadeno dispatch` only; `fadeno drive` runs are unpaired)');
+  }
   if (result.note) console.log(result.note);
 }
 
@@ -1487,6 +1496,16 @@ function runShadowCommand(
   const rate = result.rate != null ? ` [rate ${result.rate}]` : '';
   console.log(`shadow attached: ${result.archetype} ~ ${result.refString} via ${result.driver}${rate}`);
   if (result.previous) console.log(`  (was ${result.previous.model}${result.previous.rate ? ` rate ${result.previous.rate}` : ''})`);
+  // Said at attach time, because the dial reads like a property of the
+  // ARCHETYPE and is not one. `fadeno drive` never rolls a pair — shadow
+  // sampling lives in the ad-hoc dispatch kernel — so an archetype dialed here
+  // pairs when someone runs `fadeno dispatch`, and does not when the same
+  // archetype is dispatched by a playbook run. Left undisclosed, this is a
+  // dial that silently does nothing for half the system.
+  console.log(
+    `  scope: ad-hoc \`fadeno dispatch\` only. Engine runs (\`fadeno drive\`) do not roll shadow pairs, ` +
+      `so ${result.archetype} steps inside a playbook run are unpaired.`,
+  );
   return 0;
 }
 

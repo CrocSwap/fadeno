@@ -131,7 +131,11 @@ export function runNext(opts: NextOptions): NextResult {
     const toolName = step.tool;
     const artifactType = step.artifact_type;
     const outputPath = step.outputs?.[0] ?? null;
-    if (toolName && artifactType === 'test-result' && outputPath) {
+    // Registration is the axis, not artifact type. Gating this branch on
+    // `artifact_type === 'test-result'` sent a caller to `tool-complete` for a
+    // perfectly runnable tool whenever its artifact happened to be untyped,
+    // which is every tool step in the shipped `pr-review` starter.
+    if (toolName && outputPath) {
       // Check registry eligibility
       let isRegistered = false;
       try {
@@ -148,13 +152,13 @@ export function runNext(opts: NextOptions): NextResult {
         }
       } catch {}
       if (isRegistered) {
-        computation.advice = `tool "${toolName}" is registered — run \`fadeno tool-run ${run.runId} --tool ${toolName}\` to execute (writes ${outputPath}, validates test-result, synthesizes status); or manually \`fadeno tool-complete ${run.runId} --output ${outputPath}\` (Diff/PostResult remain manual).`;
+        computation.advice = `tool "${toolName}" is registered — run \`fadeno tool-run ${run.runId} --tool ${toolName}\` to execute it (writes ${outputPath}${artifactType === 'test-result' ? ', synthesizing the result from the exit status' : ', capturing stdout as the artifact'}); or record it manually with \`fadeno tool-complete ${run.runId} --output ${outputPath}\`.`;
       } else {
-        computation.advice = `tool "${toolName}" is not registered (produces ${artifactType}, planned artifact ${outputPath}) — automated tool-run is only for registered test-result tools; use manual \`fadeno tool-complete ${run.runId} --output ${outputPath}\` (no execution).`;
+        computation.advice = `tool "${toolName}" is not registered (produces ${artifactType ?? 'unknown'}, planned artifact ${outputPath}) — declare it under \`tools:\` in executors.yaml to run it automatically, or record the result manually with \`fadeno tool-complete ${run.runId} --output ${outputPath}\` (no execution).`;
       }
     } else if (step.tool) {
       const outputPath = step.outputs?.[0] ?? 'the planned artifact';
-      computation.advice = `tool "${step.tool}" produces ${artifactType ?? 'unknown'} — automated execution only supports test-result; save structured result at ${outputPath} then \`fadeno tool-complete ${run.runId} --output ${outputPath}\`.`;
+      computation.advice = `tool "${step.tool}" produces ${artifactType ?? 'unknown'} — declare it under \`tools:\` in executors.yaml to run it automatically, or save the result at ${outputPath} and attribute it with \`fadeno tool-complete ${run.runId} --output ${outputPath}\`.`;
     }
   }
 

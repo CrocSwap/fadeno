@@ -88,6 +88,13 @@ const EXECUTORS = {
     adapter: 'command',
     command: ['node', '-e', `process.stdout.write(JSON.stringify(${VALID_REVIEW}))`],
   },
+  // A second healthy reviewer, so a binding can be MEANINGFUL without also
+  // changing what the run produces — the dropped-binding test needs the role to
+  // move without the outcome moving with it.
+  'second-reviewer': {
+    adapter: 'command',
+    command: ['node', '-e', `process.stdout.write(JSON.stringify(${VALID_REVIEW}))`],
+  },
   'flaky-reviewer': {
     adapter: 'command',
     command: [
@@ -392,6 +399,34 @@ test('engine: a --bind that names the current executor is still recorded, and th
     true,
     `a no-op binding must not make a run unverifiable: ${verify.findings.filter((f) => f.status === 'fail').map((f) => f.detail).join('; ')}`,
   );
+});
+
+test('engine: dropping --bind on a later invocation warns instead of silently reverting', (t) => {
+  // `--bind` is per-invocation by design, and the recovery path below depends
+  // on that. What was missing is that the revert was silent: a run is normally
+  // driven across several invocations, because every host dispatch exits the
+  // engine, so forgetting the flag on the second call is the ordinary mistake.
+  // Both invocations stay individually consistent, so `verify` cannot object
+  // either — which is exactly why the engine has to say it.
+  const { root, runId } = seed(t, {
+    bindings: { worker: 'ok-worker', reviewer: 'ok-reviewer', '*': 'ok-worker' },
+  });
+
+  const bound = runDrive({ run: runId, repoRoot: root, bind: ['reviewer=second-reviewer'] });
+  assert.ok(
+    !bound.actions.some((a: string) => /was bound to/.test(a)),
+    'nothing to warn about on the invocation that does the binding',
+  );
+
+  const dropped = runDrive({ run: runId, repoRoot: root });
+  const note = dropped.actions.find((a: string) => /role "reviewer" was bound to "second-reviewer"/.test(a));
+  assert.ok(note, `dropping the flag must be announced; got: ${JSON.stringify(dropped.actions)}`);
+  assert.match(note!, /resolves to "ok-reviewer"/, 'names what it reverted TO, not just that it reverted');
+  assert.match(note!, /--bind reviewer=second-reviewer/, 'names the exact flag that would restore it');
+
+  // Still a warning, not a refusal or a re-application: the run continues, and
+  // the role really does resolve through the cascade now.
+  assert.notEqual(dropped.outcome, 'executor_failed');
 });
 
 test('engine: a dead executor pauses the run; explicit --bind substitution is the recorded recovery', (t) => {

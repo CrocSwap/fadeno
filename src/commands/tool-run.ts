@@ -9,7 +9,7 @@ import { parseSnapshotDocument, serializeSnapshot, loadExecutorProfile, Executor
 import { readLocalDialState } from '../lib/executors.ts';
 import { readUserDials, type UserPathOptions } from '../lib/user-paths.ts';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
-import { isToolEligible, executeToolCore, ToolExecError, recoverInterruptedToolDispatchesForHelper } from '../lib/tool-exec.ts';
+import { executeToolCore, ToolExecError, recoverInterruptedToolDispatchesForHelper } from '../lib/tool-exec.ts';
 import { parseGeneration } from '../lib/prompt-resolve.ts';
 
 export class ToolRunError extends Error {}
@@ -138,9 +138,6 @@ export function runToolRun(opts: ToolRunOptions): ToolRunResult {
     throw new ToolRunError(`run "${opts.run}" is not waiting at a tool_call step` + (next.step == null ? ` (status ${next.status}).` : `; next is ${next.step.id} (${next.step.kind}).`));
   }
   const step = next.step;
-  if (!isToolEligible(step.artifact_type)) {
-    throw new ToolRunError(`tool step "${step.id}" produces "${step.artifact_type ?? 'unknown'}" — automated execution only supports test-result; use \`fadeno tool-complete <run> --output <artifact-path>\` for manual result (Diff/PostResult remain manual).`);
-  }
   const toolName = step.tool;
   if (toolName == null || toolName.length === 0) {
     throw new ToolRunError(`tool step "${step.id}" has no declared tool.`);

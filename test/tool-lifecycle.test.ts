@@ -118,7 +118,7 @@ test('drive executes a registered nonzero tool itself and routes the tests_pass 
   assert.equal(decision?.step, 'fail');
 });
 
-test('unregistered tool, ineligible artifact type, and --tool mismatch each refuse before any spawn, event, claim, or snapshot', (t) => {
+test('an unregistered tool and a --tool mismatch each refuse before any spawn, event, claim, or snapshot', (t) => {
   const unregistered = seedToolRepo(t, {}, [{ ...TOOL_STEP, tool: 'missing' }]);
   const before = readEventsStrict(unregistered.runDir).length;
   assert.throws(
@@ -129,12 +129,21 @@ test('unregistered tool, ineligible artifact type, and --tool mismatch each refu
   assert.ok(!existsSync(inflightClaimPath(unregistered.root, unregistered.runId, 'tc-test-g1', 1)));
   assert.ok(!existsSync(join(unregistered.runDir, 'profile.yaml')), 'no snapshot for an unregistered tool');
 
-  const ineligible = seedToolRepo(t, { test_runner: { command: exitsWith(0) } }, [{ ...TOOL_STEP, output: 'Diff' }]);
-  assert.throws(
-    () => runToolRun({ repoRoot: ineligible.root, run: ineligible.runId }),
-    (err) => /only supports test-result/.test((err as Error).message) && /tool-complete/.test((err as Error).message),
+  // A non-test-result artifact type is no longer a refusal. It used to be —
+  // `tool-run` only automated `test-result` and told every other tool step to
+  // go be written by hand, which left the shipped `pr-review` starter unable
+  // to run: both its tool steps produce untyped artifacts. That step now runs
+  // and captures stdout, and it is pinned as a positive below rather than
+  // deleted, so the change cannot silently revert to a refusal.
+  const untyped = seedToolRepo(t, { test_runner: { command: ['node', '-e', "process.stdout.write('diff --git a/x b/x')"] } }, [{ ...TOOL_STEP, output: 'Diff' }]);
+  const untypedResult = runToolRun({ repoRoot: untyped.root, run: untyped.runId });
+  assert.equal(untypedResult.status, 'passed');
+  assert.equal(
+    readFileSync(join(untyped.runDir, untypedResult.artifact), 'utf8'),
+    'diff --git a/x b/x',
+    'the artifact is the tool\'s stdout, byte for byte — not a synthesized wrapper around it',
   );
-  assert.ok(!readEventsStrict(ineligible.runDir).some((e) => e.type === 'tool_dispatched'));
+  assert.ok(readEventsStrict(untyped.runDir).some((e) => e.type === 'tool_completed'));
 
   const mismatch = seedToolRepo(t, { test_runner: { command: exitsWith(0) } });
   assert.throws(

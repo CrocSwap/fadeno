@@ -110,7 +110,7 @@ import {
   truncateDiagnostics,
   isDiagnosticsEnabled,
 } from '../lib/diagnostics.ts';
-import { isToolEligible, executeToolCore, ToolExecError, recoverInterruptedToolDispatchesShared } from '../lib/tool-exec.ts';
+import { executeToolCore, ToolExecError, recoverInterruptedToolDispatchesShared } from '../lib/tool-exec.ts';
 import { bodyOwnerOf, countIterationStarts, scopeStartIndex, stepStartedInScope } from '../lib/run-scope.ts';
 
 export class DriveError extends Error {}
@@ -563,6 +563,51 @@ function resolveChain(
     resolvedVia: cascade.resolvedVia,
     ref: cascade.ref,
   };
+}
+
+/**
+ * Warn when a role this run bound earlier is NOT bound on this invocation.
+ *
+ * `--bind` is per-invocation by design — `ctx.overrides` starts empty every
+ * time and is filled only from the flags — and that design is load-bearing:
+ * the dead-executor recovery path depends on being able to bind once and then
+ * continue without repeating it.
+ *
+ * What was missing is that dropping the flag is SILENT. A run is normally
+ * driven across several invocations, because every host dispatch exits the
+ * engine, so "drive, handle a host step, drive again" is the ordinary shape —
+ * and forgetting the flag on the second call moves a role back onto the
+ * cascade with nothing said. Both invocations are individually consistent, so
+ * `verify` cannot object either: the ledger honestly records that the role was
+ * bound for one dispatch and resolved normally for the next.
+ *
+ * So this warns rather than refuses or re-applies. Re-applying would break the
+ * recovery path; refusing would make a legitimate pattern an error. Saying it
+ * out loud is what was actually missing.
+ *
+ * Found by dogfood 2026-08-21: an implementer bound to a command-lane executor
+ * silently reverted to its repo pin — and therefore to the host lane — on the
+ * next invocation of the same run.
+ */
+function warnDroppedBindings(ctx: EngineCtx, binds: Map<string, string>): void {
+  const boundEarlier = new Map<string, string>();
+  for (const event of freshEvents(ctx.runDir)) {
+    if (event.type !== 'executor_override') continue;
+    const role = typeof event.extra.role === 'string' ? event.extra.role : null;
+    const executor = typeof event.extra.executor === 'string' ? event.extra.executor : null;
+    if (role != null && executor != null) boundEarlier.set(role, executor);
+  }
+  for (const [role, executor] of boundEarlier) {
+    if (binds.has(role)) continue;
+    let now: string | null = null;
+    try { now = resolveChain(ctx, role).executor; } catch { now = null; }
+    if (now === executor) continue; // the cascade agrees; nothing moved
+    ctx.act(
+      `NOTE: role "${role}" was bound to "${executor}" earlier in this run, but this invocation did not ` +
+        `pass --bind ${role}=${executor}, so it resolves to "${now ?? 'nothing'}". --bind applies to one ` +
+        'drive invocation, not to the run — repeat it to keep the binding.',
+    );
+  }
 }
 
 /** Validate overrides against the snapshot and record each as an event once. */
@@ -2661,7 +2706,11 @@ function recoverInterruptedToolDispatches(ctx: EngineCtx): number {
 function driveTool(ctx: EngineCtx, step: import('../lib/flow-cursor.ts').NextStepInfo): { kind: 'executor_failed'; detail: string } | 'needs_decision' | null {
   const toolName = step.tool;
   if (toolName == null || toolName.length === 0) return 'needs_decision';
-  if (!isToolEligible(step.artifact_type)) return 'needs_decision';
+  // No artifact-type gate any more. Every registered tool step is executable:
+  // a `test-result` step synthesizes its artifact from the exit status, and
+  // every other one captures stdout. See `ToolCaptureMode`. A step whose tool
+  // is not registered still falls through to `needs_decision` below — that is
+  // a missing declaration, not an unsupported shape.
   const spec = (ctx.profile as any).tools?.[toolName];
   if (spec == null) return 'needs_decision';
   const outputRel = step.outputs?.[0];
@@ -3233,6 +3282,7 @@ export function runDrive(opts: DriveOptions): DriveResult {
   recoverInterruptedToolDispatches(ctx);
   // Bind overrides: validate and record
   recordOverrides(ctx, bindMapEarly);
+  warnDroppedBindings(ctx, bindMapEarly);
   recordResolutionSnapshot(ctx);
 
   const maxTransitions = opts.maxTransitions ?? MAX_TRANSITIONS_DEFAULT;

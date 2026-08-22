@@ -865,17 +865,28 @@ test('two tool-runs racing recovery over the same dead attempt append exactly on
   }
 });
 
-test('runNext advice names tool-run for a registered test-result tool and the manual fallback otherwise', (t) => {
+test('runNext advice names tool-run for any registered tool, and the manual fallback only when none is registered', (t) => {
+  // Registration is the axis now, not artifact type. The advice used to send a
+  // caller to `tool-complete` whenever the artifact was not a test-result,
+  // even with the tool sitting registered in executors.yaml — which is how the
+  // `pr-review` starter came to look like it needed hand-written artifacts.
   const registered = seedToolRepo(t, { test_runner: { command: exitsWith(0) } });
-  assert.match(runNext({ run: registered.runId, repoRoot: registered.root }).advice, /tool-run/);
+  const testResultAdvice = runNext({ run: registered.runId, repoRoot: registered.root }).advice;
+  assert.match(testResultAdvice, /tool-run/);
+  assert.match(testResultAdvice, /synthesizing the result from the exit status/, 'says WHICH capture mode applies');
 
   const unregistered = seedToolRepo(t, {}, [{ id: 'test', kind: 'tool_call', tool: 'missing', output: 'TestResult' }]);
   assert.match(runNext({ run: unregistered.runId, repoRoot: unregistered.root }).advice, /tool-complete/);
 
-  const ineligible = seedToolRepo(t, { test_runner: { command: exitsWith(0) } }, [{ id: 'test', kind: 'tool_call', tool: 'test_runner', output: 'Diff' }]);
-  const advice = runNext({ run: ineligible.runId, repoRoot: ineligible.root }).advice;
-  assert.match(advice, /only supports test-result/);
-  assert.match(advice, /tool-complete/);
+  // A registered tool with an untyped artifact is now runnable, and the advice
+  // says so — and says how its artifact will be produced, because "captures
+  // stdout" and "synthesizes from the exit status" are different contracts and
+  // a caller writing the tool needs to know which one they are writing for.
+  const untyped = seedToolRepo(t, { test_runner: { command: exitsWith(0) } }, [{ id: 'test', kind: 'tool_call', tool: 'test_runner', output: 'Diff' }]);
+  const untypedAdvice = runNext({ run: untyped.runId, repoRoot: untyped.root }).advice;
+  assert.match(untypedAdvice, /tool-run/);
+  assert.match(untypedAdvice, /capturing stdout as the artifact/);
+  assert.doesNotMatch(untypedAdvice, /only supports test-result/);
 });
 
 test('tool-run refuses a run whose ledger has no ready tool_call step', (t) => {
