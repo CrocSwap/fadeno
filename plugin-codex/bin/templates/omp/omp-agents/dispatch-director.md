@@ -22,7 +22,7 @@ that ceiling: expect to recover its result by tag (step 4) rather than
 treating the timeout as an outcome:
 
 ```bash
-fadeno dispatch --archetype director --tag director-<slug> <<'FADENO_PROMPT'
+FADENO_HARNESS=omp "${FADENO_CLI:-fadeno}" dispatch --archetype director --tag director-<slug> <<'FADENO_PROMPT'
 ...the ENTIRE task prompt, exactly as received — verbatim, every line,
 starting at its very first line; headers, markers, and metadata lines
 included; no paraphrase, no truncation, nothing added...
@@ -71,7 +71,7 @@ Then:
    Recover with the tag you launched with — the same one, exactly:
 
    ```bash
-   fadeno dispatches --output tag:director-<slug> --wait 120
+   FADENO_HARNESS=omp "${FADENO_CLI:-fadeno}" dispatches --output tag:director-<slug> --wait 120
    ```
 
    The tag is why this works after a kill: you still know it, because you chose

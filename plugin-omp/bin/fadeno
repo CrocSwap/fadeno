@@ -30261,8 +30261,8 @@ function runAttemptAccept(opts) {
 }
 
 // src/commands/init.ts
-var import_node_fs28 = require("node:fs");
-var import_node_path28 = require("node:path");
+var import_node_fs29 = require("node:fs");
+var import_node_path29 = require("node:path");
 
 // src/lib/fsutil.ts
 var import_node_fs24 = require("node:fs");
@@ -30592,13 +30592,145 @@ Relay the Fadeno steering refusal verbatim, state that the requested work was no
 }
 
 // src/commands/steering.ts
-var import_node_fs27 = require("node:fs");
+var import_node_fs28 = require("node:fs");
 var import_node_os3 = require("node:os");
-var import_node_path27 = require("node:path");
+var import_node_path28 = require("node:path");
 
-// src/lib/codex-agent-file.ts
+// src/lib/omp-steering.ts
+var import_node_crypto11 = require("node:crypto");
 var import_node_fs26 = require("node:fs");
 var import_node_path26 = require("node:path");
+var OMP_STEERING_ARCHETYPES = ["worker", "reviewer", "judge"];
+var OMP_PROJECT_EXTENSION_ENTRY = "./.omp/extensions/fadeno-steering.ts";
+var AGENT_MARK = /<!-- fadeno:managed version=([^\s]+) digest=([0-9a-f]{64}) -->/;
+var EXTENSION_MARK = /^\/\/ fadeno:managed version=([^\s]+)(?: digest=([0-9a-f]{64}))?$/m;
+function digest(text) {
+  return (0, import_node_crypto11.createHash)("sha256").update(text).digest("hex");
+}
+function missing(path) {
+  return { path, present: false, managed: false, valid: false, version: null, digest: null, digestValid: null, stale: false };
+}
+function readText(path) {
+  try {
+    return (0, import_node_fs26.existsSync)(path) ? (0, import_node_fs26.readFileSync)(path, "utf8") : null;
+  } catch {
+    return null;
+  }
+}
+function inspectAgent(path, issues, required) {
+  const text = readText(path);
+  if (text == null) {
+    if (required) issues.push({ kind: "missing", path, detail: "managed omp steering agent is missing" });
+    return missing(path);
+  }
+  const mark = AGENT_MARK.exec(text);
+  if (mark == null) {
+    issues.push({ kind: "unmanaged", path, detail: "omp steering path exists without a Fadeno managed marker" });
+    return { path, present: true, managed: false, valid: false, version: null, digest: null, digestValid: null, stale: false };
+  }
+  const version = mark[1] ?? null;
+  const recordedDigest = mark[2] ?? null;
+  const withoutMark = text.replace(`${mark[0]}
+`, "");
+  const digestValid = recordedDigest != null && digest(withoutMark) === recordedDigest;
+  const frontmatter = text.startsWith("---\n") && text.includes("\n---\n");
+  const name = /^name:\s*[A-Za-z0-9_-]+\s*$/m.test(text);
+  const description = /^description:\s*.+$/m.test(text);
+  const valid = frontmatter && name && description;
+  const stale = version != null && version !== packageVersion();
+  if (!valid) issues.push({ kind: "malformed", path, detail: "managed omp agent has malformed name/description frontmatter" });
+  if (stale) issues.push({ kind: "stale-version", path, detail: `managed omp agent is stamped ${version}, current CLI is ${packageVersion()}` });
+  if (!digestValid) issues.push({ kind: "digest-drifted", path, detail: "managed omp agent content differs from its recorded digest" });
+  return { path, present: true, managed: true, valid, version, digest: recordedDigest, digestValid, stale };
+}
+function inspectExtension(path, issues) {
+  const text = readText(path);
+  if (text == null) {
+    issues.push({ kind: "missing", path, detail: "omp steering extension is missing" });
+    return missing(path);
+  }
+  const mark = EXTENSION_MARK.exec(text);
+  if (mark == null) {
+    issues.push({ kind: "unmanaged", path, detail: "omp steering extension exists without a Fadeno managed marker" });
+    return { path, present: true, managed: false, valid: false, version: null, digest: null, digestValid: null, stale: false };
+  }
+  const version = mark[1] ?? null;
+  const recordedDigest = mark[2] ?? null;
+  const withoutMark = text.replace(`${mark[0]}
+`, "");
+  const digestValid = recordedDigest != null && digest(withoutMark) === recordedDigest;
+  const valid = /export\s+default\s+function/.test(text) && /tool_call/.test(text) && /tasks/.test(text);
+  const stale = version != null && version !== packageVersion();
+  if (!valid) issues.push({ kind: "malformed", path, detail: "managed omp extension has no valid task tool_call hook" });
+  if (stale) issues.push({ kind: "stale-version", path, detail: `managed omp extension is stamped ${version}, current CLI is ${packageVersion()}` });
+  if (!digestValid) issues.push({ kind: "digest-drifted", path, detail: "managed omp extension content differs from its recorded digest" });
+  return { path, present: true, managed: true, valid, version, digest: recordedDigest, digestValid, stale };
+}
+function inspectSettings(path, issues) {
+  const text = readText(path);
+  if (text == null) {
+    issues.push({ kind: "missing", path, detail: "omp settings are missing, so the ignored steering extension is not registered" });
+    return false;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    issues.push({ kind: "malformed", path, detail: "omp settings are not valid JSON; Fadeno preserved them and could not register steering" });
+    return false;
+  }
+  if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    issues.push({ kind: "malformed", path, detail: "omp settings must be a JSON object; Fadeno preserved the existing value" });
+    return false;
+  }
+  const extensions = parsed.extensions;
+  if (!Array.isArray(extensions) || !extensions.every((entry) => typeof entry === "string")) {
+    issues.push({ kind: "malformed", path, detail: "omp settings extensions must be an array of strings; Fadeno preserved the existing value" });
+    return false;
+  }
+  if (!extensions.includes(OMP_PROJECT_EXTENSION_ENTRY)) {
+    issues.push({ kind: "unregistered", path, detail: `omp settings do not register ${OMP_PROJECT_EXTENSION_ENTRY}` });
+    return false;
+  }
+  return true;
+}
+function inspectSlotFile(agentDir, archetype, kind, issues, required) {
+  const preferredName = kind === "host" ? `${archetype}.md` : kind === "command" ? `fadeno-dispatch-${archetype}.md` : `fadeno-steering-refused-${archetype}.md`;
+  const aliasName = `fadeno-steering-${kind}-${archetype}.md`;
+  const preferredPath = (0, import_node_path26.join)(agentDir, preferredName);
+  const preferredText = readText(preferredPath);
+  if (!required && preferredText != null && !AGENT_MARK.test(preferredText)) {
+    return { path: preferredPath, present: true, managed: false, valid: false, version: null, digest: null, digestValid: null, stale: false };
+  }
+  const preferred = inspectAgent(preferredPath, issues, required);
+  if (preferred.managed) return preferred;
+  const alias = inspectAgent((0, import_node_path26.join)(agentDir, aliasName), issues, required);
+  if (alias.present) return alias;
+  if (required && preferred.present) return preferred;
+  return preferred;
+}
+function inspectOmpMaterialization(repoRoot, expected) {
+  const agentDir = (0, import_node_path26.join)(repoRoot, ".omp", "agents");
+  const extensionPath = (0, import_node_path26.join)(repoRoot, ".omp", "extensions", "fadeno-steering.ts");
+  const settingsPath = (0, import_node_path26.join)(repoRoot, ".omp", "settings.json");
+  const issues = [];
+  const slots = [];
+  for (const archetype of OMP_STEERING_ARCHETYPES) {
+    const host = inspectSlotFile(agentDir, archetype, "host", issues, expected.get(archetype) === "host");
+    const command2 = inspectSlotFile(agentDir, archetype, "command", issues, expected.get(archetype) === "command");
+    const contradictory = host.present && command2.present;
+    if (contradictory) issues.push({ kind: "contradictory", path: agentDir, detail: `${archetype} has both host and command steering agents materialized` });
+    slots.push({ archetype, expected: expected.get(archetype) ?? null, host, command: command2, contradictory });
+  }
+  const refusals = OMP_STEERING_ARCHETYPES.map((archetype) => inspectSlotFile(agentDir, archetype, "refusal", issues, true));
+  const extension = inspectExtension(extensionPath, issues);
+  const settingsRegistered = inspectSettings(settingsPath, issues);
+  return { agentDir, extensionPath, settingsPath, settingsRegistered, slots, refusals, extension, issues, healthy: issues.length === 0, restartRequired: issues.length > 0 };
+}
+
+// src/lib/codex-agent-file.ts
+var import_node_fs27 = require("node:fs");
+var import_node_path27 = require("node:path");
 var CODEX_STEERING_ARCHETYPES = ["worker", "reviewer", "judge"];
 var CODEX_MANAGED_MARK = "# fadeno:managed";
 var CODEX_MANAGED_VERSION_RE = /^# fadeno:managed\b[^\n]*?\bversion=(\S+)/;
@@ -30617,8 +30749,8 @@ function unquoteToml(raw) {
 function readCodexAgentFile(path) {
   let text;
   try {
-    if (!(0, import_node_fs26.existsSync)(path)) return null;
-    text = (0, import_node_fs26.readFileSync)(path, "utf8");
+    if (!(0, import_node_fs27.existsSync)(path)) return null;
+    text = (0, import_node_fs27.readFileSync)(path, "utf8");
   } catch {
     return null;
   }
@@ -30640,7 +30772,7 @@ function readCodexAgentFile(path) {
   };
 }
 function codexAgentFilePath(scope, repoRoot, archetype, userPathOptions) {
-  return scope === "project" ? (0, import_node_path26.join)(repoRoot, ".codex", "agents", `${archetype}.toml`) : (0, import_node_path26.join)(codexUserAgentDir(userPathOptions), `fadeno-${archetype}.toml`);
+  return scope === "project" ? (0, import_node_path27.join)(repoRoot, ".codex", "agents", `${archetype}.toml`) : (0, import_node_path27.join)(codexUserAgentDir(userPathOptions), `fadeno-${archetype}.toml`);
 }
 function effectiveCodexAgentCandidates(repoRoot, userPathOptions) {
   const out = [];
@@ -30734,18 +30866,18 @@ function snapshotProfileForRequest(lookup) {
   }
   const snapshot = snapshots[0];
   const profileRel = typeof snapshot.extra.profile === "string" && snapshot.extra.profile.length > 0 ? snapshot.extra.profile : "profile.yaml";
-  const runAbsolute = (0, import_node_path27.resolve)(lookup.runDir);
-  const profilePath = (0, import_node_path27.isAbsolute)(profileRel) ? (0, import_node_path27.resolve)(profileRel) : (0, import_node_path27.resolve)(runAbsolute, profileRel);
-  const profileRelative = (0, import_node_path27.relative)(runAbsolute, profilePath).split("\\").join("/");
-  if (profileRelative === "" || profileRelative === ".." || profileRelative.startsWith("../") || (0, import_node_path27.isAbsolute)(profileRelative)) {
+  const runAbsolute = (0, import_node_path28.resolve)(lookup.runDir);
+  const profilePath = (0, import_node_path28.isAbsolute)(profileRel) ? (0, import_node_path28.resolve)(profileRel) : (0, import_node_path28.resolve)(runAbsolute, profileRel);
+  const profileRelative = (0, import_node_path28.relative)(runAbsolute, profilePath).split("\\").join("/");
+  if (profileRelative === "" || profileRelative === ".." || profileRelative.startsWith("../") || (0, import_node_path28.isAbsolute)(profileRelative)) {
     throw new SteeringError(`run "${lookup.runId}" profile snapshot escapes the run directory: ${profileRel}`);
   }
-  if (!(0, import_node_fs27.existsSync)(profilePath)) throw new SteeringError(`run "${lookup.runId}" profile snapshot is missing: ${profileRel}`);
-  const profileRealRelative = (0, import_node_path27.relative)((0, import_node_fs27.realpathSync)(runAbsolute), (0, import_node_fs27.realpathSync)(profilePath)).split("\\").join("/");
-  if (profileRealRelative === ".." || profileRealRelative.startsWith("../") || (0, import_node_path27.isAbsolute)(profileRealRelative)) {
+  if (!(0, import_node_fs28.existsSync)(profilePath)) throw new SteeringError(`run "${lookup.runId}" profile snapshot is missing: ${profileRel}`);
+  const profileRealRelative = (0, import_node_path28.relative)((0, import_node_fs28.realpathSync)(runAbsolute), (0, import_node_fs28.realpathSync)(profilePath)).split("\\").join("/");
+  if (profileRealRelative === ".." || profileRealRelative.startsWith("../") || (0, import_node_path28.isAbsolute)(profileRealRelative)) {
     throw new SteeringError(`run "${lookup.runId}" profile snapshot escapes the run directory through a symlink: ${profileRel}`);
   }
-  const text = (0, import_node_fs27.readFileSync)(profilePath, "utf8");
+  const text = (0, import_node_fs28.readFileSync)(profilePath, "utf8");
   const digest4 = snapshot.extra.sha256;
   if (typeof digest4 !== "string" || !/^[0-9a-f]{64}$/.test(digest4)) {
     throw new SteeringError(`run "${lookup.runId}" profile snapshot is missing or has an invalid sha256 digest.`);
@@ -30886,7 +31018,7 @@ function resolvePromptDigest(opts) {
   const file = opts.promptFile?.trim();
   if (!file) return null;
   try {
-    const text = (0, import_node_fs27.readFileSync)((0, import_node_path27.resolve)(opts.cwd ?? process.cwd(), file), "utf8");
+    const text = (0, import_node_fs28.readFileSync)((0, import_node_path28.resolve)(opts.cwd ?? process.cwd(), file), "utf8");
     return sha256Hex(text);
   } catch {
     return null;
@@ -31213,7 +31345,7 @@ resolver owns the work.
 `;
 }
 function codexAgentDir(scope, repoRoot, userPathOptions) {
-  if (scope === "project") return (0, import_node_path27.join)(repoRoot, ".codex", "agents");
+  if (scope === "project") return (0, import_node_path28.join)(repoRoot, ".codex", "agents");
   return codexUserAgentDir(userPathOptions);
 }
 function stampManagedAgent(body) {
@@ -31221,14 +31353,14 @@ function stampManagedAgent(body) {
 ${body}`;
 }
 function managedAgentEmit(path, body, force, scope) {
-  const existed = (0, import_node_fs27.existsSync)(path);
+  const existed = (0, import_node_fs28.existsSync)(path);
   if (existed && !(scope === "project" && force)) {
-    const existing = (0, import_node_fs27.readFileSync)(path, "utf8");
+    const existing = (0, import_node_fs28.readFileSync)(path, "utf8");
     if (!existing.startsWith(CODEX_MANAGED_MARK)) return "skipped";
     if (existing === body) return "skipped";
   }
-  (0, import_node_fs27.mkdirSync)((0, import_node_path27.join)(path, ".."), { recursive: true });
-  (0, import_node_fs27.writeFileSync)(path, body, "utf8");
+  (0, import_node_fs28.mkdirSync)((0, import_node_path28.join)(path, ".."), { recursive: true });
+  (0, import_node_fs28.writeFileSync)(path, body, "utf8");
   return existed ? "overwritten" : "created";
 }
 function dialLayersForApply(scope, repoRoot, profile, userPathOptions) {
@@ -31273,7 +31405,7 @@ function runSteeringApply(opts) {
   const results = [];
   const agentDir = codexAgentDir(scope, repoRoot, opts.userPathOptions);
   const managedCli = userPaths(opts.userPathOptions).managedCli;
-  const cliPath = opts.cliPath ?? (scope === "user" && (0, import_node_fs27.existsSync)(managedCli) ? managedCli : "fadeno");
+  const cliPath = opts.cliPath ?? (scope === "user" && (0, import_node_fs28.existsSync)(managedCli) ? managedCli : "fadeno");
   const relay = codexRelay(profile);
   for (const archetype of CODEX_STEERING_ARCHETYPES) {
     let cascade;
@@ -31295,7 +31427,7 @@ function runSteeringApply(opts) {
     }
     if (spec.adapter === "host" && spec.agentType === "*") spec = { ...spec, agentType: archetype };
     const filename = scope === "user" ? `fadeno-${archetype}.toml` : `${archetype}.toml`;
-    const path = (0, import_node_path27.join)(agentDir, filename);
+    const path = (0, import_node_path28.join)(agentDir, filename);
     let body;
     if (spec.adapter === "host") {
       if (spec.agentType !== archetype) {
@@ -31325,7 +31457,7 @@ function runSteeringApply(opts) {
   for (const item of pending) {
     results.push({ path: item.path, status: managedAgentEmit(item.path, item.body, opts.force ?? false, scope) });
   }
-  const conflicts = pending.filter((item) => !(0, import_node_fs27.existsSync)(item.path) || (0, import_node_fs27.readFileSync)(item.path, "utf8") !== item.body).map((item) => item.path);
+  const conflicts = pending.filter((item) => !(0, import_node_fs28.existsSync)(item.path) || (0, import_node_fs28.readFileSync)(item.path, "utf8") !== item.body).map((item) => item.path);
   const restartRequired = results.some((item) => item.status === "created" || item.status === "overwritten");
   return { results, materialization: materialization2, baseline, restartRequired, conflicts, scope, ignoredLocalDials };
 }
@@ -31340,14 +31472,14 @@ function emitCodexSteeringBrokers(opts) {
   const agentDir = codexAgentDir("project", repoRoot, opts.userPathOptions);
   const cliPath = opts.cliPath ?? "fadeno";
   return CODEX_STEERING_ARCHETYPES.map((archetype) => {
-    const path = (0, import_node_path27.join)(agentDir, `${archetype}.toml`);
+    const path = (0, import_node_path28.join)(agentDir, `${archetype}.toml`);
     const body = stampManagedAgent(renderCodexCommandBroker(archetype, cliPath, relay));
     return { path, status: managedAgentEmit(path, body, opts.force ?? false, "project") };
   });
 }
 function claudeAgentDir(scope, repoRoot, userPathOptions) {
-  if (scope === "project") return (0, import_node_path27.join)(repoRoot, ".claude", "agents");
-  return (0, import_node_path27.join)(userPathOptions?.home ?? (0, import_node_os3.homedir)(), ".claude", "agents");
+  if (scope === "project") return (0, import_node_path28.join)(repoRoot, ".claude", "agents");
+  return (0, import_node_path28.join)(userPathOptions?.home ?? (0, import_node_os3.homedir)(), ".claude", "agents");
 }
 var CLAUDE_MANAGED_MARK = "<!-- fadeno:managed";
 var CLAUDE_GRID_CELL_RE = /<!-- fadeno:managed\b[^>]*\bsource=grid:[^\s>]+/;
@@ -31357,31 +31489,31 @@ function isRetiredClaudeGridCell(text) {
 function listRetiredClaudeGridCells(agentDir) {
   let entries;
   try {
-    entries = (0, import_node_fs27.existsSync)(agentDir) ? (0, import_node_fs27.readdirSync)(agentDir) : [];
+    entries = (0, import_node_fs28.existsSync)(agentDir) ? (0, import_node_fs28.readdirSync)(agentDir) : [];
   } catch {
     return [];
   }
   const found = [];
   for (const name of entries) {
     if (!name.endsWith(".md")) continue;
-    const path = (0, import_node_path27.join)(agentDir, name);
+    const path = (0, import_node_path28.join)(agentDir, name);
     try {
-      if (isRetiredClaudeGridCell((0, import_node_fs27.readFileSync)(path, "utf8"))) found.push(path);
+      if (isRetiredClaudeGridCell((0, import_node_fs28.readFileSync)(path, "utf8"))) found.push(path);
     } catch {
     }
   }
   return found.sort();
 }
 function removeManagedClaudeAgent(path, removed) {
-  if (!(0, import_node_fs27.existsSync)(path)) return;
+  if (!(0, import_node_fs28.existsSync)(path)) return;
   let text;
   try {
-    text = (0, import_node_fs27.readFileSync)(path, "utf8");
+    text = (0, import_node_fs28.readFileSync)(path, "utf8");
   } catch {
     return;
   }
   if (!text.includes(CLAUDE_MANAGED_MARK)) return;
-  (0, import_node_fs27.unlinkSync)(path);
+  (0, import_node_fs28.unlinkSync)(path);
   removed.push(path);
 }
 function runSteeringApplyClaude(opts) {
@@ -31440,7 +31572,7 @@ function runSteeringApplyClaude(opts) {
       baseline[archetype] = executorName;
       materialization2[archetype] = { kind: "host", adapter: "host", executor: executorName, model: spec.model };
     }
-    removeManagedClaudeAgent((0, import_node_path27.join)(agentDir, `${archetype}.md`), removed);
+    removeManagedClaudeAgent((0, import_node_path28.join)(agentDir, `${archetype}.md`), removed);
   }
   for (const cell of listRetiredClaudeGridCells(agentDir)) removeManagedClaudeAgent(cell, removed);
   const conflicts = [];
@@ -31463,31 +31595,31 @@ ${body.slice(after)}`;
 ${body}`;
 }
 function openCodeManagedEmit(path, body, force) {
-  const existed = (0, import_node_fs27.existsSync)(path);
+  const existed = (0, import_node_fs28.existsSync)(path);
   if (existed && !force) {
-    const existing = (0, import_node_fs27.readFileSync)(path, "utf8");
+    const existing = (0, import_node_fs28.readFileSync)(path, "utf8");
     if (!existing.includes(OPENCODE_MANAGED_MARK)) return "skipped";
     if (existing === body) return "skipped";
   }
-  (0, import_node_fs27.mkdirSync)((0, import_node_path27.join)(path, ".."), { recursive: true });
-  (0, import_node_fs27.writeFileSync)(path, body, "utf8");
+  (0, import_node_fs28.mkdirSync)((0, import_node_path28.join)(path, ".."), { recursive: true });
+  (0, import_node_fs28.writeFileSync)(path, body, "utf8");
   return existed ? "overwritten" : "created";
 }
 function removeManagedOpenCodeFile(path, removed) {
-  if (!(0, import_node_fs27.existsSync)(path)) return;
+  if (!(0, import_node_fs28.existsSync)(path)) return;
   let text;
   try {
-    text = (0, import_node_fs27.readFileSync)(path, "utf8");
+    text = (0, import_node_fs28.readFileSync)(path, "utf8");
   } catch {
     return;
   }
   if (!text.includes(OPENCODE_MANAGED_MARK)) return;
-  (0, import_node_fs27.unlinkSync)(path);
+  (0, import_node_fs28.unlinkSync)(path);
   removed.push(path);
 }
 function readOpenCodeRoleTemplate(archetype) {
-  const source = (0, import_node_fs27.readFileSync)(
-    (0, import_node_path27.join)(templatesDir(), "opencode", "opencode-agents", `${archetype}.md`),
+  const source = (0, import_node_fs28.readFileSync)(
+    (0, import_node_path28.join)(templatesDir(), "opencode", "opencode-agents", `${archetype}.md`),
     "utf8"
   );
   let rest = source;
@@ -31625,7 +31757,7 @@ function runSteeringApplyOpenCode(opts) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
     throw err;
   }
-  const agentDir = (0, import_node_path27.join)(repoRoot, ".opencode", "agent");
+  const agentDir = (0, import_node_path28.join)(repoRoot, ".opencode", "agent");
   const results = [];
   const materialization2 = {};
   const baseline = {};
@@ -31661,10 +31793,10 @@ function runSteeringApplyOpenCode(opts) {
         model: spec.model
       };
       pending.push({
-        path: (0, import_node_path27.join)(agentDir, `fadeno-dispatch-${archetype}.md`),
+        path: (0, import_node_path28.join)(agentDir, `fadeno-dispatch-${archetype}.md`),
         body: stampManagedOpenCodeAgent(renderOpenCodeDispatchBroker(archetype))
       });
-      removeManagedOpenCodeFile((0, import_node_path27.join)(agentDir, `${archetype}.md`), removed);
+      removeManagedOpenCodeFile((0, import_node_path28.join)(agentDir, `${archetype}.md`), removed);
     } else {
       baseline[archetype] = executorName;
       materialization2[archetype] = {
@@ -31674,60 +31806,59 @@ function runSteeringApplyOpenCode(opts) {
         model: spec.model
       };
       pending.push({
-        path: (0, import_node_path27.join)(agentDir, `${archetype}.md`),
+        path: (0, import_node_path28.join)(agentDir, `${archetype}.md`),
         body: stampManagedOpenCodeAgent(
           renderOpenCodeRoleSlot(archetype, compiled?.modelId ?? spec.model ?? null, cascade.ref.effort ?? null)
         )
       });
-      removeManagedOpenCodeFile((0, import_node_path27.join)(agentDir, `fadeno-dispatch-${archetype}.md`), removed);
+      removeManagedOpenCodeFile((0, import_node_path28.join)(agentDir, `fadeno-dispatch-${archetype}.md`), removed);
     }
   }
   for (const archetype of CODEX_STEERING_ARCHETYPES) {
     pending.push({
-      path: (0, import_node_path27.join)(agentDir, `fadeno-steering-refused-${archetype}.md`),
+      path: (0, import_node_path28.join)(agentDir, `fadeno-steering-refused-${archetype}.md`),
       body: stampManagedOpenCodeAgent(renderOpenCodeRefusalBroker(archetype))
     });
   }
   for (const item of pending) {
     results.push({ path: item.path, status: openCodeManagedEmit(item.path, item.body, opts.force ?? false) });
   }
-  const pluginTemplate = (0, import_node_fs27.readFileSync)((0, import_node_path27.join)(templatesDir(), "opencode", "plugin", "fadeno-steering.js"), "utf8");
+  const pluginTemplate = (0, import_node_fs28.readFileSync)((0, import_node_path28.join)(templatesDir(), "opencode", "plugin", "fadeno-steering.js"), "utf8");
   const pluginContent = stampHookVersion(pluginTemplate).replace(/^#!.*\n/, "");
   const pluginBody = `${OPENCODE_PLUGIN_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(pluginContent)}
 ` + pluginContent;
-  const pluginPath = (0, import_node_path27.join)(repoRoot, ".opencode", "plugin", "fadeno-steering.js");
+  const pluginPath = (0, import_node_path28.join)(repoRoot, ".opencode", "plugin", "fadeno-steering.js");
   results.push({ path: pluginPath, status: openCodePluginEmit(pluginPath, pluginBody, opts.force ?? false) });
   const restartRequired = results.some((item) => item.status === "created" || item.status === "overwritten");
-  const gitignorePath = (0, import_node_path27.join)(repoRoot, ".gitignore");
-  const gitignoreExisted = (0, import_node_fs27.existsSync)(gitignorePath);
+  const gitignorePath = (0, import_node_path28.join)(repoRoot, ".gitignore");
+  const gitignoreExisted = (0, import_node_fs28.existsSync)(gitignorePath);
   if (ensureOpenCodeFadenoIgnore(repoRoot)) {
     results.push({ path: gitignorePath, status: gitignoreExisted ? "appended" : "created" });
   }
-  const conflicts = pending.filter((item) => (0, import_node_fs27.existsSync)(item.path) && openCodeFileDiffers(item.path, item.body)).map((item) => item.path);
+  const conflicts = pending.filter((item) => (0, import_node_fs28.existsSync)(item.path) && openCodeFileDiffers(item.path, item.body)).map((item) => item.path);
   return { results, materialization: materialization2, baseline, restartRequired, conflicts, scope: "project", removed };
 }
 function openCodePluginEmit(path, body, force) {
-  const existed = (0, import_node_fs27.existsSync)(path);
+  const existed = (0, import_node_fs28.existsSync)(path);
   if (existed && !force) {
-    const existing = (0, import_node_fs27.readFileSync)(path, "utf8");
+    const existing = (0, import_node_fs28.readFileSync)(path, "utf8");
     if (!existing.includes(OPENCODE_PLUGIN_MANAGED_MARK)) return "skipped";
     if (existing === body) return "skipped";
   }
-  (0, import_node_fs27.mkdirSync)((0, import_node_path27.join)(path, ".."), { recursive: true });
-  (0, import_node_fs27.writeFileSync)(path, body, "utf8");
+  (0, import_node_fs28.mkdirSync)((0, import_node_path28.join)(path, ".."), { recursive: true });
+  (0, import_node_fs28.writeFileSync)(path, body, "utf8");
   return existed ? "overwritten" : "created";
 }
 function openCodeFileDiffers(path, body) {
   try {
-    return (0, import_node_fs27.readFileSync)(path, "utf8") !== body;
+    return (0, import_node_fs28.readFileSync)(path, "utf8") !== body;
   } catch {
     return false;
   }
 }
 var OMP_MANAGED_MARK = "<!-- fadeno:managed";
 var OMP_EXTENSION_MANAGED_MARK = "// fadeno:managed";
-var OMP_STEERING_ARCHETYPES = ["worker", "reviewer", "judge"];
-var OMP_EXTENSION_ENTRY = "./.omp/extensions/fadeno-steering.ts";
+var OMP_STEERING_ARCHETYPES2 = ["worker", "reviewer", "judge"];
 var OMP_LEGACY_EXTENSION_ENTRY = "./extensions/fadeno-steering.ts";
 function stampManagedOmpAgent(body) {
   const header2 = `${OMP_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(body)} -->`;
@@ -31743,27 +31874,27 @@ ${body.slice(after)}`;
 ${body}`;
 }
 function ompManagedEmit(path, body, force) {
-  const existed = (0, import_node_fs27.existsSync)(path);
+  const existed = (0, import_node_fs28.existsSync)(path);
   if (existed) {
-    const existing = (0, import_node_fs27.readFileSync)(path, "utf8");
+    const existing = (0, import_node_fs28.readFileSync)(path, "utf8");
     if (!existing.includes(OMP_MANAGED_MARK)) return "skipped";
     if (!force && existing === body) return "skipped";
   }
-  (0, import_node_fs27.mkdirSync)((0, import_node_path27.join)(path, ".."), { recursive: true });
-  (0, import_node_fs27.writeFileSync)(path, body, "utf8");
+  (0, import_node_fs28.mkdirSync)((0, import_node_path28.join)(path, ".."), { recursive: true });
+  (0, import_node_fs28.writeFileSync)(path, body, "utf8");
   return existed ? "overwritten" : "created";
 }
 function removeManagedOmpFile(path, removed) {
-  if (!(0, import_node_fs27.existsSync)(path)) return;
+  if (!(0, import_node_fs28.existsSync)(path)) return;
   try {
-    if (!(0, import_node_fs27.readFileSync)(path, "utf8").includes(OMP_MANAGED_MARK)) return;
-    (0, import_node_fs27.unlinkSync)(path);
+    if (!(0, import_node_fs28.readFileSync)(path, "utf8").includes(OMP_MANAGED_MARK)) return;
+    (0, import_node_fs28.unlinkSync)(path);
     removed.push(path);
   } catch {
   }
 }
 function readOmpRoleTemplate(archetype) {
-  const source = (0, import_node_fs27.readFileSync)((0, import_node_path27.join)(templatesDir(), "omp", "omp-agents", `${archetype}.md`), "utf8");
+  const source = (0, import_node_fs28.readFileSync)((0, import_node_path28.join)(templatesDir(), "omp", "omp-agents", `${archetype}.md`), "utf8");
   let body = source;
   if (body.startsWith("---\n")) {
     const end = body.indexOf("\n---\n", 4);
@@ -31774,12 +31905,12 @@ function readOmpRoleTemplate(archetype) {
 }
 function ompSlotPath(agentDir, archetype, kind) {
   const filename = kind === "host" ? `${archetype}.md` : kind === "command" ? `fadeno-dispatch-${archetype}.md` : `fadeno-steering-refused-${archetype}.md`;
-  const preferred = (0, import_node_path27.join)(agentDir, filename);
+  const preferred = (0, import_node_path28.join)(agentDir, filename);
   try {
-    if (!(0, import_node_fs27.existsSync)(preferred) || (0, import_node_fs27.readFileSync)(preferred, "utf8").includes(OMP_MANAGED_MARK)) return preferred;
+    if (!(0, import_node_fs28.existsSync)(preferred) || (0, import_node_fs28.readFileSync)(preferred, "utf8").includes(OMP_MANAGED_MARK)) return preferred;
   } catch {
   }
-  return (0, import_node_path27.join)(agentDir, `fadeno-steering-${kind}-${archetype}.md`);
+  return (0, import_node_path28.join)(agentDir, `fadeno-steering-${kind}-${archetype}.md`);
 }
 function ompRoleContract(archetype) {
   const behavior = ROLE_BEHAVIOR[archetype] ?? `Perform the ${archetype} role exactly as requested.`;
@@ -31788,16 +31919,16 @@ You are Fadeno's hybrid ${archetype}. Do not spawn further task agents.
 
 Before every task, inspect whether the delivery begins with # Fadeno engine step assignment.
 For an engine assignment, the coordinator must provide both run: <run-id> and dispatch_id: <dispatch-id>.
-Run fadeno steering resolve --archetype ${archetype} --host-executor current-host --run <run-id> --dispatch-id <dispatch-id>.
+Run FADENO_HARNESS=omp "\${FADENO_CLI:-fadeno}" steering resolve --archetype ${archetype} --host-executor current-host --run <run-id> --dispatch-id <dispatch-id>.
 If either identity is absent or validation fails, stop and report the resolver error.
 For that engine assignment only:
 - mode=host: ${behavior}
-- mode=command: run fadeno dispatch-fallback <run-id> <dispatch-id> and relay stdout verbatim.
+- mode=command: run FADENO_HARNESS=omp "\${FADENO_CLI:-fadeno}" dispatch-fallback <run-id> <dispatch-id> and relay stdout verbatim.
 - mode=restart_required or mode=write_conflict: stop and relay the resolver refusal.
 
-For an ordinary task beginning with # Fadeno step assignment, first write the entire prompt verbatim to a unique file under .fadeno/local/prompts/, then run fadeno steering resolve --archetype ${archetype} --host-executor current-host --prompt-file <path>.
+For an ordinary task beginning with # Fadeno step assignment, first write the entire prompt verbatim to a unique file under .fadeno/local/prompts/, then run FADENO_HARNESS=omp "\${FADENO_CLI:-fadeno}" steering resolve --archetype ${archetype} --host-executor current-host --prompt-file <path>.
 - mode=host: ${behavior}
-- mode=command: run fadeno dispatch --archetype ${archetype} --prompt-file <path> with that same file and relay stdout verbatim. On failure, report it and do not perform the task yourself.
+- mode=command: run FADENO_HARNESS=omp "\${FADENO_CLI:-fadeno}" dispatch --archetype ${archetype} --prompt-file <path> with that same file and relay stdout verbatim. On failure, report it and do not perform the task yourself.
 - mode=restart_required or mode=write_conflict: stop and relay the resolver refusal.
 
 Never silently substitute a different model or executor.`;
@@ -31825,8 +31956,8 @@ tools: bash
 
 The Fadeno steering extension selected this command broker. You are a relay, not an implementer.
 
-For an engine assignment, run fadeno dispatch-fallback <run-id> <dispatch-id> and relay stdout verbatim.
-For an ordinary # Fadeno step assignment, first write the entire received prompt verbatim to a unique file under .fadeno/local/prompts/, then run fadeno dispatch --archetype ${archetype} --prompt-file <path> and relay stdout verbatim. If dispatch fails, report the failure and do not perform the task locally. Never paraphrase, truncate, or substitute another executor.
+For an engine assignment, run FADENO_HARNESS=omp "\${FADENO_CLI:-fadeno}" dispatch-fallback <run-id> <dispatch-id> and relay stdout verbatim.
+For an ordinary # Fadeno step assignment, first write the entire received prompt verbatim to a unique file under .fadeno/local/prompts/, then run FADENO_HARNESS=omp "\${FADENO_CLI:-fadeno}" dispatch --archetype ${archetype} --prompt-file <path> and relay stdout verbatim. If dispatch fails, report the failure and do not perform the task locally. Never paraphrase, truncate, or substitute another executor.
 
 Original role description: ${piece.description}
 `;
@@ -31863,13 +31994,13 @@ function runSteeringApplyOmp(opts = {}) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
     throw err;
   }
-  const agentDir = (0, import_node_path27.join)(repoRoot, ".omp", "agents");
+  const agentDir = (0, import_node_path28.join)(repoRoot, ".omp", "agents");
   const results = [];
   const pending = [];
   const removed = [];
   const materialization2 = {};
   const baseline = {};
-  for (const archetype of OMP_STEERING_ARCHETYPES) {
+  for (const archetype of OMP_STEERING_ARCHETYPES2) {
     let cascade;
     try {
       cascade = resolveDialCascade(archetype, archetype, { bindings: profile.bindings, archetypes: profile.archetypes }, dialLayers);
@@ -31891,57 +32022,57 @@ function runSteeringApplyOmp(opts = {}) {
       const hostPath = ompSlotPath(agentDir, archetype, "host");
       pending.push({
         path: hostPath,
-        body: stampManagedOmpAgent(renderOmpHostAgent(archetype, compiled?.modelId ?? spec.model ?? null, (0, import_node_path27.basename)(hostPath, ".md")))
+        body: stampManagedOmpAgent(renderOmpHostAgent(archetype, compiled?.modelId ?? spec.model ?? null, (0, import_node_path28.basename)(hostPath, ".md")))
       });
-      removeManagedOmpFile((0, import_node_path27.join)(agentDir, `fadeno-dispatch-${archetype}.md`), removed);
-      removeManagedOmpFile((0, import_node_path27.join)(agentDir, `fadeno-steering-command-${archetype}.md`), removed);
+      removeManagedOmpFile((0, import_node_path28.join)(agentDir, `fadeno-dispatch-${archetype}.md`), removed);
+      removeManagedOmpFile((0, import_node_path28.join)(agentDir, `fadeno-steering-command-${archetype}.md`), removed);
     } else {
       materialization2[archetype] = { kind: "command-broker", adapter: "command", executor: executorName, model: spec.model };
       const commandPath = ompSlotPath(agentDir, archetype, "command");
-      pending.push({ path: commandPath, body: stampManagedOmpAgent(renderOmpCommandAgent(archetype, (0, import_node_path27.basename)(commandPath, ".md"))) });
-      removeManagedOmpFile((0, import_node_path27.join)(agentDir, `${archetype}.md`), removed);
-      removeManagedOmpFile((0, import_node_path27.join)(agentDir, `fadeno-steering-host-${archetype}.md`), removed);
+      pending.push({ path: commandPath, body: stampManagedOmpAgent(renderOmpCommandAgent(archetype, (0, import_node_path28.basename)(commandPath, ".md"))) });
+      removeManagedOmpFile((0, import_node_path28.join)(agentDir, `${archetype}.md`), removed);
+      removeManagedOmpFile((0, import_node_path28.join)(agentDir, `fadeno-steering-host-${archetype}.md`), removed);
     }
   }
-  for (const archetype of OMP_STEERING_ARCHETYPES) {
+  for (const archetype of OMP_STEERING_ARCHETYPES2) {
     const refusalPath = ompSlotPath(agentDir, archetype, "refusal");
-    pending.push({ path: refusalPath, body: stampManagedOmpAgent(renderOmpRefusalAgent(archetype, (0, import_node_path27.basename)(refusalPath, ".md"))) });
+    pending.push({ path: refusalPath, body: stampManagedOmpAgent(renderOmpRefusalAgent(archetype, (0, import_node_path28.basename)(refusalPath, ".md"))) });
   }
-  const extensionTemplate = (0, import_node_fs27.readFileSync)((0, import_node_path27.join)(templatesDir(), "omp", "extensions", "fadeno-steering.ts"), "utf8");
+  const extensionTemplate = (0, import_node_fs28.readFileSync)((0, import_node_path28.join)(templatesDir(), "omp", "extensions", "fadeno-steering.ts"), "utf8");
   const extensionContent = stampHookVersion(extensionTemplate);
   const extensionBody = `${OMP_EXTENSION_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(extensionContent)}
 ${extensionContent}`;
-  const extensionPath = (0, import_node_path27.join)(repoRoot, ".omp", "extensions", "fadeno-steering.ts");
+  const extensionPath = (0, import_node_path28.join)(repoRoot, ".omp", "extensions", "fadeno-steering.ts");
   pending.push({ path: extensionPath, body: extensionBody });
   for (const item of pending) {
     const status = item.path === extensionPath ? ompExtensionEmit(item.path, item.body, opts.force ?? false) : ompManagedEmit(item.path, item.body, opts.force ?? false);
     results.push({ path: item.path, status });
   }
-  results.push({ path: (0, import_node_path27.join)(repoRoot, ".omp", "settings.json"), status: ompSettingsEmit(repoRoot) });
-  const gitignoreExisted = (0, import_node_fs27.existsSync)((0, import_node_path27.join)(repoRoot, ".gitignore"));
-  if (ensureOmpFadenoIgnore(repoRoot)) results.push({ path: (0, import_node_path27.join)(repoRoot, ".gitignore"), status: gitignoreExisted ? "appended" : "created" });
-  const conflicts = pending.filter((item) => (0, import_node_fs27.existsSync)(item.path) && (0, import_node_fs27.readFileSync)(item.path, "utf8") !== item.body).map((item) => item.path);
+  results.push({ path: (0, import_node_path28.join)(repoRoot, ".omp", "settings.json"), status: ompSettingsEmit(repoRoot) });
+  const gitignoreExisted = (0, import_node_fs28.existsSync)((0, import_node_path28.join)(repoRoot, ".gitignore"));
+  if (ensureOmpFadenoIgnore(repoRoot)) results.push({ path: (0, import_node_path28.join)(repoRoot, ".gitignore"), status: gitignoreExisted ? "appended" : "created" });
+  const conflicts = pending.filter((item) => (0, import_node_fs28.existsSync)(item.path) && (0, import_node_fs28.readFileSync)(item.path, "utf8") !== item.body).map((item) => item.path);
   const restartRequired = results.some((item) => item.status === "created" || item.status === "overwritten");
   return { results, materialization: materialization2, baseline, restartRequired, conflicts, scope: "project", removed, ignoredLocalDials };
 }
 function ompExtensionEmit(path, body, force) {
-  const existed = (0, import_node_fs27.existsSync)(path);
+  const existed = (0, import_node_fs28.existsSync)(path);
   if (existed) {
-    const existing = (0, import_node_fs27.readFileSync)(path, "utf8");
+    const existing = (0, import_node_fs28.readFileSync)(path, "utf8");
     if (!existing.includes(OMP_EXTENSION_MANAGED_MARK)) return "skipped";
     if (!force && existing === body) return "skipped";
   }
-  (0, import_node_fs27.mkdirSync)((0, import_node_path27.join)(path, ".."), { recursive: true });
-  (0, import_node_fs27.writeFileSync)(path, body, "utf8");
+  (0, import_node_fs28.mkdirSync)((0, import_node_path28.join)(path, ".."), { recursive: true });
+  (0, import_node_fs28.writeFileSync)(path, body, "utf8");
   return existed ? "overwritten" : "created";
 }
 function ompSettingsEmit(repoRoot) {
-  const path = (0, import_node_path27.join)(repoRoot, ".omp", "settings.json");
-  const existed = (0, import_node_fs27.existsSync)(path);
+  const path = (0, import_node_path28.join)(repoRoot, ".omp", "settings.json");
+  const existed = (0, import_node_fs28.existsSync)(path);
   let settings = {};
   if (existed) {
     try {
-      const parsed = JSON.parse((0, import_node_fs27.readFileSync)(path, "utf8"));
+      const parsed = JSON.parse((0, import_node_fs28.readFileSync)(path, "utf8"));
       if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) return "skipped";
       settings = parsed;
     } catch {
@@ -31950,12 +32081,13 @@ function ompSettingsEmit(repoRoot) {
   }
   const extensions = settings.extensions;
   if (extensions != null && !Array.isArray(extensions)) return "skipped";
-  const entries = Array.isArray(extensions) ? extensions.filter((entry) => typeof entry === "string") : [];
+  if (Array.isArray(extensions) && !extensions.every((entry) => typeof entry === "string")) return "skipped";
+  const entries = Array.isArray(extensions) ? extensions : [];
   const current = entries.filter((entry) => entry !== OMP_LEGACY_EXTENSION_ENTRY);
-  if (current.includes(OMP_EXTENSION_ENTRY) && current.length === entries.length) return "skipped";
-  settings.extensions = current.includes(OMP_EXTENSION_ENTRY) ? current : [...current, OMP_EXTENSION_ENTRY];
-  (0, import_node_fs27.mkdirSync)((0, import_node_path27.join)(path, ".."), { recursive: true });
-  (0, import_node_fs27.writeFileSync)(path, `${JSON.stringify(settings, null, 2)}
+  if (current.includes(OMP_PROJECT_EXTENSION_ENTRY) && current.length === entries.length) return "skipped";
+  settings.extensions = current.includes(OMP_PROJECT_EXTENSION_ENTRY) ? current : [...current, OMP_PROJECT_EXTENSION_ENTRY];
+  (0, import_node_fs28.mkdirSync)((0, import_node_path28.join)(path, ".."), { recursive: true });
+  (0, import_node_fs28.writeFileSync)(path, `${JSON.stringify(settings, null, 2)}
 `, "utf8");
   return existed ? "overwritten" : "created";
 }
@@ -31973,10 +32105,10 @@ function runInit(opts) {
       "Loadout steering is currently supported for Codex, Claude Code, OpenCode, and omp \u2014 not Grok Build."
     );
   }
-  copyTree((0, import_node_path28.join)(tpl, "common", "fadeno"), (0, import_node_path28.join)(repoRoot, ".fadeno"), force, results);
+  copyTree((0, import_node_path29.join)(tpl, "common", "fadeno"), (0, import_node_path29.join)(repoRoot, ".fadeno"), force, results);
   copyTree(
-    (0, import_node_path28.join)(tpl, "common", "opencode-agents"),
-    (0, import_node_path28.join)(repoRoot, ".opencode", "agents"),
+    (0, import_node_path29.join)(tpl, "common", "opencode-agents"),
+    (0, import_node_path29.join)(repoRoot, ".opencode", "agents"),
     force,
     results
   );
@@ -31989,32 +32121,32 @@ function runInit(opts) {
     let skillsBase;
     switch (opts.target) {
       case "codex":
-        skillsBase = (0, import_node_path28.join)(repoRoot, ".agents", "skills");
+        skillsBase = (0, import_node_path29.join)(repoRoot, ".agents", "skills");
         break;
       case "claude":
-        skillsBase = (0, import_node_path28.join)(repoRoot, ".claude", "skills");
+        skillsBase = (0, import_node_path29.join)(repoRoot, ".claude", "skills");
         break;
       case "grok":
-        skillsBase = (0, import_node_path28.join)(repoRoot, ".grok", "skills");
+        skillsBase = (0, import_node_path29.join)(repoRoot, ".grok", "skills");
         break;
       case "omp":
-        skillsBase = (0, import_node_path28.join)(repoRoot, ".agents", "skills");
+        skillsBase = (0, import_node_path29.join)(repoRoot, ".agents", "skills");
         break;
       case "opencode":
-        skillsBase = (0, import_node_path28.join)(repoRoot, ".agents", "skills");
+        skillsBase = (0, import_node_path29.join)(repoRoot, ".agents", "skills");
         break;
     }
     for (const skill of SKILLS2) {
-      const skillSrc = (0, import_node_path28.join)(tpl, "common", "skills", skill);
-      const skillDest = (0, import_node_path28.join)(skillsBase, skill);
-      const skillMd = (0, import_node_fs28.readFileSync)((0, import_node_path28.join)(skillSrc, "SKILL.md"), "utf8");
-      const skillMdPath = (0, import_node_path28.join)(skillDest, "SKILL.md");
+      const skillSrc = (0, import_node_path29.join)(tpl, "common", "skills", skill);
+      const skillDest = (0, import_node_path29.join)(skillsBase, skill);
+      const skillMd = (0, import_node_fs29.readFileSync)((0, import_node_path29.join)(skillSrc, "SKILL.md"), "utf8");
+      const skillMdPath = (0, import_node_path29.join)(skillDest, "SKILL.md");
       results.push({ path: skillMdPath, status: emitFile(skillMdPath, skillMd, force) });
-      const references = (0, import_node_path28.join)(skillSrc, "references");
-      if ((0, import_node_fs28.existsSync)(references)) copyTree(references, (0, import_node_path28.join)(skillDest, "references"), force, results);
+      const references = (0, import_node_path29.join)(skillSrc, "references");
+      if ((0, import_node_fs29.existsSync)(references)) copyTree(references, (0, import_node_path29.join)(skillDest, "references"), force, results);
       if (opts.target === "codex") {
-        const policy = (0, import_node_fs28.readFileSync)((0, import_node_path28.join)(tpl, "codex", "openai", `${skill}.yaml`), "utf8");
-        const policyPath = (0, import_node_path28.join)(skillDest, "agents", "openai.yaml");
+        const policy = (0, import_node_fs29.readFileSync)((0, import_node_path29.join)(tpl, "codex", "openai", `${skill}.yaml`), "utf8");
+        const policyPath = (0, import_node_path29.join)(skillDest, "agents", "openai.yaml");
         results.push({ path: policyPath, status: emitFile(policyPath, policy, force) });
       }
     }
@@ -32023,26 +32155,26 @@ function runInit(opts) {
         if (withSteering) {
           results.push(...emitCodexSteeringBrokers({ repoRoot, force }));
         } else {
-          copyTree((0, import_node_path28.join)(tpl, "codex", "codex-agents"), (0, import_node_path28.join)(repoRoot, ".codex", "agents"), force, results);
+          copyTree((0, import_node_path29.join)(tpl, "codex", "codex-agents"), (0, import_node_path29.join)(repoRoot, ".codex", "agents"), force, results);
         }
         break;
       case "claude": {
-        const agentsSrc = (0, import_node_path28.join)(tpl, "claude", "claude-agents");
-        const relayModel = relayModelForClaude((0, import_node_path28.join)(repoRoot, ".fadeno", "executors.yaml"));
-        for (const file of (0, import_node_fs28.readdirSync)(agentsSrc).sort()) {
-          const dest = (0, import_node_path28.join)(repoRoot, ".claude", "agents", file);
-          const body = stampRelayModel((0, import_node_fs28.readFileSync)((0, import_node_path28.join)(agentsSrc, file), "utf8"), relayModel);
+        const agentsSrc = (0, import_node_path29.join)(tpl, "claude", "claude-agents");
+        const relayModel = relayModelForClaude((0, import_node_path29.join)(repoRoot, ".fadeno", "executors.yaml"));
+        for (const file of (0, import_node_fs29.readdirSync)(agentsSrc).sort()) {
+          const dest = (0, import_node_path29.join)(repoRoot, ".claude", "agents", file);
+          const body = stampRelayModel((0, import_node_fs29.readFileSync)((0, import_node_path29.join)(agentsSrc, file), "utf8"), relayModel);
           results.push({ path: dest, status: emitFile(dest, body, force) });
         }
         break;
       }
       case "grok":
-        copyTree((0, import_node_path28.join)(tpl, "grok", "grok-agents"), (0, import_node_path28.join)(repoRoot, ".grok", "agents"), force, results);
+        copyTree((0, import_node_path29.join)(tpl, "grok", "grok-agents"), (0, import_node_path29.join)(repoRoot, ".grok", "agents"), force, results);
         break;
       case "opencode":
         copyTree(
-          (0, import_node_path28.join)(tpl, "opencode", "opencode-agents"),
-          (0, import_node_path28.join)(repoRoot, ".opencode", "agents"),
+          (0, import_node_path29.join)(tpl, "opencode", "opencode-agents"),
+          (0, import_node_path29.join)(repoRoot, ".opencode", "agents"),
           force,
           results
         );
@@ -32053,13 +32185,13 @@ function runInit(opts) {
       case "omp":
         if (withSteering) {
           appendOmpSteeringResults(results, runSteeringApplyOmp({ repoRoot, force }).results);
-          const agentsSrc = (0, import_node_path28.join)(tpl, "omp", "omp-agents");
-          for (const file of (0, import_node_fs28.readdirSync)(agentsSrc).sort()) {
+          const agentsSrc = (0, import_node_path29.join)(tpl, "omp", "omp-agents");
+          for (const file of (0, import_node_fs29.readdirSync)(agentsSrc).sort()) {
             if (!file.startsWith("dispatch-")) continue;
-            const dest = (0, import_node_path28.join)(repoRoot, ".omp", "agents", file);
-            results.push({ path: dest, status: emitFile(dest, (0, import_node_fs28.readFileSync)((0, import_node_path28.join)(agentsSrc, file), "utf8"), false) });
+            const dest = (0, import_node_path29.join)(repoRoot, ".omp", "agents", file);
+            results.push({ path: dest, status: emitFile(dest, (0, import_node_fs29.readFileSync)((0, import_node_path29.join)(agentsSrc, file), "utf8"), false) });
           }
-        } else copyTree((0, import_node_path28.join)(tpl, "omp", "omp-agents"), (0, import_node_path28.join)(repoRoot, ".omp", "agents"), force, results);
+        } else copyTree((0, import_node_path29.join)(tpl, "omp", "omp-agents"), (0, import_node_path29.join)(repoRoot, ".omp", "agents"), force, results);
         break;
     }
     let bootstrapName;
@@ -32074,8 +32206,8 @@ function runInit(opts) {
         bootstrapName = "AGENTS.md";
         break;
     }
-    const bootstrapBody = (0, import_node_fs28.readFileSync)((0, import_node_path28.join)(tpl, opts.target, bootstrapName), "utf8");
-    emitBootstrap((0, import_node_path28.join)(repoRoot, bootstrapName), bootstrapBody, force, results);
+    const bootstrapBody = (0, import_node_fs29.readFileSync)((0, import_node_path29.join)(tpl, opts.target, bootstrapName), "utf8");
+    emitBootstrap((0, import_node_path29.join)(repoRoot, bootstrapName), bootstrapBody, force, results);
   }
   if (opts.dataOnly && withSteering && opts.target === "codex") {
     results.push(...emitCodexSteeringBrokers({ repoRoot, force }));
@@ -32088,14 +32220,14 @@ function runInit(opts) {
   }
   if (opts.withHooks) emitHooks(tpl, repoRoot, opts.target, force, results);
   if (withSteering && opts.target === "claude") {
-    const steeringPath = (0, import_node_path28.join)(repoRoot, CLAUDE_STEERING_SCRIPT);
+    const steeringPath = (0, import_node_path29.join)(repoRoot, CLAUDE_STEERING_SCRIPT);
     const steeringBody = stampHookVersion(
-      (0, import_node_fs28.readFileSync)((0, import_node_path28.join)(tpl, "claude", "hooks", "dispatch-steering.mjs"), "utf8")
+      (0, import_node_fs29.readFileSync)((0, import_node_path29.join)(tpl, "claude", "hooks", "dispatch-steering.mjs"), "utf8")
     );
     results.push({ path: steeringPath, status: emitFile(steeringPath, steeringBody, force) });
-    const guardPath = (0, import_node_path28.join)(repoRoot, CLAUDE_GUARD_SCRIPT);
-    const guardBody = (0, import_node_fs28.readFileSync)(
-      (0, import_node_path28.join)(tpl, "claude", "hooks", "dispatch-proxy-guard.mjs"),
+    const guardPath = (0, import_node_path29.join)(repoRoot, CLAUDE_GUARD_SCRIPT);
+    const guardBody = (0, import_node_fs29.readFileSync)(
+      (0, import_node_path29.join)(tpl, "claude", "hooks", "dispatch-proxy-guard.mjs"),
       "utf8"
     );
     results.push({ path: guardPath, status: emitFile(guardPath, guardBody, force) });
@@ -32118,21 +32250,21 @@ function appendOmpSteeringResults(results, incoming) {
   }
 }
 var FADENO_BASH_RULE = "Bash(fadeno:*)";
-var CLAUDE_STEERING_SCRIPT = (0, import_node_path28.join)(".fadeno", "local", "claude-dispatch-steering.mjs");
+var CLAUDE_STEERING_SCRIPT = (0, import_node_path29.join)(".fadeno", "local", "claude-dispatch-steering.mjs");
 var CLAUDE_STEERING_COMMAND = `node ${CLAUDE_STEERING_SCRIPT}`;
-var CLAUDE_GUARD_SCRIPT = (0, import_node_path28.join)(".fadeno", "local", "claude-dispatch-proxy-guard.mjs");
+var CLAUDE_GUARD_SCRIPT = (0, import_node_path29.join)(".fadeno", "local", "claude-dispatch-proxy-guard.mjs");
 var CLAUDE_GUARD_COMMAND = `node ${CLAUDE_GUARD_SCRIPT}`;
 var CLAUDE_STEERING_HOOKS = [
   { matcher: "Agent", command: CLAUDE_STEERING_COMMAND },
   { matcher: "Bash", command: CLAUDE_GUARD_COMMAND }
 ];
 function emitClaudeSettings(repoRoot, withSteering, results) {
-  const settingsPath = (0, import_node_path28.join)(repoRoot, ".claude", "settings.local.json");
-  const existed = (0, import_node_fs28.existsSync)(settingsPath);
+  const settingsPath = (0, import_node_path29.join)(repoRoot, ".claude", "settings.local.json");
+  const existed = (0, import_node_fs29.existsSync)(settingsPath);
   let data = {};
   if (existed) {
     try {
-      const parsed = JSON.parse((0, import_node_fs28.readFileSync)(settingsPath, "utf8"));
+      const parsed = JSON.parse((0, import_node_fs29.readFileSync)(settingsPath, "utf8"));
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         results.push({ path: settingsPath, status: "skipped" });
         return;
@@ -32187,16 +32319,16 @@ function emitClaudeSettings(repoRoot, withSteering, results) {
     results.push({ path: settingsPath, status: "skipped" });
     return;
   }
-  (0, import_node_fs28.mkdirSync)((0, import_node_path28.dirname)(settingsPath), { recursive: true });
-  (0, import_node_fs28.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
+  (0, import_node_fs29.mkdirSync)((0, import_node_path29.dirname)(settingsPath), { recursive: true });
+  (0, import_node_fs29.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
 `, "utf8");
   results.push({ path: settingsPath, status: existed ? "appended" : "created" });
   ensureGitignored(repoRoot, [...FADENO_IGNORE_PATTERNS], results);
 }
 function ensureGitignored(repoRoot, patterns, results) {
-  const gitignorePath = (0, import_node_path28.join)(repoRoot, ".gitignore");
-  const existed = (0, import_node_fs28.existsSync)(gitignorePath);
-  const content = existed ? (0, import_node_fs28.readFileSync)(gitignorePath, "utf8") : "";
+  const gitignorePath = (0, import_node_path29.join)(repoRoot, ".gitignore");
+  const existed = (0, import_node_fs29.existsSync)(gitignorePath);
+  const content = existed ? (0, import_node_fs29.readFileSync)(gitignorePath, "utf8") : "";
   const lines = content.split(/\r?\n/).map((line) => line.trim());
   const missing3 = patterns.filter((pattern) => {
     if (lines.includes(pattern)) return false;
@@ -32211,39 +32343,39 @@ function ensureGitignored(repoRoot, patterns, results) {
   const block = `${sep4}${comment}
 ${missing3.join("\n")}
 `;
-  (0, import_node_fs28.writeFileSync)(gitignorePath, content + block, "utf8");
+  (0, import_node_fs29.writeFileSync)(gitignorePath, content + block, "utf8");
   results.push({ path: gitignorePath, status: existed ? "appended" : "created" });
 }
 function emitHooks(tpl, repoRoot, target, force, results) {
   const hookFile = (srcRel, destRel, executable = false) => {
-    const content = (0, import_node_fs28.readFileSync)((0, import_node_path28.join)(tpl, srcRel), "utf8");
-    const dest = (0, import_node_path28.join)(repoRoot, destRel);
+    const content = (0, import_node_fs29.readFileSync)((0, import_node_path29.join)(tpl, srcRel), "utf8");
+    const dest = (0, import_node_path29.join)(repoRoot, destRel);
     const status = emitFile(dest, content, force);
-    if (executable && (status === "created" || status === "overwritten")) (0, import_node_fs28.chmodSync)(dest, 493);
+    if (executable && (status === "created" || status === "overwritten")) (0, import_node_fs29.chmodSync)(dest, 493);
     results.push({ path: dest, status });
   };
-  hookFile((0, import_node_path28.join)("common", "hooks", "pre-commit"), (0, import_node_path28.join)(".fadeno", "hooks", "pre-commit"), true);
-  hookFile((0, import_node_path28.join)("common", "hooks", "README.md"), (0, import_node_path28.join)(".fadeno", "hooks", "README.md"));
+  hookFile((0, import_node_path29.join)("common", "hooks", "pre-commit"), (0, import_node_path29.join)(".fadeno", "hooks", "pre-commit"), true);
+  hookFile((0, import_node_path29.join)("common", "hooks", "README.md"), (0, import_node_path29.join)(".fadeno", "hooks", "README.md"));
   hookFile(
-    (0, import_node_path28.join)("common", "hooks", "fadeno-guard.yml"),
-    (0, import_node_path28.join)(".github", "workflows", "fadeno-guard.yml")
+    (0, import_node_path29.join)("common", "hooks", "fadeno-guard.yml"),
+    (0, import_node_path29.join)(".github", "workflows", "fadeno-guard.yml")
   );
   hookFile(
-    (0, import_node_path28.join)("common", "hooks", "fadeno-verify.yml"),
-    (0, import_node_path28.join)(".github", "workflows", "fadeno-verify.yml")
+    (0, import_node_path29.join)("common", "hooks", "fadeno-verify.yml"),
+    (0, import_node_path29.join)(".github", "workflows", "fadeno-verify.yml")
   );
   if (target === "claude") {
     hookFile(
-      (0, import_node_path28.join)("claude", "hooks", "settings.example.json"),
-      (0, import_node_path28.join)(".fadeno", "hooks", "claude-settings.example.json")
+      (0, import_node_path29.join)("claude", "hooks", "settings.example.json"),
+      (0, import_node_path29.join)(".fadeno", "hooks", "claude-settings.example.json")
     );
   }
 }
 
 // src/commands/dial.ts
 var import_node_child_process9 = require("node:child_process");
-var import_node_fs29 = require("node:fs");
-var import_node_path29 = require("node:path");
+var import_node_fs30 = require("node:fs");
+var import_node_path30 = require("node:path");
 var import_yaml12 = __toESM(require_dist(), 1);
 var DialError = class extends Error {
 };
@@ -32596,11 +32728,11 @@ function runDialSet(opts) {
     const next = { ...userDials, [archetype]: dial };
     writeUserDials(opts.userPathOptions ?? {}, next);
   } else if (layer === "repo") {
-    const executorsPath = (0, import_node_path29.join)(repoRoot, ".fadeno", "executors.yaml");
+    const executorsPath = (0, import_node_path30.join)(repoRoot, ".fadeno", "executors.yaml");
     let docText = "";
     let doc;
-    if ((0, import_node_fs29.existsSync)(executorsPath)) {
-      docText = (0, import_node_fs29.readFileSync)(executorsPath, "utf8");
+    if ((0, import_node_fs30.existsSync)(executorsPath)) {
+      docText = (0, import_node_fs30.readFileSync)(executorsPath, "utf8");
       doc = (0, import_yaml12.parseDocument)(docText);
     } else {
       doc = (0, import_yaml12.parseDocument)("");
@@ -32613,8 +32745,8 @@ function runDialSet(opts) {
       doc.set("schema_version", 3);
     }
     const out = String(doc);
-    (0, import_node_fs29.mkdirSync)((0, import_node_path29.join)(repoRoot, ".fadeno"), { recursive: true });
-    (0, import_node_fs29.writeFileSync)(executorsPath, out, "utf8");
+    (0, import_node_fs30.mkdirSync)((0, import_node_path30.join)(repoRoot, ".fadeno"), { recursive: true });
+    (0, import_node_fs30.writeFileSync)(executorsPath, out, "utf8");
   }
   return {
     archetype,
@@ -32694,11 +32826,11 @@ function runDialClear(opts = {}) {
     return { cleared: formatDialRef(prev2), removed: true, archetype, layer: "session", remaining: nextDials2 };
   }
   if (opts.repo) {
-    const executorsPath = (0, import_node_path29.join)(repoRoot, ".fadeno", "executors.yaml");
-    if (!(0, import_node_fs29.existsSync)(executorsPath)) {
+    const executorsPath = (0, import_node_path30.join)(repoRoot, ".fadeno", "executors.yaml");
+    if (!(0, import_node_fs30.existsSync)(executorsPath)) {
       throw new DialError(`no repo pin for "${archetype}" to clear`);
     }
-    const text = (0, import_node_fs29.readFileSync)(executorsPath, "utf8");
+    const text = (0, import_node_fs30.readFileSync)(executorsPath, "utf8");
     const doc = (0, import_yaml12.parseDocument)(text);
     const dials = doc.get("dials");
     if (dials == null || typeof dials !== "object") {
@@ -32717,7 +32849,7 @@ function runDialClear(opts = {}) {
     }
     if (empty) doc.delete("dials");
     const out = String(doc);
-    (0, import_node_fs29.writeFileSync)(executorsPath, out, "utf8");
+    (0, import_node_fs30.writeFileSync)(executorsPath, out, "utf8");
     return { cleared: archetype, removed: true, archetype, layer: "repo", remaining: {} };
   }
   if (opts.user) {
@@ -32866,7 +32998,7 @@ function runDialClearShadow(opts = {}) {
     throw new DialError(`archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
   }
   const state = readLocalDialState(repoRoot);
-  const path = (0, import_node_path29.join)(repoRoot, ".fadeno", "local", "dials");
+  const path = (0, import_node_path30.join)(repoRoot, ".fadeno", "local", "dials");
   if (archetype == null) {
     const count = Object.keys(state.shadows).length;
     if (count === 0) {
@@ -33345,8 +33477,8 @@ function runModelsDriver(opts) {
 }
 
 // src/commands/new-run.ts
-var import_node_fs30 = require("node:fs");
-var import_node_path30 = require("node:path");
+var import_node_fs31 = require("node:fs");
+var import_node_path31 = require("node:path");
 var import_yaml13 = __toESM(require_dist(), 1);
 var NewRunError = class extends Error {
 };
@@ -33362,7 +33494,7 @@ function slugify(text, maxLen = 40) {
   return slug || "run";
 }
 function readDeclaredInputs(playbookPath) {
-  const parsed = (0, import_yaml13.parse)((0, import_node_fs30.readFileSync)(playbookPath, "utf8"));
+  const parsed = (0, import_yaml13.parse)((0, import_node_fs31.readFileSync)(playbookPath, "utf8"));
   if (parsed?.inputs == null) return {};
   if (typeof parsed.inputs !== "object" || Array.isArray(parsed.inputs)) {
     throw new NewRunError("playbook inputs must be a mapping of logical name to media_type.");
@@ -33399,49 +33531,49 @@ function parseInputArgs(values) {
   return parsed;
 }
 function validateInputSources(repoRoot, declared, supplied) {
-  const realRepoRoot = (0, import_node_fs30.realpathSync)(repoRoot);
+  const realRepoRoot = (0, import_node_fs31.realpathSync)(repoRoot);
   for (const name of supplied.keys()) {
     if (!(name in declared)) throw new NewRunError(`run input "${name}" is not declared by the playbook.`);
   }
   const missing3 = Object.keys(declared).filter((name) => !supplied.has(name));
   if (missing3.length > 0) throw new NewRunError(`missing required run input(s): ${missing3.join(", ")}.`);
   for (const [name, sourceArg] of supplied) {
-    const sourceAbs = (0, import_node_path30.isAbsolute)(sourceArg) ? (0, import_node_path30.resolve)(sourceArg) : (0, import_node_path30.resolve)(repoRoot, sourceArg);
-    const sourceRel = (0, import_node_path30.relative)(repoRoot, sourceAbs).split("\\").join("/");
-    if (sourceRel === ".." || sourceRel.startsWith("../") || (0, import_node_path30.isAbsolute)(sourceRel)) {
+    const sourceAbs = (0, import_node_path31.isAbsolute)(sourceArg) ? (0, import_node_path31.resolve)(sourceArg) : (0, import_node_path31.resolve)(repoRoot, sourceArg);
+    const sourceRel = (0, import_node_path31.relative)(repoRoot, sourceAbs).split("\\").join("/");
+    if (sourceRel === ".." || sourceRel.startsWith("../") || (0, import_node_path31.isAbsolute)(sourceRel)) {
       throw new NewRunError(`input "${name}" path escapes the repository: ${sourceArg}`);
     }
-    if (!(0, import_node_fs30.existsSync)(sourceAbs)) throw new NewRunError(`input "${name}" source does not exist: ${sourceArg}`);
-    if (!(0, import_node_fs30.statSync)(sourceAbs).isFile()) throw new NewRunError(`input "${name}" source is not a file: ${sourceArg}`);
-    const realSource = (0, import_node_fs30.realpathSync)(sourceAbs);
-    const realRel = (0, import_node_path30.relative)(realRepoRoot, realSource).split("\\").join("/");
-    if (realRel === ".." || realRel.startsWith("../") || (0, import_node_path30.isAbsolute)(realRel)) {
+    if (!(0, import_node_fs31.existsSync)(sourceAbs)) throw new NewRunError(`input "${name}" source does not exist: ${sourceArg}`);
+    if (!(0, import_node_fs31.statSync)(sourceAbs).isFile()) throw new NewRunError(`input "${name}" source is not a file: ${sourceArg}`);
+    const realSource = (0, import_node_fs31.realpathSync)(sourceAbs);
+    const realRel = (0, import_node_path31.relative)(realRepoRoot, realSource).split("\\").join("/");
+    if (realRel === ".." || realRel.startsWith("../") || (0, import_node_path31.isAbsolute)(realRel)) {
       throw new NewRunError(`input "${name}" path escapes the repository through a symlink: ${sourceArg}`);
     }
   }
 }
 function recordDeclaredInputs(runDir, repoRoot, declared, supplied, now) {
-  const realRepoRoot = (0, import_node_fs30.realpathSync)(repoRoot);
+  const realRepoRoot = (0, import_node_fs31.realpathSync)(repoRoot);
   const writer = new LedgerWriter(runDir);
   const recorded = [];
   for (const name of Object.keys(declared)) {
     const sourceArg = supplied.get(name);
-    const sourceAbs = (0, import_node_path30.isAbsolute)(sourceArg) ? (0, import_node_path30.resolve)(sourceArg) : (0, import_node_path30.resolve)(repoRoot, sourceArg);
-    const sourceRel = (0, import_node_path30.relative)(repoRoot, sourceAbs).split("\\").join("/");
-    if (sourceRel === ".." || sourceRel.startsWith("../") || (0, import_node_path30.isAbsolute)(sourceRel)) {
+    const sourceAbs = (0, import_node_path31.isAbsolute)(sourceArg) ? (0, import_node_path31.resolve)(sourceArg) : (0, import_node_path31.resolve)(repoRoot, sourceArg);
+    const sourceRel = (0, import_node_path31.relative)(repoRoot, sourceAbs).split("\\").join("/");
+    if (sourceRel === ".." || sourceRel.startsWith("../") || (0, import_node_path31.isAbsolute)(sourceRel)) {
       throw new NewRunError(`input "${name}" path escapes the repository: ${sourceArg}`);
     }
-    if (!(0, import_node_fs30.existsSync)(sourceAbs)) throw new NewRunError(`input "${name}" source does not exist: ${sourceArg}`);
-    if (!(0, import_node_fs30.statSync)(sourceAbs).isFile()) throw new NewRunError(`input "${name}" source is not a file: ${sourceArg}`);
-    const realSource = (0, import_node_fs30.realpathSync)(sourceAbs);
-    const realRel = (0, import_node_path30.relative)(realRepoRoot, realSource).split("\\").join("/");
-    if (realRel === ".." || realRel.startsWith("../") || (0, import_node_path30.isAbsolute)(realRel)) {
+    if (!(0, import_node_fs31.existsSync)(sourceAbs)) throw new NewRunError(`input "${name}" source does not exist: ${sourceArg}`);
+    if (!(0, import_node_fs31.statSync)(sourceAbs).isFile()) throw new NewRunError(`input "${name}" source is not a file: ${sourceArg}`);
+    const realSource = (0, import_node_fs31.realpathSync)(sourceAbs);
+    const realRel = (0, import_node_path31.relative)(realRepoRoot, realSource).split("\\").join("/");
+    if (realRel === ".." || realRel.startsWith("../") || (0, import_node_path31.isAbsolute)(realRel)) {
       throw new NewRunError(`input "${name}" path escapes the repository through a symlink: ${sourceArg}`);
     }
-    const bytes = (0, import_node_fs30.readFileSync)(sourceAbs);
-    const destination = `artifacts/inputs/${name}${(0, import_node_path30.extname)(sourceAbs)}`;
-    (0, import_node_fs30.mkdirSync)((0, import_node_path30.join)(runDir, "artifacts", "inputs"), { recursive: true });
-    (0, import_node_fs30.writeFileSync)((0, import_node_path30.join)(runDir, destination), bytes);
+    const bytes = (0, import_node_fs31.readFileSync)(sourceAbs);
+    const destination = `artifacts/inputs/${name}${(0, import_node_path31.extname)(sourceAbs)}`;
+    (0, import_node_fs31.mkdirSync)((0, import_node_path31.join)(runDir, "artifacts", "inputs"), { recursive: true });
+    (0, import_node_fs31.writeFileSync)((0, import_node_path31.join)(runDir, destination), bytes);
     const manifest = buildArtifactManifest(runDir, destination, `input-${name}`, null);
     writer.append(
       {
@@ -33451,7 +33583,7 @@ function recordDeclaredInputs(runDir, repoRoot, declared, supplied, now) {
         logical_name: name,
         input: name,
         input_name: name,
-        source_filename: (0, import_node_path30.basename)(sourceAbs),
+        source_filename: (0, import_node_path31.basename)(sourceAbs),
         source_path: sourceRel,
         declared_media_type: declared[name].mediaType,
         media_type: declared[name].mediaType
@@ -33489,7 +33621,7 @@ function computeResolution(repoRoot, playbookPath, userPathOptions) {
   }
   let playbookDoc;
   try {
-    playbookDoc = (0, import_yaml13.parse)((0, import_node_fs30.readFileSync)(playbookPath, "utf8"));
+    playbookDoc = (0, import_yaml13.parse)((0, import_node_fs31.readFileSync)(playbookPath, "utf8"));
   } catch {
     return null;
   }
@@ -33523,7 +33655,7 @@ function computeResolution(repoRoot, playbookPath, userPathOptions) {
 function runNewRun(opts) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
-  const fadenoDir = (0, import_node_path30.join)(repoRoot, ".fadeno");
+  const fadenoDir = (0, import_node_path31.join)(repoRoot, ".fadeno");
   ensureFadenoIgnore(repoRoot);
   const resolved = resolvePlaybookFile(repoRoot, opts.playbook);
   if (resolved == null) {
@@ -33540,23 +33672,23 @@ function runNewRun(opts) {
   const datePart = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
   const timePart = `${pad(now.getHours())}${pad(now.getMinutes())}`;
   const slug = slugify(opts.task);
-  const runsDir = (0, import_node_path30.join)(fadenoDir, "runs");
+  const runsDir = (0, import_node_path31.join)(fadenoDir, "runs");
   let runId = `${datePart}-${timePart}-${slug}`;
-  let runDir = (0, import_node_path30.join)(runsDir, runId);
-  for (let n = 2; (0, import_node_fs30.existsSync)(runDir); n += 1) {
+  let runDir = (0, import_node_path31.join)(runsDir, runId);
+  for (let n = 2; (0, import_node_fs31.existsSync)(runDir); n += 1) {
     runId = `${datePart}-${timePart}-${slug}-${n}`;
-    runDir = (0, import_node_path30.join)(runsDir, runId);
+    runDir = (0, import_node_path31.join)(runsDir, runId);
   }
-  (0, import_node_fs30.mkdirSync)((0, import_node_path30.join)(runDir, "artifacts"), { recursive: true });
-  const definitionsDir = (0, import_node_path30.join)(runDir, "definitions");
-  const snapshotPlaybook = (0, import_node_path30.join)(definitionsDir, "playbook.yaml");
-  (0, import_node_fs30.mkdirSync)((0, import_node_path30.join)(definitionsDir, "schemas"), { recursive: true });
-  (0, import_node_fs30.copyFileSync)(playbookPath, snapshotPlaybook);
+  (0, import_node_fs31.mkdirSync)((0, import_node_path31.join)(runDir, "artifacts"), { recursive: true });
+  const definitionsDir = (0, import_node_path31.join)(runDir, "definitions");
+  const snapshotPlaybook = (0, import_node_path31.join)(definitionsDir, "playbook.yaml");
+  (0, import_node_fs31.mkdirSync)((0, import_node_path31.join)(definitionsDir, "schemas"), { recursive: true });
+  (0, import_node_fs31.copyFileSync)(playbookPath, snapshotPlaybook);
   for (const schemaName of ["playbook.schema.json", "run.schema.json", "review-report.schema.json", "test-result.schema.json"]) {
     const schema = resolveDefinition(repoRoot, "schema", schemaName);
-    if (schema != null) (0, import_node_fs30.copyFileSync)(schema.path, (0, import_node_path30.join)(definitionsDir, "schemas", schemaName));
+    if (schema != null) (0, import_node_fs31.copyFileSync)(schema.path, (0, import_node_path31.join)(definitionsDir, "schemas", schemaName));
   }
-  const playbookSha256 = sha256Hex((0, import_node_fs30.readFileSync)(snapshotPlaybook));
+  const playbookSha256 = sha256Hex((0, import_node_fs31.readFileSync)(snapshotPlaybook));
   const runDocument = {
     run_id: runId,
     schema_version: RUN_LEDGER_SCHEMA_VERSION,
@@ -33572,15 +33704,15 @@ function runNewRun(opts) {
   };
   writeRunDocument(runDir, runDocument);
   new LedgerWriter(runDir).append({ type: "run_started", step: null }, now);
-  (0, import_node_fs30.writeFileSync)((0, import_node_path30.join)(runDir, "artifacts", ".gitkeep"), "", "utf8");
+  (0, import_node_fs31.writeFileSync)((0, import_node_path31.join)(runDir, "artifacts", ".gitkeep"), "", "utf8");
   const recordedInputs = recordDeclaredInputs(runDir, repoRoot, declared, supplied, now);
   const resolution = computeResolution(repoRoot, playbookPath, opts.userPathOptions);
   return { runId, runDir, playbook, inputs: recordedInputs, resolution };
 }
 
 // src/commands/next.ts
-var import_node_fs31 = require("node:fs");
-var import_node_path31 = require("node:path");
+var import_node_fs32 = require("node:fs");
+var import_node_path32 = require("node:path");
 var import_yaml14 = __toESM(require_dist(), 1);
 var NextError = class extends Error {
 };
@@ -33632,7 +33764,7 @@ function runNext(opts) {
   const playbookPath = locatePlaybook3(run.dir, repoRoot, run.playbook);
   let playbook;
   try {
-    const parsed = (0, import_yaml14.parse)((0, import_node_fs31.readFileSync)(playbookPath, "utf8"));
+    const parsed = (0, import_yaml14.parse)((0, import_node_fs32.readFileSync)(playbookPath, "utf8"));
     if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("playbook is not a mapping");
     }
@@ -33663,9 +33795,9 @@ function runNext(opts) {
     if (toolName && outputPath) {
       let isRegistered = false;
       try {
-        const snapshotPath = (0, import_node_path31.join)(run.dir, "profile.yaml");
-        if ((0, import_node_fs31.existsSync)(snapshotPath)) {
-          const snapText = (0, import_node_fs31.readFileSync)(snapshotPath, "utf8");
+        const snapshotPath = (0, import_node_path32.join)(run.dir, "profile.yaml");
+        if ((0, import_node_fs32.existsSync)(snapshotPath)) {
+          const snapText = (0, import_node_fs32.readFileSync)(snapshotPath, "utf8");
           const snap = parseSnapshotDocument(snapText, "profile.yaml");
           isRegistered = Object.hasOwn(snap.tools, toolName);
         } else {
@@ -33702,8 +33834,8 @@ function runRuns(opts = {}) {
 }
 
 // src/commands/show.ts
-var import_node_fs32 = require("node:fs");
-var import_node_path32 = require("node:path");
+var import_node_fs33 = require("node:fs");
+var import_node_path33 = require("node:path");
 var import_yaml15 = __toESM(require_dist(), 1);
 var OUTPUT_IDLE_WARNING_MS = 3e5;
 function runShow(opts) {
@@ -33722,7 +33854,7 @@ function workflowSteps(runDir, repoRoot, playbook) {
   const file = resolveRunPlaybookFile(runDir, repoRoot, playbook)?.path;
   if (file == null) return [];
   try {
-    const parsed = (0, import_yaml15.parse)((0, import_node_fs32.readFileSync)(file, "utf8"));
+    const parsed = (0, import_yaml15.parse)((0, import_node_fs33.readFileSync)(file, "utf8"));
     if (!Array.isArray(parsed?.flow)) return [];
     const raw = parsed.flow.filter(
       (step) => step != null && typeof step === "object" && !Array.isArray(step)
@@ -33824,20 +33956,20 @@ function collectHarnessObserved(repoRoot, runId, now, probe2 = (pid, signal) => 
     claimWorkspaceMode.set(claim, event.extra.workspace_mode === "isolated" ? "isolated" : "shared");
   }
   const modeOf = (claimPath) => claimWorkspaceMode.get(claimPath) ?? "shared";
-  const inflightDir = (0, import_node_path32.join)(repoRoot, ...INFLIGHT_DIR.split("/"));
-  if ((0, import_node_fs32.existsSync)(inflightDir)) {
+  const inflightDir = (0, import_node_path33.join)(repoRoot, ...INFLIGHT_DIR.split("/"));
+  if ((0, import_node_fs33.existsSync)(inflightDir)) {
     try {
-      const files = (0, import_node_fs32.readdirSync)(inflightDir).sort();
+      const files = (0, import_node_fs33.readdirSync)(inflightDir).sort();
       const fileSet = new Set(files);
       for (const name of files) {
         if (!name.endsWith(".json")) continue;
         if (name.endsWith(".status.json")) {
           if (!name.startsWith(`engine-${runId}-`) && !name.startsWith(`tool-${runId}-`)) continue;
           if (fileSet.has(name.replace(/\.status\.json$/, ".json"))) continue;
-          const abs2 = (0, import_node_path32.join)(inflightDir, name);
+          const abs2 = (0, import_node_path33.join)(inflightDir, name);
           const claimPath2 = `${INFLIGHT_DIR}/${name}`;
           const holderId = name.replace(/\.status\.json$/, "");
-          const status = readSupervisorStatus(abs2, (p) => (0, import_node_fs32.readFileSync)(p, "utf8"));
+          const status = readSupervisorStatus(abs2, (p) => (0, import_node_fs33.readFileSync)(p, "utf8"));
           if (status == null) {
             out.push(blankHarnessFact(claimPath2, holderId, "engine", runId, "unreadable supervisor status"));
             continue;
@@ -33874,10 +34006,10 @@ function collectHarnessObserved(repoRoot, runId, now, probe2 = (pid, signal) => 
           continue;
         }
         if (!name.startsWith(`engine-${runId}-`) && !name.startsWith(`tool-${runId}-`)) continue;
-        const abs = (0, import_node_path32.join)(inflightDir, name);
+        const abs = (0, import_node_path33.join)(inflightDir, name);
         const claimPath = `${INFLIGHT_DIR}/${name}`;
         try {
-          const claim = readInflightClaim(abs, (p) => (0, import_node_fs32.readFileSync)(p, "utf8"));
+          const claim = readInflightClaim(abs, (p) => (0, import_node_fs33.readFileSync)(p, "utf8"));
           if (claim == null) {
             out.push(blankHarnessFact(claimPath, name.replace(/\.json$/, ""), "engine", runId, "unreadable in-flight claim"));
             continue;
@@ -33919,7 +34051,7 @@ function collectHarnessObserved(repoRoot, runId, now, probe2 = (pid, signal) => 
     } catch {
     }
   }
-  const leasePath = (0, import_node_path32.join)(repoRoot, WORKSPACE_LEASE_FILE);
+  const leasePath = (0, import_node_path33.join)(repoRoot, WORKSPACE_LEASE_FILE);
   const lease = readWorkspaceLease(repoRoot);
   if (lease != null) {
     for (const holder of lease.holders ?? [lease.holder]) {
@@ -33967,12 +34099,12 @@ function collectHarnessObserved(repoRoot, runId, now, probe2 = (pid, signal) => 
         gating: "non-gating"
       });
     }
-  } else if ((0, import_node_fs32.existsSync)(leasePath)) {
+  } else if ((0, import_node_fs33.existsSync)(leasePath)) {
     let holderId = null;
     let holderKind = null;
     let holderRunId = null;
     try {
-      const raw = JSON.parse((0, import_node_fs32.readFileSync)(leasePath, "utf8"));
+      const raw = JSON.parse((0, import_node_fs33.readFileSync)(leasePath, "utf8"));
       const holder = raw?.holder;
       holderId = typeof holder?.id === "string" ? holder.id : null;
       holderKind = typeof holder?.kind === "string" ? holder.kind : null;
@@ -34391,22 +34523,22 @@ function projectHostRequests(repoRoot, runId, events, now) {
 }
 
 // src/commands/validate.ts
-var import_node_fs33 = require("node:fs");
-var import_node_path33 = require("node:path");
+var import_node_fs34 = require("node:fs");
+var import_node_path34 = require("node:path");
 var ValidateError = class extends Error {
 };
 function runValidate(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const schemaPaths = schemaDirectories(repoRoot);
-  if (!(0, import_node_fs33.existsSync)(schemaPaths.project) && !(0, import_node_fs33.existsSync)(schemaPaths.builtin)) {
+  if (!(0, import_node_fs34.existsSync)(schemaPaths.project) && !(0, import_node_fs34.existsSync)(schemaPaths.builtin)) {
     throw new ValidateError("No bundled or project Fadeno schemas are available.");
   }
   const schemas = new SchemaSet(schemaPaths.project, schemaPaths.builtin);
   let files;
   let forcedKind;
   if (opts.path) {
-    files = [(0, import_node_path33.isAbsolute)(opts.path) ? opts.path : (0, import_node_path33.resolve)(cwd, opts.path)];
+    files = [(0, import_node_path34.isAbsolute)(opts.path) ? opts.path : (0, import_node_path34.resolve)(cwd, opts.path)];
     forcedKind = opts.schema;
   } else {
     forcedKind = "playbook";
@@ -34423,18 +34555,18 @@ function runValidate(opts = {}) {
 }
 
 // src/commands/verify.ts
-var import_node_fs34 = require("node:fs");
-var import_node_path34 = require("node:path");
+var import_node_fs35 = require("node:fs");
+var import_node_path35 = require("node:path");
 var import_yaml16 = __toESM(require_dist(), 1);
 var VerifyError = class extends Error {
 };
 function resolveArtifact(runDir, rel) {
-  return (0, import_node_path34.isAbsolute)(rel) ? rel : (0, import_node_path34.join)(runDir, rel);
+  return (0, import_node_path35.isAbsolute)(rel) ? rel : (0, import_node_path35.join)(runDir, rel);
 }
 function summaryFromDirectory(dir) {
   let doc;
   try {
-    doc = (0, import_yaml16.parse)((0, import_node_fs34.readFileSync)((0, import_node_path34.join)(dir, "run.yaml"), "utf8"));
+    doc = (0, import_yaml16.parse)((0, import_node_fs35.readFileSync)((0, import_node_path35.join)(dir, "run.yaml"), "utf8"));
   } catch (err) {
     throw new VerifyError(`evidence run.yaml did not parse: ${err.message}`);
   }
@@ -34457,15 +34589,15 @@ function summaryFromDirectory(dir) {
   };
 }
 function isInsideRun(runDir, path) {
-  const runAbsolute = (0, import_node_path34.resolve)(runDir);
+  const runAbsolute = (0, import_node_path35.resolve)(runDir);
   const target = resolveArtifact(runDir, path);
-  const rel = (0, import_node_path34.relative)(runAbsolute, target).split("\\").join("/");
-  if (rel === ".." || rel.startsWith("../") || (0, import_node_path34.isAbsolute)(rel)) return false;
+  const rel = (0, import_node_path35.relative)(runAbsolute, target).split("\\").join("/");
+  if (rel === ".." || rel.startsWith("../") || (0, import_node_path35.isAbsolute)(rel)) return false;
   let cursor = runAbsolute;
   for (const segment of rel.split("/").filter(Boolean)) {
-    cursor = (0, import_node_path34.join)(cursor, segment);
+    cursor = (0, import_node_path35.join)(cursor, segment);
     try {
-      if ((0, import_node_fs34.lstatSync)(cursor).isSymbolicLink()) return false;
+      if ((0, import_node_fs35.lstatSync)(cursor).isSymbolicLink()) return false;
     } catch (err) {
       if (err.code === "ENOENT") break;
       return false;
@@ -34475,18 +34607,18 @@ function isInsideRun(runDir, path) {
   let existingReal;
   for (; ; ) {
     try {
-      existingReal = (0, import_node_fs34.realpathSync)(existing);
+      existingReal = (0, import_node_fs35.realpathSync)(existing);
       break;
     } catch (err) {
       if (err.code !== "ENOENT") return false;
-      const parent = (0, import_node_path34.dirname)(existing);
+      const parent = (0, import_node_path35.dirname)(existing);
       if (parent === existing) return false;
       existing = parent;
     }
   }
-  const realTarget = (0, import_node_path34.resolve)(existingReal, (0, import_node_path34.relative)(existing, target));
-  const realRel = (0, import_node_path34.relative)((0, import_node_fs34.realpathSync)(runAbsolute), realTarget).split("\\").join("/");
-  return realRel !== ".." && !realRel.startsWith("../") && !(0, import_node_path34.isAbsolute)(realRel);
+  const realTarget = (0, import_node_path35.resolve)(existingReal, (0, import_node_path35.relative)(existing, target));
+  const realRel = (0, import_node_path35.relative)((0, import_node_fs35.realpathSync)(runAbsolute), realTarget).split("\\").join("/");
+  return realRel !== ".." && !realRel.startsWith("../") && !(0, import_node_path35.isAbsolute)(realRel);
 }
 function skip(check, detail2) {
   return { check, status: "skip", detail: detail2 };
@@ -34498,11 +34630,11 @@ function runVerify(opts) {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   let run;
-  const runPathCandidate = opts.run == null ? null : (0, import_node_path34.resolve)(cwd, opts.run);
-  const evidenceDir = opts.evidence ?? (runPathCandidate != null && (0, import_node_fs34.existsSync)((0, import_node_path34.join)(runPathCandidate, "run.yaml")) ? runPathCandidate : null);
+  const runPathCandidate = opts.run == null ? null : (0, import_node_path35.resolve)(cwd, opts.run);
+  const evidenceDir = opts.evidence ?? (runPathCandidate != null && (0, import_node_fs35.existsSync)((0, import_node_path35.join)(runPathCandidate, "run.yaml")) ? runPathCandidate : null);
   if (evidenceDir != null) {
     if (wantsLatest) throw new VerifyError("evidence is mutually exclusive with --latest.");
-    run = summaryFromDirectory((0, import_node_path34.resolve)(evidenceDir));
+    run = summaryFromDirectory((0, import_node_path35.resolve)(evidenceDir));
   } else if (wantsLatest) {
     const runs = listRuns(repoRoot);
     if (runs.length === 0) throw new VerifyError("No runs found under .fadeno/runs.");
@@ -34520,13 +34652,13 @@ function runVerify(opts) {
   const legacy = mode === "legacy";
   const compatibility = mode === "compatibility";
   const schemaPaths = schemaDirectories(repoRoot);
-  const snapshotSchemas = (0, import_node_path34.join)(run.dir, "definitions", "schemas");
-  const schemas = (0, import_node_fs34.existsSync)(snapshotSchemas) ? new SchemaSet(snapshotSchemas, schemaPaths.project, schemaPaths.builtin) : new SchemaSet(schemaPaths.project, schemaPaths.builtin);
+  const snapshotSchemas = (0, import_node_path35.join)(run.dir, "definitions", "schemas");
+  const schemas = (0, import_node_fs35.existsSync)(snapshotSchemas) ? new SchemaSet(snapshotSchemas, schemaPaths.project, schemaPaths.builtin) : new SchemaSet(schemaPaths.project, schemaPaths.builtin);
   const findings = [];
   findings.push(
     legacy || compatibility ? skip("ledger-version", `${run.schemaVersion ?? "pre-0.3"} ledger read in explicit compatibility mode (--legacy)`) : { check: "ledger-version", status: "ok", detail: `schema_version ${RUN_LEDGER_SCHEMA_VERSION}` }
   );
-  const runDocument = (0, import_yaml16.parse)((0, import_node_fs34.readFileSync)((0, import_node_path34.join)(run.dir, "run.yaml"), "utf8"));
+  const runDocument = (0, import_yaml16.parse)((0, import_node_fs35.readFileSync)((0, import_node_path35.join)(run.dir, "run.yaml"), "utf8"));
   const snapshotRel = typeof runDocument.playbook_snapshot === "string" ? runDocument.playbook_snapshot : null;
   const expectedPlaybookSha = typeof runDocument.playbook_sha256 === "string" ? runDocument.playbook_sha256 : null;
   if (snapshotRel == null || expectedPlaybookSha == null) {
@@ -34534,9 +34666,9 @@ function runVerify(opts) {
   } else if (snapshotRel !== "definitions/playbook.yaml") {
     findings.push({ check: "playbook-provenance", status: "fail", detail: `unexpected snapshot path ${snapshotRel}` });
   } else {
-    const snapshotPath = (0, import_node_path34.join)(run.dir, snapshotRel);
+    const snapshotPath = (0, import_node_path35.join)(run.dir, snapshotRel);
     findings.push(
-      (0, import_node_fs34.existsSync)(snapshotPath) && sha256Hex((0, import_node_fs34.readFileSync)(snapshotPath)) === expectedPlaybookSha ? { check: "playbook-provenance", status: "ok", detail: `${snapshotRel} matches ${expectedPlaybookSha}` } : { check: "playbook-provenance", status: "fail", detail: `${snapshotRel} is missing or its digest changed` }
+      (0, import_node_fs35.existsSync)(snapshotPath) && sha256Hex((0, import_node_fs35.readFileSync)(snapshotPath)) === expectedPlaybookSha ? { check: "playbook-provenance", status: "ok", detail: `${snapshotRel} matches ${expectedPlaybookSha}` } : { check: "playbook-provenance", status: "fail", detail: `${snapshotRel} is missing or its digest changed` }
     );
   }
   findings.push(
@@ -34726,10 +34858,10 @@ function checkHostDispatchLifecycle(run, events, mode) {
   if (snapshotEvent == null) problems.push("host dispatch evidence has no profile_snapshotted event");
   if (snapshotEvent != null) {
     const profileRel = typeof snapshotEvent.extra.profile === "string" ? snapshotEvent.extra.profile : "profile.yaml";
-    const profilePath = (0, import_node_path34.join)(run.dir, profileRel);
-    if ((0, import_node_fs34.existsSync)(profilePath)) {
+    const profilePath = (0, import_node_path35.join)(run.dir, profileRel);
+    if ((0, import_node_fs35.existsSync)(profilePath)) {
       try {
-        profile = parseSnapshotDocument((0, import_node_fs34.readFileSync)(profilePath, "utf8"), profileRel);
+        profile = parseSnapshotDocument((0, import_node_fs35.readFileSync)(profilePath, "utf8"), profileRel);
       } catch (err) {
         problems.push(`host profile snapshot is invalid: ${err.message}`);
       }
@@ -34957,7 +35089,7 @@ function checkHostDispatchArtifacts(run, events, mode) {
     else if (!isInsideRun(run.dir, promptPath)) problems.push(`${request.id}: prompt snapshot path escapes the run directory`);
     else {
       const abs = resolveArtifact(run.dir, promptPath);
-      if (!(0, import_node_fs34.existsSync)(abs) || sha256Hex((0, import_node_fs34.readFileSync)(abs)) !== promptSha) problems.push(`${request.id}: prompt snapshot digest does not match disk`);
+      if (!(0, import_node_fs35.existsSync)(abs) || sha256Hex((0, import_node_fs35.readFileSync)(abs)) !== promptSha) problems.push(`${request.id}: prompt snapshot digest does not match disk`);
     }
     if (terminal2?.type !== "actor_completed") continue;
     const output = typeof terminal2.extra.output === "string" ? terminal2.extra.output : null;
@@ -34967,7 +35099,7 @@ function checkHostDispatchArtifacts(run, events, mode) {
       continue;
     }
     const outputAbs = resolveArtifact(run.dir, output);
-    if (!isInsideRun(run.dir, output) || !(0, import_node_fs34.existsSync)(outputAbs) || sha256Hex((0, import_node_fs34.readFileSync)(outputAbs)) !== sha) problems.push(`${request.id}: completion output digest does not match a run-local file`);
+    if (!isInsideRun(run.dir, output) || !(0, import_node_fs35.existsSync)(outputAbs) || sha256Hex((0, import_node_fs35.readFileSync)(outputAbs)) !== sha) problems.push(`${request.id}: completion output digest does not match a run-local file`);
     if (terminal2.extra.output_valid === true) {
       if (output !== request.event.extra.output_path) problems.push(`${request.id}: successful output does not match planned immutable path`);
       const manifest = events.find((event) => event.type === "artifact_created" && event.extra.artifact === output && event.extra.dispatch_id === request.id && event.extra.actor_call_id === request.event.extra.actor_call_id);
@@ -34994,10 +35126,10 @@ function checkHostAttestation(run, events, mode) {
   const snapshot = events.find((event) => event.type === "profile_snapshotted");
   if (snapshot != null) {
     const profileRel = typeof snapshot.extra.profile === "string" ? snapshot.extra.profile : "profile.yaml";
-    const profilePath = (0, import_node_path34.join)(run.dir, profileRel);
-    if ((0, import_node_fs34.existsSync)(profilePath)) {
+    const profilePath = (0, import_node_path35.join)(run.dir, profileRel);
+    if ((0, import_node_fs35.existsSync)(profilePath)) {
       try {
-        profile = parseSnapshotDocument((0, import_node_fs34.readFileSync)(profilePath, "utf8"), profileRel);
+        profile = parseSnapshotDocument((0, import_node_fs35.readFileSync)(profilePath, "utf8"), profileRel);
       } catch {
       }
     }
@@ -35077,11 +35209,11 @@ function checkEnvelopeExtraction(run, schemas, events) {
         continue;
       }
       const rawAbs = resolveArtifact(run.dir, rawRel);
-      if (!(0, import_node_fs34.existsSync)(rawAbs)) {
+      if (!(0, import_node_fs35.existsSync)(rawAbs)) {
         problems.push(`${rawRel}: raw output file is missing`);
         continue;
       }
-      const rawBytesActual = (0, import_node_fs34.readFileSync)(rawAbs);
+      const rawBytesActual = (0, import_node_fs35.readFileSync)(rawAbs);
       const rawDigest = sha256Hex(rawBytesActual);
       if (rawDigest !== rawSha) {
         problems.push(`${rawRel}: raw output sha256 mismatch (recorded ${rawSha}, actual ${rawDigest})`);
@@ -35102,11 +35234,11 @@ function checkEnvelopeExtraction(run, schemas, events) {
         continue;
       }
       const outputAbs = resolveArtifact(run.dir, outputRel);
-      if (!(0, import_node_fs34.existsSync)(outputAbs)) {
+      if (!(0, import_node_fs35.existsSync)(outputAbs)) {
         problems.push(`${outputRel}: normalized output is missing`);
         continue;
       }
-      const outputText = (0, import_node_fs34.readFileSync)(outputAbs, "utf8");
+      const outputText = (0, import_node_fs35.readFileSync)(outputAbs, "utf8");
       const rawText = rawBytesActual.toString("utf8");
       if (!rawText.includes(outputText)) {
         problems.push(`${outputRel}: normalized output is not a contiguous substring of raw output`);
@@ -35332,9 +35464,9 @@ function checkActorAttempts(run, events) {
     const sha = typeof event.extra.output_sha256 === "string" ? event.extra.output_sha256 : null;
     if (rel == null || sha == null) continue;
     const abs = resolveArtifact(run.dir, rel);
-    if (!(0, import_node_fs34.existsSync)(abs)) {
+    if (!(0, import_node_fs35.existsSync)(abs)) {
       problems.push(`${rel}: rejected-attempt output is missing`);
-    } else if (sha256Hex((0, import_node_fs34.readFileSync)(abs)) !== sha) {
+    } else if (sha256Hex((0, import_node_fs35.readFileSync)(abs)) !== sha) {
       problems.push(`${rel}: rejected-attempt output no longer matches its recorded sha256`);
     }
   }
@@ -35362,11 +35494,11 @@ function checkExecutorBindings(run, events) {
     const snap = snapshots[0];
     const rel = typeof snap.extra.profile === "string" ? snap.extra.profile : "profile.yaml";
     const sha = typeof snap.extra.sha256 === "string" ? snap.extra.sha256 : null;
-    const abs = (0, import_node_path34.join)(run.dir, rel);
-    if (!(0, import_node_fs34.existsSync)(abs)) {
+    const abs = (0, import_node_path35.join)(run.dir, rel);
+    if (!(0, import_node_fs35.existsSync)(abs)) {
       problems.push(`${rel}: profile snapshot is missing`);
     } else {
-      const text = (0, import_node_fs34.readFileSync)(abs, "utf8");
+      const text = (0, import_node_fs35.readFileSync)(abs, "utf8");
       if (sha != null && sha256Hex(text) !== sha) {
         problems.push(`${rel}: snapshot does not match its recorded sha256`);
       }
@@ -35484,11 +35616,11 @@ function checkGateEligible(run, events) {
   const snap = snapshots[0];
   const rel = typeof snap.extra.profile === "string" ? snap.extra.profile : "profile.yaml";
   const sha = typeof snap.extra.sha256 === "string" ? snap.extra.sha256 : null;
-  const abs = (0, import_node_path34.join)(run.dir, rel);
-  if (!(0, import_node_fs34.existsSync)(abs)) {
+  const abs = (0, import_node_path35.join)(run.dir, rel);
+  if (!(0, import_node_fs35.existsSync)(abs)) {
     return { check, status: "fail", detail: `${rel}: profile snapshot is missing` };
   }
-  const text = (0, import_node_fs34.readFileSync)(abs, "utf8");
+  const text = (0, import_node_fs35.readFileSync)(abs, "utf8");
   if (sha != null && sha256Hex(text) !== sha) {
     return { check, status: "fail", detail: `${rel}: snapshot does not match its recorded sha256` };
   }
@@ -35623,7 +35755,7 @@ function checkRunSchema(run, schemas) {
   const check = "run-schema";
   let doc;
   try {
-    doc = (0, import_yaml16.parse)((0, import_node_fs34.readFileSync)((0, import_node_path34.join)(run.dir, "run.yaml"), "utf8"));
+    doc = (0, import_yaml16.parse)((0, import_node_fs35.readFileSync)((0, import_node_path35.join)(run.dir, "run.yaml"), "utf8"));
   } catch (err) {
     return { check, status: "fail", detail: `run.yaml did not parse: ${err.message}` };
   }
@@ -35749,11 +35881,11 @@ function checkReceiptOutputManifests(events) {
   return { check, status: "fail", detail: `${shown}${more}` };
 }
 function snapshotSteps(run) {
-  const path = (0, import_node_path34.join)(run.dir, "definitions", "playbook.yaml");
-  if (!(0, import_node_fs34.existsSync)(path)) return null;
+  const path = (0, import_node_path35.join)(run.dir, "definitions", "playbook.yaml");
+  if (!(0, import_node_fs35.existsSync)(path)) return null;
   let doc;
   try {
-    doc = (0, import_yaml16.parse)((0, import_node_fs34.readFileSync)(path, "utf8"));
+    doc = (0, import_yaml16.parse)((0, import_node_fs35.readFileSync)(path, "utf8"));
   } catch {
     return null;
   }
@@ -35816,13 +35948,13 @@ function checkCollectiveProvenance(run, events) {
         continue;
       }
       const abs = resolveArtifact(run.dir, rel);
-      if (!(0, import_node_fs34.existsSync)(abs)) {
+      if (!(0, import_node_fs35.existsSync)(abs)) {
         problems.push(`${output}: part ${rel} is missing on disk`);
         broken = true;
         continue;
       }
       try {
-        bodies.push(JSON.parse((0, import_node_fs34.readFileSync)(abs, "utf8")));
+        bodies.push(JSON.parse((0, import_node_fs35.readFileSync)(abs, "utf8")));
       } catch {
         problems.push(`${output}: part ${rel} is not valid JSON`);
         broken = true;
@@ -35840,7 +35972,7 @@ function checkCollectiveProvenance(run, events) {
     }
     if (isInsideRun(run.dir, output)) {
       const abs = resolveArtifact(run.dir, output);
-      if ((0, import_node_fs34.existsSync)(abs) && sha256Hex((0, import_node_fs34.readFileSync)(abs)) !== expectedSha) {
+      if ((0, import_node_fs35.existsSync)(abs) && sha256Hex((0, import_node_fs35.readFileSync)(abs)) !== expectedSha) {
         problems.push(`${output}: the bytes on disk are not the reduction of its ${n}`);
       }
     }
@@ -35908,7 +36040,7 @@ function checkToolArtifactReceipts(run, events) {
       continue;
     }
     const abs = resolveArtifact(run.dir, output);
-    if ((0, import_node_fs34.existsSync)(abs) && sha256Hex((0, import_node_fs34.readFileSync)(abs)) !== sha) {
+    if ((0, import_node_fs35.existsSync)(abs) && sha256Hex((0, import_node_fs35.readFileSync)(abs)) !== sha) {
       problems.push(`${who}: the bytes on disk at ${output} are not what the receipt attested`);
     }
   }
@@ -36011,7 +36143,7 @@ function checkArtifactsExist(run, events) {
     if (event.type !== "artifact_created") continue;
     if (typeof event.extra.artifact === "string") paths.push(event.extra.artifact);
   }
-  const missing3 = paths.filter((p) => !(0, import_node_fs34.existsSync)(resolveArtifact(run.dir, p)));
+  const missing3 = paths.filter((p) => !(0, import_node_fs35.existsSync)(resolveArtifact(run.dir, p)));
   if (missing3.length === 0) {
     return { check, status: "ok", detail: `${paths.length}/${paths.length} present` };
   }
@@ -36033,12 +36165,12 @@ function checkArtifactDigests(run, events) {
     const recordedBytes = typeof event.extra.bytes === "number" ? event.extra.bytes : null;
     if (rel == null || recordedSha == null) continue;
     const abs = resolveArtifact(run.dir, rel);
-    if (!(0, import_node_fs34.existsSync)(abs)) {
+    if (!(0, import_node_fs35.existsSync)(abs)) {
       absent += 1;
       continue;
     }
     checked += 1;
-    const bytes = (0, import_node_fs34.readFileSync)(abs);
+    const bytes = (0, import_node_fs35.readFileSync)(abs);
     if (sha256Hex(bytes) !== recordedSha) {
       problems.push(`${rel}: recorded sha256 does not match the bytes on disk`);
     } else if (recordedBytes != null && bytes.length !== recordedBytes) {
@@ -36064,11 +36196,11 @@ function checkArtifactValidation(run, schemas, events) {
     const rel = typeof event.extra.artifact === "string" ? event.extra.artifact : null;
     if (rel == null) continue;
     const abs = resolveArtifact(run.dir, rel);
-    if (!(0, import_node_fs34.existsSync)(abs)) continue;
+    if (!(0, import_node_fs35.existsSync)(abs)) continue;
     checked += 1;
     let parsed;
     try {
-      parsed = JSON.parse((0, import_node_fs34.readFileSync)(abs, "utf8"));
+      parsed = JSON.parse((0, import_node_fs35.readFileSync)(abs, "utf8"));
     } catch {
       problems.push(`${rel}: recorded as ${recorded.schema} but is not valid JSON`);
       continue;
@@ -36122,9 +36254,9 @@ function checkPromptSnapshots(run, events) {
       continue;
     }
     const abs = resolveArtifact(run.dir, promptPath);
-    if (!(0, import_node_fs34.existsSync)(abs)) {
+    if (!(0, import_node_fs35.existsSync)(abs)) {
       problems.push(`${promptPath}: snapshot is missing`);
-    } else if (sha256Hex((0, import_node_fs34.readFileSync)(abs)) !== promptSha) {
+    } else if (sha256Hex((0, import_node_fs35.readFileSync)(abs)) !== promptSha) {
       problems.push(`${promptPath}: recorded sha256 does not match the snapshot on disk`);
     }
     const inputs = Array.isArray(event.extra.inputs) ? event.extra.inputs : [];
@@ -36133,9 +36265,9 @@ function checkPromptSnapshots(run, events) {
       const rec = input;
       if (typeof rec.path !== "string" || typeof rec.sha256 !== "string") continue;
       const inputAbs = resolveArtifact(run.dir, rec.path);
-      if (!(0, import_node_fs34.existsSync)(inputAbs)) {
+      if (!(0, import_node_fs35.existsSync)(inputAbs)) {
         problems.push(`${promptPath}: input ${rec.path} is missing`);
-      } else if (sha256Hex((0, import_node_fs34.readFileSync)(inputAbs)) !== rec.sha256) {
+      } else if (sha256Hex((0, import_node_fs35.readFileSync)(inputAbs)) !== rec.sha256) {
         problems.push(`${promptPath}: input ${rec.path} no longer matches its recorded sha256`);
       }
     }
@@ -36162,12 +36294,12 @@ function checkGateEvent(run, schemas, event, lastResultByCondition) {
     return { check, status: "fail", detail: "gate event recorded no artifact to recompute from" };
   }
   const artifactPath = resolveArtifact(run.dir, artifactRel);
-  if (!(0, import_node_fs34.existsSync)(artifactPath)) {
+  if (!(0, import_node_fs35.existsSync)(artifactPath)) {
     return { check, status: "fail", detail: `artifact ${artifactRel} is missing; cannot recompute` };
   }
   let parsed;
   try {
-    parsed = JSON.parse((0, import_node_fs34.readFileSync)(artifactPath, "utf8"));
+    parsed = JSON.parse((0, import_node_fs35.readFileSync)(artifactPath, "utf8"));
   } catch (err) {
     return { check, status: "fail", detail: `artifact ${artifactRel} is not valid JSON: ${err.message}` };
   }
@@ -36215,10 +36347,10 @@ function checkToolResults(run, events, mode) {
     const isMeasured = measuredOutputs.has(artifactRel) || typeof event.extra.tool_call_id === "string" && typeof event.extra.attempt === "number" && completed.some((c) => c.extra.tool_call_id === event.extra.tool_call_id && c.extra.attempt === event.extra.attempt);
     if (!isMeasured) continue;
     const abs = resolveArtifact(run.dir, artifactRel);
-    if (!isInsideRun(run.dir, artifactRel) || !(0, import_node_fs34.existsSync)(abs)) continue;
+    if (!isInsideRun(run.dir, artifactRel) || !(0, import_node_fs35.existsSync)(abs)) continue;
     let payload;
     try {
-      payload = JSON.parse((0, import_node_fs34.readFileSync)(abs, "utf8"));
+      payload = JSON.parse((0, import_node_fs35.readFileSync)(abs, "utf8"));
     } catch {
       continue;
     }
@@ -36263,17 +36395,17 @@ function checkToolCommandDigest(run, events, mode) {
     return { check, status: "fail", detail: "measured tool dispatches recorded but no profile_snapshotted event attests the binding snapshot" };
   }
   const profileRel = typeof snapshotEvent.extra.profile === "string" ? snapshotEvent.extra.profile : "profile.yaml";
-  const profilePath = (0, import_node_path34.join)(run.dir, profileRel);
-  if (!(0, import_node_fs34.existsSync)(profilePath)) {
+  const profilePath = (0, import_node_path35.join)(run.dir, profileRel);
+  if (!(0, import_node_fs35.existsSync)(profilePath)) {
     return { check, status: "fail", detail: `profile snapshot missing for measured dispatch: ${profileRel}` };
   }
   try {
-    profile = parseSnapshotDocument((0, import_node_fs34.readFileSync)(profilePath, "utf8"), profileRel);
+    profile = parseSnapshotDocument((0, import_node_fs35.readFileSync)(profilePath, "utf8"), profileRel);
   } catch (err) {
     return { check, status: "fail", detail: `profile snapshot invalid: ${err.message}` };
   }
   if (typeof snapshotEvent.extra.sha256 === "string") {
-    const actual = sha256Hex((0, import_node_fs34.readFileSync)(profilePath, "utf8"));
+    const actual = sha256Hex((0, import_node_fs35.readFileSync)(profilePath, "utf8"));
     if (actual !== snapshotEvent.extra.sha256) {
       return { check, status: "fail", detail: `profile snapshot digest mismatch: recorded ${snapshotEvent.extra.sha256.slice(0, 12)}\u2026 != actual ${actual.slice(0, 12)}\u2026` };
     }
@@ -36341,8 +36473,8 @@ function checkToolLifecycle(run, events, mode) {
         continue;
       }
       const abs = resolveArtifact(run.dir, rel);
-      if (!(0, import_node_fs34.existsSync)(abs)) problems.push(`${key}: ${pathKey} ${rel} is missing`);
-      else if (sha256Hex((0, import_node_fs34.readFileSync)(abs)) !== sha) problems.push(`${key}: ${rel} no longer matches its recorded ${shaKey}`);
+      if (!(0, import_node_fs35.existsSync)(abs)) problems.push(`${key}: ${pathKey} ${rel} is missing`);
+      else if (sha256Hex((0, import_node_fs35.readFileSync)(abs)) !== sha) problems.push(`${key}: ${rel} no longer matches its recorded ${shaKey}`);
       else attested += 1;
     }
   }
@@ -36372,8 +36504,8 @@ function checkHumanDecisions(events) {
 }
 
 // src/commands/completion.ts
-var import_node_fs35 = require("node:fs");
-var import_node_path35 = require("node:path");
+var import_node_fs36 = require("node:fs");
+var import_node_path36 = require("node:path");
 var import_yaml17 = __toESM(require_dist(), 1);
 var CompletionError = class extends Error {
 };
@@ -36564,7 +36696,7 @@ function runCompletion() {
 }
 function isExecutableWord(word) {
   if (word == null) return false;
-  const name = (0, import_node_path35.basename)(word);
+  const name = (0, import_node_path36.basename)(word);
   return name === "fadeno" || name === "fadeno.js";
 }
 function commandStart(words) {
@@ -36623,16 +36755,16 @@ function commandContext(words, cword) {
 }
 function readDirEntries(dir) {
   try {
-    return (0, import_node_fs35.readdirSync)(dir, { withFileTypes: true });
+    return (0, import_node_fs36.readdirSync)(dir, { withFileTypes: true });
   } catch {
     return [];
   }
 }
 function pathCandidates(prefix, cwd) {
   const slash = prefix.endsWith("/") || prefix.endsWith("\\");
-  const dirPart = slash ? prefix : (0, import_node_path35.dirname)(prefix);
-  const base = slash ? "" : (0, import_node_path35.basename)(prefix);
-  const lookup = (0, import_node_path35.resolve)(cwd, dirPart === "." ? "." : dirPart);
+  const dirPart = slash ? prefix : (0, import_node_path36.dirname)(prefix);
+  const base = slash ? "" : (0, import_node_path36.basename)(prefix);
+  const lookup = (0, import_node_path36.resolve)(cwd, dirPart === "." ? "." : dirPart);
   const entries = readDirEntries(lookup);
   const out = [];
   for (const entry of entries) {
@@ -36685,7 +36817,7 @@ function readStepIds(repoRoot, runRef) {
   const file = playbookFile(repoRoot, run);
   if (file == null) return [];
   try {
-    const doc = (0, import_yaml17.parse)((0, import_node_fs35.readFileSync)(file, "utf8"));
+    const doc = (0, import_yaml17.parse)((0, import_node_fs36.readFileSync)(file, "utf8"));
     if (!Array.isArray(doc?.flow)) return [];
     const byId = /* @__PURE__ */ new Map();
     for (const raw of doc.flow) {
@@ -36731,7 +36863,7 @@ function readPlaybookRoles(repoRoot, runRef) {
   const file = playbookFile(repoRoot, run);
   if (file == null) return [];
   try {
-    const doc = (0, import_yaml17.parse)((0, import_node_fs35.readFileSync)(file, "utf8"));
+    const doc = (0, import_yaml17.parse)((0, import_node_fs36.readFileSync)(file, "utf8"));
     if (doc?.roles == null || typeof doc.roles !== "object" || Array.isArray(doc.roles)) return [];
     return Object.keys(doc.roles);
   } catch {
@@ -36744,7 +36876,7 @@ function readPlaybookInputs(repoRoot, runRef) {
   const file = playbookFile(repoRoot, run);
   if (file == null) return [];
   try {
-    const doc = (0, import_yaml17.parse)((0, import_node_fs35.readFileSync)(file, "utf8"));
+    const doc = (0, import_yaml17.parse)((0, import_node_fs36.readFileSync)(file, "utf8"));
     if (doc?.inputs == null || typeof doc.inputs !== "object" || Array.isArray(doc.inputs)) return [];
     return Object.keys(doc.inputs);
   } catch {
@@ -36885,8 +37017,8 @@ function suggestFlag(command2, subcommand, flag) {
 
 // src/commands/shadow-apply.ts
 var import_node_child_process11 = require("node:child_process");
-var import_node_fs36 = require("node:fs");
-var import_node_path36 = require("node:path");
+var import_node_fs37 = require("node:fs");
+var import_node_path37 = require("node:path");
 var ShadowApplyCommandError = class extends Error {
 };
 function gitReason(result) {
@@ -36942,8 +37074,8 @@ function runShadowApply(opts) {
     );
   }
   const diffRel = target.diffSnapshot;
-  const diffAbs = (0, import_node_path36.isAbsolute)(diffRel) ? diffRel : (0, import_node_path36.join)(repoRoot, diffRel);
-  if (!(0, import_node_fs36.existsSync)(diffAbs)) {
+  const diffAbs = (0, import_node_path37.isAbsolute)(diffRel) ? diffRel : (0, import_node_path37.join)(repoRoot, diffRel);
+  if (!(0, import_node_fs37.existsSync)(diffAbs)) {
     throw new ShadowApplyCommandError(
       `pair ${pairId8}'s diff artifact is missing on disk: ${diffRel} \u2014 it may have already been cleaned up.`
     );
@@ -37031,8 +37163,8 @@ function runShadowApply(opts) {
 
 // src/commands/bakeoff.ts
 var import_node_child_process12 = require("node:child_process");
-var import_node_fs37 = require("node:fs");
-var import_node_path37 = require("node:path");
+var import_node_fs38 = require("node:fs");
+var import_node_path38 = require("node:path");
 var import_ajv2 = __toESM(require_ajv(), 1);
 var import_yaml18 = __toESM(require_dist(), 1);
 var BakeoffCommandError = class extends Error {
@@ -37086,11 +37218,11 @@ function declaredIn(diffText, sign, patterns = DECLARATION_PATTERNS) {
   return [...found].sort();
 }
 function parseDiffstat(repoRoot, relPath, bytes) {
-  const abs = (0, import_node_path37.join)(repoRoot, relPath);
+  const abs = (0, import_node_path38.join)(repoRoot, relPath);
   let text;
   try {
-    if (!(0, import_node_fs37.existsSync)(abs)) return null;
-    text = (0, import_node_fs37.readFileSync)(abs, "utf8");
+    if (!(0, import_node_fs38.existsSync)(abs)) return null;
+    text = (0, import_node_fs38.readFileSync)(abs, "utf8");
   } catch {
     return null;
   }
@@ -37173,7 +37305,7 @@ function armOf(entry, arm, repoRoot, baseline, surfaces) {
   if (diff != null && entry.diffSnapshot != null) {
     let diffText = "";
     try {
-      diffText = (0, import_node_fs37.readFileSync)((0, import_node_path37.join)(repoRoot, entry.diffSnapshot), "utf8");
+      diffText = (0, import_node_fs38.readFileSync)((0, import_node_path38.join)(repoRoot, entry.diffSnapshot), "utf8");
     } catch {
       diffText = "";
     }
@@ -37314,7 +37446,7 @@ function armFor(label, blinding) {
 function readDiffText(repoRoot, entry) {
   if (entry?.diffSnapshot == null) return "";
   try {
-    return (0, import_node_fs37.readFileSync)((0, import_node_path37.join)(repoRoot, entry.diffSnapshot), "utf8");
+    return (0, import_node_fs38.readFileSync)((0, import_node_path38.join)(repoRoot, entry.diffSnapshot), "utf8");
   } catch {
     return "";
   }
@@ -37341,9 +37473,9 @@ function stripGeneratedHunks(diffText, generatedFiles) {
 `;
 }
 function materializeArmTree(repoRoot, relDest, baselineCommit, diffRelPath, armLabel) {
-  const absDest = (0, import_node_path37.join)(repoRoot, relDest);
-  (0, import_node_fs37.rmSync)(absDest, { recursive: true, force: true });
-  (0, import_node_fs37.mkdirSync)(absDest, { recursive: true });
+  const absDest = (0, import_node_path38.join)(repoRoot, relDest);
+  (0, import_node_fs38.rmSync)(absDest, { recursive: true, force: true });
+  (0, import_node_fs38.mkdirSync)(absDest, { recursive: true });
   const archive = (0, import_node_child_process12.spawnSync)("git", ["-C", repoRoot, "archive", "--format=tar", baselineCommit], {
     encoding: "buffer",
     maxBuffer: 512 * 1024 * 1024
@@ -37359,7 +37491,7 @@ function materializeArmTree(repoRoot, relDest, baselineCommit, diffRelPath, armL
       `could not extract the ${armLabel} arm's baseline tree: ${(untar.stderr ?? Buffer.from("")).toString("utf8").trim()}`
     );
   }
-  const diffText = (0, import_node_fs37.readFileSync)((0, import_node_path37.join)(repoRoot, diffRelPath), "utf8");
+  const diffText = (0, import_node_fs38.readFileSync)((0, import_node_path38.join)(repoRoot, diffRelPath), "utf8");
   if (diffText.trim().length === 0) return;
   const applyArgs = ["-C", repoRoot, "apply", `--directory=${relDest}`, "--whitespace=nowarn", diffRelPath];
   const applied = (0, import_node_child_process12.spawnSync)("git", [...applyArgs], { encoding: "utf8" });
@@ -37379,7 +37511,7 @@ function materializeArmTree(repoRoot, relDest, baselineCommit, diffRelPath, armL
     );
   }
 }
-var posixJoin = (...parts) => import_node_path37.posix.join(...parts);
+var posixJoin = (...parts) => import_node_path38.posix.join(...parts);
 var MAX_DIFF_PROMPT_BYTES = 2e5;
 function capDiffText(diffText) {
   const bytes = Buffer.byteLength(diffText, "utf8");
@@ -37558,14 +37690,14 @@ function extractJsonObject(text) {
 }
 function loadModelComparisonSchema(repoRoot) {
   const dirs = schemaDirectories(repoRoot);
-  const candidates = [(0, import_node_path37.join)(dirs.project, "bakeoff.schema.json"), (0, import_node_path37.join)(dirs.builtin, "bakeoff.schema.json")];
-  const schemaPath = candidates.find((p) => (0, import_node_fs37.existsSync)(p));
+  const candidates = [(0, import_node_path38.join)(dirs.project, "bakeoff.schema.json"), (0, import_node_path38.join)(dirs.builtin, "bakeoff.schema.json")];
+  const schemaPath = candidates.find((p) => (0, import_node_fs38.existsSync)(p));
   if (schemaPath == null) {
     throw new BakeoffCommandError(
       "no model-comparison schema available (missing .fadeno/schemas and the bundled template) \u2014 cannot validate a judge's output."
     );
   }
-  const text = (0, import_node_fs37.readFileSync)(schemaPath, "utf8");
+  const text = (0, import_node_fs38.readFileSync)(schemaPath, "utf8");
   const parsed = JSON.parse(text);
   const schemas = new SchemaSet(dirs.project, dirs.builtin);
   return { text, parsed, schemas };
@@ -37687,9 +37819,9 @@ function preparePrompts(measurement, pair, repoRoot, evidenceMode) {
       const treeRel = posixJoin(pairDirRel, `arm_${label}`);
       const diffRel = posixJoin(pairDirRel, `arm_${label}.diff`);
       materializeArmTree(repoRoot, treeRel, baseline, entry.diffSnapshot, `arm_${label}`);
-      (0, import_node_fs37.mkdirSync)((0, import_node_path37.join)(repoRoot, pairDirRel), { recursive: true });
-      (0, import_node_fs37.writeFileSync)(
-        (0, import_node_path37.join)(repoRoot, diffRel),
+      (0, import_node_fs38.mkdirSync)((0, import_node_path38.join)(repoRoot, pairDirRel), { recursive: true });
+      (0, import_node_fs38.writeFileSync)(
+        (0, import_node_path38.join)(repoRoot, diffRel),
         capDiffText(stripGeneratedHunks(readDiffText(repoRoot, entry), armMeasurement.diff?.generatedFiles ?? [])),
         "utf8"
       );
@@ -37788,11 +37920,11 @@ function writeComparisonArtifact(args) {
   });
   const comparisonsRelDir = BAKEOFFS_DIR.split("\\").join("/");
   const comparisonPath = `${comparisonsRelDir}/${measurement.pairId}.md`;
-  (0, import_node_fs37.mkdirSync)((0, import_node_path37.join)(repoRoot, comparisonsRelDir), { recursive: true });
-  (0, import_node_fs37.writeFileSync)((0, import_node_path37.join)(repoRoot, comparisonPath), body, "utf8");
+  (0, import_node_fs38.mkdirSync)((0, import_node_path38.join)(repoRoot, comparisonsRelDir), { recursive: true });
+  (0, import_node_fs38.writeFileSync)((0, import_node_path38.join)(repoRoot, comparisonPath), body, "utf8");
   const roundTrip = parseBakeoffFile(repoRoot, comparisonPath);
   if (!roundTrip.valid) {
-    (0, import_node_fs37.rmSync)((0, import_node_path37.join)(repoRoot, comparisonPath), { force: true });
+    (0, import_node_fs38.rmSync)((0, import_node_path38.join)(repoRoot, comparisonPath), { force: true });
     throw new BakeoffCommandError(
       `the rendered artifact for pair ${measurement.pairId.slice(0, 8)} is not readable by the scorecard (${roundTrip.error ?? "unknown"}) \u2014 removed it rather than leave a verdict the reader silently skips.`
     );
@@ -37867,12 +37999,12 @@ function runBakeoffPrepare(opts) {
   const evidenceMode = opts.evidence ?? "inlined";
   const prepared = preparePrompts(measurement, pair, repoRoot, evidenceMode);
   const pairId8 = measurement.pairId.slice(0, 8);
-  const promptsDir = (0, import_node_path37.join)(".fadeno", "local", "prompts");
-  (0, import_node_fs37.mkdirSync)((0, import_node_path37.join)(repoRoot, promptsDir), { recursive: true });
-  const comparisonPromptPath = (0, import_node_path37.join)(promptsDir, `judge-comparison-${pairId8}.md`).split("\\").join("/");
-  const adversarialPromptPath = (0, import_node_path37.join)(promptsDir, `judge-adversarial-${pairId8}.md`).split("\\").join("/");
-  (0, import_node_fs37.writeFileSync)((0, import_node_path37.join)(repoRoot, comparisonPromptPath), prepared.comparisonPrompt, "utf8");
-  (0, import_node_fs37.writeFileSync)((0, import_node_path37.join)(repoRoot, adversarialPromptPath), prepared.adversarialPrompt, "utf8");
+  const promptsDir = (0, import_node_path38.join)(".fadeno", "local", "prompts");
+  (0, import_node_fs38.mkdirSync)((0, import_node_path38.join)(repoRoot, promptsDir), { recursive: true });
+  const comparisonPromptPath = (0, import_node_path38.join)(promptsDir, `judge-comparison-${pairId8}.md`).split("\\").join("/");
+  const adversarialPromptPath = (0, import_node_path38.join)(promptsDir, `judge-adversarial-${pairId8}.md`).split("\\").join("/");
+  (0, import_node_fs38.writeFileSync)((0, import_node_path38.join)(repoRoot, comparisonPromptPath), prepared.comparisonPrompt, "utf8");
+  (0, import_node_fs38.writeFileSync)((0, import_node_path38.join)(repoRoot, adversarialPromptPath), prepared.adversarialPrompt, "utf8");
   return {
     ...measurement,
     prepared: true,
@@ -37887,14 +38019,14 @@ function runBakeoffPrepare(opts) {
   };
 }
 function readJudgmentFile(cwd, path, label) {
-  const abs = (0, import_node_path37.resolve)(cwd, path);
-  if (!(0, import_node_fs37.existsSync)(abs)) {
+  const abs = (0, import_node_path38.resolve)(cwd, path);
+  if (!(0, import_node_fs38.existsSync)(abs)) {
     throw new BakeoffCommandError(
       `no ${label} judgment file at "${path}" \u2014 fadeno bakeoff --record needs the file the judge subagent --prepare told you to spawn actually wrote.`
     );
   }
   try {
-    return (0, import_node_fs37.readFileSync)(abs, "utf8");
+    return (0, import_node_fs38.readFileSync)(abs, "utf8");
   } catch (err) {
     throw new BakeoffCommandError(`could not read ${label} judgment file "${path}": ${err.message}`);
   }
@@ -37963,8 +38095,8 @@ function runBakeoff(opts) {
 }
 
 // src/commands/dispatch-prompt.ts
-var import_node_fs38 = require("node:fs");
-var import_node_path38 = require("node:path");
+var import_node_fs39 = require("node:fs");
+var import_node_path39 = require("node:path");
 var DispatchPromptError = class extends Error {
 };
 function runDispatchPrompt(opts) {
@@ -37983,26 +38115,26 @@ function runDispatchPrompt(opts) {
     throw err;
   }
   const request = lookup.request;
-  const runAbsolute = (0, import_node_path38.resolve)(lookup.runDir);
+  const runAbsolute = (0, import_node_path39.resolve)(lookup.runDir);
   const promptRel = request.promptPath;
-  if ((0, import_node_path38.isAbsolute)(promptRel)) {
+  if ((0, import_node_path39.isAbsolute)(promptRel)) {
     throw new DispatchPromptError(`prompt snapshot must be run-relative, not absolute: ${promptRel}`);
   }
-  const promptAbs = (0, import_node_path38.resolve)(runAbsolute, promptRel);
-  const rel = (0, import_node_path38.relative)(runAbsolute, promptAbs).split("\\").join("/");
-  if (rel === "" || rel === ".." || rel.startsWith("../") || (0, import_node_path38.isAbsolute)(rel)) {
+  const promptAbs = (0, import_node_path39.resolve)(runAbsolute, promptRel);
+  const rel = (0, import_node_path39.relative)(runAbsolute, promptAbs).split("\\").join("/");
+  if (rel === "" || rel === ".." || rel.startsWith("../") || (0, import_node_path39.isAbsolute)(rel)) {
     throw new DispatchPromptError(`prompt snapshot escapes its run directory: ${promptRel}`);
   }
   let cursor = runAbsolute;
   try {
     for (const segment of rel.split("/")) {
-      cursor = (0, import_node_path38.join)(cursor, segment);
-      if ((0, import_node_fs38.lstatSync)(cursor).isSymbolicLink()) {
+      cursor = (0, import_node_path39.join)(cursor, segment);
+      if ((0, import_node_fs39.lstatSync)(cursor).isSymbolicLink()) {
         throw new DispatchPromptError(`prompt snapshot traverses a symlink: ${promptRel}`);
       }
     }
-    const realRel = (0, import_node_path38.relative)((0, import_node_fs38.realpathSync)(runAbsolute), (0, import_node_fs38.realpathSync)(promptAbs)).split("\\").join("/");
-    if (realRel === ".." || realRel.startsWith("../") || (0, import_node_path38.isAbsolute)(realRel)) {
+    const realRel = (0, import_node_path39.relative)((0, import_node_fs39.realpathSync)(runAbsolute), (0, import_node_fs39.realpathSync)(promptAbs)).split("\\").join("/");
+    if (realRel === ".." || realRel.startsWith("../") || (0, import_node_path39.isAbsolute)(realRel)) {
       throw new DispatchPromptError(`prompt snapshot escapes its run directory: ${promptRel}`);
     }
   } catch (err) {
@@ -38014,7 +38146,7 @@ function runDispatchPrompt(opts) {
   }
   let promptBytes;
   try {
-    promptBytes = (0, import_node_fs38.readFileSync)(promptAbs);
+    promptBytes = (0, import_node_fs39.readFileSync)(promptAbs);
   } catch (err) {
     throw new DispatchPromptError(`cannot read prompt snapshot ${promptRel}: ${err.message}`);
   }
@@ -38031,7 +38163,7 @@ function runDispatchPrompt(opts) {
     const prepared = readHostWorkspaceState(repoRoot, lookup.runId, request.dispatchId);
     if (prepared != null) {
       workspaceMode = "isolated";
-      workspace = (0, import_node_path38.resolve)(repoRoot, prepared.workspace);
+      workspace = (0, import_node_path39.resolve)(repoRoot, prepared.workspace);
       baseCommit = prepared.base_commit;
     }
   } catch (err) {
@@ -38084,7 +38216,7 @@ dispatch_id: ${request.dispatchId}
 }
 
 // src/commands/dispatch-prepare.ts
-var import_node_path39 = require("node:path");
+var import_node_path40 = require("node:path");
 var DispatchPrepareError = class extends Error {
 };
 function alreadyStartedMessage(dispatchId) {
@@ -38125,7 +38257,7 @@ function runDispatchPrepare(opts) {
     throw new DispatchPrepareError(alreadyStartedMessage(dispatchId));
   }
   const { state, idempotent } = prepareHostWorkspace({ repoRoot, run: lookup.runId, dispatchId, now: opts.now });
-  const workspaceAbs = (0, import_node_path39.resolve)(repoRoot, state.workspace);
+  const workspaceAbs = (0, import_node_path40.resolve)(repoRoot, state.workspace);
   return {
     run: state.run,
     dispatchId: state.dispatch_id,
@@ -38139,9 +38271,9 @@ function runDispatchPrepare(opts) {
 }
 
 // src/commands/tool-complete.ts
-var import_node_fs39 = require("node:fs");
-var import_node_path40 = require("node:path");
-var import_node_crypto11 = require("node:crypto");
+var import_node_fs40 = require("node:fs");
+var import_node_path41 = require("node:path");
+var import_node_crypto12 = require("node:crypto");
 var ToolCompleteError = class extends Error {
 };
 function runToolComplete(opts) {
@@ -38170,7 +38302,7 @@ function runToolComplete(opts) {
       if (err instanceof RunLedgerError) throw new ToolCompleteError(err.message);
       throw err;
     }
-    const outputPath = (0, import_node_path40.isAbsolute)(opts.output) ? opts.output : (0, import_node_path40.join)(runDir, opts.output);
+    const outputPath = (0, import_node_path41.isAbsolute)(opts.output) ? opts.output : (0, import_node_path41.join)(runDir, opts.output);
     const schemaPaths = runSchemaDirectories(runDir, repoRoot);
     const validation = validateFile(outputPath, new SchemaSet(schemaPaths.snapshot, schemaPaths.project, schemaPaths.builtin), next.step.artifact_type);
     if (!validation.ok) {
@@ -38191,19 +38323,19 @@ function runToolComplete(opts) {
   const eventsForAttempt = readEventsStrict(runDirForClaim);
   const dispatchedCount = eventsForAttempt.filter((e) => e.type === "tool_dispatched" && e.extra.tool_call_id === ids.toolCallId).length;
   const attempt = dispatchedCount + 1;
-  const inflightDir = (0, import_node_path40.join)(repoRoot, ...INFLIGHT_DIR.split("/"));
-  if ((0, import_node_fs39.existsSync)(inflightDir)) {
+  const inflightDir = (0, import_node_path41.join)(repoRoot, ...INFLIGHT_DIR.split("/"));
+  if ((0, import_node_fs40.existsSync)(inflightDir)) {
     let files;
     try {
-      files = (0, import_node_fs39.readdirSync)(inflightDir);
+      files = (0, import_node_fs40.readdirSync)(inflightDir);
     } catch (err) {
       throw new ToolCompleteError(`failed to scan inflight claims: ${err.message}`);
     }
     for (const file of files) {
       if (!file.startsWith(`tool-${next.run}-${ids.toolCallId}-a`) || !file.endsWith(".json")) continue;
       if (file.includes(".status.json")) continue;
-      const abs = (0, import_node_path40.join)(inflightDir, file);
-      const claim = readInflightClaim(abs, (p) => (0, import_node_fs39.readFileSync)(p, "utf8"));
+      const abs = (0, import_node_path41.join)(inflightDir, file);
+      const claim = readInflightClaim(abs, (p) => (0, import_node_fs40.readFileSync)(p, "utf8"));
       if (claim != null && inflightClaimIsAlive(claim)) {
         throw new ToolCompleteError(`tool attempt ${ids.toolCallId} has a live concurrent execution (claim ${file} pid ${claim.pid}); manual completion refused for generation ${generation} \u2014 wait or cancel the live attempt`);
       }
@@ -38222,41 +38354,41 @@ function runToolComplete(opts) {
     }
   }
   const claimRel = `${INFLIGHT_DIR}/tool-${next.run}-${ids.toolCallId}-a${attempt}.json`;
-  const claimAbs = (0, import_node_path40.join)(repoRoot, ...claimRel.split("/"));
-  (0, import_node_fs39.mkdirSync)((0, import_node_path40.join)(repoRoot, ...INFLIGHT_DIR.split("/")), { recursive: true });
-  if ((0, import_node_fs39.existsSync)(claimAbs)) {
-    const existing = readInflightClaim(claimAbs, (p) => (0, import_node_fs39.readFileSync)(p, "utf8"));
+  const claimAbs = (0, import_node_path41.join)(repoRoot, ...claimRel.split("/"));
+  (0, import_node_fs40.mkdirSync)((0, import_node_path41.join)(repoRoot, ...INFLIGHT_DIR.split("/")), { recursive: true });
+  if ((0, import_node_fs40.existsSync)(claimAbs)) {
+    const existing = readInflightClaim(claimAbs, (p) => (0, import_node_fs40.readFileSync)(p, "utf8"));
     if (existing == null) {
       throw new ToolCompleteError(`tool attempt ${ids.toolCallId}:a${attempt} has unreadable claim at ${claimRel}`);
     }
     if (inflightClaimIsAlive(existing)) {
       throw new ToolCompleteError(`tool attempt ${ids.toolCallId}:a${attempt} still has a live supervisor (pid ${existing.pid}); wait before retry`);
     }
-    (0, import_node_fs39.rmSync)(claimAbs, { force: true });
+    (0, import_node_fs40.rmSync)(claimAbs, { force: true });
   }
   {
     const nowIso = (opts.now ?? /* @__PURE__ */ new Date()).toISOString();
     const claim = { pid: process.pid, supervisor_pid: process.pid, executor_pid: null, process_group_id: null, started_at: nowIso, heartbeat_at: nowIso, last_output_at: null, stdout_bytes: 0, stderr_bytes: 0 };
-    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto11.randomUUID)()}`;
+    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto12.randomUUID)()}`;
     try {
-      (0, import_node_fs39.writeFileSync)(tmp, JSON.stringify(claim), { flag: "wx" });
-      (0, import_node_fs39.linkSync)(tmp, claimAbs);
+      (0, import_node_fs40.writeFileSync)(tmp, JSON.stringify(claim), { flag: "wx" });
+      (0, import_node_fs40.linkSync)(tmp, claimAbs);
     } catch (error) {
-      (0, import_node_fs39.rmSync)(tmp, { force: true });
+      (0, import_node_fs40.rmSync)(tmp, { force: true });
       if (error.code === "EEXIST") {
-        const competing = readInflightClaim(claimAbs, (p) => (0, import_node_fs39.readFileSync)(p, "utf8"));
+        const competing = readInflightClaim(claimAbs, (p) => (0, import_node_fs40.readFileSync)(p, "utf8"));
         throw new ToolCompleteError(`tool attempt ${ids.toolCallId}:a${attempt} already has concurrent claim (pid ${competing?.pid ?? "unknown"})`);
       }
       throw new ToolCompleteError(`failed to publish claim for ${ids.toolCallId}:a${attempt}`);
     } finally {
-      (0, import_node_fs39.rmSync)(tmp, { force: true });
+      (0, import_node_fs40.rmSync)(tmp, { force: true });
     }
   }
   const fresh = readEventsStrict(runDirForClaim);
   const already = plannedGenerationAttributed(fresh, next.step.id, plannedOutput, generation) || fresh.some((e) => e.type === "artifact_created" && e.step === next.step.id && e.extra.artifact === opts.output);
   if (already) {
     try {
-      (0, import_node_fs39.rmSync)(claimAbs, { force: true });
+      (0, import_node_fs40.rmSync)(claimAbs, { force: true });
     } catch {
     }
     throw new ToolCompleteError(`step "${next.step.id}" generation ${generation} already has an attributed artifact; refusing duplicate manual completion`);
@@ -38264,7 +38396,7 @@ function runToolComplete(opts) {
   const stillNext = runNext({ run: opts.run, cwd: opts.cwd, repoRoot });
   if (stillNext.step?.id !== next.step.id || stillNext.status !== "ready") {
     try {
-      (0, import_node_fs39.rmSync)(claimAbs, { force: true });
+      (0, import_node_fs40.rmSync)(claimAbs, { force: true });
     } catch {
     }
     throw new ToolCompleteError(`run "${opts.run}" is no longer waiting at step "${next.step.id}" (now ${stillNext.step?.id ?? stillNext.status}); concurrent attribution won`);
@@ -38307,16 +38439,16 @@ function runToolComplete(opts) {
     throw err;
   } finally {
     try {
-      (0, import_node_fs39.rmSync)(claimAbs, { force: true });
+      (0, import_node_fs40.rmSync)(claimAbs, { force: true });
     } catch {
     }
   }
 }
 
 // src/commands/tool-run.ts
-var import_node_fs40 = require("node:fs");
-var import_node_path41 = require("node:path");
-var import_node_crypto12 = require("node:crypto");
+var import_node_fs41 = require("node:fs");
+var import_node_path42 = require("node:path");
+var import_node_crypto13 = require("node:crypto");
 var ToolRunError = class extends Error {
 };
 function parseTimeoutSeconds(value) {
@@ -38331,9 +38463,9 @@ function parseTimeoutSeconds(value) {
   return sec * 1e3;
 }
 function ensureProfileSnapshot2(repoRoot, runDir, _runId, now, userPathOptions, harness, bindRefs = []) {
-  const snapshotPath = (0, import_node_path41.join)(runDir, "profile.yaml");
-  if ((0, import_node_fs40.existsSync)(snapshotPath)) {
-    const text2 = (0, import_node_fs40.readFileSync)(snapshotPath, "utf8");
+  const snapshotPath = (0, import_node_path42.join)(runDir, "profile.yaml");
+  if ((0, import_node_fs41.existsSync)(snapshotPath)) {
+    const text2 = (0, import_node_fs41.readFileSync)(snapshotPath, "utf8");
     try {
       return parseSnapshotDocument(text2, "profile.yaml (run snapshot)");
     } catch (err) {
@@ -38370,13 +38502,13 @@ function ensureProfileSnapshot2(repoRoot, runDir, _runId, now, userPathOptions, 
   }
   const extraRefs = [...Object.values(liveLayers.session), ...Object.values(liveLayers.repo), ...Object.values(liveLayers.user), ...Object.values(liveProfile.bindings), ...bindRefs];
   const text = serializeSnapshot(liveProfile, extraRefs);
-  const tmp = `${snapshotPath}.tmp-${process.pid}-${(0, import_node_crypto12.randomUUID)()}`;
-  (0, import_node_fs40.writeFileSync)(tmp, text, "utf8");
+  const tmp = `${snapshotPath}.tmp-${process.pid}-${(0, import_node_crypto13.randomUUID)()}`;
+  (0, import_node_fs41.writeFileSync)(tmp, text, "utf8");
   try {
-    (0, import_node_fs40.renameSync)(tmp, snapshotPath);
+    (0, import_node_fs41.renameSync)(tmp, snapshotPath);
   } catch (err) {
     try {
-      (0, import_node_fs40.rmSync)(tmp, { force: true });
+      (0, import_node_fs41.rmSync)(tmp, { force: true });
     } catch {
     }
     throw err;
@@ -38449,7 +38581,7 @@ function runToolRun(opts) {
   const profile = ensureProfileSnapshot2(repoRoot, run.dir, run.runId, opts.now, opts.userPathOptions, opts.harness);
   const spec = profile.tools[toolName];
   if (spec == null) {
-    const snapshotPath = (0, import_node_path41.join)(run.dir, "profile.yaml");
+    const snapshotPath = (0, import_node_path42.join)(run.dir, "profile.yaml");
     throw new ToolRunError(`tool "${toolName}" is registered in the live profile but absent from this run's immutable snapshot at ${snapshotPath} \u2014 this run was created before the tool was added. Use manual \`fadeno tool-complete ${run.runId} --output <artifact-path>\` for this run, or create a new run to use the registry binding.`);
   }
   const generation = parseGeneration(outputRel).generation;
@@ -38497,14 +38629,14 @@ function runToolRun(opts) {
 
 // src/commands/setup.ts
 var import_node_child_process13 = require("node:child_process");
-var import_node_fs42 = require("node:fs");
+var import_node_fs43 = require("node:fs");
 var import_node_os4 = require("node:os");
-var import_node_path43 = require("node:path");
+var import_node_path44 = require("node:path");
 
 // src/lib/installations.ts
-var import_node_crypto13 = require("node:crypto");
-var import_node_fs41 = require("node:fs");
-var import_node_path42 = require("node:path");
+var import_node_crypto14 = require("node:crypto");
+var import_node_fs42 = require("node:fs");
+var import_node_path43 = require("node:path");
 var InstallationError = class extends Error {
 };
 function emptyInstallationManifest() {
@@ -38512,9 +38644,9 @@ function emptyInstallationManifest() {
 }
 function readInstallationManifest(options = {}) {
   const path = userPaths(options).installationsFile;
-  if (!(0, import_node_fs41.existsSync)(path)) return emptyInstallationManifest();
+  if (!(0, import_node_fs42.existsSync)(path)) return emptyInstallationManifest();
   try {
-    const parsed = JSON.parse((0, import_node_fs41.readFileSync)(path, "utf8"));
+    const parsed = JSON.parse((0, import_node_fs42.readFileSync)(path, "utf8"));
     if (parsed.schema_version !== 1 || parsed.harnesses == null || typeof parsed.harnesses !== "object") {
       throw new InstallationError(`unsupported or malformed installation manifest at ${path}`);
     }
@@ -38532,14 +38664,14 @@ function maintainedHarnesses(options = {}) {
   return [...names].sort();
 }
 function writeInstallationManifest(paths, manifest) {
-  (0, import_node_fs41.mkdirSync)((0, import_node_path42.dirname)(paths.installationsFile), { recursive: true });
+  (0, import_node_fs42.mkdirSync)((0, import_node_path43.dirname)(paths.installationsFile), { recursive: true });
   const tmp = `${paths.installationsFile}.tmp-${process.pid}-${Date.now()}`;
-  (0, import_node_fs41.writeFileSync)(tmp, `${JSON.stringify(manifest, null, 2)}
+  (0, import_node_fs42.writeFileSync)(tmp, `${JSON.stringify(manifest, null, 2)}
 `, "utf8");
-  (0, import_node_fs41.renameSync)(tmp, paths.installationsFile);
+  (0, import_node_fs42.renameSync)(tmp, paths.installationsFile);
 }
 function fileDigest(path) {
-  return (0, import_node_crypto13.createHash)("sha256").update((0, import_node_fs41.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto14.createHash)("sha256").update((0, import_node_fs42.readFileSync)(path)).digest("hex");
 }
 var VERSION_RE = /^(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?$/;
 function compareFadenoVersions(a, b) {
@@ -38561,13 +38693,13 @@ function compareFadenoVersions(a, b) {
 }
 function sourceBundleVersion(sourceDir) {
   const candidates = [
-    (0, import_node_path42.join)((0, import_node_path42.dirname)(sourceDir), ".claude-plugin", "plugin.json"),
-    (0, import_node_path42.join)((0, import_node_path42.dirname)(sourceDir), ".codex-plugin", "plugin.json")
+    (0, import_node_path43.join)((0, import_node_path43.dirname)(sourceDir), ".claude-plugin", "plugin.json"),
+    (0, import_node_path43.join)((0, import_node_path43.dirname)(sourceDir), ".codex-plugin", "plugin.json")
   ];
   for (const candidate of candidates) {
     try {
-      if (!(0, import_node_fs41.existsSync)(candidate)) continue;
-      const parsed = JSON.parse((0, import_node_fs41.readFileSync)(candidate, "utf8"));
+      if (!(0, import_node_fs42.existsSync)(candidate)) continue;
+      const parsed = JSON.parse((0, import_node_fs42.readFileSync)(candidate, "utf8"));
       if (parsed.name !== "fadeno") continue;
       if (typeof parsed.version === "string" && parsed.version.trim().length > 0) {
         return parsed.version.trim();
@@ -38576,9 +38708,9 @@ function sourceBundleVersion(sourceDir) {
     }
   }
   try {
-    const pkg = (0, import_node_path42.join)(sourceDir, "package.json");
-    if ((0, import_node_fs41.existsSync)(pkg)) {
-      const parsed = JSON.parse((0, import_node_fs41.readFileSync)(pkg, "utf8"));
+    const pkg = (0, import_node_path43.join)(sourceDir, "package.json");
+    if ((0, import_node_fs42.existsSync)(pkg)) {
+      const parsed = JSON.parse((0, import_node_fs42.readFileSync)(pkg, "utf8"));
       if (typeof parsed.version === "string" && parsed.version.trim().length > 0) {
         if (parsed.name === "fadeno-runtime" || parsed.name === "fadeno") {
           return parsed.version.trim();
@@ -38591,9 +38723,9 @@ function sourceBundleVersion(sourceDir) {
 }
 function readRuntimeVersionAt(binDir) {
   try {
-    const pkgPath = (0, import_node_path42.join)(binDir, "package.json");
-    if ((0, import_node_fs41.existsSync)(pkgPath)) {
-      const parsed = JSON.parse((0, import_node_fs41.readFileSync)(pkgPath, "utf8"));
+    const pkgPath = (0, import_node_path43.join)(binDir, "package.json");
+    if ((0, import_node_fs42.existsSync)(pkgPath)) {
+      const parsed = JSON.parse((0, import_node_fs42.readFileSync)(pkgPath, "utf8"));
       if (typeof parsed.version === "string" && parsed.version.trim().length > 0) {
         if (parsed.name === "fadeno-runtime" || parsed.name === "fadeno") {
           return { version: parsed.version.trim(), source: "observed" };
@@ -38607,11 +38739,11 @@ function readRuntimeVersionAt(binDir) {
 var LOCK_STALE_MS2 = 12e4;
 function isStaleLock(lockPath) {
   try {
-    const st = (0, import_node_fs41.statSync)(lockPath);
+    const st = (0, import_node_fs42.statSync)(lockPath);
     return Date.now() - st.mtimeMs > LOCK_STALE_MS2;
   } catch {
     try {
-      const lst = (0, import_node_fs41.lstatSync)(lockPath);
+      const lst = (0, import_node_fs42.lstatSync)(lockPath);
       return Date.now() - lst.mtimeMs > LOCK_STALE_MS2;
     } catch {
       return false;
@@ -38622,25 +38754,25 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
   const allowInstall = opts.allowInstall ?? false;
   const trustSource = opts.trustSource ?? false;
   const force = opts.force ?? false;
-  const copyFn = opts.copyFn ?? import_node_fs41.cpSync;
+  const copyFn = opts.copyFn ?? import_node_fs42.cpSync;
   const digestFn = opts.digestFn ?? fileDigest;
-  const renameFn = opts.renameFn ?? import_node_fs41.renameSync;
-  const rmFn = opts.rmFn ?? import_node_fs41.rmSync;
+  const renameFn = opts.renameFn ?? import_node_fs42.renameSync;
+  const rmFn = opts.rmFn ?? import_node_fs42.rmSync;
   const managedDir = paths.managedRuntimeDir;
   const managedCli = paths.managedCli;
   const dataDir = paths.dataDir;
-  const lockPath = (0, import_node_path42.join)(dataDir, ".runtime.lock");
-  const stagingPath = (0, import_node_path42.join)(dataDir, "runtime.staging");
-  const oldPath = (0, import_node_path42.join)(dataDir, "runtime.old");
+  const lockPath = (0, import_node_path43.join)(dataDir, ".runtime.lock");
+  const stagingPath = (0, import_node_path43.join)(dataDir, "runtime.staging");
+  const oldPath = (0, import_node_path43.join)(dataDir, "runtime.old");
   const fromVersion = manifest.runtime?.version ?? null;
-  if (sourceDir == null || !(0, import_node_fs41.existsSync)((0, import_node_path42.join)(sourceDir, "fadeno"))) {
+  if (sourceDir == null || !(0, import_node_fs42.existsSync)((0, import_node_path43.join)(sourceDir, "fadeno"))) {
     if (manifest.runtime != null) {
       return { outcome: "skipped-no-source", from: fromVersion, to: fromVersion };
     }
     return { outcome: "absent", from: null, to: null };
   }
   try {
-    if ((0, import_node_path42.resolve)(sourceDir) === (0, import_node_path42.resolve)(managedDir)) {
+    if ((0, import_node_path43.resolve)(sourceDir) === (0, import_node_path43.resolve)(managedDir)) {
       const observed = readRuntimeVersionAt(sourceDir);
       const ver = observed.version ?? packageVersion();
       const src = observed.version != null ? "observed" : "assumed";
@@ -38676,9 +38808,9 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
     if (srcVer == null) {
       return { outcome: "kept-newer", from: null, to: null };
     }
-    (0, import_node_fs41.mkdirSync)(dataDir, { recursive: true });
+    (0, import_node_fs42.mkdirSync)(dataDir, { recursive: true });
     try {
-      (0, import_node_fs41.mkdirSync)(lockPath);
+      (0, import_node_fs42.mkdirSync)(lockPath);
     } catch (err) {
       if (err.code === "EEXIST") {
         if (isStaleLock(lockPath)) {
@@ -38687,7 +38819,7 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
           } catch {
           }
           try {
-            (0, import_node_fs41.mkdirSync)(lockPath);
+            (0, import_node_fs42.mkdirSync)(lockPath);
           } catch {
             return { outcome: "locked", from: null, to: srcVer };
           }
@@ -38710,12 +38842,12 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
       }
       copyFn(sourceDir, stagingPath, { recursive: true });
       staged2 = true;
-      if (!(0, import_node_fs41.existsSync)((0, import_node_path42.join)(stagingPath, "fadeno"))) throw new InstallationError(`staged runtime missing fadeno binary`);
-      if ((0, import_node_fs41.existsSync)((0, import_node_path42.join)(sourceDir, "templates")) && !(0, import_node_fs41.existsSync)((0, import_node_path42.join)(stagingPath, "templates"))) {
+      if (!(0, import_node_fs42.existsSync)((0, import_node_path43.join)(stagingPath, "fadeno"))) throw new InstallationError(`staged runtime missing fadeno binary`);
+      if ((0, import_node_fs42.existsSync)((0, import_node_path43.join)(sourceDir, "templates")) && !(0, import_node_fs42.existsSync)((0, import_node_path43.join)(stagingPath, "templates"))) {
         throw new InstallationError(`staged runtime missing templates`);
       }
       if (managedCli.endsWith(".cmd")) {
-        (0, import_node_fs41.writeFileSync)((0, import_node_path42.join)(stagingPath, "fadeno.cmd"), '@echo off\r\nnode "%~dp0fadeno" %*\r\n', "utf8");
+        (0, import_node_fs42.writeFileSync)((0, import_node_path43.join)(stagingPath, "fadeno.cmd"), '@echo off\r\nnode "%~dp0fadeno" %*\r\n', "utf8");
       }
       renameFn(stagingPath, managedDir);
       staged2 = false;
@@ -38742,11 +38874,11 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
       } catch {
       }
       try {
-        if ((0, import_node_fs41.existsSync)(stagingPath)) rmFn(stagingPath, { recursive: true, force: true });
+        if ((0, import_node_fs42.existsSync)(stagingPath)) rmFn(stagingPath, { recursive: true, force: true });
       } catch {
       }
       try {
-        if ((0, import_node_fs41.existsSync)(oldPath)) rmFn(oldPath, { recursive: true, force: true });
+        if ((0, import_node_fs42.existsSync)(oldPath)) rmFn(oldPath, { recursive: true, force: true });
       } catch {
       }
     }
@@ -38765,8 +38897,8 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
     let srcDigest = null;
     let dstDigest = null;
     try {
-      srcDigest = digestFn((0, import_node_path42.join)(sourceDir, "fadeno"));
-      dstDigest = digestFn((0, import_node_path42.join)(managedDir, "fadeno"));
+      srcDigest = digestFn((0, import_node_path43.join)(sourceDir, "fadeno"));
+      dstDigest = digestFn((0, import_node_path43.join)(managedDir, "fadeno"));
     } catch {
       srcDigest = "missing-src";
       dstDigest = "missing-dst";
@@ -38785,8 +38917,8 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
     let srcDigest = null;
     let dstDigest = null;
     try {
-      srcDigest = digestFn((0, import_node_path42.join)(sourceDir, "fadeno"));
-      dstDigest = digestFn((0, import_node_path42.join)(managedDir, "fadeno"));
+      srcDigest = digestFn((0, import_node_path43.join)(sourceDir, "fadeno"));
+      dstDigest = digestFn((0, import_node_path43.join)(managedDir, "fadeno"));
     } catch {
       srcDigest = "missing-src";
       dstDigest = "missing-dst";
@@ -38795,9 +38927,9 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
       return { outcome: "current", from: currentVersion, to: currentVersion };
     }
   }
-  (0, import_node_fs41.mkdirSync)(dataDir, { recursive: true });
+  (0, import_node_fs42.mkdirSync)(dataDir, { recursive: true });
   try {
-    (0, import_node_fs41.mkdirSync)(lockPath);
+    (0, import_node_fs42.mkdirSync)(lockPath);
   } catch (err) {
     if (err.code === "EEXIST") {
       if (isStaleLock(lockPath)) {
@@ -38806,7 +38938,7 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
         } catch {
         }
         try {
-          (0, import_node_fs41.mkdirSync)(lockPath);
+          (0, import_node_fs42.mkdirSync)(lockPath);
         } catch (e) {
           if (e.code === "EEXIST") return { outcome: "locked", from: currentVersion, to: sourceVersion };
           throw e;
@@ -38832,14 +38964,14 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
     }
     copyFn(sourceDir, stagingPath, { recursive: true });
     staged = true;
-    if (!(0, import_node_fs41.existsSync)((0, import_node_path42.join)(stagingPath, "fadeno"))) throw new InstallationError(`staged runtime missing fadeno binary`);
-    if ((0, import_node_fs41.existsSync)((0, import_node_path42.join)(sourceDir, "templates")) && !(0, import_node_fs41.existsSync)((0, import_node_path42.join)(stagingPath, "templates"))) {
+    if (!(0, import_node_fs42.existsSync)((0, import_node_path43.join)(stagingPath, "fadeno"))) throw new InstallationError(`staged runtime missing fadeno binary`);
+    if ((0, import_node_fs42.existsSync)((0, import_node_path43.join)(sourceDir, "templates")) && !(0, import_node_fs42.existsSync)((0, import_node_path43.join)(stagingPath, "templates"))) {
       throw new InstallationError(`staged runtime missing templates`);
     }
     if (managedCli.endsWith(".cmd")) {
-      (0, import_node_fs41.writeFileSync)((0, import_node_path42.join)(stagingPath, "fadeno.cmd"), '@echo off\r\nnode "%~dp0fadeno" %*\r\n', "utf8");
+      (0, import_node_fs42.writeFileSync)((0, import_node_path43.join)(stagingPath, "fadeno.cmd"), '@echo off\r\nnode "%~dp0fadeno" %*\r\n', "utf8");
     }
-    if ((0, import_node_fs41.existsSync)(managedDir)) {
+    if ((0, import_node_fs42.existsSync)(managedDir)) {
       renameFn(managedDir, oldPath);
       renamed = true;
     }
@@ -38863,14 +38995,14 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
     if (renamed) {
       let restored = false;
       try {
-        if ((0, import_node_fs41.existsSync)(oldPath) && !(0, import_node_fs41.existsSync)(managedDir)) {
+        if ((0, import_node_fs42.existsSync)(oldPath) && !(0, import_node_fs42.existsSync)(managedDir)) {
           try {
             renameFn(oldPath, managedDir);
             restored = true;
           } catch {
             restoreFailed = true;
           }
-        } else if ((0, import_node_fs41.existsSync)(oldPath) && (0, import_node_fs41.existsSync)(managedDir)) {
+        } else if ((0, import_node_fs42.existsSync)(oldPath) && (0, import_node_fs42.existsSync)(managedDir)) {
           try {
             rmFn(managedDir, { recursive: true, force: true });
           } catch {
@@ -38895,7 +39027,7 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
       }
     }
     try {
-      if ((0, import_node_fs41.existsSync)(stagingPath)) rmFn(stagingPath, { recursive: true, force: true });
+      if ((0, import_node_fs42.existsSync)(stagingPath)) rmFn(stagingPath, { recursive: true, force: true });
     } catch {
     }
     throw e;
@@ -38905,12 +39037,12 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
     } catch {
     }
     try {
-      if ((0, import_node_fs41.existsSync)(stagingPath)) rmFn(stagingPath, { recursive: true, force: true });
+      if ((0, import_node_fs42.existsSync)(stagingPath)) rmFn(stagingPath, { recursive: true, force: true });
     } catch {
     }
     if (!restoreFailed) {
       try {
-        if ((0, import_node_fs41.existsSync)(oldPath)) rmFn(oldPath, { recursive: true, force: true });
+        if ((0, import_node_fs42.existsSync)(oldPath)) rmFn(oldPath, { recursive: true, force: true });
       } catch {
       }
     } else {
@@ -38924,7 +39056,7 @@ function syncManagedRuntime(paths, sourceDir, manifest, opts = {}) {
 function recordHarnessInstallation(paths, harness, files, manifest, permissionRules = []) {
   manifest.harnesses[harness] = {
     version: packageVersion(),
-    files: files.filter(import_node_fs41.existsSync).map((path) => ({ path, sha256: fileDigest(path) })),
+    files: files.filter(import_node_fs42.existsSync).map((path) => ({ path, sha256: fileDigest(path) })),
     ...permissionRules.length > 0 ? { permissionRules } : {}
   };
   writeInstallationManifest(paths, manifest);
@@ -38951,20 +39083,20 @@ function probe(command2) {
 function rememberHarness(paths, target, created) {
   const body = `${target}
 `;
-  if ((0, import_node_fs42.existsSync)(paths.harnessFile) && (0, import_node_fs42.readFileSync)(paths.harnessFile, "utf8") === body) return;
-  (0, import_node_fs42.mkdirSync)(paths.stateDir, { recursive: true });
-  (0, import_node_fs42.writeFileSync)(paths.harnessFile, body, "utf8");
+  if ((0, import_node_fs43.existsSync)(paths.harnessFile) && (0, import_node_fs43.readFileSync)(paths.harnessFile, "utf8") === body) return;
+  (0, import_node_fs43.mkdirSync)(paths.stateDir, { recursive: true });
+  (0, import_node_fs43.writeFileSync)(paths.harnessFile, body, "utf8");
   created.push(paths.harnessFile);
 }
 function ensureClaudePermission(paths, options, notices) {
-  if (!(0, import_node_fs42.existsSync)(paths.managedCli)) return null;
+  if (!(0, import_node_fs43.existsSync)(paths.managedCli)) return null;
   const env = options?.env ?? process.env;
-  const settingsPath = (0, import_node_path43.join)(env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path43.join)(options?.home ?? (0, import_node_os4.homedir)(), ".claude"), "settings.json");
-  const createdFile = !(0, import_node_fs42.existsSync)(settingsPath);
+  const settingsPath = (0, import_node_path44.join)(env.CLAUDE_CONFIG_DIR?.trim() || (0, import_node_path44.join)(options?.home ?? (0, import_node_os4.homedir)(), ".claude"), "settings.json");
+  const createdFile = !(0, import_node_fs43.existsSync)(settingsPath);
   let data = {};
   if (!createdFile) {
     try {
-      const parsed = JSON.parse((0, import_node_fs42.readFileSync)(settingsPath, "utf8"));
+      const parsed = JSON.parse((0, import_node_fs43.readFileSync)(settingsPath, "utf8"));
       if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
         notices.push(`Claude user settings ${settingsPath} are not an object; permission setup left them untouched.`);
         return null;
@@ -38990,28 +39122,28 @@ function ensureClaudePermission(paths, options, notices) {
   allow.push(rule);
   permissions.allow = allow;
   data.permissions = permissions;
-  (0, import_node_fs42.mkdirSync)((0, import_node_path43.dirname)(settingsPath), { recursive: true });
-  (0, import_node_fs42.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
+  (0, import_node_fs43.mkdirSync)((0, import_node_path44.dirname)(settingsPath), { recursive: true });
+  (0, import_node_fs43.writeFileSync)(settingsPath, `${JSON.stringify(data, null, 2)}
 `, "utf8");
   notices.push(`Claude user permission added for the managed Fadeno runtime only: ${rule}`);
   return { path: settingsPath, rule, createdFile };
 }
 function inferBundledRuntimeForRemediation(userPathOptions) {
   const env = userPathOptions?.env ?? process.env;
-  if (env.FADENO_BUNDLED_RUNTIME && (0, import_node_fs42.existsSync)((0, import_node_path43.join)(env.FADENO_BUNDLED_RUNTIME, "fadeno"))) {
+  if (env.FADENO_BUNDLED_RUNTIME && (0, import_node_fs43.existsSync)((0, import_node_path44.join)(env.FADENO_BUNDLED_RUNTIME, "fadeno"))) {
     return env.FADENO_BUNDLED_RUNTIME;
   }
   try {
     const argv1 = process.argv[1];
     if (argv1) {
-      const dir = (0, import_node_path43.dirname)((0, import_node_path43.resolve)(argv1));
-      if ((0, import_node_fs42.existsSync)((0, import_node_path43.join)(dir, "fadeno")) && (0, import_node_fs42.existsSync)((0, import_node_path43.join)(dir, "package.json"))) {
+      const dir = (0, import_node_path44.dirname)((0, import_node_path44.resolve)(argv1));
+      if ((0, import_node_fs43.existsSync)((0, import_node_path44.join)(dir, "fadeno")) && (0, import_node_fs43.existsSync)((0, import_node_path44.join)(dir, "package.json"))) {
         return dir;
       }
       try {
-        const real = (0, import_node_fs42.realpathSync)(argv1);
-        const realDir = (0, import_node_path43.dirname)((0, import_node_path43.resolve)(real));
-        if ((0, import_node_fs42.existsSync)((0, import_node_path43.join)(realDir, "fadeno"))) return realDir;
+        const real = (0, import_node_fs43.realpathSync)(argv1);
+        const realDir = (0, import_node_path44.dirname)((0, import_node_path44.resolve)(real));
+        if ((0, import_node_fs43.existsSync)((0, import_node_path44.join)(realDir, "fadeno"))) return realDir;
       } catch {
       }
     }
@@ -39026,7 +39158,7 @@ function runSetup(opts = {}) {
   const probes = PROBES.map((item) => probeCommand(item.command));
   const created = [];
   const setupNotices = [];
-  const manifestExisted = (0, import_node_fs42.existsSync)(paths.installationsFile);
+  const manifestExisted = (0, import_node_fs43.existsSync)(paths.installationsFile);
   const manifest = readInstallationManifest(opts.userPathOptions);
   const runtimeSource = opts.runtimeSource !== void 0 ? opts.runtimeSource : (opts.userPathOptions?.env ?? process.env).FADENO_BUNDLED_RUNTIME ?? null;
   let syncOutcome = "absent";
@@ -39060,13 +39192,13 @@ function runSetup(opts = {}) {
       target: "codex",
       scope: "user",
       userPathOptions: opts.userPathOptions,
-      cliPath: (0, import_node_fs42.existsSync)(paths.managedCli) ? paths.managedCli : void 0
+      cliPath: (0, import_node_fs43.existsSync)(paths.managedCli) ? paths.managedCli : void 0
     });
   }
   const priorPermissionRules = opts.target == null ? [] : manifest.harnesses[opts.target]?.permissionRules ?? [];
   const addedPermission = opts.target === "claude" ? ensureClaudePermission(paths, opts.userPathOptions, setupNotices) : null;
   if (opts.target != null) {
-    const managedFiles = steering?.results.map((item) => item.path).filter((path) => (0, import_node_fs42.existsSync)(path) && (0, import_node_fs42.readFileSync)(path, "utf8").startsWith("# fadeno:managed")) ?? [];
+    const managedFiles = steering?.results.map((item) => item.path).filter((path) => (0, import_node_fs43.existsSync)(path) && (0, import_node_fs43.readFileSync)(path, "utf8").startsWith("# fadeno:managed")) ?? [];
     const permissionRules = (addedPermission == null ? priorPermissionRules : [...priorPermissionRules, addedPermission]).filter((item, index, all) => all.findIndex((other) => other.path === item.path && other.rule === item.rule) === index);
     recordHarnessInstallation(
       paths,
@@ -39077,7 +39209,7 @@ function runSetup(opts = {}) {
     );
     if (!manifestExisted && !created.includes(paths.installationsFile)) created.push(paths.installationsFile);
   } else if (manifest.runtime != null) {
-    if (!(0, import_node_fs42.existsSync)(paths.installationsFile)) {
+    if (!(0, import_node_fs43.existsSync)(paths.installationsFile)) {
       writeInstallationManifest(paths, manifest);
       if (!manifestExisted && !created.includes(paths.installationsFile)) created.push(paths.installationsFile);
     }
@@ -39147,16 +39279,16 @@ var import_node_fs45 = require("node:fs");
 var import_node_path46 = require("node:path");
 
 // src/lib/opencode-steering.ts
-var import_node_crypto14 = require("node:crypto");
-var import_node_fs43 = require("node:fs");
-var import_node_path44 = require("node:path");
+var import_node_crypto15 = require("node:crypto");
+var import_node_fs44 = require("node:fs");
+var import_node_path45 = require("node:path");
 var OPENCODE_STEERING_ARCHETYPES = ["worker", "reviewer", "judge"];
-var AGENT_MARK = /<!-- fadeno:managed version=([^\s]+) digest=([0-9a-f]{64}) -->/;
+var AGENT_MARK2 = /<!-- fadeno:managed version=([^\s]+) digest=([0-9a-f]{64}) -->/;
 var PLUGIN_MARK = /^\/\/ fadeno:managed version=([^\s]+)(?: digest=([0-9a-f]{64}))?$/m;
-function digest(text) {
-  return (0, import_node_crypto14.createHash)("sha256").update(text).digest("hex");
+function digest2(text) {
+  return (0, import_node_crypto15.createHash)("sha256").update(text).digest("hex");
 }
-function missing(path) {
+function missing2(path) {
   return {
     path,
     present: false,
@@ -39168,20 +39300,20 @@ function missing(path) {
     stale: false
   };
 }
-function readText(path) {
+function readText2(path) {
   try {
-    return (0, import_node_fs43.existsSync)(path) ? (0, import_node_fs43.readFileSync)(path, "utf8") : null;
+    return (0, import_node_fs44.existsSync)(path) ? (0, import_node_fs44.readFileSync)(path, "utf8") : null;
   } catch {
     return null;
   }
 }
-function inspectAgent(path, issues, required = true) {
-  const text = readText(path);
+function inspectAgent2(path, issues, required = true) {
+  const text = readText2(path);
   if (text == null) {
     if (required) issues.push({ kind: "missing", path, detail: "managed OpenCode steering file is missing" });
-    return missing(path);
+    return missing2(path);
   }
-  const mark = AGENT_MARK.exec(text);
+  const mark = AGENT_MARK2.exec(text);
   if (mark == null) {
     issues.push({ kind: "unmanaged", path, detail: "OpenCode steering path exists without a Fadeno managed marker" });
     return {
@@ -39199,7 +39331,7 @@ function inspectAgent(path, issues, required = true) {
   const recordedDigest = mark[2] ?? null;
   const withoutMark = text.replace(`${mark[0]}
 `, "");
-  const digestValid = recordedDigest != null && digest(withoutMark) === recordedDigest;
+  const digestValid = recordedDigest != null && digest2(withoutMark) === recordedDigest;
   const frontmatter = text.startsWith("---\n") && text.includes("\n---\n");
   const mode = /^mode:\s*subagent\s*$/m.test(text);
   const valid = frontmatter && mode;
@@ -39210,10 +39342,10 @@ function inspectAgent(path, issues, required = true) {
   return { path, present: true, managed: true, valid, version, digest: recordedDigest, digestValid, stale };
 }
 function inspectPlugin(path, issues) {
-  const text = readText(path);
+  const text = readText2(path);
   if (text == null) {
     issues.push({ kind: "missing", path, detail: "OpenCode steering plugin is missing" });
-    return missing(path);
+    return missing2(path);
   }
   const mark = PLUGIN_MARK.exec(text);
   if (mark == null) {
@@ -39224,7 +39356,7 @@ function inspectPlugin(path, issues) {
   const recordedDigest = mark[2] ?? null;
   const withoutMark = text.replace(`${mark[0]}
 `, "");
-  const digestValid = recordedDigest != null && digest(withoutMark) === recordedDigest;
+  const digestValid = recordedDigest != null && digest2(withoutMark) === recordedDigest;
   const stale = version != null && version !== packageVersion();
   const valid = /export\s+default\s+async\s+function\s+FadenoSteering/.test(text) && /tool\.execute\.before/.test(text);
   if (!valid) issues.push({ kind: "malformed", path, detail: "managed OpenCode steering plugin has no valid default hook export" });
@@ -39233,16 +39365,16 @@ function inspectPlugin(path, issues) {
   return { path, present: true, managed: true, valid, version, digest: recordedDigest, digestValid, stale };
 }
 function inspectOpenCodeMaterialization(repoRoot, expected) {
-  const agentDir = (0, import_node_path44.join)(repoRoot, ".opencode", "agent");
-  const pluginPath = (0, import_node_path44.join)(repoRoot, ".opencode", "plugin", "fadeno-steering.js");
+  const agentDir = (0, import_node_path45.join)(repoRoot, ".opencode", "agent");
+  const pluginPath = (0, import_node_path45.join)(repoRoot, ".opencode", "plugin", "fadeno-steering.js");
   const issues = [];
   const slots = [];
   for (const archetype of OPENCODE_STEERING_ARCHETYPES) {
-    const hostPath = (0, import_node_path44.join)(agentDir, `${archetype}.md`);
-    const commandPath = (0, import_node_path44.join)(agentDir, `fadeno-dispatch-${archetype}.md`);
+    const hostPath = (0, import_node_path45.join)(agentDir, `${archetype}.md`);
+    const commandPath = (0, import_node_path45.join)(agentDir, `fadeno-dispatch-${archetype}.md`);
     const expectedKind = expected.get(archetype) ?? null;
-    const host = inspectAgent(hostPath, issues, expectedKind === "host");
-    const command2 = inspectAgent(commandPath, issues, expectedKind === "command");
+    const host = inspectAgent2(hostPath, issues, expectedKind === "host");
+    const command2 = inspectAgent2(commandPath, issues, expectedKind === "command");
     const contradictory = host.present && command2.present;
     if (contradictory) {
       issues.push({ kind: "contradictory", path: agentDir, detail: `${archetype} has both host and command steering files materialized` });
@@ -39250,7 +39382,7 @@ function inspectOpenCodeMaterialization(repoRoot, expected) {
     slots.push({ archetype, expected: expectedKind, host, command: command2, contradictory });
   }
   const refusals = OPENCODE_STEERING_ARCHETYPES.map(
-    (archetype) => inspectAgent((0, import_node_path44.join)(agentDir, `fadeno-steering-refused-${archetype}.md`), issues)
+    (archetype) => inspectAgent2((0, import_node_path45.join)(agentDir, `fadeno-steering-refused-${archetype}.md`), issues)
   );
   const plugin = inspectPlugin(pluginPath, issues);
   return {
@@ -39263,107 +39395,6 @@ function inspectOpenCodeMaterialization(repoRoot, expected) {
     healthy: issues.length === 0,
     restartRequired: issues.length > 0
   };
-}
-
-// src/lib/omp-steering.ts
-var import_node_crypto15 = require("node:crypto");
-var import_node_fs44 = require("node:fs");
-var import_node_path45 = require("node:path");
-var OMP_STEERING_ARCHETYPES2 = ["worker", "reviewer", "judge"];
-var AGENT_MARK2 = /<!-- fadeno:managed version=([^\s]+) digest=([0-9a-f]{64}) -->/;
-var EXTENSION_MARK = /^\/\/ fadeno:managed version=([^\s]+)(?: digest=([0-9a-f]{64}))?$/m;
-function digest2(text) {
-  return (0, import_node_crypto15.createHash)("sha256").update(text).digest("hex");
-}
-function missing2(path) {
-  return { path, present: false, managed: false, valid: false, version: null, digest: null, digestValid: null, stale: false };
-}
-function readText2(path) {
-  try {
-    return (0, import_node_fs44.existsSync)(path) ? (0, import_node_fs44.readFileSync)(path, "utf8") : null;
-  } catch {
-    return null;
-  }
-}
-function inspectAgent2(path, issues, required) {
-  const text = readText2(path);
-  if (text == null) {
-    if (required) issues.push({ kind: "missing", path, detail: "managed omp steering agent is missing" });
-    return missing2(path);
-  }
-  const mark = AGENT_MARK2.exec(text);
-  if (mark == null) {
-    issues.push({ kind: "unmanaged", path, detail: "omp steering path exists without a Fadeno managed marker" });
-    return { path, present: true, managed: false, valid: false, version: null, digest: null, digestValid: null, stale: false };
-  }
-  const version = mark[1] ?? null;
-  const recordedDigest = mark[2] ?? null;
-  const withoutMark = text.replace(`${mark[0]}
-`, "");
-  const digestValid = recordedDigest != null && digest2(withoutMark) === recordedDigest;
-  const frontmatter = text.startsWith("---\n") && text.includes("\n---\n");
-  const name = /^name:\s*[A-Za-z0-9_-]+\s*$/m.test(text);
-  const description = /^description:\s*.+$/m.test(text);
-  const valid = frontmatter && name && description;
-  const stale = version != null && version !== packageVersion();
-  if (!valid) issues.push({ kind: "malformed", path, detail: "managed omp agent has malformed name/description frontmatter" });
-  if (stale) issues.push({ kind: "stale-version", path, detail: `managed omp agent is stamped ${version}, current CLI is ${packageVersion()}` });
-  if (!digestValid) issues.push({ kind: "digest-drifted", path, detail: "managed omp agent content differs from its recorded digest" });
-  return { path, present: true, managed: true, valid, version, digest: recordedDigest, digestValid, stale };
-}
-function inspectExtension(path, issues) {
-  const text = readText2(path);
-  if (text == null) {
-    issues.push({ kind: "missing", path, detail: "omp steering extension is missing" });
-    return missing2(path);
-  }
-  const mark = EXTENSION_MARK.exec(text);
-  if (mark == null) {
-    issues.push({ kind: "unmanaged", path, detail: "omp steering extension exists without a Fadeno managed marker" });
-    return { path, present: true, managed: false, valid: false, version: null, digest: null, digestValid: null, stale: false };
-  }
-  const version = mark[1] ?? null;
-  const recordedDigest = mark[2] ?? null;
-  const withoutMark = text.replace(`${mark[0]}
-`, "");
-  const digestValid = recordedDigest != null && digest2(withoutMark) === recordedDigest;
-  const valid = /export\s+default\s+function/.test(text) && /tool_call/.test(text) && /tasks/.test(text);
-  const stale = version != null && version !== packageVersion();
-  if (!valid) issues.push({ kind: "malformed", path, detail: "managed omp extension has no valid task tool_call hook" });
-  if (stale) issues.push({ kind: "stale-version", path, detail: `managed omp extension is stamped ${version}, current CLI is ${packageVersion()}` });
-  if (!digestValid) issues.push({ kind: "digest-drifted", path, detail: "managed omp extension content differs from its recorded digest" });
-  return { path, present: true, managed: true, valid, version, digest: recordedDigest, digestValid, stale };
-}
-function inspectSlotFile(agentDir, archetype, kind, issues, required) {
-  const preferredName = kind === "host" ? `${archetype}.md` : kind === "command" ? `fadeno-dispatch-${archetype}.md` : `fadeno-steering-refused-${archetype}.md`;
-  const aliasName = `fadeno-steering-${kind}-${archetype}.md`;
-  const preferredPath = (0, import_node_path45.join)(agentDir, preferredName);
-  const preferredText = readText2(preferredPath);
-  if (!required && preferredText != null && !AGENT_MARK2.test(preferredText)) {
-    return { path: preferredPath, present: true, managed: false, valid: false, version: null, digest: null, digestValid: null, stale: false };
-  }
-  const preferred = inspectAgent2(preferredPath, issues, required);
-  if (preferred.managed) return preferred;
-  const alias = inspectAgent2((0, import_node_path45.join)(agentDir, aliasName), issues, required);
-  if (alias.present) return alias;
-  if (required && preferred.present) return preferred;
-  return preferred;
-}
-function inspectOmpMaterialization(repoRoot, expected) {
-  const agentDir = (0, import_node_path45.join)(repoRoot, ".omp", "agents");
-  const extensionPath = (0, import_node_path45.join)(repoRoot, ".omp", "extensions", "fadeno-steering.ts");
-  const issues = [];
-  const slots = [];
-  for (const archetype of OMP_STEERING_ARCHETYPES2) {
-    const host = inspectSlotFile(agentDir, archetype, "host", issues, expected.get(archetype) === "host");
-    const command2 = inspectSlotFile(agentDir, archetype, "command", issues, expected.get(archetype) === "command");
-    const contradictory = host.present && command2.present;
-    if (contradictory) issues.push({ kind: "contradictory", path: agentDir, detail: `${archetype} has both host and command steering agents materialized` });
-    slots.push({ archetype, expected: expected.get(archetype) ?? null, host, command: command2, contradictory });
-  }
-  const refusals = OMP_STEERING_ARCHETYPES2.map((archetype) => inspectSlotFile(agentDir, archetype, "refusal", issues, true));
-  const extension = inspectExtension(extensionPath, issues);
-  return { agentDir, extensionPath, slots, refusals, extension, issues, healthy: issues.length === 0, restartRequired: issues.length > 0 };
 }
 
 // src/commands/status.ts

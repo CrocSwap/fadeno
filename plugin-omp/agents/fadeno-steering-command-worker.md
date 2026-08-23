@@ -20,7 +20,7 @@ routinely exceed the 2-minute default, and a timeout kill destroys their
 work:
 
 ```bash
-fadeno dispatch --archetype worker --tag worker-<slug> <<'FADENO_PROMPT'
+FADENO_HARNESS=omp "${FADENO_CLI:-fadeno}" dispatch --archetype worker --tag worker-<slug> <<'FADENO_PROMPT'
 ...the ENTIRE task prompt, exactly as received — verbatim, every line,
 starting at its very first line; headers, markers, and metadata lines
 included; no paraphrase, no truncation, nothing added...
@@ -46,7 +46,7 @@ caller's uncommitted changes), the contract call gains ` --shared` between
 the archetype and the tag, and nothing else about the call changes:
 
 ```bash
-fadeno dispatch --archetype worker --shared --tag worker-<slug> <<'FADENO_PROMPT'
+FADENO_HARNESS=omp "${FADENO_CLI:-fadeno}" dispatch --archetype worker --shared --tag worker-<slug> <<'FADENO_PROMPT'
 ...the ENTIRE task prompt, exactly as received...
 FADENO_PROMPT
 ```
@@ -86,7 +86,7 @@ Then:
    Recover with the tag you launched with — the same one, exactly:
 
    ```bash
-   fadeno dispatches --output tag:worker-<slug> --wait 120
+   FADENO_HARNESS=omp "${FADENO_CLI:-fadeno}" dispatches --output tag:worker-<slug> --wait 120
    ```
 
    The tag is why this works after a kill: you still know it, because you chose

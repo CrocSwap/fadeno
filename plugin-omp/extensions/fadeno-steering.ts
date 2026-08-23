@@ -13,6 +13,12 @@ const EVIDENCE_FORMAT = '1.0';
 const ROLE_NAMES = new Set(['worker', 'reviewer', 'judge']);
 const RESOLVE_TIMEOUT_MS = 10_000;
 const REFUSAL_REASON_MAX = 400;
+const BUNDLED_CLI = join(import.meta.dirname, '..', 'bin', 'fadeno');
+
+// Task-agent Bash calls inherit the OMP process environment. Export the
+// plugin's private runtime once so command brokers can use the same CLI the
+// extension resolved through without relying on PATH.
+if (!process.env.FADENO_CLI?.trim() && existsSync(BUNDLED_CLI)) process.env.FADENO_CLI = BUNDLED_CLI;
 
 function canonicalRole(value: unknown): string | null {
   if (typeof value !== 'string') return null;
@@ -35,8 +41,7 @@ async function resolveRole(role: string, cwd: string, promptSha256: string | nul
   // In an installed plugin this file lives at extensions/ beside bin/fadeno;
   // prefer that self-contained runtime so plugin-only installs do not depend
   // on an incidental global CLI.
-  const bundledCli = join(import.meta.dirname, '..', 'bin', 'fadeno');
-  const cli = process.env.FADENO_CLI?.trim() || (existsSync(bundledCli) ? bundledCli : 'fadeno');
+  const cli = process.env.FADENO_CLI?.trim() || 'fadeno';
   try {
     const args = ['steering', 'resolve', '--archetype', role, '--host-executor', 'current-host'];
     if (promptSha256 != null) args.push('--prompt-sha256', promptSha256);

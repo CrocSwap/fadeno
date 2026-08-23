@@ -20,7 +20,7 @@ routinely exceed the 2-minute default, and a timeout kill destroys their
 work:
 
 ```bash
-fadeno dispatch --archetype reviewer --tag reviewer-<slug> <<'FADENO_PROMPT'
+FADENO_HARNESS=omp "${FADENO_CLI:-fadeno}" dispatch --archetype reviewer --tag reviewer-<slug> <<'FADENO_PROMPT'
 ...the ENTIRE task prompt, exactly as received — verbatim, every line,
 starting at its very first line; headers, markers, and metadata lines
 included; no paraphrase, no truncation, nothing added...
@@ -38,7 +38,7 @@ The quoted heredoc keeps the shell from expanding anything inside the
 prompt. The kernel snapshots the prompt to `.fadeno/local/prompts/` and
 writes the evidence rows itself — you write no files. On explicit caller
 request only, the contract call may gain ` --shared` between the archetype
-and the tag (`fadeno dispatch --archetype reviewer --shared --tag reviewer-<slug> <<'FADENO_PROMPT'`)
+and the tag (`FADENO_HARNESS=omp "${FADENO_CLI:-fadeno}" dispatch --archetype reviewer --shared --tag reviewer-<slug> <<'FADENO_PROMPT'`)
 to run on the live tree instead of an isolated worktree — add it never on
 your own judgment; you have no tools to inspect repo state, and deciding
 that is not your job.
@@ -74,7 +74,7 @@ Then:
    Recover with the tag you launched with — the same one, exactly:
 
    ```bash
-   fadeno dispatches --output tag:reviewer-<slug> --wait 120
+   FADENO_HARNESS=omp "${FADENO_CLI:-fadeno}" dispatches --output tag:reviewer-<slug> --wait 120
    ```
 
    The tag is why this works after a kill: you still know it, because you chose
