@@ -136,10 +136,15 @@ routes:
       models_command: [ agy, models ]
       effort_encoding: model-suffix
       eligibility: { director: forbidden }
+    opencode-direct:
+      driver: opencode-direct
+      command: [ opencode, run, -m, "{model}", --variant, "{reasoning_effort}", --auto ]
+      eligibility: { director: forbidden }
     openrouter:
       driver: opencode
       command: [ opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto ]
       models_command: [ opencode, models ]
+      models_prefix: "openrouter/"
       eligibility: { director: forbidden }
     muse:
       driver: muse-code
@@ -186,10 +191,15 @@ routes:
       models_command: [ agy, models ]
       effort_encoding: model-suffix
       eligibility: { director: forbidden }
+    opencode-direct:
+      driver: opencode-direct
+      command: [ opencode, run, -m, "{model}", --variant, "{reasoning_effort}", --auto ]
+      eligibility: { director: forbidden }
     openrouter:
       driver: opencode
       command: [ opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto ]
       models_command: [ opencode, models ]
+      models_prefix: "openrouter/"
       eligibility: { director: forbidden }
     muse:
       driver: muse-code
@@ -220,10 +230,15 @@ routes:
       models_command: [ agy, models ]
       effort_encoding: model-suffix
       eligibility: { director: forbidden }
+    opencode-direct:
+      driver: opencode-direct
+      command: [ opencode, run, -m, "{model}", --variant, "{reasoning_effort}", --auto ]
+      eligibility: { director: forbidden }
     openrouter:
       driver: opencode
       command: [ opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto ]
       models_command: [ opencode, models ]
+      models_prefix: "openrouter/"
       eligibility: { director: forbidden }
     muse:
       driver: muse-code
@@ -258,10 +273,15 @@ routes:
       models_command: [ agy, models ]
       effort_encoding: model-suffix
       eligibility: { director: forbidden }
+    opencode-direct:
+      driver: opencode-direct
+      command: [ opencode, run, -m, "{model}", --variant, "{reasoning_effort}", --auto ]
+      eligibility: { director: forbidden }
     openrouter:
       driver: opencode
       command: [ opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto ]
       models_command: [ opencode, models ]
+      models_prefix: "openrouter/"
       eligibility: { director: forbidden }
     muse:
       driver: muse-code
@@ -295,10 +315,15 @@ routes:
       models_command: [ agy, models ]
       effort_encoding: model-suffix
       eligibility: { director: forbidden }
+    opencode-direct:
+      driver: opencode-direct
+      command: [ opencode, run, -m, "{model}", --variant, "{reasoning_effort}", --auto ]
+      eligibility: { director: forbidden }
     openrouter:
       driver: opencode
       command: [ opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto ]
       models_command: [ opencode, models ]
+      models_prefix: "openrouter/"
       eligibility: { director: forbidden }
     muse:
       driver: muse-code
@@ -328,10 +353,15 @@ routes:
       models_command: [ agy, models ]
       effort_encoding: model-suffix
       eligibility: { director: forbidden }
+    opencode-direct:
+      driver: opencode-direct
+      command: [ opencode, run, -m, "{model}", --variant, "{reasoning_effort}", --auto ]
+      eligibility: { director: forbidden }
     openrouter:
       driver: opencode
       command: [ opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto ]
       models_command: [ opencode, models ]
+      models_prefix: "openrouter/"
       eligibility: { director: forbidden }
     muse:
       driver: muse-code
