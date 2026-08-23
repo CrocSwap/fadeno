@@ -55,6 +55,24 @@ function str(value) {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
+/**
+ * Preserve the native OpenCode Task lifecycle in evidence. OpenCode 1.18.x
+ * keeps asynchronous/continuation controls in task arguments (`background`
+ * and `task_id`) while hook correlation lives in the hook input (`sessionID`
+ * and `callID`). Steering observes these values; it never synthesizes a
+ * replacement task or changes a background task into a foreground one.
+ */
+function taskCorrelation(hookInput, args) {
+  return {
+    // OpenCode defaults to foreground; recording a boolean makes that fact
+    // explicit and lets readers distinguish it from an unknown old row.
+    background: args?.background === true,
+    task_id: str(args?.task_id) ?? str(args?.taskId),
+    session_id: str(hookInput?.sessionID) ?? str(hookInput?.session_id),
+    call_id: str(hookInput?.callID) ?? str(hookInput?.call_id),
+  };
+}
+
 function sha256(text) {
   return createHash('sha256').update(text).digest('hex');
 }
@@ -190,6 +208,10 @@ function hostDeliveryRow(fields) {
     lane_reason: str(slot.lane_reason),
     transport: 'host',
     driver: str(slot.driver),
+    background: fields.background === true,
+    task_id: str(fields.taskId ?? fields.task_id),
+    session_id: str(fields.sessionId ?? fields.session_id),
+    call_id: str(fields.callId ?? fields.call_id),
     prompt_sha256: fields.promptSha256 ?? null,
     ...(fields.promptSnapshotRel != null ? { prompt_snapshot: fields.promptSnapshotRel } : {}),
   };
@@ -225,6 +247,10 @@ function hostRefusalRow(fields) {
       slot == null || typeof slot.effort_pinned !== 'boolean' ? null : slot.effort_pinned,
     session_effort: slot == null ? null : str(slot.session_effort),
     lane_reason: slot == null ? null : str(slot.lane_reason),
+    background: fields.background === true,
+    task_id: str(fields.taskId ?? fields.task_id),
+    session_id: str(fields.sessionId ?? fields.session_id),
+    call_id: str(fields.callId ?? fields.call_id),
     prompt_sha256: fields.promptSha256 ?? null,
   };
 }
@@ -334,6 +360,7 @@ async function steer(hookInput, output, repoDir) {
 
   const promptText = typeof args.prompt === 'string' ? args.prompt : '';
   const promptDigest = promptText.length > 0 ? sha256(promptText) : null;
+  const correlation = taskCorrelation(hookInput, args);
 
   // Rewrite to the refusal broker: no deny primitive exists in the plugin API,
   // so refusal = an agent whose embedded instructions report the reason and
@@ -350,6 +377,7 @@ async function steer(hookInput, output, repoDir) {
         slot,
         modelOverride: str(args.model),
         promptSha256: promptDigest,
+        ...correlation,
       }),
     );
     if (!allowRewrite || !hasManagedAgent(repoDir, `fadeno-steering-refused-${archetype}.md`)) return;
@@ -427,6 +455,7 @@ async function steer(hookInput, output, repoDir) {
         lane: decision.lane,
         modelOverride: str(args.model),
         promptSha256: promptDigest,
+        ...correlation,
         ...(snapshotRel != null ? { promptSnapshotRel: snapshotRel } : {}),
       }),
     );
@@ -472,5 +501,6 @@ export function fadenoSteeringCore() {
     applyRewrite,
     hostDeliveryRow,
     hostRefusalRow,
+    taskCorrelation,
   };
 }
