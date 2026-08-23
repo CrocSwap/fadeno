@@ -71,7 +71,11 @@ const SHADOW_SPEC = command(
 
 // Shared by `models` and its top-level alias `model` — one spec so the two
 // spellings cannot drift apart on which flags they accept.
-const MODELS_SPEC = command({ '--driver': { kind: 'free' }, '--json': NONE }, ['executor']);
+const MODELS_SPEC = command(
+  { '--driver': { kind: 'free' }, '--json': NONE },
+  ['executor'],
+  { add: command({ '--json': NONE }, ['free', 'free']) },
+);
 
 const COMMANDS: Record<string, CommandSpec> = {
   setup: command({ '--codex': NONE, '--claude': NONE, '--non-interactive': NONE, '--from': PATH, '--reset-runtime': NONE }),

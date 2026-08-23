@@ -147,6 +147,26 @@ models:
   per-archetype) moves here from targets, unchanged in semantics — it was
   always a property of the model, not of a name-effort tuple.
 
+### Discovering a canonical user model
+
+`fadeno model add <alias> <provider/id>` promotes a model that the user's
+configured discovery path can actually list. The first positional is the
+stable canonical alias (`moonshot`); the second is the upstream identity
+(`stealth/ox-alpha`). It refuses an alias already present in either the
+effective registry or the user catalog, then checks the default OpenCode path
+in order: exact `stealth/ox-alpha`, followed by
+`openrouter/stealth/ox-alpha`. Both checks consume one `opencode models`
+listing, not two subprocesses.
+
+The stored model keeps canonical `provider: stealth` and `id: ox-alpha` while
+its optional `delivery: { route, id }` preserves the discovered delivery
+spelling. The direct route receives `stealth/ox-alpha`; the OpenRouter route
+receives route-relative `stealth/ox-alpha` and adds its structural
+`models_prefix: openrouter/` only for listing/probe comparison. Thus OpenCode
+receives exactly one provider prefix in either case. The ordered discovery
+path is a command-level seam; later configuration or plugins can supply new
+routes without changing promotion control flow.
+
 ### Driver fields on routes
 
 Route rows (unchanged in shape otherwise) gain three optional fields:
@@ -546,7 +566,7 @@ not a side effect of this feature.
 2. **User-level shadows.** The rotation persona would plausibly want a
    challenger shadowing their worker *across* repos. Session-scoped
    attachments ship first; a `--user` shadow scope is additive later.
-3. **A `fadeno models` inspection command — DECIDED, built (2026-08-16).**
+3. **A `fadeno models` inspection and promotion command — DECIDED, built.**
    `fadeno models` renders the frame-neutral registry (home harness per row,
    probe-cache state in structured output, and the unregistered-fallthrough
    rule in the footer); `fadeno models <name>` adds alternate `--via`
@@ -555,8 +575,9 @@ not a side effect of this feature.
    the live backend listing with registered spellings marked. Dogfooding it
    immediately surfaced a probe wrinkle: opencode lists namespaced ids
    (`openrouter/<vendor>/<model>`) while the route template prepends that
-   namespace in argv, so bare spellings never exact-match its listing —
-   membership matching vs. command-template namespaces is an open follow-up.
+   namespace in argv. `models_prefix` now makes that listing qualification
+   structural, and `fadeno model add` persists a route-relative delivery id;
+   no double prefix reaches the command argv.
 4. **Verification-cache hygiene.** Positives are cached indefinitely; is a
    `fadeno doctor` check ("cached model no longer listed by driver") worth
    it, or is dispatch-time failure loud enough?

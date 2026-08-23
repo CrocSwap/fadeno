@@ -241,6 +241,11 @@ const CLAIMS: Claim[] = [
     src: { files: ['src/cli.ts'], patterns: [/fadeno models/] },
   },
   {
+    id: 'model-add-discovery',
+    doc: { files: [DIALS, EXTENDING], patterns: [/fadeno model add/, /OpenRouter-qualified/] },
+    src: { files: ['src/commands/models.ts', 'src/cli.ts'], patterns: [/runModelsAdd/, /opencode\/openrouter/] },
+  },
+  {
     // The permissions cut is the largest deliberate REMOVAL this project has
     // made, and a removal drifts the same way a feature does — by creeping
     // back one helper at a time. The doc states the rule; these literals are

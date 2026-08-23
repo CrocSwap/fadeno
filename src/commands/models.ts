@@ -1,16 +1,22 @@
 import { spawnSync } from 'node:child_process';
-import { loadLayeredProfile, type LayeredProfile } from '../lib/config-layers.ts';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { parseDocument } from 'yaml';
+import { loadGlobalProfile, loadLayeredProfile, type LayeredProfile } from '../lib/config-layers.ts';
 import {
   activeHarness,
+  BARE_IDENTIFIER_RE,
   compileDialRef,
   detectAmbientHarness,
   ExecutorProfileError,
+  qualifyListedModelId,
   type CommandExecutorSpec,
   type EligibilityState,
   type ExecutorProfile,
+  type RouteRaw,
 } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
-import { readUserHarness, readVerifiedModels, type UserPathOptions } from '../lib/user-paths.ts';
+import { readUserHarness, readVerifiedModels, userPaths, type UserPathOptions } from '../lib/user-paths.ts';
 
 export class ModelsError extends Error {}
 
@@ -102,16 +108,106 @@ function loadLayered(repoRoot: string, userPathOptions?: UserPathOptions): Layer
   }
 }
 
-function routesForHarness(profile: ExecutorProfile): Record<string, { driver?: string; models_command?: string[] | null }> {
-  const harness = profile.harness ?? 'standalone';
-  return (profile.routes as Record<string, Record<string, { driver?: string; models_command?: string[] | null }>>)[harness] ?? {};
+function loadGlobal(userPathOptions?: UserPathOptions): LayeredProfile {
+  try {
+    return loadGlobalProfile(userPathOptions, activeHarness(undefined, userPathOptions));
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new ModelsError(err.message);
+    throw err;
+  }
 }
 
-function routeByDriver(profile: ExecutorProfile, driver: string): { key: string; route: { driver?: string; models_command?: string[] | null } } | null {
+function routesForHarness(profile: ExecutorProfile): Record<string, RouteRaw> {
+  const harness = profile.harness ?? 'standalone';
+  return profile.routes[harness] ?? {};
+}
+
+function routeByDriver(profile: ExecutorProfile, driver: string): { key: string; route: RouteRaw } | null {
   for (const [key, route] of Object.entries(routesForHarness(profile))) {
     if ((route.driver ?? key) === driver) return { key, route };
   }
   return null;
+}
+
+export interface ModelDiscoveryPath {
+  /** Stable result label and the delivery route persisted for this match. */
+  name: string;
+  /** Public driver alias whose single model listing is inspected. */
+  driver: string;
+  /** Construct the exact identity expected on that driver's listing. */
+  listedId: (provider: string, id: string) => string;
+  /** The route-relative id delivered when this identity matched. */
+  delivery: (provider: string, id: string) => { route: string; id: string };
+}
+
+/**
+ * Default ordered discovery stays data, not command control flow: an
+ * integration can provide its own path without rewriting `runModelsAdd`.
+ * Both entries deliberately share OpenCode's one listing invocation.
+ */
+export const DEFAULT_MODEL_DISCOVERY_PATH: readonly ModelDiscoveryPath[] = [
+  {
+    name: 'opencode',
+    driver: 'opencode',
+    listedId: (provider, id) => `${provider}/${id}`,
+    delivery: (provider, id) => ({ route: 'opencode-direct', id: `${provider}/${id}` }),
+  },
+  {
+    name: 'opencode/openrouter',
+    driver: 'opencode',
+    listedId: (provider, id) => `openrouter/${provider}/${id}`,
+    delivery: (provider, id) => ({ route: 'openrouter', id: `${provider}/${id}` }),
+  },
+];
+
+type ListingSpawn = NonNullable<DriverListingOptions['spawn']>;
+
+function defaultSpawn(command: string[], opts: { timeout: number }): ReturnType<ListingSpawn> {
+  const run = spawnSync(command[0]!, command.slice(1), { timeout: opts.timeout, encoding: 'utf8' });
+  return { status: run.status, stdout: run.stdout ?? '', stderr: run.stderr ?? '', ...(run.error != null ? { error: run.error } : {}) };
+}
+
+/** One listed id per non-prose line; exact identity matching happens above it. */
+function listedIds(stdout: string): string[] {
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const id of stdout
+    .split(/\r?\n/)
+    .map((line) => line.split('\t')[0]!.trim())
+    .filter((candidate) => candidate.length > 0 && !/\s/.test(candidate))) {
+    if (!seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  return ids;
+}
+
+function runListingCommand(
+  profile: ExecutorProfile,
+  driver: string,
+  spawn: ListingSpawn | undefined,
+): { route: RouteRaw; modelsCommand: string[]; ids: string[] } {
+  const found = routeByDriver(profile, driver);
+  if (found == null) {
+    const declared = Object.entries(routesForHarness(profile)).map(([key, route]) => route.driver ?? key).sort();
+    throw new ModelsError(`unknown driver "${driver}" — declared drivers: ${[...new Set(declared)].join(', ')}`);
+  }
+  const modelsCommand = found.route.models_command;
+  if (modelsCommand == null || modelsCommand.length === 0) {
+    throw new ModelsError(`driver "${driver}" declares no models_command — its backend cannot be listed.`);
+  }
+  const spawnFn = spawn ?? defaultSpawn;
+  let result: ReturnType<ListingSpawn>;
+  try {
+    result = spawnFn(modelsCommand, { timeout: 10_000 });
+  } catch (err) {
+    throw new ModelsError(`models_command failed for ${driver}: ${(err as Error).message}`);
+  }
+  if (result.error != null) throw new ModelsError(`models_command failed for ${driver}: ${result.error.message}`);
+  if (result.status !== 0) throw new ModelsError(`models_command for ${driver} exited ${result.status}.`);
+  const stdout = typeof result.stdout === 'string' ? result.stdout : result.stdout.toString('utf8');
+  return { route: found.route, modelsCommand, ids: listedIds(stdout) };
 }
 
 /** The model's home DRIVER — the `--via` value it takes without being asked
@@ -122,12 +218,13 @@ function routeByDriver(profile: ExecutorProfile, driver: string): { key: string;
  * Named `homeHarness` until 2026-08-21, which was wrong twice over: it
  * returns `route.driver` (a CLI), and `harness` in this same command means
  * the agent asking. */
-function homeVia(profile: ExecutorProfile, provider: string): string {
+function homeVia(profile: ExecutorProfile, entry: ExecutorProfile['models'][string]): string {
+  const routeKey = entry.delivery?.route ?? entry.provider;
   for (const routes of Object.values(profile.routes)) {
-    const route = routes[provider];
-    if (route != null) return route.driver ?? provider;
+    const route = routes[routeKey];
+    if (route != null) return route.driver ?? routeKey;
   }
-  return provider;
+  return routeKey;
 }
 
 export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
@@ -143,7 +240,7 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
   const rows: ModelRow[] = [];
   for (const name of Object.keys(profile.models).sort()) {
     const entry = profile.models[name]!;
-    const modelVia = name === 'current-host' ? 'current-host' : homeVia(profile, entry.provider);
+    const modelVia = name === 'current-host' ? 'current-host' : homeVia(profile, entry);
     const lanes: ModelRow['lanes'] = [];
     let homeDriver: string | null = null;
     let row: ModelRow;
@@ -272,56 +369,7 @@ export function runModelsDriver(opts: DriverListingOptions): DriverListingResult
   const profile = layered.profile;
   const harness = profile.harness ?? 'standalone';
   const driver = opts.driver.trim();
-  const found = routeByDriver(profile, driver);
-  if (found == null) {
-    const declared = Object.entries(routesForHarness(profile)).map(([key, route]) => route.driver ?? key).sort();
-    throw new ModelsError(`unknown driver "${driver}" — declared drivers: ${[...new Set(declared)].join(', ')}`);
-  }
-  const modelsCommand = found.route.models_command;
-  if (modelsCommand == null || modelsCommand.length === 0) {
-    throw new ModelsError(`driver "${driver}" declares no models_command — its backend cannot be listed.`);
-  }
-
-  const spawnFn =
-    opts.spawn ??
-    ((command: string[], spawnOpts: { timeout: number }) => {
-      const run = spawnSync(command[0]!, command.slice(1), { timeout: spawnOpts.timeout, encoding: 'utf8' });
-      return { status: run.status, stdout: run.stdout ?? '', stderr: run.stderr ?? '', ...(run.error != null ? { error: run.error } : {}) };
-    });
-  let result: ReturnType<NonNullable<DriverListingOptions['spawn']>>;
-  try {
-    result = spawnFn(modelsCommand, { timeout: 10_000 });
-  } catch (err) {
-    throw new ModelsError(`models_command failed for ${driver}: ${(err as Error).message}`);
-  }
-  if (result.error != null) throw new ModelsError(`models_command failed for ${driver}: ${result.error.message}`);
-  if (result.status !== 0) throw new ModelsError(`models_command for ${driver} exited ${result.status}.`);
-  const stdout = typeof result.stdout === 'string' ? result.stdout : result.stdout.toString('utf8');
-  // LISTING is not MEMBERSHIP, and they need different parses.
-  //
-  // The dial-time probe asks "does this exact id appear anywhere in the
-  // output?", and splitting on every run of whitespace is the right, robust
-  // answer to that: it cannot miss an id whatever surrounds it. This function
-  // asks a different question — "what ids exist?" — and the same tokenization
-  // answers it wrongly. Verified against the three shipped backends:
-  //
-  //   agy       `gemini-3.7-flash-high\tGemini 3.7 Flash (High)`, after a
-  //             `Fetching available models...` preamble line
-  //   opencode  `opencode/big-pickle`, one bare id per line
-  //   grok      prose — `You are logged in with grok.com.` — and no listing
-  //
-  // Whitespace tokenization turned agy's 31 models into 100-odd "models"
-  // including `Gemini`, `3.7`, `Flash` and `(High)`, and would have turned
-  // grok's login banner into models named `You`, `are`, and `logged`. Found by
-  // dogfood 2026-08-21.
-  //
-  // The rule: one entry per LINE, id is the text before the first tab, and a
-  // candidate that contains whitespace is not an id — which is what drops
-  // agy's preamble and grok's prose without either needing a special case.
-  const tokens = stdout
-    .split(/\r?\n/)
-    .map((line) => line.split('\t')[0]!.trim())
-    .filter((id) => id.length > 0 && !/\s/.test(id));
+  const { route, modelsCommand, ids: tokens } = runListingCommand(profile, driver, opts.spawn);
 
   // Which registry names deliver a given id through this driver: the home
   // route's alias matching (delivered id = entry.id), or an explicit
@@ -329,9 +377,10 @@ export function runModelsDriver(opts: DriverListingOptions): DriverListingResult
   const registeredBy = new Map<string, string[]>();
   for (const [name, entry] of Object.entries(profile.models)) {
     const ids: string[] = [];
-    const home = routesForHarness(profile)[entry.provider];
-    if (home != null && (home.driver ?? entry.provider) === driver) ids.push(entry.id);
-    if (entry.spellings[driver] != null) ids.push(entry.spellings[driver]!);
+    const homeKey = entry.delivery?.route ?? entry.provider;
+    const home = routesForHarness(profile)[homeKey];
+    if (home != null && (home.driver ?? homeKey) === driver) ids.push(qualifyListedModelId(home, entry.delivery?.id ?? entry.id));
+    if (entry.spellings[driver] != null) ids.push(qualifyListedModelId(route, entry.spellings[driver]!));
     for (const id of ids) {
       const list = registeredBy.get(id) ?? [];
       if (!list.includes(name)) list.push(name);
@@ -339,12 +388,154 @@ export function runModelsDriver(opts: DriverListingOptions): DriverListingResult
     }
   }
 
-  const seen = new Set<string>();
   const models: DriverListingResult['models'] = [];
   for (const token of tokens) {
-    if (seen.has(token)) continue;
-    seen.add(token);
     models.push({ id: token, registered_as: (registeredBy.get(token) ?? []).sort() });
   }
   return { driver, harness, models_command: modelsCommand, models };
+}
+
+export interface ModelAddOptions extends ModelsCommonOptions {
+  alias: string;
+  /** The upstream identity, `provider/id`; it is not the canonical alias. */
+  discoveryId: string;
+  /** Test seam for the one driver listing call per discovery driver. */
+  spawn?: DriverListingOptions['spawn'];
+  discoveryPath?: readonly ModelDiscoveryPath[];
+}
+
+export interface ModelAddResult {
+  alias: string;
+  provider: string;
+  id: string;
+  catalog_path: string;
+  discovery_path: string;
+  matched_identity: string;
+  delivery: { route: string; id: string; listed_id: string };
+  /** A complete project catalog masks user additions in this checkout. */
+  suppressed_by_project: boolean;
+}
+
+function splitDiscoveryId(raw: string): { provider: string; id: string } {
+  const slash = raw.indexOf('/');
+  if (slash <= 0 || slash === raw.length - 1) {
+    throw new ModelsError(`discovery id "${raw}" must be provider/id.`);
+  }
+  const provider = raw.slice(0, slash).trim();
+  const id = raw.slice(slash + 1).trim();
+  if (provider.length === 0 || id.length === 0 || /\s/.test(provider) || /\s/.test(id)) {
+    throw new ModelsError(`discovery id "${raw}" must be a whitespace-free provider/id.`);
+  }
+  return { provider, id };
+}
+
+function readUserCatalog(path: string): { doc: ReturnType<typeof parseDocument>; value: Record<string, unknown> } {
+  const text = existsSync(path) ? readFileSync(path, 'utf8') : 'schema_version: 3\nmodels: {}\n';
+  const doc = parseDocument(text);
+  if (doc.errors.length > 0) throw new ModelsError(`${path} did not parse: ${doc.errors[0]!.message}`);
+  const value = doc.toJS();
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ModelsError(`${path} is not a mapping; refusing to overwrite it.`);
+  }
+  const map = value as Record<string, unknown>;
+  if (map.schema_version !== undefined && map.schema_version !== 3) {
+    throw new ModelsError(`${path} requires schema_version: 3; refusing to overwrite it.`);
+  }
+  if (map.models !== undefined && (map.models == null || typeof map.models !== 'object' || Array.isArray(map.models))) {
+    throw new ModelsError(`${path} has a non-mapping models: entry; refusing to overwrite it.`);
+  }
+  return { doc, value: map };
+}
+
+function atomicWrite(path: string, text: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = join(dirname(path), `.${basename(path)}.fadeno-${process.pid}-${Date.now()}.tmp`);
+  try {
+    writeFileSync(temporary, text, 'utf8');
+    renameSync(temporary, path);
+  } catch (err) {
+    try { if (existsSync(temporary)) unlinkSync(temporary); } catch {}
+    throw new ModelsError(`could not write ${path}: ${(err as Error).message}`);
+  }
+}
+
+/**
+ * Promote an actually listed upstream model to a stable user-catalog alias.
+ * It intentionally writes only user scope: project catalogs remain source
+ * controlled, and a complete project catalog reports (rather than hides) its
+ * suppression of the new user entry.
+ */
+export function runModelsAdd(opts: ModelAddOptions): ModelAddResult {
+  const alias = opts.alias.trim();
+  if (!BARE_IDENTIFIER_RE.test(alias) || alias === 'current-host') {
+    throw new ModelsError(`canonical alias "${opts.alias}" must be a bare lowercase identifier and may not be current-host.`);
+  }
+  const { provider, id } = splitDiscoveryId(opts.discoveryId.trim());
+  const repoRoot = repoRootOf(opts);
+  const userCatalogPath = userPaths(opts.userPathOptions ?? {}).executorsFile;
+  const { doc, value: userCatalog } = readUserCatalog(userCatalogPath);
+  // Promotion is user-scoped, so discovery routes come from builtin + user,
+  // never a project's self-contained replacement catalog. Alias admission is
+  // the union instead: neither the global catalog nor this project may already
+  // own the canonical name.
+  const global = loadGlobal(opts.userPathOptions);
+  const layered = loadLayered(repoRoot, opts.userPathOptions);
+  if (
+    Object.hasOwn(global.profile.models, alias)
+    || Object.hasOwn(layered.profile.models, alias)
+    || (userCatalog.models != null && typeof userCatalog.models === 'object' && Object.hasOwn(userCatalog.models as object, alias))
+  ) {
+    throw new ModelsError(`canonical model "${alias}" already exists; choose a new alias rather than overwriting it.`);
+  }
+
+  const path = opts.discoveryPath ?? DEFAULT_MODEL_DISCOVERY_PATH;
+  if (path.length === 0) throw new ModelsError('model discovery path is empty.');
+  const listings = new Map<string, string[]>();
+  let matched: { step: ModelDiscoveryPath; listedId: string; delivery: { route: string; id: string } } | null = null;
+  for (const step of path) {
+    if (step.name.trim().length === 0 || step.driver.trim().length === 0) {
+      throw new ModelsError('model discovery path entries need non-empty name and driver.');
+    }
+    const listedId = step.listedId(provider, id);
+    const delivery = step.delivery(provider, id);
+    if (listedId.trim().length === 0 || !BARE_IDENTIFIER_RE.test(delivery.route) || delivery.id.trim().length === 0) {
+      throw new ModelsError(`model discovery path "${step.name}" produced an invalid delivery.`);
+    }
+    let ids = listings.get(step.driver);
+    if (ids == null) {
+      ids = runListingCommand(global.profile, step.driver, opts.spawn).ids;
+      listings.set(step.driver, ids);
+    }
+    if (ids.includes(listedId)) {
+      if (routesForHarness(global.profile)[delivery.route] == null) {
+        continue;
+      }
+      matched = { step, listedId, delivery };
+      break;
+    }
+  }
+  if (matched == null) {
+    const attempted = path.map((step) => step.listedId(provider, id)).join(', ');
+    throw new ModelsError(`model "${provider}/${id}" was not found on the discovery path (tried exact identities: ${attempted}).`);
+  }
+
+  doc.set('schema_version', 3);
+  if (userCatalog.models === undefined) doc.set('models', {});
+  doc.setIn(['models', alias], {
+    provider,
+    id,
+    effort: 'default',
+    delivery: matched.delivery,
+  });
+  atomicWrite(userCatalogPath, doc.toString());
+  return {
+    alias,
+    provider,
+    id,
+    catalog_path: userCatalogPath,
+    discovery_path: matched.step.name,
+    matched_identity: matched.listedId,
+    delivery: { ...matched.delivery, listed_id: matched.listedId },
+    suppressed_by_project: layered.selfContained,
+  };
 }

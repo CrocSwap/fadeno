@@ -105,7 +105,9 @@ The reliable test for which role you mean: **does it need a
 ### The identity axis (who does the work)
 
 - **Model** — a harness-neutral registry entry (`provider` + `id` + standard
-  `effort`, optional `spellings:` per driver). Carries identity only: never
+  `effort`, optional `spellings:` per driver and promoted `delivery:` route/id).
+  It carries canonical identity while a delivery spelling selects how that
+  identity reaches its home route; never
   argv, never permission flags. `current-host` is the built-in model for
   host-native base delivery.
 - **Displayed harness** — the model's stable home driver (`luna → codex`),
@@ -113,7 +115,7 @@ The reliable test for which role you mean: **does it need a
   `host | command` adapter remains separate structured resolution data.
 - **Route** — how the *host* reaches a provider. Keyed by harness id, then by
   provider, with `driver:` as the `--via` alias and `models_command:` /
-  `effort_encoding:` for dial-time behavior.
+  `models_prefix:` / `effort_encoding:` for dial-time behavior.
 - **Dial** — an archetype → model ref (`model[@effort] [--via <driver>]`);
   **archetype** — a `worker`/`reviewer`/`judge`-shaped slot. Dials are layered
   (`session` via `.fadeno/local/dials`, `repo` via `dials:` in the project
@@ -262,7 +264,7 @@ back to ordinary file completion when no specialized candidates apply.
 - **`tool-exec.ts`** — deterministic `tool_call` execution core: strict `tools:` registry parsing (static argv, timeout), `tool_dispatched` → supervisor spawn (shared writer lease, `readdirSync` live-claim scan with `ESRCH` group reclaim) → bounded `TestResult` synthesis → exclusive `linkSync` placement (never clobbering) → `artifact_created` + `tool_completed`/`tool_failed` lifecycle (one attempt wins, `tool-generation` scoped, crash-safe attribution preserving already-attributed bytes). Used by both `fadeno tool-run` and `fadeno drive`; recovery via shared `recoverInterruptedToolDispatchesShared`.
 - **`executors.ts`** — the executor profile (`.fadeno/executors.yaml`): v3 registry
   `models:` plus per-harness `routes:` (with `driver:`, `models_command:`,
-  `effort_encoding:`), layered **dials** (`session` → `repo` → `user` → `base`),
+  `models_prefix:`, `effort_encoding:`), layered **dials** (`session` → `repo` → `user` → `base`),
   per-role `bindings`, and **`tools:`** (`tool` → `{command: string[], timeout?, timeout_ms?}` static argv, no shell/interpolation, positive timeout; layered like other catalog keys; snapshotted into `profile.yaml`); plus a `unregistered_model_driver` fall-through.
   v1 executor profiles remain supported for ledger replay via
   `resolveRoleLegacy`. Core helpers: `parseDialRef`/`formatDialRef`,

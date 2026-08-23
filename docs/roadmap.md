@@ -307,14 +307,15 @@ The dispatch kernel's full horizon is implemented and in daily dogfood.
 - **Horizon-7 — dials and the model registry (implemented, `experimental/dials-and-registry.md`; hardened post-0.6 with no compat):**
   named loadout presets retire in favor of per-archetype dials on a layered
   cascade (`binding → session → repo → user → base`) with a uniform model
-  registry (`provider` + `id` + standard `effort`, `spellings:` per driver),
-  driver display aliases (`openai→codex`, `anthropic→claude`, `xai→grok`; `google→agy`, `openrouter→opencode` already), driver fields `driver:` / `models_command:` / `effort_encoding:` on routes,
+  registry (`provider` + `id` + standard `effort`, `spellings:` per driver,
+  optional route-relative `delivery:`),
+  driver display aliases (`openai→codex`, `anthropic→claude`, `xai→grok`; `google→agy`, `openrouter→opencode` already), driver fields `driver:` / `models_command:` / `models_prefix:` / `effort_encoding:` on routes,
   `unregistered_model_driver` fall-through for unknown ids, and dial-time
   backend verification (`models_command` probe, positives cached in
   `model-verifications.json`, fail-open). Dispatch rows now carry
   `model`/`model_id`/`effort`/`driver`/`dial`/`dial_source` and the effective
-  table is `fadeno dial` (no args, verb-first `dial <archetype> <model>`, `dial clear`, `dial shadow`). Post-0.6 hardening: pre-dials catalogs/snapshots are refused loudly (`schema_version 3` / `snapshot_version 3`; `verify` fails pre-dials ledgers with `snapshot_version 3` message), command renamed `fadeno dial` (verb-first), `--executor` removed, pin is `.fadeno/local/dials`, snapshot is `snapshot_version: 3` (replacing v1-shaped emission), and `ConstraintContext.transport` is `host` — while the dispatches reader still renders 0.x/legacy rows (`[legacy]`) as evidence history, not a compat surface. `fadeno models` remains a possible future inspection surface, not a promise — the effective table is the inspection surface today. Deliberately still backlog, not scope: route operational-policy fields (env, retry, concurrency, prompt-size ceilings)
-  and canon distribution into complete legacy catalogs. (Hook-initiated
+  table is `fadeno dial` (no args, verb-first `dial <archetype> <model>`, `dial clear`, `dial shadow`). Post-0.6 hardening: pre-dials catalogs/snapshots are refused loudly (`schema_version 3` / `snapshot_version 3`; `verify` fails pre-dials ledgers with `snapshot_version 3` message), command renamed `fadeno dial` (verb-first), `--executor` removed, pin is `.fadeno/local/dials`, snapshot is `snapshot_version: 3` (replacing v1-shaped emission), and `ConstraintContext.transport` is `host` — while the dispatches reader still renders 0.x/legacy rows (`[legacy]`) as evidence history, not a compat surface. `fadeno models` is the shipped registry inspection and promotion surface; `fadeno dial` remains the effective archetype table. Deliberately still backlog, not scope: route operational-policy fields (env, retry, concurrency, prompt-size ceilings)
+  and canon distribution into complete legacy catalogs. `fadeno model add <alias> <provider/id>` discovers direct OpenCode then OpenRouter-qualified identities and atomically adds a user-catalog alias with its delivery spelling. (Hook-initiated
   shadows for host-native primaries were on this list and have since shipped
   — see horizon 8 below.)
 

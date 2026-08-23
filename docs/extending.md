@@ -163,13 +163,20 @@ one needs no harness table. To test an unregistered model immediately, dial it
 directly (`fadeno dial worker kimi-k3`) — it routes via
 `unregistered_model_driver` with the id passed verbatim.
 
+For a one-off user model, prefer `fadeno model add <alias> <provider/id>`.
+It verifies the exact upstream spelling through the ordered discovery path
+(OpenCode direct first, then OpenRouter-qualified by default) and writes only
+the user catalog. The stored `delivery: { route, id }` decouples canonical
+identity from the route-relative id that actually reaches the driver.
+
 ### Add a driver route
 
 Add a route entry for the provider under **every** host table, since how a
 driver is invoked does not depend on which harness invokes it. Each row may
 declare `driver:` (the `--via` alias; defaults to the provider key),
 `models_command: [driver, models]` for dial-time verification, and
-`effort_encoding: model-suffix | flag` (the Antigravity quirk as a one-line
+`models_prefix:` when listing names carry a namespace that argv must not
+receive, and `effort_encoding: model-suffix | flag` (the Antigravity quirk as a one-line
 driver declaration).
 
 ### Add a driver (reuses the route recipe above)

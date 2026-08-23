@@ -19,6 +19,7 @@ import {
   formatDialRef,
   hostEffortIsMaterializable,
   parseDialRef,
+  qualifyListedModelId,
   readLocalDialState,
   resolveDialCascade,
   resolveRelay,
@@ -235,12 +236,12 @@ export function probeModel(
   opts: ProbeOptions = {},
 ): { status: VerificationStatus; note: string | null } {
   const harness = profile.harness ?? 'standalone';
-  const routesForHarness = (profile.routes as Record<string, Record<string, { models_command?: string[] | null }>>)[harness] ?? {};
-  let route: { models_command?: string[] | null } | null = null;
+  const routesForHarness = (profile.routes as Record<string, Record<string, { models_command?: string[] | null; modelsPrefix?: string }>>)[harness] ?? {};
+  let route: { models_command?: string[] | null; modelsPrefix?: string } | null = null;
   for (const [key, r] of Object.entries(routesForHarness)) {
     const alias = (r as { driver?: string }).driver ?? key;
     if (alias === driver) {
-      route = r as { models_command?: string[] | null };
+      route = r as { models_command?: string[] | null; modelsPrefix?: string };
       break;
     }
   }
@@ -250,7 +251,7 @@ export function probeModel(
     // No route for driver? Should not happen if compiled; but treat as unverified
     return { status: 'unverified', note: `note: cannot verify ${modelId} on ${driver} (no route declared) — dialing unverified` };
   }
-  const modelsCommand = (route as { models_command?: string[] | null }).models_command;
+  const modelsCommand = route.models_command;
   if (modelsCommand == null || modelsCommand.length === 0) {
     // Callers suppress this for registered models and host deliveries; only an
     // unregistered dial surfaces it loudly.
@@ -283,17 +284,18 @@ export function probeModel(
     return { status: 'unverified', note: `note: cannot verify ${modelId} on ${driver} (models_command exited ${result.status}) — dialing unverified` };
   }
   const stdout = typeof result.stdout === 'string' ? result.stdout : result.stdout.toString('utf8');
+  const listedModelId = qualifyListedModelId(route, modelId);
   // Membership: delivered id appears as whitespace/comma-delimited token on some stdout line
   const tokens = stdout.split(/[\s,]+/).map((t) => t.trim()).filter((t) => t.length > 0);
   // Also consider each line tokenization? Already split.
-  if (tokens.includes(modelId)) {
+  if (tokens.includes(listedModelId)) {
     recordVerifiedModel(userOpts, { driver, model: modelId, verified_at: new Date().toISOString() });
     return { status: 'verified', note: null };
   }
   // Not found: refuse with nearest matches
-  const nearest = nearestMatches(modelId, tokens, 3);
+  const nearest = nearestMatches(listedModelId, tokens, 3);
   const suggestion = nearest.length > 0 ? ` — did you mean ${nearest.map((n) => `"${n}"`).join(', ')}?` : '';
-  throw new DialError(`unknown model "${modelId}" on ${driver}${suggestion}`);
+  throw new DialError(`unknown model "${modelId}" (listed as "${listedModelId}") on ${driver}${suggestion}`);
 }
 
 function routeForDriver(profile: ExecutorProfile, driver: string): { route: unknown; hasModelsCommand: boolean } | null {

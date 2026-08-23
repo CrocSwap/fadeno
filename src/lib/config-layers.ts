@@ -236,6 +236,38 @@ export function loadLayeredProfile(repoRoot: string, options: UserPathOptions = 
 }
 
 /**
+ * The portable, user-scoped catalog view: bundled defaults plus the user's
+ * additions, intentionally excluding the current project's self-contained
+ * catalog. Commands that PROMOTE into user scope use this to avoid letting a
+ * project hide canonical names or the discovery routes that user models rely
+ * on; callers that need current-repo visibility still load the layered view.
+ */
+export function loadGlobalProfile(options: UserPathOptions = {}, harness?: HarnessId): LayeredProfile {
+  const paths = userPaths(options);
+  const layers: Array<{ layer: ConfigLayer; path: string }> = [
+    { layer: 'builtin', path: `${templatesDir()}/common/fadeno/executors.yaml` },
+    { layer: 'user', path: paths.executorsFile },
+  ];
+  const present = layers.filter((entry) => existsSync(entry.path));
+  if (present.length === 0) throw new ExecutorProfileError('No executor catalog is available.');
+  const document: Record<string, unknown> = {};
+  const provenance: ProfileProvenance = { bindings: {} };
+  for (const entry of present) {
+    const parsed = parseLayer(entry.path);
+    mergeLayer(document, parsed, entry.layer, entry.path, provenance);
+  }
+  return {
+    profile: parseExecutorProfile(stringifyObject(document), present.map((entry) => entry.layer).join(' + '), harness),
+    path: present.find((entry) => entry.layer === 'user')?.path ?? present[0]!.path,
+    layers: present.map((entry) => entry.layer),
+    provenance,
+    paths,
+    selfContained: false,
+    suppressedCanonArchetypes: [],
+  };
+}
+
+/**
  * Declarations the builtin catalog makes that a SELF-CONTAINED project catalog
  * silently drops, as dotted paths.
  *

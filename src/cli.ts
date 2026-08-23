@@ -37,7 +37,7 @@ import {
   sessionEffort,
   type DialShowResult,
 } from './commands/dial.ts';
-import { runModels, runModelsDriver, type DriverListingResult, type ModelsResult } from './commands/models.ts';
+import { runModels, runModelsAdd, runModelsDriver, type DriverListingResult, type ModelAddResult, type ModelsResult } from './commands/models.ts';
 import { runNewRun } from './commands/new-run.ts';
 import { runCodexPlugin, runOmpPlugin, runPlugin } from './commands/plugin.ts';
 import { runNext } from './commands/next.ts';
@@ -111,6 +111,7 @@ Usage:
   fadeno dial resolve --archetype <a>          # JSON, hook contract unchanged
   fadeno models [<name>]                Model registry + each model's home driver
   fadeno models --driver <alias>        Live backend model listing (routes with models_command)
+  fadeno model add <alias> <provider/id>  Discover then add a user-catalog canonical model
   fadeno model ...                      # alias for 'fadeno models ...' (same forms)
   fadeno steering resolve|apply [...]   Resolve or materialize hybrid host steering
   fadeno dispatch [flags]               Resolve archetype → executor and invoke it once (ad hoc)
@@ -434,6 +435,8 @@ Usage:
   fadeno models <name>             One model: via, alternates, spellings, eligibility
   fadeno models --driver <alias>   Live backend listing via the route's models_command
                                    (registered spellings marked with ←)
+  fadeno model add <alias> <provider/id>
+                                   Discover and persist a canonical user model alias
 
 Options:
   --json   Structured output
@@ -454,6 +457,7 @@ Examples:
   fadeno models
   fadeno models opus
   fadeno models --driver opencode
+  fadeno model add moonshot stealth/ox-alpha
 `,
   dispatch: `fadeno dispatch — resolve an archetype to its executor and invoke it once
 
@@ -1415,6 +1419,16 @@ function printModelsDriver(result: DriverListingResult): void {
   for (const model of result.models) {
     const marks = model.registered_as.length > 0 ? `  ← ${model.registered_as.join(', ')}` : '';
     console.log(`  ${model.id}${marks}`);
+  }
+}
+
+function printModelAdd(result: ModelAddResult): void {
+  console.log(`added ${result.alias} → ${result.provider}/${result.id}`);
+  console.log(`  discovery: ${result.discovery_path} matched ${result.matched_identity}`);
+  console.log(`  delivery: ${result.delivery.route} → ${result.delivery.id}`);
+  console.log(`  user catalog: ${result.catalog_path}`);
+  if (result.suppressed_by_project) {
+    console.log('  note: this checkout has a self-contained project catalog, so it currently suppresses the user entry.');
   }
 }
 
@@ -2426,6 +2440,15 @@ function main(argv: string[]): number {
     // labels, so the two spellings cannot drift apart.
     case 'model':
     case 'models': {
+      if (positionals[1] === 'add') {
+        if (positionals.length !== 4 || values.driver != null) {
+          throw new Error('Usage: fadeno model add <alias> <provider/id> [--json]');
+        }
+        const result = runModelsAdd({ alias: positionals[2]!, discoveryId: positionals[3]! });
+        if (values.json) console.log(JSON.stringify(result, null, 2));
+        else printModelAdd(result);
+        return 0;
+      }
       if (values.driver != null) {
         if (positionals.length > 1) throw new Error('Usage: fadeno models --driver <alias>  (no positional with --driver)');
         const result = runModelsDriver({ driver: values.driver });

@@ -119,6 +119,39 @@ test('v3 routes driver fields and effort_encoding', () => {
   assert.throws(() => parseDoc({ schema_version: 3, models: { m: { provider: 'google' } }, routes: { standalone: { google: { driver: 'agy', effort_encoding: 'bad', command: ['x'] } } } }), /effort_encoding.*flag.*model-suffix/);
 });
 
+test('v3 promoted delivery and listing prefix validate strictly and compile route-relative ids', () => {
+  const profile = parseDoc({
+    schema_version: 3,
+    models: {
+      moonshot: {
+        provider: 'stealth', id: 'ox-alpha',
+        delivery: { route: 'opencode-direct', id: 'stealth/ox-alpha' },
+      },
+    },
+    routes: {
+      standalone: {
+        'opencode-direct': { driver: 'opencode-direct', command: ['opencode', 'run', '-m', '{model}'] },
+        openrouter: { driver: 'opencode', command: ['opencode', 'run', '-m', 'openrouter/{model}'], models_prefix: 'openrouter/' },
+      },
+    },
+  });
+  assert.deepEqual(profile.models.moonshot!.delivery, { route: 'opencode-direct', id: 'stealth/ox-alpha' });
+  assert.equal(profile.routes.standalone.openrouter!.modelsPrefix, 'openrouter/');
+  assert.equal(compileDialRef({ model: 'moonshot' }, profile).modelId, 'stealth/ox-alpha');
+  assert.throws(
+    () => parseDoc({ schema_version: 3, models: { m: { provider: 'p', delivery: { route: 'not/a-route', id: 'x' } } }, routes: { standalone: { p: { command: ['x'] } } } }),
+    /delivery.*bare.*route/,
+  );
+  assert.throws(
+    () => parseDoc({ schema_version: 3, models: { m: { provider: 'p', delivery: { route: 'route', id: '', extra: true } } }, routes: { standalone: { p: { command: ['x'] } } } }),
+    /delivery.*route.*id/,
+  );
+  assert.throws(
+    () => parseDoc({ schema_version: 3, models: { m: { provider: 'p' } }, routes: { standalone: { p: { command: ['x'], models_prefix: 'has space' } } } }),
+    /models_prefix.*whitespace-free/,
+  );
+});
+
 test('v3 routes reject native alias — only host: parses', () => {
   assert.throws(
     () => parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { openai: { command: ['x'], native: true } as unknown as Record<string, unknown> } } }),
@@ -594,4 +627,3 @@ test('roleArchetype accessor', () => {
   assert.equal(roleArchetype(pb, 'implementer'), 'worker');
   assert.equal(roleArchetype(pb, 'ghost'), null);
 });
-

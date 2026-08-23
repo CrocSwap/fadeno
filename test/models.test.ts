@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { KNOWN_CLI_COMMANDS } from '../src/cli.ts';
-import { ModelsError, runModels, runModelsDriver } from '../src/commands/models.ts';
+import { ModelsError, runModels, runModelsAdd, runModelsDriver } from '../src/commands/models.ts';
 import { unknownFlagsFor } from '../src/commands/completion.ts';
 import { recordVerifiedModel, type UserPathOptions } from '../src/lib/user-paths.ts';
+import { loadLayeredProfile } from '../src/lib/config-layers.ts';
+import { compileDialRef } from '../src/lib/executors.ts';
 import { tempRepo } from './helpers.ts';
 
 const CLI = join(import.meta.dirname, '..', 'src', 'cli.ts');
@@ -256,6 +258,10 @@ test('model is a registered top-level alias of models for flag validation', () =
   assert.deepEqual(unknownFlagsFor('model', undefined, ['driver', 'json']), []);
   assert.deepEqual(unknownFlagsFor('models', undefined, ['driver', 'json']), []);
   assert.deepEqual(unknownFlagsFor('model', undefined, ['session']), ['--session']);
+  assert.deepEqual(unknownFlagsFor('model', 'add', ['json']), []);
+  // Completion is intentionally additive for subcommands; the CLI still
+  // rejects --driver on model add because it would change discovery meaning.
+  assert.deepEqual(unknownFlagsFor('models', 'add', ['driver']), []);
 });
 
 test('fadeno model runs the models handler end to end', (t) => {
@@ -269,4 +275,227 @@ test('fadeno model runs the models handler end to end', (t) => {
   const plural = JSON.parse(runCli(['models', '--json']));
   assert.equal(singular.harness, 'standalone');
   assert.deepEqual(singular.models, plural.models);
+});
+
+test('model add: direct OpenCode discovery adds a preserved user-catalog alias and delivers exactly once', (t) => {
+  const root = tempRepo(t);
+  const user = isolated(root);
+  const userCatalog = join(user.env!.FADENO_CONFIG_HOME!, 'fadeno', 'executors.yaml');
+  mkdirSync(join(user.env!.FADENO_CONFIG_HOME!, 'fadeno'), { recursive: true });
+  writeFileSync(userCatalog, `# Keep this comment and unrelated known configuration.\nschema_version: 3\nmodels:\n  older:\n    provider: openai\n    id: old\nrelay:\n  codex: luna\n`);
+  let calls = 0;
+  const result = runModelsAdd({
+    repoRoot: root,
+    userPathOptions: user,
+    alias: 'moonshot',
+    discoveryId: 'stealth/ox-alpha',
+    spawn: (command) => {
+      calls += 1;
+      assert.deepEqual(command, ['opencode', 'models']);
+      return { status: 0, stdout: 'stealth/ox-alpha\nopenrouter/stealth/ox-alpha\n', stderr: '' };
+    },
+  });
+  assert.equal(calls, 1, 'direct and fallback path entries share one OpenCode listing');
+  assert.equal(result.discovery_path, 'opencode');
+  assert.equal(result.matched_identity, 'stealth/ox-alpha');
+  assert.deepEqual(result.delivery, { route: 'opencode-direct', id: 'stealth/ox-alpha', listed_id: 'stealth/ox-alpha' });
+  const stored = readFileSync(userCatalog, 'utf8');
+  assert.match(stored, /Keep this comment/);
+  assert.match(stored, /relay:\n  codex: luna/);
+  assert.match(stored, /moonshot:/);
+  const profile = loadLayeredProfile(root, user, 'standalone').profile;
+  const compiled = compileDialRef({ model: 'moonshot' }, profile);
+  assert.equal(compiled.driver, 'opencode-direct');
+  assert.equal(compiled.modelId, 'stealth/ox-alpha');
+  assert.ok((compiled.spec as { command: string[] }).command.includes('stealth/ox-alpha'));
+  assert.ok(!(compiled.spec as { command: string[] }).command.includes('openrouter/stealth/ox-alpha'));
+  const explicitFallback = compileDialRef({ model: 'moonshot', via: 'opencode' }, profile);
+  assert.equal(explicitFallback.modelId, 'ox-alpha');
+  assert.deepEqual(
+    (explicitFallback.spec as { command: string[] }).command.filter((part) => part.includes('stealth/')),
+    [],
+    'an unrelated explicit route must not inherit the home delivery spelling',
+  );
+  assert.ok((explicitFallback.spec as { command: string[] }).command.includes('openrouter/ox-alpha'));
+  assert.equal(runModels({ repoRoot: root, userPathOptions: user }).models.find((row) => row.name === 'moonshot')!.home_via, 'opencode-direct');
+});
+
+test('model add: OpenRouter fallback uses the route-relative id without double prefixing', (t) => {
+  const root = tempRepo(t);
+  const user = isolated(root);
+  let calls = 0;
+  const result = runModelsAdd({
+    repoRoot: root,
+    userPathOptions: user,
+    alias: 'moonshot',
+    discoveryId: 'stealth/ox-alpha',
+    spawn: () => {
+      calls += 1;
+      return { status: 0, stdout: 'openrouter/stealth/ox-alpha\n', stderr: '' };
+    },
+  });
+  assert.equal(calls, 1, 'the shared listing is cached across direct then OpenRouter checks');
+  assert.equal(result.discovery_path, 'opencode/openrouter');
+  assert.deepEqual(result.delivery, { route: 'openrouter', id: 'stealth/ox-alpha', listed_id: 'openrouter/stealth/ox-alpha' });
+  const compiled = compileDialRef({ model: 'moonshot' }, loadLayeredProfile(root, user, 'standalone').profile);
+  assert.equal(compiled.driver, 'opencode');
+  assert.equal(compiled.modelId, 'stealth/ox-alpha');
+  assert.deepEqual((compiled.spec as { command: string[] }).command.filter((part) => part.includes('stealth/')), ['openrouter/stealth/ox-alpha']);
+  const explicitHome = compileDialRef({ model: 'moonshot', via: 'opencode' }, loadLayeredProfile(root, user, 'standalone').profile);
+  assert.equal(explicitHome.modelId, 'stealth/ox-alpha');
+  assert.deepEqual((explicitHome.spec as { command: string[] }).command.filter((part) => part.includes('stealth/')), ['openrouter/stealth/ox-alpha']);
+  const explicitDirect = compileDialRef({ model: 'moonshot', via: 'opencode-direct' }, loadLayeredProfile(root, user, 'standalone').profile);
+  assert.equal(explicitDirect.modelId, 'ox-alpha');
+  assert.deepEqual((explicitDirect.spec as { command: string[] }).command.filter((part) => part.includes('stealth/')), []);
+  assert.ok((explicitDirect.spec as { command: string[] }).command.includes('ox-alpha'));
+  const listed = runModelsDriver({
+    repoRoot: root,
+    userPathOptions: user,
+    driver: 'opencode',
+    spawn: () => ({ status: 0, stdout: 'openrouter/stealth/ox-alpha\n', stderr: '' }),
+  });
+  assert.deepEqual(listed.models, [{ id: 'openrouter/stealth/ox-alpha', registered_as: ['moonshot'] }]);
+});
+
+test('model add: duplicate, missing discovery, and malformed user catalog never overwrite user state', (t) => {
+  const root = tempRepo(t);
+  const user = isolated(root);
+  const userCatalog = join(user.env!.FADENO_CONFIG_HOME!, 'fadeno', 'executors.yaml');
+  assert.throws(
+    () => runModelsAdd({ repoRoot: root, userPathOptions: user, alias: 'luna', discoveryId: 'stealth/ox-alpha', spawn: () => { throw new Error('must not list'); } }),
+    (err: unknown) => err instanceof ModelsError && /already exists/.test(err.message),
+  );
+  assert.ok(!existsSync(userCatalog));
+  assert.throws(
+    () => runModelsAdd({ repoRoot: root, userPathOptions: user, alias: 'moonshot', discoveryId: 'stealth/ox-alpha', spawn: () => ({ status: 0, stdout: 'other/model\n', stderr: '' }) }),
+    (err: unknown) => err instanceof ModelsError && /tried exact identities/.test(err.message),
+  );
+  assert.ok(!existsSync(userCatalog), 'failed discovery writes nothing');
+  mkdirSync(join(user.env!.FADENO_CONFIG_HOME!, 'fadeno'), { recursive: true });
+  writeFileSync(userCatalog, 'models: []\n');
+  const before = readFileSync(userCatalog, 'utf8');
+  assert.throws(
+    () => runModelsAdd({ repoRoot: root, userPathOptions: user, alias: 'moonshot', discoveryId: 'stealth/ox-alpha', spawn: () => ({ status: 0, stdout: 'stealth/ox-alpha\n', stderr: '' }) }),
+    (err: unknown) => err instanceof ModelsError && /non-mapping models/.test(err.message),
+  );
+  assert.equal(readFileSync(userCatalog, 'utf8'), before);
+});
+
+test('model add: injected discovery path and a self-contained project are explicit about promotion visibility', (t) => {
+  const root = tempRepo(t);
+  const user = isolated(root);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    schema_version: 3,
+    models: { local: { provider: 'local', id: 'local-1' } },
+    routes: {
+      standalone: {
+        local: { command: ['local', '{model}'] },
+        'opencode-direct': { driver: 'opencode-direct', command: ['opencode', 'run', '-m', '{model}'] },
+        openrouter: { driver: 'opencode', command: ['opencode', 'run', '-m', 'openrouter/{model}'], models_command: ['opencode', 'models'], models_prefix: 'openrouter/' },
+      },
+    },
+  }));
+  const result = runModelsAdd({
+    repoRoot: root,
+    userPathOptions: user,
+    alias: 'moonshot',
+    discoveryId: 'stealth/ox-alpha',
+    discoveryPath: [{
+      name: 'test-plugin-path',
+      driver: 'opencode',
+      listedId: (provider, id) => `plugin/${provider}/${id}`,
+      delivery: (provider, id) => ({ route: 'opencode-direct', id: `${provider}/${id}` }),
+    }],
+    spawn: () => ({ status: 0, stdout: 'plugin/stealth/ox-alpha\n', stderr: '' }),
+  });
+  assert.equal(result.discovery_path, 'test-plugin-path');
+  assert.equal(result.suppressed_by_project, true);
+  assert.match(readFileSync(join(user.env!.FADENO_CONFIG_HOME!, 'fadeno', 'executors.yaml'), 'utf8'), /moonshot:/);
+  assert.equal(runModels({ repoRoot: root, userPathOptions: user }).models.some((row) => row.name === 'moonshot'), false);
+});
+
+test('model add: a self-contained project cannot hide global aliases or discovery routes', (t) => {
+  const root = tempRepo(t);
+  const user = isolated(root);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  // Deliberately complete enough to suppress both builtin and user layers,
+  // while carrying no OpenCode route at all. Promotion must still use the
+  // global builtin+user catalog, then report this project's suppression.
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    schema_version: 3,
+    models: { local: { provider: 'local', id: 'local-1' } },
+    routes: { standalone: { local: { command: ['local', '{model}'] } } },
+  }));
+  assert.throws(
+    () => runModelsAdd({ repoRoot: root, userPathOptions: user, alias: 'luna', discoveryId: 'stealth/ox-alpha', spawn: () => { throw new Error('must not list'); } }),
+    (err: unknown) => err instanceof ModelsError && /already exists/.test(err.message),
+    'builtin canonical aliases remain reserved even when this project hides the builtin catalog',
+  );
+  let listings = 0;
+  const result = runModelsAdd({
+    repoRoot: root,
+    userPathOptions: user,
+    alias: 'moonshot',
+    discoveryId: 'stealth/ox-alpha',
+    spawn: (command) => {
+      listings += 1;
+      assert.deepEqual(command, ['opencode', 'models']);
+      return { status: 0, stdout: 'stealth/ox-alpha\n', stderr: '' };
+    },
+  });
+  assert.equal(listings, 1);
+  assert.equal(result.suppressed_by_project, true);
+  assert.match(readFileSync(join(user.env!.FADENO_CONFIG_HOME!, 'fadeno', 'executors.yaml'), 'utf8'), /moonshot:/);
+});
+
+test('model add: project aliases are reserved in overlay and self-contained catalogs', (t) => {
+  const cases = [
+    {
+      mode: 'overlay',
+      catalog: { schema_version: 3, models: { moonshot: { provider: 'local', id: 'local-1' } } },
+    },
+    {
+      mode: 'self-contained',
+      catalog: {
+        schema_version: 3,
+        models: { moonshot: { provider: 'local', id: 'local-1' } },
+        routes: { standalone: { local: { command: ['local', '{model}'] } } },
+      },
+    },
+  ] as const;
+  for (const { mode, catalog } of cases) {
+    const root = tempRepo(t);
+    const user = isolated(root);
+    mkdirSync(join(root, '.fadeno'), { recursive: true });
+    writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml(catalog));
+    assert.throws(
+      () => runModelsAdd({ repoRoot: root, userPathOptions: user, alias: 'moonshot', discoveryId: 'stealth/ox-alpha', spawn: () => { throw new Error('must not list'); } }),
+      (err: unknown) => err instanceof ModelsError && /already exists/.test(err.message),
+      `${mode} project aliases must be rejected before discovery`,
+    );
+  }
+});
+
+test('fadeno model add runs the singular CLI form end to end', (t) => {
+  const root = tempRepo(t);
+  const user = isolated(root);
+  const bin = join(root, 'bin');
+  mkdirSync(bin, { recursive: true });
+  const opencode = join(bin, 'opencode');
+  writeFileSync(opencode, '#!/bin/sh\nprintf "stealth/ox-alpha\\n"\n');
+  chmodSync(opencode, 0o755);
+  const output = execFileSync(
+    process.execPath,
+    [CLI, 'model', 'add', 'moonshot', 'stealth/ox-alpha', '--json'],
+    {
+      cwd: root,
+      env: { ...process.env, ...user.env, HOME: user.home!, PATH: `${bin}:${process.env.PATH ?? ''}` },
+      encoding: 'utf8',
+      stdio: 'pipe',
+    },
+  );
+  const result = JSON.parse(output);
+  assert.equal(result.alias, 'moonshot');
+  assert.equal(result.discovery_path, 'opencode');
 });

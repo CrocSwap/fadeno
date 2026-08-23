@@ -334,11 +334,23 @@ export interface ModelEntry {
   effort: string;
   spellings: Record<string, string>;
   eligibility: Record<string, EligibilityState>;
+  /**
+   * A promoted model's home delivery can differ from its upstream provider.
+   * `provider` + `id` remain the canonical identity shown in the registry;
+   * this only says which route receives which provider-facing spelling.
+   */
+  delivery?: { route: string; id: string };
 }
 
 export interface RouteRaw {
   driver?: string;
   models_command?: string[] | null;
+  /**
+   * Deliberately normalized from YAML's `models_prefix` even though most
+   * RouteRaw fields retain their YAML spelling: consumers use this only as a
+   * derived listing qualifier, never as an argv template field.
+   */
+  modelsPrefix?: string;
   effort_encoding?: 'flag' | 'model-suffix';
   command?: string[] | null;
   timeout_ms?: number | null;
@@ -352,6 +364,18 @@ export interface RouteRaw {
    * covers unregistered models falling through to this route too.
    */
   eligibility?: Record<string, EligibilityState>;
+}
+
+/**
+ * The identity a route's `models_command` prints for one argv-facing model
+ * id. This is deliberately separate from command substitution: OpenCode's
+ * OpenRouter listing includes `openrouter/`, while its `-m` argument must not
+ * receive that prefix twice.
+ */
+export function qualifyListedModelId(route: RouteRaw | null | undefined, modelId: string): string {
+  const prefix = route?.modelsPrefix;
+  if (prefix == null || modelId.startsWith(prefix)) return modelId;
+  return `${prefix}${modelId}`;
 }
 
 export interface CompiledDelivery {
@@ -735,12 +759,28 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
         spellings[driver] = sid.trim();
       }
     }
-    const eligibility = readEligibility(raw as Record<string, unknown>, `model "${name}"`, source);
-    const unknown = Object.keys(raw).filter((k) => !['provider', 'id', 'effort', 'spellings', 'eligibility'].includes(k));
-    if (unknown.length > 0) {
-      throw new ExecutorProfileError(`${source}: model "${name}" has unknown key(s) ${unknown.join(', ')}; only provider, id, effort, spellings, eligibility are allowed.`);
+    let delivery: ModelEntry['delivery'];
+    if (raw.delivery !== undefined) {
+      if (!isMapping(raw.delivery)) {
+        throw new ExecutorProfileError(`${source}: model "${name}" \`delivery\` is not a mapping (route + id).`);
+      }
+      const route = raw.delivery.route;
+      const deliveryId = raw.delivery.id;
+      if (typeof route !== 'string' || !BARE_IDENTIFIER_RE.test(route.trim()) || typeof deliveryId !== 'string' || deliveryId.trim().length === 0) {
+        throw new ExecutorProfileError(`${source}: model "${name}" \`delivery\` needs a bare \`route\` and non-empty \`id\`.`);
+      }
+      const unknownDelivery = Object.keys(raw.delivery).filter((k) => k !== 'route' && k !== 'id');
+      if (unknownDelivery.length > 0) {
+        throw new ExecutorProfileError(`${source}: model "${name}" delivery has unknown key(s) ${unknownDelivery.join(', ')}; only route, id are allowed.`);
+      }
+      delivery = { route: route.trim(), id: deliveryId.trim() };
     }
-    models[name] = { provider: prov, id, effort, spellings, eligibility };
+    const eligibility = readEligibility(raw as Record<string, unknown>, `model "${name}"`, source);
+    const unknown = Object.keys(raw).filter((k) => !['provider', 'id', 'effort', 'spellings', 'eligibility', 'delivery'].includes(k));
+    if (unknown.length > 0) {
+      throw new ExecutorProfileError(`${source}: model "${name}" has unknown key(s) ${unknown.join(', ')}; only provider, id, effort, spellings, eligibility, delivery are allowed.`);
+    }
+    models[name] = { provider: prov, id, effort, spellings, eligibility, ...(delivery != null ? { delivery } : {}) };
   }
   models['current-host'] = { provider: 'current-host', id: 'current-host', effort: 'default', spellings: {}, eligibility: {} };
 
@@ -772,6 +812,12 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
             throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}.models_command\` must be a non-empty string array.`);
           }
           route.models_command = mc as string[];
+        }
+        if (rawRoute.models_prefix !== undefined) {
+          if (typeof rawRoute.models_prefix !== 'string' || rawRoute.models_prefix.trim().length === 0 || /\s/.test(rawRoute.models_prefix)) {
+            throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}.models_prefix\` must be a non-empty whitespace-free string.`);
+          }
+          route.modelsPrefix = rawRoute.models_prefix.trim();
         }
         if (rawRoute.effort_encoding !== undefined) {
           if (rawRoute.effort_encoding !== 'flag' && rawRoute.effort_encoding !== 'model-suffix') {
@@ -852,7 +898,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
         if (route.host === true && route.timeout_ms != null) {
           throw new ExecutorProfileError(`${source}: host route \`routes.${harnessKey}.${routeKey}\` may not declare \`timeout_ms\` — host dispatch is not supervised.`);
         }
-        const unknownRouteKeys = Object.keys(rawRoute).filter((k) => !['driver','models_command','effort_encoding','command','host','resume','session_id_pattern','eligibility','timeout_ms'].includes(k));
+        const unknownRouteKeys = Object.keys(rawRoute).filter((k) => !['driver','models_command','models_prefix','effort_encoding','command','host','resume','session_id_pattern','eligibility','timeout_ms'].includes(k));
         if (unknownRouteKeys.length > 0) {
           throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}\` has unknown key(s) ${unknownRouteKeys.join(', ')}.`);
         }
@@ -1767,9 +1813,16 @@ export function compileDialRef(ref: DialRef, profile: ExecutorProfile): Compiled
       }
       driver = via;
       route = found.route;
-      id = entry.spellings[via] ?? entry.id;
+      // A promoted delivery spelling is scoped to its declared home route.
+      // An explicit unrelated driver must receive the canonical id unless it
+      // has an explicit spelling; otherwise a provider prefix leaks into a
+      // backend that never agreed to interpret it.
+      const deliveryRoute = entry.delivery != null ? routesForHarness[entry.delivery.route] ?? null : null;
+      const deliveryDriver = deliveryRoute?.driver ?? entry.delivery?.route;
+      const usesDelivery = entry.delivery != null && (found.key === entry.delivery.route || deliveryDriver === via);
+      id = entry.spellings[via] ?? (usesDelivery ? entry.delivery!.id : entry.id);
     } else {
-      const homeKey = provider;
+      const homeKey = entry.delivery?.route ?? provider;
       const homeRoute = routesForHarness[homeKey] ?? null;
       if (homeRoute == null) {
         if (ref.model === 'current-host') {
@@ -1784,7 +1837,7 @@ export function compileDialRef(ref: DialRef, profile: ExecutorProfile): Compiled
       }
       driver = homeRoute.driver ?? homeKey;
       route = homeRoute;
-      id = entry.id;
+      id = entry.delivery?.id ?? entry.id;
     }
     let modelId = id;
     const enc = route?.effort_encoding ?? 'flag';
