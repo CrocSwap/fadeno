@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
+import { KNOWN_CLI_COMMANDS } from '../src/cli.ts';
 import { ModelsError, runModels, runModelsDriver } from '../src/commands/models.ts';
+import { unknownFlagsFor } from '../src/commands/completion.ts';
 import { recordVerifiedModel, type UserPathOptions } from '../src/lib/user-paths.ts';
 import { tempRepo } from './helpers.ts';
+
+const CLI = join(import.meta.dirname, '..', 'src', 'cli.ts');
 
 function isolated(root: string): UserPathOptions {
   return {
@@ -71,7 +76,11 @@ test('models: registry table — deliveries, lane marks, stale providers, verifi
   assert.deepEqual(result.listable_drivers, ['openai', 'openrouter']);
 
   const names = result.models.map((r) => r.name);
-  assert.deepEqual([...names].sort(), names, 'rows are name-sorted');
+  assert.deepEqual(
+    names.filter((n) => n !== 'current-host'),
+    ['opus', 'ghost', 'sol'],
+    'rows sort by home_via (claude < nowhere < openai)',
+  );
   assert.ok(names.includes('sol') && names.includes('opus') && names.includes('ghost'));
 
   const sol = result.models.find((r) => r.name === 'sol')!;
@@ -195,4 +204,69 @@ test('models: home `via` is stable while the caller-specific adapter changes', (
   assert.equal(rows.get('claude')!.adapter, 'command');
   assert.equal(rows.get('grok')!.adapter, 'command');
   assert.equal(rows.get('standalone')!.adapter, 'command');
+});
+
+test('models: rows sort by home_via, then provider, then name', (t) => {
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    schema_version: 3,
+    // Name order (alpha, bravo, mike, zulu) differs from every sort key. The
+    // acme tie pair is declared mike-before-bravo: rows enter the sort in
+    // name-sorted iteration order and Array.sort is stable, so the `name`
+    // comparator key alone can never flip this assertion — but this document
+    // order means losing either the name key OR the iteration `.sort()` (or a
+    // non-stable sort) does.
+    models: {
+      zulu: { provider: 'anthropic', id: 'z-1', effort: 'high' },
+      alpha: { provider: 'zenith', id: 'a-1', effort: 'high' },
+      mike: { provider: 'acme', id: 'm-1', effort: 'high' },
+      bravo: { provider: 'acme', id: 'b-1', effort: 'high' },
+    },
+    routes: {
+      standalone: {
+        anthropic: { driver: 'claude', command: ['node', '-e', '0'] },
+        // Two providers share one driver alias, so `home_via` ties and the
+        // provider key decides between them.
+        acme: { driver: 'shared', command: ['node', '-e', '0'] },
+        zenith: { driver: 'shared', command: ['node', '-e', '0'] },
+      },
+    },
+    archetypes: { worker: {} },
+  }));
+
+  const result = runModels({ repoRoot: root, userPathOptions: isolated(root) });
+  assert.deepEqual(
+    result.models.map((r) => [r.name, r.home_via, r.provider]),
+    [
+      ['zulu', 'claude', 'anthropic'],
+      // The synthesized current-host row participates in the same ordering.
+      ['current-host', 'current-host', 'current-host'],
+      ['bravo', 'shared', 'acme'],
+      ['mike', 'shared', 'acme'],
+      ['alpha', 'shared', 'zenith'],
+    ],
+  );
+});
+
+test('model is a registered top-level alias of models for flag validation', () => {
+  assert.ok(KNOWN_CLI_COMMANDS.has('model'));
+  // Same completion spec object as `models`, so the accepted flag sets match
+  // exactly — including what each spelling rejects.
+  assert.deepEqual(unknownFlagsFor('model', undefined, ['driver', 'json']), []);
+  assert.deepEqual(unknownFlagsFor('models', undefined, ['driver', 'json']), []);
+  assert.deepEqual(unknownFlagsFor('model', undefined, ['session']), ['--session']);
+});
+
+test('fadeno model runs the models handler end to end', (t) => {
+  const { root, user } = seed(t);
+  const env = { ...process.env, ...user.env, HOME: user.home! };
+  const runCli = (args: string[]): string =>
+    execFileSync(process.execPath, [CLI, ...args], { cwd: root, env, encoding: 'utf8', stdio: 'pipe' });
+
+  assert.equal(runCli(['model']), runCli(['models']));
+  const singular = JSON.parse(runCli(['model', '--json']));
+  const plural = JSON.parse(runCli(['models', '--json']));
+  assert.equal(singular.harness, 'standalone');
+  assert.deepEqual(singular.models, plural.models);
 });

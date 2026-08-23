@@ -69,6 +69,10 @@ const SHADOW_SPEC = command(
   ['archetype', 'free'],
 );
 
+// Shared by `models` and its top-level alias `model` — one spec so the two
+// spellings cannot drift apart on which flags they accept.
+const MODELS_SPEC = command({ '--driver': { kind: 'free' }, '--json': NONE }, ['executor']);
+
 const COMMANDS: Record<string, CommandSpec> = {
   setup: command({ '--codex': NONE, '--claude': NONE, '--non-interactive': NONE, '--from': PATH, '--reset-runtime': NONE }),
   status: command({ '--verbose': NONE }),
@@ -92,7 +96,9 @@ const COMMANDS: Record<string, CommandSpec> = {
   validate: command({ '--schema': { kind: 'enum', values: [...SCHEMA_KINDS] } }, ['path']),
   diagram: command({ '--format': { kind: 'enum', values: ['ascii', 'mermaid'] } }, ['playbook']),
   'new-run': command({ '--input': { kind: 'input' } }, ['playbook', 'free']),
-  models: command({ '--driver': { kind: 'free' }, '--json': NONE }, ['executor']),
+  models: MODELS_SPEC,
+  // Top-level alias for `models` — same handler in cli.ts, same flags.
+  model: MODELS_SPEC,
   dial: command(
     { '--via': { kind: 'free' }, '--session': NONE, '--user': NONE, '--repo': NONE, '--rate': { kind: 'free' }, '--archetype': { kind: 'archetype' }, '--json': NONE },
     ['archetype', 'free'],

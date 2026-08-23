@@ -111,6 +111,7 @@ Usage:
   fadeno dial resolve --archetype <a>          # JSON, hook contract unchanged
   fadeno models [<name>]                Model registry + each model's home driver
   fadeno models --driver <alias>        Live backend model listing (routes with models_command)
+  fadeno model ...                      # alias for 'fadeno models ...' (same forms)
   fadeno steering resolve|apply [...]   Resolve or materialize hybrid Codex steering
   fadeno dispatch [flags]               Resolve archetype → executor and invoke it once (ad hoc)
                                         (--shadow <ref> duplicates it to a one-shot challenger)
@@ -279,7 +280,7 @@ export const KNOWN_CLI_COMMANDS = new Set([
   'setup', 'status', 'doctor', 'vendor', 'unvendor', 'clean', 'uninstall',
   'evidence', 'init', 'steering', 'validate', 'diagram', 'new-run', 'run',
   'tool-run', 'tool-complete', 'plugin', 'completion', 'gate', 'prompt', 'next', 'drive',
-  'cancel', 'models', 'dial', 'shadow', 'dispatch', 'dispatch-fallback', 'dispatch-start',
+  'cancel', 'models', 'model', 'dial', 'shadow', 'dispatch', 'dispatch-fallback', 'dispatch-start',
   'dispatch-prompt', 'dispatch-complete', 'dispatch-progress', 'dispatch-prepare',
   'dispatch-fail', 'decide', 'attempt-accept', 'runs', 'attest', 'dispatches', 'shadow-apply', 'bakeoff', 'show', 'verify',
 ]);
@@ -435,6 +436,8 @@ Usage:
 
 Options:
   --json   Structured output
+
+\`fadeno model\` is an alias for every form above.
 
 The table is frame-neutral: \`via\` is the model's home driver — the CLI its
 provider route names, and the value \`--via\` takes to pick a different one —
@@ -2338,6 +2341,9 @@ function main(argv: string[]): number {
         throw err;
       }
     }
+    // Top-level alias for `fadeno models ...` — same handler via grouped case
+    // labels, so the two spellings cannot drift apart.
+    case 'model':
     case 'models': {
       if (values.driver != null) {
         if (positionals.length > 1) throw new Error('Usage: fadeno models --driver <alias>  (no positional with --driver)');

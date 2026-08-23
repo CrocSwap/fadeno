@@ -83,7 +83,7 @@ export interface ModelsResult {
 function harnessSource(userPathOptions: UserPathOptions = {}): ModelsResult['harness_source'] {
   const env = userPathOptions.env ?? process.env;
   const explicit = env.FADENO_HARNESS?.trim();
-  if (explicit === 'codex' || explicit === 'claude' || explicit === 'grok' || explicit === 'opencode' || explicit === 'standalone') return 'FADENO_HARNESS';
+  if (explicit === 'codex' || explicit === 'claude' || explicit === 'grok' || explicit === 'opencode' || explicit === 'omp' || explicit === 'standalone') return 'FADENO_HARNESS';
   if (detectAmbientHarness(userPathOptions).harness != null) return 'ambient';
   if (readUserHarness(userPathOptions) != null) return 'user default';
   return 'fallback';
@@ -216,6 +216,18 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
     }
     rows.push(row);
   }
+
+  // Table order groups by the printed `via` column, not registry scan order.
+  // ModelRow.provider is `string | null` even though neither construction path
+  // above yields null today; `?? ''` keeps the comparator total if that ever
+  // changes, with a null leading its group.
+  rows.sort((a, b) => {
+    if (a.home_via !== b.home_via) return a.home_via < b.home_via ? -1 : 1;
+    const pa = a.provider ?? '';
+    const pb = b.provider ?? '';
+    if (pa !== pb) return pa < pb ? -1 : 1;
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+  });
 
   const listable = new Set<string>();
   for (const [key, route] of Object.entries(routesForHarness(profile))) {
