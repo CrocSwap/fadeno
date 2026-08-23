@@ -12,5 +12,9 @@
     "workflow",
     "skills"
   ],
-  "omp": {}
+  "omp": {
+    "extensions": [
+      "./extensions/fadeno-steering.ts"
+    ]
+  }
 }
