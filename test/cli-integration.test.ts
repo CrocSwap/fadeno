@@ -93,7 +93,7 @@ test('committed bundled CLI supports Grok init and rejects mixed target flags', 
 
   const help = cliSplit(root, ['--help']);
   assert.equal(help.status, 0);
-  assert.match(help.stdout, /fadeno init --codex\|--claude\|--grok/);
+  assert.match(help.stdout, /fadeno init --codex/);
   assert.match(help.stdout, /fadeno init --grok/);
 
   const initialized = cliSplit(root, ['init', '--grok']);

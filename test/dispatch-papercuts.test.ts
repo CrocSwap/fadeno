@@ -121,14 +121,16 @@ test('built-in catalog: worker resolves to base (current-host) with no dials', (
 
 test('help: new dial flags are discoverable and old loadout vars are gone', (t) => {
   const root = tempRepo(t);
-  const result = cli(root, ['--help']);
-  assert.equal(result.status, 0);
-  assert.match(result.stdout, /--via/);
-  assert.match(result.stdout, /--model/);
-  assert.match(result.stdout, /--user/);
-  assert.match(result.stdout, /--repo/);
-  assert.doesNotMatch(result.stdout, /FADENO_LOADOUT/);
-  assert.match(result.stdout, /fadeno dial/);
+  const dial = cli(root, ['dial', '--help']);
+  const dispatch = cli(root, ['dispatch', '--help']);
+  assert.equal(dial.status, 0);
+  assert.equal(dispatch.status, 0);
+  assert.match(dial.stdout, /--via/);
+  assert.match(dispatch.stdout, /--model/);
+  assert.match(dial.stdout, /--user/);
+  assert.match(dial.stdout, /--repo/);
+  assert.doesNotMatch(`${dial.stdout}${dispatch.stdout}`, /FADENO_LOADOUT/);
+  assert.match(dial.stdout, /fadeno dial/);
 });
 
 // --- 3. echo-tag disambiguation ---------------------------------------------

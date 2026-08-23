@@ -51,6 +51,10 @@ Same discipline — plan → implement → review → test → bounded revision 
 
 Fadeno is **harness-neutral**: the same playbooks run on Codex, Claude Code, Grok Build, OpenCode, and omp today. Its repo-local runtime records durable execution evidence; only a thin per-target adapter differs, while richer compiled orchestration remains future work.
 
+Run `fadeno --help` for a compact command overview, then `fadeno <command> --help`
+for exact usage and only that command's options (including nested paths such as
+`fadeno dial shadow --help`).
+
 > **Honest about enforcement, up front:** in instruction-only hosts, approval policies are *advisory* — the model is asked to honor them, with no hard guarantee. For real guarantees, wire gates to your git/CI/pre-commit layer (or Claude Code hooks). See [Enforcement](#enforcement-advisory-vs-enforced). We'd rather you trust the tool because it's honest than because it overclaims.
 
 ---

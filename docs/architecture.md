@@ -155,8 +155,9 @@ so it has never needed a schema slot.
 4. Formats the returned data into stdout/stderr and sets `process.exitCode`.
 
 The top-level `try/catch` turns any thrown error into `Error: <message>` + exit 1.
-`HELP` (the usage string) lives here and must be updated whenever you add a
-command or flag.
+The compact global page and focused pages render from `lib/cli-help.ts`; tests
+check its path coverage against the public completion grammar so a public
+command cannot silently lack focused help.
 
 ### Commands return data; they don't print (`src/commands/*.ts`)
 

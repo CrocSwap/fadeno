@@ -227,6 +227,17 @@ const COMMANDS: Record<string, CommandSpec> = {
   }),
 };
 
+/** Public top-level spellings shared by completion, CLI dispatch, and help coverage. */
+export const TOP_LEVEL_COMMANDS: readonly string[] = Object.freeze(Object.keys(COMMANDS));
+
+/** Public help paths; the internal `completion candidates` protocol is omitted. */
+export const PUBLIC_COMMAND_PATHS: readonly string[] = Object.freeze(
+  TOP_LEVEL_COMMANDS.flatMap((name) => {
+    const subcommands = COMMANDS[name]!.subcommands;
+    return [name, ...Object.keys(subcommands ?? {}).filter((subcommand) => !(name === 'completion' && subcommand === 'candidates')).map((subcommand) => `${name} ${subcommand}`)];
+  }),
+);
+
 // `CommandSpec` is deliberately small, but gate conditions are useful values
 // just like enum options. Keeping this separate avoids a second parser while
 // retaining the static type of ordinary positional kinds.

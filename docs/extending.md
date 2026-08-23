@@ -20,8 +20,13 @@ Example: a hypothetical `fadeno list`.
    with `findRepoRoot()` from `lib/paths.ts`.
 2. **`src/cli.ts`** — import `runList`; add any new flags to the `parseArgs`
    `options`; add a `case 'list':` that calls it and formats the result to stdout;
-   set the exit code. Add a line to the `HELP` string and an example.
-3. **`test/list.test.ts`** — `tempRepo(t)` → (init if needed) → `runList(...)` →
+   set the exit code.
+3. **`src/commands/completion.ts` + `src/lib/cli-help.ts`** — add the command
+   grammar and its structured focused-help page. Tests cross-check public
+   help-path coverage against the completion grammar, so either side missing
+   a command fails.
+   Keep the global page concise; put flags and detailed examples on focused pages.
+4. **`test/list.test.ts`** — `tempRepo(t)` → (init if needed) → `runList(...)` →
    assert on the return value and files. Follow the existing test shape.
 
 Keep all printing in `cli.ts`; the command stays a pure function over the FS.
@@ -799,7 +804,8 @@ format.
    subagent copy, bootstrap name, any policy emit). Keep every write
    non-destructive via the `fsutil` helpers.
 3. **`src/cli.ts`** — add the target to the `Target` type, the `SIGIL` map,
-   `requireTarget`, the `parseArgs` options, and `HELP`.
+   `requireTarget`, and the `parseArgs` options; update structured help in
+   `src/lib/cli-help.ts` when the public CLI grammar changes.
 4. **README** + the current adapter note/table in `docs/kickoff-memo.md` — document
    the new adapter row and distinguish host handles from namespaced plugin
    commands where applicable.

@@ -579,7 +579,7 @@ test('the claims registry is well-formed', () => {
  * is the point: one truth, three consumers.
  */
 const PARALLEL_SURFACES = [
-  'src/cli.ts',
+  'src/lib/cli-help.ts',
   'templates/common/skills/fadeno-driver/SKILL.md',
   'templates/common/skills/fadeno-runner/references/runtime.md',
 ];
