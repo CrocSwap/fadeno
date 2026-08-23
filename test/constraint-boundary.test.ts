@@ -6,7 +6,7 @@ import { stringify as stringifyYaml } from 'yaml';
 import { DispatchCommandError, DISPATCHES_FILE, runDispatch } from '../src/commands/dispatch.ts';
 import { runDispatches } from '../src/commands/dispatches.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
-import { tempRepo } from './helpers.ts';
+import { echoedStdin, tempRepo } from './helpers.ts';
 
 const onHarness = (harness: string): UserPathOptions => ({ env: { FADENO_HARNESS: harness } });
 
@@ -212,7 +212,7 @@ test('dispatch: unresolvable --produced-by warns under advisory', (t) => {
 test('dispatch: constraint exit 0 allows with 2 rows and no refusal', (t) => {
   const root = seedConstraint(t, 'allow');
   const r = runDispatch({ archetype: 'worker', prompt: 'go', repoRoot: root, userPathOptions: onHarness('standalone') });
-  assert.equal(r.stdout, 'A:go');
+  assert.equal(r.stdout, echoedStdin('A:go'));
   const rows = evidenceRows(root);
   assert.equal(rows.length, 2);
   assert.equal(rows[0]!.event, 'dispatch_requested');

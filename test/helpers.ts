@@ -2,6 +2,17 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { TestContext } from 'node:test';
+import { DISPATCH_RESULT_FOOTER } from '../src/commands/dispatch.ts';
+
+/**
+ * What an executor that echoes its stdin back (the common test-executor shape)
+ * writes to stdout, given the kernel now appends the fixed result-footer to
+ * every dispatch prompt. One indirection point so a footer rewording cannot
+ * scatter literal bytes across the suite.
+ */
+export function echoedStdin(echoed: string): string {
+  return `${echoed}\n${DISPATCH_RESULT_FOOTER}`;
+}
 
 // Hermetic user scope for the whole suite: a developer's real `fadeno setup`
 // state (user executor catalog + sticky user loadout under XDG/state) must

@@ -13,7 +13,7 @@ import {
   substitutePromptFile,
 } from '../src/lib/executors.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
-import { tempRepo } from './helpers.ts';
+import { echoedStdin, tempRepo } from './helpers.ts';
 
 // A stand-in for Muse Code: reads the prompt ONLY from the file named by its
 // last argv element, ignores stdin entirely.
@@ -54,7 +54,7 @@ test('dispatch: a file-reading driver receives the attested snapshot via {prompt
   }));
   const user = isolated(root);
   const result = runDispatch({ archetype: 'worker', prompt: 'FILE-DELIVERED', repoRoot: root, userPathOptions: user });
-  assert.equal(result.stdout, 'FILE-DELIVERED');
+  assert.equal(result.stdout, echoedStdin('FILE-DELIVERED'));
 
   const rows = readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
   const request = rows.find((r) => r.event === 'dispatch_requested')!;
@@ -62,7 +62,7 @@ test('dispatch: a file-reading driver receives the attested snapshot via {prompt
   // Evidence records the argv that actually spawned: an absolute snapshot path.
   const pathArg = command[command.length - 1]!;
   assert.ok(isAbsolute(pathArg), pathArg);
-  assert.equal(readFileSync(pathArg, 'utf8'), 'FILE-DELIVERED');
+  assert.equal(readFileSync(pathArg, 'utf8'), echoedStdin('FILE-DELIVERED'));
 });
 
 test('drive: a file-reading actor gets the run-recorded prompt artifact', (t) => {

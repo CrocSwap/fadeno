@@ -9,7 +9,7 @@ import { DispatchCommandError } from '../src/commands/dispatch.ts';
 import { runDispatchesOutput } from '../src/commands/dispatches.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
-import { tempRepo } from './helpers.ts';
+import { echoedStdin, tempRepo } from './helpers.ts';
 
 const onHarness = (harness: string): UserPathOptions => ({ env: { FADENO_HARNESS: harness } });
 
@@ -69,17 +69,18 @@ test('dispatch output: snapshot file exists and row fields match the executor by
   const comp = rows.find((r) => r.event === 'dispatch_completed')!;
   assert.ok(existsSync(join(root, req.output_snapshot as string)));
   assert.equal(req.output_snapshot, comp.output_snapshot);
-  assert.equal(comp.output_sha256, sha256Hex('REPORT:hello'));
-  assert.equal(comp.output_bytes, Buffer.byteLength('REPORT:hello'));
+  assert.equal(comp.output_sha256, sha256Hex(echoedStdin('REPORT:hello')));
+  assert.equal(comp.output_bytes, Buffer.byteLength(echoedStdin('REPORT:hello')));
   assert.ok(!('output_bytes' in req));
   // file prompt variant
   writeFileSync(join(root, 'task.md'), 'from-a-file');
   const fromFile = runDispatch({ archetype: 'worker', promptFile: 'task.md', cwd: root, repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
   const fileRow = evidenceRows(root).at(-1)!;
   assert.equal(fileRow.prompt_source, 'file');
+  assert.match(fileRow.prompt_snapshot as string, /^\.fadeno\/local\/prompts\/worker-[0-9a-f]{8}\.md$/);
   assert.match(fileRow.output_snapshot as string, /^\.fadeno\/local\/outputs\/worker-[0-9a-f]{8}\.md$/);
-  assert.equal(readFileSync(join(root, fileRow.output_snapshot as string), 'utf8'), 'REPORT:from-a-file');
-  assert.equal(fileRow.output_sha256, sha256Hex('REPORT:from-a-file'));
+  assert.equal(readFileSync(join(root, fileRow.output_snapshot as string), 'utf8'), echoedStdin('REPORT:from-a-file'));
+  assert.equal(fileRow.output_sha256, sha256Hex(echoedStdin('REPORT:from-a-file')));
   assert.equal(fileRow.output_bytes, Buffer.byteLength(fromFile.stdout));
 });
 

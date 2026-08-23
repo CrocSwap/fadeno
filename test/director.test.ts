@@ -15,7 +15,7 @@ import {
   type ExecutorProfile,
 } from '../src/lib/executors.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
-import { tempRepo } from './helpers.ts';
+import { echoedStdin, tempRepo } from './helpers.ts';
 
 function parseDoc(doc: Record<string, unknown>): ExecutorProfile {
   return parseExecutorProfile(stringifyYaml(doc), 'test.yaml');
@@ -134,27 +134,28 @@ test('dispatch: the declared brief is composed ahead of the task and stamped in 
   const { root, user } = seedDirectorRepo(t);
   const result = runDispatch({ archetype: 'director', prompt: 'THE-TASK', repoRoot: root, userPathOptions: user });
   assert.ok(result.stdout.startsWith('BRIEF-HEADER: coordinate through fadeno.'), result.stdout.slice(0, 80));
-  assert.ok(result.stdout.endsWith('THE-TASK'), result.stdout.slice(-40));
+  assert.ok(result.stdout.endsWith(echoedStdin('THE-TASK')), result.stdout.slice(-40));
 
   const rows = readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
   const request = rows.find((r) => r.event === 'dispatch_requested')!;
   assert.equal(request.brief, 'director');
-  // The snapshot holds the composed bytes — the digest attests brief + task.
+  // The snapshot holds the composed bytes — the digest attests brief + task
+  // (+ the kernel's result footer).
   const snapshot = readFileSync(join(root, String(request.prompt_snapshot)), 'utf8');
   assert.ok(snapshot.startsWith('BRIEF-HEADER'));
-  assert.ok(snapshot.endsWith('THE-TASK'));
+  assert.ok(snapshot.endsWith(echoedStdin('THE-TASK')));
 });
 
 test('dispatch: --no-brief sends the bare task; a declared-but-missing brief refuses loudly', (t) => {
   const { root, user } = seedDirectorRepo(t);
   const bare = runDispatch({ archetype: 'director', prompt: 'THE-TASK', noBrief: true, repoRoot: root, userPathOptions: user });
-  assert.equal(bare.stdout, 'THE-TASK');
+  assert.equal(bare.stdout, echoedStdin('THE-TASK'));
 
   // A repo brief absent falls back to the shipped builtin — still composed.
   const { root: root2, user: user2 } = seedDirectorRepo(t, { brief: false });
   const builtin = runDispatch({ archetype: 'director', prompt: 'THE-TASK', repoRoot: root2, userPathOptions: user2 });
   assert.match(builtin.stdout, /You are a Fadeno director/);
-  assert.ok(builtin.stdout.endsWith('THE-TASK'));
+  assert.ok(builtin.stdout.endsWith(echoedStdin('THE-TASK')));
 
   // A brief name with no template anywhere refuses loudly.
   const { root: root3, user: user3 } = seedDirectorRepo(t, { brief: false });

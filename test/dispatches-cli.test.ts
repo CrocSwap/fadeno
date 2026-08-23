@@ -11,7 +11,7 @@ import {
   runDispatchesOutput,
 } from '../src/commands/dispatches.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
-import { tempRepo } from './helpers.ts';
+import { echoedStdin, tempRepo } from './helpers.ts';
 
 const onHarness = (harness: string): UserPathOptions => ({ env: { FADENO_HARNESS: harness } });
 const SNAPSHOT = '.fadeno/local/prompts/worker-1a2b3c4d.md';

@@ -2787,6 +2787,11 @@ function main(argv: string[]): number {
               );
             }
             case 'failed':
+              if (result.signal == null && result.exitCode === 0) {
+                // Only the executor's outcome claim lands here: every other
+                // failed derivation has a nonzero exit or a signal behind it.
+                return 'FAILED: exit 0, but the report claimed failure (FADENO-DISPATCH-RESULT: failed) — do not relay this as a success';
+              }
               return result.signal != null
                 ? `FAILED: the executor was killed by ${result.signal}`
                 : `FAILED: exit ${result.exitCode ?? '?'}`;

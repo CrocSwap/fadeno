@@ -11,7 +11,7 @@ import { sha256Hex } from '../src/lib/artifact-manifest.ts';
 import { readLocalDialState, writeLocalDialState } from '../src/lib/executors.ts';
 import { ensureFadenoIgnore } from '../src/lib/source-control.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
-import { exists, tempRepo } from './helpers.ts';
+import { echoedStdin, exists, tempRepo } from './helpers.ts';
 import { read } from './helpers.ts';
 
 const onHarness = (harness: string): UserPathOptions => ({ env: { FADENO_HARNESS: harness } });
@@ -156,7 +156,7 @@ test('shadow attachment fires and writes paired rows with identical prompt_sha25
   assert.ok(!('workspace_changed' in sComp));
   assert.ok(echoes.some((l) => l.startsWith('shadow → luna-worker')));
   assert.ok(echoes.some((l) => l.startsWith('shadow diff:')));
-  assert.equal(result.stdout, 'REPORT:hello shadow');
+  assert.equal(result.stdout, echoedStdin('REPORT:hello shadow'));
   assert.ok(existsSync(join(root, sReq.output_snapshot as string)));
   assert.ok(existsSync(join(root, sComp.diff_snapshot as string)));
 });
@@ -170,7 +170,7 @@ test('--shadow flag fires without attachment', (t) => {
   const sReq = rows.find((r) => r.shadow === true && r.event === 'dispatch_requested')!;
   assert.equal(sReq.shadow_source, 'flag');
   assert.deepEqual(sReq.dial, { model: 'luna-worker' });
-  assert.equal(result.stdout, 'REPORT:flag test');
+  assert.equal(result.stdout, echoedStdin('REPORT:flag test'));
 });
 
 test('shadow rate: not fired leaves no trace, fired when sampler passes, flag ignores rate', (t) => {
@@ -222,7 +222,7 @@ test('shadow refusal: forbidden eligibility writes dispatch_refused with shadow 
   initGit(root);
   writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'forbidden-worker' } }, legacyNote: null });
   const result = runDispatch({ archetype: 'worker', prompt: 'should refuse shadow', repoRoot: root, userPathOptions: onHarness('standalone') });
-  assert.equal(result.stdout, 'REPORT:should refuse shadow');
+  assert.equal(result.stdout, echoedStdin('REPORT:should refuse shadow'));
   const rows = evidenceRows(root);
   assert.equal(rows.length, 3);
   // A refused shadow is known before the primary runs, so its row sits
@@ -254,7 +254,7 @@ test('shadow refusal: shadow_isolation in non-git dir', (t) => {
   writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'luna-worker' } }, legacyNote: null });
   const echoes: string[] = [];
   const result = runDispatch({ archetype: 'worker', prompt: 'no git', repoRoot: root, onEcho: (l) => echoes.push(l), userPathOptions: onHarness('standalone') });
-  assert.equal(result.stdout, 'REPORT:no git');
+  assert.equal(result.stdout, echoedStdin('REPORT:no git'));
   const rows = evidenceRows(root);
   assert.equal(rows.length, 3);
   const refusal = rows.find((r) => r.event === 'dispatch_refused')!;
@@ -578,7 +578,7 @@ test('dispatches --output last never resolves to a shadow', (t) => {
   const result = runDispatch({ archetype: 'worker', prompt: 'mine', repoRoot: root, userPathOptions: onHarness('standalone') });
   const last = runDispatchesOutput({ repoRoot: root, dispatchId: 'last' });
   assert.equal(last.dispatchId, result.dispatchId);
-  assert.equal(last.bytes, 'REPORT:mine');
+  assert.equal(last.bytes, echoedStdin('REPORT:mine'));
   // Explicit id recovery still reaches the shadow's snapshot.
   const sReq = evidenceRows(root).find((r) => r.shadow === true && r.event === 'dispatch_requested')!;
   const shadowOut = runDispatchesOutput({ repoRoot: root, dispatchId: sReq.dispatch_id as string });
@@ -977,7 +977,7 @@ test("a dirty primary workspace replays into the shadow worktree as one commit, 
   const result = runDispatch({ archetype: 'worker', prompt: 'dirty primary', repoRoot: root, userPathOptions: onHarness('standalone') });
   // The primary itself is untouched — same output it would produce with no
   // shadow attached at all.
-  assert.equal(result.stdout, 'REPORT:dirty primary');
+  assert.equal(result.stdout, echoedStdin('REPORT:dirty primary'));
 
   const rows = evidenceRows(root);
   const sReq = rows.find((r) => r.shadow === true && r.event === 'dispatch_requested')! as Record<string, unknown>;
@@ -1113,7 +1113,7 @@ test('an un-replayable primary state refuses the pair loudly, spawns no shadow, 
 
   // A dirty tree that cannot be snapshotted must not silently produce a
   // skewed pair, and must not take the primary down with it either.
-  assert.equal(result.stdout, 'REPORT:unreadable');
+  assert.equal(result.stdout, echoedStdin('REPORT:unreadable'));
   assert.equal(result.exitCode, 0);
 
   const rows = evidenceRows(root);
@@ -1289,7 +1289,7 @@ test('a declared-but-uncarriable path refuses the pair loudly, spawns no shadow,
     const result = runDispatch({ archetype: 'worker', prompt: 'uncarriable', repoRoot: root, onEcho: (l) => echoes.push(l), userPathOptions: onHarness('standalone') });
 
     // A carry failure must never take the primary down with it.
-    assert.equal(result.stdout, 'REPORT:uncarriable');
+    assert.equal(result.stdout, echoedStdin('REPORT:uncarriable'));
     assert.equal(result.exitCode, 0);
 
     const rows = evidenceRows(root);
@@ -1341,7 +1341,7 @@ test('a prompt naming the repo root as an absolute path refuses the pair with sh
   });
   // The primary is unaffected — only the challenger is skipped.
   assert.equal(absoluteResult.exitCode, 0);
-  assert.equal(absoluteResult.stdout, `REPORT:${absolutePrompt}`);
+  assert.equal(absoluteResult.stdout, echoedStdin(`REPORT:${absolutePrompt}`));
 
   const absoluteRows = evidenceRows(root);
   const refusal = absoluteRows.find((r) => r.event === 'dispatch_refused')! as Record<string, unknown>;

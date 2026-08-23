@@ -89,13 +89,19 @@ const PROMPT_FILE = String.raw`${PROMPT_DIR}/[A-Za-z0-9._-]+`;
 const CLI = String.raw`(fadeno|"\$CLAUDE_PLUGIN_ROOT/bin/fadeno"|"\$\{CLAUDE_PLUGIN_ROOT[^"]*\}fadeno")`;
 const HEREDOC_TAIL = String.raw` *<<-? *'FADENO_PROMPT'`;
 const TAG = String.raw`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`;
+// The isolation opt-out, ONLY on explicit caller request (see the proxy
+// bodies): accepted between the archetype and the tag, nowhere else, and
+// never combined with the other spellings. The proxy has no inspection
+// tools and must never decide repo state itself — this just lets a caller's
+// explicit "--shared" through the relay.
+const SHARED = String.raw`( --shared)?`;
 const ALLOWED = [
   // PRIMARY contract: the prompt piped on stdin via quoted heredoc — the
   // kernel snapshots it and writes the evidence rows itself. `--tag` is
   // optional in the grammar but expected in practice: it is the only handle
   // that survives this Bash call being killed at its timeout, which is exactly
   // when recovery is needed.
-  new RegExp(String.raw`^${CLI} dispatch --archetype ${archetype}( --tag ${TAG})?${HEREDOC_TAIL}$`),
+  new RegExp(String.raw`^${CLI} dispatch --archetype ${archetype}${SHARED}( --tag ${TAG})?${HEREDOC_TAIL}$`),
   // Retry of an already-written prompt file.
   new RegExp(
     String.raw`^${CLI} dispatch --archetype ${archetype} --prompt-file ("\$${VAR}"|\$${VAR}|"?${PROMPT_FILE}"?)$`,

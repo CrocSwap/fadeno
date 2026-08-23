@@ -148,12 +148,65 @@ export type DispatchOutcome = 'ok' | 'failed' | 'empty' | 'timeout';
 const DISPATCH_OUTCOMES: readonly string[] = ['ok', 'failed', 'empty', 'timeout'];
 
 /**
+ * The outcome an executor may explicitly claim, via the protocol footer.
+ *
+ * Exit codes cannot express "I did not finish" from a tool that exits 0 on
+ * completion of its *turn* rather than its *task* — a dispatched worker that
+ * wrote a 356-byte "I failed" report and exited 0 used to classify as `ok`,
+ * content-blind. The footer gives the executor a channel that says so in
+ * bytes the kernel can parse deterministically; no model is ever asked to
+ * decide anything here.
+ */
+export type DispatchResultClaim = 'ok' | 'failed';
+
+/**
+ * The FIXED protocol footer appended to every command-lane dispatch's prompt
+ * bytes at spawn time — constant across every dispatch, so prompt digests stay
+ * deterministic per prompt content and both arms of a shadow pair receive
+ * identical bytes. The example lines are deliberately wrapped in backticks and
+ * prose: a literal echo of this footer never matches the strict claim regex.
+ */
+export const DISPATCH_RESULT_FOOTER = [
+  '--- dispatch result protocol ---',
+  'End your final report with exactly one last line: `FADENO-DISPATCH-RESULT: ok`',
+  'if you completed the task, or `FADENO-DISPATCH-RESULT: failed — <one-line reason>`',
+  'if you did not or could not. That line — not the exit code — is how the dispatcher',
+  'learns the outcome: a failure MUST be reported as failed even if the process will exit 0.',
+].join('\n');
+
+/**
+ * Scan collected executor stdout for its outcome claim, LAST match wins.
+ *
+ * Strict and case-sensitive by design: a near-miss line (`fadeno-dispatch-result:
+ * ok`, trailing commentary) is no claim at all, and a non-compliant executor
+ * falls through to exactly the derivation it always got — absent is not a
+ * downgrade path. Last-wins because an executor that echoes its prompt and then
+ * claims once yields one true claim, and determinism requires a fixed rule.
+ */
+export function scanDispatchResultClaim(stdout: string): DispatchResultClaim | null {
+  const lines = stdout.split('\n');
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const match = /^FADENO-DISPATCH-RESULT: (ok|failed)(?: — .*)?$/.exec(lines[i]);
+    if (match != null) return match[1] as DispatchResultClaim;
+  }
+  return null;
+}
+
+/**
  * Classify a completion row from the facts it already carries.
  *
  * `failed` covers every way the spawn itself went wrong (spawn error, signal,
  * nonzero exit). `empty` is the quieter failure — the executor exited 0 and
  * wrote nothing, which is what an unusable model id, or a worker that stops
  * after backgrounding its real work, looks like from here.
+ *
+ * `claimed`, when the executor stated an outcome via the protocol footer,
+ * decides the exit-0 case outright: `failed` claimed at exit 0 is recorded as
+ * failed (exit 0 can no longer launder a reported failure), and `ok` claimed
+ * with bytes is ok. Timeout, spawn error, and signal still outrank any claim —
+ * a process the kernel killed did not complete its report protocol either way.
+ * Without a claim (or for callers predating the parameter) this is exactly the
+ * pre-footer derivation.
  *
  * Returns null when the row does not carry enough to classify: absent is not a
  * claim, so a pre-0.6 row missing `output_bytes` renders exactly as it does
@@ -165,11 +218,15 @@ export function deriveDispatchOutcome(row: {
   error?: string | null;
   outputBytes: number | null;
   timedOut?: boolean | null;
-}): DispatchOutcome | null {
+}, claimed?: DispatchResultClaim | null): DispatchOutcome | null {
   if (row.timedOut === true) return 'timeout';
   if (row.error != null || row.signal != null) return 'failed';
   if (row.exitCode == null) return null;
   if (row.exitCode !== 0) return 'failed';
+  // Exit 0: the executor's explicit claim outranks the content-blind bytes
+  // heuristic. A claim can only exist when output bytes were collected, so
+  // this cannot mask an `empty`.
+  if (claimed === 'ok' || claimed === 'failed') return claimed;
   if (row.outputBytes == null) return null;
   return row.outputBytes === 0 ? 'empty' : 'ok';
 }
@@ -194,6 +251,39 @@ export function normalizeDispatchOutcome(
  * dispatches match without ordering.
  */
 export const PENDING_RELAYS_FILE = join('.fadeno', 'local', 'pending-relays.jsonl');
+
+/**
+ * The parent tree's dirty state, read once per isolated spawn for the
+ * dirty-base advisory. HEAD is the commit the worktree is cut from; `count`
+ * is the number of TRACKED uncommitted entries (staged or modified).
+ *
+ * Untracked files are deliberately not counted: they are carried into the
+ * worktree baseline by copy like everything else the executor would otherwise
+ * miss, they are scratch-shaped more often than work-shaped, and counting
+ * them would fire the advisory on nearly every active repo. Tracked
+ * modifications are the caller's in-flight work, and the way that work
+ * appears to the executor differs from the live tree (replayed as one
+ * synthetic baseline commit rather than left uncommitted), which is exactly
+ * what the advisory exists to surface.
+ */
+function uncommittedTrackedChanges(repoRoot: string): { head: string | null; count: number } {
+  try {
+    const headRes = spawnSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+    const statusRes = spawnSync('git', ['-C', repoRoot, 'status', '--porcelain'], { encoding: 'utf8' });
+    if (headRes.error != null || headRes.status !== 0 || statusRes.error != null || statusRes.status !== 0) {
+      return { head: null, count: 0 };
+    }
+    // Porcelain marks untracked with `??`; every other non-empty line is a
+    // tracked entry (staged, modified, renamed, deleted).
+    const count = String(statusRes.stdout ?? '')
+      .split('\n')
+      .filter((line) => line.length > 0 && !line.startsWith('?'))
+      .length;
+    return { head: String(headRes.stdout ?? '').trim() || null, count };
+  } catch {
+    return { head: null, count: 0 };
+  }
+}
 
 /**
  * Dispatch-side proof that a DISPATCH PROXY is the caller — rows of
@@ -541,7 +631,11 @@ export interface AdHocDispatchResult {
   dispatchId: string;
   /** Where the prompt bytes came from (`stdin` gets a kernel-written snapshot). */
   promptSource: 'stdin' | 'file';
-  /** Repo-relative snapshot path (stdin) or the given prompt file's path. */
+  /**
+   * Repo-relative snapshot path — always kernel-written, since the composed
+   * prompt (brief and/or result footer) is what was sent even when the caller
+   * supplied a `--prompt-file`.
+   */
   promptSnapshot: string;
   /**
    * Spawn-side relay verdict: `true` = the prompt matches a stashed
@@ -1146,25 +1240,45 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const dispatchId = randomUUID();
   const now = opts.now ?? new Date();
 
-  // The kernel owns the prompt snapshot for stdin dispatches — and for any
-  // dispatch where a brief was composed: the snapshot must hold the bytes
-  // actually SENT, and a brief makes those differ from the caller's file.
-  let promptSnapshot: string;
-  if (promptSource === 'stdin' || briefApplied != null) {
-    const snapshotRel = join(
-      '.fadeno',
-      'local',
-      'prompts',
-      `${archetype ?? role ?? 'dispatch'}-${dispatchId.slice(0, 8)}.md`,
+  // Spawn-side attestation runs on the RECEIVED bytes, before any kernel
+  // composition below: a proxy is judged against exactly what it handed over,
+  // not what the kernel then added to it.
+  const relayAttested = consumeRelayAttestation(repoRoot, prompt, now);
+  if (relayAttested === false) {
+    // Contemporaneous, because retrospective is the wrong shape for this. A
+    // defecting relay means the executor is about to work from bytes the
+    // caller never wrote, and the person who can tell whether that matters is
+    // watching this command right now. The row is written either way; this is
+    // the part that gets read.
+    opts.onEcho?.(
+      'RELAY FIDELITY FAILED: a dispatch proxy sent bytes that do not match what it was handed. ' +
+      'The executor below is working from an altered prompt — treat its output as answering a ' +
+      'different question. Check the relay identity (`relay.claude` / `relay.codex` in ' +
+      'executors.yaml); a model too small for the relay contract summarizes instead of forwarding.',
     );
-    const snapshotAbs = join(repoRoot, snapshotRel);
-    mkdirSync(join(repoRoot, '.fadeno', 'local', 'prompts'), { recursive: true });
-    writeFileSync(snapshotAbs, prompt, 'utf8');
-    promptSnapshot = snapshotRel.split('\\').join('/');
-  } else {
-    const rel = relative(repoRoot, promptPath!).split('\\').join('/');
-    promptSnapshot = rel === '' || rel.startsWith('../') || isAbsolute(rel) ? promptPath! : rel;
   }
+
+  // Outcome-claim protocol. Appended to EVERY command-lane dispatch, after
+  // attestation and before snapshotting: these are now the bytes SENT, so the
+  // digest attests the protocol too, and both arms of a pair receive identical
+  // bytes (the constant footer cannot fork them).
+  prompt = `${prompt}\n${DISPATCH_RESULT_FOOTER}`;
+
+  // The kernel owns the prompt snapshot for every dispatch: with the result
+  // footer composed ahead of the spawn, the sent bytes differ from whatever
+  // the caller wrote, and the snapshot must hold the bytes actually SENT.
+  // It is also the file a shadow arm reads its prompt from (by fd), so one
+  // kernel-owned copy is what keeps a pair's arms byte-identical.
+  const snapshotRel = join(
+    '.fadeno',
+    'local',
+    'prompts',
+    `${archetype ?? role ?? 'dispatch'}-${dispatchId.slice(0, 8)}.md`,
+  );
+  const snapshotAbs = join(repoRoot, snapshotRel);
+  mkdirSync(join(repoRoot, '.fadeno', 'local', 'prompts'), { recursive: true });
+  writeFileSync(snapshotAbs, prompt, 'utf8');
+  const promptSnapshot = snapshotRel.split('\\').join('/');
 
   // File-reading drivers: `{prompt_file}` in the route argv becomes the
   // snapshot's absolute path — the digest attests exactly what the executor
@@ -1184,21 +1298,6 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   );
   const outputAbs = join(repoRoot, outputRel);
   const outputSnapshot = outputRel.split('\\').join('/');
-
-  const relayAttested = consumeRelayAttestation(repoRoot, prompt, now);
-  if (relayAttested === false) {
-    // Contemporaneous, because retrospective is the wrong shape for this. A
-    // defecting relay means the executor is about to work from bytes the
-    // caller never wrote, and the person who can tell whether that matters is
-    // watching this command right now. The row is written either way; this is
-    // the part that gets read.
-    opts.onEcho?.(
-      'RELAY FIDELITY FAILED: a dispatch proxy sent bytes that do not match what it was handed. ' +
-      'The executor below is working from an altered prompt — treat its output as answering a ' +
-      'different question. Check the relay identity (`relay.claude` / `relay.codex` in ' +
-      'executors.yaml); a model too small for the relay contract summarizes instead of forwarding.',
-    );
-  }
 
   const promptSha256 = sha256Hex(prompt);
 
@@ -2095,13 +2194,15 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     }
     const sOutputBytes = Buffer.byteLength(sStdout);
     const sIsTimeout = status?.timedOut === true;
+    // Same claim channel as the primary: a challenger that reports failure at
+    // exit 0 is failed, so the pair is not judged against a laundered arm.
     const sOutcome = deriveDispatchOutcome({
       exitCode: sExitCode,
       signal: sSignal as NodeJS.Signals | null,
       error: spawnFailedMsg,
       outputBytes: sOutputBytes,
       timedOut: sIsTimeout ? true : null,
-    });
+    }, scanDispatchResultClaim(sStdout));
     const sRow: Record<string, unknown> = {
       format: DISPATCHES_FORMAT,
       // Same rule as the primary: start plus measured duration, so
@@ -2429,6 +2530,24 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
               'comparison would be meaningless. Refusing rather than recording a baseline only one arm has.',
           );
         }
+        // Dirty-base advisory, emitted at the spawn itself — after the
+        // worktree exists and its baseline has been applied, so everything it
+        // says already happened. Advisory only, and only on the isolated
+        // paths: a `--shared` dispatch IS the live tree, so there is nothing
+        // to tell. The worktree's base is HEAD plus a replay of this tree's
+        // uncommitted state (one synthetic baseline commit), which is not the
+        // same thing as working in the live tree — uncommitted work shows up
+        // committed, siblings' merges are invisible mid-flight, and merge-back
+        // reconciles rather than editing in place. A caller who wants live-tree
+        // semantics says so with --shared.
+        const dirtyBase = uncommittedTrackedChanges(repoRoot);
+        if (dirtyBase.head != null && dirtyBase.count > 0) {
+          opts.onEcho?.(
+            `advisory: cutting the worktree from HEAD ${dirtyBase.head.slice(0, 12)}; ${dirtyBase.count} ` +
+            "uncommitted change(s) in your tree will be replayed into the executor's base as one synthetic " +
+            'commit (not left uncommitted) — pass --shared to run on the live tree instead.',
+          );
+        }
         const spawnedInWorktree = invoke(worktreeAbs);
         // Set the instant the executor has run, and never reset. Everything
         // above this line is recoverable by falling back to a shared-tree
@@ -2548,13 +2667,16 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     try { return readFileSync(path, 'utf8'); } catch { return '{}'; }
   });
   const isTimeout = supervisorStatus?.timedOut === true;
+  // The executor's explicit outcome claim, scanned from its collected report.
+  // No well-formed claim leaves the derivation exactly as it was.
+  const resultClaim = scanDispatchResultClaim(stdout);
   const outcome = deriveDispatchOutcome({
     exitCode: spawnFailure != null ? null : spawned.status,
     signal: spawned.signal,
     error: spawnFailure,
     outputBytes,
     timedOut: isTimeout ? true : null,
-  });
+  }, resultClaim);
 
   // Bounded opt-in diagnostics: machine-local only, never ledger-persisted
   // beyond the evidence row's byte counters. Written atomically under

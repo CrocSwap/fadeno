@@ -19,7 +19,7 @@ import {
   supervisedSpawnError,
 } from '../src/lib/supervisor.ts';
 import { isWorkspaceLeaseAlive, readWorkspaceLease, releaseWorkspaceLease, WORKSPACE_LEASE_FILE } from '../src/lib/workspace-lease.ts';
-import { tempRepo } from './helpers.ts';
+import { echoedStdin, tempRepo } from './helpers.ts';
 
 /**
  * Executor lifetime. `fadeno dispatch` blocks inside `spawnSync`, so a killed
@@ -70,7 +70,7 @@ test('supervision is invisible: stdin, stdout, and exit code pass through unchan
   const result = runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, userPathOptions: harnessOpts });
   // The prompt reached the executor through the supervisor's stdin relay, and
   // its stdout landed in the snapshot exactly as a direct spawn would.
-  assert.equal(result.stdout, 'GOT:hello');
+  assert.equal(result.stdout, echoedStdin('GOT:hello'));
   assert.equal(result.exitCode, 0);
   assert.equal(result.outcome, 'ok');
 });

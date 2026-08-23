@@ -12,7 +12,7 @@ import { runNewRun } from '../src/commands/new-run.ts';
 import { runSteeringResolve } from '../src/commands/steering.ts';
 import { runValidate } from '../src/commands/validate.ts';
 import { DIALS_LOCAL_FILE, parseExecutorProfile, writeLocalDialState } from '../src/lib/executors.ts';
-import { read, tempRepo } from './helpers.ts';
+import { echoedStdin, read, tempRepo } from './helpers.ts';
 
 /**
  * Dogfood papercut fixes for the dial/dispatch kernel: scaffold
@@ -294,7 +294,7 @@ test('stale pin: dispatch still succeeds via base/repo pin (legacy pin ignored)'
   const root = seedStalePin(t);
   // dispatch should succeed, not throw – legacy pin is empty with note
   const result = runDispatch({ archetype: 'worker', prompt: 'p', repoRoot: root, userPathOptions: harnessOpts });
-  assert.equal(result.stdout, 'REPORT:p');
+  assert.equal(result.stdout, echoedStdin('REPORT:p'));
   // exactly one dispatch pair
   const rows = evidenceRows(root);
   assert.equal(rows.length, 2);

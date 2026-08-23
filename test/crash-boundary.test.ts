@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
-import { tempRepo } from './helpers.ts';
+import { echoedStdin, tempRepo } from './helpers.ts';
 import {
   DIAGNOSTICS_MAX_BYTES,
   DIAGNOSTICS_MAX_LINES,
@@ -94,7 +94,7 @@ test('diagnostics: not persisted by default, only byte counters remain', (t) => 
   const rows = evidenceRows(root);
   const completed = rows.find((r) => r.event === 'dispatch_completed')!;
   assert.ok(completed);
-  assert.equal(completed.output_bytes, Buffer.byteLength('hello'));
+  assert.equal(completed.output_bytes, Buffer.byteLength(echoedStdin('hello')));
   assert.equal('diagnostics_snapshot' in completed, false);
   assert.equal('diagnostics_bytes' in completed, false);
   assert.equal(existsSync(join(root, '.fadeno', 'local', 'outputs', 'diagnostics', `dispatch-${result.dispatchId}.log`)), false);

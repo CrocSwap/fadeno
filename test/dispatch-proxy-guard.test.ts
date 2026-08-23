@@ -141,6 +141,53 @@ test('guard: the tagged contract call is allowed and still gets the long timeout
   assert.deepEqual(decision!.hookSpecificOutput?.updatedInput, { timeout: 600000 });
 });
 
+test('guard: the --shared variant is inside the grammar, on explicit caller request only', () => {
+  // The caller explicitly asked for live-tree work: archetype, then --shared,
+  // then the tag — nothing else about the call changes.
+  for (const withTag of [true, false]) {
+    for (const archetype of ['worker', 'reviewer', 'judge']) {
+      const base = CONTRACT_CALL.split('worker').join(archetype);
+      const call = base.replace(
+        `--archetype ${archetype}`,
+        `--archetype ${archetype} --shared${withTag ? ` --tag ${archetype}-survey` : ''}`,
+      );
+      const decision = runGuard(bashEvent(`fadeno:dispatch-${archetype}`, call));
+      assert.deepEqual(decision!.hookSpecificOutput?.updatedInput, { timeout: 600000 }, call);
+    }
+  }
+  // The flag goes between the archetype and the tag — after the tag is not
+  // the documented spelling and stays outside the grammar.
+  const tagged = CONTRACT_CALL.replace(
+    '--archetype worker',
+    '--archetype worker --tag worker-survey-the-repo',
+  );
+  const misplaced = tagged.replace('--tag worker-survey-the-repo', '--tag worker-survey-the-repo --shared');
+  assert.equal(runGuard(bashEvent('fadeno:dispatch-worker', misplaced))?.hookSpecificOutput?.permissionDecision, 'deny');
+});
+
+test('guard: other isolation argv mutations stay outside the grammar', () => {
+  // --isolate changes what happens to the work; a proxy may never add it.
+  const isolate = CONTRACT_CALL.replace(
+    '--archetype worker',
+    '--archetype worker --isolate',
+  );
+  assert.equal(runGuard(bashEvent('fadeno:dispatch-worker', isolate))?.hookSpecificOutput?.permissionDecision, 'deny');
+  const sharedPromptFile = '"$CLAUDE_PLUGIN_ROOT/bin/fadeno" dispatch --archetype worker --shared --prompt-file .fadeno/local/prompts/worker-a1B2c3D4';
+  assert.equal(runGuard(bashEvent('fadeno:dispatch-worker', sharedPromptFile))?.hookSpecificOutput?.permissionDecision, 'deny');
+});
+
+test('guard: proxy bodies document --shared exactly where the guard allows it', () => {
+  // Template/guard consistency: the proxies are told about the flag in the
+  // same position the grammar accepts it, and director — which PROXY_RE does
+  // not cover — deliberately carries no --shared language at all.
+  for (const archetype of ['worker', 'reviewer', 'judge']) {
+    const body = readFileSync(join(import.meta.dirname, '..', 'templates', 'claude', 'claude-agents', `dispatch-${archetype}.md`), 'utf8');
+    assert.match(body, new RegExp(`--archetype ${archetype} --shared --tag ${archetype}-`), archetype);
+  }
+  const director = readFileSync(join(import.meta.dirname, '..', 'templates', 'claude', 'claude-agents', 'dispatch-director.md'), 'utf8');
+  assert.doesNotMatch(director, /--shared/);
+});
+
 test('guard: an unsubstituted <slug> placeholder is denied, not passed through', () => {
   // The proxy body shows `--tag worker-<slug>` as a template. Copied literally
   // it is not a usable handle, and the kernel would reject it after the guard

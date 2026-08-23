@@ -37,7 +37,12 @@ concurrent proxy that picks the same tag makes both unrecoverable.
 
 The quoted heredoc keeps the shell from expanding anything inside the
 prompt. The kernel snapshots the prompt to `.fadeno/local/prompts/` and
-writes the evidence rows itself — you write no files.
+writes the evidence rows itself — you write no files. On explicit caller
+request only, the contract call may gain ` --shared` between the archetype
+and the tag (`fadeno dispatch --archetype judge --shared --tag judge-<slug> <<'FADENO_PROMPT'`)
+to run on the live tree instead of an isolated worktree — add it never on
+your own judgment; you have no tools to inspect repo state, and deciding
+that is not your job.
 
 Then:
 

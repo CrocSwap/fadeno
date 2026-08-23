@@ -8,6 +8,7 @@ import {
   DispatchCommandError,
   DISPATCHES_FILE,
   DISPATCHES_FORMAT,
+  DISPATCH_RESULT_FOOTER,
   PENDING_RELAYS_FILE,
   PROXY_DISPATCHES_FILE,
   runDispatch,
@@ -15,7 +16,7 @@ import {
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
 import { writeLocalDialState } from '../src/lib/executors.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
-import { tempRepo } from './helpers.ts';
+import { echoedStdin, tempRepo } from './helpers.ts';
 
 const onHarness = (harness: string): UserPathOptions => ({ env: { FADENO_HARNESS: harness } });
 
@@ -72,7 +73,7 @@ test('dispatch: request-before-spawn pairing with 1.0 row shape', (t) => {
   const now = new Date('2026-08-09T12:00:00Z');
   const echoes: string[] = [];
   const result = runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, now, onEcho: (l) => echoes.push(l), userPathOptions: onHarness('standalone') });
-  assert.equal(result.stdout, 'REPORT:hello');
+  assert.equal(result.stdout, echoedStdin('REPORT:hello'));
   assert.equal(result.exitCode, 0);
   assert.equal(result.executor, 'echo-worker');
   assert.equal(result.model, 'echo-worker');
@@ -98,7 +99,7 @@ test('dispatch: request-before-spawn pairing with 1.0 row shape', (t) => {
   assert.ok(!('exit_code' in req));
   assert.ok(!('output_sha256' in req));
   assert.ok(!('duration_ms' in req));
-  assert.equal(req.prompt_sha256, sha256Hex('hello'));
+  assert.equal(req.prompt_sha256, sha256Hex(`hello\n${DISPATCH_RESULT_FOOTER}`));
   assert.equal(comp.timestamp, new Date(now.getTime() + (comp.duration_ms as number)).toISOString());
   assert.equal(req.prompt_source, 'stdin');
   assert.equal(result.promptSource, 'stdin');
@@ -248,23 +249,28 @@ test('dispatch: a proxy dispatch with no spawn-side stash attests null, never fa
   assert.equal(result.relayAttested, null);
 });
 
-test('dispatch: --prompt-file rows record the given file as the snapshot', (t) => {
+test('dispatch: --prompt-file dispatches get a kernel snapshot of the composed bytes', (t) => {
   const root = seedV3(t, { dials: { worker: 'echo-worker' } });
   writeFileSync(join(root, 'task.md'), 'from-a-file');
   const result = runDispatch({ archetype: 'worker', promptFile: 'task.md', cwd: root, repoRoot: root, userPathOptions: onHarness('standalone') });
   assert.equal(result.promptSource, 'file');
-  assert.equal(result.promptSnapshot, 'task.md');
+  // The kernel composes the result footer onto every prompt, so it owns the
+  // snapshot even for a --prompt-file dispatch — and the digest attests the
+  // composed bytes, not the caller's file.
+  const composed = `from-a-file\n${DISPATCH_RESULT_FOOTER}`;
+  assert.match(result.promptSnapshot, /^\.fadeno\/local\/prompts\/worker-[0-9a-f]{8}\.md$/);
   const row = evidenceRows(root).at(-1)!;
   assert.equal(row.prompt_source, 'file');
-  assert.equal(row.prompt_snapshot, 'task.md');
-  assert.equal(row.prompt_sha256, sha256Hex('from-a-file'));
+  assert.equal(row.prompt_snapshot, result.promptSnapshot);
+  assert.equal(row.prompt_sha256, sha256Hex(composed));
+  assert.equal(readFileSync(join(root, row.prompt_snapshot as string), 'utf8'), composed);
 });
 
 test('dispatch: --prompt-file missing-file and no-prompt errors', (t) => {
   const root = seedV3(t, { dials: { worker: 'echo-worker' } });
   writeFileSync(join(root, 'prompt.txt'), 'from-file');
   const result = runDispatch({ archetype: 'worker', promptFile: 'prompt.txt', cwd: root, repoRoot: root, userPathOptions: onHarness('standalone') });
-  assert.equal(result.stdout, 'REPORT:from-file');
+  assert.equal(result.stdout, echoedStdin('REPORT:from-file'));
   assert.throws(
     () => runDispatch({ archetype: 'worker', promptFile: 'missing.txt', cwd: root, repoRoot: root, userPathOptions: onHarness('standalone') }),
     /--prompt-file missing\.txt does not exist/,

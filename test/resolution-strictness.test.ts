@@ -10,7 +10,7 @@ import { SteeringError, runSteeringResolve } from '../src/commands/steering.ts';
 import { loadLayeredProfile } from '../src/lib/config-layers.ts';
 import { ExecutorProfileError } from '../src/lib/executors.ts';
 import { userPaths, type UserPathOptions } from '../src/lib/user-paths.ts';
-import { tempRepo } from './helpers.ts';
+import { echoedStdin, tempRepo } from './helpers.ts';
 
 /**
  * Resolution strictness under dials:

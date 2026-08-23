@@ -11,7 +11,7 @@ import { runSteeringResolve } from '../src/commands/steering.ts';
 import { runVerify } from '../src/commands/verify.ts';
 import { writeLocalDialState } from '../src/lib/executors.ts';
 import { readEvents, type RunEvent } from '../src/lib/run-ledger.ts';
-import { tempRepo } from './helpers.ts';
+import { echoedStdin, tempRepo } from './helpers.ts';
 
 /**
  * Session dials as every resolution consumer sees them: `fadeno
@@ -139,7 +139,7 @@ test('dispatch: a session dial binds the archetype and both evidence rows say so
   writeLocalDialState(root, { dials: { worker: { model: 'over-model' } }, shadows: {}, legacyNote: null });
 
   const result = runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, userPathOptions: harnessOpts() });
-  assert.equal(result.stdout, 'OVER:hello');
+  assert.equal(result.stdout, echoedStdin('OVER:hello'));
   assert.equal(result.executor, 'over-model');
   assert.equal(result.source, 'session');
   assert.equal(result.dial.model, 'over-model');

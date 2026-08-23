@@ -12,7 +12,7 @@ import { runSteeringResolve } from '../src/commands/steering.ts';
 import { runVerify } from '../src/commands/verify.ts';
 import { writeLocalDialState } from '../src/lib/executors.ts';
 import { readEvents, type RunEvent } from '../src/lib/run-ledger.ts';
-import { tempRepo } from './helpers.ts';
+import { echoedStdin, tempRepo } from './helpers.ts';
 
 /**
  * Phase-2 fallback chains as every owned consumer sees them: dispatch evidence
@@ -133,7 +133,7 @@ test('dispatch: a fallback archetype resolves onto the worker slot and both rows
   const root = seedDispatchProfile(t);
   writeLocalDialState(root, { dials: { worker: { model: 'w-model' } }, shadows: {}, legacyNote: null });
   const result = runDispatch({ archetype: 'scout', prompt: 'hello', repoRoot: root, userPathOptions: harnessOpts() as any });
-  assert.equal(result.stdout, 'W:hello');
+  assert.equal(result.stdout, echoedStdin('W:hello'));
   assert.equal(result.executor, 'w-model');
   assert.equal(result.source, 'session');
   assert.equal(DISPATCHES_FORMAT, '1.0');

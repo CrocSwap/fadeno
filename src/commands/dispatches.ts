@@ -1032,6 +1032,13 @@ export function renderDispatchLine(entry: DispatchEntry): string {
       ) {
         parts.push('[no workspace change]');
       }
+      // FAILED at exit 0 can only come from the executor's own outcome claim
+      // (every other failed derivation implies a nonzero/null exit), so say so:
+      // a reader who stops at "exit 0" was exactly the failure mode the claim
+      // channel exists to close.
+      if (entry.outcome === 'failed' && entry.exitCode === 0) {
+        parts.push('[claimed failed despite exit 0]');
+      }
     } else {
       parts.push('no completion recorded (killed or in flight)');
     }

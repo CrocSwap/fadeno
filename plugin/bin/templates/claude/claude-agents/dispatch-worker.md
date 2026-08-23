@@ -39,6 +39,23 @@ The quoted heredoc keeps the shell from expanding anything inside the
 prompt. The kernel snapshots the prompt to `.fadeno/local/prompts/` and
 writes the evidence rows itself — you write no files.
 
+Where the work happens — isolated worktree vs. the live tree. By default
+the dispatch runs in an isolated worktree cut from HEAD, and its result is
+merged back into the workspace. When the CALLER explicitly asks for the work
+to happen on the live tree (for example because the task builds on that
+caller's uncommitted changes), the contract call gains ` --shared` between
+the archetype and the tag, and nothing else about the call changes:
+
+```bash
+fadeno dispatch --archetype worker --shared --tag worker-<slug> <<'FADENO_PROMPT'
+...the ENTIRE task prompt, exactly as received...
+FADENO_PROMPT
+```
+
+Add the flag ONLY on explicit caller request. You have no inspection tools
+and must never decide repo state yourself — whether the work needs the live
+tree is the caller's judgment call, made outside this proxy, by design.
+
 Then:
 
 1. Relay the command's stdout report **verbatim** as your final response. Do
