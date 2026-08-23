@@ -99,6 +99,7 @@ const COMMANDS: Record<string, CommandSpec> = {
     '--data-only': NONE,
   }),
   validate: command({ '--schema': { kind: 'enum', values: [...SCHEMA_KINDS] } }, ['path']),
+  playbooks: command({ '--json': NONE }, ['playbook']),
   diagram: command({ '--format': { kind: 'enum', values: ['ascii', 'mermaid'] } }, ['playbook']),
   'new-run': command({ '--input': { kind: 'input' } }, ['playbook', 'free']),
   models: MODELS_SPEC,

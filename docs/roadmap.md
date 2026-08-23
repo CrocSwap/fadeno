@@ -617,8 +617,9 @@ uses the vendor lock's file digests. See
    hatch to record an externally composed prompt as a snapshot (host-subagent
    dispatch currently caps at prompt-snapshots: skip); (e) `fadeno show`
    lists `artifacts/.gitkeep` in the artifacts section (cosmetic).
-1. **Authoring helpers** — `fadeno list` (playbooks + `when_to_use`),
-   `fadeno new-playbook <pattern>` scaffolder. (`fadeno diagram` already ships.)
+1. **Authoring helpers** — `fadeno playbooks` now lists effective playbooks
+   with `when_to_use` cues; a `fadeno new-playbook <pattern>` scaffolder
+   remains deferred. (`fadeno diagram` already ships.)
 2. **More gate conditions** in `fadeno gate` (e.g. `no_unsupported_claims` from a
    fact-check report) + a fact-check artifact schema, widening deterministic enforcement.
 3. **More harness targets** — Cursor and others (SKILL.md is a cross-harness standard, so

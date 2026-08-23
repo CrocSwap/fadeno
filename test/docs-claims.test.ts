@@ -39,6 +39,11 @@ const EXTENDING = 'docs/extending.md';
 
 const CLAIMS: Claim[] = [
   {
+    id: 'effective-playbooks-command',
+    doc: { files: ['README.md', 'docs/extending.md'], patterns: [/fadeno playbooks/] },
+    src: { files: ['src/commands/playbooks.ts', 'src/cli.ts'], patterns: [/runPlaybooks/, /case 'playbooks'/] },
+  },
+  {
     id: 'two-row-evidence',
     doc: { files: [DIALS], patterns: [/dispatch_requested/, /dispatch_completed/] },
     src: { files: ['src/commands/dispatch.ts'], patterns: [/dispatch_requested/, /dispatch_completed/] },

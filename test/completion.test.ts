@@ -23,6 +23,7 @@ test('completion script is sourceable Bash and covers commands/options', () => {
   assert.deepEqual(complete('/tmp', ['fadeno', '-']), ['--help', '--version', '-h', '-v']);
   assert.deepEqual(complete('/tmp', ['fadeno', '--']), ['--help', '--version']);
   assert.ok(complete('/tmp', ['fadeno', 'd']).includes('diagram'));
+  assert.ok(complete('/tmp', ['fadeno', 'p']).includes('playbooks'));
   assert.deepEqual(complete('/tmp', ['fadeno', 'dial', '']), ['clear', 'clear-shadow', 'resolve', 'shadow']);
   assert.deepEqual(complete('/tmp', ['fadeno', 'steering', '']), ['apply', 'resolve']);
   // Derived, not restated: this list was a sixth copy of the schema-kind
@@ -72,6 +73,7 @@ test('completion discovers repo-local playbooks, runs, steps, and paths', (t) =>
 
   // Exact match, not a superset check: every starter plus the repo-local `zeta`, sorted.
   assert.deepEqual(complete(root, ['fadeno', 'diagram', '']), [...starterPlaybooks(), 'zeta'].sort());
+  assert.deepEqual(complete(root, ['fadeno', 'playbooks', '']), [...starterPlaybooks(), 'zeta'].sort());
   assert.ok(complete(root, ['fadeno', 'show', '']).includes(runId));
   // dial no longer has use/list; subcommands are dial vocabulary
   assert.ok(!complete(root, ['fadeno', 'dial', '']).includes('use'));

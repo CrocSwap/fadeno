@@ -767,6 +767,12 @@ The test registries need no edits: completion, diagram, init, and validate
 coverage all derive from `starterPlaybooks()` in `test/helpers.ts`, which
 reads the playbooks directory itself.
 
+Users can inspect the effective catalog without copying a starter first:
+`fadeno playbooks` lists bundled definitions plus project additions, with a
+project file shadowing a bundled name; `fadeno playbooks <name>` shows that
+effective definition's metadata and ASCII workflow. Keep this resolver-backed
+view in sync when changing definition lookup.
+
 Starters ship to **all supported targets** (they're under `common/fadeno`) and
 are available from the bundled plugin runtime. `init` / `init --data-only` and
 `vendor` remain the explicit project-copy paths.

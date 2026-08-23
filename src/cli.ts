@@ -39,6 +39,7 @@ import {
 } from './commands/dial.ts';
 import { runModels, runModelsAdd, runModelsDriver, type DriverListingResult, type ModelAddResult, type ModelsResult } from './commands/models.ts';
 import { runNewRun } from './commands/new-run.ts';
+import { runPlaybooks, type PlaybooksDetailResult, type PlaybooksListResult } from './commands/playbooks.ts';
 import { runCodexPlugin, runOmpPlugin, runPlugin } from './commands/plugin.ts';
 import { runNext } from './commands/next.ts';
 import { runPrompt } from './commands/prompt.ts';
@@ -98,6 +99,7 @@ Usage:
   fadeno clean [--force]                      Preview/remove ignored repo runtime state
   fadeno unvendor [--force]                   Remove lock-owned vendored files
   fadeno validate [file] [--schema K]   Validate playbooks (schema + references + semantics)
+  fadeno playbooks [<name>]             List effective playbooks or view one workflow
   fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
   fadeno new-run <playbook> <task>      Create a new run-ledger directory
   fadeno dial                                  # effective table
@@ -279,7 +281,7 @@ Examples:
 
 export const KNOWN_CLI_COMMANDS = new Set([
   'setup', 'status', 'doctor', 'vendor', 'unvendor', 'clean', 'uninstall',
-  'evidence', 'init', 'steering', 'validate', 'diagram', 'new-run', 'run',
+  'evidence', 'init', 'steering', 'validate', 'playbooks', 'diagram', 'new-run', 'run',
   'tool-run', 'tool-complete', 'plugin', 'completion', 'gate', 'prompt', 'next', 'drive',
   'cancel', 'models', 'model', 'dial', 'shadow', 'dispatch', 'dispatch-fallback', 'dispatch-start',
   'dispatch-prompt', 'dispatch-complete', 'dispatch-progress', 'dispatch-prepare',
@@ -832,6 +834,25 @@ Options:
 
 With no file, validates every playbook under .fadeno/playbooks (schema,
 references, and flow semantics).
+`,
+  playbooks: `fadeno playbooks — browse effective bundled and project workflows
+
+Usage:
+  fadeno playbooks             List effective playbooks (project overrides bundled)
+  fadeno playbooks <name>      Show metadata and an annotated ASCII workflow
+
+Options:
+  --json   Structured list/detail output
+
+Each summary includes its invocable name, description, when_to_use cues,
+definition source, and resolved path. A project override with missing display
+fields is an error rather than silently falling back; use \`fadeno validate\`
+for complete schema and flow validation.
+
+Examples:
+  fadeno playbooks
+  fadeno playbooks code-change-review
+  fadeno playbooks --json
 `,
   'tool-run': `fadeno tool-run — execute a registered tool step deterministically
 
@@ -1430,6 +1451,23 @@ function printModelAdd(result: ModelAddResult): void {
   if (result.suppressed_by_project) {
     console.log('  note: this checkout has a self-contained project catalog, so it currently suppresses the user entry.');
   }
+}
+
+function printPlaybookSummary(summary: PlaybooksListResult['playbooks'][number]): void {
+  console.log(`${summary.name}  [${summary.source}]`);
+  console.log(`  ${summary.description}`);
+  if (summary.when_to_use.length > 0) console.log(`  when: ${summary.when_to_use.join('; ')}`);
+  console.log(`  path: ${summary.path}`);
+}
+
+function printPlaybooksList(result: PlaybooksListResult): void {
+  console.log(`${result.playbooks.length} effective playbook${result.playbooks.length === 1 ? '' : 's'}:`);
+  for (const summary of result.playbooks) printPlaybookSummary(summary);
+}
+
+function printPlaybooksDetail(result: PlaybooksDetailResult): void {
+  printPlaybookSummary(result.playbook);
+  console.log(`\nworkflow\n${result.diagram}`);
 }
 
 /**
@@ -2148,6 +2186,14 @@ function main(argv: string[]): number {
       });
       printValidate(outcome);
       return outcome.ok ? 0 : 1;
+    }
+    case 'playbooks': {
+      if (positionals.length > 2) throw new Error('Usage: fadeno playbooks [<name>] [--json]');
+      const result = runPlaybooks({ playbook: positionals[1] });
+      if (values.json) console.log(JSON.stringify(result, null, 2));
+      else if (result.kind === 'list') printPlaybooksList(result);
+      else printPlaybooksDetail(result);
+      return 0;
     }
     case 'diagram': {
       const playbook = positionals[1];

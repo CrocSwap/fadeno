@@ -512,9 +512,15 @@ runs a short loop:
 You can render any playbook's flow yourself:
 
 ```bash
+fadeno playbooks                              # effective bundled + project catalog
+fadeno playbooks code-change-review           # metadata + annotated ASCII workflow
 fadeno diagram code-change-review              # annotated ASCII
 fadeno diagram code-change-review --format mermaid   # graph for GitHub/docs
 ```
+
+`fadeno playbooks` is the quickest catalog view: project definitions shadow
+bundled names, and every entry reports its `when_to_use` cues and source. Add
+`--json` for the resolved path and structured metadata.
 
 ```
 ┌─ review ───────────────────────────── map ─┐

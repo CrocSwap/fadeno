@@ -60,9 +60,17 @@ export function listDefinitionNames(repoRoot: string, kind: 'playbook' = 'playbo
 
 export function resolvePlaybookFile(repoRoot: string, name: string): DefinitionSource | null {
   const stripped = name.replace(/\.ya?ml$/i, '');
-  for (const suffix of ['.yaml', '.yml']) {
-    const found = resolveDefinition(repoRoot, 'playbook', `${stripped}${suffix}`);
-    if (found) return found;
+  // Source precedence comes before extension precedence: a project `.yml`
+  // must shadow a bundled `.yaml`. Within one source, `.yaml` remains the
+  // deterministic preferred spelling when both files exist.
+  for (const [kind, base] of [
+    ['project', join(projectRoot(repoRoot), 'playbooks')],
+    ['builtin', join(builtinRoot(), 'playbooks')],
+  ] as const) {
+    for (const suffix of ['.yaml', '.yml']) {
+      const path = join(base, `${stripped}${suffix}`);
+      if (existsSync(path)) return { kind, path };
+    }
   }
   return null;
 }

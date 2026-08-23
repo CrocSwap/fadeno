@@ -170,6 +170,7 @@ assert on return values and filesystem effects instead of scraping stdout.
 |---------|---------|-------|
 | `runInit` | `EmitResult[]` + `repoRoot` | Scaffolds a target; see *Templates & the plugin*. |
 | `runValidate` | per-file results + `ok` | The 3-pass validator; see below. |
+| `runPlaybooks` | effective catalog or metadata + ASCII workflow | Read-only resolver-backed list/detail view; project playbooks shadow bundled names. |
 | `runDiagram` | a rendered string | Pure; delegates to `lib/diagram.ts`. |
 | `runNewRun` | `runId` + `runDir` | Creates a run ledger. |
 | `runRun` | updated fields + appended events | Mutates `run.yaml`, appends `events.jsonl`. |
