@@ -17,7 +17,10 @@ export class StatusError extends Error {}
 
 export interface StatusOptions {
   verbose?: boolean;
-  target?: 'codex' | 'claude' | null;
+  // 'opencode' is accepted since OpenCode steering materialization exists and
+  // the harness compiles routes for it; 'grok' stays excluded — it has no
+  // steering surface to report on.
+  target?: 'codex' | 'claude' | 'opencode' | null;
   cwd?: string;
   repoRoot?: string;
   env?: string | null;
@@ -36,7 +39,7 @@ export interface StatusRole {
 export interface StatusResult {
   repoRoot: string;
   version: string;
-  harness: 'codex' | 'claude' | 'grok' | 'opencode' | 'standalone' | null;
+  harness: 'codex' | 'claude' | 'grok' | 'opencode' | 'omp' | 'standalone' | null;
   definitions: ReturnType<typeof definitionSourceSummary>;
   dials: { session: Record<string, DialRef>; repo: Record<string, DialRef>; user: Record<string, DialRef> };
   legacy_pin_note: string | null;

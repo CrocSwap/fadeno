@@ -620,18 +620,27 @@ test('Grok rejects --with-steering before scaffolding anything', (t) => {
   const root = tempRepo(t);
   assert.throws(
     () => runInit({ target: 'grok', repoRoot: root, withSteering: true }),
-    /supported for Codex and Claude Code, not Grok Build/,
+    /supported for Codex, Claude Code, and OpenCode — not Grok Build or omp/,
   );
   assert.ok(!exists(root, '.fadeno/vocabulary.md'));
 });
 
-test('OpenCode rejects --with-steering before scaffolding anything', (t) => {
+test('OpenCode accepts --with-steering and materializes agents plus the runtime plugin', (t) => {
   const root = tempRepo(t);
-  assert.throws(
-    () => runInit({ target: 'opencode', repoRoot: root, withSteering: true }),
-    /supported for Codex and Claude Code, not Grok Build or OpenCode/,
-  );
-  assert.ok(!exists(root, '.fadeno/vocabulary.md'));
+  const { results } = runInit({ target: 'opencode', repoRoot: root, withSteering: true });
+  assert.ok(exists(root, '.fadeno/vocabulary.md'));
+  // Identity is materialized under `.opencode/agent/` (Codex-style) and lane
+  // selection ships as the `tool.execute.before` plugin (Claude-style).
+  assert.ok(exists(root, '.opencode/plugin/fadeno-steering.js'));
+  for (const archetype of ARCHETYPES) {
+    assert.ok(
+      exists(root, `.opencode/agent/fadeno-dispatch-${archetype}.md`) ||
+        exists(root, `.opencode/agent/${archetype}.md`),
+      `no materialized slot for ${archetype}`,
+    );
+    assert.ok(exists(root, `.opencode/agent/fadeno-steering-refused-${archetype}.md`));
+  }
+  assert.ok(results.every((r) => r.status === 'created'));
 });
 
 test('bundled CLI parses --with-steering and carries its templates', (t) => {

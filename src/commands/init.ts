@@ -4,9 +4,9 @@ import { copyTree, emitBootstrap, emitFile, type EmitResult } from '../lib/fsuti
 import { findRepoRoot, templatesDir } from '../lib/paths.ts';
 import { FADENO_IGNORE_PATTERNS } from '../lib/source-control.ts';
 import { relayModelForClaude, stampHookVersion, stampRelayModel } from './plugin.ts';
-import { emitCodexSteeringBrokers } from './steering.ts';
+import { emitCodexSteeringBrokers, runSteeringApplyOpenCode } from './steering.ts';
 
-export type Target = 'codex' | 'claude' | 'grok' | 'opencode';
+export type Target = 'codex' | 'claude' | 'grok' | 'opencode' | 'omp';
 
 export interface InitOptions {
   target: Target;
@@ -57,11 +57,13 @@ export function runInit(opts: InitOptions): InitResult {
   const force = opts.force ?? false;
   const withSteering = opts.noSteering === true
     ? false
-    : opts.withSteering ?? (opts.target !== 'grok' && opts.target !== 'opencode');
+    : opts.withSteering ?? (opts.target !== 'grok' && opts.target !== 'omp');
   const results: EmitResult[] = [];
 
-  if (withSteering && (opts.target === 'grok' || opts.target === 'opencode')) {
-    throw new Error('Loadout steering is currently supported for Codex and Claude Code, not Grok Build or OpenCode.');
+  if (withSteering && (opts.target === 'grok' || opts.target === 'omp')) {
+    throw new Error(
+      'Loadout steering is currently supported for Codex, Claude Code, and OpenCode — not Grok Build or omp.',
+    );
   }
 
   // 1. Shared `.fadeno/` tree (vocabulary, playbooks, schemas, runs, enforcement).
@@ -177,6 +179,19 @@ export function runInit(opts: InitOptions): InitResult {
           force,
           results,
         );
+        // Steering materializes dialed identity into `.opencode/agent/` (the
+        // static role agents above stay as the unsteered fallback) plus the
+        // `tool.execute.before` plugin that picks the lane per spawn. Same
+        // rendered-from-catalog rule as Codex: never a frozen template copy.
+        if (withSteering) {
+          results.push(...runSteeringApplyOpenCode({ repoRoot, force }).results);
+        }
+        break;
+      case 'omp':
+        // omp discovers project task agents from `.omp/agents/*.md` (name +
+        // description frontmatter required). Role agents plus the dispatch
+        // proxies land here; no steering means no rendered slots.
+        copyTree(join(tpl, 'omp', 'omp-agents'), join(repoRoot, '.omp', 'agents'), force, results);
         break;
     }
 
@@ -200,8 +215,13 @@ export function runInit(opts: InitOptions): InitResult {
   // Codex plugins intentionally do not carry project-scoped custom agents.
   // A data-only plugin setup that explicitly requests steering still needs the
   // three local role overrides, while continuing to skip skills/bootstrap.
+  // Same rule for OpenCode: its plugins are global too, so the materialized
+  // agent files and runtime plugin are project scaffolding either way.
   if (opts.dataOnly && withSteering && opts.target === 'codex') {
     results.push(...emitCodexSteeringBrokers({ repoRoot, force }));
+  }
+  if (opts.dataOnly && withSteering && opts.target === 'opencode') {
+    results.push(...runSteeringApplyOpenCode({ repoRoot, force }).results);
   }
 
   // 5. Optional tier-2 enforcement scaffold (per-repo policy — allowed with --data-only).

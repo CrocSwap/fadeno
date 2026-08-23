@@ -70,7 +70,7 @@ export interface DoctorFinding {
 }
 
 export interface DoctorOptions extends StatusOptions {
-  target?: 'codex' | 'claude' | null;
+  target?: 'codex' | 'claude' | 'opencode' | null;
   /** Injectable for tests; defaults to the real process environment. */
   processEnv?: NodeJS.ProcessEnv;
 }

@@ -31,9 +31,10 @@ import {
 import { readUserDials } from '../lib/user-paths.ts';
 import { type EmitResult } from '../lib/fsutil.ts';
 import { HostDispatchError, readHostDispatchRequest, type HostDispatchRequest, type HostDispatchRequestLookup } from '../lib/host-dispatch.ts';
-import { findRepoRoot, packageVersion } from '../lib/paths.ts';
+import { findRepoRoot, packageVersion, templatesDir } from '../lib/paths.ts';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { codexUserAgentDir, userPaths, type UserPathOptions } from '../lib/user-paths.ts';
+import { stampHookVersion } from './plugin.ts';
 import {
   CODEX_MANAGED_MARK,
   CODEX_STEERING_ARCHETYPES,
@@ -1395,4 +1396,385 @@ export function runSteeringApplyClaude(opts: SteeringApplyOptions): SteeringAppl
   // — is something this command can cause.
   const restartRequired = false;
   return { results, materialization, baseline, restartRequired, conflicts, scope, removed, ignoredLocalDials };
+}
+
+// --- OpenCode steering materialization ---
+
+/**
+ * The managed-file mark stamped into every OpenCode agent file this module
+ * writes. The runtime plugin (`.opencode/plugin/fadeno-steering.js`) refuses
+ * to rewrite a spawn onto a role slot that does not carry it, so an unmarked
+ * `.opencode/agent/<archetype>.md` is the user's own file: Fadeno neither
+ * claims it nor steers onto it. Same ownership rule as the Codex
+ * `CODEX_MANAGED_MARK`, in the syntax an agent file can carry — the mark sits
+ * below the frontmatter, which must stay first.
+ */
+const OPENCODE_MANAGED_MARK = '<!-- fadeno:managed';
+
+/** Same ownership mark for the emitted plugin file, in JS-comment syntax. */
+const OPENCODE_PLUGIN_MANAGED_MARK = '// fadeno:managed';
+
+/**
+ * Insert the managed header into a rendered OpenCode agent body BELOW the
+ * frontmatter, which YAML frontmatter parsing requires to stay first (an
+ * agent file that opens with an HTML comment would not parse as one). The
+ * digest covers the body WITHOUT the header, so two files rendered from one
+ * resolution compare equal.
+ */
+function stampManagedOpenCodeAgent(body: string): string {
+  const header = `${OPENCODE_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(body)} -->`;
+  if (body.startsWith('---\n')) {
+    const close = body.indexOf('\n---\n');
+    if (close >= 0) {
+      const after = close + '\n---\n'.length;
+      return `${body.slice(0, after)}${header}\n${body.slice(after)}`;
+    }
+  }
+  return `${header}\n${body}`;
+}
+
+/**
+ * Write a Fadeno-managed OpenCode file, refreshing what Fadeno wrote and
+ * preserving what it did not. Same ownership rule as `managedAgentEmit` but
+ * keyed on CONTAINS rather than startsWith: agent files must open with their
+ * frontmatter, so the mark cannot be the first bytes of the file.
+ */
+function openCodeManagedEmit(path: string, body: string, force: boolean): EmitResult['status'] {
+  const existed = existsSync(path);
+  if (existed && !force) {
+    const existing = readFileSync(path, 'utf8');
+    if (!existing.includes(OPENCODE_MANAGED_MARK)) return 'skipped';
+    if (existing === body) return 'skipped';
+  }
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, body, 'utf8');
+  return existed ? 'overwritten' : 'created';
+}
+
+/** Delete a Fadeno-managed OpenCode file, recording it. Unmanaged files are untouched. */
+function removeManagedOpenCodeFile(path: string, removed: string[]): void {
+  if (!existsSync(path)) return;
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return;
+  }
+  if (!text.includes(OPENCODE_MANAGED_MARK)) return;
+  unlinkSync(path);
+  removed.push(path);
+}
+
+interface OpenCodeTemplatePiece {
+  description: string;
+  body: string;
+}
+
+/** Split today's static role-agent template into description + body. */
+function readOpenCodeRoleTemplate(archetype: string): OpenCodeTemplatePiece {
+  const source = readFileSync(
+    join(templatesDir(), 'opencode', 'opencode-agents', `${archetype}.md`),
+    'utf8',
+  );
+  let rest = source;
+  if (rest.startsWith('---\n')) {
+    const end = rest.indexOf('\n---\n', 4);
+    if (end >= 0) rest = rest.slice(end + '\n---\n'.length);
+  }
+  const described = /^description:\s*(.+)$/m.exec(source);
+  return {
+    description: described?.[1]?.trim() ?? `Fadeno ${archetype} role.`,
+    body: rest.trimStart(),
+  };
+}
+
+/**
+ * A host-routed dialed slot: today's static role body with the dial's identity
+ * in the frontmatter. `model` uses the provider-namespaced id the opencode
+ * harness compiles (`spellings.opencode`); `variant` carries a PINNED effort —
+ * OpenCode variants are named request overlays whose valid values are
+ * model-specific, so a registry default effort is never asserted as one. A
+ * `current-host` slot states neither: it inherits the session, which is what
+ * current-host means.
+ */
+function renderOpenCodeRoleSlot(archetype: string, modelId: string | null, pinnedEffort: string | null): string {
+  const piece = readOpenCodeRoleTemplate(archetype);
+  const refresh =
+    ' Fadeno-steered slot; re-run `fadeno steering apply --opencode` after re-dialing.';
+  const lines = ['---', `description: ${piece.description}${refresh}`, 'mode: subagent'];
+  if (modelId != null && modelId !== NEUTRAL_HOST_EXECUTOR) lines.push(`model: ${modelId}`);
+  if (pinnedEffort != null && modelId != null && modelId !== NEUTRAL_HOST_EXECUTOR) {
+    lines.push(`variant: ${pinnedEffort}`);
+  }
+  lines.push('---', '');
+  return `${lines.join('\n')}\n${piece.body}\n`;
+}
+
+/**
+ * The command-lane relay broker: ONE Bash call piping the prompt verbatim via
+ * quoted heredoc to `fadeno dispatch`, then verbatim relay of report + verdict.
+ * Compressed from templates/claude/claude-agents/dispatch-worker.md — same
+ * contract, no Claude-specific guard or plugin-root retry. No model pin: the
+ * catalog names no opencode relay today, so the broker inherits the session's
+ * model rather than inventing one.
+ */
+function renderOpenCodeDispatchBroker(archetype: string): string {
+  const piece = readOpenCodeRoleTemplate(archetype);
+  return `---
+description: Fadeno command broker for the ${archetype} archetype — relays the received task verbatim to the external executor bound by Fadeno dials. Never performs the task itself.
+mode: subagent
+---
+
+You are a **dispatch relay**, not an implementer. You do no thinking about the
+task itself and you never attempt it: your only job is to hand the task,
+byte-for-byte, to the external executor the user bound to the \`${archetype}\`
+archetype via Fadeno dials, then relay its report.
+
+Your FIRST and only required tool call is the contract call below — make it
+ONE Bash call with the Bash \`timeout\` parameter set to \`600000\` (external
+executors routinely exceed the default, and a timeout kill destroys their work):
+
+\`\`\`bash
+fadeno dispatch --archetype ${archetype} --tag ${archetype}-<slug> <<'FADENO_PROMPT'
+...the ENTIRE task prompt you received, exactly as received — verbatim, every
+line, starting at its very first line; headers, markers, and metadata included;
+no paraphrase, no truncation, nothing added...
+FADENO_PROMPT
+\`\`\`
+
+Replace \`<slug>\` with 2-4 hyphenated words naming THIS task
+(\`${archetype}-parse-retry-header\`). Choose it BEFORE the call: the tag is the
+only handle that survives the Bash call being killed, and it makes recovery
+after a kill possible at all. The quoted heredoc keeps the shell from expanding
+anything inside the prompt; the kernel snapshots the prompt and writes the
+evidence rows itself.
+
+Then:
+
+1. Relay the command's stdout report **verbatim** as your final response — no
+   summarizing, trimming, reformatting, or annotating. Relay the verdict line
+   the command prints on stderr with it (\`ok\`, \`FAILED\`, \`NO OUTPUT\`,
+   \`TIMED OUT\`, plus any merge-back line). \`output attested\` is NOT a
+   verdict. You may prefix one structural sentence stating these are the
+   executor's own claims, which you have no tools to verify.
+
+2. If the command exits non-zero, report its output verbatim and state plainly
+   that the dispatch failed. Do NOT attempt the task yourself as a fallback.
+
+3. If the call is killed or times out, the result is UNKNOWN, not failed.
+   Recover with the tag you launched with:
+
+   \`\`\`bash
+   fadeno dispatches --output tag:${archetype}-<slug> --wait 120
+   \`\`\`
+
+   The kernel writes the completion row only when the executor exits, so a
+   caller that just timed out must wait like this before concluding anything.
+   If the wait returns a completed dispatch, that IS the result: relay its
+   output and verdict per rule 1. Only if the wait expires with still no
+   completion row, report that the executor MAY STILL BE RUNNING and must be
+   checked on disk before anyone re-dispatches — two workers racing on the same
+   files is the failure this avoids. An empty recovered output is not a result:
+   say it produced nothing.
+
+4. If the task changes after you dispatched, do NOT re-dispatch and do not fold
+   the amendment into a new call. Report the discrepancy; amending a live
+   dispatch is the caller's decision.
+
+Permission boundary: the external executor runs outside this harness's fences,
+under flags the user configured via Fadeno dials; the dispatch evidence row is
+the audit trail. Original role description: ${piece.description}
+`;
+}
+
+/**
+ * The refusal reporter: reports an embedded refusal reason verbatim and stops.
+ * The plugin embeds the reason by PREPENDING the refusal envelope to the task
+ * prompt, so this file is static across refusals.
+ */
+function renderOpenCodeRefusalBroker(archetype: string): string {
+  return `---
+description: Reports why the Fadeno steering layer refused a ${archetype} spawn, then stops. Spawned only by the fadeno steering plugin when no honest delivery exists.
+mode: subagent
+---
+
+You are a **refusal reporter**. Your task prompt begins with a block titled
+\`# FADENO STEERING REFUSED (<predicate>)\`. Do everything below and NOTHING else:
+
+1. Relay the entire refusal block — from the title through the
+   \`FADENO REFUSAL BOUNDARY\` line, including the REFUSAL REASON — **verbatim**
+   as your response.
+2. State plainly that the requested work was NOT started and nothing was done.
+3. Stop. Do not read further, do not perform the task after the boundary, do
+   not attempt any substitute or partial version of it, and do not inspect the
+   repository.
+
+The task text below the boundary exists only because the original spawn could
+not be emptied; it is context for whoever reads your report, never work for you.
+`;
+}
+
+export interface OpenCodeSteeringApplyOptions extends CommonOptions {
+  /** Accepted for call-site symmetry with the other apply targets; always 'opencode'. */
+  target?: 'opencode';
+  /** Only 'project' is valid; anything else is refused (see `runSteeringApplyOpenCode`). */
+  scope?: 'project' | 'user';
+  /** `init`'s "re-scaffold over what is there" — see `openCodeManagedEmit`. */
+  force?: boolean;
+}
+
+/**
+ * Materialize the current dials into project-scoped OpenCode agent files under
+ * `.opencode/agent/`, and emit the runtime steering plugin beside them.
+ *
+ * Architecture (the decided hybrid, mirroring how each parent host does it):
+ * identity is MATERIALIZED into agent files the way Codex bakes it into TOML,
+ * while lane selection stays RUNTIME through the `tool.execute.before` plugin
+ * the way Claude's PreToolUse hook rewrites spawns. Per slot:
+ *
+ * - command adapter  → `fadeno-dispatch-<archetype>.md`, a relay-only broker.
+ * - host adapter     → `<archetype>.md`, the static role body plus the dial's
+ *                      model (and a pinned effort as `variant:`).
+ *
+ * Three refusal brokers (`fadeno-steering-refused-<archetype>.md`) are always
+ * emitted: the plugin has no deny primitive, so every refusal is delivered by
+ * rewriting the spawn onto one of these with the reason embedded in the prompt.
+ *
+ * Deliberately PROJECT scope only. A user-scope set would steer every repo on
+ * the machine, so — same rule as Codex user scope — it is refused rather than
+ * silently exported; `.opencode/agent/` is per-repo session machinery that any
+ * later apply refreshes in place when it carries the managed mark.
+ */
+export function runSteeringApplyOpenCode(opts: OpenCodeSteeringApplyOptions): SteeringApplyResult {
+  const repoRoot = rootOf(opts);
+  if ((opts as unknown as { scope?: string }).scope === 'user') {
+    throw new SteeringError(
+      'OpenCode steering materializes at project scope only (.opencode/agent/); ' +
+        '--scope user would export this repo\'s dials to every repo on this machine.',
+    );
+  }
+  // This apply materializes OPENCODE deliveries, so load that harness family:
+  // route compilation (model spellings, fallback commands) must agree with the
+  // resolver the plugin invokes under FADENO_HARNESS=opencode.
+  const { profile } = (() => {
+    try {
+      return loadExecutorProfile(repoRoot, opts.userPathOptions, 'opencode');
+    } catch (err) {
+      if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+      throw err;
+    }
+  })();
+  let dialLayers: DialLayers;
+  try {
+    dialLayers = dialLayersForApply('project', repoRoot, profile, opts.userPathOptions).layers;
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+    throw err;
+  }
+  const agentDir = join(repoRoot, '.opencode', 'agent');
+  const results: EmitResult[] = [];
+  const materialization: SteeringApplyResult['materialization'] = {};
+  const baseline: Record<string, string> = {};
+  const removed: string[] = [];
+  const pending: Array<{ path: string; body: string }> = [];
+
+  for (const archetype of CODEX_STEERING_ARCHETYPES) {
+    let cascade: { ref: DialRef; source: RoleResolutionSource; resolvedVia: string | null };
+    try {
+      cascade = resolveDialCascade(archetype, archetype, { bindings: profile.bindings, archetypes: profile.archetypes }, dialLayers);
+    } catch (err) {
+      if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+      throw err;
+    }
+    const executorName = formatDialRef(cascade.ref);
+    let spec: ExecutorSpec | null = (profile as unknown as SnapshotDocument).executors?.[executorName] ?? null;
+    let compiled: ReturnType<typeof compileDialRef> | null = null;
+    try {
+      compiled = compileDialRef(cascade.ref, profile);
+      if (spec == null) spec = compiled.spec;
+    } catch {}
+    if (spec == null) {
+      throw new SteeringError(`archetype "${archetype}" resolved to "${executorName}" but no executor exists in profile`);
+    }
+    if (spec.adapter === 'host' && (spec as { agentType?: string }).agentType === '*') {
+      spec = { ...spec, agentType: archetype } as ExecutorSpec;
+    }
+    if (spec.adapter !== 'host') {
+      materialization[archetype] = {
+        kind: 'command-broker', adapter: 'command', executor: executorName,
+        model: (spec as { model: string | null }).model,
+      };
+      pending.push({
+        path: join(agentDir, `fadeno-dispatch-${archetype}.md`),
+        body: stampManagedOpenCodeAgent(renderOpenCodeDispatchBroker(archetype)),
+      });
+      // The host slot file from a previous apply is now stale identity: remove
+      // it so no session keeps loading yesterday's dialed model.
+      removeManagedOpenCodeFile(join(agentDir, `${archetype}.md`), removed);
+    } else {
+      baseline[archetype] = executorName;
+      materialization[archetype] = {
+        kind: 'host', adapter: 'host', executor: executorName, model: spec.model,
+      };
+      pending.push({
+        path: join(agentDir, `${archetype}.md`),
+        body: stampManagedOpenCodeAgent(
+          renderOpenCodeRoleSlot(archetype, compiled?.modelId ?? spec.model ?? null, cascade.ref.effort ?? null),
+        ),
+      });
+      removeManagedOpenCodeFile(join(agentDir, `fadeno-dispatch-${archetype}.md`), removed);
+    }
+  }
+
+  // Refusal brokers are static across dials — emit all three on every apply so
+  // an upgrade refreshes their instructions like any other managed file.
+  for (const archetype of CODEX_STEERING_ARCHETYPES) {
+    pending.push({
+      path: join(agentDir, `fadeno-steering-refused-${archetype}.md`),
+      body: stampManagedOpenCodeAgent(renderOpenCodeRefusalBroker(archetype)),
+    });
+  }
+
+  for (const item of pending) {
+    results.push({ path: item.path, status: openCodeManagedEmit(item.path, item.body, opts.force ?? false) });
+  }
+
+  // The runtime plugin. Stamped with the package version so evidence rows name
+  // the generation that wrote them; refreshed whenever this apply runs against
+  // a file carrying Fadeno's mark, never against a foreign file.
+  const pluginTemplate = readFileSync(join(templatesDir(), 'opencode', 'plugin', 'fadeno-steering.js'), 'utf8');
+  const pluginBody =
+    `${OPENCODE_PLUGIN_MANAGED_MARK} version=${packageVersion()}\n` +
+    stampHookVersion(pluginTemplate).replace(/^#!.*\n/, '');
+  const pluginPath = join(repoRoot, '.opencode', 'plugin', 'fadeno-steering.js');
+  results.push({ path: pluginPath, status: openCodePluginEmit(pluginPath, pluginBody, opts.force ?? false) });
+
+  const conflicts = pending
+    .filter((item) => existsSync(item.path) && openCodeFileDiffers(item.path, item.body))
+    .map((item) => item.path);
+  // Agents AND the plugin register at process start, so any change to either
+  // needs a fresh OpenCode session to take effect.
+  const restartRequired = results.some((item) => item.status === 'created' || item.status === 'overwritten');
+  return { results, materialization, baseline, restartRequired, conflicts, scope: 'project', removed };
+}
+
+/** Plugin variant of `openCodeManagedEmit`: ownership keyed on its own mark. */
+function openCodePluginEmit(path: string, body: string, force: boolean): EmitResult['status'] {
+  const existed = existsSync(path);
+  if (existed && !force) {
+    const existing = readFileSync(path, 'utf8');
+    if (!existing.includes(OPENCODE_PLUGIN_MANAGED_MARK)) return 'skipped';
+    if (existing === body) return 'skipped';
+  }
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, body, 'utf8');
+  return existed ? 'overwritten' : 'created';
+}
+
+function openCodeFileDiffers(path: string, body: string): boolean {
+  try {
+    return readFileSync(path, 'utf8') !== body;
+  } catch {
+    return false;
+  }
 }

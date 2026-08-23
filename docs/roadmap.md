@@ -101,8 +101,10 @@ general scheduler, or orchestration platform.
   advisory→enforced bridge. The driver skill composes these helpers into the
   current model-mediated execution procedure.
 - Tier-2 enforcement scaffold via `--with-hooks` (pre-commit, CI workflow, Claude hook example).
-- Default loadout steering for Codex and Claude (with `--no-steering` opt-out):
-  hybrid Codex custom agents plus `fadeno steering apply`, and a selective Claude `PreToolUse` rewrite. Codex
+- Default loadout steering for Codex, Claude, and OpenCode (with `--no-steering` opt-out):
+  hybrid Codex custom agents plus `fadeno steering apply`, a selective Claude `PreToolUse` rewrite, and an
+  OpenCode hybrid — materialized `.opencode/agent/` slots plus a runtime
+  `tool.execute.before` lane-selection plugin. Codex
   switches command slots live, executes matching host slots in-session, invokes
   an explicit `fallback_command` for mismatched host slots, and reports
   `restart_required` only when no honest fallback exists;
@@ -125,6 +127,9 @@ general scheduler, or orchestration platform.
   but their Fadeno steering behavior remains unverified in a live Codex session.
   (The Claude plugin subagents are verified live; the new Claude rewrite hook
   still needs the same live-session dogfood pass.)
+- OpenCode steering (materialized agents + runtime plugin) is emitted and
+  unit-tested, but live end-to-end steering requires a fresh OpenCode session
+  and has not been demonstrated yet.
 
 ## Next protocol (in progress — provenance slice shipped)
 

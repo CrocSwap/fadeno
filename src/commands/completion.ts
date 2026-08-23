@@ -75,9 +75,9 @@ const MODELS_SPEC = command({ '--driver': { kind: 'free' }, '--json': NONE }, ['
 
 const COMMANDS: Record<string, CommandSpec> = {
   setup: command({ '--codex': NONE, '--claude': NONE, '--non-interactive': NONE, '--from': PATH, '--reset-runtime': NONE }),
-  status: command({ '--verbose': NONE }),
-  doctor: command({ '--codex': NONE, '--claude': NONE }),
-  vendor: command({ '--codex': NONE, '--claude': NONE, '--grok': NONE, '--opencode': NONE, '--with-hooks': NONE, '--no-steering': NONE, '--force': NONE }),
+  status: command({ '--verbose': NONE, '--codex': NONE, '--claude': NONE, '--opencode': NONE }),
+  doctor: command({ '--codex': NONE, '--claude': NONE, '--opencode': NONE }),
+  vendor: command({ '--codex': NONE, '--claude': NONE, '--grok': NONE, '--opencode': NONE, '--omp': NONE, '--with-hooks': NONE, '--no-steering': NONE, '--force': NONE }),
   uninstall: command({ '--codex': NONE, '--claude': NONE, '--all': NONE, '--purge-user-data': NONE, '--force': NONE }),
   clean: command({ '--force': NONE }),
   unvendor: command({ '--force': NONE }),

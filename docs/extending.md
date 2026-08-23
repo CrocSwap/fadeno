@@ -682,6 +682,21 @@ it is required only when the selected host slot has no fallback command. The Cod
 bundles the CLI and built-in definitions; it does not overwrite unrelated user
 agents. Existing files remain protected unless `--force` is supplied.
 
+OpenCode combines both mechanisms. Identity is **materialized**: `fadeno init
+--opencode` and `fadeno steering apply --opencode --scope project` render
+project agent files under `.opencode/agent/` — host-routed slots as role
+agents carrying the dialed model in frontmatter, command-routed slots as relay
+brokers, plus one refusal reporter per archetype (the plugin API has no deny
+primitive, so a refused spawn is rewritten to an agent that reports the reason
+and stops). Lane selection stays **runtime**: an auto-discovered plugin at
+`.opencode/plugin/fadeno-steering.js` intercepts the task tool per spawn,
+resolves the dials (`FADENO_HARNESS=opencode`), and rewrites the spawn onto the
+materialized slot, the broker, or the refusal reporter — with the same three
+refusal predicates, evidence rows, and fail-open philosophy as the Claude
+hook. Plugins and agents load at process start, so any change requires a fresh
+OpenCode session; today's static `.opencode/agents/*.md` stay as the unsteered
+fallback.
+
 What stays unsteered: Explore/Plan-style read-only scouting — cheap, tightly
 integrated with the harness's codebase tools, and not where quota pressure
 lives. The arbitrage win is expensive worker turns.
