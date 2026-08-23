@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
@@ -47,7 +47,8 @@ test('omp command lane preserves native project agents and materializes a broker
   assert.equal(existsSync(join(root, '.omp', 'agents', 'fadeno-dispatch-worker.md')), true);
   assert.equal(existsSync(join(root, '.omp', 'agents', 'worker.md')), false);
   assert.match(readFileSync(join(root, '.omp', 'agents', 'fadeno-dispatch-worker.md'), 'utf8'), /name: fadeno-dispatch-worker/);
-  assert.match(readFileSync(join(root, '.omp', 'agents', 'fadeno-dispatch-worker.md'), 'utf8'), /fadeno dispatch --archetype worker --prompt-file/);
+  assert.match(readFileSync(join(root, '.omp', 'agents', 'fadeno-dispatch-worker.md'), 'utf8'), /dispatch --archetype worker --prompt-file/);
+  assert.match(readFileSync(join(root, '.omp', 'agents', 'fadeno-dispatch-worker.md'), 'utf8'), /FADENO_HARNESS=omp "\$\{FADENO_CLI:-fadeno\}" dispatch/);
 });
 
 test('omp init with an existing command dial does not recreate the host slot', (t) => {
@@ -77,6 +78,36 @@ test('omp apply migrates the old project-relative extension entry and preserves 
     './foreign.ts',
     './.omp/extensions/fadeno-steering.ts',
   ]);
+});
+
+test('omp settings failures are preserved and reported as unhealthy', (t) => {
+  for (const [name, body] of [
+    ['invalid-json', '{ not json\n'],
+    ['non-array', `${JSON.stringify({ extensions: 'wrong' }, null, 2)}\n`],
+    ['mixed-array', `${JSON.stringify({ extensions: ['./foreign.ts', 7] }, null, 2)}\n`],
+  ] as const) {
+    const root = tempRepo(t);
+    runInit({ target: 'omp', repoRoot: root, force: true });
+    const settingsPath = join(root, '.omp', 'settings.json');
+    writeFileSync(settingsPath, body, 'utf8');
+    runSteeringApplyOmp({ repoRoot: root, force: true });
+    assert.equal(readFileSync(settingsPath, 'utf8'), body, name);
+    const materialization = inspectOmpMaterialization(root, hostExpected);
+    assert.equal(materialization.healthy, false, name);
+    assert.equal(materialization.settingsRegistered, false, name);
+    assert.ok(materialization.issues.some((issue) => issue.kind === 'malformed' && issue.path === settingsPath), name);
+  }
+});
+
+test('omp status detects a valid settings file that does not register steering', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'omp', repoRoot: root, force: true });
+  const settingsPath = join(root, '.omp', 'settings.json');
+  writeFileSync(settingsPath, `${JSON.stringify({ extensions: ['./foreign.ts'] }, null, 2)}\n`, 'utf8');
+  const materialization = inspectOmpMaterialization(root, hostExpected);
+  assert.equal(materialization.healthy, false);
+  assert.equal(materialization.settingsRegistered, false);
+  assert.ok(materialization.issues.some((issue) => issue.kind === 'unregistered'));
 });
 
 test('omp aliases preserve a foreign preferred name and carry the matching frontmatter name', (t) => {
@@ -222,6 +253,7 @@ process.stdout.write(JSON.stringify({ mode: 'host', lane: 'host', executor: 'cur
   delete process.env.FADENO_CLI;
   t.after(() => { if (priorCli == null) delete process.env.FADENO_CLI; else process.env.FADENO_CLI = priorCli; });
   const imported = await import(`${pathToFileURL(extensionPath).href}?test=${Date.now()}`) as { default: typeof fadenoSteering };
+  assert.equal(realpathSync(process.env.FADENO_CLI!), realpathSync(bundledCli));
   let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
   imported.default({ on(event, candidate) { if (event === 'tool_call') handler = candidate; } });
   assert.ok(handler);

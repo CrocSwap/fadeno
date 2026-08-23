@@ -95,6 +95,7 @@ test('omp plugin: agents satisfy the task-agent contract', (t) => {
     assert.match(md, /^tools: bash$/m, `${proxy} must restrict itself to bash`);
     assert.doesNotMatch(md, /^model: /m, `${proxy} must not pin a host model`);
     assert.doesNotMatch(md, /CLAUDE_PLUGIN_ROOT|PreToolUse/, `${proxy} must not reference Claude-only machinery`);
+    assert.match(md, /FADENO_HARNESS=omp "\$\{FADENO_CLI:-fadeno\}" dispatch/, `${proxy} must retain the omp route family and bundled CLI`);
   }
   for (const file of AGENTS) {
     assert.equal(

@@ -12,7 +12,10 @@ export type OmpIssueKind =
   | 'malformed'
   | 'stale-version'
   | 'digest-drifted'
-  | 'contradictory';
+  | 'contradictory'
+  | 'unregistered';
+
+export const OMP_PROJECT_EXTENSION_ENTRY = './.omp/extensions/fadeno-steering.ts';
 
 export interface OmpIssue {
   kind: OmpIssueKind;
@@ -42,6 +45,8 @@ export interface OmpSlotState {
 export interface OmpMaterialization {
   agentDir: string;
   extensionPath: string;
+  settingsPath: string;
+  settingsRegistered: boolean;
   slots: OmpSlotState[];
   refusals: OmpFileState[];
   extension: OmpFileState;
@@ -118,6 +123,35 @@ function inspectExtension(path: string, issues: OmpIssue[]): OmpFileState {
   return { path, present: true, managed: true, valid, version, digest: recordedDigest, digestValid, stale };
 }
 
+function inspectSettings(path: string, issues: OmpIssue[]): boolean {
+  const text = readText(path);
+  if (text == null) {
+    issues.push({ kind: 'missing', path, detail: 'omp settings are missing, so the ignored steering extension is not registered' });
+    return false;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    issues.push({ kind: 'malformed', path, detail: 'omp settings are not valid JSON; Fadeno preserved them and could not register steering' });
+    return false;
+  }
+  if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    issues.push({ kind: 'malformed', path, detail: 'omp settings must be a JSON object; Fadeno preserved the existing value' });
+    return false;
+  }
+  const extensions = (parsed as Record<string, unknown>).extensions;
+  if (!Array.isArray(extensions) || !extensions.every((entry) => typeof entry === 'string')) {
+    issues.push({ kind: 'malformed', path, detail: 'omp settings extensions must be an array of strings; Fadeno preserved the existing value' });
+    return false;
+  }
+  if (!extensions.includes(OMP_PROJECT_EXTENSION_ENTRY)) {
+    issues.push({ kind: 'unregistered', path, detail: `omp settings do not register ${OMP_PROJECT_EXTENSION_ENTRY}` });
+    return false;
+  }
+  return true;
+}
+
 function inspectSlotFile(
   agentDir: string,
   archetype: string,
@@ -153,6 +187,7 @@ export function inspectOmpMaterialization(
 ): OmpMaterialization {
   const agentDir = join(repoRoot, '.omp', 'agents');
   const extensionPath = join(repoRoot, '.omp', 'extensions', 'fadeno-steering.ts');
+  const settingsPath = join(repoRoot, '.omp', 'settings.json');
   const issues: OmpIssue[] = [];
   const slots: OmpSlotState[] = [];
   for (const archetype of OMP_STEERING_ARCHETYPES) {
@@ -164,5 +199,6 @@ export function inspectOmpMaterialization(
   }
   const refusals = OMP_STEERING_ARCHETYPES.map((archetype) => inspectSlotFile(agentDir, archetype, 'refusal', issues, true));
   const extension = inspectExtension(extensionPath, issues);
-  return { agentDir, extensionPath, slots, refusals, extension, issues, healthy: issues.length === 0, restartRequired: issues.length > 0 };
+  const settingsRegistered = inspectSettings(settingsPath, issues);
+  return { agentDir, extensionPath, settingsPath, settingsRegistered, slots, refusals, extension, issues, healthy: issues.length === 0, restartRequired: issues.length > 0 };
 }

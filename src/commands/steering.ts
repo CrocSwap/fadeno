@@ -36,6 +36,7 @@ import { findRepoRoot, packageVersion, templatesDir } from '../lib/paths.ts';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { codexUserAgentDir, userPaths, type UserPathOptions } from '../lib/user-paths.ts';
 import { ensureOpenCodeFadenoIgnore, ensureOmpFadenoIgnore } from '../lib/source-control.ts';
+import { OMP_PROJECT_EXTENSION_ENTRY } from '../lib/omp-steering.ts';
 import { stampHookVersion } from './plugin.ts';
 import {
   CODEX_MANAGED_MARK,
@@ -1808,7 +1809,6 @@ function openCodeFileDiffers(path: string, body: string): boolean {
 const OMP_MANAGED_MARK = '<!-- fadeno:managed';
 const OMP_EXTENSION_MANAGED_MARK = '// fadeno:managed';
 const OMP_STEERING_ARCHETYPES = ['worker', 'reviewer', 'judge'] as const;
-const OMP_EXTENSION_ENTRY = './.omp/extensions/fadeno-steering.ts';
 const OMP_LEGACY_EXTENSION_ENTRY = './extensions/fadeno-steering.ts';
 
 function stampManagedOmpAgent(body: string): string {
@@ -1881,16 +1881,16 @@ You are Fadeno's hybrid ${archetype}. Do not spawn further task agents.
 
 Before every task, inspect whether the delivery begins with # Fadeno engine step assignment.
 For an engine assignment, the coordinator must provide both run: <run-id> and dispatch_id: <dispatch-id>.
-Run fadeno steering resolve --archetype ${archetype} --host-executor current-host --run <run-id> --dispatch-id <dispatch-id>.
+Run FADENO_HARNESS=omp "\${FADENO_CLI:-fadeno}" steering resolve --archetype ${archetype} --host-executor current-host --run <run-id> --dispatch-id <dispatch-id>.
 If either identity is absent or validation fails, stop and report the resolver error.
 For that engine assignment only:
 - mode=host: ${behavior}
-- mode=command: run fadeno dispatch-fallback <run-id> <dispatch-id> and relay stdout verbatim.
+- mode=command: run FADENO_HARNESS=omp "\${FADENO_CLI:-fadeno}" dispatch-fallback <run-id> <dispatch-id> and relay stdout verbatim.
 - mode=restart_required or mode=write_conflict: stop and relay the resolver refusal.
 
-For an ordinary task beginning with # Fadeno step assignment, first write the entire prompt verbatim to a unique file under .fadeno/local/prompts/, then run fadeno steering resolve --archetype ${archetype} --host-executor current-host --prompt-file <path>.
+For an ordinary task beginning with # Fadeno step assignment, first write the entire prompt verbatim to a unique file under .fadeno/local/prompts/, then run FADENO_HARNESS=omp "\${FADENO_CLI:-fadeno}" steering resolve --archetype ${archetype} --host-executor current-host --prompt-file <path>.
 - mode=host: ${behavior}
-- mode=command: run fadeno dispatch --archetype ${archetype} --prompt-file <path> with that same file and relay stdout verbatim. On failure, report it and do not perform the task yourself.
+- mode=command: run FADENO_HARNESS=omp "\${FADENO_CLI:-fadeno}" dispatch --archetype ${archetype} --prompt-file <path> with that same file and relay stdout verbatim. On failure, report it and do not perform the task yourself.
 - mode=restart_required or mode=write_conflict: stop and relay the resolver refusal.
 
 Never silently substitute a different model or executor.`;
@@ -1904,7 +1904,7 @@ function renderOmpHostAgent(archetype: string, modelId: string | null, agentName
 
 function renderOmpCommandAgent(archetype: string, agentName = `fadeno-dispatch-${archetype}`): string {
   const piece = readOmpRoleTemplate(archetype);
-  return `---\nname: ${agentName}\ndescription: Fadeno command broker for ${archetype}; relays the task through the active external executor and never performs it locally.\ntools: bash\n---\n\nThe Fadeno steering extension selected this command broker. You are a relay, not an implementer.\n\nFor an engine assignment, run fadeno dispatch-fallback <run-id> <dispatch-id> and relay stdout verbatim.\nFor an ordinary # Fadeno step assignment, first write the entire received prompt verbatim to a unique file under .fadeno/local/prompts/, then run fadeno dispatch --archetype ${archetype} --prompt-file <path> and relay stdout verbatim. If dispatch fails, report the failure and do not perform the task locally. Never paraphrase, truncate, or substitute another executor.\n\nOriginal role description: ${piece.description}\n`;
+  return `---\nname: ${agentName}\ndescription: Fadeno command broker for ${archetype}; relays the task through the active external executor and never performs it locally.\ntools: bash\n---\n\nThe Fadeno steering extension selected this command broker. You are a relay, not an implementer.\n\nFor an engine assignment, run FADENO_HARNESS=omp "\${FADENO_CLI:-fadeno}" dispatch-fallback <run-id> <dispatch-id> and relay stdout verbatim.\nFor an ordinary # Fadeno step assignment, first write the entire received prompt verbatim to a unique file under .fadeno/local/prompts/, then run FADENO_HARNESS=omp "\${FADENO_CLI:-fadeno}" dispatch --archetype ${archetype} --prompt-file <path> and relay stdout verbatim. If dispatch fails, report the failure and do not perform the task locally. Never paraphrase, truncate, or substitute another executor.\n\nOriginal role description: ${piece.description}\n`;
 }
 
 function renderOmpRefusalAgent(archetype: string, agentName = `fadeno-steering-refused-${archetype}`): string {
@@ -2038,10 +2038,11 @@ function ompSettingsEmit(repoRoot: string): EmitResult['status'] {
   }
   const extensions = settings.extensions;
   if (extensions != null && !Array.isArray(extensions)) return 'skipped';
-  const entries = Array.isArray(extensions) ? extensions.filter((entry): entry is string => typeof entry === 'string') : [];
+  if (Array.isArray(extensions) && !extensions.every((entry) => typeof entry === 'string')) return 'skipped';
+  const entries = Array.isArray(extensions) ? extensions as string[] : [];
   const current = entries.filter((entry) => entry !== OMP_LEGACY_EXTENSION_ENTRY);
-  if (current.includes(OMP_EXTENSION_ENTRY) && current.length === entries.length) return 'skipped';
-  settings.extensions = current.includes(OMP_EXTENSION_ENTRY) ? current : [...current, OMP_EXTENSION_ENTRY];
+  if (current.includes(OMP_PROJECT_EXTENSION_ENTRY) && current.length === entries.length) return 'skipped';
+  settings.extensions = current.includes(OMP_PROJECT_EXTENSION_ENTRY) ? current : [...current, OMP_PROJECT_EXTENSION_ENTRY];
   mkdirSync(join(path, '..'), { recursive: true });
   writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
   return existed ? 'overwritten' : 'created';
