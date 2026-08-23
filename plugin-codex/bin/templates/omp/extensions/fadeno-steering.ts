@@ -31,7 +31,12 @@ function hash(value: string): string {
 type Resolution = { mode: string; slot?: Record<string, unknown>; error?: string; timedOut?: boolean };
 
 async function resolveRole(role: string, cwd: string, promptSha256: string | null): Promise<Resolution> {
-  const cli = process.env.FADENO_CLI?.trim() || 'fadeno';
+  // Project materializations normally resolve through PATH (or FADENO_CLI).
+  // In an installed plugin this file lives at extensions/ beside bin/fadeno;
+  // prefer that self-contained runtime so plugin-only installs do not depend
+  // on an incidental global CLI.
+  const bundledCli = join(import.meta.dirname, '..', 'bin', 'fadeno');
+  const cli = process.env.FADENO_CLI?.trim() || (existsSync(bundledCli) ? bundledCli : 'fadeno');
   try {
     const args = ['steering', 'resolve', '--archetype', role, '--host-executor', 'current-host'];
     if (promptSha256 != null) args.push('--prompt-sha256', promptSha256);
