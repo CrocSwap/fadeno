@@ -32,7 +32,9 @@ import {
   type RoleResolutionSource,
   type CompiledDelivery,
   type DialLayers,
+  shadowAttachmentExpired,
   shadowSampleRoll,
+  withLocalDialStateLock,
 } from '../lib/executors.ts';
 import {
   decideLane,
@@ -99,8 +101,27 @@ export interface ShadowAttachmentView {
   effort?: string;
   via?: string;
   rate?: number;
+  /** Configured finite trigger budget, or null for an unlimited attachment. */
+  n: number | null;
+  /** Pairings still available, or null for an unlimited attachment. */
+  remaining: number | null;
+  /** Derived from the persisted budget; expired attachments remain visible. */
+  expired: boolean;
   adapter?: 'command' | 'host';
   driver?: string;
+}
+
+function shadowAttachmentView(att: ShadowAttachment, delivery?: CompiledDelivery): ShadowAttachmentView {
+  return {
+    model: att.model,
+    ...(att.effort ? { effort: att.effort } : {}),
+    ...(att.via ? { via: att.via } : {}),
+    ...(att.rate != null ? { rate: att.rate } : {}),
+    n: att.n ?? null,
+    remaining: att.remaining ?? null,
+    expired: shadowAttachmentExpired(att),
+    ...(delivery != null ? { adapter: delivery.spec.adapter, driver: delivery.driver } : {}),
+  };
 }
 
 export interface StaleShadowView {
@@ -673,8 +694,14 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
 
   // Write to layer
   if (layer === 'session') {
-    const nextDials = { ...localState.dials, [archetype]: dial };
-    writeLocalDialState(repoRoot, { dials: nextDials, shadows: localState.shadows, legacyNote: null });
+    withLocalDialStateLock(repoRoot, () => {
+      const current = readLocalDialState(repoRoot);
+      previous = Object.hasOwn(current.dials, archetype)
+        ? { layer: 'session', dial: current.dials[archetype]! }
+        : null;
+      const nextDials = { ...current.dials, [archetype]: dial };
+      writeLocalDialState(repoRoot, { dials: nextDials, shadows: current.shadows, legacyNote: null });
+    });
   } else if (layer === 'user') {
     const next = { ...userDials, [archetype]: dial as DialRef };
     writeUserDials(opts.userPathOptions ?? {}, next);
@@ -773,11 +800,13 @@ export function runDialClear(opts: DialClearOptions = {}): DialClearResult {
   // No archetype: clear all in layer
   if (archetype == null) {
     if (opts.session) {
-      const state = readLocalDialState(repoRoot);
-      const count = Object.keys(state.dials).length;
-      if (count === 0) return { cleared: null, removed: false, archetype: null, layer: 'session', remaining: {}, count: 0 };
-      writeLocalDialState(repoRoot, { dials: {}, shadows: state.shadows, legacyNote: null });
-      return { cleared: null, removed: true, archetype: null, layer: 'session', remaining: {}, count };
+      return withLocalDialStateLock(repoRoot, () => {
+        const state = readLocalDialState(repoRoot);
+        const count = Object.keys(state.dials).length;
+        if (count === 0) return { cleared: null, removed: false, archetype: null, layer: 'session' as const, remaining: {}, count: 0 };
+        writeLocalDialState(repoRoot, { dials: {}, shadows: state.shadows, legacyNote: null });
+        return { cleared: null, removed: true, archetype: null, layer: 'session' as const, remaining: {}, count };
+      });
     }
     if (opts.user) {
       const userDials = readUserDials(opts.userPathOptions);
@@ -805,22 +834,31 @@ export function runDialClear(opts: DialClearOptions = {}): DialClearResult {
     if (count === 0) {
       return { cleared: null, removed: false, archetype: null, layer: null, remaining: {}, count: 0, cleared_layers: { session: 0, user: 0 }, repo_pins_remaining: repoPins };
     }
-    if (sessionCount > 0) writeLocalDialState(repoRoot, { dials: {}, shadows: state.shadows, legacyNote: null });
+    // Re-read under the same lock used by finite shadow reservations so this
+    // bulk dial clear cannot restore a stale `remaining` count.
+    const clearedSessionCount = withLocalDialStateLock(repoRoot, () => {
+      const current = readLocalDialState(repoRoot);
+      const count = Object.keys(current.dials).length;
+      if (count > 0) writeLocalDialState(repoRoot, { dials: {}, shadows: current.shadows, legacyNote: null });
+      return count;
+    });
     if (userCount > 0) writeUserDials(opts.userPathOptions ?? {}, {});
-    return { cleared: null, removed: true, archetype: null, layer: null, remaining: {}, count, cleared_layers: { session: sessionCount, user: userCount }, repo_pins_remaining: repoPins };
+    return { cleared: null, removed: true, archetype: null, layer: null, remaining: {}, count: clearedSessionCount + userCount, cleared_layers: { session: clearedSessionCount, user: userCount }, repo_pins_remaining: repoPins };
   }
 
   // Single archetype clear
   if (opts.session) {
-    const state = readLocalDialState(repoRoot);
-    if (!Object.hasOwn(state.dials, archetype)) {
-      return { cleared: null, removed: false, archetype, layer: 'session', remaining: state.dials };
-    }
-    const prev = state.dials[archetype]!;
-    const nextDials = { ...state.dials };
-    delete nextDials[archetype];
-    writeLocalDialState(repoRoot, { dials: nextDials, shadows: state.shadows, legacyNote: null });
-    return { cleared: formatDialRef(prev), removed: true, archetype, layer: 'session', remaining: nextDials };
+    return withLocalDialStateLock(repoRoot, () => {
+      const state = readLocalDialState(repoRoot);
+      if (!Object.hasOwn(state.dials, archetype)) {
+        return { cleared: null, removed: false, archetype, layer: 'session' as const, remaining: state.dials };
+      }
+      const prev = state.dials[archetype]!;
+      const nextDials = { ...state.dials };
+      delete nextDials[archetype];
+      writeLocalDialState(repoRoot, { dials: nextDials, shadows: state.shadows, legacyNote: null });
+      return { cleared: formatDialRef(prev), removed: true, archetype, layer: 'session' as const, remaining: nextDials };
+    });
   }
   if (opts.repo) {
     // Remove from .fadeno/executors.yaml dials
@@ -887,11 +925,17 @@ export function runDialClear(opts: DialClearOptions = {}): DialClearResult {
     const livesAt = Object.hasOwn(layered.profile.dials, archetype) ? ('repo' as const) : null;
     return { cleared: null, removed: false, archetype, layer: null, remaining: state.dials, livesAt };
   }
-  const prev = state.dials[archetype]!;
-  const nextDials = { ...state.dials };
-  delete nextDials[archetype];
-  writeLocalDialState(repoRoot, { dials: nextDials, shadows: state.shadows, legacyNote: null });
-  return { cleared: formatDialRef(prev), removed: true, archetype, layer: 'session', remaining: nextDials };
+  return withLocalDialStateLock(repoRoot, () => {
+    const current = readLocalDialState(repoRoot);
+    if (!Object.hasOwn(current.dials, archetype)) {
+      return { cleared: null, removed: false, archetype, layer: 'session' as const, remaining: current.dials };
+    }
+    const prev = current.dials[archetype]!;
+    const nextDials = { ...current.dials };
+    delete nextDials[archetype];
+    writeLocalDialState(repoRoot, { dials: nextDials, shadows: current.shadows, legacyNote: null });
+    return { cleared: formatDialRef(prev), removed: true, archetype, layer: 'session' as const, remaining: nextDials };
+  });
 }
 
 // ---- Shadow ----
@@ -900,6 +944,7 @@ export interface DialShadowOptions extends DialCommonOptions {
   model: string;
   via?: string | null;
   rate?: number | string | null;
+  n?: number | string | null;
   spawn?: ProbeOptions['spawn'];
 }
 
@@ -922,6 +967,9 @@ export interface DialShadowResult {
   effective_effort: string;
   driver: string;
   rate: number | null;
+  n: number | null;
+  remaining: number | null;
+  expired: boolean;
   path: string;
   previous: ShadowAttachment | null;
   shadows: Record<string, ShadowAttachment>;
@@ -940,7 +988,7 @@ export function runDialShadow(opts: DialShadowOptions): DialShadowResult {
     throw new DialError(`archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
   }
   const modelInput = opts.model.trim();
-  if (modelInput.length === 0) throw new DialError('Usage: fadeno dial shadow <archetype> <model>[@effort] [--via <driver>] [--rate <n>]');
+  if (modelInput.length === 0) throw new DialError('Usage: fadeno dial shadow <archetype> <model>[@effort] [--via <driver>] [--rate <r>] [--n <count>]');
   let dial: DialRef;
   try {
     dial = buildDialRef(modelInput, opts.via?.trim() || undefined, `model "${modelInput}"`);
@@ -956,6 +1004,15 @@ export function runDialShadow(opts: DialShadowOptions): DialShadowResult {
       throw new DialError(`rate ${JSON.stringify(raw)} is not a number in (0, 1].`);
     }
     rate = parsed;
+  }
+  let n: number | undefined;
+  if (opts.n != null && opts.n !== '') {
+    const raw = opts.n;
+    const parsed = typeof raw === 'string' ? Number(raw) : raw;
+    if (typeof parsed !== 'number' || !Number.isSafeInteger(parsed) || parsed <= 0) {
+      throw new DialError(`n ${JSON.stringify(raw)} is not a positive integer.`);
+    }
+    n = parsed;
   }
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
@@ -1013,18 +1070,33 @@ export function runDialShadow(opts: DialShadowOptions): DialShadowResult {
     const unroutable = unroutablePrimaryNote({ profile, layers: shadowLayers, archetype });
     if (unroutable != null) notes.push(unroutable);
   }
-  const previous = state.shadows[archetype] ?? null;
-  const nextShadows: Record<string, ShadowAttachment> = { ...state.shadows, [archetype]: rate == null ? { model: dial.model, ...(dial.effort ? { effort: dial.effort } : {}), ...(dial.via ? { via: dial.via } : {}) } : { model: dial.model, ...(dial.effort ? { effort: dial.effort } : {}), ...(dial.via ? { via: dial.via } : {}), rate } };
-  const path = writeLocalDialState(repoRoot, { dials: state.dials, shadows: nextShadows, legacyNote: null });
+  const nextAttachment: ShadowAttachment = {
+    model: dial.model,
+    ...(dial.effort ? { effort: dial.effort } : {}),
+    ...(dial.via ? { via: dial.via } : {}),
+    ...(rate != null ? { rate } : {}),
+    ...(n != null ? { n, remaining: n } : {}),
+  };
+  // Attachment changes share the dispatch reservation lock. A concurrent
+  // dispatch either reserves the old attachment before this reset or sees the
+  // complete new configuration/count afterwards; it can never decrement a
+  // half-written or superseded attachment.
+  const written = withLocalDialStateLock(repoRoot, () => {
+    const current = readLocalDialState(repoRoot);
+    const nextShadows: Record<string, ShadowAttachment> = { ...current.shadows, [archetype]: nextAttachment };
+    const path = writeLocalDialState(repoRoot, { dials: current.dials, shadows: nextShadows, legacyNote: null });
+    return { previous: current.shadows[archetype] ?? null, nextShadows, path };
+  });
+  const { previous, nextShadows, path } = written;
   const shadow_attachments: Record<string, ShadowAttachmentView> = {};
   for (const [key, att] of Object.entries(nextShadows)) {
     // Compile to get model id/driver for view? Use att's dial compile if possible
     try {
       const d: DialRef = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.via ? { via: att.via } : {}) };
       const c = compileDialRef(d, profile);
-      shadow_attachments[key] = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.via ? { via: att.via } : {}), ...(att.rate != null ? { rate: att.rate } : {}), adapter: c.spec.adapter, driver: c.driver };
+      shadow_attachments[key] = shadowAttachmentView(att, c);
     } catch {
-      shadow_attachments[key] = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.via ? { via: att.via } : {}), ...(att.rate != null ? { rate: att.rate } : {}) };
+      shadow_attachments[key] = shadowAttachmentView(att);
     }
   }
   return {
@@ -1038,6 +1110,9 @@ export function runDialShadow(opts: DialShadowOptions): DialShadowResult {
     effective_effort: compiled.effectiveEffort,
     driver: compiled.driver,
     rate: rate ?? null,
+    n: n ?? null,
+    remaining: n ?? null,
+    expired: false,
     path,
     previous,
     shadows: nextShadows,
@@ -1073,25 +1148,39 @@ export function runDialClearShadow(opts: DialClearShadowOptions = {}): DialClear
     if (count === 0) {
       return { archetype: null, cleared: null, removed: false, count: 0, shadows: {}, shadow_attachments: {}, path };
     }
-    const newPath = writeLocalDialState(repoRoot, { dials: state.dials, shadows: {}, legacyNote: null });
-    return { archetype: null, cleared: null, removed: true, count, shadows: {}, shadow_attachments: {}, path: newPath };
+    const cleared = withLocalDialStateLock(repoRoot, () => {
+      const current = readLocalDialState(repoRoot);
+      const currentCount = Object.keys(current.shadows).length;
+      if (currentCount === 0) return null;
+      const path = writeLocalDialState(repoRoot, { dials: current.dials, shadows: {}, legacyNote: null });
+      return { count: currentCount, path };
+    });
+    if (cleared == null) return { archetype: null, cleared: null, removed: false, count: 0, shadows: {}, shadow_attachments: {}, path };
+    return { archetype: null, cleared: null, removed: true, count: cleared.count, shadows: {}, shadow_attachments: {}, path: cleared.path };
   }
   if (!Object.hasOwn(state.shadows, archetype)) {
     throw new DialError(`no shadow attachment for "${archetype}" to clear (.fadeno/local/dials)`);
   }
-  const cleared = state.shadows[archetype]!;
-  const nextShadows = { ...state.shadows };
-  delete nextShadows[archetype];
-  const newPath = writeLocalDialState(repoRoot, { dials: state.dials, shadows: nextShadows, legacyNote: null });
+  const removed = withLocalDialStateLock(repoRoot, () => {
+    const current = readLocalDialState(repoRoot);
+    const cleared = current.shadows[archetype];
+    if (cleared == null) return null;
+    const nextShadows = { ...current.shadows };
+    delete nextShadows[archetype];
+    const path = writeLocalDialState(repoRoot, { dials: current.dials, shadows: nextShadows, legacyNote: null });
+    return { cleared, nextShadows, path };
+  });
+  if (removed == null) throw new DialError(`no shadow attachment for "${archetype}" to clear (.fadeno/local/dials)`);
+  const { cleared, nextShadows, path: newPath } = removed;
   const shadow_attachments: Record<string, ShadowAttachmentView> = {};
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   for (const [key, att] of Object.entries(nextShadows)) {
     try {
       const d: DialRef = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.via ? { via: att.via } : {}) };
       const c = compileDialRef(d, layered.profile);
-      shadow_attachments[key] = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.via ? { via: att.via } : {}), ...(att.rate != null ? { rate: att.rate } : {}), adapter: c.spec.adapter, driver: c.driver };
+      shadow_attachments[key] = shadowAttachmentView(att, c);
     } catch {
-      shadow_attachments[key] = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.via ? { via: att.via } : {}), ...(att.rate != null ? { rate: att.rate } : {}) };
+      shadow_attachments[key] = shadowAttachmentView(att);
     }
   }
   return { archetype, cleared, removed: true, count: 1, shadows: nextShadows, shadow_attachments, path: newPath };
@@ -1139,7 +1228,7 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
     try {
       const d: DialRef = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.via ? { via: att.via } : {}) };
       const c = compileDialRef(d, profile);
-      shadow_attachments[arch] = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.via ? { via: att.via } : {}), ...(att.rate != null ? { rate: att.rate } : {}), adapter: c.spec.adapter, driver: c.driver };
+      shadow_attachments[arch] = shadowAttachmentView(att, c);
     } catch {
       // stale driver etc -> mark stale
       staleShadows.push({ archetype: arch, target: att.model });
@@ -1319,6 +1408,9 @@ export interface DialResolveResult {
     attached: true;
     challenger: string;
     rate: number | null;
+    n: number | null;
+    remaining: number | null;
+    expired: boolean;
     selected: boolean | null;
     routable: boolean;
     /**
@@ -1440,13 +1532,17 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
     });
     const digest = opts.promptSha256?.trim();
     const rate = attachment.rate ?? null;
+    const expired = shadowAttachmentExpired(attachment);
     shadow = {
       attached: true,
       challenger,
       rate,
+      n: attachment.n ?? null,
+      remaining: attachment.remaining ?? null,
+      expired,
       // No rate means every dispatch fires; no digest means the caller cannot
       // be told, and must not read the silence as a "no".
-      selected: rate == null ? true : digest ? shadowSampleRoll(digest, archetype, challenger) < rate : null,
+      selected: expired ? false : rate == null ? true : digest ? shadowSampleRoll(digest, archetype, challenger) < rate : null,
       // The PRIMARY's own resolved spec — `spec` above, after write-posture —
       // not the challenger's: this is what a selected pair would have to reuse
       // to reach the command lane.
@@ -1525,8 +1621,13 @@ export function formatShadowLine(shadow: ShadowAttachmentView, baseIndent: strin
   const effort = shadow.effort ? ` @ ${shadow.effort}` : '';
   const model = `${shadow.model}${effort}${via}`;
   const rate = shadow.rate != null ? ` rate ${shadow.rate}` : '';
+  const budget = shadow.n != null
+    ? shadow.expired
+      ? ` [expired after ${shadow.n} trigger${shadow.n === 1 ? '' : 's'}]`
+      : ` [${shadow.remaining}/${shadow.n} triggers remaining]`
+    : '';
   const transport = shadow.adapter != null ? ` [${shadow.adapter}]` : '';
-  return `${baseIndent}  ~ shadow: ${model}${transport}${rate}`;
+  return `${baseIndent}  ~ shadow: ${model}${transport}${rate}${budget}`;
 }
 
 // ---- Delivery lane (why a dial leaves the session) ----

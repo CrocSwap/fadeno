@@ -18,6 +18,7 @@ import {
   readLocalDialState,
   resolveDialCascade,
   resolveRelay,
+  shadowAttachmentExpired,
   shadowSampleRoll,
   type DialLayers,
   type DialRef,
@@ -175,6 +176,9 @@ export interface SteeringResolution extends LaneDecision {
     attached: true;
     challenger: string;
     rate: number | null;
+    n: number | null;
+    remaining: number | null;
+    expired: boolean;
     selected: boolean | null;
     routable: boolean;
     /** Why not, when `routable` is false; `null` when it is true. */
@@ -643,13 +647,17 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     });
     const digest = resolvePromptDigest(opts);
     const rate = attachment.rate ?? null;
+    const expired = shadowAttachmentExpired(attachment);
     shadow = {
       attached: true,
       challenger,
       rate,
+      n: attachment.n ?? null,
+      remaining: attachment.remaining ?? null,
+      expired,
       // No rate means every dispatch fires; no digest means the caller cannot
       // be told, and must not read the silence as a "no".
-      selected: rate == null ? true : digest ? shadowSampleRoll(digest, archetype, challenger) < rate : null,
+      selected: expired ? false : rate == null ? true : digest ? shadowSampleRoll(digest, archetype, challenger) < rate : null,
       // The PRIMARY's own resolved spec, after write-posture — what a
       // selected pair would have to reuse to reach the command lane.
       ...pairRoutabilityFields(explainPairRoutability(spec, refString)),

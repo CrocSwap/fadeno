@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { loadLayeredProfile, type ProfileProvenance } from './config-layers.ts';
@@ -1232,6 +1232,10 @@ export interface ShadowAttachment {
   effort?: string;
   via?: string;
   rate?: number;
+  /** Maximum successful attachment-backed pairings; absent means unlimited. */
+  n?: number;
+  /** Successful pairings still available. Present exactly when `n` is present. */
+  remaining?: number;
 }
 
 export interface LocalDialState {
@@ -1244,6 +1248,156 @@ function localDialPinError(detail: string): ExecutorProfileError {
   return new ExecutorProfileError(
     `${DIALS_LOCAL_FILE} ${detail} Fix: delete it (machine-local state, never committed), then re-dial with \`fadeno dial <archetype> <model>\`.`,
   );
+}
+
+const LOCAL_DIALS_LOCK = `${DIALS_LOCAL_FILE}.lock`;
+const LOCAL_DIALS_LOCK_WAIT_MS = 10;
+const LOCAL_DIALS_LOCK_TIMEOUT_MS = 30_000;
+const LOCAL_DIALS_LOCK_STALE_MS = 120_000;
+const heldLocalDialLocks = new Map<string, number>();
+
+function waitSync(milliseconds: number): void {
+  const signal = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(signal, 0, 0, milliseconds);
+}
+
+/**
+ * Serialize a local dial read-modify-write operation across processes.
+ *
+ * Shadow trigger budgets live in the same machine-local file as session
+ * dials. `mkdir` is the acquisition primitive: exactly one process wins, so
+ * checking a remaining count and decrementing it cannot oversubscribe a
+ * shadow attachment. The lock is re-entrant for nested synchronous helpers.
+ */
+export function withLocalDialStateLock<T>(repoRoot: string, action: () => T): T {
+  const lockPath = join(repoRoot, LOCAL_DIALS_LOCK);
+  const depth = heldLocalDialLocks.get(lockPath) ?? 0;
+  if (depth > 0) {
+    heldLocalDialLocks.set(lockPath, depth + 1);
+    try {
+      return action();
+    } finally {
+      heldLocalDialLocks.set(lockPath, depth);
+    }
+  }
+  mkdirSync(dirname(lockPath), { recursive: true });
+  const started = Date.now();
+  for (;;) {
+    try {
+      mkdirSync(lockPath);
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      let stale = false;
+      try {
+        stale = Date.now() - statSync(lockPath).mtimeMs > LOCAL_DIALS_LOCK_STALE_MS;
+      } catch {
+        // A competing writer may have released the lock between mkdir/stat.
+      }
+      if (stale) {
+        rmSync(lockPath, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() - started >= LOCAL_DIALS_LOCK_TIMEOUT_MS) {
+        throw new ExecutorProfileError(`timed out waiting for the local dial lock at ${LOCAL_DIALS_LOCK}.`);
+      }
+      waitSync(LOCAL_DIALS_LOCK_WAIT_MS);
+    }
+  }
+  heldLocalDialLocks.set(lockPath, 1);
+  try {
+    return action();
+  } finally {
+    heldLocalDialLocks.delete(lockPath);
+    rmSync(lockPath, { recursive: true, force: true });
+  }
+}
+
+/** True only for an attachment whose finite trigger budget has run out. */
+export function shadowAttachmentExpired(attachment: ShadowAttachment): boolean {
+  return attachment.n != null && attachment.remaining === 0;
+}
+
+/**
+ * Equality for the user-selected attachment configuration. `remaining` is
+ * deliberately excluded: it changes whenever a pairing fires, while a
+ * model/rate/count change means an already-prepared challenger is no longer
+ * the attachment the user asked to sample.
+ */
+export function sameShadowAttachmentConfiguration(a: ShadowAttachment, b: ShadowAttachment): boolean {
+  return a.model === b.model
+    && a.effort === b.effort
+    && a.via === b.via
+    && a.rate === b.rate
+    && a.n === b.n;
+}
+
+export interface ShadowTriggerReservation {
+  reserved: boolean;
+  reason: 'unchanged' | 'expired' | 'changed' | 'missing';
+  attachment: ShadowAttachment | null;
+}
+
+/**
+ * Reserve one real attachment-backed shadow pairing.
+ *
+ * Call this only after all materialization checks pass and immediately before
+ * recording/spawning the challenger. Unlimited attachments reserve without a
+ * write; finite ones atomically decrement their persisted remaining count.
+ */
+export function reserveShadowAttachmentTrigger(
+  repoRoot: string,
+  archetype: string,
+  expected: ShadowAttachment,
+): ShadowTriggerReservation {
+  return withLocalDialStateLock(repoRoot, () => {
+    const state = readLocalDialState(repoRoot);
+    const current = state.shadows[archetype] ?? null;
+    if (current == null) return { reserved: false, reason: 'missing', attachment: null };
+    if (!sameShadowAttachmentConfiguration(current, expected)) {
+      return { reserved: false, reason: 'changed', attachment: current };
+    }
+    if (shadowAttachmentExpired(current)) {
+      return { reserved: false, reason: 'expired', attachment: current };
+    }
+    if (current.n == null) return { reserved: true, reason: 'unchanged', attachment: current };
+    const remaining = current.remaining!;
+    const next = {
+      ...state,
+      shadows: {
+        ...state.shadows,
+        [archetype]: { ...current, remaining: remaining - 1 },
+      },
+      legacyNote: null,
+    };
+    writeLocalDialState(repoRoot, next);
+    return { reserved: true, reason: 'unchanged', attachment: next.shadows[archetype]! };
+  });
+}
+
+/**
+ * Return a finite reservation that could not be admitted to the dispatch
+ * ledger. The bounded increment is safe with concurrent reservations: it
+ * restores exactly one available slot while never exceeding `n`, and does
+ * nothing if the user changed or removed the attachment in the meantime.
+ */
+export function releaseShadowAttachmentTrigger(
+  repoRoot: string,
+  archetype: string,
+  expected: ShadowAttachment,
+): void {
+  if (expected.n == null) return;
+  withLocalDialStateLock(repoRoot, () => {
+    const state = readLocalDialState(repoRoot);
+    const current = state.shadows[archetype];
+    if (current == null || !sameShadowAttachmentConfiguration(current, expected) || current.n == null) return;
+    if (current.remaining! >= current.n) return;
+    writeLocalDialState(repoRoot, {
+      ...state,
+      shadows: { ...state.shadows, [archetype]: { ...current, remaining: current.remaining! + 1 } },
+      legacyNote: null,
+    });
+  });
 }
 
 export function readLocalDialState(repoRoot: string): LocalDialState {
@@ -1290,7 +1444,7 @@ export function readLocalDialState(repoRoot: string): LocalDialState {
     if (!isMapping(doc.shadows)) throw localDialPinError('has a `shadows` that is not a mapping (archetype → shadow attachment).');
     for (const [arch, raw] of Object.entries(doc.shadows)) {
       if (!BARE_IDENTIFIER_RE.test(arch)) throw localDialPinError(`has shadow key "${arch}", which is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-      if (!isMapping(raw)) throw localDialPinError(`shadow "${arch}" is not a mapping ({model, effort?, via?, rate?}).`);
+      if (!isMapping(raw)) throw localDialPinError(`shadow "${arch}" is not a mapping ({model, effort?, via?, rate?, n?, remaining?}).`);
       const model = raw.model;
       if (typeof model !== 'string' || model.trim().length === 0) throw localDialPinError(`shadow "${arch}" needs a non-empty \`model\`.`);
       let effort: string | undefined;
@@ -1310,12 +1464,30 @@ export function readLocalDialState(repoRoot: string): LocalDialState {
         }
         rate = raw.rate;
       }
-      const unknown = Object.keys(raw).filter((k) => !['model','effort','via','rate'].includes(k));
-      if (unknown.length > 0) throw localDialPinError(`shadow "${arch}" has unknown key(s) ${unknown.join(', ')}; only model, effort, via, rate are allowed.`);
+      let n: number | undefined;
+      let remaining: number | undefined;
+      if (raw.n !== undefined) {
+        if (typeof raw.n !== 'number' || !Number.isSafeInteger(raw.n) || raw.n <= 0) {
+          throw localDialPinError(`shadow "${arch}" has n ${JSON.stringify(raw.n)}, which is not a positive integer.`);
+        }
+        n = raw.n;
+        if (typeof raw.remaining !== 'number' || !Number.isSafeInteger(raw.remaining) || raw.remaining < 0 || raw.remaining > n) {
+          throw localDialPinError(`shadow "${arch}" has remaining ${JSON.stringify(raw.remaining)}, which must be an integer in [0, n].`);
+        }
+        remaining = raw.remaining;
+      } else if (raw.remaining !== undefined) {
+        throw localDialPinError(`shadow "${arch}" has \`remaining\` without a finite \`n\` trigger limit.`);
+      }
+      const unknown = Object.keys(raw).filter((k) => !['model','effort','via','rate','n','remaining'].includes(k));
+      if (unknown.length > 0) throw localDialPinError(`shadow "${arch}" has unknown key(s) ${unknown.join(', ')}; only model, effort, via, rate, n, remaining are allowed.`);
       const att: ShadowAttachment = { model: model.trim() };
       if (effort != null) att.effort = effort;
       if (via != null) att.via = via;
       if (rate != null) att.rate = rate;
+      if (n != null) {
+        att.n = n;
+        att.remaining = remaining;
+      }
       shadows[arch] = att;
     }
   }
@@ -1342,6 +1514,10 @@ export function writeLocalDialState(repoRoot: string, state: LocalDialState): st
     if (!BARE_IDENTIFIER_RE.test(arch)) throw new ExecutorProfileError(`shadow key "${arch}" is not a bare identifier.`);
     if (typeof att.model !== 'string' || att.model.trim().length === 0) throw new ExecutorProfileError(`shadow "${arch}" has empty model.`);
     if (att.rate !== undefined && (typeof att.rate !== 'number' || !Number.isFinite(att.rate) || att.rate <= 0 || att.rate > 1)) throw new ExecutorProfileError(`shadow "${arch}" has invalid rate ${String(att.rate)}.`);
+    if (att.n !== undefined && (!Number.isSafeInteger(att.n) || att.n <= 0 || !Number.isSafeInteger(att.remaining) || att.remaining! < 0 || att.remaining! > att.n)) {
+      throw new ExecutorProfileError(`shadow "${arch}" has invalid finite trigger state.`);
+    }
+    if (att.n === undefined && att.remaining !== undefined) throw new ExecutorProfileError(`shadow "${arch}" has remaining without n.`);
   }
   const out: Record<string, unknown> = {};
   if (dialKeys.length > 0) {
@@ -1360,13 +1536,24 @@ export function writeLocalDialState(repoRoot: string, state: LocalDialState): st
       if (att.effort != null) entry.effort = att.effort;
       if (att.via != null) entry.via = att.via;
       if (att.rate != null) entry.rate = att.rate;
+      if (att.n != null) {
+        entry.n = att.n;
+        entry.remaining = att.remaining;
+      }
       sortedShadows[k] = entry;
     }
     out.shadows = sortedShadows;
   }
   const ordered: Record<string, unknown> = {};
   for (const k of Object.keys(out).sort()) ordered[k] = out[k];
-  writeFileSync(path, `${JSON.stringify(ordered)}\n`, 'utf8');
+  const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  writeFileSync(tmp, `${JSON.stringify(ordered)}\n`, 'utf8');
+  try {
+    renameSync(tmp, path);
+  } catch (err) {
+    try { rmSync(tmp, { force: true }); } catch {}
+    throw err;
+  }
   return path;
 }
 

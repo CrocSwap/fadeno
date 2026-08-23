@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -197,6 +197,89 @@ test('shadow rate: not fired leaves no trace, fired when sampler passes, flag ig
   runDispatch({ archetype: 'worker', prompt: 'flag ignores rate', repoRoot: root2, shadow: 'luna-worker', shadowSampler: () => 0.99, userPathOptions: onHarness('standalone') });
   const rows2 = evidenceRows(root2);
   assert.equal(rows2.filter((r) => r.shadow === true).length, 2);
+});
+
+test('finite attachment budget counts admitted pairs, composes with rate, and never limits --shadow', (t) => {
+  const root = seedV3(t);
+  initGit(root);
+  writeLocalDialState(root, {
+    dials: { worker: { model: 'echo-worker' } },
+    shadows: { worker: { model: 'luna-worker', rate: 0.5, n: 2, remaining: 2 } },
+    legacyNote: null,
+  });
+
+  // A rate miss has no challenger and does not burn either finite trigger.
+  runDispatch({ archetype: 'worker', prompt: 'count rate miss', repoRoot: root, shadowSampler: () => 0.9, userPathOptions: onHarness('standalone') });
+  assert.equal(readLocalDialState(root).shadows.worker?.remaining, 2);
+
+  runDispatch({ archetype: 'worker', prompt: 'count first hit', repoRoot: root, shadowSampler: () => 0.1, userPathOptions: onHarness('standalone') });
+  assert.equal(readLocalDialState(root).shadows.worker?.remaining, 1);
+  const firstRequest = evidenceRows(root).find((row) => row.shadow === true && row.event === 'dispatch_requested')!;
+  assert.equal(firstRequest.shadow_n, 2);
+  assert.equal(firstRequest.shadow_remaining, 1);
+
+  runDispatch({ archetype: 'worker', prompt: 'count second hit', repoRoot: root, shadowSampler: () => 0.1, userPathOptions: onHarness('standalone') });
+  assert.equal(readLocalDialState(root).shadows.worker?.remaining, 0);
+
+  // A spent attachment is silent like an unsampled one: still visible in the
+  // dial state, but no new challenger request/refusal is attempted.
+  const beforeExpired = evidenceRows(root).filter((row) => row.shadow === true).length;
+  runDispatch({ archetype: 'worker', prompt: 'count exhausted', repoRoot: root, shadowSampler: () => 0.1, userPathOptions: onHarness('standalone') });
+  assert.equal(evidenceRows(root).filter((row) => row.shadow === true).length, beforeExpired);
+  assert.equal(readLocalDialState(root).shadows.worker?.remaining, 0);
+
+  // Explicit one-shot comparison is independent of the standing attachment.
+  runDispatch({ archetype: 'worker', prompt: 'explicit stays unlimited', repoRoot: root, shadow: 'luna-worker', userPathOptions: onHarness('standalone') });
+  assert.equal(readLocalDialState(root).shadows.worker?.remaining, 0);
+  assert.equal(evidenceRows(root).filter((row) => row.shadow === true && row.shadow_source === 'flag').length, 2);
+});
+
+test('shadow refusals do not consume a finite attachment budget', (t) => {
+  const root = seedV3(t);
+  initGit(root);
+  writeLocalDialState(root, {
+    dials: { worker: { model: 'echo-worker' } },
+    shadows: { worker: { model: 'luna-worker', n: 1, remaining: 1 } },
+    legacyNote: null,
+  });
+  const prior = process.env.FADENO_SHADOW_MAX_LIVE;
+  process.env.FADENO_SHADOW_MAX_LIVE = '0';
+  t.after(() => { if (prior == null) delete process.env.FADENO_SHADOW_MAX_LIVE; else process.env.FADENO_SHADOW_MAX_LIVE = prior; });
+  runDispatch({ archetype: 'worker', prompt: 'refusal cannot burn count', repoRoot: root, userPathOptions: onHarness('standalone') });
+  assert.equal(readLocalDialState(root).shadows.worker?.remaining, 1);
+  const refusal = evidenceRows(root).find((row) => row.event === 'dispatch_refused')!;
+  assert.equal((refusal.refusal as { predicate: string }).predicate, 'shadow_cap');
+});
+
+test('atomic trigger reservation admits at most N concurrent contenders', async (t) => {
+  const root = seedV3(t);
+  writeLocalDialState(root, {
+    dials: {},
+    shadows: { worker: { model: 'luna-worker', n: 1, remaining: 1 } },
+    legacyNote: null,
+  });
+  const moduleUrl = new URL('../src/lib/executors.ts', import.meta.url).href;
+  const script = [
+    `import { reserveShadowAttachmentTrigger } from ${JSON.stringify(moduleUrl)};`,
+    'const root = process.argv[1];',
+    "const result = reserveShadowAttachmentTrigger(root, 'worker', { model: 'luna-worker', n: 1, remaining: 1 });",
+    'process.stdout.write(JSON.stringify(result));',
+  ].join('\n');
+  const reserve = (): Promise<{ reserved: boolean }> => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', script, root], { cwd: root });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+    child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0) reject(new Error(`reservation child failed (${code}): ${stderr}`));
+      else resolve(JSON.parse(stdout) as { reserved: boolean });
+    });
+  });
+  const results = await Promise.all([reserve(), reserve()]);
+  assert.equal(results.filter((result) => result.reserved).length, 1);
+  assert.equal(readLocalDialState(root).shadows.worker?.remaining, 0);
 });
 
 test('shadow rate sampling fired-half and flag ignores rate (explicit)', (t) => {

@@ -210,7 +210,7 @@ base and is accepted-but-ignored with a deprecation note.
 fadeno dial                                   # effective table
 fadeno dial <archetype> <model>[@effort] [--via <driver>] [--session|--user|--repo] [--force]
 fadeno dial clear <archetype> [--session|--user|--repo]
-fadeno dial shadow <archetype> <model>[@effort] [--via <driver>] [--rate <r>]
+fadeno dial shadow <archetype> <model>[@effort] [--via <driver>] [--rate <r>] [--n <count>]
 fadeno dial clear-shadow [<archetype>]
 fadeno dial resolve --archetype <a>          # JSON, hook contract
 ```
@@ -221,6 +221,14 @@ The `model[@effort]` grammar is uniform everywhere a model is named: bare
 registry's `spellings` supplying the id translation. `--via` is honest
 about being an escape hatch: OpenCode is the one universal adapter today;
 the other drivers only run their own models.
+
+A shadow attachment may also carry `--n <count>`, a positive finite count of
+admitted attachment-backed pair requests. `remaining` is persisted beside `n`
+in the local dial state; a completed budget is intentionally retained and shown
+as expired rather than silently detached. `--rate` controls whether a call is
+sampled, while `--n` controls how many sampled pairs may be durably admitted, so
+the two compose without rate misses consuming the budget. Without `--n`, the
+attachment is unlimited.
 
 **Set-time refusals** cover write posture and eligibility `forbidden` before
 any dial state changes. A write-posture refusal names `--force` as a

@@ -539,7 +539,7 @@ policy language.
   for debugging); invokes the executor; report to stdout; appends the evidence
   row pair. `--shadow` fires a one-shot shadow duplication with the
   byte-identical prompt, isolated in a worktree; also available as a standing
-  attachment, `fadeno dial shadow <archetype> <model>[@effort] [--rate <0..1>]`
+  attachment, `fadeno dial shadow <archetype> <model>[@effort] [--rate <0..1>] [--n <count>]`
   and `fadeno dial clear-shadow [archetype]`. The shadow runs *concurrently*
   with the primary — resolved, worktree-cut from HEAD, and spawned before the
   primary starts, collected after it finishes — so dispatch latency is

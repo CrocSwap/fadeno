@@ -296,7 +296,8 @@ The dispatch kernel's full horizon is implemented and in daily dogfood.
      hatch; every boundary refusal writes a `dispatch_refused` row; verify
      recomputes gate-eligibility from the snapshot.
   3. **Shadow dispatches and model tryouts** — per-slot shadow attachments
-     with sha-identical paired prompts and `--rate` sampling, isolated
+     with sha-identical paired prompts, composable `--rate` sampling and
+     finite `--n` trigger budgets, isolated
      worktree delivery with diff-as-artifact, and `fadeno dispatches
      --bakeoffs`. (The `model-tryout` starter playbook and its
      `ModelComparison` artifact contract shipped here and were retired in

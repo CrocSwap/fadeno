@@ -426,10 +426,20 @@ zero-risk challenger sampled alongside the primary dispatch:
 ```bash
 fadeno dial shadow worker grok            # every worker dispatch
 fadeno dial shadow worker grok --rate 0.2 # sampled trickle
+fadeno dial shadow worker grok --rate 0.2 --n 3 # sampled trickle, then expire after 3 pairs
 fadeno dispatch --archetype worker --shadow grok  # one-shot opt-in
 fadeno dial clear-shadow worker                   # clear one
 fadeno dial clear-shadow                          # clear all
 ```
+
+`--n <count>` is an optional positive-integer exhaustion budget for a standing
+attachment. It counts admitted attachment-backed pair requests, after all
+deterministic materialization checks have passed, not ordinary calls or failed
+rate samples/refusals, and composes with `--rate`. For example,
+`--rate 0.2 --n 3` keeps sampling until three challenger requests have been
+durably admitted. The attachment remains in `fadeno dial` after that with an
+explicit `expired` state until it is reattached or cleared. An omitted `--n`
+is unlimited; the one-shot `dispatch --shadow` flag never consumes it.
 
 The shadow runs with the **byte-identical prompt** (`prompt_snapshot` and
 `prompt_sha256` are the primary's) delivered isolated — a detached-HEAD

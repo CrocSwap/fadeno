@@ -145,10 +145,10 @@ test('shadow is registered for completion and flag validation', () => {
   const dialShadowFlags = knownFlagsFor('dial', 'shadow');
   assert.ok(shadowFlags);
   assert.ok(dialShadowFlags);
-  for (const flag of ['--via', '--rate', '--json', '--help', '--version']) {
+  for (const flag of ['--via', '--rate', '--n', '--json', '--help', '--version']) {
     assert.ok(shadowFlags!.has(flag), `shadow should accept ${flag}`);
     assert.ok(dialShadowFlags!.has(flag), `dial shadow should accept ${flag}`);
   }
-  assert.deepEqual(unknownFlagsFor('shadow', undefined, ['via', 'rate', 'json']), []);
+  assert.deepEqual(unknownFlagsFor('shadow', undefined, ['via', 'rate', 'n', 'json']), []);
   assert.deepEqual(unknownFlagsFor('shadow', undefined, ['session']), ['--session']);
 });

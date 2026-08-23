@@ -861,3 +861,18 @@ test('Codex steering resolve forces mode=command on a selected, routable pair, k
   assert.equal(viaSha.mode, 'command');
   assert.equal(viaSha.shadow?.selected, true);
 });
+
+test('steering reports a finite exhausted shadow as attached but never selected', (t) => {
+  const root = tempRepo(t);
+  seedCodexPairV3(root);
+  writeLocalDialState(root, { dials: {}, shadows: { worker: { model: 'grok', rate: 1, n: 1, remaining: 0 } }, legacyNote: null });
+  const resolved = runSteeringResolve({ repoRoot: root, archetype: 'worker', hostExecutor: 'luna' });
+  assert.equal(resolved.shadow?.attached, true);
+  assert.equal(resolved.shadow?.n, 1);
+  assert.equal(resolved.shadow?.remaining, 0);
+  assert.equal(resolved.shadow?.expired, true);
+  assert.equal(resolved.shadow?.selected, false);
+  // Expiry prevents an attached challenger from forcing the host primary onto
+  // the command lane: there is no pair left to materialize.
+  assert.equal(resolved.mode, 'host');
+});

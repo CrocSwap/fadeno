@@ -185,6 +185,14 @@ const CLAIMS: Claim[] = [
     src: { files: ['src/commands/dispatches.ts', 'src/commands/dispatch.ts'], patterns: [/shadow/, /primary_dispatch_id/, /diff_snapshot/, /shadow_source/] },
   },
   {
+    // A finite attachment must remain inspectable after it spends its last
+    // trigger. This names the persisted counter and the public flag on both
+    // sides, so neither silently turns into a transient in-memory limit.
+    id: 'shadow-trigger-budget',
+    doc: { files: [DIALS, EXTENDING], patterns: [/--n/, /remaining/, /expired/] },
+    src: { files: ['src/lib/executors.ts', 'src/commands/dial.ts'], patterns: [/remaining/, /shadowAttachmentExpired/, /--n/] },
+  },
+  {
     id: 'shadow-bakeoffs-surface',
     doc: { files: [DIALS, EXTENDING], patterns: [/--bakeoffs/, /Bakeoff/] },
     src: { files: ['src/commands/dispatches.ts'], patterns: [/runDispatchesBakeoffs/, /BakeoffArtifact/] },

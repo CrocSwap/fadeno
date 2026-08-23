@@ -34,6 +34,7 @@ test('completion script is sourceable Bash and covers commands/options', () => {
   assert.deepEqual(complete('/tmp', ['fadeno', 'gate', 'run', '']), ['all_reviews_approved', 'no_blocking_issues', 'tests_pass']);
   // new flags: --via, --model, --session, --user, --repo exist; old --executor gone
   assert.ok(complete('/tmp', ['fadeno', 'dial', 'shadow', '--']).includes('--via'));
+  assert.ok(complete('/tmp', ['fadeno', 'dial', 'shadow', '--']).includes('--n'));
   assert.ok(complete('/tmp', ['fadeno', 'dispatch', '--']).includes('--model'));
   assert.ok(complete('/tmp', ['fadeno', 'dispatch', '--']).includes('--via'));
 });

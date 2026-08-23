@@ -357,7 +357,7 @@ fadeno loadout clear-shadow worker
 ```
 
 *Spelling note (added after the dials rename): these verbs shipped under
-`fadeno dial` — `fadeno dial shadow <archetype> <model>[@effort] [--rate <r>]`
+`fadeno dial` — `fadeno dial shadow <archetype> <model>[@effort] [--rate <r>] [--n <count>]`
 and `fadeno dial clear-shadow [<archetype>]`; `--shadow` takes a dial ref. The
 sketch is left in its original spelling as the record; the semantics below are
 unchanged.*
@@ -429,7 +429,10 @@ the pair different trees despite byte-identical prompts — a mandatory
 `prompt_snapshot`/`prompt_sha256` (one snapshot, byte-identity by
 construction) and stamp `resolution: "shadow"`,
 `shadow_source: "attachment" | "flag"`, `gate_eligible: false`; the
-`--shadow` flag ignores `--rate`, and a not-fired sample leaves no trace.
+`--shadow` flag ignores attachment `--rate` and `--n`, and a not-fired sample
+leaves no trace. A finite attachment persists after its `n` admitted pair
+requests with `remaining: 0`, so the dial table can visibly report it as
+expired until changed or cleared.
 `loadout use` drops shadow attachments along with overrides (one overlay,
 one base) while `set`/`clear` preserve them. `fadeno status` does not render
 attachments yet — the loadout tables (show/list, stale-attachment warnings
@@ -581,12 +584,14 @@ and exit codes, and dial provenance. Worktrees are therefore retained, and
 judging. Both rows carry a `pair_id` from the start — correlation is cheap to
 emit and miserable to retrofit.
 
-**Bounded blast radius.** Two independent controls, because they bound
-different things: `--rate` bounds spend, and a cap on live shadow claims in
+**Bounded blast radius.** Three independent controls, because they bound
+different things: `--rate` bounds sampling probability, `--n` bounds total
+admitted attachment-backed pair requests, and a cap on live shadow claims in
 `.fadeno/local/inflight/` bounds machine load. A serial trickle of two hundred
-shadows costs exactly what two hundred concurrent ones cost, so neither
-substitutes for the other. The nesting rule and the cap ship together: without
-the cap, depth-k nesting fires k shadows for one task.
+shadows costs exactly what two hundred concurrent ones cost unless its finite
+attachment budget expires, so none substitutes for the others. The nesting
+rule and the cap ship together: without the cap, depth-k nesting fires k
+shadows for one task.
 
 **Vendor egress is a set-time check.** *Shipped ahead of the rest.* Dialing or
 shadowing a model whose provider nothing else in the repo dials warns at set

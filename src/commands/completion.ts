@@ -65,7 +65,7 @@ const PATH: OptionSpec = { kind: 'path' };
 // Shared by `dial shadow` and its top-level alias `shadow` — one spec so the
 // two spellings cannot drift apart on which flags they accept.
 const SHADOW_SPEC = command(
-  { '--via': { kind: 'free' }, '--rate': { kind: 'free' }, '--json': NONE },
+  { '--via': { kind: 'free' }, '--rate': { kind: 'free' }, '--n': { kind: 'free' }, '--json': NONE },
   ['archetype', 'free'],
 );
 

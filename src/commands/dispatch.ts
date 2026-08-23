@@ -21,6 +21,8 @@ import {
   explainPairRoutability,
   loadExecutorProfile,
   readLocalDialState,
+  releaseShadowAttachmentTrigger,
+  reserveShadowAttachmentTrigger,
   resolveRole,
   compileDialRef,
   parseDialRef,
@@ -33,6 +35,8 @@ import {
   type InputProducer,
   type DialRef,
   type RoleResolutionSource,
+  type ShadowAttachment,
+  shadowAttachmentExpired,
   shadowSampleRoll,
 } from '../lib/executors.ts';
 import { decideLane, readSessionEffort } from '../lib/lane.ts';
@@ -424,6 +428,7 @@ export type DispatchRefusalPredicate =
   | 'shadow_isolation'
   | 'shadow_resolution'
   | 'shadow_cap'
+  | 'shadow_exhausted'
   | 'shadow_baseline'
   | 'shadow_carry'
   | 'shadow_containment'
@@ -1307,6 +1312,8 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     dial: DialRef | null;
     executorName: string;
     sourceTag: 'flag' | 'attachment';
+    /** Configuration captured before materialization; excludes mutable remaining. */
+    attachment?: ShadowAttachment;
   }
 
   const decidePairCandidate = (): PairCandidate | null => {
@@ -1320,6 +1327,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     let executorName: string | null = null;
     let sourceTag: 'flag' | 'attachment' | null = null;
     let attachmentRate: number | undefined;
+    let attachment: ShadowAttachment | undefined;
     if (hasFlag) {
       try {
         const parsed = parseDialRef(opts.shadow!.trim(), '--shadow');
@@ -1336,11 +1344,12 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     } else if (archetype != null) {
       const localStateForShadow = readLocalDialState(repoRoot);
       const att = localStateForShadow.shadows[archetype];
-      if (att != null) {
+      if (att != null && !shadowAttachmentExpired(att)) {
         dial = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.via ? { via: att.via } : {}) };
         executorName = formatDialRef(dial);
         sourceTag = 'attachment';
         attachmentRate = att.rate;
+        attachment = { ...att };
       }
     }
     if (executorName == null || sourceTag == null) return null;
@@ -1352,7 +1361,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       try { roll = sampler(); } catch { roll = 0; }
       if (!(roll < attachmentRate)) return null;
     }
-    return { dial, executorName, sourceTag };
+    return { dial, executorName, sourceTag, ...(attachment != null ? { attachment } : {}) };
   };
 
   // Captured lazily and at most once. Both arms replay this same value; see
@@ -2060,38 +2069,88 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     if (carryRecords.length > 0) {
       shadowIdentity.worktree_carry = carryRecords;
     }
-    appendEvidenceRow(repoRoot, {
-      format: DISPATCHES_FORMAT,
-      timestamp: shadowNow.toISOString(),
-      event: 'dispatch_requested',
-      ...shadowIdentity,
-    });
 
-    // The prompt reaches the child as an fd on the attested snapshot, not as
-    // kernel-pumped stdin bytes: the kernel is about to block inside the
-    // primary's spawnSync, where it can pump nothing.
-    let promptFd: number;
+    const discardPreparedWorktree = (): void => {
+      try { spawnSync('git', ['worktree', 'remove', '--force', shadowWorktreeAbs], { cwd: repoRoot, encoding: 'utf8' }); } catch {}
+      try { spawnSync('git', ['worktree', 'prune'], { cwd: repoRoot, encoding: 'utf8' }); } catch {}
+    };
+    let promptFd: number | null = null;
+    let sfd: number | null = null;
+    let reservationExpected: ShadowAttachment | null = null;
+    let requestRecorded = false;
+    let childSpawned = false;
+    const closePreparedDescriptors = (): void => {
+      if (promptFd != null) {
+        try { closeSync(promptFd); } catch {}
+        promptFd = null;
+      }
+      if (sfd != null) {
+        try { closeSync(sfd); } catch {}
+        sfd = null;
+      }
+    };
     try {
-      promptFd = openSync(promptFileAbs, 'r');
-    } catch {
-      const fallbackAbs = join(repoRoot, '.fadeno', 'local', 'prompts', `shadow-${shadowId8}.md`);
-      mkdirSync(join(repoRoot, '.fadeno', 'local', 'prompts'), { recursive: true });
-      writeFileSync(fallbackAbs, prompt, 'utf8');
-      promptFd = openSync(fallbackAbs, 'r');
-    }
-    mkdirSync(join(repoRoot, '.fadeno', 'local', 'outputs'), { recursive: true });
-    mkdirSync(join(repoRoot, ...INFLIGHT_DIR.split('/')), { recursive: true });
-    const shadowInflightAbs = join(repoRoot, ...INFLIGHT_DIR.split('/'), `${shadowDispatchId}.json`);
-    const statusAbs = join(repoRoot, ...INFLIGHT_DIR.split('/'), `${shadowDispatchId}.status.json`);
-    const sfd = openSync(shadowOutputAbs, 'w');
-    const startedMs = Date.now();
-    let child: ChildProcess;
-    try {
-      // Its own supervisor, for the same reason as the primary — a killed
-      // kernel must not orphan it — plus the exit report that concurrent
-      // collection depends on. The claim file makes a long-running shadow
-      // cancellable by its own id.
-      child = spawn(process.execPath, superviseArgv(shadowCommand, shadowInflightAbs, statusAbs, undefined, timeoutFor(shadowSpec)), {
+      // Open every fallible local resource BEFORE taking a finite budget. A
+      // reservation therefore means an admitted request row is immediately
+      // next, not merely that a future open might succeed.
+      try {
+        promptFd = openSync(promptFileAbs, 'r');
+      } catch {
+        const fallbackAbs = join(repoRoot, '.fadeno', 'local', 'prompts', `shadow-${shadowId8}.md`);
+        mkdirSync(join(repoRoot, '.fadeno', 'local', 'prompts'), { recursive: true });
+        writeFileSync(fallbackAbs, prompt, 'utf8');
+        promptFd = openSync(fallbackAbs, 'r');
+      }
+      mkdirSync(join(repoRoot, '.fadeno', 'local', 'outputs'), { recursive: true });
+      mkdirSync(join(repoRoot, ...INFLIGHT_DIR.split('/')), { recursive: true });
+      const shadowInflightAbs = join(repoRoot, ...INFLIGHT_DIR.split('/'), `${shadowDispatchId}.json`);
+      const statusAbs = join(repoRoot, ...INFLIGHT_DIR.split('/'), `${shadowDispatchId}.status.json`);
+      sfd = openSync(shadowOutputAbs, 'w');
+
+      // The finite attachment budget is consumed only now: every refusal and
+      // every local preparation above has succeeded, and an admitted pair is
+      // defined by the request row recorded immediately below. The lock
+      // rechecks configuration/count so concurrent dispatches cannot exceed
+      // N. A one-shot `--shadow` flag deliberately never enters this path.
+      if (shadowSourceTag === 'attachment') {
+        const expected = pairCandidate?.attachment;
+        if (expected == null || archetype == null) {
+          closePreparedDescriptors();
+          writeShadowRefusal('shadow_exhausted', 'shadow attachment changed before its challenger could be started.');
+          discardPreparedWorktree();
+          return null;
+        }
+        const reservation = reserveShadowAttachmentTrigger(repoRoot, archetype, expected);
+        if (!reservation.reserved) {
+          const reason = reservation.reason === 'expired'
+            ? 'shadow attachment exhausted its finite trigger limit before this challenger could be started.'
+            : reservation.reason === 'changed'
+              ? 'shadow attachment changed before this challenger could be started.'
+              : 'shadow attachment was removed before this challenger could be started.';
+          closePreparedDescriptors();
+          writeShadowRefusal('shadow_exhausted', reason, {
+            ...(reservation.attachment?.n != null ? { shadow_n: reservation.attachment.n } : {}),
+            ...(reservation.attachment?.remaining != null ? { shadow_remaining: reservation.attachment.remaining } : {}),
+          });
+          discardPreparedWorktree();
+          return null;
+        }
+        reservationExpected = expected;
+        if (reservation.attachment?.n != null) {
+          shadowIdentity.shadow_n = reservation.attachment.n;
+          shadowIdentity.shadow_remaining = reservation.attachment.remaining;
+        }
+      }
+      appendEvidenceRow(repoRoot, {
+        format: DISPATCHES_FORMAT,
+        timestamp: shadowNow.toISOString(),
+        event: 'dispatch_requested',
+        ...shadowIdentity,
+      });
+      requestRecorded = true;
+
+      const startedMs = Date.now();
+      const child = spawn(process.execPath, superviseArgv(shadowCommand, shadowInflightAbs, statusAbs, undefined, timeoutFor(shadowSpec)), {
         cwd: shadowWorktreeAbs,
         // Without `atCwd` the shadow escapes its worktree and edits the real
         // workspace. FADENO_IN_SHADOW rides along so any fadeno the challenger
@@ -2099,45 +2158,54 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         env: { ...atCwd(withoutHarnessIdentity(process.env), shadowWorktreeAbs), FADENO_IN_SHADOW: '1' },
         stdio: [promptFd, sfd, 'ignore'],
       });
-    } finally {
-      // The child holds its own copies once spawned.
-      closeSync(promptFd);
-      closeSync(sfd);
+      childSpawned = true;
+      // The child owns its duplicated descriptors after spawn.
+      closePreparedDescriptors();
+      child.unref();
+      const markerAbs = join(repoRoot, ...INFLIGHT_DIR.split('/'), `${shadowDispatchId}${SHADOW_MARKER_SUFFIX}`);
+      try {
+        writeFileSync(markerAbs, `${JSON.stringify({
+          pair_id: pairId,
+          dispatch_id: shadowDispatchId,
+          primary_dispatch_id: dispatchId,
+          archetype,
+          supervisor_pid: child.pid ?? null,
+          started_at: shadowNow.toISOString(),
+          workspace: shadowWorktreeRel,
+        })}\n`, 'utf8');
+      } catch {
+        // Best-effort: the lease bounds concurrency, it never gates the shadow.
+      }
+      return {
+        dispatchId: shadowDispatchId,
+        pairId,
+        baselineCommit,
+        markerAbs,
+        startedAt: shadowNow,
+        startedMs,
+        identity: shadowIdentity,
+        child,
+        statusAbs,
+        inflightAbs: shadowInflightAbs,
+        outputRel: shadowOutputRel,
+        outputAbs: shadowOutputAbs,
+        diffRel: shadowDiffRel,
+        diffAbs: shadowDiffAbs,
+        worktreeAbs: shadowWorktreeAbs,
+        worktreeRel: shadowWorktreeRel,
+        carryFingerprint,
+      };
+    } catch (err) {
+      closePreparedDescriptors();
+      // A request row is the admission boundary. If the row itself could not
+      // be appended, return the reservation so failed bookkeeping never
+      // burns a trigger; after a row exists its paired attempt is durable.
+      if (!requestRecorded && reservationExpected != null && archetype != null) {
+        try { releaseShadowAttachmentTrigger(repoRoot, archetype, reservationExpected); } catch {}
+      }
+      if (!childSpawned) discardPreparedWorktree();
+      throw err;
     }
-    child.unref();
-    const markerAbs = join(repoRoot, ...INFLIGHT_DIR.split('/'), `${shadowDispatchId}${SHADOW_MARKER_SUFFIX}`);
-    try {
-      writeFileSync(markerAbs, `${JSON.stringify({
-        pair_id: pairId,
-        dispatch_id: shadowDispatchId,
-        primary_dispatch_id: dispatchId,
-        archetype,
-        supervisor_pid: child.pid ?? null,
-        started_at: shadowNow.toISOString(),
-        workspace: shadowWorktreeRel,
-      })}\n`, 'utf8');
-    } catch {
-      // Best-effort: the lease bounds concurrency, it never gates the shadow.
-    }
-    return {
-      dispatchId: shadowDispatchId,
-      pairId,
-      baselineCommit,
-      markerAbs,
-      startedAt: shadowNow,
-      startedMs,
-      identity: shadowIdentity,
-      child,
-      statusAbs,
-      inflightAbs: shadowInflightAbs,
-      outputRel: shadowOutputRel,
-      outputAbs: shadowOutputAbs,
-      diffRel: shadowDiffRel,
-      diffAbs: shadowDiffAbs,
-      worktreeAbs: shadowWorktreeAbs,
-      worktreeRel: shadowWorktreeRel,
-      carryFingerprint,
-    };
   };
 
   const collectShadow = (pending: PendingShadow): void => {
