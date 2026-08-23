@@ -105,12 +105,13 @@ test('omp plugin: agents satisfy the task-agent contract', (t) => {
   }
 });
 
-test('omp plugin: bundles a self-contained CLI and no hooks', (t) => {
+test('omp plugin: bundles a self-contained CLI used by its steering extension', (t) => {
   const root = tempRepo(t);
   const { outDir } = runOmpPlugin({ cwd: root, outDir: join(root, 'plugin-omp') });
 
-  assert.ok(!exists(outDir, 'hooks'), 'steering has no omp implementation yet — no hooks may ship');
+  assert.ok(!exists(outDir, 'hooks'), 'omp steering ships as an extension, not a hooks directory');
   assert.ok(exists(outDir, 'bin/fadeno'), 'omp plugin must bundle a binary');
+  assert.match(read(outDir, 'extensions/fadeno-steering.ts'), /import\.meta\.dirname, '\.\.', 'bin', 'fadeno'/);
   assert.ok(exists(outDir, 'bin/templates/common/fadeno/playbooks/code-change-review.yaml'));
   const binary = join(outDir, 'bin', 'fadeno');
   assert.notEqual(statSync(binary).mode & 0o111, 0, 'generated omp plugin CLI must be executable');

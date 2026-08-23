@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { runInit } from '../src/commands/init.ts';
 import { runSteeringApplyOmp } from '../src/commands/steering.ts';
@@ -195,4 +196,36 @@ test('omp extension leaves host-owned async policy untouched and records honest 
   assert.equal(delivered.async_lifecycle, 'host-owned');
   assert.equal(delivered.call_id, 'host-call');
   assert.equal(delivered.task_name, 'native-job');
+});
+
+test('omp plugin-layout extension prefers its bundled CLI without FADENO_CLI', async (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'omp', repoRoot: root, force: true });
+  const extensionDir = join(root, 'extensions');
+  const binDir = join(root, 'bin');
+  mkdirSync(extensionDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  const extensionPath = join(extensionDir, 'fadeno-steering.ts');
+  writeFileSync(
+    extensionPath,
+    readFileSync(join(import.meta.dirname, '..', 'templates', 'omp', 'extensions', 'fadeno-steering.ts'), 'utf8'),
+    'utf8',
+  );
+  const bundledCli = join(binDir, 'fadeno');
+  writeFileSync(bundledCli, `#!/usr/bin/env node
+if (process.argv[process.argv.indexOf('--host-executor') + 1] !== 'current-host') process.exit(2);
+process.stdout.write(JSON.stringify({ mode: 'host', lane: 'host', executor: 'current-host' }));
+`, 'utf8');
+  chmodSync(bundledCli, 0o755);
+
+  const priorCli = process.env.FADENO_CLI;
+  delete process.env.FADENO_CLI;
+  t.after(() => { if (priorCli == null) delete process.env.FADENO_CLI; else process.env.FADENO_CLI = priorCli; });
+  const imported = await import(`${pathToFileURL(extensionPath).href}?test=${Date.now()}`) as { default: typeof fadenoSteering };
+  let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
+  imported.default({ on(event, candidate) { if (event === 'tool_call') handler = candidate; } });
+  assert.ok(handler);
+  const result = await handler({ toolName: 'task', input: { agent: 'worker', task: 'plugin route' } }, { cwd: root });
+  assert.equal(result, undefined);
+  assert.match(readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8'), /"event":"host_delivery"/);
 });
