@@ -49,7 +49,7 @@ Define the workflow **once**, commit it to your repo, and then just say:
 
 Same discipline — plan → implement → review → test → bounded revision — every time. Inspectable. Shareable. Portable across the agents your team actually uses.
 
-Fadeno is **harness-neutral**: the same playbooks run on Codex, Claude Code, Grok Build, and OpenCode today. Its repo-local runtime records durable execution evidence; only a thin per-target adapter differs, while richer compiled orchestration remains future work.
+Fadeno is **harness-neutral**: the same playbooks run on Codex, Claude Code, Grok Build, OpenCode, and omp today. Its repo-local runtime records durable execution evidence; only a thin per-target adapter differs, while richer compiled orchestration remains future work.
 
 > **Honest about enforcement, up front:** in instruction-only hosts, approval policies are *advisory* — the model is asked to honor them, with no hard guarantee. For real guarantees, wire gates to your git/CI/pre-commit layer (or Claude Code hooks). See [Enforcement](#enforcement-advisory-vs-enforced). We'd rather you trust the tool because it's honest than because it overclaims.
 
@@ -90,6 +90,9 @@ npx fadeno init --grok
 
 # OpenCode target → .agents/skills/, AGENTS.md, description-invoked skills
 npx fadeno init --opencode
+
+# omp target → .agents/skills/, AGENTS.md, .omp/agents/ task agents
+npx fadeno init --omp
 ```
 
 `init` remains the explicit project-vendoring path and is safe to re-run: existing files are left untouched (and your
@@ -133,11 +136,15 @@ AGENTS.md                                CLAUDE.md
 AGENTS.md
 .grok/skills/                         # shared SKILL.md bodies + references
 .grok/agents/                         # worker/reviewer/judge.md
-
 # OpenCode (--opencode):
 AGENTS.md
 .agents/skills/                       # shared SKILL.md bodies + references (shared with Codex)
 .opencode/agents/                     # worker/reviewer/judge.md + the read-only driver lane
+
+# omp (--omp):
+AGENTS.md
+.agents/skills/                       # shared SKILL.md bodies + references (shared with Codex and OpenCode)
+.omp/agents/                          # role agents + dispatch proxies in omp's task-agent format
 ```
 
 The playbooks, schemas, vocabulary, and SKILL.md *bodies* are **identical** on
@@ -145,7 +152,10 @@ all targets. Only the install dir, bootstrap file + invocation sigil, invocation
 policy, and subagent format differ. Grok uses `.grok/skills/`, `.grok/agents/`,
 and `AGENTS.md`; it does not create `.grok/config.toml` or change Claude settings.
 OpenCode reads the cross-harness `.agents/skills/` directory and `AGENTS.md`
-natively; its role subagents land in `.opencode/agents/`.
+natively; its role subagents land in `.opencode/agents/`. omp shares the same
+`.agents/skills/` tree and `AGENTS.md`; its task agents — role agents plus the
+bash-only `dispatch-*` proxies that relay archetype-shaped subtasks through
+Fadeno dials — land in `.omp/agents/`.
 
 ### Plugin-first installation
 
@@ -166,6 +176,10 @@ codex plugin add fadeno@fadeno
 # Claude Code: the same repo doubles as a Claude plugin marketplace
 /plugin marketplace add <owner>/fadeno      # or a local path for testing
 /plugin install fadeno@fadeno               # provides /fadeno:runner and /fadeno:builder
+
+# omp: the repo ships an .omp-plugin/marketplace.json catalog
+omp plugin marketplace add <owner>/fadeno   # or a local path for testing
+omp plugin install fadeno@fadeno            # provides /skill:fadeno-runner and the task agents
 
 # built-in playbooks work immediately; optional project-data customization:
 npx fadeno init --claude --data-only
@@ -207,6 +221,14 @@ release does not add a separate Grok plugin generator or mutate Grok permission
 files. Use `--data-only` when the Grok session already has the shared skills from
 another compatible installation.
 
+omp has both surfaces: `npx fadeno init --omp` seeds a repo (shared
+`.agents/skills/` tree, `AGENTS.md`, task agents under `.omp/agents/`), and the
+generated `plugin-omp/` installs through omp's marketplace (`omp plugin install
+fadeno@fadeno`). The plugin carries full-named skills — omp registers a native
+`/skill:<name>` command for each, so no separate commands ship — plus the role
+agents and dispatch proxies, and the bundled CLI. Loadout steering has no omp
+implementation yet: `init --omp --with-steering` refuses, like Grok.
+
 OpenCode likewise has native repo-local support through `npx fadeno init --opencode`
 — no plugin generator. It shares Codex's `.agents/skills/` tree and reads
 `AGENTS.md`; role subagents install to `.opencode/agents/`.
@@ -244,6 +266,7 @@ Fadeno ships three skills: runner, builder, and driver. Point your agent at the
 | Claude Code | `/fadeno:runner` (plugin command), or describe a complex task (implicit). |
 | Grok Build | `/fadeno-runner`, or describe a complex task (implicit). |
 | OpenCode | Describe a complex task (skills are description-invoked), or `@fadeno-runner` where supported. |
+| omp | `/skill:fadeno-runner`, or describe a complex task (implicit). |
 
 `/fadeno:runner` is the namespaced Claude plugin command. Native Grok projects
 use the repo-local `/fadeno-runner` skill emitted by `init --grok`.

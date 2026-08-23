@@ -1,13 +1,14 @@
 {
   "name": "fadeno",
   "version": "0.6.0",
-  "description": "Portable, repo-native playbook layer for AI coding agents (Codex, Claude Code, Grok Build, OpenCode).",
+  "description": "Portable, repo-native playbook layer for AI coding agents (Codex, Claude Code, Grok Build, OpenCode, omp).",
   "keywords": [
     "ai",
     "agents",
     "codex",
     "claude-code",
     "grok-build",
+    "omp",
     "playbook",
     "workflow",
     "skills"
@@ -32,6 +33,7 @@
     "build:bin": "node scripts/build-bin.mjs",
     "build:plugin": "npm run build && node src/cli.ts plugin ./plugin --force && npm run build:bin",
     "build:plugin:codex": "npm run build && node src/cli.ts plugin --codex --force && npm run build:bin",
+    "build:plugin:omp": "npm run build && node src/cli.ts plugin --omp --force && npm run build:bin",
     "prepare": "npm run build",
     "dev": "node src/cli.ts",
     "test": "node --test \"test/**/*.test.ts\"",

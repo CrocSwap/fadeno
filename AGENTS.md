@@ -23,8 +23,8 @@ per the next-protocol boundary) that exists in service of verification — it
 dispatches configured executor commands, mints runtime identity, and pauses at
 human decisions. It is **not** a daemon, cloud service, or general
 orchestration platform. Targets today: **Codex**, **Claude Code**, **Grok
-Build**, and **OpenCode** (Claude Code is also packaged as a Claude Code
-**plugin**).
+Build**, **OpenCode**, and **omp** (Claude Code is also packaged as a Claude Code
+**plugin**; omp additionally ships a generated `plugin-omp/`).
 
 These docs frame the rest:
 
@@ -95,7 +95,7 @@ asked); real guarantees come from git/CI/pre-commit/hooks (tier 2). See
 | `src/cli.ts` | Entry point: arg parsing (`node:util.parseArgs`), command dispatch, **all** stdout/exit-code formatting (the "view"). | architecture.md → *The CLI* |
 | `src/commands/*.ts` | One file per command. Each exports a `run*()` that **returns data and throws on error** — no `console.*`. | architecture.md, extending.md |
 | `src/lib/*.ts` | Shared logic: `paths.ts` (root/templates/version resolution), `fsutil.ts` (non-destructive emit), `playbook-validate.ts` (3-pass validator), `diagram.ts` (ASCII/Mermaid). | architecture.md |
-| `templates/` | **Single source of truth** for everything `init` emits *and* the plugin bundles. `common/` (shared) + `codex/` + `claude/` + `grok/` (per-target adapters). | architecture.md → *Templates & the plugin* |
+| `templates/` | **Single source of truth** for everything `init` emits *and* the plugin bundles. `common/` (shared) + `codex/` + `claude/` + `grok/` + `opencode/` + `omp/` (per-target adapters). | architecture.md → *Templates & the plugin* |
 | `plugin/` | The **generated, committed** Claude plugin (skills/commands/agents + the bundled `bin/fadeno`). Its bundled CLI also carries the Grok templates. A build artifact — never hand-edit; regenerate. | architecture.md, extending.md |
 | `scripts/build-bin.mjs` | esbuild bundler → `plugin/bin/fadeno` (standalone CJS, deps inlined) + adjacent templates. | architecture.md → *Build & module system* |
 | `test/` | `node:test` suite (~50 cases). `helpers.ts` = `tempRepo`/`exists`/`read`. Tests call `run*()` directly, with built-boundary checks for the bundled CLI. | architecture.md → *Tests* |

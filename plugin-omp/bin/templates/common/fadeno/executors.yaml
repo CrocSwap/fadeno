@@ -1,0 +1,437 @@
+# Fadeno's model registry and harness-neutral dispatch routes. Models are
+# addressable by bare name (the who); routes decide how the active harness
+# delivers each provider (the how): `host: true` runs in the session you are
+# already in, anything else spawns a command. User
+# ~/.config/fadeno/executors.yaml and project .fadeno/executors.yaml may
+# extend or override these names under the same layering rules.
+#
+# Dials select the model per archetype: `fadeno dial worker grok`,
+# `fadeno dial judge sol@xhigh --via opencode`, `fadeno dial clear worker`.
+# A bare model name resolves at its registry-standard effort via its home driver.
+# A repo can pin archetypes it has opinions about:
+#
+#   dials:
+#     judge: sol
+#
+# The cascade is: binding → session dial → repo pin → user dial → host-native
+# base (current-host). There are no named presets.
+schema_version: 3
+
+models:
+  luna:
+    provider: openai
+    id: gpt-5.6-luna
+    effort: xhigh
+  terra:
+    provider: openai
+    id: gpt-5.6-terra
+    effort: xhigh
+  sol:
+    provider: openai
+    id: gpt-5.6-sol
+    effort: high
+  opus:
+    provider: anthropic
+    id: opus
+    effort: xhigh
+    spellings:
+      opencode: anthropic/claude-opus-4.8
+  fable:
+    provider: anthropic
+    id: fable
+    effort: high
+  sonnet:
+    provider: anthropic
+    id: sonnet
+    effort: xhigh
+  grok:
+    provider: xai
+    id: grok-4.6
+    effort: xhigh
+  gemini:
+    provider: google
+    # `high`, not `xhigh`, and this is a correctness fix rather than a taste
+    # one. The google route sets `effort_encoding: model-suffix`, so the dial's
+    # effort is appended to the id — and Antigravity publishes only
+    # `-high|-medium|-low`. A bare `fadeno dial judge gemini` therefore built
+    # `gemini-3.7-flash-xhigh`, which agy rejects with exit 1 after printing
+    # its model list. Found by dogfood 2026-08-21: the default was unusable.
+    id: gemini-3.7-flash
+    effort: high
+  muse:
+    provider: muse
+    id: muse-spark-1.2-contributor
+    effort: xhigh
+
+# The relay: the model that reads a resolver answer and forwards a delivery,
+# doing none of the role work itself. Per-harness because a relay must be a
+# model that harness's own provider already serves. Not an archetype — it
+# carries no policy the kernel enforces, and listing it in `fadeno dial` would
+# imply it is work to be dialed. Absent for a harness = keep the built-in
+# default.
+#
+# These are dogfood receipts, not guesses. 2026-08-12 A/B: haiku broke the
+# relay contract — it summarized deliveries instead of relaying them verbatim,
+# answered from the prompt's first line, and asserted evidence it had not
+# written. sonnet and luna each held it. Raise a value here only against a
+# comparable run; a relay that paraphrases silently corrupts every dispatch.
+relay:
+  # Claude's proxies inherit session effort (the Agent tool has no effort
+  # channel), so a pin here would be inert — model only.
+  claude: sonnet
+  # Codex bakes both into the broker TOML, so effort is pinned rather than
+  # left at luna's xhigh registry default.
+  #
+  # Raised low -> high 2026-08-20. Unlike the model choice above, this is a
+  # judgment call and not a receipt: luna is cheap enough that the broker's
+  # few relay tokens are not worth optimizing, and the broker's contract is
+  # not one instruction but a branch table (engine vs ordinary delivery, then
+  # command / host / restart_required / write_conflict) that it must route
+  # correctly every time. Raising effort on a model that ALREADY held the
+  # relay contract moves in the safe direction, which is why it does not need
+  # the A/B the rule above demands -- that rule guards changing WHO relays.
+  #
+  # The failure mode to watch is the opposite of haiku's: a more capable
+  # broker is likelier to decide it can just do the work itself. Its
+  # instructions forbid that in every branch. If a broker is ever observed
+  # doing role work instead of dispatching, suspect this line first.
+  codex: luna@high
+
+# routes: <harness> -> <route key> -> one delivery.
+#
+# `driver:` is the route's PUBLIC name — the value `--via` takes and the value
+# `fadeno dial` prints in its `via` column. The route key is a provider
+# (`anthropic`), the driver is the CLI that delivers it (`claude`). Renamed
+# from `claude-cli` on 2026-08-21: nobody dials a "cli", and the suffix made
+# `--via claude-cli` look like a different tool from the `claude` on their PATH.
+#
+# Driver names and harness names share spellings on purpose and are NOT the
+# same namespace. `claude` the harness is the agent you are sitting inside (it
+# selects which block below applies); `claude` the driver is the binary a route
+# shells out to. Under `routes.codex.anthropic` the driver is `claude` and the
+# harness is `codex` — that pairing is the whole point of the two-level table.
+routes:
+  codex:
+    current-host:
+      host: true
+    openai:
+      driver: codex
+      host: true
+      command: [ codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-" ]
+    anthropic:
+      driver: claude
+      command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits ]
+      eligibility: { director: forbidden }
+    anthropic-exec:
+      driver: claude-exec
+      command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, "Bash(fadeno:*)" ]
+    xai:
+      driver: grok
+      command: [ grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve ]
+      models_command: [ grok, models ]
+      eligibility: { director: forbidden }
+    google:
+      driver: agy
+      command: [ agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text ]
+      models_command: [ agy, models ]
+      effort_encoding: model-suffix
+      eligibility: { director: forbidden }
+    openrouter:
+      driver: opencode
+      command: [ opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto ]
+      models_command: [ opencode, models ]
+      eligibility: { director: forbidden }
+    muse:
+      driver: muse-code
+      command: [ muse, exec, --provider, meta, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --prompt-file, "{prompt_file}", --workspace, ".", --trust-workspace, --disable-approval, --user-input-auto-resolve, --no-session-log ]
+      eligibility: { director: forbidden }
+  claude:
+    current-host:
+      host: true
+    anthropic:
+      driver: claude
+      host: true
+      command:
+        - claude
+        - -p
+        - --model
+        - "{model}"
+        - --permission-mode
+        - acceptEdits
+        - --allowedTools
+        - Bash(fadeno:*)
+      eligibility: { director: forbidden }
+    # The command lane for claude models under the claude harness: `--via
+    # claude-exec` spawns a fresh headless claude instead of delivering
+    # in-session. This is how an expensive host session hands a whole side
+    # task — planning included — to a cheaper claude (`fadeno dial director
+    # opus --via claude-exec`): this argv can edit AND run the fadeno command
+    # family (scoped Bash grant, nothing wider), so a dispatched director can
+    # coordinate workers/reviewers itself. Read the command to see that — the
+    # grant is IN the argv, not in metadata beside it.
+    anthropic-exec:
+      driver: claude-exec
+      command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, "Bash(fadeno:*)" ]
+    openai:
+      driver: codex
+      command: [ codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-" ]
+    xai:
+      driver: grok
+      command: [ grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve ]
+      models_command: [ grok, models ]
+      eligibility: { director: forbidden }
+    google:
+      driver: agy
+      command: [ agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text ]
+      models_command: [ agy, models ]
+      effort_encoding: model-suffix
+      eligibility: { director: forbidden }
+    openrouter:
+      driver: opencode
+      command: [ opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto ]
+      models_command: [ opencode, models ]
+      eligibility: { director: forbidden }
+    muse:
+      driver: muse-code
+      command: [ muse, exec, --provider, meta, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --prompt-file, "{prompt_file}", --workspace, ".", --trust-workspace, --disable-approval, --user-input-auto-resolve, --no-session-log ]
+      eligibility: { director: forbidden }
+  grok:
+    current-host:
+      host: true
+    xai:
+      driver: grok
+      host: true
+      command: [ grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve ]
+      models_command: [ grok, models ]
+      eligibility: { director: forbidden }
+    openai:
+      driver: codex
+      command: [ codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-" ]
+    anthropic:
+      driver: claude
+      command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits ]
+      eligibility: { director: forbidden }
+    anthropic-exec:
+      driver: claude-exec
+      command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, "Bash(fadeno:*)" ]
+    google:
+      driver: agy
+      command: [ agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text ]
+      models_command: [ agy, models ]
+      effort_encoding: model-suffix
+      eligibility: { director: forbidden }
+    openrouter:
+      driver: opencode
+      command: [ opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto ]
+      models_command: [ opencode, models ]
+      eligibility: { director: forbidden }
+    muse:
+      driver: muse-code
+      command: [ muse, exec, --provider, meta, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --prompt-file, "{prompt_file}", --workspace, ".", --trust-workspace, --disable-approval, --user-input-auto-resolve, --no-session-log ]
+      eligibility: { director: forbidden }
+  # OpenCode as a HOST (promoted from driver-only on 2026-08-22): role work is
+  # delivered by OpenCode's own subagents (.opencode/agents), while cross-model
+  # delivery mirrors the standalone command lanes. The openrouter route still
+  # names the opencode DRIVER — spawning a nested headless opencode is fine;
+  # its identity env is stripped like any other subprocess.
+  opencode:
+    current-host:
+      host: true
+    openai:
+      driver: codex
+      command: [ codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-" ]
+    anthropic:
+      driver: claude
+      command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits ]
+      eligibility: { director: forbidden }
+    anthropic-exec:
+      driver: claude-exec
+      command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, "Bash(fadeno:*)" ]
+    xai:
+      driver: grok
+      command: [ grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve ]
+      models_command: [ grok, models ]
+      eligibility: { director: forbidden }
+    google:
+      driver: agy
+      command: [ agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text ]
+      models_command: [ agy, models ]
+      effort_encoding: model-suffix
+      eligibility: { director: forbidden }
+    openrouter:
+      driver: opencode
+      command: [ opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto ]
+      models_command: [ opencode, models ]
+      eligibility: { director: forbidden }
+    muse:
+      driver: muse-code
+      command: [ muse, exec, --provider, meta, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --prompt-file, "{prompt_file}", --workspace, ".", --trust-workspace, --disable-approval, --user-input-auto-resolve, --no-session-log ]
+      eligibility: { director: forbidden }
+  standalone:
+    current-host:
+      host: true
+    openai:
+      driver: codex
+      command: [ codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-" ]
+    anthropic:
+      driver: claude
+      command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits ]
+      eligibility: { director: forbidden }
+    anthropic-exec:
+      driver: claude-exec
+      command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, "Bash(fadeno:*)" ]
+    xai:
+      driver: grok
+      command: [ grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve ]
+      models_command: [ grok, models ]
+      eligibility: { director: forbidden }
+    google:
+      driver: agy
+      command: [ agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text ]
+      models_command: [ agy, models ]
+      effort_encoding: model-suffix
+      eligibility: { director: forbidden }
+    openrouter:
+      driver: opencode
+      command: [ opencode, run, -m, "openrouter/{model}", --variant, "{reasoning_effort}", --auto ]
+      models_command: [ opencode, models ]
+      eligibility: { director: forbidden }
+    muse:
+      driver: muse-code
+      command: [ muse, exec, --provider, meta, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --prompt-file, "{prompt_file}", --workspace, ".", --trust-workspace, --disable-approval, --user-input-auto-resolve, --no-session-log ]
+      eligibility: { director: forbidden }
+
+# Driver routes (harnesses Fadeno spawns, never runs inside — see
+# docs/architecture.md → "Glossary: harnesses, hosts, and drivers"). They carry
+# the same argv under every host, because how a driver is invoked does not
+# depend on which harness is doing the invoking.
+#
+# google → Antigravity (`agy`). NOT gemini-cli: that client is retired for
+# individuals and dies at auth with "IneligibleTierError", pointing at
+# Antigravity as its replacement.
+#
+# Three things here are load-bearing, each verified live 2026-08-13, and each
+# of the two rejected spellings fails by exiting 0 having done nothing:
+#
+#   1. No `-p`. `agy -p` requires a value, and `agy -p -` does NOT read stdin —
+#      it takes "-" as the literal prompt and answers "How can I help you
+#      today?" with exit 0. Piping stdin with no `-p` is the spelling that
+#      actually delivers the prompt.
+#   2. `--new-project` binds the workspace to the current directory. Without
+#      it, agy has no active workspace and silently writes to
+#      ~/.gemini/antigravity-cli/scratch/ instead of the repo — reporting "I
+#      have created the file" and exiting 0 while the repo gets nothing.
+#      `--add-dir .` does NOT fix this (only an absolute path does, which a
+#      static route cannot express), so `--new-project` is the one spelling
+#      that works from argv alone.
+#   3. No effort flag. `--effort` only accepts low|medium|high, so passing
+#      {reasoning_effort} would hard-fail every target left at the `default`
+#      effort. Antigravity encodes effort in the model id instead.
+#
+# `--dangerously-skip-permissions` is the headless-approval case documented for
+# xai below. Verified end to end: prompt on stdin, exit 0, report on stdout,
+# and a file actually written into the repo.
+# A 2026-08-16 read probe of `--mode plan --sandbox` blocked mutation, but the
+# denied tool made headless agy exit 0 with no report. That violates the driver
+# contract, so Antigravity honestly remains write-only until its headless
+# permission surface can both deny the write and return the requested report.
+#
+# muse → Muse Code (`muse exec`). Verified live 2026-08-16; three spellings
+# REJECTED before this one: `--prompt-file /dev/stdin` ("not a regular
+# file"), bare stdin ("missing prompt"), and `--prompt-file -` (literal
+# filename) — Muse Code reads prompts only from a regular file, so the route
+# uses the {prompt_file} placeholder: the kernel substitutes its attested
+# prompt snapshot's absolute path at spawn (digest attests exactly what the
+# executor reads). `--workspace .` verified to root tools at the spawn cwd
+# (banner: "workspace root: . (explicit)"); a write landed in-place.
+# `--reasoning-effort` accepts none|minimal|low|medium|high|xhigh|ultra —
+# NOT `default`, so an unregistered model forced through `--via muse-code`
+# fails loudly at the CLI. `--trust-workspace --disable-approval
+# --user-input-auto-resolve` is the headless-approval trio (finer-grained
+# than `--yolo`: the OS sandbox stays on). Stdout is the report; banners go
+# to stderr. No models listing subcommand — no dial-time probe. Engine
+# repair re-asks travel on stdin, which file-reading drivers ignore — a
+# muse-dialed actor re-runs its recorded prompt instead (known limitation).
+# A live probe with `--disable-write --disable-shell` read the workspace,
+# was physically denied the write tool, and still returned a report — so a
+# restricted muse lane genuinely works. It is not the default: a restriction
+# is its own named route, spelled out in its own command, never a second argv
+# hidden beside this one.
+#
+# openrouter → opencode. `--variant` is OpenCode's reasoning-effort dial and
+# accepts `default` as well as high/max/minimal, so {reasoning_effort}
+# substitutes safely. `--auto` is its headless approval flag.
+
+# Permissions: every route above is the PERMISSIVE argv for its vendor, and
+# that is deliberate. Fadeno enforces nothing itself — a `write_access:` key
+# was only ever a claim in YAML that nothing checked, and the machinery that
+# matched such claims against archetype demands produced four distinct
+# silent-wrong-answer defects before it was removed. Enforcement belongs to
+# the vendor flags you can read in the argv (`--sandbox`, `--permission-mode`,
+# `--disable-shell`), and containment belongs to isolated worktrees, which are
+# now the default for command dispatches.
+#
+# To run something restricted, declare it as its OWN route with its own name
+# (e.g. `openai-sandboxed` with `--sandbox read-only`) and dial that. A
+# restriction spelled out in an argv is one a reader can see; a restriction
+# carried in metadata is one nobody knows about.
+#
+# `requires_write:` and `write_variant:` are REMOVED and now error at load.
+# See docs/experimental/permissions-and-isolation.md before reintroducing
+# anything of that shape.
+# `generator` is divergent artifact-producing work that must not mutate the
+# workspace. It is its own archetype: undialed it resolves to the host-native
+# base (current-host) like any other, never through another archetype's dial.
+# (`fallback` remains available for custom archetypes: binding-only — an
+# archetype without a dial resolves through its fallback's binding, never its
+# policy.)
+# `director` is high-level planning/orchestration delegated to a (usually
+# cheaper) model: it decomposes a side task and coordinates workers/reviewers
+# itself, via the fadeno CLI. That means it needs an argv that can actually run
+# `fadeno` — for claude models, `--via claude-exec` (the in-session host lane
+# cannot spawn one); codex/grok/agy/opencode routes are already shell-capable.
+# Nothing enforces this: check the command, not a declaration.
+archetypes:
+  # `worker` and `generator` declare no policy — their only key was a write
+  # posture, which no longer exists. They stay listed because membership in
+  # this map is itself meaningful: it is the canon set a self-contained
+  # project is measured against (`suppressedCanonArchetypes`), so deleting the
+  # entries would silently shrink that warning.
+  worker: {}
+  generator: {}
+  director:
+    # Composed ahead of every director dispatch (briefs/director.md): teaches
+    # the spawned model to coordinate through fadeno instead of doing the
+    # work itself. Routes without fadeno capability declare
+    # `eligibility: { director: forbidden }` — the block is structural, so it
+    # also covers unregistered models falling through to those lanes.
+    brief: director
+
+unregistered_model_driver: opencode
+
+# Deterministic tool registry for `tool_call` steps (Priority 7 frozen contract).
+# `tool:` in a playbook is a logical capability name, never shell. Each name
+# must be bound here as a static argv array with optional positive timeout.
+# No shell is inserted: argv runs directly. An entry may explicitly name a shell
+# such as [sh, -c, "…"] — that is the operator's explicit choice, not Fadeno's.
+# No interpolation (`{`, `}`, `$`, backtick are rejected — this is a literal
+# argv, not a template). Only ready `tool_call` steps whose output schema is
+# `test-result` are automated via `fadeno tool-run`; Diff and other typed
+# outputs remain manual via `fadeno tool-complete`.
+#
+# Layering follows the same precedence as executors: project
+# `.fadeno/executors.yaml` overrides user `~/.config/fadeno/executors.yaml`
+# which overrides this shipped default, except a self-contained project catalog
+# with its own `models:` + `routes:` suppresses the builtin and user layers
+# entirely (see src/lib/config-layers.ts:projectIsComplete). Snapshotted per
+# run into `profile.yaml`; verification recomputes command_sha256 against that
+# snapshot.
+tools:
+  # Example (matches starter playbooks — `tool: test_runner`):
+  # test_runner:
+  #   command: [npm, test]
+  #   timeout_ms: 300000
+  # # or timeout in seconds:
+  # # test_runner:
+  # #   command: [npm, test]
+  # #   timeout: 300

@@ -1,0 +1,16 @@
+{
+  "name": "fadeno",
+  "version": "0.6.0",
+  "description": "Run and author Fadeno playbooks — repeatable plan/implement/review/test workflows with file-backed run traces. Seed a repo with `fadeno init --omp --data-only`.",
+  "license": "MIT",
+  "repository": "https://github.com/CrocSwap/fadeno",
+  "keywords": [
+    "ai",
+    "agents",
+    "omp",
+    "playbook",
+    "workflow",
+    "skills"
+  ],
+  "omp": {}
+}

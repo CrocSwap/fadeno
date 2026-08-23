@@ -129,6 +129,55 @@ test('init --opencode creates the OpenCode target tree without other host artifa
   assert.ok(results.every((r) => r.status === 'created'));
 });
 
+test('init --omp creates the omp target tree without other host artifacts', (t) => {
+  const root = tempRepo(t);
+  const { results } = runInit({ target: 'omp', repoRoot: root });
+
+  for (const f of SHARED_FILES) assert.ok(exists(root, f), `missing ${f}`);
+
+  assert.ok(exists(root, 'AGENTS.md'));
+  // omp reads the cross-harness `.agents/skills` directory (shared with Codex
+  // and OpenCode), with no openai.yaml policy — that format is Codex-only.
+  for (const skill of ['fadeno-runner', 'fadeno-builder', 'fadeno-driver']) {
+    assert.ok(exists(root, `.agents/skills/${skill}/SKILL.md`));
+    assert.ok(!exists(root, `.agents/skills/${skill}/agents/openai.yaml`));
+  }
+  assert.ok(exists(root, '.agents/skills/fadeno-runner/references/runtime.md'));
+
+  // Role agents plus dispatch proxies in omp's task-agent format under
+  // `.omp/agents/` (the project root omp discovers agents from).
+  for (const file of ['worker', 'reviewer', 'judge', 'dispatch-worker', 'dispatch-reviewer', 'dispatch-judge', 'dispatch-director']) {
+    const body = read(root, `.omp/agents/${file}.md`);
+    // omp's parse contract: an agent without name + description is invalid.
+    assert.match(body, /^name: /m, `${file}.md must declare a name`);
+    assert.match(body, /^description: .+/m, `${file}.md must carry a description`);
+  }
+  const proxy = read(root, '.omp/agents/dispatch-worker.md');
+  assert.match(proxy, /^tools: bash$/m);
+  assert.doesNotMatch(proxy, /CLAUDE_PLUGIN_ROOT|PreToolUse/);
+
+  assert.ok(!exists(root, '.grok/agents/worker.md'));
+  assert.ok(!exists(root, '.codex/agents/worker.toml'));
+  assert.ok(!exists(root, '.claude/skills/fadeno-runner/SKILL.md'));
+  assert.ok(!exists(root, '.claude/agents/worker.md'));
+  assert.ok(!exists(root, 'CLAUDE.md'));
+  assert.ok(!exists(root, '.claude/settings.local.json'));
+
+  assert.ok(results.every((r) => r.status === 'created'));
+
+  // Non-destructive re-run: everything already present is skipped.
+  const second = runInit({ target: 'omp', repoRoot: root });
+  assert.ok(second.results.every((r) => r.status === 'skipped'));
+});
+
+test('init --omp refuses steering like Grok', (t) => {
+  const root = tempRepo(t);
+  assert.throws(
+    () => runInit({ target: 'omp', repoRoot: root, withSteering: true }),
+    /steering/i,
+  );
+});
+
 test('OpenCode receives shared skill bodies and a sigil-free bootstrap', (t) => {
   const opencodeRoot = tempRepo(t);
   const codexRoot = tempRepo(t);

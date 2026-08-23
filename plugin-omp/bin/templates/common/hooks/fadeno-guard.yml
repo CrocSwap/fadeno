@@ -1,0 +1,27 @@
+# Fadeno enforcement guard (tier-2, enforced in CI).
+# Makes `require_user_approval_for` categories real on pull requests, independent
+# of any agent's compliance. Adapt the patterns/labels to your project.
+name: fadeno-guard
+
+on:
+  pull_request:
+
+jobs:
+  deploy-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Block deploy-affecting changes without the "deploy-approved" label
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          if echo "$changed" | grep -qE '(Dockerfile|^deploy/|^infra/|\.tf$)'; then
+            if ! echo "$LABELS" | grep -q 'deploy-approved'; then
+              echo "::error::Deploy-affecting change without the 'deploy-approved' label (Fadeno: deploy)."
+              echo "$changed" | grep -E '(Dockerfile|^deploy/|^infra/|\.tf$)'
+              exit 1
+            fi
+          fi

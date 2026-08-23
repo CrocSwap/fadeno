@@ -39,7 +39,7 @@ import {
 } from './commands/dial.ts';
 import { runModels, runModelsDriver, type DriverListingResult, type ModelsResult } from './commands/models.ts';
 import { runNewRun } from './commands/new-run.ts';
-import { runCodexPlugin, runPlugin } from './commands/plugin.ts';
+import { runCodexPlugin, runOmpPlugin, runPlugin } from './commands/plugin.ts';
 import { runNext } from './commands/next.ts';
 import { runPrompt } from './commands/prompt.ts';
 import { runRun } from './commands/run.ts';
@@ -88,7 +88,7 @@ import { userPaths } from './lib/user-paths.ts';
 const HELP = `fadeno — the playbook layer for AI coding agents
 
 Usage:
-  fadeno init --codex|--claude|--grok|--opencode [opts]   Explicitly scaffold project-owned capability
+  fadeno init --codex|--claude|--grok|--opencode|--omp [opts]   Explicitly scaffold project-owned capability
   fadeno setup [--codex|--claude] [--from <bin-dir>] [--reset-runtime]  Install safe user-scoped integration
   fadeno status [--verbose]                   Show effective definitions, routing, and state
   fadeno doctor [--codex|--claude|--opencode]            Run read-only diagnostics
@@ -244,7 +244,7 @@ Options:
   -v, --version           Show version
 
 Environment:
-  FADENO_HARNESS          Select the harness for route compilation (codex|claude|grok|opencode|standalone)
+  FADENO_HARNESS          Select the harness for route compilation (codex|claude|grok|opencode|omp|standalone)
 Examples:
   fadeno validate
   fadeno new-run code-change-review "Add CSV export for reports"
@@ -752,7 +752,7 @@ Options:
   init: `fadeno init — scaffold project-owned Fadeno capability
 
 Usage:
-  fadeno init --codex|--claude|--grok|--opencode [flags]
+  fadeno init --codex|--claude|--grok|--opencode|--omp [flags]
 
 Options:
   --with-hooks    Also scaffold tier-2 enforcement hooks
@@ -855,13 +855,14 @@ Shares validation with tool-run; one attempt wins via durable claim.
 Usage:
   fadeno plugin [dir]            Claude Code plugin (default dir: plugin/)
   fadeno plugin [dir] --codex    Codex plugin
+  fadeno plugin [dir] --omp      omp plugin
 
 Options:
   --force   Overwrite existing generated files
 `,
 };
 
-const SIGIL: Record<Target, string> = { codex: '$', claude: '/', grok: '/', opencode: '' };
+const SIGIL: Record<Target, string> = { codex: '$', claude: '/', grok: '/', opencode: '', omp: '' };
 const SCHEMA_KINDS: readonly SchemaKind[] = SCHEMA_KIND_LIST;
 
 function printInitSummary(
@@ -904,7 +905,7 @@ function printInitSummary(
     console.log(
         target === 'codex'
           ? '  3. Use the $fadeno-runner skill (from the installed Fadeno plugin)'
-          : target === 'opencode'
+          : target === 'opencode' || target === 'omp'
             ? '  3. Use the fadeno-runner skill (installed under .agents/skills)'
             : '  3. Use the /fadeno:runner skill (from the installed Fadeno plugin)',
     );
@@ -1601,7 +1602,7 @@ function printVerify(result: VerifyResult): void {
   else console.error(summary);
 }
 
-type TargetFlags = { codex?: boolean; claude?: boolean; grok?: boolean; opencode?: boolean };
+type TargetFlags = { codex?: boolean; claude?: boolean; grok?: boolean; opencode?: boolean; omp?: boolean };
 
 function requireTarget(values: TargetFlags): Target {
   const selected: Target[] = [];
@@ -1609,12 +1610,13 @@ function requireTarget(values: TargetFlags): Target {
   if (values.claude) selected.push('claude');
   if (values.grok) selected.push('grok');
   if (values.opencode) selected.push('opencode');
+  if (values.omp) selected.push('omp');
   if (selected.length > 1) {
-    throw new Error('Choose exactly one target: --codex, --claude, --grok, or --opencode.');
+    throw new Error('Choose exactly one target: --codex, --claude, --grok, --opencode, or --omp.');
   }
   if (selected.length === 1) return selected[0];
   throw new Error(
-    'Specify a target: `fadeno init --codex`, `fadeno init --claude`, `fadeno init --grok`, or `fadeno init --opencode`.',
+    'Specify a target: `fadeno init --codex`, `fadeno init --claude`, `fadeno init --grok`, `fadeno init --opencode`, or `fadeno init --omp`.',
   );
 }
 
@@ -1624,7 +1626,8 @@ function optionalTarget(values: TargetFlags): Target | undefined {
   if (values.claude) selected.push('claude');
   if (values.grok) selected.push('grok');
   if (values.opencode) selected.push('opencode');
-  if (selected.length > 1) throw new Error('Choose at most one target: --codex, --claude, --grok, or --opencode.');
+  if (values.omp) selected.push('omp');
+  if (selected.length > 1) throw new Error('Choose at most one target: --codex, --claude, --grok, --opencode, or --omp.');
   return selected[0];
 }
 
@@ -1655,6 +1658,7 @@ function main(argv: string[]): number {
         claude: { type: 'boolean' },
         grok: { type: 'boolean' },
         opencode: { type: 'boolean' },
+        omp: { type: 'boolean' },
         force: { type: 'boolean' },
         'with-hooks': { type: 'boolean' },
         'with-steering': { type: 'boolean' },
@@ -1807,7 +1811,7 @@ function main(argv: string[]): number {
   switch (command) {
     case 'setup': {
       const target = optionalTarget(values);
-      if (target === 'grok' || target === 'opencode') throw new Error('`fadeno setup` supports --codex or --claude; Grok and OpenCode have no user-scoped setup.');
+      if (target === 'grok' || target === 'opencode' || target === 'omp') throw new Error('`fadeno setup` supports --codex or --claude; Grok, OpenCode, and omp have no user-scoped setup.');
       const runtimeSource = values.from != null ? String(values.from) : undefined;
       const result = runSetup({ target: target ?? null, nonInteractive: values['non-interactive'], runtimeSource: runtimeSource as any, resetRuntime: Boolean(values['reset-runtime']) });
       console.log(`Fadeno setup (${result.target ?? 'standalone'})`);
@@ -1903,7 +1907,7 @@ function main(argv: string[]): number {
     }
     case 'uninstall': {
       const target = optionalTarget(values);
-      if (target === 'grok' || target === 'opencode') throw new Error('Grok and OpenCode have no user-scoped Fadeno integration to uninstall.');
+      if (target === 'grok' || target === 'opencode' || target === 'omp') throw new Error('Grok, OpenCode, and omp have no user-scoped Fadeno integration to uninstall.');
       const result = runUninstall({
         target: target ?? null,
         all: values.all,
@@ -2192,6 +2196,17 @@ function main(argv: string[]): number {
       return 0;
     }
     case 'plugin': {
+      if (values.omp) {
+        const { outDir, results } = runOmpPlugin({ outDir: positionals[1], force: values.force });
+        const counts = { created: 0, overwritten: 0, appended: 0, skipped: 0 };
+        for (const r of results) counts[r.status] += 1;
+        console.log(`Generated Fadeno omp plugin in ${outDir}`);
+        console.log(`  ${counts.created} created, ${counts.overwritten} overwritten, ${counts.skipped} skipped.`);
+        // Marketplace root is the repo root (where .omp-plugin/marketplace.json
+        // lives), not the plugin dir — pass `.`, not the payload path.
+        console.log('\nTest it: `omp plugin marketplace add . && omp plugin install fadeno@fadeno`');
+        return 0;
+      }
       if (values.grok || values.opencode) {
         throw new Error('The --grok and --opencode targets are supported by init only; no plugin generator exists for them.');
       }

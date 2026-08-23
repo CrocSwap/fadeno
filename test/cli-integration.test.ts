@@ -108,6 +108,31 @@ test('committed bundled CLI supports Grok init and rejects mixed target flags', 
   assert.match(`${mixed.stdout}${mixed.stderr}`, /choose exactly one target/i);
 });
 
+test('committed bundled CLI supports omp init and plugin generation', (t) => {
+  const root = tempRepo(t);
+
+  const initialized = cliSplit(root, ['init', '--omp']);
+  assert.equal(initialized.status, 0, initialized.stderr);
+  assert.match(initialized.stdout, /Fadeno initialized for omp/);
+  // Skills land in the shared cross-harness tree; agents under .omp/agents.
+  assert.ok(readFileSync(join(root, '.agents', 'skills', 'fadeno-runner', 'SKILL.md'), 'utf8'));
+  assert.ok(readFileSync(join(root, '.omp', 'agents', 'dispatch-worker.md'), 'utf8'));
+  assert.ok(readFileSync(join(root, 'AGENTS.md'), 'utf8').includes('fadeno-runner'));
+
+  const mixed = cliSplit(root, ['init', '--omp', '--opencode']);
+  assert.equal(mixed.status, 1);
+  assert.match(`${mixed.stdout}${mixed.stderr}`, /choose exactly one target/i);
+
+  const steering = cliSplit(root, ['init', '--omp', '--with-steering']);
+  assert.equal(steering.status, 1);
+  assert.match(`${steering.stdout}${steering.stderr}`, /[Ss]teering/);
+
+  const generated = cliSplit(root, ['plugin', join(root, 'generated-omp'), '--omp']);
+  assert.equal(generated.status, 0, `${generated.stdout}${generated.stderr}`);
+  assert.match(generated.stdout, /Generated Fadeno omp plugin/);
+  assert.ok(readFileSync(join(root, 'generated-omp', 'package.json'), 'utf8').includes('"omp"'));
+});
+
 test('bundled CLI serves focused per-command help and falls back globally', (t) => {
   const root = tempRepo(t);
 

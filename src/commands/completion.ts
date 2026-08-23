@@ -87,6 +87,7 @@ const COMMANDS: Record<string, CommandSpec> = {
     '--claude': NONE,
     '--grok': NONE,
     '--opencode': NONE,
+    '--omp': NONE,
     '--force': NONE,
     '--with-hooks': NONE,
     '--with-steering': NONE,
@@ -128,7 +129,7 @@ const COMMANDS: Record<string, CommandSpec> = {
         '--prompt-file': PATH,
         '--prompt-sha256': { kind: 'free' },
       }),
-      apply: command({ '--codex': NONE, '--claude': NONE, '--grok': NONE, '--opencode': NONE, '--force': NONE, '--scope': { kind: 'enum', values: ['project', 'user'] } }, ['dial']),
+      apply: command({ '--codex': NONE, '--claude': NONE, '--grok': NONE, '--opencode': NONE, '--omp': NONE, '--force': NONE, '--scope': { kind: 'enum', values: ['project', 'user'] } }, ['dial']),
     },
   ),
   dispatch: command(
@@ -215,7 +216,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ),
   show: command({ '--legacy': NONE, '--events': NONE }, ['run']),
   verify: command({ '--latest': NONE, '--allow-failed': NONE, '--legacy': NONE }, ['run']),
-  plugin: command({ '--codex': NONE, '--grok': NONE, '--opencode': NONE, '--force': NONE }, ['path']),
+  plugin: command({ '--codex': NONE, '--grok': NONE, '--opencode': NONE, '--omp': NONE, '--force': NONE }, ['path']),
   completion: command({}, [], {
     bash: command({}),
   }),

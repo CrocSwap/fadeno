@@ -104,6 +104,12 @@ export function runInit(opts: InitOptions): InitResult {
       case 'grok':
         skillsBase = join(repoRoot, '.grok', 'skills');
         break;
+      case 'omp':
+        // omp reads the cross-harness `.agents/skills` directory natively (the
+        // canonical shared tree it also uses for Codex and OpenCode), so one
+        // skill body serves all three; `emitFile` keeps re-installs inert.
+        skillsBase = join(repoRoot, '.agents', 'skills');
+        break;
       case 'opencode':
         // OpenCode reads the cross-harness `.agents/skills` directory (the same
         // one Codex uses), so a repo scaffolded for both hosts shares one
@@ -204,7 +210,8 @@ export function runInit(opts: InitOptions): InitResult {
       case 'codex':
       case 'grok':
       case 'opencode':
-        // OpenCode reads AGENTS.md natively, like Codex and Grok.
+      case 'omp':
+        // OpenCode and omp read AGENTS.md natively, like Codex and Grok.
         bootstrapName = 'AGENTS.md';
         break;
     }

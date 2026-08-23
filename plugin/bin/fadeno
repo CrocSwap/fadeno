@@ -14430,7 +14430,7 @@ function hostEffortIsMaterializable(harness) {
 function activeHarness(explicit, options = {}) {
   if (explicit != null) return explicit;
   const raw = (options.env ?? process.env).FADENO_HARNESS?.trim();
-  if (raw === "codex" || raw === "claude" || raw === "grok" || raw === "opencode" || raw === "standalone") return raw;
+  if (raw === "codex" || raw === "claude" || raw === "grok" || raw === "opencode" || raw === "omp" || raw === "standalone") return raw;
   return detectAmbientHarness(options).harness ?? readUserHarness(options) ?? "standalone";
 }
 var AMBIENT_HARNESS_MARKERS = [
@@ -20931,11 +20931,27 @@ function normalizeDispatchTag(tag) {
   return trimmed;
 }
 var DISPATCH_OUTCOMES = ["ok", "failed", "empty", "timeout"];
-function deriveDispatchOutcome(row) {
+var DISPATCH_RESULT_FOOTER = [
+  "--- dispatch result protocol ---",
+  "End your final report with exactly one last line: `FADENO-DISPATCH-RESULT: ok`",
+  "if you completed the task, or `FADENO-DISPATCH-RESULT: failed \u2014 <one-line reason>`",
+  "if you did not or could not. That line \u2014 not the exit code \u2014 is how the dispatcher",
+  "learns the outcome: a failure MUST be reported as failed even if the process will exit 0."
+].join("\n");
+function scanDispatchResultClaim(stdout) {
+  const lines = stdout.split("\n");
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const match = /^FADENO-DISPATCH-RESULT: (ok|failed)(?: — .*)?$/.exec(lines[i]);
+    if (match != null) return match[1];
+  }
+  return null;
+}
+function deriveDispatchOutcome(row, claimed) {
   if (row.timedOut === true) return "timeout";
   if (row.error != null || row.signal != null) return "failed";
   if (row.exitCode == null) return null;
   if (row.exitCode !== 0) return "failed";
+  if (claimed === "ok" || claimed === "failed") return claimed;
   if (row.outputBytes == null) return null;
   return row.outputBytes === 0 ? "empty" : "ok";
 }
@@ -20944,6 +20960,19 @@ function normalizeDispatchOutcome(stated, row) {
   return deriveDispatchOutcome(row);
 }
 var PENDING_RELAYS_FILE = (0, import_node_path16.join)(".fadeno", "local", "pending-relays.jsonl");
+function uncommittedTrackedChanges(repoRoot) {
+  try {
+    const headRes = (0, import_node_child_process6.spawnSync)("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" });
+    const statusRes = (0, import_node_child_process6.spawnSync)("git", ["-C", repoRoot, "status", "--porcelain"], { encoding: "utf8" });
+    if (headRes.error != null || headRes.status !== 0 || statusRes.error != null || statusRes.status !== 0) {
+      return { head: null, count: 0 };
+    }
+    const count = String(statusRes.stdout ?? "").split("\n").filter((line) => line.length > 0 && !line.startsWith("?")).length;
+    return { head: String(headRes.stdout ?? "").trim() || null, count };
+  } catch {
+    return { head: null, count: 0 };
+  }
+}
 var PROXY_DISPATCHES_FILE = (0, import_node_path16.join)(".fadeno", "local", "proxy-dispatches.jsonl");
 var PENDING_RELAY_MAX_AGE_MS = 60 * 60 * 1e3;
 function consumeSpawnSideRelay(repoRoot, prompt, now) {
@@ -21336,22 +21365,24 @@ ${prompt}`;
   }
   const dispatchId = (0, import_node_crypto7.randomUUID)();
   const now = opts.now ?? /* @__PURE__ */ new Date();
-  let promptSnapshot;
-  if (promptSource === "stdin" || briefApplied != null) {
-    const snapshotRel = (0, import_node_path16.join)(
-      ".fadeno",
-      "local",
-      "prompts",
-      `${archetype ?? role ?? "dispatch"}-${dispatchId.slice(0, 8)}.md`
+  const relayAttested = consumeRelayAttestation(repoRoot, prompt, now);
+  if (relayAttested === false) {
+    opts.onEcho?.(
+      "RELAY FIDELITY FAILED: a dispatch proxy sent bytes that do not match what it was handed. The executor below is working from an altered prompt \u2014 treat its output as answering a different question. Check the relay identity (`relay.claude` / `relay.codex` in executors.yaml); a model too small for the relay contract summarizes instead of forwarding."
     );
-    const snapshotAbs = (0, import_node_path16.join)(repoRoot, snapshotRel);
-    (0, import_node_fs16.mkdirSync)((0, import_node_path16.join)(repoRoot, ".fadeno", "local", "prompts"), { recursive: true });
-    (0, import_node_fs16.writeFileSync)(snapshotAbs, prompt, "utf8");
-    promptSnapshot = snapshotRel.split("\\").join("/");
-  } else {
-    const rel = (0, import_node_path16.relative)(repoRoot, promptPath).split("\\").join("/");
-    promptSnapshot = rel === "" || rel.startsWith("../") || (0, import_node_path16.isAbsolute)(rel) ? promptPath : rel;
   }
+  prompt = `${prompt}
+${DISPATCH_RESULT_FOOTER}`;
+  const snapshotRel = (0, import_node_path16.join)(
+    ".fadeno",
+    "local",
+    "prompts",
+    `${archetype ?? role ?? "dispatch"}-${dispatchId.slice(0, 8)}.md`
+  );
+  const snapshotAbs = (0, import_node_path16.join)(repoRoot, snapshotRel);
+  (0, import_node_fs16.mkdirSync)((0, import_node_path16.join)(repoRoot, ".fadeno", "local", "prompts"), { recursive: true });
+  (0, import_node_fs16.writeFileSync)(snapshotAbs, prompt, "utf8");
+  const promptSnapshot = snapshotRel.split("\\").join("/");
   const promptFileAbs = (0, import_node_path16.isAbsolute)(promptSnapshot) ? promptSnapshot : (0, import_node_path16.join)(repoRoot, promptSnapshot);
   command2 = substitutePromptFile(command2, promptFileAbs);
   const outputRel = (0, import_node_path16.join)(
@@ -21362,12 +21393,6 @@ ${prompt}`;
   );
   const outputAbs = (0, import_node_path16.join)(repoRoot, outputRel);
   const outputSnapshot = outputRel.split("\\").join("/");
-  const relayAttested = consumeRelayAttestation(repoRoot, prompt, now);
-  if (relayAttested === false) {
-    opts.onEcho?.(
-      "RELAY FIDELITY FAILED: a dispatch proxy sent bytes that do not match what it was handed. The executor below is working from an altered prompt \u2014 treat its output as answering a different question. Check the relay identity (`relay.claude` / `relay.codex` in executors.yaml); a model too small for the relay contract summarizes instead of forwarding."
-    );
-  }
   const promptSha256 = sha256Hex(prompt);
   const decidePairCandidate = () => {
     if (process.env.FADENO_IN_SHADOW === "1") return null;
@@ -21987,7 +22012,7 @@ ${prompt}`;
         error: spawnFailedMsg,
         outputBytes: sOutputBytes,
         timedOut: sIsTimeout ? true : null
-      });
+      }, scanDispatchResultClaim(sStdout));
       const sRow = {
         format: DISPATCHES_FORMAT,
         // Same rule as the primary: start plus measured duration, so
@@ -22186,6 +22211,12 @@ ${prompt}`;
               `the pair's two arms produced different baseline commits (${primaryBaseline.slice(0, 12)} vs ${pendingShadow.baselineCommit.slice(0, 12)}) \u2014 they did not start from the same state, so the comparison would be meaningless. Refusing rather than recording a baseline only one arm has.`
             );
           }
+          const dirtyBase = uncommittedTrackedChanges(repoRoot);
+          if (dirtyBase.head != null && dirtyBase.count > 0) {
+            opts.onEcho?.(
+              `advisory: cutting the worktree from HEAD ${dirtyBase.head.slice(0, 12)}; ${dirtyBase.count} uncommitted change(s) in your tree will be replayed into the executor's base as one synthetic commit (not left uncommitted) \u2014 pass --shared to run on the live tree instead.`
+            );
+          }
           const spawnedInWorktree = invoke(worktreeAbs);
           executorRanInWorktree = true;
           isolatedIgnoredOutput = scanIgnoredOutput(worktreeAbs, profile.worktreeCarry);
@@ -22266,13 +22297,14 @@ ${prompt}`;
       }
     });
     const isTimeout = supervisorStatus?.timedOut === true;
+    const resultClaim = scanDispatchResultClaim(stdout);
     const outcome = deriveDispatchOutcome({
       exitCode: spawnFailure != null ? null : spawned.status,
       signal: spawned.signal,
       error: spawnFailure,
       outputBytes,
       timedOut: isTimeout ? true : null
-    });
+    }, resultClaim);
     let diagnosticsRel = null;
     let diagnosticsBytes = null;
     const diagnosticsEnabled = isDiagnosticsEnabled({ diagnostics: opts.diagnostics });
@@ -23141,6 +23173,9 @@ function renderDispatchLine(entry) {
       parts.push(entry.durationMs != null ? `${code} in ${entry.durationMs}ms` : code);
       if (entry.exitCode === 0 && entry.workspaceChanged === false && !entry.shadow) {
         parts.push("[no workspace change]");
+      }
+      if (entry.outcome === "failed" && entry.exitCode === 0) {
+        parts.push("[claimed failed despite exit 0]");
       }
     } else {
       parts.push("no completion recorded (killed or in flight)");
@@ -30339,6 +30374,58 @@ function runCodexPlugin(opts = {}) {
   if ((0, import_node_fs25.existsSync)(destinationCli)) (0, import_node_fs25.chmodSync)(destinationCli, 493);
   return { outDir, results };
 }
+var OMP_SKILLS = ["fadeno-runner", "fadeno-builder", "fadeno-driver", "fadeno-bakeoff"];
+function runOmpPlugin(opts = {}) {
+  const cwd = opts.cwd ?? process.cwd();
+  const tpl = templatesDir();
+  const ref = opts.outDir ?? "plugin-omp";
+  const outDir = (0, import_node_path25.isAbsolute)(ref) ? ref : (0, import_node_path25.resolve)(cwd, ref);
+  const force = opts.force ?? false;
+  const results = [];
+  const manifest = JSON.stringify(
+    {
+      name: "fadeno",
+      version: packageVersion(),
+      description: "Run and author Fadeno playbooks \u2014 repeatable plan/implement/review/test workflows with file-backed run traces. Seed a repo with `fadeno init --omp --data-only`.",
+      license: "MIT",
+      repository: "https://github.com/CrocSwap/fadeno",
+      keywords: ["ai", "agents", "omp", "playbook", "workflow", "skills"],
+      omp: {}
+    },
+    null,
+    2
+  ) + "\n";
+  const manifestPath = (0, import_node_path25.join)(outDir, "package.json");
+  results.push({ path: manifestPath, status: emitFile(manifestPath, manifest, force) });
+  for (const skill of OMP_SKILLS) {
+    const skillMd = (0, import_node_fs25.readFileSync)((0, import_node_path25.join)(tpl, "common", "skills", skill, "SKILL.md"), "utf8");
+    const skillMdPath = (0, import_node_path25.join)(outDir, "skills", skill, "SKILL.md");
+    results.push({ path: skillMdPath, status: emitFile(skillMdPath, skillMd, force) });
+    const references = (0, import_node_path25.join)(tpl, "common", "skills", skill, "references");
+    if ((0, import_node_fs25.existsSync)(references)) copyTree(references, (0, import_node_path25.join)(outDir, "skills", skill, "references"), force, results);
+    const launcherPath = (0, import_node_path25.join)(outDir, "skills", skill, "scripts", "fadeno.cjs");
+    results.push({
+      path: launcherPath,
+      status: emitFile(
+        launcherPath,
+        (0, import_node_fs25.readFileSync)((0, import_node_path25.join)(tpl, "common", "plugin", "fadeno.cjs"), "utf8").replace("__FADENO_HARNESS__", "omp"),
+        force
+      )
+    });
+    (0, import_node_fs25.chmodSync)(launcherPath, 493);
+  }
+  copyTree((0, import_node_path25.join)(tpl, "omp", "omp-agents"), (0, import_node_path25.join)(outDir, "agents"), force, results);
+  const repoBundle = (0, import_node_path25.join)(tpl, "..", "plugin-omp", "bin");
+  const adjacentBundle = (0, import_node_path25.dirname)(tpl);
+  const bundledBin = (0, import_node_fs25.existsSync)((0, import_node_path25.join)(repoBundle, "fadeno")) ? repoBundle : (0, import_node_fs25.existsSync)((0, import_node_path25.join)(adjacentBundle, "fadeno")) ? adjacentBundle : null;
+  const destinationBin = (0, import_node_path25.join)(outDir, "bin");
+  if (bundledBin != null && (0, import_node_path25.resolve)(bundledBin) !== (0, import_node_path25.resolve)(destinationBin)) {
+    copyTree(bundledBin, destinationBin, force, results);
+  }
+  const destinationCli = (0, import_node_path25.join)(destinationBin, "fadeno");
+  if ((0, import_node_fs25.existsSync)(destinationCli)) (0, import_node_fs25.chmodSync)(destinationCli, 493);
+  return { outDir, results };
+}
 
 // src/commands/steering.ts
 var import_node_fs27 = require("node:fs");
@@ -31189,6 +31276,277 @@ function runSteeringApplyClaude(opts) {
   const restartRequired = false;
   return { results, materialization: materialization2, baseline, restartRequired, conflicts, scope, removed, ignoredLocalDials };
 }
+var OPENCODE_MANAGED_MARK = "<!-- fadeno:managed";
+var OPENCODE_PLUGIN_MANAGED_MARK = "// fadeno:managed";
+function stampManagedOpenCodeAgent(body) {
+  const header2 = `${OPENCODE_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(body)} -->`;
+  if (body.startsWith("---\n")) {
+    const close = body.indexOf("\n---\n");
+    if (close >= 0) {
+      const after = close + "\n---\n".length;
+      return `${body.slice(0, after)}${header2}
+${body.slice(after)}`;
+    }
+  }
+  return `${header2}
+${body}`;
+}
+function openCodeManagedEmit(path, body, force) {
+  const existed = (0, import_node_fs27.existsSync)(path);
+  if (existed && !force) {
+    const existing = (0, import_node_fs27.readFileSync)(path, "utf8");
+    if (!existing.includes(OPENCODE_MANAGED_MARK)) return "skipped";
+    if (existing === body) return "skipped";
+  }
+  (0, import_node_fs27.mkdirSync)((0, import_node_path27.join)(path, ".."), { recursive: true });
+  (0, import_node_fs27.writeFileSync)(path, body, "utf8");
+  return existed ? "overwritten" : "created";
+}
+function removeManagedOpenCodeFile(path, removed) {
+  if (!(0, import_node_fs27.existsSync)(path)) return;
+  let text;
+  try {
+    text = (0, import_node_fs27.readFileSync)(path, "utf8");
+  } catch {
+    return;
+  }
+  if (!text.includes(OPENCODE_MANAGED_MARK)) return;
+  (0, import_node_fs27.unlinkSync)(path);
+  removed.push(path);
+}
+function readOpenCodeRoleTemplate(archetype) {
+  const source = (0, import_node_fs27.readFileSync)(
+    (0, import_node_path27.join)(templatesDir(), "opencode", "opencode-agents", `${archetype}.md`),
+    "utf8"
+  );
+  let rest = source;
+  if (rest.startsWith("---\n")) {
+    const end = rest.indexOf("\n---\n", 4);
+    if (end >= 0) rest = rest.slice(end + "\n---\n".length);
+  }
+  const described = /^description:\s*(.+)$/m.exec(source);
+  return {
+    description: described?.[1]?.trim() ?? `Fadeno ${archetype} role.`,
+    body: rest.trimStart()
+  };
+}
+function renderOpenCodeRoleSlot(archetype, modelId, pinnedEffort) {
+  const piece = readOpenCodeRoleTemplate(archetype);
+  const refresh = " Fadeno-steered slot; re-run `fadeno steering apply --opencode` after re-dialing.";
+  const lines = ["---", `description: ${piece.description}${refresh}`, "mode: subagent"];
+  if (modelId != null && modelId !== NEUTRAL_HOST_EXECUTOR) lines.push(`model: ${modelId}`);
+  if (pinnedEffort != null && modelId != null && modelId !== NEUTRAL_HOST_EXECUTOR) {
+    lines.push(`variant: ${pinnedEffort}`);
+  }
+  lines.push("---", "");
+  return `${lines.join("\n")}
+${piece.body}
+`;
+}
+function renderOpenCodeDispatchBroker(archetype) {
+  const piece = readOpenCodeRoleTemplate(archetype);
+  return `---
+description: Fadeno command broker for the ${archetype} archetype \u2014 relays the received task verbatim to the external executor bound by Fadeno dials. Never performs the task itself.
+mode: subagent
+---
+
+You are a **dispatch relay**, not an implementer. You do no thinking about the
+task itself and you never attempt it: your only job is to hand the task,
+byte-for-byte, to the external executor the user bound to the \`${archetype}\`
+archetype via Fadeno dials, then relay its report.
+
+Your FIRST and only required tool call is the contract call below \u2014 make it
+ONE Bash call with the Bash \`timeout\` parameter set to \`600000\` (external
+executors routinely exceed the default, and a timeout kill destroys their work):
+
+\`\`\`bash
+fadeno dispatch --archetype ${archetype} --tag ${archetype}-<slug> <<'FADENO_PROMPT'
+...the ENTIRE task prompt you received, exactly as received \u2014 verbatim, every
+line, starting at its very first line; headers, markers, and metadata included;
+no paraphrase, no truncation, nothing added...
+FADENO_PROMPT
+\`\`\`
+
+Replace \`<slug>\` with 2-4 hyphenated words naming THIS task
+(\`${archetype}-parse-retry-header\`). Choose it BEFORE the call: the tag is the
+only handle that survives the Bash call being killed, and it makes recovery
+after a kill possible at all. The quoted heredoc keeps the shell from expanding
+anything inside the prompt; the kernel snapshots the prompt and writes the
+evidence rows itself.
+
+Then:
+
+1. Relay the command's stdout report **verbatim** as your final response \u2014 no
+   summarizing, trimming, reformatting, or annotating. Relay the verdict line
+   the command prints on stderr with it (\`ok\`, \`FAILED\`, \`NO OUTPUT\`,
+   \`TIMED OUT\`, plus any merge-back line). \`output attested\` is NOT a
+   verdict. You may prefix one structural sentence stating these are the
+   executor's own claims, which you have no tools to verify.
+
+2. If the command exits non-zero, report its output verbatim and state plainly
+   that the dispatch failed. Do NOT attempt the task yourself as a fallback.
+
+3. If the call is killed or times out, the result is UNKNOWN, not failed.
+   Recover with the tag you launched with:
+
+   \`\`\`bash
+   fadeno dispatches --output tag:${archetype}-<slug> --wait 120
+   \`\`\`
+
+   The kernel writes the completion row only when the executor exits, so a
+   caller that just timed out must wait like this before concluding anything.
+   If the wait returns a completed dispatch, that IS the result: relay its
+   output and verdict per rule 1. Only if the wait expires with still no
+   completion row, report that the executor MAY STILL BE RUNNING and must be
+   checked on disk before anyone re-dispatches \u2014 two workers racing on the same
+   files is the failure this avoids. An empty recovered output is not a result:
+   say it produced nothing.
+
+4. If the task changes after you dispatched, do NOT re-dispatch and do not fold
+   the amendment into a new call. Report the discrepancy; amending a live
+   dispatch is the caller's decision.
+
+Permission boundary: the external executor runs outside this harness's fences,
+under flags the user configured via Fadeno dials; the dispatch evidence row is
+the audit trail. Original role description: ${piece.description}
+`;
+}
+function renderOpenCodeRefusalBroker(archetype) {
+  return `---
+description: Reports why the Fadeno steering layer refused a ${archetype} spawn, then stops. Spawned only by the fadeno steering plugin when no honest delivery exists.
+mode: subagent
+---
+
+You are a **refusal reporter**. Your task prompt begins with a block titled
+\`# FADENO STEERING REFUSED (<predicate>)\`. Do everything below and NOTHING else:
+
+1. Relay the entire refusal block \u2014 from the title through the
+   \`FADENO REFUSAL BOUNDARY\` line, including the REFUSAL REASON \u2014 **verbatim**
+   as your response.
+2. State plainly that the requested work was NOT started and nothing was done.
+3. Stop. Do not read further, do not perform the task after the boundary, do
+   not attempt any substitute or partial version of it, and do not inspect the
+   repository.
+
+The task text below the boundary exists only because the original spawn could
+not be emptied; it is context for whoever reads your report, never work for you.
+`;
+}
+function runSteeringApplyOpenCode(opts) {
+  const repoRoot = rootOf(opts);
+  if (opts.scope === "user") {
+    throw new SteeringError(
+      "OpenCode steering materializes at project scope only (.opencode/agent/); --scope user would export this repo's dials to every repo on this machine."
+    );
+  }
+  const { profile } = (() => {
+    try {
+      return loadExecutorProfile(repoRoot, opts.userPathOptions, "opencode");
+    } catch (err) {
+      if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+      throw err;
+    }
+  })();
+  let dialLayers;
+  try {
+    dialLayers = dialLayersForApply("project", repoRoot, profile, opts.userPathOptions).layers;
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+    throw err;
+  }
+  const agentDir = (0, import_node_path27.join)(repoRoot, ".opencode", "agent");
+  const results = [];
+  const materialization2 = {};
+  const baseline = {};
+  const removed = [];
+  const pending = [];
+  for (const archetype of CODEX_STEERING_ARCHETYPES) {
+    let cascade;
+    try {
+      cascade = resolveDialCascade(archetype, archetype, { bindings: profile.bindings, archetypes: profile.archetypes }, dialLayers);
+    } catch (err) {
+      if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+      throw err;
+    }
+    const executorName = formatDialRef(cascade.ref);
+    let spec = profile.executors?.[executorName] ?? null;
+    let compiled = null;
+    try {
+      compiled = compileDialRef(cascade.ref, profile);
+      if (spec == null) spec = compiled.spec;
+    } catch {
+    }
+    if (spec == null) {
+      throw new SteeringError(`archetype "${archetype}" resolved to "${executorName}" but no executor exists in profile`);
+    }
+    if (spec.adapter === "host" && spec.agentType === "*") {
+      spec = { ...spec, agentType: archetype };
+    }
+    if (spec.adapter !== "host") {
+      materialization2[archetype] = {
+        kind: "command-broker",
+        adapter: "command",
+        executor: executorName,
+        model: spec.model
+      };
+      pending.push({
+        path: (0, import_node_path27.join)(agentDir, `fadeno-dispatch-${archetype}.md`),
+        body: stampManagedOpenCodeAgent(renderOpenCodeDispatchBroker(archetype))
+      });
+      removeManagedOpenCodeFile((0, import_node_path27.join)(agentDir, `${archetype}.md`), removed);
+    } else {
+      baseline[archetype] = executorName;
+      materialization2[archetype] = {
+        kind: "host",
+        adapter: "host",
+        executor: executorName,
+        model: spec.model
+      };
+      pending.push({
+        path: (0, import_node_path27.join)(agentDir, `${archetype}.md`),
+        body: stampManagedOpenCodeAgent(
+          renderOpenCodeRoleSlot(archetype, compiled?.modelId ?? spec.model ?? null, cascade.ref.effort ?? null)
+        )
+      });
+      removeManagedOpenCodeFile((0, import_node_path27.join)(agentDir, `fadeno-dispatch-${archetype}.md`), removed);
+    }
+  }
+  for (const archetype of CODEX_STEERING_ARCHETYPES) {
+    pending.push({
+      path: (0, import_node_path27.join)(agentDir, `fadeno-steering-refused-${archetype}.md`),
+      body: stampManagedOpenCodeAgent(renderOpenCodeRefusalBroker(archetype))
+    });
+  }
+  for (const item of pending) {
+    results.push({ path: item.path, status: openCodeManagedEmit(item.path, item.body, opts.force ?? false) });
+  }
+  const pluginTemplate = (0, import_node_fs27.readFileSync)((0, import_node_path27.join)(templatesDir(), "opencode", "plugin", "fadeno-steering.js"), "utf8");
+  const pluginBody = `${OPENCODE_PLUGIN_MANAGED_MARK} version=${packageVersion()}
+` + stampHookVersion(pluginTemplate).replace(/^#!.*\n/, "");
+  const pluginPath = (0, import_node_path27.join)(repoRoot, ".opencode", "plugin", "fadeno-steering.js");
+  results.push({ path: pluginPath, status: openCodePluginEmit(pluginPath, pluginBody, opts.force ?? false) });
+  const conflicts = pending.filter((item) => (0, import_node_fs27.existsSync)(item.path) && openCodeFileDiffers(item.path, item.body)).map((item) => item.path);
+  const restartRequired = results.some((item) => item.status === "created" || item.status === "overwritten");
+  return { results, materialization: materialization2, baseline, restartRequired, conflicts, scope: "project", removed };
+}
+function openCodePluginEmit(path, body, force) {
+  const existed = (0, import_node_fs27.existsSync)(path);
+  if (existed && !force) {
+    const existing = (0, import_node_fs27.readFileSync)(path, "utf8");
+    if (!existing.includes(OPENCODE_PLUGIN_MANAGED_MARK)) return "skipped";
+    if (existing === body) return "skipped";
+  }
+  (0, import_node_fs27.mkdirSync)((0, import_node_path27.join)(path, ".."), { recursive: true });
+  (0, import_node_fs27.writeFileSync)(path, body, "utf8");
+  return existed ? "overwritten" : "created";
+}
+function openCodeFileDiffers(path, body) {
+  try {
+    return (0, import_node_fs27.readFileSync)(path, "utf8") !== body;
+  } catch {
+    return false;
+  }
+}
 
 // src/commands/init.ts
 var SKILLS2 = ["fadeno-runner", "fadeno-builder", "fadeno-driver", "fadeno-bakeoff"];
@@ -31196,10 +31554,12 @@ function runInit(opts) {
   const tpl = templatesDir();
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
   const force = opts.force ?? false;
-  const withSteering = opts.noSteering === true ? false : opts.withSteering ?? (opts.target !== "grok" && opts.target !== "opencode");
+  const withSteering = opts.noSteering === true ? false : opts.withSteering ?? (opts.target !== "grok" && opts.target !== "omp");
   const results = [];
-  if (withSteering && (opts.target === "grok" || opts.target === "opencode")) {
-    throw new Error("Loadout steering is currently supported for Codex and Claude Code, not Grok Build or OpenCode.");
+  if (withSteering && (opts.target === "grok" || opts.target === "omp")) {
+    throw new Error(
+      "Loadout steering is currently supported for Codex, Claude Code, and OpenCode \u2014 not Grok Build or omp."
+    );
   }
   copyTree((0, import_node_path28.join)(tpl, "common", "fadeno"), (0, import_node_path28.join)(repoRoot, ".fadeno"), force, results);
   copyTree(
@@ -31224,6 +31584,9 @@ function runInit(opts) {
         break;
       case "grok":
         skillsBase = (0, import_node_path28.join)(repoRoot, ".grok", "skills");
+        break;
+      case "omp":
+        skillsBase = (0, import_node_path28.join)(repoRoot, ".agents", "skills");
         break;
       case "opencode":
         skillsBase = (0, import_node_path28.join)(repoRoot, ".agents", "skills");
@@ -31271,6 +31634,12 @@ function runInit(opts) {
           force,
           results
         );
+        if (withSteering) {
+          results.push(...runSteeringApplyOpenCode({ repoRoot, force }).results);
+        }
+        break;
+      case "omp":
+        copyTree((0, import_node_path28.join)(tpl, "omp", "omp-agents"), (0, import_node_path28.join)(repoRoot, ".omp", "agents"), force, results);
         break;
     }
     let bootstrapName;
@@ -31281,6 +31650,7 @@ function runInit(opts) {
       case "codex":
       case "grok":
       case "opencode":
+      case "omp":
         bootstrapName = "AGENTS.md";
         break;
     }
@@ -31289,6 +31659,9 @@ function runInit(opts) {
   }
   if (opts.dataOnly && withSteering && opts.target === "codex") {
     results.push(...emitCodexSteeringBrokers({ repoRoot, force }));
+  }
+  if (opts.dataOnly && withSteering && opts.target === "opencode") {
+    results.push(...runSteeringApplyOpenCode({ repoRoot, force }).results);
   }
   if (opts.withHooks) emitHooks(tpl, repoRoot, opts.target, force, results);
   if (withSteering && opts.target === "claude") {
@@ -32355,7 +32728,7 @@ var ModelsError = class extends Error {
 function harnessSource(userPathOptions = {}) {
   const env = userPathOptions.env ?? process.env;
   const explicit = env.FADENO_HARNESS?.trim();
-  if (explicit === "codex" || explicit === "claude" || explicit === "grok" || explicit === "opencode" || explicit === "standalone") return "FADENO_HARNESS";
+  if (explicit === "codex" || explicit === "claude" || explicit === "grok" || explicit === "opencode" || explicit === "omp" || explicit === "standalone") return "FADENO_HARNESS";
   if (detectAmbientHarness(userPathOptions).harness != null) return "ambient";
   if (readUserHarness(userPathOptions) != null) return "user default";
   return "fallback";
@@ -32463,6 +32836,13 @@ function runModels(opts = {}) {
     }
     rows.push(row);
   }
+  rows.sort((a, b) => {
+    if (a.home_via !== b.home_via) return a.home_via < b.home_via ? -1 : 1;
+    const pa = a.provider ?? "";
+    const pb = b.provider ?? "";
+    if (pa !== pb) return pa < pb ? -1 : 1;
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+  });
   const listable = /* @__PURE__ */ new Set();
   for (const [key, route] of Object.entries(routesForHarness(profile))) {
     if (route.models_command != null && route.models_command.length > 0) listable.add(route.driver ?? key);
@@ -35571,11 +35951,12 @@ var SHADOW_SPEC = command(
   { "--via": { kind: "free" }, "--rate": { kind: "free" }, "--json": NONE },
   ["archetype", "free"]
 );
+var MODELS_SPEC = command({ "--driver": { kind: "free" }, "--json": NONE }, ["executor"]);
 var COMMANDS = {
   setup: command({ "--codex": NONE, "--claude": NONE, "--non-interactive": NONE, "--from": PATH, "--reset-runtime": NONE }),
-  status: command({ "--verbose": NONE }),
-  doctor: command({ "--codex": NONE, "--claude": NONE }),
-  vendor: command({ "--codex": NONE, "--claude": NONE, "--grok": NONE, "--opencode": NONE, "--with-hooks": NONE, "--no-steering": NONE, "--force": NONE }),
+  status: command({ "--verbose": NONE, "--codex": NONE, "--claude": NONE, "--opencode": NONE }),
+  doctor: command({ "--codex": NONE, "--claude": NONE, "--opencode": NONE }),
+  vendor: command({ "--codex": NONE, "--claude": NONE, "--grok": NONE, "--opencode": NONE, "--omp": NONE, "--with-hooks": NONE, "--no-steering": NONE, "--force": NONE }),
   uninstall: command({ "--codex": NONE, "--claude": NONE, "--all": NONE, "--purge-user-data": NONE, "--force": NONE }),
   clean: command({ "--force": NONE }),
   unvendor: command({ "--force": NONE }),
@@ -35585,6 +35966,7 @@ var COMMANDS = {
     "--claude": NONE,
     "--grok": NONE,
     "--opencode": NONE,
+    "--omp": NONE,
     "--force": NONE,
     "--with-hooks": NONE,
     "--with-steering": NONE,
@@ -35594,7 +35976,9 @@ var COMMANDS = {
   validate: command({ "--schema": { kind: "enum", values: [...SCHEMA_KINDS] } }, ["path"]),
   diagram: command({ "--format": { kind: "enum", values: ["ascii", "mermaid"] } }, ["playbook"]),
   "new-run": command({ "--input": { kind: "input" } }, ["playbook", "free"]),
-  models: command({ "--driver": { kind: "free" }, "--json": NONE }, ["executor"]),
+  models: MODELS_SPEC,
+  // Top-level alias for `models` — same handler in cli.ts, same flags.
+  model: MODELS_SPEC,
   dial: command(
     { "--via": { kind: "free" }, "--session": NONE, "--user": NONE, "--repo": NONE, "--rate": { kind: "free" }, "--archetype": { kind: "archetype" }, "--json": NONE },
     ["archetype", "free"],
@@ -35712,7 +36096,7 @@ var COMMANDS = {
   ),
   show: command({ "--legacy": NONE, "--events": NONE }, ["run"]),
   verify: command({ "--latest": NONE, "--allow-failed": NONE, "--legacy": NONE }, ["run"]),
-  plugin: command({ "--codex": NONE, "--grok": NONE, "--opencode": NONE, "--force": NONE }, ["path"]),
+  plugin: command({ "--codex": NONE, "--grok": NONE, "--opencode": NONE, "--omp": NONE, "--force": NONE }, ["path"]),
   completion: command({}, [], {
     bash: command({})
   })
@@ -39427,11 +39811,11 @@ var import_meta2 = {};
 var HELP = `fadeno \u2014 the playbook layer for AI coding agents
 
 Usage:
-  fadeno init --codex|--claude|--grok|--opencode [opts]   Explicitly scaffold project-owned capability
+  fadeno init --codex|--claude|--grok|--opencode|--omp [opts]   Explicitly scaffold project-owned capability
   fadeno setup [--codex|--claude] [--from <bin-dir>] [--reset-runtime]  Install safe user-scoped integration
   fadeno status [--verbose]                   Show effective definitions, routing, and state
-  fadeno doctor [--codex|--claude]            Run read-only diagnostics
-  fadeno vendor --codex|--claude|--grok|--opencode   Vendor capability and definitions into a project
+  fadeno doctor [--codex|--claude|--opencode]            Run read-only diagnostics
+  fadeno vendor --codex|--claude|--grok|--opencode|--omp   Vendor capability and definitions into a project
   fadeno evidence promote <run>               Promote a verified run receipt
   fadeno uninstall --codex|--claude|--all     Remove managed user integration
   fadeno clean [--force]                      Preview/remove ignored repo runtime state
@@ -39450,6 +39834,7 @@ Usage:
   fadeno dial resolve --archetype <a>          # JSON, hook contract unchanged
   fadeno models [<name>]                Model registry + each model's home driver
   fadeno models --driver <alias>        Live backend model listing (routes with models_command)
+  fadeno model ...                      # alias for 'fadeno models ...' (same forms)
   fadeno steering resolve|apply [...]   Resolve or materialize hybrid Codex steering
   fadeno dispatch [flags]               Resolve archetype \u2192 executor and invoke it once (ad hoc)
                                         (--shadow <ref> duplicates it to a one-shot challenger)
@@ -39498,7 +39883,7 @@ Usage:
 Options:
   --with-hooks            (init) Also scaffold tier-2 enforcement hooks
   --with-steering         (init) Deprecated compatibility alias; steering is now default
-  --no-steering           (init) Opt out of default Codex/Claude steering
+  --no-steering           (init) Opt out of default Codex/Claude/OpenCode steering
   --non-interactive       (setup) Accepted compatibility no-op; setup never prompts
   --from <bin-dir>        (setup) Use bin dir as runtime source (instead of bundled)
   --reset-runtime         (setup) Allow downgrade to mirror this plugin
@@ -39582,7 +39967,7 @@ Options:
   -v, --version           Show version
 
 Environment:
-  FADENO_HARNESS          Select the harness for route compilation (codex|claude|grok|opencode|standalone)
+  FADENO_HARNESS          Select the harness for route compilation (codex|claude|grok|opencode|omp|standalone)
 Examples:
   fadeno validate
   fadeno new-run code-change-review "Add CSV export for reports"
@@ -39638,6 +40023,7 @@ var KNOWN_CLI_COMMANDS = /* @__PURE__ */ new Set([
   "drive",
   "cancel",
   "models",
+  "model",
   "dial",
   "shadow",
   "dispatch",
@@ -39795,6 +40181,8 @@ Usage:
 
 Options:
   --json   Structured output
+
+\`fadeno model\` is an alias for every form above.
 
 The table is frame-neutral: \`via\` is the model's home driver \u2014 the CLI its
 provider route names, and the value \`--via\` takes to pick a different one \u2014
@@ -40109,11 +40497,11 @@ Options:
   init: `fadeno init \u2014 scaffold project-owned Fadeno capability
 
 Usage:
-  fadeno init --codex|--claude|--grok|--opencode [flags]
+  fadeno init --codex|--claude|--grok|--opencode|--omp [flags]
 
 Options:
   --with-hooks    Also scaffold tier-2 enforcement hooks
-  --no-steering   Opt out of default Codex/Claude steering
+  --no-steering   Opt out of default Codex/Claude/OpenCode steering
   --data-only     Seed definitions + driver policy (host capability via plugin)
   --force         Overwrite existing files / refresh the bootstrap section
 `,
@@ -40134,14 +40522,14 @@ The managed runtime self-refreshes from the plugin on every plugin-launched comm
   status: `fadeno status \u2014 show effective definitions, routing, and state
 
 Usage:
-  fadeno status [--verbose] [--codex|--claude]
+  fadeno status [--verbose] [--codex|--claude|--opencode]
 
 The status runtime reports skew direction (managed-older, managed-newer, divergent) and preferredCli (use managed only when observed version matches invoking version; otherwise use invoking path). Skills and subagents are loaded at host session start; a fresh session is required to refresh them \u2014 no setup or refresh will update the current session. FADENO_BUNDLED_RUNTIME is used for plugin-launched refresh detection.
 `,
   doctor: `fadeno doctor \u2014 run read-only diagnostics
 
 Usage:
-  fadeno doctor [--codex|--claude]
+  fadeno doctor [--codex|--claude|--opencode]
 
 Checks include runtime skew (managed-older, managed-newer, divergent), preferredCli, runtime.staging, kept-newer, locked, skipped-no-source, and session-definitions. Doctor remains read-only and never writes the runtime. Skills and subagents require a fresh session.
 `,
@@ -40151,7 +40539,7 @@ Usage:
   fadeno steering resolve --archetype <a> [--host-executor <n>] [--role <r>]
                           [--run <id> --dispatch-id <id>]
                           [--prompt-file <path>|--prompt-sha256 <hex>]
-  fadeno steering apply --codex|--claude [--scope project|user] [--force]
+  fadeno steering apply --codex|--claude|--opencode [--scope project|user] [--force]
 
 resolve emits the routing JSON hooks consume (exit 2 = restart required or
 write conflict \u2014 not runnable in this session). apply materializes the
@@ -40159,7 +40547,11 @@ worker/reviewer/judge slots from the current dials, where the harness's agent
 format can carry one: Codex TOMLs (model + model_reasoning_effort), loaded on
 a fresh session. Under --claude it writes nothing and only cleans up retired
 managed files \u2014 the Agent tool has no effort channel, so a dialed @effort
-selects the delivery lane instead of an identity. Re-run after re-dialing.
+selects the delivery lane instead of an identity. Under --opencode it renders
+materialized agent files under .opencode/agent/ (identity baked in, Codex-style)
+plus a runtime plugin that picks the delivery lane per spawn (Claude-style);
+project scope only, and OpenCode loads both at process start, so restart it
+after changes. Re-run after re-dialing.
 --prompt-file (or --prompt-sha256) lets resolve see this exact prompt's
 digest, so a shadow-attached archetype's reply carries the pair decision
 (shadow.selected/shadow.routable) and, on a selected routable pair, resolves
@@ -40208,12 +40600,13 @@ Shares validation with tool-run; one attempt wins via durable claim.
 Usage:
   fadeno plugin [dir]            Claude Code plugin (default dir: plugin/)
   fadeno plugin [dir] --codex    Codex plugin
+  fadeno plugin [dir] --omp      omp plugin
 
 Options:
   --force   Overwrite existing generated files
 `
 };
-var SIGIL = { codex: "$", claude: "/", grok: "/", opencode: "" };
+var SIGIL = { codex: "$", claude: "/", grok: "/", opencode: "", omp: "" };
 var SCHEMA_KINDS2 = SCHEMA_KINDS;
 function printInitSummary(target, repoRoot, results, withHooks, withSteering, dataOnly) {
   const counts = { created: 0, overwritten: 0, appended: 0, skipped: 0 };
@@ -40243,7 +40636,7 @@ ${counts.created} created, ${counts.appended} appended, ${counts.overwritten} ov
   console.log("  2. Run `fadeno validate` to check the playbooks");
   if (dataOnly) {
     console.log(
-      target === "codex" ? "  3. Use the $fadeno-runner skill (from the installed Fadeno plugin)" : target === "opencode" ? "  3. Use the fadeno-runner skill (installed under .agents/skills)" : "  3. Use the /fadeno:runner skill (from the installed Fadeno plugin)"
+      target === "codex" ? "  3. Use the $fadeno-runner skill (from the installed Fadeno plugin)" : target === "opencode" || target === "omp" ? "  3. Use the fadeno-runner skill (installed under .agents/skills)" : "  3. Use the /fadeno:runner skill (from the installed Fadeno plugin)"
     );
   } else {
     console.log(`  3. Ask your agent to use the ${SIGIL[target]}fadeno-runner skill on a complex task`);
@@ -40255,7 +40648,7 @@ ${counts.created} created, ${counts.appended} appended, ${counts.overwritten} ov
   }
   if (withSteering) {
     console.log(
-      target === "claude" ? `  ${nextStep}. Steering is active locally; restart Claude Code so the Agent hook is loaded` : `  ${nextStep}. Materialize Codex steering with \`fadeno steering apply <loadout> --codex --force\`; command slots switch live, while host changes require a fresh session`
+      target === "claude" ? `  ${nextStep}. Steering is active locally; restart Claude Code so the Agent hook is loaded` : target === "opencode" ? `  ${nextStep}. Steering materialized under .opencode/; restart OpenCode so the agent files and plugin load` : `  ${nextStep}. Materialize Codex steering with \`fadeno steering apply <loadout> --codex --force\`; command slots switch live, while host changes require a fresh session`
     );
   }
 }
@@ -40803,12 +41196,13 @@ function requireTarget(values) {
   if (values.claude) selected.push("claude");
   if (values.grok) selected.push("grok");
   if (values.opencode) selected.push("opencode");
+  if (values.omp) selected.push("omp");
   if (selected.length > 1) {
-    throw new Error("Choose exactly one target: --codex, --claude, --grok, or --opencode.");
+    throw new Error("Choose exactly one target: --codex, --claude, --grok, --opencode, or --omp.");
   }
   if (selected.length === 1) return selected[0];
   throw new Error(
-    "Specify a target: `fadeno init --codex`, `fadeno init --claude`, `fadeno init --grok`, or `fadeno init --opencode`."
+    "Specify a target: `fadeno init --codex`, `fadeno init --claude`, `fadeno init --grok`, `fadeno init --opencode`, or `fadeno init --omp`."
   );
 }
 function optionalTarget(values) {
@@ -40817,7 +41211,8 @@ function optionalTarget(values) {
   if (values.claude) selected.push("claude");
   if (values.grok) selected.push("grok");
   if (values.opencode) selected.push("opencode");
-  if (selected.length > 1) throw new Error("Choose at most one target: --codex, --claude, --grok, or --opencode.");
+  if (values.omp) selected.push("omp");
+  if (selected.length > 1) throw new Error("Choose at most one target: --codex, --claude, --grok, --opencode, or --omp.");
   return selected[0];
 }
 function main(argv) {
@@ -40845,6 +41240,7 @@ function main(argv) {
         claude: { type: "boolean" },
         grok: { type: "boolean" },
         opencode: { type: "boolean" },
+        omp: { type: "boolean" },
         force: { type: "boolean" },
         "with-hooks": { type: "boolean" },
         "with-steering": { type: "boolean" },
@@ -40972,7 +41368,7 @@ function main(argv) {
   switch (command2) {
     case "setup": {
       const target = optionalTarget(values);
-      if (target === "grok" || target === "opencode") throw new Error("`fadeno setup` supports --codex or --claude; Grok and OpenCode have no user-scoped setup.");
+      if (target === "grok" || target === "opencode" || target === "omp") throw new Error("`fadeno setup` supports --codex or --claude; Grok, OpenCode, and omp have no user-scoped setup.");
       const runtimeSource = values.from != null ? String(values.from) : void 0;
       const result = runSetup({ target: target ?? null, nonInteractive: values["non-interactive"], runtimeSource, resetRuntime: Boolean(values["reset-runtime"]) });
       console.log(`Fadeno setup (${result.target ?? "standalone"})`);
@@ -40984,7 +41380,7 @@ function main(argv) {
     }
     case "status": {
       const target = optionalTarget(values);
-      if (target === "grok" || target === "opencode") throw new Error("Use `fadeno status` without --grok/--opencode; steering for those hosts is intentionally unsupported.");
+      if (target === "grok") throw new Error("Use `fadeno status` without --grok; steering for that host is intentionally unsupported.");
       const result = runStatus({ verbose: values.verbose, target: target ?? null });
       console.log(`Fadeno ${result.version} \xB7 harness ${result.harness ?? "unknown"}`);
       console.log(`runtime: ${result.runtime.invocationSource}; managed ${result.runtime.managedVersion ?? "not installed"}${result.runtime.managedPath ? ` at ${result.runtime.managedPath}` : ""}${result.runtime.versionCurrent ? "" : " (version skew)"}`);
@@ -41022,7 +41418,8 @@ function main(argv) {
     }
     case "doctor": {
       const target = optionalTarget(values);
-      if (target === "grok" || target === "opencode") throw new Error("Use `fadeno doctor` without --grok/--opencode; steering for those hosts is intentionally unsupported.");
+      if (target === "grok") throw new Error("Use `fadeno doctor` without --grok; steering for that host is intentionally unsupported.");
+      if (target === "omp") throw new Error("Use `fadeno doctor` without --omp; there is no user-scoped omp integration to diagnose.");
       const result = runDoctor({ target: target ?? null });
       for (const item of result.findings) console.log(`${item.severity.padEnd(7)} ${item.check}: ${item.detail}${item.remediation ? ` \u2014 ${item.remediation}` : ""}`);
       return result.ok ? 0 : 1;
@@ -41031,8 +41428,7 @@ function main(argv) {
       const target = requireTarget(values);
       const result = runVendor({
         target,
-        withHooks: values["with-hooks"],
-        withSteering: target !== "grok" && target !== "opencode" && !values["no-steering"],
+        withSteering: target !== "grok" && target !== "omp" && !values["no-steering"],
         force: values.force
       });
       console.log(`Fadeno vendored for ${result.target} in ${result.repoRoot}`);
@@ -41063,7 +41459,7 @@ function main(argv) {
     }
     case "uninstall": {
       const target = optionalTarget(values);
-      if (target === "grok" || target === "opencode") throw new Error("Grok and OpenCode have no user-scoped Fadeno integration to uninstall.");
+      if (target === "grok" || target === "opencode" || target === "omp") throw new Error("Grok, OpenCode, and omp have no user-scoped Fadeno integration to uninstall.");
       const result = runUninstall({
         target: target ?? null,
         all: values.all,
@@ -41097,7 +41493,7 @@ function main(argv) {
         repoRoot,
         results,
         Boolean(values["with-hooks"]),
-        Boolean(values["with-steering"] || target !== "grok" && target !== "opencode" && !values["no-steering"]),
+        Boolean(values["with-steering"] || target !== "grok" && !values["no-steering"]),
         Boolean(values["data-only"])
       );
       return 0;
@@ -41152,11 +41548,29 @@ function main(argv) {
         return result.mode === "restart_required" || result.mode === "write_conflict" ? 2 : 0;
       }
       if (sub === "apply") {
-        const applyTarget = values.claude && !values.codex ? "claude" : values.codex && !values.claude ? "codex" : null;
-        if (applyTarget == null || values.grok || values.opencode || positionals[2] != null) {
-          throw new Error("Usage: fadeno steering apply --codex|--claude [--scope project|user] [--force]");
+        if (values.omp) throw new Error("Loadout steering has no omp implementation; supported targets are --codex, --claude, and --opencode.");
+        const targets = [values.codex && "codex", values.claude && "claude", values.opencode && "opencode"].filter(Boolean);
+        const applyTarget = targets.length === 1 ? targets[0] : null;
+        if (applyTarget == null || values.grok || positionals[2] != null) {
+          throw new Error("Usage: fadeno steering apply --codex|--claude|--opencode [--scope project|user] [--force]");
         }
         if (values.scope && values.scope !== "project" && values.scope !== "user") throw new Error("Invalid --scope. Use project or user.");
+        if (applyTarget === "opencode") {
+          const result2 = runSteeringApplyOpenCode({ target: "opencode", force: values.force, scope: values.scope });
+          const changed2 = result2.results.filter((item) => item.status !== "skipped").length;
+          console.log(`OpenCode steering materialized: ${result2.scope}`);
+          for (const [archetype, slot] of Object.entries(result2.materialization)) {
+            const how = slot.kind === "host" ? `in-session agent file (model: ${slot.model ?? "session baseline"})` : "dispatch broker (relay to the command lane)";
+            console.log(`  ${archetype} \u2192 ${how} ${slot.executor}`);
+          }
+          const removed = result2.removed ?? [];
+          for (const path of removed) console.log(`  removed stale managed agent: ${path}`);
+          console.log(
+            `  ${changed2} file(s) written under .opencode/; agent files and plugins load at process start, so restart OpenCode to steer live sessions.`
+          );
+          if (changed2 === 0 && result2.conflicts.length > 0) console.log("  Existing files were preserved; pass --force to replace them.");
+          return 0;
+        }
         if (applyTarget === "claude") {
           const result2 = runSteeringApplyClaude({ target: "claude", force: values.force, scope: values.scope });
           const changed2 = result2.results.filter((item) => item.status !== "skipped").length;
@@ -41314,6 +41728,15 @@ Or advance manually with the playbook cursor:`);
       return 0;
     }
     case "plugin": {
+      if (values.omp) {
+        const { outDir: outDir2, results: results2 } = runOmpPlugin({ outDir: positionals[1], force: values.force });
+        const counts2 = { created: 0, overwritten: 0, appended: 0, skipped: 0 };
+        for (const r of results2) counts2[r.status] += 1;
+        console.log(`Generated Fadeno omp plugin in ${outDir2}`);
+        console.log(`  ${counts2.created} created, ${counts2.overwritten} overwritten, ${counts2.skipped} skipped.`);
+        console.log("\nTest it: `omp plugin marketplace add . && omp plugin install fadeno@fadeno`");
+        return 0;
+      }
       if (values.grok || values.opencode) {
         throw new Error("The --grok and --opencode targets are supported by init only; no plugin generator exists for them.");
       }
@@ -41486,6 +41909,9 @@ Or advance manually with the playbook cursor:`);
         throw err;
       }
     }
+    // Top-level alias for `fadeno models ...` — same handler via grouped case
+    // labels, so the two spellings cannot drift apart.
+    case "model":
     case "models": {
       if (values.driver != null) {
         if (positionals.length > 1) throw new Error("Usage: fadeno models --driver <alias>  (no positional with --driver)");
@@ -41875,6 +42301,9 @@ Or advance manually with the playbook cursor:`);
               return `TIMED OUT: the kernel killed the executor at its ${deadline}deadline${result2.signal != null ? ` (${result2.signal})` : ""}; the work did NOT finish. ${result2.outputBytes ?? 0} bytes of output were captured before the kill. Re-dispatch with a larger --timeout, or none, rather than into the same wall.`;
             }
             case "failed":
+              if (result2.signal == null && result2.exitCode === 0) {
+                return "FAILED: exit 0, but the report claimed failure (FADENO-DISPATCH-RESULT: failed) \u2014 do not relay this as a success";
+              }
               return result2.signal != null ? `FAILED: the executor was killed by ${result2.signal}` : `FAILED: exit ${result2.exitCode ?? "?"}`;
             case "empty":
               return "NO OUTPUT: exit 0 with 0 bytes \u2014 nothing to relay";

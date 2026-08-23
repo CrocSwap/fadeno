@@ -1,0 +1,7 @@
+# Codex invocation policy for the Fadeno Driver skill.
+# The driver is for explicit "drive/resume this run" intent (host hands a run id),
+# not ambient task matching — the runner covers implicit playbook starts.
+interface:
+  displayname: "Fadeno Driver"
+  shortdescription: "Drive a Fadeno run with fadeno next and CLI role dispatch."
+allow_implicit_invocation: false

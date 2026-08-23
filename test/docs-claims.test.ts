@@ -479,6 +479,17 @@ const CLAIMS: Claim[] = [
       patterns: [/runAttest/, /host_attestation/, /never attested/],
     },
   },
+  {
+    id: 'omp-host-adapter',
+    doc: {
+      files: ['README.md', 'docs/kickoff-memo.md'],
+      patterns: [/init --omp/, /\.omp\/agents/],
+    },
+    src: {
+      files: ['src/commands/init.ts', 'src/lib/executors.ts'],
+      patterns: [/case 'omp'/, /'omp' \| 'standalone'/],
+    },
+  },
 ];
 
 /**

@@ -1,0 +1,13 @@
+{
+  "name": "fadeno",
+  "owner": {
+    "name": "Fadeno"
+  },
+  "plugins": [
+    {
+      "name": "fadeno",
+      "source": "./plugin-omp",
+      "description": "Run and author Fadeno playbooks (skills + role subagents + dispatch proxies). Seed a repo's playbooks with `fadeno init --omp --data-only`."
+    }
+  ]
+}

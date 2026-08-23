@@ -26,7 +26,7 @@ async function buildRuntime(binDir) {
   cpSync(join(repoRoot, 'templates'), join(binDir, 'templates'), { recursive: true });
 }
 
-for (const plugin of ['plugin', 'plugin-codex']) {
+for (const plugin of ['plugin', 'plugin-codex', 'plugin-omp']) {
   await buildRuntime(join(repoRoot, plugin, 'bin'));
   console.log(`built ${plugin}/bin/fadeno (v${version}) + ${plugin}/bin/templates`);
 }

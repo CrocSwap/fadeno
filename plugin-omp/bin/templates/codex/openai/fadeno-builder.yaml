@@ -1,0 +1,7 @@
+# Codex invocation policy for the Fadeno Builder skill.
+# The builder should NOT fire accidentally on prompts that merely mention a
+# "playbook" — require explicit $fadeno-builder invocation.
+interface:
+  displayname: "Fadeno Builder"
+  shortdescription: "Author or revise a Fadeno playbook."
+allow_implicit_invocation: false

@@ -328,3 +328,98 @@ export function runCodexPlugin(opts: PluginOptions = {}): PluginResult {
 
   return { outDir, results };
 }
+
+// omp plugin skills keep their full `fadeno-` names (the Codex convention):
+// omp deduplicates skills by name across providers and hands every skill a
+// native `/skill:<name>` command, so the Claude plugin's shortened names would
+// buy nothing here while risking collisions with unrelated plugins.
+const OMP_SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-bakeoff'] as const;
+
+/**
+ * Emit an omp plugin (`package.json` manifest + `skills/` + `agents/`) from the
+ * SAME shared skill templates as the Claude and Codex plugins. Bodies stay
+ * byte-identical to `fadeno init`'s — no surface-version stamps — because omp
+ * keys plugin upgrades off the manifest version, exactly like Codex.
+ *
+ * Deliberately absent, with reasons:
+ * - `commands/`: omp registers `/skill:<name>` for every discovered skill, so
+ *   slash entry points need no separate artifact.
+ * - `hooks/`: loadout steering has no omp implementation yet (init --omp says
+ *   so); when it lands it will be an extension module via `omp.extensions`.
+ * - `fadeno-setup` skill: `<cli> setup` supports only --codex/--claude, and
+ *   the skill's own text says to use only the current host's line — shipping
+ *   it here would teach an invocation that refuses.
+ */
+export function runOmpPlugin(opts: PluginOptions = {}): PluginResult {
+  const cwd = opts.cwd ?? process.cwd();
+  const tpl = templatesDir();
+  const ref = opts.outDir ?? 'plugin-omp';
+  const outDir = isAbsolute(ref) ? ref : resolve(cwd, ref);
+  const force = opts.force ?? false;
+  const results: EmitResult[] = [];
+
+  // `package.json` IS the omp plugin manifest: the `omp` key is what runtime
+  // plugin discovery requires before a package counts as loadable, and the
+  // version is single-sourced from package.json like both other manifests.
+  const manifest =
+    JSON.stringify(
+      {
+        name: 'fadeno',
+        version: packageVersion(),
+        description:
+          'Run and author Fadeno playbooks — repeatable plan/implement/review/test workflows with file-backed run traces. Seed a repo with `fadeno init --omp --data-only`.',
+        license: 'MIT',
+        repository: 'https://github.com/CrocSwap/fadeno',
+        keywords: ['ai', 'agents', 'omp', 'playbook', 'workflow', 'skills'],
+        omp: {},
+      },
+      null,
+      2,
+    ) + '\n';
+  const manifestPath = join(outDir, 'package.json');
+  results.push({ path: manifestPath, status: emitFile(manifestPath, manifest, force) });
+
+  for (const skill of OMP_SKILLS) {
+    // Full-named, unmodified SKILL.md — byte-identical to the other plugins'
+    // bodies and `fadeno init`'s (the shared single source).
+    const skillMd = readFileSync(join(tpl, 'common', 'skills', skill, 'SKILL.md'), 'utf8');
+    const skillMdPath = join(outDir, 'skills', skill, 'SKILL.md');
+    results.push({ path: skillMdPath, status: emitFile(skillMdPath, skillMd, force) });
+    const references = join(tpl, 'common', 'skills', skill, 'references');
+    if (existsSync(references)) copyTree(references, join(outDir, 'skills', skill, 'references'), force, results);
+    const launcherPath = join(outDir, 'skills', skill, 'scripts', 'fadeno.cjs');
+    results.push({
+      path: launcherPath,
+      status: emitFile(
+        launcherPath,
+        readFileSync(join(tpl, 'common', 'plugin', 'fadeno.cjs'), 'utf8')
+          .replace('__FADENO_HARNESS__', 'omp'),
+        force,
+      ),
+    });
+    chmodSync(launcherPath, 0o755);
+  }
+
+  // Task agents: role agents plus dispatch proxies in omp's format (name +
+  // description frontmatter required; proxies are bash-only relays). Discovered
+  // from the installed plugin tree's `agents/` subdir by task-agent discovery.
+  copyTree(join(tpl, 'omp', 'omp-agents'), join(outDir, 'agents'), force, results);
+
+  // The committed standalone bundle is copied during generation and rebuilt by
+  // scripts/build-bin.mjs, exactly like the Codex plugin's bin/.
+  const repoBundle = join(tpl, '..', 'plugin-omp', 'bin');
+  const adjacentBundle = dirname(tpl);
+  const bundledBin = existsSync(join(repoBundle, 'fadeno'))
+    ? repoBundle
+    : existsSync(join(adjacentBundle, 'fadeno'))
+      ? adjacentBundle
+      : null;
+  const destinationBin = join(outDir, 'bin');
+  if (bundledBin != null && resolve(bundledBin) !== resolve(destinationBin)) {
+    copyTree(bundledBin, destinationBin, force, results);
+  }
+  const destinationCli = join(destinationBin, 'fadeno');
+  if (existsSync(destinationCli)) chmodSync(destinationCli, 0o755);
+
+  return { outDir, results };
+}

@@ -1,0 +1,6 @@
+# Codex invocation policy for the Fadeno Runner skill.
+# The runner SHOULD be allowed to fire implicitly on complex tasks.
+interface:
+  displayname: "Fadeno Runner"
+  shortdescription: "Run a Fadeno playbook with file-backed run traces."
+allow_implicit_invocation: true
