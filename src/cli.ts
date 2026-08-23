@@ -58,7 +58,7 @@ import {
   type BakeoffResult,
 } from './commands/bakeoff.ts';
 import { EVIDENCE_MODES, isEvidenceMode, type EvidenceMode } from './lib/bakeoff.ts';
-import { runSteeringApply, runSteeringApplyClaude, runSteeringApplyOpenCode, runSteeringResolve } from './commands/steering.ts';
+import { runSteeringApply, runSteeringApplyClaude, runSteeringApplyOpenCode, runSteeringApplyOmp, runSteeringResolve } from './commands/steering.ts';
 import { runDispatchPrompt } from './commands/dispatch-prompt.ts';
 import { runDispatchPrepare } from './commands/dispatch-prepare.ts';
 import { runToolComplete } from './commands/tool-complete.ts';
@@ -91,7 +91,7 @@ Usage:
   fadeno init --codex|--claude|--grok|--opencode|--omp [opts]   Explicitly scaffold project-owned capability
   fadeno setup [--codex|--claude] [--from <bin-dir>] [--reset-runtime]  Install safe user-scoped integration
   fadeno status [--verbose]                   Show effective definitions, routing, and state
-  fadeno doctor [--codex|--claude|--opencode]            Run read-only diagnostics
+  fadeno doctor [--codex|--claude|--opencode|--omp]      Run read-only diagnostics
   fadeno vendor --codex|--claude|--grok|--opencode|--omp   Vendor capability and definitions into a project
   fadeno evidence promote <run>               Promote a verified run receipt
   fadeno uninstall --codex|--claude|--all     Remove managed user integration
@@ -112,7 +112,7 @@ Usage:
   fadeno models [<name>]                Model registry + each model's home driver
   fadeno models --driver <alias>        Live backend model listing (routes with models_command)
   fadeno model ...                      # alias for 'fadeno models ...' (same forms)
-  fadeno steering resolve|apply [...]   Resolve or materialize hybrid Codex steering
+  fadeno steering resolve|apply [...]   Resolve or materialize hybrid host steering
   fadeno dispatch [flags]               Resolve archetype → executor and invoke it once (ad hoc)
                                         (--shadow <ref> duplicates it to a one-shot challenger)
   fadeno dispatch-prepare <run> <id> --isolate  Prepare an isolated worktree for a pending host dispatch (opt-in)
@@ -160,7 +160,7 @@ Usage:
 Options:
   --with-hooks            (init) Also scaffold tier-2 enforcement hooks
   --with-steering         (init) Deprecated compatibility alias; steering is now default
-  --no-steering           (init) Opt out of default Codex/Claude/OpenCode steering
+  --no-steering           (init) Opt out of default Codex/Claude/OpenCode/omp steering
   --non-interactive       (setup) Accepted compatibility no-op; setup never prompts
   --from <bin-dir>        (setup) Use bin dir as runtime source (instead of bundled)
   --reset-runtime         (setup) Allow downgrade to mirror this plugin
@@ -756,7 +756,7 @@ Usage:
 
 Options:
   --with-hooks    Also scaffold tier-2 enforcement hooks
-  --no-steering   Opt out of default Codex/Claude/OpenCode steering
+  --no-steering   Opt out of default Codex/Claude/OpenCode/omp steering
   --data-only     Seed definitions + driver policy (host capability via plugin)
   --force         Overwrite existing files / refresh the bootstrap section
 `,
@@ -777,14 +777,14 @@ The managed runtime self-refreshes from the plugin on every plugin-launched comm
   status: `fadeno status — show effective definitions, routing, and state
 
 Usage:
-  fadeno status [--verbose] [--codex|--claude|--opencode]
+  fadeno status [--verbose] [--codex|--claude|--opencode|--omp]
 
 The status runtime reports skew direction (managed-older, managed-newer, divergent) and preferredCli (use managed only when observed version matches invoking version; otherwise use invoking path). Skills and subagents are loaded at host session start; a fresh session is required to refresh them — no setup or refresh will update the current session. FADENO_BUNDLED_RUNTIME is used for plugin-launched refresh detection.
 `,
   doctor: `fadeno doctor — run read-only diagnostics
 
 Usage:
-  fadeno doctor [--codex|--claude|--opencode]
+  fadeno doctor [--codex|--claude|--opencode|--omp]
 
 Checks include runtime skew (managed-older, managed-newer, divergent), preferredCli, runtime.staging, kept-newer, locked, skipped-no-source, and session-definitions. Doctor remains read-only and never writes the runtime. Skills and subagents require a fresh session.
 `,
@@ -794,7 +794,7 @@ Usage:
   fadeno steering resolve --archetype <a> [--host-executor <n>] [--role <r>]
                           [--run <id> --dispatch-id <id>]
                           [--prompt-file <path>|--prompt-sha256 <hex>]
-  fadeno steering apply --codex|--claude|--opencode [--scope project|user] [--force]
+  fadeno steering apply --codex|--claude|--opencode|--omp [--scope project|user] [--force]
 
 resolve emits the routing JSON hooks consume (exit 2 = restart required or
 write conflict — not runnable in this session). apply materializes the
@@ -806,7 +806,11 @@ selects the delivery lane instead of an identity. Under --opencode it renders
 materialized agent files under .opencode/agent/ (identity baked in, Codex-style)
 plus a runtime plugin that picks the delivery lane per spawn (Claude-style);
 project scope only, and OpenCode loads both at process start, so restart it
-after changes. Re-run after re-dialing.
+after changes. Under --omp it renders .omp/agents/ role or command slots plus
+an omp 18.0.1 tool_call extension. The extension rewrites only the selected
+agent in flat or batched native task inputs; omp retains background execution,
+continuations, and completion receipts. Resolver failures become refusal-agent
+inputs with local evidence. Restart omp after changes. Re-run after re-dialing.
 --prompt-file (or --prompt-sha256) lets resolve see this exact prompt's
 digest, so a shadow-attached archetype's reply carries the pair decision
 (shadow.selected/shadow.routable) and, on a selected routable pair, resolves
@@ -923,6 +927,8 @@ function printInitSummary(
         ? `  ${nextStep}. Steering is active locally; restart Claude Code so the Agent hook is loaded`
         : target === 'opencode'
           ? `  ${nextStep}. Steering materialized under .opencode/; restart OpenCode so the agent files and plugin load`
+          : target === 'omp'
+            ? `  ${nextStep}. Steering materialized under .omp/; restart omp so agents and the extension load`
           : `  ${nextStep}. Materialize Codex steering with \`fadeno steering apply <loadout> --codex --force\`; command slots switch live, while host changes require a fresh session`,
     );
   }
@@ -1862,6 +1868,12 @@ function main(argv: string[]): number {
         console.log(`OpenCode steering: ${m.healthy ? 'current' : `missing/stale${issueKinds ? ` (${issueKinds})` : ''}`}${m.restartRequired ? ' (restart required)' : ''}`);
         if (values.verbose) console.log(JSON.stringify({ opencodeMaterialization: m }, null, 2));
       }
+      if ((result as any).ompMaterialization) {
+        const m = (result as any).ompMaterialization;
+        const issueKinds = [...new Set((m.issues ?? []).map((issue: any) => issue.kind))].join(', ');
+        console.log(`omp steering: ${m.healthy ? 'current' : `missing/stale${issueKinds ? ` (${issueKinds})` : ''}`}${m.restartRequired ? ' (restart required)' : ''}`);
+        if (values.verbose) console.log(JSON.stringify({ ompMaterialization: m }, null, 2));
+      }
       if ((result as any).next) console.log(`next: ${(result as any).next}`);
       if (values.verbose) console.log(JSON.stringify({ repoRoot: (result as any).repoRoot, paths: (result as any).definitions, roles: (result as any).roles }, null, 2));
       return 0;
@@ -1869,7 +1881,6 @@ function main(argv: string[]): number {
     case 'doctor': {
       const target = optionalTarget(values);
       if (target === 'grok') throw new Error('Use `fadeno doctor` without --grok; steering for that host is intentionally unsupported.');
-      if (target === 'omp') throw new Error('Use `fadeno doctor` without --omp; there is no user-scoped omp integration to diagnose.');
       const result = runDoctor({ target: target ?? null });
       for (const item of result.findings) console.log(`${item.severity.padEnd(7)} ${item.check}: ${item.detail}${item.remediation ? ` — ${item.remediation}` : ''}`);
       return result.ok ? 0 : 1;
@@ -1878,7 +1889,7 @@ function main(argv: string[]): number {
       const target = requireTarget(values);
       const result = runVendor({
         target,
-        withSteering: target !== 'grok' && target !== 'omp' && !values['no-steering'],
+        withSteering: target !== 'grok' && !values['no-steering'],
         force: values.force,
       });
       console.log(`Fadeno vendored for ${result.target} in ${result.repoRoot}`);
@@ -2004,11 +2015,10 @@ function main(argv: string[]): number {
         return result.mode === 'restart_required' || result.mode === 'write_conflict' ? 2 : 0;
       }
       if (sub === 'apply') {
-        if (values.omp) throw new Error('Loadout steering has no omp implementation; supported targets are --codex, --claude, and --opencode.');
-        const targets = [values.codex && 'codex', values.claude && 'claude', values.opencode && 'opencode'].filter(Boolean) as string[];
+        const targets = [values.codex && 'codex', values.claude && 'claude', values.opencode && 'opencode', values.omp && 'omp'].filter(Boolean) as string[];
         const applyTarget = targets.length === 1 ? targets[0]! : null;
         if (applyTarget == null || values.grok || positionals[2] != null) {
-          throw new Error('Usage: fadeno steering apply --codex|--claude|--opencode [--scope project|user] [--force]');
+          throw new Error('Usage: fadeno steering apply --codex|--claude|--opencode|--omp [--scope project|user] [--force]');
         }
         if (values.scope && values.scope !== 'project' && values.scope !== 'user') throw new Error('Invalid --scope. Use project or user.');
         if (applyTarget === 'opencode') {
@@ -2027,6 +2037,19 @@ function main(argv: string[]): number {
             `  ${changed} file(s) written under .opencode/; agent files and plugins load at ` +
               'process start, so restart OpenCode to steer live sessions.',
           );
+          if (changed === 0 && result.conflicts.length > 0) console.log('  Existing files were preserved; pass --force to replace them.');
+          return 0;
+        }
+        if (applyTarget === 'omp') {
+          const result = runSteeringApplyOmp({ target: 'omp', force: values.force, scope: values.scope as 'project' | 'user' | undefined });
+          const changed = result.results.filter((item) => item.status !== 'skipped').length;
+          console.log(`omp steering materialized: ${result.scope}`);
+          for (const [archetype, slot] of Object.entries(result.materialization)) {
+            const how = slot.kind === 'host' ? 'in-session agent' : 'dispatch broker';
+            console.log(`  ${archetype} → ${how} ${slot.executor}`);
+          }
+          for (const path of result.removed ?? []) console.log(`  removed stale managed agent: ${path}`);
+          console.log(`  ${changed} file(s) written under .omp/; restart omp so agents and the extension load.`);
           if (changed === 0 && result.conflicts.length > 0) console.log('  Existing files were preserved; pass --force to replace them.');
           return 0;
         }

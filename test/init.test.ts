@@ -170,12 +170,11 @@ test('init --omp creates the omp target tree without other host artifacts', (t) 
   assert.ok(second.results.every((r) => r.status === 'skipped'));
 });
 
-test('init --omp refuses steering like Grok', (t) => {
+test('init --omp accepts explicit steering and materializes its extension', (t) => {
   const root = tempRepo(t);
-  assert.throws(
-    () => runInit({ target: 'omp', repoRoot: root, withSteering: true }),
-    /steering/i,
-  );
+  const result = runInit({ target: 'omp', repoRoot: root, withSteering: true });
+  assert.equal(result.target, 'omp');
+  assert.equal(exists(root, '.omp/extensions/fadeno-steering.ts'), true);
 });
 
 test('OpenCode receives shared skill bodies and a sigil-free bootstrap', (t) => {

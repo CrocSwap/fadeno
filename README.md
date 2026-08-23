@@ -226,8 +226,12 @@ omp has both surfaces: `npx fadeno init --omp` seeds a repo (shared
 generated `plugin-omp/` installs through omp's marketplace (`omp plugin install
 fadeno@fadeno`). The plugin carries full-named skills — omp registers a native
 `/skill:<name>` command for each, so no separate commands ship — plus the role
-agents and dispatch proxies, and the bundled CLI. Loadout steering has no omp
-implementation yet: `init --omp --with-steering` refuses, like Grok.
+agents, dispatch proxies, steering extension, and bundled CLI. OMP 18.0.1's
+native `task` lifecycle remains authoritative: Fadeno rewrites only the selected
+agent in flat or batched calls, preserving background, continuation, and other
+task fields while recording local routing evidence. `fadeno status --omp` and
+`fadeno doctor --omp` report missing, foreign, stale, malformed, and digest-drifted
+materialization; restart omp after changing agents or the extension.
 
 OpenCode likewise has native repo-local support through `npx fadeno init --opencode`
 — no plugin generator. It shares Codex's `.agents/skills/` tree and reads

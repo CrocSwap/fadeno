@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   BARE_IDENTIFIER_RE,
+  activeHarness,
   ExecutorProfileError,
   compileDialRef,
   commandRoutable,
@@ -34,7 +35,7 @@ import { HostDispatchError, readHostDispatchRequest, type HostDispatchRequest, t
 import { findRepoRoot, packageVersion, templatesDir } from '../lib/paths.ts';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { codexUserAgentDir, userPaths, type UserPathOptions } from '../lib/user-paths.ts';
-import { ensureOpenCodeFadenoIgnore } from '../lib/source-control.ts';
+import { ensureOpenCodeFadenoIgnore, ensureOmpFadenoIgnore } from '../lib/source-control.ts';
 import { stampHookVersion } from './plugin.ts';
 import {
   CODEX_MANAGED_MARK,
@@ -192,7 +193,9 @@ function rootOf(opts: CommonOptions): string {
 
 function profileOf(repoRoot: string, userPathOptions?: UserPathOptions): LoadedExecutorProfile {
   try {
-    return loadExecutorProfile(repoRoot, userPathOptions, 'codex');
+    // Resolver callers set FADENO_HARNESS for host-specific route compilation
+    // (the OMP extension uses `omp`; ordinary Codex callers remain codex).
+    return loadExecutorProfile(repoRoot, userPathOptions, activeHarness(undefined, userPathOptions));
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
     throw err;
@@ -1081,7 +1084,17 @@ function dialLayersForApply(
 /** Materialize every archetype's resolved dial into a session-static Codex role agent. */
 export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResult {
   const repoRoot = rootOf(opts);
-  const { profile } = profileOf(repoRoot, opts.userPathOptions);
+  // This command materializes Codex agents even when invoked from another
+  // harness (or a standalone test environment), so its route family must not
+  // follow FADENO_HARNESS. Runtime resolution still uses profileOf above.
+  const { profile } = (() => {
+    try {
+      return loadExecutorProfile(repoRoot, opts.userPathOptions, 'codex');
+    } catch (err) {
+      if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+      throw err;
+    }
+  })();
   // Read live dial layers (ignore loadout if present)
   const scope = opts.scope ?? 'project';
   let dialLayers: DialLayers;
@@ -1788,4 +1801,248 @@ function openCodeFileDiffers(path: string, body: string): boolean {
   } catch {
     return false;
   }
+}
+
+// --- omp steering materialization ---
+
+const OMP_MANAGED_MARK = '<!-- fadeno:managed';
+const OMP_EXTENSION_MANAGED_MARK = '// fadeno:managed';
+const OMP_STEERING_ARCHETYPES = ['worker', 'reviewer', 'judge'] as const;
+const OMP_EXTENSION_ENTRY = './.omp/extensions/fadeno-steering.ts';
+const OMP_LEGACY_EXTENSION_ENTRY = './extensions/fadeno-steering.ts';
+
+function stampManagedOmpAgent(body: string): string {
+  const header = `${OMP_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(body)} -->`;
+  if (body.startsWith('---\n')) {
+    const close = body.indexOf('\n---\n');
+    if (close >= 0) {
+      const after = close + '\n---\n'.length;
+      return `${body.slice(0, after)}${header}\n${body.slice(after)}`;
+    }
+  }
+  return `${header}\n${body}`;
+}
+
+function ompManagedEmit(path: string, body: string, force: boolean): EmitResult['status'] {
+  const existed = existsSync(path);
+  if (existed) {
+    const existing = readFileSync(path, 'utf8');
+    // `--force` refreshes files Fadeno owns; it never grants ownership of a
+    // native omp agent or a foreign alias that happens to share our name.
+    if (!existing.includes(OMP_MANAGED_MARK)) return 'skipped';
+    if (!force && existing === body) return 'skipped';
+  }
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, body, 'utf8');
+  return existed ? 'overwritten' : 'created';
+}
+
+function removeManagedOmpFile(path: string, removed: string[]): void {
+  if (!existsSync(path)) return;
+  try {
+    if (!readFileSync(path, 'utf8').includes(OMP_MANAGED_MARK)) return;
+    unlinkSync(path);
+    removed.push(path);
+  } catch {
+    // Ownership cannot be proven: preserve the file.
+  }
+}
+
+function readOmpRoleTemplate(archetype: string): { description: string; body: string } {
+  const source = readFileSync(join(templatesDir(), 'omp', 'omp-agents', `${archetype}.md`), 'utf8');
+  let body = source;
+  if (body.startsWith('---\n')) {
+    const end = body.indexOf('\n---\n', 4);
+    if (end >= 0) body = body.slice(end + '\n---\n'.length);
+  }
+  const description = /^description:\s*(.+)$/m.exec(source)?.[1]?.trim() ?? `Fadeno ${archetype} role.`;
+  return { description, body: body.trimStart() };
+}
+
+function ompSlotPath(agentDir: string, archetype: string, kind: 'host' | 'command' | 'refusal'): string {
+  const filename = kind === 'host'
+    ? `${archetype}.md`
+    : kind === 'command'
+      ? `fadeno-dispatch-${archetype}.md`
+      : `fadeno-steering-refused-${archetype}.md`;
+  const preferred = join(agentDir, filename);
+  try {
+    if (!existsSync(preferred) || readFileSync(preferred, 'utf8').includes(OMP_MANAGED_MARK)) return preferred;
+  } catch {}
+  // A pre-existing unmarked native agent belongs to the project author. Keep
+  // it loadable and use a deterministic Fadeno-owned alias beside it.
+  return join(agentDir, `fadeno-steering-${kind}-${archetype}.md`);
+}
+
+function ompRoleContract(archetype: string): string {
+  const behavior = ROLE_BEHAVIOR[archetype] ?? `Perform the ${archetype} role exactly as requested.`;
+  return `
+You are Fadeno's hybrid ${archetype}. Do not spawn further task agents.
+
+Before every task, inspect whether the delivery begins with # Fadeno engine step assignment.
+For an engine assignment, the coordinator must provide both run: <run-id> and dispatch_id: <dispatch-id>.
+Run fadeno steering resolve --archetype ${archetype} --host-executor current-host --run <run-id> --dispatch-id <dispatch-id>.
+If either identity is absent or validation fails, stop and report the resolver error.
+For that engine assignment only:
+- mode=host: ${behavior}
+- mode=command: run fadeno dispatch-fallback <run-id> <dispatch-id> and relay stdout verbatim.
+- mode=restart_required or mode=write_conflict: stop and relay the resolver refusal.
+
+For an ordinary task beginning with # Fadeno step assignment, first write the entire prompt verbatim to a unique file under .fadeno/local/prompts/, then run fadeno steering resolve --archetype ${archetype} --host-executor current-host --prompt-file <path>.
+- mode=host: ${behavior}
+- mode=command: run fadeno dispatch --archetype ${archetype} --prompt-file <path> with that same file and relay stdout verbatim. On failure, report it and do not perform the task yourself.
+- mode=restart_required or mode=write_conflict: stop and relay the resolver refusal.
+
+Never silently substitute a different model or executor.`;
+}
+
+function renderOmpHostAgent(archetype: string, modelId: string | null, agentName = archetype): string {
+  const piece = readOmpRoleTemplate(archetype);
+  const identity = modelId == null || modelId === NEUTRAL_HOST_EXECUTOR ? '' : `model: ${modelId}\n`;
+  return `---\nname: ${agentName}\ndescription: ${piece.description} [Fadeno steering]\n${identity}---\n\n${piece.body}\n${ompRoleContract(archetype)}\n`;
+}
+
+function renderOmpCommandAgent(archetype: string, agentName = `fadeno-dispatch-${archetype}`): string {
+  const piece = readOmpRoleTemplate(archetype);
+  return `---\nname: ${agentName}\ndescription: Fadeno command broker for ${archetype}; relays the task through the active external executor and never performs it locally.\ntools: bash\n---\n\nThe Fadeno steering extension selected this command broker. You are a relay, not an implementer.\n\nFor an engine assignment, run fadeno dispatch-fallback <run-id> <dispatch-id> and relay stdout verbatim.\nFor an ordinary # Fadeno step assignment, first write the entire received prompt verbatim to a unique file under .fadeno/local/prompts/, then run fadeno dispatch --archetype ${archetype} --prompt-file <path> and relay stdout verbatim. If dispatch fails, report the failure and do not perform the task locally. Never paraphrase, truncate, or substitute another executor.\n\nOriginal role description: ${piece.description}\n`;
+}
+
+function renderOmpRefusalAgent(archetype: string, agentName = `fadeno-steering-refused-${archetype}`): string {
+  return `---\nname: ${agentName}\ndescription: Reports why Fadeno refused a ${archetype} spawn, then stops.\ntools: read\n---\n\nYou are a refusal reporter. The task prompt begins with a Fadeno steering refusal. Relay that refusal verbatim, state that the requested work was not started, and stop. Do not inspect the repository or attempt a substitute.\n`;
+}
+
+export interface OmpSteeringApplyOptions extends CommonOptions {
+  target?: 'omp';
+  scope?: 'project' | 'user';
+  force?: boolean;
+}
+
+/** Materialize one omp role agent (host or command), refusal agents, and the task hook. */
+export function runSteeringApplyOmp(opts: OmpSteeringApplyOptions = {}): SteeringApplyResult {
+  const repoRoot = rootOf(opts);
+  if (opts.scope === 'user') {
+    throw new SteeringError('omp steering materializes at project scope only (.omp/); --scope user would export this repo\'s dials to every repo on this machine.');
+  }
+  let profile: ExecutorProfile;
+  try {
+    profile = loadExecutorProfile(repoRoot, opts.userPathOptions, 'omp').profile;
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+    throw err;
+  }
+  let dialLayers: DialLayers;
+  let ignoredLocalDials: string[];
+  try {
+    const scoped = dialLayersForApply('project', repoRoot, profile, opts.userPathOptions);
+    dialLayers = scoped.layers;
+    ignoredLocalDials = scoped.ignoredLocal;
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+    throw err;
+  }
+  const agentDir = join(repoRoot, '.omp', 'agents');
+  const results: EmitResult[] = [];
+  const pending: Array<{ path: string; body: string }> = [];
+  const removed: string[] = [];
+  const materialization: SteeringApplyResult['materialization'] = {};
+  const baseline: Record<string, string> = {};
+
+  for (const archetype of OMP_STEERING_ARCHETYPES) {
+    let cascade: { ref: DialRef; source: RoleResolutionSource; resolvedVia: string | null };
+    try {
+      cascade = resolveDialCascade(archetype, archetype, { bindings: profile.bindings, archetypes: profile.archetypes }, dialLayers);
+    } catch (err) {
+      if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
+      throw err;
+    }
+    const executorName = formatDialRef(cascade.ref);
+    let compiled: ReturnType<typeof compileDialRef> | null = null;
+    try { compiled = compileDialRef(cascade.ref, profile); } catch {}
+    const spec = compiled?.spec ?? (profile as unknown as SnapshotDocument).executors?.[executorName];
+    if (spec == null) throw new SteeringError(`archetype "${archetype}" resolved to "${executorName}" but no executor exists in profile`);
+    if (spec.adapter === 'host') {
+      baseline[archetype] = executorName;
+      materialization[archetype] = { kind: 'host', adapter: 'host', executor: executorName, model: spec.model };
+      const hostPath = ompSlotPath(agentDir, archetype, 'host');
+      pending.push({
+        path: hostPath,
+        body: stampManagedOmpAgent(renderOmpHostAgent(archetype, compiled?.modelId ?? spec.model ?? null, basename(hostPath, '.md'))),
+      });
+      removeManagedOmpFile(join(agentDir, `fadeno-dispatch-${archetype}.md`), removed);
+      removeManagedOmpFile(join(agentDir, `fadeno-steering-command-${archetype}.md`), removed);
+    } else {
+      materialization[archetype] = { kind: 'command-broker', adapter: 'command', executor: executorName, model: spec.model };
+      const commandPath = ompSlotPath(agentDir, archetype, 'command');
+      pending.push({ path: commandPath, body: stampManagedOmpAgent(renderOmpCommandAgent(archetype, basename(commandPath, '.md'))) });
+      removeManagedOmpFile(join(agentDir, `${archetype}.md`), removed);
+      removeManagedOmpFile(join(agentDir, `fadeno-steering-host-${archetype}.md`), removed);
+    }
+  }
+
+  for (const archetype of OMP_STEERING_ARCHETYPES) {
+    const refusalPath = ompSlotPath(agentDir, archetype, 'refusal');
+    pending.push({ path: refusalPath, body: stampManagedOmpAgent(renderOmpRefusalAgent(archetype, basename(refusalPath, '.md'))) });
+  }
+  const extensionTemplate = readFileSync(join(templatesDir(), 'omp', 'extensions', 'fadeno-steering.ts'), 'utf8');
+  const extensionContent = stampHookVersion(extensionTemplate);
+  const extensionBody = `${OMP_EXTENSION_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(extensionContent)}\n${extensionContent}`;
+  const extensionPath = join(repoRoot, '.omp', 'extensions', 'fadeno-steering.ts');
+  pending.push({ path: extensionPath, body: extensionBody });
+
+  for (const item of pending) {
+    const status = item.path === extensionPath
+      ? ompExtensionEmit(item.path, item.body, opts.force ?? false)
+      : ompManagedEmit(item.path, item.body, opts.force ?? false);
+    results.push({ path: item.path, status });
+  }
+  results.push({ path: join(repoRoot, '.omp', 'settings.json'), status: ompSettingsEmit(repoRoot) });
+  const gitignoreExisted = existsSync(join(repoRoot, '.gitignore'));
+  if (ensureOmpFadenoIgnore(repoRoot)) results.push({ path: join(repoRoot, '.gitignore'), status: gitignoreExisted ? 'appended' : 'created' });
+  const conflicts = pending.filter((item) => existsSync(item.path) && readFileSync(item.path, 'utf8') !== item.body).map((item) => item.path);
+  const restartRequired = results.some((item) => item.status === 'created' || item.status === 'overwritten');
+  return { results, materialization, baseline, restartRequired, conflicts, scope: 'project', removed, ignoredLocalDials };
+}
+
+function ompExtensionEmit(path: string, body: string, force: boolean): EmitResult['status'] {
+  const existed = existsSync(path);
+  if (existed) {
+    const existing = readFileSync(path, 'utf8');
+    // An extension is executable user code. Preserve it unless its own
+    // Fadeno marker proves that a previous apply created it.
+    if (!existing.includes(OMP_EXTENSION_MANAGED_MARK)) return 'skipped';
+    if (!force && existing === body) return 'skipped';
+  }
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, body, 'utf8');
+  return existed ? 'overwritten' : 'created';
+}
+
+/** Configure the ignored native extension through omp's explicit settings path.
+ * Native discovery honors gitignore, so a generated extension must be listed in
+ * `.omp/settings.json` to remain active while keeping executable project
+ * machinery out of the repository's ordinary tracked file set. Existing
+ * malformed or non-array settings are preserved rather than overwritten.
+ */
+function ompSettingsEmit(repoRoot: string): EmitResult['status'] {
+  const path = join(repoRoot, '.omp', 'settings.json');
+  const existed = existsSync(path);
+  let settings: Record<string, unknown> = {};
+  if (existed) {
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+      if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) return 'skipped';
+      settings = parsed as Record<string, unknown>;
+    } catch {
+      return 'skipped';
+    }
+  }
+  const extensions = settings.extensions;
+  if (extensions != null && !Array.isArray(extensions)) return 'skipped';
+  const entries = Array.isArray(extensions) ? extensions.filter((entry): entry is string => typeof entry === 'string') : [];
+  const current = entries.filter((entry) => entry !== OMP_LEGACY_EXTENSION_ENTRY);
+  if (current.includes(OMP_EXTENSION_ENTRY) && current.length === entries.length) return 'skipped';
+  settings.extensions = current.includes(OMP_EXTENSION_ENTRY) ? current : [...current, OMP_EXTENSION_ENTRY];
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
+  return existed ? 'overwritten' : 'created';
 }

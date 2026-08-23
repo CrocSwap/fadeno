@@ -344,8 +344,8 @@ const OMP_SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-
  * Deliberately absent, with reasons:
  * - `commands/`: omp registers `/skill:<name>` for every discovered skill, so
  *   slash entry points need no separate artifact.
- * - `hooks/`: loadout steering has no omp implementation yet (init --omp says
- *   so); when it lands it will be an extension module via `omp.extensions`.
+ * - `hooks/`: steering is an omp extension module under `extensions/`, loaded
+ *   from the manifest's `omp.extensions` entry.
  * - `fadeno-setup` skill: `<cli> setup` supports only --codex/--claude, and
  *   the skill's own text says to use only the current host's line — shipping
  *   it here would teach an invocation that refuses.
@@ -371,7 +371,7 @@ export function runOmpPlugin(opts: PluginOptions = {}): PluginResult {
         license: 'MIT',
         repository: 'https://github.com/CrocSwap/fadeno',
         keywords: ['ai', 'agents', 'omp', 'playbook', 'workflow', 'skills'],
-        omp: {},
+        omp: { extensions: ['./extensions/fadeno-steering.ts'] },
       },
       null,
       2,
@@ -400,10 +400,41 @@ export function runOmpPlugin(opts: PluginOptions = {}): PluginResult {
     chmodSync(launcherPath, 0o755);
   }
 
+  const extensionPath = join(outDir, 'extensions', 'fadeno-steering.ts');
+  results.push({
+    path: extensionPath,
+    status: emitFile(
+      extensionPath,
+      stampHookVersion(readFileSync(join(tpl, 'omp', 'extensions', 'fadeno-steering.ts'), 'utf8')),
+      force,
+    ),
+  });
+
   // Task agents: role agents plus dispatch proxies in omp's format (name +
   // description frontmatter required; proxies are bash-only relays). Discovered
   // from the installed plugin tree's `agents/` subdir by task-agent discovery.
   copyTree(join(tpl, 'omp', 'omp-agents'), join(outDir, 'agents'), force, results);
+  // The extension may need an alias when a project owns the conventional
+  // `worker`/`dispatch-worker` name. Carry both native and alias role surfaces
+  // in the global plugin so a plugin-only setup remains routable.
+  for (const archetype of ['worker', 'reviewer', 'judge']) {
+    const roleSource = readFileSync(join(tpl, 'omp', 'omp-agents', `${archetype}.md`), 'utf8');
+    const dispatchSource = readFileSync(join(tpl, 'omp', 'omp-agents', `dispatch-${archetype}.md`), 'utf8');
+    const refusal = `---\nname: fadeno-steering-refused-${archetype}\ndescription: Reports why Fadeno refused a ${archetype} spawn, then stops.\ntools: read\n---\n\nRelay the Fadeno steering refusal verbatim, state that the requested work was not started, and stop.\n`;
+    const refusalAlias = refusal.replace(`name: fadeno-steering-refused-${archetype}`, `name: fadeno-steering-refusal-${archetype}`);
+    const hostAlias = roleSource.replace(`name: ${archetype}`, `name: fadeno-steering-host-${archetype}`);
+    const dispatch = dispatchSource.replace(`name: dispatch-${archetype}`, `name: fadeno-dispatch-${archetype}`);
+    const dispatchAlias = dispatch.replace(`name: fadeno-dispatch-${archetype}`, `name: fadeno-steering-command-${archetype}`);
+    for (const [name, body] of [
+      [`fadeno-steering-host-${archetype}.md`, hostAlias],
+      [`fadeno-dispatch-${archetype}.md`, dispatch],
+      [`fadeno-steering-command-${archetype}.md`, dispatchAlias],
+      [`fadeno-steering-refused-${archetype}.md`, refusal],
+      [`fadeno-steering-refusal-${archetype}.md`, refusalAlias],
+    ] as const) {
+      results.push({ path: join(outDir, 'agents', name), status: emitFile(join(outDir, 'agents', name), body, force) });
+    }
+  }
 
   // The committed standalone bundle is copied during generation and rebuilt by
   // scripts/build-bin.mjs, exactly like the Codex plugin's bin/.

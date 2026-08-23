@@ -124,7 +124,7 @@ test('committed bundled CLI supports omp init and plugin generation', (t) => {
   assert.match(`${mixed.stdout}${mixed.stderr}`, /choose exactly one target/i);
 
   const steering = cliSplit(root, ['init', '--omp', '--with-steering']);
-  assert.equal(steering.status, 1);
+  assert.equal(steering.status, 0);
   assert.match(`${steering.stdout}${steering.stderr}`, /[Ss]teering/);
 
   const generated = cliSplit(root, ['plugin', join(root, 'generated-omp'), '--omp']);

@@ -4,7 +4,7 @@ import { copyTree, emitBootstrap, emitFile, type EmitResult } from '../lib/fsuti
 import { findRepoRoot, templatesDir } from '../lib/paths.ts';
 import { FADENO_IGNORE_PATTERNS } from '../lib/source-control.ts';
 import { relayModelForClaude, stampHookVersion, stampRelayModel } from './plugin.ts';
-import { emitCodexSteeringBrokers, runSteeringApplyOpenCode } from './steering.ts';
+import { emitCodexSteeringBrokers, runSteeringApplyOpenCode, runSteeringApplyOmp } from './steering.ts';
 
 export type Target = 'codex' | 'claude' | 'grok' | 'opencode' | 'omp';
 
@@ -57,12 +57,12 @@ export function runInit(opts: InitOptions): InitResult {
   const force = opts.force ?? false;
   const withSteering = opts.noSteering === true
     ? false
-    : opts.withSteering ?? (opts.target !== 'grok' && opts.target !== 'omp');
+    : opts.withSteering ?? (opts.target !== 'grok');
   const results: EmitResult[] = [];
 
-  if (withSteering && (opts.target === 'grok' || opts.target === 'omp')) {
+  if (withSteering && opts.target === 'grok') {
     throw new Error(
-      'Loadout steering is currently supported for Codex, Claude Code, and OpenCode — not Grok Build or omp.',
+      'Loadout steering is currently supported for Codex, Claude Code, OpenCode, and omp — not Grok Build.',
     );
   }
 
@@ -195,9 +195,23 @@ export function runInit(opts: InitOptions): InitResult {
         break;
       case 'omp':
         // omp discovers project task agents from `.omp/agents/*.md` (name +
-        // description frontmatter required). Role agents plus the dispatch
-        // proxies land here; no steering means no rendered slots.
-        copyTree(join(tpl, 'omp', 'omp-agents'), join(repoRoot, '.omp', 'agents'), force, results);
+        // description frontmatter required). A steered install renders one
+        // managed host/command slot per role; the legacy static surface is
+        // retained only for explicit --no-steering installs.
+        if (withSteering) {
+          appendOmpSteeringResults(results, runSteeringApplyOmp({ repoRoot, force }).results);
+          // Preserve the old dispatch-* entry points without recreating the
+          // plain worker/reviewer/judge files that a command lane deliberately
+          // removed. Those plain names are the native host slots, so copying
+          // them after apply would materialize both lanes and make a fresh init
+          // immediately contradictory.
+          const agentsSrc = join(tpl, 'omp', 'omp-agents');
+          for (const file of readdirSync(agentsSrc).sort()) {
+            if (!file.startsWith('dispatch-')) continue;
+            const dest = join(repoRoot, '.omp', 'agents', file);
+            results.push({ path: dest, status: emitFile(dest, readFileSync(join(agentsSrc, file), 'utf8'), false) });
+          }
+        } else copyTree(join(tpl, 'omp', 'omp-agents'), join(repoRoot, '.omp', 'agents'), force, results);
         break;
     }
 
@@ -229,6 +243,9 @@ export function runInit(opts: InitOptions): InitResult {
   }
   if (opts.dataOnly && withSteering && opts.target === 'opencode') {
     appendOpenCodeSteeringResults(results, runSteeringApplyOpenCode({ repoRoot, force }).results);
+  }
+  if (opts.dataOnly && withSteering && opts.target === 'omp') {
+    appendOmpSteeringResults(results, runSteeringApplyOmp({ repoRoot, force }).results);
   }
 
   // 5. Optional tier-2 enforcement scaffold (per-repo policy — allowed with --data-only).
@@ -268,6 +285,14 @@ function appendOpenCodeSteeringResults(results: EmitResult[], incoming: EmitResu
     // A clean init creates `.gitignore` for the common local-state entries,
     // then the OpenCode apply refreshes its marker-bounded subsection. Report
     // the path once as created; standalone apply still reports its own append.
+    if (prior != null && item.status === 'appended') continue;
+    results.push(item);
+  }
+}
+
+function appendOmpSteeringResults(results: EmitResult[], incoming: EmitResult[]): void {
+  for (const item of incoming) {
+    const prior = results.find((candidate) => candidate.path === item.path);
     if (prior != null && item.status === 'appended') continue;
     results.push(item);
   }

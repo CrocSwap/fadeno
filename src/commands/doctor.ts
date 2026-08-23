@@ -24,7 +24,7 @@ import {
 } from '../lib/codex-agent-file.ts';
 import { listRuns, readEvents } from '../lib/run-ledger.ts';
 import { normalizeDeliveryTransport } from '../lib/host-dispatch.ts';
-import { openCodeManagedIgnorePatterns } from '../lib/source-control.ts';
+import { openCodeManagedIgnorePatterns, ompManagedIgnorePatterns } from '../lib/source-control.ts';
 
 // Same literal `steering.ts` writes into every managed Claude agent file
 // (retired grid cell or legacy per-dial); not exported there, so duplicated
@@ -71,7 +71,7 @@ export interface DoctorFinding {
 }
 
 export interface DoctorOptions extends StatusOptions {
-  target?: 'codex' | 'claude' | 'opencode' | null;
+  target?: 'codex' | 'claude' | 'opencode' | 'omp' | null;
   /** Injectable for tests; defaults to the real process environment. */
   processEnv?: NodeJS.ProcessEnv;
 }
@@ -364,6 +364,23 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
       }
     }
   }
+  if (status.ompMaterialization != null) {
+    const materialized = status.ompMaterialization;
+    if (materialized.healthy) {
+      findings.push(finding('omp-steering', 'ok', 'managed omp agents and runtime extension are current and internally consistent'));
+    } else {
+      for (const issue of materialized.issues) {
+        const remediation = issue.kind === 'missing'
+          ? 'Run `fadeno steering apply --omp --force`, then restart omp.'
+          : issue.kind === 'unmanaged'
+            ? 'Move or rename the foreign file, then run `fadeno steering apply --omp`; Fadeno preserves unmarked files.'
+            : issue.kind === 'contradictory'
+              ? 'Keep only the lane selected by `fadeno status --omp`; refresh with `fadeno steering apply --omp --force`.'
+              : 'Refresh with `fadeno steering apply --omp --force`, then restart omp.';
+        findings.push(finding(`omp-${issue.kind}`, 'warning', `${issue.detail} (${issue.path})`, remediation));
+      }
+    }
+  }
   // --- Project-scope Codex brokers shadowing the user-scope ones ---
   //
   // Codex resolves a role agent from `<repo>/.codex/agents/<archetype>.toml`
@@ -625,11 +642,14 @@ function missingBundledTemplates(pluginRoot: string): string[] {
     '.fadeno/runs/', '.fadeno/progress/', '.fadeno/local/', '.fadeno/dispatches.jsonl',
     '.codex/agents/fadeno-*.toml', '.claude/settings.local.json',
     ...(status.harness === 'opencode' ? openCodeManagedIgnorePatterns(repoRoot) : []),
+    ...(status.harness === 'omp' ? ompManagedIgnorePatterns(repoRoot) : []),
   ];
   for (const pattern of ignorePatterns) {
     if (!isFadenoPathIgnored(ignoreLines, pattern)) {
       const remediation = pattern.startsWith('.opencode/')
         ? 'Run `fadeno steering apply --opencode`; it adds ignores only for currently managed OpenCode files.'
+        : pattern.startsWith('.omp/')
+          ? 'Run `fadeno steering apply --omp`; it adds ignores only for currently managed omp files.'
         : 'The first `new-run`/`dispatch`, `fadeno init`, or `fadeno vendor` adds it non-destructively.';
       findings.push(finding(`ignore:${pattern}`, 'warning', 'managed ignore entry is absent', remediation));
     }

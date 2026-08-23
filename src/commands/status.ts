@@ -13,6 +13,7 @@ import { loadLayeredProfile } from '../lib/config-layers.ts';
 import { maintainedHarnesses, readInstallationManifest, compareFadenoVersions, readRuntimeVersionAt } from '../lib/installations.ts';
 import type { DialRef } from '../lib/executors.ts';
 import { inspectOpenCodeMaterialization, type OpenCodeMaterialization } from '../lib/opencode-steering.ts';
+import { inspectOmpMaterialization, type OmpMaterialization } from '../lib/omp-steering.ts';
 
 export class StatusError extends Error {}
 
@@ -21,7 +22,7 @@ export interface StatusOptions {
   // 'opencode' is accepted since OpenCode steering materialization exists and
   // the harness compiles routes for it; 'grok' stays excluded — it has no
   // steering surface to report on.
-  target?: 'codex' | 'claude' | 'opencode' | null;
+  target?: 'codex' | 'claude' | 'opencode' | 'omp' | null;
   cwd?: string;
   repoRoot?: string;
   env?: string | null;
@@ -48,6 +49,7 @@ export interface StatusResult {
   external: StatusRole[];
   codexMaterialization: { path: string; fresh: boolean; restartRequired: boolean } | null;
   opencodeMaterialization: OpenCodeMaterialization | null;
+  ompMaterialization: OmpMaterialization | null;
   projectCustomized: boolean;
   verbose: boolean;
   next: string | null;
@@ -161,6 +163,12 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
       new Map(roles.map((role) => [role.archetype, role.adapter === 'command' ? 'command' : 'host'] as const)),
     )
     : null;
+  const ompMaterialized = harness === 'omp'
+    ? inspectOmpMaterialization(
+      repoRoot,
+      new Map(roles.map((role) => [role.archetype, role.adapter === 'command' ? 'command' : 'host'] as const)),
+    )
+    : null;
 
   const next = legacy_pin_note ? 'clear legacy pin with `fadeno dial clear`' : external.length > 0 ? 'review the external sandbox boundary before driving' : null;
 
@@ -227,6 +235,7 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
     external,
     codexMaterialization: materialized,
     opencodeMaterialization: opencodeMaterialized,
+    ompMaterialization: ompMaterialized,
     projectCustomized: existsSync(join(repoRoot, '.fadeno')),
     verbose: Boolean(opts.verbose),
     next,

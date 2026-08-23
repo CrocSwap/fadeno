@@ -45,7 +45,7 @@ test('omp plugin: package.json manifest is loadable with a single-sourced versio
   // counts as loadable; without it an npm/link install is skipped wholesale.
   const manifest = JSON.parse(readFileSync(join(outDir, 'package.json'), 'utf8'));
   assert.equal(manifest.name, 'fadeno');
-  assert.deepEqual(manifest.omp, {});
+  assert.deepEqual(manifest.omp, { extensions: ['./extensions/fadeno-steering.ts'] });
   const pkgVersion = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).version;
   assert.equal(manifest.version, pkgVersion);
 });

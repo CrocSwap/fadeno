@@ -101,10 +101,11 @@ general scheduler, or orchestration platform.
   advisory→enforced bridge. The driver skill composes these helpers into the
   current model-mediated execution procedure.
 - Tier-2 enforcement scaffold via `--with-hooks` (pre-commit, CI workflow, Claude hook example).
-- Default loadout steering for Codex, Claude, and OpenCode (with `--no-steering` opt-out):
+- Default loadout steering for Codex, Claude, OpenCode, and omp (with `--no-steering` opt-out):
   hybrid Codex custom agents plus `fadeno steering apply`, a selective Claude `PreToolUse` rewrite, and an
-  OpenCode hybrid — materialized `.opencode/agent/` slots plus a runtime
-  `tool.execute.before` lane-selection plugin. Codex
+  OpenCode/omp hybrid — materialized native agent slots plus runtime
+  lane-selection plugins (`tool.execute.before` for OpenCode and `tool_call` for
+  omp). Codex
   switches command slots live, executes matching host slots in-session, invokes
   an explicit `fallback_command` for mismatched host slots, and reports
   `restart_required` only when no honest fallback exists;
@@ -135,6 +136,13 @@ general scheduler, or orchestration platform.
   malformed, stale, and digest-drifted materialization. Headless runs can
   outlive the caller while a background child is still active, so a caller
   timeout is reported as a host limitation rather than a Fadeno failure.
+- omp steering (materialized `.omp/agents` slots + `fadeno-steering.ts`) is
+  live-verified on omp 18.0.1 for native background tasks. The extension uses
+  omp's shared-events `tool_call` input revision for flat and batched task
+  calls, passes each task prompt digest to the resolver, preserves every native
+  task field, and leaves async completion/correlation to omp. Resolver errors,
+  timeouts, restart requirements, and write conflicts become explicit refusal
+  agents with local evidence rather than silently falling through.
 
 ## Next protocol (in progress — provenance slice shipped)
 

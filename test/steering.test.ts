@@ -620,7 +620,7 @@ test('Grok rejects --with-steering before scaffolding anything', (t) => {
   const root = tempRepo(t);
   assert.throws(
     () => runInit({ target: 'grok', repoRoot: root, withSteering: true }),
-    /supported for Codex, Claude Code, and OpenCode — not Grok Build or omp/,
+    /supported for Codex, Claude Code, OpenCode, and omp — not Grok Build/,
   );
   assert.ok(!exists(root, '.fadeno/vocabulary.md'));
 });
