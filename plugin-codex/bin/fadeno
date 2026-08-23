@@ -37217,6 +37217,13 @@ var COMMANDS = {
     bash: command({})
   })
 };
+var TOP_LEVEL_COMMANDS = Object.freeze(Object.keys(COMMANDS));
+var PUBLIC_COMMAND_PATHS = Object.freeze(
+  TOP_LEVEL_COMMANDS.flatMap((name) => {
+    const subcommands = COMMANDS[name].subcommands;
+    return [name, ...Object.keys(subcommands ?? {}).filter((subcommand) => !(name === "completion" && subcommand === "candidates")).map((subcommand) => `${name} ${subcommand}`)];
+  })
+);
 var GATE_CONDITIONS = ["all_reviews_approved", "no_blocking_issues", "tests_pass"];
 function runCompletion() {
   return [
@@ -41088,247 +41095,429 @@ function runCancel(opts) {
   };
 }
 
+// src/lib/cli-help.ts
+var page = (summary, usage, notes, examples) => ({
+  summary,
+  usage: Array.isArray(usage) ? usage : [usage],
+  notes,
+  examples
+});
+var aliasPage = (canonical2, usage, note) => ({
+  ...canonical2,
+  usage: Array.isArray(usage) ? usage : [usage],
+  notes: [...canonical2.notes ?? [], note]
+});
+var MODELS_PAGE = page("Inspect the model registry and backend listings.", [
+  "fadeno models [<name>]",
+  "fadeno models --driver <alias>",
+  "fadeno models add <alias> <provider/id>"
+]);
+var SHADOW_PAGE = page("Attach or show a sampled shadow challenger.", [
+  "fadeno dial shadow",
+  "fadeno dial shadow <archetype> <model>[@effort] [options]"
+]);
+var MODEL_ADD_PAGE = page("Discover and persist a canonical user model alias.", "fadeno models add <alias> <provider/id>", [
+  "Discovery checks direct OpenCode first, then the OpenCode/OpenRouter discovery path."
+]);
+var TOP_LEVEL = {
+  setup: page("Install safe user-scoped integration.", "fadeno setup [--codex|--claude] [options]"),
+  status: page("Show effective definitions, routing, and runtime state.", "fadeno status [options]"),
+  doctor: page("Run read-only integration diagnostics.", "fadeno doctor [options]"),
+  vendor: page("Vendor capability and definitions into this project.", "fadeno vendor --codex|--claude|--grok|--opencode|--omp [options]"),
+  uninstall: page("Remove managed user integration.", [
+    "fadeno uninstall --codex|--claude|--all [options]",
+    "fadeno uninstall --purge-user-data --force [--codex|--claude|--all]"
+  ]),
+  clean: page("Preview or remove ignored repository runtime state.", "fadeno clean [--force]"),
+  unvendor: page("Remove lock-owned vendored files.", "fadeno unvendor [--force]"),
+  evidence: page("Promote a verified run receipt.", "fadeno evidence promote <run>"),
+  init: page("Scaffold project-owned Fadeno capability.", "fadeno init --codex|--claude|--grok|--opencode|--omp [options]"),
+  validate: page("Validate playbooks and run documents.", "fadeno validate [file] [--schema <kind>]"),
+  playbooks: page("Browse effective bundled and project workflows.", ["fadeno playbooks", "fadeno playbooks <name> [--json]"]),
+  diagram: page("Render a playbook workflow as ASCII or Mermaid.", "fadeno diagram <playbook> [--format ascii|mermaid]"),
+  "new-run": page("Create a run ledger from a playbook.", "fadeno new-run <playbook> <task> [--input Name=path]..."),
+  models: MODELS_PAGE,
+  model: aliasPage(MODELS_PAGE, ["fadeno model [<name>]", "fadeno model --driver <alias>", "fadeno model add <alias> <provider/id>"], "`fadeno model` is an alias for `fadeno models`."),
+  dial: page("Show or set per-archetype model selection.", [
+    "fadeno dial",
+    "fadeno dial <archetype> [<model>[@effort]]",
+    "fadeno dial <a> <b>... <model>[@effort] [options]",
+    "fadeno dial <a>+<b>[+...] <model>[@effort] [options]",
+    "fadeno dial <a>,<b>[,...] <model>[@effort] [options]",
+    "fadeno dial clear [<archetype>] [--session|--user|--repo]",
+    "fadeno dial shadow [<archetype> <model>[@effort]] [options]",
+    "fadeno dial clear-shadow [<archetype>]",
+    "fadeno dial resolve --archetype <name> [--prompt-sha256 <hex>]"
+  ], ["Cascade: binding \u2192 session dial \u2192 repo pin \u2192 user dial \u2192 base."]),
+  shadow: aliasPage(SHADOW_PAGE, ["fadeno shadow", "fadeno shadow <archetype> <model>[@effort] [options]"], "`fadeno shadow` is an alias for `fadeno dial shadow`."),
+  steering: page("Resolve dials or materialize harness steering.", ["fadeno steering resolve --archetype <name> [options]", "fadeno steering apply --codex|--claude|--opencode|--omp [options]"]),
+  dispatch: page("Resolve an archetype and invoke it once.", ["fadeno dispatch --archetype <name> [options]", "fadeno dispatch --model <ref> [options]"], ["Read prompt text from stdin or `--prompt-file`. `--archetype` is required unless `--model` is supplied; both are accepted.", "Dispatches isolate by default and merge a successful primary diff back. `--isolate` withholds merge-back; `--shadow <ref>` adds a one-shot challenger.", "Recover output with `fadeno dispatches --output tag:<tag> --wait 120`."]),
+  "dispatch-prepare": page("Prepare an isolated workspace for a pending host dispatch.", "fadeno dispatch-prepare <run> <dispatch-id> --isolate"),
+  "dispatch-prompt": page("Emit the canonical host-dispatch envelope.", "fadeno dispatch-prompt <run> <dispatch-id>"),
+  "dispatch-fallback": page("Deliver a locked host request through its declared fallback.", "fadeno dispatch-fallback <run> <dispatch-id>"),
+  "dispatch-start": page("Record a host dispatch start.", "fadeno dispatch-start <run> <dispatch-id> --agent-id <host-agent-id> [options]"),
+  "dispatch-progress": page("Record an attested host progress observation.", "fadeno dispatch-progress <run> <dispatch-id> --file <status.json> [options]"),
+  "dispatch-complete": page("Submit a host dispatch result.", "fadeno dispatch-complete <run> <dispatch-id> --output <path|-> [options]"),
+  "dispatch-fail": page("Submit a host dispatch failure.", "fadeno dispatch-fail <run> <dispatch-id> --reason <text>"),
+  run: page("Append attested updates to a run ledger.", "fadeno run <run> [options]"),
+  "tool-run": page("Execute a registered ready tool step.", "fadeno tool-run <run> [--tool <name>] [--timeout <seconds>]", ["The registered tool determines its output artifact; there is no `--output` override. Use `--timeout 0` to disable a route deadline."]),
+  "tool-complete": page("Record a manually produced tool result.", "fadeno tool-complete <run> --output <artifact-path>"),
+  gate: page("Evaluate a deterministic gate from an artifact.", "fadeno gate <run> <condition> [--artifact <path>]"),
+  prompt: page("Assemble and optionally record an actor prompt.", "fadeno prompt <run> <step> [options]"),
+  next: page("Emit the next actionable run step.", "fadeno next <run> [--legacy]"),
+  drive: page("Advance a run until it is terminal or paused.", "fadeno drive <run> [options]", ["Use `--timeout 0` to disable a route deadline; none by default."]),
+  cancel: page("Cancel a live engine attempt.", "fadeno cancel <run> [--actor-call <id>]", ["Sends SIGTERM to the single live engine command claim; the engine records the terminal receipt."]),
+  decide: page("Resolve a pending named human decision.", "fadeno decide <run> <option> [options]"),
+  "attempt-accept": page("Accept a hand-resolved isolated attempt.", "fadeno attempt-accept <run> <actor-call>"),
+  runs: page("List run ledgers under `.fadeno/runs`.", "fadeno runs"),
+  attest: page("Record this subagent delivery as evidence.", "fadeno attest --archetype <name>"),
+  dispatches: page("Inspect or recover command dispatches.", ["fadeno dispatches [--tail <count>] [--json] [--bakeoffs]", "fadeno dispatches --output <id|last|tag:<tag>> [--wait <seconds>]", "fadeno dispatches --cancel <id|tag:<tag>> | --merge <id|tag:<tag>>"], ["`--output` writes the saved snapshot bytes verbatim to stdout; use `--wait` only for a completion row."]),
+  "shadow-apply": page("Apply a selected shadow arm diff.", "fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]"),
+  bakeoff: page("Measure or adjudicate a shadow pair.", ["fadeno bakeoff <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--via <driver>] [--evidence inlined|explored]", "fadeno bakeoff <pair-id|dispatch-id> --prepare [--evidence inlined|explored]", "fadeno bakeoff <pair-id|dispatch-id> --record --comparison <file> --adversarial <file> [--evidence inlined|explored]"], ["`--measure-only` records no adjudication; `--prepare` writes blinded prompts; `--record` requires both host-delivered judgment files."]),
+  show: page("Show a run step projection and artifacts.", "fadeno show <run> [--events] [--legacy]"),
+  verify: page("Re-audit a run\u2019s deterministic claims.", ["fadeno verify <run> [options]", "fadeno verify --latest [options]"]),
+  plugin: page("Generate a harness plugin from this checkout.", "fadeno plugin [dir] [--codex|--omp] [--force]", ["Claude Code is the default plugin; `--codex` and `--omp` select their generators. OpenCode and Grok use `fadeno init` instead."]),
+  completion: page("Emit sourceable Bash completion.", "fadeno completion bash")
+};
+var NESTED = {
+  "evidence promote": page("Promote a verified run receipt.", "fadeno evidence promote <run>"),
+  "models add": MODEL_ADD_PAGE,
+  "model add": aliasPage(MODEL_ADD_PAGE, "fadeno model add <alias> <provider/id>", "`fadeno model add` is an alias for `fadeno models add`."),
+  "dial clear": page("Clear one or more dial layers.", "fadeno dial clear [<archetype>] [--session|--user|--repo]"),
+  "dial shadow": aliasPage(SHADOW_PAGE, SHADOW_PAGE.usage, "`fadeno shadow` is the top-level alias."),
+  "dial clear-shadow": page("Remove shadow attachments.", "fadeno dial clear-shadow [<archetype>]"),
+  "dial resolve": page("Emit the stable dial-resolution hook contract.", "fadeno dial resolve --archetype <name> [--prompt-sha256 <hex>]"),
+  "steering resolve": page("Resolve one hybrid host steering request.", "fadeno steering resolve --archetype <name> [options]"),
+  "steering apply": page("Materialize harness steering from active dials.", "fadeno steering apply --codex|--claude|--opencode|--omp [options]"),
+  "completion bash": page("Emit sourceable Bash completion.", "fadeno completion bash", void 0, ["source <(fadeno completion bash)"])
+};
+var OPTION_HINTS = {
+  "--adversarial": "Adversarial judgment file",
+  "--agent-id": "Host agent identity",
+  "--all": "Every managed harness",
+  "--allow-failed": "Accept a failed terminal run",
+  "--archetype": "Archetype name",
+  "--arm": "Shadow-pair arm",
+  "--artifact": "Artifact path",
+  "--actor": "Actor or role name",
+  "--actor-call": "Engine actor-call id",
+  "--bakeoffs": "Show bakeoff scorecards",
+  "--bind": "Role-to-executor override",
+  "--branch": "Host branch provenance",
+  "--cancel": "Dispatch id or tag to cancel",
+  "--check": "Check applicability only",
+  "--claude": "Target Claude Code",
+  "--codex": "Target Codex",
+  "--commit": "Optional commit provenance",
+  "--comparison": "Comparison judgment file",
+  "--data-only": "Definitions without host capability",
+  "--decision": "Pending decision id",
+  "--diagnostics": "Persist bounded process diagnostics",
+  "--dispatch-id": "Immutable host dispatch id",
+  "--driver": "Live backend driver",
+  "--events": "Include raw event timeline",
+  "--evidence": "Judge evidence mode",
+  "--event": "Custom run event type",
+  "--feedback": "Human decision feedback",
+  "--field": "Additional event field",
+  "--file": "Progress status file",
+  "--force": "Overwrite managed files",
+  "--format": "Rendered output format",
+  "--from": "Runtime source directory",
+  "--grok": "Target Grok Build",
+  "--help": "Show this command help",
+  "--host-executor": "Materialized host executor",
+  "--ignored-output": "Gitignored output retention policy",
+  "--inline": "Embed input contents",
+  "--input": "Declared input name and path",
+  "--isolate": "Use an isolated worktree",
+  "--iteration": "Loop iteration to target",
+  "--json": "Emit structured JSON output",
+  "--judge": "Override judge model reference",
+  "--latest": "Use newest run",
+  "--legacy": "Enable explicit legacy compatibility",
+  "--max-transitions": "Engine transition limit",
+  "--measure-only": "Measure without adjudicating",
+  "--member": "Map member attribution",
+  "--merge": "Dispatch id or tag to merge",
+  "--model": "Direct model reference",
+  "--n": "Maximum shadow pairings",
+  "--native-executor": "Legacy host-executor spelling",
+  "--no-brief": "Skip archetype brief preamble",
+  "--no-record": "Preview without recording",
+  "--no-steering": "Do not scaffold steering",
+  "--non-interactive": "Never prompt during setup",
+  "--omp": "Target omp",
+  "--opencode": "Target OpenCode",
+  "--output": "Output artifact path or selector",
+  "--parallel": "Concurrent deliveries in isolated worktrees",
+  "--prepare": "Write blinded judge prompts",
+  "--prompt-file": "Read prompt from file",
+  "--prompt-sha256": "Prompt content SHA-256",
+  "--purge-user-data": "Also remove shared user data",
+  "--rate": "Shadow sampling rate",
+  "--reason": "Failure reason",
+  "--record": "Record supplied host judgments",
+  "--repo": "Repository scope",
+  "--report": "Legacy artifact-path spelling",
+  "--reset-runtime": "Allow runtime downgrade",
+  "--role": "Role name",
+  "--run": "Immutable engine run id",
+  "--schema": "Document schema kind",
+  "--scope": "Steering installation scope",
+  "--session": "Local session scope",
+  "--shadow": "One-shot challenger reference",
+  "--shared": "Run in the current worktree",
+  "--source": "Progress observation source",
+  "--status": "Run status",
+  "--step": "Run step id",
+  "--tag": "Dispatch recovery label",
+  "--tail": "Number of recent entries",
+  "--timeout": "Deadline in seconds (0 disables)",
+  "--tool": "Registered tool name",
+  "--user": "User-default scope",
+  "--verbose": "Include diagnostic detail",
+  "--version": "Show Fadeno version",
+  "--via": "Delivery driver",
+  "--wait": "Wait before recovering output",
+  "--with-hooks": "Scaffold enforcement hooks",
+  "--with-steering": "Deprecated compatibility alias; steering is already default",
+  "--workspace": "Host workspace provenance"
+};
+var OPTION_FORMS = {
+  "--timeout": "--timeout <seconds>",
+  "--format": "--format <format>",
+  "--schema": "--schema <kind>",
+  "--archetype": "--archetype <name>",
+  "--model": "--model <ref>",
+  "--via": "--via <driver>",
+  "--prompt-file": "--prompt-file <path>",
+  "--output": "--output <path>",
+  "--bind": "--bind <role=executor>",
+  "--tool": "--tool <name>",
+  "--driver": "--driver <alias>",
+  "--input": "--input <name=path>",
+  "--rate": "--rate <0..1>",
+  "--n": "--n <count>",
+  "--prompt-sha256": "--prompt-sha256 <hex>",
+  "--host-executor": "--host-executor <name>",
+  "--native-executor": "--native-executor <name>",
+  "--role": "--role <name>",
+  "--run": "--run <id>",
+  "--dispatch-id": "--dispatch-id <id>",
+  "--tag": "--tag <label>",
+  "--ignored-output": "--ignored-output <policy>",
+  "--agent-id": "--agent-id <id>",
+  "--workspace": "--workspace <path>",
+  "--branch": "--branch <name>",
+  "--file": "--file <path>",
+  "--source": "--source <kind>",
+  "--commit": "--commit <sha>",
+  "--reason": "--reason <text>",
+  "--step": "--step <id>",
+  "--status": "--status <status>",
+  "--event": "--event <type>",
+  "--iteration": "--iteration <count>",
+  "--artifact": "--artifact <path>",
+  "--report": "--report <path>",
+  "--member": "--member <role>",
+  "--field": "--field <key=value>",
+  "--max-transitions": "--max-transitions <count>",
+  "--parallel": "--parallel <count>",
+  "--actor-call": "--actor-call <id>",
+  "--decision": "--decision <id>",
+  "--feedback": "--feedback <text>",
+  "--tail": "--tail <count>",
+  "--wait": "--wait <seconds>",
+  "--cancel": "--cancel <id|tag>",
+  "--merge": "--merge <id|tag>",
+  "--arm": "--arm <arm>",
+  "--shadow": "--shadow <ref>",
+  "--evidence": "--evidence <mode>",
+  "--comparison": "--comparison <path>",
+  "--adversarial": "--adversarial <path>",
+  "--judge": "--judge <ref>",
+  "--scope": "--scope <project|user>",
+  "--from": "--from <bin-dir>"
+};
+var withGlobals = (...flags) => ["--help", "--version", ...flags];
+var PAGE_OPTIONS = {
+  setup: withGlobals("--codex", "--claude", "--from", "--reset-runtime"),
+  status: withGlobals("--verbose", "--codex", "--claude", "--opencode", "--omp"),
+  doctor: withGlobals("--codex", "--claude", "--opencode", "--omp"),
+  vendor: withGlobals("--codex", "--claude", "--grok", "--opencode", "--omp", "--no-steering", "--force"),
+  uninstall: withGlobals("--codex", "--claude", "--all", "--purge-user-data", "--force"),
+  clean: withGlobals("--force"),
+  unvendor: withGlobals("--force"),
+  evidence: withGlobals(),
+  init: withGlobals("--codex", "--claude", "--grok", "--opencode", "--omp", "--with-hooks", "--with-steering", "--no-steering", "--data-only", "--force"),
+  validate: withGlobals("--schema"),
+  playbooks: withGlobals("--json"),
+  diagram: withGlobals("--format"),
+  "new-run": withGlobals("--input"),
+  models: withGlobals("--driver", "--json"),
+  model: withGlobals("--driver", "--json"),
+  dial: withGlobals("--via", "--session", "--user", "--repo", "--json"),
+  shadow: withGlobals("--via", "--rate", "--n", "--json"),
+  steering: withGlobals(),
+  dispatch: withGlobals("--archetype", "--model", "--role", "--via", "--prompt-file", "--tag", "--shadow", "--timeout", "--isolate", "--shared", "--ignored-output", "--diagnostics", "--no-brief"),
+  "dispatch-prepare": withGlobals("--isolate"),
+  "dispatch-prompt": withGlobals(),
+  "dispatch-fallback": withGlobals(),
+  "dispatch-start": withGlobals("--agent-id", "--workspace", "--branch"),
+  "dispatch-progress": withGlobals("--file", "--source"),
+  "dispatch-complete": withGlobals("--output", "--commit"),
+  "dispatch-fail": withGlobals("--reason"),
+  run: withGlobals("--step", "--status", "--event", "--artifact", "--member", "--field"),
+  "tool-run": withGlobals("--tool", "--timeout"),
+  "tool-complete": withGlobals("--output"),
+  gate: withGlobals("--artifact"),
+  prompt: withGlobals("--actor", "--iteration", "--inline", "--no-record", "--format"),
+  next: withGlobals("--legacy"),
+  drive: withGlobals("--bind", "--max-transitions", "--parallel", "--timeout", "--diagnostics"),
+  cancel: withGlobals("--actor-call"),
+  decide: withGlobals("--decision", "--feedback"),
+  "attempt-accept": withGlobals(),
+  runs: withGlobals(),
+  attest: withGlobals("--archetype"),
+  dispatches: withGlobals("--tail", "--json", "--bakeoffs", "--output", "--wait", "--tag", "--cancel", "--merge"),
+  "shadow-apply": withGlobals("--arm", "--check"),
+  bakeoff: withGlobals("--measure-only", "--evidence", "--prepare", "--record", "--comparison", "--adversarial", "--json", "--judge", "--via"),
+  show: withGlobals("--events", "--legacy"),
+  verify: withGlobals("--latest", "--allow-failed", "--legacy"),
+  plugin: withGlobals("--codex", "--omp", "--force"),
+  completion: withGlobals(),
+  "evidence promote": withGlobals(),
+  "models add": withGlobals("--json"),
+  "model add": withGlobals("--json"),
+  "dial clear": withGlobals("--session", "--user", "--repo", "--json"),
+  "dial shadow": withGlobals("--via", "--rate", "--n", "--json"),
+  "dial clear-shadow": withGlobals("--json"),
+  "dial resolve": withGlobals("--archetype", "--prompt-sha256"),
+  "steering resolve": withGlobals("--archetype", "--host-executor", "--native-executor", "--role", "--run", "--dispatch-id", "--prompt-file", "--prompt-sha256"),
+  "steering apply": withGlobals("--codex", "--claude", "--opencode", "--omp", "--scope", "--force"),
+  "completion bash": withGlobals()
+};
+var PATH_OPTION_HINTS = {
+  clean: { "--force": "Remove ignored runtime state" },
+  unvendor: { "--force": "Also remove modified lock-owned files" },
+  uninstall: { "--force": "Required with --purge-user-data; confirms removal" },
+  vendor: { "--force": "Overwrite managed vendored files" },
+  init: { "--force": "Overwrite managed scaffold files" },
+  plugin: { "--force": "Overwrite generated plugin files" },
+  "steering apply": { "--force": "Overwrite managed steering files" },
+  dispatches: { "--output": "Print saved snapshot bytes for an id, last dispatch, or tag" },
+  dispatch: {
+    "--isolate": "Withhold the primary diff from merge-back",
+    "--shared": "Run directly in the current worktree",
+    "--shadow": "One-shot challenger model reference"
+  }
+};
+var PATH_OPTION_FORMS = {
+  dispatches: {
+    "--output": "--output <id|last|tag:<tag>>",
+    "--cancel": "--cancel <id|tag:<tag>>",
+    "--merge": "--merge <id|tag:<tag>>"
+  },
+  "dispatch-complete": { "--output": "--output <path|->" },
+  dispatch: { "--ignored-output": "--ignored-output <kept|discardable>" },
+  "dispatch-progress": { "--source": "--source <agent|harness|director>" },
+  prompt: { "--actor": "--actor <role>", "--format": "--format <text|json>" }
+};
+var HELP_PATHS = Object.freeze([...Object.keys(TOP_LEVEL), ...Object.keys(NESTED)].sort());
+var HELP_LINE_WIDTH = 100;
+function wrapHelpText(text, firstPrefix = "", continuationPrefix = firstPrefix) {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [firstPrefix.trimEnd()];
+  const lines = [];
+  let line = firstPrefix;
+  for (const word of words) {
+    const separator = line === firstPrefix || line === continuationPrefix ? "" : " ";
+    if (line.length + separator.length + word.length > HELP_LINE_WIDTH && line.trim().length > 0) {
+      lines.push(line.trimEnd());
+      line = `${continuationPrefix}${word}`;
+    } else {
+      line += `${separator}${word}`;
+    }
+  }
+  lines.push(line.trimEnd());
+  return lines;
+}
+function resolveHelpPath(positionals) {
+  for (let length = Math.min(2, positionals.length); length >= 1; length -= 1) {
+    const candidate = positionals.slice(0, length).join(" ");
+    if (HELP_PATHS.includes(candidate)) return candidate;
+  }
+  return null;
+}
+function optionsFor(path) {
+  const options = PAGE_OPTIONS[path];
+  if (options == null) throw new Error(`No semantic focused-help options registered for ${path}.`);
+  return [...options].sort().map((flag) => `${PATH_OPTION_FORMS[path]?.[flag] ?? OPTION_FORMS[flag] ?? flag}`).map((flag) => {
+    const name = flag.split(" ")[0];
+    const hint = PATH_OPTION_HINTS[path]?.[name] ?? OPTION_HINTS[name];
+    if (hint == null) throw new Error(`No focused-help description registered for ${name}.`);
+    const prefix = `  ${flag.padEnd(30)} `;
+    return wrapHelpText(hint, prefix, " ".repeat(prefix.length)).join("\n");
+  });
+}
+function renderGlobalHelp() {
+  return `fadeno \u2014 the playbook layer for AI coding agents
+
+Usage: fadeno <command> [options]
+
+Get started
+  init        Scaffold project capability
+  playbooks   Browse workflows
+  new-run     Create a run
+  drive       Advance a run
+
+Workflows and evidence
+  validate, diagram, prompt, gate, run, tool-run, tool-complete, next,
+  cancel, decide, attempt-accept, show, verify, runs, evidence, attest
+
+Models and delivery
+  dial, shadow, models (model), steering, dispatch, dispatches, shadow-apply, bakeoff
+
+Host dispatch protocol
+  dispatch-prepare, dispatch-prompt, dispatch-start, dispatch-progress,
+  dispatch-complete, dispatch-fail, dispatch-fallback
+
+Setup and maintenance
+  setup, status, doctor, vendor, unvendor, clean, uninstall, plugin, completion
+
+Global options
+  -h, --help       Show this page or focused command help
+  -v, --version    Show the Fadeno version
+
+Run \`fadeno <command> --help\` for exact usage and command options.
+
+Examples:
+  fadeno init --codex
+  fadeno init --grok
+  fadeno playbooks
+  fadeno new-run code-change-review "Add CSV export"
+  fadeno drive <run>`;
+}
+function renderFocusedHelp(path) {
+  const seed = NESTED[path] ?? TOP_LEVEL[path];
+  if (seed == null) throw new Error(`No focused help registered for ${path}.`);
+  const options = optionsFor(path);
+  const parts = [
+    ...wrapHelpText(`fadeno ${path} \u2014 ${seed.summary}`),
+    "",
+    "Usage:",
+    ...seed.usage.flatMap((usage) => wrapHelpText(usage, "  ", "    "))
+  ];
+  if (options.length > 0) parts.push("", "Options:", ...options);
+  if (seed.notes?.length) parts.push("", ...seed.notes.flatMap((note) => wrapHelpText(note)));
+  if (seed.examples?.length) parts.push("", "Examples:", ...seed.examples.flatMap((example) => wrapHelpText(example, "  ", "    ")));
+  return parts.join("\n");
+}
+
 // src/cli.ts
 var import_meta2 = {};
-var HELP = `fadeno \u2014 the playbook layer for AI coding agents
-
-Usage:
-  fadeno init --codex|--claude|--grok|--opencode|--omp [opts]   Explicitly scaffold project-owned capability
-  fadeno setup [--codex|--claude] [--from <bin-dir>] [--reset-runtime]  Install safe user-scoped integration
-  fadeno status [--verbose]                   Show effective definitions, routing, and state
-  fadeno doctor [--codex|--claude|--opencode|--omp]      Run read-only diagnostics
-  fadeno vendor --codex|--claude|--grok|--opencode|--omp   Vendor capability and definitions into a project
-  fadeno evidence promote <run>               Promote a verified run receipt
-  fadeno uninstall --codex|--claude|--all     Remove managed user integration
-  fadeno clean [--force]                      Preview/remove ignored repo runtime state
-  fadeno unvendor [--force]                   Remove lock-owned vendored files
-  fadeno validate [file] [--schema K]   Validate playbooks (schema + references + semantics)
-  fadeno playbooks [<name>]             List effective playbooks or view one workflow
-  fadeno diagram <playbook> [--format]  Render a playbook's flow (ascii | mermaid)
-  fadeno new-run <playbook> <task>      Create a new run-ledger directory
-  fadeno dial                                  # effective table
-  fadeno dial <archetype>                      # one archetype's row (+shadow)
-  fadeno dial <archetype>[+<archetype>\u2026] <model>[@effort] [--via <driver>] [--session|--user|--repo]   # set (multi: a+b, a,b, or a b c)
-  fadeno dial clear [<archetype>] [--session|--user|--repo]
-  fadeno dial shadow <archetype> <model>[@effort] [--via <driver>] [--rate <r>] [--n <count>]
-  fadeno dial shadow                           # show mode: archetypes with an active shadow
-  fadeno shadow ...                            # alias for 'fadeno dial shadow ...' (same forms)
-  fadeno dial clear-shadow [<archetype>]
-  fadeno dial resolve --archetype <a>          # JSON, hook contract unchanged
-  fadeno models [<name>]                Model registry + each model's home driver
-  fadeno models --driver <alias>        Live backend model listing (routes with models_command)
-  fadeno model add <alias> <provider/id>  Discover then add a user-catalog canonical model
-  fadeno model ...                      # alias for 'fadeno models ...' (same forms)
-  fadeno steering resolve|apply [...]   Resolve or materialize hybrid host steering
-  fadeno dispatch [flags]               Resolve archetype \u2192 executor and invoke it once (ad hoc)
-                                        (--shadow <ref> duplicates it to a one-shot challenger)
-  fadeno dispatch-prepare <run> <id> --isolate  Prepare an isolated worktree for a pending host dispatch (opt-in)
-  fadeno dispatch-fallback <run> <id>   Deliver a locked host request by declared fallback
-  fadeno dispatch-prompt <run> <id>     Emit the canonical engine envelope for a host dispatch
-  fadeno dispatch-start <run> <id>      Start a host dispatch
-  fadeno dispatch-progress <run> <id>   Record an attested progress observation
-  fadeno dispatch-complete <run> <id>   Submit a host result (use --output - to read stdin)
-  fadeno dispatch-fail <run> <id>       Submit a host failure
-  fadeno run <run> [flags]              Update a run ledger (run.yaml + events.jsonl)
-  fadeno tool-run <run> [--tool <name>] [--timeout <seconds>]  Execute a registered tool step deterministically
-  fadeno tool-complete <run> --output P Atomically record the next tool_call result
-  fadeno gate <run> <condition>         Evaluate a gate condition from a structured artifact
-  fadeno prompt <run> <step> [flags]    Assemble (and record) a step's actor prompt
-  fadeno next <run>                     Emit the next actionable step (JSON flow cursor)
-  fadeno drive <run> [flags]            Engine: advance the run until terminal or paused
-  fadeno cancel <run>                   Cancel the active engine attempt for a run (SIGTERM to its executor group)
-  fadeno decide <run> <option> [flags]  Resolve a pending named human decision
-  fadeno attempt-accept <run> <call>    Merge a worktree you resolved by hand and complete its attempt
-  fadeno runs                           List run ledgers under .fadeno/runs/
-  fadeno attest --archetype <a>         Record this subagent's own measured delivery (run FROM inside it)
-  fadeno dispatches [--tail n] [--json] Show which executor ran what (.fadeno/dispatches.jsonl)
-  fadeno dispatches --cancel <id|tag:h> Stop a running dispatch (SIGTERM to its executor group)
-  fadeno dispatches --merge <id|tag:h>  Merge a retained worktree after resolving its conflicts by hand
-  fadeno dispatches --output <id|last> [--wait <s>]  Print a dispatch's output snapshot verbatim
-  fadeno dispatches --bakeoffs          Adjudicated bakeoff scorecard per challenger
-  fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]
-                                        Port a shadow pair's diff into your workspace (git apply --3way)
-  fadeno bakeoff <pair-id|dispatch-id> [--judge <ref>] [--via <driver>] [--evidence inlined|explored]
-                                        Measure + adjudicate a shadow pair: two blinded judge dispatches, then
-                                        write .fadeno/bakeoffs/<pair-id-8>.md
-  fadeno bakeoff <pair-id|dispatch-id> --measure-only
-                                        Measure a shadow pair's arms only (deterministic; no model is consulted)
-  fadeno bakeoff <pair-id|dispatch-id> --prepare [--evidence inlined|explored]
-                                        Measure + write the two blinded judge prompts under .fadeno/local/prompts/;
-                                        writes no artifact \u2014 for a host coordinator to spawn judge subagents on
-  fadeno bakeoff <pair-id|dispatch-id> --record --comparison <file> --adversarial <file>
-                                        Validate two host-delivered judgments and write the artifact
-                                        (judge_delivery: host \u2014 see the fadeno-judge skill)
-  fadeno show <run>                     Show a run's step projection and artifacts (--events for raw timeline)
-  fadeno verify <run> [--allow-failed]  Re-audit a run's deterministic claims (or --latest)
-  fadeno plugin [dir] [--codex]         Generate a Claude Code (default) or Codex plugin
-  fadeno completion bash                Emit a sourceable Bash completion script
-
-Options:
-  --with-hooks            (init) Also scaffold tier-2 enforcement hooks
-  --with-steering         (init) Deprecated compatibility alias; steering is now default
-  --no-steering           (init) Opt out of default Codex/Claude/OpenCode/omp steering
-  --non-interactive       (setup) Accepted compatibility no-op; setup never prompts
-  --from <bin-dir>        (setup) Use bin dir as runtime source (instead of bundled)
-  --reset-runtime         (setup) Allow downgrade to mirror this plugin
-  --all                   (uninstall) Remove every registered harness integration
-  --purge-user-data       (uninstall) Also remove shared config/state/data; requires --force
-  --scope <scope>         (steering apply) project (default) | user
-  --data-only             (init) Seed definitions + driver policy (host capability via plugin)
-  --force                 (init) Overwrite existing files / refresh the bootstrap section
-  --schema <kind>         (validate) Force document kind: playbook | run | review-report | test-result
-  --format <fmt>          (diagram) ascii (default) | mermaid
-  --step <id>             (run) Set current_step and log a step_started event
-  --status <status>       (run) Set status: running | completed | failed | aborted
-  --event <type>          (run) Append a custom event
-  --artifact <path>       (run) Attach an artifact path to the event
-  --member <role>         (run) Attribute the event to a map member / actor
-  --field <k=v>           (run) Extra field on the event (repeatable; e.g. branch=approve)
-  --artifact <path>       (gate) Artifact path relative to run (condition-specific default)
-  --report <path>         (gate) Deprecated alias for --artifact
-  --actor <role>          (prompt) Map member / actor to assemble the prompt for
-  --iteration <n>         (prompt) Loop-body iteration to target (default: latest)
-  --inline                (prompt) Embed input file contents in the prompt
-  --no-record             (prompt) Preview only: write no snapshot or event
-  --bind <role=executor>  (drive) Session executor override for a role (repeatable; recorded)
-  --max-transitions <n>   (drive) Engine transition cap per invocation (default 50)
-  --parallel <n>          (drive) Max concurrent deliveries per wave (1\u201316, default 1). Members overlap
-                          via one git worktree each; without git they share the tree and serialize
-  --timeout <seconds>     (drive/dispatch) Hard executor deadline in seconds; none by default
-  --input <Name=path>     (new-run) Supply a declared input (repeatable)
-  --via <driver>          (dial/dispatch) Driver alias that delivers the model; on dispatch it
-                          escalates one call onto that lane without moving the dial
-  --session               (dial) Write/clear this checkout's session dial
-  --user                  (dial) Write/clear the user default
-  --repo                  (dial) Write/clear the repo pin (committed)
-  --archetype <a>         (dispatch) Archetype to resolve (required unless --model)
-  --role <name>           (dispatch) Role name: enables binding pins + evidence attribution
-  --model <ref>           (dispatch) Bypass resolution and invoke a dial ref directly (debugging)
-  --host-executor <n>     (steering resolve) Host executor materialized into this role
-  --run <id>              (steering resolve) Immutable engine run identity for a delivered host request
-  --dispatch-id <id>      (steering resolve) Immutable host dispatch identity paired with --run
-  --prompt-file <path>    (dispatch) Read the prompt from a file instead of stdin
-  --tag <t>               (dispatch) Label the dispatch for recovery (dispatches --output tag:<t>)
-  --shadow <ref>          (dispatch) Duplicate the prompt to a one-shot shadow challenger
-                          (FADENO_SHADOW_MAX_LIVE caps concurrent challengers; default 4)
-  --isolate               (dispatch) Keep the work OUT of your tree: detached worktree, no merge-back
-  --shared                (dispatch) Opt OUT of isolation and run in this tree (nothing contains the executor)
-  --ignored-output <kept|discardable>  (dispatch) Whether this task's gitignored output must survive; kept forgoes the pair AND the worktree
-  --diagnostics           (dispatch/drive) Persist bounded process output (32 KiB / 500 lines) to diagnostics log
-  --no-brief              (dispatch) Skip the archetype's declared brief preamble
-  --tail <n>              (dispatches) Logical entries to show, newest last (default 10)
-  --json                  (dispatches) Emit structured entries on stdout for scripting
-  --arm <arm>             (shadow-apply) challenger (default) | primary
-  --check                 (shadow-apply) Report applicability only (git apply --check --3way); changes nothing
-  --measure-only          (bakeoff) Report the pair's measured facts and write nothing; skips adjudication
-  --evidence <mode>       (bakeoff) inlined (default) embeds each arm's diff in the prompt; explored
-                          reconstructs both arms' trees under .fadeno/local/judge/<pair-8>/ and passes
-                          paths, so the judge reads whole files instead of hunks. Pass the same value to
-                          --record that you passed to --prepare; the artifact stamps evidence_mode
-  --prepare               (bakeoff) Measure + write the two blinded judge prompts; write no artifact
-  --record                (bakeoff) Validate --comparison/--adversarial judgment files and write the artifact
-  --comparison <path>     (bakeoff --record) The comparison judge subagent's raw JSON output
-  --adversarial <path>    (bakeoff --record) The adversarial judge subagent's raw JSON output
-  --judge <ref>           (bakeoff) Override the judge archetype's dial model (bypasses catalog resolution)
-  --isolate               (dispatch-prepare) Create isolated worktree at .fadeno/local/host-worktrees/<run>/<id> (workspace_mode: isolated)
-  --agent-id <id>         (dispatch-start) Host agent identity
-  --workspace <path>      (dispatch-start) Host workspace provenance
-  --branch <name>         (dispatch-start) Host branch provenance
-  --file <path>           (dispatch-progress) Agent/harness status JSON file
-  --source <kind>         (dispatch-progress) agent | harness | director
-  --output <path>         (dispatch-complete) Temporary output file
-  --output <id|last>      (dispatches) Recover a dispatch's output snapshot (killed relays included)
-  --wait [seconds]        (dispatches --output) Wait for the completion row before answering (default 120)
-  --commit <sha>          (dispatch-complete) Optional commit provenance
-  --reason <text>         (dispatch-fail) Host-attested failure reason
-  --decision <id>         (decide) Target decision id (optional when exactly one is pending)
-  --feedback <text>       (decide) Free-text feedback recorded on the resolution
-  --latest                (verify) Audit the newest run instead of a named one
-  --allow-failed          (verify) Accept an honest failed/aborted terminal
-  --legacy                (show/verify/next) Read a 0.2 or unversioned pre-0.3 ledger in explicit compatibility mode
-  --events                (show) Print the raw event timeline instead of the step projection
-  -h, --help              Show this help (fadeno <command> --help for focused command help)
-  -v, --version           Show version
-
-Environment:
-  FADENO_HARNESS          Select the harness for route compilation (codex|claude|grok|opencode|omp|standalone)
-Examples:
-  fadeno validate
-  fadeno new-run code-change-review "Add CSV export for reports"
-  fadeno setup --codex
-  fadeno status
-  fadeno doctor --codex
-  fadeno init --codex --with-hooks
-  fadeno init --grok
-  fadeno validate .fadeno/runs/2026-05-30-1132-csv/run.yaml --schema run
-  fadeno run 2026-05-30-1132-csv --step review
-  fadeno run 2026-05-30-1132-csv --status completed
-  fadeno run 2026-05-30-1132-csv --event artifact_created --artifact artifacts/x.json --member architect_fable
-  fadeno run 2026-05-30-1132-csv --step arbitrate --event human_decision --field branch=approve
-  fadeno dial worker sol --user
-  fadeno dial worker sol@high --via opencode
-  fadeno dial clear worker --session
-  fadeno steering apply --codex --force
-  echo "Summarize the repo layout." | fadeno dispatch --archetype worker
-  fadeno gate 2026-05-30-1132-csv no_blocking_issues --artifact artifacts/review-report.json
-  fadeno prompt 2026-05-30-1132-csv cross_review --actor architect_fable --no-record
-  fadeno next 2026-05-30-1132-csv
-  fadeno runs
-  fadeno attest --archetype worker
-  fadeno dispatches --tail 20
-  fadeno shadow-apply pair-abcd1234 --check
-  fadeno shadow-apply pair-abcd1234
-  fadeno show 2026-07-10-2212
-  fadeno verify --latest
-  source <(fadeno completion bash)
-`;
-var KNOWN_CLI_COMMANDS = /* @__PURE__ */ new Set([
-  "setup",
-  "status",
-  "doctor",
-  "vendor",
-  "unvendor",
-  "clean",
-  "uninstall",
-  "evidence",
-  "init",
-  "steering",
-  "validate",
-  "playbooks",
-  "diagram",
-  "new-run",
-  "run",
-  "tool-run",
-  "tool-complete",
-  "plugin",
-  "completion",
-  "gate",
-  "prompt",
-  "next",
-  "drive",
-  "cancel",
-  "models",
-  "model",
-  "dial",
-  "shadow",
-  "dispatch",
-  "dispatch-fallback",
-  "dispatch-start",
-  "dispatch-prompt",
-  "dispatch-complete",
-  "dispatch-progress",
-  "dispatch-prepare",
-  "dispatch-fail",
-  "decide",
-  "attempt-accept",
-  "runs",
-  "attest",
-  "dispatches",
-  "shadow-apply",
-  "bakeoff",
-  "show",
-  "verify"
-]);
+var KNOWN_CLI_COMMANDS = new Set(TOP_LEVEL_COMMANDS);
 function shouldRunPreflight(command2) {
   if (!command2) return false;
   const excluded = /* @__PURE__ */ new Set(["status", "doctor", "setup", "uninstall"]);
@@ -41407,517 +41596,6 @@ function maybeRunRuntimePreflight(_argv, command2, deps = {}) {
     }
   }
 }
-var COMMAND_HELP = {
-  dial: `fadeno dial \u2014 per-archetype model selection
-
-Usage:
-  fadeno dial                                  Effective table (model, effort, via, source)
-  fadeno dial <archetype>                      One archetype's row (+ shadow; --json adds layers)
-  fadeno dial <archetype>\u2026 <model>[@effort]    Set a dial (several archetypes at
-                                               once: space, \`+\`, or \`,\` separated)
-  fadeno dial clear [<archetype>]              Clear a dial at the layer it lives;
-                                               no archetype = all session + user dials
-  fadeno dial shadow <archetype> <model>[@effort] [--rate <r>] [--n <count>]
-                                               Attach a shadow challenger (scored, never gates)
-  fadeno dial shadow                          Show mode: only archetypes with an active shadow
-  fadeno dial clear-shadow [<archetype>]       Remove shadow attachment(s)
-  fadeno dial resolve --archetype <a>          Resolution JSON (hook/script contract)
-
-'fadeno shadow ...' is a top-level alias for 'fadeno dial shadow ...' \u2014 same
-attach and show-mode forms, same flags (including --json).
-
-Options:
-  --via <driver>   Driver alias that delivers the model (e.g. opencode, codex)
-  --session        Write/clear the local session dial (this checkout only)
-  --user           Write/clear the user default (applies across your repos)
-  --repo           Write/clear the repo pin (committed to .fadeno/executors.yaml)
-  --rate <r>       (shadow) Sampling rate in [0,1]
-  --n <count>      (shadow) Stop after this many successful pairings; positive integer
-  --prompt-sha256 <hex>
-                   (resolve) Prompt digest, so the reply carries the pair decision
-                   (shadow.selected) for this exact prompt. Omit it and selected
-                   is null \u2014 unknown, never "no".
-  --json           Structured output
-
-The cascade: role binding \u2192 session dial \u2192 repo pin \u2192 user dial \u2192 host-native base.
-A plain set updates the highest existing dial (session \u2192 repo \u2192 user), or creates
-a user default when none exists. --session, --user, or --repo makes scope explicit.
-Unregistered models fall through to the catalog's unregistered_model_driver.
-A route is an argv: what you dial is what runs. Fadeno does not enforce write
-permissions \u2014 that belongs to the vendor flags in the command and to isolated
-worktrees, which are the default for command dispatches. To run something
-restricted, dial a route whose argv restricts it. Eligibility and constraint
-policies still refuse.
-
-Examples:
-  fadeno dial worker sol
-  fadeno dial judge fable@high --session
-  fadeno dial judge fable@high
-  fadeno dial worker qwen-3.5-coder --via opencode
-  fadeno dial generator gemini --via agy
-  fadeno dial clear worker --user
-`,
-  models: `fadeno models \u2014 the model registry and the driver each model rides
-
-Usage:
-  fadeno models                    Frame-neutral registry table
-  fadeno models <name>             One model: via, alternates, spellings, eligibility
-  fadeno models --driver <alias>   Live backend listing via the route's models_command
-                                   (registered spellings marked with \u2190)
-  fadeno model add <alias> <provider/id>
-                                   Discover and persist a canonical user model alias
-
-Options:
-  --json   Structured output
-
-\`fadeno model\` is an alias for every form above.
-
-The table is frame-neutral: \`via\` is the model's home driver \u2014 the CLI its
-provider route names, and the value \`--via\` takes to pick a different one \u2014
-and effort is the registry standard. Whether that driver is reached in-session
-through a host agent or spawned as a command is selected later from the
-caller's route and is not part of the model's identity, which is why the
-column says \`via\` and not \`harness\`: the harness is the agent asking. Names
-not in the registry route via the catalog's unregistered_model_driver with the
-id passed verbatim. The single-model view lists every alternate lane. Probe-cache
-verification state stays in --json (verified_at per row).
-
-Examples:
-  fadeno models
-  fadeno models opus
-  fadeno models --driver opencode
-  fadeno model add moonshot stealth/ox-alpha
-`,
-  dispatch: `fadeno dispatch \u2014 resolve an archetype to its executor and invoke it once
-
-Usage:
-  echo "<prompt>" | fadeno dispatch --archetype <a> [flags]
-  fadeno dispatch --archetype <a> --prompt-file <path> [flags]
-
-Options:
-  --archetype <a>       Archetype to resolve (required unless --model)
-  --role <name>         Role name: enables binding pins + evidence attribution
-  --model <ref>         Bypass resolution and invoke a dial ref directly (debugging)
-  --via <driver>        Driver alias for --model (e.g. opencode)
-  --prompt-file <path>  Read the prompt from a file instead of stdin
-  --tag <t>             Label the dispatch for recovery (dispatches --output tag:<t>)
-  --shadow <ref>        Duplicate the prompt to a one-shot shadow challenger. Sampling is
-                        keyed on the prompt digest, so a retry never re-rolls; challengers
-                        run concurrently, capped by FADENO_SHADOW_MAX_LIVE (default 4), and
-                        their worktrees are retained under .fadeno/local/shadow for review
-  --timeout <seconds>   Hard executor deadline in seconds; none by default (0 also means none)
-  --isolate             HOLD THE WORK OUT of your tree. A detached worktree, like the default, but
-                        the diff is never applied back \u2014 it is left at the recorded diff_snapshot for
-                        you to inspect or apply yourself. This is the flag's entire purpose now that
-                        a worktree is the default: the default isolates for containment and merges
-                        back, --isolate isolates to withhold. Refuses outside a git repository rather
-                        than running in your tree, which is what it exists to prevent.
-  --shared              Opt OUT of isolation and run in THIS tree. Nothing stands between the executor
-                        and your files \u2014 Fadeno enforces no write permissions of its own
-  --ignored-output <kept|discardable>
-                        Whether this task's gitignored output must survive. A worktree is merged back
-                        through git add -A, which respects .gitignore, so "kept" forgoes BOTH the
-                        shadow pair and the worktree itself: the dispatch runs in your tree, where
-                        nothing discards its gitignored output. Overrides the archetype's
-                        ignored_output policy. Default: discardable.
-  --diagnostics         Persist bounded process output (32 KiB / 500 lines per stream) to diagnostics log
-  --no-brief            Skip the archetype's declared brief preamble
-
-An archetype declaring \`brief: <name>\` (the starter's director does) gets that
-template composed ahead of the task \u2014 .fadeno/briefs/<name>.md, else the
-builtin \u2014 and the evidence row records \`brief\`. The digest attests the
-composed bytes. Evidence lands in .fadeno/dispatches.jsonl. Exit 0 with no
-output is reported as a failure \u2014 an empty relay is not a result.
-
-Examples:
-  echo "Summarize the repo layout." | fadeno dispatch --archetype worker
-  fadeno dispatch --archetype worker --tag fix-flaky --prompt-file /tmp/task.md
-`,
-  "dispatch-prepare": `fadeno dispatch-prepare \u2014 prepare an isolated worktree for a host dispatch
-
-Usage:
-  fadeno dispatch-prepare <run> <dispatch-id> --isolate
-
-Options:
-  --isolate   Create detached worktree at .fadeno/local/host-worktrees/<run>/<dispatch-id> (workspace_mode: isolated)
-
-Creates an idempotent detached worktree from HEAD at .fadeno/local/host-worktrees/<run>/<dispatch-id> and records
-preparation state at .fadeno/local/host-workspaces/<run>/<dispatch-id>.json (workspace, base_commit, prepared_at).
-Applies only to a pending nonterminal host request that has not started; concurrent preparation is serialized by
-.fadeno/local/.host-workspace.lock. After preparation, dispatch-prompt includes workspace_mode: isolated and the
-absolute workspace path; dispatch-start then bypasses the shared writer lease and stamps workspace_mode: isolated.
-Both dispatch-complete and dispatch-fail collect a binary staged diff to .fadeno/local/outputs/host-isolated-<run>-<dispatch-id>.diff
-and remove the worktree only after the terminal receipt is durable. Nothing merges automatically.
-`,
-  attest: `fadeno attest \u2014 record this subagent's own measured host delivery
-
-Usage:
-  fadeno attest --archetype <a>
-
-Run this FROM INSIDE the subagent it describes \u2014 a \`host_delivery\` row is
-written by the Claude steering hook in the PARENT, before the subagent ever
-runs, so everything on it is a request. This records what the subagent can
-actually MEASURE about itself: the resolved \`CLAUDE_EFFORT\` (already past any
-silent per-model/per-org downgrade), pid, cwd, and the archetype it was told
-it is. Model is never recorded here \u2014 there is no equivalent environment
-variable, and this command never asks the model to self-report its own name \u2014
-so the row carries \`identity_evidence: requested_only\`, the same admission
-\`fadeno steering resolve\` already makes.
-
-Writes a \`host_attestation\` row to .fadeno/dispatches.jsonl, correlated by a
-later reader (\`fadeno dispatches\`) onto the nearest preceding unattested
-\`host_delivery\` row of the same archetype \u2014 best-effort, since the subagent
-has neither the parent's prompt digest nor its session id to key on exactly.
-Advisory only (tier-1): nothing forces a subagent to call this, which is
-exactly why \`fadeno dispatches\` marks a host delivery with no matching
-attestation as \`[never attested]\`, and one whose attested effort differs
-from what was requested as an \`[effort mismatch]\` \u2014 the signature of a
-silent downgrade.
-
-Examples:
-  fadeno attest --archetype worker
-`,
-  dispatches: `fadeno dispatches \u2014 the executor evidence ledger (.fadeno/dispatches.jsonl)
-
-Usage:
-  fadeno dispatches [--tail <n>] [--json]      Who ran what, newest last
-  fadeno dispatches --output <id|last|tag:<t>> [--wait [s]]
-                                               Print a dispatch's output snapshot verbatim
-  fadeno dispatches --cancel <id|tag:<t>>      Stop a running dispatch (SIGTERM to its group)
-  fadeno dispatches --merge <id|tag:<t>>       Merge a retained worktree after resolving its conflicts
-  fadeno dispatches --bakeoffs                 Adjudicated bakeoff scorecard per challenger
-
-Options:
-  --tail <n>       Logical entries to show (default 10)
-  --json           Structured entries on stdout for scripting
-  --wait [s]       (--output) Wait for the completion row (default 120s)
-
-Rows carry dial provenance: [session dial], [repo pin], [user dial]. Old-format
-ledger generations still render, marked [legacy] / [format 0.x].
-
-Merge-back works like a pull request. An isolated dispatch's worktree is the
-branch and your working tree is main; if main moved while the executor worked,
-the kernel rebases the worktree onto it and applies the result. When the rebase
-conflicts, the merge-back is \`unresolved\`: the worktree is retained with the
-conflict markers, your tree is untouched, and --output says so. Resolve the
-markers in that worktree (its path is on the completion row as \`workspace\`),
-then \`--merge\` applies the resolved work, records a dispatch_merged row, and
-removes the worktree. It refuses, touching nothing, while markers remain.
-`,
-  "attempt-accept": `fadeno attempt-accept \u2014 merge a worktree you resolved by hand and complete its attempt
-
-Usage:
-  fadeno attempt-accept <run> <actor-call-id>
-
-An engine attempt whose work conflicts with the workspace gets conflict rounds:
-the executor is re-invoked in its retained worktree (attempt_reason
-merge_conflict) to resolve the markers. When the rounds are spent the attempt
-fails as merge_back_failed with the worktree still retained \u2014 the receipt names
-it. Resolve the markers there yourself, then run this: it validates the
-executor's parked report against the step's schema, merges the worktree
-(rebasing first if the tree moved again), writes the artifact, and records a
-new attempt with reason host_resolved plus its actor_completed receipt. The
-next \`fadeno drive\` continues from there; no executor re-runs.
-
-Refuses, with nothing applied and the worktree kept, while markers remain,
-if the parked report fails validation, or if the rebase conflicts again.
-`,
-  "shadow-apply": `fadeno shadow-apply \u2014 port a shadow pair's diff into your workspace
-
-Usage:
-  fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]
-
-Options:
-  --arm <arm>   Which pair arm's diff to apply: challenger (default) | primary
-  --check       Report applicability only (git apply --check --3way); changes nothing
-
-<pair-id|dispatch-id> is a pair's pair_id, or either arm's own dispatch_id \u2014
-full, or an 8+ character prefix. Applies the arm's diff_snapshot with
-\`git apply --3way\` against the arm's recorded baseline_commit, so the port-back
-survives the main tree moving on while the pair ran. Conflict-aware from the
-first version: on any conflict it stops, keeps the diff artifact exactly where
-it was, records the attempt in .fadeno/dispatches.jsonl, and exits non-zero \u2014
-it never auto-resolves. --arm primary refuses twice over: on a primary that
-ran in the shared tree (nothing to apply \u2014 its work is already there), and on
-one whose recorded primary_merge is \`clean\` (already applied; a second apply
-would either do nothing or corrupt a tree that has moved). It is meant for a
-primary whose merge-back came back \`conflicted\` or \`blocked\`. A baseline
-commit that is no longer in the object database (for example, garbage
-collected after \`fadeno clean --force\` removed its retained shadow worktree)
-is diagnosed precisely rather than surfacing raw git output.
-
-Examples:
-  fadeno shadow-apply pair-abcd1234 --check
-  fadeno shadow-apply pair-abcd1234
-  fadeno shadow-apply pair-abcd1234 --arm primary
-`,
-  drive: `fadeno drive \u2014 advance a run until terminal or paused
-
-Usage:
-  fadeno drive <run> [flags]
-
-Options:
-  --bind <role=executor>   Session executor override for a role (repeatable; recorded)
-  --max-transitions <n>    Engine transition cap per invocation (default 50)
-  --parallel <n>           Max concurrent deliveries per wave (1\u201316, default 1).
-                           In a git repo each engine attempt runs in its own detached worktree
-                           and its diff is merged back on success, so command members genuinely
-                           overlap. Without git there is no worktree to isolate into: deliveries
-                           fall back to the shared tree and serialize on the repo-wide writer
-                           lease whatever you pass. Host requests interleave either way.
-                           See docs/experimental/permissions-and-isolation.md
-  --timeout <seconds>      Hard executor deadline in seconds; none by default (0 also means none)
-  --diagnostics            Persist bounded process output (32 KiB / 500 lines per stream) to diagnostics log
-
-Drive executes command-delivered steps itself and pauses for host dispatches and
-human gates. Resolve pauses with \`fadeno decide\` (decisions) or the dispatch-*
-host protocol, then re-run drive. Executor identity is snapshotted on first
-contact; resumed runs keep resolving against their recorded snapshot. Executors run
-with no deadline unless a route declares timeout_ms or --timeout sets one: an
-agent's work has a long tail, and a clock cannot tell slow from stuck. Watch a
-long attempt with \`fadeno show\` (idle output is reported, never acted on) and end
-one yourself with \`fadeno cancel\`.
-`,
-  cancel: `fadeno cancel \u2014 cancel the active engine attempt for a run
-
-Usage:
-  fadeno cancel <run> [--actor-call <id>]
-
-Sends SIGTERM to the single live engine command claim for <run>
-(engine-<run>-<actorCallId>-a<attempt>.json). With --actor-call, targets that
-single claim; without it, targets the single live claim and refuses when
-multiple claims are live rather than guessing. The target is the single live
-engine command claim by default. The target is the supervisor
-PID when alive, otherwise the negative executor process-group ID when the
-supervisor is proven dead (ESRCH), otherwise the executor PID. Never writes
-the run ledger; the active engine remains the sole ledger writer and records
-the terminal actor receipt. The workspace lease and inflight claim are
-preserved until child-group termination is proven (supervisor close), never
-at signal-send time. Check the workspace before re-dispatching; a cancelled
-executor may have written already.
-`,
-  decide: `fadeno decide \u2014 resolve a pending named human decision
-
-Usage:
-  fadeno decide <run> <option> [flags]
-
-Options:
-  --decision <id>    Target decision id (optional when exactly one is pending)
-  --feedback <text>  Free-text feedback recorded on the resolution
-
-Then re-run \`fadeno drive <run>\` to continue.
-`,
-  verify: `fadeno verify \u2014 re-audit a run's deterministic claims
-
-Usage:
-  fadeno verify <run> [flags]
-  fadeno verify --latest [flags]
-
-Options:
-  --latest         Audit the newest run instead of a named one
-  --allow-failed   Accept an honest failed/aborted terminal
-  --legacy         Read a 0.2/unversioned ledger in explicit compatibility mode
-
-Replays gate conditions against recorded artifacts and checks executor-binding
-attestations against the run's snapshot. Pre-dials run snapshots are refused;
-verify them with fadeno <= 0.6.0-rc.27.
-`,
-  show: `fadeno show \u2014 a run's step projection and artifacts
-
-Usage:
-  fadeno show <run> [flags]
-
-Options:
-  --events   Print the raw event timeline instead of the step projection
-  --legacy   Read a 0.2/unversioned ledger in explicit compatibility mode
-`,
-  "new-run": `fadeno new-run \u2014 create a run-ledger directory for a playbook
-
-Usage:
-  fadeno new-run <playbook> "<task>" [--input Name=path]...
-
-Options:
-  --input <Name=path>   Supply a declared input (repeatable)
-
-Creates .fadeno/runs/<stamp>-<slug>/ with run.yaml + events.jsonl. Then either
-\`fadeno drive <run>\` (engine) or follow the playbook manually with
-\`fadeno next\` / \`fadeno run\` / \`fadeno gate\`.
-`,
-  run: `fadeno run \u2014 append attested updates to a run ledger
-
-Usage:
-  fadeno run <run> [flags]
-
-Options:
-  --step <id>         Set current_step and log a step_started event
-  --status <status>   Set status: running | completed | failed | aborted
-  --event <type>      Append a custom event
-  --artifact <path>   Attach an artifact path to the event
-  --member <role>     Attribute the event to a map member / actor
-  --field <k=v>       Extra field on the event (repeatable)
-
-Examples:
-  fadeno run 2026-05-30-1132-csv --step review
-  fadeno run 2026-05-30-1132-csv --event artifact_created --artifact artifacts/x.json --member architect_fable
-  fadeno run 2026-05-30-1132-csv --status completed
-`,
-  gate: `fadeno gate \u2014 evaluate a gate condition from a structured artifact
-
-Usage:
-  fadeno gate <run> <condition> [--artifact <path>]
-
-Options:
-  --artifact <path>   Artifact path relative to the run (condition-specific default)
-
-The gate reads the declared artifact, evaluates the deterministic condition, and
-records the result as evidence. Exit code reflects the verdict.
-`,
-  prompt: `fadeno prompt \u2014 assemble (and record) a step's actor prompt
-
-Usage:
-  fadeno prompt <run> <step> [flags]
-
-Options:
-  --actor <role>    Map member / actor to assemble the prompt for
-  --iteration <n>   Loop-body iteration to target (default: latest)
-  --inline          Embed input file contents in the prompt
-  --no-record       Preview only: write no snapshot or event
-`,
-  init: `fadeno init \u2014 scaffold project-owned Fadeno capability
-
-Usage:
-  fadeno init --codex|--claude|--grok|--opencode|--omp [flags]
-
-Options:
-  --with-hooks    Also scaffold tier-2 enforcement hooks
-  --no-steering   Opt out of default Codex/Claude/OpenCode/omp steering
-  --data-only     Seed definitions + driver policy (host capability via plugin)
-  --force         Overwrite existing files / refresh the bootstrap section
-`,
-  setup: `fadeno setup \u2014 install safe user-scoped integration
-
-Usage:
-  fadeno setup [--codex|--claude] [--from <bin-dir>] [--reset-runtime]
-
-Options:
-  --non-interactive   Accepted compatibility no-op; setup never prompts
-  --from <bin-dir>    Use bin dir as runtime source (instead of bundled)
-  --reset-runtime     Allow downgrade to mirror this plugin
-
-Writes user-level capability only; project scaffolding is \`fadeno init\`.
-Inspect with \`fadeno status\`, remove with \`fadeno uninstall\`.
-The managed runtime self-refreshes from the plugin on every plugin-launched command; setup is needed only for first-time integration.
-`,
-  status: `fadeno status \u2014 show effective definitions, routing, and state
-
-Usage:
-  fadeno status [--verbose] [--codex|--claude|--opencode|--omp]
-
-The status runtime reports skew direction (managed-older, managed-newer, divergent) and preferredCli (use managed only when observed version matches invoking version; otherwise use invoking path). Skills and subagents are loaded at host session start; a fresh session is required to refresh them \u2014 no setup or refresh will update the current session. FADENO_BUNDLED_RUNTIME is used for plugin-launched refresh detection.
-`,
-  doctor: `fadeno doctor \u2014 run read-only diagnostics
-
-Usage:
-  fadeno doctor [--codex|--claude|--opencode|--omp]
-
-Checks include runtime skew (managed-older, managed-newer, divergent), preferredCli, runtime.staging, kept-newer, locked, skipped-no-source, and session-definitions. Doctor remains read-only and never writes the runtime. Skills and subagents require a fresh session.
-`,
-  steering: `fadeno steering \u2014 hybrid steering: resolve dials, materialize host slots
-
-Usage:
-  fadeno steering resolve --archetype <a> [--host-executor <n>] [--role <r>]
-                          [--run <id> --dispatch-id <id>]
-                          [--prompt-file <path>|--prompt-sha256 <hex>]
-  fadeno steering apply --codex|--claude|--opencode|--omp [--scope project|user] [--force]
-
-resolve emits the routing JSON hooks consume (exit 2 = restart required or
-write conflict \u2014 not runnable in this session). apply materializes the
-worker/reviewer/judge slots from the current dials, where the harness's agent
-format can carry one: Codex TOMLs (model + model_reasoning_effort), loaded on
-a fresh session. Under --claude it writes nothing and only cleans up retired
-managed files \u2014 the Agent tool has no effort channel, so a dialed @effort
-selects the delivery lane instead of an identity. Under --opencode it renders
-materialized agent files under .opencode/agent/ (identity baked in, Codex-style)
-plus a runtime plugin that picks the delivery lane per spawn (Claude-style);
-project scope only, and OpenCode loads both at process start, so restart it
-after changes. Under --omp it renders .omp/agents/ role or command slots plus
-an omp 18.0.1 tool_call extension. The extension rewrites only the selected
-agent in flat or batched native task inputs; omp retains background execution,
-continuations, and completion receipts. Resolver failures become refusal-agent
-inputs with local evidence. Restart omp after changes. Re-run after re-dialing.
---prompt-file (or --prompt-sha256) lets resolve see this exact prompt's
-digest, so a shadow-attached archetype's reply carries the pair decision
-(shadow.selected/shadow.routable) and, on a selected routable pair, resolves
-mode=command instead of mode=host so both arms are comparable. Omitted, and
-a shadow attachment's selected is null \u2014 unknown, never "no".
-`,
-  validate: `fadeno validate \u2014 validate playbooks and run documents
-
-Usage:
-  fadeno validate [file] [--schema <kind>]
-
-Options:
-  --schema <kind>   Force document kind: playbook | run | review-report | test-result
-
-With no file, validates every playbook under .fadeno/playbooks (schema,
-references, and flow semantics).
-`,
-  playbooks: `fadeno playbooks \u2014 browse effective bundled and project workflows
-
-Usage:
-  fadeno playbooks             List effective playbooks (project overrides bundled)
-  fadeno playbooks <name>      Show metadata and an annotated ASCII workflow
-
-Options:
-  --json   Structured list/detail output
-
-Each summary includes its invocable name, description, when_to_use cues,
-definition source, and resolved path. A project override with missing display
-fields is an error rather than silently falling back; use \`fadeno validate\`
-for complete schema and flow validation.
-
-Examples:
-  fadeno playbooks
-  fadeno playbooks code-change-review
-  fadeno playbooks --json
-`,
-  "tool-run": `fadeno tool-run \u2014 execute a registered tool step deterministically
-
-Usage:
-  fadeno tool-run <run> [--tool <name>] [--timeout <seconds>]
-
-Options:
-  --tool <name>       Race guard: must equal the ready step's declared tool
-  --timeout <seconds> Hard deadline seconds; 0 disables timeout
-
-The tool must be registered in the layered executors.yaml tools registry as a static argv
-array with optional timeout_ms. The playbook's tool name is a logical capability, never shell.
-Every ready tool_call step whose tool is registered can be executed. A step whose artifact
-type is test-result has its result SYNTHESIZED from the exit status (the exit code is the
-finding); every other step captures the tool's STDOUT as the artifact, and a non-zero exit
-is a failure rather than a result. Executes without a shell under the
-supervisor, strips harness identity, acquires the shared writer lease, and synthesizes a
-schema-valid TestResult (exit 0 => passed, nonzero => failed, spawn/timeout/signal => error).
-`,
-  "tool-complete": `fadeno tool-complete \u2014 record a manual tool result
-
-Usage:
-  fadeno tool-complete <run> --output <artifact-path>
-
-Validates the artifact against the step's declared schema and atomically attributes it.
-Shares validation with tool-run; one attempt wins via durable claim.
-`,
-  plugin: `fadeno plugin \u2014 generate a harness plugin from this checkout's templates
-
-Usage:
-  fadeno plugin [dir]            Claude Code plugin (default dir: plugin/)
-  fadeno plugin [dir] --codex    Codex plugin
-  fadeno plugin [dir] --omp      omp plugin
-
-Options:
-  --force   Overwrite existing generated files
-`
-};
 var SIGIL = { codex: "$", claude: "/", grok: "/", opencode: "", omp: "" };
 var SCHEMA_KINDS2 = SCHEMA_KINDS;
 function printInitSummary(target, repoRoot, results, withHooks, withSteering, dataOnly) {
@@ -42676,7 +42354,7 @@ function main(argv) {
   } catch (err) {
     console.error(`Error: ${err.message}
 `);
-    console.error(HELP);
+    console.error(renderGlobalHelp());
     return 1;
   }
   const { values, positionals } = parsed;
@@ -42699,11 +42377,12 @@ function main(argv) {
     return 0;
   }
   if (values.help) {
-    console.log(command2 != null && Object.hasOwn(COMMAND_HELP, command2) ? COMMAND_HELP[command2] : HELP);
+    const path = resolveHelpPath(positionals);
+    console.log(path == null ? renderGlobalHelp() : renderFocusedHelp(path));
     return 0;
   }
   if (!command2) {
-    console.log(HELP);
+    console.log(renderGlobalHelp());
     return 1;
   }
   maybeRunRuntimePreflight(argv, command2);
@@ -43814,7 +43493,7 @@ Or advance manually with the playbook cursor:`);
     default:
       console.error(`Unknown command: ${command2}
 `);
-      console.error(HELP);
+      console.error(renderGlobalHelp());
       return 1;
   }
 }
