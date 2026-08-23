@@ -697,6 +697,14 @@ hook. Plugins and agents load at process start, so any change requires a fresh
 OpenCode session; today's static `.opencode/agents/*.md` stay as the unsteered
 fallback.
 
+OpenCode 1.18.21's native `task` tool also supports `background: true` and
+continuations through `task_id`. The steering hook mutates only the selected
+agent field, so `background`, `task_id`, and every other task argument survive
+host, command-broker, and refusal rewrites. Host delivery/refusal evidence
+records `background`, `task_id`, and the hook's `session_id`/`call_id`
+correlation fields. Command brokers remain synchronous inside the child task;
+OpenCode owns the background job and its completion notification.
+
 What stays unsteered: Explore/Plan-style read-only scouting — cheap, tightly
 integrated with the harness's codebase tools, and not where quota pressure
 lives. The arbitrage win is expensive worker turns.

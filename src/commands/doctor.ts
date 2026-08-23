@@ -24,6 +24,7 @@ import {
 } from '../lib/codex-agent-file.ts';
 import { listRuns, readEvents } from '../lib/run-ledger.ts';
 import { normalizeDeliveryTransport } from '../lib/host-dispatch.ts';
+import { openCodeManagedIgnorePatterns } from '../lib/source-control.ts';
 
 // Same literal `steering.ts` writes into every managed Claude agent file
 // (retired grid cell or legacy per-dial); not exported there, so duplicated
@@ -338,6 +339,31 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
   } else if (status.codexMaterialization != null) {
     findings.push(finding('codex-agents', 'ok', 'managed host-agent state is current'));
   }
+  // OpenCode materializes one selected lane per role plus three refusal
+  // brokers. Unlike Codex's user-scoped TOMLs, these files are project-local
+  // and can be silently shadowed by a foreign file at the same path, so
+  // status/doctor inspect ownership, frontmatter, version, and the digest
+  // stamped into every managed agent. The plugin has the same ownership and
+  // version checks plus a digest stamped over its generated JS body.
+  if (status.opencodeMaterialization != null) {
+    const materialized = status.opencodeMaterialization;
+    if (materialized.healthy) {
+      findings.push(finding('opencode-steering', 'ok', 'managed OpenCode agents and runtime plugin are current and internally consistent'));
+    } else {
+      for (const issue of materialized.issues) {
+        const remediation = issue.kind === 'missing'
+          ? 'Run `fadeno steering apply --opencode --force`, then restart OpenCode.'
+          : issue.kind === 'unmanaged'
+            ? 'Move or remove the foreign file, or replace it deliberately with `fadeno steering apply --opencode --force`; never edit a managed file in place.'
+            : issue.kind === 'malformed'
+              ? 'Run `fadeno steering apply --opencode --force`, then restart OpenCode.'
+              : issue.kind === 'stale-version' || issue.kind === 'digest-drifted'
+                ? 'Refresh with `fadeno steering apply --opencode --force`, then restart OpenCode.'
+                : 'Keep only the lane selected by `fadeno status --opencode`; refresh with `fadeno steering apply --opencode --force`.';
+        findings.push(finding(`opencode-${issue.kind}`, 'warning', `${issue.detail} (${issue.path})`, remediation));
+      }
+    }
+  }
   // --- Project-scope Codex brokers shadowing the user-scope ones ---
   //
   // Codex resolves a role agent from `<repo>/.codex/agents/<archetype>.toml`
@@ -595,8 +621,18 @@ function missingBundledTemplates(pluginRoot: string): string[] {
   const gitignore = join(repoRoot, '.gitignore');
   const ignored = existsSync(gitignore) ? readFileSync(gitignore, 'utf8') : '';
   const ignoreLines = ignored.split(/\r?\n/).map((line) => line.trim());
-  for (const pattern of ['.fadeno/runs/', '.fadeno/progress/', '.fadeno/local/', '.fadeno/dispatches.jsonl', '.codex/agents/fadeno-*.toml', '.claude/settings.local.json']) {
-    if (!isFadenoPathIgnored(ignoreLines, pattern)) findings.push(finding(`ignore:${pattern}`, 'warning', 'managed ignore entry is absent', 'The first `new-run`/`dispatch`, `fadeno init`, or `fadeno vendor` adds it non-destructively.'));
+  const ignorePatterns = [
+    '.fadeno/runs/', '.fadeno/progress/', '.fadeno/local/', '.fadeno/dispatches.jsonl',
+    '.codex/agents/fadeno-*.toml', '.claude/settings.local.json',
+    ...(status.harness === 'opencode' ? openCodeManagedIgnorePatterns(repoRoot) : []),
+  ];
+  for (const pattern of ignorePatterns) {
+    if (!isFadenoPathIgnored(ignoreLines, pattern)) {
+      const remediation = pattern.startsWith('.opencode/')
+        ? 'Run `fadeno steering apply --opencode`; it adds ignores only for currently managed OpenCode files.'
+        : 'The first `new-run`/`dispatch`, `fadeno init`, or `fadeno vendor` adds it non-destructively.';
+      findings.push(finding(`ignore:${pattern}`, 'warning', 'managed ignore entry is absent', remediation));
+    }
   }
   {
     const LOCK_STALE_MS = 120_000;

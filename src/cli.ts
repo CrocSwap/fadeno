@@ -1856,6 +1856,12 @@ function main(argv: string[]): number {
         const fix = m.fresh ? '' : `; run \`fadeno setup --codex\` then start a fresh Codex session`;
         console.log(`Codex managed agents: ${m.fresh ? 'current' : 'missing/stale'}${m.restartRequired ? ' (restart required)' : ''}${fix}`);
       }
+      if ((result as any).opencodeMaterialization) {
+        const m = (result as any).opencodeMaterialization;
+        const issueKinds = [...new Set((m.issues ?? []).map((issue: any) => issue.kind))].join(', ');
+        console.log(`OpenCode steering: ${m.healthy ? 'current' : `missing/stale${issueKinds ? ` (${issueKinds})` : ''}`}${m.restartRequired ? ' (restart required)' : ''}`);
+        if (values.verbose) console.log(JSON.stringify({ opencodeMaterialization: m }, null, 2));
+      }
       if ((result as any).next) console.log(`next: ${(result as any).next}`);
       if (values.verbose) console.log(JSON.stringify({ repoRoot: (result as any).repoRoot, paths: (result as any).definitions, roles: (result as any).roles }, null, 2));
       return 0;

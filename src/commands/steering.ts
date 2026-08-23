@@ -34,6 +34,7 @@ import { HostDispatchError, readHostDispatchRequest, type HostDispatchRequest, t
 import { findRepoRoot, packageVersion, templatesDir } from '../lib/paths.ts';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { codexUserAgentDir, userPaths, type UserPathOptions } from '../lib/user-paths.ts';
+import { ensureOpenCodeFadenoIgnore } from '../lib/source-control.ts';
 import { stampHookVersion } from './plugin.ts';
 import {
   CODEX_MANAGED_MARK,
@@ -1743,18 +1744,28 @@ export function runSteeringApplyOpenCode(opts: OpenCodeSteeringApplyOptions): St
   // the generation that wrote them; refreshed whenever this apply runs against
   // a file carrying Fadeno's mark, never against a foreign file.
   const pluginTemplate = readFileSync(join(templatesDir(), 'opencode', 'plugin', 'fadeno-steering.js'), 'utf8');
+  const pluginContent = stampHookVersion(pluginTemplate).replace(/^#!.*\n/, '');
   const pluginBody =
-    `${OPENCODE_PLUGIN_MANAGED_MARK} version=${packageVersion()}\n` +
-    stampHookVersion(pluginTemplate).replace(/^#!.*\n/, '');
+    `${OPENCODE_PLUGIN_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(pluginContent)}\n` +
+    pluginContent;
   const pluginPath = join(repoRoot, '.opencode', 'plugin', 'fadeno-steering.js');
   results.push({ path: pluginPath, status: openCodePluginEmit(pluginPath, pluginBody, opts.force ?? false) });
+
+  // The apply command is also a supported upgrade path for an existing repo,
+  // so install ignores after emission. The helper inspects ownership markers
+  // and skips exact paths occupied by preserved foreign files.
+  const restartRequired = results.some((item) => item.status === 'created' || item.status === 'overwritten');
+  const gitignorePath = join(repoRoot, '.gitignore');
+  const gitignoreExisted = existsSync(gitignorePath);
+  if (ensureOpenCodeFadenoIgnore(repoRoot)) {
+    results.push({ path: gitignorePath, status: gitignoreExisted ? 'appended' : 'created' });
+  }
 
   const conflicts = pending
     .filter((item) => existsSync(item.path) && openCodeFileDiffers(item.path, item.body))
     .map((item) => item.path);
   // Agents AND the plugin register at process start, so any change to either
   // needs a fresh OpenCode session to take effect.
-  const restartRequired = results.some((item) => item.status === 'created' || item.status === 'overwritten');
   return { results, materialization, baseline, restartRequired, conflicts, scope: 'project', removed };
 }
 

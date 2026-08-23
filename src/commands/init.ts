@@ -190,7 +190,7 @@ export function runInit(opts: InitOptions): InitResult {
         // `tool.execute.before` plugin that picks the lane per spawn. Same
         // rendered-from-catalog rule as Codex: never a frozen template copy.
         if (withSteering) {
-          results.push(...runSteeringApplyOpenCode({ repoRoot, force }).results);
+          appendOpenCodeSteeringResults(results, runSteeringApplyOpenCode({ repoRoot, force }).results);
         }
         break;
       case 'omp':
@@ -228,7 +228,7 @@ export function runInit(opts: InitOptions): InitResult {
     results.push(...emitCodexSteeringBrokers({ repoRoot, force }));
   }
   if (opts.dataOnly && withSteering && opts.target === 'opencode') {
-    results.push(...runSteeringApplyOpenCode({ repoRoot, force }).results);
+    appendOpenCodeSteeringResults(results, runSteeringApplyOpenCode({ repoRoot, force }).results);
   }
 
   // 5. Optional tier-2 enforcement scaffold (per-repo policy — allowed with --data-only).
@@ -260,6 +260,17 @@ export function runInit(opts: InitOptions): InitResult {
   if (opts.target === 'claude') emitClaudeSettings(repoRoot, withSteering, results);
 
   return { target: opts.target, repoRoot, results };
+}
+
+function appendOpenCodeSteeringResults(results: EmitResult[], incoming: EmitResult[]): void {
+  for (const item of incoming) {
+    const prior = results.find((candidate) => candidate.path === item.path);
+    // A clean init creates `.gitignore` for the common local-state entries,
+    // then the OpenCode apply refreshes its marker-bounded subsection. Report
+    // the path once as created; standalone apply still reports its own append.
+    if (prior != null && item.status === 'appended') continue;
+    results.push(item);
+  }
 }
 
 const FADENO_BASH_RULE = 'Bash(fadeno:*)';
@@ -387,6 +398,7 @@ function ensureGitignored(repoRoot: string, patterns: string[], results: EmitRes
     if (lines.includes(pattern)) return false;
     if (pattern.startsWith('.fadeno/') && (lines.includes('.fadeno') || lines.includes('.fadeno/'))) return false;
     if (pattern.startsWith('.claude/') && (lines.includes('.claude') || lines.includes('.claude/'))) return false;
+    if (pattern.startsWith('.opencode/') && (lines.includes('.opencode') || lines.includes('.opencode/'))) return false;
     return true;
   });
   if (missing.length === 0) return;

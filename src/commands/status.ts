@@ -12,6 +12,7 @@ import { codexUserAgentDir, readUserDials, type UserPathOptions, userPaths } fro
 import { loadLayeredProfile } from '../lib/config-layers.ts';
 import { maintainedHarnesses, readInstallationManifest, compareFadenoVersions, readRuntimeVersionAt } from '../lib/installations.ts';
 import type { DialRef } from '../lib/executors.ts';
+import { inspectOpenCodeMaterialization, type OpenCodeMaterialization } from '../lib/opencode-steering.ts';
 
 export class StatusError extends Error {}
 
@@ -46,6 +47,7 @@ export interface StatusResult {
   roles: StatusRole[];
   external: StatusRole[];
   codexMaterialization: { path: string; fresh: boolean; restartRequired: boolean } | null;
+  opencodeMaterialization: OpenCodeMaterialization | null;
   projectCustomized: boolean;
   verbose: boolean;
   next: string | null;
@@ -153,6 +155,12 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
     }
   }
   const materialized = codexProfile == null ? null : materialization(codexProfile, true, opts.userPathOptions);
+  const opencodeMaterialized = harness === 'opencode'
+    ? inspectOpenCodeMaterialization(
+      repoRoot,
+      new Map(roles.map((role) => [role.archetype, role.adapter === 'command' ? 'command' : 'host'] as const)),
+    )
+    : null;
 
   const next = legacy_pin_note ? 'clear legacy pin with `fadeno dial clear`' : external.length > 0 ? 'review the external sandbox boundary before driving' : null;
 
@@ -218,6 +226,7 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
     roles,
     external,
     codexMaterialization: materialized,
+    opencodeMaterialization: opencodeMaterialized,
     projectCustomized: existsSync(join(repoRoot, '.fadeno')),
     verbose: Boolean(opts.verbose),
     next,

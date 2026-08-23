@@ -338,6 +338,11 @@ const CLAIMS: Claim[] = [
     src: { files: ['templates/opencode/plugin/fadeno-steering.js'], patterns: [/fadeno-steering/] },
   },
   {
+    id: 'opencode-background-task-steering',
+    doc: { files: [EXTENDING], patterns: [/background: true/, /task_id/, /session_id/, /call_id/] },
+    src: { files: ['templates/opencode/plugin/fadeno-steering.js'], patterns: [/background/, /task_id/, /session_id/, /call_id/] },
+  },
+  {
     id: 'isolated-host-workspace',
     doc: { files: ['README.md', 'docs/architecture.md'], patterns: [/fadeno dispatch-prepare/, /--isolate/, /workspace_mode: isolated/] },
     src: { files: ['src/commands/dispatch-prepare.ts', 'src/lib/host-workspace.ts'], patterns: [/dispatch-prepare/, /workspace_mode/, /host-worktrees/] },

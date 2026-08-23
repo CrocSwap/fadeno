@@ -481,12 +481,16 @@ bodies unchanged:
 | Subagent defs | `.opencode/agents/{worker,reviewer,judge}.md` (`mode: subagent`) |
 | Enforcement | common CI/pre-commit scaffold; no OpenCode-specific hook scaffold |
 | Route lane | `routes.opencode:` in the catalog mirrors `standalone:` command delivery |
+| Steering | project `.opencode/agent/` slots plus an auto-discovered `tool.execute.before` plugin; native background tasks remain background |
 
-Steering is intentionally unsupported at this tier: OpenCode's plugin API
-(`tool.execute.before`) is the eventual seam for Claude-style dispatch steering,
-and that remains deferred pending dogfood evidence. The driver role is
-unaffected — spawning a nested headless `opencode run` as a command executor is
-still valid under any host, with harness identity stripped like any subprocess.
+OpenCode steering is now implemented as a hybrid: identity is materialized in
+project agent files while the auto-discovered `tool.execute.before` plugin
+selects host, command, or refusal per spawn. On OpenCode 1.18.21, the plugin
+mutates only the selected agent field; native `background: true` and
+continuation `task_id` arguments remain intact, and host/refusal evidence keeps
+the session/call correlation ids. The driver role is unaffected — spawning a
+nested headless `opencode run` as a command executor is still valid under any
+host, with harness identity stripped like any subprocess.
 
 ### Post-v0 omp adapter note (2026-08-23)
 

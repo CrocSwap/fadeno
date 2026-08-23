@@ -127,9 +127,14 @@ general scheduler, or orchestration platform.
   but their Fadeno steering behavior remains unverified in a live Codex session.
   (The Claude plugin subagents are verified live; the new Claude rewrite hook
   still needs the same live-session dogfood pass.)
-- OpenCode steering (materialized agents + runtime plugin) is emitted and
-  unit-tested, but live end-to-end steering requires a fresh OpenCode session
-  and has not been demonstrated yet.
+- OpenCode steering (materialized agents + runtime plugin) is live-verified on
+  OpenCode 1.18.21 for native `background: true` tasks; hook-level tests cover
+  `task_id` continuations. The plugin preserves the complete task argument
+  shape and records correlated host/refusal evidence; `fadeno status
+  --opencode` and `fadeno doctor --opencode` report missing, unmanaged,
+  malformed, stale, and digest-drifted materialization. Headless runs can
+  outlive the caller while a background child is still active, so a caller
+  timeout is reported as a host limitation rather than a Fadeno failure.
 
 ## Next protocol (in progress — provenance slice shipped)
 

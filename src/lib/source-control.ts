@@ -1,6 +1,23 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+/** Exact OpenCode files emitted by Fadeno's project-scoped steering apply. */
+export const OPENCODE_IGNORE_PATTERNS = [
+  '.opencode/agent/worker.md',
+  '.opencode/agent/reviewer.md',
+  '.opencode/agent/judge.md',
+  '.opencode/agent/fadeno-dispatch-worker.md',
+  '.opencode/agent/fadeno-dispatch-reviewer.md',
+  '.opencode/agent/fadeno-dispatch-judge.md',
+  '.opencode/agent/fadeno-steering-refused-worker.md',
+  '.opencode/agent/fadeno-steering-refused-reviewer.md',
+  '.opencode/agent/fadeno-steering-refused-judge.md',
+  '.opencode/plugin/fadeno-steering.js',
+] as const;
+
+const OPENCODE_IGNORE_BEGIN = '# fadeno:opencode-steering:begin';
+const OPENCODE_IGNORE_END = '# fadeno:opencode-steering:end';
+
 export const FADENO_IGNORE_PATTERNS = [
   '.fadeno/runs/',
   '.fadeno/progress/',
@@ -18,19 +35,70 @@ export function isFadenoPathIgnored(lines: string[], pattern: string): boolean {
   if (pattern.startsWith('.fadeno/') && (lines.includes('.fadeno') || lines.includes('.fadeno/'))) return true;
   if (pattern.startsWith('.codex/') && (lines.includes('.codex') || lines.includes('.codex/'))) return true;
   if (pattern.startsWith('.claude/') && (lines.includes('.claude') || lines.includes('.claude/'))) return true;
+  if (pattern.startsWith('.opencode/') && (lines.includes('.opencode') || lines.includes('.opencode/'))) return true;
   return false;
 }
 
-/** Add the managed Fadeno block without touching unrelated .gitignore bytes. */
-export function ensureFadenoIgnore(repoRoot: string): boolean {
+/** Return only OpenCode paths that currently contain Fadeno's ownership mark. */
+export function openCodeManagedIgnorePatterns(repoRoot: string): string[] {
+  return OPENCODE_IGNORE_PATTERNS.filter((pattern) => {
+    const path = join(repoRoot, pattern);
+    if (!existsSync(path)) return false;
+    const marker = pattern === '.opencode/plugin/fadeno-steering.js'
+      ? '// fadeno:managed'
+      : '<!-- fadeno:managed';
+    try {
+      return readFileSync(path, 'utf8').includes(marker);
+    } catch {
+      return false;
+    }
+  });
+}
+
+function ensureIgnorePatterns(repoRoot: string, patterns: readonly string[]): boolean {
   const path = join(repoRoot, '.gitignore');
   const existed = existsSync(path);
   const content = existed ? readFileSync(path, 'utf8') : '';
   const lines = content.split(/\r?\n/).map((line) => line.trim());
-  const missing = FADENO_IGNORE_PATTERNS.filter((pattern) => !isFadenoPathIgnored(lines, pattern));
+  const missing = patterns.filter((pattern) => !isFadenoPathIgnored(lines, pattern));
   if (missing.length === 0) return false;
   const sep = content.length === 0 || content.endsWith('\n') ? '' : '\n';
   const block = `${sep}# Fadeno: local generated files (not committed)\n${missing.join('\n')}\n`;
   writeFileSync(path, content + block, 'utf8');
+  return true;
+}
+
+function replaceOpenCodeIgnoreBlock(content: string, patterns: readonly string[]): string {
+  const block = patterns.length === 0
+    ? ''
+    : `${OPENCODE_IGNORE_BEGIN}\n${patterns.join('\n')}\n${OPENCODE_IGNORE_END}\n`;
+  const markerStart = content.indexOf(OPENCODE_IGNORE_BEGIN);
+  if (markerStart < 0) {
+    if (block === '') return content;
+    const separator = content.length === 0 || content.endsWith('\n') ? '' : '\n';
+    return `${content}${separator}${block}`;
+  }
+
+  const lineStart = content.lastIndexOf('\n', markerStart - 1) + 1;
+  const markerEnd = content.indexOf(OPENCODE_IGNORE_END, markerStart + OPENCODE_IGNORE_BEGIN.length);
+  if (markerEnd < 0) return content;
+  let suffixStart = markerEnd + OPENCODE_IGNORE_END.length;
+  if (content.startsWith('\r\n', suffixStart)) suffixStart += 2;
+  else if (content.startsWith('\n', suffixStart)) suffixStart += 1;
+  return `${content.slice(0, lineStart)}${block}${content.slice(suffixStart)}`;
+}
+
+/** Add the managed Fadeno block without touching unrelated .gitignore bytes. */
+export function ensureFadenoIgnore(repoRoot: string): boolean {
+  return ensureIgnorePatterns(repoRoot, FADENO_IGNORE_PATTERNS);
+}
+
+/** Add ignores only for OpenCode files that were actually materialized by Fadeno. */
+export function ensureOpenCodeFadenoIgnore(repoRoot: string): boolean {
+  const path = join(repoRoot, '.gitignore');
+  const content = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  const updated = replaceOpenCodeIgnoreBlock(content, openCodeManagedIgnorePatterns(repoRoot));
+  if (updated === content) return false;
+  writeFileSync(path, updated, 'utf8');
   return true;
 }

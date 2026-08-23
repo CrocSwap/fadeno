@@ -481,7 +481,10 @@ revision writes a new generation, never overwrites.
 `runs/` is execution-trace output, **not source code**. It is safe to delete old
 runs. Fadeno's managed ignore block keeps `.fadeno/runs/`, `.fadeno/progress/`,
 `.fadeno/local/`, ad-hoc dispatch evidence, local Claude settings, and
-materialized steering brokers out of commits. Commit project-owned playbooks,
+materialized steering brokers (the managed role, dispatch, and refusal files
+under `.codex/agents/` and `.opencode/agent/`, plus the exact
+`.opencode/plugin/fadeno-steering.js` file) out of commits. Unmanaged OpenCode
+agents and plugins remain trackable. Commit project-owned playbooks,
 schemas, policy, hooks, and `fadeno.lock`. To retain a run as source-controlled
 evidence, use `fadeno evidence promote <run>`; it first verifies the receipt and
 copies its immutable ledger plus snapshotted definitions to `.fadeno/evidence/`.

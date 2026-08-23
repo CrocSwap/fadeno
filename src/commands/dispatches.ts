@@ -236,6 +236,11 @@ export interface DispatchEntry {
   target: string | null;
   provider: string | null;
   transport: string | null;
+  /** Native OpenCode Task lifecycle and hook correlation, when supplied. */
+  background: boolean | null;
+  taskId: string | null;
+  sessionId: string | null;
+  callId: string | null;
   promptSource: string | null;
   promptSnapshot: string | null;
   promptSha256: string | null;
@@ -677,6 +682,10 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     target: str(row.target),
     provider: str(row.provider),
     transport: str(row.transport),
+    background: bool(row.background),
+    taskId: str(row.task_id),
+    sessionId: str(row.session_id),
+    callId: str(row.call_id),
     promptSource: str(row.prompt_source),
     promptSnapshot: str(row.prompt_snapshot),
     promptSha256: str(row.prompt_sha256),
@@ -753,6 +762,10 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     target: null,
     provider: null,
     transport: str(row.transport),
+    background: bool(row.background),
+    taskId: str(row.task_id),
+    sessionId: str(row.session_id),
+    callId: str(row.call_id),
     promptSource: null,
     promptSnapshot: str(row.prompt_snapshot),
     promptSha256: str(row.prompt_sha256),
@@ -997,6 +1010,8 @@ export function renderDispatchLine(entry: DispatchEntry): string {
   );
   const via = entry.driver ?? entry.transport;
   if (via != null) parts.push(`via ${via}`);
+  if (entry.background === true) parts.push('[background]');
+  if (entry.taskId != null) parts.push(`[task: ${entry.taskId}]`);
   if (entry.shadow) {
     const pid8 = entry.primaryDispatchId ? entry.primaryDispatchId.slice(0, 8) : '?';
     parts.push(`[shadow of ${pid8}]`);
