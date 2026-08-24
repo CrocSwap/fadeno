@@ -271,15 +271,25 @@ test('adversarial process group: deadline kills entire executor subtree, not jus
   assert.ok(st.processGroupId != null, 'process_group_id must be recorded for group-kill verification');
   // Verify process group is dead
   const pgid = st.processGroupId!;
-  let groupAlive = false;
-  try {
-    process.kill(-pgid, 0);
-    groupAlive = true;
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    assert.equal(code, 'ESRCH', `process group ${pgid} should be ESRCH after deadline, got ${code}`);
+  // Darwin answers EPERM while the SIGKILLed group's members are still being
+  // reaped and ESRCH only once the last one is gone — the same kill-semantics
+  // asymmetry the workspace-lease liveness probe documents (EPERM counts as
+  // alive there). Observing EPERM immediately after the KILL is that race,
+  // not a live executor, so poll briefly for the group to finish dying
+  // instead of asserting on the first sample.
+  const reapedDeadline = Date.now() + 3000;
+  let code = 'alive';
+  while (Date.now() < reapedDeadline) {
+    try {
+      process.kill(-pgid, 0);
+    } catch (err) {
+      code = (err as NodeJS.ErrnoException).code ?? 'unknown';
+      if (code === 'ESRCH') break;
+    }
+    code = 'alive';
+    await sleep(50);
   }
-  assert.equal(groupAlive, false, 'executor process group must be dead after deadline KILL');
+  assert.equal(code, 'ESRCH', `process group ${pgid} should be ESRCH after deadline, got ${code}`);
   // Sentinel child should have been reaped too — if group kill failed, sentinel would keep updating
   const before = existsSync(sentinel) ? readFileSync(sentinel, 'utf8') : null;
   await sleep(800);
