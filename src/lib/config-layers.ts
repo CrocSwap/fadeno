@@ -19,6 +19,27 @@ export type ConfigLayer = 'builtin' | 'user' | 'project';
 
 export interface ProfileProvenance {
   bindings: Record<string, ConfigLayer>;
+  /** Which layer supplied each `models:` entry, when tracked. Absent keys predate tracking. */
+  models?: Record<string, ConfigLayer>;
+}
+
+/**
+ * What happened to the user catalog's personal models when a self-contained
+ * project catalog took over. Names the outcome instead of leaving it implicit:
+ * a promoted alias behaves exactly like a project-declared one, and a dropped
+ * one failed INTEGRITY (its delivery route resolves nowhere in the merged
+ * catalog), never mere absence from the project's `models:` list.
+ */
+export interface ModelFallbackOutcome {
+  /** User-catalog model names promoted into the effective profile. */
+  promoted: string[];
+  /**
+   * User-catalog model names dropped because their home delivery route is not
+   * declared anywhere in the merged route table. `route` is the unresolved
+   * route key (`delivery.route`, or `provider` when the entry declares no
+   * delivery).
+   */
+  dropped: Array<{ alias: string; route: string }>;
 }
 
 export interface LayeredProfile {
@@ -33,6 +54,11 @@ export interface LayeredProfile {
    * inapplicable: `layers` only reports which catalogs exist on disk, so a repo
    * with no project catalog at all (`['builtin']`) would read as "no user
    * layer" and wrongly drop a pin that names a perfectly valid builtin loadout.
+   *
+   * Suppression is wholesale EXCEPT for one deliberate carve-out: user-catalog
+   * models fall back per-key (see `modelFallback`). A personal alias is state,
+   * not catalog policy — an unlisted name in the project's `models:` is not an
+   * explicit exclusion of it.
    */
   selfContained: boolean;
   /**
@@ -40,6 +66,12 @@ export interface LayeredProfile {
    * when a self-contained project profile suppressed layering.
    */
   suppressedCanonArchetypes: string[];
+  /**
+   * Per-key model fallback outcomes. Empty (not null) whenever layering ran
+   * normally — a self-contained catalog is the only loader path that can
+   * promote or drop a user model.
+   */
+  modelFallback: ModelFallbackOutcome;
 }
 
 function mapping(value: unknown): Record<string, unknown> | null {
@@ -96,8 +128,12 @@ const ENTRY_MERGED_KEYS: ReadonlySet<CatalogTopLevelKey> = new Set<CatalogTopLev
  *
  * Scope note: only the layers that actually take part in the merge are
  * checked. A self-contained project catalog suppresses the builtin and user
- * layers wholesale by design, and a repo insulating itself that way should
- * not start failing over a key in a file it deliberately does not consult.
+ * layers wholesale by design — except the per-key user-model fallback
+ * (`applyUserModelFallback`), which merges a fragment of the user layer after
+ * this check has run. That fragment is a `models:` mapping read out of a file
+ * that passed its own layer's check when it was written; and a repo
+ * insulating itself this way should not start failing over a key in a file it
+ * deliberately does not consult.
  */
 function validateLayerKeys(doc: Record<string, unknown>, path: string): void {
   const unknown = Object.keys(doc).filter((key) => !(CATALOG_TOP_LEVEL_KEYS as readonly string[]).includes(key));
@@ -174,6 +210,7 @@ function mergeLayer(target: Record<string, unknown>, source: Record<string, unkn
         current[name] = value;
       }
       if (key === 'bindings') provenance.bindings[name] = layer;
+      if (key === 'models') (provenance.models ??= {})[name] = layer;
     }
     target[key] = current;
   }
@@ -199,8 +236,81 @@ function missingCanonArchetypes(
 }
 
 /**
+ * The home route key a model entry compiles against: its declared delivery
+ * route when it has one, else its provider (the `homeKey = delivery?.route ??
+ * provider` rule in `compileDialRef`). Null when the entry is not a mapping —
+ * the parser will reject that shape anyway; the fallback must not crash first.
+ */
+function modelHomeRoute(entry: unknown): string | null {
+  const map = mapping(entry);
+  if (map == null) return null;
+  const delivery = mapping(map.delivery);
+  if (delivery != null && typeof delivery.route === 'string' && delivery.route.trim().length > 0) {
+    return delivery.route.trim();
+  }
+  const provider = map.provider;
+  if (typeof provider === 'string' && provider.trim().length > 0) return provider.trim();
+  return null;
+}
+
+/**
+ * Per-key user-model fallback into a self-contained project catalog.
+ *
+ * A self-contained catalog suppresses the user layer wholesale EXCEPT for one
+ * carve-out: models. A personal alias (`fadeno models add`) is machine state,
+ * not repo policy — a project catalog that simply does not list `ox` has not
+ * thereby excluded it. Without this fallback the alias silently vanished,
+ * dispatch fell through to the unregistered path, and the task died hours
+ * later on an upstream error naming neither file (observed 2026-08-24: an
+ * `ox` alias promoted at user scope never reached a self-contained checkout).
+ *
+ * Integrity guard: promotion requires the entry's home route to be declared in
+ * at least one harness route table of the MERGED catalog. A dangling route
+ * reference cannot compile anywhere, so merging it would only move today's
+ * late confusing failure (`no route for provider ... in harness ...`, thrown
+ * from deep inside `compileDialRef` at dispatch time) into the profile under a
+ * name nobody asked for. Dropped entries are named, not silent; per-harness
+ * gaps stay with `compileDialRef`'s existing loud per-harness errors.
+ */
+function applyUserModelFallback(
+  document: Record<string, unknown>,
+  userDoc: Record<string, unknown> | undefined,
+  userPath: string,
+  provenance: ProfileProvenance,
+): ModelFallbackOutcome {
+  const outcome: ModelFallbackOutcome = { promoted: [], dropped: [] };
+  const userModelEntries = userDoc != null ? mapping(userDoc.models) : null;
+  if (userModelEntries == null || Object.keys(userModelEntries).length === 0) return outcome;
+  const targetModels = mapping(document.models);
+  if (targetModels == null) return outcome;
+  const mergedRoutes = mapping(document.routes) ?? {};
+  const routeDeclaredSomewhere = (routeKey: string): boolean =>
+    Object.values(mergedRoutes).some((table) => {
+      const routes = mapping(table);
+      return routes != null && routes[routeKey] != null;
+    });
+  for (const [alias, entry] of Object.entries(userModelEntries)) {
+    // A project-declared (or already-promoted) name wins: explicit catalog
+    // policy outranks personal state, and admission in `runModelsAdd` makes
+    // same-name collisions rare enough to stay quiet here.
+    if (Object.hasOwn(targetModels, alias)) continue;
+    const routeKey = modelHomeRoute(entry);
+    if (routeKey == null || !routeDeclaredSomewhere(routeKey)) {
+      outcome.dropped.push({ alias, route: routeKey ?? '?' });
+      continue;
+    }
+    mergeLayer(document, { models: { [alias]: entry } }, 'user', userPath, provenance);
+    outcome.promoted.push(alias);
+  }
+  return outcome;
+}
+
+/**
  * Compose bundled → user → project profiles. A self-contained legacy project
- * profile remains authoritative, preserving the pre-layering contract.
+ * profile remains authoritative — it suppresses the builtin and user layers,
+ * with one deliberate carve-out: the user catalog's personal models fall back
+ * per-key, integrity-gated on their delivery route resolving in the merged
+ * route table (see `applyUserModelFallback`).
  */
 export function loadLayeredProfile(repoRoot: string, options: UserPathOptions = {}, harness?: HarnessId): LayeredProfile {
   const paths = userPaths(options);
@@ -221,6 +331,12 @@ export function loadLayeredProfile(repoRoot: string, options: UserPathOptions = 
   const document: Record<string, unknown> = {};
   const provenance: ProfileProvenance = { bindings: {} };
   for (const entry of effective) mergeLayer(document, parsedLayers.get(entry.layer)!, entry.layer, entry.path, provenance);
+  // The carve-out: even when the project layer suppressed layering, the user
+  // catalog's personal models fall back per-key (integrity-gated). Runs only
+  // on the suppression path — normal layering already merges models by key.
+  const modelFallback = suppressLayering
+    ? applyUserModelFallback(document, parsedLayers.get('user'), layers.find((entry) => entry.layer === 'user')?.path ?? '', provenance)
+    : { promoted: [], dropped: [] };
   const text = stringifyObject(document);
   return {
     profile: parseExecutorProfile(text, effective.map((entry) => entry.layer).join(' + '), harness),
@@ -232,6 +348,7 @@ export function loadLayeredProfile(repoRoot: string, options: UserPathOptions = 
     suppressedCanonArchetypes: suppressLayering
       ? missingCanonArchetypes(parsedLayers.get('builtin') ?? null, projectDoc)
       : [],
+    modelFallback,
   };
 }
 
@@ -264,6 +381,7 @@ export function loadGlobalProfile(options: UserPathOptions = {}, harness?: Harne
     paths,
     selfContained: false,
     suppressedCanonArchetypes: [],
+    modelFallback: { promoted: [], dropped: [] },
   };
 }
 
@@ -272,12 +390,12 @@ export function loadGlobalProfile(options: UserPathOptions = {}, harness?: Harne
  * silently drops, as dotted paths.
  *
  * A project catalog that declares its own `models:` and `routes:` suppresses
- * the builtin and user layers wholesale (see `projectIsComplete`). That is a
- * supported, deliberate mode — and it is also a one-way ratchet: from that
- * moment the catalog can only fall behind the builtin sitting next to it, and
- * nothing ever says so. This repo's own catalog drifted 25 `timeout_ms`
- * declarations, a stale `relay.codex`, and the entire `tools:` block that way
- * while `doctor` reported zero warnings.
+ * the builtin layer wholesale (see `projectIsComplete`; user models are the
+ * one per-key carve-out). That is a supported, deliberate mode — and it is
+ * also a one-way ratchet: from that moment the catalog can only fall behind
+ * the builtin sitting next to it, and nothing ever says so. This repo's own
+ * catalog drifted 25 `timeout_ms` declarations, a stale `relay.codex`, and the
+ * entire `tools:` block that way while `doctor` reported zero warnings.
  *
  * **Absences only, never differing values.** A different value IS the point of
  * an override, so reporting it would be noise on every honest catalog. An

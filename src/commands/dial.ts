@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseDocument } from 'yaml';
-import { loadLayeredProfile, type LayeredProfile } from '../lib/config-layers.ts';
+import { loadLayeredProfile, type LayeredProfile, type ModelFallbackOutcome } from '../lib/config-layers.ts';
 import {
   activeHarness,
   BARE_IDENTIFIER_RE,
@@ -179,9 +179,35 @@ export function formatSuppressedCanonNote(archetypes: readonly string[]): string
   );
 }
 
+/**
+ * The per-key user-model carve-out, as a reader-facing note. Promotions and
+ * drops are both named: a promoted alias is personal state the repo is now
+ * serving, and a dropped one failed integrity (its route resolves nowhere),
+ * which the user must see rather than discover at dispatch time.
+ */
+export function formatModelFallbackNote(fallback: ModelFallbackOutcome): string | null {
+  const parts: string[] = [];
+  if (fallback.promoted.length > 0) {
+    parts.push(
+      `user-catalog model${fallback.promoted.length === 1 ? '' : 's'} promoted into this self-contained catalog: ` +
+        `${fallback.promoted.join(', ')}`,
+    );
+  }
+  for (const drop of fallback.dropped) {
+    parts.push(
+      `user-catalog model "${drop.alias}" dropped — delivery route "${drop.route}" is declared nowhere in this catalog`,
+    );
+  }
+  if (parts.length === 0) return null;
+  return `note: ${parts.join('; ')}`;
+}
+
 function canonSurfacing(layered: LayeredProfile): { suppressed_canon_archetypes: string[]; note: string | null } {
   const arr = layered.suppressedCanonArchetypes;
-  return { suppressed_canon_archetypes: arr, note: formatSuppressedCanonNote(arr) };
+  const canonNote = formatSuppressedCanonNote(arr);
+  const fallbackNote = formatModelFallbackNote(layered.modelFallback);
+  const note = [canonNote, fallbackNote].filter((part) => part != null).join('\n') || null;
+  return { suppressed_canon_archetypes: arr, note };
 }
 
 function buildDialRef(modelInput: string, via: string | undefined, label: string): DialRef {
@@ -1361,6 +1387,16 @@ export interface DialResolveResult {
   source: RoleResolutionSource;
   resolved_via?: string;
 
+  /**
+   * Present when the resolved model reached this profile through the per-key
+   * user-catalog fallback — a self-contained project catalog promoting a
+   * personal alias. Null otherwise: project-declared, builtin, unregistered,
+   * or any repo where layering ran normally. Additive and always derived from
+   * the same load that produced the delivery, so a caller can audit WHERE an
+   * executor came from without re-loading catalogs.
+   */
+  model_fallback?: { promoted_from_user: true; note: string };
+
   eligibility?: string;
   dial: DialRef;
   delivery: { dispatchable: boolean; dispatch_command: string | null; action: string };
@@ -1588,6 +1624,9 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
     harness,
     source: resolved.source,
     ...(resolved.resolvedVia != null ? { resolved_via: resolved.resolvedVia } : {}),
+    ...(layered.selfContained && layered.modelFallback.promoted.includes(resolved.delivery.model)
+      ? { model_fallback: { promoted_from_user: true as const, note: formatModelFallbackNote(layered.modelFallback)! } }
+      : {}),
     ...(eligibility !== 'eligible' ? { eligibility } : {}),
     dial: resolved.delivery.ref,
     delivery: deliveryGuidance(

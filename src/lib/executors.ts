@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { loadLayeredProfile, type ProfileProvenance } from './config-layers.ts';
+import { loadLayeredProfile, type ModelFallbackOutcome, type ProfileProvenance } from './config-layers.ts';
 import { readUserHarness, type FadenoHarness, type UserPathOptions } from './user-paths.ts';
 
 export class ExecutorProfileError extends Error {}
@@ -558,6 +558,11 @@ export interface LoadedExecutorProfile {
   layers?: Array<'builtin' | 'user' | 'project'>;
   selfContained?: boolean;
   provenance?: ProfileProvenance;
+  /**
+   * Per-key user-model fallback outcomes under a self-contained project
+   * catalog (config-layers). Absent on loaders that predate the field.
+   */
+  modelFallback?: ModelFallbackOutcome;
 }
 
 /** Repo-relative location of the profile (playbooks stay harness-neutral). */
@@ -1261,6 +1266,7 @@ export function loadExecutorProfile(repoRoot: string, options: UserPathOptions =
       layers: loaded.layers,
       selfContained: loaded.selfContained,
       provenance: loaded.provenance,
+      modelFallback: loaded.modelFallback,
     };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw err;

@@ -412,7 +412,12 @@ test('model add: injected discovery path and a self-contained project are explic
   assert.equal(result.discovery_path, 'test-plugin-path');
   assert.equal(result.suppressed_by_project, true);
   assert.match(readFileSync(join(user.env!.FADENO_CONFIG_HOME!, 'fadeno', 'executors.yaml'), 'utf8'), /moonshot:/);
-  assert.equal(runModels({ repoRoot: root, userPathOptions: user }).models.some((row) => row.name === 'moonshot'), false);
+  // The alias's delivery route (`opencode-direct`) IS declared in this
+  // self-contained catalog, so the per-key fallback promotes it: it is now a
+  // first-class citizen of this repo's effective view, not hidden. A user
+  // model whose route resolves NOWHERE is the dropped case — covered in
+  // test/model-fallback.test.ts.
+  assert.equal(runModels({ repoRoot: root, userPathOptions: user }).models.some((row) => row.name === 'moonshot'), true);
 });
 
 test('model add: a self-contained project cannot hide global aliases or discovery routes', (t) => {

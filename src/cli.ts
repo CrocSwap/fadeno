@@ -735,7 +735,7 @@ function printModelAdd(result: ModelAddResult): void {
   console.log(`  delivery: ${result.delivery.route} → ${result.delivery.id}`);
   console.log(`  user catalog: ${result.catalog_path}`);
   if (result.suppressed_by_project) {
-    console.log('  note: this checkout has a self-contained project catalog, so it currently suppresses the user entry.');
+    console.log('  note: this checkout has a self-contained project catalog; the alias will fall back into it per-key when its delivery route resolves there (dial show names any that drop).');
   }
 }
 

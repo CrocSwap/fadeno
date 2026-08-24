@@ -361,6 +361,11 @@ const CLAIMS: Claim[] = [
     src: { files: ['templates/opencode/plugin/fadeno-steering.js'], patterns: [/background/, /task_id/, /session_id/, /call_id/] },
   },
   {
+    id: 'self-contained-user-model-fallback',
+    doc: { files: [EXTENDING], patterns: [/modelFallback/, /per-key/] },
+    src: { files: ['src/lib/config-layers.ts', 'src/commands/dial.ts'], patterns: [/applyUserModelFallback/, /formatModelFallbackNote/] },
+  },
+  {
     id: 'isolated-host-workspace',
     doc: { files: ['README.md', 'docs/architecture.md'], patterns: [/fadeno dispatch-prepare/, /--isolate/, /workspace_mode: isolated/] },
     src: { files: ['src/commands/dispatch-prepare.ts', 'src/lib/host-workspace.ts'], patterns: [/dispatch-prepare/, /workspace_mode/, /host-worktrees/] },

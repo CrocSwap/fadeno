@@ -462,8 +462,9 @@ function atomicWrite(path: string, text: string): void {
 /**
  * Promote an actually listed upstream model to a stable user-catalog alias.
  * It intentionally writes only user scope: project catalogs remain source
- * controlled, and a complete project catalog reports (rather than hides) its
- * suppression of the new user entry.
+ * controlled, and a complete project catalog reports (rather than hides) the
+ * new entry's standing there — per-key fallback serves it when its delivery
+ * route resolves, and `dial show` names any that drop.
  */
 export function runModelsAdd(opts: ModelAddOptions): ModelAddResult {
   const alias = opts.alias.trim();

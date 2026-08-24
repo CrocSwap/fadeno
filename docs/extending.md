@@ -314,7 +314,7 @@ Rules enforced identically at catalog and snapshot parse boundaries:
 - `timeout` / `timeout_ms` is a positive integer (`timeout` in seconds, `timeout_ms` in ms); `timeout: 0` is invalid there — use `--timeout 0` on the CLI to disable a registry deadline for one invocation;
 - exactly one of `timeout` / `timeout_ms` when present.
 
-Layering follows existing profile precedence: `builtin` → `user` → `project`; a self-contained project catalog (`models:` + `routes:`) suppresses builtin/user. `tools:` merges by key like `bindings:`/`models:`.
+Layering follows existing profile precedence: `builtin` → `user` → `project`; a self-contained project catalog (`models:` + `routes:`) suppresses builtin/user, with one carve-out: user-catalog models fall back per-key when their delivery route resolves in the merged catalog (`modelFallback` names promotions and drops; `dial show`/`dial resolve` surface both). `tools:` merges by key like `bindings:`/`models:`.
 
 `fadeno tool-run <run> [--tool <name>] [--timeout <seconds>]` then executes the ready `tool_call` only when its `tool` is registered and its artifact schema is `test-result`; `--tool` is a race guard. `Diff`/`PostResult` stay manual via `fadeno tool-complete <run> --output <path>` (which shares the same generation-scoped claim/lease discipline, so one attempt wins, and writes a `tool_recorded` receipt — `recorded_by: host` — after the manifest; `verify`'s `tool-artifact-receipts` requires every tool step's artifact to be claimed by `tool_completed` or `tool_recorded`). `fadeno drive` auto-executes registered `test-result` tools inline and otherwise returns `needs_decision`.
 
