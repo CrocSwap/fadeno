@@ -832,7 +832,13 @@ test('Codex steering resolve forces mode=command on a selected, routable pair, k
 
   // Baseline: hostExecutor matches the resolved dial, so with no digest at
   // all this resolves mode=host, same as it would with no shadow attached.
-  const noDigest = runSteeringResolve({ repoRoot: root, archetype: 'worker', hostExecutor: 'luna' });
+  // The harness must be pinned explicitly: activeHarness() falls through
+  // ambient markers and the user harness file to 'standalone', where this
+  // fixture's codex-only route table never compiles luna into a host spec.
+  const noDigest = runSteeringResolve({
+    repoRoot: root, archetype: 'worker', hostExecutor: 'luna',
+    userPathOptions: { env: { FADENO_HARNESS: 'codex' } },
+  });
   assert.equal(noDigest.mode, 'host');
   // A rate is set but no digest was supplied — the resolver cannot answer
   // "is this a pair", and must not read that silence as "no".
@@ -840,6 +846,7 @@ test('Codex steering resolve forces mode=command on a selected, routable pair, k
 
   const paired = runSteeringResolve({
     repoRoot: root, archetype: 'worker', hostExecutor: 'luna', promptFile: promptPath,
+    userPathOptions: { env: { FADENO_HARNESS: 'codex' } },
   });
   assert.equal(paired.shadow?.selected, true);
   assert.equal(paired.shadow?.routable, true);
@@ -857,6 +864,7 @@ test('Codex steering resolve forces mode=command on a selected, routable pair, k
   const digest = sha256Hex(readFileSync(promptPath, 'utf8'));
   const viaSha = runSteeringResolve({
     repoRoot: root, archetype: 'worker', hostExecutor: 'luna', promptSha256: digest,
+    userPathOptions: { env: { FADENO_HARNESS: 'codex' } },
   });
   assert.equal(viaSha.mode, 'command');
   assert.equal(viaSha.shadow?.selected, true);
@@ -866,7 +874,10 @@ test('steering reports a finite exhausted shadow as attached but never selected'
   const root = tempRepo(t);
   seedCodexPairV3(root);
   writeLocalDialState(root, { dials: {}, shadows: { worker: { model: 'grok', rate: 1, n: 1, remaining: 0 } }, legacyNote: null });
-  const resolved = runSteeringResolve({ repoRoot: root, archetype: 'worker', hostExecutor: 'luna' });
+  const resolved = runSteeringResolve({
+    repoRoot: root, archetype: 'worker', hostExecutor: 'luna',
+    userPathOptions: { env: { FADENO_HARNESS: 'codex' } },
+  });
   assert.equal(resolved.shadow?.attached, true);
   assert.equal(resolved.shadow?.n, 1);
   assert.equal(resolved.shadow?.remaining, 0);

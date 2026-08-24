@@ -158,8 +158,7 @@ test('new-run copies declared inputs and bindings filter map prompts', (t) => {
   assert.deepEqual(first.plan.inputs.map((input) => input.artifact), ['Agent1Spec']);
 });
 
-test.skip('drive batches host requests and receipts are idempotent and verifiable', (t) => {
-  // Skipped per G2: uses old executors format; covered by seedPendingHostRun which is now v3
+test('drive batches host requests and receipts are idempotent and verifiable', { skip: 'per G2: uses old executors format; covered by seedPendingHostRun which is now v3' }, (t) => {
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
   writeFileSync(join(root, '.fadeno', 'playbooks', 'host-dispatch-fixture.yaml'), PLAYBOOK);
@@ -392,8 +391,7 @@ test('host progress is provenance-labelled, idempotent, projected, and lifecycle
   assert.match(tampered.findings.find((finding) => finding.check === 'host-dispatch-lifecycle')!.detail, /observation_source/);
 });
 
-test.skip('host schema repair requests carry immutable validation feedback', (t) => {
-  // Skipped per G2: uses old executors format
+test('host schema repair requests carry immutable validation feedback', { skip: 'per G2: uses old executors format' }, (t) => {
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
   writeFileSync(join(root, '.fadeno', 'playbooks', 'host-repair-fixture.yaml'), REPAIR_PLAYBOOK);

@@ -101,9 +101,7 @@ function seedHybridProfileV3(root: string): void {
   }));
 }
 
-test.skip('hybrid steering resolves matching host locally, command slots live, and mismatches loudly', (t) => {
-  // Shim test dropped per G2: loadout-based steering is retired; dial world uses dials + hostExecutor matching
-});
+test('hybrid steering resolves matching host locally, command slots live, and mismatches loudly', { skip: 'per G2: shim test dropped — loadout-based steering is retired; dial world uses dials + hostExecutor matching' }, () => {});
 
 test('engine host steering is locked to the run request, not ambient dials', (t) => {
   const root = tempRepo(t);
@@ -407,8 +405,7 @@ function seedWriteGuardProfileV3(root: string): void {
   }));
 }
 
-test.skip('steering resolve refuses a command slot whose delivery cannot do the archetype\'s work', (t) => {
-  // Skipped per G2: write guard profile needs dial-specific harness; covered by constraint tests
+test('steering resolve refuses a command slot whose delivery cannot do the archetype\'s work', { skip: 'per G2: write guard profile needs dial-specific harness; covered by constraint tests' }, (t) => {
   const root = tempRepo(t);
   seedWriteGuardProfile(root);
 

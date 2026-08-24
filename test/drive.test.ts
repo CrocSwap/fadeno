@@ -704,9 +704,7 @@ test('verify: a forged resumed dispatch with an unknown session fails session-co
   );
 });
 
-test.skip('sessions: profile validation rejects resume without an id source, and double id sources', (t) => {
-  // Skipped per G2: old executors profile validation is now at route level (v3); covered by dials-kernel tests
-});
+test('sessions: profile validation rejects resume without an id source, and double id sources', { skip: 'per G2: old executors profile validation is now at route level (v3); covered by dials-kernel tests' }, () => {});
 
 test('engine: refuses legacy ledgers and honors the transition cap', (t) => {
   const { root, runId } = seed(t);
