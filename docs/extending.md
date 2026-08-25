@@ -735,9 +735,13 @@ For model-initiated background without relying on the native flag,
 custom tool: it launches `fadeno dispatch` detached, returns the dispatch id
 within seconds, and optionally blocks up to `wait_seconds` (capped at 600) for
 the finished report. Background semantics come from process detachment — the
-kernel owns evidence, worktree isolation, and attested output recovery — and
-completion does not notify the session; the model checks
-`fadeno dispatches --output tag:<tag>`.
+kernel owns evidence, worktree isolation, and attested output recovery. When
+fired fire-and-forget, the tool registers the launch (persisted in
+`.fadeno/local/dispatch-watch.json`) and a watcher on
+`.fadeno/dispatches.jsonl` delivers the completion report back into the
+launching session via `client.session.prompt` — a real host turn, not just a
+toast — so the model wakes with the result. Delivery is best-effort: a failed
+injection degrades to the tag recovery path, never breaks the host.
 
 What stays unsteered: Explore/Plan-style read-only scouting — cheap, tightly
 integrated with the harness's codebase tools, and not where quota pressure

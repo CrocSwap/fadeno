@@ -1,26 +1,34 @@
 // Fadeno background-dispatch tool for OpenCode — a plugin-defined custom tool
 // that gives the model a first-class "run a role agent in the background"
-// verb. The native task tool in current OpenCode builds owns background
-// execution end-to-end but does not expose a `background` parameter in the
-// schema models see (verified 2026-08-25 across two sessions), so
-// model-initiated background is unreachable by prompting. This tool closes
-// that gap WITHOUT touching OpenCode's task machinery: background semantics
-// come from process detachment around `fadeno dispatch`, whose kernel already
-// owns the evidence rows, the isolated worktree, and attested output
-// recovery. OpenCode only ever sees an ordinary tool call that returns in
-// seconds.
+// verb, plus automatic completion delivery back into the launching session.
+//
+// Two gaps in current OpenCode builds motivated this file (both verified
+// 2026-08-25):
+// 1. The native task tool owns background execution but its model-facing
+//    schema has no `background` parameter, so model-initiated background is
+//    unreachable by prompting. This tool's background semantics come from
+//    process detachment around `fadeno dispatch`, whose kernel already owns
+//    the evidence rows, the isolated worktree, and attested output recovery.
+// 2. A detached dispatch has no channel back into the session — the native
+//    background task delivers completion notifications, a shell-detached
+//    process cannot. This plugin closes that by watching
+//    `.fadeno/dispatches.jsonl` and injecting a completion report into the
+//    launching session via `client.session.prompt` (no `noReply`), which
+//    triggers a real host turn. The SDK marks prompt-with-noReply as context
+//    injection; omitting it is what wakes the model.
 //
 // Loader constraints, same as fadeno-steering.js: auto-discovery globs
 // `{plugin,plugins}/*.{js,ts}` and every exported function value is CALLED at
-// startup, so the pure decision core hangs behind one exported factory whose
-// product is an inert object. The `tool` helper import is what makes this a
-// tool-defining plugin rather than a hooks plugin.
+// startup, so the pure core hangs behind one exported factory whose product
+// is an inert object.
 //
 // Fail-open philosophy: the tool returns descriptive text instead of throwing
-// wherever possible — a launch failure is information for the model, not an
-// exception for the harness.
+// wherever possible, and every notification-path error is swallowed — a
+// broken wake-up must never break the host session.
 
 import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { tool } from '@opencode-ai/plugin';
 
 // How long execute() waits for the kernel to print the dispatch id before
@@ -33,6 +41,12 @@ const DISPATCH_ID_TIMEOUT_MS = 15_000;
 // `fadeno dispatches --output tag:<tag> --wait <n>`, which the model can call
 // itself; a tool call that blocks for minutes defeats the point.
 const MAX_WAIT_SECONDS = 600;
+
+// The completion watcher's cadence and the report size it will inject. The
+// poll is deliberately an unref'd interval: it must never hold the host open,
+// and two seconds is fast next to any role-agent runtime.
+const WATCH_POLL_MS = 2_000;
+const REPORT_MAX_CHARS = 8_000;
 
 const ARCHETYPES = ['worker', 'reviewer', 'judge'];
 
@@ -59,6 +73,80 @@ function parseDispatchId(stdout) {
 function recoveryHint(tag, dispatchId) {
   const by = dispatchId != null ? `id:${dispatchId}` : `tag:${tag}`;
   return `Recover output with: fadeno dispatches --output ${by} --wait 600`;
+}
+
+/** The persisted launch registry: which session owns which in-flight dispatch. */
+const WATCH_REGISTRY_BASENAME = 'dispatch-watch.json';
+
+function watchRegistryPath(repoDir) {
+  return join(repoDir, '.fadeno', 'local', WATCH_REGISTRY_BASENAME);
+}
+
+/** Read the registry; unreadable/absent/malformed all degrade to empty. */
+function readWatchRegistry(path) {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (entry) => entry != null && typeof entry === 'object' && typeof entry.dispatchId === 'string',
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** Best-effort registry write; a failed write loses wake-ups, not the host. */
+function writeWatchRegistry(path, entries) {
+  try {
+    mkdirSync(join(path, '..'), { recursive: true });
+    writeFileSync(path, `${JSON.stringify(entries, null, 2)}\n`, 'utf8');
+  } catch {}
+}
+
+/**
+ * Completed-dispatch rows from an appended evidence chunk. Only
+ * `dispatch_completed` rows carry the terminal verdict; everything else is
+ * noise to the watcher.
+ */
+function extractCompletedRows(chunk) {
+  const out = [];
+  for (const line of String(chunk ?? '').split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    try {
+      const row = JSON.parse(trimmed);
+      if (row?.event === 'dispatch_completed' && typeof row.dispatch_id === 'string') {
+        out.push(row);
+      }
+    } catch {}
+  }
+  return out;
+}
+
+/** One-line verdict for a completion row, matching the kernel's own vocabulary. */
+function verdictOf(row) {
+  return row.exit_code === 0 ? 'ok' : `FAILED (exit ${row.exit_code ?? 'unknown'})`;
+}
+
+/** The message injected into the session on completion. Pure; tests pin it. */
+function buildCompletionMessage(tag, row, report) {
+  const lines = [
+    `Background Fadeno dispatch finished — tag ${tag}, verdict ${verdictOf(row)}.`,
+  ];
+  if (report != null && report.length > 0) {
+    const trimmed = report.length > REPORT_MAX_CHARS ? `${report.slice(0, REPORT_MAX_CHARS)}…[truncated]` : report;
+    lines.push('Report:', trimmed);
+  } else {
+    lines.push(recoveryHint(tag, row.dispatch_id));
+  }
+  return lines.join('\n');
+}
+
+/** Bound a fetched report before it reaches the session context. */
+function truncateReport(text) {
+  const trimmed = String(text ?? '').trim();
+  if (trimmed.length === 0) return null;
+  return trimmed.length > REPORT_MAX_CHARS ? `${trimmed.slice(0, REPORT_MAX_CHARS)}…[truncated]` : trimmed;
 }
 
 /**
@@ -162,13 +250,101 @@ function waitForOutput(repoDir, tag, seconds, argv0 = 'fadeno', spawnSyncFn = sp
 
 /**
  * The plugin OpenCode loads. One exported factory (loader constraint above);
- * its product carries the tool registration.
+ * its product carries the tool registration plus the completion watcher.
  */
 export default async function FadenoDispatchTool(input) {
   const repoDir =
     typeof input?.directory === 'string' && input.directory.length > 0
       ? input.directory
       : process.cwd();
+  const client = input?.client;
+  const registryPath = watchRegistryPath(repoDir);
+  const evidencePath = join(repoDir, '.fadeno', 'dispatches.jsonl');
+
+  // dispatchId -> { tag, sessionID }. Hydrated from the persisted registry so
+  // a host restart does not orphan in-flight wake-ups.
+  const watched = new Map();
+  for (const entry of readWatchRegistry(registryPath)) {
+    if (entry.dispatchId != null) watched.set(entry.dispatchId, { tag: entry.tag, sessionID: entry.sessionID });
+  }
+  let pollTimer = null;
+  let evidenceOffset = 0;
+  const notified = new Set();
+
+  function persistWatched() {
+    writeWatchRegistry(
+      registryPath,
+      [...watched.entries()].map(([dispatchId, meta]) => ({ dispatchId, ...meta })),
+    );
+  }
+
+  function toast(message, variant) {
+    try {
+      client?.tui?.showToast?.({ body: { message, variant } })?.catch?.(() => {});
+    } catch {}
+  }
+
+  /** Fire a completion report into the session that launched the dispatch. */
+  function deliver(row) {
+    const meta = watched.get(row.dispatch_id);
+    if (meta == null || meta.sessionID == null || notified.has(row.dispatch_id)) return;
+    notified.add(row.dispatch_id);
+    watched.delete(row.dispatch_id);
+    persistWatched();
+    let report = null;
+    try {
+      const fetched = spawnSync('fadeno', ['dispatches', '--output', `id:${row.dispatch_id}`], {
+        cwd: repoDir,
+        encoding: 'utf8',
+        timeout: 30_000,
+      });
+      report = truncateReport(fetched?.stdout);
+    } catch {}
+    const message = buildCompletionMessage(meta.tag, row, report);
+    // The turn trigger: prompt WITHOUT noReply so the model wakes and
+    // processes the report. Fire-and-forget — a failed injection degrades to
+    // silent dispatch, which is the pre-watcher status quo, and the tag
+    // recovery path still exists.
+    try {
+      const pending = client?.session?.prompt?.({
+        path: { id: meta.sessionID },
+        body: { parts: [{ type: 'text', text: message }] },
+      });
+      pending?.catch?.(() => toast(`Fadeno dispatch ${meta.tag}: ${verdictOf(row)} (delivery failed)`, 'warning'));
+    } catch {
+      toast(`Fadeno dispatch ${meta.tag}: ${verdictOf(row)} (delivery failed)`, 'warning');
+    }
+    toast(`Fadeno dispatch ${meta.tag}: ${verdictOf(row)}`, row.exit_code === 0 ? 'success' : 'error');
+  }
+
+  function pollEvidence() {
+    if (!existsSync(evidencePath)) return;
+    const size = statSync(evidencePath).size;
+    if (size <= evidenceOffset) return;
+    const handle = readFileSync(evidencePath);
+    const chunk = handle.subarray(evidenceOffset).toString('utf8');
+    evidenceOffset = size;
+    for (const row of extractCompletedRows(chunk)) deliver(row);
+  }
+
+  function startWatching() {
+    if (pollTimer != null) return;
+    // Start from the file's current size, then reconcile: a registry entry
+    // whose dispatch ALREADY completed (host was closed mid-run) delivers now
+    // rather than never. Only rows after the offset are watched live.
+    try {
+      if (existsSync(evidencePath)) {
+        evidenceOffset = statSync(evidencePath).size;
+        for (const row of extractCompletedRows(readFileSync(evidencePath, 'utf8'))) deliver(row);
+      }
+    } catch {}
+    pollTimer = setInterval(() => {
+      try { pollEvidence(); } catch {}
+    }, WATCH_POLL_MS);
+    // Never hold the host open on behalf of the watcher.
+    pollTimer.unref?.();
+  }
+
   return {
     tool: {
       fadeno_dispatch: tool({
@@ -177,16 +353,16 @@ export default async function FadenoDispatchTool(input) {
           'Returns within seconds with a dispatch id; the role work continues independently and the host ' +
           'session stays interactive. The prompt is delivered verbatim to the role agent. ' +
           'Set wait_seconds to also block for the finished report (capped at ' + MAX_WAIT_SECONDS + 's); ' +
-          'leave it 0 to fire-and-forget. Recover output any time with ' +
-          '`fadeno dispatches --output tag:<tag> --wait <seconds>`. ' +
-          'Completion does NOT notify this session — check with `fadeno dispatches --output tag:<tag>`.',
+          'leave it 0 to fire-and-forget. When fire-and-forgot, the completion report is delivered back ' +
+          'into this session automatically as a new message when the dispatch finishes. ' +
+          'Recover output any time with `fadeno dispatches --output tag:<tag> --wait <seconds>`.',
         args: {
           archetype: tool.schema.string().describe('Fadeno role archetype: worker, reviewer, or judge'),
           prompt: tool.schema.string().describe('The complete task prompt for the role agent'),
           tag: tool.schema.string().optional().describe('Optional stable tag for output recovery; auto-generated when omitted'),
-          wait_seconds: tool.schema.number().optional().describe('Optionally block up to this many seconds for the finished report (0 = fire-and-forget)'),
+          wait_seconds: tool.schema.number().optional().describe('Optionally block up to this many seconds for the finished report (0 = fire-and-forget with automatic delivery later)'),
         },
-        async execute(args) {
+        async execute(args, context) {
           const archetype = str(args?.archetype);
           if (archetype == null || !ARCHETYPES.includes(archetype)) {
             return `fadeno_dispatch: archetype must be one of ${ARCHETYPES.join(', ')}; got ${JSON.stringify(args?.archetype ?? null)}.`;
@@ -197,6 +373,7 @@ export default async function FadenoDispatchTool(input) {
           }
           const tag = str(args?.tag) ?? buildTag(archetype);
           const waitSeconds = typeof args?.wait_seconds === 'number' && Number.isFinite(args.wait_seconds) ? args.wait_seconds : 0;
+          const sessionID = str(context?.sessionID);
           const launch = await launchDispatch(repoDir, archetype, tag, prompt);
           if (!launch.ok) return `fadeno_dispatch failed: ${launch.message}`;
           const waited = waitSeconds > 0 ? waitForOutput(repoDir, tag, waitSeconds) : null;
@@ -206,9 +383,15 @@ export default async function FadenoDispatchTool(input) {
           ];
           if (waited != null) {
             lines.push(`report (waited ${Math.min(Math.max(0, Math.floor(waitSeconds)), MAX_WAIT_SECONDS)}s):`, waited);
+          } else if (launch.dispatchId != null && sessionID != null) {
+            // Registered for automatic delivery; the watcher owns it from here.
+            watched.set(launch.dispatchId, { tag, sessionID });
+            persistWatched();
+            startWatching();
+            lines.push(`The completion report will be delivered back into this session automatically (dispatch ${launch.dispatchId}).`);
           } else {
             lines.push(recoveryHint(tag, launch.dispatchId));
-            lines.push('There is no automatic completion notification; check the output when it matters.');
+            lines.push('No automatic completion delivery for this dispatch (no dispatch id or session id available); check the output when it matters.');
           }
           return lines.join('\n');
         },
@@ -228,11 +411,20 @@ export function fadenoDispatchToolCore() {
     ARCHETYPES,
     DISPATCH_ID_TIMEOUT_MS,
     MAX_WAIT_SECONDS,
+    REPORT_MAX_CHARS,
+    WATCH_REGISTRY_BASENAME,
     buildArgv,
     buildTag,
     parseDispatchId,
     recoveryHint,
     launchDispatch,
     waitForOutput,
+    watchRegistryPath,
+    readWatchRegistry,
+    writeWatchRegistry,
+    extractCompletedRows,
+    verdictOf,
+    buildCompletionMessage,
+    truncateReport,
   };
 }

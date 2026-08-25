@@ -64,6 +64,13 @@ const core = pluginModule.fadenoDispatchToolCore() as {
     argv0?: string,
     spawnSyncFn?: any,
   ) => string | null;
+  watchRegistryPath: (repoDir: string) => string;
+  readWatchRegistry: (path: string) => Array<{ dispatchId: string; tag?: string; sessionID?: string }>;
+  writeWatchRegistry: (path: string, entries: Array<Record<string, unknown>>) => void;
+  extractCompletedRows: (chunk: string | null | undefined) => Array<Record<string, any>>;
+  verdictOf: (row: Record<string, unknown>) => string;
+  buildCompletionMessage: (tag: string, row: Record<string, unknown>, report: string | null) => string;
+  truncateReport: (text: unknown) => string | null;
 };
 
 test.after?.(() => rmSync(scratchDir, { recursive: true, force: true }));
@@ -167,4 +174,57 @@ test('steering apply emits the dispatch tool beside the steering plugin under th
   assert.ok(body.startsWith('// fadeno:managed'));
   assert.match(body, /fadeno_dispatch/);
   assert.match(body, /fadenoDispatchToolCore/);
+});
+
+test('extractCompletedRows picks terminal rows out of an appended evidence chunk', () => {
+  const requested = JSON.stringify({ event: 'dispatch_requested', dispatch_id: 'aaa', tag: 't' });
+  const completed = JSON.stringify({ event: 'dispatch_completed', dispatch_id: 'aaa', exit_code: 0 });
+  const other = JSON.stringify({ event: 'dispatch_requested', dispatch_id: 'bbb' });
+  const garbage = '{not json';
+  const rows = core.extractCompletedRows(`${requested}\n${completed}\n${other}\n${garbage}\n\n`);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.dispatch_id, 'aaa');
+  assert.equal(rows[0]!.exit_code, 0);
+  assert.deepEqual(core.extractCompletedRows(''), []);
+  assert.deepEqual(core.extractCompletedRows(null), []);
+});
+
+test('verdictOf speaks the kernel vocabulary: ok or FAILED with exit code', () => {
+  assert.equal(core.verdictOf({ exit_code: 0 }), 'ok');
+  assert.equal(core.verdictOf({ exit_code: 1 }), 'FAILED (exit 1)');
+  assert.equal(core.verdictOf({}), 'FAILED (exit unknown)');
+});
+
+test('buildCompletionMessage carries tag, verdict, and a bounded report', () => {
+  const row = { dispatch_id: 'aaa', exit_code: 0 };
+  const message = core.buildCompletionMessage('bg-worker-x', row, 'All green.');
+  assert.match(message, /tag bg-worker-x/);
+  assert.match(message, /verdict ok/);
+  assert.match(message, /All green\./);
+  // No report -> the recovery hint is the fallback, not silence.
+  assert.match(core.buildCompletionMessage('bg-worker-x', row, null), /fadeno dispatches --output id:aaa/);
+  // Oversized reports are truncated, never dropped.
+  const huge = core.buildCompletionMessage('t', row, 'x'.repeat(core.REPORT_MAX_CHARS + 500));
+  assert.match(huge, /\[truncated\]/);
+  assert.ok(huge.length < core.REPORT_MAX_CHARS + 200);
+});
+
+test('truncateReport trims, bounds, and rejects empty', () => {
+  assert.equal(core.truncateReport('  hi  \n'), 'hi');
+  assert.equal(core.truncateReport('   '), null);
+  assert.equal(core.truncateReport(undefined), null);
+  const bounded = core.truncateReport('y'.repeat(core.REPORT_MAX_CHARS * 3));
+  assert.equal(bounded!.length, core.REPORT_MAX_CHARS + '…[truncated]'.length);
+});
+
+test('watch registry round-trips and degrades to empty on garbage', (t) => {
+  const root = tempRepo(t);
+  const path = core.watchRegistryPath(root);
+  assert.deepEqual(core.readWatchRegistry(path), []);
+  core.writeWatchRegistry(path, [{ dispatchId: 'aaa', tag: 't', sessionID: 'ses_1' }]);
+  assert.deepEqual(core.readWatchRegistry(path), [{ dispatchId: 'aaa', tag: 't', sessionID: 'ses_1' }]);
+  writeFileSync(path, '{broken');
+  assert.deepEqual(core.readWatchRegistry(path), []);
+  writeFileSync(path, JSON.stringify({ not: 'an array' }));
+  assert.deepEqual(core.readWatchRegistry(path), []);
 });

@@ -367,8 +367,8 @@ const CLAIMS: Claim[] = [
   },
   {
     id: 'opencode-dispatch-tool',
-    doc: { files: [EXTENDING], patterns: [/fadeno_dispatch/, /fadeno-dispatch-tool\.js/, /wait_seconds/] },
-    src: { files: ['templates/opencode/plugin/fadeno-dispatch-tool.js'], patterns: [/fadeno_dispatch/, /wait_seconds/] },
+    doc: { files: [EXTENDING], patterns: [/fadeno_dispatch/, /fadeno-dispatch-tool\.js/, /wait_seconds/, /dispatch-watch\.json/, /session\.prompt/] },
+    src: { files: ['templates/opencode/plugin/fadeno-dispatch-tool.js'], patterns: [/fadeno_dispatch/, /wait_seconds/, /dispatch-watch\.json/, /session\?\.prompt/] },
   },
   {
     id: 'isolated-host-workspace',
