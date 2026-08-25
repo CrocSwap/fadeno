@@ -262,14 +262,29 @@ export default async function FadenoDispatchTool(input) {
   const evidencePath = join(repoDir, '.fadeno', 'dispatches.jsonl');
 
   // dispatchId -> { tag, sessionID }. Hydrated from the persisted registry so
-  // a host restart does not orphan in-flight wake-ups.
+  // a host restart does not orphan in-flight wake-ups. A null sessionID is a
+  // first-class entry: the watcher still toasts the verdict, it just cannot
+  // inject a turn.
   const watched = new Map();
   for (const entry of readWatchRegistry(registryPath)) {
-    if (entry.dispatchId != null) watched.set(entry.dispatchId, { tag: entry.tag, sessionID: entry.sessionID });
+    if (entry.dispatchId != null) watched.set(entry.dispatchId, { tag: entry.tag, sessionID: entry.sessionID ?? null });
   }
   let pollTimer = null;
   let evidenceOffset = 0;
   const notified = new Set();
+
+  // The session that most recently sent a message, per the chat.message hook.
+  // Fallback when the tool context carries no sessionID — observed once in
+  // the wild (2026-08-25: a launch took the no-session branch, the registry
+  // file was never written, and the completion never delivered). The session
+  // that is talking is the session that dispatched.
+  let lastActiveSessionID = null;
+
+  function log(level, message) {
+    try {
+      client?.app?.log?.({ body: { service: 'fadeno-dispatch-tool', level, message } })?.catch?.(() => {});
+    } catch {}
+  }
 
   function persistWatched() {
     writeWatchRegistry(
@@ -287,10 +302,18 @@ export default async function FadenoDispatchTool(input) {
   /** Fire a completion report into the session that launched the dispatch. */
   function deliver(row) {
     const meta = watched.get(row.dispatch_id);
-    if (meta == null || meta.sessionID == null || notified.has(row.dispatch_id)) return;
+    if (meta == null || notified.has(row.dispatch_id)) return;
     notified.add(row.dispatch_id);
     watched.delete(row.dispatch_id);
     persistWatched();
+    const verdict = verdictOf(row);
+    if (meta.sessionID == null) {
+      // Degrade to user-visible: no session to wake, but the human still hears
+      // about it — never the pre-watcher silence.
+      log('warn', `dispatch ${row.dispatch_id} completed (${verdict}) with no session to deliver to`);
+      toast(`Fadeno dispatch ${meta.tag}: ${verdict} (no session for direct delivery)`, row.exit_code === 0 ? 'success' : 'error');
+      return;
+    }
     let report = null;
     try {
       const fetched = spawnSync('fadeno', ['dispatches', '--output', `id:${row.dispatch_id}`], {
@@ -303,18 +326,20 @@ export default async function FadenoDispatchTool(input) {
     const message = buildCompletionMessage(meta.tag, row, report);
     // The turn trigger: prompt WITHOUT noReply so the model wakes and
     // processes the report. Fire-and-forget — a failed injection degrades to
-    // silent dispatch, which is the pre-watcher status quo, and the tag
-    // recovery path still exists.
+    // the toast, and the tag recovery path still exists.
     try {
       const pending = client?.session?.prompt?.({
         path: { id: meta.sessionID },
         body: { parts: [{ type: 'text', text: message }] },
       });
-      pending?.catch?.(() => toast(`Fadeno dispatch ${meta.tag}: ${verdictOf(row)} (delivery failed)`, 'warning'));
+      pending?.then?.(
+        () => log('info', `completion of ${row.dispatch_id} delivered to session ${meta.sessionID}`),
+        () => toast(`Fadeno dispatch ${meta.tag}: ${verdict} (delivery failed)`, 'warning'),
+      );
     } catch {
-      toast(`Fadeno dispatch ${meta.tag}: ${verdictOf(row)} (delivery failed)`, 'warning');
+      toast(`Fadeno dispatch ${meta.tag}: ${verdict} (delivery failed)`, 'warning');
     }
-    toast(`Fadeno dispatch ${meta.tag}: ${verdictOf(row)}`, row.exit_code === 0 ? 'success' : 'error');
+    toast(`Fadeno dispatch ${meta.tag}: ${verdict}`, row.exit_code === 0 ? 'success' : 'error');
   }
 
   function pollEvidence() {
@@ -373,9 +398,23 @@ export default async function FadenoDispatchTool(input) {
           }
           const tag = str(args?.tag) ?? buildTag(archetype);
           const waitSeconds = typeof args?.wait_seconds === 'number' && Number.isFinite(args.wait_seconds) ? args.wait_seconds : 0;
-          const sessionID = str(context?.sessionID);
+          // Resolution order: the tool context's own session id, then the
+          // chat.message hook's record of the session that last spoke. The
+          // context field has been observed missing in the wild; the fallback
+          // is what keeps delivery alive when it is.
+          const contextSessionID = str(context?.sessionID);
+          const sessionID = contextSessionID ?? lastActiveSessionID;
+          log(
+            'info',
+            `launch ${archetype} tag=${tag}: context sessionID ${contextSessionID != null ? 'present' : 'ABSENT'}` +
+              `${contextSessionID == null ? ` (context keys: ${context != null ? Object.keys(context).sort().join(',') : 'none'})` : ''}` +
+              `, resolved session ${sessionID ?? 'none'}`,
+          );
           const launch = await launchDispatch(repoDir, archetype, tag, prompt);
-          if (!launch.ok) return `fadeno_dispatch failed: ${launch.message}`;
+          if (!launch.ok) {
+            log('error', `launch failed: ${launch.message}`);
+            return `fadeno_dispatch failed: ${launch.message}`;
+          }
           const waited = waitSeconds > 0 ? waitForOutput(repoDir, tag, waitSeconds) : null;
           const lines = [
             `fadeno_dispatch: ${launch.message}`,
@@ -383,19 +422,31 @@ export default async function FadenoDispatchTool(input) {
           ];
           if (waited != null) {
             lines.push(`report (waited ${Math.min(Math.max(0, Math.floor(waitSeconds)), MAX_WAIT_SECONDS)}s):`, waited);
-          } else if (launch.dispatchId != null && sessionID != null) {
-            // Registered for automatic delivery; the watcher owns it from here.
+          } else if (launch.dispatchId != null) {
+            // Registered either way: with a session for turn-triggering
+            // delivery, without one for a completion toast. The watcher owns
+            // it from here.
             watched.set(launch.dispatchId, { tag, sessionID });
             persistWatched();
             startWatching();
-            lines.push(`The completion report will be delivered back into this session automatically (dispatch ${launch.dispatchId}).`);
+            lines.push(
+              sessionID != null
+                ? `The completion report will be delivered back into this session automatically (dispatch ${launch.dispatchId}, session ${sessionID}).`
+                : `Watching for completion, but no session id is available for direct delivery — you will get a toast only (dispatch ${launch.dispatchId}). Recover with: ${recoveryHint(tag, launch.dispatchId)}`,
+            );
           } else {
             lines.push(recoveryHint(tag, launch.dispatchId));
-            lines.push('No automatic completion delivery for this dispatch (no dispatch id or session id available); check the output when it matters.');
+            lines.push('No automatic completion delivery for this dispatch (no dispatch id available); check the output when it matters.');
           }
           return lines.join('\n');
         },
       }),
+    },
+    // The session-discovery fallback: remember whoever spoke last. Cheap,
+    // best-effort, and only consulted when the tool context omits sessionID.
+    'chat.message': async (input) => {
+      const id = str(input?.sessionID);
+      if (id != null) lastActiveSessionID = id;
     },
   };
 }
