@@ -11,11 +11,12 @@ dist/
 .codex/agents/judge.toml
 .codex/agents/fadeno-*.toml
 # fadeno:opencode-steering:begin
+.opencode/agent/reviewer.md
+.opencode/agent/judge.md
 .opencode/agent/fadeno-dispatch-worker.md
-.opencode/agent/fadeno-dispatch-reviewer.md
-.opencode/agent/fadeno-dispatch-judge.md
 .opencode/agent/fadeno-steering-refused-worker.md
 .opencode/agent/fadeno-steering-refused-reviewer.md
 .opencode/agent/fadeno-steering-refused-judge.md
 .opencode/plugin/fadeno-steering.js
+.opencode/plugin/fadeno-dispatch-tool.js
 # fadeno:opencode-steering:end

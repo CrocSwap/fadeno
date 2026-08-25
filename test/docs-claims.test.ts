@@ -366,6 +366,11 @@ const CLAIMS: Claim[] = [
     src: { files: ['src/lib/config-layers.ts', 'src/commands/dial.ts'], patterns: [/applyUserModelFallback/, /formatModelFallbackNote/] },
   },
   {
+    id: 'opencode-dispatch-tool',
+    doc: { files: [EXTENDING], patterns: [/fadeno_dispatch/, /fadeno-dispatch-tool\.js/, /wait_seconds/] },
+    src: { files: ['templates/opencode/plugin/fadeno-dispatch-tool.js'], patterns: [/fadeno_dispatch/, /wait_seconds/] },
+  },
+  {
     id: 'isolated-host-workspace',
     doc: { files: ['README.md', 'docs/architecture.md'], patterns: [/fadeno dispatch-prepare/, /--isolate/, /workspace_mode: isolated/] },
     src: { files: ['src/commands/dispatch-prepare.ts', 'src/lib/host-workspace.ts'], patterns: [/dispatch-prepare/, /workspace_mode/, /host-worktrees/] },

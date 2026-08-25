@@ -13,6 +13,7 @@ export const OPENCODE_IGNORE_PATTERNS = [
   '.opencode/agent/fadeno-steering-refused-reviewer.md',
   '.opencode/agent/fadeno-steering-refused-judge.md',
   '.opencode/plugin/fadeno-steering.js',
+  '.opencode/plugin/fadeno-dispatch-tool.js',
 ] as const;
 
 /** Exact omp files emitted by Fadeno's project-scoped steering apply. */
@@ -70,7 +71,7 @@ export function openCodeManagedIgnorePatterns(repoRoot: string): string[] {
   return OPENCODE_IGNORE_PATTERNS.filter((pattern) => {
     const path = join(repoRoot, pattern);
     if (!existsSync(path)) return false;
-    const marker = pattern === '.opencode/plugin/fadeno-steering.js'
+    const marker = pattern === '.opencode/plugin/fadeno-steering.js' || pattern === '.opencode/plugin/fadeno-dispatch-tool.js'
       ? '// fadeno:managed'
       : '<!-- fadeno:managed';
     try {

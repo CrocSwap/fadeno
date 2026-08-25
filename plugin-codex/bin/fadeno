@@ -14208,6 +14208,7 @@ function mergeLayer(target, source, layer, path, provenance) {
         current[name] = value;
       }
       if (key === "bindings") provenance.bindings[name] = layer;
+      if (key === "models") (provenance.models ??= {})[name] = layer;
     }
     target[key] = current;
   }
@@ -14224,6 +14225,40 @@ function missingCanonArchetypes(builtinDoc, projectDoc) {
   if (builtin == null || projectDoc == null) return [];
   const declared = mapping(projectDoc.archetypes) ?? {};
   return Object.keys(builtin).filter((name) => !Object.hasOwn(declared, name)).sort();
+}
+function modelHomeRoute(entry) {
+  const map = mapping(entry);
+  if (map == null) return null;
+  const delivery = mapping(map.delivery);
+  if (delivery != null && typeof delivery.route === "string" && delivery.route.trim().length > 0) {
+    return delivery.route.trim();
+  }
+  const provider = map.provider;
+  if (typeof provider === "string" && provider.trim().length > 0) return provider.trim();
+  return null;
+}
+function applyUserModelFallback(document, userDoc, userPath, provenance) {
+  const outcome = { promoted: [], dropped: [] };
+  const userModelEntries = userDoc != null ? mapping(userDoc.models) : null;
+  if (userModelEntries == null || Object.keys(userModelEntries).length === 0) return outcome;
+  const targetModels = mapping(document.models);
+  if (targetModels == null) return outcome;
+  const mergedRoutes = mapping(document.routes) ?? {};
+  const routeDeclaredSomewhere = (routeKey) => Object.values(mergedRoutes).some((table) => {
+    const routes = mapping(table);
+    return routes != null && routes[routeKey] != null;
+  });
+  for (const [alias, entry] of Object.entries(userModelEntries)) {
+    if (Object.hasOwn(targetModels, alias)) continue;
+    const routeKey = modelHomeRoute(entry);
+    if (routeKey == null || !routeDeclaredSomewhere(routeKey)) {
+      outcome.dropped.push({ alias, route: routeKey ?? "?" });
+      continue;
+    }
+    mergeLayer(document, { models: { [alias]: entry } }, "user", userPath, provenance);
+    outcome.promoted.push(alias);
+  }
+  return outcome;
 }
 function loadLayeredProfile(repoRoot, options = {}, harness) {
   const paths = userPaths(options);
@@ -14242,6 +14277,7 @@ function loadLayeredProfile(repoRoot, options = {}, harness) {
   const document = {};
   const provenance = { bindings: {} };
   for (const entry of effective) mergeLayer(document, parsedLayers.get(entry.layer), entry.layer, entry.path, provenance);
+  const modelFallback = suppressLayering ? applyUserModelFallback(document, parsedLayers.get("user"), layers.find((entry) => entry.layer === "user")?.path ?? "", provenance) : { promoted: [], dropped: [] };
   const text = stringifyObject(document);
   return {
     profile: parseExecutorProfile(text, effective.map((entry) => entry.layer).join(" + "), harness),
@@ -14250,7 +14286,8 @@ function loadLayeredProfile(repoRoot, options = {}, harness) {
     provenance,
     paths,
     selfContained: suppressLayering,
-    suppressedCanonArchetypes: suppressLayering ? missingCanonArchetypes(parsedLayers.get("builtin") ?? null, projectDoc) : []
+    suppressedCanonArchetypes: suppressLayering ? missingCanonArchetypes(parsedLayers.get("builtin") ?? null, projectDoc) : [],
+    modelFallback
   };
 }
 function loadGlobalProfile(options = {}, harness) {
@@ -14274,7 +14311,8 @@ function loadGlobalProfile(options = {}, harness) {
     provenance,
     paths,
     selfContained: false,
-    suppressedCanonArchetypes: []
+    suppressedCanonArchetypes: [],
+    modelFallback: { promoted: [], dropped: [] }
   };
 }
 function missingBuiltinDeclarations(builtinDoc, projectDoc) {
@@ -15024,7 +15062,8 @@ function loadExecutorProfile(repoRoot, options = {}, harness) {
       path: loaded.path,
       layers: loaded.layers,
       selfContained: loaded.selfContained,
-      provenance: loaded.provenance
+      provenance: loaded.provenance,
+      modelFallback: loaded.modelFallback
     };
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw err;
@@ -21034,7 +21073,8 @@ var OPENCODE_IGNORE_PATTERNS = [
   ".opencode/agent/fadeno-steering-refused-worker.md",
   ".opencode/agent/fadeno-steering-refused-reviewer.md",
   ".opencode/agent/fadeno-steering-refused-judge.md",
-  ".opencode/plugin/fadeno-steering.js"
+  ".opencode/plugin/fadeno-steering.js",
+  ".opencode/plugin/fadeno-dispatch-tool.js"
 ];
 var OMP_IGNORE_PATTERNS = [
   ".omp/agents/worker.md",
@@ -21085,7 +21125,7 @@ function openCodeManagedIgnorePatterns(repoRoot) {
   return OPENCODE_IGNORE_PATTERNS.filter((pattern) => {
     const path = (0, import_node_path15.join)(repoRoot, pattern);
     if (!(0, import_node_fs15.existsSync)(path)) return false;
-    const marker = pattern === ".opencode/plugin/fadeno-steering.js" ? "// fadeno:managed" : "<!-- fadeno:managed";
+    const marker = pattern === ".opencode/plugin/fadeno-steering.js" || pattern === ".opencode/plugin/fadeno-dispatch-tool.js" ? "// fadeno:managed" : "<!-- fadeno:managed";
     try {
       return (0, import_node_fs15.readFileSync)(path, "utf8").includes(marker);
     } catch {
@@ -32090,6 +32130,12 @@ function runSteeringApplyOpenCode(opts) {
 ` + pluginContent;
   const pluginPath = (0, import_node_path28.join)(repoRoot, ".opencode", "plugin", "fadeno-steering.js");
   results.push({ path: pluginPath, status: openCodePluginEmit(pluginPath, pluginBody, opts.force ?? false) });
+  const dispatchToolTemplate = (0, import_node_fs28.readFileSync)((0, import_node_path28.join)(templatesDir(), "opencode", "plugin", "fadeno-dispatch-tool.js"), "utf8");
+  const dispatchToolContent = dispatchToolTemplate.replace(/^#!.*\n/, "");
+  const dispatchToolBody = `${OPENCODE_PLUGIN_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(dispatchToolContent)}
+` + dispatchToolContent;
+  const dispatchToolPath = (0, import_node_path28.join)(repoRoot, ".opencode", "plugin", "fadeno-dispatch-tool.js");
+  results.push({ path: dispatchToolPath, status: openCodePluginEmit(dispatchToolPath, dispatchToolBody, opts.force ?? false) });
   const restartRequired = results.some((item) => item.status === "created" || item.status === "overwritten");
   const gitignorePath = (0, import_node_path28.join)(repoRoot, ".gitignore");
   const gitignoreExisted = (0, import_node_fs28.existsSync)(gitignorePath);
@@ -32667,9 +32713,27 @@ function formatSuppressedCanonNote(archetypes) {
   if (archetypes.length === 0) return null;
   return `note: canon archetypes not declared by this catalog: <${archetypes.join(", ")}> (self-contained profile suppresses builtin layering; declare them in .fadeno/executors.yaml to adopt)`;
 }
+function formatModelFallbackNote(fallback) {
+  const parts = [];
+  if (fallback.promoted.length > 0) {
+    parts.push(
+      `user-catalog model${fallback.promoted.length === 1 ? "" : "s"} promoted into this self-contained catalog: ${fallback.promoted.join(", ")}`
+    );
+  }
+  for (const drop of fallback.dropped) {
+    parts.push(
+      `user-catalog model "${drop.alias}" dropped \u2014 delivery route "${drop.route}" is declared nowhere in this catalog`
+    );
+  }
+  if (parts.length === 0) return null;
+  return `note: ${parts.join("; ")}`;
+}
 function canonSurfacing(layered) {
   const arr = layered.suppressedCanonArchetypes;
-  return { suppressed_canon_archetypes: arr, note: formatSuppressedCanonNote(arr) };
+  const canonNote = formatSuppressedCanonNote(arr);
+  const fallbackNote = formatModelFallbackNote(layered.modelFallback);
+  const note = [canonNote, fallbackNote].filter((part) => part != null).join("\n") || null;
+  return { suppressed_canon_archetypes: arr, note };
 }
 function buildDialRef(modelInput, via, label) {
   const base = parseDialRef(modelInput, label);
@@ -33573,6 +33637,7 @@ function runDialResolve(opts) {
     harness,
     source: resolved.source,
     ...resolved.resolvedVia != null ? { resolved_via: resolved.resolvedVia } : {},
+    ...layered.selfContained && layered.modelFallback.promoted.includes(resolved.delivery.model) ? { model_fallback: { promoted_from_user: true, note: formatModelFallbackNote(layered.modelFallback) } } : {},
     ...eligibility !== "eligible" ? { eligibility } : {},
     dial: resolved.delivery.ref,
     delivery: deliveryGuidance(
@@ -42080,7 +42145,7 @@ function printModelAdd(result) {
   console.log(`  delivery: ${result.delivery.route} \u2192 ${result.delivery.id}`);
   console.log(`  user catalog: ${result.catalog_path}`);
   if (result.suppressed_by_project) {
-    console.log("  note: this checkout has a self-contained project catalog, so it currently suppresses the user entry.");
+    console.log("  note: this checkout has a self-contained project catalog; the alias will fall back into it per-key when its delivery route resolves there (dial show names any that drop).");
   }
 }
 function printPlaybookSummary(summary) {

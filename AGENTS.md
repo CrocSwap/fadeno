@@ -98,7 +98,7 @@ asked); real guarantees come from git/CI/pre-commit/hooks (tier 2). See
 | `templates/` | **Single source of truth** for everything `init` emits *and* the plugin bundles. `common/` (shared) + `codex/` + `claude/` + `grok/` + `opencode/` + `omp/` (per-target adapters). | architecture.md → *Templates & the plugin* |
 | `plugin/` | The **generated, committed** Claude plugin (skills/commands/agents + the bundled `bin/fadeno`). Its bundled CLI also carries the Grok templates. A build artifact — never hand-edit; regenerate. | architecture.md, extending.md |
 | `scripts/build-bin.mjs` | esbuild bundler → `plugin/bin/fadeno` (standalone CJS, deps inlined) + adjacent templates. | architecture.md → *Build & module system* |
-| `test/` | `node:test` suite (~50 cases). `helpers.ts` = `tempRepo`/`exists`/`read`. Tests call `run*()` directly, with built-boundary checks for the bundled CLI. | architecture.md → *Tests* |
+| `test/` | `node:test` suite (~1,480 tests). `helpers.ts` = `tempRepo`/`exists`/`read`. Tests call `run*()` directly, with built-boundary checks for the bundled CLI. | architecture.md → *Tests* |
 | `docs/` | This guide's companions + the design spec, roadmap, and `product/` (marketing — **not** for code contributors). | — |
 | `.claude-plugin/marketplace.json` | Makes the repo itself a one-repo plugin marketplace. | — |
 

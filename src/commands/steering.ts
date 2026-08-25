@@ -1773,6 +1773,17 @@ export function runSteeringApplyOpenCode(opts: OpenCodeSteeringApplyOptions): St
   const pluginPath = join(repoRoot, '.opencode', 'plugin', 'fadeno-steering.js');
   results.push({ path: pluginPath, status: openCodePluginEmit(pluginPath, pluginBody, opts.force ?? false) });
 
+  // The background-dispatch tool, beside the steering plugin under the same
+  // managed-mark discipline (no HOOK_VERSION stamp: it writes no evidence of
+  // its own — the kernel owns every dispatch row).
+  const dispatchToolTemplate = readFileSync(join(templatesDir(), 'opencode', 'plugin', 'fadeno-dispatch-tool.js'), 'utf8');
+  const dispatchToolContent = dispatchToolTemplate.replace(/^#!.*\n/, '');
+  const dispatchToolBody =
+    `${OPENCODE_PLUGIN_MANAGED_MARK} version=${packageVersion()} digest=${sha256Hex(dispatchToolContent)}\n` +
+    dispatchToolContent;
+  const dispatchToolPath = join(repoRoot, '.opencode', 'plugin', 'fadeno-dispatch-tool.js');
+  results.push({ path: dispatchToolPath, status: openCodePluginEmit(dispatchToolPath, dispatchToolBody, opts.force ?? false) });
+
   // The apply command is also a supported upgrade path for an existing repo,
   // so install ignores after emission. The helper inspects ownership markers
   // and skips exact paths occupied by preserved foreign files.

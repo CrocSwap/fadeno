@@ -725,7 +725,19 @@ agent field, so `background`, `task_id`, and every other task argument survive
 host, command-broker, and refusal rewrites. Host delivery/refusal evidence
 records `background`, `task_id`, and the hook's `session_id`/`call_id`
 correlation fields. Command brokers remain synchronous inside the child task;
-OpenCode owns the background job and its completion notification.
+OpenCode owns the background job and its completion notification. (Observed
+2026-08-25: current builds do not surface a `background` parameter in the
+task-tool schema models see, so model-initiated background via the native tool
+is unreachable by prompting.)
+
+For model-initiated background without relying on the native flag,
+`.opencode/plugin/fadeno-dispatch-tool.js` registers a `fadeno_dispatch`
+custom tool: it launches `fadeno dispatch` detached, returns the dispatch id
+within seconds, and optionally blocks up to `wait_seconds` (capped at 600) for
+the finished report. Background semantics come from process detachment — the
+kernel owns evidence, worktree isolation, and attested output recovery — and
+completion does not notify the session; the model checks
+`fadeno dispatches --output tag:<tag>`.
 
 What stays unsteered: Explore/Plan-style read-only scouting — cheap, tightly
 integrated with the harness's codebase tools, and not where quota pressure
