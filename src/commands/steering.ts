@@ -798,11 +798,19 @@ function renderCodexHostAgent(
 ): string {
   const behavior = ROLE_BEHAVIOR[archetype] ?? `Perform the ${archetype} role exactly as requested.`;
   const cli = /\s/.test(cliPath) ? JSON.stringify(cliPath) : cliPath;
+  // A `current-host` slot names no provider-servable model: Codex rejects the
+  // literal with a 400 ("The 'current-host' model is not supported when using
+  // Codex with a ChatGPT account", observed 2026-08-26), and the sentinel
+  // means "inherit the session" anyway — the same rule renderOpenCodeRoleSlot
+  // applies. Omit both identity lines rather than writing an unusable string.
+  const neutralHost = spec.model === NEUTRAL_HOST_EXECUTOR;
+  const identity =
+    neutralHost
+      ? ''
+      : `model = ${tomlString(spec.model)}\nmodel_reasoning_effort = ${tomlString(spec.reasoningEffort)}\n`;
   return `name = ${tomlString(archetype)}
 description = ${tomlString(`Fadeno hybrid ${archetype}: host-delivered on the session baseline, command-dispatched when the active loadout switches providers.`)}
-model = ${tomlString(spec.model)}
-model_reasoning_effort = ${tomlString(spec.reasoningEffort)}
-sandbox_mode = "workspace-write"
+${identity}sandbox_mode = "workspace-write"
 
 developer_instructions = """
 You are Fadeno's hybrid ${archetype}. Do not spawn subagents.

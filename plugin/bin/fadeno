@@ -15486,7 +15486,9 @@ function compileDialRef(ref, profile) {
           return buildDelivery(ref.model, modelId3, effectiveEffort2, provider, driver2, true, route2, entry.eligibility);
         }
         const declared = declaredDriverAliases(routesForHarness2);
-        throw new ExecutorProfileError(`no route for provider "${provider}" in harness "${harness}" \u2014 declared drivers: ${declared.join(", ")}`);
+        throw new ExecutorProfileError(
+          `no route for provider "${provider}" in harness "${harness}" \u2014 declared drivers: ${declared.join(", ")}${entry.delivery == null ? `; register a delivery route with: fadeno model add ${ref.model} ${provider}/${entry.id}` : ""}`
+        );
       }
       driver2 = homeRoute.driver ?? homeKey;
       route2 = homeRoute;
@@ -31542,11 +31544,13 @@ function tomlString(value) {
 function renderCodexHostAgent(archetype, executorName, spec, cliPath) {
   const behavior = ROLE_BEHAVIOR[archetype] ?? `Perform the ${archetype} role exactly as requested.`;
   const cli = /\s/.test(cliPath) ? JSON.stringify(cliPath) : cliPath;
+  const neutralHost = spec.model === NEUTRAL_HOST_EXECUTOR;
+  const identity = neutralHost ? "" : `model = ${tomlString(spec.model)}
+model_reasoning_effort = ${tomlString(spec.reasoningEffort)}
+`;
   return `name = ${tomlString(archetype)}
 description = ${tomlString(`Fadeno hybrid ${archetype}: host-delivered on the session baseline, command-dispatched when the active loadout switches providers.`)}
-model = ${tomlString(spec.model)}
-model_reasoning_effort = ${tomlString(spec.reasoningEffort)}
-sandbox_mode = "workspace-write"
+${identity}sandbox_mode = "workspace-write"
 
 developer_instructions = """
 You are Fadeno's hybrid ${archetype}. Do not spawn subagents.

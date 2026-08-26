@@ -106,7 +106,11 @@ test('models: registry table — deliveries, lane marks, stale providers, verifi
 
   const ghost = result.models.find((r) => r.name === 'ghost')!;
   assert.equal(ghost.home_via, 'nowhere');
+  // The entry has no `delivery`, so the compile error must name the command
+  // that records a real route — the 2026-08-26 futa failure was only
+  // diagnosable by reading the source.
   assert.match(ghost.stale ?? '', /no route for provider "nowhere"/);
+  assert.match(ghost.stale ?? '', /fadeno model add ghost nowhere\/ghost-1/);
 });
 
 test('models --driver: live listing via models_command with registered spellings marked', (t) => {

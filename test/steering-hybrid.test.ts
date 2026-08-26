@@ -334,6 +334,22 @@ test('steering apply materializes mixed host and command slots without clobberin
   assert.deepEqual(agentPaths.map((path) => read(root, path)), beforeInvalid);
 });
 
+test('a current-host slot omits model identity instead of writing a string Codex cannot serve', (t) => {
+  // A repo with no dials resolves every slot to the neutral host sentinel.
+  const root = tempRepo(t);
+  const applied = runSteeringApply({ repoRoot: root, target: 'codex' });
+  assert.equal(applied.materialization.worker?.kind, 'host');
+  assert.equal(applied.materialization.worker?.model, 'current-host');
+  const body = read(root, '.codex/agents/worker.toml');
+  // Codex (ChatGPT auth) 400s on `model = "current-host"`, and the sentinel
+  // means "inherit the session" — so neither identity line may appear.
+  assert.doesNotMatch(body, /^model = /m);
+  assert.doesNotMatch(body, /^model_reasoning_effort = /m);
+  // The resolver instruction keeps naming the sentinel; only the TOML model
+  // key is dropped.
+  assert.match(body, /--host-executor current-host/);
+});
+
 /**
  * `ro-cli` stands in for a headless CLI in a read-only permission mode, and
  * `ro-host` for a native target whose declared command fallback is read-only.

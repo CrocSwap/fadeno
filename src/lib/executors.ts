@@ -1839,7 +1839,14 @@ export function compileDialRef(ref: DialRef, profile: ExecutorProfile): Compiled
           return buildDelivery(ref.model, modelId, effectiveEffort, provider, driver, true, route, entry.eligibility);
         }
         const declared = declaredDriverAliases(routesForHarness);
-        throw new ExecutorProfileError(`no route for provider "${provider}" in harness "${harness}" — declared drivers: ${declared.join(', ')}`);
+        // The common cause of this shape is a hand-written registry entry with
+        // no `delivery` (observed 2026-08-26: provider "stealth" fell back to
+        // being the home-route key and matched nothing). Point at the command
+        // that records a real route instead of leaving the fix to be inferred.
+        throw new ExecutorProfileError(
+          `no route for provider "${provider}" in harness "${harness}" — declared drivers: ${declared.join(', ')}` +
+            `${entry.delivery == null ? `; register a delivery route with: fadeno model add ${ref.model} ${provider}/${entry.id}` : ''}`,
+        );
       }
       driver = homeRoute.driver ?? homeKey;
       route = homeRoute;
