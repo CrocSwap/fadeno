@@ -456,6 +456,16 @@ export interface DispatchesOutputOptions {
   waitMs?: number;
   /** Poll interval while waiting. Injectable so tests need no real delay. */
   pollMs?: number;
+  /**
+   * Progress sink for long waits, invoked at most once per heartbeat interval
+   * with an elapsed-time line. The host agent relaying this call otherwise
+   * sees pure silence for its whole timeout and reports a healthy review as
+   * hung (Codex host feedback, 2026-08-26). Stderr by convention at the call
+   * site — stdout carries the report bytes.
+   */
+  onHeartbeat?: (line: string) => void;
+  /** Heartbeat interval while waiting. Injectable so tests need no real delay. */
+  heartbeatMs?: number;
 }
 
 export interface DispatchesOutputResult {
@@ -503,6 +513,17 @@ export interface DispatchesOutputResult {
 function sleepSync(ms: number): void {
   if (ms <= 0) return;
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** `855944` → `14m 16s`; sub-minute stays in seconds, hours roll up. */
+export function formatElapsed(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
 }
 
 function str(value: unknown): string | null {
@@ -1703,7 +1724,10 @@ export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOu
   const waitMs = opts.waitMs ?? 0;
   if (waitMs > 0 && !rec.completed) {
     const pollMs = opts.pollMs ?? 1_000;
-    const deadline = Date.now() + waitMs;
+    const heartbeatMs = opts.heartbeatMs ?? 30_000;
+    let lastBeat = Date.now();
+    const startedAt = lastBeat;
+    const deadline = startedAt + waitMs;
     // How the caller reached this dispatch is settled; only its state is not.
     const settledId = rec.dispatchId;
     while (!rec.completed && Date.now() < deadline) {
@@ -1712,6 +1736,12 @@ export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOu
       // Re-resolve by the id already settled on: `last` must not drift onto a
       // different dispatch that started while this one was being waited for.
       rec = resolveOutputRecord(settledId, byId, lastWithSnapshot, requestOrder).record;
+      if (!rec.completed && opts.onHeartbeat != null && Date.now() - lastBeat >= heartbeatMs) {
+        lastBeat = Date.now();
+        opts.onHeartbeat(
+          `fadeno dispatches: ${settledId.slice(0, 8)} still running (elapsed ${formatElapsed(lastBeat - startedAt)})`,
+        );
+      }
     }
   }
 

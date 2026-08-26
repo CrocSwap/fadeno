@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { DISPATCHES_FILE, runDispatch } from '../src/commands/dispatch.ts';
+import { formatElapsed } from '../src/commands/dispatches.ts';
 import { DispatchCommandError } from '../src/commands/dispatch.ts';
 import { runDispatchesOutput } from '../src/commands/dispatches.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
@@ -287,4 +288,38 @@ test('dispatch output: an open dispatch carries no verdict — the facts are nul
   const { stderr } = outputNote(root, 'worker-open');
   assert.match(stderr, /— no completion row recorded YET/);
   assert.doesNotMatch(stderr, /TIMED OUT|FAILED|NO OUTPUT|ok: exit/);
+});
+
+test('dispatch output: a blocking wait heartbeats elapsed time instead of looking hung', (t) => {
+  // Codex host feedback, 2026-08-26: a healthy long review is indistinguishable
+  // from a dead one while the wait call runs. The heartbeat names the dispatch
+  // and its elapsed time; the caller decides where it goes (cli.ts: stderr).
+  const root = seedV3(t);
+  mkdirSync(join(root, '.fadeno', 'local', 'outputs'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'local', 'outputs', 'worker-beat.md'), 'so far');
+  writeFileSync(join(root, DISPATCHES_FILE), JSON.stringify({
+    format: '0.2', timestamp: '2026-08-22T12:00:00.000Z', event: 'dispatch_requested',
+    dispatch_id: 'beat-0000-0000-0000-000000000000', tag: 'worker-beat',
+    output_snapshot: '.fadeno/local/outputs/worker-beat.md',
+  }) + '\n');
+  const beats: string[] = [];
+  const rec = runDispatchesOutput({
+    repoRoot: root, dispatchId: '', tag: 'worker-beat',
+    waitMs: 60, pollMs: 10, heartbeatMs: 25,
+    onHeartbeat: (line) => beats.push(line),
+  });
+  assert.equal(rec.attested, 'incomplete');
+  assert.ok(beats.length >= 1, `expected at least one heartbeat, got ${JSON.stringify(beats)}`);
+  for (const line of beats) {
+    assert.match(line, /^fadeno dispatches: beat-000 still running \(elapsed \d+s\)$/);
+  }
+  // Elapsed is computed per beat from the wall clock; a sub-second synthetic
+  // wait cannot show growth, so the per-beat format match above is the claim.
+});
+
+test('formatElapsed reads like a human clock at every magnitude', () => {
+  assert.equal(formatElapsed(42_000), '42s');
+  assert.equal(formatElapsed(855_944), '14m 15s');
+  assert.equal(formatElapsed(3_723_000), '1h 2m 3s');
+  assert.equal(formatElapsed(0), '0s');
 });

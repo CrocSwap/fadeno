@@ -23242,6 +23242,15 @@ function sleepSync2(ms) {
   if (ms <= 0) return;
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
+function formatElapsed(ms) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1e3));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor(totalSeconds % 3600 / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
 function str(value) {
   return typeof value === "string" && value !== "" ? value : null;
 }
@@ -23966,12 +23975,21 @@ function runDispatchesOutput(opts) {
   const waitMs = opts.waitMs ?? 0;
   if (waitMs > 0 && !rec.completed) {
     const pollMs = opts.pollMs ?? 1e3;
-    const deadline = Date.now() + waitMs;
+    const heartbeatMs = opts.heartbeatMs ?? 3e4;
+    let lastBeat = Date.now();
+    const startedAt = lastBeat;
+    const deadline = startedAt + waitMs;
     const settledId = rec.dispatchId;
     while (!rec.completed && Date.now() < deadline) {
       sleepSync2(Math.min(pollMs, Math.max(0, deadline - Date.now())));
       ({ byId, lastWithSnapshot, requestOrder } = loadOutputRecords(ledger));
       rec = resolveOutputRecord(settledId, byId, lastWithSnapshot, requestOrder).record;
+      if (!rec.completed && opts.onHeartbeat != null && Date.now() - lastBeat >= heartbeatMs) {
+        lastBeat = Date.now();
+        opts.onHeartbeat(
+          `fadeno dispatches: ${settledId.slice(0, 8)} still running (elapsed ${formatElapsed(lastBeat - startedAt)})`
+        );
+      }
     }
   }
   if (rec.snapshot == null) {
@@ -43421,7 +43439,10 @@ Or advance manually with the playbook cursor:`);
         const result2 = runDispatchesOutput({
           dispatchId: inline != null ? "" : values.output,
           tag: inline ?? values.tag,
-          waitMs
+          waitMs,
+          // Progress goes to stderr so stdout stays relay-safe; a host agent
+          // blocked on this call sees life instead of a hang.
+          onHeartbeat: (line) => console.error(line)
         });
         process.stdout.write(result2.bytes);
         const verdict = (() => {

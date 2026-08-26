@@ -226,9 +226,25 @@ function extractCompletedRows(chunk) {
   return consumeEvidence(chunk, new Map(), new Map(), new Set());
 }
 
+/** `855944` → `14m 16s`; mirrors the CLI's formatElapsed for one shared vocabulary. */
+function formatDuration(ms) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
 /** One-line verdict for a completion row, matching the kernel's own vocabulary. */
 function verdictOf(row) {
-  return row.exit_code === 0 ? 'ok' : `FAILED (exit ${row.exit_code ?? 'unknown'})`;
+  const verdict = row.exit_code === 0 ? 'ok' : `FAILED (exit ${row.exit_code ?? 'unknown'})`;
+  // The kernel records duration_ms on every completion row; a long healthy
+  // review should not have to explain itself after the fact.
+  return typeof row.duration_ms === 'number' && Number.isFinite(row.duration_ms)
+    ? `${verdict} · ran ${formatDuration(row.duration_ms)}`
+    : verdict;
 }
 
 /** The message injected into the session on completion. Pure; tests pin it. */
@@ -633,6 +649,7 @@ export function fadenoDispatchToolCore() {
     WATCH_REGISTRY_BASENAME,
     buildArgv,
     buildTag,
+    formatDuration,
     parseDispatchId,
     reportFilePath,
     launchDispatch,

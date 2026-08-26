@@ -679,6 +679,22 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
   }
   const sessionPinned = Object.hasOwn(localState.dials, archetype);
   const repoPinned = Object.hasOwn(profile.dials, archetype) ? profile.dials[archetype]! : null;
+  // Graceful degradation: an existing shadow attachment with a redialed
+  // unroutable primary emits a warning rather than a silent drop (design:
+  // docs/experimental/slots-and-archetypes.md, graceful case when shadow set
+  // first and dial current-host follows).
+  if (localState.shadows != null && Object.hasOwn(localState.shadows, archetype)) {
+    try {
+      const shadowLayers: DialLayers = { session: localState.dials, repo: profile.dials, user: readUserDials(opts.userPathOptions) as Record<string, DialRef> };
+      const unroutable = unroutablePrimaryNote({ profile, layers: shadowLayers, archetype });
+      if (unroutable != null) {
+        console.warn(
+          `fadeno dial warning: archetype "${archetype}" has an existing shadow attachment but its new primary is unroutable for shadow pairs — the pair degrades to no pair (primary runs solo). ` +
+            `To restore pairing, redial to a command delivery for this archetype.`,
+        );
+      }
+    } catch {}
+  }
   const userPinned = Object.hasOwn(userDials, archetype);
   let layer: 'session' | 'repo' | 'user';
   let adaptive = false;
@@ -1096,7 +1112,15 @@ export function runDialShadow(opts: DialShadowOptions): DialShadowResult {
   }
   {
     const unroutable = unroutablePrimaryNote({ profile, layers: shadowLayers, archetype });
-    if (unroutable != null) notes.push(unroutable);
+    if (unroutable != null) {
+      // Explicit `fadeno shadow` with an unroutable primary: the user asked
+      // for a pair and the command lane cannot serve it. Fail loudly rather
+      // than degrading silently (docs/experimental/slots-and-archetypes.md,
+      // `shadow.routable` gate). The graceful case — an existing shadow
+      // attachment with a redialed unroutable primary — emits a warning
+      // through the dial-change path instead.
+      throw new DialError(unroutable);
+    }
   }
   const nextAttachment: ShadowAttachment = {
     model: dial.model,

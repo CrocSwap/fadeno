@@ -2208,6 +2208,9 @@ function main(argv: string[]): number {
           dispatchId: inline != null ? '' : values.output,
           tag: inline ?? values.tag,
           waitMs,
+          // Progress goes to stderr so stdout stays relay-safe; a host agent
+          // blocked on this call sees life instead of a hang.
+          onHeartbeat: (line) => console.error(line),
         });
         // stdout carries the snapshot bytes verbatim (relay-safe); the
         // attestation verdict goes to stderr so piping stays clean.

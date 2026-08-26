@@ -47,6 +47,7 @@ const core = pluginModule.fadenoDispatchToolCore() as {
   MAX_WAIT_SECONDS: number;
   buildArgv: (archetype: string, tag: string) => string[];
   buildTag: (archetype: string, now?: number) => string;
+  formatDuration: (ms: number) => string;
   parseDispatchId: (stdout: string | null | undefined) => string | null;
   reportFilePath: (row: Record<string, unknown>) => string | null;
   launchDispatch: (
@@ -223,10 +224,15 @@ test('extractCompletedRows picks terminal rows out of an appended evidence chunk
   assert.deepEqual(core.extractCompletedRows(null), []);
 });
 
-test('verdictOf speaks the kernel vocabulary: ok or FAILED with exit code', () => {
+test('verdictOf speaks the kernel vocabulary: ok or FAILED with exit code, plus duration', () => {
   assert.equal(core.verdictOf({ exit_code: 0 }), 'ok');
   assert.equal(core.verdictOf({ exit_code: 1 }), 'FAILED (exit 1)');
   assert.equal(core.verdictOf({}), 'FAILED (exit unknown)');
+  // The kernel stamps duration_ms on every completion row; a long healthy
+  // review should read as long and healthy, not hung (Codex host feedback).
+  assert.equal(core.verdictOf({ exit_code: 0, duration_ms: 855944 }), 'ok · ran 14m 15s');
+  assert.equal(core.verdictOf({ exit_code: 0, duration_ms: 42000 }), 'ok · ran 42s');
+  assert.equal(core.verdictOf({ exit_code: 0, duration_ms: Number.NaN }), 'ok');
 });
 
 test('buildCompletionMessage carries tag, verdict, and a bounded report', () => {
