@@ -82,7 +82,7 @@ function watchRegistryPath(repoDir) {
   return join(repoDir, '.fadeno', 'local', WATCH_REGISTRY_BASENAME);
 }
 
-/** Read the registry; unreadable/absent/malformed all degrade to empty. */
+/** Read a registry; unreadable/absent/malformed all degrade to empty. */
 function readWatchRegistry(path) {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
@@ -95,12 +95,52 @@ function readWatchRegistry(path) {
   }
 }
 
-/** Best-effort registry write; a failed write loses wake-ups, not the host. */
+/** Every tag already named in the evidence log; an unreadable log degrades to empty. */
+function usedTags(evidencePath) {
+  const tags = new Set();
+  try {
+    for (const line of readFileSync(evidencePath, 'utf8').split('\n')) {
+      if (!line.startsWith('{')) continue;
+      try {
+        const row = JSON.parse(line);
+        if (typeof row?.tag === 'string' && row.tag.length > 0) tags.add(row.tag);
+      } catch {}
+    }
+  } catch {}
+  return tags;
+}
+
+/**
+ * A caller-supplied tag reused across launches makes every later
+ * `--output tag:<tag>` ambiguous (observed 2026-08-26: two dispatches carried
+ * `test-suite-run`, and the model's own recovery command failed on it).
+ * Suffix -2, -3… until free; auto-generated tags never collide.
+ */
+function dedupeTag(tag, evidencePath) {
+  const taken = usedTags(evidencePath);
+  if (!taken.has(tag)) return { tag, deduped: false };
+  for (let n = 2; ; n += 1) {
+    const candidate = `${tag}-${n}`;
+    if (!taken.has(candidate)) return { tag: candidate, deduped: true };
+  }
+}
+
+/**
+ * Best-effort registry write; a failed write loses wake-ups, not the host.
+ * Returns null on success, else the failure reason — persistWatched() turns
+ * that into an app.log line so a silent registry gap is diagnosable from the
+ * host log instead of being discovered as a missing completion (observed
+ * 2026-08-25/26: the registered branch ran but no registry file appeared,
+ * and the swallow-everything catch left nothing to investigate).
+ */
 function writeWatchRegistry(path, entries) {
   try {
     mkdirSync(join(path, '..'), { recursive: true });
     writeFileSync(path, `${JSON.stringify(entries, null, 2)}\n`, 'utf8');
-  } catch {}
+    return null;
+  } catch (error) {
+    return error?.message ?? String(error);
+  }
 }
 
 /**
@@ -287,10 +327,17 @@ export default async function FadenoDispatchTool(input) {
   }
 
   function persistWatched() {
-    writeWatchRegistry(
+    const failure = writeWatchRegistry(
       registryPath,
       [...watched.entries()].map(([dispatchId, meta]) => ({ dispatchId, ...meta })),
     );
+    if (failure != null) {
+      log(
+        'warn',
+        `watch registry write FAILED (${registryPath}): ${failure}` +
+          ` — restart-orphan recovery lost for ${watched.size} in-flight dispatch(es); live delivery unaffected`,
+      );
+    }
   }
 
   function toast(message, variant) {
@@ -384,7 +431,7 @@ export default async function FadenoDispatchTool(input) {
         args: {
           archetype: tool.schema.string().describe('Fadeno role archetype: worker, reviewer, or judge'),
           prompt: tool.schema.string().describe('The complete task prompt for the role agent'),
-          tag: tool.schema.string().optional().describe('Optional stable tag for output recovery; auto-generated when omitted'),
+          tag: tool.schema.string().optional().describe('Optional stable tag for output recovery; auto-generated when omitted, auto-suffixed when it would collide with an earlier dispatch'),
           wait_seconds: tool.schema.number().optional().describe('Optionally block up to this many seconds for the finished report (0 = fire-and-forget with automatic delivery later)'),
         },
         async execute(args, context) {
@@ -396,7 +443,9 @@ export default async function FadenoDispatchTool(input) {
           if (prompt == null) {
             return 'fadeno_dispatch: prompt is required and must be non-empty.';
           }
-          const tag = str(args?.tag) ?? buildTag(archetype);
+          const requestedTag = str(args?.tag) ?? buildTag(archetype);
+          const resolvedTag = dedupeTag(requestedTag, evidencePath);
+          const tag = resolvedTag.tag;
           const waitSeconds = typeof args?.wait_seconds === 'number' && Number.isFinite(args.wait_seconds) ? args.wait_seconds : 0;
           // Resolution order: the tool context's own session id, then the
           // chat.message hook's record of the session that last spoke. The
@@ -420,6 +469,9 @@ export default async function FadenoDispatchTool(input) {
             `fadeno_dispatch: ${launch.message}`,
             `archetype: ${archetype} | tag: ${tag} | running detached — the host session is free`,
           ];
+          if (resolvedTag.deduped) {
+            lines.push(`Requested tag "${requestedTag}" already names an earlier dispatch; this launch uses "${tag}" instead.`);
+          }
           if (waited != null) {
             lines.push(`report (waited ${Math.min(Math.max(0, Math.floor(waitSeconds)), MAX_WAIT_SECONDS)}s):`, waited);
           } else if (launch.dispatchId != null) {
@@ -429,6 +481,13 @@ export default async function FadenoDispatchTool(input) {
             watched.set(launch.dispatchId, { tag, sessionID });
             persistWatched();
             startWatching();
+            // The 2026-08-26 live run showed the host model ignoring the
+            // detached semantics and immediately blocking on
+            // `fadeno dispatches --wait`, which defeats the backgrounding.
+            // Say what to do, not only what will happen.
+            lines.push(
+              'End your turn now — do NOT poll or block with `fadeno dispatches --wait`; the watcher delivers the report into this session automatically.',
+            );
             lines.push(
               sessionID != null
                 ? `The completion report will be delivered back into this session automatically (dispatch ${launch.dispatchId}, session ${sessionID}).`
@@ -473,6 +532,8 @@ export function fadenoDispatchToolCore() {
     watchRegistryPath,
     readWatchRegistry,
     writeWatchRegistry,
+    usedTags,
+    dedupeTag,
     extractCompletedRows,
     verdictOf,
     buildCompletionMessage,

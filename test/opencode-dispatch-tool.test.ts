@@ -66,7 +66,9 @@ const core = pluginModule.fadenoDispatchToolCore() as {
   ) => string | null;
   watchRegistryPath: (repoDir: string) => string;
   readWatchRegistry: (path: string) => Array<{ dispatchId: string; tag?: string; sessionID?: string }>;
-  writeWatchRegistry: (path: string, entries: Array<Record<string, unknown>>) => void;
+  writeWatchRegistry: (path: string, entries: Array<Record<string, unknown>>) => string | null;
+  usedTags: (evidencePath: string) => Set<string>;
+  dedupeTag: (tag: string, evidencePath: string) => { tag: string; deduped: boolean };
   extractCompletedRows: (chunk: string | null | undefined) => Array<Record<string, any>>;
   verdictOf: (row: Record<string, unknown>) => string;
   buildCompletionMessage: (tag: string, row: Record<string, unknown>, report: string | null) => string;
@@ -174,6 +176,10 @@ test('steering apply emits the dispatch tool beside the steering plugin under th
   assert.ok(body.startsWith('// fadeno:managed'));
   assert.match(body, /fadeno_dispatch/);
   assert.match(body, /fadenoDispatchToolCore/);
+  // The 2026-08-26 live-run repairs must survive template edits: the explicit
+  // no-poll instruction and tag deduplication are behavior the host reads.
+  assert.match(body, /End your turn now/);
+  assert.match(body, /dedupeTag\(/);
 });
 
 test('extractCompletedRows picks terminal rows out of an appended evidence chunk', () => {
@@ -227,4 +233,51 @@ test('watch registry round-trips and degrades to empty on garbage', (t) => {
   assert.deepEqual(core.readWatchRegistry(path), []);
   writeFileSync(path, JSON.stringify({ not: 'an array' }));
   assert.deepEqual(core.readWatchRegistry(path), []);
+});
+
+test('writeWatchRegistry reports success and failure instead of swallowing silently', (t) => {
+  const root = tempRepo(t);
+  // Success is null so persistWatched can stay quiet when nothing went wrong.
+  const ok = core.writeWatchRegistry(core.watchRegistryPath(root), []);
+  assert.equal(ok, null);
+  // A directory sitting where the file must go makes writeFileSync fail —
+  // exactly the class of silent gap that hid the 2026-08-25/26 registry
+  // anomaly. The failure must come back as a diagnosable string.
+  const blocked = join(root, '.fadeno', 'blocked');
+  mkdirSync(join(blocked, core.WATCH_REGISTRY_BASENAME), { recursive: true });
+  const failure = core.writeWatchRegistry(join(blocked, core.WATCH_REGISTRY_BASENAME), [
+    { dispatchId: 'aaa', tag: 't' },
+  ]);
+  assert.equal(typeof failure, 'string');
+  assert.ok(failure!.length > 0);
+});
+
+test('usedTags reads the evidence log and degrades to empty on absence or garbage', (t) => {
+  const root = tempRepo(t);
+  const evidence = join(root, '.fadeno', 'dispatches.jsonl');
+  assert.equal(core.usedTags(evidence).size, 0);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(
+    evidence,
+    [
+      JSON.stringify({ event: 'dispatch_requested', dispatch_id: 'a', tag: 'first' }),
+      '{not json',
+      JSON.stringify({ event: 'dispatch_completed', dispatch_id: 'a', exit_code: 0 }),
+      JSON.stringify({ event: 'dispatch_requested', dispatch_id: 'b', tag: 'second' }),
+      JSON.stringify({ event: 'dispatch_requested', dispatch_id: 'c' }),
+      '',
+    ].join('\n'),
+  );
+  assert.deepEqual([...core.usedTags(evidence)].sort(), ['first', 'second']);
+});
+
+test('dedupeTag keeps free tags, suffixes collisions, and skips taken suffixes', (t) => {
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  const evidence = join(root, '.fadeno', 'dispatches.jsonl');
+  writeFileSync(evidence, [JSON.stringify({ tag: 'run' }), JSON.stringify({ tag: 'run-2' }), ''].join('\n'));
+  assert.deepEqual(core.dedupeTag('fresh', evidence), { tag: 'fresh', deduped: false });
+  assert.deepEqual(core.dedupeTag('run', evidence), { tag: 'run-3', deduped: true });
+  // An unreadable log means no known collisions — never block the launch.
+  assert.deepEqual(core.dedupeTag('run', join(root, '.fadeno', 'missing.jsonl')), { tag: 'run', deduped: false });
 });
