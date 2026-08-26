@@ -48,7 +48,7 @@ const core = pluginModule.fadenoDispatchToolCore() as {
   buildArgv: (archetype: string, tag: string) => string[];
   buildTag: (archetype: string, now?: number) => string;
   parseDispatchId: (stdout: string | null | undefined) => string | null;
-  recoveryHint: (tag: string, dispatchId: string | null) => string;
+  reportFilePath: (row: Record<string, unknown>) => string | null;
   launchDispatch: (
     repoDir: string,
     archetype: string,
@@ -69,6 +69,13 @@ const core = pluginModule.fadenoDispatchToolCore() as {
   writeWatchRegistry: (path: string, entries: Array<Record<string, unknown>>) => string | null;
   usedTags: (evidencePath: string) => Set<string>;
   dedupeTag: (tag: string, evidencePath: string) => { tag: string; deduped: boolean };
+  consumeEvidence: (
+    chunk: string | null | undefined,
+    watched: Map<string, { tag?: string; sessionID?: string | null }>,
+    pending: Map<string, { tag: string; sessionID?: string | null }>,
+    notified: Set<string>,
+  ) => Array<Record<string, any>>;
+  lastRequestIdForTag: (evidenceText: string | null | undefined, tag: string) => string | null;
   extractCompletedRows: (chunk: string | null | undefined) => Array<Record<string, any>>;
   verdictOf: (row: Record<string, unknown>) => string;
   buildCompletionMessage: (tag: string, row: Record<string, unknown>, report: string | null) => string;
@@ -93,6 +100,24 @@ test('parseDispatchId extracts the kernel uuid and rejects near misses', () => {
   assert.equal(core.parseDispatchId('dispatch id: not-a-uuid'), null);
   assert.equal(core.parseDispatchId(''), null);
   assert.equal(core.parseDispatchId(null), null);
+});
+
+test('launchDispatch captures the id from STDERR — where the kernel actually prints it', async () => {
+  // cli.ts echoes progress via console.error, so `dispatch id:` arrives on
+  // stderr. Two days of live launches lost this race because only stdout was
+  // parsed; this pins both streams as correlation channels.
+  let unrefd = false;
+  const child = {
+    stdin: { write() {}, end() {}, on() {}, destroy() {} },
+    stdout: { setEncoding() {}, on() {}, destroy() {} },
+    stderr: { setEncoding() {}, on(_event: string, handler: (chunk: string) => void) { handler('worker → ox\ndispatch id: aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee (tag: t)\n'); }, destroy() {} },
+    once() {},
+    unref() { unrefd = true; },
+  };
+  const result = await core.launchDispatch('/repo', 'worker', 't-stderr', 'p', 'fadeno', () => child);
+  assert.equal(result.ok, true);
+  assert.equal(result.dispatchId, 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
+  assert.equal(unrefd, true);
 });
 
 test('launchDispatch resolves with the id as soon as the kernel prints it, then detaches', async () => {
@@ -161,9 +186,12 @@ test('waitForOutput clamps to the cap and passes --wait to the kernel', () => {
   }), null);
 });
 
-test('recoveryHint prefers the dispatch id and falls back to the tag', () => {
-  assert.match(core.recoveryHint('t', 'abc-123'), /id:abc-123/);
-  assert.match(core.recoveryHint('t', null), /tag:t/);
+test('reportFilePath mirrors the kernel attestation name and degrades to null', () => {
+  // Pinned to src/commands/dispatch.ts:1281 — archetype-prefixed, 8-char id.
+  assert.equal(core.reportFilePath({ dispatch_id: '043d7b8a-6210-4564-a8a5-ea2bfa0192f3', archetype: 'worker' }), join('.fadeno', 'local', 'outputs', 'worker-043d7b8a.md'));
+  assert.equal(core.reportFilePath({ dispatch_id: '043d7b8a-6210', role: 'judge' }), join('.fadeno', 'local', 'outputs', 'judge-043d7b8a.md'));
+  assert.equal(core.reportFilePath({ dispatch_id: 'short' }), join('.fadeno', 'local', 'outputs', 'dispatch-short.md'));
+  assert.equal(core.reportFilePath({}), null);
 });
 
 test('steering apply emits the dispatch tool beside the steering plugin under the managed mark', (t) => {
@@ -207,8 +235,9 @@ test('buildCompletionMessage carries tag, verdict, and a bounded report', () => 
   assert.match(message, /tag bg-worker-x/);
   assert.match(message, /verdict ok/);
   assert.match(message, /All green\./);
-  // No report -> the recovery hint is the fallback, not silence.
-  assert.match(core.buildCompletionMessage('bg-worker-x', row, null), /fadeno dispatches --output id:aaa/);
+  // No report -> point at the attested output file, never a CLI wait.
+  assert.match(core.buildCompletionMessage('bg-worker-x', { dispatch_id: 'aaa', exit_code: 0, archetype: 'worker' }, null), /Full report file: .*worker-aaa\.md/);
+  assert.doesNotMatch(core.buildCompletionMessage('bg-worker-x', row, null), /fadeno dispatches/);
   // Oversized reports are truncated, never dropped.
   const huge = core.buildCompletionMessage('t', row, 'x'.repeat(core.REPORT_MAX_CHARS + 500));
   assert.match(huge, /\[truncated\]/);
@@ -280,4 +309,50 @@ test('dedupeTag keeps free tags, suffixes collisions, and skips taken suffixes',
   assert.deepEqual(core.dedupeTag('run', evidence), { tag: 'run-3', deduped: true });
   // An unreadable log means no known collisions — never block the launch.
   assert.deepEqual(core.dedupeTag('run', join(root, '.fadeno', 'missing.jsonl')), { tag: 'run', deduped: false });
+});
+
+test('consumeEvidence promotes a tag-pending watch and delivers its completion', () => {
+  // The 2026-08-26 no-id launch: the kernel owns the dispatch but the plugin
+  // never captured the id. The request row is what closes the gap.
+  const watched = new Map();
+  const pending = new Map([['slow-tag', { tag: 'slow-tag', sessionID: 'ses_1' }]]);
+  const notified = new Set();
+  const chunk = [
+    JSON.stringify({ event: 'dispatch_requested', dispatch_id: 'eee', tag: 'slow-tag' }),
+    JSON.stringify({ event: 'dispatch_completed', dispatch_id: 'eee', exit_code: 0 }),
+    '',
+  ].join('\n');
+  const deliveries = core.consumeEvidence(chunk, watched, pending, notified);
+  assert.equal(pending.size, 0);
+  assert.deepEqual(watched.get('eee'), { tag: 'slow-tag', sessionID: 'ses_1' });
+  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries[0]!.dispatch_id, 'eee');
+  // Promotion never resurrects a delivery that already happened.
+  const again = new Map([['x', { tag: 'x', sessionID: 's' }]]);
+  const rewatched = new Map();
+  core.consumeEvidence(JSON.stringify({ event: 'dispatch_requested', dispatch_id: 'done', tag: 'x' }), rewatched, again, new Set(['done']));
+  assert.equal(rewatched.size, 0);
+  // Duplicate completion rows collapse to one delivery; foreign completions
+  // are returned but harmlessly miss the watch.
+  const dupes = core.consumeEvidence(
+    [JSON.stringify({ event: 'dispatch_completed', dispatch_id: 'z', exit_code: 1 }), JSON.stringify({ event: 'dispatch_completed', dispatch_id: 'z', exit_code: 1 })].join('\n'),
+    new Map(),
+    new Map(),
+    new Set(),
+  );
+  assert.equal(dupes.length, 1);
+});
+
+test('lastRequestIdForTag scans full evidence history for a tag\u2019s newest request row', () => {
+  const text = [
+    JSON.stringify({ event: 'dispatch_requested', dispatch_id: 'old', tag: 'run' }),
+    '{not json',
+    JSON.stringify({ event: 'dispatch_completed', dispatch_id: 'old', exit_code: 0 }),
+    JSON.stringify({ event: 'dispatch_requested', dispatch_id: 'new', tag: 'run' }),
+    JSON.stringify({ event: 'dispatch_requested', dispatch_id: 'other', tag: 'different' }),
+    '',
+  ].join('\n');
+  assert.equal(core.lastRequestIdForTag(text, 'run'), 'new');
+  assert.equal(core.lastRequestIdForTag(text, 'missing'), null);
+  assert.equal(core.lastRequestIdForTag(null, 'run'), null);
 });

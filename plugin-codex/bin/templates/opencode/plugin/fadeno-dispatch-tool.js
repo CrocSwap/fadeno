@@ -37,9 +37,9 @@ import { tool } from '@opencode-ai/plugin';
 // startup, not the role work.
 const DISPATCH_ID_TIMEOUT_MS = 15_000;
 
-// Upper bound on the optional in-tool wait. Longer waits belong to
-// `fadeno dispatches --output tag:<tag> --wait <n>`, which the model can call
-// itself; a tool call that blocks for minutes defeats the point.
+// Upper bound on the optional in-tool wait. Longer waits belong to the
+// kernel's own `fadeno dispatches --wait`, used internally by waitForOutput;
+// a tool call that blocks for minutes defeats the point.
 const MAX_WAIT_SECONDS = 600;
 
 // The completion watcher's cadence and the report size it will inject. The
@@ -70,9 +70,21 @@ function parseDispatchId(stdout) {
   return match == null ? null : match[1];
 }
 
-function recoveryHint(tag, dispatchId) {
-  const by = dispatchId != null ? `id:${dispatchId}` : `tag:${tag}`;
-  return `Recover output with: fadeno dispatches --output ${by} --wait 600`;
+/**
+ * Where the kernel attested this dispatch's full report (src/commands/dispatch.ts
+ * owns the exact name). Recovery points at a file read — never at a CLI wait,
+ * which is how models talked themselves into ten-minute blocking polls.
+ */
+function reportFilePath(row) {
+  const id = typeof row?.dispatch_id === 'string' && row.dispatch_id.length > 0 ? row.dispatch_id : null;
+  if (id == null) return null;
+  const stem =
+    typeof row?.archetype === 'string' && row.archetype.length > 0
+      ? row.archetype
+      : typeof row?.role === 'string' && row.role.length > 0
+        ? row.role
+        : 'dispatch';
+  return join('.fadeno', 'local', 'outputs', `${stem}-${id.slice(0, 8)}.md`);
 }
 
 /** The persisted launch registry: which session owns which in-flight dispatch. */
@@ -144,23 +156,74 @@ function writeWatchRegistry(path, entries) {
 }
 
 /**
- * Completed-dispatch rows from an appended evidence chunk. Only
- * `dispatch_completed` rows carry the terminal verdict; everything else is
- * noise to the watcher.
+ * The newest `dispatch_requested` id carrying this tag, from evidence text
+ * scanned in full — a pending watch registered after the 15s id-capture race
+ * must reconcile against rows already on disk, because live polling only
+ * reads appended bytes. Null when the log names no such launch yet.
  */
-function extractCompletedRows(chunk) {
-  const out = [];
+function lastRequestIdForTag(evidenceText, tag) {
+  let found = null;
+  for (const line of String(evidenceText ?? '').split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    try {
+      const row = JSON.parse(trimmed);
+      if (row?.event === 'dispatch_requested' && row.tag === tag && typeof row.dispatch_id === 'string') {
+        found = row.dispatch_id;
+      }
+    } catch {}
+  }
+  return found;
+}
+
+/**
+ * Consume an appended evidence chunk against the watch state. Two passes, in
+ * file order: a `dispatch_requested` row promotes a tag-pending watch into a
+ * real dispatchId entry (a launch whose id print lost the 15s capture race —
+ * observed twice live, both under heavy CPU load), then `dispatch_completed`
+ * rows become deliveries. Mutates watched/pending/notified; returns completed
+ * rows in file order.
+ */
+function consumeEvidence(chunk, watched, pending, notified) {
+  const rows = [];
   for (const line of String(chunk ?? '').split('\n')) {
     const trimmed = line.trim();
     if (trimmed.length === 0) continue;
     try {
       const row = JSON.parse(trimmed);
-      if (row?.event === 'dispatch_completed' && typeof row.dispatch_id === 'string') {
-        out.push(row);
-      }
+      if (row != null && typeof row === 'object') rows.push(row);
     } catch {}
   }
-  return out;
+  for (const row of rows) {
+    if (
+      row.event === 'dispatch_requested' &&
+      typeof row.tag === 'string' &&
+      typeof row.dispatch_id === 'string' &&
+      pending.has(row.tag)
+    ) {
+      const meta = pending.get(row.tag);
+      pending.delete(row.tag);
+      if (!notified.has(row.dispatch_id)) watched.set(row.dispatch_id, meta);
+    }
+  }
+  const deliveries = [];
+  const seen = new Set();
+  for (const row of rows) {
+    if (row.event !== 'dispatch_completed' || typeof row.dispatch_id !== 'string') continue;
+    if (seen.has(row.dispatch_id)) continue;
+    seen.add(row.dispatch_id);
+    deliveries.push(row);
+  }
+  return deliveries;
+}
+
+/**
+ * Completed-dispatch rows from an appended evidence chunk. Only
+ * `dispatch_completed` rows carry the terminal verdict; everything else is
+ * noise to the watcher.
+ */
+function extractCompletedRows(chunk) {
+  return consumeEvidence(chunk, new Map(), new Map(), new Set());
 }
 
 /** One-line verdict for a completion row, matching the kernel's own vocabulary. */
@@ -177,7 +240,11 @@ function buildCompletionMessage(tag, row, report) {
     const trimmed = report.length > REPORT_MAX_CHARS ? `${report.slice(0, REPORT_MAX_CHARS)}…[truncated]` : report;
     lines.push('Report:', trimmed);
   } else {
-    lines.push(recoveryHint(tag, row.dispatch_id));
+    // No fetched report: point at the attested file instead of a CLI wait.
+    const file = reportFilePath(row);
+    if (file != null) {
+      lines.push(`Full report file: ${file} — read it with your file tools if you need more than the verdict.`);
+    }
   }
   return lines.join('\n');
 }
@@ -231,14 +298,26 @@ function launchDispatch(repoDir, archetype, tag, prompt, argv0 = 'fadeno', spawn
     };
     child.stdout?.setEncoding('utf8');
     child.stderr?.setEncoding('utf8');
-    child.stdout?.on('data', (chunk) => {
-      stdout += chunk;
-      const dispatchId = parseDispatchId(stdout);
+    // The kernel names the dispatch on STDERR (cli.ts echoes progress via
+    // console.error to keep stdout clean for reports). Parsing only stdout —
+    // as this did for two days of live launches — guarantees the 15s timeout
+    // fires, the registered branch never runs, and no wake-up is ever
+    // persisted. Both streams are correlation channels; read both.
+    const correlate = () => {
+      const dispatchId = parseDispatchId(stdout) ?? parseDispatchId(stderr);
       if (dispatchId != null) {
         finish({ ok: true, dispatchId, tag, message: `dispatch ${dispatchId} launched (tag ${tag})` });
       }
+      return dispatchId;
+    };
+    child.stdout?.on('data', (chunk) => {
+      stdout += chunk;
+      correlate();
     });
-    child.stderr?.on('data', (chunk) => { stderr += chunk; });
+    child.stderr?.on('data', (chunk) => {
+      stderr += chunk;
+      correlate();
+    });
     child.once('error', (error) => {
       finish({ ok: false, dispatchId: null, tag, message: `fadeno dispatch failed to start: ${error?.message ?? error}` });
     });
@@ -246,7 +325,7 @@ function launchDispatch(repoDir, archetype, tag, prompt, argv0 = 'fadeno', spawn
       // The kernel exiting BEFORE printing an id is a real launch failure.
       // After the id is captured this fires only at kernel completion, long
       // after finish() — settled guards it.
-      if (parseDispatchId(stdout) == null) {
+      if (parseDispatchId(stdout) == null && parseDispatchId(stderr) == null) {
         const detail = stderr.trim().length > 0 ? stderr.trim() : `exit code ${code ?? 'unknown'}`;
         finish({ ok: false, dispatchId: null, tag, message: `fadeno dispatch exited before naming a dispatch id: ${detail}` });
       }
@@ -258,7 +337,7 @@ function launchDispatch(repoDir, archetype, tag, prompt, argv0 = 'fadeno', spawn
         ok: true,
         dispatchId: null,
         tag,
-        message: `fadeno dispatch launched but had not printed a dispatch id within ${DISPATCH_ID_TIMEOUT_MS}ms; use tag-based recovery`,
+        message: `fadeno dispatch launched but had not printed a dispatch id within ${DISPATCH_ID_TIMEOUT_MS}ms; the watcher will deliver via the tag watch`,
       });
     }, DISPATCH_ID_TIMEOUT_MS);
     child.stdin?.on('error', () => {}); // EPIPE after early kernel exit is reported by 'close'
@@ -312,6 +391,13 @@ export default async function FadenoDispatchTool(input) {
   let pollTimer = null;
   let evidenceOffset = 0;
   const notified = new Set();
+
+  // Launches whose dispatch id never arrived: tag -> { tag, sessionID }.
+  // The kernel owns the launch either way (the evidence row proves it), so
+  // the watcher can still own the delivery — pollEvidence promotes these to
+  // real watched entries when the request row appears. In-memory only: a
+  // host restart before promotion loses the wake-up, same as pre-watcher.
+  const pendingByTag = new Map();
 
   // The session that most recently sent a message, per the chat.message hook.
   // Fallback when the tool context carries no sessionID — observed once in
@@ -396,7 +482,7 @@ export default async function FadenoDispatchTool(input) {
     const handle = readFileSync(evidencePath);
     const chunk = handle.subarray(evidenceOffset).toString('utf8');
     evidenceOffset = size;
-    for (const row of extractCompletedRows(chunk)) deliver(row);
+    for (const row of consumeEvidence(chunk, watched, pendingByTag, notified)) deliver(row);
   }
 
   function startWatching() {
@@ -426,8 +512,8 @@ export default async function FadenoDispatchTool(input) {
           'session stays interactive. The prompt is delivered verbatim to the role agent. ' +
           'Set wait_seconds to also block for the finished report (capped at ' + MAX_WAIT_SECONDS + 's); ' +
           'leave it 0 to fire-and-forget. When fire-and-forgot, the completion report is delivered back ' +
-          'into this session automatically as a new message when the dispatch finishes. ' +
-          'Recover output any time with `fadeno dispatches --output tag:<tag> --wait <seconds>`.',
+          'into this session automatically as a new message when the dispatch finishes — no polling, ' +
+          'no recovery command, in every launch path.',
         args: {
           archetype: tool.schema.string().describe('Fadeno role archetype: worker, reviewer, or judge'),
           prompt: tool.schema.string().describe('The complete task prompt for the role agent'),
@@ -491,11 +577,33 @@ export default async function FadenoDispatchTool(input) {
             lines.push(
               sessionID != null
                 ? `The completion report will be delivered back into this session automatically (dispatch ${launch.dispatchId}, session ${sessionID}).`
-                : `Watching for completion, but no session id is available for direct delivery — you will get a toast only (dispatch ${launch.dispatchId}). Recover with: ${recoveryHint(tag, launch.dispatchId)}`,
+                : `Watching for completion, but no session id is available for direct delivery — you will get a toast only (dispatch ${launch.dispatchId}). The full report lands under .fadeno/local/outputs/.`,
             );
           } else {
-            lines.push(recoveryHint(tag, launch.dispatchId));
-            lines.push('No automatic completion delivery for this dispatch (no dispatch id available); check the output when it matters.');
+            // The kernel launched (the evidence row proves it) but no id was
+            // captured. Register by tag instead — and reconcile immediately:
+            // the request row usually landed while the capture race was still
+            // running, so it is already behind the poller's offset and only a
+            // full-file scan can see it (observed live 2026-08-26 03:27: the
+            // row was on disk 200ms in; the pending watch never promoted).
+            pendingByTag.set(tag, { tag, sessionID });
+            const historyId = lastRequestIdForTag(
+              existsSync(evidencePath) ? readFileSync(evidencePath, 'utf8') : null,
+              tag,
+            );
+            if (historyId != null && !notified.has(historyId)) {
+              pendingByTag.delete(tag);
+              watched.set(historyId, { tag, sessionID });
+              persistWatched();
+            }
+            startWatching();
+            log(
+              'warn',
+              `no dispatch id within ${Math.round(DISPATCH_ID_TIMEOUT_MS / 1000)}s; watching by tag "${tag}"` +
+                `${historyId != null ? ` (promoted from evidence: dispatch ${historyId})` : ' (request row not yet on disk)'} — delivery still automatic`,
+            );
+            lines.push(`No dispatch id was captured within ${Math.round(DISPATCH_ID_TIMEOUT_MS / 1000)}s, so recovery by id is unavailable — but the completion will still be delivered into this session automatically via the tag watch (${tag}).`);
+            lines.push('End your turn now — do NOT poll or block with `fadeno dispatches --wait`; the watcher delivers the report automatically.');
           }
           return lines.join('\n');
         },
@@ -526,7 +634,7 @@ export function fadenoDispatchToolCore() {
     buildArgv,
     buildTag,
     parseDispatchId,
-    recoveryHint,
+    reportFilePath,
     launchDispatch,
     waitForOutput,
     watchRegistryPath,
@@ -534,6 +642,8 @@ export function fadenoDispatchToolCore() {
     writeWatchRegistry,
     usedTags,
     dedupeTag,
+    consumeEvidence,
+    lastRequestIdForTag,
     extractCompletedRows,
     verdictOf,
     buildCompletionMessage,
