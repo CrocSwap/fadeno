@@ -43,6 +43,7 @@ import {
   type SnapshotDocument,
   atCwd,
   withoutHarnessIdentity,
+  withDispatchProvenance,
 } from '../lib/executors.ts';
 import { readUserDials } from '../lib/user-paths.ts';
 import { computeNext, FlowCursorError, type NextComputation } from '../lib/flow-cursor.ts';
@@ -1569,7 +1570,12 @@ function beginCommandAttempt(
     child = spawn(process.execPath, superviseArgv(argv, claimAbs, statusAbs, leaseRelease, effectiveTimeout), {
       stdio: [promptFd, outFd, errFd],
       cwd: spawnCwd,
-      env: atCwd(withoutHarnessIdentity(process.env), spawnCwd),
+      // Same provenance the ad-hoc kernel stamps: an engine-dispatched actor is
+      // an executor too, and may not dispatch unless its role coordinates.
+      env: withDispatchProvenance(atCwd(withoutHarnessIdentity(process.env), spawnCwd), {
+        dispatchId: `${ids.actorCallId}:a${attempt}`,
+        archetype: role,
+      }),
       detached: false,
     });
     child.unref();

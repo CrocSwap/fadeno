@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, posix as posixPath, resolve } from 'node:path';
 import { Ajv, type ValidateFunction } from 'ajv';
@@ -1607,9 +1608,16 @@ function adjudicateViaCommand(
   const evidenceMode = opts.evidence ?? 'inlined';
   const prepared = preparePrompts(measurement, pair, repoRoot, evidenceMode);
   const pairId8 = measurement.pairId.slice(0, 8);
+  // The pair alone cannot name these dispatches. Two pairs can share an
+  // eight-character prefix, and re-judging one pair dispatches under the same
+  // name twice — either way `--output tag:cmp-<pair>` would resolve to two
+  // dispatches and refuse, so both judgments become unrecoverable. A
+  // per-invocation suffix keeps the pair legible in the handle while leaving
+  // the handle unique, which is what the kernel now requires of every tag.
+  const judgeRun = randomUUID().slice(0, 8);
   const judgeCallOpts = { repoRoot, cwd, judgeModel: opts.judgeModel ?? null, judgeVia: opts.judgeVia ?? null, now: opts.now };
 
-  const comparisonResult = dispatchJudge(prepared.comparisonPrompt, { ...judgeCallOpts, tag: `cmp-${pairId8}` });
+  const comparisonResult = dispatchJudge(prepared.comparisonPrompt, { ...judgeCallOpts, tag: `cmp-${pairId8}-${judgeRun}` });
   const comparisonParsed = extractJsonObject(comparisonResult.stdout);
   if (comparisonParsed == null || !prepared.validateComparison(comparisonParsed)) {
     const errors = comparisonParsed == null
@@ -1623,7 +1631,7 @@ function adjudicateViaCommand(
   const comparison = comparisonParsed as RawComparisonJudgment;
   const verdict = unblindAndCheckCoherence(comparison, prepared.blinding, `comparison judge dispatch ${comparisonResult.dispatchId.slice(0, 8)}`);
 
-  const adversarialResult = dispatchJudge(prepared.adversarialPrompt, { ...judgeCallOpts, tag: `adv-${pairId8}` });
+  const adversarialResult = dispatchJudge(prepared.adversarialPrompt, { ...judgeCallOpts, tag: `adv-${pairId8}-${judgeRun}` });
   const adversarialParsed = extractJsonObject(adversarialResult.stdout);
   if (adversarialParsed == null || !prepared.validateAdversarial(adversarialParsed)) {
     const errors = adversarialParsed == null

@@ -1,0 +1,7 @@
+# Codex invocation policy for session-scoped Fadeno host mode.
+# Activation is always an explicit user choice; ordinary complex work remains
+# the runner skill's implicit surface.
+interface:
+  displayname: "Fadeno Host Mode"
+  shortdescription: "Coordinate this session through Fadeno."
+allow_implicit_invocation: false

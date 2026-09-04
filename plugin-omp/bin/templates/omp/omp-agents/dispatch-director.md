@@ -1,6 +1,6 @@
 ---
 name: dispatch-director
-description: Dispatch proxy that hands a whole side task — planning and orchestration included — to the external executor bound to the director archetype by Fadeno dials. The director decomposes the task and coordinates workers/reviewers itself via fadeno. Use proactively. MUST BE USED when the user wants a side quest delegated wholesale rather than worked in this session.
+description: Dispatch proxy that hands a whole side task — planning and orchestration included — to the external executor bound to the director archetype by Fadeno dials. The director decomposes the task and coordinates workers/reviewers itself via fadeno. Your prompt is relayed to that executor verbatim, so write it as pure task text addressed to the director — never as an instruction to dispatch, and never naming a tag. Use proactively. MUST BE USED when the user wants a side quest delegated wholesale rather than worked in this session.
 tools: bash
 ---
 

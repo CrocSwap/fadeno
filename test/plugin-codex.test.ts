@@ -7,7 +7,7 @@ import { runCodexPlugin } from '../src/commands/plugin.ts';
 import { exists, read, tempRepo } from './helpers.ts';
 
 const REPO = join(import.meta.dirname, '..');
-const SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-setup', 'fadeno-bakeoff'] as const;
+const SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-host', 'fadeno-setup', 'fadeno-bakeoff'] as const;
 
 // Same escape hatch as test/plugin.test.ts: `FADENO_SKIP_DRIFT=1` skips only the
 // committed-vs-fresh comparison so a work-in-progress template edit doesn't block
@@ -73,13 +73,14 @@ test('codex plugin: skills are the shared bodies + in-plugin invocation policy',
   assert.match(read(outDir, 'skills/fadeno-runner/agents/openai.yaml'), /allow_implicit_invocation:\s*true/);
   assert.match(read(outDir, 'skills/fadeno-builder/agents/openai.yaml'), /allow_implicit_invocation:\s*false/);
   assert.match(read(outDir, 'skills/fadeno-driver/agents/openai.yaml'), /allow_implicit_invocation:\s*false/);
+  assert.match(read(outDir, 'skills/fadeno-host/agents/openai.yaml'), /allow_implicit_invocation:\s*false/);
 
   // References carry over; the driver reference exists.
   assert.ok(exists(outDir, 'skills/fadeno-runner/references/runtime.md'));
   assert.ok(exists(outDir, 'skills/fadeno-driver/references/README.md'));
 });
 
-test('codex plugin: carries setup, bundled CLI, and built-in definitions', (t) => {
+test('codex plugin: carries setup, host-mode hooks, bundled CLI, and built-in definitions', (t) => {
   const root = tempRepo(t);
   const { outDir } = runCodexPlugin({ cwd: root, outDir: join(root, 'plugin-codex') });
 
@@ -88,6 +89,11 @@ test('codex plugin: carries setup, bundled CLI, and built-in definitions', (t) =
   assert.ok(!exists(outDir, 'agents'), 'codex plugin must not ship subagents');
   assert.ok(!exists(outDir, 'commands'), 'codex plugin has no commands component');
   assert.ok(exists(outDir, 'skills/fadeno-setup/SKILL.md'));
+  assert.ok(exists(outDir, 'skills/fadeno-host/SKILL.md'));
+  assert.ok(exists(outDir, 'hooks/host-mode.mjs'));
+  const hooks = JSON.parse(read(outDir, 'hooks/hooks.json'));
+  assert.ok(Array.isArray(hooks.hooks.UserPromptSubmit));
+  assert.match(hooks.hooks.UserPromptSubmit[0].hooks[0].command, /\$\{PLUGIN_ROOT\}\/hooks\/host-mode\.mjs/);
   assert.ok(exists(outDir, 'bin/fadeno'), 'codex plugin must bundle a binary');
   assert.ok(exists(outDir, 'bin/templates/common/fadeno/playbooks/code-change-review.yaml'));
   const binary = join(outDir, 'bin', 'fadeno');

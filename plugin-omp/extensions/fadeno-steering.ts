@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 
-const HOOK_VERSION = '0.6.0';
+const HOOK_VERSION = '0.6.1';
 const EVIDENCE_FORMAT = '1.0';
 const ROLE_NAMES = new Set(['worker', 'reviewer', 'judge']);
 const RESOLVE_TIMEOUT_MS = 10_000;

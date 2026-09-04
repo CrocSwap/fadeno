@@ -6,6 +6,23 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-09-04
+
+### Added
+
+- Added explicit, session-scoped Fadeno host-coordinator mode for both plugins:
+  `/fadeno:host` in Claude Code and `$fadeno-host` in Codex. Lifecycle hooks
+  preserve the policy across later turns and compaction without modifying a
+  repository's `AGENTS.md` or `CLAUDE.md`; `off` disables it for the session.
+
+### Fixed
+
+- Prevented command executors from accidentally recursively dispatching through
+  Fadeno by carrying dispatch provenance across ad-hoc, shadow, fallback,
+  engine-actor, and registered-tool spawn paths.
+- Made dispatch tags unique recovery handles, including concurrent and
+  in-flight reuse protection.
+
 ## [0.6.0] — 2026-08-22
 
 The engine release. `fadeno drive` advances a run deterministically until it

@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { sha256Hex } from './artifact-manifest.ts';
 import { INFLIGHT_DIR, inflightClaimIsAlive, readInflightClaim, readSupervisorStatus, sleepSync, superviseArgv, supervisedSpawnError, supervisorCanStillReport } from './supervisor.ts';
 import { acquireWorkspaceLease, isWorkspaceLeaseAlive, readEffectiveLease, readWorkspaceLease, releaseWorkspaceLease, WorkspaceLeaseError, WORKSPACE_LEASE_FILE } from './workspace-lease.ts';
-import { atCwd, withoutHarnessIdentity } from './executors.ts';
+import { atCwd, withDispatchProvenance, withoutHarnessIdentity } from './executors.ts';
 import { readEventsStrict, type RunEvent } from './run-ledger.ts';
 import { parseGeneration } from './prompt-resolve.ts';
 import { countIterationStarts, scopeStartIndex, stepStartedInScope } from './run-scope.ts';
@@ -604,7 +604,12 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
     child = spawn(process.execPath, superviseArgv(argv, claimAbs, statusAbs, leaseRelease, params.effectiveTimeoutMs ?? null), {
       stdio: [promptFd, outFd, errFd],
       cwd: params.repoRoot,
-      env: atCwd(withoutHarnessIdentity(process.env), params.repoRoot),
+      // A registered tool never coordinates, so it carries `deny`: `npm test`
+      // has no business starting a dispatch either.
+      env: withDispatchProvenance(atCwd(withoutHarnessIdentity(process.env), params.repoRoot), {
+        dispatchId: `${ids.toolCallId}:a${attempt}`,
+        archetype: null,
+      }),
       detached: false,
     });
     child.unref();

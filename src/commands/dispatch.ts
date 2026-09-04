@@ -30,6 +30,9 @@ import {
   roleResolutionEchoLabel,
   withoutHarnessIdentity,
   atCwd,
+  withDispatchProvenance,
+  DISPATCH_NESTING_ENV,
+  IN_DISPATCH_ENV,
   type ExecutorProfile,
   type CompiledDelivery,
   type InputProducer,
@@ -493,6 +496,121 @@ function provenanceFields(producers: InputProducer[]): Array<{
     executor: producer.executor,
     provider: producer.provider,
   }));
+}
+
+
+/**
+ * Refuse a dispatch launched from inside another dispatch's executor.
+ *
+ * Dispatch proxies relay their prompt byte-for-byte — that verbatim relay is
+ * what makes the proxy auditable, and the PreToolUse guard deliberately never
+ * inspects the prompt body. So a prompt addressed to the *proxy* ("dispatch a
+ * fadeno worker… use tag X") reaches the executor as its own instructions, and
+ * it dutifully runs `fadeno dispatch` inside its own worktree. Observed
+ * 2026-08-31: the recursion collided with its own tag and the dispatch exited
+ * having done zero work — silently, because a recursive dispatch is
+ * indistinguishable from a person at a terminal once the prompt has been
+ * relayed.
+ *
+ * The check is on the environment rather than the prompt text: exact, with no
+ * false positives on the many legitimate prompts that discuss dispatch (this
+ * repo writes them weekly). A director carries `allow` because its brief tells
+ * it to coordinate through fadeno; everything else carries `deny`.
+ */
+function assertNestingAllowed(env: NodeJS.ProcessEnv = process.env): void {
+  const parent = (env[IN_DISPATCH_ENV] ?? '').trim();
+  if (parent === '') return;
+  if ((env[DISPATCH_NESTING_ENV] ?? '').trim() === 'allow') return;
+  throw new DispatchCommandError(
+    `refusing to dispatch from inside dispatch ${parent.slice(0, 8)}: this process is already ` +
+      'a fadeno executor, and its archetype does not coordinate. The usual cause is a prompt ' +
+      'addressed to the dispatch proxy rather than to you — proxies relay their prompt ' +
+      'byte-for-byte, so "dispatch a fadeno worker…" arrives here as your instructions. Do the ' +
+      `task yourself instead. If nesting is genuinely intended, dispatch the \`director\` ` +
+      `archetype (its brief teaches coordination) or set ${DISPATCH_NESTING_ENV}=allow explicitly.`,
+  );
+}
+
+/** A prior dispatch already carrying the tag a launch just asked for. */
+interface TagOccupant {
+  dispatchId: string;
+  /** A completion row exists for it. */
+  completed: boolean;
+  /** Request-row timestamp, when readable. */
+  requestedAt: string | null;
+}
+
+/**
+ * The newest dispatch already carrying `tag`, preferring an open one.
+ *
+ * Same tolerant scan as `lookupInputProducers`: an unreadable or torn log
+ * yields no occupant rather than blocking a launch on bookkeeping.
+ */
+function findTagOccupant(repoRoot: string, tag: string): TagOccupant | null {
+  const path = join(repoRoot, DISPATCHES_FILE);
+  if (!existsSync(path)) return null;
+  const tagged = new Map<string, string | null>();
+  const completed = new Set<string>();
+  try {
+    for (const line of readFileSync(path, 'utf8').split('\n')) {
+      if (line.trim() === '') continue;
+      let row: Record<string, unknown>;
+      try {
+        const parsed = JSON.parse(line) as unknown;
+        if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+        row = parsed as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const id = typeof row.dispatch_id === 'string' ? row.dispatch_id : null;
+      if (id == null) continue;
+      if (row.event === 'dispatch_requested' && row.tag === tag) {
+        tagged.set(id, typeof row.timestamp === 'string' ? row.timestamp : null);
+      } else if (row.event === 'dispatch_completed') {
+        completed.add(id);
+      }
+    }
+  } catch {
+    return null;
+  }
+  if (tagged.size === 0) return null;
+  const occupants = [...tagged].map(([dispatchId, requestedAt]) => ({
+    dispatchId,
+    requestedAt,
+    completed: completed.has(dispatchId),
+  }));
+  return occupants.find((occupant) => !occupant.completed) ?? occupants[occupants.length - 1]!;
+}
+
+/**
+ * Refuse a tag another dispatch already holds.
+ *
+ * A tag is a recovery handle, and `resolveByTag` refuses an ambiguous one
+ * outright — so a reused tag does not pick a winner, it makes *both*
+ * dispatches unrecoverable. Today that ambiguity only surfaces later, at the
+ * read, by which point the work is gone; the 2026-08-31 recursion collided
+ * with its own tag and nothing said so until recovery was attempted. Refusing
+ * at launch moves the complaint to the moment the mistake is made.
+ */
+function assertTagAvailable(repoRoot: string, tag: string): void {
+  const occupant = findTagOccupant(repoRoot, tag);
+  if (occupant == null) return;
+  const id8 = occupant.dispatchId.slice(0, 8);
+  if (occupant.completed) {
+    throw new DispatchCommandError(
+      `tag "${tag}" already names dispatch ${id8}` +
+        `${occupant.requestedAt != null ? ` (started ${occupant.requestedAt})` : ''}, which has completed. ` +
+        `Reusing it would make \`fadeno dispatches --output tag:${tag}\` ambiguous for both — ` +
+        'pick a distinct tag for this dispatch.',
+    );
+  }
+  throw new DispatchCommandError(
+    `tag "${tag}" is already held by dispatch ${id8}` +
+      `${occupant.requestedAt != null ? `, started ${occupant.requestedAt}` : ''}, which has not completed. ` +
+      `Read it with \`fadeno dispatches --output tag:${tag} --wait 120\`, or stop it with ` +
+      `\`fadeno dispatches --cancel tag:${tag}\`. Launching a second dispatch under this tag makes ` +
+      'both unrecoverable — pick a distinct tag for separate work.',
+  );
 }
 
 
@@ -988,6 +1106,9 @@ function workspaceFingerprint(repoRoot: string): string | null {
  * `--model` bypasses resolution for debugging.
  */
 export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
+  // Before anything reads the catalog: a recursive dispatch is refused on its
+  // environment, so a broken profile cannot mask it.
+  assertNestingAllowed();
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const layered = loadProfileOrThrow(repoRoot, opts.userPathOptions);
@@ -996,6 +1117,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const archetype = opts.archetype?.trim() ? opts.archetype.trim() : null;
   const role = opts.role?.trim() ? opts.role.trim() : null;
   const tag = normalizeDispatchTag(opts.tag);
+  if (tag != null) assertTagAvailable(repoRoot, tag);
 
   let delivery: CompiledDelivery;
   let source: DispatchResolutionSource;
@@ -2155,7 +2277,13 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         // Without `atCwd` the shadow escapes its worktree and edits the real
         // workspace. FADENO_IN_SHADOW rides along so any fadeno the challenger
         // runs — at any depth — declines to fire challengers of its own.
-        env: { ...atCwd(withoutHarnessIdentity(process.env), shadowWorktreeAbs), FADENO_IN_SHADOW: '1' },
+        env: {
+          ...withDispatchProvenance(atCwd(withoutHarnessIdentity(process.env), shadowWorktreeAbs), {
+            dispatchId: shadowDispatchId,
+            archetype,
+          }),
+          FADENO_IN_SHADOW: '1',
+        },
         stdio: [promptFd, sfd, 'ignore'],
       });
       childSpawned = true;
@@ -2442,7 +2570,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         // The child is a different session, usually a different host. Inheriting
         // our harness identity would tell a `codex exec` worker it is inside
         // Claude; it establishes its own.
-        env: atCwd(withoutHarnessIdentity(process.env), spawnCwd),
+        env: withDispatchProvenance(atCwd(withoutHarnessIdentity(process.env), spawnCwd), {
+          dispatchId,
+          archetype,
+        }),
         maxBuffer: SPAWN_MAX_BUFFER,
         stdio: ['pipe', outputFd, 'pipe'],
         },
@@ -3015,7 +3146,10 @@ export function runDispatchFallback(opts: DispatchFallbackOptions): DispatchFall
         input: prompt,
         encoding: 'utf8',
         cwd: repoRoot,
-        env: atCwd(withoutHarnessIdentity(process.env), repoRoot),
+        env: withDispatchProvenance(atCwd(withoutHarnessIdentity(process.env), repoRoot), {
+          dispatchId: request.dispatchId,
+          archetype: request.agentType,
+        }),
         maxBuffer: SPAWN_MAX_BUFFER,
       });
     } finally {

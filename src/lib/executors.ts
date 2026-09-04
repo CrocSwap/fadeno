@@ -552,6 +552,50 @@ export function atCwd(env: NodeJS.ProcessEnv, cwd: string): NodeJS.ProcessEnv {
   return { ...env, PWD: cwd };
 }
 
+/**
+ * Names the dispatch an executor is running as. Pure provenance: any `fadeno`
+ * the executor runs — at any depth — can say which dispatch it is inside.
+ */
+export const IN_DISPATCH_ENV = 'FADENO_IN_DISPATCH';
+
+/**
+ * Whether the executor reading it may dispatch again. `allow` or `deny`, and
+ * always written rather than merely omitted: a director's executor carries
+ * `allow`, and the workers *it* dispatches must not inherit that.
+ */
+export const DISPATCH_NESTING_ENV = 'FADENO_DISPATCH_NESTING';
+
+/**
+ * Archetypes whose executor is *told* to coordinate through fadeno, so a
+ * nested dispatch from inside their workspace is the design rather than an
+ * accident. `director` earns it through its brief
+ * (`archetypes.director.brief: director`), which teaches the spawned model to
+ * decompose and delegate instead of doing the work itself.
+ *
+ * Every other archetype re-dispatching is the 2026-08-31 dogfood failure:
+ * proxies relay their prompt byte-for-byte, so a prompt addressed to the
+ * *proxy* ("dispatch a fadeno worker… use tag X") arrives at the executor as
+ * its own instructions, and it runs `fadeno dispatch` inside its own worktree.
+ */
+export const COORDINATING_ARCHETYPES: ReadonlySet<string> = new Set(['director']);
+
+/**
+ * Stamp an executor's environment with which dispatch it is, and whether it
+ * may start another. The mirror of `FADENO_IN_SHADOW`, which has ridden along
+ * to challengers for the same reason since shadow pairs shipped.
+ */
+export function withDispatchProvenance(
+  env: NodeJS.ProcessEnv,
+  identity: { dispatchId: string; archetype: string | null },
+): NodeJS.ProcessEnv {
+  return {
+    ...env,
+    [IN_DISPATCH_ENV]: identity.dispatchId,
+    [DISPATCH_NESTING_ENV]:
+      identity.archetype != null && COORDINATING_ARCHETYPES.has(identity.archetype) ? 'allow' : 'deny',
+  };
+}
+
 export interface LoadedExecutorProfile {
   profile: ExecutorProfile;
   path: string;

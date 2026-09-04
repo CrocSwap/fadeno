@@ -452,8 +452,9 @@ templates/
   common/                 # identical across targets
     fadeno/               # → .fadeno/ : vocabulary, playbooks, schemas, enforcement
     opencode-agents/      # → .opencode/agents : read-only driver policy
-    skills/               # the three SKILL.md bodies + references (sigil-free)
+    skills/               # shared SKILL.md bodies + references (sigil-free)
     commands/             # /fadeno:* slash-command files (plugin)
+    plugin/               # shared plugin launchers + session hooks
     hooks/                # pre-commit, CI workflow, README (tier-2 scaffold)
   codex/                  # Codex adapter: AGENTS.md, host + steering agent TOML, openai/*.yaml
   claude/                 # Claude adapter: CLAUDE.md, agents, enforcement + steering hooks
@@ -553,7 +554,11 @@ Two non-obvious template rules:
 The build adds a standalone CLI plus immutable built-in definitions under
 `plugin/bin/`; every skill also gets an executable private launcher under
 `scripts/fadeno.cjs`, so plugin operation does not depend on shell `PATH`. Plugin
-users can run starter playbooks without project init.
+users can run starter playbooks without project init. `/fadeno:host` explicitly
+enables a root-session coordinator policy; a plugin hook stores only a hashed
+session marker in the plugin's private data directory, reinforces the policy on
+later prompts and after compaction, and removes it on `/fadeno:host off` or
+session end. It never edits `CLAUDE.md` or another repository instruction file.
 `init --data-only` is the project-data seam (definitions plus driver policy,
 without host capability). `vendor` deliberately
 emits the full project capability surface plus definitions and a lock.
@@ -581,6 +586,8 @@ Together they make the repo installable via `codex plugin marketplace add
 CrocSwap/fadeno` → `codex plugin add fadeno@fadeno`. The manifest
 `interface.category` is a capitalized bucket (`Engineering`) and the version is
 single-sourced from `package.json`, both verified against a real `codex plugin add`.
+The Codex spelling is `$fadeno-host`; its plugin-bundled lifecycle hook uses
+`PLUGIN_DATA` for the same session-only activation and reinjection contract.
 
 ### Keeping the plugin in sync (the no-drift guard)
 

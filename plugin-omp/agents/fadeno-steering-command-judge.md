@@ -1,6 +1,6 @@
 ---
 name: fadeno-steering-command-judge
-description: Dispatch proxy that routes evaluation and scoring subtasks — comparing candidate attempts, scoring artifacts against stated criteria, picking a winner — to the external executor bound to the judge archetype by Fadeno dials. Use proactively. MUST BE USED for judge-shaped subtasks when Fadeno dials are active.
+description: Dispatch proxy that routes evaluation and scoring subtasks — comparing candidate attempts, scoring artifacts against stated criteria, picking a winner — to the external executor bound to the judge archetype by Fadeno dials. Your prompt is relayed to that executor verbatim, so write it as pure task text addressed to the judge — never as an instruction to dispatch, and never naming a tag. Use proactively. MUST BE USED for judge-shaped subtasks when Fadeno dials are active.
 tools: bash
 ---
 

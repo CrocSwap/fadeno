@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { PUBLIC_COMMAND_PATHS, TOP_LEVEL_COMMANDS } from '../src/commands/completion.ts';
 import { HELP_PATHS, missingHelpPaths, renderFocusedHelp, renderGlobalHelp, resolveHelpPath } from '../src/lib/cli-help.ts';
+import { packageVersion } from '../src/lib/paths.ts';
 import { tempRepo } from './helpers.ts';
 
 const SOURCE = join(import.meta.dirname, '..', 'src', 'cli.ts');
@@ -136,7 +137,7 @@ test('source and every bundled CLI render representative focused and global help
 test('help keeps version precedence and unknown-command global fallback', (t) => {
   const root = tempRepo(t);
   const version = run(process.execPath, [SOURCE, 'unknown-command', '--help', '--version'], root).trim();
-  assert.match(version, /^0\.6\.0$/);
+  assert.equal(version, packageVersion());
   const unknown = run(process.execPath, [SOURCE, 'unknown-command', '--help'], root);
   assert.match(unknown, /Get started/);
 });

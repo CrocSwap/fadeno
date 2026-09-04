@@ -36,6 +36,7 @@ const DIALS = 'docs/experimental/dials-and-registry.md';
 const SLOTS = 'docs/experimental/slots-and-archetypes.md';
 const LOADOUTS = 'docs/experimental/loadouts-and-dispatch.md';
 const EXTENDING = 'docs/extending.md';
+const NEXT_PROTOCOL = 'docs/experimental/next-protocol.md';
 
 const CLAIMS: Claim[] = [
   {
@@ -120,6 +121,11 @@ const CLAIMS: Claim[] = [
     id: 'requires-write-field',
     doc: { files: [DIALS], patterns: [/requires_write/] },
     src: { files: ['src/lib/executors.ts'], patterns: [/requires_write/] },
+  },
+  {
+    id: 'dispatch-nesting-guard',
+    doc: { files: [NEXT_PROTOCOL], patterns: [/FADENO_IN_DISPATCH/, /FADENO_DISPATCH_NESTING/] },
+    src: { files: ['src/lib/executors.ts'], patterns: [/FADENO_IN_DISPATCH/, /FADENO_DISPATCH_NESTING/] },
   },
   {
     id: 'relay-attestation',

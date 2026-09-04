@@ -25,6 +25,7 @@ const SKILLS = [
   { src: 'fadeno-runner', dst: 'runner' },
   { src: 'fadeno-builder', dst: 'builder' },
   { src: 'fadeno-driver', dst: 'driver' },
+  { src: 'fadeno-host', dst: 'host' },
   { src: 'fadeno-setup', dst: 'setup' },
   // Named `compare`, never `judge`: the plugin already ships a SUBAGENT
   // named `judge` (`fadeno:judge`, the evaluator role this skill spawns), and
@@ -223,6 +224,15 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
     path: guardPath,
     status: emitFile(guardPath, readFileSync(join(tpl, 'claude', 'hooks', 'dispatch-proxy-guard.mjs'), 'utf8'), force),
   });
+  const hostModePath = join(outDir, 'hooks', 'host-mode.mjs');
+  results.push({
+    path: hostModePath,
+    status: emitFile(
+      hostModePath,
+      readFileSync(join(tpl, 'common', 'plugin', 'host-mode-hook.mjs'), 'utf8'),
+      force,
+    ),
+  });
   const hookManifestPath = join(outDir, 'hooks', 'hooks.json');
   results.push({
     path: hookManifestPath,
@@ -236,7 +246,7 @@ export function runPlugin(opts: PluginOptions = {}): PluginResult {
 // `$fadeno-runner` / `$fadeno-builder` / `$fadeno-driver` (the openai.yaml
 // policies reference those handles), unlike the Claude plugin which shortens to
 // the `fadeno:runner` namespace form.
-const CODEX_SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-setup', 'fadeno-bakeoff'] as const;
+const CODEX_SKILLS = ['fadeno-runner', 'fadeno-builder', 'fadeno-driver', 'fadeno-host', 'fadeno-setup', 'fadeno-bakeoff'] as const;
 
 /**
  * Emit a Codex CLI plugin (`.codex-plugin/plugin.json` + `skills/`) from the
@@ -325,6 +335,28 @@ export function runCodexPlugin(opts: PluginOptions = {}): PluginResult {
   }
   const destinationCli = join(destinationBin, 'fadeno');
   if (existsSync(destinationCli)) chmodSync(destinationCli, 0o755);
+
+  // Codex plugins discover hooks/hooks.json by convention. Host mode is inert
+  // until this plugin user's explicit $fadeno-host invocation, then stores its
+  // marker in PLUGIN_DATA rather than the repository.
+  const hostModePath = join(outDir, 'hooks', 'host-mode.mjs');
+  results.push({
+    path: hostModePath,
+    status: emitFile(
+      hostModePath,
+      readFileSync(join(tpl, 'common', 'plugin', 'host-mode-hook.mjs'), 'utf8'),
+      force,
+    ),
+  });
+  const hookManifestPath = join(outDir, 'hooks', 'hooks.json');
+  results.push({
+    path: hookManifestPath,
+    status: emitFile(
+      hookManifestPath,
+      readFileSync(join(tpl, 'codex', 'hooks', 'hooks.json'), 'utf8'),
+      force,
+    ),
+  });
 
   return { outDir, results };
 }

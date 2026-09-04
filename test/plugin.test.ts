@@ -41,6 +41,7 @@ test('plugin generates manifest, namespaced skills, and subagents', (t) => {
   assert.ok(exists(outDir, 'skills/runner/references/runtime.md'));
   assert.ok(exists(outDir, 'skills/builder/SKILL.md'));
   assert.ok(exists(outDir, 'skills/driver/SKILL.md'));
+  assert.ok(exists(outDir, 'skills/host/SKILL.md'));
   assert.ok(exists(outDir, 'skills/setup/SKILL.md'));
   // `fadeno-bakeoff`'s template shortens to `bakeoff`, never `judge` — the plugin
   // already ships a SUBAGENT named `judge` (checked below), and a skill and a
@@ -48,7 +49,7 @@ test('plugin generates manifest, namespaced skills, and subagents', (t) => {
   // be ambiguous to a coordinator choosing between them.
   assert.ok(exists(outDir, 'skills/bakeoff/SKILL.md'));
   assert.ok(!exists(outDir, 'skills/judge/SKILL.md'), 'the judge skill must not collide with the judge subagent');
-  for (const skill of ['runner', 'builder', 'driver', 'setup', 'bakeoff']) {
+  for (const skill of ['runner', 'builder', 'driver', 'host', 'setup', 'bakeoff']) {
     const launcher = join(outDir, 'skills', skill, 'scripts', 'fadeno.cjs');
     assert.ok(existsSync(launcher), `${skill} must carry its private CLI launcher`);
     assert.notEqual(statSync(launcher).mode & 0o111, 0, `${skill} CLI launcher must be executable`);
@@ -57,6 +58,7 @@ test('plugin generates manifest, namespaced skills, and subagents', (t) => {
   const runner = readFileSync(join(outDir, 'skills/runner/SKILL.md'), 'utf8');
   const builder = readFileSync(join(outDir, 'skills/builder/SKILL.md'), 'utf8');
   const driver = readFileSync(join(outDir, 'skills/driver/SKILL.md'), 'utf8');
+  const host = readFileSync(join(outDir, 'skills/host/SKILL.md'), 'utf8');
   const bakeoff = readFileSync(join(outDir, 'skills/bakeoff/SKILL.md'), 'utf8');
   assert.match(bakeoff, /^name: bakeoff$/m);
   assert.match(runner, /^name: runner$/m);
@@ -67,16 +69,21 @@ test('plugin generates manifest, namespaced skills, and subagents', (t) => {
   assert.doesNotMatch(builder, /disable-model-invocation/);
   assert.match(driver, /^name: driver$/m);
   assert.match(driver, /fadeno next/);
+  assert.match(host, /^name: host$/m);
+  assert.match(host, /host coordinator/i);
 
   // slash-command entry points → /fadeno:runner, /fadeno:builder, /fadeno:driver
   assert.ok(exists(outDir, 'commands/runner.md'));
   assert.ok(exists(outDir, 'commands/builder.md'));
   assert.ok(exists(outDir, 'commands/driver.md'));
+  assert.ok(exists(outDir, 'commands/host.md'));
   assert.ok(exists(outDir, 'commands/setup.md'));
 
   // Claude plugins register the inert-native steering hook explicitly.
   assert.ok(exists(outDir, 'hooks/dispatch-steering.mjs'));
+  assert.ok(exists(outDir, 'hooks/host-mode.mjs'));
   const hooks = JSON.parse(read(outDir, 'hooks/hooks.json'));
+  assert.equal(hooks.hooks.UserPromptExpansion[0].matcher, '(^|:)host$');
   assert.equal(hooks.hooks.PreToolUse[0].matcher, 'Agent');
 
   // subagents — namespaced as fadeno:worker / :reviewer / :judge

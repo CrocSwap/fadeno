@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
@@ -86,7 +86,14 @@ test('`last` answers across dispatches that never overlapped', (t) => {
 test('a reused tag is refused rather than resolved to the newest', (t) => {
   const root = seedV3(t, echoing('x'));
   runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, tag: 'same', userPathOptions: onHarness('standalone') });
-  runDispatch({ archetype: 'worker', prompt: 'b', repoRoot: root, tag: 'same', userPathOptions: onHarness('standalone') });
+  // The kernel now refuses this tag at launch, so a second `runDispatch` can no
+  // longer build the ambiguity. It can still arrive another way — a ledger
+  // written before that guard, an edit, two kernels racing the request row —
+  // and the read must keep refusing when it does.
+  appendFileSync(join(root, '.fadeno', 'dispatches.jsonl'), [
+    JSON.stringify({ format: '1.0', timestamp: '2026-08-14T12:00:00.000Z', event: 'dispatch_requested', dispatch_id: 'cccccccc-3333-4000-8000-000000000003', archetype: 'worker', tag: 'same', output_snapshot: '.fadeno/local/outputs/cccccccc-3333-4000-8000-000000000003.md' }),
+    JSON.stringify({ format: '1.0', timestamp: '2026-08-14T12:00:09.000Z', event: 'dispatch_completed', dispatch_id: 'cccccccc-3333-4000-8000-000000000003', archetype: 'worker', tag: 'same', duration_ms: 9000, output_sha256: 'a'.repeat(64), output_bytes: 1 }),
+  ].join('\n') + '\n', 'utf8');
   const err = captureError(() => runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'same' }));
   assert.ok(err instanceof DispatchesCommandError);
   assert.match(err.message, /ambiguous tag "same": 2 dispatches carry it/);
@@ -161,4 +168,58 @@ test('waiting by tag settles on that dispatch and does not drift', (t) => {
   const result = runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'worker-first', waitMs: 1000, pollMs: 100 });
   assert.equal(result.bytes, 'first');
   assert.equal(result.resolvedBy, 'tag');
+});
+
+// --- a tag is a handle, so two dispatches may never share one ---
+
+test('a tag still in flight refuses the second launch, and says how to reach the first', (t) => {
+  const root = seedV3(t, echoing('x'));
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  // A request row with no completion row: the shape a killed kernel leaves,
+  // and the shape a recursive dispatch collides with.
+  writeFileSync(join(root, '.fadeno', 'dispatches.jsonl'), JSON.stringify({
+    format: '1.0',
+    timestamp: '2026-08-31T12:00:00.000Z',
+    event: 'dispatch_requested',
+    dispatch_id: 'aaaaaaaa-1111-4000-8000-000000000001',
+    archetype: 'worker',
+    tag: 'worker-redesign',
+  }) + '\n');
+  const err = captureError(() => runDispatch({
+    archetype: 'worker', prompt: 'x', repoRoot: root, tag: 'worker-redesign', userPathOptions: onHarness('standalone'),
+  }));
+  assert.ok(err instanceof DispatchCommandError);
+  assert.match(err.message, /already held by dispatch aaaaaaaa/);
+  assert.match(err.message, /started 2026-08-31T12:00:00\.000Z/);
+  assert.match(err.message, /--output tag:worker-redesign --wait 120/);
+  assert.match(err.message, /--cancel tag:worker-redesign/);
+});
+
+test('reusing a completed tag is refused too: it would make both unrecoverable', (t) => {
+  const root = seedV3(t, echoing('first'));
+  runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, tag: 'worker-shared', userPathOptions: onHarness('standalone') });
+  const err = captureError(() => runDispatch({
+    archetype: 'worker', prompt: 'b', repoRoot: root, tag: 'worker-shared', userPathOptions: onHarness('standalone'),
+  }));
+  assert.ok(err instanceof DispatchCommandError);
+  assert.match(err.message, /already names dispatch/);
+  assert.match(err.message, /ambiguous for both/);
+  // And the first dispatch stays recoverable, which is the whole point.
+  assert.equal(runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'worker-shared' }).bytes, 'first');
+});
+
+test('the refusal is per tag, not per repo: distinct handles still launch', (t) => {
+  const root = seedV3(t, echoing('x'));
+  runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, tag: 'worker-one', userPathOptions: onHarness('standalone') });
+  runDispatch({ archetype: 'worker', prompt: 'b', repoRoot: root, tag: 'worker-two', userPathOptions: onHarness('standalone') });
+  assert.equal(runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'worker-two' }).bytes, 'x');
+});
+
+test('an unreadable ledger never blocks a launch on bookkeeping', (t) => {
+  const root = seedV3(t, echoing('ran'));
+  writeFileSync(join(root, '.fadeno', 'dispatches.jsonl'), '{ torn\n{"event":\n');
+  const result = runDispatch({
+    archetype: 'worker', prompt: 'x', repoRoot: root, tag: 'worker-torn', userPathOptions: onHarness('standalone'),
+  });
+  assert.equal(result.stdout, 'ran');
 });

@@ -13963,7 +13963,7 @@ function findRepoRoot(startDir = process.cwd()) {
   return (0, import_node_path.resolve)(startDir);
 }
 function packageVersion() {
-  if (true) return "0.6.0";
+  if (true) return "0.6.1";
   const pkgPath = findUp("package.json", moduleDir);
   if (!pkgPath) return "0.0.0";
   try {
@@ -14525,6 +14525,16 @@ function withoutHarnessIdentity(env) {
 }
 function atCwd(env, cwd) {
   return { ...env, PWD: cwd };
+}
+var IN_DISPATCH_ENV = "FADENO_IN_DISPATCH";
+var DISPATCH_NESTING_ENV = "FADENO_DISPATCH_NESTING";
+var COORDINATING_ARCHETYPES = /* @__PURE__ */ new Set(["director"]);
+function withDispatchProvenance(env, identity) {
+  return {
+    ...env,
+    [IN_DISPATCH_ENV]: identity.dispatchId,
+    [DISPATCH_NESTING_ENV]: identity.archetype != null && COORDINATING_ARCHETYPES.has(identity.archetype) ? "allow" : "deny"
+  };
 }
 var EXECUTORS_FILE = (0, import_node_path4.join)(".fadeno", "executors.yaml");
 var CATALOG_TOP_LEVEL_KEYS = [
@@ -21429,6 +21439,62 @@ function provenanceFields(producers) {
     provider: producer.provider
   }));
 }
+function assertNestingAllowed(env = process.env) {
+  const parent = (env[IN_DISPATCH_ENV] ?? "").trim();
+  if (parent === "") return;
+  if ((env[DISPATCH_NESTING_ENV] ?? "").trim() === "allow") return;
+  throw new DispatchCommandError(
+    `refusing to dispatch from inside dispatch ${parent.slice(0, 8)}: this process is already a fadeno executor, and its archetype does not coordinate. The usual cause is a prompt addressed to the dispatch proxy rather than to you \u2014 proxies relay their prompt byte-for-byte, so "dispatch a fadeno worker\u2026" arrives here as your instructions. Do the task yourself instead. If nesting is genuinely intended, dispatch the \`director\` archetype (its brief teaches coordination) or set ${DISPATCH_NESTING_ENV}=allow explicitly.`
+  );
+}
+function findTagOccupant(repoRoot, tag) {
+  const path = (0, import_node_path16.join)(repoRoot, DISPATCHES_FILE);
+  if (!(0, import_node_fs16.existsSync)(path)) return null;
+  const tagged = /* @__PURE__ */ new Map();
+  const completed = /* @__PURE__ */ new Set();
+  try {
+    for (const line of (0, import_node_fs16.readFileSync)(path, "utf8").split("\n")) {
+      if (line.trim() === "") continue;
+      let row;
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+        row = parsed;
+      } catch {
+        continue;
+      }
+      const id = typeof row.dispatch_id === "string" ? row.dispatch_id : null;
+      if (id == null) continue;
+      if (row.event === "dispatch_requested" && row.tag === tag) {
+        tagged.set(id, typeof row.timestamp === "string" ? row.timestamp : null);
+      } else if (row.event === "dispatch_completed") {
+        completed.add(id);
+      }
+    }
+  } catch {
+    return null;
+  }
+  if (tagged.size === 0) return null;
+  const occupants = [...tagged].map(([dispatchId, requestedAt]) => ({
+    dispatchId,
+    requestedAt,
+    completed: completed.has(dispatchId)
+  }));
+  return occupants.find((occupant) => !occupant.completed) ?? occupants[occupants.length - 1];
+}
+function assertTagAvailable(repoRoot, tag) {
+  const occupant = findTagOccupant(repoRoot, tag);
+  if (occupant == null) return;
+  const id8 = occupant.dispatchId.slice(0, 8);
+  if (occupant.completed) {
+    throw new DispatchCommandError(
+      `tag "${tag}" already names dispatch ${id8}${occupant.requestedAt != null ? ` (started ${occupant.requestedAt})` : ""}, which has completed. Reusing it would make \`fadeno dispatches --output tag:${tag}\` ambiguous for both \u2014 pick a distinct tag for this dispatch.`
+    );
+  }
+  throw new DispatchCommandError(
+    `tag "${tag}" is already held by dispatch ${id8}${occupant.requestedAt != null ? `, started ${occupant.requestedAt}` : ""}, which has not completed. Read it with \`fadeno dispatches --output tag:${tag} --wait 120\`, or stop it with \`fadeno dispatches --cancel tag:${tag}\`. Launching a second dispatch under this tag makes both unrecoverable \u2014 pick a distinct tag for separate work.`
+  );
+}
 function appendEvidenceRow(repoRoot, row) {
   ensureFadenoIgnore(repoRoot);
   (0, import_node_fs16.mkdirSync)((0, import_node_path16.join)(repoRoot, ".fadeno"), { recursive: true });
@@ -21568,6 +21634,7 @@ function workspaceFingerprint(repoRoot) {
   return sha256Hex(`${status.stdout ?? ""}\0${head.stdout ?? ""}`);
 }
 function runDispatch(opts) {
+  assertNestingAllowed();
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? findRepoRoot(cwd);
   const layered = loadProfileOrThrow(repoRoot, opts.userPathOptions);
@@ -21575,6 +21642,7 @@ function runDispatch(opts) {
   const archetype = opts.archetype?.trim() ? opts.archetype.trim() : null;
   const role = opts.role?.trim() ? opts.role.trim() : null;
   const tag = normalizeDispatchTag(opts.tag);
+  if (tag != null) assertTagAvailable(repoRoot, tag);
   let delivery;
   let source;
   let resolvedVia = null;
@@ -22325,7 +22393,13 @@ ${DISPATCH_RESULT_FOOTER}`;
         // Without `atCwd` the shadow escapes its worktree and edits the real
         // workspace. FADENO_IN_SHADOW rides along so any fadeno the challenger
         // runs — at any depth — declines to fire challengers of its own.
-        env: { ...atCwd(withoutHarnessIdentity(process.env), shadowWorktreeAbs), FADENO_IN_SHADOW: "1" },
+        env: {
+          ...withDispatchProvenance(atCwd(withoutHarnessIdentity(process.env), shadowWorktreeAbs), {
+            dispatchId: shadowDispatchId,
+            archetype
+          }),
+          FADENO_IN_SHADOW: "1"
+        },
         stdio: [promptFd, sfd, "ignore"]
       });
       childSpawned = true;
@@ -22538,7 +22612,10 @@ ${DISPATCH_RESULT_FOOTER}`;
             // The child is a different session, usually a different host. Inheriting
             // our harness identity would tell a `codex exec` worker it is inside
             // Claude; it establishes its own.
-            env: atCwd(withoutHarnessIdentity(process.env), spawnCwd),
+            env: withDispatchProvenance(atCwd(withoutHarnessIdentity(process.env), spawnCwd), {
+              dispatchId,
+              archetype
+            }),
             maxBuffer: SPAWN_MAX_BUFFER2,
             stdio: ["pipe", outputFd, "pipe"]
           }
@@ -22936,7 +23013,10 @@ function runDispatchFallback(opts) {
         input: prompt,
         encoding: "utf8",
         cwd: repoRoot,
-        env: atCwd(withoutHarnessIdentity(process.env), repoRoot),
+        env: withDispatchProvenance(atCwd(withoutHarnessIdentity(process.env), repoRoot), {
+          dispatchId: request.dispatchId,
+          archetype: request.agentType
+        }),
         maxBuffer: SPAWN_MAX_BUFFER2
       });
     } finally {
@@ -27042,7 +27122,12 @@ function executeToolCore(params) {
     child = (0, import_node_child_process7.spawn)(process.execPath, superviseArgv(argv, claimAbs, statusAbs, leaseRelease, params.effectiveTimeoutMs ?? null), {
       stdio: [promptFd, outFd, errFd],
       cwd: params.repoRoot,
-      env: atCwd(withoutHarnessIdentity(process.env), params.repoRoot),
+      // A registered tool never coordinates, so it carries `deny`: `npm test`
+      // has no business starting a dispatch either.
+      env: withDispatchProvenance(atCwd(withoutHarnessIdentity(process.env), params.repoRoot), {
+        dispatchId: `${ids.toolCallId}:a${attempt}`,
+        archetype: null
+      }),
       detached: false
     });
     child.unref();
@@ -28764,7 +28849,12 @@ ${repairCore}`;
     child = (0, import_node_child_process8.spawn)(process.execPath, superviseArgv(argv, claimAbs, statusAbs, leaseRelease, effectiveTimeout), {
       stdio: [promptFd, outFd, errFd],
       cwd: spawnCwd,
-      env: atCwd(withoutHarnessIdentity(process.env), spawnCwd),
+      // Same provenance the ad-hoc kernel stamps: an engine-dispatched actor is
+      // an executor too, and may not dispatch unless its role coordinates.
+      env: withDispatchProvenance(atCwd(withoutHarnessIdentity(process.env), spawnCwd), {
+        dispatchId: `${ids.actorCallId}:a${attempt}`,
+        archetype: role
+      }),
       detached: false
     });
     child.unref();
@@ -30648,6 +30738,7 @@ var SKILLS = [
   { src: "fadeno-runner", dst: "runner" },
   { src: "fadeno-builder", dst: "builder" },
   { src: "fadeno-driver", dst: "driver" },
+  { src: "fadeno-host", dst: "host" },
   { src: "fadeno-setup", dst: "setup" },
   // Named `compare`, never `judge`: the plugin already ships a SUBAGENT
   // named `judge` (`fadeno:judge`, the evaluator role this skill spawns), and
@@ -30754,6 +30845,15 @@ function runPlugin(opts = {}) {
     path: guardPath,
     status: emitFile(guardPath, (0, import_node_fs25.readFileSync)((0, import_node_path25.join)(tpl, "claude", "hooks", "dispatch-proxy-guard.mjs"), "utf8"), force)
   });
+  const hostModePath = (0, import_node_path25.join)(outDir, "hooks", "host-mode.mjs");
+  results.push({
+    path: hostModePath,
+    status: emitFile(
+      hostModePath,
+      (0, import_node_fs25.readFileSync)((0, import_node_path25.join)(tpl, "common", "plugin", "host-mode-hook.mjs"), "utf8"),
+      force
+    )
+  });
   const hookManifestPath = (0, import_node_path25.join)(outDir, "hooks", "hooks.json");
   results.push({
     path: hookManifestPath,
@@ -30761,7 +30861,7 @@ function runPlugin(opts = {}) {
   });
   return { outDir, results };
 }
-var CODEX_SKILLS = ["fadeno-runner", "fadeno-builder", "fadeno-driver", "fadeno-setup", "fadeno-bakeoff"];
+var CODEX_SKILLS = ["fadeno-runner", "fadeno-builder", "fadeno-driver", "fadeno-host", "fadeno-setup", "fadeno-bakeoff"];
 function runCodexPlugin(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const tpl = templatesDir();
@@ -30819,6 +30919,24 @@ function runCodexPlugin(opts = {}) {
   }
   const destinationCli = (0, import_node_path25.join)(destinationBin, "fadeno");
   if ((0, import_node_fs25.existsSync)(destinationCli)) (0, import_node_fs25.chmodSync)(destinationCli, 493);
+  const hostModePath = (0, import_node_path25.join)(outDir, "hooks", "host-mode.mjs");
+  results.push({
+    path: hostModePath,
+    status: emitFile(
+      hostModePath,
+      (0, import_node_fs25.readFileSync)((0, import_node_path25.join)(tpl, "common", "plugin", "host-mode-hook.mjs"), "utf8"),
+      force
+    )
+  });
+  const hookManifestPath = (0, import_node_path25.join)(outDir, "hooks", "hooks.json");
+  results.push({
+    path: hookManifestPath,
+    status: emitFile(
+      hookManifestPath,
+      (0, import_node_fs25.readFileSync)((0, import_node_path25.join)(tpl, "codex", "hooks", "hooks.json"), "utf8"),
+      force
+    )
+  });
   return { outDir, results };
 }
 var OMP_SKILLS = ["fadeno-runner", "fadeno-builder", "fadeno-driver", "fadeno-bakeoff"];
@@ -33049,6 +33167,18 @@ function runDialSet(opts) {
   }
   const sessionPinned = Object.hasOwn(localState.dials, archetype);
   const repoPinned = Object.hasOwn(profile.dials, archetype) ? profile.dials[archetype] : null;
+  if (localState.shadows != null && Object.hasOwn(localState.shadows, archetype)) {
+    try {
+      const shadowLayers = { session: localState.dials, repo: profile.dials, user: readUserDials(opts.userPathOptions) };
+      const unroutable = unroutablePrimaryNote({ profile, layers: shadowLayers, archetype });
+      if (unroutable != null) {
+        console.warn(
+          `fadeno dial warning: archetype "${archetype}" has an existing shadow attachment but its new primary is unroutable for shadow pairs \u2014 the pair degrades to no pair (primary runs solo). To restore pairing, redial to a command delivery for this archetype.`
+        );
+      }
+    } catch {
+    }
+  }
   const userPinned = Object.hasOwn(userDials, archetype);
   let layer;
   let adaptive = false;
@@ -33346,7 +33476,9 @@ function runDialShadow(opts) {
   }
   {
     const unroutable = unroutablePrimaryNote({ profile, layers: shadowLayers, archetype });
-    if (unroutable != null) notes.push(unroutable);
+    if (unroutable != null) {
+      throw new DialError(unroutable);
+    }
   }
   const nextAttachment = {
     model: dial.model,
@@ -37803,6 +37935,7 @@ function runShadowApply(opts) {
 
 // src/commands/bakeoff.ts
 var import_node_child_process12 = require("node:child_process");
+var import_node_crypto12 = require("node:crypto");
 var import_node_fs40 = require("node:fs");
 var import_node_path39 = require("node:path");
 var import_ajv2 = __toESM(require_ajv(), 1);
@@ -38584,8 +38717,9 @@ function adjudicateViaCommand(measurement, pair, repoRoot, cwd, opts) {
   const evidenceMode = opts.evidence ?? "inlined";
   const prepared = preparePrompts(measurement, pair, repoRoot, evidenceMode);
   const pairId8 = measurement.pairId.slice(0, 8);
+  const judgeRun = (0, import_node_crypto12.randomUUID)().slice(0, 8);
   const judgeCallOpts = { repoRoot, cwd, judgeModel: opts.judgeModel ?? null, judgeVia: opts.judgeVia ?? null, now: opts.now };
-  const comparisonResult = dispatchJudge(prepared.comparisonPrompt, { ...judgeCallOpts, tag: `cmp-${pairId8}` });
+  const comparisonResult = dispatchJudge(prepared.comparisonPrompt, { ...judgeCallOpts, tag: `cmp-${pairId8}-${judgeRun}` });
   const comparisonParsed = extractJsonObject(comparisonResult.stdout);
   if (comparisonParsed == null || !prepared.validateComparison(comparisonParsed)) {
     const errors = comparisonParsed == null ? ["could not find a JSON object in the judge's output"] : schemaErrorMessages(prepared.validateComparison);
@@ -38595,7 +38729,7 @@ function adjudicateViaCommand(measurement, pair, repoRoot, cwd, opts) {
   }
   const comparison = comparisonParsed;
   const verdict = unblindAndCheckCoherence(comparison, prepared.blinding, `comparison judge dispatch ${comparisonResult.dispatchId.slice(0, 8)}`);
-  const adversarialResult = dispatchJudge(prepared.adversarialPrompt, { ...judgeCallOpts, tag: `adv-${pairId8}` });
+  const adversarialResult = dispatchJudge(prepared.adversarialPrompt, { ...judgeCallOpts, tag: `adv-${pairId8}-${judgeRun}` });
   const adversarialParsed = extractJsonObject(adversarialResult.stdout);
   if (adversarialParsed == null || !prepared.validateAdversarial(adversarialParsed)) {
     const errors = adversarialParsed == null ? ["could not find a JSON object in the judge's output"] : schemaErrorMessages(prepared.validateAdversarial);
@@ -38913,7 +39047,7 @@ function runDispatchPrepare(opts) {
 // src/commands/tool-complete.ts
 var import_node_fs42 = require("node:fs");
 var import_node_path42 = require("node:path");
-var import_node_crypto12 = require("node:crypto");
+var import_node_crypto13 = require("node:crypto");
 var ToolCompleteError = class extends Error {
 };
 function runToolComplete(opts) {
@@ -39009,7 +39143,7 @@ function runToolComplete(opts) {
   {
     const nowIso = (opts.now ?? /* @__PURE__ */ new Date()).toISOString();
     const claim = { pid: process.pid, supervisor_pid: process.pid, executor_pid: null, process_group_id: null, started_at: nowIso, heartbeat_at: nowIso, last_output_at: null, stdout_bytes: 0, stderr_bytes: 0 };
-    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto12.randomUUID)()}`;
+    const tmp = `${claimAbs}.tmp-${process.pid}-${(0, import_node_crypto13.randomUUID)()}`;
     try {
       (0, import_node_fs42.writeFileSync)(tmp, JSON.stringify(claim), { flag: "wx" });
       (0, import_node_fs42.linkSync)(tmp, claimAbs);
@@ -39088,7 +39222,7 @@ function runToolComplete(opts) {
 // src/commands/tool-run.ts
 var import_node_fs43 = require("node:fs");
 var import_node_path43 = require("node:path");
-var import_node_crypto13 = require("node:crypto");
+var import_node_crypto14 = require("node:crypto");
 var ToolRunError = class extends Error {
 };
 function parseTimeoutSeconds(value) {
@@ -39142,7 +39276,7 @@ function ensureProfileSnapshot2(repoRoot, runDir, _runId, now, userPathOptions, 
   }
   const extraRefs = [...Object.values(liveLayers.session), ...Object.values(liveLayers.repo), ...Object.values(liveLayers.user), ...Object.values(liveProfile.bindings), ...bindRefs];
   const text = serializeSnapshot(liveProfile, extraRefs);
-  const tmp = `${snapshotPath}.tmp-${process.pid}-${(0, import_node_crypto13.randomUUID)()}`;
+  const tmp = `${snapshotPath}.tmp-${process.pid}-${(0, import_node_crypto14.randomUUID)()}`;
   (0, import_node_fs43.writeFileSync)(tmp, text, "utf8");
   try {
     (0, import_node_fs43.renameSync)(tmp, snapshotPath);
@@ -39274,7 +39408,7 @@ var import_node_os4 = require("node:os");
 var import_node_path45 = require("node:path");
 
 // src/lib/installations.ts
-var import_node_crypto14 = require("node:crypto");
+var import_node_crypto15 = require("node:crypto");
 var import_node_fs44 = require("node:fs");
 var import_node_path44 = require("node:path");
 var InstallationError = class extends Error {
@@ -39311,7 +39445,7 @@ function writeInstallationManifest(paths, manifest) {
   (0, import_node_fs44.renameSync)(tmp, paths.installationsFile);
 }
 function fileDigest(path) {
-  return (0, import_node_crypto14.createHash)("sha256").update((0, import_node_fs44.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto15.createHash)("sha256").update((0, import_node_fs44.readFileSync)(path)).digest("hex");
 }
 var VERSION_RE = /^(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?$/;
 function compareFadenoVersions(a, b) {
@@ -39919,14 +40053,14 @@ var import_node_fs47 = require("node:fs");
 var import_node_path47 = require("node:path");
 
 // src/lib/opencode-steering.ts
-var import_node_crypto15 = require("node:crypto");
+var import_node_crypto16 = require("node:crypto");
 var import_node_fs46 = require("node:fs");
 var import_node_path46 = require("node:path");
 var OPENCODE_STEERING_ARCHETYPES = ["worker", "reviewer", "judge"];
 var AGENT_MARK2 = /<!-- fadeno:managed version=([^\s]+) digest=([0-9a-f]{64}) -->/;
 var PLUGIN_MARK = /^\/\/ fadeno:managed version=([^\s]+)(?: digest=([0-9a-f]{64}))?$/m;
 function digest2(text) {
-  return (0, import_node_crypto15.createHash)("sha256").update(text).digest("hex");
+  return (0, import_node_crypto16.createHash)("sha256").update(text).digest("hex");
 }
 function missing2(path) {
   return {
@@ -40739,7 +40873,7 @@ function runDoctor(opts = {}) {
 }
 
 // src/commands/vendor.ts
-var import_node_crypto16 = require("node:crypto");
+var import_node_crypto17 = require("node:crypto");
 var import_node_fs49 = require("node:fs");
 var import_node_path49 = require("node:path");
 function makeVendoredCodexAgentsTrackable(repoRoot) {
@@ -40759,7 +40893,7 @@ function digestTree(root) {
     for (const entry of (0, import_node_fs49.readdirSync)(dir, { withFileTypes: true })) {
       const full = (0, import_node_path49.join)(dir, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (entry.isFile()) files[(0, import_node_path49.relative)(root, full).split("\\").join("/")] = (0, import_node_crypto16.createHash)("sha256").update((0, import_node_fs49.readFileSync)(full)).digest("hex");
+      else if (entry.isFile()) files[(0, import_node_path49.relative)(root, full).split("\\").join("/")] = (0, import_node_crypto17.createHash)("sha256").update((0, import_node_fs49.readFileSync)(full)).digest("hex");
     }
   }
   walk(root);
@@ -40772,7 +40906,7 @@ function ownedVendoredFiles(repoRoot, init) {
     if (result.status !== "created" && result.status !== "overwritten") continue;
     const rel = (0, import_node_path49.relative)(repoRoot, result.path).split("\\").join("/");
     if (shared.has(rel) || rel.startsWith("../") || !(0, import_node_fs49.existsSync)(result.path)) continue;
-    owned[rel] = (0, import_node_crypto16.createHash)("sha256").update((0, import_node_fs49.readFileSync)(result.path)).digest("hex");
+    owned[rel] = (0, import_node_crypto17.createHash)("sha256").update((0, import_node_fs49.readFileSync)(result.path)).digest("hex");
   }
   return owned;
 }
@@ -40802,13 +40936,13 @@ function runVendor(opts) {
 }
 
 // src/commands/evidence.ts
-var import_node_crypto17 = require("node:crypto");
+var import_node_crypto18 = require("node:crypto");
 var import_node_fs50 = require("node:fs");
 var import_node_path50 = require("node:path");
 var EvidenceError = class extends Error {
 };
 function sha256(path) {
-  return (0, import_node_crypto17.createHash)("sha256").update((0, import_node_fs50.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto18.createHash)("sha256").update((0, import_node_fs50.readFileSync)(path)).digest("hex");
 }
 function copyOne(source, destination, rel, files) {
   if ((0, import_node_fs50.existsSync)(destination)) {
@@ -41024,13 +41158,13 @@ function runClean(opts = {}) {
 }
 
 // src/commands/unvendor.ts
-var import_node_crypto18 = require("node:crypto");
+var import_node_crypto19 = require("node:crypto");
 var import_node_fs53 = require("node:fs");
 var import_node_path53 = require("node:path");
 var UnvendorError = class extends Error {
 };
 function digest3(path) {
-  return (0, import_node_crypto18.createHash)("sha256").update((0, import_node_fs53.readFileSync)(path)).digest("hex");
+  return (0, import_node_crypto19.createHash)("sha256").update((0, import_node_fs53.readFileSync)(path)).digest("hex");
 }
 function runUnvendor(opts = {}) {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());

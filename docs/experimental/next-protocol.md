@@ -282,6 +282,19 @@ name an ephemeral JSON sidecar, and `fadeno show` projects its latest phase,
 current action, blockers, and runtime onto the original workflow graph. These
 observations are attested, not recomputable, and are forbidden as gate inputs.
 
+Two launch-time invariants keep that lifetime addressable. **An executor may
+not dispatch.** The kernel stamps `FADENO_IN_DISPATCH` (the dispatch this
+process is) and `FADENO_DISPATCH_NESTING` (`allow` or `deny`) into every
+executor's environment — ad-hoc dispatch, shadow challenger, command fallback,
+engine actor call, and registered tool alike — and refuses a dispatch whose
+environment carries a parent with `deny`. Only archetypes whose brief teaches coordination —
+`director` today — carry `allow`, and they never hand it down: the workers a
+director dispatches carry `deny` like any other. **One dispatch per tag.** A
+tag is a recovery handle, and an ambiguous one resolves to nothing, so a tag
+another dispatch already holds is refused at launch rather than at the read
+that needed it. Both refusals happen before the spawn and write no evidence
+row: nothing was dispatched.
+
 ### Deterministic tool execution (Priority 7 frozen contract)
 
 `tool_call` steps name a logical capability (`tool: tests`), never shell. The
@@ -594,3 +607,34 @@ and every "gate green" in that loop rested on the caller's own test runs. A
 reviewer that cannot run the tests it is reviewing is a known limitation of
 routing review outward; nothing in Fadeno claims otherwise, but nothing
 surfaces it either.
+
+#### Field finding (2026-08-31): a proxy-addressed prompt made the executor dispatch itself
+
+Same shape as the finding above, one level further out. A caller wrote its
+prompt to the *proxy* — "Dispatch a fadeno worker… use tag X" — and the proxy
+did exactly what it is built to do: relayed it byte-for-byte. The executor at
+the far end read those words as its own instructions and ran `fadeno dispatch`
+inside its own worktree. The recursion collided with its own tag, and the
+dispatch exited having done zero work.
+
+Nothing along that path was in a position to notice. Verbatim relay is what
+makes a proxy auditable, and the PreToolUse guard deliberately never inspects
+the prompt body — a text heuristic would misfire on every legitimate prompt
+about dispatch, which this repo writes weekly. The defect is in the prompt the
+caller composes, and the caller is one level above the proxy.
+
+So the guards are on facts, not text. The kernel stamps every executor's
+environment with the dispatch it is running as and whether it may start
+another, and refuses a nested launch that does not carry `allow` — the mirror
+of `FADENO_IN_SHADOW`, which has ridden along to challengers for the same
+reason since shadow pairs shipped. `--tag` is checked against the ledger at
+launch, so a collision is refused at the moment it is made rather than
+surfacing later as an unrecoverable read. The proxy descriptions now say, to
+the model that composes the prompt, that it is relayed verbatim and must be
+addressed to the implementer.
+
+Fixing the tag check turned up a collision Fadeno was generating itself:
+`bakeoff` named its two judge dispatches `cmp-<pair-id-8>` and
+`adv-<pair-id-8>`, so two pairs sharing an eight-character prefix — and any
+re-judged pair — produced duplicate tags and made both judgments
+unrecoverable by handle. Those tags now carry a per-invocation suffix.

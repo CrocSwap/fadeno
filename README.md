@@ -265,8 +265,8 @@ explicitly forced.
 
 ## Running a playbook
 
-Fadeno ships three skills: runner, builder, and driver. Point your agent at the
-**runner**:
+Fadeno ships workflow skills plus a plugin-only, session-scoped host mode. Point
+your agent at the **runner**:
 
 | Host | How |
 |------|-----|
@@ -278,6 +278,11 @@ Fadeno ships three skills: runner, builder, and driver. Point your agent at the
 
 `/fadeno:runner` is the namespaced Claude plugin command. Native Grok projects
 use the repo-local `/fadeno-runner` skill emitted by `init --grok`.
+
+Plugin users can explicitly enable Fadeno's coordinator policy for only the
+current harness session with `/fadeno:host` in Claude Code or `$fadeno-host` in
+Codex. Use the same command with `off` to disable it. The mode stores its marker
+in plugin-private session data and does not modify `AGENTS.md` or `CLAUDE.md`.
 
 The runner will:
 

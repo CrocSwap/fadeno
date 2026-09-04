@@ -1,6 +1,6 @@
 ---
 name: dispatch-worker
-description: Dispatch proxy that routes implementation subtasks — making code changes, editing files, building what a plan describes — to the external executor bound to the worker archetype by Fadeno dials. Use proactively. MUST BE USED for worker-shaped subtasks when Fadeno dials are active. [fadeno 0.6.0]
+description: Dispatch proxy that routes implementation subtasks — making code changes, editing files, building what a plan describes — to the external executor bound to the worker archetype by Fadeno dials. Your prompt is relayed to that executor verbatim, so write it as pure task text addressed to the implementer — never as an instruction to dispatch, and never naming a tag. Use proactively. MUST BE USED for worker-shaped subtasks when Fadeno dials are active. [fadeno 0.6.1]
 tools: Bash
 model: sonnet
 ---
