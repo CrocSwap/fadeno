@@ -484,10 +484,12 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
           // the immutable wildcard, where any declared role surface could have
           // taken it. The agent's own model/effort are NOT compared: Codex
           // applies an agent file only after an explicit spawn value, so any
-          // managed agent for the role could have carried this row's
-          // snapshotted identity.
+          // managed agent for the role AND executor could have carried this
+          // row's snapshotted identity. The model/effort defaults may differ,
+          // but the baked host executor is behavioral: a broker (none) or an
+          // agent for another executor would resolve recursively.
           const agentType = typeof row.extra.agent_type === 'string' ? row.extra.agent_type : null;
-          if (findSpawnableCodexAgent(candidates, agentType) == null) continue;
+          if (findSpawnableCodexAgent(candidates, agentType, executor) == null) continue;
           avoidableCount += 1;
           avoidableExecutors.add(executor);
         }

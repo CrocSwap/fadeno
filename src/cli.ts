@@ -923,7 +923,8 @@ function printDrive(result: DriveResult): number {
     case 'awaiting_host_dispatch':
       console.log(`awaiting ${result.requests.length} host dispatch(es) for run ${result.run}`);
       for (const request of result.requests) {
-        console.log(`  ${request.dispatchId}  ${request.step}${request.actor ? ` (${request.actor})` : ''}  ${request.model}/${request.reasoningEffort}`);
+        const artifactType = request.artifactType == null ? '' : `  artifact_type=${request.artifactType}`;
+        console.log(`  ${request.dispatchId}  ${request.step}${request.actor ? ` (${request.actor})` : ''}  ${request.model}/${request.reasoningEffort}${artifactType}`);
         if (request.nodeInstanceId != null) console.log(`      instance: ${request.nodeInstanceId}`);
         const progress = request.nodeInstanceId == null
           ? progressSidecarPath(request.run, request.step, request.actor)

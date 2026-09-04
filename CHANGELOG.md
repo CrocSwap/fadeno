@@ -6,6 +6,18 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Isolated host workspaces now replay the caller's tracked and
+  untracked/unignored changes as their synthetic baseline, so concurrent
+  reviewers see the uncommitted implementation they were asked to review and
+  their diff receipts contain only post-baseline work. Runner guidance now
+  prepares an entire evaluative host fan-out before spawning any member,
+  allowing reviewers and judges to bypass the shared-workspace lease safely.
+- Locked Codex host dispatches no longer advertise a generic command broker or
+  a role agent materialized for another executor as `delegate_to`; those
+  agents would resolve the same envelope recursively instead of executing it.
+
 ## [0.6.1] — 2026-09-04
 
 ### Added

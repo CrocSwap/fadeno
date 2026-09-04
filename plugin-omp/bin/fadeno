@@ -17244,8 +17244,8 @@ function decideLane(input) {
 
 // src/lib/host-dispatch.ts
 var import_node_crypto6 = require("node:crypto");
-var import_node_fs13 = require("node:fs");
-var import_node_path13 = require("node:path");
+var import_node_fs14 = require("node:fs");
+var import_node_path14 = require("node:path");
 
 // src/lib/schema-envelope.ts
 function ajvErrorMessages(validate) {
@@ -19160,15 +19160,207 @@ function describeWorkspaceLeaseLiveness(record2, repoRoot, opts = {}) {
 }
 
 // src/lib/host-workspace.ts
+var import_node_fs13 = require("node:fs");
+var import_node_path13 = require("node:path");
+var import_node_child_process5 = require("node:child_process");
+var import_node_crypto5 = require("node:crypto");
+
+// src/lib/workspace-baseline.ts
+var import_node_child_process4 = require("node:child_process");
 var import_node_fs12 = require("node:fs");
 var import_node_path12 = require("node:path");
-var import_node_child_process4 = require("node:child_process");
-var import_node_crypto5 = require("node:crypto");
+var SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
+var BASELINE_COMMIT_DATE = "2000-01-01T00:00:00Z";
+var FIXED_IDENTITY = ["-c", "user.name=fadeno", "-c", "user.email=fadeno@localhost"];
+var FIXED_DATES = { GIT_AUTHOR_DATE: BASELINE_COMMIT_DATE, GIT_COMMITTER_DATE: BASELINE_COMMIT_DATE };
+function isUnderShadowHome(repoRelPath) {
+  return repoRelPath === ".fadeno/local" || repoRelPath.startsWith(".fadeno/local/");
+}
+function gitFailureReason(result) {
+  if (result.error != null) return result.error.message;
+  const stderr = String(result.stderr ?? "").trim();
+  if (stderr.length > 0) return stderr;
+  return `exit ${result.status ?? "unknown"}`;
+}
+function git(cwd, args, extraEnv = {}) {
+  return (0, import_node_child_process4.spawnSync)("git", ["-C", cwd, ...args], { encoding: "utf8", maxBuffer: SPAWN_MAX_BUFFER, env: { ...process.env, ...extraEnv } });
+}
+function gitOk(res) {
+  return res.error == null && res.status === 0;
+}
+function captureWorkspaceBaseline(repoRoot) {
+  const diffRes = (0, import_node_child_process4.spawnSync)("git", ["-C", repoRoot, "diff", "HEAD", "--binary"], {
+    encoding: "buffer",
+    maxBuffer: SPAWN_MAX_BUFFER
+  });
+  if (diffRes.error != null || diffRes.status !== 0) {
+    throw new Error(`could not capture the primary workspace's pre-spawn state: ${gitFailureReason(diffRes)}`);
+  }
+  const untrackedRes = (0, import_node_child_process4.spawnSync)("git", ["-C", repoRoot, "ls-files", "--others", "--exclude-standard", "-z"], {
+    encoding: "utf8",
+    maxBuffer: SPAWN_MAX_BUFFER
+  });
+  if (untrackedRes.error != null || untrackedRes.status !== 0) {
+    throw new Error(`could not list the primary workspace's untracked files: ${gitFailureReason(untrackedRes)}`);
+  }
+  return {
+    patch: diffRes.stdout ?? Buffer.alloc(0),
+    untrackedFiles: String(untrackedRes.stdout ?? "").split("\0").filter((p) => p.length > 0).filter((p) => !isUnderShadowHome(p))
+  };
+}
+function applyWorkspaceBaseline(repoRoot, worktreeAbs, captured, baselineRef, armLabel) {
+  const patch = captured.patch;
+  if (patch.length > 0) {
+    const applyRes = (0, import_node_child_process4.spawnSync)("git", ["-C", worktreeAbs, "apply", "--index"], {
+      input: patch,
+      encoding: "utf8",
+      maxBuffer: SPAWN_MAX_BUFFER
+    });
+    if (applyRes.error != null || applyRes.status !== 0) {
+      throw new Error(`could not replay the caller's pre-spawn changes into the ${armLabel} worktree: ${gitFailureReason(applyRes)}`);
+    }
+  }
+  let copiedAny = false;
+  for (const relPath of captured.untrackedFiles) {
+    try {
+      const srcAbs = (0, import_node_path12.join)(repoRoot, relPath);
+      const destAbs = (0, import_node_path12.join)(worktreeAbs, relPath);
+      (0, import_node_fs12.mkdirSync)((0, import_node_path12.dirname)(destAbs), { recursive: true });
+      (0, import_node_fs12.copyFileSync)(srcAbs, destAbs);
+      (0, import_node_fs12.chmodSync)(destAbs, (0, import_node_fs12.statSync)(srcAbs).mode);
+      copiedAny = true;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`could not copy untracked file "${relPath}" into the ${armLabel} worktree: ${reason}`);
+    }
+  }
+  if (patch.length === 0 && !copiedAny) {
+    const headRes = git(worktreeAbs, ["rev-parse", "HEAD"]);
+    if (!gitOk(headRes)) {
+      throw new Error(`could not resolve the ${armLabel} worktree's HEAD: ${gitFailureReason(headRes)}`);
+    }
+    return String(headRes.stdout ?? "").trim();
+  }
+  const addRes = git(worktreeAbs, ["add", "-A"]);
+  if (!gitOk(addRes)) {
+    throw new Error(`could not stage the workspace baseline in the ${armLabel} worktree: ${gitFailureReason(addRes)}`);
+  }
+  const commitRes = git(worktreeAbs, [...FIXED_IDENTITY, "commit", "--no-verify", "--no-gpg-sign", "-m", `fadeno workspace baseline ${baselineRef}`], FIXED_DATES);
+  if (!gitOk(commitRes)) {
+    throw new Error(`could not commit the workspace baseline in the ${armLabel} worktree: ${gitFailureReason(commitRes)}`);
+  }
+  const shaRes = git(worktreeAbs, ["rev-parse", "HEAD"]);
+  if (!gitOk(shaRes)) {
+    throw new Error(`could not resolve the ${armLabel} worktree's baseline commit: ${gitFailureReason(shaRes)}`);
+  }
+  return String(shaRes.stdout ?? "").trim();
+}
+function mergeBackReapplyCommand(diffRel) {
+  return `git apply ${diffRel}`;
+}
+function applyDiffToWorkspace(repoRoot, diffAbs) {
+  const res = git(repoRoot, ["apply", diffAbs]);
+  if (gitOk(res)) return { ok: true };
+  return { ok: false, detail: gitFailureReason(res) };
+}
+function rebaseWorktreeOntoWorkspace(opts) {
+  const { repoRoot, worktreeAbs, baselineRef, armLabel } = opts;
+  const commitRes = git(worktreeAbs, [...FIXED_IDENTITY, "commit", "--no-verify", "--no-gpg-sign", "--allow-empty", "-m", `fadeno attempt work ${baselineRef}`], FIXED_DATES);
+  if (!gitOk(commitRes)) {
+    throw new Error(`could not commit the ${armLabel} worktree's work before rebasing: ${gitFailureReason(commitRes)}`);
+  }
+  const workRes = git(worktreeAbs, ["rev-parse", "HEAD"]);
+  if (!gitOk(workRes)) throw new Error(`could not resolve the ${armLabel} worktree's work commit: ${gitFailureReason(workRes)}`);
+  const work = String(workRes.stdout ?? "").trim();
+  const headRes = git(repoRoot, ["rev-parse", "HEAD"]);
+  if (!gitOk(headRes)) throw new Error(`could not resolve the workspace's HEAD: ${gitFailureReason(headRes)}`);
+  const callerHead = String(headRes.stdout ?? "").trim();
+  const captured = captureWorkspaceBaseline(repoRoot);
+  const checkoutRes = git(worktreeAbs, ["checkout", "-q", "--detach", callerHead]);
+  if (!gitOk(checkoutRes)) {
+    throw new Error(`could not move the ${armLabel} worktree to the workspace's HEAD: ${gitFailureReason(checkoutRes)}`);
+  }
+  const baselineCommit = applyWorkspaceBaseline(repoRoot, worktreeAbs, captured, baselineRef, armLabel);
+  const pickRes = git(worktreeAbs, ["cherry-pick", "--no-commit", work]);
+  if (gitOk(pickRes)) return { status: "clean", baselineCommit, conflicts: [] };
+  const unmergedRes = git(worktreeAbs, ["diff", "--name-only", "--diff-filter=U"]);
+  const conflicts = String(unmergedRes.stdout ?? "").split("\n").map((l) => l.trim()).filter((l) => l.length > 0).sort();
+  git(worktreeAbs, ["cherry-pick", "--quit"]);
+  git(worktreeAbs, ["reset", "-q"]);
+  if (conflicts.length === 0) {
+    return { status: "clean", baselineCommit, conflicts: [] };
+  }
+  return { status: "conflict", baselineCommit, conflicts };
+}
+function hasConflictMarkers(text) {
+  return /^<{7}( |$)/m.test(text) && /^>{7}( |$)/m.test(text);
+}
+function settleIsolatedWork(opts) {
+  const { repoRoot, worktreeAbs, baselineRef, armLabel } = opts;
+  let diff = opts.diff;
+  if (opts.priorConflicts != null && opts.priorConflicts.length > 0) {
+    const stillMarked = opts.priorConflicts.filter((rel) => {
+      try {
+        return hasConflictMarkers((0, import_node_fs12.readFileSync)((0, import_node_path12.join)(worktreeAbs, rel), "utf8"));
+      } catch {
+        return false;
+      }
+    });
+    if (stillMarked.length > 0) {
+      return {
+        stamp: {
+          status: "unresolved",
+          detail: `conflict markers remain in ${stillMarked.length} file(s) after the round: ${stillMarked.join(", ")}. The worktree is retained; the workspace is untouched`,
+          conflicts: stillMarked
+        },
+        diff
+      };
+    }
+  }
+  if (diff.diffBytes === 0) {
+    return { stamp: { status: "clean", detail: `nothing to apply: the ${armLabel} made no changes` }, diff };
+  }
+  const first = applyDiffToWorkspace(repoRoot, diff.diffAbs);
+  if (first.ok) return { stamp: { status: "clean" }, diff };
+  const rebase = rebaseWorktreeOntoWorkspace({ repoRoot, worktreeAbs, baselineRef, armLabel });
+  if (rebase.status === "conflict") {
+    return {
+      stamp: {
+        status: "unresolved",
+        detail: `the workspace changed while the ${armLabel} worked; rebased onto it and ${rebase.conflicts.length} file(s) conflict: ${rebase.conflicts.join(", ")}. The worktree is retained with conflict markers; the workspace is untouched`,
+        rebased_onto: rebase.baselineCommit,
+        conflicts: rebase.conflicts
+      },
+      diff
+    };
+  }
+  diff = collectIsolatedDiff({ repoRoot, worktreeAbs, diffAbs: diff.diffAbs, diffRel: diff.diffRel });
+  if (diff.diffBytes === 0) {
+    return {
+      stamp: { status: "clean", detail: `nothing left to apply: the workspace already contains the ${armLabel}'s work`, rebased_onto: rebase.baselineCommit },
+      diff
+    };
+  }
+  const second = applyDiffToWorkspace(repoRoot, diff.diffAbs);
+  if (second.ok) {
+    return { stamp: { status: "clean", detail: "the workspace had moved; rebased onto it before applying", rebased_onto: rebase.baselineCommit }, diff };
+  }
+  return {
+    stamp: {
+      status: "blocked",
+      detail: `nothing was applied: rebased onto the workspace without conflicts, yet the apply still refused (${second.detail}); the diff is kept`,
+      rebased_onto: rebase.baselineCommit
+    },
+    diff
+  };
+}
+
+// src/lib/host-workspace.ts
 var HOST_WORKSPACE_SCHEMA_VERSION = "1.0";
-var HOST_WORKTREES_DIR = (0, import_node_path12.join)(".fadeno", "local", "host-worktrees");
-var HOST_WORKSPACES_DIR = (0, import_node_path12.join)(".fadeno", "local", "host-workspaces");
-var HOST_WORKSPACE_LOCK = (0, import_node_path12.join)(".fadeno", "local", ".host-workspace.lock");
-var HOST_ISOLATED_DIFF_DIR = (0, import_node_path12.join)(".fadeno", "local", "outputs");
+var HOST_WORKTREES_DIR = (0, import_node_path13.join)(".fadeno", "local", "host-worktrees");
+var HOST_WORKSPACES_DIR = (0, import_node_path13.join)(".fadeno", "local", "host-workspaces");
+var HOST_WORKSPACE_LOCK = (0, import_node_path13.join)(".fadeno", "local", ".host-workspace.lock");
+var HOST_ISOLATED_DIFF_DIR = (0, import_node_path13.join)(".fadeno", "local", "outputs");
 var HOST_WORKSPACE_SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 var HostWorkspaceError = class extends Error {
 };
@@ -19179,22 +19371,22 @@ function waitSync4(ms) {
 var LOCK_WAIT_MS3 = 10;
 var LOCK_TIMEOUT_MS3 = 3e4;
 function withHostWorkspaceLock(repoRoot, action) {
-  const lockPath = (0, import_node_path12.join)(repoRoot, HOST_WORKSPACE_LOCK);
-  (0, import_node_fs12.mkdirSync)((0, import_node_path12.dirname)(lockPath), { recursive: true });
+  const lockPath = (0, import_node_path13.join)(repoRoot, HOST_WORKSPACE_LOCK);
+  (0, import_node_fs13.mkdirSync)((0, import_node_path13.dirname)(lockPath), { recursive: true });
   const started = Date.now();
   for (; ; ) {
     try {
-      (0, import_node_fs12.mkdirSync)(lockPath);
+      (0, import_node_fs13.mkdirSync)(lockPath);
       break;
     } catch (err) {
       if (err.code !== "EEXIST") throw err;
       let stale = false;
       try {
-        stale = Date.now() - (0, import_node_fs12.statSync)(lockPath).mtimeMs > WORKSPACE_LEASE_LOCK_STALE_MS;
+        stale = Date.now() - (0, import_node_fs13.statSync)(lockPath).mtimeMs > WORKSPACE_LEASE_LOCK_STALE_MS;
       } catch {
       }
       if (stale) {
-        (0, import_node_fs12.rmSync)(lockPath, { recursive: true, force: true });
+        (0, import_node_fs13.rmSync)(lockPath, { recursive: true, force: true });
         continue;
       }
       if (Date.now() - started >= LOCK_TIMEOUT_MS3) {
@@ -19206,7 +19398,7 @@ function withHostWorkspaceLock(repoRoot, action) {
   try {
     return action();
   } finally {
-    (0, import_node_fs12.rmSync)(lockPath, { recursive: true, force: true });
+    (0, import_node_fs13.rmSync)(lockPath, { recursive: true, force: true });
   }
 }
 function validateSegment(value, label) {
@@ -19230,22 +19422,22 @@ function isHostPathSafe(repoRoot, repoRel) {
   }
 }
 function assertHostPathSafe(repoRoot, repoRel) {
-  const abs = (0, import_node_path12.resolve)(repoRoot, repoRel);
-  const localAbs = (0, import_node_path12.resolve)(repoRoot, ".fadeno", "local");
-  if (abs !== localAbs && !abs.startsWith(localAbs + import_node_path12.sep)) {
-    const relToLocal = (0, import_node_path12.relative)(localAbs, abs);
-    if (relToLocal === ".." || relToLocal.startsWith(`..${import_node_path12.sep}`) || relToLocal.startsWith("../") || (0, import_node_path12.isAbsolute)(relToLocal)) {
+  const abs = (0, import_node_path13.resolve)(repoRoot, repoRel);
+  const localAbs = (0, import_node_path13.resolve)(repoRoot, ".fadeno", "local");
+  if (abs !== localAbs && !abs.startsWith(localAbs + import_node_path13.sep)) {
+    const relToLocal = (0, import_node_path13.relative)(localAbs, abs);
+    if (relToLocal === ".." || relToLocal.startsWith(`..${import_node_path13.sep}`) || relToLocal.startsWith("../") || (0, import_node_path13.isAbsolute)(relToLocal)) {
       throw new HostWorkspaceError(`path escapes .fadeno/local: ${repoRel}`);
     }
     throw new HostWorkspaceError(`path escapes .fadeno/local: ${repoRel}`);
   }
-  let cursor = (0, import_node_path12.resolve)(repoRoot);
+  let cursor = (0, import_node_path13.resolve)(repoRoot);
   const segments = repoRel.split("/");
   for (const segment of segments) {
     if (segment === "" || segment === ".") continue;
-    cursor = (0, import_node_path12.join)(cursor, segment);
+    cursor = (0, import_node_path13.join)(cursor, segment);
     try {
-      if ((0, import_node_fs12.lstatSync)(cursor).isSymbolicLink()) {
+      if ((0, import_node_fs13.lstatSync)(cursor).isSymbolicLink()) {
         throw new HostWorkspaceError(`path traverses a symlink: ${repoRel}`);
       }
     } catch (err) {
@@ -19256,36 +19448,36 @@ function assertHostPathSafe(repoRoot, repoRel) {
   }
   let repoReal;
   try {
-    repoReal = (0, import_node_fs12.realpathSync)((0, import_node_path12.resolve)(repoRoot));
+    repoReal = (0, import_node_fs13.realpathSync)((0, import_node_path13.resolve)(repoRoot));
   } catch {
-    repoReal = (0, import_node_path12.resolve)(repoRoot);
+    repoReal = (0, import_node_path13.resolve)(repoRoot);
   }
-  const localReal = (0, import_node_path12.join)(repoReal, ".fadeno", "local");
+  const localReal = (0, import_node_path13.join)(repoReal, ".fadeno", "local");
   let existing = abs;
   let existingReal = null;
   for (; ; ) {
     try {
-      existingReal = (0, import_node_fs12.realpathSync)(existing);
+      existingReal = (0, import_node_fs13.realpathSync)(existing);
       break;
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
-      const parent = (0, import_node_path12.dirname)(existing);
+      const parent = (0, import_node_path13.dirname)(existing);
       if (parent === existing) throw new HostWorkspaceError(`path cannot be resolved: ${repoRel}`);
       existing = parent;
     }
   }
   if (existingReal != null) {
-    const suffix = (0, import_node_path12.relative)(existing, abs);
-    const resolvedTarget = (0, import_node_path12.resolve)(existingReal, suffix);
-    const realRel = (0, import_node_path12.relative)(localReal, resolvedTarget).split("\\").join("/");
-    if (realRel === ".." || realRel.startsWith("../") || (0, import_node_path12.isAbsolute)(realRel)) {
+    const suffix = (0, import_node_path13.relative)(existing, abs);
+    const resolvedTarget = (0, import_node_path13.resolve)(existingReal, suffix);
+    const realRel = (0, import_node_path13.relative)(localReal, resolvedTarget).split("\\").join("/");
+    if (realRel === ".." || realRel.startsWith("../") || (0, import_node_path13.isAbsolute)(realRel)) {
       throw new HostWorkspaceError(`path escapes .fadeno/local through a symlink: ${repoRel}`);
     }
-    if (resolvedTarget !== localReal && !resolvedTarget.startsWith(localReal + import_node_path12.sep)) {
+    if (resolvedTarget !== localReal && !resolvedTarget.startsWith(localReal + import_node_path13.sep)) {
       if (realRel.startsWith("..")) {
         throw new HostWorkspaceError(`path escapes .fadeno/local through a symlink: ${repoRel}`);
       }
-      if (!resolvedTarget.startsWith(localReal + "/") && !resolvedTarget.startsWith(localReal + import_node_path12.sep)) {
+      if (!resolvedTarget.startsWith(localReal + "/") && !resolvedTarget.startsWith(localReal + import_node_path13.sep)) {
         if (realRel.startsWith("..") || realRel === "..") {
           throw new HostWorkspaceError(`path escapes .fadeno/local through a symlink: ${repoRel}`);
         }
@@ -19296,27 +19488,27 @@ function assertHostPathSafe(repoRoot, repoRel) {
 }
 function hostWorktreePath(run, dispatchId) {
   validateRunAndDispatch(run, dispatchId);
-  return (0, import_node_path12.join)(HOST_WORKTREES_DIR, run, dispatchId).split("\\").join("/");
+  return (0, import_node_path13.join)(HOST_WORKTREES_DIR, run, dispatchId).split("\\").join("/");
 }
 function hostWorkspaceStatePath(run, dispatchId) {
   validateRunAndDispatch(run, dispatchId);
-  return (0, import_node_path12.join)(HOST_WORKSPACES_DIR, run, `${dispatchId}.json`).split("\\").join("/");
+  return (0, import_node_path13.join)(HOST_WORKSPACES_DIR, run, `${dispatchId}.json`).split("\\").join("/");
 }
 function hostIsolatedDiffPath(run, dispatchId) {
   validateRunAndDispatch(run, dispatchId);
-  return (0, import_node_path12.join)(HOST_ISOLATED_DIFF_DIR, `host-isolated-${run}-${dispatchId}.diff`).split("\\").join("/");
+  return (0, import_node_path13.join)(HOST_ISOLATED_DIFF_DIR, `host-isolated-${run}-${dispatchId}.diff`).split("\\").join("/");
 }
 function writeStateAtomic(repoRoot, state) {
   const rel = hostWorkspaceStatePath(state.run, state.dispatch_id);
   const abs = assertHostPathSafe(repoRoot, rel);
-  (0, import_node_fs12.mkdirSync)((0, import_node_path12.dirname)(abs), { recursive: true });
+  (0, import_node_fs13.mkdirSync)((0, import_node_path13.dirname)(abs), { recursive: true });
   const tmp = `${abs}.tmp-${process.pid}-${(0, import_node_crypto5.randomUUID)()}`;
-  (0, import_node_fs12.writeFileSync)(tmp, `${JSON.stringify(state, null, 2)}
+  (0, import_node_fs13.writeFileSync)(tmp, `${JSON.stringify(state, null, 2)}
 `, "utf8");
   try {
-    (0, import_node_fs12.renameSync)(tmp, abs);
+    (0, import_node_fs13.renameSync)(tmp, abs);
   } catch (err) {
-    (0, import_node_fs12.rmSync)(tmp, { force: true });
+    (0, import_node_fs13.rmSync)(tmp, { force: true });
     throw err;
   }
 }
@@ -19324,10 +19516,10 @@ function readHostWorkspaceState(repoRoot, run, dispatchId) {
   validateRunAndDispatch(run, dispatchId);
   const rel = hostWorkspaceStatePath(run, dispatchId);
   const abs = assertHostPathSafe(repoRoot, rel);
-  if (!(0, import_node_fs12.existsSync)(abs)) return null;
+  if (!(0, import_node_fs13.existsSync)(abs)) return null;
   let text;
   try {
-    text = (0, import_node_fs12.readFileSync)(abs, "utf8");
+    text = (0, import_node_fs13.readFileSync)(abs, "utf8");
   } catch (err) {
     throw new HostWorkspaceError(`could not read host workspace state at ${rel}: ${err.message}`);
   }
@@ -19392,13 +19584,13 @@ function prepareHostWorkspace(opts) {
     const statePathAbs = assertHostPathSafe(repoRoot, stateRel);
     const worktreeAbs = assertHostPathSafe(repoRoot, worktreeRel);
     let existing = null;
-    if ((0, import_node_fs12.existsSync)(statePathAbs)) {
+    if ((0, import_node_fs13.existsSync)(statePathAbs)) {
       existing = readHostWorkspaceState(repoRoot, run, dispatchId);
     }
     if (existing != null) {
       let worktreeExists = false;
       try {
-        worktreeExists = (0, import_node_fs12.existsSync)(worktreeAbs) && (0, import_node_fs12.statSync)(worktreeAbs).isDirectory();
+        worktreeExists = (0, import_node_fs13.existsSync)(worktreeAbs) && (0, import_node_fs13.statSync)(worktreeAbs).isDirectory();
       } catch {
         worktreeExists = false;
       }
@@ -19410,12 +19602,12 @@ function prepareHostWorkspace(opts) {
         }
         return { state: existing, idempotent: true };
       }
-      (0, import_node_fs12.mkdirSync)((0, import_node_path12.dirname)(worktreeAbs), { recursive: true });
+      (0, import_node_fs13.mkdirSync)((0, import_node_path13.dirname)(worktreeAbs), { recursive: true });
       try {
-        (0, import_node_child_process4.spawnSync)("git", ["worktree", "prune"], { cwd: repoRoot, encoding: "utf8" });
+        (0, import_node_child_process5.spawnSync)("git", ["worktree", "prune"], { cwd: repoRoot, encoding: "utf8" });
       } catch {
       }
-      const add2 = (0, import_node_child_process4.spawnSync)("git", ["worktree", "add", "--detach", worktreeAbs, existing.base_commit], { cwd: repoRoot, encoding: "utf8" });
+      const add2 = (0, import_node_child_process5.spawnSync)("git", ["worktree", "add", "--detach", worktreeAbs, existing.base_commit], { cwd: repoRoot, encoding: "utf8" });
       if (add2.error != null || add2.status !== 0) {
         const raw = add2.error?.message ?? (add2.stderr != null ? String(add2.stderr).trim() : "");
         const reason = raw || `exit ${add2.status ?? "unknown"}`;
@@ -19423,39 +19615,69 @@ function prepareHostWorkspace(opts) {
       }
       return { state: existing, idempotent: true };
     }
-    const rev = (0, import_node_child_process4.spawnSync)("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" });
+    const rev = (0, import_node_child_process5.spawnSync)("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" });
     if (rev.error != null || rev.status !== 0) {
       const rawRev = rev.error?.message ?? (rev.stderr != null ? String(rev.stderr).trim() : "");
       const reason = rawRev || `exit ${rev.status ?? "unknown"}`;
       throw new HostWorkspaceError(`could not resolve HEAD: ${String(reason).slice(0, 4e3)}`);
     }
-    const baseCommit = String(rev.stdout).trim();
-    if (!/^[0-9a-f]{40}$/.test(baseCommit)) {
-      throw new HostWorkspaceError(`invalid base_commit from HEAD: ${baseCommit}`);
+    const headCommit = String(rev.stdout).trim();
+    if (!/^[0-9a-f]{40}$/.test(headCommit)) {
+      throw new HostWorkspaceError(`invalid base_commit from HEAD: ${headCommit}`);
     }
-    (0, import_node_fs12.mkdirSync)((0, import_node_path12.dirname)(worktreeAbs), { recursive: true });
+    (0, import_node_fs13.mkdirSync)((0, import_node_path13.dirname)(worktreeAbs), { recursive: true });
     try {
-      (0, import_node_child_process4.spawnSync)("git", ["worktree", "prune"], { cwd: repoRoot, encoding: "utf8" });
+      (0, import_node_child_process5.spawnSync)("git", ["worktree", "prune"], { cwd: repoRoot, encoding: "utf8" });
     } catch {
     }
-    const add = (0, import_node_child_process4.spawnSync)("git", ["worktree", "add", "--detach", worktreeAbs, baseCommit], { cwd: repoRoot, encoding: "utf8" });
+    const add = (0, import_node_child_process5.spawnSync)("git", ["worktree", "add", "--detach", worktreeAbs, headCommit], { cwd: repoRoot, encoding: "utf8" });
     if (add.error != null || add.status !== 0) {
       const raw2 = add.error?.message ?? (add.stderr != null ? String(add.stderr).trim() : "");
       const reason = raw2 || `exit ${add.status ?? "unknown"}`;
       throw new HostWorkspaceError(`isolated worktree could not be created: ${String(reason).slice(0, 4e3)}`);
     }
-    const now = opts.now ?? /* @__PURE__ */ new Date();
-    const state = {
-      schema_version: HOST_WORKSPACE_SCHEMA_VERSION,
-      run,
-      dispatch_id: dispatchId,
-      workspace_mode: "isolated",
-      workspace: worktreeRel,
-      base_commit: baseCommit,
-      prepared_at: now.toISOString()
-    };
-    writeStateAtomic(repoRoot, state);
-    return { state, idempotent: false };
+    try {
+      const baseCommit = withWorkspaceWindowLease(
+        {
+          repoRoot,
+          holder: {
+            id: `baseline:host:${run}:${dispatchId}`,
+            kind: "host-dispatch",
+            runId: run,
+            dispatchId
+          },
+          mode: "read",
+          ...opts.now != null ? { now: opts.now } : {}
+        },
+        () => applyWorkspaceBaseline(
+          repoRoot,
+          worktreeAbs,
+          captureWorkspaceBaseline(repoRoot),
+          `${run}:${dispatchId}`,
+          "host dispatch"
+        )
+      );
+      const now = opts.now ?? /* @__PURE__ */ new Date();
+      const state = {
+        schema_version: HOST_WORKSPACE_SCHEMA_VERSION,
+        run,
+        dispatch_id: dispatchId,
+        workspace_mode: "isolated",
+        workspace: worktreeRel,
+        base_commit: baseCommit,
+        prepared_at: now.toISOString()
+      };
+      writeStateAtomic(repoRoot, state);
+      return { state, idempotent: false };
+    } catch (err) {
+      try {
+        removeIsolatedWorktree(repoRoot, worktreeAbs);
+      } catch {
+      }
+      if (err instanceof HostWorkspaceError) throw err;
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new HostWorkspaceError(`isolated host baseline could not be prepared: ${reason}`);
+    }
   });
 }
 function collectHostWorkspaceDiff(opts) {
@@ -19476,8 +19698,8 @@ function collectHostWorkspaceDiff(opts) {
       } catch {
       }
       if (safe) {
-        const existingDiffAbs = (0, import_node_path12.resolve)(repoRoot, effective.diff_snapshot);
-        if ((0, import_node_fs12.existsSync)(existingDiffAbs)) {
+        const existingDiffAbs = (0, import_node_path13.resolve)(repoRoot, effective.diff_snapshot);
+        if ((0, import_node_fs13.existsSync)(existingDiffAbs)) {
           return { state: effective, diffSnapshot: effective.diff_snapshot, diffBytes: effective.diff_bytes };
         }
       }
@@ -19562,18 +19784,18 @@ function hostRequestProfile(lookup) {
   }
   const snapshot = snapshots[0];
   const profileRel = typeof snapshot.extra.profile === "string" && snapshot.extra.profile.length > 0 ? snapshot.extra.profile : "profile.yaml";
-  const runAbsolute = (0, import_node_path13.resolve)(lookup.runDir);
-  const profilePath = (0, import_node_path13.isAbsolute)(profileRel) ? (0, import_node_path13.resolve)(profileRel) : (0, import_node_path13.resolve)(runAbsolute, profileRel);
-  const profileRelative = (0, import_node_path13.relative)(runAbsolute, profilePath).split("\\").join("/");
-  if (profileRelative === "" || profileRelative === ".." || profileRelative.startsWith("../") || (0, import_node_path13.isAbsolute)(profileRelative)) {
+  const runAbsolute = (0, import_node_path14.resolve)(lookup.runDir);
+  const profilePath = (0, import_node_path14.isAbsolute)(profileRel) ? (0, import_node_path14.resolve)(profileRel) : (0, import_node_path14.resolve)(runAbsolute, profileRel);
+  const profileRelative = (0, import_node_path14.relative)(runAbsolute, profilePath).split("\\").join("/");
+  if (profileRelative === "" || profileRelative === ".." || profileRelative.startsWith("../") || (0, import_node_path14.isAbsolute)(profileRelative)) {
     throw new HostDispatchError(`run "${lookup.runId}" profile snapshot escapes the run directory: ${profileRel}`);
   }
-  if (!(0, import_node_fs13.existsSync)(profilePath)) throw new HostDispatchError(`run "${lookup.runId}" profile snapshot is missing: ${profileRel}`);
-  const profileRealRelative = (0, import_node_path13.relative)((0, import_node_fs13.realpathSync)(runAbsolute), (0, import_node_fs13.realpathSync)(profilePath)).split("\\").join("/");
-  if (profileRealRelative === ".." || profileRealRelative.startsWith("../") || (0, import_node_path13.isAbsolute)(profileRealRelative)) {
+  if (!(0, import_node_fs14.existsSync)(profilePath)) throw new HostDispatchError(`run "${lookup.runId}" profile snapshot is missing: ${profileRel}`);
+  const profileRealRelative = (0, import_node_path14.relative)((0, import_node_fs14.realpathSync)(runAbsolute), (0, import_node_fs14.realpathSync)(profilePath)).split("\\").join("/");
+  if (profileRealRelative === ".." || profileRealRelative.startsWith("../") || (0, import_node_path14.isAbsolute)(profileRealRelative)) {
     throw new HostDispatchError(`run "${lookup.runId}" profile snapshot escapes the run directory through a symlink: ${profileRel}`);
   }
-  const text = (0, import_node_fs13.readFileSync)(profilePath, "utf8");
+  const text = (0, import_node_fs14.readFileSync)(profilePath, "utf8");
   const digest4 = snapshot.extra.sha256;
   if (typeof digest4 !== "string" || !/^[0-9a-f]{64}$/.test(digest4)) {
     throw new HostDispatchError(`run "${lookup.runId}" profile snapshot is missing or has an invalid sha256 digest.`);
@@ -19784,10 +20006,10 @@ function inspectIsolatedEvidence(opts) {
       let matchesExpected = validated === expectedRel;
       if (!matchesExpected) {
         try {
-          const expectedAbs = (0, import_node_path13.resolve)(repoRoot, expectedRel);
-          const candidateAbs = (0, import_node_path13.resolve)(repoRoot, validated);
+          const expectedAbs = (0, import_node_path14.resolve)(repoRoot, expectedRel);
+          const candidateAbs = (0, import_node_path14.resolve)(repoRoot, validated);
           try {
-            matchesExpected = (0, import_node_fs13.realpathSync)(expectedAbs) === (0, import_node_fs13.realpathSync)(candidateAbs);
+            matchesExpected = (0, import_node_fs14.realpathSync)(expectedAbs) === (0, import_node_fs14.realpathSync)(candidateAbs);
           } catch {
             matchesExpected = false;
           }
@@ -19807,10 +20029,10 @@ function inspectIsolatedEvidence(opts) {
       let stateMatchesExpected = state.workspace === expectedRel;
       if (!stateMatchesExpected) {
         try {
-          const expectedAbs = (0, import_node_path13.resolve)(repoRoot, expectedRel);
-          const stateAbs = (0, import_node_path13.resolve)(repoRoot, state.workspace);
+          const expectedAbs = (0, import_node_path14.resolve)(repoRoot, expectedRel);
+          const stateAbs = (0, import_node_path14.resolve)(repoRoot, state.workspace);
           try {
-            stateMatchesExpected = (0, import_node_fs13.realpathSync)(expectedAbs) === (0, import_node_fs13.realpathSync)(stateAbs);
+            stateMatchesExpected = (0, import_node_fs14.realpathSync)(expectedAbs) === (0, import_node_fs14.realpathSync)(stateAbs);
           } catch {
             stateMatchesExpected = false;
           }
@@ -19831,7 +20053,7 @@ function inspectIsolatedEvidence(opts) {
   let worktreeVerified = false;
   if (workspaceRel != null) {
     try {
-      const abs = (0, import_node_path13.resolve)(repoRoot, workspaceRel);
+      const abs = (0, import_node_path14.resolve)(repoRoot, workspaceRel);
       worktreeVerified = isRegisteredWorktree(repoRoot, abs);
     } catch {
       worktreeVerified = false;
@@ -19843,16 +20065,16 @@ function inspectIsolatedEvidence(opts) {
   let hasDiff = false;
   if (state?.diff_snapshot != null && state?.diff_bytes != null) {
     try {
-      const diffAbs = (0, import_node_path13.resolve)(repoRoot, state.diff_snapshot);
-      hasDiff = (0, import_node_fs13.existsSync)(diffAbs);
+      const diffAbs = (0, import_node_path14.resolve)(repoRoot, state.diff_snapshot);
+      hasDiff = (0, import_node_fs14.existsSync)(diffAbs);
     } catch {
       hasDiff = false;
     }
   } else {
     try {
       const canonicalRel = hostIsolatedDiffPath(runId, dispatchId);
-      const canonicalAbs = (0, import_node_path13.resolve)(repoRoot, canonicalRel);
-      if (isHostPathSafe(repoRoot, canonicalRel) && (0, import_node_fs13.existsSync)(canonicalAbs)) hasDiff = true;
+      const canonicalAbs = (0, import_node_path14.resolve)(repoRoot, canonicalRel);
+      if (isHostPathSafe(repoRoot, canonicalRel) && (0, import_node_fs14.existsSync)(canonicalAbs)) hasDiff = true;
     } catch {
       hasDiff = false;
     }
@@ -19880,18 +20102,18 @@ function settleIsolatedTerminalWorkspace(opts) {
   }
 }
 function safeRunRelative(runDir, value, label) {
-  const runAbsolute = (0, import_node_path13.resolve)(runDir);
-  const absolute = (0, import_node_path13.isAbsolute)(value) ? (0, import_node_path13.resolve)(value) : (0, import_node_path13.resolve)(runAbsolute, value);
-  const rel = (0, import_node_path13.relative)(runAbsolute, absolute).split("\\").join("/");
-  if (rel === "" || rel === "." || rel === ".." || rel.startsWith("../") || (0, import_node_path13.isAbsolute)(rel)) {
+  const runAbsolute = (0, import_node_path14.resolve)(runDir);
+  const absolute = (0, import_node_path14.isAbsolute)(value) ? (0, import_node_path14.resolve)(value) : (0, import_node_path14.resolve)(runAbsolute, value);
+  const rel = (0, import_node_path14.relative)(runAbsolute, absolute).split("\\").join("/");
+  if (rel === "" || rel === "." || rel === ".." || rel.startsWith("../") || (0, import_node_path14.isAbsolute)(rel)) {
     throw new HostDispatchError(`${label} path escapes the run directory: ${value}`);
   }
-  const runReal = (0, import_node_fs13.realpathSync)(runAbsolute);
+  const runReal = (0, import_node_fs14.realpathSync)(runAbsolute);
   let cursor = runAbsolute;
   for (const segment of rel.split("/")) {
-    cursor = (0, import_node_path13.join)(cursor, segment);
+    cursor = (0, import_node_path14.join)(cursor, segment);
     try {
-      if ((0, import_node_fs13.lstatSync)(cursor).isSymbolicLink()) {
+      if ((0, import_node_fs14.lstatSync)(cursor).isSymbolicLink()) {
         throw new HostDispatchError(`${label} path traverses a symlink: ${value}`);
       }
     } catch (err) {
@@ -19904,19 +20126,19 @@ function safeRunRelative(runDir, value, label) {
   let existingReal;
   for (; ; ) {
     try {
-      existingReal = (0, import_node_fs13.realpathSync)(existing);
+      existingReal = (0, import_node_fs14.realpathSync)(existing);
       break;
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
-      const parent = (0, import_node_path13.dirname)(existing);
+      const parent = (0, import_node_path14.dirname)(existing);
       if (parent === existing) throw new HostDispatchError(`${label} path cannot be resolved: ${value}`);
       existing = parent;
     }
   }
-  const suffix = (0, import_node_path13.relative)(existing, absolute);
-  const resolvedTarget = (0, import_node_path13.resolve)(existingReal, suffix);
-  const realRel = (0, import_node_path13.relative)(runReal, resolvedTarget).split("\\").join("/");
-  if (realRel === ".." || realRel.startsWith("../") || (0, import_node_path13.isAbsolute)(realRel)) {
+  const suffix = (0, import_node_path14.relative)(existing, absolute);
+  const resolvedTarget = (0, import_node_path14.resolve)(existingReal, suffix);
+  const realRel = (0, import_node_path14.relative)(runReal, resolvedTarget).split("\\").join("/");
+  if (realRel === ".." || realRel.startsWith("../") || (0, import_node_path14.isAbsolute)(realRel)) {
     throw new HostDispatchError(`${label} path escapes the run directory through a symlink: ${value}`);
   }
   return rel;
@@ -19950,7 +20172,7 @@ function validationFor(repoRoot, runDir, request, bytes) {
   return validate(parsed) ? { ok: true, parsed } : { ok: false, errors: schemaErrorMessages(validate) };
 }
 function attemptPath(request) {
-  const suffix = (0, import_node_path13.extname)(request.outputPath) || ".out";
+  const suffix = (0, import_node_path14.extname)(request.outputPath) || ".out";
   const safeId = request.dispatchId.replace(/[^A-Za-z0-9_.-]+/g, "_");
   return `artifacts/attempts/${safeId}${suffix}`;
 }
@@ -19970,10 +20192,10 @@ function releaseHostLease(repoRoot, runId, dispatchId) {
 function writeArtifactAtomic(path, bytes) {
   const temporary = `${path}.tmp-${process.pid}-${(0, import_node_crypto6.randomUUID)()}`;
   try {
-    (0, import_node_fs13.writeFileSync)(temporary, bytes, { flag: "wx" });
-    (0, import_node_fs13.renameSync)(temporary, path);
+    (0, import_node_fs14.writeFileSync)(temporary, bytes, { flag: "wx" });
+    (0, import_node_fs14.renameSync)(temporary, path);
   } catch (err) {
-    (0, import_node_fs13.rmSync)(temporary, { force: true });
+    (0, import_node_fs14.rmSync)(temporary, { force: true });
     throw err;
   }
 }
@@ -20215,14 +20437,14 @@ function progressHostDispatch(opts) {
   if (terminalsFor(events, opts.dispatchId).length > 0) {
     throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already has a terminal receipt.`);
   }
-  const reportFile = (0, import_node_path13.isAbsolute)(opts.file) ? opts.file : (0, import_node_path13.resolve)(cwd, opts.file);
-  if (!(0, import_node_fs13.existsSync)(reportFile) || !(0, import_node_fs13.statSync)(reportFile).isFile()) {
+  const reportFile = (0, import_node_path14.isAbsolute)(opts.file) ? opts.file : (0, import_node_path14.resolve)(cwd, opts.file);
+  if (!(0, import_node_fs14.existsSync)(reportFile) || !(0, import_node_fs14.statSync)(reportFile).isFile()) {
     throw new HostDispatchError(`progress report does not exist: ${opts.file}`);
   }
-  if ((0, import_node_fs13.lstatSync)(reportFile).isSymbolicLink()) {
+  if ((0, import_node_fs14.lstatSync)(reportFile).isSymbolicLink()) {
     throw new HostDispatchError(`progress report must not be a symlink: ${opts.file}`);
   }
-  const bytes = (0, import_node_fs13.readFileSync)(reportFile);
+  const bytes = (0, import_node_fs14.readFileSync)(reportFile);
   if (bytes.length > MAX_PROGRESS_BYTES) {
     throw new HostDispatchError(`progress report exceeds ${MAX_PROGRESS_BYTES} bytes.`);
   }
@@ -20306,7 +20528,7 @@ function completeHostDispatch(opts) {
       bytes = opts.stdinBytes;
     } else {
       try {
-        bytes = (0, import_node_fs13.readFileSync)(0);
+        bytes = (0, import_node_fs14.readFileSync)(0);
       } catch (err) {
         throw new HostDispatchError(`failed to read stdin for --output -: ${err.message}`);
       }
@@ -20314,9 +20536,9 @@ function completeHostDispatch(opts) {
       }
     }
   } else {
-    const outputFile = (0, import_node_path13.isAbsolute)(opts.output) ? opts.output : (0, import_node_path13.resolve)(cwd, opts.output);
-    if (!(0, import_node_fs13.existsSync)(outputFile) || !(0, import_node_fs13.statSync)(outputFile).isFile()) throw new HostDispatchError(`temporary output does not exist: ${opts.output}`);
-    bytes = (0, import_node_fs13.readFileSync)(outputFile);
+    const outputFile = (0, import_node_path14.isAbsolute)(opts.output) ? opts.output : (0, import_node_path14.resolve)(cwd, opts.output);
+    if (!(0, import_node_fs14.existsSync)(outputFile) || !(0, import_node_fs14.statSync)(outputFile).isFile()) throw new HostDispatchError(`temporary output does not exist: ${opts.output}`);
+    bytes = (0, import_node_fs14.readFileSync)(outputFile);
   }
   const digest4 = sha256Hex(bytes);
   const isIsolated = hostDeliveryWorkspaceMode(starts[0]) === "isolated";
@@ -20380,10 +20602,10 @@ function completeHostDispatch(opts) {
   const agentId = typeof starts[0].extra.agent_id === "string" ? starts[0].extra.agent_id : void 0;
   if (!verdict.ok) {
     const parked = safeRunRelative(runDir, attemptPath(request), "invalid output attempt");
-    const parkedAbs = (0, import_node_path13.join)(runDir, parked);
-    (0, import_node_fs13.mkdirSync)((0, import_node_path13.join)(runDir, "artifacts", "attempts"), { recursive: true });
-    if ((0, import_node_fs13.existsSync)(parkedAbs) && sha256Hex((0, import_node_fs13.readFileSync)(parkedAbs)) !== digest4) throw new HostDispatchError(`invalid output attempt path "${parked}" already contains different bytes.`);
-    if (!(0, import_node_fs13.existsSync)(parkedAbs)) writeArtifactAtomic(parkedAbs, bytes);
+    const parkedAbs = (0, import_node_path14.join)(runDir, parked);
+    (0, import_node_fs14.mkdirSync)((0, import_node_path14.join)(runDir, "artifacts", "attempts"), { recursive: true });
+    if ((0, import_node_fs14.existsSync)(parkedAbs) && sha256Hex((0, import_node_fs14.readFileSync)(parkedAbs)) !== digest4) throw new HostDispatchError(`invalid output attempt path "${parked}" already contains different bytes.`);
+    if (!(0, import_node_fs14.existsSync)(parkedAbs)) writeArtifactAtomic(parkedAbs, bytes);
     if (isIsolated) {
       if (isolatedComplete == null) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" isolated evidence was not collected`);
       const collected = isolatedComplete.collected;
@@ -20477,22 +20699,22 @@ function completeHostDispatch(opts) {
     const payloadStr = extraction.payload;
     const payloadBytes = Buffer.from(payloadStr, "utf8");
     const normalizedDigest = sha256Hex(payloadBytes);
-    const suffixRaw = (0, import_node_path13.extname)(request.outputPath) || ".out";
+    const suffixRaw = (0, import_node_path14.extname)(request.outputPath) || ".out";
     const safeIdRaw = request.dispatchId.replace(/[^A-Za-z0-9_.-]+/g, "_");
     const rawRel = `artifacts/attempts/${safeIdRaw}.raw${suffixRaw}`;
-    const rawAbs = (0, import_node_path13.join)(runDir, rawRel);
-    (0, import_node_fs13.mkdirSync)((0, import_node_path13.join)(runDir, "artifacts", "attempts"), { recursive: true });
-    if ((0, import_node_fs13.existsSync)(rawAbs) && sha256Hex((0, import_node_fs13.readFileSync)(rawAbs)) !== digest4) {
+    const rawAbs = (0, import_node_path14.join)(runDir, rawRel);
+    (0, import_node_fs14.mkdirSync)((0, import_node_path14.join)(runDir, "artifacts", "attempts"), { recursive: true });
+    if ((0, import_node_fs14.existsSync)(rawAbs) && sha256Hex((0, import_node_fs14.readFileSync)(rawAbs)) !== digest4) {
       throw new HostDispatchError(`raw output attempt path "${rawRel}" already contains different bytes.`);
     }
-    if (!(0, import_node_fs13.existsSync)(rawAbs)) writeArtifactAtomic(rawAbs, bytes);
+    if (!(0, import_node_fs14.existsSync)(rawAbs)) writeArtifactAtomic(rawAbs, bytes);
     const outputRel2 = safeRunRelative(runDir, request.outputPath, "planned output");
-    const outputAbs2 = (0, import_node_path13.join)(runDir, outputRel2);
-    if ((0, import_node_fs13.existsSync)(outputAbs2) && sha256Hex((0, import_node_fs13.readFileSync)(outputAbs2)) !== normalizedDigest) {
+    const outputAbs2 = (0, import_node_path14.join)(runDir, outputRel2);
+    if ((0, import_node_fs14.existsSync)(outputAbs2) && sha256Hex((0, import_node_fs14.readFileSync)(outputAbs2)) !== normalizedDigest) {
       throw new HostDispatchError(`planned output "${outputRel2}" already contains different bytes.`);
     }
-    (0, import_node_fs13.mkdirSync)((0, import_node_path13.dirname)(outputAbs2), { recursive: true });
-    if (!(0, import_node_fs13.existsSync)(outputAbs2)) writeArtifactAtomic(outputAbs2, payloadBytes);
+    (0, import_node_fs14.mkdirSync)((0, import_node_path14.dirname)(outputAbs2), { recursive: true });
+    if (!(0, import_node_fs14.existsSync)(outputAbs2)) writeArtifactAtomic(outputAbs2, payloadBytes);
     const schemaPaths2 = runSchemaDirectories(runDir, repoRoot);
     const manifest2 = buildArtifactManifest(runDir, outputRel2, `artifact-${request.dispatchId}`, new SchemaSet(schemaPaths2.snapshot, schemaPaths2.project, schemaPaths2.builtin));
     const existingManifest2 = events.find(
@@ -20624,12 +20846,12 @@ function completeHostDispatch(opts) {
     }
   }
   const outputRel = safeRunRelative(runDir, request.outputPath, "planned output");
-  const outputAbs = (0, import_node_path13.join)(runDir, outputRel);
-  if ((0, import_node_fs13.existsSync)(outputAbs) && sha256Hex((0, import_node_fs13.readFileSync)(outputAbs)) !== digest4) {
+  const outputAbs = (0, import_node_path14.join)(runDir, outputRel);
+  if ((0, import_node_fs14.existsSync)(outputAbs) && sha256Hex((0, import_node_fs14.readFileSync)(outputAbs)) !== digest4) {
     throw new HostDispatchError(`planned output "${outputRel}" already contains different bytes.`);
   }
-  (0, import_node_fs13.mkdirSync)((0, import_node_path13.dirname)(outputAbs), { recursive: true });
-  if (!(0, import_node_fs13.existsSync)(outputAbs)) writeArtifactAtomic(outputAbs, bytes);
+  (0, import_node_fs14.mkdirSync)((0, import_node_path14.dirname)(outputAbs), { recursive: true });
+  if (!(0, import_node_fs14.existsSync)(outputAbs)) writeArtifactAtomic(outputAbs, bytes);
   const schemaPaths = runSchemaDirectories(runDir, repoRoot);
   const manifest = buildArtifactManifest(runDir, outputRel, `artifact-${request.dispatchId}`, new SchemaSet(schemaPaths.snapshot, schemaPaths.project, schemaPaths.builtin));
   const existingManifest = events.find(
@@ -20880,196 +21102,6 @@ function failHostDispatch(opts) {
     releaseHostLease(repoRoot, runId, opts.dispatchId);
     return { dispatchId: opts.dispatchId, state: "failed", idempotent: false, agentId: typeof starts[0].extra.agent_id === "string" ? starts[0].extra.agent_id : void 0 };
   }
-}
-
-// src/lib/workspace-baseline.ts
-var import_node_child_process5 = require("node:child_process");
-var import_node_fs14 = require("node:fs");
-var import_node_path14 = require("node:path");
-var SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
-var BASELINE_COMMIT_DATE = "2000-01-01T00:00:00Z";
-var FIXED_IDENTITY = ["-c", "user.name=fadeno", "-c", "user.email=fadeno@localhost"];
-var FIXED_DATES = { GIT_AUTHOR_DATE: BASELINE_COMMIT_DATE, GIT_COMMITTER_DATE: BASELINE_COMMIT_DATE };
-function isUnderShadowHome(repoRelPath) {
-  return repoRelPath === ".fadeno/local" || repoRelPath.startsWith(".fadeno/local/");
-}
-function gitFailureReason(result) {
-  if (result.error != null) return result.error.message;
-  const stderr = String(result.stderr ?? "").trim();
-  if (stderr.length > 0) return stderr;
-  return `exit ${result.status ?? "unknown"}`;
-}
-function git(cwd, args, extraEnv = {}) {
-  return (0, import_node_child_process5.spawnSync)("git", ["-C", cwd, ...args], { encoding: "utf8", maxBuffer: SPAWN_MAX_BUFFER, env: { ...process.env, ...extraEnv } });
-}
-function gitOk(res) {
-  return res.error == null && res.status === 0;
-}
-function captureWorkspaceBaseline(repoRoot) {
-  const diffRes = (0, import_node_child_process5.spawnSync)("git", ["-C", repoRoot, "diff", "HEAD", "--binary"], {
-    encoding: "buffer",
-    maxBuffer: SPAWN_MAX_BUFFER
-  });
-  if (diffRes.error != null || diffRes.status !== 0) {
-    throw new Error(`could not capture the primary workspace's pre-spawn state: ${gitFailureReason(diffRes)}`);
-  }
-  const untrackedRes = (0, import_node_child_process5.spawnSync)("git", ["-C", repoRoot, "ls-files", "--others", "--exclude-standard", "-z"], {
-    encoding: "utf8",
-    maxBuffer: SPAWN_MAX_BUFFER
-  });
-  if (untrackedRes.error != null || untrackedRes.status !== 0) {
-    throw new Error(`could not list the primary workspace's untracked files: ${gitFailureReason(untrackedRes)}`);
-  }
-  return {
-    patch: diffRes.stdout ?? Buffer.alloc(0),
-    untrackedFiles: String(untrackedRes.stdout ?? "").split("\0").filter((p) => p.length > 0).filter((p) => !isUnderShadowHome(p))
-  };
-}
-function applyWorkspaceBaseline(repoRoot, worktreeAbs, captured, baselineRef, armLabel) {
-  const patch = captured.patch;
-  if (patch.length > 0) {
-    const applyRes = (0, import_node_child_process5.spawnSync)("git", ["-C", worktreeAbs, "apply", "--index"], {
-      input: patch,
-      encoding: "utf8",
-      maxBuffer: SPAWN_MAX_BUFFER
-    });
-    if (applyRes.error != null || applyRes.status !== 0) {
-      throw new Error(`could not replay the caller's pre-spawn changes into the ${armLabel} worktree: ${gitFailureReason(applyRes)}`);
-    }
-  }
-  let copiedAny = false;
-  for (const relPath of captured.untrackedFiles) {
-    try {
-      const srcAbs = (0, import_node_path14.join)(repoRoot, relPath);
-      const destAbs = (0, import_node_path14.join)(worktreeAbs, relPath);
-      (0, import_node_fs14.mkdirSync)((0, import_node_path14.dirname)(destAbs), { recursive: true });
-      (0, import_node_fs14.copyFileSync)(srcAbs, destAbs);
-      (0, import_node_fs14.chmodSync)(destAbs, (0, import_node_fs14.statSync)(srcAbs).mode);
-      copiedAny = true;
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      throw new Error(`could not copy untracked file "${relPath}" into the ${armLabel} worktree: ${reason}`);
-    }
-  }
-  if (patch.length === 0 && !copiedAny) {
-    const headRes = git(worktreeAbs, ["rev-parse", "HEAD"]);
-    if (!gitOk(headRes)) {
-      throw new Error(`could not resolve the ${armLabel} worktree's HEAD: ${gitFailureReason(headRes)}`);
-    }
-    return String(headRes.stdout ?? "").trim();
-  }
-  const addRes = git(worktreeAbs, ["add", "-A"]);
-  if (!gitOk(addRes)) {
-    throw new Error(`could not stage the workspace baseline in the ${armLabel} worktree: ${gitFailureReason(addRes)}`);
-  }
-  const commitRes = git(worktreeAbs, [...FIXED_IDENTITY, "commit", "--no-verify", "--no-gpg-sign", "-m", `fadeno workspace baseline ${baselineRef}`], FIXED_DATES);
-  if (!gitOk(commitRes)) {
-    throw new Error(`could not commit the workspace baseline in the ${armLabel} worktree: ${gitFailureReason(commitRes)}`);
-  }
-  const shaRes = git(worktreeAbs, ["rev-parse", "HEAD"]);
-  if (!gitOk(shaRes)) {
-    throw new Error(`could not resolve the ${armLabel} worktree's baseline commit: ${gitFailureReason(shaRes)}`);
-  }
-  return String(shaRes.stdout ?? "").trim();
-}
-function mergeBackReapplyCommand(diffRel) {
-  return `git apply ${diffRel}`;
-}
-function applyDiffToWorkspace(repoRoot, diffAbs) {
-  const res = git(repoRoot, ["apply", diffAbs]);
-  if (gitOk(res)) return { ok: true };
-  return { ok: false, detail: gitFailureReason(res) };
-}
-function rebaseWorktreeOntoWorkspace(opts) {
-  const { repoRoot, worktreeAbs, baselineRef, armLabel } = opts;
-  const commitRes = git(worktreeAbs, [...FIXED_IDENTITY, "commit", "--no-verify", "--no-gpg-sign", "--allow-empty", "-m", `fadeno attempt work ${baselineRef}`], FIXED_DATES);
-  if (!gitOk(commitRes)) {
-    throw new Error(`could not commit the ${armLabel} worktree's work before rebasing: ${gitFailureReason(commitRes)}`);
-  }
-  const workRes = git(worktreeAbs, ["rev-parse", "HEAD"]);
-  if (!gitOk(workRes)) throw new Error(`could not resolve the ${armLabel} worktree's work commit: ${gitFailureReason(workRes)}`);
-  const work = String(workRes.stdout ?? "").trim();
-  const headRes = git(repoRoot, ["rev-parse", "HEAD"]);
-  if (!gitOk(headRes)) throw new Error(`could not resolve the workspace's HEAD: ${gitFailureReason(headRes)}`);
-  const callerHead = String(headRes.stdout ?? "").trim();
-  const captured = captureWorkspaceBaseline(repoRoot);
-  const checkoutRes = git(worktreeAbs, ["checkout", "-q", "--detach", callerHead]);
-  if (!gitOk(checkoutRes)) {
-    throw new Error(`could not move the ${armLabel} worktree to the workspace's HEAD: ${gitFailureReason(checkoutRes)}`);
-  }
-  const baselineCommit = applyWorkspaceBaseline(repoRoot, worktreeAbs, captured, baselineRef, armLabel);
-  const pickRes = git(worktreeAbs, ["cherry-pick", "--no-commit", work]);
-  if (gitOk(pickRes)) return { status: "clean", baselineCommit, conflicts: [] };
-  const unmergedRes = git(worktreeAbs, ["diff", "--name-only", "--diff-filter=U"]);
-  const conflicts = String(unmergedRes.stdout ?? "").split("\n").map((l) => l.trim()).filter((l) => l.length > 0).sort();
-  git(worktreeAbs, ["cherry-pick", "--quit"]);
-  git(worktreeAbs, ["reset", "-q"]);
-  if (conflicts.length === 0) {
-    return { status: "clean", baselineCommit, conflicts: [] };
-  }
-  return { status: "conflict", baselineCommit, conflicts };
-}
-function hasConflictMarkers(text) {
-  return /^<{7}( |$)/m.test(text) && /^>{7}( |$)/m.test(text);
-}
-function settleIsolatedWork(opts) {
-  const { repoRoot, worktreeAbs, baselineRef, armLabel } = opts;
-  let diff = opts.diff;
-  if (opts.priorConflicts != null && opts.priorConflicts.length > 0) {
-    const stillMarked = opts.priorConflicts.filter((rel) => {
-      try {
-        return hasConflictMarkers((0, import_node_fs14.readFileSync)((0, import_node_path14.join)(worktreeAbs, rel), "utf8"));
-      } catch {
-        return false;
-      }
-    });
-    if (stillMarked.length > 0) {
-      return {
-        stamp: {
-          status: "unresolved",
-          detail: `conflict markers remain in ${stillMarked.length} file(s) after the round: ${stillMarked.join(", ")}. The worktree is retained; the workspace is untouched`,
-          conflicts: stillMarked
-        },
-        diff
-      };
-    }
-  }
-  if (diff.diffBytes === 0) {
-    return { stamp: { status: "clean", detail: `nothing to apply: the ${armLabel} made no changes` }, diff };
-  }
-  const first = applyDiffToWorkspace(repoRoot, diff.diffAbs);
-  if (first.ok) return { stamp: { status: "clean" }, diff };
-  const rebase = rebaseWorktreeOntoWorkspace({ repoRoot, worktreeAbs, baselineRef, armLabel });
-  if (rebase.status === "conflict") {
-    return {
-      stamp: {
-        status: "unresolved",
-        detail: `the workspace changed while the ${armLabel} worked; rebased onto it and ${rebase.conflicts.length} file(s) conflict: ${rebase.conflicts.join(", ")}. The worktree is retained with conflict markers; the workspace is untouched`,
-        rebased_onto: rebase.baselineCommit,
-        conflicts: rebase.conflicts
-      },
-      diff
-    };
-  }
-  diff = collectIsolatedDiff({ repoRoot, worktreeAbs, diffAbs: diff.diffAbs, diffRel: diff.diffRel });
-  if (diff.diffBytes === 0) {
-    return {
-      stamp: { status: "clean", detail: `nothing left to apply: the workspace already contains the ${armLabel}'s work`, rebased_onto: rebase.baselineCommit },
-      diff
-    };
-  }
-  const second = applyDiffToWorkspace(repoRoot, diff.diffAbs);
-  if (second.ok) {
-    return { stamp: { status: "clean", detail: "the workspace had moved; rebased onto it before applying", rebased_onto: rebase.baselineCommit }, diff };
-  }
-  return {
-    stamp: {
-      status: "blocked",
-      detail: `nothing was applied: rebased onto the workspace without conflicts, yet the apply still refused (${second.detail}); the diff is kept`,
-      rebased_onto: rebase.baselineCommit
-    },
-    diff
-  };
 }
 
 // src/lib/source-control.ts
@@ -31224,9 +31256,9 @@ function effectiveCodexAgentCandidates(repoRoot, userPathOptions) {
   }
   return out;
 }
-function findSpawnableCodexAgent(candidates, archetype) {
+function findSpawnableCodexAgent(candidates, archetype, hostExecutor) {
   return candidates.find(
-    (candidate) => (archetype == null || archetype === "*" || candidate.archetype === archetype) && candidate.state.managed
+    (candidate) => (archetype == null || archetype === "*" || candidate.archetype === archetype) && candidate.state.managed && candidate.state.hostExecutor === hostExecutor
   ) ?? null;
 }
 
@@ -31392,7 +31424,7 @@ function runLockedSteeringResolve(opts, archetype, role, hostExecutor) {
   let delegateTo;
   if (!matchesHost && !neutral && hasFallback && hostExecutor == null && executor.adapter === "host" && request.model !== NEUTRAL_HOST_EXECUTOR) {
     const candidates = effectiveCodexAgentCandidates(repoRoot, opts.userPathOptions);
-    const target = findSpawnableCodexAgent(candidates, archetype);
+    const target = findSpawnableCodexAgent(candidates, archetype, request.executor);
     if (target != null) {
       delegateTo = {
         archetype: target.state.name ?? target.archetype,
@@ -40643,7 +40675,7 @@ function runDoctor(opts = {}) {
           const executor = typeof row.extra.executor === "string" ? row.extra.executor : null;
           if (executor == null) continue;
           const agentType = typeof row.extra.agent_type === "string" ? row.extra.agent_type : null;
-          if (findSpawnableCodexAgent(candidates, agentType) == null) continue;
+          if (findSpawnableCodexAgent(candidates, agentType, executor) == null) continue;
           avoidableCount += 1;
           avoidableExecutors.add(executor);
         }
@@ -42402,7 +42434,8 @@ function printDrive(result) {
     case "awaiting_host_dispatch":
       console.log(`awaiting ${result.requests.length} host dispatch(es) for run ${result.run}`);
       for (const request of result.requests) {
-        console.log(`  ${request.dispatchId}  ${request.step}${request.actor ? ` (${request.actor})` : ""}  ${request.model}/${request.reasoningEffort}`);
+        const artifactType = request.artifactType == null ? "" : `  artifact_type=${request.artifactType}`;
+        console.log(`  ${request.dispatchId}  ${request.step}${request.actor ? ` (${request.actor})` : ""}  ${request.model}/${request.reasoningEffort}${artifactType}`);
         if (request.nodeInstanceId != null) console.log(`      instance: ${request.nodeInstanceId}`);
         const progress = request.nodeInstanceId == null ? progressSidecarPath(request.run, request.step, request.actor) : `.fadeno/progress/${request.run}/${request.stepExecutionId}.json`;
         console.log(`      progress: <workspace>/${progress}`);

@@ -48,7 +48,7 @@ test('host-workspace path helpers validate segments and build frozen paths', () 
   assert.equal(HOST_WORKSPACE_SEGMENT_RE.test('..'), false);
 });
 
-test('prepare cut-from-HEAD with dirty shared checkout preserved', (t) => {
+test('prepare replays the dirty shared checkout as the isolated baseline', (t) => {
   const root = tempRepo(t);
   initGit(root);
   // create dirty file in shared checkout (not committed)
@@ -63,17 +63,42 @@ test('prepare cut-from-HEAD with dirty shared checkout preserved', (t) => {
   assert.equal(state.workspace, hostWorktreePath('runA', 'd1'));
   assert.match(state.base_commit, /^[0-9a-f]{40}$/);
   assert.ok(state.prepared_at);
-  // worktree should exist and be at HEAD content, not dirty
+  // The isolated host sees the exact dirty state the coordinator sees.
   const wtAbs = join(root, state.workspace);
   assert.ok(existsSync(wtAbs));
-  assert.equal(readFileSync(join(wtAbs, 'base.txt'), 'utf8'), 'base\n');
-  assert.equal(existsSync(join(wtAbs, 'dirty.txt')), false, 'isolated worktree must not contain dirty file');
+  assert.equal(readFileSync(join(wtAbs, 'base.txt'), 'utf8'), 'dirty-base\n');
+  assert.equal(readFileSync(join(wtAbs, 'dirty.txt'), 'utf8'), 'user-dirty\n');
   // shared checkout still dirty
   assert.equal(readFileSync(join(root, 'base.txt'), 'utf8'), 'dirty-base\n');
   assert.equal(readFileSync(join(root, 'dirty.txt'), 'utf8'), 'user-dirty\n');
   // isolated writes must not leak to shared
   writeFileSync(join(wtAbs, 'isolated.txt'), 'from-isolated\n');
   assert.equal(existsSync(join(root, 'isolated.txt')), false);
+  // Baseline content is input, not attributed to the host as output.
+  const collected = collectHostWorkspaceDiff({ repoRoot: root, state });
+  const diff = readFileSync(join(root, collected.diffSnapshot), 'utf8');
+  assert.match(diff, /isolated\.txt/);
+  assert.doesNotMatch(diff, /dirty-base|dirty\.txt/);
+});
+
+test('an evaluative fan-out can prepare matching dirty baselines before either member starts', (t) => {
+  const root = tempRepo(t);
+  initGit(root);
+  writeFileSync(join(root, 'base.txt'), 'implementation-under-review\n');
+  writeFileSync(join(root, 'untracked-review-input.txt'), 'same input\n');
+
+  const substance = prepareHostWorkspace({ repoRoot: root, run: 'reviewRun', dispatchId: 'substance' });
+  const style = prepareHostWorkspace({ repoRoot: root, run: 'reviewRun', dispatchId: 'style' });
+  const substanceAbs = join(root, substance.state.workspace);
+  const styleAbs = join(root, style.state.workspace);
+
+  for (const workspace of [substanceAbs, styleAbs]) {
+    assert.equal(readFileSync(join(workspace, 'base.txt'), 'utf8'), 'implementation-under-review\n');
+    assert.equal(readFileSync(join(workspace, 'untracked-review-input.txt'), 'utf8'), 'same input\n');
+  }
+  writeFileSync(join(substanceAbs, 'accidental-review-write.txt'), 'contained\n');
+  assert.equal(existsSync(join(styleAbs, 'accidental-review-write.txt')), false);
+  assert.equal(existsSync(join(root, 'accidental-review-write.txt')), false);
 });
 
 test('prepare idempotent re-prepare returns same base_commit and idempotent:true', (t) => {

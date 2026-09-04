@@ -271,6 +271,20 @@ test('SKILL.md bodies are sigil-free; sigils live only in the bootstrap file', (
   assert.match(read(claudeRoot, 'CLAUDE.md'), /\/fadeno-driver/);
 });
 
+test('runner surfaces prepare evaluative host fan-out before spawning agents', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'codex', repoRoot: root });
+
+  const runner = read(root, '.agents/skills/fadeno-runner/SKILL.md');
+  const driver = read(root, '.agents/skills/fadeno-driver/SKILL.md');
+  for (const body of [runner, driver]) {
+    assert.match(body, /tracked and untracked\/unignored changes/);
+    assert.match(body, /prepare ALL of them before spawning ANY agent/);
+    assert.match(body, /artifact_type: review-report/);
+    assert.match(body, /(?:nothing|not) auto-merge/);
+  }
+});
+
 test('existing bootstrap content is preserved; section appended once', (t) => {
   const root = tempRepo(t);
   writeFileSync(join(root, 'AGENTS.md'), '# My Project\n\nExisting instructions.\n');

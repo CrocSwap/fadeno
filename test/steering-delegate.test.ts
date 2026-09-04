@@ -149,6 +149,27 @@ test('delegate advisory is absent when no candidate matches (the original comman
   assert.match(resolution.detail, /deliver it through that executor's declared command fallback/);
 });
 
+test('delegate advisory does not send a locked host request to a command broker', (t) => {
+  const root = tempRepo(t);
+  const user = isolatedUser(t, root);
+  const { runId, dispatchId } = seedLockedRequest(root);
+  // Materialize the worker slot from a command route after the run has locked
+  // its request to luna. This is the exact shape that caused a broker to call
+  // resolve without --host-executor and receive the same delegate advice.
+  writeLocalDialState(root, { dials: { worker: { model: 'opus' } }, shadows: {}, legacyNote: null });
+  const applied = runSteeringApply({ repoRoot: root, target: 'codex', userPathOptions: user });
+  assert.equal(applied.materialization.worker?.kind, 'command-broker');
+  const workerPath = join(root, '.codex', 'agents', 'worker.toml');
+  assert.equal(readCodexAgentFile(workerPath)?.hostExecutor, null);
+
+  const resolution = runSteeringResolve({
+    repoRoot: root, archetype: 'worker', run: runId, dispatchId, userPathOptions: user,
+  });
+  assert.equal(resolution.mode, 'command');
+  assert.equal(resolution.delegate_to, undefined);
+  assert.match(resolution.detail, /deliver it through that executor's declared command fallback/);
+});
+
 /**
  * This test asserted the OPPOSITE until 2026-08-20, on the premise that a Codex
  * agent could only ever run as the identity its file was cut for — so a file
@@ -251,13 +272,10 @@ test('delegate advisory follows Codex\'s own project-over-user scope precedence'
 
   // Now a project-scope file exists too, cut for a DIFFERENT executor (same
   // archetype name). Codex loads ONLY this project file for "worker" — the
-  // user-scope file underneath it is never consulted — so the advisory must
-  // point at the PROJECT file, the one Codex would actually pick.
-  //
-  // It does not fall silent, and that is the 2026-08-20 correction: the
-  // project file says sol, the request says luna, and the spawn resolves an
-  // explicit value ahead of the file, so this agent delivers luna when told
-  // to. Only the archetype has to line up; the identity rides on the payload.
+  // matching user-scope file underneath it is invisible. Explicit model and
+  // effort values would override the project file's defaults, but they do not
+  // rewrite its developer instructions: it will still claim `sol` to the
+  // resolver. Offering it would therefore recurse, so the advisory is absent.
   writeLocalDialState(root, { dials: { worker: { model: 'sol' } }, shadows: {}, legacyNote: null });
   runSteeringApply({ repoRoot: root, target: 'codex', userPathOptions: user });
   const projectPath = join(root, '.codex', 'agents', 'worker.toml');
@@ -267,11 +285,8 @@ test('delegate advisory follows Codex\'s own project-over-user scope precedence'
     repoRoot: root, archetype: 'worker', run: runId, dispatchId, userPathOptions: user,
   });
   assert.equal(viaShadowed.mode, 'command');
-  assert.equal(viaShadowed.delegate_to?.agent_file, projectPath, 'names the file Codex actually loads');
-  assert.equal(viaShadowed.delegate_to?.scope, 'project');
-  // The snapshot's identity, never the shadowing file's `sol`.
-  assert.equal(viaShadowed.delegate_to?.model, 'gpt-5.6-luna');
-  assert.equal(viaShadowed.delegate_to?.reasoning_effort, 'xhigh');
+  assert.equal(viaShadowed.delegate_to, undefined);
+  assert.match(viaShadowed.detail, /declared command fallback/);
 });
 
 /**

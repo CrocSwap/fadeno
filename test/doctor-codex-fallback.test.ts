@@ -122,6 +122,38 @@ test('doctor stays silent when the command fallback ran but no native agent matc
   assert.equal(result.findings.some((f) => f.check === 'codex-agents-fallback-avoidable'), false);
 });
 
+test('doctor does not call a fallback avoidable when only a command broker is installed', (t) => {
+  const root = tempRepo(t);
+  const user = isolatedUser(t, root);
+  writeRun(root, '2026-01-01-0000-run', [fallbackRow('hd-1', 'luna', 'gpt-5.6-luna', 'xhigh')]);
+  const projectDir = codexProjectAgents(root);
+  writeFileSync(join(projectDir, 'worker.toml'), managed('0.6.1', [
+    'name = "worker"',
+    'model = "gpt-5.6-luna"',
+    'model_reasoning_effort = "high"',
+    'developer_instructions = """',
+    'Run `fadeno steering resolve --archetype worker --run <run-id> --dispatch-id <dispatch-id>`.',
+    '"""',
+    '',
+  ].join('\n')));
+
+  const result = runDoctor({ repoRoot: root, target: 'codex', userPathOptions: user });
+
+  assert.equal(result.findings.some((f) => f.check === 'codex-agents-fallback-avoidable'), false);
+});
+
+test('doctor does not call a fallback avoidable when the visible agent is for another executor', (t) => {
+  const root = tempRepo(t);
+  const user = isolatedUser(t, root);
+  writeRun(root, '2026-01-01-0000-run', [fallbackRow('hd-1', 'luna', 'gpt-5.6-luna', 'xhigh')]);
+  const projectDir = codexProjectAgents(root);
+  writeFileSync(join(projectDir, 'worker.toml'), managed('0.6.1', hostAgentBody('worker', 'sol', 'gpt-5.6-sol', 'high')));
+
+  const result = runDoctor({ repoRoot: root, target: 'codex', userPathOptions: user });
+
+  assert.equal(result.findings.some((f) => f.check === 'codex-agents-fallback-avoidable'), false);
+});
+
 /**
  * Inverted on 2026-08-20 with the rest of this feature. It previously asserted
  * silence, on the premise that an agent whose file had drifted could not have

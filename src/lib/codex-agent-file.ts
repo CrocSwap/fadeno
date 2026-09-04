@@ -173,12 +173,13 @@ export function effectiveCodexAgentCandidates(
  * and `model_reasoning_effort` explicitly at spawn time, taken from the run
  * snapshot, and any managed agent for the right role can carry it.
  *
- * That is also the safer source: the snapshot is immutable, while a file can
- * drift out from under the run. An earlier version of this function required
- * the file's baked `--host-executor` / `model` / `model_reasoning_effort` to
- * agree with the request, on the mistaken premise that a Codex agent could
- * only ever run as the identity it was cut for. It could not fire when a
- * spawn would plainly have worked, which is the failure this exists to remove.
+ * That is also the safer source for model and effort: the snapshot is
+ * immutable, while a file can drift out from under the run. The file's baked
+ * `--host-executor`, however, is behavioral rather than a Codex setting. Its
+ * developer instructions pass that value back to `steering resolve`; a
+ * command broker passes no value at all. Offering either kind for a different
+ * executor creates a recursive delegate advisory instead of delivering the
+ * assignment, so the baked executor must agree exactly.
  *
  * The ROLE still matters and is matched: an envelope can only be claimed as
  * the archetype it names, so the reviewer agent cannot take a worker's
@@ -191,9 +192,11 @@ export function effectiveCodexAgentCandidates(
 export function findSpawnableCodexAgent(
   candidates: CodexAgentCandidate[],
   archetype: string | null,
+  hostExecutor: string,
 ): CodexAgentCandidate | null {
   return candidates.find((candidate) =>
     (archetype == null || archetype === '*' || candidate.archetype === archetype) &&
-    candidate.state.managed,
+    candidate.state.managed &&
+    candidate.state.hostExecutor === hostExecutor,
   ) ?? null;
 }

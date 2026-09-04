@@ -445,10 +445,12 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
   // request is deliverable by whatever session is running and needs no
   // model-specific spawn to begin with.
   //
-  // Nor gated on the agent file's identity. Codex applies a subagent's file
-  // AFTER an explicit spawn value, so any managed agent for the right role can
-  // carry the snapshot's model and effort. Requiring the file to already say
-  // them made this silent in the common case.
+  // Model and effort are not gated on the agent file: Codex applies explicit
+  // spawn values ahead of the file defaults. The file's baked host executor is
+  // different — it controls what the agent's developer instructions pass back
+  // to this resolver. A command broker passes none, and a role agent cut for a
+  // different executor passes the wrong one; either would repeat this same
+  // delegate advice instead of executing the assignment.
   //
   // The mode is deliberately NOT changed to `host` here. A command broker also
   // passes no `--host-executor` (`renderCodexCommandBroker`), is frozen on
@@ -461,7 +463,7 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
     && executor.adapter === 'host' && request.model !== NEUTRAL_HOST_EXECUTOR
   ) {
     const candidates = effectiveCodexAgentCandidates(repoRoot, opts.userPathOptions);
-    const target = findSpawnableCodexAgent(candidates, archetype);
+    const target = findSpawnableCodexAgent(candidates, archetype, request.executor);
     if (target != null) {
       delegateTo = {
         archetype: target.state.name ?? target.archetype,

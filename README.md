@@ -316,7 +316,7 @@ fadeno drive <run-id>                           # engine: advance until terminal
 fadeno drive <run-id> --timeout 300             # override hard deadline (seconds; 0 disables 20-min default)
 fadeno cancel <run-id>                          # cancel the active engine attempt (SIGTERM to its executor group)
 fadeno decide <run-id> <option>                 # resolve a paused human decision, then re-drive
-fadeno dispatch-prepare <run-id> <dispatch-id> --isolate  # opt-in isolated worktree: .fadeno/local/host-worktrees/<run>/<dispatch-id> (workspace_mode: isolated)
+fadeno dispatch-prepare <run-id> <dispatch-id> --isolate  # opt-in worktree with the caller's dirty state replayed as its baseline
 fadeno dispatch-start <run-id> <dispatch-id> --agent-id <host-agent-id>
 fadeno dispatch-prompt <run-id> <dispatch-id> # exact immutable engine assignment envelope (isolated header includes workspace_mode: isolated when prepared)
 fadeno dispatch-progress <run-id> <dispatch-id> --file <status.json> --source agent

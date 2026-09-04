@@ -2,7 +2,8 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSyn
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { collectIsolatedDiff, isRegisteredWorktree, removeIsolatedWorktree, WORKSPACE_LEASE_LOCK_STALE_MS, WorkspaceLeaseError } from './workspace-lease.ts';
+import { collectIsolatedDiff, isRegisteredWorktree, removeIsolatedWorktree, withWorkspaceWindowLease, WORKSPACE_LEASE_LOCK_STALE_MS, WorkspaceLeaseError } from './workspace-lease.ts';
+import { applyWorkspaceBaseline, captureWorkspaceBaseline } from './workspace-baseline.ts';
 
 export const HOST_WORKSPACE_SCHEMA_VERSION = '1.0';
 export const HOST_WORKTREES_DIR = join('.fadeno', 'local', 'host-worktrees');
@@ -315,32 +316,65 @@ export function prepareHostWorkspace(opts: { repoRoot: string; run: string; disp
       const reason = rawRev || `exit ${rev.status ?? 'unknown'}`;
       throw new HostWorkspaceError(`could not resolve HEAD: ${String(reason).slice(0, 4000)}`);
     }
-    const baseCommit = String(rev.stdout).trim();
-    if (!/^[0-9a-f]{40}$/.test(baseCommit)) {
-      throw new HostWorkspaceError(`invalid base_commit from HEAD: ${baseCommit}`);
+    const headCommit = String(rev.stdout).trim();
+    if (!/^[0-9a-f]{40}$/.test(headCommit)) {
+      throw new HostWorkspaceError(`invalid base_commit from HEAD: ${headCommit}`);
     }
     mkdirSync(dirname(worktreeAbs), { recursive: true });
     try {
       spawnSync('git', ['worktree', 'prune'], { cwd: repoRoot, encoding: 'utf8' });
     } catch {}
-    const add = spawnSync('git', ['worktree', 'add', '--detach', worktreeAbs, baseCommit], { cwd: repoRoot, encoding: 'utf8' });
+    const add = spawnSync('git', ['worktree', 'add', '--detach', worktreeAbs, headCommit], { cwd: repoRoot, encoding: 'utf8' });
     if (add.error != null || add.status !== 0) {
       const raw2 = add.error?.message ?? (add.stderr != null ? String(add.stderr).trim() : '');
       const reason = raw2 || `exit ${add.status ?? 'unknown'}`;
       throw new HostWorkspaceError(`isolated worktree could not be created: ${String(reason).slice(0, 4000)}`);
     }
-    const now = opts.now ?? new Date();
-    const state: HostWorkspaceState = {
-      schema_version: HOST_WORKSPACE_SCHEMA_VERSION,
-      run: run,
-      dispatch_id: dispatchId,
-      workspace_mode: 'isolated',
-      workspace: worktreeRel,
-      base_commit: baseCommit,
-      prepared_at: now.toISOString(),
-    };
-    writeStateAtomic(repoRoot, state);
-    return { state, idempotent: false };
+    try {
+      // A detached worktree starts at clean HEAD, but a host reviewer must see
+      // the same tracked and untracked state as the coordinator that spawned
+      // it. Capture under the short read window so a concurrent merge-back
+      // cannot produce a torn baseline, then commit that replay in the
+      // worktree. The resulting commit is the actual base for later diff
+      // collection: the caller's pre-existing dirty work is input, not output.
+      const baseCommit = withWorkspaceWindowLease(
+        {
+          repoRoot,
+          holder: {
+            id: `baseline:host:${run}:${dispatchId}`,
+            kind: 'host-dispatch',
+            runId: run,
+            dispatchId,
+          },
+          mode: 'read',
+          ...(opts.now != null ? { now: opts.now } : {}),
+        },
+        () => applyWorkspaceBaseline(
+          repoRoot,
+          worktreeAbs,
+          captureWorkspaceBaseline(repoRoot),
+          `${run}:${dispatchId}`,
+          'host dispatch',
+        ),
+      );
+      const now = opts.now ?? new Date();
+      const state: HostWorkspaceState = {
+        schema_version: HOST_WORKSPACE_SCHEMA_VERSION,
+        run,
+        dispatch_id: dispatchId,
+        workspace_mode: 'isolated',
+        workspace: worktreeRel,
+        base_commit: baseCommit,
+        prepared_at: now.toISOString(),
+      };
+      writeStateAtomic(repoRoot, state);
+      return { state, idempotent: false };
+    } catch (err) {
+      try { removeIsolatedWorktree(repoRoot, worktreeAbs); } catch {}
+      if (err instanceof HostWorkspaceError) throw err;
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new HostWorkspaceError(`isolated host baseline could not be prepared: ${reason}`);
+    }
   });
 }
 
