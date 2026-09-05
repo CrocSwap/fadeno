@@ -15,9 +15,27 @@ All notable changes to Fadeno are documented here. The format follows
   the `$fadeno-host off` escape; it also denies a managed role agent whose file
   has drifted from its dial (`agent_file_drift`), since on Codex an agent
   file's `model`/`model_reasoning_effort` win over explicit spawn values and a
-  hook can therefore only refuse, never correct. In **either** mode every spawn
-  is recorded in `.fadeno/dispatches.jsonl`: `host_delivery` (now carrying
-  `agent_file` and `drift`) for managed spawns, and a new `native_spawn` row
+  hook can therefore only refuse, never correct. Drift is adjudicated for
+  **every host-adapter dial**, whatever lane `fadeno dial resolve` named: the
+  resolver reads the session's effort from `CLAUDE_EFFORT`, which Codex never
+  publishes, so a *pinned* host dial always answers `lane: command` with
+  `lane_reason: session effort unobserved` while the spawn runs in-host on the
+  agent file regardless. The file is the proof the resolver lacked — the same
+  substitution `decideLane` makes for `hostEffortProven` — so a file whose baked
+  `--host-executor` and identity match the dial is recorded as `lane: host`,
+  `lane_reason: host agent pins the same effort`, and the row carries the lane
+  the guard established rather than the one the resolver guessed. Only a
+  command-adapter dial skips the check, because a broker file bakes only the relay's own model and effort and no `--host-executor`; the dial's identity travels out of process in the dispatch argv, so nothing in that file can drift from it. A resolver that fails, times out, or exits 0 with
+  output the hook cannot read (an empty answer, non-JSON, or an object naming
+  no adapter) is refused in host mode too (`resolver_error`/`resolver_timeout`),
+  with the spawn error code — `ENOENT` for a `fadeno` that is nowhere to be
+  found — named in both the refusal text and the row. Classification of a
+  managed agent is exact: `agent_type` must be a bare name (no `/`, `\` or
+  `..`), and the file's `name` key must equal it, because Codex resolves a
+  custom agent by that key and not by its filename. In **either** mode every
+  spawn is recorded in `.fadeno/dispatches.jsonl`: `host_delivery` (now
+  carrying `agent_file`, `drift`, and the Claude row's own `model_applied`) for
+  managed spawns, and a new `native_spawn` row
   carrying `model_inherited` for generic ones — `fadeno dispatches` renders
   those as `[native] … [unsteered spawn]`. Before this, the Codex plugin
   registered no `PreToolUse` hook at all: a host session could spawn generic

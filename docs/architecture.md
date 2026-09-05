@@ -526,19 +526,37 @@ effort. Grok currently rejects the flag.
 The Codex side has one rung of that ladder, and it is a **guard rather than a
 rewrite**: `templates/codex/hooks/spawn-guard.mjs`, registered by the Codex
 plugin on `PreToolUse`/`Agent`. It classifies each `spawn_agent` by whether
-`agent_type` resolves to a managed role agent (`# fadeno:managed`, project
-`.codex/agents/<a>.toml` shadowing user `fadeno-<a>.toml`). While session-scoped
+`agent_type` resolves to a managed role agent, and the test is exact: the
+`# fadeno:managed` header, project `.codex/agents/<a>.toml` shadowing user
+`fadeno-<a>.toml`, and the file's own `name` key equal to the spawned type —
+Codex resolves a custom agent by that key, not by its filename, so
+`fadeno-worker` is not itself a spawnable type and a `fadeno-worker.toml` that
+says `name = "reviewer"` is not a worker. While session-scoped
 host mode is on, a **generic** spawn — `default`, `explorer`, any unmarked
 custom agent — is denied with predicate `generic_spawn_in_host_mode`, naming the
 model it would have inherited from the parent session; `$fadeno-host off` lifts
 the refusal. A **managed** spawn is resolved through `fadeno dial resolve` and
-drift-checked: if the agent file's `model`, `model_reasoning_effort`, or baked
-`--host-executor` disagrees with the dial, host mode denies with
+drift-checked. Drift is adjudicated for **every host-adapter dial**, whatever
+lane the resolver named: `dial resolve` reads the session's effort from
+`CLAUDE_EFFORT`, which Codex never publishes, so a *pinned* host dial always
+answers `lane: command` with `lane_reason: session effort unobserved` while the
+spawn runs in-host on the agent file anyway. The file is the proof the resolver
+lacked — the same substitution `decideLane` makes for `hostEffortProven` — so a
+file whose baked `--host-executor` and identity match the dial records
+`lane: host`, `lane_reason: host agent pins the same effort`, and the row
+carries **the lane the guard established**, not the one the resolver guessed.
+Only a command-adapter dial skips the check, because a broker file bakes only the relay's own model and effort and no `--host-executor`; the dial's identity travels out of process in the dispatch argv, so nothing in that file can drift from it. If the agent file's `model`, `model_reasoning_effort`,
+or baked `--host-executor` disagrees with the dial, host mode denies with
 `agent_file_drift` and the fix is `fadeno steering apply --codex` plus a fresh
-session. The guard never rewrites a spawn, because on Codex **a custom agent
+session; a resolver that fails, times out, or exits 0 with output the hook
+cannot read is denied in host mode too (`resolver_error`/`resolver_timeout`),
+because an identity nothing established is not a verified one.
+The guard never rewrites a spawn, because on Codex **a custom agent
 file's `model`/`model_reasoning_effort` win over explicit spawn values** — a
 stamped model would change what the evidence claims, not what runs. Every spawn
-is recorded in either mode: `host_delivery` (with `agent_file` and `drift`) for
+is recorded in either mode: `host_delivery` (with `agent_file`, `drift`, and
+the Claude row's own `model_applied` — the file's model when it declares one,
+else the inherited session model for a `current-host` slot) for
 managed ones, and a `native_spawn` row carrying `model_inherited` for generic
 ones that host mode allowed, so an unsteered subagent never again reads as no
 subagent at all. Adding this hook changes `hooks/hooks.json`, so an upgraded
