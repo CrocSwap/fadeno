@@ -35,9 +35,29 @@ const bundled = typeof process.env.CLAUDE_PLUGIN_ROOT === 'string'
   ? join(process.env.CLAUDE_PLUGIN_ROOT, 'bin', 'fadeno')
   : null;
 const cli = bundled != null && existsSync(bundled) ? bundled : 'fadeno';
-const requested = event.tool_input.subagent_type;
-if (typeof requested !== 'string') finish(null);
-const bare = requested.split(':').at(-1);
+// The type the caller asked for, or null when it asked for none. Claude's
+// Agent tool requires only `description` and `prompt`: omitting
+// `subagent_type` starts the harness's default general-purpose subagent. This
+// used to `finish(null)` on the spot, which meant a host refused for naming
+// `general-purpose` could route around the refusal by simply dropping the
+// field — the exact substitution host mode exists to stop. A missing type is
+// therefore the most generic spawn there is, not an unrecognized event, and it
+// falls into the generic block below like any other. (The Codex guard has
+// always read a missing `agent_type` this way.)
+const requested =
+  typeof event.tool_input.subagent_type === 'string' && event.tool_input.subagent_type.length > 0
+    ? event.tool_input.subagent_type
+    : null;
+const bare = requested == null ? null : requested.split(':').at(-1);
+
+// The digest the pair roll is keyed on. Supplying it to the resolver is what
+// lets it answer "is this spawn a pair?" for THIS prompt rather than in
+// general — and the kernel re-derives the same answer at dispatch time, so
+// nothing has to be threaded through the relay. Computed up here because every
+// path below records it, including the two generic-spawn paths that never
+// reach the resolver at all.
+const promptText = typeof event.tool_input.prompt === 'string' ? event.tool_input.prompt : '';
+const promptDigest = promptText.length > 0 ? createHash('sha256').update(promptText).digest('hex') : null;
 
 // Relay-fidelity attestation: whenever a subtask heads to a dispatch proxy,
 // stash the spawn-side prompt digest. The kernel consumes a matching entry at
@@ -71,7 +91,7 @@ function stashRelay() {
 // proxy like any other archetype spawn: a host slot rewrites back to the
 // in-session agent rather than shelling out to a subprocess of this same
 // harness, which re-enters this same steering one level down.
-const explicitProxy = /^dispatch-(worker|reviewer|judge|director)$/.test(bare);
+const explicitProxy = bare != null && /^dispatch-(worker|reviewer|judge|director)$/.test(bare);
 // Only agents that NAME an archetype are steered. `general-purpose` used to map
 // to `worker` and must not: it is the harness's catch-all, the default when a
 // director wants a subagent at all, so capturing it turned every generic spawn
@@ -88,7 +108,6 @@ const archetype = explicitProxy
   : bare === 'worker' || bare === 'reviewer' || bare === 'judge' || bare === 'director'
     ? bare
     : null;
-if (archetype == null) finish(null); // general-purpose, Explore, Plan, and unrelated specialists stay unsteered.
 
 /**
  * Leave the spawn exactly as the director asked. A named proxy still lands on
@@ -100,20 +119,272 @@ function passThrough() {
   finish(null);
 }
 
-// Resolve through a structured CLI surface. The same neutral dial can be
-// host-delivered in Claude and command-delivered in Codex (or vice versa).
-// The digest the pair roll is keyed on. Supplying it is what lets the
-// resolver answer "is this spawn a pair?" for THIS prompt rather than in
-// general — and the kernel re-derives the same answer at dispatch time, so
-// nothing has to be threaded through the relay.
-const promptText = typeof event.tool_input.prompt === 'string' ? event.tool_input.prompt : '';
-const promptDigest = promptText.length > 0 ? createHash('sha256').update(promptText).digest('hex') : null;
-const resolveArgv = ['dial', 'resolve', '--archetype', archetype];
-if (promptDigest != null) resolveArgv.push('--prompt-sha256', promptDigest);
+// --- refusal and evidence plumbing -------------------------------------------
+// Everything below is declared ABOVE the first deny path. That used to be the
+// resolver-error branch; it is now the generic-spawn refusal a few lines down,
+// which runs before `fadeno dial resolve` is consulted at all — so a hoisted
+// writer called from up there must not find one of these consts still in its
+// temporal dead zone.
+
 // How long a spawn gets to answer before it is killed. Named because the
 // refusal row records it: a reader who sees `resolver_timeout` immediately
 // wants to know whether the budget that expired was ten seconds or one.
 const RESOLVE_TIMEOUT_MS = 10_000;
+
+// The session's own effort, published by the harness to hook commands and
+// Bash and already resolved past any per-model or per-org downgrade. Read
+// here rather than at the lane decision below because the deny paths need it
+// too, and the earliest of them runs before any resolver output exists.
+const envEffort =
+  typeof process.env.CLAUDE_EFFORT === 'string' && process.env.CLAUDE_EFFORT.trim() !== ''
+    ? process.env.CLAUDE_EFFORT.trim()
+    : null;
+
+// Declared before the first deny path so `recordHostRefusal` can read it
+// without hitting the temporal dead zone: the function is called from points
+// above the assignment below, where the binding exists but is still unset.
+let slot;
+
+/**
+ * Longest refusal reason written to the evidence log. The kernel truncates
+ * its stderr excerpts rather than pouring an executor's whole diagnostic
+ * stream into an append-only file; a resolver's stderr deserves the same
+ * discipline. The actionable text still reaches the caller in full — this
+ * bound is on the trace, not on the denial.
+ */
+const REFUSAL_REASON_MAX = 400;
+
+/**
+ * Append one evidence row. Best-effort in both directions: a hook must never
+ * be the thing that creates a `.fadeno/` tree in a repo that opted out, and a
+ * failed write must never change the decision the hook is here to make.
+ */
+function appendRow(row) {
+  if (!existsSync(join(cwd, '.fadeno'))) return; // not a Fadeno repo
+  try {
+    appendFileSync(join(cwd, '.fadeno', 'dispatches.jsonl'), `${JSON.stringify(row)}\n`);
+  } catch {
+    // best-effort, exactly like every other write in this hook: a denial must
+    // still deny even if the evidence write throws.
+  }
+}
+
+/**
+ * Evidence for a hook-side DENIAL. The kernel writes `dispatch_refused` for
+ * its own refusals and this hook writes `host_delivery` for the spawns it
+ * lets through, but a spawn this hook denies never reaches either — so
+ * without this row a repo where every worker spawn is being denied reads
+ * exactly like a repo where nobody spawned anything.
+ *
+ * Deliberately NOT written: a prompt snapshot. Nothing was delivered, and a
+ * denial is the failure mode that repeats — a file per denial would litter
+ * `.fadeno/local/prompts/` in exactly the loop this row exists to make
+ * visible. `prompt_sha256` is enough to correlate a later successful retry.
+ *
+ * Field discipline: every key below is always present, and a value this hook
+ * could not observe is recorded as `null` rather than omitted, so the
+ * predicates produce the same row shape and a reader can diff them. Keys for
+ * things that did not HAPPEN (a transport, a prompt snapshot) are absent
+ * rather than null.
+ */
+function recordHostRefusal(predicate, reason) {
+  // One line, bounded: the row is read back into a single-line evidence
+  // view, and a resolver's stderr is neither short nor single-line.
+  const flat = String(reason).replace(/\s+/g, ' ').trim();
+  appendRow({
+    // Same duplicated literal, and the same reason, as recordHostDelivery
+    // below: this script has no import path back into the CLI, so both
+    // writers stamp DISPATCHES_FORMAT by hand. Bump them together.
+    format: '1.0',
+    timestamp: new Date().toISOString(),
+    event: 'host_refused',
+    fadeno_version: HOOK_VERSION,
+    hook_version: HOOK_VERSION,
+    archetype, // null on a generic spawn: it named no archetype to refuse for
+    agent_type: requested, // exactly what the director asked for
+    // The kernel's refusal shape, key for key. A closed vocabulary, not
+    // free text — four values, one per deny path this hook has:
+    //   resolver_error             — `fadeno dial resolve` exited non-zero
+    //                                (or never started at all)
+    //   resolver_timeout           — it was killed for not answering in time
+    //   restart_required           — it answered, with no lane this session
+    //                                can deliver
+    //   generic_spawn_in_host_mode — a non-archetype subagent while host mode
+    //                                is on (the Codex guard's predicate, same
+    //                                spelling: one name across both harnesses)
+    refusal: {
+      predicate,
+      message: flat.length > REFUSAL_REASON_MAX ? `${flat.slice(0, REFUSAL_REASON_MAX - 1)}…` : flat,
+    },
+    // The budget that expired, on the one predicate it describes. Derived
+    // here rather than passed in, so the recorded number cannot drift
+    // from the timeout the spawn was actually given.
+    timeout_ms: predicate === 'resolver_timeout' ? RESOLVE_TIMEOUT_MS : null,
+    // Identity as far as it got. On the resolver-error and generic-spawn
+    // paths there is no slot at all, so all of these read null — which is
+    // itself the evidence: the spawn was denied before anything resolved.
+    executor: typeof slot?.executor === 'string' ? slot.executor : null,
+    model: typeof slot?.model === 'string' ? slot.model : null,
+    model_override: event.tool_input.model ?? null,
+    effort: typeof slot?.effort === 'string' ? slot.effort : null,
+    effort_pinned: typeof slot?.effort_pinned === 'boolean' ? slot.effort_pinned : null,
+    session_effort:
+      envEffort ??
+      (typeof slot?.session_effort === 'string' && slot.session_effort.length > 0
+        ? slot.session_effort
+        : null),
+    lane_reason:
+      typeof slot?.lane_reason === 'string' && slot.lane_reason.length > 0 ? slot.lane_reason : null,
+    prompt_sha256: promptDigest,
+  });
+}
+
+/**
+ * The last sentence of EVERY refusal this hook writes, appended in `deny()`
+ * rather than at each call site so a deny path cannot be added without it.
+ *
+ * Host mode's policy is that a Fadeno failure is a user-facing event: the
+ * 2026-09-04 basanos receipt is a host that met a failed dispatch, wrote a
+ * dutiful feedback entry, and then quietly spawned generic subagents on a
+ * frontier model instead of telling the user. A refusal text is the one thing
+ * the model is guaranteed to read at that moment, so it carries the
+ * instruction. The Codex guard appends the identical sentence.
+ */
+const REPORT_REFUSAL = 'Report this refusal to the user instead of routing around it.';
+
+/** Refuse the spawn, with the reason the caller will read. */
+function deny(reason) {
+  const text = String(reason).trimEnd();
+  finish({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      // The reason is not flattened: a resolver's stderr is the diagnosis and
+      // reads better with its own line breaks. Only the trailing sentence is
+      // guaranteed, and a reason that stopped mid-clause gets its full stop
+      // back first so the two do not run together.
+      permissionDecisionReason: `${text}${/[.!?…]$/.test(text) ? '' : '.'} ${REPORT_REFUSAL}`,
+    },
+  });
+}
+
+// --- generic (non-archetype) spawns ------------------------------------------
+
+/**
+ * Whether the user turned Fadeno host mode on for THIS session.
+ *
+ * The marker path is duplicated from `templates/common/plugin/host-mode-hook.mjs`
+ * — same env vars, same sha256 of `session_id`, same `<root>/host-mode/<key>.enabled`
+ * layout — and from the Codex guard, which duplicates it for the same reason: a
+ * standalone hook script has no import path into the rest of the plugin. Change
+ * one, change all three.
+ */
+function hostModeEnabled() {
+  const root = process.env.PLUGIN_DATA || process.env.CLAUDE_PLUGIN_DATA;
+  const sessionId = typeof event.session_id === 'string' ? event.session_id : '';
+  if (typeof root !== 'string' || root.trim() === '' || sessionId === '') return false;
+  const key = createHash('sha256').update(sessionId).digest('hex');
+  // `root`, not `root.trim()`: `markerPath()` in the twin joins the untrimmed
+  // value, so that is the path the marker is WRITTEN to. Trimming here would
+  // send a reader looking somewhere the writer never wrote. The trim above is
+  // only the emptiness check, exactly as the twin does it.
+  return existsSync(join(root, 'host-mode', `${key}.enabled`));
+}
+
+/**
+ * The LOCALLY managed role agents this repo/user has, for the refusal text.
+ * `hostTarget` is declared further down and hoisted to here: naming the same
+ * lookup the delivery path uses means a refusal can only ever suggest an agent
+ * a steered spawn would really land on.
+ *
+ * Empty is the ordinary case, not a broken one: a plugin-only install has no
+ * `<!-- fadeno:managed` file anywhere, and its role agents are the plugin's own
+ * `fadeno:worker`/`fadeno:reviewer`/`fadeno:judge` — which is exactly what the
+ * foot of this file falls back to. So the empty branch of the refusal names
+ * those rather than a command: `fadeno steering apply --claude` no longer
+ * writes any agent (see the retired-grid section of `src/commands/doctor.ts`),
+ * so advising it would send the host to run a no-op and conclude Fadeno has
+ * nothing to delegate to.
+ */
+function availableRoleAgents() {
+  return ['worker', 'reviewer', 'judge'].filter((name) => hostTarget(name) != null);
+}
+
+// A spawn that names no archetype. Steering never rewrote these — the catch-all
+// is not a third spelling of `worker` — but "not rewritten" used to mean "not
+// seen": nothing was recorded and nothing was refused. Host mode changes what
+// that silence costs. The 2026-09-04 basanos receipt is a Codex host session
+// that answered a failed command lane with three generic subagents on the
+// parent's frontier model, and the Codex guard now refuses exactly that. The
+// same user, on the same task, must not get a different answer from Claude, so
+// this hook refuses it too — with the same predicate, and the same escape.
+if (archetype == null) {
+  if (!hostModeEnabled()) {
+    // Host mode off: Fadeno states no opinion on generic subagents, so the
+    // spawn goes through untouched — but it is recorded, because "nobody
+    // spawned anything" and "somebody spawned something Fadeno never steered"
+    // must not read identically in the log.
+    appendRow({
+      format: '1.0',
+      timestamp: new Date().toISOString(),
+      event: 'native_spawn',
+      fadeno_version: HOOK_VERSION,
+      hook_version: HOOK_VERSION,
+      harness: 'claude',
+      agent_type: requested, // null when the caller named none at all
+      model_requested: event.tool_input.model ?? null,
+      // Never observable here: a Claude PreToolUse event carries no session
+      // model, so unlike the Codex guard this hook cannot say what a spawn
+      // that named none of its own will inherit. Null rather than omitted,
+      // so the two harnesses' rows still diff field for field.
+      model_inherited: null,
+      // What the CALLER asked for, which is the Codex row's meaning of this
+      // key — and on Claude always null, because the Agent tool has no effort
+      // parameter to ask with. The session's own level is a different fact and
+      // goes under its own name below, the way `host_refused` already records
+      // it; one key must not mean "requested" on one harness and "observed" on
+      // the other.
+      reasoning_effort: null,
+      session_effort: envEffort,
+      transport: 'host',
+      // No snapshot file: a generic spawn is not a Fadeno delivery, and the
+      // digest is enough to correlate one against a later dispatch of the
+      // same prompt.
+      prompt_sha256: promptDigest,
+    });
+    finish(null);
+  }
+  const available = availableRoleAgents();
+  const requestedModel =
+    typeof event.tool_input.model === 'string' && event.tool_input.model.length > 0
+      ? event.tool_input.model
+      : null;
+  recordHostRefusal(
+    'generic_spawn_in_host_mode',
+    `generic subagent_type ${requested ?? '(omitted)'} refused; would have run on ` +
+      `${requestedModel ?? "this session's model"}`,
+  );
+  deny(
+    `fadeno: host mode is on for this session, and it refuses generic (non-archetype) subagents. ` +
+      `${requested != null
+        ? `This spawn asked for subagent_type "${requested}", which names no Fadeno archetype`
+        : 'This spawn named no subagent_type at all, which starts the harness\'s default ' +
+          'general-purpose subagent'}` +
+      `, so it would ` +
+      `have run on ${requestedModel != null ? `the model it named (${requestedModel})` : "the session's model"} ` +
+      `with no dial, no resolved identity, and no evidence row naming what ran. ` +
+      `${available.length > 0
+        ? `Managed role agents available here: ${available.join(', ')}. Spawn one of those instead`
+        : 'Spawn one of this plugin\'s role agents instead: fadeno:worker, fadeno:reviewer, fadeno:judge'}` +
+      ` (run \`fadeno dial\` to see the identity each one carries), or route the work through a Fadeno ` +
+      `playbook. To allow generic subagents again for the rest of this session, run \`/fadeno:host off\`.`,
+  );
+}
+
+// Resolve through a structured CLI surface. The same neutral dial can be
+// host-delivered in Claude and command-delivered in Codex (or vice versa).
+const resolveArgv = ['dial', 'resolve', '--archetype', archetype];
+if (promptDigest != null) resolveArgv.push('--prompt-sha256', promptDigest);
 const resolution = spawnSync(cli, resolveArgv, {
   cwd,
   env: { ...process.env, FADENO_HARNESS: 'claude' },
@@ -135,108 +406,6 @@ const timedOut =
   resolution.status == null &&
   (resolution.error?.code === 'ETIMEDOUT' || resolution.signal != null);
 
-// The session's own effort, published by the harness to hook commands and
-// Bash and already resolved past any per-model or per-org downgrade. Read
-// here rather than at the lane decision below because both deny paths need
-// it too, and the earlier of them runs before any resolver output exists.
-const envEffort =
-  typeof process.env.CLAUDE_EFFORT === 'string' && process.env.CLAUDE_EFFORT.trim() !== ''
-    ? process.env.CLAUDE_EFFORT.trim()
-    : null;
-
-// Declared before the first deny path so `recordHostRefusal` can read it
-// without hitting the temporal dead zone: the function is called from a point
-// above the assignment below, where the binding exists but is still unset.
-let slot;
-
-/**
- * Longest refusal reason written to the evidence log. The kernel truncates
- * its stderr excerpts rather than pouring an executor's whole diagnostic
- * stream into an append-only file; a resolver's stderr deserves the same
- * discipline. The actionable text still reaches the caller in full — this
- * bound is on the trace, not on the denial.
- */
-const REFUSAL_REASON_MAX = 400;
-
-/**
- * Evidence for a hook-side DENIAL. The kernel writes `dispatch_refused` for
- * its own refusals and this hook writes `host_delivery` for the spawns it
- * lets through, but a spawn this hook denies never reaches either — so
- * without this row a repo where every worker spawn is being denied reads
- * exactly like a repo where nobody spawned anything.
- *
- * Deliberately NOT written: a prompt snapshot. Nothing was delivered, and a
- * denial is the failure mode that repeats — a file per denial would litter
- * `.fadeno/local/prompts/` in exactly the loop this row exists to make
- * visible. `prompt_sha256` is enough to correlate a later successful retry.
- *
- * Field discipline: every key below is always present, and a value this hook
- * could not observe is recorded as `null` rather than omitted, so the two
- * predicates produce the same row shape and a reader can diff them. Keys for
- * things that did not HAPPEN (a transport, a prompt snapshot) are absent
- * rather than null.
- */
-function recordHostRefusal(predicate, reason) {
-  if (!existsSync(join(cwd, '.fadeno'))) return; // not a Fadeno repo
-  try {
-    // One line, bounded: the row is read back into a single-line evidence
-    // view, and a resolver's stderr is neither short nor single-line.
-    const flat = String(reason).replace(/\s+/g, ' ').trim();
-    appendFileSync(
-      join(cwd, '.fadeno', 'dispatches.jsonl'),
-      `${JSON.stringify({
-        // Same duplicated literal, and the same reason, as recordHostDelivery
-        // below: this script has no import path back into the CLI, so both
-        // writers stamp DISPATCHES_FORMAT by hand. Bump them together.
-        format: '1.0',
-        timestamp: new Date().toISOString(),
-        event: 'host_refused',
-        fadeno_version: HOOK_VERSION,
-        hook_version: HOOK_VERSION,
-        archetype,
-        agent_type: requested, // exactly what the director asked for
-        // The kernel's refusal shape, key for key. A closed vocabulary, not
-        // free text — three values, one per deny path this hook has:
-        //   resolver_error    — `fadeno dial resolve` exited non-zero (or
-        //                       never started at all)
-        //   resolver_timeout  — it was killed for not answering in time
-        //   restart_required  — it answered, with no lane this session can
-        //                       deliver
-        refusal: {
-          predicate,
-          message:
-            flat.length > REFUSAL_REASON_MAX ? `${flat.slice(0, REFUSAL_REASON_MAX - 1)}…` : flat,
-        },
-        // The budget that expired, on the one predicate it describes. Derived
-        // here rather than passed in, so the recorded number cannot drift
-        // from the timeout the spawn was actually given.
-        timeout_ms: predicate === 'resolver_timeout' ? RESOLVE_TIMEOUT_MS : null,
-        // Identity as far as it got. On the resolver-error path there is no
-        // slot at all, so all of these read null — which is itself the
-        // evidence: the spawn was denied before anything was resolved.
-        executor: typeof slot?.executor === 'string' ? slot.executor : null,
-        model: typeof slot?.model === 'string' ? slot.model : null,
-        model_override: event.tool_input.model ?? null,
-        effort: typeof slot?.effort === 'string' ? slot.effort : null,
-        effort_pinned: typeof slot?.effort_pinned === 'boolean' ? slot.effort_pinned : null,
-        session_effort:
-          envEffort ??
-          (typeof slot?.session_effort === 'string' && slot.session_effort.length > 0
-            ? slot.session_effort
-            : null),
-        lane_reason:
-          typeof slot?.lane_reason === 'string' && slot.lane_reason.length > 0
-            ? slot.lane_reason
-            : null,
-        prompt_sha256: promptDigest,
-      })}\n`,
-    );
-  } catch {
-    // best-effort, exactly like every other write in this hook: a denial must
-    // still deny even if the evidence write throws.
-  }
-}
-
 // A resolver error used to fall through to an unsteered host spawn —
 // substituting a different executor for a proxy-bound archetype. Deny
 // instead. Unreadable stdout (exit 0, not JSON) still fail-opens below.
@@ -254,13 +423,7 @@ if (resolution.status !== 0) {
       ? stderr
       : 'fadeno dial resolve failed; refusing a spawn no dial slot steered.';
   recordHostRefusal(timedOut ? 'resolver_timeout' : 'resolver_error', reason);
-  finish({
-    hookSpecificOutput: {
-      hookEventName: 'PreToolUse',
-      permissionDecision: 'deny',
-      permissionDecisionReason: reason,
-    },
-  });
+  deny(reason);
 }
 try {
   slot = JSON.parse(resolution.stdout ?? '');
@@ -326,21 +489,16 @@ if (lane === 'restart_required') {
     `no lane for ${executor}${wanted != null ? ` at effort ${wanted}` : ''}; session effort ` +
       `${sessionEffort ?? 'unknown'}${laneReason != null ? `: ${laneReason}` : ''}`,
   );
-  finish({
-    hookSpecificOutput: {
-      hookEventName: 'PreToolUse',
-      permissionDecision: 'deny',
-      permissionDecisionReason:
-        `fadeno: this session cannot deliver the ${archetype} dial (${executor}` +
-        `${wanted != null ? ` at effort ${wanted}` : ''}; session effort ` +
-        `${sessionEffort ?? 'unknown'})${laneReason != null ? `: ${laneReason}` : ''}. ` +
-        'It also has no command-lane fallback to run out of process, and a hook cannot ' +
-        'restart a session, so refusing rather than spawning a different identity. Fix by ' +
-        `one of: start a session${wanted != null ? ` at effort ${wanted}` : ' that matches the dial'}; ` +
-        `re-dial without the effort pin (fadeno dial ${archetype} <ref>); or point the dial at an ` +
-        'executor that has a command fallback.',
-    },
-  });
+  deny(
+    `fadeno: this session cannot deliver the ${archetype} dial (${executor}` +
+      `${wanted != null ? ` at effort ${wanted}` : ''}; session effort ` +
+      `${sessionEffort ?? 'unknown'})${laneReason != null ? `: ${laneReason}` : ''}. ` +
+      'It also has no command-lane fallback to run out of process, and a hook cannot ' +
+      'restart a session, so refusing rather than spawning a different identity. Fix by ' +
+      `one of: start a session${wanted != null ? ` at effort ${wanted}` : ' that matches the dial'}; ` +
+      `re-dial without the effort pin (fadeno dial ${archetype} <ref>); or point the dial at an ` +
+      'executor that has a command fallback.',
+  );
 }
 // A selected pair takes the command lane on BOTH arms. An in-session primary
 // cannot be isolated, measured, or diffed the way its challenger is, so a

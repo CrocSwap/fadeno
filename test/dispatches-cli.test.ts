@@ -218,6 +218,41 @@ test('dispatches: a native_spawn row renders as an unsteered spawn on its inheri
   assert.ok(!line.includes('[never attested]'));
 });
 
+test('dispatches: a native spawn that named its own model does not claim it overrode an unobserved one', (t) => {
+  const root = seedLog(t, [
+    {
+      format: '1.0',
+      timestamp: '2026-09-04T22:31:00.000Z',
+      event: 'native_spawn',
+      hook_version: '0.6.2',
+      harness: 'claude',
+      agent_type: 'Explore',
+      model_requested: 'opus',
+      // Null because the writer could not observe it: a Claude `PreToolUse`
+      // event publishes no session model. Reading that as "different from
+      // opus" once rendered `opus → opus` — an override against nothing.
+      model_inherited: null,
+      // The caller asked for no effort (the Agent tool has no such parameter);
+      // the session's own level is the observed fact, under its own key.
+      reasoning_effort: null,
+      session_effort: 'medium',
+      transport: 'host',
+      prompt_sha256: 'b'.repeat(64),
+    },
+  ]);
+  const entry = runDispatches({ repoRoot: root }).entries[0]!;
+  assert.equal(entry.kind, 'native');
+  assert.equal(entry.model, 'opus');
+  assert.equal(entry.modelOverride, null);
+  assert.equal(entry.reasoningEffort, null);
+  assert.equal(entry.sessionEffort, 'medium');
+  const line = runDispatches({ repoRoot: root }).lines[0]!;
+  assert.ok(!line.includes('→'));
+  // Rendered in the words of what it is: an observation of the session, not a
+  // request the caller made. `effort medium` would claim the latter.
+  assert.ok(line.includes('session effort medium'), line);
+});
+
 test('dispatches: host_delivery rows render one entry each, with model_override', (t) => {
   const root = seedLog(t, [
     hostRow({ model_override: 'sonnet' }),

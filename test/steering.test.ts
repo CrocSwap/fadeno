@@ -149,16 +149,32 @@ function writeFakeFadeno(root: string, output: string, exitCode = 0): string {
   return bin;
 }
 
+/** The session id the host-mode cases below key their marker on. */
+const HOST_SESSION = 'steering-session';
+
+/**
+ * `PLUGIN_DATA`/`CLAUDE_PLUGIN_DATA` are always pinned to a temp root, never
+ * inherited: host mode is a marker file under that root, so a developer
+ * running the suite from inside a host-mode session must not be able to flip
+ * what these tests assert.
+ */
 function runClaudeSteering(
   root: string,
   event: Record<string, unknown>,
   fadenoOutput: string,
+  options: { hostMode?: boolean } = {},
 ): string {
   const bin = writeFakeFadeno(root, fadenoOutput);
+  const data = join(root, 'plugin-data');
+  mkdirSync(join(data, 'host-mode'), { recursive: true });
+  if (options.hostMode === true) {
+    // Presence is the whole signal, exactly as `host-mode-hook.mjs` writes it.
+    writeFileSync(join(data, 'host-mode', `${sha256Hex(HOST_SESSION)}.enabled`), 'enabled\n');
+  }
   const script = join(root, '.fadeno', 'local', 'claude-dispatch-steering.mjs');
   const result = spawnSync(process.execPath, [script], {
     cwd: root,
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}`, PLUGIN_DATA: data, CLAUDE_PLUGIN_DATA: data },
     input: JSON.stringify(event),
     encoding: 'utf8',
   });
@@ -200,7 +216,29 @@ test('Claude steering rewrites worker-shaped Agent input and preserves Explore',
   assert.equal(runClaudeSteering(root, explore, '{"adapter":"command"}'), '');
 });
 
-test('Claude steering leaves the general-purpose catch-all alone', (t) => {
+/**
+ * A generic (non-archetype) spawn event, the harness's own catch-all shape.
+ * `null` omits `subagent_type` entirely — the Agent tool requires only
+ * `description` and `prompt`, and a call without a type starts the default
+ * general-purpose subagent, so it is the most generic spawn there is.
+ */
+function genericSpawn(root: string, subagentType: string | null): Record<string, unknown> {
+  return {
+    session_id: HOST_SESSION,
+    cwd: root,
+    tool_name: 'Agent',
+    tool_input: {
+      prompt: 'Analyze metrics.py and explain why marketability falls as the margin grows.',
+      description: 'Analyze',
+      ...(subagentType == null ? {} : { subagent_type: subagentType }),
+    },
+  };
+}
+
+/** Every spelling of "no archetype named", including naming nothing at all. */
+const GENERIC_TYPES: Array<string | null> = ['general-purpose', 'Explore', 'Plan', null];
+
+test('Claude steering leaves the general-purpose catch-all alone outside host mode', (t) => {
   const root = tempRepo(t);
   runInit({ target: 'claude', repoRoot: root, withSteering: true });
   // `general-purpose` is the harness's default subagent — what a director
@@ -209,19 +247,82 @@ test('Claude steering leaves the general-purpose catch-all alone', (t) => {
   // into an external dispatch; a 2026-08-13 dogfood then watched the proxy
   // guard hold the relay contract against the analysis it was asked to do, so
   // the work simply did not happen. Naming an archetype is opt-in.
-  const generic = {
-    cwd: root,
-    tool_name: 'Agent',
-    tool_input: {
-      prompt: 'Analyze metrics.py and explain why marketability falls as the margin grows.',
-      description: 'Analyze',
-      subagent_type: 'general-purpose',
-    },
-  };
-  assert.equal(runClaudeSteering(root, generic, '{"adapter":"command"}'), '');
-  // Unsteered means untouched: no relay attestation, no host_delivery row.
+  for (const type of GENERIC_TYPES) {
+    assert.equal(runClaudeSteering(root, genericSpawn(root, type), '{"adapter":"command"}'), '');
+  }
+  // Unsteered means unrewritten: no relay attestation, no host_delivery row,
+  // no proxy. It does NOT mean unrecorded — one `native_spawn` row each, so an
+  // unsteered spawn never again reads as no spawn at all.
   assert.equal(exists(root, '.fadeno/local/pending-relays.jsonl'), false);
-  assert.equal(exists(root, '.fadeno/dispatches.jsonl'), false);
+  const written = read(root, '.fadeno/dispatches.jsonl')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.deepEqual(written.map((row) => row.event), written.map(() => 'native_spawn'));
+  // The omitted type records as null rather than as an invented default.
+  assert.deepEqual(written.map((row) => row.agent_type), ['general-purpose', 'Explore', 'Plan', null]);
+  assert.equal(written[0]!.hook_version, packageVersion()); // the init-emitted copy
+});
+
+test('Claude steering refuses the same catch-all inside host mode', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: root, withSteering: true });
+  // The symmetric half of the Codex spawn guard. A user who enabled host mode
+  // asked for Fadeno delegation; answering a refused or failed dispatch with a
+  // generic subagent on the session's own model is the substitution the
+  // 2026-09-04 basanos receipt is made of, and it must not be available on one
+  // harness and denied on the other.
+  for (const type of GENERIC_TYPES) {
+    const decision = JSON.parse(
+      runClaudeSteering(root, genericSpawn(root, type), '{"adapter":"command"}', { hostMode: true }),
+    ) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } };
+    assert.equal(decision.hookSpecificOutput.permissionDecision, 'deny');
+    // Dropping the field is not a way around the refusal: it is refused by
+    // the same rule, and the reason says which of the two shapes it was.
+    assert.match(
+      decision.hookSpecificOutput.permissionDecisionReason,
+      type == null ? /named no subagent_type at all/ : new RegExp(type),
+    );
+    // The escape, spelled as the user would type it in Claude Code.
+    assert.match(decision.hookSpecificOutput.permissionDecisionReason, /\/fadeno:host off/);
+    assert.ok(
+      decision.hookSpecificOutput.permissionDecisionReason.endsWith(
+        'Report this refusal to the user instead of routing around it.',
+      ),
+    );
+  }
+  // Refused, not rewritten: nothing was delivered, so nothing is attested.
+  assert.equal(exists(root, '.fadeno/local/pending-relays.jsonl'), false);
+  const written = read(root, '.fadeno/dispatches.jsonl')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(written.length, GENERIC_TYPES.length);
+  for (const row of written) {
+    assert.equal(row.event, 'host_refused');
+    assert.equal((row.refusal as { predicate: string }).predicate, 'generic_spawn_in_host_mode');
+  }
+});
+
+test('host mode does not disturb the archetype spawns it exists to protect', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'claude', repoRoot: root, withSteering: true });
+  // Every archetype spelling keeps its routing while host mode is on: the
+  // refusal is about spawns that name NO archetype, and a rule that also broke
+  // the managed lane would leave the host with nothing at all to delegate to.
+  for (const type of ['worker', 'fadeno:reviewer', 'dispatch-judge', 'fadeno:dispatch-worker']) {
+    const event = {
+      session_id: HOST_SESSION,
+      cwd: root,
+      tool_name: 'Agent',
+      tool_input: { prompt: 'Do the thing.', description: 'x', subagent_type: type },
+    };
+    const rewritten = JSON.parse(
+      runClaudeSteering(root, event, '{"adapter":"command"}', { hostMode: true }),
+    ) as { hookSpecificOutput: { updatedInput: { subagent_type: string }; permissionDecision?: string } };
+    assert.equal(rewritten.hookSpecificOutput.permissionDecision, undefined);
+    assert.match(rewritten.hookSpecificOutput.updatedInput.subagent_type, /^dispatch-(worker|reviewer|judge)$/);
+  }
 });
 
 test('Claude steering stashes a relay attestation for proxy-bound spawns', (t) => {

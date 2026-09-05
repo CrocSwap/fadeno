@@ -886,7 +886,13 @@ function nativeSpawnEntry(row: Record<string, unknown>): DispatchEntry {
   entry.archetype = null; // by construction: this spawn named no Fadeno role
   entry.agentType = str(row.agent_type);
   entry.model = inherited ?? requested;
-  entry.modelOverride = requested != null && requested !== inherited ? requested : null;
+  // An override is only visible when BOTH sides are: `model_inherited` is null
+  // whenever the writer could not observe the session's model at all — every
+  // Claude row, since a Claude `PreToolUse` event publishes no model — and
+  // reading that null as "different" rendered `opus → opus`, claiming a spawn
+  // overrode a model nothing ever saw.
+  entry.modelOverride =
+    requested != null && inherited != null && requested !== inherited ? requested : null;
   entry.reasoningEffort = str(row.reasoning_effort);
   return entry;
 }
@@ -1073,7 +1079,14 @@ export function renderDispatchLine(entry: DispatchEntry): string {
       ? `${entry.model ?? '?'} → ${entry.modelOverride}`
       : entry.model;
     parts.push(`${entry.agentType ?? '(unnamed)'}${model != null ? ` (${model})` : ''}`);
+    // What the caller ASKED for, if anything — and otherwise what the writer
+    // OBSERVED the session running at, said in different words because it is
+    // a different fact. A Claude spawn can never request an effort (the Agent
+    // tool has no such parameter) but the hook can read the session's own, so
+    // without this branch the only effort a Claude native row carries would
+    // never be rendered at all.
     if (entry.reasoningEffort != null) parts.push(`effort ${entry.reasoningEffort}`);
+    else if (entry.sessionEffort != null) parts.push(`session effort ${entry.sessionEffort}`);
     parts.push('[unsteered spawn]');
     if (entry.promptSha256 != null) parts.push(`sha256:${entry.promptSha256.slice(0, 8)}`);
     return parts.join('  ');

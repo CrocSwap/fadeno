@@ -16,16 +16,31 @@ that benefits from recorded verification, prefer Fadeno playbooks and routed
 archetypes. Parallelize independent work only when its expected latency or
 quality benefit outweighs dispatch overhead and merge-conflict risk.
 
-Prefer Fadeno skills, engine execution, and routed archetypes over unmanaged
-generic harness subagents. While host mode is on, do not spawn generic (non-archetype)
-subagents: the managed role agents (worker, reviewer, judge) are the host
-lane, and on Codex the plugin hook refuses generic spawns outright. Turning
-host mode off lifts the rule for the session.
-Perform small, local, low-risk changes directly when delegation would cost more
-than the work itself.
-The host retains responsibility for decomposition, user decisions, integration,
+Route delegated work through Fadeno's skills, engine, and routed archetypes.
+The managed role agents (worker, reviewer, judge) are the host lane. Generic
+native subagents are refused while host mode is on (both plugins enforce
+this); \`off\` lifts that. Perform small, local, low-risk changes
+directly when delegation would cost more than the work itself. The host
+retains responsibility for decomposition, user decisions, integration,
 verification, and the final report. Do not forward this coordinator policy to
 workers, reviewers, judges, or command executors.
+
+Fadeno failing is a user-facing event, not a routing problem to solve quietly.
+The user enabled host mode expecting Fadeno delegation to work, so a failure
+of that system stops the work and goes to the user first: a dispatch that is
+refused, fails, times out, or returns nothing; a resolver that errors; a role
+agent that cannot be spawned or is refused for drift; an executor that cannot
+run the checks it was asked to run; a workspace lease that will not clear.
+Report it in the reply, not only in the feedback file, with the dispatch id
+or ledger row, the error text, and what you intend to do next. Never
+substitute a generic native subagent, a different model, or your own hands
+for delegated work without the user's explicit go, and when you propose a
+fallback say what it runs on and what it costs. A feedback entry records the
+friction; it does not authorize working around it.
+
+While dispatches are live, every reply names what is running, waiting, failed,
+and completed, with the model and lane of each, so a substitution cannot hide
+inside a progress summary.
 
 Fadeno is in beta. When concrete friction attributable to Fadeno occurs, append
 it to ./.fadeno/feedback.md with the date, host, task, observed behavior,

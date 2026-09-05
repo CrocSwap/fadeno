@@ -109,7 +109,8 @@ general scheduler, or orchestration platform.
   switches command slots live, executes matching host slots in-session, invokes
   an explicit `fallback_command` for mismatched host slots, and reports
   `restart_required` only when no honest fallback exists;
-  Explore/Plan stays unsteered. Grok steering remains unsupported.
+  Explore/Plan is never rewritten — recorded as a `native_spawn` row outside
+  host mode, refused while it is on. Grok steering remains unsupported.
 - **Validated end-to-end in live Claude Code sessions** (through v0.1.2): bundled
   CLI on PATH, `Skill(fadeno:*)` model-invocation, `/fadeno:*` slash commands in
   the `/` menu, and `fadeno:*` role-subagent dispatch after `/reload-plugins`.

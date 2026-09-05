@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { runDispatches } from '../src/commands/dispatches.ts';
@@ -55,27 +56,54 @@ function failsWith(stderr: string): string {
 }
 
 /**
+ * The sentence every refusal this hook writes ends with. Host mode's whole
+ * claim is that a Fadeno failure is a user-facing event, and the refusal text
+ * is the one thing the caller is guaranteed to read, so it carries the
+ * instruction — on every deny path, or the one path that lost it is exactly
+ * where a host quietly routes around the refusal.
+ */
+const REPORT_REFUSAL = 'Report this refusal to the user instead of routing around it.';
+
+/** The session id these tests key the host-mode marker on. */
+const SESSION = 'refusal-session';
+
+/**
  * Run the hook with an EXPLICIT `CLAUDE_EFFORT`, never the developer's own:
  * the refusal row records the session effort it observed, so an ambient value
  * would make these assertions depend on how the suite happened to be started.
+ *
+ * `PLUGIN_DATA`/`CLAUDE_PLUGIN_DATA` are pinned to a temp dir for the same
+ * reason: host mode is a marker file under that root, and a developer running
+ * the suite from a host-mode session must not change what these tests assert.
  */
 function runHook(
   root: string,
   toolInput: Record<string, unknown>,
   script: string,
   sessionEffort: string | null = 'medium',
+  hostMode: 'on' | 'off' = 'off',
 ): { status: number | null; stdout: string; stderr: string } {
   const bin = fakeFadeno(root, script);
+  const data = join(root, 'plugin-data');
+  mkdirSync(join(data, 'host-mode'), { recursive: true });
+  // Presence is the whole signal, exactly as `host-mode-hook.mjs` writes it —
+  // and absence is set explicitly, not merely left unwritten, so a test that
+  // flips host mode off after a refusal in the same repo really flips it.
+  const marker = join(data, 'host-mode', `${createHash('sha256').update(SESSION).digest('hex')}.enabled`);
+  if (hostMode === 'on') writeFileSync(marker, 'enabled\n', 'utf8');
+  else rmSync(marker, { force: true });
   const env: Record<string, string | undefined> = {
     ...process.env,
     PATH: `${bin}:${process.env.PATH ?? ''}`,
+    PLUGIN_DATA: data,
+    CLAUDE_PLUGIN_DATA: data,
     CLAUDE_EFFORT: sessionEffort ?? undefined,
   };
   if (sessionEffort == null) delete env.CLAUDE_EFFORT;
   const result = spawnSync(process.execPath, [STEERING_HOOK], {
     cwd: root,
     env,
-    input: JSON.stringify({ cwd: root, tool_name: 'Agent', tool_input: toolInput }),
+    input: JSON.stringify({ session_id: SESSION, cwd: root, tool_name: 'Agent', tool_input: toolInput }),
     encoding: 'utf8',
   });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
@@ -114,6 +142,7 @@ test('a resolver-error denial writes a host_refused row naming the predicate', (
 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(denial(result.stdout).permissionDecision, 'deny');
+  assert.ok(denial(result.stdout).permissionDecisionReason.endsWith(REPORT_REFUSAL));
 
   const written = rows(root);
   assert.equal(written.length, 1);
@@ -161,6 +190,7 @@ test('a killed resolver is resolver_timeout, and the row records the budget that
   // The caller is told what to change: a hung resolver, or a budget too tight
   // for it. A silent "failed" would send them hunting an error never written.
   assert.match(decision.permissionDecisionReason, /did not answer within 10000ms/);
+  assert.ok(decision.permissionDecisionReason.endsWith(REPORT_REFUSAL));
 
   const row = rows(root)[0]!;
   assert.equal(row.event, 'host_refused');
@@ -180,6 +210,10 @@ test('a resolver that never STARTED is resolver_error, not resolver_timeout', (t
   // installed — the mislabel the predicate split exists to avoid.
   const env: Record<string, string | undefined> = { ...process.env, PATH: join(root, 'empty-bin') };
   delete env.CLAUDE_PLUGIN_ROOT;
+  // No host-mode data root either: this event carries no session id, but the
+  // marker lookup must never depend on the developer's own session state.
+  delete env.PLUGIN_DATA;
+  delete env.CLAUDE_PLUGIN_DATA;
   const spawned = spawnSync(process.execPath, [STEERING_HOOK], {
     cwd: root,
     env,
@@ -209,6 +243,7 @@ test('a restart_required denial writes a host_refused row carrying the identity 
   const decision = denial(result.stdout);
   assert.equal(decision.permissionDecision, 'deny');
   assert.match(decision.permissionDecisionReason, /cannot deliver the worker dial/);
+  assert.ok(decision.permissionDecisionReason.endsWith(REPORT_REFUSAL));
 
   const row = rows(root)[0]!;
   assert.equal(row.event, 'host_refused');
@@ -250,6 +285,8 @@ test('the recorded reason is bounded and single-line, however the resolver screa
 
   // The caller still gets the full text — the bound is on the trace.
   assert.ok(denial(result.stdout).permissionDecisionReason.length > 500);
+  // However long the diagnosis, the instruction to report it is the last word.
+  assert.ok(denial(result.stdout).permissionDecisionReason.endsWith(REPORT_REFUSAL));
 
   const message = (rows(root)[0]!.refusal as { message: string }).message;
   assert.ok(message.length <= 400, `reason was ${message.length} chars`);
@@ -277,14 +314,135 @@ test('a repo with no .fadeno gets a denial and no evidence tree conjured for it'
   assert.equal(existsSync(join(root, '.fadeno')), false);
 });
 
-test('an unsteered spawn is still not steered, and writes no refusal', (t) => {
+test('outside host mode an unsteered spawn is allowed, unrewritten, and recorded', (t) => {
   const root = fadenoRepo(t);
   // `general-purpose` never reaches the resolver at all, so a resolver that
-  // would have failed is never consulted and nothing is denied or recorded.
-  const result = runHook(root, { prompt: 'go', description: 'x', subagent_type: 'general-purpose' }, failsWith('boom'));
+  // would have failed is never consulted and nothing is denied or rewritten.
+  const result = runHook(
+    root,
+    { prompt: 'go', description: 'x', subagent_type: 'general-purpose', model: 'opus' },
+    failsWith('boom'),
+  );
 
   assert.equal(result.stdout, '');
-  assert.deepEqual(rows(root), []);
+  const row = rows(root)[0]!;
+  // Recorded, not refused: "nobody spawned anything" and "somebody spawned
+  // something Fadeno never steered" must not read identically in the log.
+  assert.equal(rows(root).length, 1);
+  assert.equal(row.event, 'native_spawn');
+  assert.equal(row.harness, 'claude');
+  assert.equal(row.agent_type, 'general-purpose');
+  assert.equal(row.model_requested, 'opus');
+  // A Claude PreToolUse event carries no session model, so unlike the Codex
+  // guard this hook cannot say what an inheriting spawn runs on. Null, not
+  // omitted, so the two harnesses' rows still diff field for field.
+  assert.equal(row.model_inherited, null);
+  // `reasoning_effort` means what the CALLER asked for, on both harnesses —
+  // and on Claude that is always null, because the Agent tool has no effort
+  // parameter. The session's observed level is a different fact under its own
+  // name, so a reader diffing a Claude row against a Codex one is not
+  // comparing a request against an observation.
+  assert.equal(row.reasoning_effort, null);
+  assert.equal(row.session_effort, 'medium');
+  assert.equal(typeof row.prompt_sha256, 'string');
+  assert.equal(row.hook_version, 'dev'); // the template, executed directly
+  // A generic spawn is not a Fadeno delivery: digest only, no snapshot file.
+  assert.equal(existsSync(join(root, '.fadeno', 'local', 'prompts')), false);
+});
+
+test('inside host mode a generic spawn is refused, with the escape and the report line', (t) => {
+  const root = fadenoRepo(t);
+  const result = runHook(
+    root,
+    { prompt: 'go', description: 'x', subagent_type: 'general-purpose' },
+    failsWith('boom'),
+    'medium',
+    'on',
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  const decision = denial(result.stdout);
+  assert.equal(decision.permissionDecision, 'deny');
+  // The type it asked for, the identity it would have run under, the way out,
+  // and — because host mode's whole claim is that this is the user's business —
+  // the instruction to report it.
+  assert.match(decision.permissionDecisionReason, /general-purpose/);
+  assert.match(decision.permissionDecisionReason, /the session's model/);
+  assert.match(decision.permissionDecisionReason, /\/fadeno:host off/);
+  assert.ok(decision.permissionDecisionReason.endsWith(REPORT_REFUSAL));
+  // With no locally managed agent — the ordinary plugin-only install — the
+  // remedy is the plugin's own role agents, the same ones a steered spawn
+  // would land on, not a command that materializes nothing.
+  assert.match(
+    decision.permissionDecisionReason,
+    /fadeno:worker, fadeno:reviewer, fadeno:judge/,
+  );
+  assert.doesNotMatch(decision.permissionDecisionReason, /steering apply/);
+
+  const row = rows(root)[0]!;
+  assert.equal(row.event, 'host_refused');
+  // The Codex guard's predicate, spelled identically: one name for one rule
+  // across both harnesses, so `fadeno dispatches` groups them together.
+  assert.equal((row.refusal as { predicate: string }).predicate, 'generic_spawn_in_host_mode');
+  assert.equal(row.agent_type, 'general-purpose');
+  assert.equal(row.archetype, null); // it named none; that is the refusal
+  assert.equal(row.session_effort, 'medium');
+});
+
+test('a spawn that names no subagent_type at all is the most generic spawn there is', (t) => {
+  const root = fadenoRepo(t);
+  // Claude's Agent tool requires only `description` and `prompt`; omitting
+  // `subagent_type` starts the default general-purpose subagent. This used to
+  // exit the hook before anything looked at it, which left a host refused for
+  // naming `general-purpose` one keystroke away from routing around the
+  // refusal — the substitution host mode exists to stop.
+  const omitted = { prompt: 'go', description: 'x' };
+
+  const refused = runHook(root, omitted, failsWith('boom'), 'medium', 'on');
+  const decision = denial(refused.stdout);
+  assert.equal(decision.permissionDecision, 'deny');
+  assert.match(decision.permissionDecisionReason, /named no subagent_type at all/);
+  assert.ok(decision.permissionDecisionReason.endsWith(REPORT_REFUSAL));
+  const refusal = rows(root)[0]!;
+  assert.equal(refusal.event, 'host_refused');
+  assert.equal((refusal.refusal as { predicate: string }).predicate, 'generic_spawn_in_host_mode');
+  // Nothing to name: the caller asked for no type, so the row says so rather
+  // than inventing `general-purpose` on its behalf.
+  assert.equal(refusal.agent_type, null);
+
+  // And outside host mode the same call is allowed but recorded, so the two
+  // spellings of "generic" cannot diverge in the evidence either.
+  const allowed = runHook(root, omitted, failsWith('boom'), 'medium', 'off');
+  assert.equal(allowed.stdout, '');
+  const native = rows(root).at(-1)!;
+  assert.equal(native.event, 'native_spawn');
+  assert.equal(native.agent_type, null);
+});
+
+test('a host-mode refusal names a materialized role agent when the repo has one', (t) => {
+  const root = fadenoRepo(t);
+  // The same managed-agent lookup the delivery path uses, so a refusal can
+  // only ever suggest an agent a steered spawn would really land on. An
+  // unmarked file is the user's own and must not be advertised as Fadeno's.
+  mkdirSync(join(root, '.claude', 'agents'), { recursive: true });
+  writeFileSync(join(root, '.claude', 'agents', 'reviewer.md'), '<!-- fadeno:managed -->\nreviewer\n');
+  writeFileSync(join(root, '.claude', 'agents', 'judge.md'), 'hand-written, not Fadeno\'s\n');
+
+  const result = runHook(
+    root,
+    { prompt: 'go', description: 'x', subagent_type: 'Explore', model: 'haiku' },
+    failsWith('boom'),
+    'medium',
+    'on',
+  );
+  const reason = denial(result.stdout).permissionDecisionReason;
+  assert.match(reason, /Managed role agents available here: reviewer\./);
+  assert.doesNotMatch(reason, /judge/);
+  // Never a materialization command: `fadeno steering apply --claude` writes
+  // no agents any more, so advising it sends the host to run a no-op.
+  assert.doesNotMatch(reason, /steering apply/);
+  // The model the caller named, since that is what it would have run on.
+  assert.match(reason, /the model it named \(haiku\)/);
 });
 
 // --- the reader half ---

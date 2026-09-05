@@ -23616,7 +23616,7 @@ function nativeSpawnEntry(row) {
   entry.archetype = null;
   entry.agentType = str(row.agent_type);
   entry.model = inherited ?? requested;
-  entry.modelOverride = requested != null && requested !== inherited ? requested : null;
+  entry.modelOverride = requested != null && inherited != null && requested !== inherited ? requested : null;
   entry.reasoningEffort = str(row.reasoning_effort);
   return entry;
 }
@@ -23704,6 +23704,7 @@ function renderDispatchLine(entry) {
     const model2 = entry.modelOverride != null ? `${entry.model ?? "?"} \u2192 ${entry.modelOverride}` : entry.model;
     parts.push(`${entry.agentType ?? "(unnamed)"}${model2 != null ? ` (${model2})` : ""}`);
     if (entry.reasoningEffort != null) parts.push(`effort ${entry.reasoningEffort}`);
+    else if (entry.sessionEffort != null) parts.push(`session effort ${entry.sessionEffort}`);
     parts.push("[unsteered spawn]");
     if (entry.promptSha256 != null) parts.push(`sha256:${entry.promptSha256.slice(0, 8)}`);
     return parts.join("  ");

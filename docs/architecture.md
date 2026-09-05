@@ -502,7 +502,16 @@ whether any dial is active; only then does it map worker, reviewer, and judge
 launches to the corresponding dispatch proxy. Only agents that name an
 archetype are steered: `general-purpose` is the harness's catch-all, so
 capturing it turned every generic spawn in a Fadeno repo into an external
-dispatch. It, Explore, Plan, and unrelated specialists stay unsteered. A director that names
+dispatch. It, Explore, Plan, unrelated specialists, and a call that omits
+`subagent_type` altogether are never *rewritten* — but they are no longer
+unseen. Outside host mode the hook records each one as a `native_spawn` row
+(`model_inherited` is always null: a Claude `PreToolUse` event carries no
+session model) and lets it through; while session-scoped host mode is on it
+**denies** them with the Codex guard's own predicate,
+`generic_spawn_in_host_mode`, naming the model the spawn would have run on, the
+role agents to use instead, and the `/fadeno:host off` escape. Omitting the
+field is refused like any other generic spawn, so dropping it is not a way
+around the rule. A director that names
 `dispatch-<archetype>` itself is resolved the same way rather than taken at its
 word: the transport belongs to the dial, and a host slot is pulled back to
 the host agent instead of shelling out to a subprocess of this same harness —

@@ -129,6 +129,39 @@ const CLAIMS: Claim[] = [
     },
   },
   {
+    // Host mode's failure policy lives in two files with no import between
+    // them: the hook that reinjects it every turn, and the skill that governs
+    // the activation turn. Both halves must keep the claim that a Fadeno
+    // failure stops the work, and both must keep the refusal sentence the
+    // PreToolUse hooks append — that sentence is the only instruction a host
+    // is guaranteed to read at the moment it is tempted to route around a
+    // refusal, which is exactly what the 2026-09-04 receipt records it doing.
+    id: 'host-mode-failure-policy',
+    doc: {
+      files: ['templates/common/skills/fadeno-host/SKILL.md'],
+      patterns: [/Fadeno failing is a user-facing event/, /Report this refusal to the user/],
+    },
+    src: {
+      files: [
+        'templates/common/plugin/host-mode-hook.mjs',
+        'templates/claude/hooks/dispatch-steering.mjs',
+        'templates/codex/hooks/spawn-guard.mjs',
+      ],
+      patterns: [/Fadeno failing is a user-facing event/, /Report this refusal to the user/],
+    },
+  },
+  {
+    // The generic-spawn refusal is symmetric by decision, not by accident: one
+    // predicate spelled the same way in both hooks, so a user who enabled host
+    // mode gets the same answer from Claude and from Codex.
+    id: 'generic-spawn-refusal-symmetry',
+    doc: { files: ['docs/architecture.md'], patterns: [/generic_spawn_in_host_mode/, /native_spawn/] },
+    src: {
+      files: ['templates/claude/hooks/dispatch-steering.mjs', 'templates/codex/hooks/spawn-guard.mjs'],
+      patterns: [/generic_spawn_in_host_mode/, /native_spawn/],
+    },
+  },
+  {
     id: 'write-access-field',
     doc: { files: [DIALS, EXTENDING], patterns: [/write_access/] },
     src: { files: ['src/lib/executors.ts'], patterns: [/write_access/] },

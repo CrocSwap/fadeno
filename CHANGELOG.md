@@ -26,6 +26,44 @@ All notable changes to Fadeno are documented here. The format follows
   `hooks/hooks.json`, so Codex re-runs its review-and-trust flow on the next
   session start; the guard is inert until you accept it.**
 
+### Changed
+
+- **Host mode now treats a Fadeno failure as a user-facing event.** The policy
+  the host-mode hook injects (and its twin in the `fadeno-host` skill) says a
+  refused, failed, timed-out or empty dispatch — plus a resolver error, an
+  unspawnable or drift-refused role agent, an executor that cannot run the
+  checks it was asked to run, or a stuck workspace lease — **stops the work and
+  goes to the user before any fallback**, in the reply and not only in
+  `.fadeno/feedback.md`, with the dispatch id or ledger row and the error text.
+  Substituting a generic native subagent, a different model, or the host's own
+  hands now requires the user's explicit go, and a proposed fallback must say
+  what it runs on and what it costs. While dispatches are live, **every reply
+  names what is running, waiting, failed and completed, with the model and lane
+  of each**, so a substitution cannot hide inside a progress summary. The
+  2026-09-04 receipt this comes from: a host whose command lane failed wrote a
+  dutiful feedback entry and then quietly spawned three generic subagents on
+  the session's frontier model.
+- The Claude steering hook is now symmetric with the Codex spawn guard on
+  generic subagents. While host mode is on it **denies** any `subagent_type`
+  that names no Fadeno archetype (`general-purpose`, `Explore`, `Plan`, custom
+  agents) — **and a call that omits the field entirely**, which starts the
+  harness's default general-purpose subagent — with the same predicate the
+  Codex guard writes, `generic_spawn_in_host_mode`, naming the model the spawn
+  would have run on, the role agents to use instead (locally managed ones when
+  the repo has them, otherwise the plugin's `fadeno:worker`,
+  `fadeno:reviewer`, `fadeno:judge`), and `/fadeno:host off`. With host mode
+  off the spawn passes through untouched as before, but is now recorded as a
+  `native_spawn` row (`agent_type` null when none was named; `model_inherited`
+  null — a Claude `PreToolUse` event publishes no session model;
+  `reasoning_effort` is the caller's request, always null here, with the
+  observed session level under `session_effort`). Archetype-named spawns keep
+  their routing.
+- Every refusal both plugins' `PreToolUse` hooks write now ends with the
+  sentence `Report this refusal to the user instead of routing around it.` —
+  on the Claude hook's `resolver_error`, `resolver_timeout`, `restart_required`
+  and generic-spawn paths, and on every Codex guard denial. The evidence rows
+  keep their compact reason; the instruction is for the caller.
+
 ### Removed
 
 - The stored default harness. `fadeno setup --codex|--claude` no longer

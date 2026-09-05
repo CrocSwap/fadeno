@@ -155,11 +155,26 @@ ${executor != null
   );
 }
 
+/**
+ * The sentence every refusal this guard writes ends with, appended inside
+ * `deny()` so no path can lose it. Host mode's claim is that a Fadeno failure
+ * is a user-facing event, and a refusal text is the one thing the spawning
+ * model is guaranteed to read at that moment — the basanos receipt is a host
+ * that met a failure, filed feedback, and routed around it silently.
+ */
+const REPORT_REFUSAL = 'Report this refusal to the user instead of routing around it.';
+
 function denial(stdout: string): { permissionDecision: string; permissionDecisionReason: string } {
   const parsed = JSON.parse(stdout) as {
     hookSpecificOutput: { hookEventName: string; permissionDecision: string; permissionDecisionReason: string };
   };
   assert.equal(parsed.hookSpecificOutput.hookEventName, 'PreToolUse');
+  // Asserted here rather than per test: every deny path in this file goes
+  // through this parser, so a new refusal that forgot the sentence fails.
+  assert.ok(
+    parsed.hookSpecificOutput.permissionDecisionReason.endsWith(REPORT_REFUSAL),
+    `refusal did not end with the report instruction: ${parsed.hookSpecificOutput.permissionDecisionReason}`,
+  );
   return parsed.hookSpecificOutput;
 }
 
@@ -181,6 +196,9 @@ test('codex spawn guard: host mode denies a generic spawn and names the model it
   // And the two ways out, both spelled exactly as the user would type them.
   assert.match(decision.permissionDecisionReason, /\$fadeno-host off/);
   assert.doesNotMatch(decision.permissionDecisionReason, /\n/);
+  // The refusal is the user's business, not a routing problem for the host to
+  // solve quietly — the sentence says so, and it is the last thing read.
+  assert.ok(decision.permissionDecisionReason.endsWith(REPORT_REFUSAL));
 
   const rows = g.rows();
   assert.equal(rows.length, 1);
@@ -189,6 +207,9 @@ test('codex spawn guard: host mode denies a generic spawn and names the model it
   assert.equal(rows[0]!.parent_model, 'gpt-6-astra');
   assert.equal(rows[0]!.agent_type, 'default');
   assert.equal(rows[0]!.hook_version, packageVersion());
+  // The row keeps the compact reason. The report instruction is addressed to
+  // the caller, and repeating it on every line of an evidence view is noise.
+  assert.doesNotMatch((rows[0]!.refusal as { message: string }).message, /Report this refusal/);
 });
 
 test('codex spawn guard: host mode off allows a generic spawn but records it', (t) => {

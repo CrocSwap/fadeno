@@ -860,7 +860,9 @@ or live-profile changes.
 **What stays unsteered:** Explore/Plan-style read-only scouting — cheap, tightly
 integrated with the harness's codebase tools, and not where quota pressure
 lives. The rewrite hook must be selective (worker-shaped types only). The
-arbitrage win is expensive worker turns.
+arbitrage win is expensive worker turns. Unsteered is about the *rewrite*: a
+generic spawn is refused while session-scoped host mode is on, and recorded as
+a `native_spawn` row when it is off.
 
 **Permission boundary (must stay loud):** an external worker invoked with its
 own sandbox flags (e.g. `codex exec -s workspace-write`) runs *outside* the

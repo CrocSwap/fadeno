@@ -745,7 +745,10 @@ injection degrades to the tag recovery path, never breaks the host.
 
 What stays unsteered: Explore/Plan-style read-only scouting — cheap, tightly
 integrated with the harness's codebase tools, and not where quota pressure
-lives. The arbitrage win is expensive worker turns.
+lives. The arbitrage win is expensive worker turns. Unsteered means
+*unrewritten*, not unseen: both plugins refuse generic subagents while
+session-scoped host mode is on, and record a `native_spawn` row for the ones
+they allow when it is off.
 
 > **Permission boundary:** the external executor a proxy dispatches runs
 > *outside* the host harness's permission fences, under its own sandbox flags

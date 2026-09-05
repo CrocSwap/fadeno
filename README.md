@@ -471,7 +471,9 @@ matching host slots execute in-session, a different fallback-capable host slot
 runs out-of-process, and only a host slot without a fallback reports
 `restart_required`. Claude installs a
 local `PreToolUse` rewrite that redirects role launches to bundled dispatch
-proxies. Explore/Plan-style scouting stays unsteered. Existing files retain the
+proxies. Explore/Plan-style scouting is never rewritten: outside host mode it
+passes through and is recorded as an unsteered spawn, while host mode refuses
+generic subagents outright (`/fadeno:host off` lifts that). Existing files retain the
 normal non-destructive rule; `steering apply` needs `--force` to replace them.
 
 ### What `.fadeno/runs/` contains

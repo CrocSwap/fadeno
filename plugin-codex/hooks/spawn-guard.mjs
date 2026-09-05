@@ -33,6 +33,18 @@ function finish(value) {
   process.exit(0);
 }
 
+/**
+ * The last sentence of EVERY refusal this hook writes, appended here rather
+ * than at each call site so no deny path can be added without it.
+ *
+ * Host mode's policy is that a Fadeno failure is a user-facing event: the
+ * 2026-09-04 basanos receipt is a host that met a refusal, wrote a dutiful
+ * feedback entry, and then quietly spawned generic subagents on a frontier
+ * model instead of telling the user. The refusal text is the one thing the
+ * model is guaranteed to read at that moment, so it carries the instruction.
+ */
+const REPORT_REFUSAL = 'Report this refusal to the user instead of routing around it.';
+
 function deny(reason) {
   finish({
     hookSpecificOutput: {
@@ -40,7 +52,7 @@ function deny(reason) {
       permissionDecision: 'deny',
       // One paragraph, always: a resolver's stderr is neither short nor
       // single-line, and every refusal text obeys the same rule as its row.
-      permissionDecisionReason: String(reason).replace(/\s+/g, ' ').trim(),
+      permissionDecisionReason: `${String(reason).replace(/\s+/g, ' ').trim()} ${REPORT_REFUSAL}`,
     },
   });
 }
