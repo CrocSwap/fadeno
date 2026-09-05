@@ -1885,7 +1885,19 @@ function main(argv: string[]): number {
         return runShadowCommand(archetype, model, { harness: values.harness ?? null, rate: values.rate, n: values.n, json: Boolean(values.json) });
       }
       if (sub === 'resolve') {
-        if (!values.archetype) throw new Error('Usage: fadeno dial resolve --archetype <name> [--prompt-sha256 <hex>]');
+        // `--prompt-sha256` is the CALLER's prompt digest — sha256 of the bytes
+        // handed to Fadeno, before any kernel decoration (no archetype brief,
+        // no result-protocol footer) and with trailing newlines stripped, since
+        // the relay's heredoc adds one on the way to the kernel. The kernel
+        // re-derives that same digest to re-roll the pair, so a digest taken
+        // after decoration — or over raw bytes a transport will change —
+        // answers a different question than the dispatch will.
+        if (!values.archetype) {
+          throw new Error(
+            'Usage: fadeno dial resolve --archetype <name> ' +
+              '[--prompt-sha256 <hex: the caller\'s prompt bytes, before any kernel decoration, trailing newlines stripped>]',
+          );
+        }
         if (positionals.length > 2) throw new Error('Usage: fadeno dial resolve --archetype <name>');
         const result = runDialResolve({ archetype: values.archetype, promptSha256: values['prompt-sha256'] ?? null });
         console.log(JSON.stringify(result, null, 2));

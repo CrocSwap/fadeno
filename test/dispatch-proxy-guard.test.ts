@@ -259,9 +259,17 @@ test('guard records a proxy-dispatch marker for the bytes it is about to send', 
     .trim().split('\n').map((line) => JSON.parse(line) as { archetype: string; prompt_sha256: string });
   assert.equal(rows.length, 1);
   assert.equal(rows[0]!.archetype, 'worker');
-  // The digest is of what the kernel will RECEIVE on stdin — body lines plus
-  // the heredoc's trailing newline — not of the surrounding shell.
-  assert.equal(rows[0]!.prompt_sha256, createHash('sha256').update(body).digest('hex'));
+  // The digest is of what the kernel will RECEIVE on stdin — body lines, never
+  // the surrounding shell — canonicalized the way `callerPromptDigest` defines
+  // it, with the heredoc's own trailing newline stripped rather than baked in.
+  // That strip is what makes this marker equal the spawn-side stash the
+  // steering hook wrote from `tool_input.prompt`, which carries no terminator
+  // at all: three writers, one value for one task.
+  assert.equal(
+    rows[0]!.prompt_sha256,
+    createHash('sha256').update(body.replace(/(?:\r?\n)+$/, '')).digest('hex'),
+  );
+  assert.notEqual(rows[0]!.prompt_sha256, createHash('sha256').update(body).digest('hex'));
 });
 
 test('guard writes no marker outside a Fadeno repo, and none for a denied call', () => {

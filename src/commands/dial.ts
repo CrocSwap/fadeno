@@ -1575,6 +1575,19 @@ function deliveryGuidance(
   };
 }
 
+/**
+ * Resolve one archetype's dial, and — when the caller supplies a prompt digest
+ * — the pair decision for that exact prompt.
+ *
+ * `promptSha256` is the CALLER's digest: sha256 of the prompt bytes as handed
+ * to Fadeno, before any kernel decoration and with trailing newlines stripped
+ * (`callerPromptDigest` in `src/lib/executors.ts`). Passing anything else — a
+ * digest taken after a brief or the result footer was composed in, or one over
+ * raw bytes that a heredoc relay will re-terminate on the way to the kernel —
+ * makes this resolve and the kernel's own re-derivation disagree about whether
+ * the spawn is a pair, which is the one thing the roll's purity exists to
+ * prevent.
+ */
 export function runDialResolve(opts: DialCommonOptions & { archetype: string; promptSha256?: string | null }): DialResolveResult {
   const repoRoot = repoRootOf(opts);
   const layered = loadLayered(repoRoot, opts.userPathOptions);
@@ -1612,7 +1625,11 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
 
   // The pair decision. Re-derived rather than remembered: the same roll runs
   // again inside `fadeno dispatch`, so a caller that routes on `selected` and
-  // the kernel that later fires the challenger cannot disagree.
+  // the kernel that later fires the challenger cannot disagree — provided both
+  // sides feed it the same two inputs. They are the caller's prompt digest
+  // (`opts.promptSha256`, see this function's doc) and the challenger spelled
+  // `formatDialRef(shadowAttachmentRef(att))`, which is the same expression the
+  // kernel's `decidePairCandidate` uses.
   const attachment = dialState.shadows[archetype];
   let shadow: DialResolveResult['shadow'];
   if (attachment != null) {

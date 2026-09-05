@@ -205,6 +205,71 @@ All notable changes to Fadeno are documented here. The format follows
 
 ### Fixed
 
+- **One prompt digest for the shadow-pair roll — the hook and the kernel now
+  agree.** The steering hook rolled a spawn's shadow attachment on the caller's
+  prompt bytes; the kernel re-rolled the same attachment on the bytes it had
+  already decorated with the archetype brief and `DISPATCH_RESULT_FOOTER`. Two
+  digests, two independent coins: a spawn the hook selected as a pair — and
+  therefore rewrote onto the dispatch proxy, because a selected pair takes the
+  command lane on both arms — could reach a kernel that formed no pair at all
+  and quietly delivered a plain dispatch. Observed 2026-09-05: hook digest
+  `156ac11e…` SELECTED, kernel digest `fe4f9fc1…` not selected, no pair, and
+  nothing anywhere saying so. The **caller prompt digest** (`callerPromptDigest`
+  in `src/lib/executors.ts`) is now defined once as sha256 of the prompt bytes
+  before any kernel decoration, and every consumer keyed on "which prompt is
+  this?" reads it: the kernel's pair roll, the relay attestation, and
+  `fadeno dial resolve --prompt-sha256` / `fadeno steering resolve
+  --prompt-file`. The roll's other shared input is pinned the same way — the
+  kernel now spells the challenger with `shadowAttachmentRef`, the expression
+  both resolvers already used, instead of re-inlining it.
+- **...and across the relay, not only the decoration.** The digest is taken
+  over CANONICAL caller bytes: the prompt with its trailing newlines stripped
+  (`canonicalCallerPrompt`). The two processes are separated by the dispatch
+  proxy's quoted heredoc, and the shell feeds a heredoc as each body line plus
+  a terminating newline — which a director's `tool_input.prompt` does not
+  carry. Hashing raw bytes would therefore have split the hook's and the
+  kernel's digests again, for every prompt that did not happen to end in a
+  newline, with the decoration bug already fixed. The rule is stated once and
+  applied by every writer of the digest — the kernel, the Claude steering hook,
+  the Claude proxy guard's `proxy-dispatches.jsonl` marker, the OpenCode plugin
+  and the omp extension: two prompts that differ only in trailing newlines are
+  the same prompt, for pairing and for attestation, and nothing else is
+  normalized. It also reconciles the two spellings of one prompt — an inline
+  `--prompt-sha256` computed from a spawn's own string and a `--prompt-file`
+  that, like most files, ends in a newline.
+- **Relay attestation stopped missing on brief-carrying archetypes.**
+  `consumeRelayAttestation` ran after the brief was composed in, so it hashed
+  bytes no hook had ever seen: the proxy marker missed, and the row recorded
+  `relay_attested` absent ("no proxy sent this") for a dispatch a proxy
+  demonstrably had. Same skew, different consumer; it now reads the caller's
+  bytes.
+- **A rewritten spawn leaves a row and tells the session.** When the Claude
+  steering hook takes a host-eligible spawn off the host lane and onto a
+  dispatch proxy, it appends a `host_rewritten` evidence row (`archetype`,
+  `agent_type`, `subagent_type_applied`, `model_applied`, the dialed
+  `executor`/`model`, `lane`, `lane_reason`, `reason` ∈
+  `shadow_pair_selected` | `command_lane`, `challenger` and `rate` on the pair
+  reason, `prompt_sha256`, `host`, `harness`, `dial_source`, `hook_version`)
+  and returns a one-line `systemMessage` beside the rewrite. Only for a spawn
+  that was actually on the host lane: a caller that named
+  `fadeno:dispatch-<archetype>` itself is resolved like any other archetype
+  spawn (a host slot can still pull it back in-session) but is never recorded
+  or announced as a rewrite, since nothing was diverted — its relay attestation
+  is still stashed, which is about the bytes rather than the lane. Previously
+  the rewrite was recorded nowhere: `host_delivery` is deliberately not written on
+  that path, so the only trace was a kernel dispatch naming the relay rather
+  than the spawn that caused it. `fadeno dispatches` renders it as its own
+  `[rewritten]` kind — never a delivery, so it can neither read as in-session
+  work nor absorb a `host_attestation` owed to a real one.
+- `dispatch_requested` / `dispatch_completed` rows gain
+  **`caller_prompt_sha256`** beside the existing `prompt_sha256`. The two answer
+  different questions — the snapshot the executor received (brief and footer
+  included) versus the bytes the caller wrote — and only the second is stable
+  across `--brief`, which is what makes it the join key from a hook row to the
+  kernel rows it produced. Additive under ledger format `1.1`, not a bump: the
+  reader tiers on the format's MAJOR, so a new event name and a new field need
+  no new version, while bumping would make every older reader skip *all* rows as
+  "newer format".
 - Isolated host workspaces now replay the caller's tracked and
   untracked/unignored changes as their synthetic baseline, so concurrent
   reviewers see the uncommitted implementation they were asked to review and

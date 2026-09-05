@@ -426,10 +426,30 @@ surfaces at dial time too.
   (fallback chains), shadow pairing fields, refusal rows, and the two-row
   `dispatch_requested` / `dispatch_completed` contract are unchanged — same
   pairing as before, now carrying `model`, `effort`, `driver` instead of
-  `target` / `loadout`. A `host_delivery` row and its `hook_version` stamp
+  `target` / `loadout`. Both kernel rows also carry
+  **`caller_prompt_sha256`** beside `prompt_sha256`: the former is the digest
+  of the bytes handed to Fadeno *before* any kernel decoration (the archetype
+  brief, the result-protocol footer) and with trailing newlines stripped — the
+  proxy's quoted heredoc adds one on the way in, so two prompts differing only
+  in trailing newlines are one prompt — the latter attests the snapshot the
+  executor actually received, raw. Only the first is stable across `--brief`, which
+  is why the pair roll, the relay attestation and `--prompt-sha256` are all
+  keyed on it, and why it is what joins a hook row to a kernel row by content.
+  A `host_delivery` row and its `hook_version` stamp
   remain the steering hook's evidence for in-session delivery; the
   stdin-heredoc `FADENO_PROMPT` relay contract and the `relay_attested` mark
-  on paired dispatches are unchanged. A `native_spawn` row is the one entry
+  on paired dispatches are unchanged. A **`host_rewritten`** row is the
+  steering hook's evidence for the OTHER outcome: a host-eligible spawn taken
+  off the host lane and onto a dispatch proxy (only that — a caller that named
+  the proxy itself was never on the host lane and gets no row), either because
+  `reason: shadow_pair_selected` (a pair takes the command lane on both arms,
+  and the row carries the `challenger` and `rate`) or `reason: command_lane`
+  (the dial's own lane). It records `agent_type` beside
+  `subagent_type_applied` and `model_applied` so the two ends of the
+  redirection are both visible, and its `prompt_sha256` is a caller digest —
+  equal to `caller_prompt_sha256` on the kernel rows the rewrite produced.
+  It is not a delivery: nothing ran in session, so it never correlates a
+  `host_attestation`. A `native_spawn` row is the one entry
   that records a spawn Fadeno did *not* steer — both the Codex spawn guard
   and the Claude steering hook write it for a generic subagent that host mode
   allowed (with host mode on, that spawn is refused instead), carrying

@@ -591,10 +591,21 @@ test('a pinned effort the session is not running at leaves the session; a manage
     PINNED_OFF_SESSION_SLOT,
   )) as { hookSpecificOutput: { updatedInput: { subagent_type: string; model: string } } };
   assert.match(offSession.hookSpecificOutput.updatedInput.subagent_type, /dispatch-reviewer$/);
-  // Command delivery ends at `fadeno dispatch`, where the kernel writes the
-  // evidence — the hook stashes a relay attestation instead of a host row.
+  // Command DELIVERY ends at `fadeno dispatch`, where the kernel writes the
+  // request/completion rows — the hook stashes a relay attestation instead of a
+  // host_delivery row. The routing decision is still the hook's own, and is
+  // recorded as one: `lane_reason` is what makes an off-session pin legible
+  // afterwards, and it exists nowhere downstream.
   assert.ok(exists(root, '.fadeno/local/pending-relays.jsonl'));
-  assert.ok(!exists(root, '.fadeno/dispatches.jsonl'));
+  const rewritten = evidenceRows(root).at(-1)!;
+  assert.equal(rewritten.event, 'host_rewritten');
+  assert.equal(rewritten.reason, 'command_lane');
+  assert.equal(rewritten.archetype, 'reviewer');
+  assert.equal(rewritten.lane, 'command');
+  assert.equal(rewritten.lane_reason, 'session effort is high, dial pins xhigh');
+  // No pair here, and the fields say so rather than going missing.
+  assert.equal(rewritten.challenger, null);
+  assert.equal(rewritten.rate, null);
 
   // Pin == session: in-session, on the plain role agent. The bare archetype
   // name, never a `fadeno-<archetype>-<effort>` cell.
@@ -630,7 +641,7 @@ test('a pinned effort the session is not running at leaves the session; a manage
   assert.equal(unpinned.effort_source, 'session');
 });
 
-test('Claude steering leaves command-delivery evidence to the kernel', (t) => {
+test('Claude steering leaves command-delivery evidence to the kernel, but records the reroute', (t) => {
   const root = tempRepo(t);
   runInit({ target: 'claude', repoRoot: root, withSteering: true });
   const event = {
@@ -645,11 +656,38 @@ test('Claude steering leaves command-delivery evidence to the kernel', (t) => {
   };
   runClaudeSteering(root, explicit, '{"adapter":"command","executor":"codex-worker"}');
 
-  // Both rewritten and explicitly-targeted proxies are dispatched by the
-  // kernel, which owns their rows; the hook only stashes the relay digests.
-  assert.ok(!exists(root, '.fadeno/dispatches.jsonl'));
+  // Both rewritten and explicitly-targeted proxies are DELIVERED by the
+  // kernel, which owns their request/completion rows and the prompt snapshot;
+  // the hook stashes the relay digests and nothing else about the delivery.
   assert.ok(!exists(root, '.fadeno/local/prompts'));
   assert.equal(read(root, '.fadeno/local/pending-relays.jsonl').trim().split('\n').length, 2);
+
+  // What the hook DOES own is the routing decision, which no downstream row
+  // can state: the kernel's rows name the relay's dispatch, not the host spawn
+  // that was diverted into it. Until 2026-09-05 this path wrote nothing at all,
+  // so a diverted spawn was invisible.
+  const rows = read(root, '.fadeno/dispatches.jsonl').trim().split('\n')
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  // ONE row, for the one spawn that was actually diverted. The second call
+  // named `fadeno:dispatch-worker` itself: it was never on the host lane, so a
+  // `host_rewritten` row for it would assert a redirection that never happened
+  // — and its delivery evidence is the kernel's, exactly as for the first.
+  // Both still stash a relay attestation, which is about the BYTES, not the
+  // lane.
+  assert.deepEqual(rows.map((row) => row.event), ['host_rewritten']);
+  const rewritten = rows[0]!;
+  assert.equal(rewritten.reason, 'command_lane');
+  // Both ends of the redirection. `init --with-steering` emitted a
+  // project-scope proxy, so the applied type is the bare local spelling and NOT
+  // the plugin's `fadeno:` one — which is the whole reason the row records what
+  // was applied rather than deriving it: the same archetype lands on a
+  // different agent in a repo that has one.
+  assert.equal(rewritten.agent_type, 'worker');
+  assert.equal(rewritten.subagent_type_applied, 'dispatch-worker');
+  // The join key to the kernel rows the rewrite produces, and a delivery row's
+  // snapshot field is absent because nothing was delivered here.
+  assert.equal(rewritten.prompt_sha256, sha256Hex('Implement the change.'));
+  assert.ok(!('prompt_snapshot' in rewritten));
 });
 
 test('Claude steering records no native evidence outside a Fadeno repo', (t) => {
@@ -805,17 +843,36 @@ test('a selected pair sends the in-session primary down the command lane too', (
     root,
     { cwd: root, tool_name: 'Agent', tool_input: { prompt: 'Review it.', description: 'x', subagent_type: 'reviewer' } },
     PAIRED_SLOT,
-  )) as { hookSpecificOutput: { updatedInput: { subagent_type: string; model: string } } };
+  )) as {
+    systemMessage?: string;
+    hookSpecificOutput: { updatedInput: { subagent_type: string; model: string } };
+  };
 
   // Not "an in-session agent with a challenger beside it" — the spawn becomes
   // a pair of equals, both command-delivered, differing only in the model.
   assert.match(decision.hookSpecificOutput.updatedInput.subagent_type, /dispatch-reviewer$/);
   assert.equal(decision.hookSpecificOutput.updatedInput.model, 'sonnet'); // relay, not the work
 
-  // The kernel writes both arms' rows, so the hook writes none at all — it
-  // only stashes the relay attestation, as for any other command delivery.
-  assert.equal(exists(root, '.fadeno/dispatches.jsonl'), false);
+  // The kernel writes both ARMS' rows; the hook writes the decision that
+  // produced them, which nothing downstream can state. This is the exact
+  // silence of the 2026-09-05 receipt: a host-eligible spawn left the host
+  // lane, the kernel's row named the relay's dispatch, and nothing recorded
+  // that a pair was the reason — or that a pair had been intended at all.
   assert.ok(exists(root, '.fadeno/local/pending-relays.jsonl'));
+  const rows = evidenceRows(root);
+  assert.deepEqual(rows.map((row) => row.event), ['host_rewritten']);
+  assert.equal(rows[0]!.reason, 'shadow_pair_selected');
+  assert.equal(rows[0]!.challenger, 'grok');
+  assert.equal(rows[0]!.rate, 0.25);
+  assert.equal(rows[0]!.model_applied, 'sonnet');
+  assert.equal(rows[0]!.prompt_sha256, sha256Hex('Review it.'));
+  // No `host_delivery` on this path: nothing ran in session, and a row that
+  // said otherwise would owe an attestation no subagent could ever file.
+  assert.equal(rows.filter((row) => row.event === 'host_delivery').length, 0);
+
+  // And the session is told while it can still act on it, since a rewrite is
+  // otherwise invisible at the moment it happens.
+  assert.match(decision.systemMessage ?? '', /shadow pair selected \(grok @0\.25\)/);
 });
 
 test('an unselected spawn stays in-session: sampling must not tax the common path', (t) => {

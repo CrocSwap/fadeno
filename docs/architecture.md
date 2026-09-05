@@ -541,7 +541,27 @@ agent gets a best-effort `host_delivery` evidence row plus a prompt snapshot
 under `.fadeno/local/prompts/`; that path can pin the requested model but not
 reasoning effort (the Agent tool schema has no effort parameter), so the row
 records `reasoning_effort: "inherited"` rather than the target's declared
-effort. Grok currently rejects the flag.
+effort. Grok currently rejects the flag. A spawn it steers the OTHER way —
+**off** the host lane and onto a dispatch proxy, because the dial's lane is
+`command` or because a shadow pair was selected — gets a `host_rewritten` row
+instead (`reason` names which, with the `challenger` and `rate` on the pair
+case) and a one-line `systemMessage` so the session sees the lane change as it
+happens. Only a spawn that was actually on the host lane: a caller that named
+`fadeno:dispatch-<archetype>` itself is resolved like any other archetype spawn
+but never recorded or announced as a rewrite, because nothing was diverted.
+That path writes no snapshot and no delivery row: the kernel owns
+both downstream, and the two are joined by content, since the hook's
+`prompt_sha256` is the **caller prompt digest** — sha256 of `tool_input.prompt`
+before any kernel decoration, with trailing newlines stripped — which the
+kernel records as `caller_prompt_sha256`. That one digest is also what the
+shadow-pair roll is keyed on at both ends; until 2026-09-05 the kernel rolled
+on its decorated snapshot instead, so a hook-selected pair could silently
+arrive as no pair at all. The newline strip is what carries that agreement
+across the relay: the proxy hands the prompt over in a quoted heredoc and the
+shell adds a terminator the spawn side never saw, so the two hash the same
+canonical bytes rather than the same literal ones (the proxy guard's
+`proxy-dispatches.jsonl` marker and the hook's `pending-relays.jsonl` stash
+use the same rule, which is what lets `relay_attested` match at all).
 
 The Codex side has one rung of that ladder, and it is a **guard rather than a
 rewrite**: `templates/codex/hooks/spawn-guard.mjs`, registered by the Codex

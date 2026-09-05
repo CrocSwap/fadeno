@@ -73,6 +73,28 @@ function taskCorrelation(hookInput, args) {
   };
 }
 
+/**
+ * The CALLER's prompt digest, and the value `--prompt-sha256` carries: sha256
+ * of the prompt text with its trailing newlines stripped.
+ *
+ * `callerPromptDigest` in src/lib/executors.ts is the definition; a plugin
+ * bundled into another harness has no import path back into the CLI, so it is
+ * spelled by hand here as DISPATCHES_FORMAT is. The strip is what keeps this
+ * digest equal to the one `fadeno dispatch` derives from the bytes it actually
+ * receives: a prompt handed over on stdin, or through a heredoc, arrives with a
+ * terminator the spawn-side text never had, and hashing raw bytes would let the
+ * two sides roll different shadow pairs for the same task.
+ */
+function callerPromptDigest(text) {
+  return createHash('sha256').update(text.replace(/(?:\r?\n)+$/, '')).digest('hex');
+}
+
+/**
+ * Raw sha256, for the one field that attests BYTES rather than identity: a
+ * `host_delivery` row's `prompt_sha256` and the snapshot file beside it, which
+ * must digest exactly what was written. Same split the kernel keeps between
+ * `prompt_sha256` (the snapshot) and `caller_prompt_sha256` (the identity).
+ */
 function sha256(text) {
   return createHash('sha256').update(text).digest('hex');
 }
@@ -361,7 +383,7 @@ async function steer(hookInput, output, repoDir) {
   if (archetype == null) return; // catch-alls and unrelated specialists stay unsteered
 
   const promptText = typeof args.prompt === 'string' ? args.prompt : '';
-  const promptDigest = promptText.length > 0 ? sha256(promptText) : null;
+  const promptDigest = promptText.length > 0 ? callerPromptDigest(promptText) : null;
   const correlation = taskCorrelation(hookInput, args);
 
   // Rewrite to the refusal broker: no deny primitive exists in the plugin API,
@@ -446,7 +468,12 @@ async function steer(hookInput, output, repoDir) {
   // Host delivery never reaches the kernel, so this plugin is the only Fadeno
   // code on that path and therefore its evidence writer.
   if (promptText.length > 0 && promptDigest != null) {
-    const snapshotRel = snapshotDeliveredPrompt(repoDir, promptText, promptDigest);
+    // The snapshot's own digest, raw: this row points at a file, and the field
+    // has to attest the file. `promptDigest` above answers the different
+    // question — which prompt is this, canonically — and is what the resolver
+    // was asked about.
+    const snapshotDigest = sha256(promptText);
+    const snapshotRel = snapshotDeliveredPrompt(repoDir, promptText, snapshotDigest);
     recordEvidence(
       repoDir,
       hostDeliveryRow({
@@ -456,7 +483,7 @@ async function steer(hookInput, output, repoDir) {
         slot,
         lane: decision.lane,
         modelOverride: str(args.model),
-        promptSha256: promptDigest,
+        promptSha256: snapshotDigest,
         ...correlation,
         ...(snapshotRel != null ? { promptSnapshotRel: snapshotRel } : {}),
       }),

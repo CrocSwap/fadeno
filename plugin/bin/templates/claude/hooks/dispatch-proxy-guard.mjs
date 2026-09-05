@@ -183,14 +183,22 @@ function markProxyDispatch() {
     const dir = join(cwd, '.fadeno', 'local');
     mkdirSync(dir, { recursive: true });
     // The shell feeds a quoted heredoc as each body line plus a trailing
-    // newline; the kernel tolerates the stripped-newline variant too.
+    // newline — reconstructed here rather than assumed, because this hook sees
+    // the SOURCE lines and the kernel sees what the shell made of them.
     const body = `${heredocBody.join('\n')}\n`;
     appendFileSync(
       join(dir, 'proxy-dispatches.jsonl'),
       `${JSON.stringify({
         timestamp: new Date().toISOString(),
         archetype,
-        prompt_sha256: createHash('sha256').update(body).digest('hex'),
+        // The CALLER digest (`callerPromptDigest`, src/lib/executors.ts),
+        // spelled by hand as everything else in a standalone hook is. Its
+        // trailing-newline strip is precisely what makes the newline
+        // reconstructed above stop mattering: this marker, the steering hook's
+        // spawn-side stash (which hashes `tool_input.prompt`, usually with no
+        // terminator at all) and the kernel's own read of the received bytes
+        // all reduce to the same value for the same task.
+        prompt_sha256: createHash('sha256').update(body.replace(/(?:\r?\n)+$/, '')).digest('hex'),
       })}\n`,
     );
   } catch {

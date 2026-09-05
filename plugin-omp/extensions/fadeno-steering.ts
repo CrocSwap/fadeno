@@ -30,8 +30,17 @@ function text(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
-function hash(value: string): string {
-  return createHash('sha256').update(value).digest('hex');
+/**
+ * The CALLER's prompt digest — sha256 of the task text with its trailing
+ * newlines stripped — and the value `--prompt-sha256` carries into the shadow
+ * roll. `callerPromptDigest` in src/lib/executors.ts is the definition; an
+ * extension loaded by another harness has no import path back into the CLI, so
+ * it is spelled by hand here. The strip is what keeps this equal to the digest
+ * `fadeno dispatch` takes of the bytes it receives, which arrive through a
+ * transport that adds a terminator the spawn-side text never had.
+ */
+function callerPromptDigest(value: string): string {
+  return createHash('sha256').update(value.replace(/(?:\r?\n)+$/, '')).digest('hex');
 }
 
 type Resolution = { mode: string; slot?: Record<string, unknown>; error?: string; timedOut?: boolean };
@@ -178,7 +187,7 @@ async function routeOne(event: any, input: Record<string, unknown>, item: Record
   const role = canonicalRole(item.agent);
   if (role == null) return null;
   const prompt = typeof item.task === 'string' ? item.task : '';
-  const promptSha256 = prompt === '' ? null : hash(prompt);
+  const promptSha256 = prompt === '' ? null : callerPromptDigest(prompt);
   const resolution = await resolveRole(role, cwd, promptSha256);
   let target: string | null = null;
   let slot: Record<string, unknown> = {};

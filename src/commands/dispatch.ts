@@ -39,7 +39,9 @@ import {
   type DialRef,
   type RoleResolutionSource,
   type ShadowAttachment,
+  callerPromptDigest,
   shadowAttachmentExpired,
+  shadowAttachmentRef,
   shadowSampleRoll,
 } from '../lib/executors.ts';
 import { decideLane, readSessionEffort } from '../lib/lane.ts';
@@ -310,11 +312,29 @@ export const PROXY_DISPATCHES_FILE = join('.fadeno', 'local', 'proxy-dispatches.
 const PENDING_RELAY_MAX_AGE_MS = 60 * 60 * 1000;
 
 /**
+ * The digests a stored attestation row may legitimately carry for these bytes,
+ * and the only place either attestation file is matched.
+ *
+ * `callerPromptDigest` is the one every current writer stamps — the steering
+ * hook from `tool_input.prompt`, the proxy guard from the heredoc body it is
+ * about to pipe — so the canonical digest is the match. The raw digest stays as
+ * a second candidate for rows left behind by a hook build that predates the
+ * canonicalization: both files are ephemeral (a one-hour freshness window) but
+ * a session already running when Fadeno is upgraded still has the old hook
+ * loaded, and a missed match there would silently downgrade a real attestation
+ * to "no proxy sent this".
+ */
+function attestationDigests(prompt: string): Set<string> {
+  return new Set([callerPromptDigest(prompt), sha256Hex(prompt)]);
+}
+
+/**
  * Match the received prompt against spawn-side attestations. A hit consumes
- * its entry and attests the proxy copied the prompt verbatim (modulo the one
- * trailing newline a heredoc appends); fresh entries with no hit mean the
- * relay altered the prompt (`false`); no fresh entries — non-hook flows —
- * record nothing (`null`). Evidence-only: never blocks the dispatch.
+ * its entry and attests the proxy copied the prompt verbatim (modulo the
+ * trailing newlines a heredoc appends, which `callerPromptDigest` canonicalizes
+ * away on both sides); fresh entries with no hit mean the relay altered the
+ * prompt (`false`); no fresh entries — non-hook flows — record nothing
+ * (`null`). Evidence-only: never blocks the dispatch.
  */
 function consumeSpawnSideRelay(repoRoot: string, prompt: string, now: Date): boolean | null {
   const path = join(repoRoot, PENDING_RELAYS_FILE);
@@ -336,7 +356,7 @@ function consumeSpawnSideRelay(repoRoot: string, prompt: string, now: Date): boo
       typeof row.prompt_sha256 === 'string'
     );
   });
-  const digests = new Set([sha256Hex(prompt), sha256Hex(prompt.replace(/\n$/, ''))]);
+  const digests = attestationDigests(prompt);
   const hit = fresh.findIndex((row) => digests.has(row.prompt_sha256 as string));
   const remaining = hit === -1 ? fresh : fresh.filter((_, index) => index !== hit);
   try {
@@ -378,7 +398,7 @@ function consumeProxyDispatchMarker(repoRoot: string, prompt: string, now: Date)
       typeof row.prompt_sha256 === 'string'
     );
   });
-  const digests = new Set([sha256Hex(prompt), sha256Hex(prompt.replace(/\n$/, ''))]);
+  const digests = attestationDigests(prompt);
   const hit = fresh.findIndex((row) => digests.has(row.prompt_sha256 as string));
   const remaining = hit === -1 ? fresh : fresh.filter((_, index) => index !== hit);
   try {
@@ -1340,6 +1360,21 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     );
   }
 
+  // The caller's bytes, pinned HERE — before the brief prepend and the result
+  // footer below both rewrite `prompt`. This is the digest a spawn-side hook
+  // computed for the same task, so it is the only value that can make the two
+  // processes agree; see `callerPromptDigest` for the receipt. Everything that
+  // asks "which prompt is this?" reads these two bindings and never `prompt`:
+  // the relay attestation, the pair roll, and `caller_prompt_sha256` on the
+  // evidence rows.
+  //
+  // These bytes still are not byte-identical to what the spawn-side hook saw:
+  // the dispatch proxy hands them over in a quoted heredoc, and the shell adds
+  // a terminating newline. That is exactly what `callerPromptDigest`
+  // canonicalizes away — the digest, not the binding, is what has to agree.
+  const callerPrompt = prompt;
+  const callerPromptSha256 = callerPromptDigest(callerPrompt);
+
   // Archetype brief: a catalog-declared preamble composed in front of the
   // task (how a director learns to coordinate through fadeno). The composed
   // prompt is what gets snapshotted and digest-attested — evidence records
@@ -1376,10 +1411,13 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   const dispatchId = randomUUID();
   const now = opts.now ?? new Date();
 
-  // Spawn-side attestation runs on the RECEIVED bytes, before any kernel
-  // composition below: a proxy is judged against exactly what it handed over,
-  // not what the kernel then added to it.
-  const relayAttested = consumeRelayAttestation(repoRoot, prompt, now);
+  // Spawn-side attestation runs on the CALLER's bytes — `callerPrompt`, not
+  // `prompt` — so a proxy is judged against exactly what it handed over, not
+  // what the kernel then added to it. It used to read `prompt`, which by this
+  // line already carried the archetype brief: a `--brief` dispatch could
+  // therefore never match its own attestation, and recorded `relay_attested:
+  // null` ("no proxy sent this") for a relay that demonstrably had.
+  const relayAttested = consumeRelayAttestation(repoRoot, callerPrompt, now);
   if (relayAttested === false) {
     // Contemporaneous, because retrospective is the wrong shape for this. A
     // defecting relay means the executor is about to work from bytes the
@@ -1398,6 +1436,12 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // attestation and before snapshotting: these are now the bytes SENT, so the
   // digest attests the protocol too, and both arms of a pair receive identical
   // bytes (the constant footer cannot fork them).
+  //
+  // This append is exactly what `callerPromptSha256` was pinned above the
+  // brief to survive. `promptSha256` below is the digest of the SNAPSHOT, and
+  // it is deliberately not deterministic per *caller* prompt: a `--brief`
+  // dispatch and a `--no-brief` one of the same task differ here. Nothing that
+  // has to agree with another process may key on it.
   prompt = `${prompt}\n${DISPATCH_RESULT_FOOTER}`;
 
   // The kernel owns the prompt snapshot for every dispatch: with the result
@@ -1476,7 +1520,11 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       const localStateForShadow = readLocalDialState(repoRoot);
       const att = localStateForShadow.shadows[archetype];
       if (att != null && !shadowAttachmentExpired(att)) {
-        dial = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.harness ? { harness: att.harness } : {}) };
+        // `shadowAttachmentRef`, not an inline re-spelling of it: this string
+        // is the roll's third argument, and `runDialResolve`/`runSteeringResolve`
+        // derive theirs the same way. Two spellings of "the same attachment"
+        // desynchronize the roll exactly as surely as two prompt digests do.
+        dial = shadowAttachmentRef(att);
         executorName = formatDialRef(dial);
         sourceTag = 'attachment';
         attachmentRate = att.rate;
@@ -1486,8 +1534,14 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     if (executorName == null || sourceTag == null) return null;
     // Rate sampling for attachments; the flag always fires. Rolled before the
     // primary spawns — nothing about the primary's run can influence it.
+    //
+    // On `callerPromptSha256`, never `promptSha256`. A spawn-side hook rolls
+    // the same attachment on the caller's bytes to decide whether to route the
+    // spawn to the dispatch proxy at all; rolling the decorated snapshot here
+    // is how a hook-selected pair used to evaporate on arrival.
     if (sourceTag === 'attachment' && attachmentRate != null) {
-      const sampler = opts.shadowSampler ?? (() => shadowSampleRoll(promptSha256, archetype ?? '', executorName!));
+      const sampler =
+        opts.shadowSampler ?? (() => shadowSampleRoll(callerPromptSha256, archetype ?? '', executorName!));
       let roll: number;
       try { roll = sampler(); } catch { roll = 0; }
       if (!(roll < attachmentRate)) return null;
@@ -1646,7 +1700,15 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     delivery_transport: deliveryTransport,
     prompt_source: promptSource,
     prompt_snapshot: promptSnapshot,
+    // The SNAPSHOT's digest: what the executor actually received, brief and
+    // result footer included. `verify` and the snapshot attestation both
+    // depend on it meaning exactly that.
     prompt_sha256: promptSha256,
+    // The CALLER's digest, which is what a spawn-side hook row carries under
+    // its own `prompt_sha256`. Two different questions, so two fields: this is
+    // the one that joins a hook row to this kernel row by content, and the one
+    // the pair roll and the relay attestation are keyed on.
+    caller_prompt_sha256: callerPromptSha256,
     ...(relayAttested != null ? { relay_attested: relayAttested } : {}),
     command,
     command_sha256: commandSha256,
@@ -2191,6 +2253,10 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       prompt_source: promptSource,
       prompt_snapshot: promptSnapshot,
       prompt_sha256: promptSha256,
+      // Identical on both arms by construction — they read the same snapshot
+      // from the same caller bytes — and carried on both so a pair can be
+      // joined to its originating hook row from either side.
+      caller_prompt_sha256: callerPromptSha256,
       command: shadowCommand,
       command_sha256: shadowCommandSha,
       output_snapshot: shadowOutputRel,

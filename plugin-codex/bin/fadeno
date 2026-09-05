@@ -14579,6 +14579,12 @@ function normalizeSchemaVersion(document) {
 var ExecutorProfileError = class extends Error {
 };
 var BARE_IDENTIFIER_RE = /^[a-z][a-z0-9_-]*$/;
+function callerPromptDigest(prompt) {
+  return (0, import_node_crypto.createHash)("sha256").update(canonicalCallerPrompt(prompt)).digest("hex");
+}
+function canonicalCallerPrompt(prompt) {
+  return prompt.replace(/(?:\r?\n)+$/, "");
+}
 function shadowSampleRoll(promptSha256, archetype, challenger) {
   const digest4 = (0, import_node_crypto.createHash)("sha256").update(`${promptSha256}:${archetype}:${challenger}`).digest("hex");
   return Number.parseInt(digest4.slice(0, 8), 16) / 4294967296;
@@ -21846,6 +21852,9 @@ function uncommittedTrackedChanges(repoRoot) {
 }
 var PROXY_DISPATCHES_FILE = (0, import_node_path16.join)(".fadeno", "local", "proxy-dispatches.jsonl");
 var PENDING_RELAY_MAX_AGE_MS = 60 * 60 * 1e3;
+function attestationDigests(prompt) {
+  return /* @__PURE__ */ new Set([callerPromptDigest(prompt), sha256Hex(prompt)]);
+}
 function consumeSpawnSideRelay(repoRoot, prompt, now) {
   const path = (0, import_node_path16.join)(repoRoot, PENDING_RELAYS_FILE);
   if (!(0, import_node_fs16.existsSync)(path)) return null;
@@ -21859,7 +21868,7 @@ function consumeSpawnSideRelay(repoRoot, prompt, now) {
     const ts = typeof row.timestamp === "string" ? Date.parse(row.timestamp) : NaN;
     return Number.isFinite(ts) && now.getTime() - ts <= PENDING_RELAY_MAX_AGE_MS && typeof row.prompt_sha256 === "string";
   });
-  const digests = /* @__PURE__ */ new Set([sha256Hex(prompt), sha256Hex(prompt.replace(/\n$/, ""))]);
+  const digests = attestationDigests(prompt);
   const hit = fresh.findIndex((row) => digests.has(row.prompt_sha256));
   const remaining = hit === -1 ? fresh : fresh.filter((_, index) => index !== hit);
   try {
@@ -21884,7 +21893,7 @@ function consumeProxyDispatchMarker(repoRoot, prompt, now) {
     const ts = typeof row.timestamp === "string" ? Date.parse(row.timestamp) : NaN;
     return Number.isFinite(ts) && now.getTime() - ts <= PENDING_RELAY_MAX_AGE_MS && typeof row.prompt_sha256 === "string";
   });
-  const digests = /* @__PURE__ */ new Set([sha256Hex(prompt), sha256Hex(prompt.replace(/\n$/, ""))]);
+  const digests = attestationDigests(prompt);
   const hit = fresh.findIndex((row) => digests.has(row.prompt_sha256));
   const remaining = hit === -1 ? fresh : fresh.filter((_, index) => index !== hit);
   try {
@@ -22277,6 +22286,8 @@ function runDispatch(opts) {
       opts.promptFile != null && opts.promptFile !== "" ? `--prompt-file ${opts.promptFile} is empty \u2014 a dispatch needs a non-empty prompt.` : "empty prompt on stdin \u2014 pipe a non-empty prompt or pass --prompt-file <path>."
     );
   }
+  const callerPrompt = prompt;
+  const callerPromptSha256 = callerPromptDigest(callerPrompt);
   const briefName = archetype != null && Object.hasOwn(profile.archetypes, archetype) ? profile.archetypes[archetype].brief : null;
   let briefApplied = null;
   if (briefName != null && opts.noBrief !== true) {
@@ -22299,7 +22310,7 @@ ${prompt}`;
   }
   const dispatchId = (0, import_node_crypto7.randomUUID)();
   const now = opts.now ?? /* @__PURE__ */ new Date();
-  const relayAttested = consumeRelayAttestation(repoRoot, prompt, now);
+  const relayAttested = consumeRelayAttestation(repoRoot, callerPrompt, now);
   if (relayAttested === false) {
     opts.onEcho?.(
       "RELAY FIDELITY FAILED: a dispatch proxy sent bytes that do not match what it was handed. The executor below is working from an altered prompt \u2014 treat its output as answering a different question. Check the relay identity (`relay.claude` / `relay.codex` in executors.yaml); a model too small for the relay contract summarizes instead of forwarding."
@@ -22351,7 +22362,7 @@ ${DISPATCH_RESULT_FOOTER}`;
       const localStateForShadow = readLocalDialState(repoRoot);
       const att = localStateForShadow.shadows[archetype];
       if (att != null && !shadowAttachmentExpired(att)) {
-        dial2 = { model: att.model, ...att.effort ? { effort: att.effort } : {}, ...att.harness ? { harness: att.harness } : {} };
+        dial2 = shadowAttachmentRef(att);
         executorName2 = formatDialRef(dial2);
         sourceTag = "attachment";
         attachmentRate = att.rate;
@@ -22360,7 +22371,7 @@ ${DISPATCH_RESULT_FOOTER}`;
     }
     if (executorName2 == null || sourceTag == null) return null;
     if (sourceTag === "attachment" && attachmentRate != null) {
-      const sampler = opts.shadowSampler ?? (() => shadowSampleRoll(promptSha256, archetype ?? "", executorName2));
+      const sampler = opts.shadowSampler ?? (() => shadowSampleRoll(callerPromptSha256, archetype ?? "", executorName2));
       let roll;
       try {
         roll = sampler();
@@ -22427,7 +22438,15 @@ ${DISPATCH_RESULT_FOOTER}`;
     delivery_transport: deliveryTransport,
     prompt_source: promptSource,
     prompt_snapshot: promptSnapshot,
+    // The SNAPSHOT's digest: what the executor actually received, brief and
+    // result footer included. `verify` and the snapshot attestation both
+    // depend on it meaning exactly that.
     prompt_sha256: promptSha256,
+    // The CALLER's digest, which is what a spawn-side hook row carries under
+    // its own `prompt_sha256`. Two different questions, so two fields: this is
+    // the one that joins a hook row to this kernel row by content, and the one
+    // the pair roll and the relay attestation are keyed on.
+    caller_prompt_sha256: callerPromptSha256,
     ...relayAttested != null ? { relay_attested: relayAttested } : {},
     command: command2,
     command_sha256: commandSha256,
@@ -22813,6 +22832,10 @@ ${DISPATCH_RESULT_FOOTER}`;
       prompt_source: promptSource,
       prompt_snapshot: promptSnapshot,
       prompt_sha256: promptSha256,
+      // Identical on both arms by construction — they read the same snapshot
+      // from the same caller bytes — and carried on both so a pair can be
+      // joined to its originating hook row from either side.
+      caller_prompt_sha256: callerPromptSha256,
       command: shadowCommand,
       command_sha256: shadowCommandSha,
       output_snapshot: shadowOutputRel,
@@ -24003,8 +24026,11 @@ function requestedEntry(row) {
     promptSource: str(row.prompt_source),
     promptSnapshot: str(row.prompt_snapshot),
     promptSha256: str(row.prompt_sha256),
+    callerPromptSha256: str(row.caller_prompt_sha256),
     relayAttested: bool(row.relay_attested),
     writeVariant: bool(row.write_variant),
+    rewrite: null,
+    // a kernel row is the delivery, never the decision to reroute one
     refusal: refusalOf(row.refusal),
     gateEligible: row.gate_eligible === false ? false : null,
     completed: false,
@@ -24082,8 +24108,18 @@ function hostEntry(row) {
     promptSource: null,
     promptSnapshot: str(row.prompt_snapshot),
     promptSha256: str(row.prompt_sha256),
+    // A `host_delivery` row's `prompt_sha256` attests the SNAPSHOT the hook
+    // wrote beside it — raw bytes, exactly as the kernel's field does — so it
+    // is not the canonical caller digest and must not be presented as one.
+    // (They differ only by trailing newlines, and nothing joins to a host
+    // delivery by content: nothing ran downstream of it.) The one hook row that
+    // does carry a caller digest is `host_rewritten`, which overrides this
+    // below.
+    callerPromptSha256: null,
     relayAttested: null,
     writeVariant: null,
+    rewrite: null,
+    // set by `hostRewrittenEntry`, which builds on this
     refusal: null,
     gateEligible: null,
     completed: false,
@@ -24138,6 +24174,20 @@ function nativeSpawnEntry(row) {
   entry.model = inherited ?? requested;
   entry.modelOverride = requested != null && inherited != null && requested !== inherited ? requested : null;
   entry.reasoningEffort = str(row.reasoning_effort);
+  return entry;
+}
+function hostRewrittenEntry(row) {
+  const entry = hostEntry(row);
+  entry.kind = "rewritten";
+  entry.agentType = str(row.agent_type);
+  entry.callerPromptSha256 = str(row.prompt_sha256);
+  entry.rewrite = {
+    to: str(row.subagent_type_applied),
+    reason: str(row.reason) ?? "unknown",
+    modelApplied: str(row.model_applied),
+    challenger: str(row.challenger),
+    rate: num(row.rate)
+  };
   return entry;
 }
 function correlateAttestation(entries, row) {
@@ -24225,6 +24275,23 @@ function refusalMarker(predicate) {
 }
 function renderDispatchLine(entry) {
   const parts = [entry.timestamp ?? "?", `[${entry.kind}]`];
+  if (entry.kind === "rewritten") {
+    const rw = entry.rewrite;
+    parts.push(
+      `${entry.agentType ?? entry.archetype ?? "(unnamed)"} \u2192 ${rw?.to ?? "(unrecorded)"}${rw?.modelApplied != null ? ` (relay ${rw.modelApplied})` : ""}`
+    );
+    if (entry.executor != null) {
+      parts.push(`[dial: ${entry.executor}${entry.model != null ? ` (${entry.model})` : ""}]`);
+    }
+    const reason = rw?.reason ?? "unknown";
+    parts.push(`[off the host lane: ${reason}]`);
+    if (reason === "shadow_pair_selected" && rw?.challenger != null) {
+      parts.push(`[challenger: ${rw.challenger}${rw.rate != null ? ` @${rw.rate}` : ""}]`);
+    }
+    if (entry.laneReason != null) parts.push(`[lane: ${entry.laneReason}]`);
+    if (entry.promptSha256 != null) parts.push(`sha256:${entry.promptSha256.slice(0, 8)}`);
+    return parts.join("  ");
+  }
   if (entry.kind === "native") {
     const model2 = entry.modelOverride != null ? `${entry.model ?? "?"} \u2192 ${entry.modelOverride}` : entry.model;
     parts.push(`${entry.agentType ?? "(unnamed)"}${model2 != null ? ` (${model2})` : ""}`);
@@ -24393,6 +24460,10 @@ function runDispatches(opts = {}) {
     }
     if (event === "host_refused") {
       entries.push(hostRefusedEntry(row));
+      continue;
+    }
+    if (event === "host_rewritten") {
+      entries.push(hostRewrittenEntry(row));
       continue;
     }
     if (event === "native_spawn") {
@@ -24774,6 +24845,10 @@ function loadAllEntries(absolute) {
     }
     if (event === "host_refused") {
       entries.push(hostRefusedEntry(row));
+      continue;
+    }
+    if (event === "host_rewritten") {
+      entries.push(hostRewrittenEntry(row));
       continue;
     }
     if (event === "native_spawn") {
@@ -32059,7 +32134,7 @@ function resolvePromptDigest(opts) {
   if (!file) return null;
   try {
     const text = (0, import_node_fs28.readFileSync)((0, import_node_path28.resolve)(opts.cwd ?? process.cwd(), file), "utf8");
-    return sha256Hex(text);
+    return callerPromptDigest(text);
   } catch {
     return null;
   }
@@ -43907,7 +43982,11 @@ Or advance manually with the playbook cursor:`);
         return runShadowCommand(archetype, model, { harness: values.harness ?? null, rate: values.rate, n: values.n, json: Boolean(values.json) });
       }
       if (sub === "resolve") {
-        if (!values.archetype) throw new Error("Usage: fadeno dial resolve --archetype <name> [--prompt-sha256 <hex>]");
+        if (!values.archetype) {
+          throw new Error(
+            "Usage: fadeno dial resolve --archetype <name> [--prompt-sha256 <hex: the caller's prompt bytes, before any kernel decoration, trailing newlines stripped>]"
+          );
+        }
         if (positionals.length > 2) throw new Error("Usage: fadeno dial resolve --archetype <name>");
         const result = runDialResolve({ archetype: values.archetype, promptSha256: values["prompt-sha256"] ?? null });
         console.log(JSON.stringify(result, null, 2));

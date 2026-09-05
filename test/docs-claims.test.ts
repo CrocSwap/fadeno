@@ -196,6 +196,39 @@ const CLAIMS: Claim[] = [
     },
   },
   {
+    // The rewrite's evidence, and the digest that makes it joinable.
+    //
+    // Both halves have failed silently before, in the same 2026-09-05 receipt:
+    // the hook rewrote a host-eligible spawn onto the dispatch proxy and wrote
+    // no row at all, and the kernel rolled the pair on its own decorated
+    // snapshot rather than the caller's bytes, so the two processes disagreed
+    // about whether a pair existed. A `host_rewritten` row the docs stop
+    // describing, or a `caller_prompt_sha256` the kernel stops writing, puts
+    // that silence straight back.
+    id: 'host-rewritten-evidence',
+    doc: {
+      files: ['docs/architecture.md', DIALS],
+      patterns: [/host_rewritten/, /caller_prompt_sha256/, /shadow_pair_selected/],
+    },
+    src: {
+      files: ['templates/claude/hooks/dispatch-steering.mjs', 'src/commands/dispatch.ts', 'src/commands/dispatches.ts'],
+      patterns: [/host_rewritten/, /caller_prompt_sha256/, /shadow_pair_selected/],
+    },
+  },
+  {
+    // The one-digest contract itself. The helper is where the definition lives
+    // ("before any kernel decoration"); the design doc is where a reader looks
+    // for why hook and kernel cannot disagree. If either side loses the name,
+    // the next person to add a consumer has nothing telling them which bytes
+    // to hash.
+    id: 'caller-prompt-digest',
+    doc: { files: [SLOTS], patterns: [/callerPromptDigest/, /canonicalCallerPrompt/] },
+    src: {
+      files: ['src/lib/executors.ts', 'src/commands/dispatch.ts'],
+      patterns: [/callerPromptDigest/, /callerPromptSha256/, /canonicalCallerPrompt/],
+    },
+  },
+  {
     // The generic-spawn refusal is symmetric by decision, not by accident: one
     // predicate spelled the same way in both hooks, so a user who enabled host
     // mode gets the same answer from Claude and from Codex.

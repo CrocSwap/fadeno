@@ -14,7 +14,7 @@ import {
   runDispatch,
 } from '../src/commands/dispatch.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
-import { writeLocalDialState } from '../src/lib/executors.ts';
+import { callerPromptDigest, writeLocalDialState } from '../src/lib/executors.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
 import { echoedStdin, tempRepo } from './helpers.ts';
 
@@ -236,6 +236,60 @@ test('dispatch: a proxy dispatch with no spawn-side stash attests null, never fa
   // say" is not "defected".
   const result = runDispatch({ archetype: 'worker', prompt: 'hello\n', repoRoot: root, now, userPathOptions: onHarness('standalone') });
   assert.equal(result.relayAttested, null);
+});
+
+/**
+ * Attestation matches on the CALLER's bytes, so a brief cannot break it.
+ *
+ * Both attestation files are written by hooks that only ever see the caller's
+ * prompt — the spawn-side stash from `tool_input.prompt`, the proxy marker from
+ * the bytes the proxy piped in. The kernel used to hash its own `prompt`
+ * variable, which by the attestation call already carried the archetype brief,
+ * so an archetype that declares one could never match either file: the marker
+ * missed, `consumeRelayAttestation` returned `null`, and the row said "no proxy
+ * sent this" about a dispatch a proxy demonstrably had. Same digest skew as the
+ * pair roll, on a different consumer.
+ */
+test('dispatch: relay attestation matches the caller bytes with and without a brief', (t) => {
+  const now = new Date('2026-08-12T12:00:00Z');
+  const B = 'the bytes the parent handed the proxy\n';
+  const attest = (root: string): void => {
+    mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
+    writeFileSync(
+      join(root, PENDING_RELAYS_FILE),
+      `${JSON.stringify({ timestamp: '2026-08-12T11:59:00Z', prompt_sha256: sha256Hex(B) })}\n`,
+    );
+    markProxyDispatch(root, [B]);
+  };
+
+  const plain = seedCatalog(t, { dials: { worker: 'echo-worker' } });
+  attest(plain);
+  assert.equal(
+    runDispatch({ archetype: 'worker', prompt: B, repoRoot: plain, now, userPathOptions: onHarness('standalone') }).relayAttested,
+    true,
+  );
+
+  const briefed = seedCatalog(t, {
+    dials: { worker: 'echo-worker' },
+    archetypes: { worker: { brief: 'coordination' } },
+  });
+  mkdirSync(join(briefed, '.fadeno', 'briefs'), { recursive: true });
+  writeFileSync(join(briefed, '.fadeno', 'briefs', 'coordination.md'), 'BRIEF: coordinate through fadeno.\n');
+  attest(briefed);
+  const result = runDispatch({ archetype: 'worker', prompt: B, repoRoot: briefed, now, userPathOptions: onHarness('standalone') });
+  assert.equal(result.relayAttested, true);
+
+  // The brief really was composed — the fixture is not silently exercising the
+  // no-brief path — and the two digests on the row are correspondingly
+  // different, which is exactly why they need separate names.
+  const request = evidenceRows(briefed).find((row) => row.event === 'dispatch_requested')!;
+  assert.equal(request.caller_prompt_sha256, callerPromptDigest(B));
+  assert.notEqual(request.prompt_sha256, request.caller_prompt_sha256);
+  // Canonical, not raw: `B` ends in the newline a heredoc relay would have
+  // added, and the digest a spawn-side hook took of the same task before that
+  // happened is what this field has to equal.
+  assert.notEqual(request.caller_prompt_sha256, sha256Hex(B));
+  assert.match(readFileSync(join(briefed, request.prompt_snapshot as string), 'utf8'), /^BRIEF: /);
 });
 
 test('dispatch: --prompt-file dispatches get a kernel snapshot of the composed bytes', (t) => {

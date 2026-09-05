@@ -50,14 +50,45 @@ const requested =
     : null;
 const bare = requested == null ? null : requested.split(':').at(-1);
 
-// The digest the pair roll is keyed on. Supplying it to the resolver is what
-// lets it answer "is this spawn a pair?" for THIS prompt rather than in
-// general — and the kernel re-derives the same answer at dispatch time, so
-// nothing has to be threaded through the relay. Computed up here because every
-// path below records it, including the two generic-spawn paths that never
-// reach the resolver at all.
+// The CALLER's prompt digest — sha256 of `tool_input.prompt` exactly as the
+// director wrote it — and the digest the pair roll is keyed on. Supplying it to
+// the resolver is what lets it answer "is this spawn a pair?" for THIS prompt
+// rather than in general, and the kernel re-derives the same value from the
+// bytes it receives (`callerPromptDigest` / `callerPromptSha256` in
+// src/lib/executors.ts and src/commands/dispatch.ts), so nothing has to be
+// threaded through the relay.
+//
+// That agreement is a contract between two processes that share no code, and
+// it has been broken twice over: until 2026-09-05 the kernel hashed its prompt
+// AFTER composing the archetype brief and the result-protocol footer, so a
+// spawn this hook rolled as SELECTED reached a kernel that rolled it as not
+// selected and quietly delivered an unpaired dispatch — and the relay's own
+// quoted heredoc adds a trailing newline on the way, which would have split the
+// two digests again even with the decoration fixed. If either side ever hashes
+// anything but the CANONICAL caller bytes, that silence comes back.
+//
+// Computed up here because every path below records it, including the two
+// generic-spawn paths that never reach the resolver at all.
 const promptText = typeof event.tool_input.prompt === 'string' ? event.tool_input.prompt : '';
-const promptDigest = promptText.length > 0 ? createHash('sha256').update(promptText).digest('hex') : null;
+const promptDigest = promptText.length > 0 ? callerPromptDigest(promptText) : null;
+
+/**
+ * The caller digest, spelled by hand — `callerPromptDigest` in
+ * src/lib/executors.ts is the definition, and this hook has no import path back
+ * into the CLI (the same reason DISPATCHES_FORMAT is a literal here).
+ *
+ * The trailing-newline strip is the load-bearing half. This hook hashes
+ * `tool_input.prompt`, which a director usually writes without a terminating
+ * newline; the kernel hashes what reaches it through the dispatch proxy's
+ * quoted heredoc, which the shell terminates with one. Hash raw bytes on both
+ * sides and the two roll different numbers for the same task — the 2026-09-05
+ * defect exactly, relocated from the kernel's decoration to the relay's
+ * transport. Trailing newlines are not part of a prompt's identity; nothing
+ * else is normalized.
+ */
+function callerPromptDigest(text) {
+  return createHash('sha256').update(text.replace(/(?:\r?\n)+$/, '')).digest('hex');
+}
 
 // Relay-fidelity attestation: whenever a subtask heads to a dispatch proxy,
 // stash the spawn-side prompt digest. The kernel consumes a matching entry at
@@ -76,7 +107,9 @@ function stashRelay() {
       `${JSON.stringify({
         timestamp: new Date().toISOString(),
         hook_version: HOOK_VERSION,
-        prompt_sha256: createHash('sha256').update(prompt).digest('hex'),
+        // The CALLER digest, canonical — the kernel matches this file against
+        // the bytes it received, which have been through the proxy's heredoc.
+        prompt_sha256: callerPromptDigest(prompt),
       })}\n`,
     );
   } catch {
@@ -726,14 +759,138 @@ function recordHostDelivery() {
   }
 }
 
+/**
+ * Why this spawn is leaving the host lane. A closed vocabulary of two, because
+ * `commandDelivery` is exactly `lane === 'command' || pairSelected` and the two
+ * halves have different remedies: a `command_lane` rewrite follows the dial (an
+ * effort the session cannot give, or a command-adapter executor), while
+ * `shadow_pair_selected` is the pair rule taking a spawn the dial alone would
+ * have kept in session. `pairSelected` is named first: when both are true the
+ * pair is the surprising fact, and it is the one a reader needs.
+ */
+const rewriteReason = pairSelected ? 'shadow_pair_selected' : 'command_lane';
+
+/**
+ * Was a spawn actually taken OFF the host lane here?
+ *
+ * `commandDelivery` alone is not that question. A director that typed
+ * `fadeno:dispatch-worker` itself named the proxy: `explicitProxy` resolves it
+ * like any other archetype spawn (so a host slot can pull it back in-session),
+ * but when the dial's lane is `command` the spawn simply lands where it was
+ * already headed. Recording that as `host_rewritten` — with a notice saying so
+ * — would claim a diversion that did not happen, and put a row in the ledger
+ * asserting a host-lane spawn had been redirected when none existed.
+ *
+ * The relay attestation is deliberately NOT gated on this: it belongs to
+ * "these bytes went to a proxy", which is equally true either way.
+ */
+const hostRewrite = commandDelivery && !explicitProxy;
+
+/**
+ * Evidence for a spawn this hook REWROTE onto the dispatch proxy.
+ *
+ * The gap it closes, from the 2026-09-05 receipt: a host-eligible `worker`
+ * spawn was rolled as a selected pair, rewritten to `fadeno:dispatch-worker` on
+ * the relay model, and recorded NOWHERE. `recordHostDelivery` deliberately does
+ * not run on this path (the kernel writes the request/completion pair
+ * downstream), so the only trace of the rewrite was the kernel row it produced
+ * — which named the relay's own dispatch, not the spawn that caused it, and in
+ * that receipt did not even agree that a pair was involved. A reader could see
+ * that a worker had been dispatched and could not see that a host spawn had
+ * been diverted, by whom, or why.
+ *
+ * This row is not a delivery and must not be read as one: nothing ran here, and
+ * the work's actual evidence is the kernel's rows under the relay's dispatch
+ * id. `caller_prompt_sha256` on those rows is this row's `prompt_sha256` — both
+ * are the canonical caller digest — which is how the two are joined.
+ *
+ * Written only when `hostRewrite` holds, never for a proxy the caller named
+ * itself: the row's whole claim is that a spawn left the host lane.
+ *
+ * Same best-effort discipline as every other write in this hook: a failed
+ * append never changes the rewrite.
+ */
+function recordHostRewritten(appliedType) {
+  appendRow({
+    // The same hand-copied literal, for the same reason, as the two writers
+    // above: no import path back into the CLI. Bump all three together.
+    // ADDITIVE under 1.1 rather than a bump of its own — the reader tiers on
+    // the format's MAJOR, so a new event name needs no new version, while a
+    // bump would make every older reader skip ALL rows as "newer format".
+    format: '1.1',
+    timestamp: new Date().toISOString(),
+    event: 'host_rewritten',
+    fadeno_version: HOOK_VERSION,
+    hook_version: HOOK_VERSION,
+    host: 'claude',
+    archetype,
+    agent_type: requested, // what the director asked for
+    subagent_type_applied: appliedType, // the proxy it was rewritten to
+    model_applied: relayModel, // what that proxy relay runs on
+    // The DIALED identity — the thing the proxy will go and deliver. Not what
+    // ran here; nothing ran here.
+    executor: typeof slot?.executor === 'string' ? slot.executor : null,
+    model: typeof slot?.model === 'string' ? slot.model : null,
+    lane,
+    lane_reason: laneReason,
+    reason: rewriteReason,
+    // The attachment, on the one reason that turns on it. Null on a
+    // `command_lane` rewrite rather than omitted, so both shapes diff field for
+    // field — the same rule `recordHostRefusal` follows.
+    challenger:
+      rewriteReason === 'shadow_pair_selected' && typeof slot?.shadow?.challenger === 'string'
+        ? slot.shadow.challenger
+        : null,
+    rate:
+      rewriteReason === 'shadow_pair_selected' && typeof slot?.shadow?.rate === 'number'
+        ? slot.shadow.rate
+        : null,
+    // The CALLER's digest, and the join key to the kernel rows this rewrite
+    // produces (`caller_prompt_sha256` there). No prompt snapshot: the kernel
+    // owns the snapshot for everything on the command lane, and writing a
+    // second copy here would put two files on disk for one delivery.
+    prompt_sha256: promptDigest,
+    harness: typeof slot?.harness === 'string' ? slot.harness : null,
+    dial_source: typeof slot?.source === 'string' ? slot.source : slot?.dial_source ?? null,
+  });
+}
+
+/**
+ * The one line the host session sees as the rewrite happens.
+ *
+ * Host mode's policy is that Fadeno's decisions are user-facing, and this is
+ * the decision with the least visible consequence: the spawn silently becomes a
+ * different subagent on a different model, and everything that explains why
+ * lands in a file nobody is reading at that moment. A denial at least reaches
+ * the director as text. This is the equivalent text for the path that does not
+ * deny.
+ *
+ * Deliberately states where the evidence went, because it does not go where a
+ * reader would look: this hook writes no delivery row for a rewritten spawn,
+ * and the identity that matters is recorded under the relay's dispatch id.
+ */
+function rewriteNotice(appliedType) {
+  const challenger = typeof slot?.shadow?.challenger === 'string' ? slot.shadow.challenger : null;
+  const rate = typeof slot?.shadow?.rate === 'number' ? slot.shadow.rate : null;
+  const why =
+    rewriteReason === 'shadow_pair_selected'
+      ? `shadow pair selected${challenger != null ? ` (${challenger}${rate != null ? ` @${rate}` : ''})` : ''}` +
+        ' — both arms run on the command lane'
+      : `command lane${laneReason != null ? ` (${laneReason})` : ''}`;
+  return (
+    `fadeno: ${archetype} spawn → ${appliedType} (relay ${relayModel}): ${why}. ` +
+    `Kernel evidence follows under the relay's dispatch id; run \`fadeno dispatches\` to see it.`
+  );
+}
+
 // Where a host spawn lands. Only the retarget below consumes this now — the
 // evidence row used to read an effort and a source off the resolved agent
 // file, and with the grid retired there is nothing on that file to read.
 const hostAgent = commandDelivery ? null : hostTarget(archetype);
 
-if (commandDelivery) stashRelay(); // rewritten-to-proxy spawns get attested too
-else recordHostDelivery(); // no kernel downstream: record the delivery here
-
+// Resolved BEFORE the evidence write, not after: `host_rewritten` records the
+// type it was rewritten to, and a row that had to guess at that would be
+// asserting something this hook already knows.
 let subagentType;
 if (commandDelivery) {
   const localProxy = join(cwd, '.claude', 'agents', `dispatch-${archetype}.md`);
@@ -745,7 +902,21 @@ if (commandDelivery) {
   subagentType = existsSync(localAgent) ? archetype : `fadeno:${archetype}`;
 }
 
+if (commandDelivery) {
+  stashRelay(); // every spawn bound for a proxy gets attested, rewritten or not
+  if (hostRewrite) recordHostRewritten(subagentType); // only a real diversion leaves a row
+} else {
+  recordHostDelivery(); // no kernel downstream: record the delivery here
+}
+
 finish({
+  // A top-level output field, beside `hookSpecificOutput` rather than inside
+  // it, and only on the path that actually diverts something — an unsteered
+  // spawn, a host-delivered one, or a proxy the caller named itself changes
+  // nothing the caller needs told. A harness that does not surface it ignores
+  // it; the row above is the durable record either way, so this is the notice,
+  // never the evidence.
+  ...(hostRewrite ? { systemMessage: rewriteNotice(subagentType) } : {}),
   hookSpecificOutput: {
     hookEventName: 'PreToolUse',
     updatedInput: {

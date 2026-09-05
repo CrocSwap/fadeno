@@ -607,7 +607,24 @@ in-session agent, and the kernel independently re-derives the same roll to let
 a host-dialed primary take its own command fallback (echoed as `pair
 selected`, `transport: host-command-fallback`). Nothing is threaded between
 them: the roll is a pure function of (prompt digest, archetype, challenger),
-so hook and kernel cannot disagree. An unselected spawn is untouched, which is
+so hook and kernel cannot disagree — *provided both feed it the same two
+inputs*, which for eight months they did not. The digest is the **caller
+prompt digest** (`callerPromptDigest`): sha256 of the bytes handed to Fadeno,
+before the archetype brief or the result-protocol footer is composed in, and
+over `canonicalCallerPrompt` — the prompt with its trailing newlines stripped.
+The kernel used to hash its decorated snapshot instead, so a spawn the hook
+rolled as SELECTED — and rewrote onto the proxy for that reason — reached a
+kernel that rolled it as not selected and delivered a plain unpaired dispatch
+(observed 2026-09-05; the rewrite left no row either, which is why
+`host_rewritten` exists). The trailing-newline rule is the second half of the
+same fix and is not cosmetic: the two processes are separated by the proxy's
+quoted heredoc, and the shell terminates a heredoc body with a newline the
+director's `tool_input.prompt` never had, so raw bytes would split the digests
+again after the decoration was fixed. Two prompts that differ only in trailing
+newlines are one prompt, for pairing and for attestation; nothing else is
+normalized. The challenger string is the roll's other shared
+input and is spelled `formatDialRef(shadowAttachmentRef(att))` on every side.
+An unselected spawn is untouched, which is
 what keeps a 0.25 attachment from taxing the other three spawns in four. Also
 landed: prompt-digest-keyed sampling (a retried spawn cannot re-roll);
 `pair_id` on both arms and the retained challenger `workspace` on shadow

@@ -109,6 +109,18 @@ const agentType = typeof input.agent_type === 'string' && input.agent_type.lengt
   : null;
 const message = typeof input.message === 'string' ? input.message : '';
 const promptDigest = message.length > 0 ? createHash('sha256').update(message).digest('hex') : null;
+// The CALLER digest the resolver rolls the shadow pair on. Same rule, hand-
+// spelled, as the Claude steering hook and the kernel's `callerPromptDigest`:
+// the trailing run of line terminators is not part of a prompt's identity,
+// because the dispatch proxy's quoted heredoc terminates the body with a
+// newline the caller's prompt never had. `promptDigest` above stays RAW — it
+// names and attests the prompt SNAPSHOT this hook writes (a row carrying a
+// `prompt_snapshot` digests that snapshot), while the resolver must see the
+// digest the kernel will roll on. test/dispatch-shadow.test.ts pins the
+// literal across every writer.
+const callerDigest = message.length > 0
+  ? createHash('sha256').update(message.replace(/(?:\r?\n)+$/, '')).digest('hex')
+  : null;
 // The model a spawn will actually run on when it names none of its own: the
 // active model of the session that is spawning. Codex publishes it on the
 // event, and it is the single most useful fact in a refusal — an unsteered
@@ -464,7 +476,7 @@ function resolveCli() {
 
 const cli = resolveCli();
 const resolveArgv = ['dial', 'resolve', '--archetype', archetype];
-if (promptDigest != null) resolveArgv.push('--prompt-sha256', promptDigest);
+if (callerDigest != null) resolveArgv.push('--prompt-sha256', callerDigest);
 // The resolver must see only THIS harness. A Codex session launched from a
 // Claude Code shell inherits CLAUDE_EFFORT, and the resolver would then answer
 // on another harness's session effort — a lane reason no Codex hook can

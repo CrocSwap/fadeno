@@ -200,9 +200,20 @@ export interface DispatchIgnoredOutputDiscarded {
  * burned 57.5M input tokens before a human noticed, and the log said nothing
  * at all — so "nobody spawned anything" and "somebody spawned something
  * Fadeno never steered" must not render identically.
+ *
+ * `kind: "rewritten"` is a `host_rewritten` row: the Claude steering hook took
+ * a spawn OFF the host lane and onto the dispatch proxy. Its own kind, not a
+ * `host` one, because nothing ran in session — the work's real evidence is the
+ * kernel's `dispatch_requested`/`dispatch_completed` pair under the relay's
+ * dispatch id, joined to this row by content (`caller_prompt_sha256` there
+ * equals `prompt_sha256` here). Two consequences fall out of the separate
+ * kind, and both are wanted: `correlateAttestation` only walks `kind: "host"`,
+ * so a rewritten spawn can never steal an attestation owed to a real host
+ * delivery, and `[never attested]` is never printed for a spawn that was never
+ * under the attestation contract.
  */
 export interface DispatchEntry {
-  kind: 'command' | 'host' | 'native';
+  kind: 'command' | 'host' | 'native' | 'rewritten';
   format: string | null;
   legacy: boolean;
   timestamp: string | null;
@@ -263,8 +274,44 @@ export interface DispatchEntry {
   promptSource: string | null;
   promptSnapshot: string | null;
   promptSha256: string | null;
+  /**
+   * The CALLER's prompt digest: sha256 of the bytes handed to Fadeno, before
+   * the kernel composed an archetype brief or the result-protocol footer in,
+   * and with trailing newlines stripped (`callerPromptDigest` in
+   * `src/lib/executors.ts` — the relay's heredoc adds one, so raw bytes would
+   * not survive the trip). `promptSha256` above attests the SNAPSHOT the
+   * executor received, so the two differ on any brief-carrying or command-lane
+   * dispatch, and only this one is stable across them.
+   *
+   * It is what joins a spawn-side hook row to the kernel rows it produced: a
+   * `host_rewritten` row's `promptSha256` IS a caller digest, and equals this
+   * field on the `dispatch_requested` row the rewrite led to. Null on kernel
+   * rows written before the field existed, and on a `host_delivery` row, whose
+   * `prompt_sha256` attests the snapshot the hook wrote rather than the
+   * canonical caller bytes.
+   */
+  callerPromptSha256: string | null;
   relayAttested: boolean | null;
   writeVariant: boolean | null;
+  /**
+   * Present only on a `host_rewritten` row (`kind: "rewritten"`): the Claude
+   * steering hook took this spawn off the host lane and onto a dispatch proxy.
+   * Null on every other kind.
+   *
+   * `reason` is a two-value vocabulary the hook owns — `shadow_pair_selected`
+   * (the pair rule moved a spawn the dial alone would have kept in session) and
+   * `command_lane` (the dial's own lane) — kept a plain string here for the
+   * same reason `refusal.predicate` is: the vocabulary belongs to the writer
+   * and may grow. `challenger`/`rate` are the attachment, and are null unless
+   * the reason is the pair.
+   */
+  rewrite: {
+    to: string | null;
+    reason: string;
+    modelApplied: string | null;
+    challenger: string | null;
+    rate: number | null;
+  } | null;
   /**
    * Present on a kernel `dispatch_refused` row and on the steering hook's
    * `host_refused` row — the two ways a dispatch is recorded as never having
@@ -773,8 +820,10 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     promptSource: str(row.prompt_source),
     promptSnapshot: str(row.prompt_snapshot),
     promptSha256: str(row.prompt_sha256),
+    callerPromptSha256: str(row.caller_prompt_sha256),
     relayAttested: bool(row.relay_attested),
     writeVariant: bool(row.write_variant),
+    rewrite: null, // a kernel row is the delivery, never the decision to reroute one
     refusal: refusalOf(row.refusal),
     gateEligible: row.gate_eligible === false ? false : null,
     completed: false,
@@ -853,8 +902,17 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     promptSource: null,
     promptSnapshot: str(row.prompt_snapshot),
     promptSha256: str(row.prompt_sha256),
+    // A `host_delivery` row's `prompt_sha256` attests the SNAPSHOT the hook
+    // wrote beside it — raw bytes, exactly as the kernel's field does — so it
+    // is not the canonical caller digest and must not be presented as one.
+    // (They differ only by trailing newlines, and nothing joins to a host
+    // delivery by content: nothing ran downstream of it.) The one hook row that
+    // does carry a caller digest is `host_rewritten`, which overrides this
+    // below.
+    callerPromptSha256: null,
     relayAttested: null,
     writeVariant: null,
+    rewrite: null, // set by `hostRewrittenEntry`, which builds on this
     refusal: null,
     gateEligible: null,
     completed: false,
@@ -948,6 +1006,41 @@ function nativeSpawnEntry(row: Record<string, unknown>): DispatchEntry {
   entry.modelOverride =
     requested != null && inherited != null && requested !== inherited ? requested : null;
   entry.reasoningEffort = str(row.reasoning_effort);
+  return entry;
+}
+
+/**
+ * A `host_rewritten` row: the Claude steering hook took a host-eligible spawn
+ * OFF the host lane and onto a dispatch proxy — because a shadow pair was
+ * selected, or because the dial's own lane is `command`.
+ *
+ * Built on `hostEntry` because the identity half is the same shape (the dialed
+ * executor, the lane and its reason, the caller's digest), then given its own
+ * `kind` so it can never be mistaken for a delivery. Nothing ran in session
+ * here: the delivery evidence is the kernel's row pair under the relay's
+ * dispatch id, joined to this row by `caller_prompt_sha256`.
+ *
+ * The event name is the claim, exactly as in `hostRefusedEntry`: a row whose
+ * `reason` is missing still renders as a rewrite, with the reason marked
+ * unknown, rather than silently reading as an in-session delivery — which is
+ * the confusion this row exists to end.
+ */
+function hostRewrittenEntry(row: Record<string, unknown>): DispatchEntry {
+  const entry = hostEntry(row);
+  entry.kind = 'rewritten';
+  entry.agentType = str(row.agent_type);
+  // This row writes no snapshot — the kernel owns the one for the dispatch the
+  // rewrite produced — so its `prompt_sha256` is the CALLER digest, canonical,
+  // and equals `caller_prompt_sha256` on that kernel row. Both names hold it
+  // here so a reader can join in either direction.
+  entry.callerPromptSha256 = str(row.prompt_sha256);
+  entry.rewrite = {
+    to: str(row.subagent_type_applied),
+    reason: str(row.reason) ?? 'unknown',
+    modelApplied: str(row.model_applied),
+    challenger: str(row.challenger),
+    rate: num(row.rate),
+  };
   return entry;
 }
 
@@ -1121,6 +1214,8 @@ function refusalMarker(predicate: string): string {
  * <ts>  [command]  worker/reviewer → executor (model)  via command  exit 0 in 12ms  [markers]  <prompt snapshot>
  * <ts>  [native]  <agent_type> (<inherited model>)  [unsteered spawn]  sha256:<8>
  *   — a native spawn writes no snapshot, so its line ends in the prompt digest rather than a path.
+ * <ts>  [rewritten]  <agent_type> → <proxy> (relay <model>)  [off the host lane: <reason>]  sha256:<8>
+ *   — likewise no snapshot: the kernel owns the one for the dispatch this rewrite produced.
  * ```
  *
  * Host deliveries render `[host]`, fold any `model_override` into the
@@ -1128,6 +1223,38 @@ function refusalMarker(predicate: string): string {
  */
 export function renderDispatchLine(entry: DispatchEntry): string {
   const parts: string[] = [entry.timestamp ?? '?', `[${entry.kind}]`];
+  if (entry.kind === 'rewritten') {
+    // Deliberately NOT the shared renderer below. That one reads
+    // `archetype → executor (model)`, which on this row would print the DIALED
+    // identity — the thing the proxy is going to go and deliver — as though it
+    // were what this line records. What this line records is a redirection, so
+    // it renders the two ends of it: what was asked for, and what was spawned
+    // instead.
+    const rw = entry.rewrite;
+    parts.push(
+      `${entry.agentType ?? entry.archetype ?? '(unnamed)'} → ${rw?.to ?? '(unrecorded)'}` +
+        `${rw?.modelApplied != null ? ` (relay ${rw.modelApplied})` : ''}`,
+    );
+    // The dialed identity still belongs on the line — it is what the pair or
+    // the lane was decided FOR — but marked as the dial rather than as the
+    // thing that ran.
+    if (entry.executor != null) {
+      parts.push(`[dial: ${entry.executor}${entry.model != null ? ` (${entry.model})` : ''}]`);
+    }
+    const reason = rw?.reason ?? 'unknown';
+    parts.push(`[off the host lane: ${reason}]`);
+    // The attachment, on the one reason that turns on it. A pair whose
+    // challenger the row did not state renders the reason alone rather than an
+    // empty parenthesis.
+    if (reason === 'shadow_pair_selected' && rw?.challenger != null) {
+      parts.push(`[challenger: ${rw.challenger}${rw.rate != null ? ` @${rw.rate}` : ''}]`);
+    }
+    if (entry.laneReason != null) parts.push(`[lane: ${entry.laneReason}]`);
+    // The join key to the kernel rows this rewrite produced: the same eight
+    // characters appear as `caller_prompt_sha256` on the dispatch that ran.
+    if (entry.promptSha256 != null) parts.push(`sha256:${entry.promptSha256.slice(0, 8)}`);
+    return parts.join('  ');
+  }
   if (entry.kind === 'native') {
     // A generic subagent: no archetype, no dial, no executor. Every field the
     // shared renderer below would reach for is null by construction, and
@@ -1463,6 +1590,14 @@ export function runDispatches(opts: DispatchesOptions = {}): DispatchesResult {
     // repo where nobody spawned anything.
     if (event === 'host_refused') {
       entries.push(hostRefusedEntry(row));
+      continue;
+    }
+    // A spawn the steering hook REROUTED off the host lane. Its own entry for
+    // the same reason as a denial: the host spawn a director asked for did not
+    // happen, and until this row existed the only trace was a kernel dispatch
+    // that named the relay rather than the spawn that caused it.
+    if (event === 'host_rewritten') {
+      entries.push(hostRewrittenEntry(row));
       continue;
     }
     // A GENERIC subagent the Codex spawn guard let through (host mode off).
@@ -2179,6 +2314,10 @@ function loadAllEntries(absolute: string): {
     }
     if (event === 'host_refused') {
       entries.push(hostRefusedEntry(row));
+      continue;
+    }
+    if (event === 'host_rewritten') {
+      entries.push(hostRewrittenEntry(row));
       continue;
     }
     if (event === 'native_spawn') {

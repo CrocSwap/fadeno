@@ -88,6 +88,81 @@ export type ExecutorSpec = CommandExecutorSpec | HostExecutorSpec;
 
 /** Placeholder substituted into command/resume argv. */
 /**
+ * The CALLER's prompt digest: sha256 of the prompt bytes exactly as they were
+ * handed to Fadeno, before any kernel decoration.
+ *
+ * "Before any kernel decoration" is the whole definition, and it is load
+ * bearing. Two processes derive this same value independently and must agree:
+ *
+ * - the steering hook / spawn guard, from the Agent call's `tool_input.prompt`
+ *   (each hook is a standalone script with no import path back into the CLI,
+ *   so it spells the same sha256 by hand — change one, change all);
+ * - the kernel, from the stdin or `--prompt-file` bytes, captured in
+ *   `runDispatch` BEFORE the archetype brief is prepended and before
+ *   `DISPATCH_RESULT_FOOTER` is appended.
+ *
+ * The 2026-09-05 receipt for why this is one named thing: the hook rolled a
+ * shadow attachment on the caller's bytes and SELECTED, so it rewrote the
+ * spawn to the dispatch proxy; the kernel then rolled the same attachment on
+ * the footer-appended bytes, did NOT select, and delivered a plain unpaired
+ * dispatch. The hook-chosen pair evaporated between the two processes, with no
+ * row anywhere saying why. Everything keyed on "which prompt is this?" — the
+ * pair roll, the relay attestation, `fadeno dial resolve --prompt-sha256` —
+ * uses this digest and nothing else.
+ *
+ * NOT the same as a row's `prompt_sha256`, which attests the SNAPSHOT the
+ * executor actually received (brief and footer included). Both live on a
+ * request row, under their own names, because they answer different questions.
+ *
+ * THE RULE, because "the caller's bytes" is not quite enough on its own: two
+ * prompts that differ only in TRAILING NEWLINES are the same prompt, for
+ * pairing and for attestation. The digest is taken over
+ * `canonicalCallerPrompt` below, never over the raw bytes.
+ */
+export function callerPromptDigest(prompt: string): string {
+  return createHash('sha256').update(canonicalCallerPrompt(prompt)).digest('hex');
+}
+
+/**
+ * The caller's prompt with its trailing line terminators removed — the bytes
+ * `callerPromptDigest` actually hashes.
+ *
+ * There is a transport between the two processes that must agree, and it is
+ * not byte-preserving. The Claude dispatch proxy hands the prompt over in a
+ * quoted heredoc (`fadeno dispatch --archetype worker <<'FADENO_PROMPT'` — see
+ * `templates/claude/claude-agents/dispatch-worker.md`), and the shell feeds a
+ * heredoc as each body line PLUS a terminating newline. So the kernel reads
+ * `caller + "\n"` for a caller prompt that ended without one: hash the raw
+ * bytes on both sides and the hook and the kernel roll different numbers for
+ * the same task, which is the very defect this digest exists to close — just
+ * moved from the kernel's decoration to the relay's transport. The same
+ * asymmetry sits between a `--prompt-file` (files usually end in a newline)
+ * and an inline `tool_input.prompt` (usually does not).
+ *
+ * Canonicalizing instead of trying to preserve the bytes is the choice that
+ * survives contact: the transport cannot be made byte-exact from Fadeno's side
+ * (it is a model writing a heredoc), while "trailing newlines are not part of
+ * the prompt's identity" is a rule every writer can apply locally, with no
+ * state threaded between them. It strips the whole run of terminators (`\n` or
+ * `\r\n`), not exactly one, so a caller prompt that itself ends in a blank line
+ * agrees with the same prompt after a round trip through the shell.
+ *
+ * Nothing else is normalized — not leading whitespace, not interior lines, not
+ * trailing spaces. A digest that ignored more than the transport can change
+ * would start calling genuinely different prompts the same prompt.
+ *
+ * Every writer of this digest applies this rule, and each hook spells it by
+ * hand for the same reason it spells sha256 by hand (no import path back into
+ * the CLI): `templates/claude/hooks/dispatch-steering.mjs`,
+ * `templates/claude/hooks/dispatch-proxy-guard.mjs`,
+ * `templates/opencode/plugin/fadeno-steering.js`,
+ * `templates/omp/extensions/fadeno-steering.ts`. Change one, change all.
+ */
+export function canonicalCallerPrompt(prompt: string): string {
+  return prompt.replace(/(?:\r?\n)+$/, '');
+}
+
+/**
  * Deterministic shadow sampling roll, in [0, 1).
  *
  * Keyed on what is being compared rather than on chance, for two reasons.
@@ -98,6 +173,14 @@ export type ExecutorSpec = CommandExecutorSpec | HostExecutorSpec;
  * steering hook can decide whether a spawn is a pair *before* routing it, and
  * the kernel independently re-derives the same answer at dispatch time.
  * Re-attaching a different challenger re-rolls.
+ *
+ * `promptSha256` is the CALLER's digest (`callerPromptDigest` above) on every
+ * caller. Passing a decorated prompt's digest here is the one way to make two
+ * agreeing processes disagree, and it has happened.
+ *
+ * `challenger` must be the attachment spelled `formatDialRef(shadowAttachmentRef(att))`
+ * — the same string on both sides, since a different spelling re-rolls just as
+ * surely as a different digest.
  */
 export function shadowSampleRoll(promptSha256: string, archetype: string, challenger: string): number {
   const digest = createHash('sha256').update(`${promptSha256}:${archetype}:${challenger}`).digest('hex');

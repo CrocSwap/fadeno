@@ -5,10 +5,10 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { runDialResolve } from '../src/commands/dial.ts';
-import { DISPATCHES_FILE, runDispatch } from '../src/commands/dispatch.ts';
+import { DISPATCHES_FILE, DISPATCH_RESULT_FOOTER, runDispatch } from '../src/commands/dispatch.ts';
 import { runDispatchesOutput } from '../src/commands/dispatches.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
-import { readLocalDialState, writeLocalDialState } from '../src/lib/executors.ts';
+import { callerPromptDigest, readLocalDialState, shadowSampleRoll, writeLocalDialState } from '../src/lib/executors.ts';
 import { ensureFadenoIgnore } from '../src/lib/source-control.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
 import { echoedStdin, exists, tempRepo } from './helpers.ts';
@@ -17,6 +17,8 @@ import { read } from './helpers.ts';
 const onHarness = (harness: string): UserPathOptions => ({ env: { FADENO_HARNESS: harness } });
 
 const STEERING_HOOK = join(import.meta.dirname, '..', 'templates', 'claude', 'hooks', 'dispatch-steering.mjs');
+const PROXY_GUARD = join(import.meta.dirname, '..', 'templates', 'claude', 'hooks', 'dispatch-proxy-guard.mjs');
+const PROXY_AGENT = join(import.meta.dirname, '..', 'templates', 'claude', 'claude-agents', 'dispatch-worker.md');
 
 // Isolates user-scope config/state so a resolve against an undialed
 // archetype falls through to the catalog's base rather than picking up
@@ -690,6 +692,103 @@ test('shadow sampling is a function of the prompt, so a retry cannot re-roll it'
   assert.equal(decisionFor('luna-worker'), fired[0]);
 });
 
+/**
+ * The 2026-09-05 skew, pinned.
+ *
+ * The steering hook rolls a spawn's shadow attachment on the CALLER's prompt
+ * digest and routes a selected pair to the dispatch proxy. The kernel then
+ * re-rolls the same attachment. It used to do so on `sha256(prompt)` AFTER
+ * composing the archetype brief and the result-protocol footer — a different
+ * digest, therefore an independent coin — so a hook-selected pair could arrive
+ * at a kernel that formed no pair at all and delivered a plain dispatch, with
+ * nothing anywhere recording the disagreement.
+ *
+ * The fixture makes the two answers provably differ rather than hoping they
+ * do: it computes both candidate rolls and attaches at a rate BETWEEN them, so
+ * exactly one of the two digests fires. Reverting the kernel to the snapshot
+ * digest inverts the outcome and fails here.
+ */
+test('the pair roll keys on the caller bytes, not on the brief-and-footer snapshot', (t) => {
+  const BRIEF = 'BRIEF: coordinate through fadeno.\n';
+  const root = seedCatalog(t, { archetypes: { worker: { brief: 'coordination' } } });
+  mkdirSync(join(root, '.fadeno', 'briefs'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'briefs', 'coordination.md'), BRIEF);
+  initGit(root);
+
+  const B = 'the caller wrote exactly this, and nothing else';
+  const decorated = `${BRIEF.trimEnd()}\n\n${B}\n${DISPATCH_RESULT_FOOTER}`;
+  const callerRoll = shadowSampleRoll(sha256Hex(B), 'worker', 'luna-worker');
+  const snapshotRoll = shadowSampleRoll(sha256Hex(decorated), 'worker', 'luna-worker');
+  assert.notEqual(callerRoll, snapshotRoll, 'fixture is vacuous: both digests roll the same');
+  // Strictly between the two rolls, so `roll < rate` is true for exactly one of
+  // them. Which one fires does not matter; that they differ is the whole test.
+  const rate = (callerRoll + snapshotRoll) / 2;
+  writeLocalDialState(root, {
+    dials: { worker: { model: 'echo-worker' } },
+    shadows: { worker: { model: 'luna-worker', rate } },
+    legacyNote: null,
+  });
+
+  const isolated = isolatedUser(root, 'standalone');
+  runDispatch({ archetype: 'worker', prompt: B, repoRoot: root, userPathOptions: isolated });
+
+  const rows = evidenceRows(root);
+  const request = rows.find((r) => r.event === 'dispatch_requested' && r.shadow !== true)!;
+  // The skew this fixture depends on is real: the snapshot holds the decorated
+  // bytes, and its digest is not the caller's.
+  assert.equal(read(root, request.prompt_snapshot as string), decorated);
+  assert.equal(request.prompt_sha256, sha256Hex(decorated));
+  assert.equal(request.caller_prompt_sha256, sha256Hex(B));
+  assert.notEqual(request.caller_prompt_sha256, request.prompt_sha256);
+
+  // The decision itself, and the assertion that inverts on a revert.
+  const fired = rows.some((r) => r.shadow === true);
+  assert.equal(fired, callerRoll < rate);
+  assert.notEqual(callerRoll < rate, snapshotRoll < rate);
+
+  // ...and it is the same answer `fadeno dial resolve` hands a steering hook
+  // holding the caller's digest. One list, two consumers, one verdict.
+  const resolved = runDialResolve({
+    archetype: 'worker', repoRoot: root, userPathOptions: isolated, promptSha256: sha256Hex(B),
+  });
+  assert.equal(resolved.shadow?.challenger, 'luna-worker');
+  assert.equal(resolved.shadow?.selected, fired);
+});
+
+/**
+ * The roll's OTHER shared input. A digest both sides agree on still desyncs
+ * them if they spell the challenger differently, and the two sites build that
+ * string independently — the resolver from `shadowAttachmentRef(att)`, the
+ * kernel from the attachment it read itself. An attachment carrying every
+ * optional part (effort, harness) is where a re-spelling would show up.
+ */
+test('hook and kernel spell the challenger identically, effort and harness included', (t) => {
+  const root = seedCatalog(t);
+  initGit(root);
+  writeLocalDialState(root, {
+    dials: { worker: { model: 'echo-worker' } },
+    // Every optional part present: a re-spelling that dropped either one would
+    // roll a different number while still naming the same attachment.
+    shadows: { worker: { model: 'luna-worker', effort: 'high', harness: 'codex', rate: 0.5 } },
+    legacyNote: null,
+  });
+
+  const B = 'spell the challenger the same way twice';
+  const isolated = isolatedUser(root, 'standalone');
+  const resolved = runDialResolve({
+    archetype: 'worker', repoRoot: root, userPathOptions: isolated, promptSha256: sha256Hex(B),
+  });
+  // The resolver's spelling, which is the roll's third argument on its side.
+  assert.equal(resolved.shadow?.challenger, 'luna-worker@high on codex');
+
+  runDispatch({ archetype: 'worker', prompt: B, repoRoot: root, userPathOptions: isolated });
+  const fired = evidenceRows(root).some((r) => r.shadow === true);
+  // Same verdict — which it could not be if the kernel rolled on a different
+  // spelling of the same attachment.
+  assert.equal(fired, resolved.shadow?.selected);
+  assert.equal(fired, shadowSampleRoll(sha256Hex(B), 'worker', 'luna-worker@high on codex') < 0.5);
+});
+
 test('a paired dispatch carries one pair_id on both arms and records the challenger workspace', (t) => {
   const root = seedCatalog(t);
   initGit(root);
@@ -976,6 +1075,410 @@ test('an unroutable selected pair leaves the spawn untouched — no pair, never 
     () => runDispatch({ archetype: 'worker', prompt: 'do the thing', repoRoot: root, userPathOptions: isolated }),
     /fadeno dial worker <model> --harness <id>/,
   );
+});
+
+/**
+ * A fake `fadeno` on PATH that records every argv it is called with and answers
+ * with one fixed resolution. The argv log is what lets a test assert WHICH
+ * digest the hook asked the resolver about — the fact the 2026-09-05 skew
+ * turned on, and one no assertion about the hook's output can reach.
+ */
+function fakeResolver(root: string, resolution: unknown): { bin: string; argvLog: string } {
+  const bin = join(root, 'bin');
+  const argvLog = join(root, 'resolver-argv.jsonl');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(
+    join(bin, 'fadeno'),
+    '#!/usr/bin/env node\n' +
+      `require('fs').appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)) + '\\n');\n` +
+      `process.stdout.write(${JSON.stringify(JSON.stringify(resolution))});\n`,
+  );
+  chmodSync(join(bin, 'fadeno'), 0o755);
+  return { bin, argvLog };
+}
+
+function runSteeringHook(root: string, bin: string, event: unknown): { stdout: string; status: number | null } {
+  const result = spawnSync(process.execPath, [STEERING_HOOK], {
+    cwd: root,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
+    input: JSON.stringify(event),
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return { stdout: result.stdout, status: result.status };
+}
+
+/**
+ * The other half of the 2026-09-05 receipt: the rewrite itself left no trace.
+ *
+ * A host-eligible `worker` spawn was rolled as a selected pair, silently became
+ * `fadeno:dispatch-worker` on the relay model, and the ledger recorded nothing
+ * — the only downstream row named the relay's own dispatch. A reader could see
+ * that a worker had been dispatched and could not see that a host spawn had
+ * been diverted, by whom, or why. Now the rewrite is a row and a notice.
+ */
+test('a rewritten spawn leaves a host_rewritten row and tells the session why', (t) => {
+  const root = seedCatalog(t);
+  const B = 'implement the thing exactly as planned';
+  const resolution = {
+    adapter: 'command',
+    lane: 'command',
+    lane_reason: 'command executor',
+    executor: 'echo-worker on codex',
+    model: 'echo-worker',
+    harness: 'codex',
+    source: 'session',
+    relay: { model_id: 'sonnet' },
+    shadow: { attached: true, challenger: 'luna-worker', rate: 0.33, selected: true, routable: true },
+  };
+  const { bin, argvLog } = fakeResolver(root, resolution);
+  const out = runSteeringHook(root, bin, {
+    tool_name: 'Agent',
+    cwd: root,
+    tool_input: { subagent_type: 'worker', prompt: B, description: 'Implement' },
+  });
+
+  // The resolver was asked about THIS prompt, by the caller's own digest —
+  // the same value the kernel will pin as `caller_prompt_sha256`.
+  const argv = readFileSync(argvLog, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as string[]);
+  assert.deepEqual(argv, [['dial', 'resolve', '--archetype', 'worker', '--prompt-sha256', sha256Hex(B)]]);
+
+  const decision = JSON.parse(out.stdout) as {
+    systemMessage?: string;
+    hookSpecificOutput: { updatedInput: Record<string, unknown> };
+  };
+  // The rewrite still happens exactly as before — this row is evidence, never
+  // a gate.
+  assert.equal(decision.hookSpecificOutput.updatedInput.subagent_type, 'fadeno:dispatch-worker');
+  assert.equal(decision.hookSpecificOutput.updatedInput.model, 'sonnet');
+  // ...and the session is told, beside the rewrite rather than instead of it.
+  assert.match(decision.systemMessage ?? '', /^fadeno: worker spawn → fadeno:dispatch-worker \(relay sonnet\)/);
+  assert.match(decision.systemMessage ?? '', /shadow pair selected \(luna-worker @0\.33\)/);
+  assert.match(decision.systemMessage ?? '', /Kernel evidence follows under the relay's dispatch id/);
+
+  const rows = evidenceRows(root);
+  assert.equal(rows.length, 1);
+  const row = rows[0]!;
+  assert.equal(row.event, 'host_rewritten');
+  assert.equal(row.format, '1.1');
+  assert.equal(row.host, 'claude');
+  assert.equal(row.archetype, 'worker');
+  assert.equal(row.agent_type, 'worker');
+  assert.equal(row.subagent_type_applied, 'fadeno:dispatch-worker');
+  assert.equal(row.model_applied, 'sonnet');
+  assert.equal(row.executor, 'echo-worker on codex');
+  assert.equal(row.model, 'echo-worker');
+  assert.equal(row.lane, 'command');
+  assert.equal(row.lane_reason, 'command executor');
+  assert.equal(row.reason, 'shadow_pair_selected');
+  assert.equal(row.challenger, 'luna-worker');
+  assert.equal(row.rate, 0.33);
+  assert.equal(row.harness, 'codex');
+  assert.equal(row.dial_source, 'session');
+  // The join key. The kernel's rows for the dispatch this rewrite produces
+  // carry the identical value under `caller_prompt_sha256`.
+  assert.equal(row.prompt_sha256, sha256Hex(B));
+  // Not a delivery: no snapshot here, because the kernel owns the one for the
+  // dispatch that actually runs.
+  assert.ok(!('prompt_snapshot' in row));
+  // And the relay attestation the rewrite has always stashed is unchanged.
+  const stash = readFileSync(join(root, '.fadeno', 'local', 'pending-relays.jsonl'), 'utf8').trim();
+  assert.equal((JSON.parse(stash) as { prompt_sha256: string }).prompt_sha256, sha256Hex(B));
+});
+
+test('a command-lane rewrite records the lane as its reason, and names no challenger', (t) => {
+  const root = seedCatalog(t);
+  // No attachment at all: the dial's own lane is what takes this spawn out of
+  // session, so the two halves of `commandDelivery` stay distinguishable in
+  // the evidence rather than collapsing into one unexplained reroute.
+  const { bin } = fakeResolver(root, {
+    adapter: 'command',
+    lane: 'command',
+    lane_reason: 'command executor',
+    executor: 'echo-worker on codex',
+    model: 'echo-worker',
+    harness: 'codex',
+    source: 'repo',
+  });
+  const out = runSteeringHook(root, bin, {
+    tool_name: 'Agent',
+    cwd: root,
+    tool_input: { subagent_type: 'reviewer', prompt: 'review the diff', description: 'Review' },
+  });
+
+  const row = evidenceRows(root)[0]!;
+  assert.equal(row.event, 'host_rewritten');
+  assert.equal(row.reason, 'command_lane');
+  assert.equal(row.archetype, 'reviewer');
+  assert.equal(row.subagent_type_applied, 'fadeno:dispatch-reviewer');
+  // Null rather than omitted, so a `command_lane` row and a pair row diff
+  // field for field.
+  assert.equal(row.challenger, null);
+  assert.equal(row.rate, null);
+
+  const decision = JSON.parse(out.stdout) as { systemMessage?: string };
+  assert.match(decision.systemMessage ?? '', /command lane \(command executor\)/);
+  assert.doesNotMatch(decision.systemMessage ?? '', /shadow pair/);
+});
+
+test('a host-delivered spawn is neither rewritten nor announced', (t) => {
+  const root = seedCatalog(t);
+  mkdirSync(join(root, '.claude', 'agents'), { recursive: true });
+  writeFileSync(join(root, '.claude', 'agents', 'worker.md'), '<!-- fadeno:managed -->\nworker\n');
+  // A host lane naming its own model: rewritten to the managed role agent, but
+  // never off the host lane — so no `host_rewritten` row and no notice.
+  const { bin } = fakeResolver(root, {
+    adapter: 'host',
+    lane: 'host',
+    lane_reason: 'session matches the dial',
+    executor: 'opus',
+    model: 'opus',
+    source: 'repo',
+  });
+  const out = runSteeringHook(root, bin, {
+    tool_name: 'Agent',
+    cwd: root,
+    tool_input: { subagent_type: 'worker', prompt: 'stay in session', description: 'Work' },
+  });
+  const decision = JSON.parse(out.stdout) as { systemMessage?: string };
+  assert.equal(decision.systemMessage, undefined);
+  assert.deepEqual(evidenceRows(root).map((r) => r.event), ['host_delivery']);
+});
+
+/**
+ * A proxy the CALLER named is not a rewrite, and must not be recorded or
+ * announced as one.
+ *
+ * `commandDelivery` is true for both, which is why the first cut of
+ * `host_rewritten` fired on both: a director that typed
+ * `fadeno:dispatch-worker` itself was never on the host lane, so the row
+ * asserted a diversion that never happened and the notice told the session
+ * about a lane change it had asked for. The relay attestation is deliberately
+ * still stashed — it belongs to "these bytes went to a proxy", which is equally
+ * true here.
+ */
+test('a proxy the caller named itself is attested but never recorded as a rewrite', (t) => {
+  const root = seedCatalog(t);
+  const { bin } = fakeResolver(root, {
+    adapter: 'command',
+    lane: 'command',
+    lane_reason: 'command executor',
+    executor: 'echo-worker on codex',
+    model: 'echo-worker',
+    harness: 'codex',
+    source: 'repo',
+    relay: { model_id: 'sonnet' },
+  });
+  const out = runSteeringHook(root, bin, {
+    tool_name: 'Agent',
+    cwd: root,
+    tool_input: { subagent_type: 'fadeno:dispatch-worker', prompt: 'the caller chose the proxy', description: 'Work' },
+  });
+
+  const decision = JSON.parse(out.stdout) as {
+    systemMessage?: string;
+    hookSpecificOutput: { updatedInput: Record<string, unknown> };
+  };
+  assert.equal(decision.hookSpecificOutput.updatedInput.subagent_type, 'fadeno:dispatch-worker');
+  assert.equal(decision.systemMessage, undefined);
+  // No ledger row at all: the kernel writes this dispatch's evidence, and the
+  // hook has no routing decision of its own to record.
+  assert.equal(exists(root, '.fadeno/dispatches.jsonl'), false);
+  // The attestation is about the BYTES, not the lane, so it is still stashed.
+  assert.ok(exists(root, '.fadeno/local/pending-relays.jsonl'));
+});
+
+/**
+ * The transport itself, crossed for real — the half a test that hands
+ * `runDispatch` the caller's own string cannot reach.
+ *
+ * Fixing the kernel to hash before its brief and footer is not sufficient on
+ * its own, because the bytes do not arrive unchanged: the proxy relays them
+ * through a QUOTED HEREDOC (see `templates/claude/claude-agents/
+ * dispatch-worker.md`), and the shell feeds a heredoc as each body line plus a
+ * terminating newline. A director's `tool_input.prompt` normally ends without
+ * one. So the hook would hash `B`, the kernel would hash `B\n`, and the two
+ * would roll different numbers for the same task — the same silent
+ * disagreement, moved from the decoration to the relay.
+ *
+ * The rule that closes it is in `callerPromptDigest`: two prompts differing
+ * only in trailing newlines are the same prompt. This exercises all three
+ * writers of that digest on one task — the steering hook from
+ * `tool_input.prompt`, the proxy guard from the heredoc body it is about to
+ * send, the kernel from the bytes a real `bash` actually delivered — and pins
+ * them to one value and one pair decision. The rate is placed strictly between
+ * the canonical and raw rolls, so hashing the received bytes verbatim anywhere
+ * flips the outcome and fails here.
+ */
+test('the proxy heredoc does not change the prompt identity: hook, proxy guard and kernel agree on the digest and the roll', (t) => {
+  const root = seedCatalog(t);
+  initGit(root);
+
+  // What a director types into the Agent call: no trailing newline.
+  const B = 'implement the retry header exactly as the plan describes';
+
+  // The relay contract, in the proxy agent's own spelling. Read from the
+  // template so a respelled transport (an unquoted delimiter, a different
+  // heredoc form) fails here rather than silently going untested.
+  const proxyBody = readFileSync(PROXY_AGENT, 'utf8');
+  assert.match(proxyBody, /^fadeno dispatch --archetype worker --tag worker-<slug> <<'FADENO_PROMPT'$/m);
+  const contract = `fadeno dispatch --archetype worker --tag worker-retry-header <<'FADENO_PROMPT'\n${B}\nFADENO_PROMPT\n`;
+
+  // A real shell runs it, against a `fadeno` that captures exactly the bytes
+  // the kernel would have read on stdin.
+  const relayBin = join(root, 'relay-bin');
+  const receivedPath = join(root, 'received.txt');
+  mkdirSync(relayBin, { recursive: true });
+  writeFileSync(join(relayBin, 'fadeno'), `#!/bin/sh\ncat > ${JSON.stringify(receivedPath)}\n`);
+  chmodSync(join(relayBin, 'fadeno'), 0o755);
+  const relayed = spawnSync('bash', ['-c', contract], {
+    cwd: root,
+    env: { ...process.env, PATH: `${relayBin}:${process.env.PATH ?? ''}` },
+    encoding: 'utf8',
+  });
+  assert.equal(relayed.status, 0, relayed.stderr);
+  const transported = readFileSync(receivedPath, 'utf8');
+  // The fixture is not vacuous: the shell really did change the bytes.
+  assert.equal(transported, `${B}\n`);
+  assert.notEqual(transported, B);
+
+  // ...and the canonicalization is what absorbs that difference.
+  assert.equal(callerPromptDigest(transported), callerPromptDigest(B));
+  assert.notEqual(sha256Hex(transported), sha256Hex(B));
+
+  const canonicalRoll = shadowSampleRoll(callerPromptDigest(B), 'worker', 'luna-worker');
+  const rawRoll = shadowSampleRoll(sha256Hex(transported), 'worker', 'luna-worker');
+  assert.notEqual(canonicalRoll, rawRoll, 'fixture is vacuous: both digests roll the same');
+  // Strictly between them, so `roll < rate` is true for exactly one.
+  const rate = (canonicalRoll + rawRoll) / 2;
+  writeLocalDialState(root, {
+    dials: { worker: { model: 'echo-worker' } },
+    shadows: { worker: { model: 'luna-worker', rate } },
+    legacyNote: null,
+  });
+
+  // 1. The SPAWN side. The hook sees the undecorated, unterminated prompt.
+  const { bin, argvLog } = fakeResolver(root, {
+    adapter: 'command',
+    lane: 'command',
+    lane_reason: 'command executor',
+    executor: 'echo-worker on codex',
+    model: 'echo-worker',
+    harness: 'codex',
+    source: 'repo',
+    relay: { model_id: 'sonnet' },
+    shadow: { attached: true, challenger: 'luna-worker', rate, selected: true, routable: true },
+  });
+  runSteeringHook(root, bin, {
+    tool_name: 'Agent',
+    cwd: root,
+    tool_input: { subagent_type: 'worker', prompt: B, description: 'Implement' },
+  });
+  const resolverArgv = (): string[][] =>
+    readFileSync(argvLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as string[]);
+  const argv = resolverArgv()[0]!;
+  const hookDigest = argv[argv.indexOf('--prompt-sha256') + 1]!;
+  const rewritten = evidenceRows(root).find((r) => r.event === 'host_rewritten')!;
+  assert.equal(rewritten.prompt_sha256, hookDigest);
+
+  // The hook's OWN half of the rule, which the run above cannot show on its
+  // own: `B` carries no terminator, so a hook that hashed raw bytes would agree
+  // there by accident. The same prompt as a director's editor might leave it —
+  // terminated, and then some — must reach the same digest, or the agreement
+  // holds only for prompts that happen not to end in a newline.
+  runSteeringHook(root, bin, {
+    tool_name: 'Agent',
+    cwd: root,
+    tool_input: { subagent_type: 'worker', prompt: `${B}\n\n`, description: 'Implement' },
+  });
+  assert.deepEqual(resolverArgv()[1], argv); // identical argv, digest included
+  assert.deepEqual(
+    evidenceRows(root).filter((r) => r.event === 'host_rewritten').map((r) => r.prompt_sha256),
+    [hookDigest, hookDigest],
+  );
+
+  // 2. The PROXY side. The guard hashes the heredoc body it is about to send,
+  // reconstructing the terminator the shell will add.
+  const guard = spawnSync(process.execPath, [PROXY_GUARD], {
+    cwd: root,
+    input: JSON.stringify({
+      session_id: 'test',
+      agent_type: 'dispatch-worker',
+      cwd: root,
+      tool_name: 'Bash',
+      tool_input: { command: contract, timeout: 600000 },
+    }),
+    encoding: 'utf8',
+  });
+  assert.equal(guard.status, 0, guard.stderr);
+  const marker = JSON.parse(read(root, '.fadeno/local/proxy-dispatches.jsonl').trim()) as { prompt_sha256: string };
+  assert.equal(marker.prompt_sha256, hookDigest);
+
+  // 3. The KERNEL side, on the bytes bash actually produced.
+  const isolated = isolatedUser(root, 'standalone');
+  const result = runDispatch({ archetype: 'worker', prompt: transported, repoRoot: root, userPathOptions: isolated });
+  const rows = evidenceRows(root);
+  const request = rows.find((r) => r.event === 'dispatch_requested' && r.shadow !== true)!;
+  assert.equal(request.caller_prompt_sha256, hookDigest);
+  // All three agreed end to end: the stash (hook) and the marker (guard) both
+  // matched what the kernel received, which is the whole attestation chain.
+  assert.equal(result.relayAttested, true);
+
+  // And the decision itself — the thing the digests exist for. Reverting any
+  // one writer to raw bytes inverts this.
+  const fired = rows.some((r) => r.shadow === true);
+  assert.equal(fired, canonicalRoll < rate);
+  assert.notEqual(canonicalRoll < rate, rawRoll < rate);
+  const resolved = runDialResolve({
+    archetype: 'worker', repoRoot: root, userPathOptions: isolated, promptSha256: hookDigest,
+  });
+  assert.equal(resolved.shadow?.selected, fired);
+
+  // The OTHER spelling of the same prompt. A `--prompt-file` carries the
+  // terminator an inline prompt does not — a file written by an editor almost
+  // always ends in a newline — so the two spellings would disagree for exactly
+  // the same reason the heredoc did.
+  const filed = seedCatalog(t);
+  initGit(filed);
+  writeLocalDialState(filed, {
+    dials: { worker: { model: 'echo-worker' } },
+    shadows: { worker: { model: 'luna-worker', rate } },
+    legacyNote: null,
+  });
+  writeFileSync(join(filed, 'task.md'), `${B}\n`);
+  runDispatch({
+    archetype: 'worker', promptFile: 'task.md', cwd: filed, repoRoot: filed, userPathOptions: isolatedUser(filed, 'standalone'),
+  });
+  const filedRows = evidenceRows(filed);
+  const filedRequest = filedRows.find((r) => r.event === 'dispatch_requested' && r.shadow !== true)!;
+  assert.equal(filedRequest.caller_prompt_sha256, hookDigest);
+  assert.equal(filedRows.some((r) => r.shadow === true), fired);
+});
+
+/**
+ * One rule, five copies of it.
+ *
+ * `callerPromptDigest` is the definition, but a hook or a bundled plugin has no
+ * import path back into the CLI, so each spells the sha256 AND its
+ * canonicalization by hand — the same reason `DISPATCHES_FORMAT` is a literal
+ * in three places. A copy that drifts does not fail loudly: it rolls a slightly
+ * different number for prompts that end in a newline, which is precisely the
+ * silence this whole change exists to end. So the literal is pinned across
+ * every writer.
+ */
+test('every hand-spelled caller digest strips trailing newlines the same way', () => {
+  const CANON = "replace(/(?:\\r?\\n)+$/, '')";
+  for (const rel of [
+    'src/lib/executors.ts', // the definition
+    'templates/claude/hooks/dispatch-steering.mjs',
+    'templates/claude/hooks/dispatch-proxy-guard.mjs',
+    'templates/codex/hooks/spawn-guard.mjs',
+    'templates/opencode/plugin/fadeno-steering.js',
+    'templates/omp/extensions/fadeno-steering.ts',
+  ]) {
+    const body = readFileSync(join(import.meta.dirname, '..', rel), 'utf8');
+    assert.ok(body.includes(CANON), `${rel} must strip trailing newlines before hashing the caller prompt`);
+  }
 });
 
 // ---- Workspace baseline ----------------------------------------------------

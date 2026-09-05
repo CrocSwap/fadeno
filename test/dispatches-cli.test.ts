@@ -224,6 +224,102 @@ test('dispatches: a native_spawn row renders as an unsteered spawn on its inheri
   assert.ok(!line.includes('[never attested]'));
 });
 
+test('dispatches: a host_rewritten row renders as a reroute, never as a delivery', (t) => {
+  const caller = 'd'.repeat(64);
+  const root = seedLog(t, [
+    {
+      format: DISPATCHES_FORMAT,
+      timestamp: '2026-09-05T15:24:00.000Z',
+      event: 'host_rewritten',
+      fadeno_version: '0.6.2',
+      hook_version: '0.6.2',
+      host: 'claude',
+      archetype: 'worker',
+      agent_type: 'worker',
+      subagent_type_applied: 'fadeno:dispatch-worker',
+      model_applied: 'sonnet',
+      executor: 'ox-alpha on openrouter',
+      model: 'opus',
+      lane: 'command',
+      lane_reason: 'command executor',
+      reason: 'shadow_pair_selected',
+      challenger: 'openrouter/stealth/ox-alpha',
+      rate: 0.33,
+      prompt_sha256: caller,
+      harness: 'openrouter',
+      dial_source: 'user',
+    },
+    // The dispatch that rewrite produced. Same content, joined by digest: the
+    // hook's `prompt_sha256` IS the kernel's `caller_prompt_sha256`.
+    requested({ format: DISPATCHES_FORMAT, dispatch_id: 'r1', caller_prompt_sha256: caller }),
+  ]);
+  const result = runDispatches({ repoRoot: root });
+  assert.equal(result.skipped, 0);
+  assert.equal(result.entries.length, 2);
+
+  const entry = result.entries[0]!;
+  assert.equal(entry.kind, 'rewritten');
+  assert.equal(entry.rewrite?.to, 'fadeno:dispatch-worker');
+  assert.equal(entry.rewrite?.reason, 'shadow_pair_selected');
+  assert.equal(entry.rewrite?.modelApplied, 'sonnet');
+  assert.equal(entry.rewrite?.challenger, 'openrouter/stealth/ox-alpha');
+  assert.equal(entry.rewrite?.rate, 0.33);
+  // A hook row's own digest is a caller digest, so both names hold it and the
+  // join to the kernel row below is a plain equality.
+  assert.equal(entry.callerPromptSha256, caller);
+  assert.equal(result.entries[1]!.callerPromptSha256, caller);
+
+  const line = result.lines[0]!;
+  assert.ok(line.includes('[rewritten]'), line);
+  assert.ok(line.includes('worker → fadeno:dispatch-worker (relay sonnet)'), line);
+  assert.ok(line.includes('[dial: ox-alpha on openrouter (opus)]'), line);
+  assert.ok(line.includes('[off the host lane: shadow_pair_selected]'), line);
+  assert.ok(line.includes('[challenger: openrouter/stealth/ox-alpha @0.33]'), line);
+  assert.ok(line.includes(`sha256:${caller.slice(0, 8)}`), line);
+  // Never the host vocabulary: nothing ran in session, so nothing here was
+  // ever under the attestation contract.
+  assert.ok(!line.includes('[never attested]'), line);
+});
+
+/**
+ * The attestation-stealing shape the separate `kind` exists to prevent. An
+ * attestation correlates to the nearest preceding UNATTESTED host entry of its
+ * archetype; if a rewrite read as one, an attestation genuinely owed to an
+ * earlier in-session delivery would land on a spawn that never ran in session.
+ */
+test('dispatches: an attestation skips a host_rewritten row and lands on the real host delivery', (t) => {
+  const root = seedLog(t, [
+    hostRow({ timestamp: '2026-09-05T15:20:00.000Z' }),
+    {
+      format: DISPATCHES_FORMAT,
+      timestamp: '2026-09-05T15:24:00.000Z',
+      event: 'host_rewritten',
+      host: 'claude',
+      archetype: 'worker',
+      agent_type: 'worker',
+      subagent_type_applied: 'fadeno:dispatch-worker',
+      model_applied: 'sonnet',
+      reason: 'command_lane',
+      challenger: null,
+      rate: null,
+      prompt_sha256: 'e'.repeat(64),
+    },
+    {
+      format: DISPATCHES_FORMAT,
+      timestamp: '2026-09-05T15:25:00.000Z',
+      event: 'host_attestation',
+      archetype: 'worker',
+      effort: 'high',
+      effort_evidence: 'measured',
+    },
+  ]);
+  const result = runDispatches({ repoRoot: root });
+  assert.equal(result.entries[0]!.kind, 'host');
+  assert.equal(result.entries[0]!.attestedAt, '2026-09-05T15:25:00.000Z');
+  assert.equal(result.entries[1]!.kind, 'rewritten');
+  assert.equal(result.entries[1]!.attestedAt, null);
+});
+
 test('dispatches: a native spawn that named its own model does not claim it overrode an unobserved one', (t) => {
   const root = seedLog(t, [
     {

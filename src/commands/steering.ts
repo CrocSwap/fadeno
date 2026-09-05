@@ -17,6 +17,7 @@ import {
   parseDialRef,
   parseSnapshotDocument,
   readLocalDialState,
+  callerPromptDigest,
   resolveDialCascade,
   resolveRelay,
   shadowAttachmentExpired,
@@ -294,12 +295,16 @@ export interface SteeringResolveOptions extends CommonOptions {
   run?: string | null;
   dispatchId?: string | null;
   /**
-   * The digest the shadow roll is keyed on, or the file to hash it from.
-   * `promptFile` is read and sha256'd here, over the same utf8 bytes the
-   * kernel hashes (`sha256Hex(prompt)` in `src/commands/dispatch.ts`) — the
-   * agent is expected to pass the very file it will later hand to `fadeno
-   * dispatch --prompt-file`, so the two hash the same content. `promptSha256`
-   * is the pre-computed alternative. Ambient path only (see `shadow` below).
+   * The CALLER's prompt digest (`callerPromptDigest` in `src/lib/executors.ts`)
+   * — sha256 of the prompt bytes before any kernel decoration — or the file to
+   * hash it from. `promptFile` is read and sha256'd here over exactly the bytes
+   * the kernel pins as `callerPromptSha256`, because the agent is expected to
+   * pass the very file it will later hand to `fadeno dispatch --prompt-file`
+   * and the kernel captures that file's contents before prepending any brief
+   * or appending the result footer. `promptSha256` is the pre-computed
+   * alternative, and must be canonicalized the same way — trailing newlines
+   * stripped, since a heredoc relay adds one and a prompt file usually carries
+   * one. Ambient path only (see `shadow` below).
    */
   promptSha256?: string | null;
   promptFile?: string | null;
@@ -573,13 +578,22 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
 }
 
 /**
- * The digest the shadow roll is keyed on. `promptSha256` wins if given;
- * otherwise a `promptFile` is read and hashed here, over the same utf8 bytes
- * `sha256Hex(prompt)` hashes in `src/commands/dispatch.ts` for a dispatch of
- * that same file — so a Codex agent that resolves and then dispatches the
- * same path gets one digest, not two. An unreadable file answers "no digest"
- * rather than throwing: a caller that cannot supply the prompt yet must not
- * be refused resolution, only left with `shadow.selected: null`.
+ * The digest the shadow roll is keyed on — the CALLER's, always. `promptSha256`
+ * wins if given; otherwise a `promptFile` is read and hashed here, over the
+ * same utf8 bytes `runDispatch` pins as `callerPromptSha256` for a dispatch of
+ * that same file — so a Codex agent that resolves and then dispatches the same
+ * path gets one digest, not two. That agreement is what this used to only
+ * claim: the kernel hashed its prompt AFTER composing the archetype brief and
+ * the result footer, so a brief-carrying archetype rolled a different number
+ * here than it did there. An unreadable file answers "no digest" rather than
+ * throwing: a caller that cannot supply the prompt yet must not be refused
+ * resolution, only left with `shadow.selected: null`.
+ *
+ * The file is hashed through `callerPromptDigest`, not raw sha256, so the two
+ * spellings of the same prompt agree as well: a prompt FILE almost always ends
+ * in a newline and an inline `--prompt-sha256` computed from a spawn's own
+ * prompt string almost never does, and the trailing newline is not part of a
+ * prompt's identity.
  */
 function resolvePromptDigest(opts: SteeringResolveOptions): string | null {
   const direct = opts.promptSha256?.trim();
@@ -588,7 +602,7 @@ function resolvePromptDigest(opts: SteeringResolveOptions): string | null {
   if (!file) return null;
   try {
     const text = readFileSync(resolve(opts.cwd ?? process.cwd(), file), 'utf8');
-    return sha256Hex(text);
+    return callerPromptDigest(text);
   } catch {
     return null;
   }
