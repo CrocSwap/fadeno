@@ -37,6 +37,10 @@ models:
     provider: openai
     id: gpt-5.6-sol
     effort: high
+  astra:
+    provider: openai
+    id: gpt-6-astra
+    effort: medium
   opus:
     provider: anthropic
     id: opus
