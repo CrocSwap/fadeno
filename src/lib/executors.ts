@@ -125,6 +125,60 @@ export function substitutePromptFile(argv: string[], promptPath: string): string
 }
 
 /**
+ * Does this argv carry a Claude Code permission grant that admits the `fadeno`
+ * command family? Read off the argv that will actually run — the grant is IN
+ * the command, never in metadata beside it.
+ *
+ * It reads exactly two things, and nothing else in the argv:
+ *
+ *  1. The VALUES of `--allowedTools` / `--allowed-tools`, in both the
+ *     separate-token and the `=` form. The flag is variadic, so its values run
+ *     until the next `--`-prefixed token. Each value is a comma- or
+ *     space-separated list of permission rules, which is what makes
+ *     `--allowedTools "Edit Bash"` read the same as `--allowedTools Bash`. A
+ *     rule grants when it is exactly `Bash` or exactly `Bash(*)` — the vendor
+ *     documents those as the same match-all rule, and the shipped lanes write
+ *     the bare form — or when it starts with `Bash(fadeno`, the scoped grant
+ *     the lanes carried before the base lane opened its shell and which a user
+ *     catalog may still pin. `Bash(git *)` grants nothing here.
+ *  2. `--dangerously-skip-permissions`, and `--permission-mode
+ *     bypassPermissions` in either spelling — which open the shell without
+ *     naming a tool at all.
+ *
+ * It deliberately reads no other flag's values. `--disallowedTools Bash` is the
+ * natural shape of the restricted claude variant this catalog invites projects
+ * to declare, and a predicate that scanned every argv part regardless of the
+ * flag it belonged to reported that argv as CAPABLE — as it did
+ * `--append-system-prompt 'Prefer Bash, not Python'`. Position-blindness was
+ * survivable while the only token was the implausible `Bash(fadeno:`; a bare
+ * `Bash` collides freely, so the walk below is the flag-aware replacement.
+ *
+ * Claude-shaped by construction: it does NOT report codex's `--sandbox
+ * workspace-write` as capable, which is a pre-existing narrowness of the
+ * `fadeno models --json` `fadeno_capable` column, not something this predicate
+ * introduced. Widen it here, in one place, if that is ever wanted.
+ */
+export function argvGrantsFadenoShell(argv: readonly string[]): boolean {
+  const grants = (rule: string): boolean =>
+    rule === 'Bash' || rule === 'Bash(*)' || rule.startsWith('Bash(fadeno');
+  for (let i = 0; i < argv.length; i += 1) {
+    const part = argv[i] ?? '';
+    if (part === '--dangerously-skip-permissions') return true;
+    if (part === '--permission-mode=bypassPermissions') return true;
+    if (part === '--permission-mode' && argv[i + 1] === 'bypassPermissions') return true;
+    const eq = part.indexOf('=');
+    const flag = eq === -1 ? part : part.slice(0, eq);
+    if (flag !== '--allowedTools' && flag !== '--allowed-tools') continue;
+    const values = eq === -1 ? [] : [part.slice(eq + 1)];
+    for (let j = i + 1; j < argv.length && !(argv[j] ?? '').startsWith('--'); j += 1) {
+      values.push(argv[j] ?? '');
+    }
+    if (values.some((value) => value.split(/[\s,]+/).some(grants))) return true;
+  }
+  return false;
+}
+
+/**
  * Canon archetype display order — most→least powerful model typically slotted
  * into the role. Non-canon archetypes sort alphabetically after.
  */

@@ -89,7 +89,7 @@ harnesses:
   claude:                                    # …and a harness that is both
     provider: anthropic
     host: { effort_channel: none }
-    command: [claude, -p, --model, "{model}", --permission-mode, acceptEdits]
+    command: [claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, Bash]
 ```
 
 A Claude Code session can drive `grok` with no Grok plugin anywhere, and the

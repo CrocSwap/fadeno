@@ -64,17 +64,35 @@ All notable changes to Fadeno are documented here. The format follows
   base dial names whatever session is running, and a bare shell has none, so an
   in-session answer there was a claim nothing could honour. `fadeno dial`'s lane
   echo and `fadeno new-run`'s resolution echo now annotate it.
-- **The Claude-host command-lane fallback lost `--allowedTools "Bash(fadeno:*)"`
-  for non-director anthropic dials.** The v3 table was not six identical copies:
-  `routes.claude.anthropic` carried that scoped grant while the other five
-  hosts' `anthropic` routes carried the plain argv. v4's single
-  `harnesses.claude.command` is the plain argv (the five-of-six majority), and
-  the grant lives on the `exec` variant, which policy reaches for `director`.
-  So a pinned non-director anthropic dial under a Claude host — `worker
-  opus@high`, ejected to the command lane — now spawns a `claude` that cannot
-  run the fadeno family, and its `fadeno attest` / progress receipts go away.
-  **Restoring it is a one-line catalog change**: add
-  `--allowedTools "Bash(fadeno:*)"` to `harnesses.claude.command`.
+- **The Claude command lane opens its shell: `--allowedTools Bash`.** v4's
+  `harnesses.claude.command` was the plain `claude -p --permission-mode
+  acceptEdits`, which auto-approves file edits and then leaves every other shell
+  command needing an `--allowedTools` entry — and an unresolved permission
+  request is denied by a headless `-p` run. So a non-director anthropic dial
+  ejected to the command lane (`worker opus@high` under a Claude host) spawned a
+  `claude` that could edit but not run the tests, git, or `fadeno attest`, and
+  its receipts went away. It now carries the same headless trust every other
+  vendor's command lane already carried — codex `--sandbox workspace-write`,
+  grok `--always-approve`, agy `--dangerously-skip-permissions`, opencode
+  `--auto`, muse `--trust-workspace --disable-approval
+  --user-input-auto-resolve`. A **bare** `Bash` is the documented match-all rule
+  ("Match all uses of a tool": `Bash` — "Matches all Bash commands"); the same
+  page documents `Bash(*)` as equivalent to it, and the bare form is the one the
+  permission table and the headless docs lead with, which is why the argv uses
+  it. No OS sandbox is implied and none was added: containment is the
+  isolated worktree, which contains file writes and nothing else — network,
+  registries and ambient credentials stay reachable, as on the other five lanes.
+- **The `claude` `exec` variant is now the same argv as the base lane**, and
+  stays only as the `director` eligibility carrier. It no longer grants
+  anything the base lane lacks (it dropped `--allowedTools "Bash(fadeno:*)"`
+  for the wider bare rule): the base lane still declares
+  `eligibility: { director: forbidden }` so policy falls through and the ledger
+  row and run snapshot record `variant: exec`, which is what distinguishes a
+  director dispatch from a worker dispatch that ran the identical command.
+  `fadeno models --json`'s `fadeno_capable` reads both spellings — the bare
+  `Bash` rule and a scoped `Bash(fadeno:*)` a user catalog may still pin — via
+  one `argvGrantsFadenoShell` predicate, so the column did not silently flip to
+  `false` for every anthropic delivery.
 
 ### Added
 

@@ -101,9 +101,53 @@ test('v4: policy chooses the variant; a dial never names one', () => {
   const argv = director.spec.adapter === 'command'
     ? director.spec.command
     : (director.spec as { fallbackCommand: string[] | null }).fallbackCommand ?? [];
-  assert.ok(argv.includes('Bash(fadeno:*)'), 'the exec variant is the lane that can run fadeno');
+  assert.ok(argv.includes('Bash'), 'the exec variant can run fadeno');
   // And the ref the user typed is unchanged: the variant is not on the dial.
   assert.equal(formatDialRef(director.ref), 'opus');
+});
+
+test('the claude exec variant lifts `director` on an argv identical to the base lane', () => {
+  // Since the base lane opened its shell (`--allowedTools Bash`), the variant
+  // grants nothing extra. It is the ELIGIBILITY carrier: the base lane forbids
+  // `director`, policy falls through, and the delivery gets the name `exec` in
+  // the ledger row and run snapshot — the only thing that tells a director
+  // dispatch apart from a worker dispatch that ran the identical command. If
+  // this assertion ever has to be relaxed, the catalog comment must say why.
+  const profile = starter('claude');
+  const claude = profile.harnesses.claude!;
+  assert.deepEqual(
+    claude.variants!.exec!.command,
+    claude.command!.command,
+    'exec is the base argv, not an escalation of it',
+  );
+
+  const worker = resolveDelivery(parseDialRef('opus', 't'), profile, 'claude', { archetype: 'worker' });
+  const director = resolveDelivery(parseDialRef('opus', 't'), profile, 'claude', { archetype: 'director' });
+  assert.equal(worker.variant, null);
+  assert.equal(director.variant, 'exec');
+  // The lift is in the eligibility, and only there.
+  assert.equal(eligibilityFor(worker.spec, 'director'), 'forbidden');
+  assert.equal(eligibilityFor(director.spec, 'director'), 'eligible');
+  const argvOf = (d: typeof worker) => (d.spec.adapter === 'command'
+    ? d.spec.command
+    : (d.spec as { fallbackCommand: string[] | null }).fallbackCommand ?? []);
+  assert.deepEqual(argvOf(director), argvOf(worker), 'same substituted argv, different name');
+});
+
+test('the claude command lane carries the headless-approval flag every other vendor has', () => {
+  // `--permission-mode acceptEdits` auto-approves EDITS only; without a Bash
+  // grant, an unresolved permission request is denied by a headless `-p` run,
+  // so a claude could edit and then not run the tests, git, or `fadeno attest`.
+  // A BARE `Bash` is the documented match-all rule ("Match all uses of a
+  // tool"); `Bash(*)` is documented as equivalent, and the bare form is the one
+  // the permission table and the headless docs lead with, so THAT is the token
+  // this pins. If the catalog ever moves to the equivalent spelling, this
+  // assertion is the one to update — deliberately, not by accident.
+  const claude = starter('claude').harnesses.claude!.command!.command;
+  const flag = claude.indexOf('--allowedTools');
+  assert.notEqual(flag, -1, 'the base claude lane grants shell');
+  assert.equal(claude[flag + 1], 'Bash', 'the match-all rule, not a scoped Bash(<command>)');
+  assert.ok(claude.includes('acceptEdits'), 'beside acceptEdits, not instead of it');
 });
 
 // 4. Legacy read.
@@ -503,7 +547,7 @@ test('a run snapshot carries the archetype-specific lane, so drive and dispatch 
   const argv = director.adapter === 'command'
     ? director.command
     : (director as { fallbackCommand: string[] | null }).fallbackCommand ?? [];
-  assert.ok(argv.includes('Bash(fadeno:*)'));
+  assert.ok(argv.includes('Bash'));
   // Additive: a lookup with no archetype, or for an archetype policy does not
   // move, lands on the plain ref — which is what an older snapshot has.
   assert.equal(snapshotExecutor(snapshot, 'opus', null), base);
@@ -656,8 +700,10 @@ test('a locked run reaches the exec variant for a director step, as dispatch doe
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({
     models: { boss: { provider: 'anthropic', id: 'boss-1', effort: 'high' } },
     harnesses: {
-      // The shipped shape: the base lane cannot run fadeno, so a director
-      // falls through to the variant that can.
+      // The shipped shape: the base lane forbids `director`, so a director
+      // falls through to the variant and the delivery is NAMED `variant: exec`.
+      // (Two distinguishable argvs here only so the assertions below can tell
+      // which lane ran; in the shipped catalog the two are identical.)
       claude: { provider: 'anthropic', command: ECHO, eligibility: { director: 'forbidden' }, variants: { exec: { command: EXEC } } },
     },
     archetypes: { director: {} },

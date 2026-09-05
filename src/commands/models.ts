@@ -5,6 +5,7 @@ import { parseDocument } from 'yaml';
 import { loadGlobalProfile, loadLayeredProfile, type LayeredProfile } from '../lib/config-layers.ts';
 import {
   activeHarness,
+  argvGrantsFadenoShell,
   BARE_IDENTIFIER_RE,
   resolveDelivery,
   detectAmbientHarness,
@@ -244,7 +245,7 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
       // Read straight off the argv that will actually run.
       const fadenoCapable =
         adapter === 'command' &&
-        (compiled.spec as CommandExecutorSpec).command.some((part: string) => part.includes('Bash(fadeno:'));
+        argvGrantsFadenoShell((compiled.spec as CommandExecutorSpec).command);
       const verified = verifications.find((v) => v.harness === compiled.harness && v.model === compiled.modelId);
       resolvedHarness = compiled.harness;
       row = {
@@ -301,7 +302,7 @@ export function runModels(opts: ModelsCommonOptions = {}): ModelsResult {
           id: alt.modelId,
           adapter: altAdapter,
           variant: alt.variant,
-          fadeno_capable: altCommand.some((part: string) => part.includes('Bash(fadeno:')),
+          fadeno_capable: argvGrantsFadenoShell(altCommand),
         });
       } catch {
         // harness exists but cannot deliver this model — not a delivery

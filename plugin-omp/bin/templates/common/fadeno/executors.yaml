@@ -121,20 +121,57 @@ harnesses:
       # An in-session Claude agent cannot spawn subagents, so it cannot
       # coordinate; a director delivered here would do the work itself.
       eligibility: { director: forbidden }
-    command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits ]
-    # Same reason as the host lane: this argv can edit but cannot run `fadeno`,
-    # so a director dispatched onto it has no way to delegate.
+    # `--allowedTools Bash` is Claude Code's headless-approval flag, and it sits
+    # here for the same reason every other vendor's command lane carries its
+    # own: codex has `--sandbox workspace-write`, grok `--always-approve`, agy
+    # `--dangerously-skip-permissions`, opencode `--auto`, muse
+    # `--trust-workspace --disable-approval --user-input-auto-resolve`. Alone,
+    # `--permission-mode acceptEdits` auto-approves file edits and a handful of
+    # filesystem commands, but "other shell commands and network requests still
+    # need an `--allowedTools` entry" — and an unresolved permission request is
+    # DENIED by a headless `-p` run, not left pending. So a claude worker could
+    # edit and then not run the tests, git, or `fadeno attest`.
+    #
+    # A BARE tool name is the documented match-all rule: the permission
+    # reference's "Match all uses of a tool" table reads `Bash` -> "Matches all
+    # Bash commands" (code.claude.com/docs/en/permissions). That same page also
+    # says `Bash(*)` is EQUIVALENT to `Bash` — the two spellings are the same
+    # rule. The bare form is written here because it is the one the permission
+    # table and the headless docs lead with (`claude -p ... --allowedTools
+    # "Bash,Read,Edit"`). A scoped rule like `Bash(ls *)` auto-approves only
+    # matching calls. `--allowedTools` takes a comma- or space-separated list;
+    # one rule needs no separator.
+    #
+    # Be honest about what that buys and what it costs. There is no OS sandbox
+    # anywhere in this argv: Claude Code's permission layer is the only gate and
+    # this opens it. The containment is the isolated worktree, which contains
+    # FILE writes and nothing else — a spawned claude can still reach the
+    # network, a package registry, and any credential in the environment. Side
+    # effects outside the worktree are uncontained, exactly as they already are
+    # for the five lanes above and below. A project that wants a tighter posture
+    # declares its OWN variant, with its own name and its own restricting flags,
+    # and lets policy or an explicit `--harness` reach it — see the permissions
+    # note at the bottom of this file.
+    command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, Bash ]
+    # No longer a capability claim — the `exec` variant below is the SAME argv,
+    # so both claude lanes can run `fadeno`. What this block still does is make
+    # a director resolve to a NAMED lane: the base lane forbids the archetype,
+    # policy falls through to the first variant that does not, and the ledger
+    # row and run snapshot then record `variant: exec`. That is how a reader
+    # tells a director dispatch from a worker dispatch that ran the identical
+    # command. Drop it and `director` silently becomes an unnamed base-lane
+    # delivery.
     eligibility: { director: forbidden }
     variants:
-      # The lane a director takes. `--allowedTools "Bash(fadeno:*)"` is a
-      # scoped Bash grant and nothing wider: a dispatched director can run the
-      # fadeno command family and coordinate workers/reviewers itself. Read the
-      # command to see that — the grant is IN the argv, not in metadata beside
-      # it. Chosen by POLICY, never named on a dial: the base lane forbids
-      # `director`, so resolution falls through to the first variant that does
-      # not. (Was the `anthropic-exec` route / `--via claude-exec`.)
+      # The lane a director takes — and, since the base lane opened its shell,
+      # nothing more than that. Its argv is byte-identical to the base lane's;
+      # the variant grants no capability the base lane lacks, it only carries
+      # the `director` eligibility the base lane withholds. Keep the two argvs
+      # identical (a test asserts it); if they ever have to diverge, the reason
+      # goes in this comment. Chosen by POLICY, never named on a dial. (Was the
+      # `anthropic-exec` route / `--via claude-exec`.)
       exec:
-        command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, "Bash(fadeno:*)" ]
+        command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, Bash ]
   codex:
     provider: openai
     host:
@@ -291,8 +328,9 @@ harnesses:
 # matched such claims against archetype demands produced four distinct
 # silent-wrong-answer defects before it was removed. Enforcement belongs to
 # the vendor flags you can read in the argv (`--sandbox`, `--permission-mode`,
-# `--disable-shell`), and containment belongs to isolated worktrees, which are
-# now the default for command dispatches.
+# `--allowedTools`, `--disable-shell`), and containment belongs to isolated
+# worktrees, which are now the default for command dispatches. Worktrees
+# contain FILE writes; they are not a sandbox, and no lane above claims one.
 #
 # To run something restricted, declare it as its OWN variant with its own name
 # (e.g. a `sandboxed` variant with `--sandbox read-only`) and let policy or an
@@ -313,10 +351,11 @@ harnesses:
 # `director` is high-level planning/orchestration delegated to a (usually
 # cheaper) model: it decomposes a side task and coordinates workers/reviewers
 # itself, via the fadeno CLI. That means it needs an argv that can actually run
-# `fadeno` — for anthropic models the `exec` variant above, reached because
-# every other claude lane declares `eligibility: { director: forbidden }`;
-# codex is already shell-capable. Nothing enforces this: check the command, not
-# a declaration.
+# `fadeno`. Every claude lane can now (`--allowedTools Bash`), as codex already
+# could; anthropic directors still land on the `exec` variant, but for
+# NAMING — the base lane declares `eligibility: { director: forbidden }` so the
+# delivery is recorded as `variant: exec` — not because the base lane is
+# incapable. Nothing enforces this: check the command, not a declaration.
 archetypes:
   # `worker` and `generator` declare no policy — their only key was a write
   # posture, which no longer exists. They stay listed because membership in

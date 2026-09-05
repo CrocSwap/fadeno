@@ -75,11 +75,11 @@ harnesses:
       effort_channel: none               # no effort channel → a pin ejects to the command lane
       relay: sonnet                      # was relay.claude
       eligibility: { director: forbidden }
-    command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits ]
+    command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, Bash ]
     eligibility: { director: forbidden } # the BASE command lane's own constraint
     variants:
       exec:                              # was the anthropic-exec route / `--via claude-exec`
-        command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, "Bash(fadeno:*)" ]
+        command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, Bash ]
   codex:
     provider: openai
     host:
@@ -289,13 +289,27 @@ represented.
   grammars so an agent file written by an older fadeno still identifies itself.
 - **Claude**: the proxies' relay model comes from
   `harnesses.claude.host.relay`; the hook reads `harness`/`lane`. The base
-  `harnesses.claude.command` is the plain `claude -p --permission-mode
-  acceptEdits`, so a non-director anthropic dial ejected to the command lane
-  under a Claude host no longer carries the scoped `--allowedTools
-  "Bash(fadeno:*)"` grant that `routes.claude.anthropic` had (the other five v3
-  host tables carried the plain argv; v4 keeps that majority). The grant lives
-  on the `exec` variant, which policy reaches for `director`. Restoring it on
-  the base lane is a one-line catalog change.
+  `harnesses.claude.command` carries `--allowedTools Bash` beside
+  `--permission-mode acceptEdits` — the same headless trust codex, grok, agy,
+  opencode and muse already carry on their own command lanes. Without it,
+  `acceptEdits` auto-approves edits while other shell commands still need an
+  `--allowedTools` entry, and an unresolved permission request is denied by a
+  headless `-p` run — so a non-director anthropic dial ejected to the command
+  lane could edit and then not run the tests, git, or `fadeno attest`.
+  A **bare** tool name is the documented match-all rule (the permissions
+  reference's "Match all uses of a tool" table: `Bash` — "Matches all Bash
+  commands"); a scoped rule names a command (`Bash(ls *)`). The same page
+  documents `Bash(*)` as equivalent to the bare form, and the bare form is the
+  one the permission table and the headless docs lead with, so that is what the
+  catalog writes. This is a permission grant, not a sandbox: containment
+  is the isolated worktree, which contains file writes and nothing else.
+
+  The `exec` variant keeps the identical argv and remains only the `director`
+  **eligibility carrier**. It grants no capability the base lane lacks; the base
+  lane's `eligibility: { director: forbidden }` is what makes policy fall
+  through so the ledger row and run snapshot record `variant: exec` — the one
+  thing that distinguishes a director dispatch from a worker dispatch that ran
+  the same command. Keep the two argvs equal; a test asserts it.
 - **OpenCode / omp**: same field moves; their emitted artifacts are otherwise
   byte-stable.
 - `fadeno models` lists per harness; `--driver <alias>` became `--harness <id>`.

@@ -115,6 +115,20 @@ const CLAIMS: Claim[] = [
     src: { files: ['templates/claude/hooks/dispatch-steering.mjs'], patterns: [/host_delivery/] },
   },
   {
+    // The base claude lane's shell grant. Both halves have been wrong before:
+    // through v4 the docs described a receipts loss and promised a one-line
+    // remedy the catalog never carried. If the catalog's argv ever narrows back
+    // to a scoped rule (or drops the flag) while the docs keep saying the lane
+    // carries the same headless trust as every other vendor, that is the same
+    // divergence again — so pin the flag AND the mode it sits beside.
+    id: 'claude-command-shell-grant',
+    doc: { files: [HARNESSES, EXTENDING], patterns: [/--allowedTools Bash/, /acceptEdits/] },
+    src: {
+      files: ['templates/common/fadeno/executors.yaml'],
+      patterns: [/--allowedTools, Bash/, /--permission-mode, acceptEdits/],
+    },
+  },
+  {
     // The Codex steering ladder's only rung. Both halves have failed silently
     // before: a manifest that never registered the script makes the guard
     // inert cargo, and a guard that stops writing its row makes an unsteered

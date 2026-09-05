@@ -229,7 +229,7 @@ Harnesses shipped in the starter catalog:
 | Harness | Home provider | Host? | Command lane | Effort dial |
 |---|---|---|---|---|
 | `codex` | `openai` | yes (`agent-file`) | `codex exec --sandbox workspace-write` | `-c model_reasoning_effort=` |
-| `claude` | `anthropic` | yes (`none`) | `claude -p --permission-mode acceptEdits` (+ `exec` variant) | — |
+| `claude` | `anthropic` | yes (`none`) | `claude -p --permission-mode acceptEdits --allowedTools Bash` (+ `exec` variant, same argv) | — |
 | `grok` | `xai` | yes (`none`) | `grok --always-approve` | `--reasoning-effort` |
 | `agy` | `google` | no | `agy --new-project --dangerously-skip-permissions` | in the model id |
 | `opencode` | — | session-identity only | `opencode run -m openrouter/…` (+ `direct` variant) | `--variant` |
@@ -258,6 +258,23 @@ reading docs:
   no provider as home and its base lane prefixes the credential holder:
   `-m openrouter/{model}`. Its CLI has no argv-only sandbox; `init` emits
   `.opencode/agents/fadeno-readonly.md`.
+- **`--permission-mode acceptEdits` alone does not open Claude's shell.** It
+  auto-approves file edits while other shell commands still need an
+  `--allowedTools` entry, and an unresolved permission request is denied by a
+  headless `-p` run — so a `claude` command lane without `--allowedTools Bash`
+  could edit and then not run the tests, git, or `fadeno attest`. A **bare**
+  tool name is the documented match-all rule ("Match all uses of a tool":
+  `Bash` — "Matches all Bash commands"); a scoped rule names a command
+  (`Bash(ls *)`). `Bash(*)` is documented as equivalent to the bare form; the
+  bare form is the one the permission table and the headless docs lead with, so
+  it is what the catalog writes. This is a permission grant, not a sandbox —
+  containment is the isolated worktree, which contains file writes and nothing
+  else; a project wanting less declares its own restricted variant.
+- **The `claude` `exec` variant is the same argv as the base lane** and exists
+  only to carry `director` eligibility: the base lane declares
+  `eligibility: { director: forbidden }` so policy falls through and the
+  delivery is *named* `variant: exec` in the ledger row and run snapshot. It is
+  no longer a capability escalation.
 - **OpenCode and omp declare `host.identity: session`.** Their adapters rewrite
   only the agent NAME (OpenCode's `applyRewrite` sets `subagent_type`; the omp
   extension sets `agent`), so a dialed model handed to a host spawn there would

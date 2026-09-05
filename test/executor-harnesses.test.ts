@@ -154,9 +154,11 @@ test('the claude harness can escalate its own models — the asymmetry that moti
 
 test('a director reaches the exec variant by POLICY, never by naming a lane on the dial', () => {
   // The one place a variant is chosen. `worker opus` takes the base claude
-  // lane; `director opus` cannot (that lane declares `director: forbidden`,
-  // because plain `claude -p` cannot run `fadeno` and so cannot coordinate),
-  // so resolution falls through to the first variant that permits it.
+  // lane; `director opus` cannot (that lane declares `director: forbidden`), so
+  // resolution falls through to the first variant that permits it. Since the
+  // base lane opened its shell the fall-through is about NAMING, not
+  // capability: both argvs can run `fadeno`, and `variant: exec` on the ledger
+  // row is what tells the two dispatches apart.
   const profile = catalogFor('claude');
   const worker = resolveDelivery(parseDialRef('opus', 'test'), profile, 'claude', { archetype: 'worker' });
   assert.equal(worker.variant, null);
@@ -166,8 +168,8 @@ test('a director reaches the exec variant by POLICY, never by naming a lane on t
   assert.equal(director.variant, 'exec');
   assert.equal(director.hostCandidate, false, 'an in-session agent cannot spawn subagents, so it cannot coordinate');
   assert.ok(
-    (director.spec as { fallbackCommand?: string[] | null }).fallbackCommand?.includes('Bash(fadeno:*)')
-      ?? (director.spec as { command?: string[] }).command?.includes('Bash(fadeno:*)'),
-    'the exec variant is the lane that can actually run fadeno',
+    (director.spec as { fallbackCommand?: string[] | null }).fallbackCommand?.includes('Bash')
+      ?? (director.spec as { command?: string[] }).command?.includes('Bash'),
+    'the exec variant is a lane that can actually run fadeno',
   );
 });

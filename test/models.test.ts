@@ -9,7 +9,7 @@ import { ModelsError, runModels, runModelsAdd, runModelsHarness } from '../src/c
 import { unknownFlagsFor } from '../src/commands/completion.ts';
 import { recordVerifiedModel, type UserPathOptions } from '../src/lib/user-paths.ts';
 import { loadLayeredProfile } from '../src/lib/config-layers.ts';
-import { resolveDelivery } from '../src/lib/executors.ts';
+import { argvGrantsFadenoShell, resolveDelivery } from '../src/lib/executors.ts';
 import { tempRepo } from './helpers.ts';
 
 const CLI = join(import.meta.dirname, '..', 'src', 'cli.ts');
@@ -96,10 +96,56 @@ test('models: registry table — deliveries, lane marks, verification cache', (t
   const opus = result.models.find((r) => r.name === 'opus')!;
   assert.equal(opus.home_harness, 'claude');
   assert.equal(opus.fadeno_capable, true);
+  // The fixture above pins the SCOPED spelling on purpose: a user catalog may
+  // still carry `Bash(fadeno:*)`, and the shipped lanes moved to the bare
+  // `Bash` rule. `fadeno_capable` reads both, which is what kept this column
+  // from silently flipping to `false` for every anthropic delivery when the
+  // base claude lane opened its shell. See argvGrantsFadenoShell.
   // The opencode delivery is visible with its spelling-substituted id.
   const alt = opus.deliveries.find((d) => d.harness === 'opencode');
   assert.ok(alt);
   assert.equal(alt!.id, 'anthropic/claude-opus');
+});
+
+test('models: the SHIPPED catalog reports an anthropic command delivery as fadeno_capable', (t) => {
+  // End to end on the real one-list-two-consumers path — starter
+  // executors.yaml -> resolveDelivery -> runModels -> `fadeno_capable` — with
+  // no fixture in between. The test above deliberately pins a catalog that
+  // still spells the grant `Bash(fadeno:*)`, so it stays green no matter what
+  // the shipped lanes carry; this one goes red the moment the shipped argv
+  // stops granting the shell, which is exactly the drift that would otherwise
+  // flip a shipped output field in silence.
+  //
+  // No project catalog is written: the builtin layer IS
+  // templates/common/fadeno/executors.yaml.
+  const root = tempRepo(t);
+  const user: UserPathOptions = {
+    home: join(root, 'home'),
+    env: {
+      FADENO_CONFIG_HOME: join(root, 'user-config'),
+      FADENO_STATE_HOME: join(root, 'user-state'),
+      // A NON-Claude host, so the anthropic dial ejects to the command lane
+      // rather than answering in session with no argv at all.
+      FADENO_HARNESS: 'codex',
+    },
+  };
+  const opus = runModels({ repoRoot: root, userPathOptions: user }).models.find((r) => r.name === 'opus')!;
+  assert.equal(opus.home_harness, 'claude');
+  assert.equal(opus.adapter, 'command', 'ejected to the command lane under a codex host');
+  assert.equal(opus.fadeno_capable, true, 'the shipped claude command lane can run fadeno');
+
+  // The director's lane too. `runModels` resolves without an archetype, so the
+  // `exec` variant never appears in its rows — read it through the same
+  // predicate the column is computed with.
+  const profile = loadLayeredProfile(root, user, 'codex').profile;
+  const director = resolveDelivery({ model: 'opus' }, profile, 'codex', { archetype: 'director' });
+  assert.equal(director.variant, 'exec');
+  assert.equal(director.spec.adapter, 'command');
+  assert.equal(
+    argvGrantsFadenoShell((director.spec as { command: string[] }).command),
+    true,
+    'the exec variant carries the same grant as the base lane',
+  );
 });
 
 test('models: a model whose provider no harness claims as home is a LOAD error, not a stale row', (t) => {

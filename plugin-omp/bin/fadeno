@@ -14591,6 +14591,24 @@ var PROMPT_FILE_PLACEHOLDER = "{prompt_file}";
 function substitutePromptFile(argv, promptPath) {
   return argv.map((part) => part.split(PROMPT_FILE_PLACEHOLDER).join(promptPath));
 }
+function argvGrantsFadenoShell(argv) {
+  const grants = (rule) => rule === "Bash" || rule === "Bash(*)" || rule.startsWith("Bash(fadeno");
+  for (let i = 0; i < argv.length; i += 1) {
+    const part = argv[i] ?? "";
+    if (part === "--dangerously-skip-permissions") return true;
+    if (part === "--permission-mode=bypassPermissions") return true;
+    if (part === "--permission-mode" && argv[i + 1] === "bypassPermissions") return true;
+    const eq = part.indexOf("=");
+    const flag = eq === -1 ? part : part.slice(0, eq);
+    if (flag !== "--allowedTools" && flag !== "--allowed-tools") continue;
+    const values = eq === -1 ? [] : [part.slice(eq + 1)];
+    for (let j = i + 1; j < argv.length && !(argv[j] ?? "").startsWith("--"); j += 1) {
+      values.push(argv[j] ?? "");
+    }
+    if (values.some((value) => value.split(/[\s,]+/).some(grants))) return true;
+  }
+  return false;
+}
 var ARCHETYPE_DISPLAY_ORDER = ["director", "judge", "reviewer", "generator", "worker"];
 var ROLE_ARCHETYPES = ["worker", "reviewer", "judge"];
 function knownArchetypes(archetypes, ...extra) {
@@ -34513,7 +34531,7 @@ function runModels(opts = {}) {
     try {
       const compiled = resolveDelivery({ model: name }, profile);
       const adapter = compiled.spec.adapter;
-      const fadenoCapable = adapter === "command" && compiled.spec.command.some((part) => part.includes("Bash(fadeno:"));
+      const fadenoCapable = adapter === "command" && argvGrantsFadenoShell(compiled.spec.command);
       const verified = verifications.find((v) => v.harness === compiled.harness && v.model === compiled.modelId);
       resolvedHarness = compiled.harness;
       row = {
@@ -34566,7 +34584,7 @@ function runModels(opts = {}) {
           id: alt.modelId,
           adapter: altAdapter,
           variant: alt.variant,
-          fadeno_capable: altCommand.some((part) => part.includes("Bash(fadeno:"))
+          fadeno_capable: argvGrantsFadenoShell(altCommand)
         });
       } catch {
       }
