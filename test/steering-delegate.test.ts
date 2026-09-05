@@ -124,15 +124,19 @@ test('locked resolve advises the matching native Codex agent when the caller pro
   assert.equal(resolution.mode, 'command');
   assert.deepEqual(resolution.delegate_to, {
     archetype: 'worker',
-    // From the RUN SNAPSHOT, to be passed as explicit spawn values — not read
-    // off the agent file, which Codex applies only after them.
+    // The run snapshot's identity — AND what this agent's file carries, which
+    // is the reason it can be named at all: on Codex the file wins.
     model: 'gpt-5.6-luna',
     reasoning_effort: 'xhigh',
     executor: 'luna',
     agent_file: workerPath,
     scope: 'project',
   });
-  assert.match(resolution.detail, /spawn the worker Codex agent .* with explicit model gpt-5\.6-luna and model_reasoning_effort xhigh/);
+  const file = readCodexAgentFile(workerPath)!;
+  assert.equal(file.model, resolution.delegate_to!.model);
+  assert.equal(file.reasoningEffort, resolution.delegate_to!.reasoning_effort);
+  assert.match(resolution.detail, /spawn the worker Codex agent .* its file carries exactly this identity, gpt-5\.6-luna at effort xhigh/);
+  assert.doesNotMatch(resolution.detail, /is stale/);
 });
 
 test('delegate advisory is absent when no candidate matches (the original command-fallback behavior)', (t) => {
@@ -171,22 +175,16 @@ test('delegate advisory does not send a locked host request to a command broker'
 });
 
 /**
- * This test asserted the OPPOSITE until 2026-08-20, on the premise that a Codex
- * agent could only ever run as the identity its file was cut for — so a file
- * whose model/effort had drifted was treated as unsafe to offer.
- *
- * That premise is wrong. Codex resolves a spawned subagent's settings "from an
- * explicit spawn value, then the corresponding `[agents]` default, then the
- * parent's value" and applies the agent FILE LAST. The file is the
- * lowest-priority default, so a drifted one neither constrains nor delivers
- * anything: the caller passes the snapshot's model and effort explicitly and
- * they win. Refusing here made the advisory silent in exactly the cases a
- * spawn would have worked.
- *
- * What protects the identity is that `delegate_to` carries the SNAPSHOT's
- * values, never the file's — asserted below.
+ * Corrected 2026-09-05: on Codex an agent file's `model` and
+ * `model_reasoning_effort` take precedence over the values passed at spawn, so
+ * a stale file is not a valid spawn target at any spawn values (the rule and
+ * its receipt live on `findSpawnableCodexAgent`). Naming one would produce
+ * exactly the silent identity substitution a locked request exists to
+ * prevent — the agent runs the file's identity while the run's evidence claims
+ * the snapshot's — which is why the spawn guard refuses such a spawn rather
+ * than trying to rewrite it.
  */
-test('a drifted agent file is still a valid spawn target; the snapshot supplies the identity', (t) => {
+test('a stale agent file is NOT offered as a spawn target; the advisory names it', (t) => {
   const root = tempRepo(t);
   const user = isolatedUser(t, root);
   const { runId, dispatchId } = seedLockedRequest(root);
@@ -202,13 +200,35 @@ test('a drifted agent file is still a valid spawn target; the snapshot supplies 
     repoRoot: root, archetype: 'worker', run: runId, dispatchId, userPathOptions: user,
   });
   assert.equal(resolution.mode, 'command');
-  // Offered, not refused — and the effort reported is the snapshot's `xhigh`,
-  // NOT the file's drifted `low`. A caller passing these explicitly delivers
-  // the locked identity regardless of what the file says.
-  assert.equal(resolution.delegate_to?.archetype, 'worker');
-  assert.equal(resolution.delegate_to?.reasoning_effort, 'xhigh');
-  assert.equal(resolution.delegate_to?.model, 'gpt-5.6-luna');
+  assert.equal(resolution.delegate_to, undefined);
+  // Named, not silently omitted: a coordinator can see the agent on disk and
+  // has to be told why reaching for it would substitute the wrong identity.
+  // "stale" is the word the spawn guard's sibling refusal uses.
+  assert.match(resolution.detail, /the managed worker Codex agent .* is stale/);
+  assert.match(resolution.detail, /carries gpt-5\.6-luna at effort low, while this request is locked to gpt-5\.6-luna at effort xhigh/);
+  assert.match(resolution.detail, /fadeno steering apply --codex/);
+  // The resolver is read-only: it never repairs the file it just refused.
   assert.match(readFileSync(workerPath, 'utf8'), /model_reasoning_effort = "low"/);
+});
+
+test('a MODEL that went stale is refused the same way an effort is', (t) => {
+  const root = tempRepo(t);
+  const user = isolatedUser(t, root);
+  const { runId, dispatchId } = seedLockedRequest(root);
+  runSteeringApply({ repoRoot: root, target: 'codex', userPathOptions: user });
+  const workerPath = join(root, '.codex', 'agents', 'worker.toml');
+  const original = readFileSync(workerPath, 'utf8');
+  // The baked --host-executor still says `luna` and the effort still says
+  // `xhigh`; only the model line moved. The file's model is what every API
+  // call runs at, so this agent delivers `sol` however it is spawned.
+  writeFileSync(workerPath, original.replace('model = "gpt-5.6-luna"', 'model = "gpt-5.6-sol"'));
+
+  const resolution = runSteeringResolve({
+    repoRoot: root, archetype: 'worker', run: runId, dispatchId, userPathOptions: user,
+  });
+  assert.equal(resolution.mode, 'command');
+  assert.equal(resolution.delegate_to, undefined);
+  assert.match(resolution.detail, /carries gpt-5\.6-sol at effort xhigh, while this request is locked to gpt-5\.6-luna at effort xhigh/);
 });
 
 test('delegate advisory refuses an unmanaged agent file even when its content matches', (t) => {
@@ -272,10 +292,12 @@ test('delegate advisory follows Codex\'s own project-over-user scope precedence'
 
   // Now a project-scope file exists too, cut for a DIFFERENT executor (same
   // archetype name). Codex loads ONLY this project file for "worker" — the
-  // matching user-scope file underneath it is invisible. Explicit model and
-  // effort values would override the project file's defaults, but they do not
-  // rewrite its developer instructions: it will still claim `sol` to the
-  // resolver. Offering it would therefore recurse, so the advisory is absent.
+  // matching user-scope file underneath it is invisible. It carries `sol`'s
+  // identity, which is what a spawn of it would actually run, and its
+  // developer instructions would claim `sol` to the resolver besides. Offering
+  // it would substitute the identity AND recurse, so the advisory is absent.
+  // The executor half of the predicate decides here, so the detail is the
+  // plain command-fallback line rather than the stale one.
   writeLocalDialState(root, { dials: { worker: { model: 'sol' } }, shadows: {}, legacyNote: null });
   runSteeringApply({ repoRoot: root, target: 'codex', userPathOptions: user });
   const projectPath = join(root, '.codex', 'agents', 'worker.toml');

@@ -129,6 +129,35 @@ const CLAIMS: Claim[] = [
     },
   },
   {
+    // Codex's precedence rule, which this repo has now asserted BOTH ways.
+    // `delegate_to` is only safe to act on because the named file already
+    // carries the locked identity, and the runner skill is what tells a
+    // coordinator to act on it — so if either side stops stating the rule, the
+    // advice to deliver an identity by stating it at spawn time is one edit
+    // away from returning.
+    //
+    // `/takes precedence/` is the header's token rule stretched by exactly one
+    // case: it is the operative clause of Codex's own documented sentence ("if
+    // a custom agent file sets `model` or `model_reasoning_effort`, the value
+    // in the file takes precedence"), quoted rather than paraphrased on every
+    // surface, so it is as stable as a field name. Both runner surfaces are
+    // registered as carrying the claim; what actually fails a revert of
+    // SKILL.md alone is the direction test below, which scans each surface
+    // separately. This entry pins that the claim is still made at all.
+    id: 'codex-agent-file-precedence',
+    doc: {
+      files: [
+        'templates/common/skills/fadeno-runner/references/runtime.md',
+        'templates/common/skills/fadeno-runner/SKILL.md',
+      ],
+      patterns: [/takes precedence/, /delegate_to/],
+    },
+    src: {
+      files: ['src/lib/codex-agent-file.ts', 'src/commands/steering.ts'],
+      patterns: [/takes precedence/, /delegate_to/],
+    },
+  },
+  {
     // Host mode's failure policy lives in two files with no import between
     // them: the hook that reinjects it every turn, and the skill that governs
     // the activation turn. Both halves must keep the claim that a Fadeno
@@ -696,4 +725,77 @@ test('every --parallel surface names the mechanism that is actually implemented'
     }
   }
   assert.deepEqual(failures, [], `--parallel drift:\n${failures.join('\n')}`);
+});
+
+/**
+ * Which WAY the Codex precedence claim points.
+ *
+ * The second deliberate exception to this file's token-only rule, and for the
+ * same reason as the `--parallel` test above: presence-pairing cannot catch
+ * this drift. The repo asserted both readings, in prose, on five surfaces at
+ * once — from 2026-08-20 until this correction, `delegate_to`, `doctor`'s
+ * avoidable-fallback check, the runner skill and two doc comments all said an
+ * explicit spawn value beats the agent file, so a coordinator was told to
+ * deliver a locked identity by stating it at spawn time, which silently ran
+ * whatever the file said instead. Every surface still said `delegate_to`; they
+ * just said something untrue about how it is delivered.
+ *
+ * So this pins the *direction*: the phrasings that can only mean the reading
+ * that was wrong are banned outright from every surface that carries the
+ * claim. They are prose, knowingly — that is what the exception buys. The rule
+ * they contradict, with its receipt, is stated once on
+ * `findSpawnableCodexAgent`.
+ *
+ * Matching is done against a whitespace-collapsed copy of each file, with
+ * comment prefixes stripped, so a phrase that wraps across two lines — or
+ * across a `*` continuation in a JSDoc block — is caught the same as one that
+ * fits on a single line. That is how the old SKILL.md and runtime.md wordings
+ * were written, and a per-line scan missed them.
+ */
+const PRECEDENCE_SURFACES = [
+  'src/lib/codex-agent-file.ts',
+  'src/commands/steering.ts',
+  'src/commands/doctor.ts',
+  'templates/common/skills/fadeno-runner/SKILL.md',
+  'templates/common/skills/fadeno-runner/references/runtime.md',
+];
+
+const INVERTED_PRECEDENCE = [
+  /LOWEST-priority/i,
+  /applies an agent file only after/i,
+  /applies the agent file last/i,
+  /neither constrains? nor deliver/i,
+  /explicit spawn values? (?:first|ahead)/i,
+  /as explicit spawn values/i,
+];
+
+/**
+ * One line of running text per file: comment markers dropped, every run of
+ * whitespace (newlines included) folded to a single space.
+ */
+function flattenForClaimScan(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => line.replace(/^\s*(?:\/\/+|\*(?=\s|$)|#+)\s?/, ''))
+    .join(' ')
+    .replace(/\s+/g, ' ');
+}
+
+test('no surface claims an explicit spawn value beats the Codex agent file', () => {
+  const failures: string[] = [];
+  for (const rel of PRECEDENCE_SURFACES) {
+    const flat = flattenForClaimScan(readFileSync(join(REPO, rel), 'utf8'));
+    for (const inverted of INVERTED_PRECEDENCE) {
+      const hit = inverted.exec(flat);
+      if (hit != null) {
+        // Enough surrounding text to find the passage without a line number,
+        // which the flattening necessarily gives up.
+        const from = Math.max(0, hit.index - 60);
+        failures.push(
+          `[${rel}] reinstates the inverted precedence claim (${inverted}): …${flat.slice(from, hit.index + hit[0].length + 60)}…`,
+        );
+      }
+    }
+  }
+  assert.deepEqual(failures, [], `Codex agent-file precedence drift:\n${failures.join('\n')}`);
 });

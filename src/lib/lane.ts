@@ -136,8 +136,9 @@ export interface LaneInput {
    * publishing it to the environment. Codex is exactly that: `steering apply
    * --codex` writes `model_reasoning_effort` into the agent TOML, and the
    * agent then identifies itself with the full `--host-executor luna@xhigh`
-   * ref it was cut from — so a match there proves the effort as directly as
-   * `CLAUDE_EFFORT` does, without the harness publishing anything.
+   * ref it was cut from. The ref match identifies WHICH agent is asking; the
+   * `model_reasoning_effort` in its file is the proof, and the caller must
+   * read it — a file can carry the ref while pinning no effort at all.
    *
    * Only consulted when `sessionEffort` is `null`; an observed session effort
    * is the stronger evidence (it is already past any silent downgrade) and

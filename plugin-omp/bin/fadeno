@@ -31287,10 +31287,13 @@ function effectiveCodexAgentCandidates(repoRoot, userPathOptions) {
   }
   return out;
 }
-function findSpawnableCodexAgent(candidates, archetype, hostExecutor) {
+function findSpawnableCodexAgent(candidates, archetype, hostExecutor, identity) {
   return candidates.find(
-    (candidate) => (archetype == null || archetype === "*" || candidate.archetype === archetype) && candidate.state.managed && candidate.state.hostExecutor === hostExecutor
+    (candidate) => (archetype == null || archetype === "*" || candidate.archetype === archetype) && candidate.state.managed && candidate.state.hostExecutor === hostExecutor && (identity == null || candidate.state.model === identity.model && candidate.state.reasoningEffort === identity.reasoningEffort)
   ) ?? null;
+}
+function describeCodexAgentFileIdentity(state) {
+  return `${state.model ?? "the session model"}${state.reasoningEffort != null ? ` at effort ${state.reasoningEffort}` : ""}`;
 }
 
 // src/commands/steering.ts
@@ -31453,9 +31456,13 @@ function runLockedSteeringResolve(opts, archetype, role, hostExecutor) {
   const hasFallback = executor.fallbackCommand != null;
   const neutral = isReferenceFrameNeutralHostRequest(request, executor);
   let delegateTo;
+  let staleAgent = null;
   if (!matchesHost && !neutral && hasFallback && hostExecutor == null && executor.adapter === "host" && request.model !== NEUTRAL_HOST_EXECUTOR) {
     const candidates = effectiveCodexAgentCandidates(repoRoot, opts.userPathOptions);
-    const target = findSpawnableCodexAgent(candidates, archetype, request.executor);
+    const target = findSpawnableCodexAgent(candidates, archetype, request.executor, {
+      model: request.model,
+      reasoningEffort: request.reasoningEffort
+    });
     if (target != null) {
       delegateTo = {
         archetype: target.state.name ?? target.archetype,
@@ -31465,9 +31472,14 @@ function runLockedSteeringResolve(opts, archetype, role, hostExecutor) {
         agent_file: target.path,
         scope: target.scope
       };
+    } else {
+      const installed = findSpawnableCodexAgent(candidates, archetype, request.executor);
+      if (installed != null) {
+        staleAgent = { path: installed.path, identity: describeCodexAgentFileIdentity(installed.state) };
+      }
     }
   }
-  const detail2 = matchesHost ? `host request ${dispatchId} is locked to run-snapshotted executor ${request.executor}; execute in-host` : neutral ? `host request ${dispatchId} is locked to the reference-frame-neutral executor current-host; execute in-host` : hasFallback ? delegateTo != null ? `host request ${dispatchId} is locked to ${request.executor}; spawn the ${delegateTo.archetype} Codex agent (${delegateTo.agent_file}) with explicit model ${delegateTo.model} and model_reasoning_effort ${delegateTo.reasoning_effort} and hand it this engine assignment envelope \u2014 it delivers the locked identity in-host, which is preferable to that executor's declared command fallback` : `host request ${dispatchId} is locked to ${request.executor}; deliver it through that executor's declared command fallback` : `host request ${dispatchId} requires host executor ${request.executor}; this session is materialized for ${hostExecutor ?? "no host executor"}, so start a matching Codex session`;
+  const detail2 = matchesHost ? `host request ${dispatchId} is locked to run-snapshotted executor ${request.executor}; execute in-host` : neutral ? `host request ${dispatchId} is locked to the reference-frame-neutral executor current-host; execute in-host` : hasFallback ? delegateTo != null ? `host request ${dispatchId} is locked to ${request.executor}; spawn the ${delegateTo.archetype} Codex agent (${delegateTo.agent_file}) and hand it this engine assignment envelope \u2014 its file carries exactly this identity, ${delegateTo.model} at effort ${delegateTo.reasoning_effort}, so it delivers the locked identity in-host rather than through the executor's command fallback` : staleAgent != null ? `host request ${dispatchId} is locked to ${request.executor}; the managed ${archetype} Codex agent (${staleAgent.path}) is stale: its file carries ${staleAgent.identity}, while this request is locked to ${request.model} at effort ${request.reasoningEffort}, and on Codex the file wins over any spawn value \u2014 run \`fadeno steering apply --codex\` and start a fresh Codex session to re-cut it, or deliver it now through that executor's declared command fallback` : `host request ${dispatchId} is locked to ${request.executor}; deliver it through that executor's declared command fallback` : `host request ${dispatchId} requires host executor ${request.executor}; this session is materialized for ${hostExecutor ?? "no host executor"}, so start a matching Codex session`;
   let dial;
   try {
     dial = parseDialRef(request.executor, "locked");
@@ -31521,6 +31533,10 @@ function resolvePromptDigest(opts) {
   } catch {
     return null;
   }
+}
+function codexAgentFilePinsEffort(repoRoot, archetype, ref, effort, userPathOptions) {
+  const candidate = effectiveCodexAgentCandidates(repoRoot, userPathOptions).find((entry) => entry.archetype === archetype);
+  return candidate != null && candidate.state.managed && candidate.state.hostExecutor === ref && candidate.state.reasoningEffort === effort;
 }
 function runSteeringResolve(opts) {
   const repoRoot = rootOf(opts);
@@ -31628,16 +31644,16 @@ function runSteeringResolve(opts) {
   // effort at all and that `compileDialRef` could not compile.
   "default";
   const hostModel = spec.adapter === "host" && (cascade.source === "base" || hostExecutor === refString);
+  const neutralModel = spec.adapter === "host" && spec.model === NEUTRAL_HOST_EXECUTOR;
   const lane = decideLane({
     pinnedEffort,
     effectiveEffort,
     sessionEffort: readSessionEffort(opts.env ?? process.env),
     hostModel,
     // `refString` carries the pin (`formatDialRef` renders `luna@xhigh`), so a
-    // host executor that matches it identifies an agent materialized at that
-    // exact effort. This is how a Codex broker proves its own effort without
-    // any harness publishing one.
-    hostEffortProven: pinnedEffort != null && hostExecutor === refString,
+    // host executor that matches it identifies WHICH agent is asking. The
+    // proof is its file — see `codexAgentFilePinsEffort`.
+    hostEffortProven: pinnedEffort != null && hostExecutor === refString && codexAgentFilePinsEffort(repoRoot, archetype, refString, pinnedEffort, opts.userPathOptions),
     commandLane: commandRoutable(spec)
   });
   const finish = (base) => decorateSteering({ ...lane, ...shadow != null ? { shadow } : {}, ...base }, profile, cascade.resolvedVia);
@@ -31727,9 +31743,11 @@ function runSteeringResolve(opts) {
     hostExecutor,
     // Restart reason 2 of the two that survive: a host slot naming an
     // identity with neither a session that can deliver it nor a command
-    // fallback. It now has two shapes — the model, as always, and an effort
-    // the session is not running at.
-    detail: hostModel ? `dial ${refString} pins effort ${pinnedEffort} but this session runs at ${lane.session_effort ?? "no observable effort"}, and ${refString} declares no command fallback; start a session at ${pinnedEffort}, drop the pin, or declare one${detailNote}` : `dial ${refString} requests host executor ${refString}, but this session was materialized for ${hostExecutor ?? "no host executor"}; apply the dial and start a fresh session${detailNote}`
+    // fallback. It now has three shapes — the model, as always; an effort the
+    // session is running at something else; and an effort nothing here can
+    // ever prove, which needs its own remediation because the ordinary one
+    // ("start a session at <effort>") is unsatisfiable in that shape.
+    detail: !hostModel ? `dial ${refString} requests host executor ${refString}, but this session was materialized for ${hostExecutor ?? "no host executor"}; apply the dial and start a fresh session${detailNote}` : neutralModel && lane.session_effort == null ? `dial ${refString} pins effort ${pinnedEffort}, but a ${NEUTRAL_HOST_EXECUTOR} agent file carries no model_reasoning_effort by construction and this session publishes no effort to observe, so nothing can prove the pin \u2014 and ${refString} declares no command fallback; drop the pin (dial ${NEUTRAL_HOST_EXECUTOR}) or dial a concrete model, whose agent file can bake the effort${detailNote}` : `dial ${refString} pins effort ${pinnedEffort} but this session runs at ${lane.session_effort ?? "no observable effort"}, and ${refString} declares no command fallback; start a session at ${pinnedEffort}, drop the pin, or declare one${detailNote}`
   });
 }
 var ROLE_BEHAVIOR = {
@@ -40713,7 +40731,10 @@ function runDoctor(opts = {}) {
           const executor = typeof row.extra.executor === "string" ? row.extra.executor : null;
           if (executor == null) continue;
           const agentType = typeof row.extra.agent_type === "string" ? row.extra.agent_type : null;
-          if (findSpawnableCodexAgent(candidates, agentType, executor) == null) continue;
+          const model = typeof row.extra.model === "string" ? row.extra.model : null;
+          const reasoningEffort = typeof row.extra.reasoning_effort === "string" ? row.extra.reasoning_effort : null;
+          if (model == null || reasoningEffort == null) continue;
+          if (findSpawnableCodexAgent(candidates, agentType, executor, { model, reasoningEffort }) == null) continue;
           avoidableCount += 1;
           avoidableExecutors.add(executor);
         }
@@ -40721,8 +40742,8 @@ function runDoctor(opts = {}) {
           findings.push(finding(
             "codex-agents-fallback-avoidable",
             "warning",
-            `${avoidableCount} engine dispatch(es) in the most recent run (${latestRun.runId}) took the command fallback for executor(s) ${[...avoidableExecutors].sort().join(", ")}, even though a managed Codex role agent for that role is installed and could have delivered them in-host`,
-            "The coordinator resolved without --host-executor (it is not itself a materialized role agent), so `steering resolve` reported mode=command. Spawn the role agent named in the resolver's `delegate_to`, passing its `model` and `reasoning_effort` as EXPLICIT spawn values \u2014 Codex applies an agent file only after an explicit spawn value, so the file's own identity neither constrains nor delivers the snapshotted one. Use `fadeno dispatch-fallback` only when no managed role agent exists."
+            `${avoidableCount} engine dispatch(es) in the most recent run (${latestRun.runId}) took the command fallback for executor(s) ${[...avoidableExecutors].sort().join(", ")}, even though a managed Codex role agent whose file carries that exact identity is installed and could have delivered them in-host`,
+            "Spawn the role agent named in the resolver's `delegate_to` and hand it the engine assignment envelope. When the resolver names the installed agent as stale instead, run `fadeno steering apply --codex` and start a fresh Codex session to re-cut it. Otherwise use `fadeno dispatch-fallback`."
           ));
         }
       }

@@ -105,8 +105,9 @@ test('doctor reports a command-fallback dispatch a now-installed native agent co
   assert.match(finding!.detail, /1 engine dispatch/);
   assert.match(finding!.detail, /2026-01-01-0000-run/);
   assert.match(finding!.detail, /luna/);
-  assert.match(finding!.remediation ?? '', /--host-executor/);
+  // The remediation names the actions, and only the actions.
   assert.match(finding!.remediation ?? '', /delegate_to/);
+  assert.match(finding!.remediation ?? '', /fadeno dispatch-fallback/);
   // Warnings never fail the exit status.
   assert.equal(result.ok, true);
 });
@@ -155,25 +156,56 @@ test('doctor does not call a fallback avoidable when the visible agent is for an
 });
 
 /**
- * Inverted on 2026-08-20 with the rest of this feature. It previously asserted
- * silence, on the premise that an agent whose file had drifted could not have
- * delivered the request. Codex applies an agent file only AFTER an explicit
- * spawn value, so a drifted file delivers the snapshot's identity perfectly
- * well when the caller states it — which makes this fallback avoidable, and
- * staying silent would under-report exactly the drift the check exists for.
+ * Corrected 2026-09-05; this asserted the opposite from 2026-08-20 until this
+ * correction. On Codex an agent file's `model` and `model_reasoning_effort`
+ * take precedence over the values passed at spawn (the rule and its receipt
+ * live on `findSpawnableCodexAgent`), so a stale agent could not have
+ * delivered this row's snapshotted identity at any spawn values, and calling
+ * the fallback "avoidable" would advise a silent substitution.
  */
-test('a drifted installed agent still makes the fallback avoidable', (t) => {
+test('a stale installed agent does NOT make the fallback avoidable', (t) => {
   const root = tempRepo(t);
   const user = isolatedUser(t, root);
   writeRun(root, '2026-01-01-0000-run', [fallbackRow('hd-1', 'luna', 'gpt-5.6-luna', 'xhigh')]);
   const projectDir = codexProjectAgents(root);
-  // The agent file says `low`; the dispatched request said `xhigh`. A spawn
-  // passing the snapshot's `xhigh` explicitly wins over the file.
+  // The agent file says `low`; the dispatched request said `xhigh`. The file
+  // wins, so this agent would have run `low` — not the snapshotted identity.
   writeFileSync(join(projectDir, 'worker.toml'), managed('0.6.0-rc.40', hostAgentBody('worker', 'luna', 'gpt-5.6-luna', 'low')));
 
   const result = runDoctor({ repoRoot: root, target: 'codex', userPathOptions: user });
 
-  assert.equal(result.findings.some((f) => f.check === 'codex-agents-fallback-avoidable'), true);
+  assert.equal(result.findings.some((f) => f.check === 'codex-agents-fallback-avoidable'), false);
+});
+
+test('an agent whose MODEL went stale is not counted either', (t) => {
+  const root = tempRepo(t);
+  const user = isolatedUser(t, root);
+  writeRun(root, '2026-01-01-0000-run', [fallbackRow('hd-1', 'luna', 'gpt-5.6-luna', 'xhigh')]);
+  const projectDir = codexProjectAgents(root);
+  // Same executor and effort, different model: the file's model is what would
+  // have run, so this agent could not have delivered the row's identity.
+  writeFileSync(join(projectDir, 'worker.toml'), managed('0.6.1', hostAgentBody('worker', 'luna', 'gpt-5.6-sol', 'xhigh')));
+
+  const result = runDoctor({ repoRoot: root, target: 'codex', userPathOptions: user });
+
+  assert.equal(result.findings.some((f) => f.check === 'codex-agents-fallback-avoidable'), false);
+});
+
+test('a row that names no effort cannot prove avoidability, so it is not counted', (t) => {
+  const root = tempRepo(t);
+  const user = isolatedUser(t, root);
+  // A pre-0.6 ledger, or any row whose identity fields are absent: the check
+  // has nothing to compare the file against and an advisory does not guess.
+  writeRun(root, '2026-01-01-0000-run', [{
+    type: 'actor_dispatched', dispatch_id: 'hd-1', executor: 'luna', adapter: 'host',
+    model: 'gpt-5.6-luna', agent_type: 'worker', delivery_transport: 'command-fallback',
+  }]);
+  const projectDir = codexProjectAgents(root);
+  writeFileSync(join(projectDir, 'worker.toml'), managed('0.6.1', hostAgentBody('worker', 'luna', 'gpt-5.6-luna', 'xhigh')));
+
+  const result = runDoctor({ repoRoot: root, target: 'codex', userPathOptions: user });
+
+  assert.equal(result.findings.some((f) => f.check === 'codex-agents-fallback-avoidable'), false);
 });
 
 test('doctor stays silent about host-delivered dispatches (only command-fallback counts)', (t) => {

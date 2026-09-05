@@ -1116,9 +1116,14 @@ Codex therefore needs no new channel: it has been passing the answer to the
 resolver all along, just for the model half. `hostEffortProven` is that
 generalization — when `hostExecutor === refString` the requesting agent was
 materialized at that exact ref, pin included (`formatDialRef` renders
-`luna@xhigh`), so the match *is* proof. It is consulted only when the session
-effort is unobservable, and an observed one always wins. It cannot reach the
-Claude hook, which calls `dial resolve` and passes no `--host-executor`.
+`luna@xhigh`). The match *identifies* the agent; the `model_reasoning_effort`
+in its file is the proof, and the resolver reads it, because a file can carry
+the ref while pinning nothing — `renderCodexHostAgent` omits both identity
+lines for a `current-host` slot, so a `current-host@xhigh` agent bakes the
+pinned ref and inherits whatever effort the session is running at. It is
+consulted only when the session effort is unobservable, and an observed one
+always wins. It cannot reach the Claude hook, which calls `dial resolve` and
+passes no `--host-executor`.
 
 **No inheritance, and unpinned bakes the registry default.** A Codex managed
 agent inherits nothing; it runs at what its TOML says. So Claude and Codex

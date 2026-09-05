@@ -491,14 +491,23 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
           if (executor == null) continue;
           // `agent_type` is the role slot the row had to be claimed as; `*` is
           // the immutable wildcard, where any declared role surface could have
-          // taken it. The agent's own model/effort are NOT compared: Codex
-          // applies an agent file only after an explicit spawn value, so any
-          // managed agent for the role AND executor could have carried this
-          // row's snapshotted identity. The model/effort defaults may differ,
-          // but the baked host executor is behavioral: a broker (none) or an
-          // agent for another executor would resolve recursively.
+          // taken it. Only an agent whose FILE carries this row's snapshotted
+          // model and effort could have delivered it, since on Codex the file
+          // is what runs (see `findSpawnableCodexAgent`); one carrying
+          // anything else would have run that instead, and counting it would
+          // report a fallback as "avoidable" when the only alternative was a
+          // silent identity substitution. The baked host executor matters for
+          // its own reason — a broker (none) or an agent for another executor
+          // would resolve recursively.
+          //
+          // A row that names no model or effort cannot answer the question at
+          // all, and an advisory does not guess.
           const agentType = typeof row.extra.agent_type === 'string' ? row.extra.agent_type : null;
-          if (findSpawnableCodexAgent(candidates, agentType, executor) == null) continue;
+          const model = typeof row.extra.model === 'string' ? row.extra.model : null;
+          const reasoningEffort =
+            typeof row.extra.reasoning_effort === 'string' ? row.extra.reasoning_effort : null;
+          if (model == null || reasoningEffort == null) continue;
+          if (findSpawnableCodexAgent(candidates, agentType, executor, { model, reasoningEffort }) == null) continue;
           avoidableCount += 1;
           avoidableExecutors.add(executor);
         }
@@ -506,8 +515,8 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
           findings.push(finding(
             'codex-agents-fallback-avoidable',
             'warning',
-            `${avoidableCount} engine dispatch(es) in the most recent run (${latestRun.runId}) took the command fallback for executor(s) ${[...avoidableExecutors].sort().join(', ')}, even though a managed Codex role agent for that role is installed and could have delivered them in-host`,
-            'The coordinator resolved without --host-executor (it is not itself a materialized role agent), so `steering resolve` reported mode=command. Spawn the role agent named in the resolver\'s `delegate_to`, passing its `model` and `reasoning_effort` as EXPLICIT spawn values — Codex applies an agent file only after an explicit spawn value, so the file\'s own identity neither constrains nor delivers the snapshotted one. Use `fadeno dispatch-fallback` only when no managed role agent exists.',
+            `${avoidableCount} engine dispatch(es) in the most recent run (${latestRun.runId}) took the command fallback for executor(s) ${[...avoidableExecutors].sort().join(', ')}, even though a managed Codex role agent whose file carries that exact identity is installed and could have delivered them in-host`,
+            'Spawn the role agent named in the resolver\'s `delegate_to` and hand it the engine assignment envelope. When the resolver names the installed agent as stale instead, run `fadeno steering apply --codex` and start a fresh Codex session to re-cut it. Otherwise use `fadeno dispatch-fallback`.',
           ));
         }
       }

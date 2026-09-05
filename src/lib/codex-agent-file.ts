@@ -161,25 +161,40 @@ export function effectiveCodexAgentCandidates(
   return out;
 }
 
+/** The identity a spawn must actually deliver: the run snapshot's model and effort. */
+export interface CodexAgentIdentity {
+  model: string;
+  reasoningEffort: string;
+}
+
 /**
  * The managed Codex agent for `archetype` that a caller could spawn to deliver
  * a locked request in-host, or null when this repo has none.
  *
- * **The file's own model/effort are deliberately NOT matched.** Codex resolves
- * a spawned subagent's settings "from an explicit spawn value, then the
- * corresponding `[agents]` default, then the parent's value" before the agent
- * file is applied at all — the file is the LOWEST-priority default, not a
- * frozen identity. So a caller delivers the locked identity by passing `model`
- * and `model_reasoning_effort` explicitly at spawn time, taken from the run
- * snapshot, and any managed agent for the right role can carry it.
+ * **A Codex agent file is a frozen identity, not a default.** Codex's subagent
+ * doc: "If a custom agent file sets `model` or `model_reasoning_effort`, the
+ * value in the file takes precedence. Before applying the file, Codex resolves
+ * each setting from an explicit spawn value, then the corresponding `[agents]`
+ * default, then the parent's value." That cascade decides only what the file
+ * falls back FROM — the file itself is applied last and WINS. Measured
+ * 2026-09-04 (basanos session `01a06ce8`): two `reviewer` spawns passing an
+ * explicit `model: gpt-5.6-sol` ran every API call at the file's
+ * `gpt-5.6-luna`. It is the same fact `templates/codex/hooks/spawn-guard.mjs`
+ * is built on, and the reason that hook refuses a drifted spawn instead of
+ * rewriting it: nothing a caller passes can correct the file.
  *
- * That is also the safer source for model and effort: the snapshot is
- * immutable, while a file can drift out from under the run. The file's baked
- * `--host-executor`, however, is behavioral rather than a Codex setting. Its
- * developer instructions pass that value back to `steering resolve`; a
- * command broker passes no value at all. Offering either kind for a different
- * executor creates a recursive delegate advisory instead of delivering the
- * assignment, so the baked executor must agree exactly.
+ * So `identity` — the run snapshot's model and effort — is matched against the
+ * file when given. An agent whose file carries anything else would silently
+ * deliver that other identity against a snapshot that froze one on purpose,
+ * and no spawn value can stop it. Callers that only want "a managed agent for
+ * this role and executor exists" (to NAME the drift) omit `identity`.
+ *
+ * The file's baked `--host-executor` is matched too, for a different reason:
+ * it is behavioral rather than a Codex setting. Its developer instructions
+ * pass that value back to `steering resolve`; a command broker passes no value
+ * at all. Offering either kind for a different executor creates a recursive
+ * delegate advisory instead of delivering the assignment, so the baked
+ * executor must agree exactly.
  *
  * The ROLE still matters and is matched: an envelope can only be claimed as
  * the archetype it names, so the reviewer agent cannot take a worker's
@@ -188,15 +203,37 @@ export function effectiveCodexAgentCandidates(
  *
  * `managed` is still required: an unmarked file is not provably Fadeno's, so
  * its instructions cannot be assumed to resolve the envelope at all.
+ *
+ * A `current-host` file carries neither key, so an `identity` clause never
+ * matches it.
  */
 export function findSpawnableCodexAgent(
   candidates: CodexAgentCandidate[],
   archetype: string | null,
   hostExecutor: string,
+  identity?: CodexAgentIdentity,
 ): CodexAgentCandidate | null {
   return candidates.find((candidate) =>
     (archetype == null || archetype === '*' || candidate.archetype === archetype) &&
     candidate.state.managed &&
-    candidate.state.hostExecutor === hostExecutor,
+    candidate.state.hostExecutor === hostExecutor &&
+    (identity == null ||
+      (candidate.state.model === identity.model &&
+        candidate.state.reasoningEffort === identity.reasoningEffort)),
   ) ?? null;
+}
+
+/**
+ * How a file's own identity reads in an advisory that has to name it.
+ *
+ * The sibling of `fileIdentity` in `templates/codex/hooks/spawn-guard.mjs`, and
+ * deliberately renders the same string: a null half is the `current-host`
+ * shape, where the file states nothing and the session is inherited. The
+ * guard's trailing `(cut for <ref>)` clause is omitted because every caller
+ * here has already matched the baked executor exactly, so it would only repeat
+ * a value the advisory just stated.
+ */
+export function describeCodexAgentFileIdentity(state: CodexAgentFileState): string {
+  return `${state.model ?? 'the session model'}` +
+    `${state.reasoningEffort != null ? ` at effort ${state.reasoningEffort}` : ''}`;
 }

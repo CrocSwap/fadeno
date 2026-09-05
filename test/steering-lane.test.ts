@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
-import { decideLane, runSteeringResolve } from '../src/commands/steering.ts';
+import { decideLane, runSteeringApply, runSteeringResolve } from '../src/commands/steering.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
 import { tempRepo } from './helpers.ts';
 
@@ -36,6 +36,8 @@ function seed(t: TestContext, dials: Record<string, string>): { root: string; us
     },
     routes: {
       codex: {
+        // The reference-frame-neutral sentinel, in its shipped shape: host
+        // delivery and no fallback at all.
         'current-host': { host: true },
         lunap: { host: true, command: RELAY },
         terrap: { host: true },
@@ -174,12 +176,22 @@ test('an unobserved session effort still leaves an UNPINNED dial in-session', (t
 });
 
 test('a host agent materialized from the pinned ref proves its own effort without the harness publishing one', (t) => {
-  // Codex bakes effort into the agent TOML (`model_reasoning_effort`) and the
-  // agent identifies itself with the full ref it was cut from. A match on
-  // `luna@xhigh` therefore proves the effort as directly as CLAUDE_EFFORT
-  // does — otherwise every pinned dial in a Codex session would dispatch out
-  // of process from the very agent materialized for it.
+  // Codex bakes effort into the agent TOML (`model_reasoning_effort`), which
+  // is the only thing that fixes a spawned subagent's effort there, and the
+  // agent identifies itself with the full ref it was cut from. So the ref
+  // match says which agent is asking and the file it names supplies the
+  // proof — as directly as CLAUDE_EFFORT does, without the harness publishing
+  // anything. Otherwise every pinned dial in a Codex session would dispatch
+  // out of process from the very agent materialized for it.
+  //
+  // The agent is really materialized here rather than asserted into existence
+  // by its own claim, because the file is what the predicate reads.
   const { root, user } = seed(t, { worker: 'luna@xhigh' });
+  runSteeringApply({ repoRoot: root, target: 'codex', userPathOptions: user });
+  assert.match(
+    readFileSync(join(root, '.codex', 'agents', 'worker.toml'), 'utf8'),
+    /model_reasoning_effort = "xhigh"/,
+  );
   const result = resolve(root, user, 'luna@xhigh', null);
 
   assert.equal(result.mode, 'host');
@@ -189,6 +201,56 @@ test('a host agent materialized from the pinned ref proves its own effort withou
   // An OBSERVED session effort is the stronger evidence — it is already past
   // any silent downgrade — and overrules the agent file when they disagree.
   assert.equal(resolve(root, user, 'luna@xhigh', 'medium').lane, 'command');
+});
+
+test('a matching ref alone proves nothing: the agent file must actually carry the pin', (t) => {
+  // No `steering apply` at all, so nothing on disk bakes an effort. The caller
+  // still passes back the full pinned ref — which is exactly what a stale or
+  // hand-authored agent would do — and the pin stays unproven, so the delivery
+  // takes the command lane, where the effort travels in the argv.
+  const { root, user } = seed(t, { worker: 'luna@xhigh' });
+  const result = resolve(root, user, 'luna@xhigh', null);
+
+  assert.equal(result.lane, 'command');
+  assert.equal(result.lane_reason, 'session effort unobserved');
+});
+
+test('a pinned current-host agent proves no effort, and the refusal names an exit that exists', (t) => {
+  // `renderCodexHostAgent` omits BOTH identity lines for the
+  // reference-frame-neutral sentinel — Codex rejects the literal `current-host`
+  // as a model — so a `current-host@xhigh` agent bakes and passes back
+  // `--host-executor current-host@xhigh` while pinning nothing and running at
+  // whatever effort the session inherited. Reading the ref as proof made that
+  // agent "provably xhigh" on the strength of a file that says nothing at all.
+  //
+  // The shipped catalog gives `current-host` no fallback, so refusing lands on
+  // restart_required. Both proofs are permanently closed off in this shape —
+  // no agent file can ever bake this pin, and Codex publishes no session
+  // effort to observe — so the ordinary remediation ("start a session at
+  // xhigh") would loop straight back to this same refusal. The detail must
+  // name the two exits that actually exist instead.
+  const { root, user } = seed(t, { worker: 'current-host@xhigh' });
+  runSteeringApply({ repoRoot: root, target: 'codex', userPathOptions: user });
+  const agent = readFileSync(join(root, '.codex', 'agents', 'worker.toml'), 'utf8');
+  assert.match(agent, /--host-executor current-host@xhigh/);
+  assert.doesNotMatch(agent, /model_reasoning_effort/);
+
+  const result = resolve(root, user, 'current-host@xhigh', null);
+  assert.equal(result.mode, 'restart_required');
+  assert.equal(result.lane, 'restart_required');
+  assert.equal(result.lane_reason, 'no command fallback');
+  assert.match(result.detail, /carries no model_reasoning_effort by construction/);
+  assert.match(result.detail, /drop the pin \(dial current-host\) or dial a concrete model/);
+  assert.doesNotMatch(result.detail, /start a session at/);
+
+  // The PIN is what refused it, not the sentinel: unpinned, the same agent and
+  // the same executor stay in-session. That is what the removed `command:
+  // RELAY` fixture used to isolate, without misreporting the shipped catalog.
+  const { root: root2, user: user2 } = seed(t, { worker: 'current-host' });
+  runSteeringApply({ repoRoot: root2, target: 'codex', userPathOptions: user2 });
+  const unpinned = resolve(root2, user2, 'current-host', null);
+  assert.equal(unpinned.lane, 'host');
+  assert.equal(unpinned.lane_reason, 'effort unpinned');
 });
 
 test('the model half of the predicate still decides first, and says so', (t) => {

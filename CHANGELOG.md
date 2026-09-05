@@ -103,6 +103,32 @@ All notable changes to Fadeno are documented here. The format follows
 - Locked Codex host dispatches no longer advertise a generic command broker or
   a role agent materialized for another executor as `delegate_to`; those
   agents would resolve the same envelope recursively instead of executing it.
+- **Corrected the Codex agent-file precedence claim, and the two predicates
+  built on it.** Five surfaces asserted that an explicit spawn value beats a
+  custom agent file; on Codex the file's `model`/`model_reasoning_effort` take
+  precedence over the value passed at spawn (the receipt is cited once, on
+  `findSpawnableCodexAgent`). So `steering resolve` now offers `delegate_to`
+  only for a managed agent whose **file identity equals the locked request**; a
+  stale one is named in `detail`, with the `steering apply --codex` plus
+  fresh-session fix, rather than offered as a spawn target that would silently
+  run its own identity. `doctor`'s `codex-agents-fallback-avoidable` counts a
+  command fallback as avoidable on the same basis. Runner guidance stops
+  presenting explicit spawn values as the delivery mechanism: the file carries
+  the identity, and passing `model`/`reasoning_effort` at spawn is harmless and
+  overrides nothing.
+- For **ordinary (unlocked) resolutions**, `steering resolve` no longer treats a
+  matching `--host-executor` ref as proof that the host agent pins the dialed
+  effort. The ref identifies which agent is asking; the proof is
+  `model_reasoning_effort` in its managed file, so the file must carry it — the
+  same check the spawn guard makes. Engine assignments are unaffected: the
+  locked path never consults the lane predicate. **User-visible:** a pinned
+  reference-frame-neutral dial (`worker: current-host@xhigh`) on Codex now
+  resolves off-host — `restart_required` with the shipped catalog, which
+  declares no fallback for `current-host` — because `renderCodexHostAgent`
+  omits both identity lines for that sentinel, so its agent file can never
+  carry the pin and Codex publishes no session effort to observe either. The
+  refusal names the two real exits: drop the pin, or dial a concrete model.
+  Previously such a dial resolved `mode: host` on a proof that did not exist.
 
 ## [0.6.1] — 2026-09-04
 

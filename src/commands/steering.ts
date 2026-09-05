@@ -42,6 +42,7 @@ import { stampHookVersion } from './plugin.ts';
 import {
   CODEX_MANAGED_MARK,
   CODEX_STEERING_ARCHETYPES,
+  describeCodexAgentFileIdentity,
   effectiveCodexAgentCandidates,
   findSpawnableCodexAgent,
 } from '../lib/codex-agent-file.ts';
@@ -141,20 +142,22 @@ export interface SteeringResolution extends LaneDecision {
    * A native spawn that would deliver this locked request in-host, present
    * only when the CALLER could not prove a host identity of its own.
    *
-   * `model` / `reasoning_effort` are the run snapshot's, and must be passed as
-   * EXPLICIT spawn values — Codex resolves a subagent's settings from the
-   * explicit spawn value first and the agent file last, so the file's own
-   * identity neither constrains nor delivers this one. Spawning `archetype`'s
-   * agent without them runs whatever that file happens to say.
+   * Present ONLY when `agent_file` already carries exactly this identity. On
+   * Codex a custom agent file's `model` / `model_reasoning_effort` take
+   * precedence over the values passed at spawn time (see
+   * `findSpawnableCodexAgent`), so the file is what delivers the locked
+   * identity. Passing `model` and `reasoning_effort` at spawn is harmless and
+   * overrides nothing. When the managed agent for this archetype is stale,
+   * this field is absent and `detail` names it instead.
    */
   delegate_to?: {
     archetype: string;
-    /** Pass as the spawn's `model`. From the run snapshot, not from the file. */
+    /** The locked model, which this agent's file already carries. */
     model: string;
-    /** Pass as the spawn's `model_reasoning_effort`. From the run snapshot. */
+    /** The locked effort, which this agent's file already carries. */
     reasoning_effort: string;
     executor: string;
-    /** The managed agent file that would carry the spawn. Informational. */
+    /** The managed agent file whose baked identity delivers this request. */
     agent_file: string;
     scope: 'project' | 'user';
   };
@@ -441,14 +444,18 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
   // (they STOP on `restart_required`) do not permit today.
   //
   // Never for the reference-frame-neutral sentinel: `current-host` is not a
-  // model id, so it cannot be passed as an explicit spawn value. Such a
-  // request is deliverable by whatever session is running and needs no
-  // model-specific spawn to begin with.
+  // model id, and `renderCodexHostAgent` writes no identity lines at all for
+  // such a slot. Such a request is deliverable by whatever session is running
+  // and needs no model-specific spawn to begin with.
   //
-  // Model and effort are not gated on the agent file: Codex applies explicit
-  // spawn values ahead of the file defaults. The file's baked host executor is
-  // different — it controls what the agent's developer instructions pass back
-  // to this resolver. A command broker passes none, and a role agent cut for a
+  // The agent named here must be one whose FILE already carries the locked
+  // model and effort, because on Codex the file is what runs (see
+  // `findSpawnableCodexAgent`). A managed agent for this role and executor
+  // whose file says something else is named as stale in `detail` instead.
+  //
+  // The file's baked host executor is matched for a separate reason — it
+  // controls what the agent's developer instructions pass back to this
+  // resolver. A command broker passes none, and a role agent cut for a
   // different executor passes the wrong one; either would repeat this same
   // delegate advice instead of executing the assignment.
   //
@@ -458,12 +465,17 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
   // seeing the mode it sees today, and the new capability rides on the
   // payload. Only a caller that can spawn acts on `delegate_to`.
   let delegateTo: SteeringResolution['delegate_to'];
+  /** The role+executor agent that exists but cannot deliver: named, never offered. */
+  let staleAgent: { path: string; identity: string } | null = null;
   if (
     !matchesHost && !neutral && hasFallback && hostExecutor == null
     && executor.adapter === 'host' && request.model !== NEUTRAL_HOST_EXECUTOR
   ) {
     const candidates = effectiveCodexAgentCandidates(repoRoot, opts.userPathOptions);
-    const target = findSpawnableCodexAgent(candidates, archetype, request.executor);
+    const target = findSpawnableCodexAgent(candidates, archetype, request.executor, {
+      model: request.model,
+      reasoningEffort: request.reasoningEffort,
+    });
     if (target != null) {
       delegateTo = {
         archetype: target.state.name ?? target.archetype,
@@ -473,6 +485,14 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
         agent_file: target.path,
         scope: target.scope,
       };
+    } else {
+      // The same search without the identity clause: a managed agent for this
+      // role and executor that a caller can SEE on disk and would otherwise
+      // reach for. The advisory has to explain why it is not being offered.
+      const installed = findSpawnableCodexAgent(candidates, archetype, request.executor);
+      if (installed != null) {
+        staleAgent = { path: installed.path, identity: describeCodexAgentFileIdentity(installed.state) };
+      }
     }
   }
   const detail = matchesHost
@@ -481,8 +501,10 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
       ? `host request ${dispatchId} is locked to the reference-frame-neutral executor current-host; execute in-host`
       : hasFallback
         ? delegateTo != null
-          ? `host request ${dispatchId} is locked to ${request.executor}; spawn the ${delegateTo.archetype} Codex agent (${delegateTo.agent_file}) with explicit model ${delegateTo.model} and model_reasoning_effort ${delegateTo.reasoning_effort} and hand it this engine assignment envelope — it delivers the locked identity in-host, which is preferable to that executor's declared command fallback`
-          : `host request ${dispatchId} is locked to ${request.executor}; deliver it through that executor's declared command fallback`
+          ? `host request ${dispatchId} is locked to ${request.executor}; spawn the ${delegateTo.archetype} Codex agent (${delegateTo.agent_file}) and hand it this engine assignment envelope — its file carries exactly this identity, ${delegateTo.model} at effort ${delegateTo.reasoning_effort}, so it delivers the locked identity in-host rather than through the executor's command fallback`
+          : staleAgent != null
+            ? `host request ${dispatchId} is locked to ${request.executor}; the managed ${archetype} Codex agent (${staleAgent.path}) is stale: its file carries ${staleAgent.identity}, while this request is locked to ${request.model} at effort ${request.reasoningEffort}, and on Codex the file wins over any spawn value — run \`fadeno steering apply --codex\` and start a fresh Codex session to re-cut it, or deliver it now through that executor's declared command fallback`
+            : `host request ${dispatchId} is locked to ${request.executor}; deliver it through that executor's declared command fallback`
         : `host request ${dispatchId} requires host executor ${request.executor}; this session is materialized for ${hostExecutor ?? 'no host executor'}, so start a matching Codex session`;
   // For locked, dial is the executor ref itself
   let dial: DialRef;
@@ -552,6 +574,46 @@ function resolvePromptDigest(opts: SteeringResolveOptions): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * `hostEffortProven`'s EFFORT half: does the managed agent file Codex would
+ * load for `archetype` bake `effort`, and was it cut from `ref`?
+ *
+ * The only thing that fixes a Codex subagent's reasoning effort is the
+ * `model_reasoning_effort` key in its agent file, because on Codex the file
+ * takes precedence over anything passed at spawn time — see
+ * `findSpawnableCodexAgent` for the rule and its receipt. So a caller's
+ * `--host-executor luna@xhigh` ref identifies WHICH agent is asking; the file
+ * it was cut from is what proves the pin. A file that states no effort
+ * inherits the session's, which is exactly the `current-host` shape:
+ * `renderCodexHostAgent` omits both identity lines for the neutral sentinel,
+ * so such an agent bakes and passes back a pinned ref while pinning nothing.
+ *
+ * Three requirements — the same three `findSpawnableCodexAgent` applies to
+ * the file it offers, besides the model. The MODEL half is not this
+ * predicate's: `hostModel` decides
+ * whether the session can host it at all, and the spawn guard adjudicates a
+ * file whose model has drifted at the moment it is authoritative.
+ *
+ * A missing, unmarked, or silent file answers "no", which sends the delivery
+ * to the command lane, where the effort is encoded in the argv and therefore
+ * guaranteed. That is the safe direction and matches `decideLane`'s stated
+ * posture: degrade safely rather than hopefully.
+ */
+function codexAgentFilePinsEffort(
+  repoRoot: string,
+  archetype: string,
+  ref: string,
+  effort: string,
+  userPathOptions?: UserPathOptions,
+): boolean {
+  const candidate = effectiveCodexAgentCandidates(repoRoot, userPathOptions)
+    .find((entry) => entry.archetype === archetype);
+  return candidate != null &&
+    candidate.state.managed &&
+    candidate.state.hostExecutor === ref &&
+    candidate.state.reasoningEffort === effort;
 }
 
 /**
@@ -682,16 +744,20 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     // effort at all and that `compileDialRef` could not compile.
     'default';
   const hostModel = spec.adapter === 'host' && (cascade.source === 'base' || hostExecutor === refString);
+  /** The reference-frame-neutral sentinel, whose agent file states no identity at all. */
+  const neutralModel = spec.adapter === 'host' && spec.model === NEUTRAL_HOST_EXECUTOR;
   const lane = decideLane({
     pinnedEffort,
     effectiveEffort,
     sessionEffort: readSessionEffort(opts.env ?? process.env),
     hostModel,
     // `refString` carries the pin (`formatDialRef` renders `luna@xhigh`), so a
-    // host executor that matches it identifies an agent materialized at that
-    // exact effort. This is how a Codex broker proves its own effort without
-    // any harness publishing one.
-    hostEffortProven: pinnedEffort != null && hostExecutor === refString,
+    // host executor that matches it identifies WHICH agent is asking. The
+    // proof is its file — see `codexAgentFilePinsEffort`.
+    hostEffortProven:
+      pinnedEffort != null &&
+      hostExecutor === refString &&
+      codexAgentFilePinsEffort(repoRoot, archetype, refString, pinnedEffort, opts.userPathOptions),
     commandLane: commandRoutable(spec),
   });
 
@@ -773,12 +839,23 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     source: cascade.source, dial: cascade.ref, hostExecutor,
     // Restart reason 2 of the two that survive: a host slot naming an
     // identity with neither a session that can deliver it nor a command
-    // fallback. It now has two shapes — the model, as always, and an effort
-    // the session is not running at.
-    detail: hostModel
-      ? `dial ${refString} pins effort ${pinnedEffort} but this session runs at ${lane.session_effort ?? 'no observable effort'}, ` +
-        `and ${refString} declares no command fallback; start a session at ${pinnedEffort}, drop the pin, or declare one${detailNote}`
-      : `dial ${refString} requests host executor ${refString}, but this session was materialized for ${hostExecutor ?? 'no host executor'}; apply the dial and start a fresh session${detailNote}`,
+    // fallback. It now has three shapes — the model, as always; an effort the
+    // session is running at something else; and an effort nothing here can
+    // ever prove, which needs its own remediation because the ordinary one
+    // ("start a session at <effort>") is unsatisfiable in that shape.
+    detail: !hostModel
+      ? `dial ${refString} requests host executor ${refString}, but this session was materialized for ${hostExecutor ?? 'no host executor'}; apply the dial and start a fresh session${detailNote}`
+      // A pinned `current-host` on a harness that publishes no session effort.
+      // `renderCodexHostAgent` omits `model_reasoning_effort` for the neutral
+      // sentinel by construction, so no agent file can ever carry this pin and
+      // no session can be started that would observe it: both proofs are
+      // closed off permanently, and only changing the dial reopens one.
+      : neutralModel && lane.session_effort == null
+        ? `dial ${refString} pins effort ${pinnedEffort}, but a ${NEUTRAL_HOST_EXECUTOR} agent file carries no model_reasoning_effort by construction ` +
+          `and this session publishes no effort to observe, so nothing can prove the pin — and ${refString} declares no command fallback; ` +
+          `drop the pin (dial ${NEUTRAL_HOST_EXECUTOR}) or dial a concrete model, whose agent file can bake the effort${detailNote}`
+        : `dial ${refString} pins effort ${pinnedEffort} but this session runs at ${lane.session_effort ?? 'no observable effort'}, ` +
+          `and ${refString} declares no command fallback; start a session at ${pinnedEffort}, drop the pin, or declare one${detailNote}`,
   } as any);
 }
 
