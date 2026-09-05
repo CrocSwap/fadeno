@@ -22,13 +22,13 @@ import { echoedStdin, tempRepo } from './helpers.ts';
 
 const onHarness = (harness: string): UserPathOptions => ({ env: { FADENO_HARNESS: harness } });
 
-function seedV3(t: TestContext, command: string[]): string {
+function seedCatalog(t: TestContext, command: string[]): string {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { worker: { provider: 'openai', id: 'worker-1' } },
-    routes: { standalone: { openai: { command } }, codex: { openai: { command } } },
+    harnesses: { codex: { provider: 'openai', command: command } },
     archetypes: { worker: {} },
     dials: { worker: 'worker' },
   }));
@@ -92,7 +92,7 @@ test('deriveDispatchOutcome: a claim decides the exit-0 case; everything else ou
 // --- footer bytes ----------------------------------------------------------
 
 test('the result footer is a fixed constant appended to every prompt, so digests stay stable across identical dispatches', (t) => {
-  const root = seedV3(t, REPORTER('fine'));
+  const root = seedCatalog(t, REPORTER('fine'));
   const first = runDispatch({ archetype: 'worker', prompt: 'same task', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
   const second = runDispatch({ archetype: 'worker', prompt: 'same task', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
   const rows = evidenceRows(root).filter((r) => r.event === 'dispatch_requested') as Array<Record<string, unknown>>;
@@ -114,7 +114,7 @@ test('the result footer is a fixed constant appended to every prompt, so digests
 // --- end-to-end classification --------------------------------------------
 
 test('a worker that reports failure at exit 0 is classified failed', (t) => {
-  const root = seedV3(t, REPORTER('I could not finish the task\nFADENO-DISPATCH-RESULT: failed — tests would not pass'));
+  const root = seedCatalog(t, REPORTER('I could not finish the task\nFADENO-DISPATCH-RESULT: failed — tests would not pass'));
   const result = runDispatch({ archetype: 'worker', prompt: 'p', tag: 'worker-claims-failed', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
   assert.equal(result.exitCode, 0);
   assert.equal(result.outcome, 'failed');
@@ -125,27 +125,27 @@ test('a worker that reports failure at exit 0 is classified failed', (t) => {
 
 test('a claimed ok is classified ok, and no claim leaves the legacy derivation untouched', (t) => {
   {
-    const root = seedV3(t, REPORTER('done\nFADENO-DISPATCH-RESULT: ok'));
+    const root = seedCatalog(t, REPORTER('done\nFADENO-DISPATCH-RESULT: ok'));
     const result = runDispatch({ archetype: 'worker', prompt: 'p', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
     assert.equal(result.outcome, 'ok');
     assert.equal(evidenceRows(root).find((r) => r.event === 'dispatch_completed')!.outcome, 'ok');
   }
   {
     // Exit 0 with bytes but no claim line ⇒ ok exactly as before.
-    const root = seedV3(t, REPORTER('plain report'));
+    const root = seedCatalog(t, REPORTER('plain report'));
     const result = runDispatch({ archetype: 'worker', prompt: 'p', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
     assert.equal(result.outcome, 'ok');
   }
   {
     // Exit 0 with zero bytes ⇒ empty exactly as before.
-    const root = seedV3(t, REPORTER(''));
+    const root = seedCatalog(t, REPORTER(''));
     const result = runDispatch({ archetype: 'worker', prompt: 'p', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
     assert.equal(result.outcome, 'empty');
   }
 });
 
 test('rendering tells the truth about a claimed failure at exit 0', (t) => {
-  const root = seedV3(t, REPORTER('nope\nFADENO-DISPATCH-RESULT: failed — could not build'));
+  const root = seedCatalog(t, REPORTER('nope\nFADENO-DISPATCH-RESULT: failed — could not build'));
   runDispatch({ archetype: 'worker', prompt: 'p', tag: 'worker-render-failed', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
   const listing = runDispatches({ repoRoot: root });
   const line = listing.lines.find((l) => l.includes('FAILED'))!;
@@ -157,7 +157,7 @@ test('rendering tells the truth about a claimed failure at exit 0', (t) => {
   assert.equal(rec.exitCode, 0);
 
   // An honest ok at exit 0 earns neither the FAILED mark nor the bracket.
-  const okRoot = seedV3(t, REPORTER(`fine\nFADENO-DISPATCH-RESULT: ok`));
+  const okRoot = seedCatalog(t, REPORTER(`fine\nFADENO-DISPATCH-RESULT: ok`));
   runDispatch({ archetype: 'worker', prompt: 'p', tag: 'worker-render-ok', repoRoot: okRoot, shared: true, userPathOptions: onHarness('standalone') });
   const okListing = runDispatches({ repoRoot: okRoot });
   const okLine = okListing.lines.find((l) => l.includes('exit 0'))!;
@@ -171,9 +171,9 @@ test('an echo-style executor that relays its prompt does not accidentally claim 
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   const echo = ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(d))"];
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { worker: { provider: 'openai', id: 'worker-1' } },
-    routes: { standalone: { openai: { command: echo } }, codex: { openai: { command: echo } } },
+    harnesses: { codex: { provider: 'openai', command: echo } },
     archetypes: { worker: {} },
     dials: { worker: 'worker' },
   }));

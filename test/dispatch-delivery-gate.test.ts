@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import {
   commandRoutable,
   parseExecutorProfile,
+  resolveDelivery,
   type ExecutorSpec,
 } from '../src/lib/executors.ts';
 
@@ -39,17 +40,21 @@ test('a host spec WITH a fallback is dispatchable under every harness', () => {
   assert.equal(commandRoutable.length, 1);
 });
 
-test('the shipped claude-harness anthropic route is the case that was refused', () => {
+test('the shipped claude harness is the case that was refused: host AND command', () => {
   // Fixtures proved the predicate; this proves the CATALOG still has the shape
-  // the predicate was relaxed for. A route that quietly lost its `command:`
+  // the predicate was relaxed for. A harness that quietly lost its `command:`
   // would send `fadeno dispatch --archetype reviewer` back to a hard refusal
   // under Claude with no test noticing.
   const profile = parseExecutorProfile(readFileSync(CATALOG, 'utf8'), CATALOG, 'claude');
-  const route = (profile.routes as Record<string, Record<string, Record<string, unknown>>>)
-    .claude!.anthropic!;
-  assert.equal(route.host, true, 'claude→anthropic is the in-session host route');
-  assert.ok(Array.isArray(route.command) && route.command.length > 0, 'and it declares a command lane');
-  assert.equal(route.driver, 'claude', 'dialed as `--via claude`, not `--via claude-cli`');
+  const claude = profile.harnesses.claude!;
+  assert.ok(claude.host, 'claude is a host — Fadeno can run inside it');
+  assert.ok(claude.command != null && claude.command.command.length > 0, 'and it declares a command lane');
+  // The compiled shape a Claude session actually sees: a host candidate whose
+  // `fallback_command` is that lane.
+  const compiled = resolveDelivery({ model: 'opus' }, profile, 'claude', { archetype: 'reviewer' });
+  assert.equal(compiled.spec.adapter, 'host');
+  assert.equal(compiled.hostCandidate, true);
+  assert.ok(commandRoutable(compiled.spec), 'a Claude reviewer must still be dispatchable out of process');
 });
 
 

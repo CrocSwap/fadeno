@@ -40,110 +40,126 @@ Executor configuration is layered by `src/lib/config-layers.ts`:
 bundled catalog → user executors.yaml → project .fadeno/executors.yaml
 ```
 
-Registry models, harness routes, legacy executors, dials (`dials:`), and
-bindings merge by key; `unregistered_model_driver` uses the highest declaring
-layer. Pre-dials catalogs with legacy keys (`loadouts`/`targets`) are rejected at parse time. A malformed
+Registry models, the `harnesses:` table, dials (`dials:`), and bindings merge by
+key; `unregistered_model_harness` uses the highest declaring layer. A user-layer
+model nothing in the merged harness table can deliver is DROPPED with a note
+rather than failing the load — a personal alias is machine state, not catalog
+policy — while a project- or builtin-declared one is a load error. Pre-dials catalogs with legacy keys (`loadouts`/`targets`) are rejected at parse time. A malformed
 present layer is an error. User paths are resolved by `src/lib/user-paths.ts`
 with injectable XDG/Windows overrides, including `$FADENO_STATE_HOME/dials.json`
 (session dials) and `$FADENO_STATE_HOME/model-verifications.json` (dial-time
 verification cache). Setup does not synthesize a catalog from installed CLI
-probes: the bundled v3 model registry and routes are working defaults, and the
+probes: the bundled v4 model registry and harness table are working defaults, and the
 user file is an optional override.
 
-## Glossary: harnesses, hosts, and drivers
+## Glossary: harnesses, hosts, and executors
 
-Fadeno relates to an agentic coding environment in exactly two ways, and the
-codebase names one of them much better than the other. This section fixes the
-vocabulary so the two can be said apart.
+Fadeno relates to an agentic coding environment in exactly two ways. This
+section fixes the vocabulary so the two can be said apart.
 
 **Harness** — an agentic coding environment: Codex, Claude Code, Grok Build,
-OpenCode, omp. A harness is not a role; it takes one of the two roles below, and the
-same harness can take both.
+OpenCode, omp, Antigravity, Muse Code. A harness is not a role; it takes one of
+the two roles below, and the same harness can take both. Since catalog v4
+(`docs/experimental/harness-neutral-dials.md`) the catalog has exactly one
+table keyed by harness id, and which role an entry plays is read off which
+blocks it declares.
 
 **Host** — the harness Fadeno is *running inside*. This is a typed axis:
 `HarnessId = 'codex' | 'claude' | 'grok' | 'opencode' | 'omp' | 'standalone'`
 (`src/lib/executors.ts`), resolved by `activeHarness()` as `FADENO_HARNESS` →
 ambient markers → `standalone`. **There is no stored default harness**: both
-inputs are set by a host at call time, so host-specific compilation happens
-only *inside* a harness and nothing on disk remembers one. A host needs an
-**adapter** — a `templates/<host>/` tree emitted by `fadeno init --<host>` —
-because Fadeno has to install skills, subagents, bootstrap files, and hooks
-into it. The active host also selects which `routes:` sub-table compiles; a v2
-catalog with no `routes.<active host>` mapping is a hard error, not a
-silent no-op. `standalone` is the *no host* value: Fadeno invoked from a plain
-shell, with no adapter tree. OpenCode is the one harness proven to be both a
-first-class host and a driver (see kickoff-memo → *Post-v0 OpenCode adapter
-note*); omp ships host-side only today.
+inputs are set by a host at call time, so nothing on disk remembers one. A host
+needs an **adapter** — a `templates/<host>/` tree emitted by
+`fadeno init --<host>` — because Fadeno has to install skills, subagents,
+bootstrap files, and hooks into it. In the catalog a host is a `harnesses.<id>`
+entry that declares `host:`. `standalone` is the *no host* value: Fadeno
+invoked from a plain shell, with no adapter tree and no session — which is why
+`current-host` answers `restart_required` there.
 
-**Driver** — a harness Fadeno *invokes as a subprocess* to do work. A driver
-needs nothing from Fadeno but argv: no `HarnessId`, no `templates/` tree, no
-plugin, no init step. It appears only as the `command:` of a route entry, so
-the schema never interprets it as a harness at all:
+**Executor** — a harness Fadeno *invokes as a subprocess* to do work. An
+executor needs nothing from Fadeno but argv: no `templates/` tree, no plugin,
+no init step. In the catalog it is a `harnesses.<id>` entry that declares
+`command:`:
 
 ```yaml
-routes:
-  claude:                                    # the HOST is Claude Code
-    xai:
-      command: [grok, --prompt-file, /dev/stdin, --model, "{model}"]
+harnesses:
+  grok:                                      # an executor…
+    provider: xai
+    command: [grok, --prompt-file, /dev/stdin, --model, "{model}"]
+  claude:                                    # …and a harness that is both
+    provider: anthropic
+    host: { effort_channel: none }
+    command: [claude, -p, --model, "{model}", --permission-mode, acceptEdits]
 ```
 
-Grok is the driver there and Claude Code is the host. There is no Grok plugin
-in that session and none is needed. The reverse pairing is equally valid, and a
-harness can be both at once: on a `host: true` route the `command:` is the
-*fallback* delivery, so a Claude-hosted session can also drive `claude -p`
-out of process.
+A Claude Code session can drive `grok` with no Grok plugin anywhere, and the
+reverse pairing is equally valid. A harness that declares both blocks plays
+whichever role the call needs: same harness as the host → in-session; different
+→ spawn. That pairing is decided at dispatch time, never stored.
 
 The reliable test for which role you mean: **does it need a
-`templates/<x>/` tree?** Host yes, driver no.
+`templates/<x>/` tree?** Host yes, executor no.
+
+The word `driver` is retired. It named exactly what `harness` names here, in a
+vocabulary where `harness` was already taken by the host; v4 gave the ambient
+one its own word (`host`) and the collision went with it.
 
 ### The delivery axis (how a slot is filled)
 
-- **Host delivery** — `host: true` on a route (pre-0.6 alias `native: true`),
-  compiling to `adapter: 'host'`: an in-session subagent of the host, bound to
-  the requesting archetype at resolution time.
+- **Host delivery** — the dial's harness IS the host and that harness declares
+  `host:`, compiling to `adapter: 'host'`: an in-session subagent of the host,
+  bound to the requesting archetype at resolution time.
 - **Command delivery** — `adapter: 'command'`: argv with the prompt on stdin,
-  out of process. This is the only way a driver is ever reached.
+  out of process. This is the only way a spawn-only harness is ever reached.
+- **`restart_required`** — the identity is deliverable, but not from here and
+  not through any declared command: the named harness is a host you are not
+  sitting in.
 
 ### The identity axis (who does the work)
 
 - **Model** — a harness-neutral registry entry (`provider` + `id` + standard
-  `effort`, optional `spellings:` per driver and promoted `delivery:` route/id).
-  It carries canonical identity while a delivery spelling selects how that
-  identity reaches its home route; never
-  argv, never permission flags. `current-host` is the built-in model for
-  host-native base delivery.
-- **Displayed harness** — the model's stable home driver (`luna → codex`),
-  shown identically from every caller reference frame. The active route's
-  `host | command` adapter remains separate structured resolution data.
-- **Route** — how the *host* reaches a provider. Keyed by harness id, then by
-  provider, with `driver:` as the `--via` alias and `models_command:` /
-  `models_prefix:` / `effort_encoding:` for dial-time behavior.
-- **Dial** — an archetype → model ref (`model[@effort] [--via <driver>]`);
+  `effort`, optional `spellings:` per harness and an explicit `harness:`). It
+  carries canonical identity while a spelling selects how that identity reaches
+  a given harness; never argv, never permission flags. `current-host` is the
+  built-in model naming whatever session is running.
+- **Home harness** — the harness that claims the model's provider (`luna →
+  codex`), shown identically from every caller reference frame because there is
+  one harness table. The resolved `host | command` adapter is separate
+  structured resolution data.
+- **Harness entry** — `harnesses.<id>`: an optional `provider:` home claim, an
+  optional `host:` block (`effort_channel`, `identity?`, `relay?`,
+  `eligibility?`), an
+  optional `command:` base lane with `models_command:` / `models_prefix:` /
+  `effort_encoding:` / `eligibility:`, and optional named `variants:`.
+- **Dial** — an archetype → model ref (`model[@effort][ on <harness>]`, set with
+  `--harness <id>`);
   **archetype** — a `worker`/`reviewer`/`judge`-shaped slot. Dials are layered
   (`session` via `.fadeno/local/dials`, `repo` via `dials:` in the project
   catalog, `user` via `$FADENO_STATE_HOME/dials.json`, `base` = `current-host`).
 
-### Three name collisions to watch for
+### Two name collisions to watch for
 
-These predate the host/driver split and are load-bearing in existing code, so
-they are documented rather than renamed:
+These are load-bearing in existing code, so they are documented rather than
+renamed. (A third — `driver` versus `harness` — is gone: catalog v4 gave the
+ambient side its own word, `host`, and retired `driver` entirely.)
 
-1. **`grok` names two things.** A `HarnessId` (host axis) and a binary inside a
-   command route (driver axis). Same token, opposite roles.
+1. **`grok` names two things.** A `HarnessId` (the host axis) and a binary
+   inside a harness's `command:` (the executor axis). Same token, opposite
+   roles — and since v4 both are spelled `grok` in one table, where the entry
+   plays whichever role the call needs.
 2. **`adapter` names two things.** A host-side surface (`templates/grok/` is
    "the Grok Build adapter") and a delivery mechanism
    (`adapter: 'command' | 'host'`).
-3. **`Target` names two things.** `type Target = 'codex' | 'claude' | 'grok'`
-   in `src/commands/init.ts` is a *host*, while the legacy `targets:` key in
-   `executors.yaml` was a provider/model profile (now `models:`). `extending.md`
-   → *Add a harness target* collides both within one section — `harness`
-   is the live term; `target` survives only in that section title and in
-   legacy catalog lore.
 
-Nothing in the schema branches on host-versus-driver today — a driver is
-indistinguishable from a raw model endpoint, because both are just argv. That
-is not an oversight: the driven side genuinely requires nothing from Fadeno,
-so it has never needed a schema slot.
+A retired third: **`Target`**. `type Target = 'codex' | 'claude' | 'grok'` in
+`src/commands/init.ts` is a *host*, while the legacy `targets:` key in
+`executors.yaml` was a provider/model profile (now `models:`). `extending.md`'s
+two recipes are now named apart — *Add a harness entry to the catalog* and
+*Add a host adapter* — so `target` survives only in legacy catalog lore.
+
+The schema now branches on host-versus-executor in exactly one place: whether a
+`harnesses.<id>` entry declares `host:`, `command:`, or both. That single bit is
+what the six `routes.<host>` tables were spending six copies to express.
 
 ## The CLI
 
@@ -180,8 +196,8 @@ assert on return values and filesystem effects instead of scraping stdout.
 | `runGate` | pass/fail + blocking titles | The advisory→enforced bridge. |
 | `runPrompt` | prompt text + sha + record status + plan | Deterministic step-prompt assembler; records a snapshot + `prompt_assembled` by default. Pure resolution/rendering live in `lib/prompt-resolve.ts` + `lib/prompt.ts`. |
 | `runNext` | next-step JSON (`status`, `step`, `gate`, …) | Pure flow cursor over playbook + events; read-only. Logic in `lib/flow-cursor.ts`. |
-| `runDialShow` / `…Set` / `…Clear` / `…Shadow` | effective dial table + layered dial state | `set`/`clear` pin `.fadeno/local/dials` (session) or `$FADENO_STATE_HOME/dials.json` (user) or `dials:` (repo); `--force` persists a warned, direct-archetype-only write-posture override; shadows are session-pinned. Resolution via `resolveDialCascade` + `compileDialRef` in `lib/executors.ts`. |
-| `runDispatch` | executor report + evidence row | Ad-hoc archetype→executor dispatch; appends a correlated `dispatch_requested`/`dispatch_completed` row pair to `.fadeno/dispatches.jsonl`. Refuses before spawning when the resolved command route declares `write_access: false` and the archetype declares `requires_write: true`. Echo goes to stderr so stdout stays the executor's pure report. |
+| `runDialShow` / `…Set` / `…Clear` / `…Shadow` | effective dial table + layered dial state | `set`/`clear` pin `.fadeno/local/dials` (session) or `$FADENO_STATE_HOME/dials.json` (user) or `dials:` (repo); shadows are session-pinned. Resolution via `resolveDialCascade` + `resolveDelivery` in `lib/executors.ts`. |
+| `runDispatch` | executor report + evidence row | Ad-hoc archetype→executor dispatch; appends a correlated `dispatch_requested`/`dispatch_completed` row pair to `.fadeno/dispatches.jsonl`. Refuses before spawning on eligibility, a `constraints.command` refusal, or a delivery with no argv to invoke. Echo goes to stderr so stdout stays the executor's pure report. |
 | `runDispatches` | correlated dispatch rows | Read-only projection of `.fadeno/dispatches.jsonl`: pairs `dispatch_requested`/`dispatch_completed` by `dispatch_id`, keeps `host_delivery` rows inline, and marks a request with no completion as killed-or-in-flight rather than dropping it. Pre-format legacy rows render as `[legacy]`; newer-format rows get a separate count. `--tail <N>` (default 10) / `--json`. |
 | `runSteeringResolve` / `runSteeringApply` | hybrid mode / emitted Codex agents | Resolves host vs command vs restart-required vs write-conflict per invocation; materializes per-slot host agents or cheap command brokers, declining brokers for write-conflicted slots. |
 | `runToolRun` | `ToolRunResult` + `artifact` | Executes a registered `tool_call` (`test-result` only) deterministically: strict registry, supervisor/process-group, writer lease, bounded TestResult synthesis, exclusive placement, and `tool_dispatched`/`tool_completed`/`tool_failed` lifecycle. Thin adapter over `lib/tool-exec.ts`. |
@@ -266,13 +282,16 @@ back to ordinary file completion when no specialized candidates apply.
   receipted parts again and refuses a collective that does not come out
   identical.
 - **`tool-exec.ts`** — deterministic `tool_call` execution core: strict `tools:` registry parsing (static argv, timeout), `tool_dispatched` → supervisor spawn (shared writer lease, `readdirSync` live-claim scan with `ESRCH` group reclaim) → bounded `TestResult` synthesis → exclusive `linkSync` placement (never clobbering) → `artifact_created` + `tool_completed`/`tool_failed` lifecycle (one attempt wins, `tool-generation` scoped, crash-safe attribution preserving already-attributed bytes). Used by both `fadeno tool-run` and `fadeno drive`; recovery via shared `recoverInterruptedToolDispatchesShared`.
-- **`executors.ts`** — the executor profile (`.fadeno/executors.yaml`): v3 registry
-  `models:` plus per-harness `routes:` (with `driver:`, `models_command:`,
-  `models_prefix:`, `effort_encoding:`), layered **dials** (`session` → `repo` → `user` → `base`),
-  per-role `bindings`, and **`tools:`** (`tool` → `{command: string[], timeout?, timeout_ms?}` static argv, no shell/interpolation, positive timeout; layered like other catalog keys; snapshotted into `profile.yaml`); plus a `unregistered_model_driver` fall-through.
+- **`executors.ts`** — the executor profile (`.fadeno/executors.yaml`): v4 registry
+  `models:` plus one `harnesses:` table (each entry an optional `provider:` home
+  claim, an optional `host:` block with `effort_channel` / `identity` /
+  `relay?` / `eligibility?`, an optional `command:` lane with
+  `models_command:` / `models_prefix:` / `effort_encoding:` / `eligibility:`,
+  and optional named `variants:`), layered **dials** (`session` → `repo` → `user` → `base`),
+  per-role `bindings`, and **`tools:`** (`tool` → `{command: string[], timeout?, timeout_ms?}` static argv, no shell/interpolation, positive timeout; layered like other catalog keys; snapshotted into `profile.yaml`); plus an `unregistered_model_harness` fall-through.
   v1 executor profiles remain supported for ledger replay via
   `resolveRoleLegacy`. Core helpers: `parseDialRef`/`formatDialRef`,
-  `compileDialRef` (registry → delivery), `resolveDialCascade` (pure cascade,
+  `resolveDelivery` (registry + host → delivery), `resolveDialCascade` (pure cascade,
   no registry touch, so verify replays from snapshot), `resolveRole` (cascade +
   compile), `deliveryIsHost`, plus pin files (`LocalDialState`,
   `readLocalDialState`/`writeLocalDialState`) and user dials +
@@ -403,8 +422,9 @@ Two evidence surfaces sit beside the step lifecycle:
   `session` | `repo` | `user` | `base` | `fallback` | `executor-flag` — how the executor was chosen; `dial_source` records which dial layer won), executor, model, exit code,
   duration, and prompt/output sha256 digests. The row is written even when the
   spawn itself fails — a failed dispatch is still a dispatch that happened.
-  Declared `write_access` joins that identity, so a read-only delivery is
-  legible in the row rather than only in an empty-handed report. The Claude
+  The executed `command` joins that identity, so what an arm was actually
+  able to do is legible in the row rather than only in an empty-handed
+  report. The Claude
   steering hook appends `host_delivery` rows to the same file when it steers
   a spawn to a host role agent (archetype, agent_type, dial, executor,
   model, model_override, `reasoning_effort: "inherited"`,
@@ -453,7 +473,7 @@ Everything `init` emits and everything the plugin bundles comes from `templates/
 templates/
   common/                 # identical across targets
     fadeno/               # → .fadeno/ : vocabulary, playbooks, schemas, enforcement
-    opencode-agents/      # → .opencode/agents : read-only driver policy
+    opencode-agents/      # → .opencode/agents : read-only executor policy
     skills/               # shared SKILL.md bodies + references (sigil-free)
     commands/             # /fadeno:* slash-command files (plugin)
     plugin/               # shared plugin launchers + session hooks
@@ -466,7 +486,7 @@ templates/
 ```
 
 `runInit` (`src/commands/init.ts`) composes these: always copy `common/fadeno` →
-`.fadeno/` and the OpenCode driver policy → `.opencode/agents/`; unless
+`.fadeno/` and the OpenCode executor policy → `.opencode/agents/`; unless
 `--data-only`, also install skills (shared body + per-target
 dir/policy), subagents, and the bootstrap file; optionally the hooks scaffold
 (`--with-hooks`); and on Claude, merge a `Bash(fadeno:*)` allow-rule into
@@ -610,7 +630,7 @@ enables a root-session coordinator policy; a plugin hook stores only a hashed
 session marker in the plugin's private data directory, reinforces the policy on
 later prompts and after compaction, and removes it on `/fadeno:host off` or
 session end. It never edits `CLAUDE.md` or another repository instruction file.
-`init --data-only` is the project-data seam (definitions plus driver policy,
+`init --data-only` is the project-data seam (definitions plus executor policy,
 without host capability). `vendor` deliberately
 emits the full project capability surface plus definitions and a lock.
 

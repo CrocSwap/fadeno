@@ -6,7 +6,7 @@ import { stringify as stringifyYaml } from 'yaml';
 import { DialError, runDialSet } from '../src/commands/dial.ts';
 import {
   ExecutorProfileError,
-  compileDialRef,
+  resolveDelivery,
   DIALS_LOCAL_FILE,
   parseExecutorProfile,
   resolveRole,
@@ -75,25 +75,12 @@ test('starter catalog: an undialed generator resolves to the host-native base, n
 
 test('repo-declared scout with fallback: reviewer resolves via the reviewer slot through dial cascade', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'rw-model': { provider: 'openai', id: 'rw-model' },
       'ro-model': { provider: 'anthropic', id: 'ro-model' },
     },
-    routes: {
-      standalone: {
-        openai: { command: ['codex', 'exec', '-'], },
-        anthropic: { command: ['claude', '-p'], },
-      },
-      codex: {
-        openai: { command: ['codex', 'exec', '-'], },
-        anthropic: { command: ['claude', '-p'], },
-      },
-      claude: {
-        openai: { command: ['codex', 'exec', '-'], },
-        anthropic: { command: ['claude', '-p'], },
-      },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['codex', 'exec', '-'] }, claude: { provider: 'anthropic', command: ['claude', '-p'] } },
     archetypes: { scout: { fallback: 'reviewer' }, reviewer: {} },
     dials: { reviewer: 'ro-model' },
   });
@@ -108,9 +95,9 @@ test('repo-declared scout with fallback: reviewer resolves via the reviewer slot
 test('archetypes: a fallback cycle is refused at parse', () => {
   assert.throws(
     () => parseDoc({
-      schema_version: 3,
+      schema_version: 4,
       models: { 'rw-model': { provider: 'openai', id: 'rw-model' } },
-      routes: { standalone: { openai: { command: ['node', '-e', "process.stdout.write('x')"], } } },
+      harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'process.stdout.write(\'x\')'] } },
       archetypes: {
         scout: { fallback: 'reviewer' },
         reviewer: { fallback: 'scout' },
@@ -124,9 +111,9 @@ test('archetypes: a fallback cycle is refused at parse', () => {
 
 test('archetypes: boolean aliases parse to required/none', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { 'rw-model': { provider: 'openai', id: 'rw-model' } },
-    routes: { standalone: { openai: { command: ['node', '-e', "process.stdout.write('x')"], } } },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'process.stdout.write(\'x\')'] } },
     archetypes: { worker: { }, reviewer: { } },
   });
   assert.deepEqual(profile.archetypes.worker, { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });

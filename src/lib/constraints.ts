@@ -13,7 +13,10 @@ export interface ConstraintContext {
   archetype: string | null;
   role: string | null;
   executor: string;
-  driver: string | null;
+  /** The harness that will EXECUTE this delivery (was `driver`). */
+  harness: string | null;
+  /** The command-lane variant policy chose, or null for the base lane. */
+  variant?: string | null;
   provider: string | null;
   model: string | null;
   model_id: string | null;
@@ -34,7 +37,7 @@ export interface ConstraintContext {
    * is; see docs/experimental/permissions-and-isolation.md.
    */
   command: string[] | null;
-  dial: { model: string; effort?: string; via?: string } | null;
+  dial: { model: string; effort?: string; harness?: string } | null;
   dial_source: string | null;
   dials: {
     session: Record<string, string>;
@@ -47,7 +50,8 @@ export interface ConstraintContext {
     executor: string | null;
     provider: string | null;
   }>;
-  harness: string;
+  /** The ambient HOST this dispatch was resolved from (was `harness`). */
+  host: string;
   /** Present and true when this resolution is a shadow duplicate, so a
    * project constraint can treat challengers differently from primaries. */
   shadow?: boolean;

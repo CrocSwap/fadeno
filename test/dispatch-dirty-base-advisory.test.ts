@@ -16,16 +16,13 @@ import { tempRepo } from './helpers.ts';
 
 const onHarness = (harness: string): UserPathOptions => ({ env: { FADENO_HARNESS: harness } });
 
-function seedV3(t: TestContext): string {
+function seedCatalog(t: TestContext): string {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { worker: { provider: 'openai', id: 'worker-1' } },
-    routes: {
-      standalone: { openai: { command: ['node', '-e', "process.stdout.write('done')"] } },
-      codex: { openai: { command: ['node', '-e', "process.stdout.write('done')"] } },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'process.stdout.write(\'done\')'] } },
     archetypes: { worker: {} },
     dials: { worker: 'worker' },
   }));
@@ -47,7 +44,7 @@ function initGitWithCommit(root: string): string {
 }
 
 test('isolated dispatch on a dirty tree emits the loud dirty-base advisory', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const head = initGitWithCommit(root);
   // Tracked modification + a staged file = 2 uncommitted tracked entries.
   writeFileSync(join(root, 'base.txt'), 'dirty\n');
@@ -70,7 +67,7 @@ test('isolated dispatch on a dirty tree emits the loud dirty-base advisory', (t)
 test('the advisory is absent when the tree is clean or the dispatch is --shared', (t) => {
   {
     // Clean tree, kernel-isolated: nothing to warn about.
-    const root = seedV3(t);
+    const root = seedCatalog(t);
     initGitWithCommit(root);
     const echoes: string[] = [];
     runDispatch({ archetype: 'worker', prompt: 'p', repoRoot: root, userPathOptions: onHarness('standalone'), onEcho: (l) => echoes.push(l) });
@@ -78,7 +75,7 @@ test('the advisory is absent when the tree is clean or the dispatch is --shared'
   }
   {
     // Dirty tree but --shared: the executor runs ON the live tree.
-    const root = seedV3(t);
+    const root = seedCatalog(t);
     initGitWithCommit(root);
     writeFileSync(join(root, 'base.txt'), 'dirty\n');
     const echoes: string[] = [];
@@ -91,7 +88,7 @@ test('untracked files alone do not fire the advisory', (t) => {
   // Untracked scratch is carried into the baseline like everything else and
   // would nag on nearly every active repo; only tracked work counts (see
   // `uncommittedTrackedChanges`).
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   initGitWithCommit(root);
   writeFileSync(join(root, 'scratch.md'), 'untracked\n');
   const echoes: string[] = [];

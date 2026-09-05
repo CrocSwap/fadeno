@@ -9,6 +9,7 @@ import { runNewRun } from '../src/commands/new-run.ts';
 import { runDrive } from '../src/commands/drive.ts';
 import { runSteeringResolve } from '../src/commands/steering.ts';
 import { knownArchetypes, loadExecutorProfile } from '../src/lib/executors.ts';
+import type { UserPathOptions } from '../src/lib/user-paths.ts';
 import { tempRepo } from './helpers.ts';
 
 const FALLBACK_COMMAND = ['node', '-e', "process.stdout.write('fallback')"];
@@ -26,16 +27,31 @@ const FALLBACK_COMMAND = ['node', '-e', "process.stdout.write('fallback')"];
  */
 function seedProductionShapedProfile(root: string): void {
   mkdirSync(join(root, '.fadeno'), { recursive: true });
-  const routes = {
-    lunap: { host: true, command: FALLBACK_COMMAND },
+  // The host-capable harness is `codex`, which `lockedUser` below pins as the
+  // HOST: under v4 a delivery is in-session only when its harness IS the
+  // session's, so a fixture that wants a host lane has to say which host.
+  const harnesses = {
+    codex: { provider: 'lunap', host: { effort_channel: 'agent-file' }, command: FALLBACK_COMMAND },
   };
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { luna: { provider: 'lunap', id: 'gpt-5.6-luna', effort: 'xhigh' } },
-    routes: { standalone: routes, codex: routes, claude: routes, grok: routes },
+    harnesses,
     archetypes: { worker: {} },
     dials: { worker: 'luna', reviewer: 'luna' },
   }));
+}
+
+/** Pins the HOST so the fixture's host-capable harness is the one we are in. */
+function lockedUser(root: string): UserPathOptions {
+  return {
+    home: join(root, 'home'),
+    env: {
+      FADENO_CONFIG_HOME: join(root, 'user-config'),
+      FADENO_STATE_HOME: join(root, 'user-state'),
+      FADENO_HARNESS: 'codex',
+    },
+  };
 }
 
 function seedLockedReviewerRequest(root: string): { runId: string; dispatchId: string } {
@@ -52,8 +68,8 @@ function seedLockedReviewerRequest(root: string): { runId: string; dispatchId: s
     flow: [{ id: 'review', kind: 'actor_call', actor: 'checker', input: ['Task'], output: 'Notes', terminal_status: 'completed' }],
   }));
   writeFileSync(join(root, 'task.md'), 'review this');
-  const created = runNewRun({ repoRoot: root, playbook: 'locked', task: 'undeclared archetype', inputs: ['Task=task.md'] });
-  const driven = runDrive({ repoRoot: root, run: created.runId });
+  const created = runNewRun({ repoRoot: root, playbook: 'locked', task: 'undeclared archetype', inputs: ['Task=task.md'], userPathOptions: lockedUser(root) });
+  const driven = runDrive({ repoRoot: root, run: created.runId, userPathOptions: lockedUser(root) });
   assert.equal(driven.outcome, 'awaiting_host_dispatch');
   const request = driven.requests[0]!;
   assert.equal(request.agentType, 'reviewer');
@@ -69,7 +85,7 @@ test('a locked reviewer resolves natively even though the catalog declares no re
   // reviewer that correctly consulted steering was pushed onto the command
   // lane with `host_attested: false` (2026-08-21, polymarket-quoter).
   const resolved = runSteeringResolve({
-    repoRoot: root,
+    repoRoot: root, userPathOptions: lockedUser(root),
     archetype: 'reviewer',
     hostExecutor: 'luna',
     run: runId,

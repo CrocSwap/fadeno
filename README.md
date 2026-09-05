@@ -106,7 +106,7 @@ tier-2 [enforcement](#enforcement-advisory-vs-enforced) layer (a pre-commit
 guard + a CI workflow). Steering is installed by default for Codex and Claude.
 Use `--no-steering` for the legacy unsteered project surface;
 `--with-steering` remains an accepted compatibility alias. Selecting a command
-driver is still explicit and always announces the external sandbox boundary.
+lane is still explicit and always announces the external sandbox boundary.
 
 ### What gets created
 
@@ -143,7 +143,7 @@ AGENTS.md
 # OpenCode (--opencode):
 AGENTS.md
 .agents/skills/                       # shared SKILL.md bodies + references (shared with Codex)
-.opencode/agents/                     # worker/reviewer/judge.md + the read-only driver lane
+.opencode/agents/                     # worker/reviewer/judge.md + the read-only executor lane
 
 # omp (--omp):
 AGENTS.md
@@ -168,7 +168,7 @@ install Fadeno once as a plugin for every project. Each plugin carries the
 bundled CLI and immutable built-in definitions, so starter playbooks work
 without a project data seed. Use
 `init --data-only` when you want project-owned definitions plus the read-only
-OpenCode driver policy (host capability still comes from the plugin). `vendor` is the
+OpenCode executor policy (host capability still comes from the plugin). `vendor` is the
 deliberate full-capability path (skills, bootstrap, agents, definitions, and a
 lock); do not use it merely to make plugin built-ins available.
 
@@ -374,7 +374,7 @@ elapsed time and total run time. When progress exists, the view includes its
 phase and current action; it never infers internal state from busy/idle alone.
 Machine-local command facts are shown separately as harness-observed,
 non-gating state: process group and child PIDs, liveness, heartbeat/output age,
-byte counts, and terminal exit or signal where available. Command routes default
+byte counts, and terminal exit or signal where available. Command lanes default
 to a 20-minute hard deadline (`timeout_ms: 1200000`); override per invocation
 with `fadeno drive --timeout <seconds>` or `fadeno dispatch --timeout <seconds>`
 (`0` disables). A supervised timeout is recorded as `actor_failed.reason =
@@ -395,26 +395,34 @@ Code `Stop` hook. Exits non-zero when the gate fails.
 If you rotate metered subscriptions across providers — one model as the worker
 until that quota runs low, then another — the unit you think in is *"who is my
 worker / reviewer / judge right now,"* not a dozen per-role YAML edits.
-`.fadeno/executors.yaml` declares a harness-neutral **model registry** (provider, id,
-effort), harness-specific **routes** for delivering those providers via a **driver**, and
-per-archetype **dials** that select the model. The same dial therefore remains
-portable: Claude may run an Anthropic model in-session while Codex delivers that
-same model through `claude -p`.
+`.fadeno/executors.yaml` declares a harness-neutral **model registry** (provider,
+id, effort), one **harness table** saying how each harness is run, and
+per-archetype **dials** that select the model. A dial names *who* — and
+optionally *which harness* — never a lane or an argv: the harness you are
+sitting in is discovered at dispatch time, so the same dial stays portable.
+Claude runs an Anthropic model in-session; from Codex that same dial spawns
+`claude -p`.
 
 ```yaml
-schema_version: 3
+schema_version: 4
 models:
   opus: { provider: anthropic, id: opus, effort: high }
   sol: { provider: openai, id: gpt-5.6-sol, effort: high }
   grok: { provider: xai, id: grok-4.6, effort: high }
-routes:
+harnesses:
+  # `provider:` claims a provider as home, so its models default here.
+  # `host:` = Fadeno can run inside it. `command:` = Fadeno can spawn it.
   codex:
-    openai: { driver: codex, host: true, command: [codex, exec, --model, "{model}", "-"] }
-    anthropic: { driver: claude, command: [claude, -p, --model, "{model}"] }
-    xai: { driver: grok, command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve] }
+    provider: openai
+    host: { effort_channel: agent-file }
+    command: [codex, exec, --model, "{model}", "-"]
   claude:
-    anthropic: { driver: claude, host: true, command: [claude, -p, --model, "{model}"] }
-    openai: { driver: codex, command: [codex, exec, --model, "{model}", "-"] }
+    provider: anthropic
+    host: { effort_channel: none }
+    command: [claude, -p, --model, "{model}"]
+  grok:
+    provider: xai
+    command: [grok, --prompt-file, /dev/stdin, --model, "{model}", --reasoning-effort, "{reasoning_effort}", --always-approve]
 # per-repo pins (optional):
 dials:
   judge: sol
@@ -446,7 +454,7 @@ auditable after the fact.
 Write-capable command and host deliveries take one repo-wide machine-local
 writer lease. A retry cannot start while the prior writer or its durable host
 receipt is still active, including across separate runs. Explicitly read-only
-routes bypass it. `dispatch --isolate` also bypasses the shared-worktree lease
+lanes bypass it. `dispatch --isolate` also bypasses the shared-worktree lease
 because it runs from committed `HEAD` in a detached worktree and returns a
 binary diff artifact without merging it. Write-capable host map members are
 serialized even within one run; logical fan-out does not permit concurrent
@@ -460,7 +468,8 @@ For isolated host deliveries, `dispatch-fail` degrades to a terminal receipt wit
 With steering enabled by default, expensive role-shaped subagent work follows
 that same resolver. `fadeno setup --codex` records the Codex installation in the manifest, so later
 `fadeno dial` switches materialize each worker/reviewer/judge slot as
-either a host agent or a command broker according to the resolved driver.
+either a host agent or a command broker according to whether the dial's
+harness is the one you are sitting in.
 The Claude hook performs the same resolution for Claude rather than relying on
 stored labels: host slots select the requested Claude
 model, while command slots use dispatch proxies.
@@ -517,7 +526,7 @@ runs a short loop:
 > **describe the flow** (or pick a starter to adapt) → builder **writes the YAML**
 > → shows it back as a **diagram** + summary → you **approve** → it **hands off to
 > the runner**. Built-in playbooks work without a project seed; use
-> `init --data-only` for project-owned definitions and driver policy, or `vendor` only when
+> `init --data-only` for project-owned definitions and executor policy, or `vendor` only when
 > you deliberately want the complete capability surface committed.
 
 You can render any playbook's flow yourself:

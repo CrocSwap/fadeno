@@ -7,7 +7,7 @@ import { stringify as stringifyYaml } from 'yaml';
 import {
   parseExecutorProfile,
   ExecutorProfileError,
-  compileDialRef,
+  resolveDelivery,
   parseSnapshotDocument,
   serializeSnapshot,
 } from '../src/lib/executors.ts';
@@ -33,11 +33,11 @@ function sleep(ms: number): Promise<void> {
 
 test('route timeout_ms parses as positive integer and snapshots round-trip', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'], timeout_ms: 1200000 } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'], timeout_ms: 1200000 } },
   });
-  const spec = compileDialRef({ model: 'sol' }, profile).spec;
+  const spec = resolveDelivery({ model: 'sol' }, profile).spec;
   assert.equal((spec as unknown as Record<string, unknown>).timeoutMs, 1200000);
 
   const snap = serializeSnapshot(profile);
@@ -49,11 +49,11 @@ test('route timeout_ms parses as positive integer and snapshots round-trip', () 
 
 test('route timeout_ms absent by default and snapshot omits it', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
   });
-  const spec = compileDialRef({ model: 'sol' }, profile).spec as unknown as Record<string, unknown>;
+  const spec = resolveDelivery({ model: 'sol' }, profile).spec as unknown as Record<string, unknown>;
   assert.equal(spec.timeoutMs, undefined);
   const snap = serializeSnapshot(profile);
   assert.doesNotMatch(snap, /timeout_ms/);
@@ -61,24 +61,27 @@ test('route timeout_ms absent by default and snapshot omits it', () => {
 
 test('route timeout_ms rejects non-positive, non-integer, and host routes', () => {
   assert.throws(
-    () => parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { openai: { command: ['x'], timeout_ms: 0 } } } }),
+    () => parseDoc({ schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['x'], timeout_ms: 0 } } }),
     (err: unknown) => err instanceof ExecutorProfileError && /timeout_ms.*positive integer/.test(err.message),
   );
   assert.throws(
-    () => parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { openai: { command: ['x'], timeout_ms: -100 } } } }),
+    () => parseDoc({ schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['x'], timeout_ms: -100 } } }),
     /positive integer/,
   );
   assert.throws(
-    () => parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { openai: { command: ['x'], timeout_ms: 1.5 } } } }),
+    () => parseDoc({ schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['x'], timeout_ms: 1.5 } } }),
     /positive integer/,
   );
   assert.throws(
-    () => parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { openai: { command: ['x'], timeout_ms: '1200' as unknown as number } } } }),
+    () => parseDoc({ schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['x'], timeout_ms: '1200' as unknown as number } } }),
     /positive integer/,
   );
+  // A host lane still cannot carry a deadline: host dispatch is not
+  // supervised. Under v4 `host:` is a mapping with a closed key set, so the
+  // refusal is the unknown-key one rather than a bespoke check.
   assert.throws(
-    () => parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { 'current-host': { host: true, timeout_ms: 1200 } } } }),
-    (err: unknown) => err instanceof ExecutorProfileError && /host route.*may not declare.*timeout_ms/.test(err.message),
+    () => parseDoc({ schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', host: { effort_channel: 'none', timeout_ms: 1000 } } } }),
+    (err: unknown) => err instanceof ExecutorProfileError && /host has unknown key\(s\) timeout_ms/.test(err.message),
   );
   // host with timeout in snapshot entry
   assert.throws(
@@ -93,12 +96,12 @@ test('route timeout_ms rejects non-positive, non-integer, and host routes', () =
 
 test('route timeout_ms unknown key rejection and survives snapshot re-parse', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { a: { provider: 'openai' }, b: { provider: 'xai' } },
-    routes: { standalone: { openai: { command: ['a'], timeout_ms: 5000 }, xai: { command: ['b'], timeout_ms: 10000 } } },
+    harnesses: { codex: { provider: 'openai', command: ['a'], timeout_ms: 5000 }, grok: { provider: 'xai', command: ['b'], timeout_ms: 10000 } },
   });
-  const aSpec = compileDialRef({ model: 'a' }, profile).spec as unknown as Record<string, unknown>;
-  const bSpec = compileDialRef({ model: 'b' }, profile).spec as unknown as Record<string, unknown>;
+  const aSpec = resolveDelivery({ model: 'a' }, profile).spec as unknown as Record<string, unknown>;
+  const bSpec = resolveDelivery({ model: 'b' }, profile).spec as unknown as Record<string, unknown>;
   assert.equal(aSpec.timeoutMs, 5000);
   assert.equal(bSpec.timeoutMs, 10000);
   const snap = serializeSnapshot(profile);

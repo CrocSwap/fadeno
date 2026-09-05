@@ -19,6 +19,7 @@ import {
   normalizeDispatchOutcome,
   type DispatchOutcome,
 } from './dispatch.ts';
+import { legacyDriverHarness } from '../lib/executors.ts';
 import { INFLIGHT_DIR, readInflightClaim } from '../lib/supervisor.ts';
 import { collectIsolatedDiff, removeIsolatedWorktree, withWorkspaceWindowLease, WorkspaceLeaseError, type LeaseHolder } from '../lib/workspace-lease.ts';
 import { settleIsolatedWork, type MergeBackResult } from '../lib/workspace-baseline.ts';
@@ -241,7 +242,16 @@ export interface DispatchEntry {
    * rows, which do not carry a lane today.
    */
   laneReason: string | null;
-  driver: string | null;
+  /**
+   * The harness that EXECUTED this dispatch. On a format 1.0 row this comes
+   * from `driver` (translated); on 1.1 it is the `harness` field itself, which
+   * under 1.0 meant the host instead. See `harnessFieldsOf`.
+   */
+  harness: string | null;
+  /** The harness the call ran INSIDE. `harness` on a 1.0 row. */
+  host: string | null;
+  /** The command-lane variant, when policy chose a named one. 1.1 and later. */
+  variant: string | null;
   target: string | null;
   provider: string | null;
   transport: string | null;
@@ -669,17 +679,61 @@ function ignoredOutputDiscardedOf(value: unknown): DispatchIgnoredOutputDiscarde
   return out;
 }
 
-function dialOf(value: unknown): { model: string; effort?: string; via?: string } | null {
+function dialOf(value: unknown): { model: string; effort?: string; harness?: string } | null {
   if (value == null || typeof value !== 'object' || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
   const model = str(row.model);
   if (model == null) return null;
-  const out: { model: string; effort?: string; via?: string } = { model };
+  const out: { model: string; effort?: string; harness?: string } = { model };
   const eff = str(row.effort);
   if (eff != null) out.effort = eff;
-  const via = str(row.via);
-  if (via != null) out.via = via;
+  const harness = str(row.harness);
+  if (harness != null) out.harness = harness;
+  else {
+    // Format 1.0 wrote `dial.via` with a driver alias. Read as the harness it
+    // always named; never rewritten on disk.
+    const via = str(row.via);
+    if (via != null) out.harness = legacyDriverHarness(via);
+  }
   return out;
+}
+
+/** Numeric `major.minor` comparison; an unparseable side sorts oldest. */
+function compareFormat(a: string, b: string): number {
+  const parts = (v: string) => v.split('.').map((p) => Number.parseInt(p, 10));
+  const [aMajor = -1, aMinor = -1] = parts(a);
+  const [bMajor = -1, bMinor = -1] = parts(b);
+  if (!Number.isFinite(aMajor) || !Number.isFinite(aMinor)) return -1;
+  return aMajor !== bMajor ? aMajor - bMajor : aMinor - bMinor;
+}
+
+/**
+ * The two harness identities on one row, across both ledger formats.
+ *
+ * Format **1.1** writes them by their real names: `host` is the harness the
+ * call ran INSIDE, `harness` is the harness that EXECUTED it, and `variant`
+ * names the command lane when policy chose one.
+ *
+ * Format **1.0** wrote `harness` for the HOST and `driver` for the executor —
+ * one word, two meanings, on the same row. A 1.0 row is translated here and
+ * only here, so every consumer downstream sees the 1.1 vocabulary. Old rows
+ * are never rewritten.
+ */
+function harnessFieldsOf(row: Record<string, unknown>): { host: string | null; harness: string | null; variant: string | null } {
+  const format = str(row.format);
+  // A VERSION comparison, not a prefix test: `0.2` and `1.0` are both "before
+  // 1.1", and a future `1.2` must not read as legacy because it fails to start
+  // with the string `1.1`.
+  const legacy = format == null || compareFormat(format, '1.1') < 0;
+  if (!legacy) {
+    return { host: str(row.host), harness: str(row.harness), variant: str(row.variant) };
+  }
+  const driver = str(row.driver);
+  return {
+    host: str(row.host) ?? str(row.harness),
+    harness: driver != null ? legacyDriverHarness(driver) : null,
+    variant: null,
+  };
 }
 
 function requestedEntry(row: Record<string, unknown>): DispatchEntry {
@@ -708,7 +762,7 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     // "the writer said nothing" and this reader dropping what it said.
     sessionEffort: lane.sessionEffort,
     laneReason: lane.laneReason,
-    driver: str(row.driver),
+    ...harnessFieldsOf(row),
     target: str(row.target),
     provider: str(row.provider),
     transport: str(row.transport),
@@ -788,7 +842,7 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     // row types dropped them identically, and now surface them identically.
     sessionEffort: lane.sessionEffort,
     laneReason: lane.laneReason,
-    driver: str(row.driver),
+    ...harnessFieldsOf(row),
     target: null,
     provider: null,
     transport: str(row.transport),
@@ -959,7 +1013,12 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
   entry.writeVariant = entry.writeVariant ?? bool(row.write_variant);
   entry.model = entry.model ?? str(row.model);
   entry.modelId = entry.modelId ?? str(row.model_id);
-  entry.driver = entry.driver ?? str(row.driver);
+  {
+    const fields = harnessFieldsOf(row);
+    entry.harness = entry.harness ?? fields.harness;
+    entry.host = entry.host ?? fields.host;
+    entry.variant = entry.variant ?? fields.variant;
+  }
   entry.reasoningEffort = entry.reasoningEffort ?? str(row.reasoning_effort);
   const lane = laneFieldsOf(row);
   entry.sessionEffort = entry.sessionEffort ?? lane.sessionEffort;
@@ -1100,8 +1159,8 @@ export function renderDispatchLine(entry: DispatchEntry): string {
   parts.push(
     `${who} → ${entry.executor ?? '(unresolved)'}${model != null ? ` (${model})` : ''}`,
   );
-  const via = entry.driver ?? entry.transport;
-  if (via != null) parts.push(`via ${via}`);
+  const on = entry.harness ?? entry.transport;
+  if (on != null) parts.push(`on ${on}${entry.variant != null ? `/${entry.variant}` : ''}`);
   if (entry.background === true) parts.push('[background]');
   if (entry.taskId != null) parts.push(`[task: ${entry.taskId}]`);
   if (entry.shadow) {
@@ -2669,7 +2728,7 @@ export function runDispatchesBakeoffs(opts: DispatchesBakeoffsOptions = {}): Dis
  * caller's 600s window, so this is the common case rather than the corner.
  *
  * Delivering the amendment itself is not possible and is not attempted: every
- * driver is a one-shot CLI that read its whole prompt from a stdin that has
+ * harness command is a one-shot CLI that read its whole prompt from a stdin that has
  * since closed. Cancel makes the honest path — abort, then re-dispatch with
  * the corrected prompt — deterministic instead of a race.
  *

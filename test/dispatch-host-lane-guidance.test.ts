@@ -17,8 +17,8 @@ import type { UserPathOptions } from '../src/lib/user-paths.ts';
  * What the lane changes is what the kernel SAYS. When the resolver already
  * chose in-session, the write-posture refusal used to read its remedies in the
  * wrong order — calling the in-session agent a non-equivalent substitute and
- * leading with `--via` — which talks a caller into re-dialing a host-lane
- * archetype onto an exec route and moving it out of the session for good. The
+ * leading with `--harness` — which talks a caller into re-dialing a host-lane
+ * archetype onto another harness and moving it out of the session for good. The
  * message, not any gate, was the thing producing the outcome nobody wanted.
  */
 
@@ -42,19 +42,19 @@ function initGit(root: string): void {
   run(['commit', '-m', 'seed']);
 }
 
-/** A host route with a read-only command lane, plus an exec route that can write. */
+/** The host harness with its own command lane, plus a second harness to escalate onto. */
 function seed(t: TestContext): { root: string; user: UserPathOptions } {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { sonnet: { provider: 'anthropic', id: 'sonnet', effort: 'high' } },
-    routes: {
-      claude: {
-        'current-host': { host: true },
-        anthropic: { driver: 'claude', host: true, command: ECHO('HOST-FALLBACK:'), },
-        'anthropic-exec': { driver: 'claude-exec', command: ECHO('EXEC:'), },
-      },
+    harnesses: {
+      claude: { provider: 'anthropic', host: { effort_channel: 'none' }, command: ECHO('HOST-FALLBACK:') },
+      // A second harness, so a caller can move ONE dispatch elsewhere without
+      // moving the dial. Under v4 that is what `--harness` does: a variant is
+      // policy's to choose, never a caller's to name.
+      opencode: { command: ECHO('ELSEWHERE:') },
     },
     archetypes: { worker: { }, reviewer: {} },
     dials: { worker: 'sonnet', reviewer: 'sonnet' },
@@ -93,40 +93,41 @@ test('the note also fires on the delivering path — leaving the session is anno
 test('no host-lane note when the dial is genuinely command-lane', (t) => {
   const { root, user } = seed(t);
   const echoes: string[] = [];
-  // Dialed straight at the exec route: the resolver never wanted this
+  // Aimed straight at another harness: the resolver never wanted this
   // in-session, so nagging about a host lane would be noise — and worse, would
   // teach a reader to discount the note when it matters.
   const result = runDispatch({
-    archetype: 'reviewer', model: 'sonnet', via: 'claude-exec', prompt: 'review it',
+    archetype: 'reviewer', model: 'sonnet', harness: 'opencode', prompt: 'review it',
     repoRoot: root, userPathOptions: user, onEcho: (l) => echoes.push(l),
   });
   assert.equal(result.exitCode, 0);
+  assert.match(result.stdout, /^ELSEWHERE:/);
   assert.ok(!echoes.some((l) => /resolves to the HOST lane/.test(l)), echoes.join('\n'));
 });
 
-test('`--via` without `--model` escalates this one dispatch off the host lane', (t) => {
+test('`--harness` without `--model` escalates this one dispatch off the host lane', (t) => {
   const { root, user } = seed(t);
-  // Regression: `--via` used to be read only inside the `--model` branch, so
-  // this exact call accepted the flag, dropped it, and refused on write
-  // posture — while `--help` advertised `--via` as `(dial/dispatch)`. It is
-  // also the lever the host-lane note now points at, so a no-op here would
-  // make that guidance advice that cannot be followed.
+  // Regression: the per-call harness override used to be read only inside the
+  // `--model` branch, so this exact call accepted the flag, dropped it, and
+  // delivered somewhere else. It is also the lever the host-lane note points
+  // at, so a no-op here would make that guidance advice that cannot be
+  // followed.
   const result = runDispatch({
-    archetype: 'worker', via: 'claude-exec', prompt: 'do it',
+    archetype: 'worker', harness: 'opencode', prompt: 'do it',
     repoRoot: root, userPathOptions: user,
   });
   assert.equal(result.exitCode, 0);
-  assert.match(result.stdout, /^EXEC:/, 'delivered on the exec route, not the host fallback');
-  assert.equal(result.driver, 'claude-exec');
+  assert.match(result.stdout, /^ELSEWHERE:/, 'delivered on the named harness, not the host fallback');
+  assert.equal(result.harness, 'opencode');
 });
 
 test('the escalation does not move the dial', (t) => {
   // Asserted on the RECORDED EXECUTOR rather than on a refusal. It used to
   // lean on the write-posture guard rejecting the unescalated second call;
   // that guard is gone, so the invariant is now checked directly — which is
-  // what it always meant anyway: a per-call `--via` must not persist.
+  // what it always meant anyway: a per-call `--harness` must not persist.
   const { root, user } = seed(t);
-  runDispatch({ archetype: 'worker', via: 'claude-exec', prompt: 'do it', repoRoot: root, userPathOptions: user });
+  runDispatch({ archetype: 'worker', harness: 'opencode', prompt: 'do it', repoRoot: root, userPathOptions: user });
   runDispatch({ archetype: 'worker', prompt: 'again', repoRoot: root, userPathOptions: user });
   const requested = readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8')
     .split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l))
@@ -135,6 +136,6 @@ test('the escalation does not move the dial', (t) => {
   assert.notEqual(
     requested[1]!.executor,
     requested[0]!.executor,
-    'the second dispatch must resolve through the dial, not through the first call\'s --via',
+    'the second dispatch must resolve through the dial, not through the first call\'s --harness',
   );
 });

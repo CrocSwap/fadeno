@@ -8,7 +8,7 @@ import { runDrive } from '../src/commands/drive.ts';
 import { runInit } from '../src/commands/init.ts';
 import { runNewRun } from '../src/commands/new-run.ts';
 import {
-  compileDialRef,
+  resolveDelivery,
   parseExecutorProfile,
   substitutePromptFile,
 } from '../src/lib/executors.ts';
@@ -37,18 +37,13 @@ test('substitutePromptFile: replaces the placeholder, leaves everything else', (
   );
 });
 
-test('dispatch: a file-reading driver receives the attested snapshot via {prompt_file}', (t) => {
+test('dispatch: a file-reading executor receives the attested snapshot via {prompt_file}', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { musey: { provider: 'muse', id: 'musey-1', effort: 'xhigh' } },
-    routes: {
-      standalone: {
-        muse: { command: ['node', '-e', FILE_READER, '{prompt_file}'], },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { muse: { provider: 'muse', command: ['node', '-e', FILE_READER, '{prompt_file}'] } },
     archetypes: { worker: {} },
     dials: { worker: 'musey' },
   }));
@@ -72,9 +67,9 @@ test('drive: a file-reading actor gets the run-recorded prompt artifact', (t) =>
     'kind: AgentPlaybook',
     'schema_version: "0.1"',
     'name: one-file',
-    'description: Single step through a file-reading driver.',
+    'description: Single step through a file-reading executor.',
     'when_to_use:',
-    '  - prompt-file driver engine test',
+    '  - prompt-file executor engine test',
     'roles:',
     '  builder:',
     '    purpose: Implement the task.',
@@ -88,18 +83,15 @@ test('drive: a file-reading actor gets the run-recorded prompt artifact', (t) =>
     '    terminal_status: completed',
     '',
   ].join('\n'));
-  const perHarness = {
-    muse: { command: ['node', '-e', FILE_READER, '{prompt_file}'], },
-    'current-host': { host: true },
-  };
+  const harnesses = { muse: { provider: 'muse', command: ['node', '-e', FILE_READER, '{prompt_file}'] } };
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { musey: { provider: 'muse', id: 'musey-1', effort: 'xhigh' } },
-    routes: { standalone: { ...perHarness }, codex: { ...perHarness }, claude: { ...perHarness }, grok: { ...perHarness } },
+    harnesses,
     archetypes: { worker: {} },
     dials: { worker: 'musey' },
   }));
-  const { runId } = runNewRun({ playbook: 'one-file', task: 'file driver test', repoRoot: root });
+  const { runId } = runNewRun({ playbook: 'one-file', task: 'file executor test', repoRoot: root });
   const result = runDrive({ run: runId, repoRoot: root, env: null });
   assert.equal(result.outcome, 'terminal', JSON.stringify(result));
   assert.equal(result.status, 'completed');
@@ -108,15 +100,15 @@ test('drive: a file-reading actor gets the run-recorded prompt artifact', (t) =>
   const promptFiles = readFileSync(join(root, '.fadeno', 'runs', runId, 'events.jsonl'), 'utf8');
   assert.ok(artifact.length > 0);
   assert.match(promptFiles, /artifacts\/prompts\//);
-  assert.match(artifact, /file driver test/);
+  assert.match(artifact, /file executor test/);
 });
 
-test('starter catalog: muse compiles via muse-code in every family with the {prompt_file} spelling', () => {
+test('starter catalog: muse compiles onto the muse harness under every host, with the {prompt_file} spelling', () => {
   const starter = readFileSync(join(import.meta.dirname, '..', 'templates', 'common', 'fadeno', 'executors.yaml'), 'utf8');
   for (const harness of ['claude', 'codex', 'grok', 'standalone'] as const) {
     const profile = parseExecutorProfile(starter, 'starter.yaml', harness);
-    const compiled = compileDialRef({ model: 'muse' }, profile);
-    assert.equal(compiled.driver, 'muse-code', harness);
+    const compiled = resolveDelivery({ model: 'muse' }, profile);
+    assert.equal(compiled.harness, 'muse', harness);
     assert.equal(compiled.effectiveEffort, 'xhigh', harness);
     const spec = compiled.spec;
     assert.equal(spec.adapter, 'command', harness);

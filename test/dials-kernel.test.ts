@@ -5,7 +5,7 @@ import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import {
   BARE_IDENTIFIER_RE,
-  compileDialRef,
+  resolveDelivery,
   deliveryIsHost,
   DIALS_LOCAL_FILE,
   eligibilityFor,
@@ -35,51 +35,43 @@ function parseDoc(doc: Record<string, unknown>, harness: 'standalone' | 'codex' 
 
 test('pre-dials catalogs are rejected with schema_version 3 message', () => {
   assert.throws(
-    () => parseDoc({ schema_version: 2, targets: { opus: { provider: 'anthropic', model: 'opus' } }, routes: { standalone: { anthropic: { command: ['claude','-p'] } } }, loadouts: { main: { worker: 'opus' } } }),
-    (err: unknown) => err instanceof ExecutorProfileError && /schema_version 3 required/.test(err.message) && /pre-dials catalogs are not supported/.test(err.message) && /targets:→models:/.test(err.message) && /loadouts:→dials:/.test(err.message) && /dials-and-registry/.test(err.message),
+    () => parseDoc({ schema_version: 2, targets: { opus: { provider: 'anthropic', model: 'opus' } }, harnesses: { claude: { provider: 'anthropic', command: ['claude', '-p'] } }, loadouts: { main: { worker: 'opus' } } }),
+    (err: unknown) => err instanceof ExecutorProfileError && /schema_version 4 required/.test(err.message) && /pre-dials catalogs are not supported/.test(err.message) && /targets:→models:/.test(err.message) && /loadouts:→dials:/.test(err.message) && /harness-neutral-dials/.test(err.message),
   );
   assert.throws(
-    () => parseDoc({ targets: { opus: { provider: 'anthropic', model: 'opus' } }, routes: { standalone: { anthropic: { command: ['claude','-p'] } } }, bindings: { '*': 'opus' } }),
-    (err: unknown) => err instanceof ExecutorProfileError && /schema_version 3 required/.test(err.message),
+    () => parseDoc({ targets: { opus: { provider: 'anthropic', model: 'opus' } }, harnesses: { claude: { provider: 'anthropic', command: ['claude', '-p'] } }, bindings: { '*': 'opus' } }),
+    (err: unknown) => err instanceof ExecutorProfileError && /schema_version 4 required/.test(err.message),
   );
   assert.throws(
     () => parseDoc({ executors: { foo: { adapter: 'command', command: ['x'] } }, bindings: { '*': 'foo' } }),
-    /schema_version 3 required/,
+    /schema_version 4 required/,
   );
   assert.throws(
     () => parseDoc({ schema_version: 1, executors: { foo: { adapter: 'command', command: ['x'] } }, bindings: { '*': 'foo' } }),
-    /schema_version 3 required/,
+    /schema_version 4 required/,
   );
 });
 
-test('schema_version 3 requires models', () => {
-  assert.throws(() => parseDoc({ schema_version: 3, routes: { standalone: { openai: { command: ['x'] } } } }), /schema_version 3 required/);
-  assert.throws(() => parseDoc({ schema_version: 3, models: {}, routes: { standalone: { openai: { command: ['x'] } } } }), /schema_version 3 required/);
+test('schema_version 4 requires models', () => {
+  assert.throws(() => parseDoc({ schema_version: 4, harnesses: { codex: { provider: 'openai', command: ['x'] } } }), /schema_version 4 required/);
+  assert.throws(() => parseDoc({ schema_version: 4, models: {}, harnesses: { codex: { provider: 'openai', command: ['x'] } } }), /schema_version 4 required/);
 });
 
-test('v3 models registry happy path', () => {
+test('v4 models registry happy path', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' },
       grok: { provider: 'xai', id: 'grok-4.6', effort: 'high' },
       opus: { provider: 'anthropic', id: 'opus', effort: 'default', spellings: { opencode: 'anthropic/claude-opus-4.8' }, eligibility: { judge: 'shadow_only' } },
     },
-    routes: {
-      standalone: {
-        openai: { command: ['codex', 'exec', '--model', '{model}'], },
-        anthropic: { command: ['claude', '-p', '--model', '{model}'], },
-        xai: { command: ['grok', '--model', '{model}'], },
-        openrouter: { driver: 'opencode', command: ['opencode','run','-m','{model}'], },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['codex', 'exec', '--model', '{model}'] }, claude: { provider: 'anthropic', command: ['claude', '-p', '--model', '{model}'] }, grok: { provider: 'xai', command: ['grok', '--model', '{model}'] }, opencode: { command: ['opencode', 'run', '-m', '{model}'] } },
     archetypes: { worker: { }, judge: {} },
     dials: { judge: 'opus' },
     bindings: { my_role: 'sol@high' },
-    unregistered_model_driver: 'opencode',
+    unregistered_model_harness: 'opencode',
   });
-  assert.equal(profile.schemaVersion, 3);
+  assert.equal(profile.schemaVersion, 4);
   assert.equal(profile.models.sol!.provider, 'openai');
   assert.equal(profile.models.sol!.id, 'gpt-5.6-sol');
   assert.equal(profile.models.sol!.effort, 'high');
@@ -87,83 +79,93 @@ test('v3 models registry happy path', () => {
   assert.deepEqual(profile.models.opus!.eligibility, { judge: 'shadow_only' });
   assert.deepEqual(profile.dials, { judge: { model: 'opus' } });
   assert.deepEqual(profile.bindings, { my_role: { model: 'sol', effort: 'high' } });
-  assert.equal(profile.unregisteredModelDriver, 'opencode');
+  assert.equal(profile.unregisteredModelHarness, 'opencode');
   assert.ok(Object.hasOwn(profile.models, 'current-host'));
   assert.equal(profile.models['current-host']!.provider, 'current-host');
   const withDefaultId = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { foo: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['x'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['x'] } },
   });
   assert.equal(withDefaultId.models.foo!.id, 'foo');
   assert.equal(withDefaultId.models.foo!.effort, 'default');
 });
 
 test('declaring built-in current-host is error', () => {
-  assert.throws(() => parseDoc({ schema_version: 3, models: { 'current-host': { provider: 'openai' } }, routes: { standalone: { openai: { command: ['x'] } } } }), /built-in/);
+  assert.throws(() => parseDoc({ schema_version: 4, models: { 'current-host': { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['x'] } } }), /built-in/);
 });
 
-test('v3 routes driver fields and effort_encoding', () => {
+test('v4 harness entries carry provider and effort_encoding', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { gem: { provider: 'google', id: 'gemini-3.1-pro', effort: 'high' } },
-    routes: {
-      standalone: {
-        google: { driver: 'agy', command: ['agy','--model','{model}'], effort_encoding: 'model-suffix' },
-        openai: { command: ['codex','exec','{model}'] },
-      },
-    },
+    harnesses: { agy: { provider: 'google', command: ['agy', '--model', '{model}'], effort_encoding: 'model-suffix' }, codex: { provider: 'openai', command: ['codex', 'exec', '{model}'] } },
   });
-  assert.equal(profile.routes.standalone.google!.driver, 'agy');
-  assert.equal(profile.routes.standalone.google!.effort_encoding, 'model-suffix');
-  assert.throws(() => parseDoc({ schema_version: 3, models: { m: { provider: 'google' } }, routes: { standalone: { google: { driver: 'agy', effort_encoding: 'bad', command: ['x'] } } } }), /effort_encoding.*flag.*model-suffix/);
+  assert.equal(profile.harnesses.agy!.provider, 'google');
+  assert.equal(profile.harnesses.agy!.effort_encoding, 'model-suffix');
+  assert.throws(() => parseDoc({ schema_version: 4, models: { m: { provider: 'google' } }, harnesses: { agy: { provider: 'google', effort_encoding: 'bad', command: ['x'] } } }), /effort_encoding.*flag.*model-suffix/);
 });
 
-test('v3 promoted delivery and listing prefix validate strictly and compile route-relative ids', () => {
+test('v4 refuses two harnesses claiming one provider as home', () => {
+  assert.throws(
+    () => parseDoc({
+      schema_version: 4,
+      models: { sol: { provider: 'openai' } },
+      harnesses: { codex: { provider: 'openai', command: ['codex'] }, other: { provider: 'openai', command: ['other'] } },
+    }),
+    /provider "openai" is claimed as home by two harnesses \(codex, other\)/,
+  );
+});
+
+test('v4 refuses a harness that is neither host nor executor', () => {
+  assert.throws(
+    () => parseDoc({ schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai' } } }),
+    /declares neither `host:` .* nor `command:`/,
+  );
+});
+
+test('v4 explicit model harness + spelling, and the removed `delivery:` migration note', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       moonshot: {
         provider: 'stealth', id: 'ox-alpha',
-        delivery: { route: 'opencode-direct', id: 'stealth/ox-alpha' },
+        // `harness:` + `spellings.<harness>` replaced `delivery: {route, id}`.
+        harness: 'opencode',
+        spellings: { opencode: 'stealth/ox-alpha' },
       },
     },
-    routes: {
-      standalone: {
-        'opencode-direct': { driver: 'opencode-direct', command: ['opencode', 'run', '-m', '{model}'] },
-        openrouter: { driver: 'opencode', command: ['opencode', 'run', '-m', 'openrouter/{model}'], models_prefix: 'openrouter/' },
-      },
-    },
+    harnesses: { opencode: { command: ['opencode', 'run', '-m', 'openrouter/{model}'], models_prefix: 'openrouter/' } },
   });
-  assert.deepEqual(profile.models.moonshot!.delivery, { route: 'opencode-direct', id: 'stealth/ox-alpha' });
-  assert.equal(profile.routes.standalone.openrouter!.modelsPrefix, 'openrouter/');
-  assert.equal(compileDialRef({ model: 'moonshot' }, profile).modelId, 'stealth/ox-alpha');
+  assert.equal(profile.models.moonshot!.harness, 'opencode');
+  assert.equal(profile.harnesses.opencode!.modelsPrefix, 'openrouter/');
+  assert.equal(resolveDelivery({ model: 'moonshot' }, profile).modelId, 'stealth/ox-alpha');
   assert.throws(
-    () => parseDoc({ schema_version: 3, models: { m: { provider: 'p', delivery: { route: 'not/a-route', id: 'x' } } }, routes: { standalone: { p: { command: ['x'] } } } }),
-    /delivery.*bare.*route/,
+    () => parseDoc({ schema_version: 4, models: { m: { provider: 'p', delivery: { route: 'r', id: 'x' } } }, harnesses: { p: { provider: 'p', command: ['x'] } } }),
+    /`delivery` was removed in catalog v4/,
   );
   assert.throws(
-    () => parseDoc({ schema_version: 3, models: { m: { provider: 'p', delivery: { route: 'route', id: '', extra: true } } }, routes: { standalone: { p: { command: ['x'] } } } }),
-    /delivery.*route.*id/,
+    () => parseDoc({ schema_version: 4, models: { m: { provider: 'p', harness: 'nope' } }, harnesses: { p: { provider: 'p', command: ['x'] } } }),
+    /names harness "nope", which is not declared/,
   );
   assert.throws(
-    () => parseDoc({ schema_version: 3, models: { m: { provider: 'p' } }, routes: { standalone: { p: { command: ['x'], models_prefix: 'has space' } } } }),
+    () => parseDoc({ schema_version: 4, models: { m: { provider: 'p' } }, harnesses: { p: { provider: 'p', command: ['x'], models_prefix: 'has space' } } }),
     /models_prefix.*whitespace-free/,
   );
 });
 
-test('v3 routes reject native alias — only host: parses', () => {
+test('v4 harnesses reject the retired `native:` alias — only `host:` parses', () => {
   assert.throws(
-    () => parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { openai: { command: ['x'], native: true } as unknown as Record<string, unknown> } } }),
+    () => parseDoc({ schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['x'], native: true } as unknown as Record<string, unknown> } }),
     /unknown key.*native|host/,
   );
 });
 
 test('bindings "*" is accepted but ignored with deprecation note', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['x'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['x'] } },
     bindings: { '*': 'sol', my_role: 'sol' },
   });
   assert.deepEqual(profile.bindings, { my_role: { model: 'sol' } });
@@ -173,17 +175,22 @@ test('bindings "*" is accepted but ignored with deprecation note', () => {
 test('DialRef parse/format', () => {
   assert.deepEqual(parseDialRef('sol', 'test'), { model: 'sol' });
   assert.deepEqual(parseDialRef('sol@high', 'test'), { model: 'sol', effort: 'high' });
-  assert.deepEqual(parseDialRef({ model: 'sol', effort: 'high', via: 'opencode' }, 'test'), { model: 'sol', effort: 'high', via: 'opencode' });
-  assert.deepEqual(parseDialRef({ model: 'gem', via: 'agy' }, 'test'), { model: 'gem', via: 'agy' });
-  assert.deepEqual(
-    parseDialRef({ model: 'gem', via: 'agy' }, 'test'),
-    { model: 'gem', via: 'agy' },
-  );
+  assert.deepEqual(parseDialRef({ model: 'sol', effort: 'high', harness: 'opencode' }, 'test'), { model: 'sol', effort: 'high', harness: 'opencode' });
+  assert.deepEqual(parseDialRef('sol@high on opencode', 'test'), { model: 'sol', effort: 'high', harness: 'opencode' });
   assert.equal(formatDialRef({ model: 'sol' }), 'sol');
   assert.equal(formatDialRef({ model: 'sol', effort: 'xhigh' }), 'sol@xhigh');
-  assert.equal(formatDialRef({ model: 'opus', via: 'opencode' }), 'opus via opencode');
-  assert.equal(formatDialRef({ model: 'sol', effort: 'xhigh', via: 'opencode' }), 'sol@xhigh via opencode');
-  assert.deepEqual(parseDialRef(formatDialRef({ model: 'sol', effort: 'high', via: 'opencode' }), 't'), { model: 'sol', effort: 'high', via: 'opencode' });
+  assert.equal(formatDialRef({ model: 'opus', harness: 'opencode' }), 'opus on opencode');
+  assert.equal(formatDialRef({ model: 'sol', effort: 'xhigh', harness: 'opencode' }), 'sol@xhigh on opencode');
+  assert.deepEqual(parseDialRef(formatDialRef({ model: 'sol', effort: 'high', harness: 'opencode' }), 't'), { model: 'sol', effort: 'high', harness: 'opencode' });
+  // Legacy ` via <driver>` is READ and translated — never emitted back. The
+  // variant half of a driver name is dropped, which is what re-rolls a shadow
+  // sample keyed on the challenger string. See CHANGELOG.
+  assert.deepEqual(parseDialRef('sonnet via claude-exec', 't'), { model: 'sonnet', harness: 'claude' });
+  assert.equal(formatDialRef(parseDialRef('sonnet via claude-exec', 't')), 'sonnet on claude');
+  assert.deepEqual(parseDialRef('m via opencode-direct', 't'), { model: 'm', harness: 'opencode' });
+  assert.deepEqual(parseDialRef('m via muse-code', 't'), { model: 'm', harness: 'muse' });
+  assert.deepEqual(parseDialRef({ model: 'm', via: 'claude-cli' }, 't'), { model: 'm', harness: 'claude' });
+  assert.deepEqual(parseDialRef('m via grok', 't'), { model: 'm', harness: 'grok' }, 'a name that was already a harness passes through');
   assert.throws(() => parseDialRef('', 'dials.judge'), /empty string/);
   assert.throws(() => parseDialRef('sol@', 'dials.judge'), /valid dial ref/);
   assert.throws(() => parseDialRef({ model: '' }, 'dials.judge'), /non-empty "model"/);
@@ -208,9 +215,12 @@ test('user dials: force_write_posture is refused there too, not just in the cata
 
   // A plain dial still round-trips, and now writes the string form: the object
   // form existed only to carry this key.
-  writeUserDials(user, { worker: { model: 'sol', effort: 'high', via: 'opencode' } });
-  assert.deepEqual(readUserDials(user), { worker: { model: 'sol', effort: 'high', via: 'opencode' } });
-  assert.match(readFileSync(userPaths(user).dialsFile, 'utf8'), /"worker":\s*"sol@high via opencode"/);
+  writeUserDials(user, { worker: { model: 'sol', effort: 'high', harness: 'opencode' } });
+  assert.deepEqual(readUserDials(user), { worker: { model: 'sol', effort: 'high', harness: 'opencode' } });
+  assert.match(readFileSync(userPaths(user).dialsFile, 'utf8'), /"worker":\s*"sol@high on opencode"/);
+  // A user dials file written before v4 still reads, translated once.
+  writeFileSync(userPaths(user).dialsFile, JSON.stringify({ worker: 'sol@high via opencode-direct' }), 'utf8');
+  assert.deepEqual(readUserDials(user), { worker: { model: 'sol', effort: 'high', harness: 'opencode' } });
 
   // A file written by an older version still carries the key. It refuses with
   // a pointer and names the remedy, rather than being read as an ordinary dial
@@ -231,16 +241,16 @@ test('user dials: force_write_posture is refused there too, not just in the cata
   assert.deepEqual(readUserDials(user), {});
 });
 
-test('compileDialRef: registered home driver', () => {
+test('resolveDelivery: registered home harness', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' } },
-    routes: { standalone: { openai: { command: ['codex','exec','-m','{model}','--effort','{reasoning_effort}'], } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex', 'exec', '-m', '{model}', '--effort', '{reasoning_effort}'] } },
   });
-  const compiled = compileDialRef({ model: 'sol' }, profile);
+  const compiled = resolveDelivery({ model: 'sol' }, profile);
   assert.equal(compiled.registered, true);
   assert.equal(compiled.provider, 'openai');
-  assert.equal(compiled.driver, 'openai');
+  assert.equal(compiled.harness, 'codex');
   assert.equal(compiled.effectiveEffort, 'high');
   // No `@effort` on the dial: the registry default fills the effective effort,
   // and the absent pin stays visible as null.
@@ -249,147 +259,131 @@ test('compileDialRef: registered home driver', () => {
   assert.equal(compiled.modelId, 'gpt-5.6-sol');
   assert.equal(compiled.spec.adapter, 'command');
   assert.deepEqual(compiled.spec.adapter === 'command' ? compiled.spec.command : null, ['codex','exec','-m','gpt-5.6-sol','--effort','high']);
-  const over = compileDialRef({ model: 'sol', effort: 'low' }, profile);
+  const over = resolveDelivery({ model: 'sol', effort: 'low' }, profile);
   assert.equal(over.effectiveEffort, 'low');
   assert.equal(over.pinnedEffort, 'low');
   assert.deepEqual(over.spec.adapter === 'command' ? over.spec.command : null, ['codex','exec','-m','gpt-5.6-sol','--effort','low']);
 });
 
-test('compileDialRef: spellings via', () => {
+test('resolveDelivery: spellings are keyed by harness', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { opus: { provider: 'anthropic', id: 'opus', effort: 'default', spellings: { opencode: 'anthropic/claude-opus-4.8' } } },
-    routes: {
-      standalone: {
-        anthropic: { command: ['claude','-p','--model','{model}'], },
-        openrouter: { driver: 'opencode', command: ['opencode','run','-m','{model}'], },
-      },
-    },
+    harnesses: { claude: { provider: 'anthropic', command: ['claude', '-p', '--model', '{model}'] }, opencode: { command: ['opencode', 'run', '-m', '{model}'] } },
   });
-  const via = compileDialRef({ model: 'opus', via: 'opencode' }, profile);
-  assert.equal(via.modelId, 'anthropic/claude-opus-4.8');
-  assert.equal(via.driver, 'opencode');
-  assert.equal(via.spec.adapter, 'command');
-  assert.deepEqual(via.spec.adapter === 'command' ? via.spec.command : null, ['opencode','run','-m','anthropic/claude-opus-4.8']);
-  const home = compileDialRef({ model: 'opus' }, profile);
+  const onHarness = resolveDelivery({ model: 'opus', harness: 'opencode' }, profile);
+  assert.equal(onHarness.modelId, 'anthropic/claude-opus-4.8');
+  assert.equal(onHarness.harness, 'opencode');
+  assert.equal(onHarness.spec.adapter, 'command');
+  assert.deepEqual(onHarness.spec.adapter === 'command' ? onHarness.spec.command : null, ['opencode','run','-m','anthropic/claude-opus-4.8']);
+  const home = resolveDelivery({ model: 'opus' }, profile);
   assert.equal(home.modelId, 'opus');
 });
 
-test('compileDialRef: effort_encoding model-suffix', () => {
+test('resolveDelivery: effort_encoding model-suffix', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { gem: { provider: 'google', id: 'gemini-3.1-pro', effort: 'high' } },
-    routes: { standalone: { google: { driver: 'agy', command: ['agy','--model','{model}'], effort_encoding: 'model-suffix', } } },
+    harnesses: { agy: { provider: 'google', command: ['agy', '--model', '{model}'], effort_encoding: 'model-suffix' } },
   });
-  const base = compileDialRef({ model: 'gem' }, profile);
+  const base = resolveDelivery({ model: 'gem' }, profile);
   assert.equal(base.modelId, 'gemini-3.1-pro-high');
   const def = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { gem: { provider: 'google', id: 'gemini-3.1-pro', effort: 'default' } },
-    routes: { standalone: { google: { driver: 'agy', command: ['agy','--model','{model}'], effort_encoding: 'model-suffix' } } },
+    harnesses: { agy: { provider: 'google', command: ['agy', '--model', '{model}'], effort_encoding: 'model-suffix' } },
   });
-  const low = compileDialRef({ model: 'gem' }, def);
+  const low = resolveDelivery({ model: 'gem' }, def);
   assert.equal(low.modelId, 'gemini-3.1-pro');
-  const over = compileDialRef({ model: 'gem', effort: 'low' }, def);
+  const over = resolveDelivery({ model: 'gem', effort: 'low' }, def);
   assert.equal(over.modelId, 'gemini-3.1-pro-low');
 });
 
-test('compileDialRef: unregistered fall-through via default driver', () => {
+test('resolveDelivery: unregistered fall-through onto the default harness', () => {
   const profile = parseDoc({
-    schema_version: 3,
-    models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openrouter: { driver: 'opencode', command: ['opencode','run','-m','{model}'], } } },
-    unregistered_model_driver: 'opencode',
+    schema_version: 4,
+    models: { sol: { provider: 'openai', harness: 'opencode' } },
+    harnesses: { opencode: { command: ['opencode', 'run', '-m', '{model}'] } },
+    unregistered_model_harness: 'opencode',
   });
-  const compiled = compileDialRef({ model: 'kimi-k3' }, profile);
+  const compiled = resolveDelivery({ model: 'kimi-k3' }, profile);
   assert.equal(compiled.registered, false);
   assert.equal(compiled.provider, null);
-  assert.equal(compiled.driver, 'opencode');
+  assert.equal(compiled.harness, 'opencode');
   assert.equal(compiled.modelId, 'kimi-k3');
   assert.equal(compiled.effectiveEffort, 'default');
   assert.equal(compiled.pinnedEffort, null);
-  const withEffort = compileDialRef({ model: 'kimi-k3', effort: 'high' }, profile);
+  const withEffort = resolveDelivery({ model: 'kimi-k3', effort: 'high' }, profile);
   assert.equal(withEffort.effectiveEffort, 'high');
   assert.equal(withEffort.pinnedEffort, 'high');
   const profile2 = parseDoc({
-    schema_version: 3,
-    models: { sol: { provider: 'openai' } },
-    routes: {
-      standalone: {
-        openrouter: { driver: 'opencode', command: ['opencode','run','-m','{model}'] },
-        google: { driver: 'agy', command: ['agy','--model','{model}'] },
-      },
-    },
+    schema_version: 4,
+    models: { sol: { provider: 'openai', harness: 'opencode' } },
+    harnesses: { opencode: { command: ['opencode', 'run', '-m', '{model}'] }, agy: { provider: 'google', command: ['agy', '--model', '{model}'] } },
   });
-  const via = compileDialRef({ model: 'my-model', via: 'agy' }, profile2);
-  assert.equal(via.driver, 'agy');
+  const explicit = resolveDelivery({ model: 'my-model', harness: 'agy' }, profile2);
+  assert.equal(explicit.harness, 'agy');
 });
 
-test('compileDialRef: unknown driver error naming declared aliases', () => {
+test('resolveDelivery: unknown harness error naming the declared table', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' }, grok: { provider: 'xai' } },
-    routes: {
-      standalone: {
-        openai: { command: ['codex','exec'] },
-        xai: { command: ['grok','--model','{model}'] },
-        openrouter: { driver: 'opencode', command: ['opencode','run'] },
-      },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['codex', 'exec'] }, grok: { provider: 'xai', command: ['grok', '--model', '{model}'] }, opencode: { command: ['opencode', 'run'] } },
   });
-  assert.throws(() => compileDialRef({ model: 'sol', via: 'unknown' }, profile), (err: unknown) => err instanceof ExecutorProfileError && /unknown driver "unknown"/.test(err.message) && /openai/.test(err.message) && /opencode/.test(err.message));
-  assert.throws(() => compileDialRef({ model: 'nope-model', via: 'bad' }, profile), /unknown driver/);
-  assert.throws(() => compileDialRef({ model: 'nope-model' }, parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { xai: { command: ['grok'] } } }, unregistered_model_driver: 'opencode' })), /unknown driver "opencode"/);
+  assert.throws(() => resolveDelivery({ model: 'sol', harness: 'unknown' }, profile), (err: unknown) => err instanceof ExecutorProfileError && /unknown harness "unknown"/.test(err.message) && /codex/.test(err.message) && /opencode/.test(err.message));
+  assert.throws(() => resolveDelivery({ model: 'nope-model', harness: 'bad' }, profile), /unknown harness/);
+  assert.throws(() => resolveDelivery({ model: 'nope-model' }, parseDoc({ schema_version: 4, models: { sol: { provider: 'xai' } }, harnesses: { grok: { provider: 'xai', command: ['grok'] } }, unregistered_model_harness: 'opencode' })), /unknown harness "opencode"/);
 });
 
-test('compileDialRef: eligibility copied to spec', () => {
+test('resolveDelivery: eligibility copied to spec', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai', eligibility: { judge: 'forbidden', reviewer: 'shadow_only' } } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
   });
-  const compiled = compileDialRef({ model: 'sol' }, profile);
+  const compiled = resolveDelivery({ model: 'sol' }, profile);
   assert.equal(eligibilityFor(compiled.spec, 'judge'), 'forbidden');
   assert.equal(eligibilityFor(compiled.spec, 'reviewer'), 'shadow_only');
   assert.equal(eligibilityFor(compiled.spec, 'worker'), 'eligible');
 });
 
-test('compileDialRef: host built-in current-host compiles to host', () => {
+test('resolveDelivery: host built-in current-host compiles to host', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] }, 'current-host': { host: true, command: ['codex','fallback'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
   });
-  const host = compileDialRef({ model: 'current-host' }, profile);
+  const host = resolveDelivery({ model: 'current-host' }, profile);
   assert.equal(host.spec.adapter, 'host');
   assert.equal(deliveryIsHost(host), true);
   assert.equal(host.effectiveEffort, 'default');
-  const profile2 = parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { openai: { command: ['codex'] } } } });
-  const implicit = compileDialRef({ model: 'current-host' }, profile2);
+  const profile2 = parseDoc({ schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['codex'] } } });
+  const implicit = resolveDelivery({ model: 'current-host' }, profile2);
   assert.equal(implicit.spec.adapter, 'host');
 });
 
 test('archetypes: requires_write parses; an absent block is an empty map', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     archetypes: { worker: { }, reviewer: { } },
   });
   assert.deepEqual(profile.archetypes, {
     worker: { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null },
     reviewer: { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null },
   });
-  assert.deepEqual(parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { openai: { command: ['x'] } } } }).archetypes, {});
+  assert.deepEqual(parseDoc({ schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['x'] } } }).archetypes, {});
 });
 
 test('archetypes: strict validation names the offending path', () => {
   assert.throws(
-    () => parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { openai: { command: ['x'] } } }, archetypes: 'worker' as unknown as Record<string, unknown> }),
+    () => parseDoc({ schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['x'] } }, archetypes: 'worker' as unknown as Record<string, unknown> }),
     /`archetypes` is not a mapping/,
   );
   assert.throws(
-    () => parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { openai: { command: ['x'] } } }, archetypes: { worker: 'yes' as unknown as Record<string, unknown> } }),
+    () => parseDoc({ schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['x'] } }, archetypes: { worker: 'yes' as unknown as Record<string, unknown> } }),
     /`archetypes\.worker` is not a mapping/,
   );
 });
@@ -397,7 +391,7 @@ test('archetypes: strict validation names the offending path', () => {
 
 // --- pin v3 ---
 
-test('pin v3: write and read round-trip (dial keys sorted)', (t) => {
+test('pin v4: write and read round-trip (dial keys sorted)', (t) => {
   const root = tempRepo(t);
   assert.deepEqual(readLocalDialState(root), { dials: {}, shadows: {}, legacyNote: null });
   const state: LocalDialState = { dials: { generator: { model: 'gem' }, worker: { model: 'sol', effort: 'high' }, reviewer: { model: 'opus' } }, shadows: { worker: { model: 'kimi-k3', rate: 0.25 } }, legacyNote: null };
@@ -405,7 +399,7 @@ test('pin v3: write and read round-trip (dial keys sorted)', (t) => {
   assert.equal(path, join(root, DIALS_LOCAL_FILE));
   const text = read(root, DIALS_LOCAL_FILE);
   assert.equal(text, '{"dials":{"generator":"gem","reviewer":"opus","worker":"sol@high"},"shadows":{"worker":{"model":"kimi-k3","rate":0.25}}}\n');
-  assert.deepEqual(readLocalDialState(root), { dials: { generator: { model: 'gem' }, worker: { model: 'sol', effort: 'high' }, reviewer: { model: 'opus' } }, shadows: { worker: { model: 'kimi-k3', rate: 0.25 } }, legacyNote: null });
+  assert.deepEqual(readLocalDialState(root), { dials: { generator: { model: 'gem' }, worker: { model: 'sol', effort: 'high' }, reviewer: { model: 'opus' } }, shadows: { worker: { model: 'kimi-k3', rate: 0.25 } }, legacyNote: null, legacyViaNote: null });
   writeLocalDialState(root, { dials: {}, shadows: {}, legacyNote: null });
   assert.equal(exists(root, DIALS_LOCAL_FILE), false);
 });
@@ -432,27 +426,27 @@ test('pin v3: an unreadable pin names the file and how to reset it', (t) => {
   assert.throws(() => readLocalDialState(root), /bare lowercase identifier/);
 });
 
-test('pin v3: shadows with via and effort round-trip', (t) => {
+test('pin v4: shadows with harness and effort round-trip; a legacy `via` reads through', (t) => {
   const root = tempRepo(t);
-  const state: LocalDialState = { dials: {}, shadows: { worker: { model: 'opus', effort: 'high', via: 'opencode', rate: 0.5 } }, legacyNote: null };
+  const state: LocalDialState = { dials: {}, shadows: { worker: { model: 'opus', effort: 'high', harness: 'opencode', rate: 0.5 } }, legacyNote: null };
   writeLocalDialState(root, state);
   const readBack = readLocalDialState(root);
-  assert.deepEqual(readBack.shadows.worker, { model: 'opus', effort: 'high', via: 'opencode', rate: 0.5 });
+  assert.deepEqual(readBack.shadows.worker, { model: 'opus', effort: 'high', harness: 'opencode', rate: 0.5 });
+  // Written by a pre-v4 fadeno: translated on read, never rewritten silently —
+  // the note says so once.
+  writeFileSync(join(root, DIALS_LOCAL_FILE), JSON.stringify({ shadows: { worker: { model: 'opus', via: 'opencode-direct' } } }), 'utf8');
+  const legacy = readLocalDialState(root);
+  assert.deepEqual(legacy.shadows.worker, { model: 'opus', harness: 'opencode' });
+  assert.match(legacy.legacyViaNote ?? '', /still spells shadow worker with the removed `via <driver>` form/);
 });
 
 // --- cascade ---
 
 test('cascade: binding-first, then session→repo→user, base terminal', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' }, grok: { provider: 'xai' }, opus: { provider: 'anthropic' } },
-    routes: {
-      standalone: {
-        openai: { command: ['codex'] },
-        xai: { command: ['grok'] },
-        anthropic: { command: ['claude'] },
-      },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] }, grok: { provider: 'xai', command: ['grok'] }, claude: { provider: 'anthropic', command: ['claude'] } },
     bindings: { my_role: 'sol' },
     dials: { worker: 'grok' },
   });
@@ -466,9 +460,9 @@ test('cascade: binding-first, then session→repo→user, base terminal', () => 
   assert.deepEqual(b.ref, { model: 'sol' });
 
   const profileNoBinding = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' }, grok: { provider: 'xai' } },
-    routes: { standalone: { openai: { command: ['x'] }, xai: { command: ['y'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['x'] }, grok: { provider: 'xai', command: ['y'] } },
     dials: { worker: 'sol' },
     archetypes: { worker: { fallback: 'reviewer' } },
   });
@@ -483,9 +477,9 @@ test('cascade: binding-first, then session→repo→user, base terminal', () => 
 
 test('cascade: fallback chain via archetypes', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' }, grok: { provider: 'xai' } },
-    routes: { standalone: { openai: { command: ['x'] }, xai: { command: ['y'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['x'] }, grok: { provider: 'xai', command: ['y'] } },
     archetypes: { generator: { fallback: 'worker' } },
     dials: { worker: 'sol' },
   });
@@ -499,9 +493,9 @@ test('cascade: fallback chain via archetypes', () => {
 
 test('cascade: prototype hardening (hasOwn)', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['x'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['x'] } },
   });
   const plain: Record<string, { model: string }> = {};
   const res2 = resolveDialCascade('role', 'toString', { bindings: {}, archetypes: {} }, { session: plain, repo: {}, user: {} });
@@ -513,9 +507,9 @@ test('cascade: prototype hardening (hasOwn)', () => {
 
 test('resolveRole: live resolution cascade+compile', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai', id: 'gpt-5.6-sol' }, grok: { provider: 'xai', id: 'grok-4.6' } },
-    routes: { standalone: { openai: { command: ['codex','--model','{model}'] }, xai: { command: ['grok','--model','{model}'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex', '--model', '{model}'] }, grok: { provider: 'xai', command: ['grok', '--model', '{model}'] } },
     dials: { worker: 'sol' },
     archetypes: { worker: {} },
   });
@@ -539,9 +533,9 @@ test('roleResolutionEchoLabel vocabulary', () => {
 
 test('serializeSnapshot v3 byte-stable and includes current-host always', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' }, grok: { provider: 'xai', id: 'grok-4.6', effort: 'high' } },
-    routes: { standalone: { openai: { command: ['codex','{model}'] }, xai: { command: ['grok','{model}'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex', '{model}'] }, grok: { provider: 'xai', command: ['grok', '{model}'] } },
     archetypes: { worker: { } },
     bindings: { my_role: 'sol@high' },
   });
@@ -556,9 +550,9 @@ test('serializeSnapshot v3 byte-stable and includes current-host always', () => 
 
 test('serializeSnapshot round-trips via parseSnapshotDocument', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai', id: 'gpt-5.6-sol' } },
-    routes: { standalone: { openai: { command: ['codex','{model}'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex', '{model}'] } },
     archetypes: { worker: {} },
     bindings: { my_role: 'sol' },
   });
@@ -573,9 +567,9 @@ test('serializeSnapshot round-trips via parseSnapshotDocument', () => {
 
 test('serializeSnapshot all-native profile with zero dials/bindings', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai', id: 'sol-id' } },
-    routes: { standalone: { openai: { command: ['codex','{model}'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex', '{model}'] } },
   });
   // remove bindings/dials to simulate all-native
   const emptyBindingsProfile: ExecutorProfile = { ...profile, bindings: {}, dials: {}, archetypes: {} };
@@ -605,9 +599,9 @@ test('parseSnapshotDocument rejects pre-dials snapshots', () => {
 
 test('snapshot eligibility round-trip', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai', eligibility: { worker: 'forbidden' } } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
   });
   const snapText = serializeSnapshot(profile);
   const doc = parseSnapshotDocument(snapText, 'snap.yaml');

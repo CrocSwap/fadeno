@@ -171,8 +171,9 @@ a single literal in its table. Match tokens, never prose.
 | Add / change a CLI command | extending.md → *Add a CLI command* |
 | Add or modify a playbook step kind (primitive) | extending.md → *Add a step kind* |
 | Add a deterministic gate condition | extending.md → *Add a gate condition* |
+| Support a new harness Fadeno SPAWNS | extending.md → *Add a harness entry to the catalog* |
 | Edit a skill, starter playbook, schema, or template | extending.md → *Change templates*; then `npm run build:plugin` |
-| Support a new harness (e.g. Cursor) | extending.md → *Add a harness target* |
+| Support a new harness Fadeno runs INSIDE (e.g. Cursor) | extending.md → *Add a host adapter* |
 | Bump the version | extending.md → *Release a version* (rebuild + commit `plugin/`) |
 
 When in doubt about *why* a design choice exists, the answer is almost always in

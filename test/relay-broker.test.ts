@@ -23,10 +23,10 @@ import { read, tempRepo } from './helpers.ts';
 const ARCHETYPES = ['worker', 'reviewer', 'judge'] as const;
 
 /**
- * A self-contained project catalog — its own `models:` AND `routes:` — which
+ * A self-contained project catalog — its own `models:` AND `harnesses:` — which
  * suppresses the builtin layer entirely (see `config-layers.ts`'s
  * `projectIsComplete`). That is what makes it usable as the "no catalog
- * opinion" fixture: the shipped `relay:` block cannot leak in underneath it.
+ * opinion" fixture: the shipped relay values cannot leak in underneath it.
  * `grok` is command-delivered here, so every slot dialed to it materializes as
  * a broker rather than a host agent.
  */
@@ -35,20 +35,20 @@ function seedSelfContainedCatalog(root: string, relay?: Record<string, string>):
   writeFileSync(
     join(root, '.fadeno', 'executors.yaml'),
     stringifyYaml({
-      schema_version: 3,
+      schema_version: 4,
       models: {
         luna: { provider: 'openai', id: 'gpt-5.6-luna', effort: 'xhigh' },
         terra: { provider: 'openai', id: 'gpt-5.6-terra', effort: 'high' },
         grok: { provider: 'xai', id: 'grok-4.6', effort: 'xhigh' },
       },
-      routes: {
-        codex: {
-          'current-host': { host: true },
-          openai: { host: true },
-          xai: { command: ['grok', '--model', '{model}'], },
-        },
+      harnesses: {
+        // v4: a relay lives on the harness it forwards from, inside `host:`.
+        codex: { provider: 'openai', host: { effort_channel: 'agent-file', ...(relay?.codex != null ? { relay: relay.codex } : {}) } },
+        ...(relay?.claude != null
+          ? { claude: { provider: 'anthropic', host: { effort_channel: 'none', relay: relay.claude } } }
+          : {}),
+        grok: { provider: 'xai', command: ['grok', '--model', '{model}'] },
       },
-      ...(relay ? { relay } : {}),
     }),
     'utf8',
   );
@@ -63,7 +63,7 @@ function dialEverythingToCommand(root: string): void {
   });
 }
 
-test('a catalog relay.codex override reaches every emitted Codex broker', (t) => {
+test('a catalog harnesses.codex.host.relay override reaches every emitted Codex broker', (t) => {
   const root = tempRepo(t);
   seedSelfContainedCatalog(root, { codex: 'terra@medium' });
   dialEverythingToCommand(root);
@@ -98,7 +98,7 @@ test('a relay ref with no pinned effort takes the model registry default', (t) =
 
 test('a catalog with no relay opinion renders the built-in broker identity unchanged', (t) => {
   const root = tempRepo(t);
-  // No `relay:` key at all, and self-contained so the shipped block cannot
+  // No relay declared at all, and self-contained so the shipped one cannot
   // reach this repo — the common case for a real project catalog.
   seedSelfContainedCatalog(root);
   dialEverythingToCommand(root);
@@ -107,7 +107,7 @@ test('a catalog with no relay opinion renders the built-in broker identity uncha
   for (const archetype of ARCHETYPES) {
     const body = read(root, `.codex/agents/${archetype}.toml`);
     // The built-in fallback, which is kept equal to the shipped catalog's
-    // `relay.codex` rather than frozen at what the renderer once hardcoded —
+    // `harnesses.codex.host.relay` rather than frozen at what the renderer once hardcoded —
     // see the test below, which is what holds those two together.
     assert.match(body, /^model = "gpt-5\.6-luna"\nmodel_reasoning_effort = "high"$/m);
   }
@@ -139,7 +139,7 @@ test('an uncompilable relay ref degrades to the built-in identity rather than fa
  * one-question-two-places shape that has produced silent wrong answers here
  * before. They were allowed to differ once, as a migration anchor; that
  * migration is over, so this pins them together and fails the moment someone
- * edits `relay.codex` without moving the fallback with it.
+ * edits `harnesses.codex.host.relay` without moving the fallback with it.
  */
 test('the built-in relay fallback and the shipped catalog name the same identity', (t) => {
   const shipped = tempRepo(t);

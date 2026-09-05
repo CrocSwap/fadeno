@@ -51,12 +51,27 @@ function seedClaudeRepo(t: TestContext): string {
   return root;
 }
 
-/** Rewrite the project catalog's `relay:` map — `null` removes the key. */
+/**
+ * Rewrite the project catalog's relays — `null` removes them.
+ *
+ * Under v4 a relay lives on the harness it forwards from
+ * (`harnesses.<id>.host.relay`), so this edits the harness table rather than a
+ * top-level key.
+ */
 function setRelay(root: string, relay: Record<string, string> | null): void {
   const path = join(root, '.fadeno', 'executors.yaml');
   const doc = parseYaml(readFileSync(path, 'utf8')) as Record<string, unknown>;
-  if (relay == null) delete doc.relay;
-  else doc.relay = relay;
+  const harnesses = (doc.harnesses ?? {}) as Record<string, Record<string, unknown>>;
+  for (const entry of Object.values(harnesses)) {
+    const host = entry.host as Record<string, unknown> | undefined;
+    if (host != null) delete host.relay;
+  }
+  for (const [harness, ref] of Object.entries(relay ?? {})) {
+    const entry = harnesses[harness] ?? (harnesses[harness] = {});
+    const host = (entry.host ?? (entry.host = { effort_channel: 'none' })) as Record<string, unknown>;
+    host.relay = ref;
+  }
+  doc.harnesses = harnesses;
   writeFileSync(path, stringifyYaml(doc));
 }
 
@@ -242,7 +257,7 @@ test('relayModelForClaude reads one catalog and never guesses', (t) => {
   assert.equal(relayModelForClaude(join(REPO, 'templates', 'common', 'fadeno', 'executors.yaml')), 'sonnet');
   // Absent or unreadable catalog: null, so the emitter keeps its literal.
   assert.equal(relayModelForClaude(join(root, 'nope.yaml')), null);
-  writeFileSync(join(root, 'broken.yaml'), 'schema_version: 3\nmodels: [\n');
+  writeFileSync(join(root, 'broken.yaml'), 'schema_version: 4\nmodels: [\n');
   assert.equal(relayModelForClaude(join(root, 'broken.yaml')), null);
 });
 
@@ -271,7 +286,8 @@ test('init --claude stamps the proxies from the repo catalog', (t) => {
   const shipped = parseYaml(
     readFileSync(join(REPO, 'templates', 'common', 'fadeno', 'executors.yaml'), 'utf8'),
   ) as Record<string, unknown>;
-  shipped.relay = { claude: 'fable' };
+  const shippedHarnesses = shipped.harnesses as Record<string, Record<string, unknown>>;
+  (shippedHarnesses.claude!.host as Record<string, unknown>).relay = 'fable';
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml(shipped));
 
   runInit({ target: 'claude', repoRoot: root });

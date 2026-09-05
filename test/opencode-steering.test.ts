@@ -262,7 +262,11 @@ const SLOT = {
   session_effort: 'high',
   effective_effort: 'high',
   effort_pinned: false,
-  driver: 'codex',
+  // The 1.1 resolver shape the adapters actually read: `harness` is the
+  // EXECUTOR and `variant` the lane policy chose. (`host` is the adapter's own
+  // constant, not the resolver's.)
+  harness: 'codex',
+  variant: null,
 };
 
 test('host_delivery row carries the shared field names and always the digest', () => {
@@ -280,7 +284,7 @@ test('host_delivery row carries the shared field names and always the digest', (
     sessionId: 'session-7',
     callId: 'call-7',
   });
-  assert.equal(row.format, '1.0');
+  assert.equal(row.format, '1.1');
   assert.equal(row.event, 'host_delivery');
   assert.equal(row.archetype, 'worker');
   assert.equal(row.agent_type, 'worker');
@@ -289,6 +293,10 @@ test('host_delivery row carries the shared field names and always the digest', (
   assert.equal(row.prompt_snapshot, '.fadeno/local/prompts/host-aaaaaaaa.md');
   assert.equal(row.executor, 'luna');
   assert.equal(row.model_applied, 'gpt-5.6-luna');
+  // Format 1.1 splits the two harness identities by their real names: `host`
+  // is where the call ran, `harness` is what executed it. 1.0 spelled the
+  // first `harness` and the second `driver`.
+  assert.equal(row.host, 'opencode');
   assert.equal(row.effort, 'pinned-effort');
   assert.equal(row.effort_pinned, false);
   assert.equal(row.fadeno_version, row.hook_version);
@@ -324,7 +332,7 @@ test('host_refused row records predicate, bounded message, and null identity whe
     sessionId: 'session-refused',
     callId: 'call-refused',
   });
-  assert.equal(row.format, '1.0');
+  assert.equal(row.format, '1.1');
   assert.equal(row.event, 'host_refused');
   const refusal = row.refusal as { predicate: string; message: string };
   assert.equal(refusal.predicate, 'resolver_error');

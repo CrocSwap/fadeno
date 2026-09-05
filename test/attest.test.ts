@@ -41,7 +41,7 @@ test('runAttest measures CLAUDE_EFFORT when present and labels model as requeste
   assert.equal(rows.length, 1);
   const row = rows[0]!;
   assert.equal(row.event, 'host_attestation');
-  assert.equal(row.format, '1.0');
+  assert.equal(row.format, '1.1');
   assert.equal(row.archetype, 'worker');
   assert.equal(row.effort, 'xhigh');
   assert.equal(row.effort_evidence, 'measured');

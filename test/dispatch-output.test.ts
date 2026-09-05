@@ -21,31 +21,23 @@ const STDIN_ECHO = (prefix: string): string[] => [
 ];
 const MUTATE = ['node', '-e', "require('fs').writeFileSync('mutated.txt','x');process.stdout.write('MUTATED');"];
 
-function seedV3(t: TestContext, extra: Record<string, unknown> = {}): string {
+function seedCatalog(t: TestContext, extra: Record<string, unknown> = {}): string {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   const base: Record<string, unknown> = {
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'echo-worker': { provider: 'openai', id: 'echo-worker' },
       'luna-worker': { provider: 'openai', id: 'luna-worker' },
       'mutate-worker': { provider: 'openai', id: 'mutate-worker' },
       'ghost-bin': { provider: 'openai', id: 'ghost-bin' },
     },
-    routes: {
-      standalone: {
-        openai: { command: STDIN_ECHO('REPORT:'), },
-      },
-      codex: {
-        openai: { command: STDIN_ECHO('REPORT:'), },
-      },
-    },
+    harnesses: { codex: { provider: 'openai', command: STDIN_ECHO('REPORT:') } },
     archetypes: { worker: {} },
     dials: { worker: 'echo-worker' },
     ...extra,
   };
   if ((extra as any).models) (base as any).models = { ...(base as any).models, ...(extra as any).models };
-  if ((extra as any).routes) (base as any).routes = { ...(base as any).routes, ...(extra as any).routes };
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml(base));
   return root;
 }
@@ -63,7 +55,7 @@ function initGit(root: string): void {
 }
 
 test('dispatch output: snapshot file exists and row fields match the executor bytes', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const result = runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
   const rows = evidenceRows(root);
   const req = rows.find((r) => r.event === 'dispatch_requested')!;
@@ -86,12 +78,9 @@ test('dispatch output: snapshot file exists and row fields match the executor by
 });
 
 test('dispatch output: request row names the snapshot even when spawn fails', (t) => {
-  const root = seedV3(t, {
+  const root = seedCatalog(t, {
     models: { 'ghost-bin': { provider: 'openai', id: 'ghost-bin' } },
-    routes: {
-      standalone: { openai: { command: ['no-such-fadeno-dispatch-bin'], } },
-      codex: { openai: { command: ['no-such-fadeno-dispatch-bin'], } },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['no-such-fadeno-dispatch-bin'] } },
     dials: { worker: 'ghost-bin' },
   });
   // Use ghost that will fail to spawn (ENOENT) - need to make route command nonexistent
@@ -100,12 +89,9 @@ test('dispatch output: request row names the snapshot even when spawn fails', (t
   const root2 = tempRepo(t);
   mkdirSync(join(root2, '.fadeno'), { recursive: true });
   writeFileSync(join(root2, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { 'ghost-bin': { provider: 'openai', id: 'ghost-bin' } },
-    routes: {
-      standalone: { openai: { command: ['no-such-fadeno-dispatch-bin'] } },
-      codex: { openai: { command: ['no-such-fadeno-dispatch-bin'] } },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['no-such-fadeno-dispatch-bin'] } },
     archetypes: { worker: {} },
     dials: { worker: 'ghost-bin' },
   }));
@@ -140,15 +126,12 @@ test('dispatch output: request row names the snapshot even when spawn fails', (t
 });
 
 test('dispatch output: workspace_changed is true after a mutating executor', (t) => {
-  const root = seedV3(t, {
+  const root = seedCatalog(t, {
     models: {
       'mutate-worker': { provider: 'openai', id: 'mutate-worker' },
       'echo-worker': { provider: 'openai', id: 'echo-worker' },
     },
-    routes: {
-      standalone: { openai: { command: MUTATE, } },
-      codex: { openai: { command: MUTATE, } },
-    },
+    harnesses: { codex: { provider: 'openai', command: MUTATE } },
     dials: { worker: 'mutate-worker' },
   } as any);
   initGit(root);
@@ -160,7 +143,7 @@ test('dispatch output: workspace_changed is true after a mutating executor', (t)
 });
 
 test('dispatch output: workspace_changed is false after a pure-echo executor', (t) => {
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
   initGit(root);
   runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
   const completed = evidenceRows(root).find(r=>r.event==='dispatch_completed')!;
@@ -168,7 +151,7 @@ test('dispatch output: workspace_changed is false after a pure-echo executor', (
 });
 
 test('dispatch output: workspace_changed is omitted outside a git repo', (t) => {
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
   runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
   const [requested, completed] = evidenceRows(root) as [Record<string, unknown>, Record<string, unknown>];
   assert.ok(!('workspace_changed' in requested));
@@ -180,12 +163,9 @@ test('dispatch output: output snapshot on spawn failure empty file', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { 'ghost-bin': { provider: 'openai', id: 'ghost-bin' } },
-    routes: {
-      standalone: { openai: { command: ['no-such-fadeno-dispatch-bin'] } },
-      codex: { openai: { command: ['no-such-fadeno-dispatch-bin'] } },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['no-such-fadeno-dispatch-bin'] } },
     archetypes: { worker: {} },
     dials: { worker: 'ghost-bin' },
   }));
@@ -227,7 +207,7 @@ function outputNote(root: string, tag: string): { status: number | null; stdout:
 }
 
 test('dispatch output: a dispatch the kernel killed at its deadline is reported as TIMED OUT before anything about attestation', (t) => {
-  const root = seedV3(t, { routes: { standalone: { openai: { command: ['node', '-e', "setTimeout(()=>process.stdout.write('LATE'),6000)"] } } } });
+  const root = seedCatalog(t, { harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'setTimeout(()=>process.stdout.write(\'LATE\'),6000)'] } } });
   const result = runDispatch({ archetype: 'worker', prompt: 'slow', tag: 'worker-slow', repoRoot: root, shared: true, timeoutMs: 1000, userPathOptions: onHarness('standalone') });
   assert.equal(result.outcome, 'timeout');
   assert.equal(result.signal, 'SIGTERM');
@@ -249,7 +229,7 @@ test('dispatch output: a dispatch the kernel killed at its deadline is reported 
 });
 
 test('dispatch output: the direct call names the deadline kill too, rather than a fabricated "exited 1"', (t) => {
-  const root = seedV3(t, { routes: { standalone: { openai: { command: ['node', '-e', "setTimeout(()=>process.stdout.write('LATE'),6000)"] } } } });
+  const root = seedCatalog(t, { harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'setTimeout(()=>process.stdout.write(\'LATE\'),6000)'] } } });
   const cli = spawnSync('node', [join(REPO_ROOT, 'src', 'cli.ts'), 'dispatch', '--archetype', 'worker', '--tag', 'worker-direct', '--shared', '--timeout', '1'], { cwd: root, encoding: 'utf8', input: 'slow', env: { ...process.env, FADENO_HARNESS: 'standalone' } });
   assert.equal(cli.status, 1);
   assert.match(cli.stderr, /dispatch: executor \S+ TIMED OUT — the kernel killed it at its 1s deadline \(SIGTERM\); the work did NOT finish\. 0 bytes/);
@@ -263,7 +243,7 @@ test('dispatch output: FAILED, NO OUTPUT and ok verdicts each lead the note', (t
     { tag: 'worker-ok', cmd: ['node', '-e', "process.stdout.write('report')"], outcome: 'ok', note: /— ok: exit 0, 6 bytes; output attested/ },
   ];
   for (const c of cases) {
-    const root = seedV3(t, { routes: { standalone: { openai: { command: c.cmd } } } });
+    const root = seedCatalog(t, { harnesses: { codex: { provider: 'openai', command: c.cmd } } });
     runDispatch({ archetype: 'worker', prompt: 'p', tag: c.tag, repoRoot: root, shared: true, userPathOptions: onHarness('standalone') });
     const rec = runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: c.tag });
     assert.equal(rec.outcome, c.outcome, c.tag);
@@ -272,7 +252,7 @@ test('dispatch output: FAILED, NO OUTPUT and ok verdicts each lead the note', (t
 });
 
 test('dispatch output: an open dispatch carries no verdict — the facts are null until the completion row lands', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   // A request row with no completion: the killed-mid-flight shape.
   mkdirSync(join(root, '.fadeno', 'local', 'outputs'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'local', 'outputs', 'worker-open.md'), 'so far');
@@ -294,7 +274,7 @@ test('dispatch output: a blocking wait heartbeats elapsed time instead of lookin
   // Codex host feedback, 2026-08-26: a healthy long review is indistinguishable
   // from a dead one while the wait call runs. The heartbeat names the dispatch
   // and its elapsed time; the caller decides where it goes (cli.ts: stderr).
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   mkdirSync(join(root, '.fadeno', 'local', 'outputs'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'local', 'outputs', 'worker-beat.md'), 'so far');
   writeFileSync(join(root, DISPATCHES_FILE), JSON.stringify({

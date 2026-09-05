@@ -53,9 +53,10 @@ const UNPINNED_HOST_SLOT = JSON.stringify({
   session_effort: null,
   lane: 'host',
   lane_reason: 'effort unpinned',
-  driver: 'codex',
-  adapter: 'host',
   harness: 'codex',
+  variant: null,
+  adapter: 'host',
+  host: 'codex',
   source: 'repo',
 });
 
@@ -71,9 +72,10 @@ const PINNED_HOST_SLOT = JSON.stringify({
   session_effort: null,
   lane: 'command',
   lane_reason: 'session effort unobserved',
-  driver: 'codex',
-  adapter: 'host',
   harness: 'codex',
+  variant: null,
+  adapter: 'host',
+  host: 'codex',
   source: 'repo',
 });
 
@@ -94,9 +96,10 @@ const NEUTRAL_HOST_SLOT = JSON.stringify({
   session_effort: null,
   lane: 'host',
   lane_reason: 'effort unpinned',
-  driver: 'codex',
-  adapter: 'host',
   harness: 'codex',
+  variant: null,
+  adapter: 'host',
+  host: 'codex',
   source: 'binding',
 });
 
@@ -460,9 +463,12 @@ const PINNED_NEUTRAL_HOST_SLOT = JSON.stringify({
   // is restart_required — the shape `decideLane` gives with no proof.
   lane: 'restart_required',
   lane_reason: 'no command fallback',
-  driver: 'current-host',
-  adapter: 'host',
+  // `current-host` in a bare shell has no harness to name; inside Codex it is
+  // the Codex session itself.
   harness: 'codex',
+  variant: null,
+  adapter: 'host',
+  host: 'codex',
   source: 'user',
 });
 
@@ -519,8 +525,9 @@ test('codex spawn guard: a command-adapter resolution is recorded, not second-gu
       lane: 'command',
       lane_reason: 'session effort unobserved',
       adapter: 'command',
-      driver: 'claude',
-      harness: 'codex',
+      harness: 'claude',
+      variant: null,
+      host: 'codex',
       source: 'repo',
     }),
   );

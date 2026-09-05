@@ -1,6 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
+// One-directional at runtime: `executors.ts` imports only TYPES from this
+// module, so there is no cycle to break. The dial-ref grammar lives there, and
+// a second copy here is exactly how a user dial would start reading
+// differently from a catalog dial.
+import { formatDialRef, legacyDriverHarness, parseDialRef, type DialRef } from './executors.ts';
 
 /** Inputs used to resolve Fadeno's user-level configuration locations. */
 export interface UserPathOptions {
@@ -93,7 +98,7 @@ export function retiredStateFiles(paths: FadenoUserPaths): string[] {
  * removed-key file must NOT. */
 export class UserDialsError extends Error {}
 
-export function readUserDials(options: UserPathOptions = {}): Record<string, { model: string; effort?: string; via?: string }> {
+export function readUserDials(options: UserPathOptions = {}): Record<string, { model: string; effort?: string; harness?: string }> {
   const path = userPaths(options).dialsFile;
   if (!existsSync(path)) return {};
   const text = readFileSync(path, 'utf8').trim();
@@ -101,26 +106,17 @@ export function readUserDials(options: UserPathOptions = {}): Record<string, { m
   let doc: unknown;
   try { doc = JSON.parse(text); } catch { return {}; }
   if (doc == null || typeof doc !== 'object' || Array.isArray(doc)) return {};
-  const out: Record<string, { model: string; effort?: string; via?: string }> = {};
+  const out: Record<string, { model: string; effort?: string; harness?: string }> = {};
   for (const [k, v] of Object.entries(doc as Record<string, unknown>)) {
     if (typeof v === 'string') {
       const trimmed = v.trim();
       if (trimmed.length === 0) continue;
-      let via: string | undefined;
-      let core = trimmed;
-      const viaIdx = trimmed.indexOf(' via ');
-      if (viaIdx >= 0) {
-        core = trimmed.slice(0, viaIdx).trim();
-        via = trimmed.slice(viaIdx + 5).trim();
-      }
-      const atIdx = core.indexOf('@');
-      if (atIdx >= 0) {
-        const model = core.slice(0, atIdx).trim();
-        const effort = core.slice(atIdx + 1).trim();
-        out[k] = via ? { model, effort, via } : { model, effort };
-      } else {
-        out[k] = via ? { model: core, via } : { model: core };
-      }
+      // One parser for the grammar, so a user dial and a catalog dial cannot
+      // read differently — including the legacy ` via <driver>` form, which
+      // `parseDialRef` translates to a harness on read and never writes back.
+      let ref: DialRef;
+      try { ref = parseDialRef(trimmed, `user dial "${k}"`); } catch { continue; }
+      out[k] = ref;
     } else if (v != null && typeof v === 'object' && !Array.isArray(v)) {
       const map = v as Record<string, unknown>;
       const model = typeof map.model === 'string' ? map.model.trim() : '';
@@ -135,21 +131,23 @@ export function readUserDials(options: UserPathOptions = {}): Record<string, { m
       if (map.force_write_posture !== undefined) {
         throw new UserDialsError(
           `user dial "${k}" in ${path} carries "force_write_posture", which is no longer supported — there ` +
-            'is no write-posture guard left to override. Remove the key (the dial\'s model/effort/via are ' +
+            'is no write-posture guard left to override. Remove the key (the dial\'s model/effort/harness are ' +
             'still valid) or re-set the dial with `fadeno dial`. ' +
             'See docs/experimental/permissions-and-isolation.md.',
         );
       }
-      const entry: { model: string; effort?: string; via?: string } = { model };
+      const entry: { model: string; effort?: string; harness?: string } = { model };
       if (typeof map.effort === 'string' && map.effort.trim().length > 0) entry.effort = map.effort.trim();
-      if (typeof map.via === 'string' && map.via.trim().length > 0) entry.via = map.via.trim();
+      if (typeof map.harness === 'string' && map.harness.trim().length > 0) entry.harness = map.harness.trim();
+      // Legacy mapping form, read only.
+      else if (typeof map.via === 'string' && map.via.trim().length > 0) entry.harness = legacyDriverHarness(map.via.trim());
       out[k] = entry;
     }
   }
   return out;
 }
 
-export function writeUserDials(options: UserPathOptions, dials: Record<string, { model: string; effort?: string; via?: string }>): string {
+export function writeUserDials(options: UserPathOptions, dials: Record<string, { model: string; effort?: string; harness?: string }>): string {
   const path = userPaths(options).dialsFile;
   const keys = Object.keys(dials).sort();
   if (keys.length === 0) {
@@ -160,13 +158,9 @@ export function writeUserDials(options: UserPathOptions, dials: Record<string, {
   const sorted: Record<string, unknown> = {};
   for (const k of keys) {
     // One shape now. The object form existed only to carry
-    // `force_write_posture`, and with that gone every dial is expressible as the
-    // `model[@effort][ via driver]` string.
-    const ref = dials[k]!;
-    let str = ref.model;
-    if (ref.effort) str += `@${ref.effort}`;
-    if (ref.via) str += ` via ${ref.via}`;
-    sorted[k] = str;
+    // `force_write_posture`, and with that gone every dial is expressible as
+    // the `model[@effort][ on <harness>]` string that `formatDialRef` emits.
+    sorted[k] = formatDialRef(dials[k]!);
   }
   const ordered: Record<string, unknown> = {};
   for (const k of Object.keys(sorted).sort()) ordered[k] = sorted[k];
@@ -177,7 +171,8 @@ export function writeUserDials(options: UserPathOptions, dials: Record<string, {
 // --- verification cache ---
 
 export interface ModelVerification {
-  driver: string;
+  /** The executor harness whose `models_command` listed the model. */
+  harness: string;
   model: string;
   verified_at: string;
 }
@@ -194,11 +189,16 @@ export function readVerifiedModels(options: UserPathOptions = {}): ModelVerifica
     for (const entry of parsed) {
       if (entry == null || typeof entry !== 'object' || Array.isArray(entry)) continue;
       const map = entry as Record<string, unknown>;
-      if (typeof map.driver !== 'string' || typeof map.model !== 'string' || typeof map.verified_at !== 'string') continue;
-      out.push({ driver: map.driver, model: map.model, verified_at: map.verified_at });
+      // A cache written before catalog v4 keys on `driver`; the value was
+      // always a harness wearing a driver's name, so it reads back as one.
+      const harness = typeof map.harness === 'string'
+        ? map.harness
+        : typeof map.driver === 'string' ? legacyDriverHarness(map.driver) : null;
+      if (harness == null || typeof map.model !== 'string' || typeof map.verified_at !== 'string') continue;
+      out.push({ harness, model: map.model, verified_at: map.verified_at });
     }
     out.sort((a, b) => {
-      if (a.driver !== b.driver) return a.driver.localeCompare(b.driver);
+      if (a.harness !== b.harness) return a.harness.localeCompare(b.harness);
       return a.model.localeCompare(b.model);
     });
     return out;
@@ -207,18 +207,18 @@ export function readVerifiedModels(options: UserPathOptions = {}): ModelVerifica
   }
 }
 
-export function isModelVerified(options: UserPathOptions, driver: string, model: string): boolean {
+export function isModelVerified(options: UserPathOptions, harness: string, model: string): boolean {
   const list = readVerifiedModels(options);
-  return list.some((e) => e.driver === driver && e.model === model);
+  return list.some((e) => e.harness === harness && e.model === model);
 }
 
 export function recordVerifiedModel(options: UserPathOptions, entry: ModelVerification): void {
   const path = userPaths(options).modelVerificationsFile;
   const existing = readVerifiedModels(options);
-  if (existing.some((e) => e.driver === entry.driver && e.model === entry.model)) return;
+  if (existing.some((e) => e.harness === entry.harness && e.model === entry.model)) return;
   const next = [...existing, entry];
   next.sort((a, b) => {
-    if (a.driver !== b.driver) return a.driver.localeCompare(b.driver);
+    if (a.harness !== b.harness) return a.harness.localeCompare(b.harness);
     return a.model.localeCompare(b.model);
   });
   mkdirSync(join(path, '..'), { recursive: true });

@@ -5,25 +5,19 @@ import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { runDialResolve, runDialShow } from '../src/commands/dial.ts';
 import { loadLayeredProfile } from '../src/lib/config-layers.ts';
-import { tempRepo } from './helpers.ts';
+import { catalogV4Doc, tempRepo } from './helpers.ts';
 
-// A self-contained project catalog: models + routes both declared, which is
-// what flips `projectIsComplete` and historically suppressed the user layer
+// A self-contained project catalog: models + harnesses both declared, which
+// is what flips `projectIsComplete` and historically suppressed the user layer
 // wholesale. The per-key user-model fallback is the one carve-out.
-const V3_BASE = {
-  schema_version: 3,
+const V4_BASE = catalogV4Doc({
   models: {
     sol: { provider: 'dummy', id: 'sol', effort: 'high' },
   },
-  routes: {
-    standalone: {
-      dummy: { command: ['node', '-e', '0'] },
-      'current-host': { host: true },
-    },
-  },
+  harnesses: { dummy: { provider: 'dummy', command: ['node', '-e', '0'] } },
   archetypes: { worker: {} },
   dials: { worker: 'sol' },
-};
+});
 
 function isolatedPaths(root: string) {
   return {
@@ -41,14 +35,14 @@ function seedRepo(t: TestContext, doc: Record<string, unknown>, userModels?: Rec
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml(doc));
   if (userModels != null) {
     mkdirSync(join(root, 'user-config', 'fadeno'), { recursive: true });
-    writeFileSync(join(root, 'user-config', 'fadeno', 'executors.yaml'), stringifyYaml({ schema_version: 3, models: userModels }));
+    writeFileSync(join(root, 'user-config', 'fadeno', 'executors.yaml'), stringifyYaml({ schema_version: 4, models: userModels }));
   }
   return { root, paths: isolatedPaths(root) };
 }
 
-test('user-catalog alias falls back into a self-contained project catalog when its route resolves', (t) => {
-  const { root, paths } = seedRepo(t, V3_BASE, {
-    ox: { provider: 'stealth', id: 'ox-alpha', effort: 'default', delivery: { route: 'dummy', id: 'stealth/ox-alpha' } },
+test('user-catalog alias falls back into a self-contained project catalog when its harness resolves', (t) => {
+  const { root, paths } = seedRepo(t, V4_BASE, {
+    ox: { provider: 'stealth', id: 'ox-alpha', effort: 'default', harness: 'dummy', spellings: { dummy: 'stealth/ox-alpha' } },
   });
   const loaded = loadLayeredProfile(root, paths);
   assert.ok(loaded.selfContained);
@@ -60,8 +54,8 @@ test('user-catalog alias falls back into a self-contained project catalog when i
 });
 
 test('a promoted alias resolves with its delivery id and names its origin', (t) => {
-  const { root, paths } = seedRepo(t, { ...V3_BASE, dials: {} }, {
-    ox: { provider: 'stealth', id: 'ox-alpha', effort: 'default', delivery: { route: 'dummy', id: 'stealth/ox-alpha' } },
+  const { root, paths } = seedRepo(t, { ...V4_BASE, dials: {} }, {
+    ox: { provider: 'stealth', id: 'ox-alpha', effort: 'default', harness: 'dummy', spellings: { dummy: 'stealth/ox-alpha' } },
   });
   mkdirSync(join(root, 'user-state', 'fadeno'), { recursive: true });
   writeFileSync(join(root, 'user-state', 'fadeno', 'dials.json'), JSON.stringify({ worker: { model: 'ox' } }));
@@ -73,44 +67,48 @@ test('a promoted alias resolves with its delivery id and names its origin', (t) 
   assert.match(resolved.model_fallback?.note ?? '', /promoted into this self-contained catalog: ox/);
 });
 
-test('an alias whose delivery route resolves nowhere drops loudly instead of merging broken', (t) => {
-  const { root, paths } = seedRepo(t, V3_BASE, {
-    ghosty: { provider: 'ghost', id: 'ghost-1', effort: 'default', delivery: { route: 'nowhere', id: 'ghost/one' } },
+test('an alias nothing in the merged harness table can deliver drops loudly instead of merging broken', (t) => {
+  const { root, paths } = seedRepo(t, V4_BASE, {
+    ghosty: { provider: 'ghost', id: 'ghost-1', effort: 'default' },
   });
   const loaded = loadLayeredProfile(root, paths);
   assert.deepEqual(loaded.modelFallback.promoted, []);
-  assert.deepEqual(loaded.modelFallback.dropped, [{ alias: 'ghosty', route: 'nowhere' }]);
+  // No harness claims `ghost` as home, and the entry names none, so promoting
+  // it would only move a load error under a name nobody asked for.
+  assert.deepEqual(loaded.modelFallback.dropped, [{ alias: 'ghosty', harness: 'ghost' }]);
   // Dropped means NOT registered: the parser never saw the dangling reference.
   assert.equal(Object.hasOwn(loaded.profile.models, 'ghosty'), false);
   const shown = runDialShow({ repoRoot: root, userPathOptions: paths });
-  assert.match(shown.note ?? '', /dropped — delivery route "nowhere" is declared nowhere/);
+  assert.match(shown.note ?? '', /dropped — nothing in this catalog can deliver harness\/provider "ghost"/);
 });
 
 test('a project-declared model wins by name; the user entry neither overrides nor drops', (t) => {
-  const { root, paths } = seedRepo(t, V3_BASE, {
+  const { root, paths } = seedRepo(t, V4_BASE, {
     sol: { provider: 'dummy', id: 'user-sol', effort: 'low' },
   });
   const loaded = loadLayeredProfile(root, paths);
-  assert.deepEqual(loaded.modelFallback, { promoted: [], dropped: [] });
+  assert.deepEqual(loaded.modelFallback, { promoted: [], dropped: [], repairs: [] });
   assert.equal(loaded.profile.models['sol']?.id, 'sol');
 });
 
 test('normal layering reports an empty fallback outcome; user models were always merged there', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
-  // No routes key => NOT self-contained => normal layering.
+  // No harnesses key => NOT self-contained => normal layering onto the builtin.
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     archetypes: { worker: {} },
   }));
   const paths = isolatedPaths(root);
   mkdirSync(join(root, 'user-config', 'fadeno'), { recursive: true });
+  // `harness:` explicitly, because with the builtin layered in there is no
+  // harness claiming `stealth` as home — the v4 load error names exactly that.
   writeFileSync(join(root, 'user-config', 'fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
-    models: { ox: { provider: 'stealth', id: 'ox-alpha', effort: 'default' } },
+    schema_version: 4,
+    models: { ox: { provider: 'stealth', id: 'ox-alpha', effort: 'default', harness: 'opencode' } },
   }));
   const loaded = loadLayeredProfile(root, paths);
   assert.ok(!loaded.selfContained);
-  assert.deepEqual(loaded.modelFallback, { promoted: [], dropped: [] });
+  assert.deepEqual(loaded.modelFallback, { promoted: [], dropped: [], repairs: [] });
   assert.equal(loaded.profile.models['ox']?.id, 'ox-alpha');
 });

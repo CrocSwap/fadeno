@@ -26,22 +26,22 @@ const validTools = [
 ];
 
 const rejectCases: Array<{ doc: string; msg: string }> = [
-  { doc: `schema_version: 3\nmodels: {}\nroutes: {}\ntools:\n  bad:\n    command: npm test\n`, msg: 'bare string' },
-  { doc: `schema_version: 3\nmodels: {}\nroutes: {}\ntools:\n  bad:\n    command: []\n`, msg: 'empty argv' },
-  { doc: `schema_version: 3\nmodels: {}\nroutes: {}\ntools:\n  bad:\n    command: ['npm', '']\n`, msg: 'empty part' },
-  { doc: `schema_version: 3\nmodels: {}\nroutes: {}\ntools:\n  bad:\n    command: ['npm', '   ']\n`, msg: 'whitespace-only part' },
-  { doc: `schema_version: 3\nmodels: {}\nroutes: {}\ntools:\n  bad:\n    command: ['npm', 'test {placeholder}']\n`, msg: 'interpolation brace' },
-  { doc: `schema_version: 3\nmodels: {}\nroutes: {}\ntools:\n  bad:\n    command: ['npm', 'test \$HOME']\n`, msg: 'dollar' },
-  { doc: `schema_version: 3\nmodels: {}\nroutes: {}\ntools:\n  bad:\n    command: ['npm', 'test \`backtick\`']\n`, msg: 'backtick' },
-  { doc: `schema_version: 3\nmodels: {}\nroutes: {}\ntools:\n  bad:\n    command: ['npm', 'test\n']\n`, msg: 'newline' },
-  { doc: `schema_version: 3\nmodels: {}\nroutes: {}\ntools:\n  BadName:\n    command: ['npm', 'test']\n`, msg: 'non-bare name' },
-  { doc: `schema_version: 3\nmodels: {}\nroutes: {}\ntools:\n  good:\n    command: ['npm', 'test']\n    unknown: 123\n`, msg: 'unknown key' },
-  { doc: `schema_version: 3\nmodels: {}\nroutes: {}\ntools:\n  good:\n    command: ['npm', 'test']\n    timeout_ms: 0\n`, msg: 'timeout_ms 0' },
-  { doc: `schema_version: 3\nmodels: {}\nroutes: {}\ntools:\n  good:\n    command: ['npm', 'test']\n    timeout_ms: -1\n`, msg: 'timeout_ms -1' },
-  { doc: `schema_version: 3\nmodels: {}\nroutes: {}\ntools:\n  good:\n    command: ['npm', 'test']\n    timeout_ms: 1.5\n`, msg: 'timeout_ms float' },
-  { doc: `schema_version: 3\nmodels: {}\nroutes: {}\ntools:\n  good:\n    command: ['npm', 'test']\n    timeout: 0\n`, msg: 'timeout 0' },
-  { doc: `schema_version: 3\nmodels: {}\nroutes: {}\ntools:\n  good:\n    command: ['npm', 'test']\n    timeout: 1.5\n`, msg: 'timeout float' },
-  { doc: `schema_version: 3\nmodels: {}\nroutes: {}\ntools:\n  good:\n    command: ['npm', 'test']\n    timeout: 5\n    timeout_ms: 5000\n`, msg: 'both timeouts' },
+  { doc: `schema_version: 4\nmodels: {t: {provider: dummy, id: t}}\nharnesses: {dummy: {provider: dummy, command: [x]}}\ntools:\n  bad:\n    command: npm test\n`, msg: 'bare string' },
+  { doc: `schema_version: 4\nmodels: {t: {provider: dummy, id: t}}\nharnesses: {dummy: {provider: dummy, command: [x]}}\ntools:\n  bad:\n    command: []\n`, msg: 'empty argv' },
+  { doc: `schema_version: 4\nmodels: {t: {provider: dummy, id: t}}\nharnesses: {dummy: {provider: dummy, command: [x]}}\ntools:\n  bad:\n    command: ['npm', '']\n`, msg: 'empty part' },
+  { doc: `schema_version: 4\nmodels: {t: {provider: dummy, id: t}}\nharnesses: {dummy: {provider: dummy, command: [x]}}\ntools:\n  bad:\n    command: ['npm', '   ']\n`, msg: 'whitespace-only part' },
+  { doc: `schema_version: 4\nmodels: {t: {provider: dummy, id: t}}\nharnesses: {dummy: {provider: dummy, command: [x]}}\ntools:\n  bad:\n    command: ['npm', 'test {placeholder}']\n`, msg: 'interpolation brace' },
+  { doc: `schema_version: 4\nmodels: {t: {provider: dummy, id: t}}\nharnesses: {dummy: {provider: dummy, command: [x]}}\ntools:\n  bad:\n    command: ['npm', 'test \$HOME']\n`, msg: 'dollar' },
+  { doc: `schema_version: 4\nmodels: {t: {provider: dummy, id: t}}\nharnesses: {dummy: {provider: dummy, command: [x]}}\ntools:\n  bad:\n    command: ['npm', 'test \`backtick\`']\n`, msg: 'backtick' },
+  { doc: `schema_version: 4\nmodels: {t: {provider: dummy, id: t}}\nharnesses: {dummy: {provider: dummy, command: [x]}}\ntools:\n  bad:\n    command: ['npm', 'test\n']\n`, msg: 'newline' },
+  { doc: `schema_version: 4\nmodels: {t: {provider: dummy, id: t}}\nharnesses: {dummy: {provider: dummy, command: [x]}}\ntools:\n  BadName:\n    command: ['npm', 'test']\n`, msg: 'non-bare name' },
+  { doc: `schema_version: 4\nmodels: {t: {provider: dummy, id: t}}\nharnesses: {dummy: {provider: dummy, command: [x]}}\ntools:\n  good:\n    command: ['npm', 'test']\n    unknown: 123\n`, msg: 'unknown key' },
+  { doc: `schema_version: 4\nmodels: {t: {provider: dummy, id: t}}\nharnesses: {dummy: {provider: dummy, command: [x]}}\ntools:\n  good:\n    command: ['npm', 'test']\n    timeout_ms: 0\n`, msg: 'timeout_ms 0' },
+  { doc: `schema_version: 4\nmodels: {t: {provider: dummy, id: t}}\nharnesses: {dummy: {provider: dummy, command: [x]}}\ntools:\n  good:\n    command: ['npm', 'test']\n    timeout_ms: -1\n`, msg: 'timeout_ms -1' },
+  { doc: `schema_version: 4\nmodels: {t: {provider: dummy, id: t}}\nharnesses: {dummy: {provider: dummy, command: [x]}}\ntools:\n  good:\n    command: ['npm', 'test']\n    timeout_ms: 1.5\n`, msg: 'timeout_ms float' },
+  { doc: `schema_version: 4\nmodels: {t: {provider: dummy, id: t}}\nharnesses: {dummy: {provider: dummy, command: [x]}}\ntools:\n  good:\n    command: ['npm', 'test']\n    timeout: 0\n`, msg: 'timeout 0' },
+  { doc: `schema_version: 4\nmodels: {t: {provider: dummy, id: t}}\nharnesses: {dummy: {provider: dummy, command: [x]}}\ntools:\n  good:\n    command: ['npm', 'test']\n    timeout: 1.5\n`, msg: 'timeout float' },
+  { doc: `schema_version: 4\nmodels: {t: {provider: dummy, id: t}}\nharnesses: {dummy: {provider: dummy, command: [x]}}\ntools:\n  good:\n    command: ['npm', 'test']\n    timeout: 5\n    timeout_ms: 5000\n`, msg: 'both timeouts' },
 ];
 
 for (const { doc, msg } of rejectCases) {
@@ -50,7 +50,7 @@ for (const { doc, msg } of rejectCases) {
   });
   test(`registry snapshot rejects ${msg}`, () => {
     // Build snapshot text that includes same tool error via serialized snapshot? Instead directly test parseSnapshotDocument with similar structure
-    const snapshotDoc = doc.replace('schema_version: 3', 'snapshot_version: 3').replace('models:', 'executors:\n  dummy: {adapter: command, command: [echo, hi]}\nmodels:');
+    const snapshotDoc = doc.replace('schema_version: 4', 'snapshot_version: 3').replace('models:', 'executors:\n  dummy: {adapter: command, command: [echo, hi]}\nmodels:');
     // Simpler: construct minimal snapshot with tools entry mimicking catalog error
     // For snapshot, executors is required, so we need to craft snapshot that fails on tools
     // We'll build a snapshot text manually with tools having same error
@@ -67,7 +67,7 @@ for (const { doc, msg } of rejectCases) {
 }
 
 test('registry accepts valid tools', () => {
-  let doc = `schema_version: 3\nmodels: {a: {provider: dummy, id: a, effort: xhigh}}\nroutes: {standalone: {dummy: {host: true}}}\ntools:\n`;
+  let doc = `schema_version: 4\nmodels: {a: {provider: dummy, id: a, effort: xhigh}}\nharnesses: {dummy: {provider: dummy, host: {effort_channel: none}}}\ntools:\n`;
   for (const t of validTools) {
     doc += `  ${t.name}:\n    command: [${t.command.map((c) => JSON.stringify(c)).join(', ')}]\n`;
     if ((t as any).timeout_ms) doc += `    timeout_ms: ${(t as any).timeout_ms}\n`;
@@ -83,12 +83,11 @@ test('registry accepts valid tools', () => {
 });
 
 test('registry snapshot round-trip preserves tools', () => {
-  const doc = `schema_version: 3
+  const doc = `schema_version: 4
 models:
   luna: {provider: dummy, id: gpt-5.6-luna, effort: xhigh}
-routes:
-  standalone:
-    dummy: {host: true}
+harnesses:
+  dummy: {provider: dummy, host: {effort_channel: none}}
 tools:
   test_runner: {command: [npm, test], timeout_ms: 300000}
   lint: {command: [npm, run, lint], timeout: 60}
@@ -106,7 +105,7 @@ tools:
 function userScopeWithTool(t: TestContext, tools: Record<string, unknown>): { env: Record<string, string | undefined> } {
   const configHome = tempRepo(t);
   mkdirSync(join(configHome, 'fadeno'), { recursive: true });
-  writeFileSync(join(configHome, 'fadeno', 'executors.yaml'), stringifyYaml({ schema_version: 3, tools }));
+  writeFileSync(join(configHome, 'fadeno', 'executors.yaml'), stringifyYaml({ schema_version: 4, tools }));
   return { env: { ...process.env, FADENO_CONFIG_HOME: configHome } };
 }
 
@@ -121,7 +120,7 @@ test('tool layering: the builtin catalog ships no tools, and a project catalog t
 
   // Project catalog without models+routes: layering stays on, so all three merge.
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     tools: { project_tool: { command: ['echo', 'project'] } },
   }));
   const layered = loadLayeredProfile(root, userScope, 'standalone');
@@ -136,9 +135,9 @@ test('tool layering: a self-contained project catalog suppresses the user tool e
   const userScope = userScopeWithTool(t, { user_tool: { command: ['echo', 'user'] } });
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { custom: { provider: 'dummy', id: 'custom', effort: 'xhigh' } },
-    routes: { standalone: { dummy: { host: true } } },
+    harnesses: { dummy: { provider: 'dummy', host: { effort_channel: 'none' } } },
     tools: { project_tool: { command: ['echo', 'project'] } },
   }));
 
@@ -161,12 +160,11 @@ test('a project-registered tool is the binding a run executes', (t) => {
 });
 
 test('snapshot parse enforces same whitespace rejection as catalog', () => {
-  const catalogDoc = `schema_version: 3
+  const catalogDoc = `schema_version: 4
 models:
   dummy: {provider: dummy, id: a, effort: xhigh}
-routes:
-  standalone:
-    dummy: {host: true}
+harnesses:
+  dummy: {provider: dummy, host: {effort_channel: none}}
 tools:
   bad:
     command: ['npm', '   ']

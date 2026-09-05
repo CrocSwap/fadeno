@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { legacyDriverHarness } from './executors.ts';
 import { codexUserAgentDir, type UserPathOptions } from './user-paths.ts';
 
 /** The three Codex role slots that get a session-static agent file. */
@@ -39,7 +40,11 @@ const EFFORT_RE = /^model_reasoning_effort\s*=\s*"((?:[^"\\]|\\.)*)"/m;
 // alias]` — so an optional `via` clause is reassembled from the two groups
 // rather than captured as one greedy token, which would either swallow the
 // following `--run`/`--prompt-file` flag or stop short of the alias.
-const HOST_EXECUTOR_RE = /--host-executor\s+(\S+)(?:\s+via\s+(\S+))?/;
+// Both grammars: v4's ` on <harness>`, and the ` via <driver>` a file baked
+// before the bump still carries. The legacy half is READ only — the renderer
+// below always writes the v4 form — so an agent file materialized by an older
+// fadeno still identifies itself instead of silently failing its ref match.
+const HOST_EXECUTOR_RE = /--host-executor\s+(\S+)(?:\s+(on|via)\s+(\S+))?/;
 
 function unquoteToml(raw: string): string {
   try {
@@ -109,7 +114,12 @@ export function readCodexAgentFile(path: string): CodexAgentFileState | null {
     model: modelMatch ? unquoteToml(modelMatch[1]!) : null,
     reasoningEffort: effortMatch ? unquoteToml(effortMatch[1]!) : null,
     hostExecutor: hostExecutorMatch
-      ? (hostExecutorMatch[2] != null ? `${hostExecutorMatch[1]} via ${hostExecutorMatch[2]}` : hostExecutorMatch[1]!)
+      ? (hostExecutorMatch[3] != null
+          // A legacy ` via <driver>` is normalized to the v4 spelling, through
+          // the same map `parseDialRef` uses, so a ref-string comparison
+          // against `formatDialRef(ref)` still matches.
+          ? `${hostExecutorMatch[1]} on ${hostExecutorMatch[2] === 'via' ? legacyDriverHarness(hostExecutorMatch[3]!) : hostExecutorMatch[3]}`
+          : hostExecutorMatch[1]!)
       : null,
   };
 }

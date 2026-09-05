@@ -19,6 +19,12 @@ const OUTPUT_SNAP = '.fadeno/local/outputs/worker-aaaaaaaa.md';
 const OUTPUT_BODY = 'hello from the executor\n';
 const OUTPUT_DIGEST = sha256Hex(OUTPUT_BODY);
 
+/**
+ * A format **1.0** row by default — the previous generation, kept as the
+ * default so the tiered legacy reading below is exercised by every test that
+ * does not opt into the current stamp with `format: DISPATCHES_FORMAT`.
+ * Under 1.0 `harness` meant the HOST and `driver` meant the executor.
+ */
 function requested(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     format: '1.0',
@@ -33,7 +39,7 @@ function requested(over: Record<string, unknown> = {}): Record<string, unknown> 
     model: 'echo-worker',
     model_id: 'echo-worker',
     reasoning_effort: 'default',
-    driver: 'openai',
+    harness: 'codex',
     provider: 'openai',
     transport: 'command',
     prompt_source: 'stdin',
@@ -83,7 +89,7 @@ function legacyRow(over: Record<string, unknown> = {}): Record<string, unknown> 
     executor: 'grok-worker',
     model: 'grok-4.6',
     model_id: 'grok-4.6',
-    driver: 'openai',
+    harness: 'codex',
     exit_code: 0,
     duration_ms: 17444,
     prompt_sha256: 'e'.repeat(64),
@@ -110,7 +116,7 @@ test('dispatches: correlates a requested/completed pair into one logical entry',
   assert.equal(result.path, '.fadeno/dispatches.jsonl');
   assert.equal(result.exists, true);
   assert.ok(result.lines[0]!.includes('worker → echo-worker'));
-  assert.ok(result.lines[0]!.includes('via openai') || result.lines[0]!.includes('via command'));
+  assert.ok(result.lines[0]!.includes('on codex') || result.lines[0]!.includes('on command'));
   assert.equal(result.summary, '1 of 1 dispatch shown');
   const entry = result.entries[0]!;
   assert.equal(entry.kind, 'command');
@@ -128,9 +134,9 @@ test('dispatches: reads what the kernel actually writes (round trip)', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { 'echo-worker': { provider: 'openai', id: 'echo-worker' } },
-    routes: { standalone: { openai: { command: ['node', '-e', "process.stdout.write('ok')"] } }, codex: { openai: { command: ['node', '-e', "process.stdout.write('ok')"] } } },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'process.stdout.write(\'ok\')'] } },
     archetypes: { worker: {} },
     dials: { worker: 'echo-worker' },
   }));
@@ -186,7 +192,7 @@ test('dispatches: a pre-0.6 native_delivery row still renders as a host entry', 
 test('dispatches: a native_spawn row renders as an unsteered spawn on its inherited model', (t) => {
   const root = seedLog(t, [
     {
-      format: '1.0',
+      format: '1.1',
       timestamp: '2026-09-04T22:26:00.000Z',
       event: 'native_spawn',
       hook_version: '0.6.2',
@@ -221,7 +227,7 @@ test('dispatches: a native_spawn row renders as an unsteered spawn on its inheri
 test('dispatches: a native spawn that named its own model does not claim it overrode an unobserved one', (t) => {
   const root = seedLog(t, [
     {
-      format: '1.0',
+      format: '1.1',
       timestamp: '2026-09-04T22:31:00.000Z',
       event: 'native_spawn',
       hook_version: '0.6.2',
@@ -275,7 +281,7 @@ test('dispatches: host_delivery rows render one entry each, with model_override'
 
 function attestRow(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    format: '1.0',
+    format: '1.1',
     timestamp: '2026-08-12T12:02:05.000Z',
     event: 'host_attestation',
     archetype: 'worker',
@@ -414,8 +420,12 @@ test('dispatches: default shows the last 10 entries; --tail selects a different 
   }
 });
 
-test('dispatches: entries are structured data (what --json prints) — 1.0 shape pin', (t) => {
-  const root = seedLog(t, [requested(), completed(), hostRow({ model_override: 'sonnet' })]);
+test('dispatches: entries are structured data (what --json prints) — 1.1 shape pin', (t) => {
+  const root = seedLog(t, [
+    requested({ format: DISPATCHES_FORMAT, host: 'codex', harness: 'codex', driver: undefined }),
+    completed({ format: DISPATCHES_FORMAT, host: 'codex', harness: 'codex', driver: undefined }),
+    hostRow({ model_override: 'sonnet' }),
+  ]);
   const result = runDispatches({ repoRoot: root });
   const payload = JSON.parse(JSON.stringify({ path: result.path, total: result.total, shown: result.entries.length, skipped: result.skipped, entries: result.entries })) as any;
   assert.equal(payload.path, '.fadeno/dispatches.jsonl');
@@ -423,9 +433,9 @@ test('dispatches: entries are structured data (what --json prints) — 1.0 shape
   assert.equal(payload.shown, 2);
   assert.equal(payload.skipped, 0);
   const e = payload.entries[0] as Record<string, unknown>;
-  // pin 1.0 fields
+  // pin 1.1 fields
   assert.equal(e.kind, 'command');
-  assert.equal(e.format, '1.0');
+  assert.equal(e.format, '1.1');
   assert.equal(e.legacy, false);
   assert.equal(e.dispatchId, 'd1');
   assert.equal(e.archetype, 'worker');
@@ -438,7 +448,8 @@ test('dispatches: entries are structured data (what --json prints) — 1.0 shape
   assert.equal(e.modelOverride, null);
   assert.equal(e.modelId, 'echo-worker');
   assert.equal(e.reasoningEffort, 'default');
-  assert.equal(e.driver, 'openai');
+  assert.equal(e.harness, 'codex', 'the EXECUTOR harness');
+  assert.equal(e.host, 'codex', 'and the HOST it ran inside, on its own key');
   assert.equal(e.provider, 'openai');
   assert.equal(e.transport, 'command');
   assert.equal(e.promptSource, 'stdin');
@@ -812,7 +823,7 @@ test('dispatches --output: mismatch when the file no longer matches output_sha25
 
 test('dispatches --output: errors for unknown, ambiguous, pre-snapshot, and missing-file', (t) => {
   // Build a pre-snapshot row without output_snapshot
-  const preReq: Record<string, unknown> = { format: '1.0', timestamp: '2026-08-12T11:00:00.000Z', event: 'dispatch_requested', dispatch_id: 'pre-snap-00000001', archetype: 'worker', resolution: 'repo', dial: { model: 'echo-worker' }, executor: 'echo-worker', prompt_sha256: 'a'.repeat(64) };
+  const preReq: Record<string, unknown> = { format: '1.1', timestamp: '2026-08-12T11:00:00.000Z', event: 'dispatch_requested', dispatch_id: 'pre-snap-00000001', archetype: 'worker', resolution: 'repo', dial: { model: 'echo-worker' }, executor: 'echo-worker', prompt_sha256: 'a'.repeat(64) };
   const preComp: Record<string, unknown> = { ...preReq, event: 'dispatch_completed', exit_code: 0, duration_ms: 10, output_sha256: 'b'.repeat(64) };
   const root = seedLog(t, [
     preReq,
@@ -836,9 +847,9 @@ test('dispatches: a nonzero exit is stamped and rendered as FAILED, not complete
     const root = tempRepo(t);
     mkdirSync(join(root, '.fadeno'), { recursive: true });
     writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-      schema_version: 3,
+      schema_version: 4,
       models: { probe: { provider: 'openai', id: 'probe' } },
-      routes: { standalone: { openai: { command: cmd } }, codex: { openai: { command: cmd } } },
+      harnesses: { codex: { provider: 'openai', command: cmd } },
       archetypes: { worker: {} },
       dials: { worker: 'probe' },
     }));
@@ -860,9 +871,9 @@ test('dispatches: exit 0 with no output is stamped `empty`, not success', (t) =>
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { probe: { provider: 'openai', id: 'probe' } },
-    routes: { standalone: { openai: { command: ['node', '-e', '0'] } }, codex: { openai: { command: ['node', '-e', '0'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', '0'] } },
     archetypes: { worker: {} },
     dials: { worker: 'probe' },
   }));

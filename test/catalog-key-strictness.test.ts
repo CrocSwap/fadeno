@@ -11,7 +11,7 @@ import {
   type ExecutorProfile,
 } from '../src/lib/executors.ts';
 import { userPaths, type UserPathOptions } from '../src/lib/user-paths.ts';
-import { tempRepo } from './helpers.ts';
+import { catalogV4Doc, tempRepo } from './helpers.ts';
 
 /**
  * A misspelled top-level catalog key must fail loudly, not vanish.
@@ -28,17 +28,11 @@ import { tempRepo } from './helpers.ts';
  * `~/.config/fadeno/executors.yaml`.
  */
 
-const V3_BASE = {
-  schema_version: 3,
+const V4_BASE = catalogV4Doc({
   models: { sol: { provider: 'dummy', id: 'sol', effort: 'high' } },
-  routes: {
-    standalone: {
-      dummy: { command: ['node', '-e', '0'], },
-      'current-host': { host: true },
-    },
-  },
+  harnesses: { dummy: { provider: 'dummy', command: ['node', '-e', '0'] } },
   archetypes: { worker: { } },
-};
+});
 
 function isolatedUser(root: string): UserPathOptions {
   return {
@@ -85,7 +79,7 @@ test('a misspelled top-level key fails loudly instead of vanishing in the merge'
   // The regression: this catalog used to load clean, with `worktree_carry`
   // simply never in effect. Nothing downstream could tell the difference
   // between "carry nothing" and "the declaration was thrown away".
-  const { root, paths, projectFile } = seed(t, { ...V3_BASE, worktree_carrry: ['node_modules'] });
+  const { root, paths, projectFile } = seed(t, { ...V4_BASE, worktree_carrry: ['node_modules'] });
   const err = thrown(() => loadLayeredProfile(root, paths));
   assert.match(err.message, /unknown top-level key/);
   // Names the file to edit and the exact key that is wrong...
@@ -99,7 +93,7 @@ test('the layer that carries the typo is the file named, even under layering', (
   // "unknown key" without a path is close to useless when catalogs compose
   // across user and project scope: the merged document the parser sees is
   // attributed to "builtin + user + project", which names no file at all.
-  const { root, paths, projectFile, userFile } = seed(t, { dials: { worker: 'sol' } }, { ...V3_BASE, dails: { worker: 'sol' } });
+  const { root, paths, projectFile, userFile } = seed(t, { dials: { worker: 'sol' } }, { ...V4_BASE, dails: { worker: 'sol' } });
   const err = thrown(() => loadLayeredProfile(root, paths));
   assert.ok(err.message.startsWith(`${userFile}: `), `must name the user catalog; got ${err.message}`);
   assert.ok(!err.message.includes(projectFile), 'must not point at the innocent project catalog');
@@ -107,7 +101,7 @@ test('the layer that carries the typo is the file named, even under layering', (
 });
 
 test('an unknown key with no near match gets the key list, not a wild guess', (t) => {
-  const { root, paths } = seed(t, { ...V3_BASE, pipeline_settings: { retries: 2 } });
+  const { root, paths } = seed(t, { ...V4_BASE, pipeline_settings: { retries: 2 } });
   const err = thrown(() => loadLayeredProfile(root, paths));
   assert.match(err.message, /unknown top-level key `pipeline_settings`/);
   assert.doesNotMatch(err.message, /did you mean/);
@@ -116,7 +110,7 @@ test('an unknown key with no near match gets the key list, not a wild guess', (t
 });
 
 test('several unknown keys are all reported, each with its own suggestion', (t) => {
-  const { root, paths } = seed(t, { ...V3_BASE, tolos: {}, zzzz: 1 });
+  const { root, paths } = seed(t, { ...V4_BASE, tolos: {}, zzzz: 1 });
   const err = thrown(() => loadLayeredProfile(root, paths));
   assert.match(err.message, /unknown top-level keys/);
   assert.match(err.message, /`tolos` \(did you mean `tools`\?\)/);
@@ -145,14 +139,14 @@ test('a known key in the wrong layer keeps its own message, not "unknown key"', 
   // precise diagnosis for a vague one. (No project catalog in these repos: a
   // self-contained one suppresses the user layer entirely, so the user
   // catalog would never be merged and never be checked.)
-  const withDials = seed(t, null, { ...V3_BASE, dials: { worker: 'sol' } });
+  const withDials = seed(t, null, { ...V4_BASE, dials: { worker: 'sol' } });
   const dialsErr = thrown(() => loadLayeredProfile(withDials.root, withDials.paths));
   assert.equal(
     dialsErr.message,
     'repo pins live in the project catalog; user dials are state — use `fadeno dial <archetype> <model> --user`',
   );
 
-  const withCarry = seed(t, null, { ...V3_BASE, worktree_carry: ['node_modules'] });
+  const withCarry = seed(t, null, { ...V4_BASE, worktree_carry: ['node_modules'] });
   const carryErr = thrown(() => loadLayeredProfile(withCarry.root, withCarry.paths));
   assert.equal(
     carryErr.message,
@@ -160,7 +154,7 @@ test('a known key in the wrong layer keeps its own message, not "unknown key"', 
   );
 
   // Even alongside a typo: the misplacement is the more specific finding.
-  const both = seed(t, null, { ...V3_BASE, dials: { worker: 'sol' }, tolos: {} });
+  const both = seed(t, null, { ...V4_BASE, dials: { worker: 'sol' }, tolos: {} });
   assert.doesNotMatch(thrown(() => loadLayeredProfile(both.root, both.paths)).message, /unknown top-level key/);
 });
 
@@ -172,7 +166,7 @@ test('a pre-dials catalog still gets migration instructions, now naming the file
     loadouts: { main: { worker: 'opus' } },
   });
   const err = thrown(() => loadLayeredProfile(root, paths));
-  assert.match(err.message, /schema_version 3 required/);
+  assert.match(err.message, /schema_version 4 required/);
   assert.match(err.message, /targets:→models:/);
   assert.doesNotMatch(err.message, /unknown top-level key/);
   assert.ok(err.message.startsWith(`${projectFile}: `), `should name the legacy file; got ${err.message}`);
@@ -188,9 +182,31 @@ test('a pre-dials catalog still gets migration instructions, now naming the file
  * an unverified one.
  */
 const SURVIVES_THE_MERGE: Record<string, { declare: Record<string, unknown>; check: (p: ExecutorProfile) => void }> = {
-  schema_version: { declare: { schema_version: 3 }, check: (p) => assert.equal(p.schemaVersion, 3) },
+  schema_version: { declare: { schema_version: 4 }, check: (p) => assert.equal(p.schemaVersion, 4) },
   models: { declare: {}, check: (p) => assert.equal(p.models.sol?.id, 'sol') },
-  routes: { declare: {}, check: (p) => assert.ok(p.routes.standalone?.dummy) },
+  harnesses: {
+    // `relay:` moved INSIDE this key (`harnesses.<id>.host.relay`), so its
+    // survival is covered here rather than by a top-level case of its own.
+    declare: {
+      harnesses: {
+        // `dummy` carried over from the base: this case REPLACES the key in
+        // the assembled document, and `sol` still needs a home harness.
+        dummy: { provider: 'dummy', command: ['node', '-e', '0'] },
+        claude: { provider: 'anthropic', host: { effort_channel: 'none', relay: 'sonnet' } },
+        codex: { provider: 'openai', host: { effort_channel: 'agent-file', relay: 'luna@low' }, command: ['codex'] },
+      },
+    },
+    check: (p) => {
+      assert.ok(p.harnesses.dummy?.command, 'the base harness must survive layering');
+      assert.ok(p.harnesses.codex?.command, 'a project harness entry must not drop its command lane');
+      assert.equal(p.harnesses.claude?.host?.relay?.model, 'sonnet');
+      // The effort pin has to survive as a pin: the Codex broker bakes it,
+      // and losing it would silently promote the relay to luna's xhigh
+      // registry default on every dispatch.
+      assert.equal(p.harnesses.codex?.host?.relay?.model, 'luna');
+      assert.equal(p.harnesses.codex?.host?.relay?.effort, 'low');
+    },
+  },
   bindings: { declare: { bindings: { reviewer: 'sol' } }, check: (p) => assert.equal(p.bindings.reviewer?.model, 'sol') },
   dials: { declare: { dials: { worker: 'sol' } }, check: (p) => assert.equal(p.dials.worker?.model, 'sol') },
   archetypes: { declare: { archetypes: { auditor: { ignored_output: 'kept' } } }, check: (p) => assert.equal(p.archetypes.auditor?.ignoredOutput, 'kept') },
@@ -198,9 +214,9 @@ const SURVIVES_THE_MERGE: Record<string, { declare: Record<string, unknown>; che
     declare: { constraints: { command: ['node', '-e', '0'] } },
     check: (p) => assert.deepEqual(p.constraints?.command, ['node', '-e', '0']),
   },
-  unregistered_model_driver: {
-    declare: { unregistered_model_driver: 'crush' },
-    check: (p) => assert.equal(p.unregisteredModelDriver, 'crush'),
+  unregistered_model_harness: {
+    declare: { unregistered_model_harness: 'crush' },
+    check: (p) => assert.equal(p.unregisteredModelHarness, 'crush'),
   },
   tools: {
     declare: { tools: { lint: { command: ['node', '-e', '0'] } } },
@@ -214,17 +230,6 @@ const SURVIVES_THE_MERGE: Record<string, { declare: Record<string, unknown>; che
     declare: { surfaces: ['src/cli.ts'] },
     check: (p) => assert.deepEqual(p.surfaces, ['src/cli.ts']),
   },
-  relay: {
-    declare: { relay: { claude: 'sonnet', codex: 'luna@low' } },
-    check: (p) => {
-      assert.equal(p.relay.claude?.model, 'sonnet');
-      // The effort pin has to survive as a pin: the Codex broker bakes it,
-      // and losing it would silently promote the relay to luna's xhigh
-      // registry default on every dispatch.
-      assert.equal(p.relay.codex?.model, 'luna');
-      assert.equal(p.relay.codex?.effort, 'low');
-    },
-  },
 };
 
 test('every advertised top-level key survives the merge and reaches the parsed profile', (t) => {
@@ -233,7 +238,7 @@ test('every advertised top-level key survives the merge and reaches the parsed p
     [...CATALOG_TOP_LEVEL_KEYS].sort(),
     'each catalog key needs a case here proving layering does not drop it',
   );
-  const doc: Record<string, unknown> = { ...V3_BASE };
+  const doc: Record<string, unknown> = { ...V4_BASE };
   for (const entry of Object.values(SURVIVES_THE_MERGE)) Object.assign(doc, entry.declare);
   const { root, paths } = seed(t, doc);
   const { profile } = loadLayeredProfile(root, paths);
@@ -247,7 +252,7 @@ test('valid catalogs are untouched: builtin, user, and project still compose', (
   // Purely additive rejection — a catalog that was fine before is fine now,
   // including the shipped builtin one, which layers in when a project catalog
   // is not self-contained.
-  const { root, paths } = seed(t, { schema_version: 3, dials: { worker: 'sol' } }, V3_BASE);
+  const { root, paths } = seed(t, { schema_version: 4, dials: { worker: 'sol' } }, V4_BASE);
   const layered = loadLayeredProfile(root, paths);
   assert.deepEqual(layered.layers, ['builtin', 'user', 'project']);
   assert.equal(layered.selfContained, false);

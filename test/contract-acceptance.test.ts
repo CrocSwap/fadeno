@@ -26,22 +26,16 @@ function seedParallelWorkstreamsRun(t: TestContext): { root: string; runId: stri
     'rev-exec': { command: ['node', '-e', `process.stdout.write(JSON.stringify({reviewer:'r',summary:'s',issues:[],verdict:'approve'}))`] },
   };
   const models: Record<string, unknown> = {};
-  const routesStandalone: Record<string, unknown> = {};
+  const harnesses: Record<string, unknown> = {};
   for (const [name, spec] of Object.entries(execSpecs)) {
     const provider = name.replace(/-/g, '_') + '_p';
     models[name] = { provider, id: name, effort: 'high' };
-    routesStandalone[provider] = { command: spec.command, };
+    harnesses[provider] = { provider, command: spec.command };
   }
-  routesStandalone['current-host'] = { host: true };
   const v3 = {
-    schema_version: 3,
+    schema_version: 4,
     models,
-    routes: {
-      standalone: { ...routesStandalone },
-      codex: { ...routesStandalone },
-      claude: { ...routesStandalone },
-      grok: { ...routesStandalone },
-    },
+    harnesses,
     archetypes: { worker: {}, reviewer: {}, coordinator: {} },
     dials: {
       coordinator: 'coord-exec',

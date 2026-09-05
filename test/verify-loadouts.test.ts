@@ -36,18 +36,13 @@ test('verify: pre-dials run snapshot fails executor-bindings with loud message',
   runInit({ target: 'codex', repoRoot: root });
   writeFileSync(join(root, '.fadeno', 'playbooks', 'pre-dials-verify.yaml'), PLAYBOOK);
   // Valid v3 profile to create a run — routes cover every harness so CLAUDECODE does not starve the snapshot.
-  const dummyRoute = { dummy: { command: NOTES_CMD, }, 'current-host': { host: true } };
+  const dummyHarnesses = { dummy: { provider: 'dummy', command: NOTES_CMD } };
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       sol: { provider: 'dummy', id: 'sol', effort: 'high' },
     },
-    routes: {
-      standalone: { ...dummyRoute },
-      codex: { ...dummyRoute },
-      claude: { ...dummyRoute },
-      grok: { ...dummyRoute },
-    },
+    harnesses: dummyHarnesses,
     archetypes: { worker: {} },
     dials: { worker: 'sol' },
   }));

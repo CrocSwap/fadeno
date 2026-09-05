@@ -1,0 +1,1027 @@
+import assert from 'node:assert/strict';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import test from 'node:test';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { runDialResolve, runDialSet, runDialShow } from '../src/commands/dial.ts';
+import { runDispatch } from '../src/commands/dispatch.ts';
+import { runDrive } from '../src/commands/drive.ts';
+import { runInit } from '../src/commands/init.ts';
+import { runNewRun } from '../src/commands/new-run.ts';
+import { runSteeringApply, runSteeringApplyOpenCode } from '../src/commands/steering.ts';
+import { runToolRun } from '../src/commands/tool-run.ts';
+import { runVerify } from '../src/commands/verify.ts';
+import { loadGlobalProfile, loadLayeredProfile } from '../src/lib/config-layers.ts';
+import {
+  eligibilityFor,
+  ExecutorProfileError,
+  formatDialRef,
+  parseDialRef,
+  parseExecutorProfile,
+  parseSnapshotDocument,
+  resolveDelivery,
+  serializeSnapshot,
+  SNAPSHOT_ARCHETYPE_SEPARATOR,
+  snapshotExecutor,
+  writeLocalDialState,
+  type HarnessId,
+} from '../src/lib/executors.ts';
+import { userPaths, type UserPathOptions } from '../src/lib/user-paths.ts';
+import { catalogV4, tempRepo } from './helpers.ts';
+
+/**
+ * Catalog v4: the properties the collapse is FOR.
+ *
+ * The six `routes.<host>` tables are gone, so "the same dial means different
+ * lanes under different hosts" is no longer expressible as six copies of an
+ * argv — it is one table plus the pair *(dial harness, host)*. These tests pin
+ * that pair, the explicit `--harness` override, policy-chosen variants, the
+ * read-only legacy translation, and the load-time integrity rules.
+ */
+
+const STARTER = readFileSync(join(import.meta.dirname, '..', 'templates', 'common', 'fadeno', 'executors.yaml'), 'utf8');
+
+function starter(host: HarnessId) {
+  return parseExecutorProfile(STARTER, 'templates/common/fadeno/executors.yaml', host);
+}
+
+// 1. Same ref, two hosts.
+
+test('v4: the same ref is in-session under its own harness and spawned under another', () => {
+  const underClaude = resolveDelivery(parseDialRef('opus', 't'), starter('claude'), 'claude', { archetype: 'worker' });
+  assert.equal(underClaude.harness, 'claude');
+  assert.equal(underClaude.hostCandidate, true, 'worker opus is a host candidate inside Claude');
+  assert.equal(underClaude.spec.adapter, 'host');
+
+  const underCodex = resolveDelivery(parseDialRef('opus', 't'), starter('codex'), 'codex', { archetype: 'worker' });
+  assert.equal(underCodex.harness, 'claude', 'the dial names the same harness whatever the host');
+  assert.equal(underCodex.hostCandidate, false);
+  assert.equal(underCodex.spec.adapter, 'command');
+
+  // The mirror image, so the property is not an accident of one provider.
+  const lunaCodex = resolveDelivery(parseDialRef('luna', 't'), starter('codex'), 'codex', { archetype: 'worker' });
+  assert.equal(lunaCodex.harness, 'codex');
+  assert.equal(lunaCodex.hostCandidate, true);
+  const lunaClaude = resolveDelivery(parseDialRef('luna', 't'), starter('claude'), 'claude', { archetype: 'worker' });
+  assert.equal(lunaClaude.harness, 'codex');
+  assert.equal(lunaClaude.hostCandidate, false);
+  assert.equal(lunaClaude.spec.adapter, 'command');
+});
+
+// 2. Explicit harness.
+
+test('v4: an explicit `on <harness>` resolves onto that harness, with its spelling, under every host', () => {
+  for (const host of ['claude', 'codex', 'grok', 'omp', 'standalone', 'opencode'] as const) {
+    const compiled = resolveDelivery(parseDialRef('opus on opencode', 't'), starter(host), host, { archetype: 'worker' });
+    assert.equal(compiled.harness, 'opencode', host);
+    assert.equal(compiled.modelId, 'anthropic/claude-opus-4.8', `${host}: the spelling for THIS harness`);
+    const argv = compiled.spec.adapter === 'command'
+      ? compiled.spec.command
+      : (compiled.spec as { fallbackCommand: string[] | null }).fallbackCommand ?? [];
+    assert.ok(argv.includes('openrouter/anthropic/claude-opus-4.8'), `${host}: the opencode argv carries it`);
+    // Never a host candidate, on ANY host — including OpenCode itself. The
+    // `opencode` harness declares `host.identity: session`, because its plugin
+    // rewrites only the agent NAME: a dialed model handed to a host spawn
+    // there would be silently ignored. So a named model on `opencode` is a
+    // command delivery, exactly as v3's `routes.opencode` expressed it by
+    // putting `host: true` on `current-host` alone.
+    assert.equal(compiled.hostCandidate, false, host);
+  }
+});
+
+// 3. Variant by policy.
+
+test('v4: policy chooses the variant; a dial never names one', () => {
+  const profile = starter('claude');
+  const worker = resolveDelivery(parseDialRef('opus', 't'), profile, 'claude', { archetype: 'worker' });
+  assert.equal(worker.variant, null, 'the base lane, because nothing forbids a worker there');
+
+  const director = resolveDelivery(parseDialRef('opus', 't'), profile, 'claude', { archetype: 'director' });
+  assert.equal(director.variant, 'exec');
+  const argv = director.spec.adapter === 'command'
+    ? director.spec.command
+    : (director.spec as { fallbackCommand: string[] | null }).fallbackCommand ?? [];
+  assert.ok(argv.includes('Bash(fadeno:*)'), 'the exec variant is the lane that can run fadeno');
+  // And the ref the user typed is unchanged: the variant is not on the dial.
+  assert.equal(formatDialRef(director.ref), 'opus');
+});
+
+// 4. Legacy read.
+
+test('v4: a legacy ` via <driver>` is read, translated, and never written back', () => {
+  assert.deepEqual(parseDialRef('sonnet via claude-exec', 't'), { model: 'sonnet', harness: 'claude' });
+  assert.equal(formatDialRef(parseDialRef('sonnet via claude-exec', 't')), 'sonnet on claude');
+  assert.deepEqual(parseDialRef('m@high via opencode-direct', 't'), { model: 'm', effort: 'high', harness: 'opencode' });
+  assert.deepEqual(parseDialRef({ model: 'm', via: 'muse-code' }, 't'), { model: 'm', harness: 'muse' });
+  // A driver name that was ALREADY a harness id passes through untouched.
+  assert.deepEqual(parseDialRef('m via grok', 't'), { model: 'm', harness: 'grok' });
+});
+
+test('v4: a format 1.0 ledger row reads back with `driver` as the executor harness', async (t) => {
+  const { runDispatches } = await import('../src/commands/dispatches.ts');
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  // Under 1.0 `harness` was the HOST and `driver` was the executor. Both rows
+  // below describe the same delivery; only the spelling differs.
+  const rows = [
+    {
+      format: '1.0', timestamp: '2026-08-12T12:00:00.000Z', event: 'dispatch_requested',
+      dispatch_id: 'd1', archetype: 'worker', executor: 'opus', model: 'opus',
+      harness: 'codex', driver: 'claude-exec', transport: 'command',
+    },
+    {
+      format: '1.1', timestamp: '2026-08-12T12:01:00.000Z', event: 'dispatch_requested',
+      dispatch_id: 'd2', archetype: 'worker', executor: 'opus', model: 'opus',
+      host: 'codex', harness: 'claude', variant: 'exec', transport: 'command',
+    },
+  ];
+  writeFileSync(join(root, '.fadeno', 'dispatches.jsonl'), `${rows.map((r) => JSON.stringify(r)).join('\n')}\n`);
+  const result = runDispatches({ repoRoot: root });
+  const [legacy, current] = result.entries;
+  assert.equal(legacy!.harness, 'claude', 'a 1.0 `driver` reads as the executor harness');
+  assert.equal(legacy!.host, 'codex', 'and its `harness` reads as the host');
+  assert.equal(legacy!.variant, null, '1.0 could not record a variant');
+  assert.equal(current!.harness, 'claude');
+  assert.equal(current!.host, 'codex');
+  assert.equal(current!.variant, 'exec');
+});
+
+// 5. v3 layers.
+
+test('v4: a v3 layer with a removed key errors with the migration note; a models-only v3 layer loads', (t) => {
+  const root = tempRepo(t);
+  const paths: UserPathOptions = {
+    home: join(root, 'home'),
+    env: { FADENO_CONFIG_HOME: join(root, 'cfg'), FADENO_STATE_HOME: join(root, 'state'), FADENO_HARNESS: 'standalone' },
+  };
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  const project = join(root, '.fadeno', 'executors.yaml');
+
+  writeFileSync(project, stringifyYaml({
+    schema_version: 3,
+    models: { sol: { provider: 'openai', id: 'sol' } },
+    routes: { standalone: { openai: { command: ['codex'] } } },
+  }));
+  assert.throws(
+    () => loadLayeredProfile(root, paths),
+    (err: unknown) => err instanceof ExecutorProfileError
+      && /`routes` was removed in catalog v4/.test(err.message)
+      && /harnesses:/.test(err.message)
+      && err.message.startsWith(`${project}: `),
+  );
+
+  // A personal `models:`-only v3 catalog is not made wrong by the bump: it
+  // declares nothing v4 removed, so it layers onto the builtin as before.
+  writeFileSync(project, stringifyYaml({
+    schema_version: 3,
+    models: { mine: { provider: 'anthropic', id: 'mine' } },
+  }));
+  const layered = loadLayeredProfile(root, paths);
+  assert.equal(layered.profile.models.mine?.id, 'mine');
+  assert.equal(layered.profile.schemaVersion, 4, 'the merged document is always v4');
+});
+
+test('v4: `harnesses:` under schema_version 3 is refused, naming the version it needs', (t) => {
+  const root = tempRepo(t);
+  const paths: UserPathOptions = {
+    home: join(root, 'home'),
+    env: { FADENO_CONFIG_HOME: join(root, 'cfg'), FADENO_STATE_HOME: join(root, 'state'), FADENO_HARNESS: 'standalone' },
+  };
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    schema_version: 3,
+    models: { sol: { provider: 'openai', id: 'sol' } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
+  }));
+  assert.throws(
+    () => loadLayeredProfile(root, paths),
+    /`harnesses:` requires `schema_version: 4` \(found 3\)/,
+  );
+});
+
+// 6. Snapshot compatibility.
+
+test('v4: a committed v3 run snapshot still parses, unchanged', () => {
+  // The acceptance the plan names. `snapshot_version` did NOT move: the
+  // compiled executors map was already post-compile and harness-neutral, so a
+  // snapshot written before v4 replays byte-for-byte. Only its passthrough
+  // metadata key changed, and a stored `driver:` is read through the same
+  // legacy name map a dial ref uses.
+  const snapshot = [
+    'snapshot_version: 3',
+    'executors:',
+    '  current-host:',
+    '    adapter: host',
+    '    model: current-host',
+    '    reasoning_effort: default',
+    '    agent_type: "*"',
+    '    provider: current-host',
+    '    driver: current-host',
+    '  opus:',
+    '    adapter: command',
+    '    command: [claude, -p, --model, opus]',
+    '    provider: anthropic',
+    '    driver: claude-exec',
+    '    model: opus',
+    'archetypes:',
+    '  worker: {}',
+    '',
+  ].join('\n');
+  const parsed = parseSnapshotDocument(snapshot, 'profile.yaml (v3 fixture)');
+  const opus = parsed.executors.opus!;
+  assert.equal(opus.adapter, 'command');
+  assert.equal(opus.harness, 'claude', 'a stored `driver` reads back as the harness it always named');
+  assert.deepEqual((opus as { command: string[] }).command, ['claude', '-p', '--model', 'opus']);
+});
+
+// 7. A bare shell.
+
+test('v4: from a bare shell nothing is a host lane, and eligibility never refuses a dial', (t) => {
+  const root = tempRepo(t);
+  const paths: UserPathOptions = {
+    home: join(root, 'home'),
+    env: { FADENO_CONFIG_HOME: join(root, 'cfg'), FADENO_STATE_HOME: join(root, 'state'), FADENO_HARNESS: 'standalone' },
+  };
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({
+    models: {
+      sol: { provider: 'openai', id: 'gpt-sol', effort: 'high' },
+      gated: { provider: 'anthropic', id: 'gated', eligibility: { worker: 'forbidden' } },
+    },
+    archetypes: { worker: {}, scout: {} },
+  }));
+
+  // Registry-only validation: a forbidden pairing DIALS, and `dial resolve`
+  // is where the refusal is reported.
+  assert.doesNotThrow(() => runDialSet({ repoRoot: root, userPathOptions: paths, archetype: 'worker', model: 'gated', session: true }));
+  const forbidden = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'worker', env: {} });
+  assert.equal(forbidden.host, 'standalone');
+  assert.equal(forbidden.eligibility, 'forbidden');
+  assert.equal(forbidden.delivery.dispatchable, false);
+
+  // Every dial with a command lane resolves to it; the base dial has none.
+  runDialSet({ repoRoot: root, userPathOptions: paths, archetype: 'scout', model: 'sol', session: true });
+  const scout = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'scout', env: {} });
+  assert.equal(scout.host, 'standalone');
+  assert.equal(scout.lane, 'command');
+  assert.equal(scout.harness, 'codex');
+  assert.equal(scout.variant, null);
+
+  const base = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'reviewer', env: {} });
+  assert.equal(base.model, 'current-host');
+  assert.equal(base.lane, 'restart_required', 'a bare shell has no session to deliver into');
+});
+
+// 8. Home-per-provider integrity.
+
+function parseDoc(doc: Record<string, unknown>, host: HarnessId = 'standalone') {
+  return parseExecutorProfile(stringifyYaml(doc), 'test.yaml', host);
+}
+
+test('v4: exactly one home per provider, and every model must reach some harness', () => {
+  assert.throws(
+    () => parseDoc({
+      schema_version: 4,
+      models: { sol: { provider: 'openai' } },
+      harnesses: { codex: { provider: 'openai', command: ['codex'] }, other: { provider: 'openai', command: ['other'] } },
+    }),
+    /provider "openai" is claimed as home by two harnesses \(codex, other\)/,
+  );
+  assert.throws(
+    () => parseDoc({
+      schema_version: 4,
+      models: { ghost: { provider: 'nowhere', id: 'ghost-1' } },
+      harnesses: { codex: { provider: 'openai', command: ['codex'] } },
+    }),
+    /provider "nowhere", which no harness claims as home[\s\S]*fadeno model add ghost nowhere\/ghost-1/,
+  );
+  // An explicit `harness:` satisfies it without a home claim — that is what
+  // makes OpenCode, home to nobody, still reachable.
+  const ok = parseDoc({
+    schema_version: 4,
+    models: { ox: { provider: 'stealth', id: 'ox', harness: 'opencode', spellings: { opencode: 'stealth/ox' } } },
+    harnesses: { opencode: { command: ['opencode', 'run', '-m', '{model}'] } },
+  });
+  assert.equal(resolveDelivery({ model: 'ox' }, ok).modelId, 'stealth/ox');
+  // A spelling for a harness the table does not declare is a load error too:
+  // silently ignoring it would deliver the canonical id to a backend that
+  // never agreed to interpret it.
+  assert.throws(
+    () => parseDoc({
+      schema_version: 4,
+      models: { ox: { provider: 'stealth', id: 'ox', harness: 'opencode', spellings: { nope: 'x' } } },
+      harnesses: { opencode: { command: ['opencode'] } },
+    }),
+    /declares a spelling for harness "nope", which is not declared/,
+  );
+});
+
+// --- User-layer models: dropped, never fatal -------------------------------
+
+/**
+ * The regression this revision exists for.
+ *
+ * A user catalog is machine state, not catalog policy. Under v3 a personal
+ * alias whose delivery resolved nowhere was DROPPED with a note; the v4 plan
+ * made "no home for provider" a load error, and on 2026-09-05 a single stale
+ * `fadeno model add` (`ox`, provider `stealth`, registered before v4) made
+ * every unrelated `fadeno dial` in every repo fail at parse — the user's
+ * installed CLI included. A project- or builtin-declared model that cannot be
+ * delivered is a different thing: a file someone edits, and still a load
+ * error.
+ */
+function isolated(root: string): UserPathOptions {
+  return {
+    home: join(root, 'home'),
+    env: {
+      FADENO_CONFIG_HOME: join(root, 'cfg'),
+      FADENO_STATE_HOME: join(root, 'state'),
+      FADENO_HARNESS: 'standalone',
+    },
+  };
+}
+
+function seedUserCatalog(root: string, paths: UserPathOptions, models: Record<string, unknown>): void {
+  const file = userPaths(paths).executorsFile;
+  mkdirSync(join(file, '..'), { recursive: true });
+  writeFileSync(file, stringifyYaml({ schema_version: 4, models }));
+}
+
+test('regression: an undeliverable USER model is dropped with a note, not a load error', (t) => {
+  const root = tempRepo(t);
+  const paths = isolated(root);
+  // Exactly the shipped shape: a v3 models-only user catalog naming a provider
+  // no harness claims, layering onto the builtin with no project catalog.
+  const file = userPaths(paths).executorsFile;
+  mkdirSync(join(file, '..'), { recursive: true });
+  writeFileSync(file, 'schema_version: 3\nmodels:\n  ox:\n    provider: stealth\n    id: ox-alpha\n    effort: default\n');
+
+  const layered = loadLayeredProfile(root, paths);
+  assert.equal(layered.selfContained, false, 'normal layering, not the self-contained carve-out');
+  assert.deepEqual(layered.modelFallback.dropped, [{ alias: 'ox', harness: 'stealth' }]);
+  assert.equal(Object.hasOwn(layered.profile.models, 'ox'), false, 'dropped means NOT registered');
+  // Every unrelated dial still works — the whole point.
+  const resolved = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'worker', env: {} });
+  assert.equal(resolved.model, 'current-host');
+  // And the user is told, once, on the surface that lists models.
+  assert.match(runDialShow({ repoRoot: root, userPathOptions: paths }).note ?? '', /user-catalog model "ox" dropped/);
+});
+
+test('regression: the same drop happens in the user-scope global view', (t) => {
+  const root = tempRepo(t);
+  const paths = isolated(root);
+  seedUserCatalog(root, paths, { ox: { provider: 'stealth', id: 'ox-alpha' } });
+  const global = loadGlobalProfile(paths);
+  assert.deepEqual(global.modelFallback.dropped, [{ alias: 'ox', harness: 'stealth' }]);
+  assert.equal(Object.hasOwn(global.profile.models, 'ox'), false);
+  // `fadeno model add` reads this view to reserve alias names, so it must not
+  // throw here either.
+  assert.doesNotThrow(() => loadGlobalProfile(paths));
+});
+
+test('regression: dialing the dropped alias itself still fails loudly, naming the fix', (t) => {
+  const root = tempRepo(t);
+  const paths = isolated(root);
+  seedUserCatalog(root, paths, { ox: { provider: 'stealth', id: 'ox-alpha' } });
+  // Dropped is not silently-eligible: `ox` is now an UNREGISTERED name, so it
+  // falls through to the unregistered harness with its id passed verbatim —
+  // and the dial-time probe, which the drop does not bypass, refuses it by
+  // name. (Stubbed listing: the real one would reach the network.)
+  assert.throws(
+    () => runDialSet({
+      repoRoot: root, userPathOptions: paths, archetype: 'worker', model: 'ox', session: true,
+      spawn: () => ({ status: 0, stdout: 'openrouter/anthropic/claude-opus-4.8\n', stderr: '' }),
+    }),
+    (err: unknown) => err instanceof Error && /unknown model "ox"/.test(err.message),
+  );
+  // And an explicit harness nothing declares is a hard refusal either way.
+  assert.throws(
+    () => runDialSet({ repoRoot: root, userPathOptions: paths, archetype: 'worker', model: 'ox', harness: 'stealth', session: true }),
+    (err: unknown) => err instanceof Error && /unknown harness "stealth"/.test(err.message),
+  );
+});
+
+test('regression: a PROJECT-declared undeliverable model is still a load error', (t) => {
+  const root = tempRepo(t);
+  const paths = isolated(root);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    schema_version: 4,
+    models: { ghost: { provider: 'nowhere', id: 'ghost-1' } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
+  }));
+  // A file someone edits, not machine state: it must not be papered over.
+  assert.throws(
+    () => loadLayeredProfile(root, paths),
+    (err: unknown) => err instanceof ExecutorProfileError
+      && /provider "nowhere", which no harness claims as home/.test(err.message)
+      && /fadeno model add ghost nowhere\/ghost-1/.test(err.message),
+  );
+});
+
+// --- Host-slot decisions: hostCandidate, not spec.adapter ------------------
+
+/**
+ * The reviewer's repro, executable.
+ *
+ * `spec.adapter === 'host'` is not "can be delivered in-session": a host spec
+ * is also how a delivery with NO argv is represented. Keyed on it,
+ * `steering apply --codex` wrote a Codex host agent — `model = "opus"`,
+ * `--host-executor 'opus on omp'` — for a dial that `dial resolve` was calling
+ * `restart_required`, and `dispatch` prefixed its refusal with "spawn the
+ * in-session agent and you are done".
+ */
+test('a dial on a host-only harness nobody is in materializes a BROKER, not a host agent', (t) => {
+  const root = tempRepo(t);
+  const paths: UserPathOptions = {
+    home: join(root, 'home'),
+    env: { FADENO_CONFIG_HOME: join(root, 'cfg'), FADENO_STATE_HOME: join(root, 'state'), FADENO_HARNESS: 'codex' },
+  };
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({
+    models: { opus: { provider: 'anthropic', id: 'opus', effort: 'xhigh' } },
+    harnesses: {
+      codex: { provider: 'openai', host: { effort_channel: 'agent-file', relay: 'relaymodel' }, command: ['codex', 'exec'] },
+      omp: { provider: 'anthropic', host: { effort_channel: 'none' } },
+    },
+    archetypes: { worker: {} },
+    extra: { models: { opus: { provider: 'anthropic', id: 'opus', effort: 'xhigh' }, relaymodel: { provider: 'openai', id: 'relay-1' } } },
+  }));
+  runDialSet({ repoRoot: root, userPathOptions: paths, archetype: 'worker', model: 'opus', harness: 'omp', session: true });
+
+  const resolved = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'worker', env: {} });
+  assert.equal(resolved.harness, 'omp');
+  assert.equal(resolved.host, 'codex');
+  assert.equal(resolved.lane, 'restart_required', 'omp is a host this session is not inside, with no command to spawn');
+  assert.equal(resolved.delivery.dispatchable, false);
+
+  const applied = runSteeringApply({ repoRoot: root, target: 'codex', userPathOptions: paths });
+  assert.equal(applied.materialization.worker?.kind, 'command-broker', 'never a Codex host agent for an omp dial');
+  const toml = readFileSync(join(root, '.codex', 'agents', 'worker.toml'), 'utf8');
+  assert.doesNotMatch(toml, /--host-executor/, 'a broker bakes no host identity');
+  assert.doesNotMatch(toml, /model = "opus"/, 'and never the dialed model');
+});
+
+test('dispatch\'s host-lane note agrees with dial resolve on the no-argv shapes', (t) => {
+  const root = tempRepo(t);
+  const paths: UserPathOptions = {
+    home: join(root, 'home'),
+    env: { FADENO_CONFIG_HOME: join(root, 'cfg'), FADENO_STATE_HOME: join(root, 'state'), FADENO_HARNESS: 'standalone' },
+  };
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({ archetypes: { worker: {} } }));
+  // Undialed from a bare shell → `current-host`, which has no session to
+  // deliver into and no argv to spawn.
+  const resolved = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'reviewer', env: {} });
+  assert.equal(resolved.lane, 'restart_required');
+  let refusal = '';
+  try {
+    runDispatch({ archetype: 'reviewer', prompt: 'go', repoRoot: root, userPathOptions: paths });
+  } catch (err) {
+    refusal = (err as Error).message;
+  }
+  assert.match(refusal, /declares no fallback_command/);
+  assert.doesNotMatch(refusal, /resolves to the HOST lane here/, 'the note must not claim a lane dial resolve denies');
+});
+
+// --- Snapshots carry the policy-chosen variant -----------------------------
+
+test('a run snapshot carries the archetype-specific lane, so drive and dispatch agree', (t) => {
+  const root = tempRepo(t);
+  const profile = starter('claude');
+  const snapshot = parseSnapshotDocument(serializeSnapshot(profile), 'profile.yaml');
+  // The base entry is the plain claude lane; the director entry is the exec
+  // variant. Keyed by ref alone, `drive` refused `director opus` on
+  // eligibility while `dispatch` delivered it.
+  const base = snapshot.executors.opus!;
+  assert.equal(base.variant, undefined);
+  const director = snapshotExecutor(snapshot, 'opus', 'director')!;
+  assert.notEqual(director, base);
+  assert.equal(director.variant, 'exec');
+  assert.equal(eligibilityFor(director, 'director'), 'eligible');
+  assert.equal(eligibilityFor(base, 'director'), 'forbidden');
+  const argv = director.adapter === 'command'
+    ? director.command
+    : (director as { fallbackCommand: string[] | null }).fallbackCommand ?? [];
+  assert.ok(argv.includes('Bash(fadeno:*)'));
+  // Additive: a lookup with no archetype, or for an archetype policy does not
+  // move, lands on the plain ref — which is what an older snapshot has.
+  assert.equal(snapshotExecutor(snapshot, 'opus', null), base);
+  assert.equal(snapshotExecutor(snapshot, 'opus', 'worker'), base);
+  void root;
+});
+
+test('a v3 snapshot with no archetype keys still verifies a completed run', (t) => {
+  // Plan acceptance item 6, end to end rather than parse-only: a run whose
+  // profile.yaml was cut before archetype-specific keys existed must still
+  // pass `fadeno verify`.
+  const root = tempRepo(t);
+  runInit({ target: 'codex', repoRoot: root, dataOnly: true, noSteering: true });
+  const paths: UserPathOptions = {
+    home: join(root, 'home'),
+    env: { FADENO_CONFIG_HOME: join(root, 'cfg'), FADENO_STATE_HOME: join(root, 'state'), FADENO_HARNESS: 'standalone' },
+  };
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({
+    models: { echo: { provider: 'openai', id: 'echo', effort: 'high' } },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', "process.stdout.write('notes')"] } },
+    archetypes: { worker: {} },
+    dials: { worker: 'echo' },
+  }));
+  writeFileSync(join(root, '.fadeno', 'playbooks', 'v3-snap.yaml'), stringifyYaml({
+    kind: 'AgentPlaybook', schema_version: '0.1', name: 'v3-snap',
+    description: 'A one-step run whose snapshot is rewritten to the pre-archetype shape.',
+    roles: { worker: { purpose: 'Do.', archetype: 'worker' } },
+    inputs: { Task: { media_type: 'text/markdown' } },
+    flow: [{ id: 'do', kind: 'actor_call', actor: 'worker', input: ['Task'], output: 'Notes', output_path: 'artifacts/notes.md', terminal_status: 'completed' }],
+  }));
+  writeFileSync(join(root, 'task.md'), 'do it');
+  const created = runNewRun({ repoRoot: root, playbook: 'v3-snap', task: 'v3 snapshot', inputs: ['Task=task.md'], userPathOptions: paths });
+  assert.equal(runDrive({ run: created.runId, repoRoot: root, userPathOptions: paths }).status, 'completed');
+
+  // Strip every archetype-specific key: exactly the profile.yaml an older
+  // fadeno wrote, replayed by this one. Verify reads the STORED snapshot, so
+  // this is the pre-change file end to end.
+  const snapPath = join(created.runDir, 'profile.yaml');
+  const snap = parseYaml(readFileSync(snapPath, 'utf8')) as { snapshot_version: number; executors: Record<string, unknown> };
+  assert.equal(snap.snapshot_version, 3, 'the version did not move: the addition is extra keys in a map');
+  for (const key of Object.keys(snap.executors)) {
+    if (key.includes(SNAPSHOT_ARCHETYPE_SEPARATOR)) delete snap.executors[key];
+  }
+  writeFileSync(snapPath, stringifyYaml(snap));
+
+  const verified = runVerify({ run: created.runId, repoRoot: root });
+  assert.equal(verified.ok, true, JSON.stringify(verified.findings.filter((f) => f.status !== 'ok')));
+});
+
+// --- host.identity ---------------------------------------------------------
+
+/**
+ * The v3 distinction, restored with a name.
+ *
+ * `routes.opencode` and `routes.omp` carried `host: true` on `current-host`
+ * ALONE: every named model there was a command delivery. v4's harness table
+ * cannot say that with `host:` alone, and giving both a `host:` block made a
+ * named model a host candidate — while the OpenCode plugin's `applyRewrite`
+ * sets only `subagent_type` and the omp extension only `agent`, so the dialed
+ * model would have been silently ignored in-session. `identity: session` is
+ * that fact about the adapter, stated once, on the harness.
+ */
+test('host.identity: session delivers only the session\'s own identity', () => {
+  for (const host of ['opencode', 'omp'] as const) {
+    const profile = starter(host);
+    assert.equal(profile.harnesses[host]?.host?.identity, 'session', host);
+
+    // The session's own identity IS host-deliverable.
+    const base = resolveDelivery({ model: 'current-host' }, profile, host, { archetype: 'worker' });
+    assert.equal(base.hostCandidate, true, `${host}: current-host is the session`);
+
+    // A named model on that same harness is not.
+    const named = resolveDelivery(parseDialRef(`opus on ${host}`, 't'), profile, host, { archetype: 'worker' });
+    assert.equal(named.harness, host, host);
+    assert.equal(named.hostCandidate, false, `${host}: a named model cannot reach the host lane`);
+    // opencode can still spawn it; omp declares no command at all.
+    assert.equal(named.spec.adapter, host === 'opencode' ? 'command' : 'host', host);
+  }
+  // The default is `model`, and Codex/Claude keep it: those adapters DO apply
+  // a dialed model (the Codex agent TOML bakes it; the Claude hook rewrites
+  // the tool call).
+  const codex = starter('codex');
+  assert.equal(codex.harnesses.codex?.host?.identity, 'model');
+  assert.equal(resolveDelivery({ model: 'luna' }, codex, 'codex', { archetype: 'worker' }).hostCandidate, true);
+});
+
+test('harness-level eligibility gates the host lane too, unless host.eligibility says otherwise', () => {
+  // A v3 route `{ host: true, command, eligibility }` gated BOTH lanes with one
+  // map. Splitting it into `host:` + `command:` must not drop half of that.
+  const doc = (extra: Record<string, unknown>) => parseExecutorProfile(stringifyYaml({
+    schema_version: 4,
+    models: { m: { provider: 'p', id: 'm' } },
+    harnesses: { h: { provider: 'p', host: { effort_channel: 'none', ...extra }, command: ['run'], eligibility: { director: 'forbidden' } } },
+    archetypes: { director: {} },
+  }), 'test.yaml', 'h' as HarnessId);
+
+  const inherited = resolveDelivery({ model: 'm' }, doc({}), 'h' as HarnessId, { archetype: 'director' });
+  assert.equal(inherited.hostCandidate, false, 'harness-level eligibility reaches the host lane');
+
+  const overridden = resolveDelivery({ model: 'm' }, doc({ eligibility: { director: 'eligible' } }), 'h' as HarnessId, { archetype: 'director' });
+  assert.equal(overridden.hostCandidate, true, 'host.eligibility states its own answer and wins');
+});
+
+test('eligibility with no command lane, and a `standalone` harness, are refused at load', () => {
+  assert.throws(
+    () => parseExecutorProfile(stringifyYaml({
+      schema_version: 4,
+      models: { m: { provider: 'p', id: 'm' } },
+      harnesses: { h: { provider: 'p', host: { effort_channel: 'none' }, eligibility: { director: 'forbidden' } } },
+    }), 'test.yaml'),
+    /declares `eligibility:` with no `command:`[\s\S]*Move it to `.*\.host\.eligibility`/,
+  );
+  assert.throws(
+    () => parseExecutorProfile(stringifyYaml({
+      schema_version: 4,
+      models: { m: { provider: 'p', id: 'm' } },
+      harnesses: { p: { provider: 'p', command: ['run'] }, standalone: { host: { effort_channel: 'none' } } },
+    }), 'test.yaml'),
+    /`harnesses\.standalone` is not a harness/,
+  );
+});
+
+test('a bare shell reports harness: null for current-host, not a name that is not in the table', (t) => {
+  const root = tempRepo(t);
+  const paths: UserPathOptions = {
+    home: join(root, 'home'),
+    env: { FADENO_CONFIG_HOME: join(root, 'cfg'), FADENO_STATE_HOME: join(root, 'state'), FADENO_HARNESS: 'standalone' },
+  };
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({ archetypes: { worker: {} } }));
+  const resolved = runDialResolve({ repoRoot: root, userPathOptions: paths, archetype: 'reviewer', env: {} });
+  assert.equal(resolved.model, 'current-host');
+  assert.equal(resolved.host, 'standalone');
+  assert.equal(resolved.harness, null, '`standalone` is the NO-host value, not a harness to look up');
+});
+
+test('a locked run reaches the exec variant for a director step, as dispatch does', (t) => {
+  // Major 2 end to end: `drive` binds from the snapshot and `dispatch`
+  // re-resolves live. Keyed by ref alone the snapshot froze the WORKER answer,
+  // so a director step failed `eligibility_forbidden` in drive while the same
+  // dial dispatched fine.
+  const root = tempRepo(t);
+  runInit({ target: 'codex', repoRoot: root, dataOnly: true, noSteering: true });
+  const paths: UserPathOptions = {
+    home: join(root, 'home'),
+    env: { FADENO_CONFIG_HOME: join(root, 'cfg'), FADENO_STATE_HOME: join(root, 'state'), FADENO_HARNESS: 'standalone' },
+  };
+  const ECHO = ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('BASE:'+d));"];
+  const EXEC = ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('EXEC:'+d));"];
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({
+    models: { boss: { provider: 'anthropic', id: 'boss-1', effort: 'high' } },
+    harnesses: {
+      // The shipped shape: the base lane cannot run fadeno, so a director
+      // falls through to the variant that can.
+      claude: { provider: 'anthropic', command: ECHO, eligibility: { director: 'forbidden' }, variants: { exec: { command: EXEC } } },
+    },
+    archetypes: { director: {} },
+    dials: { director: 'boss' },
+  }));
+  writeFileSync(join(root, '.fadeno', 'playbooks', 'lead.yaml'), stringifyYaml({
+    kind: 'AgentPlaybook', schema_version: '0.1', name: 'lead',
+    description: 'A one-step run whose only actor is a director.',
+    roles: { lead: { purpose: 'Coordinate.', archetype: 'director' } },
+    inputs: { Task: { media_type: 'text/markdown' } },
+    flow: [{ id: 'plan', kind: 'actor_call', actor: 'lead', input: ['Task'], output: 'Notes', output_path: 'artifacts/notes.md', terminal_status: 'completed' }],
+  }));
+  writeFileSync(join(root, 'task.md'), 'coordinate it');
+  const created = runNewRun({ repoRoot: root, playbook: 'lead', task: 'director variant', inputs: ['Task=task.md'], userPathOptions: paths });
+  const driven = runDrive({ run: created.runId, repoRoot: root, userPathOptions: paths });
+  assert.equal(driven.status, 'completed', JSON.stringify(driven));
+  assert.match(readFileSync(join(created.runDir, 'artifacts', 'notes.md'), 'utf8'), /^EXEC:/, 'drive took the exec variant');
+
+  // And the ad-hoc kernel, which never reads the snapshot, agrees.
+  const dispatched = runDispatch({ archetype: 'director', prompt: 'go', repoRoot: root, userPathOptions: paths, shared: true });
+  assert.equal(dispatched.variant, 'exec');
+  assert.match(dispatched.stdout, /^EXEC:/);
+});
+
+// --- The user layer is machine state, and never fails the load -------------
+
+/**
+ * The 2026-09-05 regression, generalized.
+ *
+ * One stale `fadeno model add` entry bricked every unrelated command. Dropping
+ * an undeliverable model closed the shape that was observed; it did not close
+ * the CLASS. `models.<n>.delivery`, a `spellings` key naming a harness nobody
+ * declares, and a ` via ` in a user `bindings:` each still threw from the same
+ * two places (`refuseRemovedCatalogKeys`, then the parser), out of the same
+ * file, with the same blast radius.
+ *
+ * `repairUserLayer` runs before both and leaves a document neither can refuse
+ * for a model or a ref. Each repair is named in `modelFallback.repairs` and
+ * reaches the user through `fadeno dial`'s note.
+ */
+
+function writeUserCatalog(paths: UserPathOptions, text: string): void {
+  const file = userPaths(paths).executorsFile;
+  mkdirSync(join(file, '..'), { recursive: true });
+  writeFileSync(file, text);
+}
+
+test('user layer: a v3 `delivery: {route, id}` is translated, not refused', (t) => {
+  const root = tempRepo(t);
+  const paths = isolated(root);
+  writeUserCatalog(paths, stringifyYaml({
+    schema_version: 3,
+    models: { ox: { provider: 'anthropic', id: 'ox-alpha', delivery: { route: 'opencode-direct', id: 'openrouter/ox' } } },
+  }));
+  const layered = loadLayeredProfile(root, paths);
+  const ox = layered.profile.models['ox'];
+  assert.ok(ox, 'the alias survives the translation');
+  // The driver alias maps to its harness, and the delivery id becomes that
+  // harness's spelling — the two halves `delivery:` used to carry.
+  assert.equal(ox.harness, 'opencode');
+  assert.equal(ox.spellings['opencode'], 'openrouter/ox');
+  assert.match(layered.modelFallback.repairs.join('\n'), /model "ox" `delivery:` read as `harness: opencode`/);
+  // Nothing was dropped, so the note must not call it a drop.
+  assert.deepEqual(layered.modelFallback.dropped, []);
+});
+
+test('user layer: the `openrouter` route key a v3 `model add` wrote lands on opencode, not on a ghost harness', (t) => {
+  const root = tempRepo(t);
+  const paths = isolated(root);
+  // Exactly the entry v3 runModelsAdd wrote for its OpenRouter step.
+  writeUserCatalog(paths, stringifyYaml({
+    schema_version: 3,
+    models: { o3: { provider: 'openai', id: 'o3-pro', effort: 'high', delivery: { route: 'openrouter', id: 'openai/o3-pro' } } },
+  }));
+  const layered = loadLayeredProfile(root, paths);
+  const o3 = layered.profile.models['o3'];
+  assert.ok(o3, 'a route key is a route key, not a driver alias — the alias must survive');
+  assert.equal(o3.harness, 'opencode');
+  assert.equal(o3.spellings['opencode'], 'openai/o3-pro');
+  assert.deepEqual(layered.modelFallback.dropped, []);
+  const notes = layered.modelFallback.repairs.join('\n');
+  assert.match(notes, /model "o3" `delivery:` read as `harness: opencode`/);
+  assert.doesNotMatch(notes, /harness: openrouter|dropped/);
+});
+
+test('user layer: a translated `unregistered_model_driver` gets one note, not a second one calling it ignored', (t) => {
+  const root = tempRepo(t);
+  const paths = isolated(root);
+  writeUserCatalog(paths, stringifyYaml({ schema_version: 3, models: {}, unregistered_model_driver: 'opencode' }));
+  const layered = loadLayeredProfile(root, paths);
+  const mentions = layered.modelFallback.repairs.filter((line) => line.includes('unregistered_model_driver'));
+  assert.equal(mentions.length, 1, mentions.join('\n'));
+  assert.match(mentions[0]!, /read as `unregistered_model_harness: opencode`/);
+  assert.doesNotMatch(mentions[0]!, /ignored/);
+});
+
+test('user layer: a spelling naming an undeclared harness is dropped, not thrown', (t) => {
+  const root = tempRepo(t);
+  const paths = isolated(root);
+  writeUserCatalog(paths, stringifyYaml({
+    schema_version: 4,
+    models: { ox: { provider: 'anthropic', id: 'ox-alpha', spellings: { opencode: 'openrouter/ox', ghostharness: 'nope/ox' } } },
+  }));
+  const layered = loadLayeredProfile(root, paths);
+  const ox = layered.profile.models['ox'];
+  assert.ok(ox, 'the model survives; only the unusable spelling goes');
+  assert.equal(ox.spellings['opencode'], 'openrouter/ox', 'the good spelling is untouched');
+  assert.equal(Object.hasOwn(ox.spellings, 'ghostharness'), false);
+  assert.match(layered.modelFallback.repairs.join('\n'), /spelling for harness "ghostharness" dropped/);
+});
+
+test('user layer: a ` via <driver>` in `bindings:` reads as ` on <harness>`', (t) => {
+  const root = tempRepo(t);
+  const paths = isolated(root);
+  writeUserCatalog(paths, stringifyYaml({
+    schema_version: 3,
+    models: { ox: { provider: 'anthropic', id: 'ox-alpha' } },
+    bindings: { lead: 'opus via opencode-direct' },
+  }));
+  const layered = loadLayeredProfile(root, paths);
+  assert.deepEqual(layered.profile.bindings['lead'], { model: 'opus', harness: 'opencode' });
+  assert.match(layered.modelFallback.repairs.join('\n'), /`bindings.lead` read as "opus on opencode"/);
+});
+
+test('user layer: the original `ox` shape still drops, and says so on the dial surface', (t) => {
+  const root = tempRepo(t);
+  const paths = isolated(root);
+  // Verbatim the file that broke: schema_version 3, one models entry, a
+  // provider no harness claims as home, no `harness:` to name instead.
+  writeUserCatalog(paths, 'schema_version: 3\nmodels:\n  ox:\n    provider: stealth\n    id: ox-alpha\n    effort: default\n');
+  const layered = loadLayeredProfile(root, paths);
+  assert.deepEqual(layered.modelFallback.dropped, [{ alias: 'ox', harness: 'stealth' }]);
+  assert.match(runDialShow({ repoRoot: root, userPathOptions: paths }).note ?? '', /user-catalog model "ox" dropped/);
+});
+
+test('user layer: none of those shapes can reach a parse throw', (t) => {
+  const root = tempRepo(t);
+  const paths = isolated(root);
+  // Every legacy and malformed model shape at once, in one file, plus the
+  // top-level tables v4 removed. The load must succeed and account for all of
+  // it — the property the three tests above each check one slice of.
+  writeUserCatalog(paths, stringifyYaml({
+    schema_version: 3,
+    routes: { claude: { anthropic: { host: true } } },
+    relay: { claude: 'sonnet' },
+    unregistered_model_driver: 'opencode-direct',
+    models: {
+      legacy: { provider: 'anthropic', id: 'legacy-1', delivery: { route: 'claude-exec', id: 'legacy-x' } },
+      broken_delivery: { provider: 'anthropic', delivery: { route: 42 } },
+      noprovider: { id: 'nope' },
+      'Not-An-Identifier': { provider: 'anthropic' },
+      badkeys: { provider: 'anthropic', id: 'bk', made_up_key: true, eligibility: { worker: 'sideways' } },
+      notamapping: 'just a string',
+    },
+    bindings: { lead: { model: 'opus', via: 'muse-code' } },
+  }));
+  const layered = loadLayeredProfile(root, paths);
+  const models = layered.profile.models;
+  assert.equal(models['legacy']?.harness, 'claude');
+  assert.equal(models['legacy']?.spellings['claude'], 'legacy-x');
+  assert.equal(models['badkeys']?.provider, 'anthropic', 'unknown keys and bad eligibility are stripped, not fatal');
+  assert.deepEqual(models['badkeys']?.eligibility, {});
+  for (const gone of ['broken_delivery', 'noprovider', 'Not-An-Identifier', 'notamapping']) {
+    assert.equal(Object.hasOwn(models, gone), false, `${gone} must be dropped, not loaded`);
+  }
+  assert.deepEqual(layered.profile.bindings['lead'], { model: 'opus', harness: 'muse' });
+  assert.equal(layered.profile.unregisteredModelHarness, 'opencode');
+  const repairs = layered.modelFallback.repairs.join('\n');
+  assert.match(repairs, /`routes` was removed in catalog v4/);
+  assert.match(repairs, /`relay` was removed in catalog v4/);
+  assert.match(repairs, /`unregistered_model_driver` read as `unregistered_model_harness: opencode`/);
+});
+
+test('user layer: a project catalog with the same v3 `delivery:` is still a load error', (t) => {
+  const root = tempRepo(t);
+  const paths = isolated(root);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    schema_version: 4,
+    models: { ox: { provider: 'openai', id: 'ox-alpha', delivery: { route: 'codex', id: 'ox-x' } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
+  }));
+  // The asymmetry is the whole design: a file someone edits gets the migration
+  // note naming the key and its v4 spelling.
+  assert.throws(
+    () => loadLayeredProfile(root, paths),
+    (err: unknown) => err instanceof ExecutorProfileError
+      && /`delivery` was removed in catalog v4/.test(err.message)
+      && /models\.ox\.harness/.test(err.message),
+  );
+});
+
+test('user layer: an override that would break a lower-layer model restores it and names the collision', (t) => {
+  const root = tempRepo(t);
+  const paths = isolated(root);
+  // `opus` exists in the builtin catalog. A personal override of it that
+  // points at nothing must not take the builtin `opus` down with it — the
+  // whole catalog would lose a name over one stale personal edit.
+  writeUserCatalog(paths, stringifyYaml({
+    schema_version: 4,
+    models: { opus: { provider: 'anthropic', id: 'opus', harness: 'ghostharness' } },
+  }));
+  const layered = loadLayeredProfile(root, paths);
+  const opus = layered.profile.models['opus'];
+  assert.ok(opus, 'the builtin entry is restored, not deleted with the override');
+  assert.equal(opus.harness, undefined, 'restored means the LOWER layer\'s entry, not a merged one');
+  assert.equal(layered.modelFallback.dropped.length, 0, 'a restored name is not a dropped one');
+  assert.match(
+    layered.modelFallback.repairs.join('\n'),
+    /user-catalog override of model "opus" discarded — nothing in this catalog can deliver harness\/provider "ghostharness"/,
+  );
+  // And the name still resolves.
+  assert.doesNotThrow(() => resolveDelivery(parseDialRef('opus', 't'), layered.profile, 'claude', { archetype: 'worker' }));
+});
+
+// --- The sixth materialization site, and the reads around it ---------------
+
+/**
+ * `steering apply --opencode` was the last of the six sites still branching on
+ * `spec.adapter`, and it fails the same way `--codex` did: a dial on a
+ * host-only harness nobody is in compiles to a host spec with no argv, so the
+ * apply wrote `<archetype>.md` — an IN-SESSION OpenCode role slot naming a
+ * model OpenCode was never going to be handed.
+ */
+test('opencode apply routes a host-only-elsewhere dial to a broker, not a role slot', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'opencode', repoRoot: root });
+  // The shipped catalog: `omp` is host-only, and this apply resolves against
+  // the `opencode` host — so `opus on omp` has no lane here at all.
+  writeLocalDialState(root, { dials: { worker: { model: 'opus', harness: 'omp' } }, shadows: {}, legacyNote: null });
+  const applied = runSteeringApplyOpenCode({ repoRoot: root, force: true });
+  assert.equal(applied.materialization.worker?.kind, 'command-broker');
+  assert.equal(existsSync(join(root, '.opencode', 'agent', 'fadeno-dispatch-worker.md')), true);
+  assert.equal(existsSync(join(root, '.opencode', 'agent', 'worker.md')), false, 'no in-session slot for a model this host cannot deliver');
+
+  // The control: the session's own identity still materializes in-session, so
+  // the fix is `hostCandidate`, not "always broker".
+  writeLocalDialState(root, { dials: { worker: { model: 'current-host' } }, shadows: {}, legacyNote: null });
+  const native = runSteeringApplyOpenCode({ repoRoot: root, force: true });
+  assert.equal(native.materialization.worker?.kind, 'host');
+  assert.equal(existsSync(join(root, '.opencode', 'agent', 'worker.md')), true);
+  assert.equal(existsSync(join(root, '.opencode', 'agent', 'fadeno-dispatch-worker.md')), false, 'the stale broker is removed');
+});
+
+/**
+ * `--bind` names a DIAL REF, and the run may have frozen an archetype-specific
+ * answer for it. Reading the plain ref handed the bound role the base lane —
+ * the one the unbound path had already rejected on eligibility — so binding a
+ * role to the executor it already resolved to CHANGED its delivery.
+ */
+test('a --bind on a director role reaches the same exec variant the unbound path does', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'codex', repoRoot: root, dataOnly: true, noSteering: true });
+  const paths = isolated(root);
+  const ECHO = ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('BASE:'+d));"];
+  const EXEC = ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('EXEC:'+d));"];
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({
+    models: { boss: { provider: 'anthropic', id: 'boss-1', effort: 'high' } },
+    harnesses: {
+      claude: { provider: 'anthropic', command: ECHO, eligibility: { director: 'forbidden' }, variants: { exec: { command: EXEC } } },
+    },
+    archetypes: { director: {} },
+    dials: { director: 'boss' },
+  }));
+  writeFileSync(join(root, '.fadeno', 'playbooks', 'lead.yaml'), stringifyYaml({
+    kind: 'AgentPlaybook', schema_version: '0.1', name: 'lead',
+    description: 'A one-step run whose only actor is a director.',
+    roles: { lead: { purpose: 'Coordinate.', archetype: 'director' } },
+    inputs: { Task: { media_type: 'text/markdown' } },
+    flow: [{ id: 'plan', kind: 'actor_call', actor: 'lead', input: ['Task'], output: 'Notes', output_path: 'artifacts/notes.md', terminal_status: 'completed' }],
+  }));
+  writeFileSync(join(root, 'task.md'), 'coordinate it');
+
+  const unbound = runNewRun({ repoRoot: root, playbook: 'lead', task: 'unbound', inputs: ['Task=task.md'], userPathOptions: paths });
+  assert.equal(runDrive({ run: unbound.runId, repoRoot: root, userPathOptions: paths }).status, 'completed');
+  assert.match(readFileSync(join(unbound.runDir, 'artifacts', 'notes.md'), 'utf8'), /^EXEC:/);
+
+  // Same catalog, same dial, same role — now pinned to the executor it already
+  // resolved to. A pin must not change the delivery.
+  const bound = runNewRun({ repoRoot: root, playbook: 'lead', task: 'bound', inputs: ['Task=task.md'], userPathOptions: paths });
+  const driven = runDrive({ run: bound.runId, repoRoot: root, userPathOptions: paths, bind: ['lead=boss'] });
+  assert.equal(driven.status, 'completed', JSON.stringify(driven));
+  assert.match(readFileSync(join(bound.runDir, 'artifacts', 'notes.md'), 'utf8'), /^EXEC:/, '--bind reaches the exec variant too');
+});
+
+/**
+ * The catalog need not enumerate an archetype for its lanes to carry
+ * `eligibility:` keyed by it. `knownArchetypes` sees the canon roster plus
+ * `archetypes:` and `dials:`; a playbook role archetype appears in neither, so
+ * the run froze no specialized entry for it and every replay read the base
+ * lane — the lane policy had already ruled out.
+ */
+test('the run snapshot specializes the playbook\'s own role archetypes', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'codex', repoRoot: root, dataOnly: true, noSteering: true });
+  const paths = isolated(root);
+  const ECHO = ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('BASE:'+d));"];
+  const EXEC = ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('EXEC:'+d));"];
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({
+    models: { boss: { provider: 'anthropic', id: 'boss-1', effort: 'high' } },
+    harnesses: {
+      claude: { provider: 'anthropic', command: ECHO, eligibility: { auditor: 'forbidden' }, variants: { exec: { command: EXEC } } },
+    },
+    // `auditor` is deliberately absent from `archetypes:` and `dials:` — the
+    // only place it is written down is the playbook below.
+    archetypes: { worker: {} },
+    bindings: { checker: 'boss' },
+  }));
+  writeFileSync(join(root, '.fadeno', 'playbooks', 'audit.yaml'), stringifyYaml({
+    kind: 'AgentPlaybook', schema_version: '0.1', name: 'audit',
+    description: 'A one-step run whose only actor carries a custom archetype.',
+    roles: { checker: { purpose: 'Audit.', archetype: 'auditor' } },
+    inputs: { Task: { media_type: 'text/markdown' } },
+    flow: [{ id: 'check', kind: 'actor_call', actor: 'checker', input: ['Task'], output: 'Notes', output_path: 'artifacts/notes.md', terminal_status: 'completed' }],
+  }));
+  writeFileSync(join(root, 'task.md'), 'audit it');
+  const created = runNewRun({ repoRoot: root, playbook: 'audit', task: 'custom archetype', inputs: ['Task=task.md'], userPathOptions: paths });
+  const driven = runDrive({ run: created.runId, repoRoot: root, userPathOptions: paths });
+  assert.equal(driven.status, 'completed', JSON.stringify(driven));
+  assert.match(readFileSync(join(created.runDir, 'artifacts', 'notes.md'), 'utf8'), /^EXEC:/);
+
+  const snapshot = parseSnapshotDocument(readFileSync(join(created.runDir, 'profile.yaml'), 'utf8'), 'profile.yaml');
+  const key = `boss${SNAPSHOT_ARCHETYPE_SEPARATOR}auditor`;
+  assert.ok(Object.hasOwn(snapshot.executors, key), `snapshot must carry ${key}`);
+  assert.equal(snapshotExecutor(snapshot, 'boss', 'auditor')!.variant, 'exec');
+  assert.equal(snapshotExecutor(snapshot, 'boss', null)!.variant, undefined, 'still additive: the plain ref is the base lane');
+});
+
+/**
+ * `drive` is not the only command that cuts a run's profile snapshot —
+ * `tool-run` does too, whenever it is the first command to touch a run (a
+ * playbook whose first step is a `tool_call`). A second copy of "which
+ * archetypes does this playbook use" would drift silently: the snapshot would
+ * simply lack an entry and every replay would read the base lane. Both read
+ * `playbookRoleArchetypes`.
+ */
+test('the tool-run snapshot cut carries the same playbook archetypes drive uses', (t) => {
+  const root = tempRepo(t);
+  runInit({ target: 'codex', repoRoot: root, dataOnly: true, noSteering: true });
+  const paths = isolated(root);
+  const ECHO = ['node', '-e', 'process.exit(0)'];
+  const EXEC = ['node', '-e', 'process.exit(0)'];
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), catalogV4({
+    models: { boss: { provider: 'anthropic', id: 'boss-1', effort: 'high' } },
+    harnesses: {
+      claude: { provider: 'anthropic', command: ECHO, eligibility: { auditor: 'forbidden' }, variants: { exec: { command: EXEC } } },
+    },
+    archetypes: { worker: {} },
+    bindings: { checker: 'boss' },
+    tools: { test_runner: { command: ['node', '-e', 'process.exit(0)'] } },
+  }));
+  writeFileSync(join(root, '.fadeno', 'playbooks', 'toolfirst.yaml'), stringifyYaml({
+    kind: 'AgentPlaybook', schema_version: '0.1', name: 'toolfirst',
+    description: 'A run whose first step is a tool call, with a custom role archetype.',
+    roles: { checker: { purpose: 'Audit.', archetype: 'auditor' } },
+    flow: [{ id: 'test', kind: 'tool_call', tool: 'test_runner', output: 'TestResult' }],
+  }));
+  const created = runNewRun({ repoRoot: root, playbook: 'toolfirst', task: 'tool first', userPathOptions: paths });
+  runToolRun({ repoRoot: root, run: created.runId, userPathOptions: paths });
+
+  const snapshot = parseSnapshotDocument(readFileSync(join(created.runDir, 'profile.yaml'), 'utf8'), 'profile.yaml');
+  assert.ok(
+    Object.hasOwn(snapshot.executors, `boss${SNAPSHOT_ARCHETYPE_SEPARATOR}auditor`),
+    'tool-run cut a snapshot missing the playbook\'s own archetype',
+  );
+  assert.equal(snapshotExecutor(snapshot, 'boss', 'auditor')!.variant, 'exec');
+});

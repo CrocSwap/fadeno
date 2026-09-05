@@ -13,7 +13,7 @@ import {
   readWorkspaceLease,
 } from '../lib/workspace-lease.ts';
 import { describeWorkspaceLeaseLiveness } from '../lib/supervisor.ts';
-import { explainSuppressedBuiltin } from '../lib/config-layers.ts';
+import { catalogLayerVersions, explainSuppressedBuiltin } from '../lib/config-layers.ts';
 import { compareFadenoVersions, readInstallationManifest } from '../lib/installations.ts';
 import { codexUserAgentDir, userPaths } from '../lib/user-paths.ts';
 import {
@@ -291,12 +291,30 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
             `${missing.length} declaration(s) the builtin makes: ${shown}${rest}`,
           'Either re-declare them, or — usually better — delete everything from ' +
             '`.fadeno/executors.yaml` that is not a deliberate override. Without its own `models:` ' +
-            'and `routes:` the file layers on the builtin instead of replacing it, and cannot fall ' +
+            'and `harnesses:` the file layers on the builtin instead of replacing it, and cannot fall ' +
             'behind again. Note this reports ABSENCES only: a stale VALUE is indistinguishable from ' +
             'a deliberate override and is not checked.',
         ));
       }
     }
+  }
+
+  // Catalog version. A `schema_version: 3` layer still LOADS — a personal
+  // `models:`-only catalog is not made wrong by the v4 bump — but it is also
+  // frozen out of everything v4 added, and it will start failing the moment
+  // someone edits it toward `harnesses:`. Say so once, here, rather than
+  // letting the first edit produce the migration error with no warning that
+  // the file was old.
+  for (const layer of catalogLayerVersions(repoRoot, opts.userPathOptions ?? {})) {
+    if (layer.schemaVersion === 4) continue;
+    findings.push(finding(
+      'catalog-version',
+      'warning',
+      `${layer.path} declares schema_version ${layer.schemaVersion ?? '(absent)'}; catalog v4 is current`,
+      'It still loads because it declares none of the keys v4 removed (`routes`, `relay`, ' +
+        '`unregistered_model_driver`, a model `delivery:`, a ` via ` in a dial). Bump it to ' +
+        '`schema_version: 4` when you next edit it — see docs/experimental/harness-neutral-dials.md.',
+    ));
   }
 
   for (const role of status.roles) {

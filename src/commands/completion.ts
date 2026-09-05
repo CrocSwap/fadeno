@@ -65,14 +65,14 @@ const PATH: OptionSpec = { kind: 'path' };
 // Shared by `dial shadow` and its top-level alias `shadow` — one spec so the
 // two spellings cannot drift apart on which flags they accept.
 const SHADOW_SPEC = command(
-  { '--via': { kind: 'free' }, '--rate': { kind: 'free' }, '--n': { kind: 'free' }, '--json': NONE },
+  { '--harness': { kind: 'free' }, '--rate': { kind: 'free' }, '--n': { kind: 'free' }, '--json': NONE },
   ['archetype', 'free'],
 );
 
 // Shared by `models` and its top-level alias `model` — one spec so the two
 // spellings cannot drift apart on which flags they accept.
 const MODELS_SPEC = command(
-  { '--driver': { kind: 'free' }, '--json': NONE },
+  { '--harness': { kind: 'free' }, '--json': NONE },
   ['executor'],
   { add: command({ '--json': NONE }, ['free', 'free']) },
 );
@@ -106,7 +106,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   // Top-level alias for `models` — same handler in cli.ts, same flags.
   model: MODELS_SPEC,
   dial: command(
-    { '--via': { kind: 'free' }, '--session': NONE, '--user': NONE, '--repo': NONE, '--rate': { kind: 'free' }, '--archetype': { kind: 'archetype' }, '--json': NONE },
+    { '--harness': { kind: 'free' }, '--session': NONE, '--user': NONE, '--repo': NONE, '--rate': { kind: 'free' }, '--archetype': { kind: 'archetype' }, '--json': NONE },
     ['archetype', 'free'],
     {
       clear: command({ '--session': NONE, '--user': NONE, '--repo': NONE }, ['archetype']),
@@ -142,7 +142,7 @@ const COMMANDS: Record<string, CommandSpec> = {
       '--archetype': { kind: 'archetype' },
       '--role': { kind: 'free' },
       '--model': { kind: 'free' },
-      '--via': { kind: 'free' },
+      '--harness': { kind: 'free' },
       '--prompt-file': PATH,
       '--tag': { kind: 'free' },
       '--shadow': { kind: 'free' },
@@ -215,7 +215,7 @@ const COMMANDS: Record<string, CommandSpec> = {
       '--adversarial': PATH,
       '--json': NONE,
       '--judge': { kind: 'free' },
-      '--via': { kind: 'free' },
+      '--harness': { kind: 'free' },
     },
     ['free'],
   ),

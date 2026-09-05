@@ -38,9 +38,9 @@ import { tempRepo } from './helpers.ts';
  */
 
 const BASE = {
-  schema_version: 3,
+  schema_version: 4,
   models: { sol: { provider: 'openai' } },
-  routes: { standalone: { openai: { command: ['codex'] } } },
+  harnesses: { codex: { provider: 'openai', command: ['codex'] } },
 };
 
 function parseDoc(over: Record<string, unknown>): ExecutorProfile {
@@ -238,8 +238,8 @@ test('ignored_output: an archetype policy declared in one layer is not dropped b
   // has to arrive intact.
   const { root, paths } = seed(
     t,
-    { schema_version: 3, archetypes: { auditor: { ignored_output: 'kept' } } },
-    { schema_version: 3, archetypes: { scribe: { ignored_output: 'kept' }, courier: {} } },
+    { schema_version: 4, archetypes: { auditor: { ignored_output: 'kept' } } },
+    { schema_version: 4, archetypes: { scribe: { ignored_output: 'kept' }, courier: {} } },
   );
   const { layers, profile } = loadLayeredProfile(root, paths);
   assert.deepEqual(layers, ['builtin', 'user', 'project'], 'this fixture must actually layer');
@@ -259,8 +259,8 @@ test('ignored_output: the innermost layer that declares an archetype wins outrig
   // the project layer can both raise and lower the flag the user set.
   const { root, paths } = seed(
     t,
-    { schema_version: 3, archetypes: { scribe: { ignored_output: 'discardable' }, courier: { ignored_output: 'kept' } } },
-    { schema_version: 3, archetypes: { scribe: { ignored_output: 'kept' }, courier: { ignored_output: 'discardable' } } },
+    { schema_version: 4, archetypes: { scribe: { ignored_output: 'discardable' }, courier: { ignored_output: 'kept' } } },
+    { schema_version: 4, archetypes: { scribe: { ignored_output: 'kept' }, courier: { ignored_output: 'discardable' } } },
   );
   const { profile } = loadLayeredProfile(root, paths);
   assert.equal(profile.archetypes.scribe!.ignoredOutput, 'discardable');

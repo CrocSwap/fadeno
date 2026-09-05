@@ -32,11 +32,10 @@ const STDIN_ECHO = (prefix: string): string[] => [
   `let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('${prefix}'+d));`,
 ];
 
-const v3RoutesFor = (cmd: string[]) => ({
-  standalone: { openai: { command: cmd, }, 'current-host': { host: true } },
-  codex: { openai: { command: cmd, }, 'current-host': { host: true } },
-  claude: { openai: { command: cmd, }, 'current-host': { host: true } },
-});
+// One harness table, whatever host is asking — that is catalog v4. `codex`
+// claims `openai` as home, so a model with `provider: openai` resolves here
+// under every host without the table saying so six times.
+const harnessesFor = (cmd: string[]) => ({ codex: { provider: 'openai', command: cmd } });
 
 function seedProfile(t: TestContext, doc: Record<string, unknown>): string {
   const root = tempRepo(t);
@@ -78,22 +77,22 @@ test('scaffold: executors.yaml carries the built-in v3 catalog', (t) => {
   runInit({ target: 'codex', repoRoot: root });
 
   const content = read(root, join('.fadeno', 'executors.yaml'));
-  assert.match(content, /^schema_version: 3$/m);
+  assert.match(content, /^schema_version: 4$/m);
   assert.match(content, /^models:$/m);
   assert.match(content, /^\s+luna:/m);
   assert.match(content, /^\s+terra:/m);
   assert.match(content, /^\s+sol:/m);
   assert.match(content, /^\s+opus:/m);
-  assert.match(content, /^routes:$/m);
+  assert.match(content, /^harnesses:$/m);
   assert.doesNotMatch(content, /^loadouts:$/m);
   assert.doesNotMatch(content, /^default_loadout:/m);
 
   const asShipped = parseExecutorProfile(content, 'executors.yaml', HARNESS as any);
-  assert.equal(asShipped.schemaVersion, 3);
+  assert.equal(asShipped.schemaVersion, 4);
   assert.ok(asShipped.models.sol);
   assert.equal(asShipped.models.sol?.provider, 'openai');
   assert.equal(asShipped.models.sol?.id, 'gpt-5.6-sol');
-  assert.ok(Object.keys(asShipped.routes).length > 0);
+  assert.ok(Object.keys(asShipped.harnesses).length > 0);
   assert.deepEqual(asShipped.dials, {}, 'starter catalog ships no repo dials');
   assert.equal((asShipped as any).defaultLoadout ?? null, null);
   assert.ok(runValidate({ repoRoot: root }).ok);
@@ -125,7 +124,8 @@ test('help: new dial flags are discoverable and old loadout vars are gone', (t) 
   const dispatch = cli(root, ['dispatch', '--help']);
   assert.equal(dial.status, 0);
   assert.equal(dispatch.status, 0);
-  assert.match(dial.stdout, /--via/);
+  assert.match(dial.stdout, /--harness/);
+  assert.doesNotMatch(dial.stdout, /--via/);
   assert.match(dispatch.stdout, /--model/);
   assert.match(dial.stdout, /--user/);
   assert.match(dial.stdout, /--repo/);
@@ -142,12 +142,12 @@ test('echo: resolution labels use dial source vocabulary, not loadout', (t) => {
   writeFileSync(
     join(root, '.fadeno', 'executors.yaml'),
     stringifyYaml({
-      schema_version: 3,
+      schema_version: 4,
       models: {
         'echo-worker': { provider: 'openai', id: 'echo-worker' },
         'luna-worker': { provider: 'openai', id: 'luna-worker' },
       },
-      routes: v3RoutesFor(STDIN_ECHO('REPORT:')),
+      harnesses: harnessesFor(STDIN_ECHO('REPORT:')),
       archetypes: { worker: {}, reviewer: {} },
       dials: { worker: 'echo-worker' },
     }),
@@ -172,12 +172,12 @@ test('echo: resolution labels use dial source vocabulary, not loadout', (t) => {
 
 test('evidence: rows record the resolution path for dial sources', (t) => {
   const root = seedProfile(t, {
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'echo-worker': { provider: 'openai', id: 'echo-worker' },
       'luna-worker': { provider: 'openai', id: 'luna-worker' },
     },
-    routes: v3RoutesFor(STDIN_ECHO('REPORT:')),
+    harnesses: harnessesFor(STDIN_ECHO('REPORT:')),
     archetypes: { worker: {}, reviewer: {} },
     dials: { worker: 'echo-worker' },
     bindings: { implementer: 'luna-worker' },
@@ -213,7 +213,7 @@ test('evidence: rows record the resolution path for dial sources', (t) => {
     assert.equal(typeof r.executor, 'string');
     assert.equal(typeof r.model, 'string');
     assert.equal(typeof r.model_id, 'string');
-    assert.equal(typeof r.driver, 'string');
+    assert.equal(typeof r.harness, 'string');
     assert.ok(!('loadout' in r));
     assert.ok(!('target' in r));
   }
@@ -227,13 +227,9 @@ test('evidence: rows record the resolution path for dial sources', (t) => {
 
 test('cli: a nonzero executor exit gets a stderr diagnosis line; stdout stays pure', (t) => {
   const root = seedProfile(t, {
-    schema_version: 3,
+    schema_version: 4,
     models: { probe: { provider: 'openai', id: 'probe' }, 'fail-model': { provider: 'openai', id: 'fail-model' } },
-    routes: {
-      standalone: { openai: { command: ['node', '-e', 'process.exit(7)'], } },
-      codex: { openai: { command: ['node', '-e', 'process.exit(7)'], } },
-      claude: { openai: { command: ['node', '-e', 'process.exit(7)'], } },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'process.exit(7)'] } },
     archetypes: { worker: {} },
     dials: { worker: 'fail-model' },
   });
@@ -246,9 +242,9 @@ test('cli: a nonzero executor exit gets a stderr diagnosis line; stdout stays pu
   writeFileSync(
     join(root, '.fadeno', 'executors.yaml'),
     stringifyYaml({
-      schema_version: 3,
+      schema_version: 4,
       models: { probe: { provider: 'openai', id: 'probe' } },
-      routes: v3RoutesFor(STDIN_ECHO('REPORT:')),
+      harnesses: harnessesFor(STDIN_ECHO('REPORT:')),
       archetypes: { worker: {} },
       dials: { worker: 'probe' },
     }),
@@ -262,9 +258,9 @@ test('cli: a nonzero executor exit gets a stderr diagnosis line; stdout stays pu
 
 function seedStalePin(t: TestContext): string {
   const root = seedProfile(t, {
-    schema_version: 3,
+    schema_version: 4,
     models: { probe: { provider: 'openai', id: 'probe' }, luna: { provider: 'openai', id: 'luna' } },
-    routes: v3RoutesFor(STDIN_ECHO('REPORT:')),
+    harnesses: harnessesFor(STDIN_ECHO('REPORT:')),
     archetypes: { worker: {} },
     dials: { worker: 'probe' },
   });
@@ -309,9 +305,9 @@ test('stale pin: drive still succeeds with legacy pin ignored', (t) => {
   writeFileSync(
     join(root, '.fadeno', 'executors.yaml'),
     stringifyYaml({
-      schema_version: 3,
+      schema_version: 4,
       models: { probe: { provider: 'openai', id: 'probe' } },
-      routes: v3RoutesFor(STDIN_ECHO('REPORT:')),
+      harnesses: harnessesFor(STDIN_ECHO('REPORT:')),
       archetypes: { worker: {} },
       dials: { worker: 'probe' },
     }),
@@ -328,9 +324,9 @@ test('stale pin: drive still succeeds with legacy pin ignored', (t) => {
 
 test('dispatch: an empty or whitespace-only prompt is refused before any invocation', (t) => {
   const root = seedProfile(t, {
-    schema_version: 3,
+    schema_version: 4,
     models: { probe: { provider: 'openai', id: 'probe' } },
-    routes: v3RoutesFor(STDIN_ECHO('REPORT:')),
+    harnesses: harnessesFor(STDIN_ECHO('REPORT:')),
     archetypes: { worker: {} },
     dials: { worker: 'probe' },
   });
@@ -355,9 +351,9 @@ test('dispatch: an empty or whitespace-only prompt is refused before any invocat
 
 test('cli: empty stdin is a clear dispatch error, not a silent empty dispatch', (t) => {
   const root = seedProfile(t, {
-    schema_version: 3,
+    schema_version: 4,
     models: { probe: { provider: 'openai', id: 'probe' } },
-    routes: v3RoutesFor(STDIN_ECHO('REPORT:')),
+    harnesses: harnessesFor(STDIN_ECHO('REPORT:')),
     archetypes: { worker: {} },
     dials: { worker: 'probe' },
   });

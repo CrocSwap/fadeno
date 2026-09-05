@@ -165,18 +165,12 @@ test('bundled CLI dial shows effective table and resolves via dials', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' },
       grok: { provider: 'xai', id: 'grok-4.6', effort: 'high' },
     },
-    routes: {
-      standalone: {
-        openai: { command: ['node', '-e', '0'], },
-        xai: { command: ['node', '-e', '0'], },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', '0'] }, grok: { provider: 'xai', command: ['node', '-e', '0'] } },
     archetypes: {
       worker: { },
       reviewer: { },
@@ -295,9 +289,9 @@ test('dial resolve hook emits stable keys for agent', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' } },
-    routes: { standalone: { openai: { command: ['node', '-e', '0'], }, 'current-host': { host: true } } },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', '0'] } },
     archetypes: { worker: {} },
   }));
   // Clear any prior user dial that may have leaked from previous test's global state

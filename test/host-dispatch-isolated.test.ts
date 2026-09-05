@@ -57,9 +57,9 @@ function seedIsolatedRun(t: import('node:test').TestContext) {
   writeFileSync(join(root, '.fadeno', 'playbooks', 'isolated-host-fixture.yaml'), PLAYBOOK);
   writeFileSync(join(root, 'task.md'), 'do the thing');
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { luna: { provider: 'dummy', id: 'gpt-5.6-luna', effort: 'xhigh' } },
-    routes: { standalone: { dummy: { host: true }, 'current-host': { host: true } }, codex: { dummy: { host: true }, 'current-host': { host: true } }, claude: { dummy: { host: true }, 'current-host': { host: true } }, grok: { dummy: { host: true }, 'current-host': { host: true } } },
+    harnesses: { dummy: { provider: 'dummy', host: { effort_channel: 'none' } } },
     archetypes: { worker: {} },
     bindings: { worker: 'luna' },
   }));
@@ -543,9 +543,9 @@ test('isolated and shared terminal events differ by exactly the five isolated ke
     writeFileSync(join(root, '.fadeno', 'playbooks', 'isolated-host-fixture.yaml'), PLAYBOOK);
     writeFileSync(join(root, 'task.md'), 'do the thing');
     writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-      schema_version: 3,
+      schema_version: 4,
       models: { luna: { provider: 'dummy', id: 'gpt-5.6-luna', effort: 'xhigh' } },
-      routes: { standalone: { dummy: { host: true }, 'current-host': { host: true } }, codex: { dummy: { host: true }, 'current-host': { host: true } }, claude: { dummy: { host: true }, 'current-host': { host: true } }, grok: { dummy: { host: true }, 'current-host': { host: true } } },
+      harnesses: { dummy: { provider: 'dummy', host: { effort_channel: 'none' } } },
       archetypes: { worker: {} },
       bindings: { worker: 'luna' },
     }));
@@ -592,9 +592,9 @@ flow:
     writeFileSync(join(root, '.fadeno', 'playbooks', 'host-repair-fixture.yaml'), TYPED_PLAYBOOK);
     writeFileSync(join(root, 'agent-1.md'), 'structured work');
     writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-      schema_version: 3,
+      schema_version: 4,
       models: { luna: { provider: 'dummy', id: 'gpt-5.6-luna', effort: 'xhigh' } },
-      routes: { standalone: { dummy: { host: true }, 'current-host': { host: true } }, codex: { dummy: { host: true }, 'current-host': { host: true } }, claude: { dummy: { host: true }, 'current-host': { host: true } }, grok: { dummy: { host: true }, 'current-host': { host: true } } },
+      harnesses: { dummy: { provider: 'dummy', host: { effort_channel: 'none' } } },
       archetypes: { agent_1: {} },
       bindings: { agent_1: 'luna' },
     }));
@@ -624,9 +624,9 @@ flow:
     writeFileSync(join(root, '.fadeno', 'playbooks', 'isolated-host-fixture.yaml'), PLAYBOOK);
     writeFileSync(join(root, 'task.md'), 'do the thing');
     writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-      schema_version: 3,
+      schema_version: 4,
       models: { luna: { provider: 'dummy', id: 'gpt-5.6-luna', effort: 'xhigh' } },
-      routes: { standalone: { dummy: { host: true }, 'current-host': { host: true } }, codex: { dummy: { host: true }, 'current-host': { host: true } }, claude: { dummy: { host: true }, 'current-host': { host: true } }, grok: { dummy: { host: true }, 'current-host': { host: true } } },
+      harnesses: { dummy: { provider: 'dummy', host: { effort_channel: 'none' } } },
       archetypes: { worker: {} },
       bindings: { worker: 'luna' },
     }));

@@ -208,8 +208,8 @@ export interface BakeoffOptions {
   measureOnly?: boolean;
   /** Override the `judge` archetype's dial model (bypasses catalog resolution, same as `fadeno dispatch --model`). */
   judgeModel?: string | null;
-  /** Driver override for `judgeModel`; ignored without it. */
-  judgeVia?: string | null;
+  /** Executor-harness override for `judgeModel`; ignored without it. */
+  judgeHarness?: string | null;
   cwd?: string;
   repoRoot?: string;
   /** Injectable clock, for a stable `date` on the written artifact. */
@@ -1177,7 +1177,7 @@ interface RawAdversarialJudgment {
 /** A judge dispatch that reports its own refusal/failure/invalid-output as a `BakeoffCommandError` — never a partial write. */
 function dispatchJudge(
   prompt: string,
-  opts: { repoRoot: string; cwd: string; judgeModel: string | null; judgeVia: string | null; now?: Date; tag: string },
+  opts: { repoRoot: string; cwd: string; judgeModel: string | null; judgeHarness: string | null; now?: Date; tag: string },
 ): AdHocDispatchResult {
   let result: AdHocDispatchResult;
   try {
@@ -1185,11 +1185,11 @@ function dispatchJudge(
       // `archetype: 'judge'` even under a model override: the override only
       // bypasses which DIAL is compiled (see `runDispatch`'s own `--model`
       // bypass), so a no-command-lane refusal still names "judge" — the same
-      // wording discipline as `fadeno dial judge <model> --via <driver>`.
+      // wording discipline as `fadeno dial judge <model> --harness <id>`.
       archetype: 'judge',
       prompt,
       model: opts.judgeModel,
-      via: opts.judgeVia,
+      harness: opts.judgeHarness,
       noBrief: true,
       cwd: opts.cwd,
       repoRoot: opts.repoRoot,
@@ -1615,7 +1615,7 @@ function adjudicateViaCommand(
   // per-invocation suffix keeps the pair legible in the handle while leaving
   // the handle unique, which is what the kernel now requires of every tag.
   const judgeRun = randomUUID().slice(0, 8);
-  const judgeCallOpts = { repoRoot, cwd, judgeModel: opts.judgeModel ?? null, judgeVia: opts.judgeVia ?? null, now: opts.now };
+  const judgeCallOpts = { repoRoot, cwd, judgeModel: opts.judgeModel ?? null, judgeHarness: opts.judgeHarness ?? null, now: opts.now };
 
   const comparisonResult = dispatchJudge(prepared.comparisonPrompt, { ...judgeCallOpts, tag: `cmp-${pairId8}-${judgeRun}` });
   const comparisonParsed = extractJsonObject(comparisonResult.stdout);

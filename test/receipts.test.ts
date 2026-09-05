@@ -72,20 +72,19 @@ function seed(t: TestContext): { root: string; runId: string; runDir: string } {
   runInit({ target: 'codex', repoRoot: root });
   writeFileSync(join(root, '.fadeno', 'playbooks', 'receipts.yaml'), PLAYBOOK);
   const emit = (body: string): string[] => ['node', '-e', `process.stdout.write(${JSON.stringify(body)})`];
-  const routes: Record<string, unknown> = {
-    ro_a_p: { command: emit(VALID_REVIEW) },
-    ro_b_p: { command: emit(VALID_REVIEW) },
-    rw_worker_p: { command: emit('summary') },
-    'current-host': { host: true },
+  const harnesses: Record<string, unknown> = {
+    ro_a_p: { provider: 'ro_a_p', command: emit(VALID_REVIEW) },
+    ro_b_p: { provider: 'ro_b_p', command: emit(VALID_REVIEW) },
+    rw_worker_p: { provider: 'rw_worker_p', command: emit('summary') },
   };
   const v3 = {
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'ro-a': { provider: 'ro_a_p', id: 'ro-a', effort: 'high' },
       'ro-b': { provider: 'ro_b_p', id: 'ro-b', effort: 'high' },
       'rw-worker': { provider: 'rw_worker_p', id: 'rw-worker', effort: 'high' },
     },
-    routes: { standalone: routes, codex: routes, claude: routes, grok: routes },
+    harnesses,
     archetypes: { worker: {}, reviewer: {} },
     dials: {},
     bindings: { reviewer_a: 'ro-a', reviewer_b: 'ro-b', worker: 'rw-worker' },

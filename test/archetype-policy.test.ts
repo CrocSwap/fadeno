@@ -3,7 +3,7 @@ import test from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import {
   BARE_IDENTIFIER_RE,
-  compileDialRef,
+  resolveDelivery,
   ExecutorProfileError,
   parseExecutorProfile,
   parseSnapshotDocument,
@@ -16,7 +16,7 @@ function parseDoc(doc: Record<string, unknown>): ExecutorProfile {
 }
 
 function specForModel(profile: ExecutorProfile, model: string) {
-  return compileDialRef({ model }, profile).spec;
+  return resolveDelivery({ model }, profile).spec;
 }
 
 // --- parse: the removed write posture ---
@@ -29,9 +29,9 @@ test('archetypes: requires_write is refused with a pointer, not silently ignored
   for (const value of [true, false, 'required', 'forbidden', 'none']) {
     assert.throws(
       () => parseDoc({
-        schema_version: 3,
+        schema_version: 4,
         models: { sol: { provider: 'openai' } },
-        routes: { standalone: { openai: { command: ['codex'] } } },
+        harnesses: { codex: { provider: 'openai', command: ['codex'] } },
         archetypes: { worker: { requires_write: value } },
       }),
       (err: unknown) =>
@@ -43,13 +43,13 @@ test('archetypes: requires_write is refused with a pointer, not silently ignored
   }
 });
 
-test('routes: write_access and write_variant are refused with a pointer', () => {
-  for (const route of [{ command: ['codex'], write_access: false }, { command: ['codex'], write_variant: { command: ['codex', '--yolo'] } }]) {
+test('harnesses: write_access and write_variant are refused with a pointer', () => {
+  for (const lane of [{ command: ['codex'], write_access: false }, { command: ['codex'], write_variant: { command: ['codex', '--yolo'] } }]) {
     assert.throws(
       () => parseDoc({
-        schema_version: 3,
+        schema_version: 4,
         models: { sol: { provider: 'openai' } },
-        routes: { standalone: { openai: route } },
+        harnesses: { codex: { provider: 'openai', ...lane } },
       }),
       (err: unknown) =>
         err instanceof ExecutorProfileError &&
@@ -65,9 +65,9 @@ test('routes: write_access and write_variant are refused with a pointer', () => 
 
 test('archetypes: an empty policy is legal (all-default)', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     archetypes: { scout: {} },
   });
   assert.deepEqual(profile.archetypes.scout, { ignoredOutput: 'discardable', fallback: null, distinctProviderFromInputs: null, brief: null });
@@ -76,9 +76,9 @@ test('archetypes: an empty policy is legal (all-default)', () => {
 test('archetypes: unknown keys name the new allowed set', () => {
   assert.throws(
     () => parseDoc({
-      schema_version: 3,
+      schema_version: 4,
       models: { sol: { provider: 'openai' } },
-      routes: { standalone: { openai: { command: ['codex'] } } },
+      harnesses: { codex: { provider: 'openai', command: ['codex'] } },
       archetypes: { worker: { requires_network: true } },
     }),
     (err: unknown) =>
@@ -93,18 +93,18 @@ test('archetypes: unknown keys name the new allowed set', () => {
 test('archetypes: keys and fallback values must be bare identifiers', () => {
   assert.throws(
     () => parseDoc({
-      schema_version: 3,
+      schema_version: 4,
       models: { sol: { provider: 'openai' } },
-      routes: { standalone: { openai: { command: ['codex'] } } },
+      harnesses: { codex: { provider: 'openai', command: ['codex'] } },
       archetypes: { Worker: { } },
     }),
     /archetype name "Worker" is not a bare lowercase identifier/,
   );
   assert.throws(
     () => parseDoc({
-      schema_version: 3,
+      schema_version: 4,
       models: { sol: { provider: 'openai' } },
-      routes: { standalone: { openai: { command: ['codex'] } } },
+      harnesses: { codex: { provider: 'openai', command: ['codex'] } },
       archetypes: { scout: { fallback: 'Reviewer' } },
     }),
     (err: unknown) =>
@@ -117,9 +117,9 @@ test('archetypes: keys and fallback values must be bare identifiers', () => {
 test('archetypes: fallback may not name its own archetype', () => {
   assert.throws(
     () => parseDoc({
-      schema_version: 3,
+      schema_version: 4,
       models: { sol: { provider: 'openai' } },
-      routes: { standalone: { openai: { command: ['codex'] } } },
+      harnesses: { codex: { provider: 'openai', command: ['codex'] } },
       archetypes: { scout: { fallback: 'scout' } },
     }),
     /`archetypes\.scout\.fallback` may not name its own archetype/,
@@ -129,9 +129,9 @@ test('archetypes: fallback may not name its own archetype', () => {
 test('archetypes: a 2-cycle is refused with the cycle path', () => {
   assert.throws(
     () => parseDoc({
-      schema_version: 3,
+      schema_version: 4,
       models: { sol: { provider: 'openai' } },
-      routes: { standalone: { openai: { command: ['codex'] } } },
+      harnesses: { codex: { provider: 'openai', command: ['codex'] } },
       archetypes: {
         scout: { fallback: 'reviewer' },
         reviewer: { fallback: 'scout' },
@@ -146,9 +146,9 @@ test('archetypes: a 2-cycle is refused with the cycle path', () => {
 test('archetypes: a 3-cycle is refused with the cycle path', () => {
   assert.throws(
     () => parseDoc({
-      schema_version: 3,
+      schema_version: 4,
       models: { sol: { provider: 'openai' } },
-      routes: { standalone: { openai: { command: ['codex'] } } },
+      harnesses: { codex: { provider: 'openai', command: ['codex'] } },
       archetypes: {
         scout: { fallback: 'reviewer' },
         reviewer: { fallback: 'judge' },
@@ -163,9 +163,9 @@ test('archetypes: a 3-cycle is refused with the cycle path', () => {
 
 test('archetypes: fallback to an undeclared archetype is allowed', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     archetypes: { scout: { fallback: 'reviewer' } },
   });
   assert.deepEqual(profile.archetypes.scout, { ignoredOutput: 'discardable', fallback: 'reviewer', distinctProviderFromInputs: null, brief: null });
@@ -179,9 +179,9 @@ test('archetypes: fallback to an undeclared archetype is allowed', () => {
 
 test('serializeSnapshot: canonical strings, omits none, emits fallback, round-trips', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     archetypes: {
       worker: { },
       reviewer: { },

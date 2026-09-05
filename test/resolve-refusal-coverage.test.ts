@@ -37,9 +37,9 @@ function seed(t: TestContext, catalog: unknown): string {
 // eligibility never did.
 test('dial resolve refuses to recommend a dispatch the kernel forbids on eligibility', (t) => {
   const root = seed(t, {
-    schema_version: 3,
+    schema_version: 4,
     models: { ro: { provider: 'rop', id: 'ro-m' } },
-    routes: { codex: { rop: { command: ECHO('RO'), eligibility: { worker: 'forbidden' } } } },
+    harnesses: { rop: { provider: 'rop', command: ECHO('RO'), eligibility: { worker: 'forbidden' } } },
     archetypes: { worker: {} },
     dials: { worker: 'ro' },
   });
@@ -60,9 +60,9 @@ test('dial resolve refuses to recommend a dispatch the kernel forbids on eligibi
 // REAL archetype silently loses its posture.
 test('doctor lints an archetype policy that nothing dials', (t) => {
   const root = seed(t, {
-    schema_version: 3,
+    schema_version: 4,
     models: { ro: { provider: 'rop', id: 'ro-m' } },
-    routes: { codex: { rop: { command: ECHO('RO'), } } },
+    harnesses: { rop: { provider: 'rop', command: ECHO('RO') } },
     archetypes: { wroker: { } },
     dials: { worker: 'ro' },
   });
@@ -75,9 +75,9 @@ test('doctor lints an archetype policy that nothing dials', (t) => {
 
 test('doctor stays quiet when every declared archetype is actually dialed', (t) => {
   const root = seed(t, {
-    schema_version: 3,
+    schema_version: 4,
     models: { ro: { provider: 'rop', id: 'ro-m' } },
-    routes: { codex: { rop: { command: ECHO('RO'), } } },
+    harnesses: { rop: { provider: 'rop', command: ECHO('RO') } },
     archetypes: { worker: { } },
     dials: { worker: 'ro' },
   });

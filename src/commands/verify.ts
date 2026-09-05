@@ -3,7 +3,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { resolveActiveArtifacts, sha256Hex, type ActiveResolution } from '../lib/artifact-manifest.ts';
 import { reduceCollective } from '../lib/collective.ts';
-import { eligibilityFor, formatDialRef, parseDialRef, parseSnapshotDocument, resolveDialCascade, type DialRef, type SnapshotDocument } from '../lib/executors.ts';
+import { eligibilityFor, formatDialRef, parseDialRef, parseSnapshotDocument, resolveDialCascade, snapshotExecutor, type DialRef, type SnapshotDocument } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import { normalizeDeliveryTransport } from '../lib/host-dispatch.ts';
 import { schemaDirectories } from '../lib/definitions.ts';
@@ -426,6 +426,20 @@ function hostEvidencePresent(events: RunEvent[]): boolean {
   return events.some((event) => event.type === 'host_dispatch_requested' || event.extra.dispatch_id != null);
 }
 
+/**
+ * The archetype a locked host request was cut for, for reading its executor out
+ * of the run's profile snapshot.
+ *
+ * A snapshot may hold an archetype-specific entry (`<ref>#reviewer`) beside the
+ * plain ref when policy chose a variant for that archetype; reading the plain
+ * ref would check the request against a lane the run never used. `'*'` is the
+ * wildcard identity, which is not an archetype and has no specialized entry.
+ */
+function requestArchetype(request: RunEvent): string | null {
+  const agentType = request.extra.agent_type;
+  return typeof agentType === 'string' && agentType !== '' && agentType !== '*' ? agentType : null;
+}
+
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
@@ -522,7 +536,7 @@ function checkHostDispatchLifecycle(run: RunSummary, events: RunEvent[], mode: L
     if (typeof request.extra.prompt_path === 'string' && !isInsideRun(run.dir, request.extra.prompt_path)) problems.push(`${id}: prompt path escapes the run directory`);
     if (typeof request.extra.output_path === 'string' && !isInsideRun(run.dir, request.extra.output_path)) problems.push(`${id}: output path escapes the run directory`);
     if (profile != null) {
-      const executor = profile.executors[request.extra.executor as string];
+      const executor = snapshotExecutor(profile, request.extra.executor as string, requestArchetype(request));
       if (executor == null || executor.adapter !== 'host') {
         problems.push(`${id}: request executor is not a host executor in the profile snapshot`);
       } else if (
@@ -570,7 +584,7 @@ function checkHostDispatchLifecycle(run: RunSummary, events: RunEvent[], mode: L
         const commandSha = sha256Hex(JSON.stringify(command));
         if (start.extra.fallback_command_sha256 !== commandSha) problems.push(`${id}: fallback command digest does not match argv`);
         if (profile != null) {
-          const executor = profile.executors[request.extra.executor as string];
+          const executor = snapshotExecutor(profile, request.extra.executor as string, requestArchetype(request));
           if (executor == null || executor.adapter !== 'host' || JSON.stringify(executor.fallbackCommand ?? null) !== JSON.stringify(command)) {
             problems.push(`${id}: fallback command does not match the snapshotted host executor`);
           }
@@ -818,7 +832,9 @@ function checkHostAttestation(run: RunSummary, events: RunEvent[], mode: LedgerM
         if (start.extra[field] !== request.extra[field]) problems.push(`${dispatchId}: start ${field} does not match the request`);
       }
       if (profile != null) {
-        const executor = typeof request.extra.executor === 'string' ? profile.executors[request.extra.executor] : undefined;
+        const executor = typeof request.extra.executor === 'string'
+          ? snapshotExecutor(profile, request.extra.executor, requestArchetype(request))
+          : undefined;
         if (executor == null || executor.adapter !== 'host') {
           problems.push(`${dispatchId}: request executor is not a host profile entry`);
         } else {
@@ -1381,7 +1397,7 @@ function checkGateEligible(run: RunSummary, events: RunEvent[]): Finding {
       typeof event.extra.archetype === 'string'
         ? event.extra.archetype
         : archetypeByRole.get(actor ?? '*') ?? null;
-    const state = eligibilityFor(profile.executors[used]!, archetype);
+    const state = eligibilityFor(snapshotExecutor(profile, used, archetype)!, archetype);
     const stampedIneligible = event.extra.gate_eligible === false;
     if (stampedIneligible) {
       if (state !== 'shadow_only') {

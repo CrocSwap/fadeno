@@ -6,8 +6,93 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- **Catalog v4: harness-neutral dials and one `harnesses:` table.** A dial names
+  WHO runs an archetype and, optionally, WHICH HARNESS runs it — never a lane, a
+  driver, or an argv. The HOST harness is discovered at dispatch time from
+  ambient signals and never from stored state; the pair *(dial harness, host)*
+  plus policy decides the lane. The six `routes.<host>` tables were
+  near-identical copies whose only real difference was which entry carried
+  `host: true`, and that bit is a property of the call. Migration table, the
+  resolution algorithm and the known gap:
+  `docs/experimental/harness-neutral-dials.md`.
+
+  Removed and **refused rather than ignored**, each with a migration note
+  naming its v4 spelling: `routes:`, `driver:`, `host: true`, top-level
+  `relay:`, `unregistered_model_driver:`, `models.<m>.delivery:`. A
+  `schema_version: 3` layer still loads when it declares none of them — a
+  personal `models:`-only catalog is not made wrong by the bump — and `doctor`
+  reports it as a `catalog-version` warning. `spellings:` is keyed by harness
+  id. Exactly one harness may claim a `provider:` as home.
+- **`--via` is removed; use `--harness <id>`** — in `dial`, `dial shadow`,
+  `dispatch`, `bakeoff`, `--help` and completion. A stale `--via` errors naming
+  its replacement rather than answering "unknown option". `fadeno models
+  --driver <alias>` is likewise `--harness <id>`, and the `fadeno dial` table's
+  fourth column is `harness` again (it was `via`), marked `(home)` whenever the
+  dial did not name one.
+- **Dial-ref grammar: `model[@effort][ on <harness>]`.** `parseDialRef` accepts
+  the legacy ` via <driver>` **on read only**, mapping
+  `claude-exec`/`claude-cli` → `claude`, `opencode-direct` → `opencode`,
+  `muse-code` → `muse`, anything else to itself; nothing emits `via` again.
+  Persisted state that still spells a delivery that way is translated on read
+  and reported once, never silently rewritten. **A shadow attachment that
+  carried `via` re-rolls**: `shadowSampleRoll` is byte-identical and hashes the
+  challenger's formatted ref, so a ref string that changes samples a different
+  sequence. Preserving the old string would mean keeping the driver vocabulary
+  alive inside the hash.
+- **`fadeno dial` set-time validation is registry-only**: the model is known (or
+  falls through with the existing verification note), the effort is legal, and
+  `--harness` names a declared harness. The eligibility refusal and the
+  host-lane/effort notes are gone from set time — both are questions about a
+  CALL, and a dial is stored host-neutrally and re-resolved at every dispatch.
+  `fadeno dial resolve` reports both, with the remedy.
+- **JSON outputs: `driver` → `harness`, and `harness` → `host`**, moved together
+  so no reader can be right about one and wrong about the other. `dial resolve
+  --json`, `steering resolve --json`, `fadeno models` (`host`, `host_source`,
+  `home_harness`, `deliveries`, `unregistered_model_harness`,
+  `listable_harnesses`) and the constraint context (`harness`, `variant`,
+  `host`) all move; a nullable `variant` names the command lane when policy
+  chose a named one. `harness` is `null` for `current-host` in a bare shell —
+  `standalone` is the no-host value, not a harness to look up.
+- **Ledger format 1.1** (`.fadeno/dispatches.jsonl`). New rows write `host`,
+  `harness`, `variant` and `dial: {model, effort?, harness?}`. Format 1.0 rows —
+  where `harness` meant the host and `driver` the executor — are translated on
+  read in one place and never rewritten. The Claude hook, the Codex spawn guard
+  and the OpenCode/omp adapters stamp 1.1 too.
+- **From a bare shell `current-host` is `restart_required`, not `host`.** The
+  base dial names whatever session is running, and a bare shell has none, so an
+  in-session answer there was a claim nothing could honour. `fadeno dial`'s lane
+  echo and `fadeno new-run`'s resolution echo now annotate it.
+- **The Claude-host command-lane fallback lost `--allowedTools "Bash(fadeno:*)"`
+  for non-director anthropic dials.** The v3 table was not six identical copies:
+  `routes.claude.anthropic` carried that scoped grant while the other five
+  hosts' `anthropic` routes carried the plain argv. v4's single
+  `harnesses.claude.command` is the plain argv (the five-of-six majority), and
+  the grant lives on the `exec` variant, which policy reaches for `director`.
+  So a pinned non-director anthropic dial under a Claude host — `worker
+  opus@high`, ejected to the command lane — now spawns a `claude` that cannot
+  run the fadeno family, and its `fadeno attest` / progress receipts go away.
+  **Restoring it is a one-line catalog change**: add
+  `--allowedTools "Bash(fadeno:*)"` to `harnesses.claude.command`.
+
 ### Added
 
+- `docs/experimental/harness-neutral-dials.md` — the catalog v4 design record:
+  the principle, the schema, the resolution algorithm, the shadow-pair
+  consequence, the rename table, and the one known gap.
+- `harnesses.<id>.variants.<name>`: named alternative argvs of a harness's
+  command lane, chosen by POLICY. An archetype the base lane forbids falls
+  through to the first variant that permits it — which is how `director opus`
+  reaches the fadeno-capable `claude` lane without a dial naming it. Run
+  snapshots carry the archetype-specific lane beside the plain ref, so `fadeno
+  drive` and `fadeno dispatch` agree on which one a step gets.
+- `harnesses.<id>.host.identity`: `model` (the default) or `session`. `session`
+  says the host lane can deliver only the session's OWN identity, because that
+  adapter rewrites the agent name and nothing else — `opencode` and `omp`
+  declare it, restoring the v3 distinction where `host: true` sat on
+  `current-host` alone. Without it a named model dialed onto either would have
+  been accepted for in-session delivery and then silently ignored.
 - A Codex `PreToolUse` spawn guard (`hooks/spawn-guard.mjs`, matcher `Agent`).
   While session-scoped host mode is on it **denies** any subagent spawn whose
   `agent_type` is not a managed Fadeno role agent (`generic_spawn_in_host_mode`),
@@ -84,6 +169,14 @@ All notable changes to Fadeno are documented here. The format follows
 
 ### Removed
 
+- `fadeno model add`'s direct-OpenCode discovery step. It registered a model
+  onto the `opencode-direct` ROUTE, which v4 turned into the `direct` VARIANT
+  of the `opencode` harness — and a variant is chosen by policy, so neither a
+  dial nor a model entry can name one. Registering it anyway would write an
+  entry that silently resolves onto the OpenRouter lane carrying a direct id.
+  Discovery now uses the OpenRouter-qualified identity only, and an id that IS
+  on the direct listing is refused by name, pointing at the design record's
+  "Known gap".
 - The stored default harness. `fadeno setup --codex|--claude` no longer
   records "the harness" in user state, and nothing reads such a memo:
   `activeHarness()` resolves `FADENO_HARNESS`, then a single ambient host
@@ -129,6 +222,41 @@ All notable changes to Fadeno are documented here. The format follows
   carry the pin and Codex publishes no session effort to observe either. The
   refusal names the two real exits: drop the pin, or dial a concrete model.
   Previously such a dial resolved `mode: host` on a proof that did not exist.
+- **A stale personal model alias could no longer fail the load.** Observed
+  2026-09-05 against the working tree: one `fadeno model add` entry in
+  `~/.config/fadeno/executors.yaml` (`ox`, provider `stealth`, registered
+  before v4) made `fadeno dial` fail in every repo, with a message naming
+  neither the alias nor the file. The user catalog is machine state, not
+  catalog policy, so it is now read TOLERANTLY: `repairUserLayer` runs before
+  the merge — and therefore before both the removed-key refusal and the
+  parser — translating `models.<m>.delivery: {route, id}` into `harness:` plus
+  `spellings.<harness>:`, mapping legacy driver aliases in `spellings` keys,
+  re-emitting a ` via <driver>` in a user `dials:`/`bindings:` ref as
+  ` on <harness>`, discarding a user-layer `routes:`/`relay:` with a note, and
+  dropping anything it cannot translate. A user model the merged `harnesses:`
+  table cannot deliver is still dropped; a spelling naming an undeclared
+  harness is dropped with it; and a user override that would make a name the
+  builtin or project layer already declares undeliverable **restores the lower
+  layer's entry** and names the collision instead of removing the name from the
+  catalog. Everything changed is reported in `modelFallback.repairs` and printed
+  by `fadeno dial`. A **project or builtin** catalog in any of those shapes is
+  still a load error with its migration note — a file someone edits is not
+  machine state.
+- **Every host-slot decision now reads `hostCandidateOf`, and every snapshot
+  read carries its archetype.** `spec.adapter === 'host'` is not "can go out
+  in-session": a host spec is also how a delivery with NO argv is represented,
+  so `steering apply --opencode` wrote an in-session OpenCode role slot for
+  `opus on omp` — a host nobody is sitting in — naming a model OpenCode was
+  never handed. All six materialization sites, `fadeno status`'s
+  materialization comparison, and `fadeno models`' `native` column now key on
+  the lane. Separately, `--bind` on `fadeno drive`, `runDispatchFallback`, the
+  `verify` host checks and `steering resolve` read the run snapshot through
+  `snapshotExecutor(profile, ref, archetype)`, so a run that froze an
+  archetype-specific lane (a policy-chosen variant) replays the lane it
+  actually used rather than the base one; and the snapshot is cut with the
+  PLAYBOOK's role archetypes as well as the catalog's, so a custom role
+  archetype constrained only by a harness lane's `eligibility:` is specialized
+  too.
 
 ## [0.6.1] — 2026-09-04
 

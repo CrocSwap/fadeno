@@ -173,29 +173,16 @@ function drive(root: string, runId: string) {
   return runDrive({ run: runId, repoRoot: root, env: null });
 }
 
-function dummyRoutes(command: string[]): Record<string, unknown> {
-  const route = { command, };
-  const perHarness = { dummy: route, 'current-host': { host: true } as Record<string, unknown> };
-  return {
-    standalone: { ...perHarness },
-    codex: { ...perHarness },
-    claude: { ...perHarness },
-    grok: { ...perHarness },
-  };
+// One harness table under catalog v4, valid under every host.
+function dummyHarnesses(command: string[]): Record<string, unknown> {
+  return { dummy: { provider: 'dummy', command } };
 }
 
-function familyRoutes(): Record<string, unknown> {
+function familyHarnesses(): Record<string, unknown> {
   const cmdArr = ['node', '-e', NOTES];
-  const perHarness = {
-    moonshot: { command: cmdArr, },
-    openai: { command: cmdArr, },
-    'current-host': { host: true },
-  };
   return {
-    standalone: { ...perHarness },
-    codex: { ...perHarness },
-    claude: { ...perHarness },
-    grok: { ...perHarness },
+    moonshot: { provider: 'moonshot', command: cmdArr },
+    codex: { provider: 'openai', command: cmdArr },
   };
 }
 
@@ -204,12 +191,12 @@ function familyProfile(
   critic: 'family-a' | 'family-b',
 ): Record<string, unknown> {
   return {
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'family-a': { provider: 'moonshot', id: 'family-a', effort: 'high' },
       'family-b': { provider: 'openai', id: 'family-b', effort: 'high' },
     },
-    routes: familyRoutes(),
+    harnesses: familyHarnesses(),
     archetypes: { reviewer: { distinct_provider_from_inputs: policy }, worker: {} },
     dials: { worker: 'family-a', reviewer: critic },
   };
@@ -217,7 +204,7 @@ function familyProfile(
 
 function eligibilityProfile(state: 'forbidden' | 'shadow_only' | 'eligible'): Record<string, unknown> {
   const cmdArr = ['node', '-e', NOTES_AND_FLAG];
-  const routes = dummyRoutes(cmdArr);
+  const harnesses = dummyHarnesses(cmdArr);
   const models: Record<string, unknown> = {
     tagged: { provider: 'dummy', id: 'tagged', effort: 'high' } as Record<string, unknown>,
   };
@@ -225,9 +212,9 @@ function eligibilityProfile(state: 'forbidden' | 'shadow_only' | 'eligible'): Re
     (models.tagged as Record<string, unknown>).eligibility = { worker: state };
   }
   return {
-    schema_version: 3,
+    schema_version: 4,
     models,
-    routes,
+    harnesses,
     archetypes: { worker: {} },
     bindings: { builder: 'tagged' },
   };
@@ -379,13 +366,13 @@ function seedConstraint(
   t: TestContext,
   mode: 'allow' | 'refuse' | 'error',
 ): { root: string; runId: string } {
-  const constraintRoutes = dummyRoutes(['node', '-e', NOTES_AND_FLAG]);
+  const constraintHarnesses = dummyHarnesses(['node', '-e', NOTES_AND_FLAG]);
   const { root, runId } = seed(t, 'one-step', ONE_STEP, {
-    schema_version: 3,
+    schema_version: 4,
     models: {
       worker: { provider: 'dummy', id: 'worker', effort: 'high' },
     },
-    routes: constraintRoutes,
+    harnesses: constraintHarnesses,
     archetypes: { worker: {} },
     bindings: { builder: 'worker' },
     constraints: { command: ['node', 'constraint-fixture.cjs'] },

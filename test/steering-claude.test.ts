@@ -11,19 +11,13 @@ function seed(t: TestContext, dials: Record<string, string>): { root: string; us
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       luna: { provider: 'openai', id: 'gpt-5.6-luna', effort: 'xhigh' },
       opus: { provider: 'anthropic', id: 'opus', effort: 'xhigh' },
       fable: { provider: 'anthropic', id: 'fable', effort: 'high' },
     },
-    routes: {
-      claude: {
-        'current-host': { host: true },
-        anthropic: { driver: 'claude', host: true, command: ['claude', '-p', '--model', '{model}'], },
-        openai: { driver: 'codex', command: ['codex', 'exec', '--model', '{model}', '-'], },
-      },
-    },
+    harnesses: { claude: { provider: 'anthropic', host: { effort_channel: 'none' }, command: ['claude', '-p', '--model', '{model}'] }, codex: { provider: 'openai', command: ['codex', 'exec', '--model', '{model}', '-'] } },
     archetypes: { worker: {}, reviewer: {}, judge: {} },
     dials,
   }));

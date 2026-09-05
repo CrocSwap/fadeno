@@ -179,9 +179,9 @@ function seedDispatch(t: TestContext, cmd: string[]): string {
   const root = seedRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { w: { provider: 'openai', id: 'w' } },
-    routes: { standalone: { openai: { command: cmd } } },
+    harnesses: { codex: { provider: 'openai', command: cmd } },
     archetypes: { worker: {} },
     dials: { worker: 'w' },
   }));

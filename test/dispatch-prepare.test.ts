@@ -52,9 +52,9 @@ function seedPrepareRun(t: import('node:test').TestContext) {
   writeFileSync(join(root, '.fadeno', 'playbooks', 'dispatch-prepare-fixture.yaml'), PLAYBOOK);
   writeFileSync(join(root, 'task.md'), 'do the thing');
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { luna: { provider: 'dummy', id: 'gpt-5.6-luna', effort: 'xhigh' } },
-    routes: { standalone: { dummy: { host: true }, 'current-host': { host: true } }, codex: { dummy: { host: true }, 'current-host': { host: true } }, claude: { dummy: { host: true }, 'current-host': { host: true } }, grok: { dummy: { host: true }, 'current-host': { host: true } } },
+    harnesses: { dummy: { provider: 'dummy', host: { effort_channel: 'none' } } },
     archetypes: { worker: {} },
     bindings: { worker: 'luna' },
   }));

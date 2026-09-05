@@ -11,6 +11,9 @@ import { readUserDials, type UserPathOptions } from '../lib/user-paths.ts';
 import { sha256Hex } from '../lib/artifact-manifest.ts';
 import { executeToolCore, ToolExecError, recoverInterruptedToolDispatchesForHelper } from '../lib/tool-exec.ts';
 import { parseGeneration } from '../lib/prompt-resolve.ts';
+import { playbookRoleArchetypes } from '../lib/playbook-validate.ts';
+import { resolveRunPlaybookFile } from '../lib/definitions.ts';
+import { parse as parseYamlDocument } from 'yaml';
 
 export class ToolRunError extends Error {}
 
@@ -48,7 +51,32 @@ function parseTimeoutSeconds(value: string | undefined): number | null | undefin
   return sec * 1000;
 }
 
-function ensureProfileSnapshot(repoRoot: string, runDir: string, _runId: string, now?: Date, userPathOptions?: UserPathOptions, harness?: string, bindRefs: DialRef[] = []): import('../lib/executors.ts').SnapshotDocument {
+/**
+ * The archetypes this run's playbook will dispatch, for the snapshot cut.
+ *
+ * `tool-run` cuts the profile snapshot whenever it is the FIRST command to
+ * touch a run, and a snapshot is only complete if it was specialized for the
+ * archetypes the run will actually use — a custom role archetype is written
+ * down in the playbook and nowhere else. `drive` reads the same list from
+ * `playbookRoleArchetypes`, which is why this reads the playbook rather than
+ * re-deriving the walk.
+ *
+ * Best-effort and non-validating: `runNext` has already proven the playbook
+ * loads before this is reached, and a read that fails here degrades to the
+ * catalog's own roster — exactly what this cut used before — never to an error.
+ */
+function runPlaybookArchetypes(repoRoot: string, runDir: string, name: string | null | undefined): string[] {
+  if (name == null || name === '') return [];
+  try {
+    const source = resolveRunPlaybookFile(runDir, repoRoot, name);
+    if (source == null) return [];
+    return playbookRoleArchetypes(parseYamlDocument(readFileSync(source.path, 'utf8')));
+  } catch {
+    return [];
+  }
+}
+
+function ensureProfileSnapshot(repoRoot: string, runDir: string, _runId: string, now?: Date, userPathOptions?: UserPathOptions, harness?: string, bindRefs: DialRef[] = [], roleArchetypes: readonly string[] = []): import('../lib/executors.ts').SnapshotDocument {
   const snapshotPath = join(runDir, 'profile.yaml');
   if (existsSync(snapshotPath)) {
     const text = readFileSync(snapshotPath, 'utf8');
@@ -86,7 +114,7 @@ function ensureProfileSnapshot(repoRoot: string, runDir: string, _runId: string,
     throw err;
   }
   const extraRefs: DialRef[] = [...Object.values(liveLayers.session), ...Object.values(liveLayers.repo), ...Object.values(liveLayers.user), ...Object.values(liveProfile.bindings), ...bindRefs];
-  const text = serializeSnapshot(liveProfile, extraRefs);
+  const text = serializeSnapshot(liveProfile, extraRefs, roleArchetypes);
   // Atomic placement
   const tmp = `${snapshotPath}.tmp-${process.pid}-${randomUUID()}`;
   writeFileSync(tmp, text, 'utf8');
@@ -173,7 +201,10 @@ export function runToolRun(opts: ToolRunOptions): ToolRunResult {
     throw new ToolRunError((err as Error).message);
   }
 
-  const profile = ensureProfileSnapshot(repoRoot, run.dir, run.runId, opts.now, opts.userPathOptions, opts.harness);
+  const profile = ensureProfileSnapshot(
+    repoRoot, run.dir, run.runId, opts.now, opts.userPathOptions, opts.harness, [],
+    runPlaybookArchetypes(repoRoot, run.dir, run.playbook),
+  );
   const spec = profile.tools[toolName];
   if (spec == null) {
     const snapshotPath = join(run.dir, 'profile.yaml');

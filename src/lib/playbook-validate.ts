@@ -724,6 +724,27 @@ function archetypeChecks(playbook: Playbook, file: string): ValidationIssue[] {
  * A role's declared `archetype`, or null when the role or field is absent.
  * Accessor for the dispatch kernel's role resolution (`resolveRole`).
  */
+/**
+ * Every archetype this playbook's roles name, deduplicated.
+ *
+ * ONE list with two consumers — `drive` and `tool-run` both cut a run's
+ * profile snapshot, and a snapshot is only complete if it was specialized for
+ * the archetypes the run will actually dispatch. Two copies of this walk would
+ * drift, and the failure would be silent: the snapshot would simply lack an
+ * entry and every replay would read the base lane.
+ */
+export function playbookRoleArchetypes(playbook: unknown): string[] {
+  if (!playbook || typeof playbook !== 'object' || Array.isArray(playbook)) return [];
+  const roles = (playbook as Record<string, unknown>).roles;
+  if (!roles || typeof roles !== 'object' || Array.isArray(roles)) return [];
+  const names = new Set<string>();
+  for (const role of Object.keys(roles as Record<string, unknown>)) {
+    const archetype = roleArchetype(playbook, role);
+    if (archetype != null) names.add(archetype);
+  }
+  return [...names];
+}
+
 export function roleArchetype(playbook: unknown, role: string): string | null {
   if (!playbook || typeof playbook !== 'object' || Array.isArray(playbook)) return null;
   const roles = (playbook as Record<string, unknown>).roles;

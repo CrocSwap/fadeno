@@ -99,28 +99,32 @@ be able to evaluate the condition from the artifact **without re-asking a model*
 
 ---
 
-## Bind roles to executors (models, routes, dials)
+## Bind roles to executors (models, harnesses, dials)
 
 `fadeno drive` and `fadeno dispatch` resolve every actor through
-`.fadeno/executors.yaml` (parsed by `src/lib/executors.ts`). Version 3 separates
+`.fadeno/executors.yaml` (parsed by `src/lib/executors.ts`). Version 4 separates
 model identity from delivery: **models** are a uniform registry (model + effort
-as separate dimensions, `spellings:` per driver), **routes** say how each
-harness reaches a provider, and **dials** select the model per archetype:
+as separate dimensions, `spellings:` per harness), the **harness table** says
+how each harness is run, and **dials** select the model per archetype. A dial
+names who — and optionally which harness — never a lane: the harness you are
+sitting in is discovered at dispatch time.
 
 ```yaml
-schema_version: 3
+schema_version: 4
 models:
   sol:   { provider: openai, id: gpt-5.6-sol, effort: high }
   opus:  { provider: anthropic, id: opus, effort: high, spellings: { opencode: anthropic/claude-opus-4.8 } }
   gemini: { provider: google, id: gemini-3.1-pro, effort: high }
 
-routes:
+harnesses:
   codex:
-    openai: { host: true, command: [codex, exec, --model, "{model}", "-"] }
-    anthropic: { command: [claude, -p, --model, "{model}"] }
+    provider: openai                    # home: openai models default here
+    host: { effort_channel: agent-file }   # Fadeno can run inside it
+    command: [codex, exec, --model, "{model}", "-"]   # …and spawn it
   claude:
-    anthropic: { host: true, command: [claude, -p, --model, "{model}"] }
-    openai: { command: [codex, exec, --model, "{model}", "-"] }
+    provider: anthropic
+    host: { effort_channel: none }
+    command: [claude, -p, --model, "{model}"]
 
 dials:                        # repo pins — project layer only, per-archetype
   judge: sol                  # this repo always judges with sol; worker/reviewer defer to user dials
@@ -128,13 +132,16 @@ dials:                        # repo pins — project layer only, per-archetype
 bindings:                     # explicit role pins; win before any dial
   opus_reviewer: opus         # deliberately-multi-model playbooks pin here
 
-unregistered_model_driver: opencode   # fall-through for unknown model ids
+unregistered_model_harness: opencode  # fall-through for unknown model ids
 ```
 
-A model name resolves to `provider → route → driver → command` via the
-registry; `--via <driver>` overrides the home driver using `spellings:` for id
-translation, and `effort_encoding: model-suffix` on driver routes (e.g. `agy`)
-delivers `model@effort` as a suffixed id rather than a flag.
+A model name resolves `provider → home harness → lane` via the registry;
+`--harness <id>` overrides the home harness, using `spellings:` for id
+translation, and `effort_encoding: model-suffix` on a harness (e.g. `agy`)
+delivers `model@effort` as a suffixed id rather than a flag. Which LANE that
+harness uses — in-session or spawned — is decided at dispatch time by whether
+it happens to be the host; see
+[`harness-neutral-dials.md`](experimental/harness-neutral-dials.md).
 
 ### See what is declared
 
@@ -142,72 +149,92 @@ delivers `model@effort` as a suffixed id rather than a flag.
 per-archetype resolution, not a preset:
 
 ```
-archetype  model          effort    harness        source
-worker     grok-4.6       high      grok           user dial
-reviewer   current-host   inherit   current-host   base
-judge      sol @ xhigh    xhigh     codex          session dial
-generator  → worker       —         grok           base (via worker)
-  ~ shadow: kimi-k3 via opencode [rate 0.25]
+archetype     model               effort    harness                 source
+worker        grok-4.6            inherit   grok (home)             user dial
+reviewer      current-host        inherit   —                       base
+judge         sol @ xhigh         xhigh     codex                   session dial
+generator     → worker            —         grok (home)             base (inherits worker)
+    ~ shadow: kimi-k3 on opencode [command] rate 0.25
 ```
 
 `model` is the registry key or verbatim unregistered id; ` @ effort` appears
-only when dialed off the registry standard. `source` names the cascade layer
-that won (`binding | session dial | repo pin | user dial | base`). The
-`HARNESS` is the model's frame-neutral home driver. Whether the active caller
-reaches it through a host agent or a command route is resolved later;
-`write_access` only ever describes the command delivery.
+only when dialed off the registry standard. `effort` is the PIN, not the
+resolved effort: `inherit` means the dial pinned none, and `—` that the row has
+no dial of its own. `source` names the cascade layer that won
+(`binding | session dial | repo pin | user dial | base`). The `harness` column
+is the harness that executes — frame-neutral, because there is one harness
+table — marked `(home)` when the dial named none and the registry answered
+(the provider's home claim, or a model-level `harness:`), and `—` when there is
+no harness to name at all (`current-host` outside any harness). Whether the
+caller reaches it in-session or by spawning is resolved later, from whether
+that harness is the one you are in.
 
 ### Add a model
 
-Declare it under `models:` with `provider` (the route key / credential family),
-`id` (the provider's model id; defaults to the model name), `effort` (its
-standard effort; defaults to `default`), optional `spellings: {driver: id}`,
-and optional per-archetype `eligibility: { archetype: eligible | shadow_only | forbidden }`.
-A `models:` entry is harness-neutral — no `routes` key per model — so adding
-one needs no harness table. To test an unregistered model immediately, dial it
-directly (`fadeno dial worker kimi-k3`) — it routes via
-`unregistered_model_driver` with the id passed verbatim.
+Declare it under `models:` with `provider` (the credential family; exactly one
+harness may claim it as home), `id` (the provider's model id; defaults to the
+model name), `effort` (its standard effort; defaults to `default`), optional
+`spellings: { <harness>: id }`, an optional explicit `harness:` when its
+delivery is not its provider's home, and optional per-archetype
+`eligibility: { archetype: eligible | shadow_only | forbidden }`. A `models:`
+entry names no lane and no argv, so adding one usually needs no change to
+`harnesses:`. To test an unregistered model immediately, dial it directly
+(`fadeno dial worker kimi-k3`) — it runs on `unregistered_model_harness` with
+the id passed verbatim.
 
 For a one-off user model, prefer `fadeno model add <alias> <provider/id>`.
-It verifies the exact upstream spelling through the ordered discovery path
-(OpenCode direct first, then OpenRouter-qualified by default) and writes only
-the user catalog. The stored `delivery: { route, id }` decouples canonical
-identity from the route-relative id that actually reaches the driver.
+It verifies the exact upstream spelling against OpenCode's OpenRouter listing
+and writes only the user catalog. The stored `harness:`
+plus `spellings.<harness>` decouples canonical identity from the id THAT harness's
+CLI must be handed — the same gloss the shipped catalog uses.
 
-### Add a driver route
+### Add a harness entry to the catalog
 
-Add a route entry for the provider under **every** host table, since how a
-driver is invoked does not depend on which harness invokes it. Each row may
-declare `driver:` (the `--via` alias; defaults to the provider key),
-`models_command: [driver, models]` for dial-time verification, and
-`models_prefix:` when listing names carry a namespace that argv must not
-receive, and `effort_encoding: model-suffix | flag` (the Antigravity quirk as a one-line
-driver declaration).
+One entry in the single `harnesses:` table — there is no per-host copy, because
+how a harness is invoked does not depend on which harness is invoking it. An
+entry may declare:
 
-### Add a driver (reuses the route recipe above)
+- `provider:` — claims that provider as home, so its models default here.
+  Exactly one harness may claim a given provider.
+- `host:` — Fadeno can run inside it: `effort_channel: none | agent-file`,
+  `identity: model | session` (`session` means the adapter can rewrite only the
+  agent NAME, so only `current-host` takes the host lane there; default
+  `model`), an optional `relay:` dial ref, an optional `eligibility:` for the
+  host lane.
+- `command:` — Fadeno can spawn it. Beside it, `models_command:` for dial-time
+  verification, `models_prefix:` when listing names carry a namespace argv must
+  not receive, `effort_encoding: model-suffix | flag` (the Antigravity quirk as
+  a one-line declaration), `timeout_ms:`, `resume:` /
+  `session_id_pattern:` for a session-capable CLI, and `eligibility:`.
+- `variants:` — named alternative argvs of the command lane, chosen by policy
+  (an archetype the base lane forbids falls through to the first variant that
+  permits it). A dial never names one.
 
-A **driver** is a harness Fadeno spawns as a subprocess (see
-[`architecture.md`](architecture.md) → *Glossary*). Adding one is a
-catalog-only change — no `templates/` tree, no `init` flag, no `HarnessId`:
-declare a model under `models:` for the provider, then add a `command:` route
-entry for that provider under **every** host table (as described in *Add a
-driver route*), since how a driver is invoked does not depend on which harness
-invokes it. The contract each driver must meet is the command-delivery
+At least one of `host:` / `command:` is required.
+
+### Add an executor-only harness (a catalog-only change)
+
+An **executor** is a harness Fadeno spawns as a subprocess (see
+[`architecture.md`](architecture.md) → *Glossary*). Adding one needs no
+`templates/` tree, no `init` flag, and no `HarnessId`: declare a model under
+`models:` for the provider, then one `harnesses:` entry with a `command:` (as
+described above). The contract each executor must meet is the command-delivery
 contract: **prompt on stdin, report on stdout, chatter on stderr, non-zero
 exit on failure.** Verify that by hand before shipping the entry — a headless
 mode that stalls on an approval prompt exits 0 having done nothing, which is
 the failure this project keeps finding.
 
-Drivers shipped in the starter catalog:
+Harnesses shipped in the starter catalog:
 
-| Provider key | Driver | Read base | Write variant | Effort dial |
+| Harness | Home provider | Host? | Command lane | Effort dial |
 |---|---|---|---|---|
-| `openai` | Codex | `--sandbox read-only` | `--sandbox workspace-write` | `-c model_reasoning_effort=` |
-| `anthropic` | Claude Code | `claude -p` | `--permission-mode acceptEdits` | — |
-| `xai` | Grok | `--sandbox read-only --always-approve` | `--always-approve` | `--reasoning-effort` |
-| `google` | Antigravity (`agy`) | unavailable | `--new-project --dangerously-skip-permissions` | in the model id |
-| `openrouter` | OpenCode | `--agent fadeno-readonly --auto` | `--auto` | `--variant` |
-| `muse` | Muse Code | `--disable-write --disable-shell` | write/shell enabled | `--reasoning-effort` |
+| `codex` | `openai` | yes (`agent-file`) | `codex exec --sandbox workspace-write` | `-c model_reasoning_effort=` |
+| `claude` | `anthropic` | yes (`none`) | `claude -p --permission-mode acceptEdits` (+ `exec` variant) | — |
+| `grok` | `xai` | yes (`none`) | `grok --always-approve` | `--reasoning-effort` |
+| `agy` | `google` | no | `agy --new-project --dangerously-skip-permissions` | in the model id |
+| `opencode` | — | session-identity only | `opencode run -m openrouter/…` (+ `direct` variant) | `--variant` |
+| `muse` | `muse` | no | `muse exec --trust-workspace …` | `--reasoning-effort` |
+| `omp` | — | session-identity only | — (nothing headless to spawn) | — |
 
 The gotchas the shipped entries encode, each found by probing rather than by
 reading docs:
@@ -220,43 +247,47 @@ reading docs:
   no active workspace, so it writes to `~/.gemini/antigravity-cli/scratch/`,
   reports "I have created the file", and leaves the repo untouched
   (`--add-dir .` does not fix this; only an absolute path does, which a static
-  route cannot express). Its `--effort` accepts only `low|medium|high`, so
+  harness argv cannot express). Its `--effort` accepts only `low|medium|high`, so
   passing `{reasoning_effort}` would hard-fail any `default`-effort target;
   effort lives in the model id instead (`gemini-3.1-pro-high`).
 - **Antigravity read-only remains unavailable:** a live
   `--mode plan --sandbox` probe denied mutation but exited 0 without the
-  requested report after the denied tool call. A route must satisfy both
+  requested report after the denied tool call. A lane must satisfy both
   confinement and the command-delivery contract, so it remains write-only.
-- **OpenCode** is multi-provider — `-m` takes `provider/model` — so its provider
-  key is the credential holder and the route prefixes it: `-m openrouter/{model}`.
-  Its CLI has no argv-only sandbox; `init` emits
-  `.opencode/agents/fadeno-readonly.md`, and the base route selects that
-  explicit deny-policy agent.
+- **OpenCode** is multi-provider — `-m` takes `provider/model` — so it claims
+  no provider as home and its base lane prefixes the credential holder:
+  `-m openrouter/{model}`. Its CLI has no argv-only sandbox; `init` emits
+  `.opencode/agents/fadeno-readonly.md`.
+- **OpenCode and omp declare `host.identity: session`.** Their adapters rewrite
+  only the agent NAME (OpenCode's `applyRewrite` sets `subagent_type`; the omp
+  extension sets `agent`), so a dialed model handed to a host spawn there would
+  be silently ignored. Under `session` only `current-host` — the session's own
+  identity — takes the host lane; a named model on those harnesses is a command
+  delivery. That is what v3 expressed by putting `host: true` on
+  `routes.opencode.current-host` alone.
 
-A route entry may also declare `write_access: <bool>` — whether that route's
-**command** delivery can mutate the workspace — beside an optional top-level
-`archetypes:` mapping whose values accept `requires_write`, `ignored_output`,
-`fallback`, `distinct_provider_from_inputs`, and `brief`.
+Beside `harnesses:` an optional top-level
+`archetypes:` mapping accepts `ignored_output`, `fallback`,
+`distinct_provider_from_inputs`, and `brief`.
 `ignored_output` is `kept` | `discardable` (absent is `discardable`): `kept`
 means this archetype's gitignored output is load-bearing, so it must not be
 paired — a shadow pair merges the primary back through `git add -A`, which
 drops ignored paths. Declaring it costs a comparison, never work.
-`requires_write` is `required` | `forbidden` | `none`; booleans alias
-(`true` → `required`, `false` → `none`). `fallback` names another archetype
+`fallback` names another archetype
 whose *binding* is used when this one has no slot (never its policy).
 `distinct_provider_from_inputs` is `advisory` | `required`; absent is no
 check:
 
 ```yaml
-routes:
-  claude:
-    anthropic: { host: true, command: [claude, -p, --model, "{model}"], write_access: false }
-
 archetypes:
-  worker: { requires_write: required }
-  generator: { requires_write: forbidden, fallback: worker }
+  generator: { fallback: worker }
   reviewer: { distinct_provider_from_inputs: advisory }
+  judge: { ignored_output: kept }
 ```
+
+`requires_write` was removed with the write-permissions system and is now
+refused at parse with a message saying so; the same goes for `write_access:`
+and `write_variant:` on a harness, and `force_write_posture` on a stored dial.
 
 A model (or v1 executor) may declare `eligibility:` — a mapping of
 archetype → `eligible` | `shadow_only` | `forbidden` (default `eligible`).
@@ -269,33 +300,20 @@ boundary with the resolution context as JSON on stdin. Exit 0 allows; exit 2
 refuses (stderr is the reason); any other exit, spawn failure, or signal is
 a constraint-system error (loud, never an allow).
 
-`fadeno dispatch` then refuses *before spawning* when the resolved command
-route says `write_access: false` and the archetype says `requires_write: required`
-(or boolean `true`) — and the inverse, `requires_write: forbidden` onto
-`write_access: true`. The same check fires at dial time (`fadeno dial <archetype> <model>`),
-which also refuses dialing an archetype onto a model whose eligibility for
-it is `forbidden`. The write-posture error advertises `--force` as a
-deliberately discouraged escape hatch. `fadeno dial <archetype> <model>
---force` persists `force_write_posture: true` on that direct dial, emits a
-prominent warning, and lets dispatch/drive/steering honor the mismatch. It
-does not bypass eligibility, provider, or external constraint checks, and a
-fallback archetype never inherits another archetype's forced posture.
-The original case is a commit task routed to a headless `claude -p` that has no
-approver for a write. Either side undeclared imposes no constraint (existing profiles are
-unaffected). When declared, `write_access` joins the evidence-row identity, and
-a dispatch that proceeds on a read-only route echoes `[write_access: none]`.
-Enforcement is not kernel-only: `drive` refuses the same conflict before
-spawning (the run pauses in `executor_failed`), and `steering resolve`/`apply`
-surface `mode: write_conflict` and decline to materialize a broker for the
-conflicted slot — one shared helper keeps the refusal text identical.
-Rationale: `docs/experimental/loadouts-and-dispatch.md` → *Write access*.
+`fadeno dispatch` refuses *before spawning* on eligibility, on a
+`constraints.command` exit 2, and on a delivery with no argv to invoke at all —
+and on nothing else. There is no write-posture gate: what a harness command may
+do is expressed IN its argv, which is the vendor's business and the worktree's,
+not a claim for Fadeno to re-check. The dial-time counterpart refuses dialing
+an archetype onto a model whose eligibility for it is `forbidden`.
+Rationale: `docs/experimental/harness-neutral-dials.md`.
 
 ### Add a tool binding
 
 A **tool** is a logical capability a `tool_call` step names. The registry is strict: add it under top-level `tools:` in `.fadeno/executors.yaml` (parsed by `src/lib/executors.ts`, layered via `src/lib/config-layers.ts`, snapshotted into `profile.yaml` for the run).
 
 ```yaml
-schema_version: 3
+schema_version: 4
 tools:
   test_runner:
     command: [npm, test]          # static argv — no shell, no interpolation, no placeholders
@@ -314,7 +332,7 @@ Rules enforced identically at catalog and snapshot parse boundaries:
 - `timeout` / `timeout_ms` is a positive integer (`timeout` in seconds, `timeout_ms` in ms); `timeout: 0` is invalid there — use `--timeout 0` on the CLI to disable a registry deadline for one invocation;
 - exactly one of `timeout` / `timeout_ms` when present.
 
-Layering follows existing profile precedence: `builtin` → `user` → `project`; a self-contained project catalog (`models:` + `routes:`) suppresses builtin/user, with one carve-out: user-catalog models fall back per-key when their delivery route resolves in the merged catalog (`modelFallback` names promotions and drops; `dial show`/`dial resolve` surface both). `tools:` merges by key like `bindings:`/`models:`.
+Layering follows existing profile precedence: `builtin` → `user` → `project`; a self-contained project catalog (`models:` + `harnesses:`) suppresses builtin/user, with one carve-out: user-catalog models fall back per-key when the merged harness table can deliver them (`modelFallback` names promotions and drops; `dial show`/`dial resolve` surface both). Under normal layering the same integrity rule DROPS an undeliverable user model with a note rather than failing the load — a personal alias is machine state — while a project- or builtin-declared one is a load error. `tools:` merges by key like `bindings:`/`models:`.
 
 `fadeno tool-run <run> [--tool <name>] [--timeout <seconds>]` then executes the ready `tool_call` only when its `tool` is registered and its artifact schema is `test-result`; `--tool` is a race guard. `Diff`/`PostResult` stay manual via `fadeno tool-complete <run> --output <path>` (which shares the same generation-scoped claim/lease discipline, so one attempt wins, and writes a `tool_recorded` receipt — `recorded_by: host` — after the manifest; `verify`'s `tool-artifact-receipts` requires every tool step's artifact to be claimed by `tool_completed` or `tool_recorded`). `fadeno drive` auto-executes registered `test-result` tools inline and otherwise returns `needs_decision`.
 
@@ -329,7 +347,7 @@ inside the CLI, never cached anywhere else):
 
 1. explicit `bindings[role]` pin;
 2. session dial for the role's declared `archetype`
-   (`fadeno dial <archetype> <model>[@effort] [--via <driver>]`);
+   (`fadeno dial <archetype> <model>[@effort] [--harness <id>]`);
 3. repo pin for the archetype (`dials:` in `.fadeno/executors.yaml`);
 4. user dial for the archetype (`$FADENO_STATE_HOME/dials.json`);
 5. host-native base (`current-host`, `inherited` effort).
@@ -372,8 +390,9 @@ archetype that bound (absent when the declared archetype bound directly);
 and `resolution_snapshot` events record the dial layers — verification replays
 from the snapshot, never the live pin. Constraint-tier evidence is additive on
 format `1.0`: ad-hoc boundary refusals append a `dispatch_refused` row
-with `refusal: { predicate, message }` (`write_posture` | `eligibility` |
-`provider_distinctness` | `constraint_command`); proceeding rows may carry
+with `refusal: { predicate, message }` (`eligibility` |
+`provider_distinctness` | `constraint_command` | `ignored_output_kept` |
+`workspace_lease` | a `shadow_*` predicate); proceeding rows may carry
 `input_provenance`, `provider_distinctness: "warned"`, and
 `gate_eligible: false`. Engine command refusals are `actor_failed` with
 reason `eligibility_forbidden` | `provider_conflict` | `constraint_refused`;
@@ -386,13 +405,14 @@ Ad-hoc dispatch runs the same chain outside any playbook:
 `fadeno dispatch --archetype worker` with the prompt on stdin or via
 `--prompt-file <path>`. `--role <name>` additionally enables per-role binding
 pins and evidence attribution (without it, step 1 above has nothing to match);
-`--model <model>[@effort] [--via <driver>]` bypasses resolution entirely
-(debugging). What it can invoke is a property of the resolved **route**, not
-of the model: a command-delivered route runs its argv, and a `host: true`
-route runs its fallback `command` when one is declared. A host-routed model
-with no fallback command is a clear error naming the fix — run the task with
-the in-session agent, declare a fallback command, or dial the archetype to a
-command-delivered model.
+`--model <model>[@effort] [--harness <id>]` bypasses resolution entirely
+(debugging), and `--harness` alone moves THIS call onto another harness without
+touching the dial. What it can invoke is a property of the resolved
+**harness**, not of the model: a spawned harness runs its argv, and a host
+candidate runs the same argv as its fallback. A delivery with no argv at all —
+`current-host`, or a host-only harness named from a different host — is a clear
+error naming the fix: run the task with the in-session agent, or dial the
+archetype to a harness that declares a `command:`.
 
 Every command dispatch streams the executor's stdout to an output snapshot at
 `.fadeno/local/outputs/<archetype|role|dispatch>-<dispatchId8>.md` (same
@@ -413,12 +433,12 @@ beside them, so both delivery routes read as one history. A request row whose
 completion never arrived is kept and marked — "no completion recorded (killed
 or in flight)" — rather than dropped, since a dispatch that died mid-flight is
 the one most worth seeing. Rows carry the markers that change their meaning:
-`relay_attested`, `[write_access: none]`, `model_override`,
+`relay_attested`, `model_override`,
 `[shadow-only]` (`gate_eligible: false`), `[refused: <predicate>]`
 for `dispatch_refused` rows, `[shadow of <primaryId8>]` for shadow rows
 (which are never candidates for `[no workspace change]`), and
-`[no workspace change]` when a completed entry has `exit_code === 0`,
-`write_access === true`, and `workspace_changed === false` (the legible face
+`[no workspace change]` when a completed entry has `exit_code === 0` and
+`workspace_changed === false` (the legible face
 of an exit-0 no-op). `fadeno dispatches --output <id|last>` prints the snapshot
 bytes verbatim (`last` is the most recent request row that carries
 `output_snapshot`; `id` is a full `dispatch_id` or a unique prefix of at least
@@ -463,36 +483,26 @@ yields a diff-as-artifact and never touches the workspace. Evidence fields:
 `diff_snapshot: ".fadeno/local/outputs/shadow-<shadowId8>.diff"`, and
 `diff_bytes: <int>` (0 = clean). Shadow completions omit `workspace_changed`;
 the diff is the change record. A `dispatch_refused` shadow carries
-`shadow: true` + `primary_dispatch_id` and predicate `shadow_isolation`,
-`shadow_resolution`, `shadow_containment`, or `shadow_write_posture` (or the
-usual `eligibility`/`write_posture`/`constraint_command`).
+`shadow: true` + `primary_dispatch_id` and one of the shadow predicates
+(`shadow_isolation`, `shadow_resolution`, `shadow_cap`, `shadow_exhausted`,
+`shadow_baseline`, `shadow_carry`, `shadow_containment`,
+`shadow_no_command_lane`) or a shared one
+(`eligibility`, `provider_distinctness`, `constraint_command`,
+`ignored_output_kept`, `workspace_lease`).
 
-**A posture nothing could check.** `write_access:` is optional on a route, and
-an undeclared value is `null` — which satisfies *every* posture, so a
-`requires_write: required` archetype dialed onto such a route passes silently.
-`null` means UNKNOWN, not "fine", and the cost of staying quiet is specific: an
-arm that turns out to be read-only produces an empty diff, and a bakeoff reads
-an empty diff as "this model chose to change nothing" rather than "this model
-could not write" — a confident wrong verdict, which is worse than no verdict.
+`shadow_no_command_lane` is the pair-capability refusal: only the primary is
+moved onto its command lane — the challenger resolves its own delivery — so a
+primary with no command lane to move onto cannot be paired without comparing a
+crippled arm against an uncrippled one and measuring the lanes instead of the
+models. It is never silent: `fadeno dial shadow` warns at attach time, and both
+`dial resolve` and `steering resolve` carry `shadow.routable_reason` beside
+`shadow.routable`.
 
-Fadeno reports this rather than refusing it: refusing would break every catalog
-that simply omits the key, and "we never asked" is not the same as "no
-meaningful delivery exists". `explainUnverifiedWritePosture` produces the
-warning at `fadeno dial` and at `fadeno dial shadow` (for both arms), the
-kernel stamps `write_posture_unverified: true` on the dispatch row, and
-`fadeno bakeoff` surfaces it as a `write_posture_unverified` confound. It is a
-TRUE-only flag: its absence never asserts a lane *was* verified, because a row
-written before the flag existed also lacks it. Declare `write_access: true` or
-`false` on the route to make the posture enforceable.
-
-`shadow_write_posture` is the pair-capability refusal: the primary's command
-lane cannot satisfy the archetype's declared write posture, so the pair is
-refused rather than run. Only the primary is moved onto its command lane — the
-challenger resolves its own delivery — so running the pair anyway would compare
-a crippled arm against an uncrippled one and measure the lanes instead of the
-models. It is deliberately the only asymmetry that refuses a pair, and it is
-never silent: `fadeno dial shadow` warns at attach time, and both `dial resolve`
-and `steering resolve` carry `shadow.routable_reason` beside `shadow.routable`.
+What each arm actually ran is recorded instead of asserted: the request row
+carries the executed `command`, so a bakeoff can see capability skew between
+two arms — sandbox flags, tool allowlists, agent selection — rather than one
+bit about a posture someone declared. This replaced the `write_access:`
+claim, which an undeclared value made vacuous.
 
 **Cancelling a running dispatch.** `fadeno dispatches --cancel tag:<handle>`
 (or an id / 8+ character prefix) sends SIGTERM to that dispatch's supervisor,
@@ -511,8 +521,8 @@ the corrected prompt; the in-flight work is lost, which is the truth of it,
 since the executor was working from instructions since withdrawn.
 
 Delivering the amendment to the running executor is not possible and is not
-attempted: every driver is a one-shot CLI that read its entire prompt from a
-stdin that has since closed.
+attempted: every harness command is a one-shot CLI that read its entire prompt
+from a stdin that has since closed.
 
 The supervisor publishes `{pid, started_at}` to
 `.fadeno/local/inflight/<dispatchId>.json` while it runs and unlinks it on
@@ -537,18 +547,19 @@ than guessing, preserves the workspace lease and inflight claim until
 child-group termination is proven (`close`), and is safe against adversarial
 process-group races. See `src/commands/cancel.ts`.
 
-**Executor deadlines and idle observability.** No route in the built-in
+**Executor deadlines and idle observability.** No harness in the built-in
 catalog declares a deadline, and none is applied by default: an executor runs
 until it exits. Agent work has a long tail and a clock cannot tell slow from
 stuck, so ending a long attempt is a decision for whoever can look at it
-(`fadeno show`, then `fadeno cancel`). A deadline is opt-in — `timeout_ms` on a
-command route (host routes may not declare it) or `--timeout` per invocation.
+(`fadeno show`, then `fadeno cancel`). A deadline is opt-in — `timeout_ms` on a harness's
+`command:` lane (the `host:` block may not declare it) or `--timeout` per
+invocation.
 When one is set the supervisor owns it: it sends SIGTERM to the executor process group
 at `deadline_at = started_at + timeout_ms` and escalates to SIGKILL after the
 5-second grace. Lease and claim release still waits for `close`, so a timeout
 is not proven until the group is gone. CLI overrides: `--timeout <seconds>` on
-`fadeno drive` and `fadeno dispatch` overrides the snapshotted route value; `0`
-disables the deadline. Internal name is `timeoutMs`. Engine timeout receipts
+`fadeno drive` and `fadeno dispatch` overrides the snapshotted harness value;
+`0` disables the deadline. Internal name is `timeoutMs`. Engine timeout receipts
 are distinct: `actor_failed.reason = "executor_timeout"` with `timeout_ms` and
 `deadline_at`, and ad-hoc `dispatch_completed.outcome = "timeout"` with the same
 facts — process exit/signal facts remain present. Status-file timeout facts
@@ -803,12 +814,12 @@ are available from the bundled plugin runtime. `init` / `init --data-only` and
 
 ---
 
-## Add a harness target
+## Add a host adapter
 
 This section is about adding a **host** — a harness Fadeno runs *inside*. A
-harness Fadeno merely *drives* as a subprocess needs none of this; it is just
-the `command:` of a route entry. See
-[`architecture.md`](architecture.md) → *Glossary: harnesses, hosts, and drivers*,
+harness Fadeno merely spawns needs none of this; it is one `harnesses:` entry
+with a `command:` (see *Add a harness entry to the catalog* above). See
+[`architecture.md`](architecture.md) → *Glossary: harnesses, hosts, and executors*,
 which also records the `Target`/`targets:` collision this section straddles.
 
 Adding a host (e.g. Cursor) is mostly **adapter work** — the skill *content* is a

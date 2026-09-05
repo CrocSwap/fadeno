@@ -28,12 +28,12 @@ function layering(root: string): ReturnType<typeof runDoctor>['findings'][number
 
 test('a self-contained catalog that omits builtin declarations is reported', (t) => {
   const root = tempRepo(t);
-  // Declares its own models AND routes => self-contained => suppresses builtin.
-  // Declares the codex/openai route but omits the builtin's `timeout_ms` on it.
+  // Declares its own models AND harnesses => self-contained => suppresses
+  // builtin. Declares the codex harness but omits the builtin's `timeout_ms`.
   seed(root, {
-    schema_version: 3,
+    schema_version: 4,
     models: MODELS,
-    routes: { codex: { 'current-host': { host: true }, openai: { host: true } } },
+    harnesses: { codex: { provider: 'openai', host: { effort_channel: 'agent-file' } } },
   });
 
   const found = layering(root);
@@ -44,9 +44,9 @@ test('a self-contained catalog that omits builtin declarations is reported', (t)
 
 test('a catalog that layers is silent — it cannot fall behind', (t) => {
   const root = tempRepo(t);
-  // No `models:` + `routes:` => not self-contained => layers on the builtin.
+  // No `models:` + `harnesses:` => not self-contained => layers on the builtin.
   // This is the shape a project overlay should have.
-  seed(root, { schema_version: 3, worktree_carry: ['node_modules'] });
+  seed(root, { schema_version: 4, worktree_carry: ['node_modules'] });
 
   assert.equal(layering(root), undefined, 'a layering catalog has nothing to fall behind');
 });
@@ -56,24 +56,24 @@ test('no project catalog at all is silent', (t) => {
   assert.equal(layering(root), undefined);
 });
 
-test('omitting a whole route or model is not drift — shipping a smaller catalog is legitimate', () => {
+test('omitting a whole harness or model is not drift — shipping a smaller catalog is legitimate', () => {
   const builtin = {
     models: { luna: { id: 'a' }, terra: { id: 'b' } },
-    routes: { codex: { openai: { timeout_ms: 1 }, xai: { timeout_ms: 2 } } },
+    harnesses: { codex: { provider: 'openai', timeout_ms: 1 }, grok: { provider: 'xai', timeout_ms: 2 } },
   };
-  // The project declares only `luna` and only the `openai` route, and declares
-  // `timeout_ms` on the route it DID declare. Nothing is behind.
+  // The project declares only `luna` and only the `codex` harness, and declares
+  // `timeout_ms` on the harness it DID declare. Nothing is behind.
   const project = {
     models: { luna: { id: 'a' } },
-    routes: { codex: { openai: { timeout_ms: 1 } } },
+    harnesses: { codex: { provider: 'openai', timeout_ms: 1 } },
   };
   assert.deepEqual(missingBuiltinDeclarations(builtin, project), []);
 });
 
 test('a key omitted from a node the project DID declare is drift', () => {
-  const builtin = { routes: { codex: { openai: { timeout_ms: 1, driver: 'codex' } } } };
-  const project = { routes: { codex: { openai: { driver: 'codex' } } } };
-  assert.deepEqual(missingBuiltinDeclarations(builtin, project), ['routes.codex.openai.timeout_ms']);
+  const builtin = { harnesses: { codex: { provider: 'openai', timeout_ms: 1 } } };
+  const project = { harnesses: { codex: { provider: 'openai' } } };
+  assert.deepEqual(missingBuiltinDeclarations(builtin, project), ['harnesses.codex.timeout_ms']);
 });
 
 /**

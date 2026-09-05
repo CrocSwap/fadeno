@@ -32,7 +32,10 @@ function isolatedUser(t: TestContext, root: string): UserPathOptions {
     env: {
       FADENO_CONFIG_HOME: join(root, 'user-config'),
       FADENO_STATE_HOME: join(root, 'user-state'),
-      FADENO_HARNESS: 'standalone',
+      // These are Codex steering tests: pin the HOST so the fixture's
+      // host-capable harness is the one this session is running inside.
+      // Under v4 that pairing is the whole of "is this a host lane?".
+      FADENO_HARNESS: 'codex',
     },
   };
 }
@@ -42,38 +45,22 @@ const FALLBACK_COMMAND = ['node', '-e', "let d='';process.stdin.on('data',c=>d+=
 function seedDelegateProfile(root: string): void {
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
+      // Both on the HOST harness's provider: v4 has one host at a time, so a
+      // fixture wanting two host-deliverable slots puts both models on it.
       luna: { provider: 'lunap', id: 'gpt-5.6-luna', effort: 'xhigh' },
-      sol: { provider: 'solp', id: 'gpt-5.6-sol', effort: 'medium' },
+      sol: { provider: 'lunap', id: 'gpt-5.6-sol', effort: 'medium' },
       opus: { provider: 'opusp', id: 'opus' },
     },
-    routes: {
-      // All families declared, not just `codex`: this suite may itself run
-      // inside a Claude Code session, and `activeHarness()` detects that
-      // ambient host (`CLAUDECODE` etc.) before falling back to `standalone`
-      // — see `test/steering-hybrid.test.ts`'s `seedHybridProfileV3` for the
-      // same reasoning.
-      standalone: {
-        lunap: { host: true, command: FALLBACK_COMMAND },
-        solp: { host: true },
-        opusp: { command: ['claude', '-p', '--model', 'opus'] },
-      },
-      codex: {
-        lunap: { host: true, command: FALLBACK_COMMAND },
-        solp: { host: true },
-        opusp: { command: ['claude', '-p', '--model', 'opus'] },
-      },
-      claude: {
-        lunap: { host: true, command: FALLBACK_COMMAND },
-        solp: { host: true },
-        opusp: { command: ['claude', '-p', '--model', 'opus'] },
-      },
-      grok: {
-        lunap: { host: true, command: FALLBACK_COMMAND },
-        solp: { host: true },
-        opusp: { command: ['claude', '-p', '--model', 'opus'] },
-      },
+    // One table under v4, which is the point of the collapse: this suite may
+    // itself run inside a Claude Code session, and the ambient host no longer
+    // selects a route family — the same three harnesses answer for every host.
+    harnesses: {
+      codex: { provider: 'lunap', host: { effort_channel: 'agent-file' }, command: FALLBACK_COMMAND },
+      // A host nobody is sitting in: `restart_required` from here.
+      omp: { provider: 'solp', host: { effort_channel: 'none' } },
+      claude: { provider: 'opusp', command: ['claude', '-p', '--model', 'opus'] },
     },
     archetypes: { worker: {} },
     dials: { worker: 'luna' },
@@ -81,7 +68,7 @@ function seedDelegateProfile(root: string): void {
 }
 
 /** A locked engine dispatch bound to `luna` (host, with a declared command fallback). */
-function seedLockedRequest(root: string): { runId: string; runDir: string; dispatchId: string } {
+function seedLockedRequest(root: string, user: UserPathOptions): { runId: string; runDir: string; dispatchId: string } {
   // `noSteering: true` skips `init`'s own `.codex/agents/*.toml` broker
   // scaffolding (rendered from whatever catalog is on disk at that moment,
   // before `seedDelegateProfile` below writes the fixture's own) — these
@@ -100,8 +87,8 @@ function seedLockedRequest(root: string): { runId: string; runDir: string; dispa
     flow: [{ id: 'implement', kind: 'actor_call', actor: 'worker', input: ['Task'], output: 'Notes', terminal_status: 'completed' }],
   }));
   writeFileSync(join(root, 'task.md'), 'locked task');
-  const created = runNewRun({ repoRoot: root, playbook: 'locked', task: 'test delegate advisory', inputs: ['Task=task.md'] });
-  const driven = runDrive({ repoRoot: root, run: created.runId });
+  const created = runNewRun({ repoRoot: root, playbook: 'locked', task: 'test delegate advisory', inputs: ['Task=task.md'], userPathOptions: user });
+  const driven = runDrive({ repoRoot: root, run: created.runId, userPathOptions: user });
   assert.equal(driven.outcome, 'awaiting_host_dispatch');
   const request = driven.requests[0]!;
   assert.equal(request.executor, 'luna');
@@ -111,7 +98,7 @@ function seedLockedRequest(root: string): { runId: string; runDir: string; dispa
 test('locked resolve advises the matching native Codex agent when the caller proved no host identity', (t) => {
   const root = tempRepo(t);
   const user = isolatedUser(t, root);
-  const { runId, dispatchId } = seedLockedRequest(root);
+  const { runId, dispatchId } = seedLockedRequest(root, user);
 
   const applied = runSteeringApply({ repoRoot: root, target: 'codex', userPathOptions: user });
   assert.equal(applied.materialization.worker?.kind, 'host');
@@ -142,7 +129,7 @@ test('locked resolve advises the matching native Codex agent when the caller pro
 test('delegate advisory is absent when no candidate matches (the original command-fallback behavior)', (t) => {
   const root = tempRepo(t);
   const user = isolatedUser(t, root);
-  const { runId, dispatchId } = seedLockedRequest(root);
+  const { runId, dispatchId } = seedLockedRequest(root, user);
   // No agent files materialized at all — nothing for the resolver to find.
 
   const resolution = runSteeringResolve({
@@ -156,7 +143,7 @@ test('delegate advisory is absent when no candidate matches (the original comman
 test('delegate advisory does not send a locked host request to a command broker', (t) => {
   const root = tempRepo(t);
   const user = isolatedUser(t, root);
-  const { runId, dispatchId } = seedLockedRequest(root);
+  const { runId, dispatchId } = seedLockedRequest(root, user);
   // Materialize the worker slot from a command route after the run has locked
   // its request to luna. This is the exact shape that caused a broker to call
   // resolve without --host-executor and receive the same delegate advice.
@@ -187,7 +174,7 @@ test('delegate advisory does not send a locked host request to a command broker'
 test('a stale agent file is NOT offered as a spawn target; the advisory names it', (t) => {
   const root = tempRepo(t);
   const user = isolatedUser(t, root);
-  const { runId, dispatchId } = seedLockedRequest(root);
+  const { runId, dispatchId } = seedLockedRequest(root, user);
   runSteeringApply({ repoRoot: root, target: 'codex', userPathOptions: user });
   const workerPath = join(root, '.codex', 'agents', 'worker.toml');
   const original = readFileSync(workerPath, 'utf8');
@@ -214,7 +201,7 @@ test('a stale agent file is NOT offered as a spawn target; the advisory names it
 test('a MODEL that went stale is refused the same way an effort is', (t) => {
   const root = tempRepo(t);
   const user = isolatedUser(t, root);
-  const { runId, dispatchId } = seedLockedRequest(root);
+  const { runId, dispatchId } = seedLockedRequest(root, user);
   runSteeringApply({ repoRoot: root, target: 'codex', userPathOptions: user });
   const workerPath = join(root, '.codex', 'agents', 'worker.toml');
   const original = readFileSync(workerPath, 'utf8');
@@ -234,7 +221,7 @@ test('a MODEL that went stale is refused the same way an effort is', (t) => {
 test('delegate advisory refuses an unmanaged agent file even when its content matches', (t) => {
   const root = tempRepo(t);
   const user = isolatedUser(t, root);
-  const { runId, dispatchId } = seedLockedRequest(root);
+  const { runId, dispatchId } = seedLockedRequest(root, user);
   runSteeringApply({ repoRoot: root, target: 'codex', userPathOptions: user });
   const workerPath = join(root, '.codex', 'agents', 'worker.toml');
   const managed = readFileSync(workerPath, 'utf8');
@@ -253,7 +240,7 @@ test('delegate advisory refuses an unmanaged agent file even when its content ma
 test('delegate advisory is suppressed when the caller already supplied a --host-executor', (t) => {
   const root = tempRepo(t);
   const user = isolatedUser(t, root);
-  const { runId, dispatchId } = seedLockedRequest(root);
+  const { runId, dispatchId } = seedLockedRequest(root, user);
   runSteeringApply({ repoRoot: root, target: 'codex', userPathOptions: user });
 
   // A materialized agent or command broker always supplies its own
@@ -270,7 +257,7 @@ test('delegate advisory is suppressed when the caller already supplied a --host-
 test('delegate advisory follows Codex\'s own project-over-user scope precedence', (t) => {
   const root = tempRepo(t);
   const user = isolatedUser(t, root);
-  const { runId, dispatchId } = seedLockedRequest(root);
+  const { runId, dispatchId } = seedLockedRequest(root, user);
 
   // A user-scope apply is cut only from the USER dial layer (never a repo
   // pin — see `dialLayersForApply`'s doc comment in steering.ts), so the
@@ -341,8 +328,8 @@ test('delegate advisory names the agent for THIS dispatch\'s archetype, not mere
     flow: [{ id: 'review', kind: 'actor_call', actor: 'checker', input: ['Task'], output: 'Notes', terminal_status: 'completed' }],
   }));
   writeFileSync(join(root, 'task.md'), 'locked task');
-  const created = runNewRun({ repoRoot: root, playbook: 'locked', task: 'cross-archetype', inputs: ['Task=task.md'] });
-  const driven = runDrive({ repoRoot: root, run: created.runId });
+  const created = runNewRun({ repoRoot: root, playbook: 'locked', task: 'cross-archetype', inputs: ['Task=task.md'], userPathOptions: user });
+  const driven = runDrive({ repoRoot: root, run: created.runId, userPathOptions: user });
   assert.equal(driven.outcome, 'awaiting_host_dispatch');
   const request = driven.requests[0]!;
   assert.equal(request.executor, 'luna');
@@ -379,7 +366,7 @@ test('delegate advisory names the agent for THIS dispatch\'s archetype, not mere
 test('the CLI actually prints delegate_to — source and bundle alike', (t) => {
   const root = tempRepo(t);
   const user = isolatedUser(t, root);
-  const { runId, dispatchId } = seedLockedRequest(root);
+  const { runId, dispatchId } = seedLockedRequest(root, user);
   runSteeringApply({ repoRoot: root, target: 'codex', userPathOptions: user });
   const workerPath = join(root, '.codex', 'agents', 'worker.toml');
   assert.ok(existsSync(workerPath));

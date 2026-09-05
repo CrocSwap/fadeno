@@ -72,16 +72,16 @@ test('setup is idempotent and writes no dial/pin state', (t) => {
   const paths = pinnedUser(root, 'standalone');
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), [
-    'schema_version: 3',
+    'schema_version: 4',
     'models:',
     '  grok:',
     '    provider: xai',
     '    id: grok',
-    'routes:',
-    '  standalone:',
-    '    xai:',
-    '      command: [legacy, run]',
-    '      ',
+    'harnesses:',
+    '  grok:',
+    '    provider: xai',
+    '    command: [legacy, run]',
+    '    ',
     'archetypes:',
     '  worker: {}',
     '',
@@ -261,24 +261,11 @@ test('drive recovers a command start left without a terminal receipt', (t) => {
   // v3 fixture: failing command for worker/reviewer, plus binding for coordinator
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'fail-model': { provider: 'failp', id: 'fail-model', effort: 'default' },
     },
-    routes: {
-      standalone: {
-        failp: { command: [process.execPath, '-e', 'process.exit(7)'], },
-        'current-host': { host: true },
-      },
-      codex: {
-        failp: { command: [process.execPath, '-e', 'process.exit(7)'], },
-        'current-host': { host: true },
-      },
-      claude: {
-        failp: { command: [process.execPath, '-e', 'process.exit(7)'], },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { failp: { provider: 'failp', command: ['/opt/homebrew/Cellar/node/26.7.0/bin/node', '-e', 'process.exit(7)'] } },
     archetypes: {
       worker: { },
       reviewer: { },
@@ -332,24 +319,11 @@ test('doctor checks a repo-selected executable without executing it', (t) => {
   chmodSync(command, 0o755);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'repo-model': { provider: 'repo', id: 'repo-model', effort: 'default' },
     },
-    routes: {
-      standalone: {
-        repo: { command: [command], },
-        'current-host': { host: true },
-      },
-      codex: {
-        repo: { command: [command], },
-        'current-host': { host: true },
-      },
-      claude: {
-        repo: { command: [command], },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { repo: { provider: 'repo', command: [command] } },
     archetypes: {
       worker: { },
     },

@@ -33,6 +33,8 @@ type Side = {
 type Claim = { id: string; doc: Side; src: Side };
 
 const DIALS = 'docs/experimental/dials-and-registry.md';
+/** The catalog v4 design record — successor to DIALS for routes/`--via`. */
+const HARNESSES = 'docs/experimental/harness-neutral-dials.md';
 const SLOTS = 'docs/experimental/slots-and-archetypes.md';
 const LOADOUTS = 'docs/experimental/loadouts-and-dispatch.md';
 const EXTENDING = 'docs/extending.md';
@@ -221,9 +223,23 @@ const CLAIMS: Claim[] = [
     src: { files: ['src/commands/plugin.ts'], patterns: [/stampSurfaceVersion/] },
   },
   {
-    id: 'schema-v3-catalog',
-    doc: { files: [DIALS], patterns: [/schema_version: 3/] },
-    src: { files: ['src/lib/executors.ts'], patterns: [/schema_version: 3/, /schemaVersion/] },
+    id: 'schema-v4-catalog',
+    doc: { files: [HARNESSES], patterns: [/schema_version: 4/] },
+    src: { files: ['src/lib/executors.ts'], patterns: [/schema_version: 4/, /schemaVersion/] },
+  },
+  {
+    // The whole shape of the v4 bump: one table keyed by harness id, and the
+    // fall-through key renamed with it. A doc that still describes `routes:`
+    // while the loader refuses it is a design record for a product nobody has.
+    id: 'harness-table',
+    doc: { files: [HARNESSES], patterns: [/harnesses:/, /unregistered_model_harness/] },
+    src: { files: ['src/lib/executors.ts'], patterns: [/'harnesses'/, /'unregistered_model_harness'/] },
+  },
+  {
+    // A relay belongs to the harness it forwards from, under `host:`.
+    id: 'harness-host-relay',
+    doc: { files: [HARNESSES], patterns: [/harnesses\.codex\.host\.relay/, /host\.relay/] },
+    src: { files: ['src/lib/executors.ts'], patterns: [/host\?\.relay/] },
   },
   {
     id: 'dispatches-command',
@@ -242,8 +258,8 @@ const CLAIMS: Claim[] = [
   },
   {
     id: 'dispatches-format',
-    doc: { files: [DIALS], patterns: [/format: "1\.0"/, /\[legacy\]/] },
-    src: { files: ['src/commands/dispatch.ts'], patterns: [/DISPATCHES_FORMAT = '1\.0'/] },
+    doc: { files: [HARNESSES], patterns: [/`DISPATCHES_FORMAT` \*\*1\.1\*\*/] },
+    src: { files: ['src/commands/dispatch.ts'], patterns: [/DISPATCHES_FORMAT = '1\.1'/] },
   },
   {
     id: 'session-dials',
@@ -301,13 +317,15 @@ const CLAIMS: Claim[] = [
   },
   {
     id: 'models-registry',
-    doc: { files: [DIALS], patterns: [/models:/, /unregistered_model_driver/] },
-    src: { files: ['src/lib/executors.ts'], patterns: [/models:/, /unregisteredModelDriver/] },
+    doc: { files: [HARNESSES], patterns: [/models:/, /unregistered_model_harness/] },
+    src: { files: ['src/lib/executors.ts'], patterns: [/models:/, /unregisteredModelHarness/] },
   },
   {
+    // The user-facing grammar, both halves: the flag and the ref-string form
+    // it writes. `--via` and ` via ` are gone from both sides.
     id: 'dial-grammar',
-    doc: { files: [DIALS], patterns: [/--via/] },
-    src: { files: ['src/cli.ts', 'src/commands/dial.ts'], patterns: [/--via/, /via/] },
+    doc: { files: [HARNESSES], patterns: [/--harness <id>/, /model\[@effort\]\[ on <harness>\]/] },
+    src: { files: ['src/cli.ts', 'src/commands/dial.ts'], patterns: [/--harness <id>/, /harness/] },
   },
   {
     id: 'dial-command',
@@ -331,7 +349,7 @@ const CLAIMS: Claim[] = [
   },
   {
     id: 'model-add-discovery',
-    doc: { files: [DIALS, EXTENDING], patterns: [/fadeno model add/, /OpenRouter-qualified/] },
+    doc: { files: [DIALS, EXTENDING, HARNESSES], patterns: [/fadeno model add/, /OpenRouter/] },
     src: { files: ['src/commands/models.ts', 'src/cli.ts'], patterns: [/runModelsAdd/, /opencode\/openrouter/] },
   },
   {
@@ -364,13 +382,15 @@ const CLAIMS: Claim[] = [
     },
   },
   {
-    // The `harness`-headed column that never held a harness. The doc records
-    // the rename and the `(inherits …)` half that had to move with it; the
-    // source must actually print both, or the design record is describing a
-    // table nobody sees.
-    id: 'dial-via-column',
-    doc: { files: [DIALS], patterns: [/effort {4}via/, /inherits worker/] },
-    src: { files: ['src/cli.ts'], patterns: [/'via'\.padEnd\(22\)/, /\(inherits \$\{row\.resolvedVia\}\)/] },
+    // The column got its honest name back. It always held the EXECUTOR; the
+    // word `harness` was taken by the ambient agent, so the column was renamed
+    // `via` — and v4 renamed the other one to `host` instead. The doc records
+    // the column and the `(inherits …)` half that had to stay distinct from
+    // it; the source must actually print both, or the design record is
+    // describing a table nobody sees.
+    id: 'dial-harness-column',
+    doc: { files: [HARNESSES], patterns: [/effort {2}harness {2}source/, /\(home\)/] },
+    src: { files: ['src/cli.ts'], patterns: [/'harness'\.padEnd\(22\)/, /\(inherits \$\{row\.resolvedVia\}\)/] },
   },
   {
     id: 'models-command-probe',

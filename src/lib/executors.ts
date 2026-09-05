@@ -8,7 +8,8 @@ import { type FadenoHarness, type UserPathOptions } from './user-paths.ts';
 export class ExecutorProfileError extends Error {}
 
 /** Bare lowercase identifier: dial targets, archetype keys, role archetypes. */
-// schema_version: 3 — dial world only (pre-dials catalogs refused)
+// schema_version: 4 — harness-keyed catalog (pre-dials catalogs refused; a v3
+// layer loads only when it declares none of the removed keys)
 export const BARE_IDENTIFIER_RE = /^[a-z][a-z0-9_-]*$/;
 
 /** Per-target, per-archetype dispatch eligibility. Absent YAML is `eligible`. */
@@ -50,8 +51,10 @@ export interface CommandExecutorSpec {
   /** Neutral v2 target metadata; absent for legacy v1 executors. */
   target?: string;
   provider?: string;
-  /** v3 compiled delivery driver alias (for snapshot passthrough). */
-  driver?: string;
+  /** v4 compiled executor harness id (for snapshot passthrough). */
+  harness?: string;
+  /** v4 compiled command-lane variant, when policy chose a named one. */
+  variant?: string;
 }
 
 /** A host facility invoked outside the command adapter. */
@@ -77,7 +80,8 @@ export interface HostExecutorSpec {
   /** Neutral v2 target metadata; absent for legacy v1 executors. */
   target?: string;
   provider?: string;
-  driver?: string;
+  harness?: string;
+  variant?: string;
 }
 
 export type ExecutorSpec = CommandExecutorSpec | HostExecutorSpec;
@@ -107,12 +111,12 @@ export function substituteSessionId(argv: string[], sessionId: string): string[]
 }
 
 /**
- * Placeholder for drivers that can only read a prompt from a regular file
- * (Muse Code refuses /dev/stdin, bare stdin, and `-` — verified live
+ * Placeholder for harnesses whose CLI can only read a prompt from a regular
+ * file (Muse Code refuses /dev/stdin, bare stdin, and `-` — verified live
  * 2026-08-16). Substituted at spawn time with the absolute path of the
  * kernel's attested prompt snapshot, so the digest attests exactly the bytes
- * the executor reads. Stdin is still piped alongside; file-reading drivers
- * simply ignore it.
+ * the executor reads. Stdin is still piped alongside; a file-reading executor
+ * simply ignores it.
  */
 export const PROMPT_FILE_PLACEHOLDER = '{prompt_file}';
 
@@ -222,11 +226,47 @@ export interface ArchetypePolicy {
 
 // --- Dial / model registry types ---
 
+/**
+ * Who runs an archetype, and optionally which harness runs it.
+ *
+ * A dial names a model, an optional effort, and an optional executor
+ * `harness`. It never names a lane, a driver, or an argv: the HOST harness is
+ * discovered at dispatch time from ambient signals, and the pair
+ * *(dial harness, host)* plus policy decides the lane.
+ */
 export interface DialRef {
   model: string;
   effort?: string;
-  via?: string;
+  /** Executor harness id. Absent = the model's home harness. */
+  harness?: string;
 }
+
+/**
+ * Legacy `--via <driver>` names, mapped to the v4 harness they always were.
+ *
+ * READ ONLY. `parseDialRef` accepts a persisted ` via <driver>` and translates
+ * it; nothing in this codebase ever emits one again. The variant half of a
+ * driver name (`claude-exec`, `opencode-direct`) is deliberately dropped: a
+ * variant is chosen by policy under v4, not named on a dial, so a legacy ref
+ * that carried one formats differently afterwards — which re-rolls a shadow
+ * sample keyed on the challenger string. See CHANGELOG.
+ */
+const LEGACY_DRIVER_HARNESS: Readonly<Record<string, string>> = {
+  'claude-exec': 'claude',
+  'claude-cli': 'claude',
+  'opencode-direct': 'opencode',
+  'muse-code': 'muse',
+};
+
+/** Translate a legacy driver alias to its harness id; unknown names pass through. */
+export function legacyDriverHarness(driver: string): string {
+  return LEGACY_DRIVER_HARNESS[driver] ?? driver;
+}
+
+/** The ` on <harness>` separator in the dial-ref string grammar. */
+const ON_SEPARATOR = ' on ';
+/** The legacy ` via <driver>` separator, accepted on read only. */
+const VIA_SEPARATOR = ' via ';
 
 export function parseDialRef(raw: unknown, label: string): DialRef {
   if (typeof raw === 'string') {
@@ -234,18 +274,31 @@ export function parseDialRef(raw: unknown, label: string): DialRef {
     if (trimmed.length === 0) {
       throw new ExecutorProfileError(`${label} is an empty string — expected "model" or "model@effort".`);
     }
-    let via: string | undefined;
+    let harness: string | undefined;
     let core = trimmed;
-    const viaIdx = trimmed.indexOf(' via ');
-    if (viaIdx >= 0) {
+    const onIdx = trimmed.indexOf(ON_SEPARATOR);
+    const viaIdx = trimmed.indexOf(VIA_SEPARATOR);
+    if (onIdx >= 0) {
+      core = trimmed.slice(0, onIdx).trim();
+      const named = trimmed.slice(onIdx + ON_SEPARATOR.length).trim();
+      if (named.length === 0) {
+        throw new ExecutorProfileError(`${label} has empty harness after " on ".`);
+      }
+      if (!BARE_IDENTIFIER_RE.test(named)) {
+        throw new ExecutorProfileError(`${label} harness "${named}" is not a bare identifier.`);
+      }
+      harness = named;
+    } else if (viaIdx >= 0) {
+      // Legacy read: `model via <driver>` → `{ harness }`. Never emitted back.
       core = trimmed.slice(0, viaIdx).trim();
-      via = trimmed.slice(viaIdx + 5).trim();
-      if (via.length === 0) {
-        throw new ExecutorProfileError(`${label} has empty via after " via ".`);
+      const driver = trimmed.slice(viaIdx + VIA_SEPARATOR.length).trim();
+      if (driver.length === 0) {
+        throw new ExecutorProfileError(`${label} has empty driver after " via " (legacy form; use " on <harness>").`);
       }
-      if (!BARE_IDENTIFIER_RE.test(via) && /\s/.test(via)) {
-        throw new ExecutorProfileError(`${label} via "${via}" is not a bare identifier.`);
+      if (!BARE_IDENTIFIER_RE.test(driver)) {
+        throw new ExecutorProfileError(`${label} driver "${driver}" is not a bare identifier.`);
       }
+      harness = legacyDriverHarness(driver);
     }
     const atIdx = core.indexOf('@');
     if (atIdx >= 0) {
@@ -262,14 +315,14 @@ export function parseDialRef(raw: unknown, label: string): DialRef {
       }
       const out: DialRef = { model };
       if (effort) out.effort = effort;
-      if (via) out.via = via;
+      if (harness) out.harness = harness;
       return out;
     }
     if (core.includes(' ') || core.includes('@')) {
       throw new ExecutorProfileError(`${label} "${raw}" is not a valid dial ref.`);
     }
     const out: DialRef = { model: core };
-    if (via) out.via = via;
+    if (harness) out.harness = harness;
     return out;
   }
   if (raw !== null && typeof raw === 'object' && !Array.isArray(raw)) {
@@ -279,10 +332,8 @@ export function parseDialRef(raw: unknown, label: string): DialRef {
       throw new ExecutorProfileError(`${label} mapping needs a non-empty "model" string.`);
     }
     const trimmedModel = model.trim();
-    if (trimmedModel.includes('@') || trimmedModel.includes(' ') || trimmedModel.includes('  ')) {
-      if (trimmedModel.includes(' ')) {
-        throw new ExecutorProfileError(`${label} model "${trimmedModel}" contains whitespace.`);
-      }
+    if (trimmedModel.includes(' ')) {
+      throw new ExecutorProfileError(`${label} model "${trimmedModel}" contains whitespace.`);
     }
     const out: DialRef = { model: trimmedModel };
     if (map.effort !== undefined) {
@@ -295,11 +346,18 @@ export function parseDialRef(raw: unknown, label: string): DialRef {
       }
       out.effort = eff;
     }
+    if (map.harness !== undefined) {
+      if (typeof map.harness !== 'string' || map.harness.trim().length === 0) {
+        throw new ExecutorProfileError(`${label} "harness" must be a non-empty string.`);
+      }
+      out.harness = map.harness.trim();
+    }
     if (map.via !== undefined) {
+      // Legacy mapping form, accepted on read only.
       if (typeof map.via !== 'string' || map.via.trim().length === 0) {
         throw new ExecutorProfileError(`${label} "via" must be a non-empty string.`);
       }
-      out.via = map.via.trim();
+      if (out.harness == null) out.harness = legacyDriverHarness(map.via.trim());
     }
     if (map.force_write_posture !== undefined) {
       throw new ExecutorProfileError(
@@ -307,19 +365,19 @@ export function parseDialRef(raw: unknown, label: string): DialRef {
           'override. See docs/experimental/permissions-and-isolation.md.',
       );
     }
-    const unknown = Object.keys(map).filter((k) => k !== 'model' && k !== 'effort' && k !== 'via');
+    const unknown = Object.keys(map).filter((k) => k !== 'model' && k !== 'effort' && k !== 'harness' && k !== 'via');
     if (unknown.length > 0) {
-      throw new ExecutorProfileError(`${label} has unknown key(s) ${unknown.join(', ')}; only model, effort, via are allowed.`);
+      throw new ExecutorProfileError(`${label} has unknown key(s) ${unknown.join(', ')}; only model, effort, harness are allowed.`);
     }
     return out;
   }
-  throw new ExecutorProfileError(`${label} must be a string "model[@effort]" or a mapping {model, effort?, via?}.`);
+  throw new ExecutorProfileError(`${label} must be a string "model[@effort][ on <harness>]" or a mapping {model, effort?, harness?}.`);
 }
 
 export function formatDialRef(ref: DialRef): string {
   let base = ref.model;
   if (ref.effort != null && ref.effort.length > 0) base += `@${ref.effort}`;
-  if (ref.via != null && ref.via.length > 0) base += ` via ${ref.via}`;
+  if (ref.harness != null && ref.harness.length > 0) base += `${ON_SEPARATOR}${ref.harness}`;
   return base;
 }
 
@@ -332,48 +390,127 @@ export interface ModelEntry {
   provider: string;
   id: string;
   effort: string;
+  /** Provider-facing id per HARNESS (v4; was per driver). */
   spellings: Record<string, string>;
   eligibility: Record<string, EligibilityState>;
   /**
-   * A promoted model's home delivery can differ from its upstream provider.
-   * `provider` + `id` remain the canonical identity shown in the registry;
-   * this only says which route receives which provider-facing spelling.
+   * An explicit non-home harness for this model. A promoted model's delivery
+   * can differ from its upstream provider's home harness; `provider` + `id`
+   * remain the canonical identity shown in the registry, and the
+   * harness-facing spelling lives in `spellings.<harness>`.
+   *
+   * Replaces v3's `delivery: { route, id }`.
    */
-  delivery?: { route: string; id: string };
+  harness?: string;
 }
 
-export interface RouteRaw {
-  driver?: string;
-  models_command?: string[] | null;
-  /**
-   * Deliberately normalized from YAML's `models_prefix` even though most
-   * RouteRaw fields retain their YAML spelling: consumers use this only as a
-   * derived listing qualifier, never as an argv template field.
-   */
-  modelsPrefix?: string;
-  effort_encoding?: 'flag' | 'model-suffix';
-  command?: string[] | null;
+/** One command lane of a harness: the base `command:` or a named variant. */
+export interface HarnessLaneRaw {
+  command: string[];
   timeout_ms?: number | null;
-  host?: boolean;
   resume?: string[] | null;
   session_id_pattern?: string | null;
   /**
-   * Per-archetype eligibility of every delivery through this route, merged
+   * Per-archetype eligibility of every delivery through THIS lane, merged
    * with model-level eligibility (strictest wins). This is how a catalog says
-   * "this lane cannot host a director": the constraint is structural — it
-   * covers unregistered models falling through to this route too.
+   * "this lane cannot carry a director": the constraint is structural — it
+   * covers unregistered models falling through to the lane too. A variant
+   * does NOT inherit the base lane's eligibility; each lane states its own,
+   * exactly as each v3 route did.
    */
   eligibility?: Record<string, EligibilityState>;
 }
 
+/** The in-session half of a harness: what it can deliver without spawning. */
+export interface HarnessHostRaw {
+  /**
+   * How this harness's agent definition carries a reasoning effort.
+   * `none` — no channel at all, so a pinned effort ejects to the command
+   * lane. `agent-file` — the materialized agent file carries it, so
+   * `fadeno steering apply` can pin it and the host lane survives.
+   *
+   * A property of the FORMAT, not a preference: a Codex agent TOML has a
+   * `model_reasoning_effort` key; Claude's Agent tool has no effort channel.
+   */
+  effort_channel: 'none' | 'agent-file';
+  /**
+   * WHOSE identity the host lane can deliver.
+   *
+   * `model` (the default) — the host can be told which model to run: Codex
+   * bakes it into the agent TOML, Claude's spawn hook rewrites the tool call.
+   * A named model on this harness is a host candidate.
+   *
+   * `session` — the host lane delivers the SESSION's own identity and nothing
+   * else. OpenCode's plugin and omp's extension rewrite only the agent name
+   * (`applyRewrite` sets `subagent_type`; the omp extension sets `agent`), so
+   * a dialed model handed to a host spawn there is silently ignored. Under
+   * `session` only `current-host` — which IS the session's identity — takes
+   * the host lane; a named model on this harness is a command delivery, which
+   * is what v3's `routes.opencode` / `routes.omp` expressed by putting
+   * `host: true` on `current-host` alone.
+   *
+   * The knob is on the harness because it is a fact about that harness's
+   * adapter, not about any dial.
+   */
+  identity: 'model' | 'session';
+  /**
+   * The relay identity for this harness — the cheap model that reads a
+   * resolver answer and forwards a delivery, doing none of the role work
+   * itself (Codex's command broker, Claude's dispatch proxies).
+   *
+   * Deliberately NOT an archetype: canonical status is earned by a policy the
+   * kernel enforces, and a relay carries none. Absent means "no catalog
+   * opinion" — the caller keeps its own built-in default rather than being
+   * handed a model the provider may not serve.
+   */
+  relay?: DialRef;
+  /** Per-archetype eligibility of the HOST lane only. */
+  eligibility?: Record<string, EligibilityState>;
+}
+
 /**
- * The identity a route's `models_command` prints for one argv-facing model
+ * One harness. A harness is a HOST (Fadeno can run inside it) when it declares
+ * `host:`, and an EXECUTOR (Fadeno can spawn it) when it declares `command:`.
+ * Most are both. At least one is required.
+ */
+export interface HarnessRaw {
+  /** Home provider: models of this provider default to this harness. */
+  provider?: string;
+  host?: HarnessHostRaw;
+  /**
+   * The base command lane, in the SAME shape a variant has — so the parser
+   * reads one thing and `commandLanes` re-packs nothing. The YAML flattens it
+   * (`command:`, `timeout_ms:`, `eligibility:` sit at harness level, because
+   * a harness with one lane should not have to nest it), and this is where
+   * that flattening ends.
+   */
+  command?: HarnessLaneRaw | null;
+  /**
+   * The base command lane's eligibility when there is NO `command:` — kept
+   * only so the loader can refuse the inert placement by name instead of
+   * dropping it. A declared lane carries its own inside `command`.
+   */
+  eligibility?: Record<string, EligibilityState>;
+  models_command?: string[] | null;
+  /**
+   * Deliberately normalized from YAML's `models_prefix` even though most
+   * HarnessRaw fields retain their YAML spelling: consumers use this only as a
+   * derived listing qualifier, never as an argv template field.
+   */
+  modelsPrefix?: string;
+  effort_encoding?: 'flag' | 'model-suffix';
+  /** Named alternative argvs of this harness's command lane, chosen by policy. */
+  variants?: Record<string, HarnessLaneRaw>;
+}
+
+/**
+ * The identity a harness's `models_command` prints for one argv-facing model
  * id. This is deliberately separate from command substitution: OpenCode's
  * OpenRouter listing includes `openrouter/`, while its `-m` argument must not
  * receive that prefix twice.
  */
-export function qualifyListedModelId(route: RouteRaw | null | undefined, modelId: string): string {
-  const prefix = route?.modelsPrefix;
+export function qualifyListedModelId(harness: HarnessRaw | null | undefined, modelId: string): string {
+  const prefix = harness?.modelsPrefix;
   if (prefix == null || modelId.startsWith(prefix)) return modelId;
   return `${prefix}${modelId}`;
 }
@@ -405,12 +542,54 @@ export interface CompiledDelivery {
    */
   effectiveEffort: string;
   provider: string | null;
-  driver: string;
+  /**
+   * The EXECUTOR harness this delivery resolved onto (was `driver`).
+   *
+   * `null` only for `current-host` with no host: the base dial names whatever
+   * session is running, and in a bare shell there is none. Naming a harness
+   * there — `standalone`, say — would print a value that is not in the table.
+   */
+  harness: string | null;
+  /** The named command-lane variant policy chose, or null for the base lane. */
+  variant: string | null;
+  /**
+   * Whether this delivery is a candidate for the HOST lane: its harness is the
+   * host this call runs inside, that harness declares `host:`, and the host
+   * lane's eligibility permits the archetype.
+   *
+   * Not the same as `spec.adapter === 'host'`. A host spec is also how a
+   * delivery with NO command argv is represented (`current-host` in a bare
+   * shell, a host-only harness named from a different host) — there is nothing
+   * to spawn, so the honest answer is "start a session inside it", which
+   * `decideLane` renders as `restart_required`. Pass THIS field as
+   * `decideLane`'s `hostModel`, never `deliveryIsHost`.
+   */
+  hostCandidate: boolean;
   registered: boolean;
 }
 
 export function deliveryIsHost(compiled: CompiledDelivery): boolean {
   return compiled.spec.adapter === 'host';
+}
+
+/**
+ * Whether a delivery can go out IN-SESSION — the one question every host-slot
+ * decision has to ask, answered the same way in every caller.
+ *
+ * A LIVE compile knows the host, so it answers from `hostCandidate`, which
+ * folds in `harness === host`, the harness declaring `host:`, its
+ * `identity:`, and the host lane's eligibility. `spec.adapter === 'host'` is
+ * NOT that question: a host spec is also how a delivery with no argv at all is
+ * represented (`current-host` in a bare shell, a host-only harness named from
+ * a different host), so the two disagree exactly there — which is how
+ * `steering apply --codex` came to write a Codex host agent for `opus on omp`.
+ *
+ * A SNAPSHOT spec has no live host to compare against: the run froze the
+ * answer when it was cut, and `adapter: 'host'` IS that frozen answer. Passing
+ * `null` says "this is a replay", and the frozen answer stands.
+ */
+export function hostCandidateOf(compiled: CompiledDelivery | null, spec: ExecutorSpec): boolean {
+  return compiled != null ? compiled.hostCandidate : spec.adapter === 'host';
 }
 
 export interface ToolSpec {
@@ -420,14 +599,22 @@ export interface ToolSpec {
 
 export interface ExecutorProfile {
   models: Record<string, ModelEntry>;
-  routes: Record<string, Record<string, RouteRaw>>;
+  /**
+   * One table, keyed by harness id — the v4 replacement for the six
+   * near-identical `routes.<host>` tables. A harness's argv does not depend on
+   * which harness is doing the invoking, and the one bit that used to differ
+   * (`host: true`) is exactly "dial harness == host harness", decided at
+   * dispatch time rather than stored.
+   */
+  harnesses: Record<string, HarnessRaw>;
   bindings: Record<string, DialRef>;
   dials: Record<string, DialRef>;
   archetypes: Record<string, ArchetypePolicy>;
   constraints: { command: string[] } | null;
-  unregisteredModelDriver: string;
-  harness?: HarnessId;
-  schemaVersion?: 3;
+  unregisteredModelHarness: string;
+  /** The HOST: the harness this call is running inside. */
+  host?: HarnessId;
+  schemaVersion?: 4;
   notes: string[];
   tools: Record<string, ToolSpec>;
   /**
@@ -455,54 +642,24 @@ export interface ExecutorProfile {
    * declaration it cannot tell "reached nothing" from "nothing to reach".
    */
   surfaces: string[];
-  /**
-   * Per-harness identity of the *relay* — the cheap model that reads a
-   * resolver answer and forwards a delivery, doing none of the role work
-   * itself (Codex's command broker, Claude's dispatch proxies).
-   *
-   * Deliberately NOT an archetype. Canonical status in this system is earned
-   * by a policy the kernel enforces, and a relay carries none; making it one
-   * would also list it in `fadeno dial` as though it were work to be dialed.
-   * It is per-harness rather than a single value because a relay must be a
-   * model the session's own provider already serves — and `dials:` is a flat
-   * archetype→ref map, with harness variation living in `routes:`.
-   *
-   * Absent for a harness means "no catalog opinion": the caller keeps its own
-   * built-in default rather than being handed a model the provider may not
-   * serve. See `resolveRelay`.
-   */
-  relay: Record<string, DialRef>;
 }
 
 export type HarnessId = 'codex' | 'claude' | 'grok' | 'opencode' | 'omp' | 'standalone';
 
 /**
- * Harnesses that HAVE a relay, and so may key `relay:` in the catalog.
+ * Whether THIS catalog says the named harness's agent-definition format can
+ * carry a reasoning effort, so `fadeno steering apply` can materialize a host
+ * slot AT a dialed `@effort`.
  *
- * `standalone` is absent by construction: a relay exists to forward work from
- * inside a host session, and standalone has no host session to forward from.
+ * Read off `harnesses.<id>.host.effort_channel` rather than hardcoded: the
+ * fact is a property of the harness's FORMAT, and the catalog is where a
+ * harness is described. Where it is false, `steering apply` writes no host
+ * agent file (it has nothing to write that would change delivery), a pinned
+ * effort instead selects the LANE via `decideLane`, and telling the user to
+ * run apply would send them to a command that does nothing.
  */
-export const RELAY_HARNESSES = ['claude', 'codex', 'grok'] as const;
-
-/**
- * Harnesses whose agent-definition format can carry a reasoning effort, so
- * `fadeno steering apply` can materialize a host slot AT a dialed `@effort`.
- *
- * This is a property of the FORMAT, not a preference: a Codex agent TOML has
- * a `model_reasoning_effort` key, and Claude's Agent tool has no effort
- * channel at all — the same fact the catalog states in prose above
- * `relay.claude`. Where it is false, `steering apply` writes no host agent
- * file (it has nothing to write that would change delivery), a pinned effort
- * instead selects the LANE via `decideLane`, and telling the user to run
- * apply would send them to a command that does nothing.
- *
- * Keep this beside `RELAY_HARNESSES` rather than inside `dial.ts`: the note
- * that reads it and the apply that implements it live in different files, and
- * `test/host-effort-materialization.test.ts` pins the two together by running
- * both applies and asserting what they actually write.
- */
-export function hostEffortIsMaterializable(harness: HarnessId): boolean {
-  return harness === 'codex';
+export function hostEffortIsMaterializable(profile: ExecutorProfile, harness: string): boolean {
+  return profile.harnesses?.[harness]?.host?.effort_channel === 'agent-file';
 }
 
 /**
@@ -648,19 +805,42 @@ export const EXECUTORS_FILE = join('.fadeno', 'executors.yaml');
 export const CATALOG_TOP_LEVEL_KEYS = [
   'schema_version',
   'models',
-  'routes',
+  'harnesses',
   'bindings',
   'dials',
   'archetypes',
   'constraints',
-  'unregistered_model_driver',
+  'unregistered_model_harness',
   'tools',
   'worktree_carry',
   'surfaces',
-  'relay',
 ] as const;
 
 export type CatalogTopLevelKey = (typeof CATALOG_TOP_LEVEL_KEYS)[number];
+
+/**
+ * Keys catalog v4 removed, and the v4 spelling each one became.
+ *
+ * A `schema_version: 3` layer still loads — a personal `models:`-only catalog
+ * is not made wrong by the bump — but only if it declares NONE of these. A
+ * layer that does gets the migration note naming the key, the same posture the
+ * v2→v3 bump took, rather than having its declaration silently dropped by the
+ * selective merge.
+ */
+export const V4_REMOVED_CATALOG_KEYS: Readonly<Record<string, string>> = {
+  routes: 'harnesses: (one table keyed by harness id; `host: true` is gone — the host is discovered at dispatch time)',
+  relay: 'harnesses.<id>.host.relay',
+  unregistered_model_driver: 'unregistered_model_harness',
+};
+
+/** The one migration message a v3-shaped catalog key gets, wherever it is noticed. */
+export function v4MigrationError(source: string, key: string, detail?: string): ExecutorProfileError {
+  const replacement = V4_REMOVED_CATALOG_KEYS[key] ?? detail ?? '';
+  return new ExecutorProfileError(
+    `${source}: \`${key}\` was removed in catalog v4 — use ${replacement}. ` +
+      'See docs/experimental/harness-neutral-dials.md.',
+  );
+}
 
 /**
  * Pre-dials (schema_version < 3) top-level keys. Not allowed, but not
@@ -672,8 +852,44 @@ export const PRE_DIALS_CATALOG_KEYS = ['executors', 'targets', 'loadouts', 'defa
 /** The one migration message a pre-dials catalog gets, wherever it is noticed. */
 export function preDialsCatalogError(source: string): ExecutorProfileError {
   return new ExecutorProfileError(
-    `${source}: schema_version 3 required — pre-dials catalogs are not supported; migrate: targets:→models:, loadouts:→dials:, default_loadout: delete; see docs/experimental/dials-and-registry.md`,
+    `${source}: schema_version 4 required — pre-dials catalogs are not supported; migrate: targets:→models:, loadouts:→dials:, default_loadout: delete; routes:→harnesses:; see docs/experimental/harness-neutral-dials.md`,
   );
+}
+
+/**
+ * Refuse a document that declares anything catalog v4 removed.
+ *
+ * Run on every layer, whatever version it claims: a `schema_version: 3` layer
+ * that declares none of these still loads (the bump is about the harness
+ * table, and a personal `models:`-only catalog written before it is not
+ * thereby wrong), and a layer that DOES declare one gets the migration note
+ * naming the key — rather than an unknown-key message that says nothing about
+ * why it went away or what replaced it.
+ */
+export function refuseRemovedCatalogKeys(doc: Record<string, unknown>, source: string): void {
+  for (const key of Object.keys(V4_REMOVED_CATALOG_KEYS)) {
+    if (doc[key] !== undefined) throw v4MigrationError(source, key);
+  }
+  const models = doc.models;
+  if (models !== null && typeof models === 'object' && !Array.isArray(models)) {
+    for (const [name, raw] of Object.entries(models as Record<string, unknown>)) {
+      if (raw !== null && typeof raw === 'object' && !Array.isArray(raw) && (raw as Record<string, unknown>).delivery !== undefined) {
+        throw v4MigrationError(source, 'delivery', `\`models.${name}.harness\` plus \`models.${name}.spellings.<harness>\``);
+      }
+    }
+  }
+  for (const section of ['dials', 'bindings'] as const) {
+    const table = doc[section];
+    if (table === null || typeof table !== 'object' || Array.isArray(table)) continue;
+    for (const [name, raw] of Object.entries(table as Record<string, unknown>)) {
+      const carriesVia = typeof raw === 'string'
+        ? raw.includes(VIA_SEPARATOR)
+        : raw !== null && typeof raw === 'object' && !Array.isArray(raw) && (raw as Record<string, unknown>).via !== undefined;
+      if (carriesVia) {
+        throw v4MigrationError(source, 'via', `\`${section}.${name}\` written as "model[@effort] on <harness>" (or \`harness:\` in mapping form)`);
+      }
+    }
+  }
 }
 
 /** Levenshtein distance, iterative two-row form. */
@@ -774,8 +990,14 @@ function nextArchetypeFallback(
   return typeof next === 'string' ? next : null;
 }
 
-/** Parse + structurally validate an executor profile document. */
-export function parseExecutorProfile(text: string, source: string, harness: HarnessId = 'standalone'): ExecutorProfile {
+/**
+ * Parse + structurally validate an executor profile document.
+ *
+ * `host` is the harness this call is running INSIDE — used only to answer
+ * "same harness?" at resolution time. Nothing about the catalog itself varies
+ * with it.
+ */
+export function parseExecutorProfile(text: string, source: string, host: HarnessId = 'standalone'): ExecutorProfile {
   let doc: unknown;
   try {
     doc = parseYaml(text);
@@ -785,8 +1007,11 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
   if (!isMapping(doc)) {
     throw new ExecutorProfileError(`${source} is not a mapping.`);
   }
-  // Strict v3 requirement — no backwards compat
-  if (doc.schema_version !== 3) {
+  // v4, or a v3 document that declares nothing v4 removed. Anything older is
+  // pre-dials and gets the migration instructions.
+  if (doc.schema_version === 3) {
+    refuseRemovedCatalogKeys(doc, source);
+  } else if (doc.schema_version !== 4) {
     throw preDialsCatalogError(source);
   }
   if (!isMapping(doc.models) || Object.keys(doc.models).length === 0) {
@@ -818,161 +1043,281 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
     const spellings: Record<string, string> = {};
     if (raw.spellings !== undefined) {
       if (!isMapping(raw.spellings)) {
-        throw new ExecutorProfileError(`${source}: model "${name}" \`spellings\` is not a mapping (driver → id).`);
+        throw new ExecutorProfileError(`${source}: model "${name}" \`spellings\` is not a mapping (harness → id).`);
       }
-      for (const [driver, sid] of Object.entries(raw.spellings)) {
+      for (const [harnessKey, sid] of Object.entries(raw.spellings)) {
         if (typeof sid !== 'string' || sid.trim().length === 0) {
-          throw new ExecutorProfileError(`${source}: model "${name}" spelling for driver "${driver}" must be a non-empty string.`);
+          throw new ExecutorProfileError(`${source}: model "${name}" spelling for harness "${harnessKey}" must be a non-empty string.`);
         }
-        spellings[driver] = sid.trim();
+        spellings[harnessKey] = sid.trim();
       }
     }
-    let delivery: ModelEntry['delivery'];
     if (raw.delivery !== undefined) {
-      if (!isMapping(raw.delivery)) {
-        throw new ExecutorProfileError(`${source}: model "${name}" \`delivery\` is not a mapping (route + id).`);
+      throw v4MigrationError(source, 'delivery', `\`models.${name}.harness\` plus \`models.${name}.spellings.<harness>\``);
+    }
+    let modelHarness: string | undefined;
+    if (raw.harness !== undefined) {
+      if (typeof raw.harness !== 'string' || !BARE_IDENTIFIER_RE.test(raw.harness.trim())) {
+        throw new ExecutorProfileError(`${source}: model "${name}" \`harness\` must be a bare lowercase identifier naming a harness (${BARE_IDENTIFIER_RE.source}).`);
       }
-      const route = raw.delivery.route;
-      const deliveryId = raw.delivery.id;
-      if (typeof route !== 'string' || !BARE_IDENTIFIER_RE.test(route.trim()) || typeof deliveryId !== 'string' || deliveryId.trim().length === 0) {
-        throw new ExecutorProfileError(`${source}: model "${name}" \`delivery\` needs a bare \`route\` and non-empty \`id\`.`);
-      }
-      const unknownDelivery = Object.keys(raw.delivery).filter((k) => k !== 'route' && k !== 'id');
-      if (unknownDelivery.length > 0) {
-        throw new ExecutorProfileError(`${source}: model "${name}" delivery has unknown key(s) ${unknownDelivery.join(', ')}; only route, id are allowed.`);
-      }
-      delivery = { route: route.trim(), id: deliveryId.trim() };
+      modelHarness = raw.harness.trim();
     }
     const eligibility = readEligibility(raw as Record<string, unknown>, `model "${name}"`, source);
-    const unknown = Object.keys(raw).filter((k) => !['provider', 'id', 'effort', 'spellings', 'eligibility', 'delivery'].includes(k));
+    const unknown = Object.keys(raw).filter((k) => !['provider', 'id', 'effort', 'spellings', 'eligibility', 'harness'].includes(k));
     if (unknown.length > 0) {
-      throw new ExecutorProfileError(`${source}: model "${name}" has unknown key(s) ${unknown.join(', ')}; only provider, id, effort, spellings, eligibility, delivery are allowed.`);
+      throw new ExecutorProfileError(`${source}: model "${name}" has unknown key(s) ${unknown.join(', ')}; only provider, id, effort, spellings, eligibility, harness are allowed.`);
     }
-    models[name] = { provider: prov, id, effort, spellings, eligibility, ...(delivery != null ? { delivery } : {}) };
+    models[name] = { provider: prov, id, effort, spellings, eligibility, ...(modelHarness != null ? { harness: modelHarness } : {}) };
   }
   models['current-host'] = { provider: 'current-host', id: 'current-host', effort: 'default', spellings: {}, eligibility: {} };
 
-  // routes
-  const routes: Record<string, Record<string, RouteRaw>> = {};
-  if (doc.routes !== undefined) {
-    if (!isMapping(doc.routes)) {
-      throw new ExecutorProfileError(`${source} \`routes\` is not a mapping (harness → provider → route).`);
+  // harnesses — ONE table, keyed by harness id.
+  const harnesses: Record<string, HarnessRaw> = {};
+  if (doc.routes !== undefined) throw v4MigrationError(source, 'routes');
+  if (doc.harnesses !== undefined) {
+    if (doc.schema_version !== 4) {
+      throw new ExecutorProfileError(
+        `${source}: \`harnesses:\` requires \`schema_version: 4\` (found ${JSON.stringify(doc.schema_version)}).`,
+      );
     }
-    for (const [harnessKey, rawHarness] of Object.entries(doc.routes)) {
-      if (!isMapping(rawHarness)) {
-        throw new ExecutorProfileError(`${source}: routes.${harnessKey} is not a mapping.`);
+    if (!isMapping(doc.harnesses)) {
+      throw new ExecutorProfileError(`${source} \`harnesses\` is not a mapping (harness id → harness).`);
+    }
+    for (const [harnessKey, rawHarness] of Object.entries(doc.harnesses)) {
+      if (!BARE_IDENTIFIER_RE.test(harnessKey)) {
+        throw new ExecutorProfileError(`${source}: harness id "${harnessKey}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
       }
-      const perHarness: Record<string, RouteRaw> = {};
-      for (const [routeKey, rawRoute] of Object.entries(rawHarness)) {
-        if (!isMapping(rawRoute)) {
-          throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}\` is not a mapping.`);
+      if (harnessKey === 'standalone') {
+        // `standalone` is the NO-host value, not a harness: it is what
+        // `activeHarness()` answers when nothing claims the session. A
+        // `harnesses.standalone` entry would make every bare shell a host
+        // candidate and `current-host` deliverable with no session to deliver
+        // into — the exact pretence v4 removed.
+        throw new ExecutorProfileError(
+          `${source}: \`harnesses.standalone\` is not a harness — \`standalone\` is the value \`host\` takes when NO harness claims the session, so there is nothing there to run inside.`,
+        );
+      }
+      if (!isMapping(rawHarness)) {
+        throw new ExecutorProfileError(`${source}: \`harnesses.${harnessKey}\` is not a mapping.`);
+      }
+      const label = `\`harnesses.${harnessKey}\``;
+      const entry: HarnessRaw = {};
+      if (rawHarness.provider !== undefined) {
+        if (typeof rawHarness.provider !== 'string' || rawHarness.provider.trim().length === 0) {
+          throw new ExecutorProfileError(`${source}: ${label}.provider must be a non-empty string.`);
         }
-        const route: RouteRaw = {};
-        if (rawRoute.driver !== undefined) {
-          if (typeof rawRoute.driver !== 'string' || rawRoute.driver.trim().length === 0) {
-            throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}.driver\` must be a non-empty string.`);
-          }
-          route.driver = rawRoute.driver.trim();
+        entry.provider = rawHarness.provider.trim();
+      }
+      if (rawHarness.host !== undefined) {
+        if (rawHarness.host === true || rawHarness.host === false) {
+          throw v4MigrationError(source, 'host: true', 'a `host:` mapping (`{ effort_channel, relay?, eligibility? }`) — the boolean said "this route is the host", which v4 decides at dispatch time');
         }
-        if (rawRoute.models_command !== undefined) {
-          const mc = rawRoute.models_command;
-          if (!Array.isArray(mc) || mc.length === 0 || !mc.every((p) => typeof p === 'string' && p.length > 0)) {
-            throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}.models_command\` must be a non-empty string array.`);
-          }
-          route.models_command = mc as string[];
+        if (!isMapping(rawHarness.host)) {
+          throw new ExecutorProfileError(`${source}: ${label}.host is not a mapping ({effort_channel, relay?, eligibility?}).`);
         }
-        if (rawRoute.models_prefix !== undefined) {
-          if (typeof rawRoute.models_prefix !== 'string' || rawRoute.models_prefix.trim().length === 0 || /\s/.test(rawRoute.models_prefix)) {
-            throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}.models_prefix\` must be a non-empty whitespace-free string.`);
-          }
-          route.modelsPrefix = rawRoute.models_prefix.trim();
+        const rawHost = rawHarness.host;
+        const channel = rawHost.effort_channel ?? 'none';
+        if (channel !== 'none' && channel !== 'agent-file') {
+          throw new ExecutorProfileError(`${source}: ${label}.host.effort_channel must be "none" or "agent-file".`);
         }
-        if (rawRoute.effort_encoding !== undefined) {
-          if (rawRoute.effort_encoding !== 'flag' && rawRoute.effort_encoding !== 'model-suffix') {
-            throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}.effort_encoding\` must be "flag" or "model-suffix".`);
-          }
-          route.effort_encoding = rawRoute.effort_encoding;
+        const identity = rawHost.identity ?? 'model';
+        if (identity !== 'model' && identity !== 'session') {
+          throw new ExecutorProfileError(`${source}: ${label}.host.identity must be "model" or "session".`);
         }
-        if (rawRoute.command !== undefined) {
-          const cmd = rawRoute.command;
-          if (!Array.isArray(cmd) || cmd.length === 0 || !cmd.every((p) => typeof p === 'string' && p.length > 0)) {
-            throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}.command\` must be a non-empty string array.`);
-          }
-          route.command = cmd as string[];
+        const hostEntry: HarnessHostRaw = { effort_channel: channel, identity };
+        if (rawHost.relay !== undefined) {
+          hostEntry.relay = parseDialRef(rawHost.relay, `${source}: ${label}.host.relay`);
         }
-
-        // REMOVED. Refused rather than ignored — quietly dropping a key
-        // someone wrote to restrict something is the failure mode this whole
-        // change exists to end. `write_variant` also never did what its name
-        // said: it swapped the entire argv, so in the shipped catalog it
-        // silently dropped `--sandbox read-only`, `--agent fadeno-readonly`,
-        // and `--disable-shell` along with granting writes.
-        if (rawRoute.write_variant !== undefined || rawRoute.write_access !== undefined) {
-          const key = rawRoute.write_variant !== undefined ? 'write_variant' : 'write_access';
-          throw new ExecutorProfileError(
-            `${source}: \`routes.${harnessKey}.${routeKey}.${key}\` is no longer supported. A route is an argv ` +
-              'and nothing more: declare the command you want to run, and express any restriction as a SEPARATE ' +
-              'route with its own name so it is visible in the argv rather than in metadata. Containment is ' +
-              'isolated worktrees, now the default for command dispatches — see ' +
-              'docs/experimental/permissions-and-isolation.md.',
-          );
+        const hostEligibility = readEligibility(rawHost as Record<string, unknown>, `${label}.host`, source);
+        if (Object.keys(hostEligibility).length > 0) hostEntry.eligibility = hostEligibility;
+        const unknownHost = Object.keys(rawHost).filter((k) => !['effort_channel', 'identity', 'relay', 'eligibility'].includes(k));
+        if (unknownHost.length > 0) {
+          throw new ExecutorProfileError(`${source}: ${label}.host has unknown key(s) ${unknownHost.join(', ')}; only effort_channel, identity, relay, eligibility are allowed.`);
         }
-        // host only (native alias removed)
-        if (rawRoute.host !== undefined) {
-          if (typeof rawRoute.host !== 'boolean') {
-            throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}.host\` must be boolean.`);
-          }
-          route.host = rawRoute.host as boolean;
+        entry.host = hostEntry;
+      }
+      if (rawHarness.driver !== undefined) {
+        throw v4MigrationError(source, 'driver', `the harness id itself (\`harnesses.${harnessKey}\`)`);
+      }
+      if (rawHarness.write_variant !== undefined || rawHarness.write_access !== undefined) {
+        const key = rawHarness.write_variant !== undefined ? 'write_variant' : 'write_access';
+        throw new ExecutorProfileError(
+          `${source}: ${label}.${key} is no longer supported. A harness lane is an argv and nothing more: declare ` +
+            'the command you want to run, and express any restriction as a SEPARATE named variant so it is visible ' +
+            'in the argv rather than in metadata. Containment is isolated worktrees, now the default for command ' +
+            'dispatches — see docs/experimental/permissions-and-isolation.md.',
+        );
+      }
+      if (rawHarness.models_command !== undefined) {
+        const mc = rawHarness.models_command;
+        if (!Array.isArray(mc) || mc.length === 0 || !mc.every((p) => typeof p === 'string' && p.length > 0)) {
+          throw new ExecutorProfileError(`${source}: ${label}.models_command must be a non-empty string array.`);
         }
-        if (rawRoute.resume !== undefined) {
-          const rs = rawRoute.resume;
+        entry.models_command = mc as string[];
+      }
+      if (rawHarness.models_prefix !== undefined) {
+        if (typeof rawHarness.models_prefix !== 'string' || rawHarness.models_prefix.trim().length === 0 || /\s/.test(rawHarness.models_prefix)) {
+          throw new ExecutorProfileError(`${source}: ${label}.models_prefix must be a non-empty whitespace-free string.`);
+        }
+        entry.modelsPrefix = rawHarness.models_prefix.trim();
+      }
+      if (rawHarness.effort_encoding !== undefined) {
+        if (rawHarness.effort_encoding !== 'flag' && rawHarness.effort_encoding !== 'model-suffix') {
+          throw new ExecutorProfileError(`${source}: ${label}.effort_encoding must be "flag" or "model-suffix".`);
+        }
+        entry.effort_encoding = rawHarness.effort_encoding;
+      }
+      const readLane = (rawLane: Record<string, unknown>, laneLabel: string, required: boolean): HarnessLaneRaw | null => {
+        const cmd = rawLane.command;
+        if (cmd === undefined || cmd === null) {
+          if (required) throw new ExecutorProfileError(`${source}: ${laneLabel}.command must be a non-empty string array.`);
+          return null;
+        }
+        if (!Array.isArray(cmd) || cmd.length === 0 || !cmd.every((p) => typeof p === 'string' && p.length > 0)) {
+          throw new ExecutorProfileError(`${source}: ${laneLabel}.command must be a non-empty string array.`);
+        }
+        const lane: HarnessLaneRaw = { command: cmd as string[] };
+        if (rawLane.resume !== undefined) {
+          const rs = rawLane.resume;
           if (!Array.isArray(rs) || rs.length === 0 || !rs.every((p) => typeof p === 'string' && p.length > 0)) {
-            throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}.resume\` must be a non-empty string array.`);
+            throw new ExecutorProfileError(`${source}: ${laneLabel}.resume must be a non-empty string array.`);
           }
           if (!(rs as string[]).some((part) => part.includes(SESSION_ID_PLACEHOLDER))) {
-            throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}.resume\` must contain ${SESSION_ID_PLACEHOLDER}.`);
+            throw new ExecutorProfileError(`${source}: ${laneLabel}.resume must contain ${SESSION_ID_PLACEHOLDER}.`);
           }
-          route.resume = rs as string[];
+          lane.resume = rs as string[];
         }
-        if (rawRoute.session_id_pattern !== undefined) {
-          const pat = rawRoute.session_id_pattern;
+        if (rawLane.session_id_pattern !== undefined) {
+          const pat = rawLane.session_id_pattern;
           if (typeof pat !== 'string') {
-            throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}.session_id_pattern\` must be a string.`);
+            throw new ExecutorProfileError(`${source}: ${laneLabel}.session_id_pattern must be a string.`);
           }
           try { new RegExp(pat); } catch (err) {
-            throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}.session_id_pattern\` did not compile: ${(err as Error).message}`);
+            throw new ExecutorProfileError(`${source}: ${laneLabel}.session_id_pattern did not compile: ${(err as Error).message}`);
           }
           if (!pat.includes('(')) {
-            throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}.session_id_pattern\` needs a capture group.`);
+            throw new ExecutorProfileError(`${source}: ${laneLabel}.session_id_pattern needs a capture group.`);
           }
-          route.session_id_pattern = pat;
+          lane.session_id_pattern = pat;
         }
-        const isHost = route.host === true;
-        if (isHost) {
-          if (route.resume != null || route.session_id_pattern != null) {
-            throw new ExecutorProfileError(`${source}: host route \`routes.${harnessKey}.${routeKey}\` rejects command-session fields.`);
-          }
-        }
-
-        if (rawRoute.timeout_ms !== undefined) {
-          const tm = rawRoute.timeout_ms;
+        if (rawLane.timeout_ms !== undefined) {
+          const tm = rawLane.timeout_ms;
           if (typeof tm !== 'number' || !Number.isInteger(tm) || tm <= 0) {
-            throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}.timeout_ms\` must be a positive integer (milliseconds).`);
+            throw new ExecutorProfileError(`${source}: ${laneLabel}.timeout_ms must be a positive integer (milliseconds).`);
           }
-          route.timeout_ms = tm;
+          lane.timeout_ms = tm;
         }
-        const routeEligibility = readEligibility(rawRoute as Record<string, unknown>, `route \`routes.${harnessKey}.${routeKey}\``, source);
-        if (Object.keys(routeEligibility).length > 0) route.eligibility = routeEligibility;
-        if (route.host === true && route.timeout_ms != null) {
-          throw new ExecutorProfileError(`${source}: host route \`routes.${harnessKey}.${routeKey}\` may not declare \`timeout_ms\` — host dispatch is not supervised.`);
-        }
-        const unknownRouteKeys = Object.keys(rawRoute).filter((k) => !['driver','models_command','models_prefix','effort_encoding','command','host','resume','session_id_pattern','eligibility','timeout_ms'].includes(k));
-        if (unknownRouteKeys.length > 0) {
-          throw new ExecutorProfileError(`${source}: route \`routes.${harnessKey}.${routeKey}\` has unknown key(s) ${unknownRouteKeys.join(', ')}.`);
-        }
-        perHarness[routeKey] = route;
+        const laneEligibility = readEligibility(rawLane, laneLabel, source);
+        if (Object.keys(laneEligibility).length > 0) lane.eligibility = laneEligibility;
+        return lane;
+      };
+      const base = readLane(rawHarness as Record<string, unknown>, label, false);
+      if (base != null) {
+        entry.command = base;
+      } else {
+        // No `command:`, so the flattened lane fields describe nothing. Keep
+        // any `eligibility:` on the entry so the check below can refuse it by
+        // name rather than dropping it.
+        const eligibilityOnly = readEligibility(rawHarness as Record<string, unknown>, label, source);
+        if (Object.keys(eligibilityOnly).length > 0) entry.eligibility = eligibilityOnly;
       }
-      routes[harnessKey] = perHarness;
+      if (rawHarness.variants !== undefined) {
+        if (!isMapping(rawHarness.variants)) {
+          throw new ExecutorProfileError(`${source}: ${label}.variants is not a mapping (variant name → lane).`);
+        }
+        const variants: Record<string, HarnessLaneRaw> = {};
+        for (const [variantKey, rawVariant] of Object.entries(rawHarness.variants)) {
+          if (!BARE_IDENTIFIER_RE.test(variantKey)) {
+            throw new ExecutorProfileError(`${source}: ${label}.variants key "${variantKey}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
+          }
+          if (!isMapping(rawVariant)) {
+            throw new ExecutorProfileError(`${source}: ${label}.variants.${variantKey} is not a mapping.`);
+          }
+          const variantLabel = `${label}.variants.${variantKey}`;
+          const lane = readLane(rawVariant, variantLabel, true)!;
+          const unknownVariant = Object.keys(rawVariant).filter((k) => !['command', 'resume', 'session_id_pattern', 'timeout_ms', 'eligibility'].includes(k));
+          if (unknownVariant.length > 0) {
+            throw new ExecutorProfileError(`${source}: ${variantLabel} has unknown key(s) ${unknownVariant.join(', ')}; only command, resume, session_id_pattern, timeout_ms, eligibility are allowed.`);
+          }
+          variants[variantKey] = lane;
+        }
+        if (Object.keys(variants).length > 0) entry.variants = variants;
+      }
+      const unknownHarnessKeys = Object.keys(rawHarness).filter((k) => !['provider', 'host', 'command', 'resume', 'session_id_pattern', 'timeout_ms', 'eligibility', 'models_command', 'models_prefix', 'effort_encoding', 'variants'].includes(k));
+      if (unknownHarnessKeys.length > 0) {
+        throw new ExecutorProfileError(`${source}: ${label} has unknown key(s) ${unknownHarnessKeys.join(', ')}.`);
+      }
+      if (entry.host == null && entry.command == null) {
+        throw new ExecutorProfileError(
+          `${source}: ${label} declares neither \`host:\` (Fadeno can run inside it) nor \`command:\` (Fadeno can spawn it) — one is required.`,
+        );
+      }
+      if (entry.command == null && entry.eligibility != null) {
+        // Harness-level eligibility constrains the COMMAND lanes. With no
+        // `command:` there is none, so the key would sit there doing nothing —
+        // and a v3 route rewritten naively (`{host: true, command, eligibility}`
+        // split into a `host:` block) is exactly how someone lands here while
+        // believing the host lane is gated. Refuse rather than ignore.
+        throw new ExecutorProfileError(
+          `${source}: ${label} declares \`eligibility:\` with no \`command:\` — harness-level eligibility constrains the command lanes, so it would do nothing here. Move it to \`${label}.host.eligibility\` to gate the host lane.`,
+        );
+      }
+      harnesses[harnessKey] = entry;
+    }
+  }
+
+  // Exactly one harness may claim a provider as home. Two would make
+  // `homeHarnessOf` a coin flip, which is the silent-wrong-answer shape this
+  // catalog keeps closing.
+  const homeByProvider: Record<string, string> = {};
+  for (const [harnessKey, entry] of Object.entries(harnesses)) {
+    const provider = entry.provider;
+    if (provider == null) continue;
+    const existing = homeByProvider[provider];
+    if (existing != null) {
+      throw new ExecutorProfileError(
+        `${source}: provider "${provider}" is claimed as home by two harnesses (${existing}, ${harnessKey}) — exactly one may declare it.`,
+      );
+    }
+    homeByProvider[provider] = harnessKey;
+  }
+
+  // Every model must resolve to SOME harness: an explicit `harness:`, or a
+  // home harness for its provider. Otherwise the dial fails much later, deep
+  // inside resolution, with a message that names neither the model nor the fix.
+  for (const [name, entry] of Object.entries(models)) {
+    if (name === 'current-host') continue;
+    for (const spellingHarness of Object.keys(entry.spellings)) {
+      if (!Object.hasOwn(harnesses, spellingHarness)) {
+        throw new ExecutorProfileError(
+          `${source}: model "${name}" declares a spelling for harness "${spellingHarness}", which is not declared under \`harnesses:\`.`,
+        );
+      }
+    }
+    if (entry.harness != null) {
+      if (!Object.hasOwn(harnesses, entry.harness)) {
+        throw new ExecutorProfileError(
+          `${source}: model "${name}" names harness "${entry.harness}", which is not declared under \`harnesses:\`.`,
+        );
+      }
+      continue;
+    }
+    if (!Object.hasOwn(homeByProvider, entry.provider)) {
+      // A CATALOG defect: the project or builtin layer declared a model
+      // nothing can deliver, which is a file someone edits and should fix.
+      //
+      // A USER-layer model never reaches here, nor any other throw in this
+      // parse: `config-layers.ts` runs `repairUserLayer` before the merge and
+      // `dropUndeliverableUserModels` after it, translating what it can and
+      // dropping the rest into `modelFallback.repairs`/`.dropped`. A stale
+      // `fadeno model add` is machine state, not catalog policy: on 2026-09-05
+      // one such alias (`ox`, provider `stealth`, registered before v4) made
+      // every unrelated `fadeno dial` in every repo fail at load. Dialing the
+      // dropped alias itself still fails loudly, naming this same fix.
+      throw new ExecutorProfileError(
+        `${source}: model "${name}" has provider "${entry.provider}", which no harness claims as home, and names no \`harness:\` — ` +
+          `declare one with: fadeno model add ${name} ${entry.provider}/${entry.id}`,
+      );
     }
   }
 
@@ -1008,13 +1353,14 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
     }
   }
 
-  // unregistered_model_driver
-  let unregisteredModelDriver = 'opencode';
-  if (doc.unregistered_model_driver !== undefined) {
-    if (typeof doc.unregistered_model_driver !== 'string' || (doc.unregistered_model_driver as string).trim().length === 0) {
-      throw new ExecutorProfileError(`${source}: \`unregistered_model_driver\` must be a non-empty string.`);
+  // unregistered_model_harness
+  if (doc.unregistered_model_driver !== undefined) throw v4MigrationError(source, 'unregistered_model_driver');
+  let unregisteredModelHarness = 'opencode';
+  if (doc.unregistered_model_harness !== undefined) {
+    if (typeof doc.unregistered_model_harness !== 'string' || (doc.unregistered_model_harness as string).trim().length === 0) {
+      throw new ExecutorProfileError(`${source}: \`unregistered_model_harness\` must be a non-empty string.`);
     }
-    unregisteredModelDriver = (doc.unregistered_model_driver as string).trim();
+    unregisteredModelHarness = (doc.unregistered_model_harness as string).trim();
   }
 
   // archetypes
@@ -1237,35 +1583,7 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
     }
   }
 
-  // relay
-  //
-  // The relay identity used to live in source literals — `gpt-5.6-luna` in
-  // the Codex broker renderer, `sonnet` in Claude's spawn hook and proxy
-  // frontmatter. Both were the right VALUE (each holds the relay contract
-  // under dogfood where a smaller model did not) and the wrong LOCATION: the
-  // relay was the one role in a system built on dialable identities whose
-  // identity was unreachable from the catalog.
-  //
-  // Keys are harness ids, and strictly so — a misspelled `cladue:` here would
-  // otherwise mean "no catalog opinion for claude", i.e. silently keeping the
-  // built-in default, which is the exact silent-drop failure the layered key
-  // check exists to prevent.
-  const relay: Record<string, DialRef> = {};
-  if (doc.relay !== undefined) {
-    if (!isMapping(doc.relay)) {
-      throw new ExecutorProfileError(
-        `${source}: \`relay\` must be a mapping of harness → dial ref (e.g. \`claude: sonnet\`).`,
-      );
-    }
-    for (const [harnessKey, value] of Object.entries(doc.relay)) {
-      if (!RELAY_HARNESSES.includes(harnessKey as (typeof RELAY_HARNESSES)[number])) {
-        throw new ExecutorProfileError(
-          `${source}: \`relay.${harnessKey}\` is not a harness that has a relay. Known: ${RELAY_HARNESSES.join(', ')}.`,
-        );
-      }
-      relay[harnessKey] = parseDialRef(value, `${source}: \`relay.${harnessKey}\``);
-    }
-  }
+  if (doc.relay !== undefined) throw v4MigrationError(source, 'relay');
 
   // Reject unknown top-level keys (to catch legacy loadouts etc. as error via schema_version already, but also unknown keys).
   // Via the layered loader this is now a backstop: config-layers.ts rejects an
@@ -1285,19 +1603,18 @@ export function parseExecutorProfile(text: string, source: string, harness: Harn
 
   return {
     models,
-    routes,
+    harnesses,
     bindings,
     dials,
     archetypes,
     constraints,
-    unregisteredModelDriver,
-    harness,
-    schemaVersion: 3,
+    unregisteredModelHarness,
+    host,
+    schemaVersion: 4,
     notes,
     tools,
     worktreeCarry,
     surfaces,
-    relay,
   };
 }
 
@@ -1345,7 +1662,8 @@ export const DIALS_LOCAL_FILE = join('.fadeno', 'local', 'dials');
 export interface ShadowAttachment {
   model: string;
   effort?: string;
-  via?: string;
+  /** Executor harness for the challenger; absent = the model's home harness. */
+  harness?: string;
   rate?: number;
   /** Maximum successful attachment-backed pairings; absent means unlimited. */
   n?: number;
@@ -1357,6 +1675,14 @@ export interface LocalDialState {
   dials: Record<string, DialRef>;
   shadows: Record<string, ShadowAttachment>;
   legacyNote: string | null;
+  /**
+   * Set when this file still spells a delivery the pre-v4 way (` via
+   * <driver>` on a dial, `via:` on a shadow). The value was translated to a
+   * harness on read and is never written back, so the user is told once —
+   * silently rewriting the meaning of stored state is the failure this whole
+   * project exists to prevent. Absent files and clean ones report `null`.
+   */
+  legacyViaNote?: string | null;
 }
 
 function localDialPinError(detail: string): ExecutorProfileError {
@@ -1428,6 +1754,15 @@ export function withLocalDialStateLock<T>(repoRoot: string, action: () => T): T 
   }
 }
 
+/** The dial ref an attachment names, in one place so callers cannot drift. */
+export function shadowAttachmentRef(att: ShadowAttachment): DialRef {
+  return {
+    model: att.model,
+    ...(att.effort ? { effort: att.effort } : {}),
+    ...(att.harness ? { harness: att.harness } : {}),
+  };
+}
+
 /** True only for an attachment whose finite trigger budget has run out. */
 export function shadowAttachmentExpired(attachment: ShadowAttachment): boolean {
   return attachment.n != null && attachment.remaining === 0;
@@ -1442,7 +1777,7 @@ export function shadowAttachmentExpired(attachment: ShadowAttachment): boolean {
 export function sameShadowAttachmentConfiguration(a: ShadowAttachment, b: ShadowAttachment): boolean {
   return a.model === b.model
     && a.effort === b.effort
-    && a.via === b.via
+    && a.harness === b.harness
     && a.rate === b.rate
     && a.n === b.n;
 }
@@ -1543,10 +1878,13 @@ export function readLocalDialState(repoRoot: string): LocalDialState {
     };
   }
   const dials: Record<string, DialRef> = {};
+  const legacyShadowVia: string[] = [];
+  const legacyDialVia: string[] = [];
   if (doc.dials != null) {
     if (!isMapping(doc.dials)) throw localDialPinError('has a `dials` that is not a mapping (archetype → dial ref).');
     for (const [arch, raw] of Object.entries(doc.dials)) {
       if (!BARE_IDENTIFIER_RE.test(arch)) throw localDialPinError(`has dial key "${arch}", which is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
+      if (typeof raw === 'string' ? raw.includes(VIA_SEPARATOR) : isMapping(raw) && raw.via !== undefined) legacyDialVia.push(arch);
       try {
         dials[arch] = parseDialRef(raw, `dials.${arch}`);
       } catch (err) {
@@ -1559,7 +1897,7 @@ export function readLocalDialState(repoRoot: string): LocalDialState {
     if (!isMapping(doc.shadows)) throw localDialPinError('has a `shadows` that is not a mapping (archetype → shadow attachment).');
     for (const [arch, raw] of Object.entries(doc.shadows)) {
       if (!BARE_IDENTIFIER_RE.test(arch)) throw localDialPinError(`has shadow key "${arch}", which is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
-      if (!isMapping(raw)) throw localDialPinError(`shadow "${arch}" is not a mapping ({model, effort?, via?, rate?, n?, remaining?}).`);
+      if (!isMapping(raw)) throw localDialPinError(`shadow "${arch}" is not a mapping ({model, effort?, harness?, rate?, n?, remaining?}).`);
       const model = raw.model;
       if (typeof model !== 'string' || model.trim().length === 0) throw localDialPinError(`shadow "${arch}" needs a non-empty \`model\`.`);
       let effort: string | undefined;
@@ -1567,10 +1905,16 @@ export function readLocalDialState(repoRoot: string): LocalDialState {
         if (typeof raw.effort !== 'string' || raw.effort.trim().length === 0) throw localDialPinError(`shadow "${arch}" has invalid \`effort\`.`);
         effort = raw.effort.trim();
       }
-      let via: string | undefined;
-      if (raw.via !== undefined) {
+      let shadowHarness: string | undefined;
+      if (raw.harness !== undefined) {
+        if (typeof raw.harness !== 'string' || raw.harness.trim().length === 0) throw localDialPinError(`shadow "${arch}" has invalid \`harness\`.`);
+        shadowHarness = raw.harness.trim();
+      } else if (raw.via !== undefined) {
+        // Legacy attachment, read only: `via` was always a harness wearing a
+        // driver's name. Translated on read; never written back.
         if (typeof raw.via !== 'string' || raw.via.trim().length === 0) throw localDialPinError(`shadow "${arch}" has invalid \`via\`.`);
-        via = raw.via.trim();
+        shadowHarness = legacyDriverHarness(raw.via.trim());
+        legacyShadowVia.push(arch);
       }
       let rate: number | undefined;
       if (raw.rate !== undefined) {
@@ -1593,11 +1937,11 @@ export function readLocalDialState(repoRoot: string): LocalDialState {
       } else if (raw.remaining !== undefined) {
         throw localDialPinError(`shadow "${arch}" has \`remaining\` without a finite \`n\` trigger limit.`);
       }
-      const unknown = Object.keys(raw).filter((k) => !['model','effort','via','rate','n','remaining'].includes(k));
-      if (unknown.length > 0) throw localDialPinError(`shadow "${arch}" has unknown key(s) ${unknown.join(', ')}; only model, effort, via, rate, n, remaining are allowed.`);
+      const unknown = Object.keys(raw).filter((k) => !['model','effort','harness','via','rate','n','remaining'].includes(k));
+      if (unknown.length > 0) throw localDialPinError(`shadow "${arch}" has unknown key(s) ${unknown.join(', ')}; only model, effort, harness, rate, n, remaining are allowed.`);
       const att: ShadowAttachment = { model: model.trim() };
       if (effort != null) att.effort = effort;
-      if (via != null) att.via = via;
+      if (shadowHarness != null) att.harness = shadowHarness;
       if (rate != null) att.rate = rate;
       if (n != null) {
         att.n = n;
@@ -1610,7 +1954,23 @@ export function readLocalDialState(repoRoot: string): LocalDialState {
   if (unknownTop.length > 0) {
     throw localDialPinError(`has unknown key(s) ${unknownTop.join(', ')}; only \`dials\` and \`shadows\` are allowed.`);
   }
-  return { dials, shadows, legacyNote: null };
+  return { dials, shadows, legacyNote: null, legacyViaNote: formatLegacyViaNote(legacyDialVia, legacyShadowVia) };
+}
+
+/**
+ * One line telling the user their stored state was translated out of the
+ * removed ` via <driver>` grammar, or null when nothing was.
+ */
+export function formatLegacyViaNote(dials: string[], shadows: string[]): string | null {
+  const parts: string[] = [];
+  if (dials.length > 0) parts.push(`dial${dials.length === 1 ? '' : 's'} ${dials.sort().join(', ')}`);
+  if (shadows.length > 0) parts.push(`shadow${shadows.length === 1 ? '' : 's'} ${shadows.sort().join(', ')}`);
+  if (parts.length === 0) return null;
+  return (
+    `note: ${DIALS_LOCAL_FILE} still spells ${parts.join(' and ')} with the removed \`via <driver>\` form; ` +
+    'read as `on <harness>` (claude-exec/claude-cli→claude, opencode-direct→opencode, muse-code→muse). ' +
+    'Re-dial to rewrite the file.'
+  );
 }
 
 export function writeLocalDialState(repoRoot: string, state: LocalDialState): string {
@@ -1649,7 +2009,7 @@ export function writeLocalDialState(repoRoot: string, state: LocalDialState): st
       const att = state.shadows[k]!;
       const entry: ShadowAttachment = { model: att.model };
       if (att.effort != null) entry.effort = att.effort;
-      if (att.via != null) entry.via = att.via;
+      if (att.harness != null) entry.harness = att.harness;
       if (att.rate != null) entry.rate = att.rate;
       if (att.n != null) {
         entry.n = att.n;
@@ -1737,7 +2097,7 @@ export function resolveRole(
   layers: DialLayers,
 ): RoleResolution {
   const cascade = resolveDialCascade(role, archetype, { bindings: profile.bindings, archetypes: profile.archetypes }, layers);
-  const delivery = compileDialRef(cascade.ref, profile);
+  const delivery = resolveDelivery(cascade.ref, profile, profile.host ?? 'standalone', { archetype });
   return { delivery, source: cascade.source, resolvedVia: cascade.resolvedVia };
 }
 
@@ -1752,29 +2112,10 @@ export function roleResolutionEchoLabel(source: RoleResolutionSource): string {
   }
 }
 
-// --- compileDialRef ---
-
-function findRouteByDriver(
-  routes: Record<string, RouteRaw>,
-  driver: string,
-): { key: string; route: RouteRaw } | null {
-  for (const [key, route] of Object.entries(routes)) {
-    const alias = route.driver ?? key;
-    if (alias === driver) return { key, route };
-  }
-  return null;
-}
-
-function declaredDriverAliases(routes: Record<string, RouteRaw>): string[] {
-  const s = new Set<string>();
-  for (const [key, route] of Object.entries(routes)) {
-    s.add(route.driver ?? key);
-  }
-  return [...s].sort();
-}
+// --- resolveDelivery ---
 
 export interface ResolvedRelay {
-  /** As written in the catalog, e.g. `gpt-5.6-luna@low`. */
+  /** As written in the catalog, e.g. `luna@high`. */
   refString: string;
   /** Provider-facing id the harness must be handed, e.g. `gpt-5.6-luna`. */
   modelId: string;
@@ -1789,150 +2130,282 @@ export interface ResolvedRelay {
  * keep their own built-in default rather than inventing one, because a relay
  * the session's provider cannot serve is worse than a stale-but-servable one.
  *
- * The harness is applied to the profile before compiling so this answers for
- * the REQUESTED harness's route table, not the ambient session's: the Claude
- * plugin assets are routinely generated from a Codex session and vice versa.
+ * The requested harness is applied as the HOST before resolving so this
+ * answers for the harness the assets are being generated FOR, not the ambient
+ * session's: the Claude plugin assets are routinely generated from a Codex
+ * session and vice versa.
  */
-export function resolveRelay(profile: ExecutorProfile, harness: HarnessId): ResolvedRelay | null {
-  const ref = profile.relay?.[harness];
+export function resolveRelay(profile: ExecutorProfile, harness: string): ResolvedRelay | null {
+  const ref = profile.harnesses?.[harness]?.host?.relay;
   if (ref == null) return null;
-  const compiled = compileDialRef(ref, { ...profile, harness });
+  const compiled = resolveDelivery(ref, profile, harness as HarnessId);
   return { refString: formatDialRef(ref), modelId: compiled.modelId, effort: compiled.effectiveEffort };
 }
 
-export function compileDialRef(ref: DialRef, profile: ExecutorProfile): CompiledDelivery {
-  const harness = profile.harness ?? 'standalone';
-  const routesForHarness = profile.routes?.[harness] ?? {};
+/** The harness that claims a provider as home, or null when none does. */
+export function homeHarnessOf(profile: ExecutorProfile, provider: string): string | null {
+  for (const [id, entry] of Object.entries(profile.harnesses ?? {})) {
+    if (entry.provider === provider) return id;
+  }
+  return null;
+}
+
+/** Every harness id the catalog declares, sorted — for "did you mean" lists. */
+export function declaredHarnesses(profile: ExecutorProfile): string[] {
+  return Object.keys(profile.harnesses ?? {}).sort();
+}
+
+const ELIGIBILITY_RANK: Record<EligibilityState, number> = { eligible: 0, shadow_only: 1, forbidden: 2 };
+
+/**
+ * Strictest-wins merge of any number of eligibility maps.
+ *
+ * `Object.hasOwn`, not a truthiness check on `out[key]`: an archetype named
+ * `constructor` or `toString` would otherwise read a value off
+ * `Object.prototype`, rank as `undefined`, and be silently dropped — a
+ * forbidden archetype quietly becoming eligible.
+ */
+function mergeEligibility(...maps: Array<Record<string, EligibilityState> | undefined>): Record<string, EligibilityState> {
+  const out: Record<string, EligibilityState> = {};
+  for (const map of maps) {
+    for (const [key, state] of Object.entries(map ?? {})) {
+      if (!Object.hasOwn(out, key) || ELIGIBILITY_RANK[state] > ELIGIBILITY_RANK[out[key]!]) out[key] = state;
+    }
+  }
+  return out;
+}
+
+/** One candidate command lane of a harness: the base argv, or a named variant. */
+interface LaneCandidate {
+  /** null for the base `command:` lane. */
+  name: string | null;
+  lane: HarnessLaneRaw;
+}
+
+/**
+ * Every command lane a harness declares, base first.
+ *
+ * Base-first is the policy: an unconstrained delivery takes the plain argv,
+ * and a variant is reached only because the base lane refuses the archetype.
+ * That is what makes `worker opus` the base claude command and `director opus`
+ * the `exec` variant, without either naming a lane on the dial.
+ */
+function commandLanes(entry: HarnessRaw | undefined): LaneCandidate[] {
+  if (entry == null) return [];
+  const lanes: LaneCandidate[] = [];
+  if (entry.command != null) lanes.push({ name: null, lane: entry.command });
+  for (const [name, lane] of Object.entries(entry.variants ?? {})) lanes.push({ name, lane });
+  return lanes;
+}
+
+/** Context resolution consults: the archetype whose lane is being chosen. */
+export interface DeliveryContext {
+  archetype?: string | null;
+}
+
+/**
+ * Resolve a dial ref to a delivery — the ONE resolution function.
+ *
+ *     h       = ref.harness ?? entry.harness ?? homeHarnessOf(provider) ?? unregistered_model_harness
+ *     H       = harnesses[h]
+ *     modelId = entry.spellings[h] ?? entry.id, then effort_encoding
+ *     variant = first command lane whose eligibility permits ctx.archetype
+ *     host lane iff h === host and H declares `host:`
+ *
+ * A dial never names a lane. The pair *(dial harness, host)* decides whether
+ * the delivery is a host candidate; `decideLane` then decides the lane itself
+ * from effort and proof. `hostCandidate` on the result is what to hand
+ * `decideLane` as `hostModel` — never `spec.adapter`, which is also how a
+ * delivery with no argv at all is represented.
+ */
+export function resolveDelivery(
+  ref: DialRef,
+  profile: ExecutorProfile,
+  host: HarnessId = profile.host ?? 'standalone',
+  ctx: DeliveryContext = {},
+): CompiledDelivery {
+  const harnesses = profile.harnesses ?? {};
   const refString = formatDialRef(ref);
-  const buildDelivery = (
-    model: string,
-    modelId: string,
-    effectiveEffort: string,
-    provider: string | null,
-    driver: string,
-    registered: boolean,
-    route: RouteRaw | null,
-    eligibility: Record<string, EligibilityState>,
-  ): CompiledDelivery => {
-    const isHost = route?.host === true || (route == null && model === 'current-host');
+  const archetype = ctx.archetype ?? null;
+
+  const build = (params: {
+    model: string;
+    modelId: string;
+    effectiveEffort: string;
+    provider: string | null;
+    harness: string | null;
+    registered: boolean;
+    entry: HarnessRaw | undefined;
+    modelEligibility: Record<string, EligibilityState>;
+  }): CompiledDelivery => {
+    const { model, modelId, effectiveEffort, provider, harness, entry, modelEligibility } = params;
     const subst = (argv: string[]): string[] =>
       argv.map((part) => part.split('{model}').join(modelId).split('{reasoning_effort}').join(effectiveEffort));
-    // Route-level eligibility merges over model-level, strictest wins — a
-    // lane's structural constraint (e.g. "no directors here") binds every
-    // model delivered through it, registered or not.
-    const ELIGIBILITY_RANK: Record<EligibilityState, number> = { eligible: 0, shadow_only: 1, forbidden: 2 };
-    const mergedEligibility: Record<string, EligibilityState> = { ...eligibility };
-    for (const [archKey, state] of Object.entries(route?.eligibility ?? {})) {
-      const current = mergedEligibility[archKey];
-      if (current == null || ELIGIBILITY_RANK[state] > ELIGIBILITY_RANK[current]) mergedEligibility[archKey] = state;
-    }
-    eligibility = mergedEligibility;
+
+    // Pick the command lane: base first, then variants, skipping any lane the
+    // archetype is forbidden on. When every lane forbids it the base is kept
+    // anyway, so the kernel refuses with a reason instead of resolution
+    // failing with none.
+    const lanes = commandLanes(entry);
+    const permitted = lanes.filter(
+      (candidate) =>
+        archetype == null ||
+        mergeEligibility(modelEligibility, candidate.lane.eligibility)[archetype] !== 'forbidden',
+    );
+    const chosen = permitted[0] ?? lanes[0] ?? null;
+    const variant = chosen?.name ?? null;
+
+    // The host lane exists when the dial's harness IS the host and that
+    // harness declares `host:`. `current-host` under a bare shell has neither,
+    // which is why a bare shell answers `restart_required` rather than
+    // pretending an in-session delivery it cannot make.
+    const hostSide = harness === host ? entry?.host ?? null : null;
+    // Harness-level `eligibility:` gates the host lane too, unless
+    // `host.eligibility` states its own answer for that archetype. A v3 route
+    // carried ONE eligibility map for a `host: true` entry that also declared
+    // a `command:`, and it gated both lanes; splitting the entry in two must
+    // not silently drop half of that.
+    //
+    // Per-key OVERRIDE between the two harness-side maps, not strictest-wins:
+    // `host.eligibility` is the more specific statement about the same harness
+    // and must be able to relax as well as tighten (the whole reason to write
+    // it). The MODEL's map then merges strictest-wins over the result, because
+    // a model's own restriction is not a harness's to relax.
+    const hostEligibility = mergeEligibility(modelEligibility, {
+      ...(entry?.command?.eligibility ?? {}),
+      ...(hostSide?.eligibility ?? {}),
+    });
+    const hostCandidate =
+      hostSide != null
+      // `identity: session` means the host lane can deliver only the session's
+      // own identity: the adapter rewrites the agent NAME and nothing else, so
+      // a named model handed to a host spawn there would be silently ignored.
+      && (hostSide.identity !== 'session' || model === 'current-host')
+      && (archetype == null || hostEligibility[archetype] !== 'forbidden');
+
     let spec: ExecutorSpec;
-    if (isHost) {
-      const fallback = route?.command ? subst(route.command) : null;
+    // A HOST spec is emitted for a genuine host candidate, and for the one
+    // other shape that has no argv to run: a delivery with neither a host lane
+    // here nor a command anywhere (`current-host` in a bare shell, a host-only
+    // harness named from a different host). `hostCandidate` on the result —
+    // never `spec.adapter` — is what tells those two apart.
+    //
+    // When the host lane exists but its eligibility forbids this archetype,
+    // the delivery is NOT a host candidate and the spec is the command lane it
+    // will actually go out on, carrying that lane's eligibility. Emitting a
+    // host spec there reported the HOST lane's refusal for a delivery that had
+    // already fallen through to a variant which permits it — the resolver
+    // contradicting its own variant choice.
+    if (hostCandidate || chosen == null) {
       spec = {
         adapter: 'host',
         model: modelId,
         reasoningEffort: effectiveEffort,
         agentType: '*',
-        fallbackCommand: fallback,
-        eligibility: { ...eligibility },
+        fallbackCommand: chosen != null ? subst(chosen.lane.command) : null,
+        eligibility: hostCandidate ? { ...hostEligibility } : { ...mergeEligibility(modelEligibility, chosen?.lane.eligibility) },
         ...(provider != null ? { provider } : {}),
-        ...(driver ? { driver } : {}),
+        ...(harness != null ? { harness } : {}),
+        ...(variant != null ? { variant } : {}),
       };
     } else {
-      if (route?.command == null) {
-        throw new ExecutorProfileError(`no route for driver "${driver}" in harness "${harness}" — declare routes.${harness}.${driver} with host:true or command`);
-      }
-      const cmd = subst(route.command);
-      let resume: string[] | null = null;
-      if (route.resume != null) {
-        resume = subst(route.resume);
-      }
       spec = {
         adapter: 'command',
-        command: cmd,
+        command: subst(chosen.lane.command),
         model: modelId,
-        resume,
-        sessionIdPattern: route.session_id_pattern ?? null,
-        ...(route.timeout_ms != null ? { timeoutMs: route.timeout_ms } : {}),
-        eligibility: { ...eligibility },
+        resume: chosen.lane.resume != null ? subst(chosen.lane.resume) : null,
+        sessionIdPattern: chosen.lane.session_id_pattern ?? null,
+        ...(chosen.lane.timeout_ms != null ? { timeoutMs: chosen.lane.timeout_ms } : {}),
+        eligibility: { ...mergeEligibility(modelEligibility, chosen.lane.eligibility) },
         ...(provider != null ? { provider } : {}),
-        ...(driver ? { driver } : {}),
+        ...(harness != null ? { harness } : {}),
+        ...(variant != null ? { variant } : {}),
       };
     }
-    return { ref, refString, spec, model, modelId, pinnedEffort: ref.effort ?? null, effectiveEffort, provider, driver, registered };
+    return {
+      ref,
+      refString,
+      spec,
+      model,
+      modelId,
+      pinnedEffort: ref.effort ?? null,
+      effectiveEffort,
+      provider,
+      harness,
+      variant,
+      hostCandidate,
+      registered: params.registered,
+    };
   };
 
-  if (Object.hasOwn(profile.models, ref.model)) {
-    const entry = profile.models[ref.model]!;
-    const provider = entry.provider;
-    // The pin when there is one; otherwise the registry's declared default.
-    // `ref.effort` alone (the pin) survives on `CompiledDelivery.pinnedEffort`.
-    const effectiveEffort = ref.effort ?? entry.effort;
-    const via = ref.via;
-    let driver: string;
-    let route: RouteRaw | null = null;
-    let id: string;
-    if (via != null) {
-      const found = findRouteByDriver(routesForHarness, via);
-      if (found == null) {
-        const declared = declaredDriverAliases(routesForHarness);
-        throw new ExecutorProfileError(`unknown driver "${via}" — declared drivers: ${declared.join(', ')}`);
-      }
-      driver = via;
-      route = found.route;
-      // A promoted delivery spelling is scoped to its declared home route.
-      // An explicit unrelated driver must receive the canonical id unless it
-      // has an explicit spelling; otherwise a provider prefix leaks into a
-      // backend that never agreed to interpret it.
-      const deliveryRoute = entry.delivery != null ? routesForHarness[entry.delivery.route] ?? null : null;
-      const deliveryDriver = deliveryRoute?.driver ?? entry.delivery?.route;
-      const usesDelivery = entry.delivery != null && (found.key === entry.delivery.route || deliveryDriver === via);
-      id = entry.spellings[via] ?? (usesDelivery ? entry.delivery!.id : entry.id);
-    } else {
-      const homeKey = entry.delivery?.route ?? provider;
-      const homeRoute = routesForHarness[homeKey] ?? null;
-      if (homeRoute == null) {
-        if (ref.model === 'current-host') {
-          driver = 'current-host';
-          route = null;
-          id = entry.id;
-          const modelId = id;
-          return buildDelivery(ref.model, modelId, effectiveEffort, provider, driver, true, route, entry.eligibility);
-        }
-        const declared = declaredDriverAliases(routesForHarness);
-        // The common cause of this shape is a hand-written registry entry with
-        // no `delivery` (observed 2026-08-26: provider "stealth" fell back to
-        // being the home-route key and matched nothing). Point at the command
-        // that records a real route instead of leaving the fix to be inferred.
-        throw new ExecutorProfileError(
-          `no route for provider "${provider}" in harness "${harness}" — declared drivers: ${declared.join(', ')}` +
-            `${entry.delivery == null ? `; register a delivery route with: fadeno model add ${ref.model} ${provider}/${entry.id}` : ''}`,
-        );
-      }
-      driver = homeRoute.driver ?? homeKey;
-      route = homeRoute;
-      id = entry.delivery?.id ?? entry.id;
-    }
-    let modelId = id;
-    const enc = route?.effort_encoding ?? 'flag';
-    if (enc === 'model-suffix' && effectiveEffort !== 'default') modelId = `${id}-${effectiveEffort}`;
-    return buildDelivery(ref.model, modelId, effectiveEffort, provider, driver, true, route, entry.eligibility);
+  // `current-host` is the base dial, not a harness: it names whatever host is
+  // running. In a bare shell there is none, and the honest answer is
+  // `restart_required`, which falls out of an absent `harnesses.standalone`.
+  if (ref.model === 'current-host') {
+    const entry = harnesses[host];
+    return build({
+      model: 'current-host',
+      modelId: 'current-host',
+      effectiveEffort: ref.effort ?? 'default',
+      provider: 'current-host',
+      // Null in a bare shell: `standalone` is not a harness in the table, and
+      // printing it as one invited a reader to look it up.
+      harness: entry != null ? host : null,
+      registered: true,
+      // The host lane, with its command lanes AND its eligibility stripped.
+      //
+      // Both removals matter. There is no argv for "the session you are
+      // already in", so `current-host` must never acquire a fallback command —
+      // that is what makes a pinned `current-host` honestly `restart_required`
+      // rather than silently spawning a second session.
+      //
+      // And `host.eligibility` describes delivering a NAMED MODEL to a spawned
+      // in-session agent (`harnesses.claude.host.eligibility: { director:
+      // forbidden }` — a Claude subagent cannot spawn subagents of its own, so
+      // it cannot coordinate). `current-host` is not that agent: it is the
+      // session itself, which can. Inheriting the constraint refused every
+      // locked wildcard host request that specialized to `director`.
+      entry: entry?.host != null
+        ? { host: { effort_channel: entry.host.effort_channel, identity: entry.host.identity } }
+        : undefined,
+      modelEligibility: {},
+    });
   }
-  const driver = ref.via ?? profile.unregisteredModelDriver;
-  const found = findRouteByDriver(routesForHarness, driver);
-  if (found == null) {
-    const declared = declaredDriverAliases(routesForHarness);
-    throw new ExecutorProfileError(`unknown driver "${driver}" — declared drivers: ${declared.join(', ')}`);
+
+  const registered = Object.hasOwn(profile.models, ref.model);
+  const entryModel = registered ? profile.models[ref.model]! : null;
+  const provider = entryModel?.provider ?? null;
+  const harness =
+    ref.harness
+    ?? entryModel?.harness
+    ?? (provider != null ? homeHarnessOf(profile, provider) : null)
+    ?? profile.unregisteredModelHarness;
+  const harnessEntry = harnesses[harness];
+  if (harnessEntry == null) {
+    const declared = declaredHarnesses(profile);
+    throw new ExecutorProfileError(
+      `unknown harness "${harness}"${registered ? ` for model "${ref.model}"` : ''} — declared harnesses: ${declared.join(', ') || '(none)'}` +
+        (registered ? '' : `; register the model with: fadeno model add ${ref.model} <provider>/<id>`),
+    );
   }
-  const route = found.route;
-  // Unregistered: no registry entry to default from, so an unpinned dial runs
-  // at the neutral `'default'`. `pinnedEffort` still records only the pin.
-  const effectiveEffort = ref.effort ?? 'default';
-  let modelId = ref.model;
-  if (route.effort_encoding === 'model-suffix' && effectiveEffort !== 'default') modelId = `${ref.model}-${effectiveEffort}`;
-  return buildDelivery(ref.model, modelId, effectiveEffort, null, driver, false, route, {});
+  // Registered: the registry's declared default when the dial states none.
+  // Unregistered: no entry to default from, so the neutral `'default'`.
+  const effectiveEffort = ref.effort ?? entryModel?.effort ?? 'default';
+  const baseId = entryModel != null ? entryModel.spellings[harness] ?? entryModel.id : ref.model;
+  const modelId =
+    harnessEntry.effort_encoding === 'model-suffix' && effectiveEffort !== 'default'
+      ? `${baseId}-${effectiveEffort}`
+      : baseId;
+  return build({
+    model: ref.model,
+    modelId,
+    effectiveEffort,
+    provider,
+    harness,
+    registered,
+    entry: harnessEntry,
+    modelEligibility: entryModel?.eligibility ?? {},
+  });
 }
 
 /** One delivery under consideration: the profile's name for it, plus its spec. */
@@ -2155,7 +2628,12 @@ function parseExecutorSpecEntry(raw: unknown, label: string, source: string): Ex
     }
     const target = typeof raw.target === 'string' ? raw.target : undefined;
     const provider = typeof raw.provider === 'string' ? raw.provider : undefined;
-    const driver = typeof raw.driver === 'string' ? raw.driver : undefined;
+    // A snapshot written before catalog v4 records `driver:`; the value was
+    // always a harness wearing a driver's name, so it reads back as one.
+    const specHarness = typeof raw.harness === 'string'
+      ? raw.harness
+      : typeof raw.driver === 'string' ? legacyDriverHarness(raw.driver) : undefined;
+    const variant = typeof raw.variant === 'string' ? raw.variant : undefined;
     let eligibility: Record<string, EligibilityState> = {};
     if (raw.eligibility !== undefined) {
       if (!isMapping(raw.eligibility)) throw new ExecutorProfileError(`${source}: ${label} host executor \`eligibility\` is not a mapping.`);
@@ -2172,7 +2650,8 @@ function parseExecutorSpecEntry(raw: unknown, label: string, source: string): Ex
       adapter: 'host', model, reasoningEffort, agentType, fallbackCommand, eligibility,
       ...(target != null ? { target } : {}),
       ...(provider != null ? { provider } : {}),
-      ...(driver != null ? { driver } : {}),
+      ...(specHarness != null ? { harness: specHarness } : {}),
+      ...(variant != null ? { variant } : {}),
     };
     return spec;
   }
@@ -2258,23 +2737,87 @@ function parseExecutorSpecEntry(raw: unknown, label: string, source: string): Ex
     eligibility,
     ...(typeof raw.target === 'string' ? { target: raw.target } : {}),
     ...(typeof raw.provider === 'string' ? { provider: raw.provider } : {}),
-    ...(typeof raw.driver === 'string' ? { driver: raw.driver } : {}),
+    ...(typeof raw.harness === 'string'
+      ? { harness: raw.harness }
+      : typeof raw.driver === 'string' ? { harness: legacyDriverHarness(raw.driver) } : {}),
+    ...(typeof raw.variant === 'string' ? { variant: raw.variant } : {}),
   };
   return spec;
 }
 
-export function serializeSnapshot(profile: ExecutorProfile, extraRefs: DialRef[] = []): string {
+/**
+ * The separator between a ref and the archetype whose lane policy chose.
+ *
+ * A ref string is `model[@effort][ on <harness>]` — bare identifiers and `@`
+ * only — so `#` cannot occur in one and the compound key is unambiguous.
+ */
+export const SNAPSHOT_ARCHETYPE_SEPARATOR = '#';
+
+/**
+ * The snapshot key for one (ref, archetype) pair.
+ *
+ * Under v3 a variant lived ON the ref (`opus via claude-exec`) and therefore
+ * had a snapshot key of its own. Under v4 a variant is chosen by POLICY from
+ * the archetype, so the ref alone no longer identifies the argv: `opus`
+ * resolves to the base claude lane for a worker and to the `exec` variant for
+ * a director. A snapshot keyed by ref alone froze the worker answer and made
+ * `fadeno drive` refuse a director that `fadeno dispatch` delivers.
+ */
+export function snapshotExecutorKey(refString: string, archetype: string | null): string {
+  return archetype == null ? refString : `${refString}${SNAPSHOT_ARCHETYPE_SEPARATOR}${archetype}`;
+}
+
+/**
+ * Read a run snapshot's executor for a ref, preferring the archetype-specific
+ * entry and falling back to the plain ref.
+ *
+ * The fallback is what keeps `snapshot_version: 3` honest: a snapshot cut
+ * before this change has no `#` keys, and every lookup lands on exactly the
+ * entry it always did. Going the other way, an older fadeno reading a newer
+ * snapshot finds the plain ref and replays the answer IT would have given —
+ * degrading to its own behaviour rather than to a wrong one.
+ */
+export function snapshotExecutor(
+  profile: { executors?: Record<string, ExecutorSpec> } | SnapshotDocument | ExecutorProfile,
+  refString: string,
+  archetype: string | null,
+): ExecutorSpec | undefined {
+  const executors = (profile as { executors?: Record<string, ExecutorSpec> }).executors;
+  if (executors == null) return undefined;
+  if (archetype != null) {
+    const specific = executors[snapshotExecutorKey(refString, archetype)];
+    if (specific != null) return specific;
+  }
+  return executors[refString];
+}
+
+export function serializeSnapshot(
+  profile: ExecutorProfile,
+  extraRefs: DialRef[] = [],
+  /**
+   * Archetypes the CALLER knows about that the catalog does not enumerate —
+   * in practice a playbook's role archetypes.
+   *
+   * `knownArchetypes` sees the canon roster plus whatever `archetypes:` and
+   * `dials:` name; a playbook declaring `roles: { auditor: { archetype:
+   * auditor } }` against a catalog that only constrains `auditor` through a
+   * harness lane's `eligibility:` names it in neither. Without this the run
+   * froze no specialized entry for that archetype and every replay read the
+   * base lane — the lane policy had already ruled out.
+   */
+  extraArchetypes: readonly string[] = [],
+): string {
   const seen = new Set<string>();
   const executorsMap: Record<string, ExecutorSpec> = {};
-  const insertRef = (ref: DialRef) => {
-    const key = formatDialRef(ref);
+  const insertRef = (ref: DialRef, archetype: string | null = null) => {
+    const key = snapshotExecutorKey(formatDialRef(ref), archetype);
     if (seen.has(key)) return;
     seen.add(key);
     try {
-      const compiled = compileDialRef(ref, profile);
+      const compiled = resolveDelivery(ref, profile, profile.host ?? 'standalone', { archetype });
       executorsMap[key] = compiled.spec as ExecutorSpec;
     } catch {
-      // missing route etc. — skip (should not happen for builtin)
+      // missing harness etc. — skip (should not happen for builtin)
     }
   };
   for (const name of Object.keys(profile.models).sort()) {
@@ -2285,6 +2828,36 @@ export function serializeSnapshot(profile: ExecutorProfile, extraRefs: DialRef[]
   for (const ref of Object.values(profile.bindings)) insertRef(ref);
   for (const ref of Object.values(profile.dials)) insertRef(ref);
   for (const ref of extraRefs) insertRef(ref);
+
+  // Then, per archetype, only where policy chooses a DIFFERENT lane than the
+  // archetype-less resolution did. Additive by construction: a catalog whose
+  // lanes carry no eligibility adds no keys at all, and every snapshot cut
+  // before this change is byte-identical to one cut after it.
+  const refsToSpecialize = new Map<string, DialRef>();
+  for (const name of Object.keys(profile.models)) {
+    if (name !== 'current-host') refsToSpecialize.set(name, { model: name });
+  }
+  for (const ref of [...Object.values(profile.bindings), ...Object.values(profile.dials), ...extraRefs]) {
+    refsToSpecialize.set(formatDialRef(ref), ref);
+  }
+  const archetypes = archetypeDisplaySort(
+    knownArchetypes(profile.archetypes, profile.dials, Object.fromEntries(extraArchetypes.map((name) => [name, true]))),
+  );
+  for (const ref of refsToSpecialize.values()) {
+    const refString = formatDialRef(ref);
+    const base = executorsMap[refString];
+    if (base == null) continue;
+    for (const archetype of archetypes) {
+      let compiled: CompiledDelivery;
+      try {
+        compiled = resolveDelivery(ref, profile, profile.host ?? 'standalone', { archetype });
+      } catch {
+        continue;
+      }
+      if (JSON.stringify(compiled.spec) === JSON.stringify(base)) continue;
+      executorsMap[snapshotExecutorKey(refString, archetype)] = compiled.spec;
+    }
+  }
 
   const tools: Record<string, ToolSpec> = { ...profile.tools };
 
@@ -2301,7 +2874,8 @@ export function serializeSnapshot(profile: ExecutorProfile, extraRefs: DialRef[]
         }
       : { adapter: spec.adapter, command: spec.command };
     if (spec.provider != null) entry.provider = spec.provider;
-    if ((spec as CommandExecutorSpec).driver != null) entry.driver = (spec as unknown as Record<string, unknown>).driver;
+    if (spec.harness != null) entry.harness = spec.harness;
+    if (spec.variant != null) entry.variant = spec.variant;
     if (spec.adapter === 'command' && (spec as CommandExecutorSpec).model != null) entry.model = (spec as CommandExecutorSpec).model;
     if (spec.eligibility != null && Object.keys(spec.eligibility).length > 0) {
       const sortedEligibility: Record<string, EligibilityState> = {};

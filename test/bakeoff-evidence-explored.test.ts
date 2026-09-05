@@ -61,11 +61,11 @@ function seed(
   writeFileSync(join(root, '.fadeno', 'local', 'outputs', 'p.diff'), opts.primaryDiff);
   writeFileSync(join(root, '.fadeno', 'local', 'outputs', 'c.diff'), opts.challengerDiff);
   if (opts.judge != null) {
-    const route = { judgeprov: { command: opts.judge, } };
+    const harnesses = { judgeprov: { provider: 'judgeprov', command: opts.judge } };
     writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-      schema_version: 3,
+      schema_version: 4,
       models: { 'judge-model': { provider: 'judgeprov', id: 'judge-model' } },
-      routes: { standalone: route, claude: route, codex: route, grok: route },
+      harnesses,
       dials: { judge: 'judge-model' },
     }));
   }

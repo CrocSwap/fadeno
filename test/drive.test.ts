@@ -165,26 +165,20 @@ function seed(t: TestContext, opts: SeedOpts = {}): { root: string; runId: strin
   writeFileSync(join(root, '.fadeno', 'playbooks', 'engine-e2e.yaml'), PLAYBOOK);
   // Translate old executors map into v3 models/routes/dials
   const models: Record<string, unknown> = {};
-  const routesStandalone: Record<string, unknown> = {};
+  const harnesses: Record<string, unknown> = {};
   for (const [name, spec] of Object.entries(EXECUTORS as Record<string, Record<string, unknown>>)) {
     const provider = name.replace(/-/g, '_') + '_p';
     models[name] = { provider, id: name, effort: 'high' };
-    const route: Record<string, unknown> = { };
-    if (spec.command) route.command = spec.command;
-    if (spec.resume) route.resume = spec.resume;
-    if (spec.session_id_pattern) route.session_id_pattern = spec.session_id_pattern;
-    routesStandalone[provider] = route;
+    const lane: Record<string, unknown> = { provider };
+    if (spec.command) lane.command = spec.command;
+    if (spec.resume) lane.resume = spec.resume;
+    if (spec.session_id_pattern) lane.session_id_pattern = spec.session_id_pattern;
+    harnesses[provider] = lane;
   }
-  routesStandalone['current-host'] = { host: true };
   const v3 = {
-    schema_version: 3,
+    schema_version: 4,
     models,
-    routes: {
-      standalone: { ...routesStandalone },
-      codex: { ...routesStandalone },
-      claude: { ...routesStandalone },
-      grok: { ...routesStandalone },
-    },
+    harnesses,
     archetypes: { worker: {}, reviewer: {} },
     dials: { worker: 'ok-worker', reviewer: 'ok-reviewer' },
     bindings: opts.bindings ?? DEFAULT_BINDINGS,

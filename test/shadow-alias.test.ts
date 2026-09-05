@@ -28,27 +28,27 @@ function envFor(root: string): NodeJS.ProcessEnv {
   return { ...process.env, ...paths.env, HOME: paths.home! };
 }
 
-function seedV3(t: TestContext): string {
+function seedCatalog(t: TestContext): string {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' },
       grok: { provider: 'xai', id: 'grok-4.6', effort: 'high' },
     },
-    routes: {
-      standalone: {
-        openai: { command: ['node', '-e', '0'], },
-        xai: { command: ['node', '-e', '0'], },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', '0'] }, grok: { provider: 'xai', command: ['node', '-e', '0'] } },
     archetypes: {
       worker: { },
       reviewer: { },
       judge: { },
     },
+    // Primaries dialed onto a command-capable harness: an undialed archetype
+    // falls through to `current-host`, which in a bare shell is neither a host
+    // candidate nor command-routable, and a shadow attach onto it is refused
+    // outright (test/dial-set.test.ts pins that refusal). These tests are
+    // about the two CLI spellings agreeing, not about the refusal.
+    dials: { worker: 'sol', reviewer: 'sol', judge: 'sol' },
   }));
   return root;
 }
@@ -72,8 +72,8 @@ function runFails(root: string, args: string[]): { status: number; stdout: strin
 }
 
 test('fadeno shadow attaches identically to fadeno dial shadow', (t) => {
-  const rootA = seedV3(t);
-  const rootB = seedV3(t);
+  const rootA = seedCatalog(t);
+  const rootB = seedCatalog(t);
   const attachedA = runJson(rootA, ['shadow', 'worker', 'sol']);
   const attachedB = runJson(rootB, ['dial', 'shadow', 'worker', 'sol']);
   // `path` is the only field expected to differ (it names the repo root).
@@ -89,7 +89,7 @@ test('fadeno shadow attaches identically to fadeno dial shadow', (t) => {
 });
 
 test('show mode lists only archetypes with an active shadow, in both spellings', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   run(root, ['dial', 'shadow', 'worker', 'sol']);
 
   const dialShow = runJson(root, ['dial', 'shadow']);
@@ -106,7 +106,7 @@ test('show mode lists only archetypes with an active shadow, in both spellings',
 });
 
 test('show mode empty case prints the honest message, not a bare header', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const dialEmpty = run(root, ['dial', 'shadow']);
   const topEmpty = run(root, ['shadow']);
   for (const output of [dialEmpty, topEmpty]) {
@@ -118,7 +118,7 @@ test('show mode empty case prints the honest message, not a bare header', (t) =>
 });
 
 test('--json works in show mode', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   run(root, ['dial', 'shadow', 'reviewer', 'grok', '--rate', '0.5']);
   const result = runJson(root, ['shadow']);
   assert.deepEqual(result.rows.map((r: any) => r.archetype), ['reviewer']);
@@ -129,7 +129,7 @@ test('--json works in show mode', (t) => {
 });
 
 test('the one-positional form still errors, in both spellings', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const dialResult = runFails(root, ['dial', 'shadow', 'worker']);
   assert.notEqual(dialResult.status, 0);
   assert.match(dialResult.stderr, /Usage: fadeno dial shadow/);
@@ -145,10 +145,10 @@ test('shadow is registered for completion and flag validation', () => {
   const dialShadowFlags = knownFlagsFor('dial', 'shadow');
   assert.ok(shadowFlags);
   assert.ok(dialShadowFlags);
-  for (const flag of ['--via', '--rate', '--n', '--json', '--help', '--version']) {
+  for (const flag of ['--harness', '--rate', '--n', '--json', '--help', '--version']) {
     assert.ok(shadowFlags!.has(flag), `shadow should accept ${flag}`);
     assert.ok(dialShadowFlags!.has(flag), `dial shadow should accept ${flag}`);
   }
-  assert.deepEqual(unknownFlagsFor('shadow', undefined, ['via', 'rate', 'n', 'json']), []);
+  assert.deepEqual(unknownFlagsFor('shadow', undefined, ['harness', 'rate', 'n', 'json']), []);
   assert.deepEqual(unknownFlagsFor('shadow', undefined, ['session']), ['--session']);
 });

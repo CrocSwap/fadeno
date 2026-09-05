@@ -269,12 +269,12 @@ function recordHostRefusal(predicate, reason, refusedSlot) {
   appendRow({
     // Duplicated from DISPATCHES_FORMAT in src/commands/dispatch.ts by hand,
     // exactly as the Claude hook duplicates it. Bump them together.
-    format: '1.0',
+    format: '1.1',
     timestamp: new Date().toISOString(),
     event: 'host_refused',
     fadeno_version: HOOK_VERSION,
     hook_version: HOOK_VERSION,
-    harness: 'codex',
+    host: 'codex',
     archetype,
     agent_type: agentType,
     refusal: {
@@ -324,12 +324,12 @@ function recordHostDelivery(extra) {
     }
   }
   appendRow({
-    format: '1.0',
+    format: '1.1',
     timestamp: new Date().toISOString(),
     event: 'host_delivery',
     fadeno_version: HOOK_VERSION,
     hook_version: HOOK_VERSION,
-    harness: 'codex',
+    host: 'codex',
     archetype,
     agent_type: agentType,
     executor: typeof slot?.executor === 'string' ? slot.executor : null,
@@ -351,7 +351,11 @@ function recordHostDelivery(extra) {
     lane: extra.lane,
     lane_reason: extra.lane_reason ?? null,
     dial_source: typeof slot?.source === 'string' ? slot.source : null,
-    driver: typeof slot?.driver === 'string' ? slot.driver : null,
+    // The EXECUTOR harness and the lane variant the resolver chose. Under
+    // format 1.0 this pair was one field named `driver`, and `harness` above
+    // meant the host; 1.1 gives each its own name.
+    harness: typeof slot?.harness === 'string' ? slot.harness : null,
+    variant: typeof slot?.variant === 'string' ? slot.variant : null,
     transport: 'host',
     agent_file: agentFileRow,
     // true / false / null — null means the resolver never answered, so drift
@@ -380,12 +384,12 @@ if (agentFile == null) {
     // spawn — "nobody was watching" must not be one of the states the log can
     // be in.
     appendRow({
-      format: '1.0',
+      format: '1.1',
       timestamp: new Date().toISOString(),
       event: 'native_spawn',
       fadeno_version: HOOK_VERSION,
       hook_version: HOOK_VERSION,
-      harness: 'codex',
+      host: 'codex',
       agent_type: agentType,
       // What the caller asked for, and what the spawn inherits when it asks
       // for nothing. Both, always: `model_inherited` alone cannot say whether

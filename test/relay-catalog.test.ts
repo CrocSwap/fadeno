@@ -6,12 +6,11 @@ import { stringify as stringifyYaml } from 'yaml';
 import { loadLayeredProfile } from '../src/lib/config-layers.ts';
 import {
   ExecutorProfileError,
-  RELAY_HARNESSES,
   resolveRelay,
   type ExecutorProfile,
 } from '../src/lib/executors.ts';
 import { userPaths, type UserPathOptions } from '../src/lib/user-paths.ts';
-import { tempRepo } from './helpers.ts';
+import { catalogV4Doc, tempRepo } from './helpers.ts';
 
 /**
  * `relay:` names the model that forwards a delivery without doing role work.
@@ -36,29 +35,30 @@ import { tempRepo } from './helpers.ts';
  * real `~/.config/fadeno/executors.yaml`.
  */
 
-const V3_BASE = {
-  schema_version: 3,
+const V4_BASE = catalogV4Doc({
   models: {
     sol: { provider: 'dummy', id: 'sol', effort: 'high' },
     luna: { provider: 'dummy', id: 'gpt-5.6-luna', effort: 'xhigh' },
     sonnet: { provider: 'dummy', id: 'sonnet', effort: 'xhigh' },
   },
-  routes: {
-    standalone: {
-      dummy: { command: ['node', '-e', '0'], },
-      'current-host': { host: true },
-    },
-    claude: {
-      dummy: { command: ['node', '-e', '0'], },
-      'current-host': { host: true },
-    },
-    codex: {
-      dummy: { command: ['node', '-e', '0'], },
-      'current-host': { host: true },
-    },
-  },
+  harnesses: { dummy: { provider: 'dummy', command: ['node', '-e', '0'] } },
   archetypes: { worker: { } },
-};
+});
+
+/**
+ * The v4 spelling: a relay lives on the harness it belongs to, inside its
+ * `host:` block. `relay:` as a top-level key is gone — a relay only means
+ * anything for a harness Fadeno can run INSIDE, and that is exactly what
+ * `host:` marks.
+ */
+function withRelays(relays: Record<string, string>, base: Record<string, unknown> = V4_BASE): Record<string, unknown> {
+  const harnesses: Record<string, unknown> = { ...(base.harnesses as Record<string, unknown> ?? {}) };
+  for (const [harness, ref] of Object.entries(relays)) {
+    const existing = (harnesses[harness] ?? {}) as Record<string, unknown>;
+    harnesses[harness] = { ...existing, host: { effort_channel: 'none', relay: ref } };
+  }
+  return { ...base, harnesses };
+}
 
 function isolatedUser(root: string): UserPathOptions {
   return {
@@ -106,7 +106,7 @@ function load(t: TestContext, project: Record<string, unknown>): ExecutorProfile
 }
 
 test('an unpinned relay resolves at the model registry default; a pinned one keeps its pin', (t) => {
-  const profile = load(t, { ...V3_BASE, relay: { claude: 'sonnet', codex: 'luna@low' } });
+  const profile = load(t, withRelays({ claude: 'sonnet', codex: 'luna@low' }));
 
   // Claude's proxies inherit session effort — the Agent tool has no effort
   // channel — so the unpinned form is the correct spelling there, and it
@@ -127,14 +127,14 @@ test('an unpinned relay resolves at the model registry default; a pinned one kee
 });
 
 test('a harness the catalog says nothing about resolves to null, not a guess', (t) => {
-  const profile = load(t, { ...V3_BASE, relay: { claude: 'sonnet' } });
+  const profile = load(t, withRelays({ claude: 'sonnet' }));
   assert.equal(resolveRelay(profile, 'grok'), null);
   assert.equal(resolveRelay(profile, 'codex'), null);
-  // And a catalog with no `relay:` at all is the same answer for everyone:
-  // callers keep their built-in defaults rather than being handed a model the
-  // session's provider may not serve.
-  const bare = load(t, V3_BASE);
-  for (const harness of RELAY_HARNESSES) assert.equal(resolveRelay(bare, harness), null);
+  // And a catalog whose harnesses declare no relay at all is the same answer
+  // for everyone: callers keep their built-in defaults rather than being
+  // handed a model the session's provider may not serve.
+  const bare = load(t, V4_BASE);
+  for (const harness of ['claude', 'codex', 'grok']) assert.equal(resolveRelay(bare, harness), null);
 });
 
 test('the relay is compiled for the harness asked about, not the ambient one', (t) => {
@@ -142,51 +142,48 @@ test('the relay is compiled for the harness asked about, not the ambient one', (
   // vice versa. If `resolveRelay` read `profile.harness` instead of its own
   // argument it would answer from the wrong route table — silently, since
   // both tables usually carry a route of the same name.
-  const { root, paths } = seed(t, { ...V3_BASE, relay: { claude: 'sonnet', codex: 'luna@low' } });
+  const { root, paths } = seed(t, withRelays({ claude: 'sonnet', codex: 'luna@low' }));
   const codexProfile = loadLayeredProfile(root, paths, 'codex').profile;
-  assert.equal(codexProfile.harness, 'codex');
+  assert.equal(codexProfile.host, 'codex');
   assert.equal(resolveRelay(codexProfile, 'claude')?.modelId, 'sonnet');
   assert.equal(resolveRelay(codexProfile, 'codex')?.modelId, 'gpt-5.6-luna');
 });
 
-test('a misspelled harness key is rejected, not read as "no opinion"', (t) => {
-  const { root, paths, projectFile } = seed(t, { ...V3_BASE, relay: { cladue: 'sonnet' } });
+test('a relay on a harness with no host block cannot be declared at all', (t) => {
+  // The v4 shape carries the rule structurally: a relay forwards work from
+  // inside a session, so it lives under `host:`, and a harness Fadeno can only
+  // spawn has nowhere to put one. `relay:` as a top-level key — where
+  // `relay.cladue` used to mean "no opinion for claude", silently keeping the
+  // default — no longer exists, and says so.
+  const { root, paths, projectFile } = seed(t, { ...V4_BASE, relay: { cladue: 'sonnet' } });
   const err = thrown(() => loadLayeredProfile(root, paths));
-  // Nested keys name the LAYER, not the file — the convention every other
-  // nested catalog error follows. Only top-level keys name the file, because
-  // only there is the offending text still in hand before the merge.
-  assert.match(err.message, /`relay\.cladue`/);
-  assert.ok(projectFile.length > 0);
-  // The remedy is the list of harnesses that actually have a relay.
-  for (const harness of RELAY_HARNESSES) assert.match(err.message, new RegExp(harness));
+  assert.match(err.message, /`relay` was removed in catalog v4/);
+  assert.match(err.message, /harnesses\.<id>\.host\.relay/);
+  assert.ok(err.message.startsWith(`${projectFile}: `), 'a top-level key still names the file');
+
+  // A relay beside a `command:` with no `host:` is refused as an unknown key,
+  // because there is no host lane for it to describe.
+  const noHost = seed(t, {
+    ...V4_BASE,
+    harnesses: { dummy: { provider: 'dummy', command: ['node', '-e', '0'], relay: 'sonnet' } },
+  });
+  assert.match(thrown(() => loadLayeredProfile(noHost.root, noHost.paths)).message, /`harnesses\.dummy` has unknown key\(s\) relay/);
 });
 
-test('standalone is not a relay harness: it has no host session to forward from', (t) => {
-  const { root, paths } = seed(t, { ...V3_BASE, relay: { standalone: 'sonnet' } });
-  const err = thrown(() => loadLayeredProfile(root, paths));
-  assert.match(err.message, /`relay\.standalone`/);
-  assert.ok(!(RELAY_HARNESSES as readonly string[]).includes('standalone'));
-});
-
-test('a relay that is not a mapping, or holds a malformed ref, fails loudly', (t) => {
-  // `relay: sonnet` is the tempting shorthand — it must not quietly become a
-  // claude-only opinion, or worse, be dropped.
-  const flat = seed(t, { ...V3_BASE, relay: 'sonnet' });
-  assert.match(thrown(() => loadLayeredProfile(flat.root, flat.paths)).message, /`relay` must be a mapping/);
-
-  const empty = seed(t, { ...V3_BASE, relay: { claude: '' } });
-  assert.match(thrown(() => loadLayeredProfile(empty.root, empty.paths)).message, /relay\.claude/);
+test('a relay holding a malformed ref fails loudly', (t) => {
+  const empty = seed(t, withRelays({ claude: '' }));
+  assert.match(thrown(() => loadLayeredProfile(empty.root, empty.paths)).message, /harnesses\.claude`\.host\.relay/);
 });
 
 test('overriding one harness relay does not drop the other', (t) => {
-  // `relay:` is entry-merged. Whole-key replacement would mean a project
-  // catalog naming only `codex:` silently discards the user-scope `claude:`
-  // beside it — a drop with no error, which is the failure this key was
-  // added under.
+  // `harnesses:` is entry-merged, per harness id. Whole-key replacement would
+  // mean a project catalog naming only `codex:` silently discards the
+  // user-scope `claude:` beside it — a drop with no error, which is the
+  // failure the relay key was added under in the first place.
   const { root, paths } = seed(
     t,
-    { schema_version: 3, relay: { codex: 'luna@low' } },
-    { ...V3_BASE, relay: { claude: 'sonnet', codex: 'sol' } },
+    { schema_version: 4, harnesses: { codex: { provider: 'openai', host: { effort_channel: 'agent-file', relay: 'luna@low' }, command: ['codex'] } } },
+    withRelays({ claude: 'sonnet', codex: 'sol' }),
   );
   const profile = loadLayeredProfile(root, paths).profile;
   assert.equal(resolveRelay(profile, 'claude')?.modelId, 'sonnet', 'the user-scope claude relay must survive');

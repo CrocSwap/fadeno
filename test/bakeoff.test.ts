@@ -74,17 +74,15 @@ function seedPair(t: TestContext, opts: {
   writeFileSync(join(root, '.fadeno', 'local', 'outputs', 'p.diff'), opts.primaryDiff);
   writeFileSync(join(root, '.fadeno', 'local', 'outputs', 'c.diff'), opts.challengerDiff);
   if (opts.surfaces != null || opts.judgeCommand != null) {
-    const catalog: Record<string, unknown> = { schema_version: 3 };
+    const catalog: Record<string, unknown> = { schema_version: 4 };
     if (opts.surfaces != null) catalog.surfaces = opts.surfaces;
     if (opts.judgeCommand != null) {
       catalog.models = { 'judge-model': { provider: 'judgeprov', id: 'judge-model' } };
-      // Declared for every harness this suite might ambiently detect (a real
-      // `CLAUDECODE`/`CODEX_*` env var in whatever session runs the tests) —
-      // the same redundancy `dispatch-shadow.test.ts`'s own fixtures use,
-      // since which harness is active is real ambient state a command has no
-      // business overriding.
-      const route = { judgeprov: { command: opts.judgeCommand, } };
-      catalog.routes = { standalone: route, claude: route, codex: route, grok: route };
+      // ONE table, whatever harness this suite ambiently detects (a real
+      // `CLAUDECODE`/`CODEX_*` env var in whatever session runs the tests).
+      // Under v4 a command lane no longer varies by host, so the redundancy
+      // this fixture used to need is gone.
+      catalog.harnesses = { judgeprov: { provider: 'judgeprov', command: opts.judgeCommand } };
       catalog.dials = { judge: 'judge-model' };
     }
     writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml(catalog));
@@ -219,13 +217,13 @@ test('a judge with no command lane refuses with an actionable message, and write
   // No dial for `judge` anywhere in this fixture — resolution falls back to
   // the bare `current-host` sentinel, exactly the case `runDispatch` itself
   // already refuses with the remedy this command's own wording discipline
-  // borrows verbatim: `fadeno dial judge <model> --via <driver>`.
+  // borrows verbatim: `fadeno dial judge <model> --harness <id>`.
   const root = seedPair(t, { primaryDiff: diffFor('src/a.ts', ['+x']), challengerDiff: diffFor('src/b.ts', ['+y']) });
   assert.throws(
     () => runBakeoff({ repoRoot: root, ref: 'pair0001' }),
     (err: unknown) =>
       err instanceof BakeoffCommandError &&
-      /fadeno dial judge <model> --via <driver>/.test((err as Error).message),
+      /fadeno dial judge <model> --harness <id>/.test((err as Error).message),
   );
   assert.equal(existsSync(join(root, '.fadeno', 'bakeoffs')), false, 'a refused adjudication must write nothing');
 });

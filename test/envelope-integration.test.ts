@@ -39,14 +39,9 @@ flow:
   writeFileSync(join(root, '.fadeno', 'playbooks', 'envelope-host-fixture.yaml'), playbook);
   writeFileSync(join(root, 'agent-1.md'), 'spec');
   const execYaml = {
-    schema_version: 3,
+    schema_version: 4,
     models: { m: { provider: 'dummy', id: 'm', effort: 'high' } },
-    routes: {
-      standalone: { dummy: { host: true }, 'current-host': { host: true } },
-      codex: { dummy: { host: true }, 'current-host': { host: true } },
-      claude: { dummy: { host: true }, 'current-host': { host: true } },
-      grok: { dummy: { host: true }, 'current-host': { host: true } },
-    },
+    harnesses: { dummy: { provider: 'dummy', host: { effort_channel: 'none' } } },
     archetypes: { worker: {} },
     bindings: { agent_1: 'm' },
   };
@@ -81,14 +76,9 @@ flow:
   writeFileSync(join(root, '.fadeno', 'playbooks', 'envelope-engine-fixture.yaml'), playbook);
   writeFileSync(join(root, 'agent-1.md'), 'spec');
   const execYaml = {
-    schema_version: 3,
+    schema_version: 4,
     models: { m: { provider: 'dummy', id: 'm', effort: 'high' } },
-    routes: {
-      standalone: { dummy: { command, }, 'current-host': { host: true } },
-      codex: { dummy: { command, }, 'current-host': { host: true } },
-      claude: { dummy: { command, }, 'current-host': { host: true } },
-      grok: { dummy: { command, }, 'current-host': { host: true } },
-    },
+    harnesses: { dummy: { provider: 'dummy', command: command } },
     archetypes: { worker: {} },
     bindings: { agent_1: 'm' },
   };

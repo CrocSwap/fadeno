@@ -13,7 +13,6 @@ import {
   BARE_IDENTIFIER_RE,
   ExecutorProfileError,
   commandRoutable,
-  deliveryIsHost,
   eligibilityFor,
   substitutePromptFile,
   explainEligibilityConflict,
@@ -24,7 +23,8 @@ import {
   releaseShadowAttachmentTrigger,
   reserveShadowAttachmentTrigger,
   resolveRole,
-  compileDialRef,
+  resolveDelivery,
+  snapshotExecutor,
   parseDialRef,
   formatDialRef,
   roleResolutionEchoLabel,
@@ -117,7 +117,7 @@ export const DISPATCHES_FILE = join('.fadeno', 'dispatches.jsonl');
  * The Claude steering hook writes the same stamp as a literal — it runs as a
  * standalone script and cannot import this constant. Bump both together.
  */
-export const DISPATCHES_FORMAT = '1.0';
+export const DISPATCHES_FORMAT = '1.1';
 
 /**
  * What a finished command dispatch actually produced.
@@ -677,8 +677,8 @@ export interface AdHocDispatchOptions {
   role?: string | null;
   /** Bypass resolution and invoke this dial ref directly (debugging). */
   model?: string | null;
-  /** Driver override for --model bypass. */
-  via?: string | null;
+  /** Per-call executor-harness override; also usable without `--model`. */
+  harness?: string | null;
   /** Prompt file path (relative paths resolve against `cwd`); wins over `prompt`. */
   promptFile?: string | null;
   /** Prompt text — the CLI reads stdin into this when no `--prompt-file`. */
@@ -775,7 +775,10 @@ export interface AdHocDispatchResult {
   modelId: string | null;
   /** The resolved delivery's provider, or null when the catalog states none. */
   provider: string | null;
-  driver: string | null;
+  /** The EXECUTOR harness this delivery ran on (was `driver`). */
+  harness: string | null;
+  /** The command-lane variant policy chose, or null for the base lane. */
+  variant: string | null;
   reasoningEffort: string | null;
   source: DispatchResolutionSource;
   /** The resolution echo line (`<role-or-archetype> → <executor> (<model>) [<source>]`). */
@@ -1130,20 +1133,20 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   let legacyNote: string | null = null;
 
   const bypassModelRaw = opts.model?.trim() ? opts.model.trim() : null;
-  const viaOverride = opts.via?.trim() ? opts.via.trim() : null;
+  const harnessOverride = opts.harness?.trim() ? opts.harness.trim() : null;
 
   if (bypassModelRaw != null && bypassModelRaw !== '') {
-    // --model <ref> (+ --via) direct compile
+    // --model <ref> (+ --harness) direct resolution
     let ref: DialRef;
     try {
       ref = parseDialRef(bypassModelRaw, '--model');
-      if (viaOverride != null) ref.via = viaOverride;
+      if (harnessOverride != null) ref.harness = harnessOverride;
     } catch (err) {
       if (err instanceof ExecutorProfileError) throw new DispatchCommandError(err.message);
       throw err;
     }
     try {
-      delivery = compileDialRef(ref, profile);
+      delivery = resolveDelivery(ref, profile);
     } catch (err) {
       if (err instanceof ExecutorProfileError) throw new DispatchCommandError(err.message);
       throw err;
@@ -1186,20 +1189,20 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       source = resolved.source;
       resolvedVia = resolved.resolvedVia;
       dial = resolved.delivery.ref;
-      // `--via` without `--model`: escalate THIS dispatch onto another driver
+      // `--harness` without `--model`: escalate THIS dispatch onto another harness
       // without touching the dial. Until 2026-08-21 the override was read only
       // inside the `--model` branch above, so `fadeno dispatch --archetype
-      // worker --via claude-exec` accepted the flag, ignored it, and delivered
+      // worker --harness codex` accepted the flag, ignored it, and delivered
       // on the dial's own route — while `--help` advertised `--via` as
       // `(dial/dispatch)`. A flag that is parsed and dropped is the silent
       // no-op this repo keeps paying for, and it sits directly on the
       // escalation path the host-lane guidance below points at: telling a
       // caller to escalate with a flag that does nothing is worse than not
       // offering one.
-      if (viaOverride != null) {
-        const overridden: DialRef = { ...resolved.delivery.ref, via: viaOverride };
+      if (harnessOverride != null) {
+        const overridden: DialRef = { ...resolved.delivery.ref, harness: harnessOverride };
         try {
-          delivery = compileDialRef(overridden, profile);
+          delivery = resolveDelivery(overridden, profile);
         } catch (err) {
           if (err instanceof ExecutorProfileError) throw new DispatchCommandError(err.message);
           throw err;
@@ -1229,7 +1232,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
    * order: it calls the in-session agent a non-equivalent substitute and leads
    * with `--via`, which is right for a genuinely command-lane archetype and
    * backwards when the resolver already chose in-session. An agent following
-   * that advice re-dials a host-lane archetype onto an exec route and moves it
+   * that advice re-dials a host-lane archetype onto an exec variant and moves it
    * out of the session permanently — the opposite of what the resolver
    * decided, produced by the message rather than by any gate.
    */
@@ -1237,7 +1240,12 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     pinnedEffort: delivery.pinnedEffort,
     effectiveEffort: delivery.effectiveEffort,
     sessionEffort: readSessionEffort(opts.userPathOptions?.env ?? process.env),
-    hostModel: deliveryIsHost(delivery),
+    // `hostCandidate`, not `deliveryIsHost`: a host spec is also how a
+    // delivery with no argv at all is represented, so the two disagree exactly
+    // on `current-host` in a bare shell and on a host-only harness named from
+    // a different host — where this note used to say "spawn the in-session
+    // agent and you are done" while `dial resolve` said restart_required.
+    hostModel: delivery.hostCandidate,
     commandLane: commandRoutable(spec),
   });
   const hostLanePreferred = laneDecision.lane === 'host';
@@ -1253,12 +1261,13 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       `choice for this task is the in-session ${shape} agent — spawn it and you are done; it is not a ` +
       'downgrade, it is the delivery every other caller gets. Dispatch it only when you specifically need ' +
       'what in-session cannot give: an isolated worktree, a dispatch id, a terminal receipt, --timeout/' +
-      `--diagnostics, or a shadow pair. To do that for THIS call without moving the dial, add \`--via ` +
-      '<driver>\` (an *-exec route is the command-lane counterpart of a host one).'
+      `--diagnostics, or a shadow pair. This call already delivers out of process down the harness's own ` +
+      'command lane; to send it to a DIFFERENT harness for this call only, without moving the dial, add ' +
+      '`--harness <id>` (`fadeno models` lists them).'
     : null;
   // The one delivery gate left. A host spec with a `fallback_command` is
   // dispatched down that lane — the same lane a selected pair forces both arms
-  // onto, and the same lane the `*-exec` routes name explicitly — so the only
+  // onto, and the same lane an `exec` variant names explicitly — so the only
   // spec ad-hoc dispatch has to refuse is one with nothing to invoke at all.
   // The harness-dependent `host_in_session` refusal that used to sit here is
   // gone; see `commandRoutable` for why it was a coin-flip rather than a
@@ -1266,7 +1275,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // is enforced for real a few lines below, by `explainWriteConflict`.
   if (!commandRoutable(spec)) {
     // `current-host` is a reference-frame sentinel, not a model you can route
-    // — suggesting `--via` on it would be advice that cannot be followed.
+    // — suggesting `--harness` on it would be advice that cannot be followed.
     const dialModel = spec.model != null && spec.model !== 'current-host' ? spec.model : '<model>';
     // The in-session agent is a FALLBACK, not an equivalent, and saying so is
     // the point of this wording. A caller who reached for `fadeno dispatch`
@@ -1281,7 +1290,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // Precise about what is actually lost. An earlier version of this said the
     // in-session path "writes no evidence row", which is FALSE — the steering
     // hook writes a `host_delivery` / `native_delivery` row carrying the
-    // archetype, executor, model, effort, driver and a prompt snapshot. What
+    // archetype, executor, model, effort, harness and a prompt snapshot. What
     // it has no way to write is a terminal receipt: those rows carry no
     // dispatch id, so there is no exit code, duration, captured output, or
     // `--output tag:` handle. Overstating the loss is the same failure as
@@ -1292,8 +1301,8 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         `resolved to host executor "${executorName}", which declares no fallback_command, so ad-hoc ` +
         'dispatch has nothing to invoke. ' +
         `To dispatch for real, give ${shape} a command lane: \`fadeno dial ${archetype ?? '<archetype>'} ` +
-        `${dialModel} --via <driver>\` (\`fadeno models\` lists the drivers; an *-exec route ` +
-        'is the command-lane counterpart of a host one). ' +
+        `${dialModel} --harness <id>\` (\`fadeno models\` lists the harnesses; one that declares a ` +
+        '`command:` can be spawned). ' +
         'An in-session agent is NOT an equivalent substitute. It writes a host_delivery evidence row (with ' +
         'the prompt snapshot), but that row carries no dispatch id and no terminal receipt — no exit code, ' +
         'no duration, no captured output, and nothing to read back with `fadeno dispatches --output ' +
@@ -1407,7 +1416,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   writeFileSync(snapshotAbs, prompt, 'utf8');
   const promptSnapshot = snapshotRel.split('\\').join('/');
 
-  // File-reading drivers: `{prompt_file}` in the route argv becomes the
+  // File-reading executors: `{prompt_file}` in the harness argv becomes the
   // snapshot's absolute path — the digest attests exactly what the executor
   // reads. Substituted before the identity row so evidence records the argv
   // that actually spawns.
@@ -1467,7 +1476,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       const localStateForShadow = readLocalDialState(repoRoot);
       const att = localStateForShadow.shadows[archetype];
       if (att != null && !shadowAttachmentExpired(att)) {
-        dial = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.via ? { via: att.via } : {}) };
+        dial = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.harness ? { harness: att.harness } : {}) };
         executorName = formatDialRef(dial);
         sourceTag = 'attachment';
         attachmentRate = att.rate;
@@ -1608,9 +1617,13 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   let needsLease = workspaceMode === 'shared';
   const commandSha256 = sha256Hex(JSON.stringify(command));
   const producers = lookupInputProducers(repoRoot, producedByIds(opts));
+  // The ambient host, recorded beside the executor harness. Under format 1.0
+  // one key `harness` carried the HOST and `driver` carried the executor;
+  // 1.1 splits them by their real names, and the reader translates 1.0 rows.
+  const host = profile.host ?? 'standalone';
   const dialField: Record<string, unknown> = { model: dial.model };
   if (dial.effort != null) dialField.effort = dial.effort;
-  if (dial.via != null) dialField.via = dial.via;
+  if (dial.harness != null) dialField.harness = dial.harness;
   const identity: Record<string, unknown> = {
     dispatch_id: dispatchId,
     ...(tag != null ? { tag } : {}),
@@ -1623,7 +1636,9 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     model: delivery.model,
     model_id: delivery.modelId,
     reasoning_effort: delivery.effectiveEffort,
-    driver: delivery.driver,
+    host,
+    harness: delivery.harness,
+    ...(delivery.variant != null ? { variant: delivery.variant } : {}),
     ...(delivery.provider != null ? { provider: delivery.provider } : {}),
     transport,
     workspace_mode: workspaceMode,
@@ -1641,7 +1656,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // Boundary predicates, before the spawn. Each hard refusal appends one
   // `dispatch_refused` row (the request-point evidence) and throws; an
   // advisory provider clash warns and continues. There is no write-posture
-  // predicate here any more: a route is an argv, and what it may do is the
+  // predicate here any more: a harness lane is an argv, and what it may do is the
   // vendor's business and the worktree's, not a claim for Fadeno to check.
   const deliveryChoice = { executor: executorName, spec };
   const eligibilityConflict = explainEligibilityConflict(deliveryChoice, archetype);
@@ -1670,7 +1685,8 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     archetype,
     role,
     executor: executorName,
-    driver: delivery.driver,
+    harness: delivery.harness,
+    variant: delivery.variant,
     provider: delivery.provider ?? null,
     model: delivery.model,
     model_id: delivery.modelId,
@@ -1682,7 +1698,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     dials: { session: sessionMap, repo: repoMap, user: userMap },
     resolved_via: resolvedVia,
     input_provenance: provenanceFields(producers),
-    harness: profile.harness ?? 'standalone',
+    host,
   } satisfies ConstraintContext;
   let constraintVerdict;
   try {
@@ -1750,7 +1766,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   }
 
   // Resolve effective timeout: one CLI override applies to every lane; without
-  // one, each lane uses its own snapshotted route default.
+  // one, each lane uses the `timeout_ms` its own snapshotted harness declares.
   const timeoutFor = (laneSpec: CompiledDelivery['spec']): number | null => {
     if (opts.timeoutMs === 0) return null;
     if (typeof opts.timeoutMs === 'number' && Number.isInteger(opts.timeoutMs) && opts.timeoutMs > 0) {
@@ -1953,7 +1969,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     let shadowDelivery: CompiledDelivery;
     if (shadowDial != null) {
       try {
-        shadowDelivery = compileDialRef(shadowDial, profile);
+        shadowDelivery = resolveDelivery(shadowDial, profile);
       } catch (err) {
         const msg = err instanceof ExecutorProfileError ? err.message : String(err);
         writeShadowRefusal('shadow_resolution', msg);
@@ -1963,11 +1979,16 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       writeShadowRefusal('shadow_resolution', `shadow target "${shadowExecutorNameInner}" is not a valid dial ref.`);
       return null;
     }
+    // `spec.adapter`, not `hostCandidateOf`, and for the same reason as the
+    // attach-time refusal in `runDialShadow`: this asks whether the challenger
+    // has a command lane the kernel can duplicate onto, and the shapes the two
+    // predicates disagree on (a host spec with no argv) have none. The strict
+    // side is the correct side here.
     if (shadowDelivery.spec.adapter === 'host') {
       writeShadowRefusal('shadow_resolution', `shadow executor "${shadowExecutorNameInner}" is a host executor — the kernel cannot duplicate a host dispatch.`, {
         model: shadowDelivery.model,
         model_id: shadowDelivery.modelId,
-        driver: shadowDelivery.driver,
+        harness: shadowDelivery.harness,
         reasoning_effort: shadowDelivery.effectiveEffort,
         transport: 'host',
       });
@@ -1979,7 +2000,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     const eligibilityState = eligibilityFor(shadowSpec, archetype);
     if (eligibilityState === 'forbidden') {
       const msg = explainEligibilityConflict({ executor: shadowRefString, spec: shadowSpec }, archetype) ?? `archetype "${archetype}" is forbidden on executor "${shadowRefString}".`;
-      writeShadowRefusal('eligibility', msg, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: 'command' });
+      writeShadowRefusal('eligibility', msg, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, harness: shadowDelivery.harness, reasoning_effort: shadowDelivery.effectiveEffort, transport: 'command' });
       return null;
     }
     // Constraint check with shadow:true
@@ -1989,12 +2010,13 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     for (const [k, v] of Object.entries(repoDials)) sRepoMap[k] = formatDialRef(v);
     const sUserMap: Record<string, string> = {};
     for (const [k, v] of Object.entries(userDials)) sUserMap[k] = formatDialRef(v);
-    const sDialField = { model: shadowDial.model, ...(shadowDial.effort ? { effort: shadowDial.effort } : {}), ...(shadowDial.via ? { via: shadowDial.via } : {}) };
+    const sDialField = { model: shadowDial.model, ...(shadowDial.effort ? { effort: shadowDial.effort } : {}), ...(shadowDial.harness ? { harness: shadowDial.harness } : {}) };
     const shadowConstraintContext = {
       archetype,
       role,
       executor: shadowRefString,
-      driver: shadowDelivery.driver,
+      harness: shadowDelivery.harness,
+      variant: shadowDelivery.variant,
       provider: shadowDelivery.provider ?? null,
       model: shadowDelivery.model,
       model_id: shadowDelivery.modelId,
@@ -2005,7 +2027,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       dials: { session: sSessionMap, repo: sRepoMap, user: sUserMap },
       resolved_via: resolvedVia,
       input_provenance: provenanceFields(producers),
-      harness: profile.harness ?? 'standalone',
+      host,
       shadow: true,
     } satisfies ConstraintContext;
     let shadowConstraintVerdict;
@@ -2022,7 +2044,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       throw err;
     }
     if (shadowConstraintVerdict.verdict === 'refused') {
-      writeShadowRefusal('constraint_command', shadowConstraintVerdict.reason, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: 'command' });
+      writeShadowRefusal('constraint_command', shadowConstraintVerdict.reason, { model: shadowDelivery.model, model_id: shadowDelivery.modelId, harness: shadowDelivery.harness, reasoning_effort: shadowDelivery.effectiveEffort, transport: 'command' });
       return null;
     }
 
@@ -2054,7 +2076,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
           `This is a trade, not a fault: a comparison AND containment were given up to protect the work. Set ` +
           `\`ignored_output: discardable\` on the archetype, or pass \`--ignored-output discardable\`, if this ` +
           `task's gitignored output is intermediate and safe to lose.`,
-        { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: 'command' },
+        { model: shadowDelivery.model, model_id: shadowDelivery.modelId, harness: shadowDelivery.harness, reasoning_effort: shadowDelivery.effectiveEffort, transport: 'command' },
       );
       return null;
     }
@@ -2077,7 +2099,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       writeShadowRefusal(
         'shadow_containment',
         `the prompt contains this repo's absolute path ("${repoRoot}") — both arms receive byte-identical prompt bytes, so a prompt naming absolute repo paths cannot be isolated: the challenger would follow that path straight into the primary's tree. Rewrite it repo-relative (drop the "${repoRoot}/" prefix) to make the pair possible.`,
-        { model: shadowDelivery.model, model_id: shadowDelivery.modelId, driver: shadowDelivery.driver, reasoning_effort: shadowDelivery.effectiveEffort, transport: 'command' },
+        { model: shadowDelivery.model, model_id: shadowDelivery.modelId, harness: shadowDelivery.harness, reasoning_effort: shadowDelivery.effectiveEffort, transport: 'command' },
       );
       return null;
     }
@@ -2143,7 +2165,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     const shadowCommandSha = sha256Hex(JSON.stringify(shadowCommand));
     const shadowDialField: Record<string, unknown> = { model: shadowDial.model };
     if (shadowDial.effort != null) shadowDialField.effort = shadowDial.effort;
-    if (shadowDial.via != null) shadowDialField.via = shadowDial.via;
+    if (shadowDial.harness != null) shadowDialField.harness = shadowDial.harness;
     const shadowIdentity: Record<string, unknown> = {
       dispatch_id: shadowDispatchId,
       pair_id: pairId,
@@ -2160,7 +2182,9 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       model: shadowDelivery.model,
       model_id: shadowDelivery.modelId,
       reasoning_effort: shadowDelivery.effectiveEffort,
-      driver: shadowDelivery.driver,
+      host,
+      harness: shadowDelivery.harness,
+      ...(shadowDelivery.variant != null ? { variant: shadowDelivery.variant } : {}),
       ...(shadowDelivery.provider != null ? { provider: shadowDelivery.provider } : {}),
       transport: 'command',
       delivery_transport: 'command',
@@ -3040,7 +3064,8 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     model: delivery.model,
     modelId: delivery.modelId,
     provider: delivery.provider ?? null,
-    driver: delivery.driver,
+    harness: delivery.harness,
+    variant: delivery.variant,
     reasoningEffort: delivery.effectiveEffort,
     source,
     echo,
@@ -3072,7 +3097,10 @@ export function runDispatchFallback(opts: DispatchFallbackOptions): DispatchFall
   const lookup = readHostDispatchRequest({ repoRoot, run: opts.run, dispatchId: opts.dispatchId });
   const request = lookup.request;
   const profile = hostRequestProfile(lookup);
-  const spec = profile.executors[request.executor];
+  // The archetype the locked request was cut for, so a policy-chosen variant's
+  // snapshot entry is the one this fallback delivers — the same read
+  // `runLockedSteeringResolve` and `verify` make of the same request.
+  const spec = snapshotExecutor(profile, request.executor, request.agentType === '*' ? null : request.agentType);
   if (spec == null || spec.adapter !== 'host') {
     throw new DispatchCommandError(`locked request executor "${request.executor}" is not a host executor.`);
   }

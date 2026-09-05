@@ -17,9 +17,9 @@ import {
 function seedDriveRepo(root: string, command: string): void {
   runInit({ target: 'codex', repoRoot: root });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { writer: { provider: 'writerp', id: 'writer', effort: 'default' } },
-    routes: { standalone: { writerp: { command: ['node', '-e', command], } } },
+    harnesses: { writerp: { provider: 'writerp', command: ['node', '-e', command] } },
     archetypes: { worker: {} },
     dials: { worker: 'writer' },
   }));

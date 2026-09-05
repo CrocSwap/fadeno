@@ -9,7 +9,7 @@ import {
   archetypeDisplaySort,
   knownArchetypes,
   commandRoutable,
-  compileDialRef,
+  resolveDelivery,
   deliveryIsHost,
   eligibilityFor,
   ExecutorProfileError,
@@ -17,7 +17,7 @@ import {
   explainPairRoutability,
   pairRoutabilityFields,
   formatDialRef,
-  hostEffortIsMaterializable,
+  declaredHarnesses,
   parseDialRef,
   qualifyListedModelId,
   readLocalDialState,
@@ -25,6 +25,7 @@ import {
   resolveRelay,
   resolveRole,
   serializeDialRef,
+  shadowAttachmentRef,
   writeLocalDialState,
   type DialRef,
   type ExecutorProfile,
@@ -77,14 +78,18 @@ export interface EffectiveRow {
   /** The effort this delivery runs at: the pin, else the registry default. */
   effective_effort: string;
   /**
-   * The route's public name — what `--via` takes and what the table prints in
-   * its `via` column. This field used to have two synonyms, `harness` and
-   * `delivery`, both carrying this same value; both are gone. `harness` was
-   * the actively harmful one: `DialShowResult.harness` in the SAME payload
-   * means the actual harness (`claude`, `codex`), so a reader who found
-   * `harness: "codex"` on a row had no way to know it meant the driver.
+   * The EXECUTOR harness this row resolves onto — what `--harness` takes and
+   * what the table prints in its `harness` column.
+   *
+   * Under v4 this name finally means one thing everywhere. `DialShowResult`
+   * carries the ambient HOST as `host`, so the two can no longer be confused:
+   * `harness` is who executes, `host` is where you are sitting.
    */
-  driver: string;
+  harness: string | null;
+  /** Whether the row's harness is the model's home (no explicit `--harness`). */
+  harness_explicit: boolean;
+  /** The command-lane variant policy chose, or null for the base lane. */
+  variant: string | null;
   source: RoleResolutionSource;
   resolvedVia: string | null;
   dial: DialRef;
@@ -100,7 +105,7 @@ export interface EffectiveRow {
 export interface ShadowAttachmentView {
   model: string;
   effort?: string;
-  via?: string;
+  harness?: string;
   rate?: number;
   /** Configured finite trigger budget, or null for an unlimited attachment. */
   n: number | null;
@@ -109,19 +114,20 @@ export interface ShadowAttachmentView {
   /** Derived from the persisted budget; expired attachments remain visible. */
   expired: boolean;
   adapter?: 'command' | 'host';
-  driver?: string;
+  /** The executor harness the challenger resolved onto. */
+  resolved_harness?: string | null;
 }
 
 function shadowAttachmentView(att: ShadowAttachment, delivery?: CompiledDelivery): ShadowAttachmentView {
   return {
     model: att.model,
     ...(att.effort ? { effort: att.effort } : {}),
-    ...(att.via ? { via: att.via } : {}),
+    ...(att.harness ? { harness: att.harness } : {}),
     ...(att.rate != null ? { rate: att.rate } : {}),
     n: att.n ?? null,
     remaining: att.remaining ?? null,
     expired: shadowAttachmentExpired(att),
-    ...(delivery != null ? { adapter: delivery.spec.adapter, driver: delivery.driver } : {}),
+    ...(delivery != null ? { adapter: delivery.spec.adapter, resolved_harness: delivery.harness } : {}),
   };
 }
 
@@ -138,9 +144,12 @@ export interface DialShowResult {
   staleShadows: StaleShadowView[];
   staleDials: Array<{ archetype: string; target: string }>;
   legacy_pin_note: string | null;
+  /** One line when stored state still spells a delivery ` via <driver>`. */
+  legacy_via_note: string | null;
   suppressed_canon_archetypes: string[];
   note: string | null;
-  harness: string;
+  /** The ambient HOST this call is running inside. */
+  host: string;
   // legacy alias
   legacyPinNote?: string | null;
 }
@@ -182,8 +191,10 @@ export function formatSuppressedCanonNote(archetypes: readonly string[]): string
 /**
  * The per-key user-model carve-out, as a reader-facing note. Promotions and
  * drops are both named: a promoted alias is personal state the repo is now
- * serving, and a dropped one failed integrity (its route resolves nowhere),
- * which the user must see rather than discover at dispatch time.
+ * serving, and a dropped one failed integrity (nothing in the merged
+ * `harnesses:` table can deliver it), which the user must see rather than
+ * discover at dispatch time. Repairs ride along: what the tolerant user-layer
+ * read translated or discarded on the way in.
  */
 export function formatModelFallbackNote(fallback: ModelFallbackOutcome): string | null {
   const parts: string[] = [];
@@ -195,9 +206,12 @@ export function formatModelFallbackNote(fallback: ModelFallbackOutcome): string 
   }
   for (const drop of fallback.dropped) {
     parts.push(
-      `user-catalog model "${drop.alias}" dropped — delivery route "${drop.route}" is declared nowhere in this catalog`,
+      `user-catalog model "${drop.alias}" dropped — nothing in this catalog can deliver harness/provider "${drop.harness}"`,
     );
   }
+  // Repairs are already whole sentences naming the file and the key; they read
+  // as written rather than being re-wrapped in a category label.
+  parts.push(...fallback.repairs);
   if (parts.length === 0) return null;
   return `note: ${parts.join('; ')}`;
 }
@@ -210,21 +224,37 @@ function canonSurfacing(layered: LayeredProfile): { suppressed_canon_archetypes:
   return { suppressed_canon_archetypes: arr, note };
 }
 
-function buildDialRef(modelInput: string, via: string | undefined, label: string): DialRef {
-  // modelInput may be "model@effort" or just "model"
+function buildDialRef(modelInput: string, harness: string | undefined, label: string): DialRef {
+  // modelInput may be "model@effort", "model", or "model on <harness>"
   const base = parseDialRef(modelInput, label);
-  if (via != null && via.trim().length > 0) {
-    const v = via.trim();
-    if (!BARE_IDENTIFIER_RE.test(v) && /\s/.test(v)) {
-      throw new DialError(`${label} via "${v}" is not a bare identifier.`);
+  if (harness != null && harness.trim().length > 0) {
+    const h = harness.trim();
+    if (!BARE_IDENTIFIER_RE.test(h)) {
+      throw new DialError(`${label} harness "${h}" is not a bare identifier.`);
     }
-    // If base already has via, conflict?
-    if (base.via != null && base.via !== v) {
-      throw new DialError(`${label} via mismatch: "${base.via}" vs "${v}".`);
+    if (base.harness != null && base.harness !== h) {
+      throw new DialError(`${label} harness mismatch: "${base.harness}" vs "${h}".`);
     }
-    base.via = v;
+    base.harness = h;
   }
   return base;
+}
+
+/**
+ * Refuse an unknown `--harness` at set time, naming the table.
+ *
+ * This is the whole of what a `--harness` can be wrong about: the dial names
+ * an executor, and the executor either exists in the catalog or it does not.
+ * Whether that harness can carry this archetype, and on which lane, are
+ * questions about a CALL — answered at dispatch, where a host exists.
+ */
+function assertHarnessDeclared(profile: ExecutorProfile, ref: DialRef): void {
+  if (ref.harness == null) return;
+  if (Object.hasOwn(profile.harnesses ?? {}, ref.harness)) return;
+  const declared = declaredHarnesses(profile);
+  throw new DialError(
+    `unknown harness "${ref.harness}" — declared harnesses: ${declared.join(', ') || '(none)'}`,
+  );
 }
 
 // Levenshtein distance helper
@@ -257,35 +287,28 @@ export interface ProbeOptions {
 
 export function probeModel(
   profile: ExecutorProfile,
-  driver: string,
+  harness: string,
   modelId: string,
   opts: ProbeOptions = {},
 ): { status: VerificationStatus; note: string | null } {
-  const harness = profile.harness ?? 'standalone';
-  const routesForHarness = (profile.routes as Record<string, Record<string, { models_command?: string[] | null; modelsPrefix?: string }>>)[harness] ?? {};
-  let route: { models_command?: string[] | null; modelsPrefix?: string } | null = null;
-  for (const [key, r] of Object.entries(routesForHarness)) {
-    const alias = (r as { driver?: string }).driver ?? key;
-    if (alias === driver) {
-      route = r as { models_command?: string[] | null; modelsPrefix?: string };
-      break;
-    }
-  }
+  // The probe argv is resolved through the DIAL's harness — explicit or home —
+  // never through the host. Asking the session's harness whether some other
+  // harness serves a model answers a question nobody asked.
+  const entry = profile.harnesses?.[harness] ?? null;
   // If model is current-host, skip silently (no probe)
   if (modelId === 'current-host') return { status: null, note: null };
-  if (route == null) {
-    // No route for driver? Should not happen if compiled; but treat as unverified
-    return { status: 'unverified', note: `note: cannot verify ${modelId} on ${driver} (no route declared) — dialing unverified` };
+  if (entry == null) {
+    return { status: 'unverified', note: `note: cannot verify ${modelId} on ${harness} (no such harness declared) — dialing unverified` };
   }
-  const modelsCommand = route.models_command;
+  const modelsCommand = entry.models_command;
   if (modelsCommand == null || modelsCommand.length === 0) {
     // Callers suppress this for registered models and host deliveries; only an
     // unregistered dial surfaces it loudly.
-    return { status: 'unverified', note: `note: cannot verify ${modelId} on ${driver} (no models_command declared) — dialing unverified` };
+    return { status: 'unverified', note: `note: cannot verify ${modelId} on ${harness} (no models_command declared) — dialing unverified` };
   }
   // Check cache
   const userOpts = opts.userPathOptions ?? {};
-  if (isModelVerified(userOpts, driver, modelId)) {
+  if (isModelVerified(userOpts, harness, modelId)) {
     return { status: 'cached', note: null };
   }
   const spawnFn =
@@ -301,43 +324,37 @@ export function probeModel(
   try {
     result = spawnFn(modelsCommand, { timeout: 10_000 });
   } catch (err) {
-    return { status: 'unverified', note: `note: cannot verify ${modelId} on ${driver} (${(err as Error).message}) — dialing unverified` };
+    return { status: 'unverified', note: `note: cannot verify ${modelId} on ${harness} (${(err as Error).message}) — dialing unverified` };
   }
   if ((result as { error?: Error }).error != null) {
-    return { status: 'unverified', note: `note: cannot verify ${modelId} on ${driver} (${(result as { error?: Error }).error!.message}) — dialing unverified` };
+    return { status: 'unverified', note: `note: cannot verify ${modelId} on ${harness} (${(result as { error?: Error }).error!.message}) — dialing unverified` };
   }
   if (result.status !== 0) {
-    return { status: 'unverified', note: `note: cannot verify ${modelId} on ${driver} (models_command exited ${result.status}) — dialing unverified` };
+    return { status: 'unverified', note: `note: cannot verify ${modelId} on ${harness} (models_command exited ${result.status}) — dialing unverified` };
   }
   const stdout = typeof result.stdout === 'string' ? result.stdout : result.stdout.toString('utf8');
-  const listedModelId = qualifyListedModelId(route, modelId);
+  const listedModelId = qualifyListedModelId(entry, modelId);
   // Membership: delivered id appears as whitespace/comma-delimited token on some stdout line
   const tokens = stdout.split(/[\s,]+/).map((t) => t.trim()).filter((t) => t.length > 0);
-  // Also consider each line tokenization? Already split.
   if (tokens.includes(listedModelId)) {
-    recordVerifiedModel(userOpts, { driver, model: modelId, verified_at: new Date().toISOString() });
+    recordVerifiedModel(userOpts, { harness, model: modelId, verified_at: new Date().toISOString() });
     return { status: 'verified', note: null };
   }
   // Not found: refuse with nearest matches
   const nearest = nearestMatches(listedModelId, tokens, 3);
   const suggestion = nearest.length > 0 ? ` — did you mean ${nearest.map((n) => `"${n}"`).join(', ')}?` : '';
-  throw new DialError(`unknown model "${modelId}" (listed as "${listedModelId}") on ${driver}${suggestion}`);
+  throw new DialError(`unknown model "${modelId}" (listed as "${listedModelId}") on ${harness}${suggestion}`);
 }
 
-function routeForDriver(profile: ExecutorProfile, driver: string): { route: unknown; hasModelsCommand: boolean } | null {
-  const harness = profile.harness ?? 'standalone';
-  const routesForHarness = (profile.routes as Record<string, Record<string, unknown>>)[harness] ?? {};
-  for (const [key, r] of Object.entries(routesForHarness)) {
-    const alias = (r as { driver?: string }).driver ?? key;
-    if (alias === driver) return { route: r, hasModelsCommand: (r as { models_command?: unknown }).models_command != null };
-  }
-  return null;
+/** Whether the named harness can answer a dial-time model probe. */
+function harnessCanProbe(profile: ExecutorProfile, harness: string | null): boolean {
+  return harness != null && (profile.harnesses?.[harness]?.models_command ?? null) != null;
 }
 
 export interface DialSetOptions extends DialCommonOptions {
   archetype: string;
   model: string; // model[@effort]
-  via?: string | null;
+  harness?: string | null;
   session?: boolean;
   user?: boolean;
   repo?: boolean;
@@ -358,8 +375,10 @@ export interface DialSetResult {
   pinned_effort: string | null;
   /** The effort this dial runs at: the pin, else the registry default. */
   effective_effort: string;
-  /** The route's public name — the value `--via` takes. See `EffectiveRow.driver`. */
-  driver: string;
+  /** The EXECUTOR harness this dial resolved onto. See `EffectiveRow.harness`. */
+  harness: string | null;
+  /** The command-lane variant policy chose, or null for the base lane. */
+  variant: string | null;
   layer: 'session' | 'repo' | 'user';
   adaptive: boolean;
   repo_pinned: DialRef | null;
@@ -374,7 +393,7 @@ export interface DialSetManyOptions extends DialCommonOptions {
   /** Archetype names, already split (the CLI accepts `a+b`, `a,b`, and `a b`). */
   archetypes: string[];
   model: string;
-  via?: string | null;
+  harness?: string | null;
   session?: boolean;
   user?: boolean;
   repo?: boolean;
@@ -395,7 +414,7 @@ export function runDialSetMany(opts: DialSetManyOptions): DialSetResult[] {
     if (name.length > 0 && !archetypes.includes(name)) archetypes.push(name);
   }
   if (archetypes.length === 0) {
-    throw new DialError('Usage: fadeno dial <archetype>[+<archetype>…] <model>[@effort] [--via <driver>] [--session|--user|--repo] [--force]');
+    throw new DialError('Usage: fadeno dial <archetype>[+<archetype>…] <model>[@effort] [--harness <id>] [--session|--user|--repo] [--force]');
   }
   if ([opts.session, opts.user, opts.repo].filter(Boolean).length > 1) {
     throw new DialError('--session, --user, and --repo are mutually exclusive.');
@@ -403,27 +422,33 @@ export function runDialSetMany(opts: DialSetManyOptions): DialSetResult[] {
   const repoRoot = repoRootOf(opts);
   const modelInput = opts.model.trim();
   if (modelInput.length === 0) {
-    throw new DialError('Usage: fadeno dial <archetype>[+<archetype>…] <model>[@effort] [--via <driver>] [--session|--user|--repo] [--force]');
+    throw new DialError('Usage: fadeno dial <archetype>[+<archetype>…] <model>[@effort] [--harness <id>] [--session|--user|--repo] [--force]');
   }
   let dial: DialRef;
   try {
-    dial = buildDialRef(modelInput, opts.via?.trim() || undefined, `model "${modelInput}"`);
+    dial = buildDialRef(modelInput, opts.harness?.trim() || undefined, `model "${modelInput}"`);
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new DialError(err.message);
     throw err;
   }
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
-  let compiled: CompiledDelivery;
+  // The same two admissions `runDialSet` makes, in the same order, so a
+  // multi-archetype dial cannot be accepted on terms the single-archetype form
+  // would have refused: the named harness must be declared, and the ref must
+  // compile. Both throw; neither returns anything this function needs, which
+  // is why the compile result is discarded rather than named.
+  assertHarnessDeclared(profile, dial);
   try {
-    compiled = compileDialRef(dial, profile);
+    resolveDelivery(dial, profile);
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new DialError(err.message);
     throw err;
   }
-  const refString = formatDialRef(dial);
   // Atomic pre-validation: same checks runDialSet applies, over every
-  // archetype, before a single write.
+  // archetype, before a single write. Registry only — an archetype's
+  // eligibility on a LANE is a dispatch-time question, and refusing it here
+  // refused dials that resolve perfectly well on another lane or another host.
   const failures: string[] = [];
   for (const archetype of archetypes) {
     if (archetype === 'set' || archetype === 'clear' || archetype === 'shadow' || archetype === 'clear-shadow' || archetype === 'resolve') {
@@ -434,8 +459,6 @@ export function runDialSetMany(opts: DialSetManyOptions): DialSetResult[] {
       failures.push(`archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
       continue;
     }
-    const eligibilityConflict = explainEligibilityConflict({ executor: refString, spec: compiled.spec }, archetype);
-    if (eligibilityConflict != null) failures.push(eligibilityConflict);
   }
   if (failures.length > 0) {
     throw new DialError(
@@ -480,7 +503,7 @@ function providerNoveltyNote(params: {
   const archetypes = knownArchetypes(profile.archetypes, layers.session, layers.repo, layers.user);
   const providerOf = (ref: DialRef): void => {
     try {
-      const other = compileDialRef(ref, profile);
+      const other = resolveDelivery(ref, profile);
       if (other.provider != null) inUse.add(other.provider);
     } catch {
       // Unresolvable: vouches for nothing.
@@ -497,11 +520,7 @@ function providerNoveltyNote(params: {
   }
   for (const [other, attachment] of Object.entries(shadows)) {
     if (kind === 'shadow' && other === archetype) continue; // the attachment being replaced
-    providerOf({
-      model: attachment.model,
-      ...(attachment.effort ? { effort: attachment.effort } : {}),
-      ...(attachment.via ? { via: attachment.via } : {}),
-    });
+    providerOf(shadowAttachmentRef(attachment));
   }
   if (inUse.has(provider)) return null;
   const arrow = kind === 'shadow' ? '~' : '→';
@@ -566,89 +585,59 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
     throw new DialError(`archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
   }
   const modelInput = opts.model.trim();
-  if (modelInput.length === 0) throw new DialError('Usage: fadeno dial <archetype> <model>[@effort] [--via <driver>] [--session|--user|--repo] [--force]');
+  if (modelInput.length === 0) throw new DialError('Usage: fadeno dial <archetype> <model>[@effort] [--harness <id>] [--session|--user|--repo] [--force]');
   // Build dial ref
   let dial: DialRef;
   try {
-    dial = buildDialRef(modelInput, opts.via?.trim() || undefined, `model "${modelInput}"`);
+    dial = buildDialRef(modelInput, opts.harness?.trim() || undefined, `model "${modelInput}"`);
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new DialError(err.message);
     throw err;
   }
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
+  assertHarnessDeclared(profile, dial);
   // Compile before any state touch
   let compiled: CompiledDelivery;
   try {
-    compiled = compileDialRef(dial, profile);
+    compiled = resolveDelivery(dial, profile);
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new DialError(err.message);
     throw err;
   }
   const refString = formatDialRef(dial);
-  // Set-time checks. Eligibility only: a route's permissions are whatever its
-  // argv grants, and Fadeno no longer holds an opinion about that.
-  const eligibilityConflict = explainEligibilityConflict({ executor: refString, spec: compiled.spec }, archetype);
-  if (eligibilityConflict != null) throw new DialError(eligibilityConflict);
 
   // c. Verification probe
   let verification: VerificationStatus = null;
   let probeNote: string | null = null;
   const notes: string[] = [];
-  // `@effort` on a host delivery is a request, not a live setting — but what
-  // happens to that request splits by harness, and saying only the Codex half
-  // sent Claude users to a command that does nothing. Where the agent format
-  // carries an effort (Codex TOML), apply materializes the slot and a fresh
-  // session delivers it in-session. Where it does not (Claude's Agent tool has
-  // no effort channel), apply writes nothing and the pin instead moves the
-  // delivery to the command lane — which for a write-required archetype on a
-  // host route means no deliverable lane at all, so name that here rather than
-  // letting it surface as a refusal at dispatch time.
-  if (dial.effort != null && deliveryIsHost(compiled)) {
-    if (hostEffortIsMaterializable(profile.harness ?? 'standalone')) {
-      notes.push(
-        `note: ${compiled.driver} host route — effort ${compiled.effectiveEffort} is recorded as the request; run \`fadeno steering apply\` to pin it into the host agent slots, then start a fresh session`,
-      );
-    } else if (!commandRoutable(compiled.spec)) {
-      // No lane to move to either: `current-host` and any host route with no
-      // `fallback_command`. The pin is simply inert — worth saying plainly,
-      // because silence here reads as "recorded", which is what the old note
-      // claimed for every harness.
-      notes.push(
-        `note: ${compiled.driver} host route — a ${profile.harness ?? 'host'} agent carries no effort and this ` +
-        `route has no command lane, so ${archetype} runs in-session at the session's own effort and the ` +
-        `${compiled.effectiveEffort} pin has no effect. \`fadeno steering apply\` writes nothing here.`,
-      );
-    } else {
-      notes.push(
-        `note: ${compiled.driver} host route — a ${profile.harness ?? 'host'} agent carries no effort, so pinning ` +
-        `${compiled.effectiveEffort} selects the DELIVERY LANE instead: ${archetype} leaves the session for this ` +
-        'route\'s command lane whenever the session is running at a different effort. `fadeno steering apply` ' +
-        'writes nothing here.',
-      );
-    }
-  }
+  // Set time validates against the REGISTRY and nothing else. It used to also
+  // compile the dial against the ambient host and narrate the lane a pinned
+  // effort would take — which made `fadeno dial worker opus@xhigh` print a
+  // different story depending on which terminal you typed it in, for a dial
+  // that is stored host-neutrally and re-resolved at every dispatch. The lane
+  // is a property of the CALL, so it is answered by `dial resolve` and by the
+  // dispatch kernel, where a host actually exists.
   if (!compiled.registered) {
     notes.push(
-      `note: ${compiled.model} is not in the model registry — routing via ${compiled.driver}, id passed verbatim ` +
-        '(declare it under models: to set a home driver or standard effort)',
+      `note: ${compiled.model} is not in the model registry — running on ${compiled.harness}, id passed verbatim ` +
+        '(declare it under models: to set a home harness or standard effort)',
     );
   }
-  // Skip for current-host silently; a registered model on a driver with no
-  // models_command also skips silently (probing is for drivers that can answer).
-  const shouldProbe = compiled.model !== 'current-host' && compiled.driver !== 'current-host';
-  const routeInfo = routeForDriver(profile, compiled.driver);
-  const hasModelsCommand = routeInfo?.hasModelsCommand ?? false;
+  // Skip for current-host silently; a registered model on a harness with no
+  // models_command also skips silently (probing is for harnesses that answer).
+  const shouldProbe = compiled.model !== 'current-host' && compiled.harness != null;
+  const hasModelsCommand = harnessCanProbe(profile, compiled.harness);
   if (shouldProbe) {
     if (!hasModelsCommand) {
       if (!compiled.registered) {
-        probeNote = `note: cannot verify ${compiled.modelId} on ${compiled.driver} (no models_command declared) — dialing unverified`;
+        probeNote = `note: cannot verify ${compiled.modelId} on ${compiled.harness} (no models_command declared) — dialing unverified`;
         verification = 'unverified';
       }
     } else {
       // Has models_command, do probe
       try {
-        const probe = probeModel(profile, compiled.driver, compiled.modelId, { spawn: opts.spawn, userPathOptions: opts.userPathOptions });
+        const probe = probeModel(profile, compiled.harness!, compiled.modelId, { spawn: opts.spawn, userPathOptions: opts.userPathOptions });
         verification = probe.status;
         probeNote = probe.note;
       } catch (err) {
@@ -785,7 +774,8 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
     effort: compiled.effectiveEffort,
     pinned_effort: compiled.pinnedEffort,
     effective_effort: compiled.effectiveEffort,
-    driver: compiled.driver,
+    harness: compiled.harness,
+    variant: compiled.variant,
     layer,
     adaptive,
     repo_pinned: repoPinned,
@@ -986,7 +976,7 @@ export function runDialClear(opts: DialClearOptions = {}): DialClearResult {
 export interface DialShadowOptions extends DialCommonOptions {
   archetype: string;
   model: string;
-  via?: string | null;
+  harness?: string | null;
   rate?: number | string | null;
   n?: number | string | null;
   spawn?: ProbeOptions['spawn'];
@@ -1009,7 +999,10 @@ export interface DialShadowResult {
    * default is the command-lane default, never an inherited session effort.
    */
   effective_effort: string;
-  driver: string;
+  /** The EXECUTOR harness the challenger resolved onto. */
+  harness: string | null;
+  /** The command-lane variant policy chose for the challenger. */
+  variant: string | null;
   rate: number | null;
   n: number | null;
   remaining: number | null;
@@ -1032,10 +1025,10 @@ export function runDialShadow(opts: DialShadowOptions): DialShadowResult {
     throw new DialError(`archetype "${archetype}" is not a bare lowercase identifier (${BARE_IDENTIFIER_RE.source}).`);
   }
   const modelInput = opts.model.trim();
-  if (modelInput.length === 0) throw new DialError('Usage: fadeno dial shadow <archetype> <model>[@effort] [--via <driver>] [--rate <r>] [--n <count>]');
+  if (modelInput.length === 0) throw new DialError('Usage: fadeno dial shadow <archetype> <model>[@effort] [--harness <id>] [--rate <r>] [--n <count>]');
   let dial: DialRef;
   try {
-    dial = buildDialRef(modelInput, opts.via?.trim() || undefined, `model "${modelInput}"`);
+    dial = buildDialRef(modelInput, opts.harness?.trim() || undefined, `model "${modelInput}"`);
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new DialError(err.message);
     throw err;
@@ -1060,14 +1053,24 @@ export function runDialShadow(opts: DialShadowOptions): DialShadowResult {
   }
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
+  assertHarnessDeclared(profile, dial);
   let compiled: CompiledDelivery;
   try {
-    compiled = compileDialRef(dial, profile);
+    compiled = resolveDelivery(dial, profile, profile.host ?? 'standalone', { archetype });
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new DialError(err.message);
     throw err;
   }
-  // Shadows are command deliveries only
+  // Shadows are command deliveries only.
+  //
+  // `deliveryIsHost`, deliberately, and it is the one place `hostCandidateOf`
+  // would be WRONG. That predicate asks "can this go out in-session", and its
+  // answer is `false` for exactly the shapes with no argv at all
+  // (`current-host` in a bare shell, a host-only harness named from another
+  // host) — so keying on it would ADMIT as a challenger a delivery that has
+  // no command lane to be paired on, and the refusal would surface later as a
+  // dispatch failure instead of at attach time. `spec.adapter === 'host'` is
+  // the shape question here, not the lane question, and it is the strict side.
   if (deliveryIsHost(compiled)) {
     throw new DialError(`shadow for "${archetype}" must be a command delivery — host shadows are not dispatchable`);
   }
@@ -1079,20 +1082,19 @@ export function runDialShadow(opts: DialShadowOptions): DialShadowResult {
     throw new DialError(conflict ?? `archetype "${archetype}" is forbidden on model "${compiled.model}"`);
   }
   // Probe with the same rules as `set`: silent skip for registered models on
-  // a driver with no models_command; loud advisories otherwise.
+  // a harness with no models_command; loud advisories otherwise.
   const notes: string[] = [];
   if (!compiled.registered) {
     notes.push(
-      `note: ${compiled.model} is not in the model registry — routing via ${compiled.driver}, id passed verbatim ` +
-        '(declare it under models: to set a home driver or standard effort)',
+      `note: ${compiled.model} is not in the model registry — running on ${compiled.harness}, id passed verbatim ` +
+        '(declare it under models: to set a home harness or standard effort)',
     );
   }
-  const routeInfo = routeForDriver(profile, compiled.driver);
-  const hasModelsCommand = routeInfo?.hasModelsCommand ?? false;
+  const hasModelsCommand = harnessCanProbe(profile, compiled.harness);
   if (!compiled.registered && !hasModelsCommand) {
-    notes.push(`note: cannot verify ${compiled.modelId} on ${compiled.driver} (no models_command declared) — attaching unverified`);
+    notes.push(`note: cannot verify ${compiled.modelId} on ${compiled.harness} (no models_command declared) — attaching unverified`);
   } else if (hasModelsCommand) {
-    const probe = probeModel(profile, compiled.driver, compiled.modelId, { spawn: opts.spawn, userPathOptions: opts.userPathOptions });
+    const probe = probeModel(profile, compiled.harness!, compiled.modelId, { spawn: opts.spawn, userPathOptions: opts.userPathOptions });
     if (probe.note != null) notes.push(probe.note);
   }
 
@@ -1125,7 +1127,7 @@ export function runDialShadow(opts: DialShadowOptions): DialShadowResult {
   const nextAttachment: ShadowAttachment = {
     model: dial.model,
     ...(dial.effort ? { effort: dial.effort } : {}),
-    ...(dial.via ? { via: dial.via } : {}),
+    ...(dial.harness ? { harness: dial.harness } : {}),
     ...(rate != null ? { rate } : {}),
     ...(n != null ? { n, remaining: n } : {}),
   };
@@ -1142,10 +1144,11 @@ export function runDialShadow(opts: DialShadowOptions): DialShadowResult {
   const { previous, nextShadows, path } = written;
   const shadow_attachments: Record<string, ShadowAttachmentView> = {};
   for (const [key, att] of Object.entries(nextShadows)) {
-    // Compile to get model id/driver for view? Use att's dial compile if possible
+    // Compile to get the model id and harness for the view, when the
+    // attachment's dial still resolves.
     try {
-      const d: DialRef = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.via ? { via: att.via } : {}) };
-      const c = compileDialRef(d, profile);
+      const d: DialRef = shadowAttachmentRef(att);
+      const c = resolveDelivery(d, profile);
       shadow_attachments[key] = shadowAttachmentView(att, c);
     } catch {
       shadow_attachments[key] = shadowAttachmentView(att);
@@ -1160,7 +1163,8 @@ export function runDialShadow(opts: DialShadowOptions): DialShadowResult {
     effort: compiled.effectiveEffort,
     pinned_effort: compiled.pinnedEffort,
     effective_effort: compiled.effectiveEffort,
-    driver: compiled.driver,
+    harness: compiled.harness,
+    variant: compiled.variant,
     rate: rate ?? null,
     n: n ?? null,
     remaining: n ?? null,
@@ -1228,8 +1232,8 @@ export function runDialClearShadow(opts: DialClearShadowOptions = {}): DialClear
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   for (const [key, att] of Object.entries(nextShadows)) {
     try {
-      const d: DialRef = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.via ? { via: att.via } : {}) };
-      const c = compileDialRef(d, layered.profile);
+      const d: DialRef = shadowAttachmentRef(att);
+      const c = resolveDelivery(d, layered.profile);
       shadow_attachments[key] = shadowAttachmentView(att, c);
     } catch {
       shadow_attachments[key] = shadowAttachmentView(att);
@@ -1243,7 +1247,7 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
   const repoRoot = repoRootOf(opts);
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
-  const harness = profile.harness ?? 'standalone';
+  const host = profile.host ?? 'standalone';
   const dialState = (() => {
     try {
       return readLocalDialState(repoRoot);
@@ -1278,11 +1282,11 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
   // Build shadow attachments for table
   for (const [arch, att] of Object.entries(shadows)) {
     try {
-      const d: DialRef = { model: att.model, ...(att.effort ? { effort: att.effort } : {}), ...(att.via ? { via: att.via } : {}) };
-      const c = compileDialRef(d, profile);
+      const d: DialRef = shadowAttachmentRef(att);
+      const c = resolveDelivery(d, profile);
       shadow_attachments[arch] = shadowAttachmentView(att, c);
     } catch {
-      // stale driver etc -> mark stale
+      // unknown harness etc -> mark stale
       staleShadows.push({ archetype: arch, target: att.model });
     }
   }
@@ -1298,9 +1302,9 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
     }
     let compiled: CompiledDelivery;
     try {
-      compiled = compileDialRef(cascade.ref, profile);
+      compiled = resolveDelivery(cascade.ref, profile);
     } catch {
-      // Unknown driver etc -> stale dial
+      // Unknown harness etc -> stale dial
       staleDials.push({ archetype, target: formatDialRef(cascade.ref) });
       continue;
     }
@@ -1328,7 +1332,9 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
       effort: cascade.resolvedVia != null ? '—' : effort,
       pinned_effort: compiled.pinnedEffort,
       effective_effort: compiled.effectiveEffort,
-      driver: compiled.driver,
+      harness: compiled.harness,
+      harness_explicit: cascade.ref.harness != null,
+      variant: compiled.variant,
       source: cascade.source,
       resolvedVia: cascade.resolvedVia,
       dial: cascade.ref,
@@ -1354,9 +1360,10 @@ export function runDialShow(opts: DialCommonOptions = {}): DialShowResult {
     staleShadows,
     staleDials,
     legacy_pin_note,
+    legacy_via_note: dialState.legacyViaNote ?? null,
     suppressed_canon_archetypes,
     note,
-    harness,
+    host,
     legacyPinNote: legacy_pin_note,
   };
 }
@@ -1405,9 +1412,28 @@ export interface DialResolveResult {
   session_effort: string | null;
   lane: DeliveryLane;
   lane_reason: LaneReason;
-  driver: string;
+  /**
+   * The EXECUTOR harness this dial resolved onto: `claude`, `codex`,
+   * `opencode`… Replaces `driver`, which named the same thing in a vocabulary
+   * that no longer exists.
+   *
+   * `null` only for `current-host` with no host — a bare shell. The base dial
+   * names whatever session is running, and there is none; printing
+   * `standalone` here would name a value that is not in `harnesses:`.
+   */
+  harness: string | null;
+  /** The command-lane variant policy chose, or null for the base lane. */
+  variant: string | null;
   adapter: 'command' | 'host';
-  harness: string;
+  /**
+   * The ambient HOST — the harness this call is running inside, `standalone`
+   * from a bare shell. Discovered per call, never stored.
+   *
+   * This key used to be `harness` and meant the host, while `driver` meant the
+   * executor. Both names moved at once so no reader can be right about one and
+   * wrong about the other.
+   */
+  host: string;
   source: RoleResolutionSource;
   resolved_via?: string;
 
@@ -1542,7 +1568,10 @@ function deliveryGuidance(
       `Do NOT dispatch. Host executor "${executorName}" declares no fallback_command, so ad-hoc dispatch has ` +
       `nothing to invoke. Either spawn the in-session ${archetype} agent — which writes a host_delivery row but ` +
       'no dispatch id or terminal receipt, has no isolated worktree, and forms no shadow pair — or give it a ' +
-      `command lane: \`fadeno dial ${archetype} ${executorName} --via <driver>\`.`,
+      // `<model>` for the sentinel, exactly as `dispatch.ts` does: naming a
+      // harness beside `current-host` is advice that cannot be followed, since
+      // the base dial names the session and ignores a harness entirely.
+      `command lane: \`fadeno dial ${archetype} ${executorName === 'current-host' ? '<model>' : executorName} --harness <id>\`.`,
   };
 }
 
@@ -1550,7 +1579,7 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
   const repoRoot = repoRootOf(opts);
   const layered = loadLayered(repoRoot, opts.userPathOptions);
   const profile = layered.profile;
-  const harness = profile.harness ?? 'standalone';
+  const host = profile.host ?? 'standalone';
   const archetype = opts.archetype.trim();
   if (archetype === 'set' || archetype === 'clear' || archetype === 'shadow' || archetype === 'clear-shadow' || archetype === 'resolve') {
     throw new DialError(`archetype "${archetype}" is a reserved word — rename the archetype`);
@@ -1587,11 +1616,7 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
   const attachment = dialState.shadows[archetype];
   let shadow: DialResolveResult['shadow'];
   if (attachment != null) {
-    const challenger = formatDialRef({
-      model: attachment.model,
-      ...(attachment.effort ? { effort: attachment.effort } : {}),
-      ...(attachment.via ? { via: attachment.via } : {}),
-    });
+    const challenger = formatDialRef(shadowAttachmentRef(attachment));
     const digest = opts.promptSha256?.trim();
     const rate = attachment.rate ?? null;
     const expired = shadowAttachmentExpired(attachment);
@@ -1620,10 +1645,10 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
   // text points at the line to fix.
   const relay = (() => {
     try {
-      return resolveRelay(profile, harness);
+      return resolveRelay(profile, host);
     } catch (err) {
       if (err instanceof ExecutorProfileError) {
-        throw new DialError(`relay.${harness}: ${err.message}`);
+        throw new DialError(`harnesses.${host}.host.relay: ${err.message}`);
       }
       throw err;
     }
@@ -1640,12 +1665,13 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
       pinnedEffort: resolved.delivery.pinnedEffort,
       effectiveEffort: resolved.delivery.effectiveEffort,
       sessionEffort: readSessionEffort(opts.env ?? process.env),
-      hostModel: deliveryIsHost(resolved.delivery),
+      hostModel: resolved.delivery.hostCandidate,
       commandLane: commandRoutable(spec),
     }),
-    driver: resolved.delivery.driver,
+    harness: resolved.delivery.harness,
+    variant: resolved.delivery.variant,
     adapter: spec.adapter,
-    harness,
+    host,
     source: resolved.source,
     ...(resolved.resolvedVia != null ? { resolved_via: resolved.resolvedVia } : {}),
     ...(layered.selfContained && layered.modelFallback.promoted.includes(resolved.delivery.model)
@@ -1682,9 +1708,9 @@ export function runDialResolve(opts: DialCommonOptions & { archetype: string; pr
  * its command-lane default and inherits no session effort at all.
  */
 export function formatShadowLine(shadow: ShadowAttachmentView, baseIndent: string): string {
-  const via = shadow.via ? ` via ${shadow.via}` : '';
+  const on = shadow.harness ? ` on ${shadow.harness}` : '';
   const effort = shadow.effort ? ` @ ${shadow.effort}` : '';
-  const model = `${shadow.model}${effort}${via}`;
+  const model = `${shadow.model}${effort}${on}`;
   const rate = shadow.rate != null ? ` rate ${shadow.rate}` : '';
   const budget = shadow.n != null
     ? shadow.expired
@@ -1740,8 +1766,8 @@ export function offHostLanes(
   return refStrings.map((refString) => {
     if (refString == null) return null;
     try {
-      const compiled = compileDialRef(parseDialRef(refString, `dial "${refString}"`), profile);
-      const hostModel = deliveryIsHost(compiled);
+      const compiled = resolveDelivery(parseDialRef(refString, `dial "${refString}"`), profile);
+      const hostModel = compiled.hostCandidate;
       const decision = decideLane({
         pinnedEffort: compiled.pinnedEffort,
         effectiveEffort: compiled.effectiveEffort,
@@ -1757,13 +1783,23 @@ export function offHostLanes(
       // just said does not exist. `hostEffortProven` is deliberately not
       // passed: it needs a `--host-executor` this echo never has, so the echo
       // degrades to the stricter answer rather than claiming proof.
-      // A delivery that was never a host candidate is suppressed for DISPLAY
-      // only — the decision above is still the resolver's. A command executor
-      // leaves the session because of its model, which the reader can already
-      // see on the same line; annotating it with an effort-shaped label would
-      // misattribute the cause. This is a rendering filter, never a second
-      // predicate: nothing here can turn an off-host answer into a host one.
-      return decision.lane === 'host' || !hostModel ? null : decision;
+      // A delivery that was never a host candidate AND has a command lane is
+      // suppressed for DISPLAY only — the decision above is still the
+      // resolver's. A command executor leaves the session because of its
+      // model, which the reader can already see on the same line; annotating
+      // it with an effort-shaped label would misattribute the cause.
+      //
+      // `restart_required` is never suppressed, host candidate or not: it is
+      // the one answer that says the delivery is going NOWHERE, and a reader
+      // who is not told that has no way to find out. Under v4 that shape is
+      // more common than it was — `current-host` in a bare shell is not a host
+      // candidate at all, because a bare shell has no session to deliver in.
+      //
+      // This is a rendering filter, never a second predicate: nothing here can
+      // turn an off-host answer into a host one.
+      if (decision.lane === 'host') return null;
+      if (decision.lane === 'restart_required') return decision;
+      return hostModel ? decision : null;
     } catch {
       return null;
     }

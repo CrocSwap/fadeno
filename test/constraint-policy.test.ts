@@ -9,7 +9,7 @@ import {
 } from '../src/lib/constraints.ts';
 import {
   BARE_IDENTIFIER_RE,
-  compileDialRef,
+  resolveDelivery,
   ExecutorProfileError,
   eligibilityFor,
   explainEligibilityConflict,
@@ -26,7 +26,7 @@ function parseDoc(doc: Record<string, unknown>): ExecutorProfile {
 }
 
 function specForModel(profile: ExecutorProfile, model: string) {
-  return compileDialRef({ model }, profile).spec;
+  return resolveDelivery({ model }, profile).spec;
 }
 
 function producer(over: Partial<InputProducer> = {}): InputProducer {
@@ -71,9 +71,9 @@ function fakeSpawn(partial: {
 
 test('archetypes: advisory and required distinct_provider_from_inputs parse; absent is null', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     archetypes: {
       reviewer: { distinct_provider_from_inputs: 'advisory' },
       judge: { distinct_provider_from_inputs: 'required' },
@@ -92,9 +92,9 @@ test('archetypes: a bad distinct_provider_from_inputs value lists both forms', (
   for (const bad of ['yes', 'true', 'Advisory', 1, null, false]) {
     assert.throws(
       () => parseDoc({
-        schema_version: 3,
+        schema_version: 4,
         models: { sol: { provider: 'openai' } },
-        routes: { standalone: { openai: { command: ['codex'] } } },
+        harnesses: { codex: { provider: 'openai', command: ['codex'] } },
         archetypes: { reviewer: { distinct_provider_from_inputs: bad } },
       }),
       (err: unknown) =>
@@ -110,9 +110,9 @@ test('archetypes: a bad distinct_provider_from_inputs value lists both forms', (
 test('archetypes: unknown keys name the whole allowed set', () => {
   assert.throws(
     () => parseDoc({
-      schema_version: 3,
+      schema_version: 4,
       models: { sol: { provider: 'openai' } },
-      routes: { standalone: { openai: { command: ['codex'] } } },
+      harnesses: { codex: { provider: 'openai', command: ['codex'] } },
       archetypes: { worker: { requires_network: true } },
     }),
     (err: unknown) =>
@@ -122,9 +122,9 @@ test('archetypes: unknown keys name the whole allowed set', () => {
   );
   assert.throws(
     () => parseDoc({
-      schema_version: 3,
+      schema_version: 4,
       models: { sol: { provider: 'openai' } },
-      routes: { standalone: { openai: { command: ['codex'] } } },
+      harnesses: { codex: { provider: 'openai', command: ['codex'] } },
       archetypes: { worker: 'yes' },
     }),
     /`archetypes\.worker` is not a mapping \(only `ignored_output`, `fallback`, `distinct_provider_from_inputs`, and `brief` are allowed\)/,
@@ -136,30 +136,30 @@ test('archetypes: unknown keys name the whole allowed set', () => {
 test('eligibility: v3 models compile the map onto both native and command branches', () => {
   const expected = { worker: 'eligible', reviewer: 'shadow_only', judge: 'forbidden' };
   const cmdProfile = parseExecutorProfile(stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { opus: { provider: 'anthropic', id: 'opus', eligibility: expected } },
-    routes: { standalone: { anthropic: { command: ['claude','-p'] } } },
+    harnesses: { claude: { provider: 'anthropic', command: ['claude', '-p'] } },
   }), 'v3.yaml', 'standalone');
   assert.deepEqual(cmdProfile.models.opus!.eligibility, expected);
-  const compiledCmd = compileDialRef({ model: 'opus' }, cmdProfile);
+  const compiledCmd = resolveDelivery({ model: 'opus' }, cmdProfile);
   assert.deepEqual(compiledCmd.spec.eligibility, expected);
   assert.equal(compiledCmd.spec.adapter, 'command');
   const hostProfile = parseExecutorProfile(stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { opus: { provider: 'anthropic', id: 'opus', eligibility: expected } },
-    routes: { claude: { anthropic: { host: true } }, standalone: { anthropic: { command: ['claude'] } } },
+    harnesses: { claude: { provider: 'anthropic', host: { effort_channel: 'none' }, command: ['claude'] } },
   }), 'v3.yaml', 'claude');
   assert.deepEqual(hostProfile.models.opus!.eligibility, expected);
-  const compiledHost = compileDialRef({ model: 'opus' }, hostProfile);
+  const compiledHost = resolveDelivery({ model: 'opus' }, hostProfile);
   assert.deepEqual(compiledHost.spec.eligibility, expected);
   assert.equal(compiledHost.spec.adapter, 'host');
 });
 
 test('eligibility: snapshot entries preserve eligibility', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { gated: { provider: 'openai', eligibility: { worker: 'eligible', judge: 'forbidden', reviewer: 'shadow_only' } } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
   });
   const snapText = serializeSnapshot(profile);
   const doc = parseSnapshotDocument(snapText, 'snap.yaml');
@@ -170,9 +170,9 @@ test('eligibility: a bad state lists the three; keys must be bare identifiers', 
   for (const bad of ['yes', 'Eligible', 'deny', 1, null, true]) {
     assert.throws(
       () => parseDoc({
-        schema_version: 3,
+        schema_version: 4,
         models: { gated: { provider: 'openai', eligibility: { worker: bad as unknown as string } } },
-        routes: { standalone: { openai: { command: ['codex'] } } },
+        harnesses: { codex: { provider: 'openai', command: ['codex'] } },
       }),
       (err: unknown) =>
         err instanceof ExecutorProfileError &&
@@ -185,9 +185,9 @@ test('eligibility: a bad state lists the three; keys must be bare identifiers', 
   }
   assert.throws(
     () => parseDoc({
-      schema_version: 3,
+      schema_version: 4,
       models: { gated: { provider: 'openai', eligibility: { Worker: 'eligible' } } },
-      routes: { standalone: { openai: { command: ['codex'] } } },
+      harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     }),
     (err: unknown) =>
       err instanceof ExecutorProfileError &&
@@ -196,9 +196,9 @@ test('eligibility: a bad state lists the three; keys must be bare identifiers', 
   );
   assert.throws(
     () => parseDoc({
-      schema_version: 3,
+      schema_version: 4,
       models: { gated: { provider: 'openai', eligibility: ['worker'] as unknown as Record<string,string> } },
-      routes: { standalone: { openai: { command: ['codex'] } } },
+      harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     }),
     /model "gated" `eligibility` is not a mapping/,
   );
@@ -208,27 +208,27 @@ test('eligibility: a bad state lists the three; keys must be bare identifiers', 
 
 test('constraints: a valid command parses; absent is null', () => {
   const withCmd = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     constraints: { command: ['node', '.fadeno/constraints.mjs'] },
   });
   assert.deepEqual(withCmd.constraints, { command: ['node', '.fadeno/constraints.mjs'] });
-  assert.equal(parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { openai: { command: ['codex'] } } } }).constraints, null);
+  assert.equal(parseDoc({ schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['codex'] } } }).constraints, null);
 });
 
 test('constraints: only command is allowed; argv must be a non-empty string array', () => {
   assert.throws(
     () => parseDoc({
-      schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { openai: { command: ['codex'] } } }, constraints: 'node' as unknown as Record<string,unknown>,
+      schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['codex'] } }, constraints: 'node' as unknown as Record<string,unknown>,
     }),
     /`constraints` is not a mapping \(only `command` is allowed\)/,
   );
   assert.throws(
     () => parseDoc({
-      schema_version: 3,
+      schema_version: 4,
       models: { sol: { provider: 'openai' } },
-      routes: { standalone: { openai: { command: ['codex'] } } },
+      harnesses: { codex: { provider: 'openai', command: ['codex'] } },
       constraints: { command: ['node'], extra: true } as unknown as Record<string,unknown>,
     }),
     /`constraints` has unknown key\(s\) extra; only `command` is allowed/,
@@ -236,9 +236,9 @@ test('constraints: only command is allowed; argv must be a non-empty string arra
   for (const bad of [undefined, [], [''], ['node', ''], 'node', 1, null]) {
     assert.throws(
       () => parseDoc({
-        schema_version: 3,
+        schema_version: 4,
         models: { sol: { provider: 'openai' } },
-        routes: { standalone: { openai: { command: ['codex'] } } },
+        harnesses: { codex: { provider: 'openai', command: ['codex'] } },
         constraints: { command: bad } as unknown as Record<string,unknown>,
       }),
       /`constraints\.command` must be a non-empty array of non-empty strings/,
@@ -251,12 +251,12 @@ test('constraints: only command is allowed; argv must be a non-empty string arra
 
 test('eligibilityFor: defaults to eligible; hasOwn-hardens prototype keys', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { gated: { provider: 'openai', eligibility: { reviewer: 'shadow_only', constructor: 'forbidden' } } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
   });
   const gated = specForModel(profile, 'gated');
-  const bare = specForModel(parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { openai: { command: ['codex'] } } } }), 'sol');
+  const bare = specForModel(parseDoc({ schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['codex'] } } }), 'sol');
   assert.equal(eligibilityFor(bare, 'worker'), 'eligible');
   assert.equal(eligibilityFor(bare, null), 'eligible');
   assert.equal(eligibilityFor(gated, 'reviewer'), 'shadow_only');
@@ -270,9 +270,9 @@ test('eligibilityFor: defaults to eligible; hasOwn-hardens prototype keys', () =
 
 test('explainEligibilityConflict: forbidden refuses; shadow_only and eligible do not', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { gated: { provider: 'openai', eligibility: { judge: 'forbidden', reviewer: 'shadow_only', worker: 'eligible' } } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
   });
   const delivery = { executor: 'gated', spec: specForModel(profile, 'gated') };
 
@@ -295,9 +295,9 @@ test('explainEligibilityConflict: forbidden refuses; shadow_only and eligible do
 
 test('explainProviderConflict: null policy or empty producers is no check', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     archetypes: {
       reviewer: { distinct_provider_from_inputs: 'required' },
       worker: { },
@@ -313,9 +313,9 @@ test('explainProviderConflict: null policy or empty producers is no check', () =
 
 test('explainProviderConflict: declared-archetype only — fallback does not import policy', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     archetypes: {
       scout: { fallback: 'reviewer' },
       reviewer: { distinct_provider_from_inputs: 'required' },
@@ -330,15 +330,15 @@ test('explainProviderConflict: declared-archetype only — fallback does not imp
 
 test('explainProviderConflict: clash refuses under required and warns under advisory', () => {
   const required = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     archetypes: { reviewer: { distinct_provider_from_inputs: 'required' } },
   });
   const advisory = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     archetypes: { reviewer: { distinct_provider_from_inputs: 'advisory' } },
   });
   const clash = [producer({ dispatchId: 'disp-9', executor: 'opus-xhigh', provider: 'anthropic' })];
@@ -369,15 +369,15 @@ test('explainProviderConflict: clash refuses under required and warns under advi
 
 test('explainProviderConflict: unresolvable provenance refuses under required and warns under advisory', () => {
   const required = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     archetypes: { reviewer: { distinct_provider_from_inputs: 'required' } },
   });
   const advisory = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     archetypes: { reviewer: { distinct_provider_from_inputs: 'advisory' } },
   });
   const unknownProducer = [producer({ dispatchId: 'disp-3', provider: null })];
@@ -408,9 +408,9 @@ test('explainProviderConflict: unresolvable provenance refuses under required an
 
 test('explainProviderConflict: distinct providers pass; a later clash still fires', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     archetypes: { reviewer: { distinct_provider_from_inputs: 'required' } },
   });
   assert.equal(
@@ -432,9 +432,9 @@ test('explainProviderConflict: distinct providers pass; a later clash still fire
 
 test('serializeSnapshot: eligibility, distinct_provider, and constraints round-trip', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { gated: { provider: 'openai', eligibility: { worker: 'eligible', judge: 'forbidden', reviewer: 'shadow_only' } } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     archetypes: {
       reviewer: { distinct_provider_from_inputs: 'advisory' },
       judge: { distinct_provider_from_inputs: 'required', fallback: 'reviewer' },
@@ -459,9 +459,9 @@ test('serializeSnapshot: eligibility, distinct_provider, and constraints round-t
   assert.match(solBlock, /eligibility:/);
 
   const omitted = serializeSnapshot(parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     archetypes: { worker: { } },
   }));
   assert.match(omitted, /snapshot_version: 3/);
@@ -470,7 +470,7 @@ test('serializeSnapshot: eligibility, distinct_provider, and constraints round-t
   // snapshot without eligibility entries should not contain eligibility for empty spec
   // we check that no eligibility block appears for a plain model
   // Instead verify constraints omitted when null
-  const plainProfile = parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { openai: { command: ['codex'] } } } });
+  const plainProfile = parseDoc({ schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['codex'] } } });
   const plainSnap = serializeSnapshot(plainProfile);
   assert.doesNotMatch(plainSnap, /distinct_provider_from_inputs:/);
   assert.doesNotMatch(plainSnap, /constraints:/);
@@ -484,7 +484,7 @@ test('serializeSnapshot: eligibility, distinct_provider, and constraints round-t
 // --- evaluateConstraint ---
 
 test('evaluateConstraint: no constraints allows without spawning', () => {
-  const profile = parseDoc({ schema_version: 3, models: { sol: { provider: 'openai' } }, routes: { standalone: { openai: { command: ['codex'] } } } });
+  const profile = parseDoc({ schema_version: 4, models: { sol: { provider: 'openai' } }, harnesses: { codex: { provider: 'openai', command: ['codex'] } } });
   let called = false;
   const verdict = evaluateConstraint(profile, CONTEXT, {
     cwd: '/tmp/repo',
@@ -499,9 +499,9 @@ test('evaluateConstraint: no constraints allows without spawning', () => {
 
 test('evaluateConstraint: exit 0 allows and feeds JSON context on stdin', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     constraints: { command: ['node', '.fadeno/constraints.mjs'] },
   });
   let captured: { cmd: unknown; args: unknown; opts: { cwd?: string; input?: string } } | null = null;
@@ -522,9 +522,9 @@ test('evaluateConstraint: exit 0 allows and feeds JSON context on stdin', () => 
 
 test('evaluateConstraint: exit 2 refuses with trimmed stderr or the fixed fallback', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     constraints: { command: ['node', '.fadeno/constraints.mjs'] },
   });
   assert.deepEqual(
@@ -545,9 +545,9 @@ test('evaluateConstraint: exit 2 refuses with trimmed stderr or the fixed fallba
 
 test('evaluateConstraint: any other exit, signal, or spawn failure throws ConstraintError', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     constraints: { command: ['node', '.fadeno/constraints.mjs'] },
   });
   assert.throws(

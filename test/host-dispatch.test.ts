@@ -75,16 +75,11 @@ function seedPendingHostRun(t: import('node:test').TestContext): { root: string;
   writeFileSync(join(root, 'agent-1.md'), 'agent one');
   writeFileSync(join(root, 'agent-3.md'), 'agent three');
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       luna: { provider: 'dummy', id: 'gpt-5.6-luna', effort: 'xhigh' },
     },
-    routes: {
-      standalone: { dummy: { host: true }, 'current-host': { host: true } },
-      codex: { dummy: { host: true }, 'current-host': { host: true } },
-      claude: { dummy: { host: true }, 'current-host': { host: true } },
-      grok: { dummy: { host: true }, 'current-host': { host: true } },
-    },
+    harnesses: { dummy: { provider: 'dummy', host: { effort_channel: 'none' } } },
     archetypes: { worker: {} },
     bindings: { agent_1: 'luna', agent_3: 'luna' },
   }));
@@ -100,14 +95,9 @@ function seedTypedPendingHostRun(t: import('node:test').TestContext) {
   writeFileSync(join(root, '.fadeno', 'playbooks', 'host-repair-fixture.yaml'), REPAIR_PLAYBOOK);
   writeFileSync(join(root, 'agent-1.md'), 'structured work');
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { luna: { provider: 'dummy', id: 'gpt-5.6-luna', effort: 'xhigh' } },
-    routes: {
-      standalone: { dummy: { host: true }, 'current-host': { host: true } },
-      codex: { dummy: { host: true }, 'current-host': { host: true } },
-      claude: { dummy: { host: true }, 'current-host': { host: true } },
-      grok: { dummy: { host: true }, 'current-host': { host: true } },
-    },
+    harnesses: { dummy: { provider: 'dummy', host: { effort_channel: 'none' } } },
     archetypes: { worker: {} },
     bindings: { agent_1: 'luna' },
   }));

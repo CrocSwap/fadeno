@@ -41,15 +41,11 @@ function seedExecutor(t: TestContext, command: string[]): string {
   writeFileSync(
     join(root, '.fadeno', 'executors.yaml'),
     stringifyYaml({
-      schema_version: 3,
+      schema_version: 4,
       models: {
         probe: { provider: 'openai', id: 'probe', effort: 'default' },
       },
-      routes: {
-        standalone: { openai: { command, } },
-        codex: { openai: { command, } },
-        claude: { openai: { command, } },
-      },
+      harnesses: { codex: { provider: 'openai', command: command } },
       archetypes: { worker: {} },
       dials: { worker: 'probe' },
     }),
@@ -375,20 +371,9 @@ test('drive supervises command attempts and refuses a retry while the first writ
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { slow: { provider: 'slowp', id: 'slow', effort: 'default' } },
-    routes: {
-      standalone: {
-        slowp: {
-          command: [
-            'node',
-            '-e',
-            "let i=0;const f=require('node:fs');const t=setInterval(()=>{i++;f.writeFileSync('drive-tick-'+i+'.txt','x');if(i>=60)clearInterval(t)},200)",
-          ],
-          },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { slowp: { provider: 'slowp', command: ['node', '-e', 'let i=0;const f=require(\'node:fs\');const t=setInterval(()=>{i++;f.writeFileSync(\'drive-tick-\'+i+\'.txt\',\'x\');if(i>=60)clearInterval(t)},200)'] } },
     archetypes: { worker: { } },
     dials: { worker: 'slow' },
   }));
@@ -435,20 +420,9 @@ test('drive supervises read-only command attempts and refuses a retry while the 
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { slow: { provider: 'slowp', id: 'slow', effort: 'default' } },
-    routes: {
-      standalone: {
-        slowp: {
-          command: [
-            'node',
-            '-e',
-            "let i=0;const f=require('node:fs');const t=setInterval(()=>{i++;f.writeFileSync('drive-tick-'+i+'.txt','x');if(i>=60)clearInterval(t)},200)",
-          ],
-          },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { slowp: { provider: 'slowp', command: ['node', '-e', 'let i=0;const f=require(\'node:fs\');const t=setInterval(()=>{i++;f.writeFileSync(\'drive-tick-\'+i+\'.txt\',\'x\');if(i>=60)clearInterval(t)},200)'] } },
     archetypes: { worker: { } },
     dials: { worker: 'slow' },
   }));

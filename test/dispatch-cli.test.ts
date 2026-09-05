@@ -26,28 +26,18 @@ const STDIN_ECHO = (prefix: string): string[] => [
   `let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('${prefix}'+d));`,
 ];
 
-function seedV3(t: TestContext, extra: Record<string, unknown> = {}): string {
+function seedCatalog(t: TestContext, extra: Record<string, unknown> = {}): string {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   const base: Record<string, unknown> = {
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'echo-worker': { provider: 'openai', id: 'echo-worker', effort: 'default' },
       'luna-worker': { provider: 'openai', id: 'luna-worker', effort: 'default' },
       'fail-7': { provider: 'openai', id: 'fail-7' },
       'ro-model': { provider: 'openai', id: 'ro-model' },
     },
-    routes: {
-      standalone: {
-        openai: { command: STDIN_ECHO('REPORT:'), },
-      },
-      codex: {
-        openai: { command: STDIN_ECHO('REPORT:'), },
-      },
-      'test-harness': {
-        openai: { command: STDIN_ECHO('REPORT:'), },
-      },
-    },
+    harnesses: { codex: { provider: 'openai', command: STDIN_ECHO('REPORT:') } },
     archetypes: {
       worker: {},
       reviewer: { },
@@ -57,7 +47,6 @@ function seedV3(t: TestContext, extra: Record<string, unknown> = {}): string {
   };
   // Also merge if extra provides models/routes
   if (extra.models) (base as any).models = { ...(base as any).models, ...(extra.models as any) };
-  if (extra.routes) (base as any).routes = { ...(base as any).routes, ...(extra.routes as any) };
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml(base));
   return root;
 }
@@ -68,8 +57,8 @@ function evidenceRows(root: string): Record<string, unknown>[] {
   return readFileSync(path, 'utf8').split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 
-test('dispatch: request-before-spawn pairing with 1.0 row shape', (t) => {
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+test('dispatch: request-before-spawn pairing with 1.1 row shape', (t) => {
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
   const now = new Date('2026-08-09T12:00:00Z');
   const echoes: string[] = [];
   const result = runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, now, onEcho: (l) => echoes.push(l), userPathOptions: onHarness('standalone') });
@@ -84,8 +73,8 @@ test('dispatch: request-before-spawn pairing with 1.0 row shape', (t) => {
   const [req, comp] = rows as [Record<string, unknown>, Record<string, unknown>];
   assert.equal(req.event, 'dispatch_requested');
   assert.equal(comp.event, 'dispatch_completed');
-  assert.equal(req.format, '1.0');
-  assert.equal(comp.format, '1.0');
+  assert.equal(req.format, '1.1');
+  assert.equal(comp.format, '1.1');
   assert.equal(req.dispatch_id, comp.dispatch_id);
   assert.equal(req.dispatch_id, result.dispatchId);
   assert.deepEqual(req.dial, { model: 'echo-worker' });
@@ -93,7 +82,7 @@ test('dispatch: request-before-spawn pairing with 1.0 row shape', (t) => {
   assert.equal(req.model, 'echo-worker');
   assert.equal(req.model_id, 'echo-worker');
   assert.equal(req.reasoning_effort, 'default');
-  assert.equal(req.driver, 'openai');
+  assert.equal(req.harness, 'codex');
   assert.equal(req.provider, 'openai');
   assert.equal(req.resolution, 'repo');
   assert.ok(!('exit_code' in req));
@@ -126,7 +115,7 @@ function markProxyDispatch(root: string, prompts: string[], timestamp = '2026-08
 }
 
 test('dispatch: relay attestation consumes a matching spawn-side stash', (t) => {
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
   const now = new Date('2026-08-12T12:00:00Z');
   mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
   markProxyDispatch(root, ['hello\n', 'ello\n']);
@@ -153,7 +142,7 @@ test('dispatch: relay attestation consumes a matching spawn-side stash', (t) => 
 });
 
 test('dispatch: pending relay stale-pruned and trailing-newline tolerance', (t) => {
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
   const now = new Date('2026-08-12T12:00:00Z');
   mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
   // trailing newline case: stash has sha of 'hello' without newline, dispatch with 'hello\n' still matches via heredoc contract
@@ -169,7 +158,7 @@ test('dispatch: pending relay stale-pruned and trailing-newline tolerance', (t) 
 });
 
 test('dispatch: concurrent pending relay survives', (t) => {
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
   const now = new Date('2026-08-12T12:00:00Z');
   mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
   writeFileSync(
@@ -195,7 +184,7 @@ test('dispatch: concurrent pending relay survives', (t) => {
  * means no proxy sent it, so the honest verdict is `null`.
  */
 test('dispatch: an un-relayed dispatch colliding with a fresh stash attests null, not false', (t) => {
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
   const now = new Date('2026-08-12T12:00:00Z');
   mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
   // Someone else's relay is in flight, and it is fresh.
@@ -215,7 +204,7 @@ test('dispatch: an un-relayed dispatch colliding with a fresh stash attests null
 });
 
 test('dispatch: a proxy that altered the prompt attests false', (t) => {
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
   const now = new Date('2026-08-12T12:00:00Z');
   mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
   // The parent handed the proxy these bytes...
@@ -239,7 +228,7 @@ test('dispatch: a proxy that altered the prompt attests false', (t) => {
 });
 
 test('dispatch: a proxy dispatch with no spawn-side stash attests null, never false', (t) => {
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
   const now = new Date('2026-08-12T12:00:00Z');
   markProxyDispatch(root, ['hello\n']);
   // No pending-relays file at all: the spawn did not route through the
@@ -250,7 +239,7 @@ test('dispatch: a proxy dispatch with no spawn-side stash attests null, never fa
 });
 
 test('dispatch: --prompt-file dispatches get a kernel snapshot of the composed bytes', (t) => {
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
   writeFileSync(join(root, 'task.md'), 'from-a-file');
   const result = runDispatch({ archetype: 'worker', promptFile: 'task.md', cwd: root, repoRoot: root, userPathOptions: onHarness('standalone') });
   assert.equal(result.promptSource, 'file');
@@ -267,7 +256,7 @@ test('dispatch: --prompt-file dispatches get a kernel snapshot of the composed b
 });
 
 test('dispatch: --prompt-file missing-file and no-prompt errors', (t) => {
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
   writeFileSync(join(root, 'prompt.txt'), 'from-file');
   const result = runDispatch({ archetype: 'worker', promptFile: 'prompt.txt', cwd: root, repoRoot: root, userPathOptions: onHarness('standalone') });
   assert.equal(result.stdout, echoedStdin('REPORT:from-file'));
@@ -282,7 +271,7 @@ test('dispatch: --prompt-file missing-file and no-prompt errors', (t) => {
 });
 
 test('dispatch: unknown --model rejected with helpful list', (t) => {
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
   // bypass via --model
   const result = runDispatch({ model: 'echo-worker', prompt: 'raw', repoRoot: root, userPathOptions: onHarness('standalone') });
   assert.equal(result.executor, 'echo-worker');
@@ -305,15 +294,12 @@ test('dispatch: unknown --model rejected with helpful list', (t) => {
 });
 
 test('dispatch: propagates the executor exit code and records it as evidence', (t) => {
-  const root = seedV3(t, {
+  const root = seedCatalog(t, {
     models: {
       'fail-7': { provider: 'openai', id: 'fail-7' },
       'echo-worker': { provider: 'openai', id: 'echo-worker' },
     },
-    routes: {
-      standalone: { openai: { command: ['node', '-e', 'process.exit(7)'], } },
-      codex: { openai: { command: ['node', '-e', 'process.exit(7)'], } },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'process.exit(7)'] } },
     dials: { worker: 'fail-7' },
   });
   const result = runDispatch({ archetype: 'worker', prompt: 'p', repoRoot: root, userPathOptions: onHarness('standalone') });
@@ -325,7 +311,7 @@ test('dispatch: propagates the executor exit code and records it as evidence', (
 });
 
 test('dispatch: requires --archetype unless --model bypasses', (t) => {
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
   assert.throws(
     () => runDispatch({ prompt: 'p', repoRoot: root, userPathOptions: onHarness('standalone') }),
     /needs --archetype/,
@@ -340,12 +326,9 @@ test('dispatch: requires --archetype unless --model bypasses', (t) => {
 
 
 test('dispatch: exit-code propagation row.exit_code ===7 + sha256("") pinned', (t) => {
-  const root = seedV3(t, {
+  const root = seedCatalog(t, {
     models: { 'fail-7': { provider: 'openai', id: 'fail-7' } },
-    routes: {
-      standalone: { openai: { command: ['node', '-e', 'process.exit(7)'], } },
-      codex: { openai: { command: ['node', '-e', 'process.exit(7)'], } },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'process.exit(7)'] } },
     dials: { worker: 'fail-7' },
   });
   const result = runDispatch({ archetype: 'worker', prompt: 'p', repoRoot: root, userPathOptions: onHarness('standalone') });
@@ -356,7 +339,7 @@ test('dispatch: exit-code propagation row.exit_code ===7 + sha256("") pinned', (
 });
 
 test('dispatch: request-row negatives + append-only', (t) => {
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
   const now = new Date('2026-08-09T12:00:00Z');
   runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, now, userPathOptions: onHarness('standalone') });
   const rows = evidenceRows(root);
@@ -369,7 +352,7 @@ test('dispatch: request-row negatives + append-only', (t) => {
 });
 
 test('dispatch: output snapshot agreement and workspace_changed false case', (t) => {
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
   const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@invalid' };
   spawnSync('git', ['init'], { cwd: root, env });
   spawnSync('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: root, env });
@@ -383,7 +366,7 @@ test('dispatch: output snapshot agreement and workspace_changed false case', (t)
 });
 
 test('dispatch: workspace_changed omitted outside git', (t) => {
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
   runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, userPathOptions: onHarness('standalone') });
   const [req, comp] = evidenceRows(root) as [Record<string, unknown>, Record<string, unknown>];
   assert.ok(!('workspace_changed' in req));
@@ -391,7 +374,7 @@ test('dispatch: workspace_changed omitted outside git', (t) => {
 });
 
 test('dispatch: unknown --model and empty prompt handling', (t) => {
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
   assert.throws(() => runDispatch({ archetype: 'worker', prompt: '   ', repoRoot: root, userPathOptions: onHarness('standalone') }), /empty prompt/);
   assert.equal(evidenceRows(root).length, 0);
 });
@@ -402,9 +385,9 @@ test('dispatch: unknown --model and empty prompt handling', (t) => {
  * is how isolation stayed declared-but-not-delivered through a green suite. */
 function seedIsolationRepo(t: TestContext, opts: { command?: string[] } = {}): string {
   const write = opts.command ?? ['node', '-e', "require('node:fs').writeFileSync('made-by-executor.txt','x');process.stdout.write('REPORT:done')"];
-  const root = seedV3(t, {
+  const root = seedCatalog(t, {
     dials: { worker: 'echo-worker' },
-    routes: { standalone: { openai: { command: write } } },
+    harnesses: { codex: { provider: 'openai', command: write } },
   });
   const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@invalid' };
   spawnSync('git', ['init'], { cwd: root, env });
@@ -459,7 +442,7 @@ test('dispatch: --isolate without git refuses rather than silently running in th
   // for. Kernel isolation may degrade — nobody asked for it — but an explicit
   // containment request that lands in the caller's tree anyway is the silent
   // wrong answer this codebase keeps paying for.
-  const root = seedV3(t, { dials: { worker: 'echo-worker' } });
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
   assert.throws(
     () => runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, isolate: true, userPathOptions: onHarness('standalone') }),
     (err: unknown) => err instanceof DispatchCommandError && /--isolate needs a git repository/.test(err.message),

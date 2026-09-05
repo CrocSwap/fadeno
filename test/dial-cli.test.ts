@@ -29,23 +29,17 @@ const isolated = (root: string): UserPathOptions => ({
   },
 });
 
-function seedV3(t: TestContext, extra: Record<string, unknown> = {}): string {
+function seedCatalog(t: TestContext, extra: Record<string, unknown> = {}): string {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   const base: Record<string, unknown> = {
-    schema_version: 3,
+    schema_version: 4,
     models: {
       sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' },
       grok: { provider: 'xai', id: 'grok-4.6', effort: 'high' },
       terra: { provider: 'openai', id: 'terra-model', effort: 'medium' },
     },
-    routes: {
-      standalone: {
-        openai: { command: ['node', '-e', '0'], },
-        xai: { command: ['node', '-e', '0'], },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', '0'] }, grok: { provider: 'xai', command: ['node', '-e', '0'] } },
     archetypes: {
       worker: { },
       reviewer: { },
@@ -58,9 +52,9 @@ function seedV3(t: TestContext, extra: Record<string, unknown> = {}): string {
 }
 
 test('dial show: effective table with triad and source base', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const result = runDialShow({ repoRoot: root, userPathOptions: isolated(root) });
-  assert.equal(result.harness, 'standalone');
+  assert.equal(result.host, 'standalone');
   // All three triad rows present with base source
   const workers = result.rows.find((r) => r.archetype === 'worker');
   assert.ok(workers);
@@ -75,7 +69,7 @@ test('dial show: effective table with triad and source base', (t) => {
 });
 
 test('dial show: rows follow the canon power order, extras alphabetical after', (t) => {
-  const root = seedV3(t, {
+  const root = seedCatalog(t, {
     archetypes: {
       worker: { },
       reviewer: { },
@@ -93,7 +87,7 @@ test('dial show: rows follow the canon power order, extras alphabetical after', 
 });
 
 test('dial show: legacy pin note surfaces', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
   writeFileSync(join(root, DIALS_LOCAL_FILE), 'anthropic-primary\n', 'utf8');
   const result = runDialShow({ repoRoot: root, userPathOptions: isolated(root) });
@@ -103,7 +97,7 @@ test('dial show: legacy pin note surfaces', (t) => {
 });
 
 test('dial resolve: hook fields stable', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const result = runDialResolve({ repoRoot: root, archetype: 'worker', userPathOptions: isolated(root) });
   assert.equal(result.archetype, 'worker');
   assert.equal(result.model, 'current-host');
@@ -111,7 +105,10 @@ test('dial resolve: hook fields stable', (t) => {
   assert.equal(result.source, 'base');
   assert.ok('executor' in result);
   assert.ok('model_id' in result);
-  assert.ok('driver' in result);
+  assert.ok('harness' in result);
+  assert.ok('host' in result);
+  assert.ok('variant' in result);
+  assert.ok(!('driver' in result), 'the driver vocabulary is gone, not deprecated');
   assert.ok('delivery' in result);
   assert.equal(typeof result.delivery.dispatchable, 'boolean');
   assert.equal(typeof result.delivery.action, 'string');
@@ -122,7 +119,7 @@ test('dial resolve: hook fields stable', (t) => {
   assert.ok(!keys.includes('active')); // active is gone
 });
 
-test('dial show: luna stays in codex while adapter selection follows the caller', (t) => {
+test('dial show: luna stays on codex while adapter selection follows the caller', (t) => {
   const root = tempRepo(t);
   const rows = new Map<string, ReturnType<typeof runDialShow>['rows'][number]>();
   for (const harness of ['codex', 'claude', 'grok', 'standalone']) {
@@ -138,10 +135,11 @@ test('dial show: luna stays in codex while adapter selection follows the caller'
     rows.set(harness, runDialShow({ repoRoot: root, userPathOptions }).rows.find((row) => row.archetype === 'reviewer')!);
   }
   for (const row of rows.values()) {
-    // `driver`, the route's public name — printed as the `via` column. Not
-    // `harness`: that word means the agent asking, which is what the loop
-    // above varies, and it used to name this field too.
-    assert.equal(row.driver, 'codex');
+    // `harness`, the EXECUTOR — printed as the `harness` column. Not `host`,
+    // which means the agent asking and is what the loop above varies. Under
+    // v4 those are two keys with two names; they used to be one word.
+    assert.equal(row.harness, 'codex');
+    assert.equal(row.harness_explicit, false, 'no `--harness` was given; this is the model\'s home');
   }
   assert.equal(rows.get('codex')!.adapter, 'host');
   assert.equal(rows.get('claude')!.adapter, 'command');
@@ -150,7 +148,7 @@ test('dial show: luna stays in codex while adapter selection follows the caller'
 });
 
 test('dial CLI: --session creates a local dial and a later unscoped set updates it', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const paths = isolated(root);
   const env = { ...process.env, ...paths.env, HOME: paths.home! };
   const cli = join(import.meta.dirname, '..', 'src', 'cli.ts');
@@ -176,7 +174,7 @@ test('dial CLI: --session creates a local dial and a later unscoped set updates 
 // ---- Pinned vs unpinned effort ----
 
 test('dial show: a registry default never renders as a pin', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const paths = isolated(root);
   // `sol` declares effort: high in the registry. Three dials on the same
   // model: no opinion, a pin that differs from the default, and a pin that
@@ -203,7 +201,7 @@ test('dial show: a registry default never renders as a pin', (t) => {
 });
 
 test('dial set/resolve JSON carries the pin separately from the resolved effort', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const paths = isolated(root);
   const unpinned = runDialSet({ repoRoot: root, userPathOptions: paths, archetype: 'worker', model: 'sol', session: true });
   assert.equal(unpinned.pinned_effort, null);
@@ -222,7 +220,11 @@ test('dial set/resolve JSON carries the pin separately from the resolved effort'
 });
 
 test('dial shadow: the attachment line shows a pin and only a pin', (t) => {
-  const root = seedV3(t);
+  // Both primaries dialed onto a command-capable harness: an undialed
+  // archetype falls through to `current-host`, which in a bare shell can carry
+  // no pair at all, and an explicit attach onto it is refused (see
+  // test/dial-set.test.ts). This test is about the rendered line.
+  const root = seedCatalog(t, { dials: { reviewer: 'sol', judge: 'sol' } });
   const paths = isolated(root);
   const unpinned = runDialShadow({ repoRoot: root, userPathOptions: paths, archetype: 'reviewer', model: 'grok' });
   assert.equal(unpinned.pinned_effort, null);
@@ -247,38 +249,56 @@ test('sessionEffort reads the harness channel, never a resolved default', () => 
 });
 
 test('offHostLanes: only a pin that differs from the session leaves it', (t) => {
-  const root = seedV3(t);
-  const paths = isolated(root);
-  const lanes = (refs: Array<string | null>, session: string | null) =>
-    offHostLanes(refs, session, { repoRoot: root, userPathOptions: paths });
-  const shape = (refs: Array<string | null>, session: string | null) =>
-    lanes(refs, session).map((d) => (d == null ? null : [d.lane, d.lane_reason]));
+  // Inside a HOST, because under v4 that is what makes `current-host` a host
+  // lane at all: it names whatever session is running, and a bare shell is not
+  // one. The `standalone` case is its own assertion at the bottom.
+  const root = seedCatalog(t, {
+    harnesses: {
+      codex: { provider: 'openai', host: { effort_channel: 'agent-file' }, command: ['node', '-e', '0'] },
+      grok: { provider: 'xai', command: ['node', '-e', '0'] },
+    },
+  });
+  const inHost: UserPathOptions = {
+    home: join(root, 'home-codex'),
+    env: { FADENO_CONFIG_HOME: join(root, 'cfg-codex'), FADENO_STATE_HOME: join(root, 'state-codex'), FADENO_HARNESS: 'codex' },
+  };
+  const shape = (refs: Array<string | null>, session: string | null, paths: UserPathOptions = inHost) =>
+    offHostLanes(refs, session, { repoRoot: root, userPathOptions: paths })
+      .map((d) => (d == null ? null : [d.lane, d.lane_reason]));
 
   // The implementation trap: an unpinned host dial resolves to a registry
   // default, and must NOT be read as an opinion that leaves the session.
   assert.deepEqual(shape(['current-host'], 'medium'), [null]);
   assert.deepEqual(shape(['current-host@xhigh'], 'xhigh'), [null]);
   // A pin the session cannot serve leaves it. `current-host` declares no
-  // command fallback, so there is nowhere to go and the honest answer is
-  // restart_required — NOT `command`, which would name a lane that does not
-  // exist. The reason reports the blocker, and the renderer must not label
-  // this "command lane".
+  // command fallback — the base dial is the session, and there is no argv for
+  // "the session" — so there is nowhere to go and the honest answer is
+  // restart_required, NOT `command`, which would name a lane that does not
+  // exist.
   assert.deepEqual(shape(['current-host@xhigh'], 'medium'), [['restart_required', 'no command fallback']]);
   // Unmeasurable session effort is the absence of proof, and a pin loses on
   // it: we cannot show the host lane delivers xhigh, so we do not claim it.
   assert.deepEqual(shape(['current-host@xhigh'], null), [['restart_required', 'no command fallback']]);
   // A command executor is already off-session for reasons that are not
-  // effort, so it is suppressed rather than mislabeled.
-  assert.deepEqual(shape(['sol@low'], 'medium'), [null]);
-  // Unresolved roles and unknown drivers stay silent, positionally aligned.
+  // effort, so it is suppressed rather than mislabeled. `grok` is not this
+  // session's harness, so it was never a host candidate.
+  assert.deepEqual(shape(['grok@low'], 'medium'), [null]);
+  // Unresolved roles and unknown harnesses stay silent, positionally aligned.
   assert.deepEqual(
-    shape([null, 'current-host@xhigh', 'nope@low:no-such-driver'], 'medium'),
+    shape([null, 'current-host@xhigh', 'nope@low:no-such-harness'], 'medium'),
     [null, ['restart_required', 'no command fallback'], null],
   );
+
+  // From a bare shell there is no session to deliver in, so even an UNPINNED
+  // `current-host` goes nowhere — and that is never suppressed, because
+  // `restart_required` is the one answer a reader cannot infer from the rest
+  // of the line.
+  const bare = isolated(root);
+  assert.deepEqual(shape(['current-host'], 'medium', bare), [['restart_required', 'no command fallback']]);
 });
 
 test('dial CLI: the effort column shows the pin, and `inherit` where there is none', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const paths = isolated(root);
   const env = { ...process.env, ...paths.env, HOME: paths.home! };
   const cli = join(import.meta.dirname, '..', 'src', 'cli.ts');
@@ -301,8 +321,19 @@ test('dial CLI: the effort column shows the pin, and `inherit` where there is no
 });
 
 test('new-run echo: an out-of-session pin names the lane and why', (t) => {
-  const root = seedV3(t);
-  const paths = isolated(root);
+  // Inside a host: `current-host` is a host lane only when there is a session
+  // to be in. (The bare-shell answer — restart_required whatever the pin says
+  // — is asserted at the end.)
+  const root = seedCatalog(t, {
+    harnesses: {
+      codex: { provider: 'openai', host: { effort_channel: 'agent-file' }, command: ['node', '-e', '0'] },
+      grok: { provider: 'xai', command: ['node', '-e', '0'] },
+    },
+  });
+  const paths: UserPathOptions = {
+    home: join(root, 'home-codex'),
+    env: { FADENO_CONFIG_HOME: join(root, 'cfg-codex'), FADENO_STATE_HOME: join(root, 'state-codex'), FADENO_HARNESS: 'codex' },
+  };
   const cli = join(import.meta.dirname, '..', 'src', 'cli.ts');
   // CLAUDE_EFFORT is set explicitly on every spawn: this suite must never
   // read the effort of the session that happens to be running it.
@@ -328,4 +359,11 @@ test('new-run echo: an out-of-session pin names the lane and why', (t) => {
     run(['new-run', 'code-change-review', 'lane echo'], null),
     /implementer → current-host@xhigh \(current-host\) \[restart required: no command fallback\]/,
   );
+
+  // A bare shell has no session at all, so the same dial is restart_required
+  // whatever the effort says — the pin never even gets to be the reason.
+  const bare = isolated(root);
+  const bareEnv: NodeJS.ProcessEnv = { ...process.env, ...bare.env, HOME: bare.home!, CLAUDE_EFFORT: 'xhigh' };
+  const bareOut = execFileSync(process.execPath, [cli, 'new-run', 'code-change-review', 'lane echo'], { cwd: root, env: bareEnv, encoding: 'utf8', stdio: 'pipe' });
+  assert.match(bareOut, /implementer → current-host@xhigh \(current-host\) \[restart required: no command fallback\]/);
 });

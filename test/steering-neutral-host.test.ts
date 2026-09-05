@@ -87,16 +87,11 @@ test('concrete host executor without fallback still restart_required without mat
   // Overwrite executors.yaml to define luna host-only
   // Use v3 models/routes with dummy provider for luna
   const yaml = stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       luna: { provider: 'dummy', id: 'gpt-5.6-luna', effort: 'xhigh' },
     },
-    routes: {
-      standalone: { dummy: { host: true }, 'current-host': { host: true } },
-      codex: { dummy: { host: true }, 'current-host': { host: true } },
-      claude: { dummy: { host: true }, 'current-host': { host: true } },
-      grok: { dummy: { host: true }, 'current-host': { host: true } },
-    },
+    harnesses: { dummy: { provider: 'dummy', host: { effort_channel: 'none' } } },
     archetypes: { worker: {} },
     bindings: { agent_1: 'luna' },
   });

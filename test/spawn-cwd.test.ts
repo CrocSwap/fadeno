@@ -46,31 +46,12 @@ test('a shadow sees PWD inside its worktree, not the workspace it must not touch
   writeFileSync(
     join(root, '.fadeno', 'executors.yaml'),
     stringifyYaml({
-      schema_version: 3,
+      schema_version: 4,
       models: {
         noop: { provider: 'noop', id: 'noop' },
         probe: { provider: 'probe', id: 'probe' },
       },
-      routes: {
-        claude: {
-          noop: { command: ['node', '-e', "process.stdout.write('primary')"], },
-          probe: {
-            command: ['node', '-e', 'process.stdout.write(JSON.stringify({pwd:process.env.PWD,cwd:process.cwd()}))'],
-            },
-        },
-        standalone: {
-          noop: { command: ['node', '-e', "process.stdout.write('primary')"], },
-          probe: {
-            command: ['node', '-e', 'process.stdout.write(JSON.stringify({pwd:process.env.PWD,cwd:process.cwd()}))'],
-            },
-        },
-        codex: {
-          noop: { command: ['node', '-e', "process.stdout.write('primary')"], },
-          probe: {
-            command: ['node', '-e', 'process.stdout.write(JSON.stringify({pwd:process.env.PWD,cwd:process.cwd()}))'],
-            },
-        },
-      },
+      harnesses: { noop: { provider: 'noop', command: ['node', '-e', 'process.stdout.write(\'primary\')'] }, probe: { provider: 'probe', command: ['node', '-e', 'process.stdout.write(JSON.stringify({pwd:process.env.PWD,cwd:process.cwd()}))'] } },
       archetypes: { worker: {} },
       dials: { worker: 'noop' },
     }),

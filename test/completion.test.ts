@@ -34,10 +34,10 @@ test('completion script is sourceable Bash and covers commands/options', () => {
   assert.deepEqual(complete('/tmp', ['fadeno', 'diagram', '--format=']), ['--format=ascii', '--format=mermaid']);
   assert.deepEqual(complete('/tmp', ['fadeno', 'gate', 'run', '']), ['all_reviews_approved', 'no_blocking_issues', 'tests_pass']);
   // new flags: --via, --model, --session, --user, --repo exist; old --executor gone
-  assert.ok(complete('/tmp', ['fadeno', 'dial', 'shadow', '--']).includes('--via'));
+  assert.ok(complete('/tmp', ['fadeno', 'dial', 'shadow', '--']).includes('--harness'));
   assert.ok(complete('/tmp', ['fadeno', 'dial', 'shadow', '--']).includes('--n'));
   assert.ok(complete('/tmp', ['fadeno', 'dispatch', '--']).includes('--model'));
-  assert.ok(complete('/tmp', ['fadeno', 'dispatch', '--']).includes('--via'));
+  assert.ok(complete('/tmp', ['fadeno', 'dispatch', '--']).includes('--harness'));
 });
 
 test('completion discovers repo-local playbooks, runs, steps, and paths', (t) => {
@@ -47,7 +47,7 @@ test('completion discovers repo-local playbooks, runs, steps, and paths', (t) =>
   writeFileSync(
     join(root, '.fadeno', 'executors.yaml'),
     [
-      'schema_version: 3',
+      'schema_version: 4',
       'models:',
       '  alpha:',
       '    provider: openai',
@@ -55,11 +55,11 @@ test('completion discovers repo-local playbooks, runs, steps, and paths', (t) =>
       '  beta:',
       '    provider: openai',
       '    id: beta',
-      'routes:',
-      '  standalone:',
-      '    openai:',
-      '      command: [alpha]',
-      '      ',
+      'harnesses:',
+      '  codex:',
+      '    provider: openai',
+      '    command: [alpha]',
+      '    ',
       'archetypes:',
       '  worker: {}',
       '  reviewer: {}',

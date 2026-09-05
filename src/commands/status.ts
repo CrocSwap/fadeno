@@ -3,6 +3,7 @@ import { join, resolve } from 'node:path';
 import {
   activeHarness,
   archetypeDisplaySort,
+  hostCandidateOf,
   resolveRole,
   readLocalDialState,
 } from '../lib/executors.ts';
@@ -20,7 +21,7 @@ export class StatusError extends Error {}
 export interface StatusOptions {
   verbose?: boolean;
   // 'opencode' is accepted since OpenCode steering materialization exists and
-  // the harness compiles routes for it; 'grok' stays excluded — it has no
+  // the harness has an adapter tree; 'grok' stays excluded — it has no
   // steering surface to report on.
   target?: 'codex' | 'claude' | 'opencode' | 'omp' | null;
   cwd?: string;
@@ -121,6 +122,19 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
   const legacy_pin_note = dialState.legacyNote;
 
   const roles: StatusRole[] = [];
+  /**
+   * Per archetype: can this delivery go out IN-SESSION, as `steering apply`
+   * decides it.
+   *
+   * Kept beside `adapter` rather than folded into it, because they answer
+   * different questions and both are wanted here: `adapter` is the SPEC SHAPE
+   * (which fields the row's `command` can come from), while this is the LANE.
+   * They diverge on a host spec with no argv, and keying the materialization
+   * comparison below on `adapter` made `status` expect an in-session slot the
+   * apply had deliberately written as a broker — reporting drift that was not
+   * there.
+   */
+  const hostSlots = new Map<string, boolean>();
   const archetypes = archetypeDisplaySort(new Set(['worker', 'reviewer', 'judge', ...Object.keys(profile.archetypes)]));
 
   const layers = { session: sessionDials, repo: repoDials, user: userDials };
@@ -128,6 +142,7 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
     try {
       const resolved = resolveRole(archetype, archetype, profile, layers);
       const spec = resolved.delivery.spec;
+      hostSlots.set(archetype, hostCandidateOf(resolved.delivery, spec));
       roles.push({
         archetype,
         executor: resolved.delivery.refString,
@@ -137,7 +152,7 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
         command: spec.adapter === 'command' ? spec.command : null,
       });
     } catch {
-      // Skip if resolution fails (unknown driver)
+      // Skip if resolution fails (an undeclared harness, say).
     }
   }
   const external = roles.filter((r) => r.adapter === 'command');
@@ -160,13 +175,13 @@ export function runStatus(opts: StatusOptions = {}): StatusResult {
   const opencodeMaterialized = harness === 'opencode'
     ? inspectOpenCodeMaterialization(
       repoRoot,
-      new Map(roles.map((role) => [role.archetype, role.adapter === 'command' ? 'command' : 'host'] as const)),
+      new Map(roles.map((role) => [role.archetype, hostSlots.get(role.archetype) === true ? 'host' : 'command'] as const)),
     )
     : null;
   const ompMaterialized = harness === 'omp'
     ? inspectOmpMaterialization(
       repoRoot,
-      new Map(roles.map((role) => [role.archetype, role.adapter === 'command' ? 'command' : 'host'] as const)),
+      new Map(roles.map((role) => [role.archetype, hostSlots.get(role.archetype) === true ? 'host' : 'command'] as const)),
     )
     : null;
 

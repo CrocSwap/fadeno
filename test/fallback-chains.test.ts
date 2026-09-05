@@ -81,16 +81,11 @@ function seedDispatchProfile(t: TestContext, extra: Record<string, unknown> = {}
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'w-model': { provider: 'dummy', id: 'w-model', effort: 'high' },
     },
-    routes: {
-      standalone: {
-        dummy: { command: STDIN_ECHO('W:'), },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { dummy: { provider: 'dummy', command: STDIN_ECHO('W:') } },
     archetypes: { scout: { fallback: 'worker' } },
     ...extra,
   }));
@@ -136,14 +131,14 @@ test('dispatch: a fallback archetype resolves onto the worker slot and both rows
   assert.equal(result.stdout, echoedStdin('W:hello'));
   assert.equal(result.executor, 'w-model');
   assert.equal(result.source, 'session');
-  assert.equal(DISPATCHES_FORMAT, '1.0');
+  assert.equal(DISPATCHES_FORMAT, '1.1');
 
   const rows = evidenceRows(root);
   assert.equal(rows.length, 2);
   assert.equal(rows[0]!.event, 'dispatch_requested');
   assert.equal(rows[1]!.event, 'dispatch_completed');
   for (const row of rows) {
-    assert.equal(row.format, '1.0');
+    assert.equal(row.format, '1.1');
     assert.equal(row.format, DISPATCHES_FORMAT);
     assert.equal(row.archetype, 'scout');
     assert.equal(row.resolved_via, 'worker');
@@ -160,7 +155,7 @@ test('dispatch: a direct bind omits resolved_via entirely', (t) => {
   const rows = evidenceRows(root);
   assert.equal(rows.length, 2);
   for (const row of rows) {
-    assert.equal(row.format, '1.0');
+    assert.equal(row.format, '1.1');
     assert.equal(row.archetype, 'worker');
     assert.equal(row.executor, 'w-model');
     assert.ok(!('resolved_via' in row), 'direct resolution must omit the key, not stamp null');
@@ -194,18 +189,13 @@ test('verify: a chain-resolved run passes, and a tampered resolved_via fails', (
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
   writeFileSync(join(root, '.fadeno', 'playbooks', 'chain-e2e.yaml'), PLAYBOOK);
-  const dummyRoute = { dummy: { command: NOTES_CMD, }, 'current-host': { host: true } };
+  const dummyHarnesses = { dummy: { provider: 'dummy', command: NOTES_CMD } };
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'echo-worker': { provider: 'dummy', id: 'echo-worker', effort: 'high' },
     },
-    routes: {
-      standalone: { ...dummyRoute },
-      codex: { ...dummyRoute },
-      claude: { ...dummyRoute },
-      grok: { ...dummyRoute },
-    },
+    harnesses: dummyHarnesses,
     archetypes: { scout: { fallback: 'worker' }, worker: {} },
     dials: { worker: 'echo-worker' },
   }));

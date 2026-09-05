@@ -79,23 +79,23 @@ test('an executor child sheds the host frame even when the parent had one', (t) 
   assert.equal(activeHarness(undefined, child), 'standalone');
 });
 
-test('models reports standalone with harness_source fallback from a bare shell', (t) => {
+test('models reports standalone with host_source fallback from a bare shell', (t) => {
   const { root, user } = bareRepo(t);
   const result = runModels({ repoRoot: root, userPathOptions: user });
-  assert.equal(result.harness, 'standalone');
-  assert.equal(result.harness_source, 'fallback');
+  assert.equal(result.host, 'standalone');
+  assert.equal(result.host_source, 'fallback');
 
   staleMemo(user);
   const withMemo = runModels({ repoRoot: root, userPathOptions: user });
-  assert.equal(withMemo.harness, 'standalone');
-  assert.equal(withMemo.harness_source, 'fallback', 'a leftover file is not a source');
+  assert.equal(withMemo.host, 'standalone');
+  assert.equal(withMemo.host_source, 'fallback', 'a leftover file is not a source');
 
   const inCodex = runModels({ repoRoot: root, userPathOptions: { ...user, env: { ...user.env, CODEX_THREAD_ID: 't' } } });
-  assert.equal(inCodex.harness, 'codex');
-  assert.equal(inCodex.harness_source, 'ambient');
+  assert.equal(inCodex.host, 'codex');
+  assert.equal(inCodex.host_source, 'ambient');
 });
 
-test('status reports harness standalone from a bare shell', (t) => {
+test('status reports host standalone from a bare shell', (t) => {
   const { root, user } = bareRepo(t);
   staleMemo(user);
   assert.equal(runStatus({ repoRoot: root, userPathOptions: user }).harness, 'standalone');
@@ -105,14 +105,14 @@ test('a bare shell compiles exactly what an explicit standalone compiles', (t) =
   const { root, user } = bareRepo(t);
   const explicit: UserPathOptions = { ...user, env: { ...user.env, FADENO_HARNESS: 'standalone' } };
   const before = runDialShow({ repoRoot: root, userPathOptions: user, env: {} });
-  assert.equal(before.harness, 'standalone');
+  assert.equal(before.host, 'standalone');
   assert.ok(before.rows.length > 0, 'the shipped catalog must produce rows');
   assert.deepEqual(before.rows, runDialShow({ repoRoot: root, userPathOptions: explicit, env: {} }).rows);
 
   // The point of the whole change: a file cannot move the frame of reference.
   staleMemo(user);
   const after = runDialShow({ repoRoot: root, userPathOptions: user, env: {} });
-  assert.equal(after.harness, 'standalone');
+  assert.equal(after.host, 'standalone');
   assert.deepEqual(after.rows, before.rows);
 });
 
@@ -122,25 +122,26 @@ test('dial resolve from a bare shell resolves standalone and stays memo-independ
   // lane — there is no session for a host lane to use.
   runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'worker', model: 'grok' });
   const worker = runDialResolve({ repoRoot: root, userPathOptions: user, env: {}, archetype: 'worker' });
-  assert.equal(worker.harness, 'standalone');
+  assert.equal(worker.host, 'standalone');
   assert.equal(worker.adapter, 'command');
   assert.equal(worker.lane, 'command');
-  assert.equal(worker.driver, 'grok');
+  assert.equal(worker.harness, 'grok');
   assert.equal(worker.delivery.dispatchable, true);
 
   staleMemo(user);
   for (const row of runDialShow({ repoRoot: root, userPathOptions: user, env: {} }).rows) {
     const resolved = runDialResolve({ repoRoot: root, userPathOptions: user, env: {}, archetype: row.archetype });
-    assert.equal(resolved.harness, 'standalone', `${row.archetype} must compile against routes.standalone`);
-    // A bare shell CAN still resolve a host lane: `current-host` is a built-in
-    // host model (`executors.ts` treats an unrouted `current-host` as host), so
-    // the base dial for an archetype nobody has dialed is host-adapter under
-    // every harness id, standalone included. What must hold is that it never
-    // *pretends* — with no session to deliver into, the delivery is refused
-    // rather than silently dispatched somewhere.
-    if (resolved.lane === 'host') {
-      assert.equal(resolved.model, 'current-host');
-      assert.equal(resolved.delivery.dispatchable, false, `${row.archetype} claims a dispatchable host lane with no host`);
+    assert.equal(resolved.host, 'standalone', `${row.archetype} must resolve against the standalone host`);
+    // A bare shell can never resolve a HOST LANE under v4: `current-host`
+    // names whatever session is running, and there is none — so the base dial
+    // for an archetype nobody has dialed answers `restart_required`, which is
+    // the honest reading of "start a session, then ask again". The v3 answer
+    // was `lane: host` with `dispatchable: false`, which said the delivery was
+    // in-session AND could not be dispatched: two halves of one contradiction.
+    if (resolved.model === 'current-host') {
+      assert.equal(resolved.lane, 'restart_required', `${row.archetype} must not claim a host lane with no host`);
+      assert.equal(resolved.delivery.dispatchable, false);
     }
+    assert.notEqual(resolved.lane, 'host', `${row.archetype} claims an in-session lane from a bare shell`);
   }
 });

@@ -5,11 +5,11 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { KNOWN_CLI_COMMANDS } from '../src/cli.ts';
-import { ModelsError, runModels, runModelsAdd, runModelsDriver } from '../src/commands/models.ts';
+import { ModelsError, runModels, runModelsAdd, runModelsHarness } from '../src/commands/models.ts';
 import { unknownFlagsFor } from '../src/commands/completion.ts';
 import { recordVerifiedModel, type UserPathOptions } from '../src/lib/user-paths.ts';
 import { loadLayeredProfile } from '../src/lib/config-layers.ts';
-import { compileDialRef } from '../src/lib/executors.ts';
+import { resolveDelivery } from '../src/lib/executors.ts';
 import { tempRepo } from './helpers.ts';
 
 const CLI = join(import.meta.dirname, '..', 'src', 'cli.ts');
@@ -29,105 +29,113 @@ function seed(t: TestContext): { root: string; user: UserPathOptions } {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' },
-      opus: { provider: 'anthropic', id: 'opus', effort: 'high', spellings: { openrouter: 'anthropic/claude-opus' } },
-      // provider with no route under standalone → stale row, still listed
-      ghost: { provider: 'nowhere', id: 'ghost-1', effort: 'high' },
+      opus: { provider: 'anthropic', id: 'opus', effort: 'high', spellings: { opencode: 'anthropic/claude-opus' } },
     },
-    routes: {
-      standalone: {
-        openai: {
-          command: ['node', '-e', '0'],
-          // One id per LINE, which is what every shipped backend actually
-          // emits. This fixture used to put both ids on one space-separated
-          // line — a shape no real backend produces, and one that only
-          // "worked" because the listing tokenized on whitespace and so also
-          // turned agy's `id<TAB>Description` rows into four models each.
-          models_command: ['printf', 'gpt-5.6-sol\\ngpt-5.6-luna\\n'],
-        },
-        anthropic: {
-          driver: 'claude',
-          // `fadeno_capable` is now read off the argv that will actually run,
-          // so the flag has to be IN it — there is no second "variant" argv to
-          // look inside any more.
-          command: ['claude', '-p', '--model', '{model}', '--allowedTools', 'Bash(fadeno:*)'],
-        },
-        openrouter: {
-          command: ['opencode', 'run', '-m', '{model}'],
-          models_command: ['printf', 'anthropic/claude-opus\\nqwen-max\\n'],
-        },
-        'current-host': { host: true },
+    harnesses: {
+      codex: {
+        provider: 'openai',
+        command: ['node', '-e', '0'],
+        // One id per LINE, which is what every shipped backend actually
+        // emits. This fixture used to put both ids on one space-separated
+        // line — a shape no real backend produces, and one that only
+        // "worked" because the listing tokenized on whitespace and so also
+        // turned agy's `id<TAB>Description` rows into four models each.
+        models_command: ['printf', 'gpt-5.6-sol\\ngpt-5.6-luna\\n'],
+      },
+      claude: {
+        provider: 'anthropic',
+        // `fadeno_capable` is read off the argv that will actually run, so the
+        // flag has to be IN it — there is no second "variant" argv beside it.
+        command: ['claude', '-p', '--model', '{model}', '--allowedTools', 'Bash(fadeno:*)'],
+      },
+      opencode: {
+        command: ['opencode', 'run', '-m', '{model}'],
+        models_command: ['printf', 'anthropic/claude-opus\\nqwen-max\\n'],
       },
     },
     archetypes: { worker: { } },
-    unregistered_model_driver: 'openrouter',
+    unregistered_model_harness: 'opencode',
   }));
   return { root, user: isolated(root) };
 }
 
-test('models: registry table — deliveries, lane marks, stale providers, verification cache', (t) => {
+test('models: registry table — deliveries, lane marks, verification cache', (t) => {
   const { root, user } = seed(t);
-  recordVerifiedModel(user, { driver: 'openai', model: 'gpt-5.6-sol', verified_at: '2026-08-16T00:00:00Z' });
+  recordVerifiedModel(user, { harness: 'codex', model: 'gpt-5.6-sol', verified_at: '2026-08-16T00:00:00Z' });
 
   const result = runModels({ repoRoot: root, userPathOptions: user });
-  assert.equal(result.harness, 'standalone');
-  assert.equal(result.harness_source, 'FADENO_HARNESS');
-  assert.equal(result.unregistered_model_driver, 'openrouter');
-  assert.deepEqual(result.listable_drivers, ['openai', 'openrouter']);
+  assert.equal(result.host, 'standalone');
+  assert.equal(result.host_source, 'FADENO_HARNESS');
+  assert.equal(result.unregistered_model_harness, 'opencode');
+  assert.deepEqual(result.listable_harnesses, ['codex', 'opencode']);
 
   const names = result.models.map((r) => r.name);
   assert.deepEqual(
     names.filter((n) => n !== 'current-host'),
-    ['opus', 'ghost', 'sol'],
-    'rows sort by home_via (claude < nowhere < openai)',
+    ['opus', 'sol'],
+    'rows sort by home_harness (claude < codex)',
   );
-  assert.ok(names.includes('sol') && names.includes('opus') && names.includes('ghost'));
 
   const sol = result.models.find((r) => r.name === 'sol')!;
-  assert.equal(sol.home_via, 'openai');
+  assert.equal(sol.home_harness, 'codex');
   assert.equal(sol.native, false);
   assert.equal(sol.effort, 'high');
   assert.equal(sol.verified_at, '2026-08-16T00:00:00Z');
 
-  // Adapter state remains structured resolution data; the displayed `via`
-  // and effort are frame-neutral model identity.
   const host = result.models.find((r) => r.name === 'current-host');
-  if (host != null) assert.equal(host.native, true);
+  // `false`, from a bare shell and against a catalog whose harnesses declare
+  // no `host:` block at all. `native` means "runs in the session you are in",
+  // and there is no session here — the `true` this used to assert came from
+  // reading `spec.adapter`, which is also how a delivery with NO argv is
+  // represented. The positive case is pinned in the caller-frame test below.
+  if (host != null) assert.equal(host.native, false);
 
   const opus = result.models.find((r) => r.name === 'opus')!;
-  assert.equal(opus.home_via, 'claude');
+  assert.equal(opus.home_harness, 'claude');
   assert.equal(opus.fadeno_capable, true);
-  // The openrouter lane is visible with its spelling-substituted id.
-  const orLane = opus.lanes.find((l) => l.via === 'openrouter');
-  assert.ok(orLane);
-  assert.equal(orLane!.id, 'anthropic/claude-opus');
-
-  const ghost = result.models.find((r) => r.name === 'ghost')!;
-  assert.equal(ghost.home_via, 'nowhere');
-  // The entry has no `delivery`, so the compile error must name the command
-  // that records a real route — the 2026-08-26 futa failure was only
-  // diagnosable by reading the source.
-  assert.match(ghost.stale ?? '', /no route for provider "nowhere"/);
-  assert.match(ghost.stale ?? '', /fadeno model add ghost nowhere\/ghost-1/);
+  // The opencode delivery is visible with its spelling-substituted id.
+  const alt = opus.deliveries.find((d) => d.harness === 'opencode');
+  assert.ok(alt);
+  assert.equal(alt!.id, 'anthropic/claude-opus');
 });
 
-test('models --driver: live listing via models_command with registered spellings marked', (t) => {
+test('models: a model whose provider no harness claims as home is a LOAD error, not a stale row', (t) => {
+  const root = tempRepo(t);
+  mkdirSync(join(root, '.fadeno'), { recursive: true });
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
+    schema_version: 4,
+    models: { ghost: { provider: 'nowhere', id: 'ghost-1', effort: 'high' } },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', '0'] } },
+  }));
+  // v3 listed it as a stale row and failed at dispatch time instead. Under v4
+  // the harness table is host-independent, so "nothing can deliver this" is
+  // knowable at load — and the message names the command that fixes it.
+  assert.throws(
+    () => runModels({ repoRoot: root, userPathOptions: isolated(root) }),
+    (err: unknown) => err instanceof ModelsError
+      && /provider "nowhere", which no harness claims as home/.test(err.message)
+      && /fadeno model add ghost nowhere\/ghost-1/.test(err.message),
+  );
+});
+
+test('models --harness: live listing via models_command with registered spellings marked', (t) => {
   const { root, user } = seed(t);
-  const result = runModelsDriver({ repoRoot: root, userPathOptions: user, driver: 'openrouter' });
+  const result = runModelsHarness({ repoRoot: root, userPathOptions: user, harness: 'opencode' });
   assert.deepEqual(result.models_command, ['printf', 'anthropic/claude-opus\\nqwen-max\\n']);
   assert.deepEqual(result.models, [
     { id: 'anthropic/claude-opus', registered_as: ['opus'] },
     { id: 'qwen-max', registered_as: [] },
   ]);
-  // Home-route ids mark too.
-  const openai = runModelsDriver({ repoRoot: root, userPathOptions: user, driver: 'openai' });
-  assert.deepEqual(openai.models[0], { id: 'gpt-5.6-sol', registered_as: ['sol'] });
-  assert.deepEqual(openai.models[1], { id: 'gpt-5.6-luna', registered_as: [] });
+  // Home ids mark too.
+  const codex = runModelsHarness({ repoRoot: root, userPathOptions: user, harness: 'codex' });
+  assert.deepEqual(codex.models[0], { id: 'gpt-5.6-sol', registered_as: ['sol'] });
+  assert.deepEqual(codex.models[1], { id: 'gpt-5.6-luna', registered_as: [] });
 });
 
-test('models --driver: a listing is parsed per line, not per whitespace token', (t) => {
+test('models --harness: a listing is parsed per line, not per whitespace token', (t) => {
   // The three shapes the shipped backends actually emit, pinned together
   // because the bug was that one parse was serving two different questions.
   // `agy` is the one that broke: `id<TAB>Description` after a progress
@@ -136,53 +144,51 @@ test('models --driver: a listing is parsed per line, not per whitespace token', 
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { flash: { provider: 'google', id: 'gemini-3.7-flash-high', effort: 'high' } },
-    routes: {
-      standalone: {
-        // agy: a preamble line, then tab-separated id + human label.
-        google: {
-          driver: 'agy',
-          command: ['agy'],
-          models_command: ['printf', 'Fetching available models...\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\ngemini-3.7-flash-low\tGemini 3.7 Flash (Low)\n'],
-        },
-        // opencode: one bare id per line, nothing else.
-        openrouter: { command: ['opencode'], models_command: ['printf', 'opencode/big-pickle\nopencode/hy3-free\n'] },
-        // grok: prose, and no listing at all. The honest answer is an empty
-        // list, not a set of models named after the words in its login banner.
-        xai: { driver: 'grok', command: ['grok'], models_command: ['printf', 'You are logged in with grok.com.\n\nDefault model: grok-4.6\n'] },
+    harnesses: {
+      // agy: a preamble line, then tab-separated id + human label.
+      agy: {
+        provider: 'google',
+        command: ['agy'],
+        models_command: ['printf', 'Fetching available models...\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\ngemini-3.7-flash-low\tGemini 3.7 Flash (Low)\n'],
       },
+      // opencode: one bare id per line, nothing else.
+      opencode: { command: ['opencode'], models_command: ['printf', 'opencode/big-pickle\nopencode/hy3-free\n'] },
+      // grok: prose, and no listing at all. The honest answer is an empty
+      // list, not a set of models named after the words in its login banner.
+      grok: { provider: 'xai', command: ['grok'], models_command: ['printf', 'You are logged in with grok.com.\n\nDefault model: grok-4.6\n'] },
     },
     archetypes: { worker: {} },
   }));
   const user = isolated(root);
 
-  const agy = runModelsDriver({ repoRoot: root, userPathOptions: user, driver: 'agy' });
+  const agy = runModelsHarness({ repoRoot: root, userPathOptions: user, harness: 'agy' });
   assert.deepEqual(agy.models, [
     { id: 'gemini-3.7-flash-high', registered_as: ['flash'] },
     { id: 'gemini-3.7-flash-low', registered_as: [] },
   ], 'the tab-separated label is not a model, and the preamble is not a model');
 
-  const oc = runModelsDriver({ repoRoot: root, userPathOptions: user, driver: 'openrouter' });
+  const oc = runModelsHarness({ repoRoot: root, userPathOptions: user, harness: 'opencode' });
   assert.deepEqual(oc.models.map((m) => m.id), ['opencode/big-pickle', 'opencode/hy3-free']);
 
-  const grok = runModelsDriver({ repoRoot: root, userPathOptions: user, driver: 'grok' });
+  const grok = runModelsHarness({ repoRoot: root, userPathOptions: user, harness: 'grok' });
   assert.deepEqual(grok.models, [], 'prose yields no models rather than one per word');
 });
 
-test('models --driver: unknown driver and probe-less driver refuse with guidance', (t) => {
+test('models --harness: unknown harness and probe-less harness refuse with guidance', (t) => {
   const { root, user } = seed(t);
   assert.throws(
-    () => runModelsDriver({ repoRoot: root, userPathOptions: user, driver: 'nope' }),
-    (err: unknown) => err instanceof ModelsError && /unknown driver "nope" — declared drivers:/.test((err as Error).message),
+    () => runModelsHarness({ repoRoot: root, userPathOptions: user, harness: 'nope' }),
+    (err: unknown) => err instanceof ModelsError && /unknown harness "nope" — declared harnesses:/.test((err as Error).message),
   );
   assert.throws(
-    () => runModelsDriver({ repoRoot: root, userPathOptions: user, driver: 'claude' }),
+    () => runModelsHarness({ repoRoot: root, userPathOptions: user, harness: 'claude' }),
     (err: unknown) => err instanceof ModelsError && /declares no models_command/.test((err as Error).message),
   );
 });
 
-test('models: home `via` is stable while the caller-specific adapter changes', (t) => {
+test('models: the home harness is stable while the caller-specific adapter changes', (t) => {
   const root = tempRepo(t);
   const rows = new Map<string, ReturnType<typeof runModels>['models'][number]>();
   for (const harness of ['codex', 'claude', 'grok', 'standalone']) {
@@ -200,23 +206,30 @@ test('models: home `via` is stable while the caller-specific adapter changes', (
     rows.set(harness, result.models.find((row) => row.name === 'luna')!);
   }
   for (const row of rows.values()) {
-    // `home_via`, the model's own driver — not `harness`, which in this same
-    // command means the agent asking and differs on every iteration of the
-    // loop above. The two used to share a field name.
-    assert.equal(row.home_via, 'codex');
-    assert.ok(!('harness' in row), 'the misleading synonym is gone, not deprecated');
+    // `home_harness`, the model's own executor — not `host`, which in this
+    // same command means the agent asking and differs on every iteration of
+    // the loop above. The two used to share the name `harness`.
+    assert.equal(row.home_harness, 'codex');
+    assert.ok(!('home_via' in row), 'the driver-era synonym is gone, not deprecated');
   }
   assert.equal(rows.get('codex')!.adapter, 'host');
   assert.equal(rows.get('claude')!.adapter, 'command');
   assert.equal(rows.get('grok')!.adapter, 'command');
   assert.equal(rows.get('standalone')!.adapter, 'command');
+  // `native` is the LANE, and the two questions diverge on a spec with no
+  // argv: only the caller sitting inside `luna`'s own harness gets it
+  // in-session.
+  assert.equal(rows.get('codex')!.native, true);
+  assert.equal(rows.get('claude')!.native, false);
+  assert.equal(rows.get('grok')!.native, false);
+  assert.equal(rows.get('standalone')!.native, false);
 });
 
-test('models: rows sort by home_via, then provider, then name', (t) => {
+test('models: rows sort by home_harness, then provider, then name', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     // Name order (alpha, bravo, mike, zulu) differs from every sort key. The
     // acme tie pair is declared mike-before-bravo: rows enter the sort in
     // name-sorted iteration order and Array.sort is stable, so the `name`
@@ -229,28 +242,26 @@ test('models: rows sort by home_via, then provider, then name', (t) => {
       mike: { provider: 'acme', id: 'm-1', effort: 'high' },
       bravo: { provider: 'acme', id: 'b-1', effort: 'high' },
     },
-    routes: {
-      standalone: {
-        anthropic: { driver: 'claude', command: ['node', '-e', '0'] },
-        // Two providers share one driver alias, so `home_via` ties and the
-        // provider key decides between them.
-        acme: { driver: 'shared', command: ['node', '-e', '0'] },
-        zenith: { driver: 'shared', command: ['node', '-e', '0'] },
-      },
+    harnesses: {
+      claude: { provider: 'anthropic', command: ['node', '-e', '0'] },
+      // Two providers cannot share one harness under v4 (exactly one home per
+      // provider), so the tie is made by two harnesses that sort together.
+      shared_a: { provider: 'acme', command: ['node', '-e', '0'] },
+      shared_z: { provider: 'zenith', command: ['node', '-e', '0'] },
     },
     archetypes: { worker: {} },
   }));
 
   const result = runModels({ repoRoot: root, userPathOptions: isolated(root) });
   assert.deepEqual(
-    result.models.map((r) => [r.name, r.home_via, r.provider]),
+    result.models.map((r) => [r.name, r.home_harness, r.provider]),
     [
       ['zulu', 'claude', 'anthropic'],
       // The synthesized current-host row participates in the same ordering.
       ['current-host', 'current-host', 'current-host'],
-      ['bravo', 'shared', 'acme'],
-      ['mike', 'shared', 'acme'],
-      ['alpha', 'shared', 'zenith'],
+      ['bravo', 'shared_a', 'acme'],
+      ['mike', 'shared_a', 'acme'],
+      ['alpha', 'shared_z', 'zenith'],
     ],
   );
 });
@@ -259,13 +270,13 @@ test('model is a registered top-level alias of models for flag validation', () =
   assert.ok(KNOWN_CLI_COMMANDS.has('model'));
   // Same completion spec object as `models`, so the accepted flag sets match
   // exactly — including what each spelling rejects.
-  assert.deepEqual(unknownFlagsFor('model', undefined, ['driver', 'json']), []);
-  assert.deepEqual(unknownFlagsFor('models', undefined, ['driver', 'json']), []);
+  assert.deepEqual(unknownFlagsFor('model', undefined, ['harness', 'json']), []);
+  assert.deepEqual(unknownFlagsFor('models', undefined, ['harness', 'json']), []);
   assert.deepEqual(unknownFlagsFor('model', undefined, ['session']), ['--session']);
   assert.deepEqual(unknownFlagsFor('model', 'add', ['json']), []);
   // Completion is intentionally additive for subcommands; the CLI still
-  // rejects --driver on model add because it would change discovery meaning.
-  assert.deepEqual(unknownFlagsFor('models', 'add', ['driver']), []);
+  // rejects --harness on model add because it would change discovery meaning.
+  assert.deepEqual(unknownFlagsFor('models', 'add', ['harness']), []);
 });
 
 test('fadeno model runs the models handler end to end', (t) => {
@@ -277,51 +288,47 @@ test('fadeno model runs the models handler end to end', (t) => {
   assert.equal(runCli(['model']), runCli(['models']));
   const singular = JSON.parse(runCli(['model', '--json']));
   const plural = JSON.parse(runCli(['models', '--json']));
-  assert.equal(singular.harness, 'standalone');
+  assert.equal(singular.host, 'standalone');
   assert.deepEqual(singular.models, plural.models);
 });
 
-test('model add: direct OpenCode discovery adds a preserved user-catalog alias and delivers exactly once', (t) => {
+test('model add: a directly-served identity is no longer registrable — v4 has no way to name a variant', (t) => {
+  // The `opencode-direct` ROUTE became the `direct` VARIANT of the `opencode`
+  // harness, and a variant is chosen by policy: neither a dial nor a model
+  // entry can name one. So an identity OpenCode lists WITHOUT the
+  // `openrouter/` prefix has no v4 spelling to record, and discovery must fail
+  // loudly rather than write an entry that silently resolves onto the
+  // OpenRouter lane carrying a direct id.
   const root = tempRepo(t);
   const user = isolated(root);
   const userCatalog = join(user.env!.FADENO_CONFIG_HOME!, 'fadeno', 'executors.yaml');
   mkdirSync(join(user.env!.FADENO_CONFIG_HOME!, 'fadeno'), { recursive: true });
-  writeFileSync(userCatalog, `# Keep this comment and unrelated known configuration.\nschema_version: 3\nmodels:\n  older:\n    provider: openai\n    id: old\nrelay:\n  codex: luna\n`);
-  let calls = 0;
-  const result = runModelsAdd({
-    repoRoot: root,
-    userPathOptions: user,
-    alias: 'moonshot',
-    discoveryId: 'stealth/ox-alpha',
-    spawn: (command) => {
-      calls += 1;
-      assert.deepEqual(command, ['opencode', 'models']);
-      return { status: 0, stdout: 'stealth/ox-alpha\nopenrouter/stealth/ox-alpha\n', stderr: '' };
-    },
-  });
-  assert.equal(calls, 1, 'direct and fallback path entries share one OpenCode listing');
-  assert.equal(result.discovery_path, 'opencode');
-  assert.equal(result.matched_identity, 'stealth/ox-alpha');
-  assert.deepEqual(result.delivery, { route: 'opencode-direct', id: 'stealth/ox-alpha', listed_id: 'stealth/ox-alpha' });
-  const stored = readFileSync(userCatalog, 'utf8');
-  assert.match(stored, /Keep this comment/);
-  assert.match(stored, /relay:\n  codex: luna/);
-  assert.match(stored, /moonshot:/);
-  const profile = loadLayeredProfile(root, user, 'standalone').profile;
-  const compiled = compileDialRef({ model: 'moonshot' }, profile);
-  assert.equal(compiled.driver, 'opencode-direct');
-  assert.equal(compiled.modelId, 'stealth/ox-alpha');
-  assert.ok((compiled.spec as { command: string[] }).command.includes('stealth/ox-alpha'));
-  assert.ok(!(compiled.spec as { command: string[] }).command.includes('openrouter/stealth/ox-alpha'));
-  const explicitFallback = compileDialRef({ model: 'moonshot', via: 'opencode' }, profile);
-  assert.equal(explicitFallback.modelId, 'ox-alpha');
-  assert.deepEqual(
-    (explicitFallback.spec as { command: string[] }).command.filter((part) => part.includes('stealth/')),
-    [],
-    'an unrelated explicit route must not inherit the home delivery spelling',
+  writeFileSync(userCatalog, `# Keep this comment and unrelated known configuration.\nschema_version: 4\nmodels:\n  older:\n    provider: openai\n    id: old\n`);
+  const before = readFileSync(userCatalog, 'utf8');
+  assert.throws(
+    () => runModelsAdd({
+      repoRoot: root,
+      userPathOptions: user,
+      alias: 'moonshot',
+      discoveryId: 'stealth/ox-alpha',
+      spawn: () => ({ status: 0, stdout: 'stealth/ox-alpha\n', stderr: '' }),
+    }),
+    // And the message names WHICH failure this is: the identity is listed,
+    // just not registrable, so a reader is not sent hunting for a spelling
+    // that is right in front of them.
+    (err: unknown) => err instanceof ModelsError
+      && /IS listed by OpenCode, but only as a direct \(non-OpenRouter\) identity/.test(err.message)
+      && /Known gap/.test(err.message),
   );
-  assert.ok((explicitFallback.spec as { command: string[] }).command.includes('openrouter/ox-alpha'));
-  assert.equal(runModels({ repoRoot: root, userPathOptions: user }).models.find((row) => row.name === 'moonshot')!.home_via, 'opencode-direct');
+  assert.equal(readFileSync(userCatalog, 'utf8'), before, 'a failed discovery writes nothing');
+  // An identity that is on NEITHER listing still gets the plain not-found.
+  assert.throws(
+    () => runModelsAdd({
+      repoRoot: root, userPathOptions: user, alias: 'nope', discoveryId: 'stealth/absent',
+      spawn: () => ({ status: 0, stdout: 'stealth/ox-alpha\n', stderr: '' }),
+    }),
+    (err: unknown) => err instanceof ModelsError && /tried exact identities: openrouter\/stealth\/absent/.test(err.message),
+  );
 });
 
 test('model add: OpenRouter fallback uses the route-relative id without double prefixing', (t) => {
@@ -340,22 +347,23 @@ test('model add: OpenRouter fallback uses the route-relative id without double p
   });
   assert.equal(calls, 1, 'the shared listing is cached across direct then OpenRouter checks');
   assert.equal(result.discovery_path, 'opencode/openrouter');
-  assert.deepEqual(result.delivery, { route: 'openrouter', id: 'stealth/ox-alpha', listed_id: 'openrouter/stealth/ox-alpha' });
-  const compiled = compileDialRef({ model: 'moonshot' }, loadLayeredProfile(root, user, 'standalone').profile);
-  assert.equal(compiled.driver, 'opencode');
+  assert.deepEqual(result.delivery, { harness: 'opencode', id: 'stealth/ox-alpha', listed_id: 'openrouter/stealth/ox-alpha' });
+  const compiled = resolveDelivery({ model: 'moonshot' }, loadLayeredProfile(root, user, 'standalone').profile);
+  assert.equal(compiled.harness, 'opencode');
   assert.equal(compiled.modelId, 'stealth/ox-alpha');
   assert.deepEqual((compiled.spec as { command: string[] }).command.filter((part) => part.includes('stealth/')), ['openrouter/stealth/ox-alpha']);
-  const explicitHome = compileDialRef({ model: 'moonshot', via: 'opencode' }, loadLayeredProfile(root, user, 'standalone').profile);
+  // Naming the same harness explicitly resolves identically: the spelling is
+  // a property of the (model, harness) pair, not of how the dial reached it.
+  // Under v3 the same name reached two different ROUTES (`openrouter` vs
+  // `opencode-direct`) and produced two different ids; v4 has one lane per
+  // harness, and a variant is policy's to choose, never a dial's to name.
+  const explicitHome = resolveDelivery({ model: 'moonshot', harness: 'opencode' }, loadLayeredProfile(root, user, 'standalone').profile);
   assert.equal(explicitHome.modelId, 'stealth/ox-alpha');
   assert.deepEqual((explicitHome.spec as { command: string[] }).command.filter((part) => part.includes('stealth/')), ['openrouter/stealth/ox-alpha']);
-  const explicitDirect = compileDialRef({ model: 'moonshot', via: 'opencode-direct' }, loadLayeredProfile(root, user, 'standalone').profile);
-  assert.equal(explicitDirect.modelId, 'ox-alpha');
-  assert.deepEqual((explicitDirect.spec as { command: string[] }).command.filter((part) => part.includes('stealth/')), []);
-  assert.ok((explicitDirect.spec as { command: string[] }).command.includes('ox-alpha'));
-  const listed = runModelsDriver({
+  const listed = runModelsHarness({
     repoRoot: root,
     userPathOptions: user,
-    driver: 'opencode',
+    harness: 'opencode',
     spawn: () => ({ status: 0, stdout: 'openrouter/stealth/ox-alpha\n', stderr: '' }),
   });
   assert.deepEqual(listed.models, [{ id: 'openrouter/stealth/ox-alpha', registered_as: ['moonshot'] }]);
@@ -390,14 +398,11 @@ test('model add: injected discovery path and a self-contained project are explic
   const user = isolated(root);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { local: { provider: 'local', id: 'local-1' } },
-    routes: {
-      standalone: {
-        local: { command: ['local', '{model}'] },
-        'opencode-direct': { driver: 'opencode-direct', command: ['opencode', 'run', '-m', '{model}'] },
-        openrouter: { driver: 'opencode', command: ['opencode', 'run', '-m', 'openrouter/{model}'], models_command: ['opencode', 'models'], models_prefix: 'openrouter/' },
-      },
+    harnesses: {
+      local: { provider: 'local', command: ['local', '{model}'] },
+      opencode: { command: ['opencode', 'run', '-m', 'openrouter/{model}'], models_command: ['opencode', 'models'], models_prefix: 'openrouter/' },
     },
   }));
   const result = runModelsAdd({
@@ -407,19 +412,19 @@ test('model add: injected discovery path and a self-contained project are explic
     discoveryId: 'stealth/ox-alpha',
     discoveryPath: [{
       name: 'test-plugin-path',
-      driver: 'opencode',
+      harness: 'opencode',
       listedId: (provider, id) => `plugin/${provider}/${id}`,
-      delivery: (provider, id) => ({ route: 'opencode-direct', id: `${provider}/${id}` }),
+      spelling: (provider, id) => `${provider}/${id}`,
     }],
     spawn: () => ({ status: 0, stdout: 'plugin/stealth/ox-alpha\n', stderr: '' }),
   });
   assert.equal(result.discovery_path, 'test-plugin-path');
   assert.equal(result.suppressed_by_project, true);
   assert.match(readFileSync(join(user.env!.FADENO_CONFIG_HOME!, 'fadeno', 'executors.yaml'), 'utf8'), /moonshot:/);
-  // The alias's delivery route (`opencode-direct`) IS declared in this
-  // self-contained catalog, so the per-key fallback promotes it: it is now a
-  // first-class citizen of this repo's effective view, not hidden. A user
-  // model whose route resolves NOWHERE is the dropped case — covered in
+  // The alias's harness (`opencode`) IS declared in this self-contained
+  // catalog, so the per-key fallback promotes it: it is now a first-class
+  // citizen of this repo's effective view, not hidden. A user model whose
+  // harness resolves NOWHERE is the dropped case — covered in
   // test/model-fallback.test.ts.
   assert.equal(runModels({ repoRoot: root, userPathOptions: user }).models.some((row) => row.name === 'moonshot'), true);
 });
@@ -432,9 +437,9 @@ test('model add: a self-contained project cannot hide global aliases or discover
   // while carrying no OpenCode route at all. Promotion must still use the
   // global builtin+user catalog, then report this project's suppression.
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { local: { provider: 'local', id: 'local-1' } },
-    routes: { standalone: { local: { command: ['local', '{model}'] } } },
+    harnesses: { local: { provider: 'local', command: ['local', '{model}'] } },
   }));
   assert.throws(
     () => runModelsAdd({ repoRoot: root, userPathOptions: user, alias: 'luna', discoveryId: 'stealth/ox-alpha', spawn: () => { throw new Error('must not list'); } }),
@@ -450,7 +455,7 @@ test('model add: a self-contained project cannot hide global aliases or discover
     spawn: (command) => {
       listings += 1;
       assert.deepEqual(command, ['opencode', 'models']);
-      return { status: 0, stdout: 'stealth/ox-alpha\n', stderr: '' };
+      return { status: 0, stdout: 'openrouter/stealth/ox-alpha\n', stderr: '' };
     },
   });
   assert.equal(listings, 1);
@@ -462,14 +467,17 @@ test('model add: project aliases are reserved in overlay and self-contained cata
   const cases = [
     {
       mode: 'overlay',
-      catalog: { schema_version: 3, models: { moonshot: { provider: 'local', id: 'local-1' } } },
+      catalog: {
+        schema_version: 4,
+        models: { moonshot: { provider: 'local', id: 'local-1', harness: 'opencode' } },
+      },
     },
     {
       mode: 'self-contained',
       catalog: {
-        schema_version: 3,
+        schema_version: 4,
         models: { moonshot: { provider: 'local', id: 'local-1' } },
-        routes: { standalone: { local: { command: ['local', '{model}'] } } },
+        harnesses: { local: { provider: 'local', command: ['local', '{model}'] } },
       },
     },
   ] as const;
@@ -492,7 +500,7 @@ test('fadeno model add runs the singular CLI form end to end', (t) => {
   const bin = join(root, 'bin');
   mkdirSync(bin, { recursive: true });
   const opencode = join(bin, 'opencode');
-  writeFileSync(opencode, '#!/bin/sh\nprintf "stealth/ox-alpha\\n"\n');
+  writeFileSync(opencode, '#!/bin/sh\nprintf "openrouter/stealth/ox-alpha\\n"\n');
   chmodSync(opencode, 0o755);
   const output = execFileSync(
     process.execPath,
@@ -506,5 +514,5 @@ test('fadeno model add runs the singular CLI form end to end', (t) => {
   );
   const result = JSON.parse(output);
   assert.equal(result.alias, 'moonshot');
-  assert.equal(result.discovery_path, 'opencode');
+  assert.equal(result.discovery_path, 'opencode/openrouter');
 });

@@ -5,12 +5,13 @@ import {
   BARE_IDENTIFIER_RE,
   activeHarness,
   ExecutorProfileError,
-  compileDialRef,
+  resolveDelivery,
   commandRoutable,
   explainPairRoutability,
   pairRoutabilityFields,
   eligibilityFor,
   formatDialRef,
+  hostCandidateOf,
   knownArchetypes,
   loadExecutorProfile,
   parseDialRef,
@@ -19,7 +20,10 @@ import {
   resolveDialCascade,
   resolveRelay,
   shadowAttachmentExpired,
+  shadowAttachmentRef,
+  snapshotExecutor,
   shadowSampleRoll,
+  type CompiledDelivery,
   type DialLayers,
   type DialRef,
   type ExecutorProfile,
@@ -122,7 +126,17 @@ export interface SteeringResolution extends LaneDecision {
    * for it. Old readers must keep reading this one.
    */
   effort: string | null;
-  driver: string | null;
+  /**
+   * The EXECUTOR harness this resolution lands on (was `driver`). `host` on
+   * the same payload is the ambient harness this call runs inside — the two
+   * names moved together so no reader can be right about one and wrong about
+   * the other.
+   */
+  harness: string | null;
+  /** The command-lane variant policy chose, or null for the base lane. */
+  variant?: string | null;
+  /** The ambient host, `standalone` from a bare shell. */
+  host?: string;
   source: RoleResolutionSource | 'host-request';
   dial: DialRef;
   hostExecutor: string | null;
@@ -201,8 +215,9 @@ function rootOf(opts: CommonOptions): string {
 
 function profileOf(repoRoot: string, userPathOptions?: UserPathOptions): LoadedExecutorProfile {
   try {
-    // Resolver callers set FADENO_HARNESS for host-specific route compilation
-    // (the OMP extension uses `omp`; ordinary Codex callers remain codex).
+    // Resolver callers set FADENO_HARNESS so the HOST this delivery is
+    // resolved against is the one they are actually running inside (the OMP
+    // extension uses `omp`; ordinary Codex callers remain codex).
     return loadExecutorProfile(repoRoot, userPathOptions, activeHarness(undefined, userPathOptions));
   } catch (err) {
     if (err instanceof ExecutorProfileError) throw new SteeringError(err.message);
@@ -261,7 +276,7 @@ function decorateSteering(
       if (!allowHostWithoutSurface) {
         throw new SteeringError(
           `archetype "${result.archetype}" has no host agent surface on its fallback chain (${chain.join(' → ')}); ` +
-            `deliver it through a command route, or declare a fallback to ${[...HOST_SURFACE_SET].join(', ')}.`,
+            `deliver it on a command lane, or declare a fallback to ${[...HOST_SURFACE_SET].join(', ')}.`,
         );
       }
     } else {
@@ -407,7 +422,9 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
       `host dispatch "${dispatchId}" cannot specialize wildcard identity to unknown archetype "${archetype}".`,
     );
   }
-  const executor = profile.executors[request.executor];
+  // The archetype this locked request is being specialized TO, so a
+  // policy-chosen variant's snapshot entry is the one checked.
+  const executor = snapshotExecutor(profile, request.executor, archetype);
   if (executor == null || executor.adapter !== 'host') {
     throw new SteeringError(
       `host dispatch "${dispatchId}" requests executor "${request.executor}", which is not a host executor in the run profile snapshot.`,
@@ -509,7 +526,7 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
   // For locked, dial is the executor ref itself
   let dial: DialRef;
   try { dial = parseDialRef(request.executor, 'locked'); } catch { dial = { model: request.executor }; }
-  const compiled = (() => { try { return compileDialRef(dial, profile as unknown as ExecutorProfile); } catch { return null; } })();
+  const compiled = (() => { try { return resolveDelivery(dial, profile as unknown as ExecutorProfile); } catch { return null; } })();
   // Structured wildcard specialization: report both the immutable requested "*" and the concrete delivered archetype
   // without upgrading identity_evidence. This is advisory routing, not a new attestation.
   const requestedAgentType = request.agentType;
@@ -536,7 +553,8 @@ function runLockedSteeringResolve(opts: SteeringResolveOptions, archetype: strin
     adapter: 'host',
     model: request.model,
     effort: request.reasoningEffort,
-    driver: (executor as any).driver ?? compiled?.driver ?? null,
+    harness: (executor as { harness?: string }).harness ?? compiled?.harness ?? null,
+    variant: (executor as { variant?: string }).variant ?? compiled?.variant ?? null,
     source: 'host-request',
     dial,
     hostExecutor,
@@ -639,17 +657,12 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     let parsed: DialRef | null = null;
     try { parsed = parseDialRef(hostExecutor, 'host'); } catch {}
     if (parsed != null) {
-      try { hostSpec = compileDialRef(parsed, profile).spec; } catch {}
+      try { hostSpec = resolveDelivery(parsed, profile, undefined, { archetype }).spec; } catch {}
     }
-    if (hostSpec == null && (profile as unknown as SnapshotDocument).executors != null) {
-      hostSpec = (profile as unknown as SnapshotDocument).executors[hostExecutor] ?? null;
-    }
-    if (hostSpec == null) {
-      try {
-        const fallback = (profile as unknown as Record<string, unknown>).executors as Record<string, ExecutorSpec> | undefined;
-        if (fallback != null && hostExecutor in fallback) hostSpec = fallback[hostExecutor]!;
-      } catch {}
-    }
+    // `snapshotExecutor`, so a run whose snapshot froze an archetype-specific
+    // answer for this ref is read the way it was written; it falls back to the
+    // plain ref itself, which is why no second lookup follows it.
+    if (hostSpec == null) hostSpec = snapshotExecutor(profile, hostExecutor, archetype) ?? null;
   }
   if (hostExecutor != null && (hostSpec == null || hostSpec.adapter !== 'host')) {
     throw new SteeringError(
@@ -686,9 +699,9 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     throw err;
   }
   const refString = formatDialRef(cascade.ref);
-  let spec: ExecutorSpec | null = (profile as unknown as SnapshotDocument).executors?.[refString] ?? null;
-  let compiled: ReturnType<typeof compileDialRef> | null = null;
-  try { compiled = compileDialRef(cascade.ref, profile); } catch {}
+  let spec: ExecutorSpec | null = snapshotExecutor(profile, refString, archetype) ?? null;
+  let compiled: CompiledDelivery | null = null;
+  try { compiled = resolveDelivery(cascade.ref, profile, undefined, { archetype }); } catch {}
   if (spec == null && compiled != null) spec = compiled.spec;
   if (spec == null) throw new SteeringError(`resolved dial "${refString}" has no compiled executor in profile`);
   // Bind neutral host agentType
@@ -704,11 +717,7 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
   const attachment = shadows[archetype];
   let shadow: SteeringResolution['shadow'];
   if (attachment != null) {
-    const challenger = formatDialRef({
-      model: attachment.model,
-      ...(attachment.effort ? { effort: attachment.effort } : {}),
-      ...(attachment.via ? { via: attachment.via } : {}),
-    });
+    const challenger = formatDialRef(shadowAttachmentRef(attachment));
     const digest = resolvePromptDigest(opts);
     const rate = attachment.rate ?? null;
     const expired = shadowAttachmentExpired(attachment);
@@ -741,9 +750,11 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     compiled?.effectiveEffort ??
     (spec.adapter === 'host' ? spec.reasoningEffort : null) ??
     // Only reachable on a legacy profile whose command executor declares no
-    // effort at all and that `compileDialRef` could not compile.
+    // effort at all and that `resolveDelivery` could not compile.
     'default';
-  const hostModel = spec.adapter === 'host' && (cascade.source === 'base' || hostExecutor === refString);
+  // `hostCandidateOf`, not `spec.adapter`: a host spec is also how a delivery
+  // with no argv is represented, and the two disagree exactly there.
+  const hostModel = hostCandidateOf(compiled, spec) && (cascade.source === 'base' || hostExecutor === refString);
   /** The reference-frame-neutral sentinel, whose agent file states no identity at all. */
   const neutralModel = spec.adapter === 'host' && spec.model === NEUTRAL_HOST_EXECUTOR;
   const lane = decideLane({
@@ -777,7 +788,9 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     return finish({
       mode: 'command', archetype, role,
       executor: refString, adapter: 'command', model: (spec as any).model ?? compiled?.model ?? null,
-      effort: compiled?.effectiveEffort ?? null, driver: (spec as any).driver ?? compiled?.driver ?? null,
+      effort: compiled?.effectiveEffort ?? null,
+      harness: (spec as { harness?: string }).harness ?? compiled?.harness ?? null,
+      variant: (spec as { variant?: string }).variant ?? compiled?.variant ?? null,
       source: cascade.source, dial: cascade.ref, hostExecutor,
       detail: `dispatch through command executor ${refString}; effective immediately${detailNote}`,
     } as any);
@@ -803,7 +816,8 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
         lane_reason: 'shadow pair forces the command lane',
         executor: refString, adapter: 'host', model: (spec as any).model,
         effort: (spec as any).reasoningEffort ?? compiled?.effectiveEffort ?? null,
-        driver: (spec as any).driver ?? compiled?.driver ?? null,
+        harness: (spec as { harness?: string }).harness ?? compiled?.harness ?? null,
+        variant: (spec as { variant?: string }).variant ?? compiled?.variant ?? null,
         source: cascade.source, dial: cascade.ref, hostExecutor,
         detail: `pair selected: ${archetype} → ${refString} moved to its command lane so both arms are comparable${detailNote}`,
       } as any);
@@ -812,7 +826,8 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
       mode: 'host', archetype, role,
       executor: refString, adapter: 'host', model: (spec as any).model,
       effort: (spec as any).reasoningEffort ?? compiled?.effectiveEffort ?? null,
-      driver: (spec as any).driver ?? compiled?.driver ?? null,
+      harness: (spec as { harness?: string }).harness ?? compiled?.harness ?? null,
+      variant: (spec as { variant?: string }).variant ?? compiled?.variant ?? null,
       source: cascade.source, dial: cascade.ref, hostExecutor,
       detail: `host executor ${refString} matches this session's host baseline${detailNote}`,
     } as any);
@@ -822,7 +837,8 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
       mode: 'command', archetype, role,
       executor: refString, adapter: 'host', model: (spec as any).model,
       effort: (spec as any).reasoningEffort ?? compiled?.effectiveEffort ?? null,
-      driver: (spec as any).driver ?? compiled?.driver ?? null,
+      harness: (spec as { harness?: string }).harness ?? compiled?.harness ?? null,
+      variant: (spec as { variant?: string }).variant ?? compiled?.variant ?? null,
       source: cascade.source, dial: cascade.ref, hostExecutor,
       // Two ways to be here now, and the agent is told which: the model this
       // session cannot host, or an effort it is not running at.
@@ -835,7 +851,8 @@ export function runSteeringResolve(opts: SteeringResolveOptions): SteeringResolu
     mode: 'restart_required', archetype, role,
     executor: refString, adapter: 'host', model: (spec as any).model,
     effort: (spec as any).reasoningEffort ?? compiled?.effectiveEffort ?? null,
-    driver: (spec as any).driver ?? compiled?.driver ?? null,
+    harness: (spec as { harness?: string }).harness ?? compiled?.harness ?? null,
+    variant: (spec as { variant?: string }).variant ?? compiled?.variant ?? null,
     source: cascade.source, dial: cascade.ref, hostExecutor,
     // Restart reason 2 of the two that survive: a host slot naming an
     // identity with neither a session that can deliver it nor a command
@@ -1222,21 +1239,31 @@ export function runSteeringApply(opts: SteeringApplyOptions): SteeringApplyResul
       throw err;
     }
     const executorName = formatDialRef(cascade.ref);
-    let spec: ExecutorSpec | null = (profile as unknown as SnapshotDocument).executors?.[executorName] ?? null;
+    let spec: ExecutorSpec | null = snapshotExecutor(profile, executorName, archetype) ?? null;
+    // Resolved with the ARCHETYPE, so a policy-chosen variant and the host
+    // lane's own eligibility both reach this decision.
+    let compiled: CompiledDelivery | null = null;
     try {
-      const compiled = compileDialRef(cascade.ref, profile);
+      compiled = resolveDelivery(cascade.ref, profile as unknown as ExecutorProfile, undefined, { archetype });
       if (spec == null) spec = compiled.spec;
     } catch {}
     if (spec == null) {
       throw new SteeringError(`archetype "${archetype}" resolved to "${executorName}" but no executor exists in profile`);
     }
+    // Whether this slot can be delivered IN-SESSION. `spec.adapter` alone said
+    // yes for `opus on omp` under a Codex host — a host-only harness nobody is
+    // sitting in — and materialized a Codex host agent for it.
+    const hostSlot = hostCandidateOf(compiled, spec);
     // bind neutral host agentType
-    if (spec.adapter === 'host' && (spec as any).agentType === '*' ) spec = { ...spec, agentType: archetype } as ExecutorSpec;
+    if (hostSlot && spec.adapter === 'host' && (spec as any).agentType === '*' ) spec = { ...spec, agentType: archetype } as ExecutorSpec;
     // Write-posture delivery selection, same rule as dispatch/drive.
       const filename = scope === 'user' ? `fadeno-${archetype}.toml` : `${archetype}.toml`;
     const path = join(agentDir, filename);
     let body: string;
-    if (spec.adapter === 'host') {
+    // `spec.adapter === 'host'` is implied by `hostSlot` — `resolveDelivery`
+    // only sets `hostCandidate` on a host spec — and is written out so the
+    // narrowing is the compiler's rather than a comment's.
+    if (hostSlot && spec.adapter === 'host') {
       if (spec.agentType !== archetype) {
         throw new SteeringError(
           `dial "${executorName}" for ${archetype} targets ${executorName} with agent_type ` +
@@ -1463,18 +1490,20 @@ export function runSteeringApplyClaude(opts: SteeringApplyOptions): SteeringAppl
       throw err;
     }
     const executorName = formatDialRef(cascade.ref);
-    let spec: ExecutorSpec | null = (profile as unknown as SnapshotDocument).executors?.[executorName] ?? null;
+    let spec: ExecutorSpec | null = snapshotExecutor(profile, executorName, archetype) ?? null;
+    let compiled: CompiledDelivery | null = null;
     try {
-      const compiled = compileDialRef(cascade.ref, profile);
+      compiled = resolveDelivery(cascade.ref, profile as unknown as ExecutorProfile, undefined, { archetype });
       if (spec == null) spec = compiled.spec;
     } catch {}
     if (spec == null) {
       throw new SteeringError(`archetype "${archetype}" resolved to "${executorName}" but no executor exists in profile`);
     }
-    if (spec.adapter === 'host' && (spec as { agentType?: string }).agentType === '*') spec = { ...spec, agentType: archetype } as ExecutorSpec;
+    const hostSlot = hostCandidateOf(compiled, spec);
+    if (hostSlot && spec.adapter === 'host' && (spec as { agentType?: string }).agentType === '*') spec = { ...spec, agentType: archetype } as ExecutorSpec;
       // Every slot reaches the same conclusion now — report the delivery, keep
     // no file — so the three branches differ only in what they report.
-    if (spec.adapter !== 'host') {
+    if (!hostSlot) {
       materialization[archetype] = {
         kind: 'command-broker', adapter: 'command', executor: executorName, model: (spec as { model: string | null }).model,
       };
@@ -1763,9 +1792,10 @@ export function runSteeringApplyOpenCode(opts: OpenCodeSteeringApplyOptions): St
         '--scope user would export this repo\'s dials to every repo on this machine.',
     );
   }
-  // This apply materializes OPENCODE deliveries, so load that harness family:
-  // route compilation (model spellings, fallback commands) must agree with the
-  // resolver the plugin invokes under FADENO_HARNESS=opencode.
+  // This apply materializes OPENCODE deliveries, so resolve against that
+  // host: which lane each dial lands on, and the spelling and argv it lands
+  // with, must agree with the resolver the plugin invokes under
+  // FADENO_HARNESS=opencode.
   const { profile } = (() => {
     try {
       return loadExecutorProfile(repoRoot, opts.userPathOptions, 'opencode');
@@ -1797,19 +1827,27 @@ export function runSteeringApplyOpenCode(opts: OpenCodeSteeringApplyOptions): St
       throw err;
     }
     const executorName = formatDialRef(cascade.ref);
-    let spec: ExecutorSpec | null = (profile as unknown as SnapshotDocument).executors?.[executorName] ?? null;
-    let compiled: ReturnType<typeof compileDialRef> | null = null;
+    let spec: ExecutorSpec | null = snapshotExecutor(profile, executorName, archetype) ?? null;
+    let compiled: CompiledDelivery | null = null;
     try {
-      compiled = compileDialRef(cascade.ref, profile);
+      // With the ARCHETYPE, so a policy-chosen variant and the host lane's own
+      // eligibility both reach this decision — the same call the Codex, Claude
+      // and omp applies make.
+      compiled = resolveDelivery(cascade.ref, profile as unknown as ExecutorProfile, undefined, { archetype });
       if (spec == null) spec = compiled.spec;
     } catch {}
     if (spec == null) {
       throw new SteeringError(`archetype "${archetype}" resolved to "${executorName}" but no executor exists in profile`);
     }
-    if (spec.adapter === 'host' && (spec as { agentType?: string }).agentType === '*') {
+    // Whether this slot can be delivered IN-SESSION. `spec.adapter` alone said
+    // yes for `opus on omp` under an OpenCode host — a host nobody is sitting
+    // in — and wrote an in-session role slot naming a model OpenCode would
+    // never have been handed.
+    const hostSlot = hostCandidateOf(compiled, spec);
+    if (hostSlot && spec.adapter === 'host' && (spec as { agentType?: string }).agentType === '*') {
       spec = { ...spec, agentType: archetype } as ExecutorSpec;
     }
-    if (spec.adapter !== 'host') {
+    if (!hostSlot) {
       materialization[archetype] = {
         kind: 'command-broker', adapter: 'command', executor: executorName,
         model: (spec as { model: string | null }).model,
@@ -1824,12 +1862,13 @@ export function runSteeringApplyOpenCode(opts: OpenCodeSteeringApplyOptions): St
     } else {
       baseline[archetype] = executorName;
       materialization[archetype] = {
-        kind: 'host', adapter: 'host', executor: executorName, model: spec.model,
+        kind: 'host', adapter: 'host', executor: executorName,
+        model: (spec as { model: string | null }).model,
       };
       pending.push({
         path: join(agentDir, `${archetype}.md`),
         body: stampManagedOpenCodeAgent(
-          renderOpenCodeRoleSlot(archetype, compiled?.modelId ?? spec.model ?? null, cascade.ref.effort ?? null),
+          renderOpenCodeRoleSlot(archetype, compiled?.modelId ?? (spec as { model: string | null }).model ?? null, cascade.ref.effort ?? null),
         ),
       });
       removeManagedOpenCodeFile(join(agentDir, `fadeno-dispatch-${archetype}.md`), removed);
@@ -2062,11 +2101,11 @@ export function runSteeringApplyOmp(opts: OmpSteeringApplyOptions = {}): Steerin
       throw err;
     }
     const executorName = formatDialRef(cascade.ref);
-    let compiled: ReturnType<typeof compileDialRef> | null = null;
-    try { compiled = compileDialRef(cascade.ref, profile); } catch {}
-    const spec = compiled?.spec ?? (profile as unknown as SnapshotDocument).executors?.[executorName];
+    let compiled: ReturnType<typeof resolveDelivery> | null = null;
+    try { compiled = resolveDelivery(cascade.ref, profile as unknown as ExecutorProfile, undefined, { archetype }); } catch {}
+    const spec = compiled?.spec ?? snapshotExecutor(profile, executorName, archetype);
     if (spec == null) throw new SteeringError(`archetype "${archetype}" resolved to "${executorName}" but no executor exists in profile`);
-    if (spec.adapter === 'host') {
+    if (hostCandidateOf(compiled, spec)) {
       baseline[archetype] = executorName;
       materialization[archetype] = { kind: 'host', adapter: 'host', executor: executorName, model: spec.model };
       const hostPath = ompSlotPath(agentDir, archetype, 'host');

@@ -39,33 +39,12 @@ flow:
 `;
 
 const EXECUTORS = {
-  schema_version: 3,
+  schema_version: 4,
   models: {
     'luna-host': { provider: 'luna_p', id: 'gpt-5.6-luna', effort: 'xhigh' },
     'ok-worker': { provider: 'ok_p', id: 'ok-worker', effort: 'high' },
   },
-  routes: {
-    standalone: {
-      luna_p: { host: true },
-      ok_p: { command: ['node', '-e', "process.stdout.write('COMMAND NOTES')"], },
-      'current-host': { host: true },
-    },
-    codex: {
-      luna_p: { host: true },
-      ok_p: { command: ['node', '-e', "process.stdout.write('COMMAND NOTES')"], },
-      'current-host': { host: true },
-    },
-    claude: {
-      luna_p: { host: true },
-      ok_p: { command: ['node', '-e', "process.stdout.write('COMMAND NOTES')"], },
-      'current-host': { host: true },
-    },
-    grok: {
-      luna_p: { host: true },
-      ok_p: { command: ['node', '-e', "process.stdout.write('COMMAND NOTES')"], },
-      'current-host': { host: true },
-    },
-  },
+  harnesses: { luna_p: { provider: 'luna_p', host: { effort_channel: 'none' } }, ok_p: { provider: 'ok_p', command: ['node', '-e', 'process.stdout.write(\'COMMAND NOTES\')'] } },
   archetypes: { worker: {} },
   dials: { worker: 'luna-host' },
 };

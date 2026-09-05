@@ -35,46 +35,24 @@ function harnessOpts(): any {
 }
 
 const DISPATCH_PROFILE = {
-  schema_version: 3,
+  schema_version: 4,
   models: {
     'base-model': { provider: 'basep', id: 'base-model', effort: 'high' },
     'over-model': { provider: 'overp', id: 'over-model', effort: 'high' },
   },
-  routes: {
-    standalone: {
-      basep: { command: STDIN_ECHO('BASE:'), },
-      overp: { command: STDIN_ECHO('OVER:'), },
-      'current-host': { host: true },
-    },
-    codex: {
-      basep: { command: STDIN_ECHO('BASE:'), },
-      overp: { command: STDIN_ECHO('OVER:'), },
-      'current-host': { host: true },
-    },
-  },
+  harnesses: { basep: { provider: 'basep', command: STDIN_ECHO('BASE:') }, overp: { provider: 'overp', command: STDIN_ECHO('OVER:') } },
   archetypes: {
     worker: { },
   },
 };
 
 const DRIVE_PROFILE = {
-  schema_version: 3,
+  schema_version: 4,
   models: {
     'base-model': { provider: 'basep', id: 'base-model', effort: 'high' },
     'over-model': { provider: 'overp', id: 'over-model', effort: 'high' },
   },
-  routes: {
-    standalone: {
-      basep: { command: BASE_CMD, },
-      overp: { command: OVER_CMD, },
-      'current-host': { host: true },
-    },
-    codex: {
-      basep: { command: BASE_CMD, },
-      overp: { command: OVER_CMD, },
-      'current-host': { host: true },
-    },
-  },
+  harnesses: { basep: { provider: 'basep', command: BASE_CMD }, overp: { provider: 'overp', command: OVER_CMD } },
   archetypes: {
     worker: { },
   },
@@ -150,7 +128,7 @@ test('dispatch: a session dial binds the archetype and both evidence rows say so
   assert.equal(rows.length, 2);
   for (const row of rows) {
     assert.equal(row.format, DISPATCHES_FORMAT);
-    assert.equal(row.format, '1.0');
+    assert.equal(row.format, '1.1');
     assert.equal(row.resolution, 'session');
     assert.deepEqual(row.dial, { model: 'over-model' });
     assert.equal(row.executor, 'over-model');
@@ -163,20 +141,13 @@ test('dispatch: no session dial means no session source, and a session dial for 
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'base-model': { provider: 'basep', id: 'base-model' },
       'over-model': { provider: 'overp', id: 'over-model' },
       'other-model': { provider: 'otherp', id: 'other-model' },
     },
-    routes: {
-      standalone: {
-        basep: { command: STDIN_ECHO('BASE:'), },
-        overp: { command: STDIN_ECHO('OVER:'), },
-        otherp: { command: STDIN_ECHO('OTHER:'), },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { basep: { provider: 'basep', command: STDIN_ECHO('BASE:') }, overp: { provider: 'overp', command: STDIN_ECHO('OVER:') }, otherp: { provider: 'otherp', command: STDIN_ECHO('OTHER:') } },
     archetypes: {
       worker: {},
       reviewer: {},

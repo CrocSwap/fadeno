@@ -29,9 +29,9 @@ function seed(t: TestContext): string {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { probe: { provider: 'openai', id: 'probe' } },
-    routes: { standalone: { openai: { command: REPORT_ENV } } },
+    harnesses: { codex: { provider: 'openai', command: REPORT_ENV } },
     archetypes: { worker: {}, director: {} },
     dials: { worker: 'probe', director: 'probe' },
   }));
@@ -94,7 +94,7 @@ test('the 2026-08-31 recursion: an executor handed a proxy-addressed prompt is r
 test('the refusal survives a catalog it never reads', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
-  writeFileSync(join(root, '.fadeno', 'executors.yaml'), 'schema_version: 3\nmodels: [not-a-map\n');
+  writeFileSync(join(root, '.fadeno', 'executors.yaml'), 'schema_version: 4\nmodels: [not-a-map\n');
   withEnv(t, IN_DISPATCH_ENV, 'deadbeefcafe');
   withEnv(t, DISPATCH_NESTING_ENV, 'deny');
   // Nesting is refused on the environment alone, so a broken profile cannot
@@ -149,16 +149,13 @@ test('an engine-dispatched actor is an executor too, and carries deny', (t) => {
   runInit({ target: 'codex', repoRoot: root });
   writeFileSync(join(root, '.fadeno', 'playbooks', 'nesting-probe.yaml'), PROBE_PLAYBOOK);
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { probe: { provider: 'probe_p', id: 'probe', effort: 'high' } },
     // Every harness lane, so the run snapshot resolves whatever ambient
     // harness the suite happens to run under.
-    routes: Object.fromEntries(
-      ['standalone', 'codex', 'claude', 'grok', 'opencode', 'omp'].map((lane) => [
-        lane,
-        { probe_p: { command: REPORT_ENV }, 'current-host': { host: true } },
-      ]),
-    ),
+    // One table, whatever ambient harness the suite happens to run under —
+    // that is exactly what catalog v4 collapsed the six host families into.
+    harnesses: { probe_p: { provider: 'probe_p', command: REPORT_ENV } },
     archetypes: { worker: {} },
     dials: { worker: 'probe' },
     bindings: { worker: 'probe', '*': 'probe' },

@@ -4,7 +4,7 @@ import { parse as parseYaml } from 'yaml';
 import { buildArtifactManifest, sha256Hex } from '../lib/artifact-manifest.ts';
 import {
   ExecutorProfileError,
-  compileDialRef,
+  resolveDelivery,
   formatDialRef,
   loadExecutorProfile,
   readLocalDialState,
@@ -269,7 +269,7 @@ function computeResolution(
       const refString = formatDialRef(cascade.ref);
       let model: string | null = null;
       try {
-        const compiled = compileDialRef(cascade.ref, profile);
+        const compiled = resolveDelivery(cascade.ref, profile);
         model = compiled.model;
       } catch {
         model = null;

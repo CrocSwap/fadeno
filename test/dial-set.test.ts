@@ -12,26 +12,21 @@ import {
   runDialShadow,
   runDialShow,
 } from '../src/commands/dial.ts';
+import { readLocalDialState } from '../src/lib/executors.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
 import { read, tempRepo } from './helpers.ts';
 
-function seedV3(t: TestContext, extra: Record<string, unknown> = {}): string {
+function seedCatalog(t: TestContext, extra: Record<string, unknown> = {}): string {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   const base: Record<string, unknown> = {
-    schema_version: 3,
+    schema_version: 4,
     models: {
       sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' },
       grok: { provider: 'xai', id: 'grok-4.6', effort: 'high' },
       luna: { provider: 'openai', id: 'luna-model', effort: 'default' },
     },
-    routes: {
-      standalone: {
-        openai: { command: ['node', '-e', '0'], models_command: ['echo', 'gpt-5.6-sol gpt-5.6-luna grok-4.6'] },
-        xai: { command: ['node', '-e', '0'], models_command: ['echo', 'grok-4.6 gpt-5.6-sol'] },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', '0'], models_command: ['echo', 'gpt-5.6-sol gpt-5.6-luna grok-4.6'] }, grok: { provider: 'xai', command: ['node', '-e', '0'], models_command: ['echo', 'grok-4.6 gpt-5.6-sol'] } },
     archetypes: {
       worker: { },
       reviewer: { },
@@ -57,7 +52,7 @@ function isolatedUser(root: string): UserPathOptions {
 }
 
 test('set: dial round-trip through pin file (user default)', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const user = isolatedUser(root);
   const result = runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'worker', model: 'sol' });
   assert.equal(result.layer, 'user');
@@ -71,7 +66,7 @@ test('set: dial round-trip through pin file (user default)', (t) => {
 });
 
 test('set: plain set updates an active repo pin in place', (t) => {
-  const root = seedV3(t, { dials: { worker: 'sol' } });
+  const root = seedCatalog(t, { dials: { worker: 'sol' } });
   const user = isolatedUser(root);
   const result = runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'worker', model: 'grok' });
   assert.equal(result.layer, 'repo');
@@ -83,7 +78,7 @@ test('set: plain set updates an active repo pin in place', (t) => {
 });
 
 test('set: plain set updates the active session dial instead of writing a shadowed user default', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const user = isolatedUser(root);
   runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'judge', model: 'grok', session: true });
   const result = runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'judge', model: 'sol' });
@@ -98,7 +93,7 @@ test('set: plain set updates the active session dial instead of writing a shadow
 });
 
 test('set: --session creates a checkout-local dial and clear --session removes it', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const user = isolatedUser(root);
   const set = runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'judge', model: 'grok', session: true });
   assert.equal(set.layer, 'session');
@@ -111,7 +106,7 @@ test('set: --session creates a checkout-local dial and clear --session removes i
 });
 
 test('set: explicit --user forces user layer even with repo pin', (t) => {
-  const root = seedV3(t, { dials: { worker: 'sol' } });
+  const root = seedCatalog(t, { dials: { worker: 'sol' } });
   const user = isolatedUser(root);
   const result = runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'worker', model: 'grok', user: true });
   assert.equal(result.layer, 'user');
@@ -120,7 +115,7 @@ test('set: explicit --user forces user layer even with repo pin', (t) => {
 });
 
 test('set and clear reject more than one explicit scope', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const user = isolatedUser(root);
   assert.throws(
     () => runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'judge', model: 'sol', session: true, user: true }),
@@ -133,7 +128,7 @@ test('set and clear reject more than one explicit scope', (t) => {
 });
 
 test('clear: plain clear falls through to the user default when it is the only dial', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const user = isolatedUser(root);
   runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'worker', model: 'grok', user: true });
   // No session dial, no repo pin: the user default is the only dial this
@@ -148,7 +143,7 @@ test('clear: plain clear falls through to the user default when it is the only d
 });
 
 test('clear: a repo pin blocks the inference and keeps the user dial untouched', (t) => {
-  const root = seedV3(t, { dials: { worker: 'sol' } });
+  const root = seedCatalog(t, { dials: { worker: 'sol' } });
   const user = isolatedUser(root);
   runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'worker', model: 'grok', user: true });
   const cleared = runDialClear({ repoRoot: root, userPathOptions: user, archetype: 'worker' });
@@ -164,7 +159,7 @@ test('clear: a repo pin blocks the inference and keeps the user dial untouched',
 });
 
 test('clear: a session dial still wins over the user default on plain clear', (t) => {
-  const root = seedV3(t, { dials: { judge: 'sol' } });
+  const root = seedCatalog(t, { dials: { judge: 'sol' } });
   const user = isolatedUser(root);
   runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'judge', model: 'grok', session: true });
   runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'judge', model: 'sol', user: true });
@@ -177,7 +172,7 @@ test('clear: a session dial still wins over the user default on plain clear', (t
 });
 
 test('clear: no archetype wipes session AND user dials, preserves shadows and repo pins', (t) => {
-  const root = seedV3(t, { dials: { judge: 'sol' } });
+  const root = seedCatalog(t, { dials: { judge: 'sol' } });
   const user = isolatedUser(root);
   runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'judge', model: 'grok', session: true });
   runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'worker', model: 'sol', user: true }); // user
@@ -194,7 +189,7 @@ test('clear: no archetype wipes session AND user dials, preserves shadows and re
 });
 
 test('repo pin: --repo writes via parseDocument preserving comments', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const executorsPath = join(root, '.fadeno', 'executors.yaml');
   // Add comment
   const original = readFileSync(executorsPath, 'utf8');
@@ -207,52 +202,48 @@ test('repo pin: --repo writes via parseDocument preserving comments', (t) => {
   assert.match(text, /dials:/);
 });
 
-test('set-time refusals: @effort on host, forbidden eligibility', (t) => {
-  const root = seedV3(t, {
+test('set time validates against the REGISTRY only — no lane notes, no eligibility refusal', (t) => {
+  // Catalog v4 moved both of these out of `dial set`. A dial is stored
+  // host-neutrally and re-resolved at every dispatch, so narrating the lane a
+  // pin would take made `fadeno dial worker opus@xhigh` print a different
+  // story depending on which terminal you typed it in — and refusing on
+  // eligibility refused dials that resolve perfectly well on another lane or
+  // another host. Both questions are about a CALL; both are answered where a
+  // host exists (`dial resolve`, and the dispatch kernel).
+  const root = seedCatalog(t, {
     models: {
       sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' },
       forbidden: { provider: 'openai', id: 'forbid-model', effort: 'high', eligibility: { worker: 'forbidden' } },
     },
-    routes: {
-      standalone: {
-        openai: { command: ['node', '-e', '0'], },
-        'current-host': { host: true },
-      },
-    },
-    archetypes: {
-      worker: { },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', '0'] } },
+    archetypes: { worker: { } },
   });
-  // @effort on host: no longer refused — but what the pin DOES splits by
-  // harness, and `current-host` on standalone is the inert case: no agent
-  // format to carry an effort, and no command lane to divert to either. The
-  // note must say that rather than send the user to a `steering apply` that
-  // writes nothing. (worker requires_write would bite here, so pin a
-  // posture-free archetype.)
-  const hostEffort = runDialSet({ repoRoot: root, userPathOptions: isolatedUser(root), archetype: 'scout', model: 'current-host@high' });
-  assert.ok(hostEffort.notes.some((n) => /has no command lane, so scout runs in-session at the session's own effort/.test(n)), JSON.stringify(hostEffort.notes));
-  assert.ok(hostEffort.notes.every((n) => !/run `fadeno steering apply`/.test(n)), JSON.stringify(hostEffort.notes));
-  // Write posture used to refuse here too. It no longer exists: a route is an
-  // argv, so dialing onto one is never a permissions question.
-  assert.doesNotThrow(() => runDialSet({ repoRoot: root, userPathOptions: onHarness('standalone'), archetype: 'worker', model: 'sol' }));
-  // forbidden eligibility (need a write-compatible route for this test, so use different root)
-  const root2 = seedV3(t, {
-    models: {
-      sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' },
-      forbidden: { provider: 'openai', id: 'forbid-model', effort: 'high', eligibility: { worker: 'forbidden' } },
-    },
-    routes: {
-      standalone: {
-        openai: { command: ['node', '-e', '0'], },
-        'current-host': { host: true },
-      },
-    },
-  });
-  assert.throws(() => runDialSet({ repoRoot: root2, userPathOptions: onHarness('standalone'), archetype: 'worker', model: 'forbidden' }), (err: unknown) => err instanceof DialError && /forbidden/.test((err as Error).message));
+  const user = isolatedUser(root);
+
+  // An `@effort` pin on a host-shaped dial is recorded, silently.
+  const hostEffort = runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'scout', model: 'current-host@high' });
+  assert.equal(hostEffort.pinned_effort, 'high');
+  assert.deepEqual(hostEffort.notes, [], 'no lane narration at set time');
+
+  // A model the archetype is forbidden on still DIALS. The refusal is real,
+  // and it is the kernel's: `dial resolve` reports it and names the remedy.
+  assert.doesNotThrow(() => runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'worker', model: 'forbidden' }));
+  const resolved = runDialResolve({ repoRoot: root, userPathOptions: user, archetype: 'worker' });
+  assert.equal(resolved.eligibility, 'forbidden');
+  assert.equal(resolved.delivery.dispatchable, false);
+  assert.match(resolved.delivery.action, /Do NOT dispatch/);
+
+  // An unknown `--harness` IS refused at set time: it is the one thing a dial
+  // can be wrong about without knowing anything about the call.
+  assert.throws(
+    () => runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'worker', model: 'sol', harness: 'nope' }),
+    (err: unknown) => err instanceof DialError && /unknown harness "nope" — declared harnesses: codex/.test(err.message),
+  );
+  assert.doesNotThrow(() => runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'worker', model: 'sol', harness: 'codex' }));
 });
 
 test('probe: verified/cached/unverified/refused via injected spawn', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const user = isolatedUser(root);
   // Verified: spawn returns listing containing delivered model ids (gpt-5.6-sol etc)
   const spawnVerified = () => ({ status: 0, stdout: 'gpt-5.6-sol grok-4.6 luna-model', stderr: '' });
@@ -275,7 +266,7 @@ test('probe: verified/cached/unverified/refused via injected spawn', (t) => {
 });
 
 test('set many: one model lands on several archetypes atomically', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const user = isolatedUser(root);
   const results = runDialSetMany({ repoRoot: root, userPathOptions: user, archetypes: ['judge', 'reviewer'], model: 'sol' });
   assert.deepEqual(results.map((r) => r.archetype ?? null).length, 2);
@@ -285,23 +276,24 @@ test('set many: one model lands on several archetypes atomically', (t) => {
 });
 
 test('set many: one refused archetype refuses the whole command — nothing written', (t) => {
-  // The all-or-nothing invariant, re-pinned on ELIGIBILITY. It used to be
-  // triggered by a write posture; that refusal no longer exists, but the
-  // property under test — a partial multi-set must write nothing — is
-  // unrelated to which predicate did the refusing.
-  const root = seedV3(t, {
+  // The all-or-nothing invariant. Re-pinned on the refusal that survives at
+  // set time under v4 — an archetype name that is not a bare identifier —
+  // because eligibility no longer refuses here (it is a dispatch-time
+  // question). The property under test, that a partial multi-set writes
+  // NOTHING, is unrelated to which predicate did the refusing.
+  const root = seedCatalog(t, {
     models: {
       sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' },
-      grok: { provider: 'xai', id: 'grok-4.6', effort: 'high', eligibility: { generator: 'forbidden' } },
+      grok: { provider: 'xai', id: 'grok-4.6', effort: 'high' },
     },
   });
   const user = isolatedUser(root);
   assert.throws(
-    () => runDialSetMany({ repoRoot: root, userPathOptions: user, archetypes: ['worker', 'generator'], model: 'grok' }),
+    () => runDialSetMany({ repoRoot: root, userPathOptions: user, archetypes: ['worker', 'Generator'], model: 'grok' }),
     (err: unknown) =>
       err instanceof DialError &&
       /nothing was dialed — 1 of 2 archetype\(s\) refused/.test((err as Error).message) &&
-      /forbidden/.test((err as Error).message),
+      /bare lowercase identifier/.test((err as Error).message),
   );
   const shown = runDialShow({ repoRoot: root, userPathOptions: user });
   assert.equal(shown.dials.user.worker, undefined);
@@ -309,7 +301,7 @@ test('set many: one refused archetype refuses the whole command — nothing writ
 });
 
 test('set many: reserved words and duplicates handled; single archetype keeps the plain error shape', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const user = isolatedUser(root);
   assert.throws(
     () => runDialSetMany({ repoRoot: root, userPathOptions: user, archetypes: ['judge', 'clear'], model: 'sol' }),
@@ -326,7 +318,7 @@ test('set many: reserved words and duplicates handled; single archetype keeps th
 });
 
 test('a dial that introduces a provider nothing else uses says so', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const opts = { repoRoot: root, userPathOptions: onHarness('standalone') };
   // Seed the repo on one vendor. `sol` is openai; every other slot falls back
   // to the host baseline, which has no provider to vouch for anything.
@@ -349,7 +341,7 @@ test('a dial that introduces a provider nothing else uses says so', (t) => {
 });
 
 test('a shadow attachment gets the same provider check, scoped to its own slot', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const opts = { repoRoot: root, userPathOptions: onHarness('standalone') };
   runDialSet({ ...opts, archetype: 'worker', model: 'sol', session: true });
 
@@ -367,48 +359,60 @@ test('a shadow attachment gets the same provider check, scoped to its own slot',
   assert.match(warning!, /duplicates the prompt/);
 });
 
-test('a shadow attachment warns at set time when the primary has no command lane to force', (t) => {
-  const root = seedV3(t);
+test('an explicit shadow attach REFUSES when the primary has no command lane to force', (t) => {
+  const root = seedCatalog(t);
   // Isolated user scope: this checks the truly undialed base, so it must not
   // pick up whatever the real machine's user-scoped worker dial happens to be.
   const opts = { repoRoot: root, userPathOptions: isolatedUser(root) };
   // worker carries no primary dial anywhere, so it falls through to the
-  // current-host base — a host executor with no fallback_command. A selected
+  // current-host base — a host delivery with no fallback_command. A selected
   // pair has nothing to reuse for the command lane, so this attachment could
-  // sample forever and never produce a pair; dispatch time is too late to
-  // say so.
-  const result = runDialShadow({ ...opts, archetype: 'worker', model: 'sol' });
-  const warning = result.notes.find((n) => n.includes('NO PAIR POSSIBLE'));
-  assert.ok(warning, result.notes.join('\n'));
-  assert.match(warning!, /worker.*current-host.*no fallback_command/s);
+  // sample forever and never produce a pair; dispatch time is too late to say
+  // so.
+  //
+  // A REFUSAL, not a note: the user typed `dial shadow` and asked for a pair,
+  // and the honest answer is that this one cannot exist. (The graceful case —
+  // an attachment already in place whose primary is redialed underneath it —
+  // degrades to a warning instead, on the dial-change path.) This assertion
+  // is the reason the shadow-attach refusal must not be softened to make the
+  // mechanics tests below pass.
+  assert.throws(
+    () => runDialShadow({ ...opts, archetype: 'worker', model: 'sol' }),
+    (err: unknown) => err instanceof DialError
+      && /NO PAIR POSSIBLE/.test(err.message)
+      && /worker[\s\S]*current-host[\s\S]*no fallback_command/.test(err.message),
+  );
+  assert.deepEqual(readLocalDialState(root).shadows, {}, 'a refused attach writes nothing');
 
-  // A warning, not a refusal: dialing the primary onto a command-capable
-  // executor afterwards makes the same attachment usable without touching
-  // the shadow attachment itself.
+  // Dialing the primary onto a command-capable executor makes the very same
+  // attach succeed, with no note.
   runDialSet({ ...opts, archetype: 'worker', model: 'grok', session: true });
   const fixed = runDialShadow({ ...opts, archetype: 'worker', model: 'sol' });
   assert.ok(!fixed.notes.some((n) => n.includes('NO PAIR POSSIBLE')), fixed.notes.join('\n'));
 });
 
 test('dial resolve: shadow.routable mirrors whether the kernel could force the primary onto a command lane', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   // Isolated user scope, same reason as above: the undialed check must not
   // depend on the real machine's ambient user dial for worker.
   const opts = { repoRoot: root, userPathOptions: isolatedUser(root) };
-  runDialShadow({ ...opts, archetype: 'worker', model: 'sol' });
-
-  // Undialed worker resolves to current-host, a host executor with no
-  // fallback_command — the same condition `dispatchability` reports as
-  // host_in_session/host_without_fallback and `pairCommandFallback` refuses.
-  const unroutable = runDialResolve({ ...opts, archetype: 'worker' });
-  assert.equal(unroutable.shadow?.routable, false);
-  // `selected` is unaffected — it stays a pure function of the roll, and
-  // with no rate on the attachment every dispatch "fires" the roll.
-  assert.equal(unroutable.shadow?.selected, true);
-
-  // Once the primary is dialed to a command executor, `routable` flips
-  // without the shadow attachment changing at all.
+  // Attach while the primary CAN carry a pair — an explicit attach onto an
+  // unroutable primary is refused outright (test above), so the only way to
+  // observe `routable: false` is the graceful path: redial the primary out
+  // from under an attachment that already exists.
   runDialSet({ ...opts, archetype: 'worker', model: 'grok', session: true });
+  runDialShadow({ ...opts, archetype: 'worker', model: 'sol' });
   const routable = runDialResolve({ ...opts, archetype: 'worker' });
   assert.equal(routable.shadow?.routable, true);
+  // `selected` is a pure function of the roll, and with no rate on the
+  // attachment every dispatch "fires" it.
+  assert.equal(routable.shadow?.selected, true);
+
+  // Redial the primary to the current-host base: a host delivery with no
+  // fallback_command, so a selected pair has nothing to reuse. `routable`
+  // flips without the shadow attachment changing at all.
+  runDialClear({ ...opts, archetype: 'worker', session: true });
+  const unroutable = runDialResolve({ ...opts, archetype: 'worker' });
+  assert.equal(unroutable.shadow?.routable, false);
+  assert.equal(unroutable.shadow?.selected, true);
 });

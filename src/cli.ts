@@ -37,7 +37,7 @@ import {
   sessionEffort,
   type DialShowResult,
 } from './commands/dial.ts';
-import { runModels, runModelsAdd, runModelsDriver, type DriverListingResult, type ModelAddResult, type ModelsResult } from './commands/models.ts';
+import { runModels, runModelsAdd, runModelsHarness, type HarnessListingResult, type ModelAddResult, type ModelsResult } from './commands/models.ts';
 import { runNewRun } from './commands/new-run.ts';
 import { runPlaybooks, type PlaybooksDetailResult, type PlaybooksListResult } from './commands/playbooks.ts';
 import { runCodexPlugin, runOmpPlugin, runPlugin } from './commands/plugin.ts';
@@ -679,23 +679,23 @@ function printStaleDials(stale: Array<{ archetype: string; target: string }>): v
 }
 
 function printModels(result: ModelsResult): void {
-  // `via`, not `harness`: the column holds the model's home DRIVER, which is
-  // the value `--via` takes. Renamed 2026-08-21 — see `printDialShow`.
-  const header = `${'model'.padEnd(12)}  ${'provider'.padEnd(12)}  ${'id'.padEnd(26)}  ${'effort'.padEnd(8)}  via`;
+  // `harness`: the model's home EXECUTOR harness. One harness table under v4,
+  // so this column no longer varies with the host you are sitting inside.
+  const header = `${'model'.padEnd(12)}  ${'provider'.padEnd(12)}  ${'id'.padEnd(26)}  ${'effort'.padEnd(8)}  harness`;
   console.log(header);
   for (const row of result.models) {
     console.log(
-      `${row.name.padEnd(12)}  ${(row.provider ?? '—').padEnd(12)}  ${row.id.padEnd(26)}  ${row.effort.padEnd(8)}  ${row.home_via}`,
+      `${row.name.padEnd(12)}  ${(row.provider ?? '—').padEnd(12)}  ${row.id.padEnd(26)}  ${row.effort.padEnd(8)}  ${row.home_harness}`,
     );
   }
   for (const row of result.models) {
     if (row.stale != null) console.error(`warning: ${row.name} — ${row.stale}`);
   }
   console.log(
-    `\nany other name routes via ${result.unregistered_model_driver} — id passed verbatim, probed at dial time`,
+    `\nany other name runs on ${result.unregistered_model_harness} — id passed verbatim, probed at dial time`,
   );
-  if (result.listable_drivers.length > 0) {
-    console.log(`live backend listings: fadeno models --driver <${result.listable_drivers.join('|')}>`);
+  if (result.listable_harnesses.length > 0) {
+    console.log(`live backend listings: fadeno models --harness <${result.listable_harnesses.join('|')}>`);
   }
 }
 
@@ -703,26 +703,26 @@ function printModelDetail(result: ModelsResult, name: string): void {
   const row = result.models.find((r) => r.name === name);
   if (row == null) {
     console.log(
-      `"${name}" is not in the registry — dialing it routes via ${result.unregistered_model_driver} with the id passed verbatim (probed at dial time). ` +
-        'Declare it under models: to set a home driver or standard effort.',
+      `"${name}" is not in the registry — dialing it runs on ${result.unregistered_model_harness} with the id passed verbatim (probed at dial time). ` +
+        'Declare it under models: to set a home harness or standard effort.',
     );
     return;
   }
   printModels({ ...result, models: [row] });
-  console.log(`  via: ${row.home_via}`);
-  for (const lane of row.lanes) {
-    console.log(`  alternate: --via ${lane.via} → ${lane.id}`);
+  console.log(`  harness: ${row.home_harness}`);
+  for (const delivery of row.deliveries) {
+    console.log(`  alternate: --harness ${delivery.harness} → ${delivery.id}${delivery.variant != null ? ` [variant ${delivery.variant}]` : ''}`);
   }
-  for (const [driver, id] of Object.entries(row.spellings)) {
-    console.log(`  spelling: --via ${driver} → ${id}`);
+  for (const [harness, id] of Object.entries(row.spellings)) {
+    console.log(`  spelling: --harness ${harness} → ${id}`);
   }
   for (const [archetype, state] of Object.entries(row.eligibility)) {
     if (state !== 'eligible') console.log(`  eligibility: ${archetype} → ${state}`);
   }
 }
 
-function printModelsDriver(result: DriverListingResult): void {
-  console.log(`${result.driver} backend listing (${result.models_command.join(' ')}): ${result.models.length} model(s)`);
+function printModelsHarness(result: HarnessListingResult): void {
+  console.log(`${result.harness} backend listing (${result.models_command.join(' ')}): ${result.models.length} model(s)`);
   for (const model of result.models) {
     const marks = model.registered_as.length > 0 ? `  ← ${model.registered_as.join(', ')}` : '';
     console.log(`  ${model.id}${marks}`);
@@ -732,10 +732,10 @@ function printModelsDriver(result: DriverListingResult): void {
 function printModelAdd(result: ModelAddResult): void {
   console.log(`added ${result.alias} → ${result.provider}/${result.id}`);
   console.log(`  discovery: ${result.discovery_path} matched ${result.matched_identity}`);
-  console.log(`  delivery: ${result.delivery.route} → ${result.delivery.id}`);
+  console.log(`  delivery: ${result.delivery.harness} → ${result.delivery.id}`);
   console.log(`  user catalog: ${result.catalog_path}`);
   if (result.suppressed_by_project) {
-    console.log('  note: this checkout has a self-contained project catalog; the alias will fall back into it per-key when its delivery route resolves there (dial show names any that drop).');
+    console.log('  note: this checkout has a self-contained project catalog; the alias will fall back into it per-key when its harness is declared there (dial show names any that drop).');
   }
 }
 
@@ -812,12 +812,12 @@ function printDialShow(result: DialShowResult, emptyMessage?: string): void {
     return;
   }
   // Header
-  // `via`, not `harness`. The column always held the DRIVER — the value
-  // `--via <driver>` sets — while `harness` in the same command's JSON means
-  // the agent you are sitting inside. Two meanings, one word, printed a column
-  // apart. Renamed 2026-08-21 along with `claude-cli` → `claude`, which is
-  // what the column now says for an Anthropic model under any harness.
-  const header = `${'archetype'.padEnd(12)}  ${'model'.padEnd(18)}  ${'effort'.padEnd(8)}  ${'via'.padEnd(22)}  source`;
+  // `harness` is the EXECUTOR, and under v4 that is the only thing this word
+  // means anywhere: the ambient host travels as `host`, on its own key. The
+  // column used to be called `via` precisely because `harness` was taken.
+  // `(home)` marks a row whose DIAL named no harness — the registry answered,
+  // whether through the provider's home claim or a model-level `harness:`.
+  const header = `${'archetype'.padEnd(12)}  ${'model'.padEnd(18)}  ${'effort'.padEnd(8)}  ${'harness'.padEnd(22)}  source`;
   console.log(header);
   for (const row of result.rows) {
     const arch = row.archetype.padEnd(12);
@@ -833,15 +833,18 @@ function printDialShow(result: DialShowResult, emptyMessage?: string): void {
     // is also the one word that cannot be mistaken for a value, unlike
     // `default`, which is a literal effort in the vocabulary.
     const effort = (row.resolvedVia != null ? '—' : row.pinned_effort ?? 'inherit').padEnd(8);
-    const via = row.driver.padEnd(22);
+    // `—` for a null harness, which is `current-host` with no host: the cell
+    // has no value rather than the value `null`. Same dash this table already
+    // uses for a not-applicable effort.
+    const harness = (row.harness == null ? '—' : `${row.harness}${row.harness_explicit ? '' : ' (home)'}`).padEnd(22);
     const elig = row.eligibility === 'shadow_only' ? '  SHADOW-ONLY (never gates)' : row.eligibility === 'forbidden' ? '  FORBIDDEN (refused at dispatch)' : '';
     // `inherits`, not `via`: `resolvedVia` is the ARCHETYPE this row borrowed
     // its dial from (`reviewer` with no dial of its own falling back to
-    // `worker`), which has nothing to do with the `via` column two cells left
-    // — that one is the driver. Printing both as "via" on one line was the
-    // collision that kept the column named `harness`.
+    // `worker`), which has nothing to do with the harness column two cells
+    // left. Printing both as "via" on one line was the collision that kept
+    // the column named `harness` in the first place.
     const inherits = row.resolvedVia ? ` (inherits ${row.resolvedVia})` : '';
-    console.log(`${arch}  ${model}  ${effort}  ${via}  ${DIAL_SOURCE_TEXT[row.source] ?? row.source}${inherits}${elig}`);
+    console.log(`${arch}  ${model}  ${effort}  ${harness}  ${DIAL_SOURCE_TEXT[row.source] ?? row.source}${inherits}${elig}`);
     if (row.shadow) console.log(formatShadowLine(row.shadow, '  '));
   }
   // One line, once, when any shadow is shown. The shadow row reads as a
@@ -866,7 +869,7 @@ const SHADOW_EMPTY_MESSAGE =
 function runShadowCommand(
   archetype: string | undefined,
   model: string | undefined,
-  opts: { via: string | null; rate?: string; n?: string; json: boolean },
+  opts: { harness: string | null; rate?: string; n?: string; json: boolean },
 ): number {
   if (archetype == null) {
     const result = runShadowShow({});
@@ -877,7 +880,7 @@ function runShadowCommand(
     printDialShow(result, SHADOW_EMPTY_MESSAGE);
     return 0;
   }
-  const result = runDialShadow({ archetype, model: model!, via: opts.via, rate: opts.rate, n: opts.n });
+  const result = runDialShadow({ archetype, model: model!, harness: opts.harness, rate: opts.rate, n: opts.n });
   if (opts.json) {
     console.log(JSON.stringify(result, null, 2));
     return 0;
@@ -885,7 +888,7 @@ function runShadowCommand(
   for (const note of result.notes) console.log(note);
   const rate = result.rate != null ? ` [rate ${result.rate}]` : '';
   const budget = result.n != null ? ` [${result.remaining}/${result.n} triggers remaining]` : '';
-  console.log(`shadow attached: ${result.archetype} ~ ${result.refString} via ${result.driver}${rate}${budget}`);
+  console.log(`shadow attached: ${result.archetype} ~ ${result.refString} on ${result.harness}${rate}${budget}`);
   if (result.previous) {
     const previousBudget = result.previous.n != null
       ? result.previous.remaining === 0
@@ -1002,6 +1005,19 @@ function main(argv: string[]): number {
     if (candidates.length > 0) process.stdout.write(`${candidates.join('\n')}\n`);
     return 0;
   }
+  // `--via` is gone with the driver vocabulary it belonged to. `parseArgs`
+  // would answer "Unknown option" for it, which tells a reader the flag is
+  // wrong but not what replaced it — and every scripted `fadeno dial … --via`
+  // in the wild deserves the one-line answer. Checked before parsing, since
+  // an undeclared option aborts there.
+  const staleVia = argv.find((arg) => arg === '--via' || arg.startsWith('--via='));
+  if (staleVia != null) {
+    throw new Error(
+      '`--via` was removed with catalog v4 — use `--harness <id>`. A dial names a model and, optionally, ' +
+        'the harness that executes it; the driver names it took (claude-exec, opencode-direct, muse-code) ' +
+        'were harnesses all along. See docs/experimental/harness-neutral-dials.md.',
+    );
+  }
   let parsed;
   try {
     parsed = parseArgs({
@@ -1045,8 +1061,7 @@ function main(argv: string[]): number {
         'actor-call': { type: 'string' },
         timeout: { type: 'string' },
         input: { type: 'string', multiple: true },
-        via: { type: 'string' },
-        driver: { type: 'string' },
+        harness: { type: 'string' },
         user: { type: 'boolean' },
         session: { type: 'boolean' },
         repo: { type: 'boolean' },
@@ -1345,7 +1360,9 @@ function main(argv: string[]): number {
           session_effort: result.session_effort,
           lane: result.lane,
           lane_reason: result.lane_reason,
-          driver: result.driver,
+          harness: result.harness,
+          variant: result.variant ?? null,
+          host: result.host ?? null,
           host_executor: result.hostExecutor,
           resolution: result.source,
           resolved_via: result.resolved_via ?? null,
@@ -1775,7 +1792,7 @@ function main(argv: string[]): number {
     case 'model':
     case 'models': {
       if (positionals[1] === 'add') {
-        if (positionals.length !== 4 || values.driver != null) {
+        if (positionals.length !== 4 || values.harness != null) {
           throw new Error('Usage: fadeno model add <alias> <provider/id> [--json]');
         }
         const result = runModelsAdd({ alias: positionals[2]!, discoveryId: positionals[3]! });
@@ -1783,14 +1800,14 @@ function main(argv: string[]): number {
         else printModelAdd(result);
         return 0;
       }
-      if (values.driver != null) {
-        if (positionals.length > 1) throw new Error('Usage: fadeno models --driver <alias>  (no positional with --driver)');
-        const result = runModelsDriver({ driver: values.driver });
+      if (values.harness != null) {
+        if (positionals.length > 1) throw new Error('Usage: fadeno models --harness <id>  (no positional with --harness)');
+        const result = runModelsHarness({ harness: values.harness });
         if (values.json) console.log(JSON.stringify(result, null, 2));
-        else printModelsDriver(result);
+        else printModelsHarness(result);
         return 0;
       }
-      if (positionals.length > 2) throw new Error('Usage: fadeno models [<name>] [--driver <alias>] [--json]');
+      if (positionals.length > 2) throw new Error('Usage: fadeno models [<name>] [--harness <id>] [--json]');
       const result = runModels({});
       const name = positionals[1];
       if (values.json) {
@@ -1860,12 +1877,12 @@ function main(argv: string[]): number {
         return 0;
       }
       if (sub === 'shadow') {
-        const shadowUsage = 'Usage: fadeno dial shadow [<archetype> <model>[@effort] [--via <driver>] [--rate <r>] [--n <count>]]';
+        const shadowUsage = 'Usage: fadeno dial shadow [<archetype> <model>[@effort] [--harness <id>] [--rate <r>] [--n <count>]]';
         if (positionals.length > 4) throw new Error(shadowUsage);
         const archetype = positionals[2];
         const model = positionals[3];
         if (archetype != null && model == null) throw new Error(shadowUsage);
-        return runShadowCommand(archetype, model, { via: values.via ?? null, rate: values.rate, n: values.n, json: Boolean(values.json) });
+        return runShadowCommand(archetype, model, { harness: values.harness ?? null, rate: values.rate, n: values.n, json: Boolean(values.json) });
       }
       if (sub === 'resolve') {
         if (!values.archetype) throw new Error('Usage: fadeno dial resolve --archetype <name> [--prompt-sha256 <hex>]');
@@ -1917,7 +1934,7 @@ function main(argv: string[]): number {
           .flatMap((token) => token.split(/[+,]/))
           .map((name) => name.trim())
           .filter((name) => name.length > 0);
-        const results = runDialSetMany({ archetypes, model, via: values.via ?? null, session: Boolean(values.session), user: Boolean(values.user), repo: Boolean(values.repo) });
+        const results = runDialSetMany({ archetypes, model, harness: values.harness ?? null, session: Boolean(values.session), user: Boolean(values.user), repo: Boolean(values.repo) });
         if (values.json) {
           console.log(JSON.stringify(results.length === 1 ? results[0] : results, null, 2));
           return 0;
@@ -1931,18 +1948,18 @@ function main(argv: string[]): number {
         }
         return 0;
       }
-      throw new Error('Usage: fadeno dial [<archetype> [<model>[@effort] [--via <driver>] [--session|--user|--repo]] | clear [<archetype>] [--session|--user|--repo] | shadow [<archetype> <model>[@effort] [--via <driver>] [--rate <r>] [--n <count>]] | clear-shadow [<archetype>] | resolve --archetype <name>]');
+      throw new Error('Usage: fadeno dial [<archetype> [<model>[@effort] [--harness <id>] [--session|--user|--repo]] | clear [<archetype>] [--session|--user|--repo] | shadow [<archetype> <model>[@effort] [--harness <id>] [--rate <r>] [--n <count>]] | clear-shadow [<archetype>] | resolve --archetype <name>]');
     }
     // Top-level alias for `fadeno dial shadow ...` — same handler
     // (`runShadowCommand`) as the `dial` subcommand above, so the two
     // spellings cannot drift apart.
     case 'shadow': {
-      const shadowUsage = 'Usage: fadeno shadow [<archetype> <model>[@effort] [--via <driver>] [--rate <r>] [--n <count>]]';
+      const shadowUsage = 'Usage: fadeno shadow [<archetype> <model>[@effort] [--harness <id>] [--rate <r>] [--n <count>]]';
       if (positionals.length > 3) throw new Error(shadowUsage);
       const archetype = positionals[1];
       const model = positionals[2];
       if (archetype != null && model == null) throw new Error(shadowUsage);
-      return runShadowCommand(archetype, model, { via: values.via ?? null, rate: values.rate, n: values.n, json: Boolean(values.json) });
+      return runShadowCommand(archetype, model, { harness: values.harness ?? null, rate: values.rate, n: values.n, json: Boolean(values.json) });
     }
     case 'dispatch': {
       const promptFile = values['prompt-file'];
@@ -1961,7 +1978,7 @@ function main(argv: string[]): number {
         archetype: values.archetype,
         role: values.role,
         model: values.model ?? null,
-        via: values.via ?? null,
+        harness: values.harness ?? null,
         tag: values.tag,
         shadow: values.shadow,
         timeoutMs: dispatchTimeoutMs,
@@ -2344,7 +2361,7 @@ function main(argv: string[]): number {
     case 'bakeoff': {
       const ref = positionals[1];
       const usage =
-        'Usage: fadeno bakeoff <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--via <driver>] [--evidence inlined|explored]\n' +
+        'Usage: fadeno bakeoff <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--harness <id>] [--evidence inlined|explored]\n' +
         '   or: fadeno bakeoff <pair-id|dispatch-id> --prepare [--evidence inlined|explored]\n' +
         '   or: fadeno bakeoff <pair-id|dispatch-id> --record --comparison <file> --adversarial <file> [--evidence inlined|explored]';
       if (!ref) throw new Error(usage);
@@ -2380,7 +2397,7 @@ function main(argv: string[]): number {
         ref,
         measureOnly: Boolean(values['measure-only']),
         judgeModel: values.judge ?? null,
-        judgeVia: values.via ?? null,
+        judgeHarness: values.harness ?? null,
         evidence,
       });
       if (values.json) {

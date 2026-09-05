@@ -10,13 +10,13 @@ import { tempRepo } from './helpers.ts';
 
 const onHarness = (harness: string): UserPathOptions => ({ env: { FADENO_HARNESS: harness } });
 
-function seedV3(t: TestContext, cmd: string[]): string {
+function seedCatalog(t: TestContext, cmd: string[]): string {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { probe: { provider: 'openai', id: 'probe' } },
-    routes: { standalone: { openai: { command: cmd } }, codex: { openai: { command: cmd } } },
+    harnesses: { codex: { provider: 'openai', command: cmd } },
     archetypes: { worker: {}, reviewer: {} },
     dials: { worker: 'probe', reviewer: 'probe' },
   }));
@@ -29,7 +29,7 @@ function captureError(fn: () => unknown): Error {
 }
 
 test('a tag recovers caller own dispatch with no id in hand', (t) => {
-  const root = seedV3(t, echoing('mine'));
+  const root = seedCatalog(t, echoing('mine'));
   runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, tag: 'worker-parse-header', userPathOptions: onHarness('standalone') });
   const rec = runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'worker-parse-header' });
   assert.equal(rec.bytes, 'mine');
@@ -38,21 +38,21 @@ test('a tag recovers caller own dispatch with no id in hand', (t) => {
 });
 
 test('tag lands on evidence rows', (t) => {
-  const root = seedV3(t, echoing('x'));
+  const root = seedCatalog(t, echoing('x'));
   runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, tag: 'worker-abc', userPathOptions: onHarness('standalone') });
   const rows = readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
   assert.deepEqual(rows.map((r) => r.tag), ['worker-abc', 'worker-abc']);
 });
 
 test('an untagged dispatch stays untagged rather than carrying a null', (t) => {
-  const root = seedV3(t, echoing('x'));
+  const root = seedCatalog(t, echoing('x'));
   runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, userPathOptions: onHarness('standalone') });
   const first = JSON.parse(readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8').trim().split('\n')[0]!) as Record<string, unknown>;
   assert.ok(!('tag' in first));
 });
 
 test('the exact failure: two concurrent dispatches, both finished, and `last` refuses', (t) => {
-  const root = seedV3(t, ['node', '-e', "setTimeout(()=>process.stdout.write('report'),150)"]);
+  const root = seedCatalog(t, ['node', '-e', "setTimeout(()=>process.stdout.write('report'),150)"]);
   const together = new Date('2026-08-14T12:00:00.000Z');
   runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, tag: 'worker-a', now: together, userPathOptions: onHarness('standalone') });
   runDispatch({ archetype: 'reviewer', prompt: 'b', repoRoot: root, tag: 'reviewer-b', now: together, userPathOptions: onHarness('standalone') });
@@ -67,7 +67,7 @@ test('the exact failure: two concurrent dispatches, both finished, and `last` re
 });
 
 test('`last` still answers when the dispatch genuinely ran alone', (t) => {
-  const root = seedV3(t, echoing('only one'));
+  const root = seedCatalog(t, echoing('only one'));
   runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, userPathOptions: onHarness('standalone') });
   const result = runDispatchesOutput({ repoRoot: root, dispatchId: 'last' });
   assert.equal(result.bytes, 'only one');
@@ -75,7 +75,7 @@ test('`last` still answers when the dispatch genuinely ran alone', (t) => {
 });
 
 test('`last` answers across dispatches that never overlapped', (t) => {
-  const root = seedV3(t, echoing('second'));
+  const root = seedCatalog(t, echoing('second'));
   runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, now: new Date('2026-08-14T10:00:00.000Z'), userPathOptions: onHarness('standalone') });
   runDispatch({ archetype: 'worker', prompt: 'b', repoRoot: root, now: new Date('2026-08-14T18:00:00.000Z'), userPathOptions: onHarness('standalone') });
   const result = runDispatchesOutput({ repoRoot: root, dispatchId: 'last' });
@@ -84,7 +84,7 @@ test('`last` answers across dispatches that never overlapped', (t) => {
 });
 
 test('a reused tag is refused rather than resolved to the newest', (t) => {
-  const root = seedV3(t, echoing('x'));
+  const root = seedCatalog(t, echoing('x'));
   runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, tag: 'same', userPathOptions: onHarness('standalone') });
   // The kernel now refuses this tag at launch, so a second `runDispatch` can no
   // longer build the ambiguity. It can still arrive another way — a ledger
@@ -100,7 +100,7 @@ test('a reused tag is refused rather than resolved to the newest', (t) => {
 });
 
 test('an unknown tag says which tags the log does hold', (t) => {
-  const root = seedV3(t, echoing('x'));
+  const root = seedCatalog(t, echoing('x'));
   runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, tag: 'worker-real', userPathOptions: onHarness('standalone') });
   const err = captureError(() => runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'worker-typo' }));
   assert.ok(err instanceof DispatchesCommandError);
@@ -109,7 +109,7 @@ test('an unknown tag says which tags the log does hold', (t) => {
 });
 
 test('a malformed tag is refused at the kernel, before anything is spawned', (t) => {
-  const root = seedV3(t, echoing('x'));
+  const root = seedCatalog(t, echoing('x'));
   for (const bad of ['worker-<slug>', 'has space', '-leading', 'a'.repeat(65)]) {
     assert.throws(() => runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, tag: bad, userPathOptions: onHarness('standalone') }), DispatchCommandError, `"${bad}" should not be usable`);
   }
@@ -117,7 +117,7 @@ test('a malformed tag is refused at the kernel, before anything is spawned', (t)
 });
 
 test('the spawn echo names the tag, and nags when there is none', (t) => {
-  const root = seedV3(t, echoing('x'));
+  const root = seedCatalog(t, echoing('x'));
   const tagged: string[] = [];
   runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, tag: 'worker-t', onEcho: (line) => tagged.push(line), userPathOptions: onHarness('standalone') });
   const named = tagged.find((line) => line.startsWith('dispatch id:'));
@@ -131,7 +131,7 @@ test('the spawn echo names the tag, and nags when there is none', (t) => {
 });
 
 test('a slow dispatch records when it ended, and the pair agrees with its duration', (t) => {
-  const root = seedV3(t, ['node', '-e', "setTimeout(()=>process.stdout.write('slow'),400)"]);
+  const root = seedCatalog(t, ['node', '-e', "setTimeout(()=>process.stdout.write('slow'),400)"]);
   const at = new Date('2026-08-14T09:00:00.000Z');
   runDispatch({ archetype: 'worker', prompt: 'x', repoRoot: root, now: at, tag: 'worker-slow', userPathOptions: onHarness('standalone') });
   const [requested, completed] = readFileSync(join(root, '.fadeno', 'dispatches.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>) as [Record<string, unknown>, Record<string, unknown>];
@@ -162,7 +162,7 @@ test('overlap detection still works on rows written before the stamp was fixed',
 });
 
 test('waiting by tag settles on that dispatch and does not drift', (t) => {
-  const root = seedV3(t, echoing('first'));
+  const root = seedCatalog(t, echoing('first'));
   runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, tag: 'worker-first', userPathOptions: onHarness('standalone') });
   runDispatch({ archetype: 'worker', prompt: 'b', repoRoot: root, tag: 'worker-second', userPathOptions: onHarness('standalone') });
   const result = runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'worker-first', waitMs: 1000, pollMs: 100 });
@@ -173,7 +173,7 @@ test('waiting by tag settles on that dispatch and does not drift', (t) => {
 // --- a tag is a handle, so two dispatches may never share one ---
 
 test('a tag still in flight refuses the second launch, and says how to reach the first', (t) => {
-  const root = seedV3(t, echoing('x'));
+  const root = seedCatalog(t, echoing('x'));
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   // A request row with no completion row: the shape a killed kernel leaves,
   // and the shape a recursive dispatch collides with.
@@ -196,7 +196,7 @@ test('a tag still in flight refuses the second launch, and says how to reach the
 });
 
 test('reusing a completed tag is refused too: it would make both unrecoverable', (t) => {
-  const root = seedV3(t, echoing('first'));
+  const root = seedCatalog(t, echoing('first'));
   runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, tag: 'worker-shared', userPathOptions: onHarness('standalone') });
   const err = captureError(() => runDispatch({
     archetype: 'worker', prompt: 'b', repoRoot: root, tag: 'worker-shared', userPathOptions: onHarness('standalone'),
@@ -209,14 +209,14 @@ test('reusing a completed tag is refused too: it would make both unrecoverable',
 });
 
 test('the refusal is per tag, not per repo: distinct handles still launch', (t) => {
-  const root = seedV3(t, echoing('x'));
+  const root = seedCatalog(t, echoing('x'));
   runDispatch({ archetype: 'worker', prompt: 'a', repoRoot: root, tag: 'worker-one', userPathOptions: onHarness('standalone') });
   runDispatch({ archetype: 'worker', prompt: 'b', repoRoot: root, tag: 'worker-two', userPathOptions: onHarness('standalone') });
   assert.equal(runDispatchesOutput({ repoRoot: root, dispatchId: '', tag: 'worker-two' }).bytes, 'x');
 });
 
 test('an unreadable ledger never blocks a launch on bookkeeping', (t) => {
-  const root = seedV3(t, echoing('ran'));
+  const root = seedCatalog(t, echoing('ran'));
   writeFileSync(join(root, '.fadeno', 'dispatches.jsonl'), '{ torn\n{"event":\n');
   const result = runDispatch({
     archetype: 'worker', prompt: 'x', repoRoot: root, tag: 'worker-torn', userPathOptions: onHarness('standalone'),

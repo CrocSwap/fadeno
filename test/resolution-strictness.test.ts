@@ -23,17 +23,12 @@ import { echoedStdin, tempRepo } from './helpers.ts';
 const STEERING_HOOK = join(import.meta.dirname, '..', 'templates', 'claude', 'hooks', 'dispatch-steering.mjs');
 
 const V3_BASE = {
-  schema_version: 3,
+  schema_version: 4,
   models: {
     sol: { provider: 'dummy', id: 'sol', effort: 'high' },
     grok: { provider: 'dummy', id: 'grok', effort: 'high' },
   },
-  routes: {
-    standalone: {
-      dummy: { command: ['node', '-e', '0'], },
-      'current-host': { host: true },
-    },
-  },
+  harnesses: { dummy: { provider: 'dummy', command: ['node', '-e', '0'] } },
   archetypes: {
     worker: { },
     reviewer: { },

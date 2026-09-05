@@ -26,25 +26,13 @@ function seedDispatch(t: TestContext): string {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       writer: { provider: 'writerp', id: 'writer', effort: 'default' },
       reader: { provider: 'readerp', id: 'reader', effort: 'default' },
       unknown: { provider: 'unknownp', id: 'unknown', effort: 'default' },
     },
-    routes: {
-      standalone: {
-        writerp: {
-          command: ['node', '-e', "require('node:fs').writeFileSync('executor-write.txt','isolated');process.stdout.write('written')"],
-          },
-        readerp: {
-          command: ['node', '-e', "process.stdout.write('read-only report')"],
-          },
-        unknownp: {
-          command: ['node', '-e', "process.stdout.write('unknown posture')"],
-        },
-      },
-    },
+    harnesses: { writerp: { provider: 'writerp', command: ['node', '-e', 'require(\'node:fs\').writeFileSync(\'executor-write.txt\',\'isolated\');process.stdout.write(\'written\')'] }, readerp: { provider: 'readerp', command: ['node', '-e', 'process.stdout.write(\'read-only report\')'] }, unknownp: { provider: 'unknownp', command: ['node', '-e', 'process.stdout.write(\'unknown posture\')'] } },
     archetypes: { worker: {}, reviewer: { } },
     dials: { worker: 'writer', reviewer: 'reader' },
   }));
@@ -150,9 +138,9 @@ test('drive refuses a write-capable attempt before actor_dispatched while anothe
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { writer: { provider: 'writerp', id: 'writer', effort: 'default' } },
-    routes: { standalone: { writerp: { command: ['node', '-e', "process.stdout.write('notes')"], } } },
+    harnesses: { writerp: { provider: 'writerp', command: ['node', '-e', 'process.stdout.write(\'notes\')'] } },
     archetypes: { worker: { } },
     dials: { worker: 'writer' },
   }));
@@ -182,9 +170,9 @@ function seedDanglingDrive(t: TestContext): { root: string; runId: string; runDi
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { writer: { provider: 'writerp', id: 'writer', effort: 'default' } },
-    routes: { standalone: { writerp: { command: ['node', '-e', "process.stdout.write('notes')"], } } },
+    harnesses: { writerp: { provider: 'writerp', command: ['node', '-e', 'process.stdout.write(\'notes\')'] } },
     archetypes: { worker: { } },
     dials: { worker: 'writer' },
   }));

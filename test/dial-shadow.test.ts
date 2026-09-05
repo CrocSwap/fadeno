@@ -17,32 +17,32 @@ import { read, tempRepo } from './helpers.ts';
 
 const onHarness = (harness: string): UserPathOptions => ({ env: { FADENO_HARNESS: harness } });
 
-function seedV3(t: TestContext): string {
+function seedCatalog(t: TestContext): string {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       sol: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high' },
       grok: { provider: 'xai', id: 'grok-4.6', effort: 'high' },
     },
-    routes: {
-      standalone: {
-        openai: { command: ['node', '-e', '0'], },
-        xai: { command: ['node', '-e', '0'], },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', '0'] }, grok: { provider: 'xai', command: ['node', '-e', '0'] } },
     archetypes: {
       worker: { },
       reviewer: { },
     },
+    // Both primaries dialed onto a command-capable harness. Under v4 an
+    // undialed archetype falls through to `current-host`, which in a bare
+    // shell is not a host candidate AND has no command lane — so a shadow
+    // attach onto it is refused outright (see test/dial-set.test.ts). These
+    // tests are about the attachment state machine, not that refusal.
+    dials: { worker: 'sol', reviewer: 'sol' },
   }));
   return root;
 }
 
 test('shadow attach/clear round-trip', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const attached = runDialShadow({ repoRoot: root, userPathOptions: onHarness('standalone'), archetype: 'worker', model: 'sol' });
   assert.equal(attached.archetype, 'worker');
   assert.equal(attached.model, 'sol');
@@ -60,8 +60,8 @@ test('shadow attach/clear round-trip', (t) => {
   assert.equal(Object.keys(shown2.shadows).length, 0);
 });
 
-test('shadow with rate and via', (t) => {
-  const root = seedV3(t);
+test('shadow with rate and an explicit harness', (t) => {
+  const root = seedCatalog(t);
   const withRate = runDialShadow({ repoRoot: root, userPathOptions: onHarness('standalone'), archetype: 'worker', model: 'grok', rate: 0.25 });
   assert.equal(withRate.rate, 0.25);
   const shown = runDialShow({ repoRoot: root, userPathOptions: onHarness('standalone') });
@@ -73,7 +73,7 @@ test('shadow with rate and via', (t) => {
 });
 
 test('finite shadow budget persists, reattach resets it, and expiry stays visible', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   const attached = runDialShadow({
     repoRoot: root, userPathOptions: onHarness('standalone'), archetype: 'worker', model: 'grok', rate: 0.2, n: 3,
   });
@@ -104,7 +104,7 @@ test('finite shadow budget persists, reattach resets it, and expiry stays visibl
 });
 
 test('shadow refusals: host delivery and forbidden', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   assert.throws(() => runDialShadow({ repoRoot: root, userPathOptions: onHarness('standalone'), archetype: 'worker', model: 'current-host' }), (err: unknown) => err instanceof DialError && /command delivery/.test((err as Error).message));
   // bad rate
   assert.throws(() => runDialShadow({ repoRoot: root, userPathOptions: onHarness('standalone'), archetype: 'worker', model: 'sol', rate: 0 }), /is not a number in \(0, 1\]/);
@@ -115,7 +115,7 @@ test('shadow refusals: host delivery and forbidden', (t) => {
 });
 
 test('local shadow count state rejects malformed finite records but keeps legacy unlimited records', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
   const write = (shadow: unknown): void => writeFileSync(join(root, '.fadeno', 'local', 'dials'), JSON.stringify({ shadows: { worker: shadow } }));
   write({ model: 'sol' });
@@ -129,12 +129,12 @@ test('local shadow count state rejects malformed finite records but keeps legacy
 });
 
 test('clear-shadow error when no attachment', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   assert.throws(() => runDialClearShadow({ repoRoot: root, userPathOptions: onHarness('standalone'), archetype: 'worker' }), (err: unknown) => err instanceof DialError && /no shadow attachment for "worker"/.test((err as Error).message));
 });
 
 test('clear-shadow all', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   runDialShadow({ repoRoot: root, userPathOptions: onHarness('standalone'), archetype: 'worker', model: 'sol' });
   runDialShadow({ repoRoot: root, userPathOptions: onHarness('standalone'), archetype: 'reviewer', model: 'grok', rate: 0.5 });
   const clearedAll = runDialClearShadow({ repoRoot: root, userPathOptions: onHarness('standalone') });

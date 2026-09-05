@@ -110,38 +110,13 @@ function seed(t: TestContext): { root: string; runId: string } {
   runInit({ target: 'codex', repoRoot: root });
   writeFileSync(join(root, '.fadeno', 'playbooks', 'compositional-review.yaml'), PLAYBOOK);
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'luna-model': { provider: 'luna_p', id: 'gpt-luna', effort: 'xhigh' },
       'terra-model': { provider: 'terra_p', id: 'gpt-terra', effort: 'medium' },
       'final-model': { provider: 'sol_p', id: 'gpt-sol', effort: 'high' },
     },
-    routes: {
-      standalone: {
-        luna_p: { host: true },
-        terra_p: { host: true },
-        sol_p: { host: true },
-        'current-host': { host: true },
-      },
-      codex: {
-        luna_p: { host: true },
-        terra_p: { host: true },
-        sol_p: { host: true },
-        'current-host': { host: true },
-      },
-      claude: {
-        luna_p: { host: true },
-        terra_p: { host: true },
-        sol_p: { host: true },
-        'current-host': { host: true },
-      },
-      grok: {
-        luna_p: { host: true },
-        terra_p: { host: true },
-        sol_p: { host: true },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { luna_p: { provider: 'luna_p', host: { effort_channel: 'none' } }, terra_p: { provider: 'terra_p', host: { effort_channel: 'none' } }, sol_p: { provider: 'sol_p', host: { effort_channel: 'none' } } },
     dials: { worker: 'luna-model', reviewer: 'terra-model' },
     bindings: { luna: 'luna-model', terra: 'terra-model', finalizer: 'final-model' },
     archetypes: { worker: {}, reviewer: {} },
@@ -231,17 +206,12 @@ test('drive: a loop generation may contain a compositional map', (t) => {
   runInit({ target: 'codex', repoRoot: root });
   writeFileSync(join(root, '.fadeno', 'playbooks', 'loop-map-review.yaml'), LOOP_MAP_PLAYBOOK);
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'terra-model': { provider: 'terra_p', id: 'gpt-terra', effort: 'medium' },
       'final-model': { provider: 'sol_p', id: 'gpt-sol', effort: 'high' },
     },
-    routes: {
-      standalone: { terra_p: { host: true }, sol_p: { host: true }, 'current-host': { host: true } },
-      codex: { terra_p: { host: true }, sol_p: { host: true }, 'current-host': { host: true } },
-      claude: { terra_p: { host: true }, sol_p: { host: true }, 'current-host': { host: true } },
-      grok: { terra_p: { host: true }, sol_p: { host: true }, 'current-host': { host: true } },
-    },
+    harnesses: { terra_p: { provider: 'terra_p', host: { effort_channel: 'none' } }, sol_p: { provider: 'sol_p', host: { effort_channel: 'none' } } },
     dials: { reviewer: 'terra-model', worker: 'final-model' },
     bindings: { terra: 'terra-model', finalizer: 'final-model' },
     archetypes: { reviewer: {}, worker: {} },

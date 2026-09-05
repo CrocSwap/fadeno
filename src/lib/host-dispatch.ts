@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { buildArtifactManifest, sha256Hex } from './artifact-manifest.ts';
+import { snapshotExecutor } from './executors.ts';
 import { SchemaSet, schemaErrorMessages, type SchemaKind } from './playbook-validate.ts';
 import { extractSchemaEnvelope, type EnvelopeExtraction } from './schema-envelope.ts';
 import { runSchemaDirectories } from './definitions.ts';
@@ -786,7 +787,10 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
       request,
       terminal: null,
     });
-    const executor = profile.executors[request.executor];
+    // `agentType` is the archetype on a locked host request (the engine
+    // stamps `agent_type: <archetype>`), so it is what selects a
+    // policy-chosen variant's snapshot entry. The wildcard names no archetype.
+    const executor = snapshotExecutor(profile, request.executor, request.agentType === '*' ? null : request.agentType);
     if (
       executor == null || executor.adapter !== 'host' ||
       JSON.stringify(executor.fallbackCommand ?? null) !== JSON.stringify(opts.command ?? null) ||

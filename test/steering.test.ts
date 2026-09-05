@@ -498,7 +498,7 @@ test('Claude steering writes the host_delivery evidence the kernel never sees', 
     // cannot import DISPATCHES_FORMAT (it runs as a standalone script), so the
     // literal is duplicated there and pinned here — orthogonal to hook_version
     // below, which stamps the *writer*, not the format it writes.
-    format: '1.0',
+    format: '1.1',
     event: 'host_delivery',
     // The one key that answers "which Fadeno produced this row?" on every row
     // in the log, kernel-written or hook-written. Before it existed the only
@@ -522,7 +522,12 @@ test('Claude steering writes the host_delivery evidence the kernel never sees', 
     model_override: 'sonnet',
     model_applied: 'opus',
     dial_source: null,
-    driver: null,
+    // The EXECUTOR harness and the lane variant the resolver chose. Under
+    // format 1.0 those were one field named `driver`; `host` — the harness
+    // this ran INSIDE — is on its own key beside them.
+    harness: 'claude',
+    variant: null,
+    host: 'claude',
     effort: null,
     // Nothing pins an effort on the host lane any more — no agent file does,
     // and this dial stated no opinion — so the spawn takes the session's. With
@@ -852,25 +857,28 @@ test('a selected pair with no command lane to force stays in-session — degrade
   assert.equal(evidenceRows(root).filter((r) => r.event === 'host_delivery').length, 1);
 });
 
-/** A codex-harness catalog with a host worker that has a command fallback (`luna`) and a command-only shadow challenger (`grok`). */
+/** Pins the HOST, so the fixture's host-capable harness is the one we are in. */
+function codexPairUser(root: string): UserPathOptions {
+  return {
+    home: join(root, 'home'),
+    env: {
+      FADENO_CONFIG_HOME: join(root, 'user-config'),
+      FADENO_STATE_HOME: join(root, 'user-state'),
+      FADENO_HARNESS: 'codex',
+    },
+  };
+}
+
+/** A catalog whose HOST harness (`codex`) has a command fallback, plus a command-only shadow challenger (`grok`). */
 function seedCodexPairV3(root: string): void {
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       luna: { provider: 'lunap', id: 'gpt-5.6-luna', effort: 'high' },
       grok: { provider: 'xai', id: 'grok' },
     },
-    routes: {
-      codex: {
-        lunap: {
-          host: true,
-          command: ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('HOST-FALLBACK:'+d))"],
-        },
-        xai: { command: ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('CHALLENGER:'+d))"] },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { codex: { provider: 'lunap', host: { effort_channel: 'agent-file' }, command: ['node', '-e', 'let d=\'\';process.stdin.on(\'data\',c=>d+=c);process.stdin.on(\'end\',()=>process.stdout.write(\'HOST-FALLBACK:\'+d))'] }, grok: { provider: 'xai', command: ['node', '-e', 'let d=\'\';process.stdin.on(\'data\',c=>d+=c);process.stdin.on(\'end\',()=>process.stdout.write(\'CHALLENGER:\'+d))'] } },
     archetypes: { worker: {} },
     dials: { worker: 'luna' },
   }));
@@ -885,7 +893,7 @@ test('Codex host agent instructions write the prompt file before resolving, so t
   // path.
   const root = tempRepo(t);
   seedCodexPairV3(root);
-  const applied = runSteeringApply({ repoRoot: root, target: 'codex' });
+  const applied = runSteeringApply({ repoRoot: root, target: 'codex', userPathOptions: codexPairUser(root) });
   assert.equal(applied.materialization.worker?.kind, 'host');
   const body = read(root, '.codex/agents/worker.toml');
   assert.match(body, /ordinary `# Fadeno step assignment` heading, FIRST\nwrite the ENTIRE task prompt/);
@@ -909,7 +917,7 @@ test('Codex command-broker instructions also write the prompt file before resolv
   // A command-only session dial (no host route at all) forces the
   // command-broker branch instead of the host-agent branch tested above.
   writeLocalDialState(root, { dials: { worker: { model: 'grok' } }, shadows: {}, legacyNote: null });
-  const applied = runSteeringApply({ repoRoot: root, target: 'codex' });
+  const applied = runSteeringApply({ repoRoot: root, target: 'codex', userPathOptions: codexPairUser(root) });
   assert.equal(applied.materialization.worker?.kind, 'command-broker');
   const body = read(root, '.codex/agents/worker.toml');
   const writeAt = body.indexOf('ENTIRE task prompt');
@@ -937,7 +945,7 @@ test('Codex steering resolve forces mode=command on a selected, routable pair, k
   // ambient markers and the user harness file to 'standalone', where this
   // fixture's codex-only route table never compiles luna into a host spec.
   const noDigest = runSteeringResolve({
-    repoRoot: root, archetype: 'worker', hostExecutor: 'luna',
+    repoRoot: root, userPathOptions: codexPairUser(root), archetype: 'worker', hostExecutor: 'luna',
     userPathOptions: { env: { FADENO_HARNESS: 'codex' } },
   });
   assert.equal(noDigest.mode, 'host');
@@ -946,7 +954,7 @@ test('Codex steering resolve forces mode=command on a selected, routable pair, k
   assert.equal(noDigest.shadow?.selected, null);
 
   const paired = runSteeringResolve({
-    repoRoot: root, archetype: 'worker', hostExecutor: 'luna', promptFile: promptPath,
+    repoRoot: root, userPathOptions: codexPairUser(root), archetype: 'worker', hostExecutor: 'luna', promptFile: promptPath,
     userPathOptions: { env: { FADENO_HARNESS: 'codex' } },
   });
   assert.equal(paired.shadow?.selected, true);
@@ -964,7 +972,7 @@ test('Codex steering resolve forces mode=command on a selected, routable pair, k
   // and kernel (here, resolver and kernel) could disagree on the pair.
   const digest = sha256Hex(readFileSync(promptPath, 'utf8'));
   const viaSha = runSteeringResolve({
-    repoRoot: root, archetype: 'worker', hostExecutor: 'luna', promptSha256: digest,
+    repoRoot: root, userPathOptions: codexPairUser(root), archetype: 'worker', hostExecutor: 'luna', promptSha256: digest,
     userPathOptions: { env: { FADENO_HARNESS: 'codex' } },
   });
   assert.equal(viaSha.mode, 'command');
@@ -976,7 +984,7 @@ test('steering reports a finite exhausted shadow as attached but never selected'
   seedCodexPairV3(root);
   writeLocalDialState(root, { dials: {}, shadows: { worker: { model: 'grok', rate: 1, n: 1, remaining: 0 } }, legacyNote: null });
   const resolved = runSteeringResolve({
-    repoRoot: root, archetype: 'worker', hostExecutor: 'luna',
+    repoRoot: root, userPathOptions: codexPairUser(root), archetype: 'worker', hostExecutor: 'luna',
     userPathOptions: { env: { FADENO_HARNESS: 'codex' } },
   });
   assert.equal(resolved.shadow?.attached, true);

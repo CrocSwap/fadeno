@@ -57,9 +57,9 @@ test('cli dispatch --timeout rejects empty string and whitespace', (t) => {
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
   const v3 = {
-    schema_version: 3,
+    schema_version: 4,
     models: { sleep: { provider: 'openai', id: 'sleep', effort: 'high' } },
-    routes: { standalone: { openai: { command: ['node', '-e', '0'] }, 'current-host': { host: true } } },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', '0'] } },
     archetypes: { worker: {} },
   };
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml(v3));
@@ -119,28 +119,11 @@ test('dispatch_completed outcome timeout carries timeout_ms and deadline_at', (t
   runInit({ target: 'codex', repoRoot: root });
   // route with short deadline, executor sleeps longer than deadline
   const sleepCmd = ['node', '-e', 'setTimeout(()=>{}, 10000)'];
-  const sleepyRoute = { command: sleepCmd, timeout_ms: 800, };
+  const sleepyHarnesses = { sleep_p: { provider: 'sleep_p', command: sleepCmd, timeout_ms: 800 } };
   const v3 = {
-    schema_version: 3,
+    schema_version: 4,
     models: { sleepy: { provider: 'sleep_p', id: 'sleepy', effort: 'high' } },
-    routes: {
-      standalone: {
-        sleep_p: sleepyRoute,
-        'current-host': { host: true },
-      },
-      codex: {
-        sleep_p: sleepyRoute,
-        'current-host': { host: true },
-      },
-      claude: {
-        sleep_p: sleepyRoute,
-        'current-host': { host: true },
-      },
-      grok: {
-        sleep_p: sleepyRoute,
-        'current-host': { host: true },
-      },
-    },
+    harnesses: sleepyHarnesses,
     archetypes: { worker: {} },
     dials: { worker: 'sleepy' },
   };
@@ -171,16 +154,11 @@ test('dispatch --timeout 0 disables route deadline', (t) => {
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
   // same sleepy route but override with 0
-  const fastRoute = { command: ['node', '-e', "process.stdout.write('ok')"], timeout_ms: 100, };
+  const fastHarnesses = { fast_p: { provider: 'fast_p', command: ['node', '-e', "process.stdout.write('ok')"], timeout_ms: 100 } };
   const v3 = {
-    schema_version: 3,
+    schema_version: 4,
     models: { fast: { provider: 'fast_p', id: 'fast', effort: 'high' } },
-    routes: {
-      standalone: { fast_p: fastRoute, 'current-host': { host: true } },
-      codex: { fast_p: fastRoute, 'current-host': { host: true } },
-      claude: { fast_p: fastRoute, 'current-host': { host: true } },
-      grok: { fast_p: fastRoute, 'current-host': { host: true } },
-    },
+    harnesses: fastHarnesses,
     archetypes: { worker: {} },
     dials: { worker: 'fast' },
   };
@@ -202,16 +180,11 @@ test('dispatch --timeout 0 disables route deadline', (t) => {
 test('dispatch --timeout positive overrides route deadline', (t) => {
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root });
-  const fastRoute = { command: ['node', '-e', "process.stdout.write('override')"], };
   const v3 = {
-    schema_version: 3,
+    schema_version: 4,
     models: { fast: { provider: 'fast_p', id: 'fast', effort: 'high' } },
-    routes: {
-      standalone: { fast_p: fastRoute, 'current-host': { host: true } },
-      codex: { fast_p: fastRoute, 'current-host': { host: true } },
-      claude: { fast_p: fastRoute, 'current-host': { host: true } },
-      grok: { fast_p: fastRoute, 'current-host': { host: true } },
-    },
+    // No `timeout_ms` on the lane: the CLI override is the only deadline.
+    harnesses: { fast_p: { provider: 'fast_p', command: ['node', '-e', "process.stdout.write('override')"] } },
     archetypes: { worker: {} },
     dials: { worker: 'fast' },
   };
@@ -226,16 +199,10 @@ test('dispatch --timeout positive overrides route deadline', (t) => {
   });
   assert.equal(result.outcome, 'ok');
   // Now test override that triggers timeout: fast_route sleeps, CLI timeout short
-  const sleepyRoute = { command: ['node', '-e', 'setTimeout(()=>{}, 10000)'], timeout_ms: 60000, };
   const v3sleep = {
-    schema_version: 3,
+    schema_version: 4,
     models: { sleepy: { provider: 'sleep_p', id: 'sleepy', effort: 'high' } },
-    routes: {
-      standalone: { sleep_p: sleepyRoute, 'current-host': { host: true } },
-      codex: { sleep_p: sleepyRoute, 'current-host': { host: true } },
-      claude: { sleep_p: sleepyRoute, 'current-host': { host: true } },
-      grok: { sleep_p: sleepyRoute, 'current-host': { host: true } },
-    },
+    harnesses: { sleep_p: { provider: 'sleep_p', command: ['node', '-e', 'setTimeout(()=>{}, 10000)'], timeout_ms: 60000 } },
     archetypes: { worker: {} },
     dials: { worker: 'sleepy' },
   };
@@ -274,16 +241,10 @@ flow:
   writeFileSync(join(root, '.fadeno', 'playbooks', 'timeout-engine.yaml'), playbook);
   // sleep executor with short timeout via route, then drive with no CLI override
   const sleepCmd = ['node', '-e', 'setTimeout(()=>{}, 10000)'];
-  const slowRoute = { command: sleepCmd, timeout_ms: 700, };
   const v3 = {
-    schema_version: 3,
+    schema_version: 4,
     models: { slow: { provider: 'slow_p', id: 'slow', effort: 'high' } },
-    routes: {
-      standalone: { slow_p: slowRoute, 'current-host': { host: true } },
-      codex: { slow_p: slowRoute, 'current-host': { host: true } },
-      claude: { slow_p: slowRoute, 'current-host': { host: true } },
-      grok: { slow_p: slowRoute, 'current-host': { host: true } },
-    },
+    harnesses: { slow_p: { provider: 'slow_p', command: sleepCmd, timeout_ms: 700 } },
     archetypes: { worker: {} },
     dials: { worker: 'slow' },
     bindings: { worker: 'slow' },
@@ -321,16 +282,14 @@ test('shadow route default produces an independently classified timeout receipt'
   execFileSync('git', ['init'], { cwd: root, env: gitEnv, stdio: 'ignore' });
   execFileSync('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: root, env: gitEnv, stdio: 'ignore' });
   const profile = {
-    schema_version: 3,
+    schema_version: 4,
     models: {
       primary: { provider: 'fast', id: 'primary', effort: 'high' },
       challenger: { provider: 'slow', id: 'challenger', effort: 'high' },
     },
-    routes: {
-      standalone: {
-        fast: { command: ['node', '-e', "process.stdout.write('primary')"], timeout_ms: 5000 },
-        slow: { command: ['node', '-e', 'setTimeout(()=>{}, 10000)'], timeout_ms: 500 },
-      },
+    harnesses: {
+      fast: { provider: 'fast', command: ['node', '-e', "process.stdout.write('primary')"], timeout_ms: 5000 },
+      slow: { provider: 'slow', command: ['node', '-e', 'setTimeout(()=>{}, 10000)'], timeout_ms: 500 },
     },
     archetypes: { worker: {} },
     dials: { worker: 'primary' },
@@ -501,37 +460,36 @@ test('executor handles timeout_ms: absent default, host rejection, positive inte
   const { parseExecutorProfile } = await import('../src/lib/executors.ts');
   // absent is ok
   const base = `
-schema_version: 3
+schema_version: 4
 models:
   m: { provider: openai, id: m, effort: high }
-routes:
-  standalone:
-    r: { command: [node, -e, "0"] }
+harnesses:
+  codex: { provider: openai, command: [node, -e, "0"] }
 archetypes: {}
 `;
   const p = parseExecutorProfile(base, 'test');
-  // @ts-expect-error
-  assert.equal((p as any).routes?.standalone?.r?.timeout_ms, undefined);
-  // host with timeout should throw
+  assert.equal(p.harnesses.codex?.timeout_ms, undefined);
+  // A host lane still cannot carry a deadline: host dispatch is not
+  // supervised. Under v4 `host:` is a mapping with a closed key set, so the
+  // refusal is the unknown-key one rather than a bespoke check — same
+  // outcome, one fewer special case.
   const hostBad = `
-schema_version: 3
+schema_version: 4
 models:
   m: { provider: openai, id: m, effort: high }
-routes:
-  standalone:
-    h: { host: true, timeout_ms: 1000 }
+harnesses:
+  codex: { provider: openai, host: { effort_channel: none, timeout_ms: 1000 } }
 archetypes: {}
 `;
-  assert.throws(() => parseExecutorProfile(hostBad, 'test'), /host route.*may not declare.*timeout_ms/);
+  assert.throws(() => parseExecutorProfile(hostBad, 'test'), /host has unknown key\(s\) timeout_ms/);
   // invalid values
   for (const bad of ['0', '-1', '1.5', '"1000"', 'null']) {
     const badYaml = `
-schema_version: 3
+schema_version: 4
 models:
   m: { provider: openai, id: m, effort: high }
-routes:
-  standalone:
-    r: { command: [node, -e, "0"], timeout_ms: ${bad} }
+harnesses:
+  codex: { provider: openai, command: [node, -e, "0"], timeout_ms: ${bad} }
 archetypes: {}
 `;
     assert.throws(() => parseExecutorProfile(badYaml, 'test'), /must be a positive integer/);

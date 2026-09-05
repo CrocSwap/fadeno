@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 
 const HOOK_VERSION = '0.6.1';
-const EVIDENCE_FORMAT = '1.0';
+const EVIDENCE_FORMAT = '1.1';
 const ROLE_NAMES = new Set(['worker', 'reviewer', 'judge']);
 const RESOLVE_TIMEOUT_MS = 10_000;
 const REFUSAL_REASON_MAX = 400;
@@ -165,7 +165,9 @@ function evidenceRow(event: any, input: Record<string, unknown>, item: Record<st
     lane: slot.lane ?? null,
     lane_reason: slot.lane_reason ?? null,
     transport: eventName === 'host_delivery' ? 'host' : null,
-    driver: slot.driver ?? null,
+    host: 'omp',
+    harness: slot.harness ?? null,
+    variant: slot.variant ?? null,
     prompt_sha256: promptSha256,
     ...taskCorrelation(event, input, item),
     ...extra,

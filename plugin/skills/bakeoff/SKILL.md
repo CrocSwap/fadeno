@@ -12,7 +12,7 @@ Otherwise use `fadeno` from `PATH`. Never prefer an unrelated global CLI over
 the plugin launcher.
 
 `fadeno bakeoff <pair-id>` alone dispatches both judges itself, over the
-command lane — which needs a `judge` dial configured with `--via` a second
+command lane — which needs a `judge` dial configured with `--harness` a second
 vendor. Most hosts already have a `judge` subagent for free (the same one a
 Fadeno playbook's judging step spawns). This skill inverts control: it drives
 `fadeno bakeoff` in two phases so YOU spawn the judges, as host subagents,

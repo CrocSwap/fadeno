@@ -9,6 +9,7 @@ import { runNewRun } from '../src/commands/new-run.ts';
 import { runNext } from '../src/commands/next.ts';
 import { runDispatchFallback, runDispatchStart } from '../src/commands/dispatch.ts';
 import { runSteeringApply, runSteeringResolve } from '../src/commands/steering.ts';
+import type { UserPathOptions } from '../src/lib/user-paths.ts';
 import { runPrompt } from '../src/commands/prompt.ts';
 import { runToolComplete } from '../src/commands/tool-complete.ts';
 import { runVerify } from '../src/commands/verify.ts';
@@ -39,54 +40,43 @@ function seedHybridProfile(root: string): void {
   }));
 }
 
+/** Pins the HOST, so the fixture's host-capable harness is the one we are in. */
+function hybridUser(root: string): UserPathOptions {
+  return {
+    home: join(root, 'home'),
+    env: {
+      FADENO_CONFIG_HOME: join(root, 'user-config'),
+      FADENO_STATE_HOME: join(root, 'user-state'),
+      FADENO_HARNESS: 'codex',
+    },
+  };
+}
+
 function seedHybridProfileV3(root: string): void {
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
+      // All three on the HOST harness's provider: under v4 exactly one
+      // harness is the host at a time, so "three host-capable slots" means
+      // three models on THAT harness — which is what the v3 fixture's three
+      // `host: true` routes under `routes.codex` were really saying.
       luna: { provider: 'lunap', id: 'gpt-5.6-luna', effort: 'xhigh' },
-      terra: { provider: 'terrap', id: 'gpt-5.6-terra', effort: 'high' },
-      sol: { provider: 'solp', id: 'gpt-5.6-sol', effort: 'medium' },
+      terra: { provider: 'lunap', id: 'gpt-5.6-terra', effort: 'high' },
+      sol: { provider: 'lunap', id: 'gpt-5.6-sol', effort: 'medium' },
       opus: { provider: 'opusp', id: 'opus' },
       other: { provider: 'otherp', id: 'gpt-5.6-terra', effort: 'high' },
     },
-    routes: {
-      standalone: {
-        lunap: { host: true, command: ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('fallback:'+d))"] },
-        terrap: { host: true },
-        solp: { host: true },
-        opusp: { command: ['claude', '-p', '--model', 'opus'] },
-        otherp: { host: true },
-        'current-host': { host: true },
-        opencode: { command: ['node', '-e', "process.stdout.write('opencode')"] },
-      },
-      codex: {
-        lunap: { host: true, command: ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('fallback:'+d))"] },
-        terrap: { host: true },
-        solp: { host: true },
-        opusp: { command: ['claude', '-p', '--model', 'opus'] },
-        otherp: { host: true },
-        'current-host': { host: true },
-        opencode: { command: ['node', '-e', "process.stdout.write('opencode')"] },
-      },
-      claude: {
-        lunap: { host: true, command: ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('fallback:'+d))"] },
-        terrap: { host: true },
-        solp: { host: true },
-        opusp: { command: ['claude', '-p', '--model', 'opus'] },
-        otherp: { host: true },
-        'current-host': { host: true },
-        opencode: { command: ['node', '-e', "process.stdout.write('opencode')"] },
-      },
-      grok: {
-        lunap: { host: true, command: ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write('fallback:'+d))"] },
-        terrap: { host: true },
-        solp: { host: true },
-        opusp: { command: ['claude', '-p', '--model', 'opus'] },
-        otherp: { host: true },
-        'current-host': { host: true },
-        opencode: { command: ['node', '-e', "process.stdout.write('opencode')"] },
-      },
+    // Under v4 a delivery is a HOST delivery only when its harness IS this
+    // session's host, so the models these tests drive in-session sit on
+    // `codex`, which `hybridUser` below pins as the host.
+    harnesses: {
+      codex: { provider: 'lunap', host: { effort_channel: 'agent-file' }, command: ['node', '-e', 'let d=\'\';process.stdin.on(\'data\',c=>d+=c);process.stdin.on(\'end\',()=>process.stdout.write(\'fallback:\'+d))'] },
+      // A host nobody is sitting in: host-deliverable in principle,
+      // `restart_required` from here.
+      omp: { provider: 'terrap', host: { effort_channel: 'none' } },
+      claude: { provider: 'opusp', command: ['claude', '-p', '--model', 'opus'] },
+      opencode: { provider: 'otherp', host: { effort_channel: 'none' }, command: ['node', '-e', 'process.stdout.write(\'opencode\')'] },
     },
     archetypes: {
       worker: {},
@@ -118,15 +108,15 @@ test('engine host steering is locked to the run request, not ambient dials', (t)
     flow: [{ id: 'implement', kind: 'actor_call', actor: 'worker', input: ['Task'], output: 'Notes', terminal_status: 'completed' }],
   }));
   writeFileSync(join(root, 'task.md'), 'locked task');
-  const created = runNewRun({ repoRoot: root, playbook: 'locked', task: 'test locked steering', inputs: ['Task=task.md'] });
-  const driven = runDrive({ repoRoot: root, run: created.runId });
+  const created = runNewRun({ repoRoot: root, userPathOptions: hybridUser(root), playbook: 'locked', task: 'test locked steering', inputs: ['Task=task.md'] });
+  const driven = runDrive({ repoRoot: root, run: created.runId, userPathOptions: hybridUser(root) });
   assert.equal(driven.outcome, 'awaiting_host_dispatch');
   const request = driven.requests[0]!;
 
   // ambient dial now points elsewhere, but locked resolve stays with original request
   writeLocalDialState(root, { dials: { worker: { model: 'other' } }, shadows: {}, legacyNote: null });
   const locked = runSteeringResolve({
-    repoRoot: root,
+    repoRoot: root, userPathOptions: hybridUser(root),
     archetype: 'worker',
     role: 'worker',
     hostExecutor: 'luna',
@@ -138,7 +128,7 @@ test('engine host steering is locked to the run request, not ambient dials', (t)
   assert.equal(locked.source, 'host-request');
 
   const restart = runSteeringResolve({
-    repoRoot: root,
+    repoRoot: root, userPathOptions: hybridUser(root),
     archetype: 'worker',
     hostExecutor: 'other',
     run: created.runId,
@@ -146,15 +136,18 @@ test('engine host steering is locked to the run request, not ambient dials', (t)
   });
   assert.equal(restart.mode, 'command');
   assert.match(restart.detail, /declared command fallback/);
-  const broker = runSteeringResolve({ repoRoot: root, archetype: 'worker', run: created.runId, dispatchId: request.dispatchId });
+  const broker = runSteeringResolve({
+    repoRoot: root, userPathOptions: hybridUser(root), archetype: 'worker', run: created.runId, dispatchId: request.dispatchId });
   assert.equal(broker.mode, 'command');
   assert.match(broker.detail, /declared command fallback/);
   assert.throws(
-    () => runSteeringResolve({ repoRoot: root, archetype: 'reviewer', run: created.runId, dispatchId: request.dispatchId }),
+    () => runSteeringResolve({
+    repoRoot: root, userPathOptions: hybridUser(root), archetype: 'reviewer', run: created.runId, dispatchId: request.dispatchId }),
     /agent_type "worker"/,
   );
   assert.throws(
-    () => runSteeringResolve({ repoRoot: root, archetype: 'worker', run: created.runId }),
+    () => runSteeringResolve({
+    repoRoot: root, userPathOptions: hybridUser(root), archetype: 'worker', run: created.runId }),
     /both --run and --dispatch-id/,
   );
 
@@ -171,7 +164,8 @@ test('engine host steering is locked to the run request, not ambient dials', (t)
   }).join('\n');
   writeFileSync(eventsPath, `${withoutDigest}\n`);
   assert.throws(
-    () => runSteeringResolve({ repoRoot: root, archetype: 'worker', run: created.runId, dispatchId: request.dispatchId }),
+    () => runSteeringResolve({
+    repoRoot: root, userPathOptions: hybridUser(root), archetype: 'worker', run: created.runId, dispatchId: request.dispatchId }),
     /sha256 digest/,
   );
   writeFileSync(eventsPath, originalEvents);
@@ -186,7 +180,8 @@ test('engine host steering is locked to the run request, not ambient dials', (t)
   withDuplicateStart.push(startLine);
   writeFileSync(eventsPath, `${withDuplicateStart.join('\n')}\n`);
   assert.throws(
-    () => runSteeringResolve({ repoRoot: root, archetype: 'worker', run: created.runId, dispatchId: request.dispatchId }),
+    () => runSteeringResolve({
+    repoRoot: root, userPathOptions: hybridUser(root), archetype: 'worker', run: created.runId, dispatchId: request.dispatchId }),
     /started more than once/,
   );
 });
@@ -194,15 +189,15 @@ test('engine host steering is locked to the run request, not ambient dials', (t)
 test('locked steering specializes a wildcard host request to the delivered archetype', (t) => {
   const root = tempRepo(t);
   runInit({ target: 'codex', repoRoot: root, dataOnly: true });
-  const created = runNewRun({ repoRoot: root, playbook: 'code-change-review', task: 'plan a safe change' });
-  const driven = runDrive({ repoRoot: root, run: created.runId });
+  const created = runNewRun({ repoRoot: root, userPathOptions: hybridUser(root), playbook: 'code-change-review', task: 'plan a safe change' });
+  const driven = runDrive({ repoRoot: root, run: created.runId, userPathOptions: hybridUser(root) });
   assert.equal(driven.outcome, 'awaiting_host_dispatch');
   const request = driven.requests[0]!;
   assert.equal(request.actor, 'coordinator');
   assert.equal(request.agentType, '*');
 
   const resolution = runSteeringResolve({
-    repoRoot: root,
+    repoRoot: root, userPathOptions: hybridUser(root),
     archetype: 'director',
     run: created.runId,
     dispatchId: request.dispatchId,
@@ -231,13 +226,13 @@ test('engine host steering automatically completes a mismatched native slot thro
     flow: [{ id: 'implement', kind: 'actor_call', actor: 'worker', input: ['Task'], output: 'Notes', terminal_status: 'completed' }],
   }));
   writeFileSync(join(root, 'task.md'), 'fallback task');
-  const created = runNewRun({ repoRoot: root, playbook: 'fallback', task: 'test automatic fallback', inputs: ['Task=task.md'] });
-  const paused = runDrive({ repoRoot: root, run: created.runId });
+  const created = runNewRun({ repoRoot: root, userPathOptions: hybridUser(root), playbook: 'fallback', task: 'test automatic fallback', inputs: ['Task=task.md'] });
+  const paused = runDrive({ repoRoot: root, run: created.runId, userPathOptions: hybridUser(root) });
   assert.equal(paused.outcome, 'awaiting_host_dispatch');
   const request = paused.requests[0]!;
 
   const resolution = runSteeringResolve({
-    repoRoot: root,
+    repoRoot: root, userPathOptions: hybridUser(root),
     archetype: 'worker',
     hostExecutor: 'other',
     run: created.runId,
@@ -248,7 +243,7 @@ test('engine host steering automatically completes a mismatched native slot thro
   assert.equal(delivered.exitCode, 0);
   assert.match(delivered.stdout, /^fallback:# Fadeno step assignment/);
 
-  const terminal = runDrive({ repoRoot: root, run: created.runId });
+  const terminal = runDrive({ repoRoot: root, run: created.runId, userPathOptions: hybridUser(root) });
   assert.equal(terminal.outcome, 'terminal');
   assert.equal(terminal.status, 'completed');
   assert.equal(runVerify({ repoRoot: root, run: created.runId }).ok, true);
@@ -284,7 +279,7 @@ test('steering apply materializes mixed host and command slots without clobberin
   const root = tempRepo(t);
   seedHybridProfileV3(root);
 
-  const first = runSteeringApply({ repoRoot: root, target: 'codex' });
+  const first = runSteeringApply({ repoRoot: root, userPathOptions: hybridUser(root), target: 'codex' });
   assert.ok(first.results.every((item) => item.status === 'created'));
   assert.deepEqual(first.materialization.worker, {
     kind: 'host', adapter: 'host', executor: 'luna', model: 'gpt-5.6-luna',
@@ -299,12 +294,12 @@ test('steering apply materializes mixed host and command slots without clobberin
   assert.match(read(root, '.codex/agents/worker.toml'), /fadeno steering resolve --archetype worker --host-executor luna/);
   assert.match(read(root, '.codex/agents/worker.toml'), /fadeno dispatch-fallback <run-id> <dispatch-id>/);
 
-  const second = runSteeringApply({ repoRoot: root, target: 'codex' });
+  const second = runSteeringApply({ repoRoot: root, userPathOptions: hybridUser(root), target: 'codex' });
   assert.ok(second.results.every((item) => item.status === 'skipped'));
 
   // mixed: reviewer via session dial to command executor opus
   writeLocalDialState(root, { dials: { reviewer: { model: 'opus' } }, shadows: {}, legacyNote: null });
-  const mixed = runSteeringApply({ repoRoot: root, target: 'codex', force: true });
+  const mixed = runSteeringApply({ repoRoot: root, userPathOptions: hybridUser(root), target: 'codex', force: true });
   assert.equal(mixed.materialization.reviewer?.kind, 'command-broker');
   assert.equal(mixed.materialization.reviewer?.executor, 'opus');
   const broker = read(root, '.codex/agents/reviewer.toml');
@@ -320,16 +315,16 @@ test('steering apply materializes mixed host and command slots without clobberin
 
   // all-command: all three via opus
   writeLocalDialState(root, { dials: { worker: { model: 'opus' }, reviewer: { model: 'opus' }, judge: { model: 'opus' } }, shadows: {}, legacyNote: null });
-  const allCommand = runSteeringApply({ repoRoot: root, target: 'codex', force: true });
+  const allCommand = runSteeringApply({ repoRoot: root, userPathOptions: hybridUser(root), target: 'codex', force: true });
   assert.ok(Object.values(allCommand.materialization).every((slot) => slot.kind === 'command-broker'));
   const agentPaths = ['worker', 'reviewer', 'judge'].map((role) => `.codex/agents/${role}.toml`);
   const beforeInvalid = agentPaths.map((path) => read(root, path));
 
-  // invalid dial should fail and preserve files (unknown driver)
-  writeLocalDialState(root, { dials: { worker: { model: 'luna', via: 'no-such-driver' } }, shadows: {}, legacyNote: null });
+  // invalid dial should fail and preserve files (unknown harness)
+  writeLocalDialState(root, { dials: { worker: { model: 'luna', harness: 'no-such-harness' } }, shadows: {}, legacyNote: null });
   assert.throws(
-    () => runSteeringApply({ repoRoot: root, target: 'codex', force: true }),
-    /unknown driver|no route for provider|no executor exists/,
+    () => runSteeringApply({ repoRoot: root, userPathOptions: hybridUser(root), target: 'codex', force: true }),
+    /unknown harness|no executor exists/,
   );
   assert.deepEqual(agentPaths.map((path) => read(root, path)), beforeInvalid);
 });
@@ -337,7 +332,7 @@ test('steering apply materializes mixed host and command slots without clobberin
 test('a current-host slot omits model identity instead of writing a string Codex cannot serve', (t) => {
   // A repo with no dials resolves every slot to the neutral host sentinel.
   const root = tempRepo(t);
-  const applied = runSteeringApply({ repoRoot: root, target: 'codex' });
+  const applied = runSteeringApply({ repoRoot: root, userPathOptions: hybridUser(root), target: 'codex' });
   assert.equal(applied.materialization.worker?.kind, 'host');
   assert.equal(applied.materialization.worker?.model, 'current-host');
   const body = read(root, '.codex/agents/worker.toml');
@@ -380,7 +375,7 @@ function seedWriteGuardProfile(root: string): void {
 function seedWriteGuardProfileV3(root: string): void {
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'ro-cli': { provider: 'roclip', id: 'opus' },
       'rw-cli': { provider: 'rwclip', id: 'gpt-5.6-sol' },
@@ -389,26 +384,7 @@ function seedWriteGuardProfileV3(root: string): void {
       reviewer: { provider: 'reviewerp', id: 'gpt-5.6-terra', effort: 'high' },
       judge: { provider: 'judgep', id: 'gpt-5.6-sol', effort: 'medium' },
     },
-    routes: {
-      standalone: {
-        roclip: { command: ['claude', '-p'], },
-        rwclip: { command: ['codex', 'exec', '-'], },
-        rohostp: { host: true, command: ['claude', '-p'], },
-        nativep: { host: true },
-        reviewerp: { host: true },
-        judgep: { host: true },
-        'current-host': { host: true },
-      },
-      codex: {
-        roclip: { command: ['claude', '-p'], },
-        rwclip: { command: ['codex', 'exec', '-'], },
-        rohostp: { host: true, command: ['claude', '-p'], },
-        nativep: { host: true },
-        reviewerp: { host: true },
-        judgep: { host: true },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { roclip: { provider: 'roclip', command: ['claude', '-p'] }, rwclip: { provider: 'rwclip', command: ['codex', 'exec', '-'] }, rohostp: { provider: 'rohostp', host: { effort_channel: 'none' }, command: ['claude', '-p'] }, nativep: { provider: 'nativep', host: { effort_channel: 'none' } }, reviewerp: { provider: 'reviewerp', host: { effort_channel: 'none' } }, judgep: { provider: 'judgep', host: { effort_channel: 'none' } } },
     archetypes: {
       worker: { },
       reviewer: { },
@@ -426,7 +402,8 @@ test('steering resolve refuses a command slot whose delivery cannot do the arche
   seedWriteGuardProfile(root);
 
   writeLocalDialState(root, { dials: { worker: { model: 'ro-cli' } }, shadows: {}, legacyNote: null });
-  const refused = runSteeringResolve({ repoRoot: root, archetype: 'worker', env: null });
+  const refused = runSteeringResolve({
+    repoRoot: root, userPathOptions: hybridUser(root), archetype: 'worker', env: null });
   assert.equal(refused.mode, 'write_conflict');
   assert.equal(refused.executor, 'ro-cli');
   assert.equal(refused.adapter, 'command');
@@ -435,27 +412,31 @@ test('steering resolve refuses a command slot whose delivery cannot do the arche
   assert.equal(refused.detail, refused.writeConflict);
 
   writeLocalDialState(root, { dials: { worker: { model: 'ro-host' } }, shadows: {}, legacyNote: null });
-  const fallback = runSteeringResolve({ repoRoot: root, archetype: 'worker', env: null });
+  const fallback = runSteeringResolve({
+    repoRoot: root, userPathOptions: hybridUser(root), archetype: 'worker', env: null });
   assert.equal(fallback.mode, 'write_conflict');
   assert.equal(fallback.executor, 'ro-host');
   assert.equal(fallback.adapter, 'host');
 
   const native = runSteeringResolve({
-    repoRoot: root, archetype: 'worker', hostExecutor: 'ro-host', env: null,
+    repoRoot: root, userPathOptions: hybridUser(root), archetype: 'worker', hostExecutor: 'ro-host', env: null,
   });
   // Need to ensure native dial is ro-host for this check
   writeLocalDialState(root, { dials: { worker: { model: 'ro-host' } }, shadows: {}, legacyNote: null });
-  const native2 = runSteeringResolve({ repoRoot: root, archetype: 'worker', hostExecutor: 'ro-host', env: null });
+  const native2 = runSteeringResolve({
+    repoRoot: root, userPathOptions: hybridUser(root), archetype: 'worker', hostExecutor: 'ro-host', env: null });
   assert.equal(native2.mode, 'host');
   assert.equal(native2.writeConflict, undefined);
 
   writeLocalDialState(root, { dials: { worker: { model: 'rw-cli' } }, shadows: {}, legacyNote: null });
-  const capable = runSteeringResolve({ repoRoot: root, archetype: 'worker', env: null });
+  const capable = runSteeringResolve({
+    repoRoot: root, userPathOptions: hybridUser(root), archetype: 'worker', env: null });
   assert.equal(capable.mode, 'command');
   assert.equal(capable.executor, 'rw-cli');
   assert.equal(capable.writeConflict, undefined);
   writeLocalDialState(root, { dials: { worker: { model: 'ro-cli' } }, shadows: {}, legacyNote: null });
-  const reader = runSteeringResolve({ repoRoot: root, archetype: 'reviewer', env: null });
+  const reader = runSteeringResolve({
+    repoRoot: root, userPathOptions: hybridUser(root), archetype: 'reviewer', env: null });
   assert.equal(reader.mode, 'command');
   // reviewer archetype has no write requirement, so ro-cli is allowed
   assert.equal(reader.writeConflict, undefined);
@@ -473,7 +454,7 @@ test('tool-complete starts and attributes the exact next tool_call atomically', 
     roles: { coordinator: { purpose: 'Own the run.' } },
     flow: [{ id: 'test', kind: 'tool_call', tool: 'test_runner', output: 'TestResult' }],
   }));
-  const created = runNewRun({ repoRoot: root, playbook: 'tool-only', task: 'Run tests' });
+  const created = runNewRun({ repoRoot: root, userPathOptions: hybridUser(root), playbook: 'tool-only', task: 'Run tests' });
   const output = join(created.runDir, 'artifacts', 'test-result.json');
   const beforeEvents = readFileSync(join(created.runDir, 'events.jsonl'), 'utf8');
   const beforeRun = readFileSync(join(created.runDir, 'run.yaml'), 'utf8');

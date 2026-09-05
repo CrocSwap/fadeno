@@ -25,24 +25,24 @@ function seed(t: TestContext, dials: Record<string, string>): { root: string; us
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
-      // Host-deliverable AND command-routable: it has both lanes to choose from.
-      luna: { provider: 'lunap', id: 'gpt-5.6-luna', effort: 'xhigh' },
-      // Host-deliverable with NO command lane: the restart_required case.
-      terra: { provider: 'terrap', id: 'gpt-5.6-terra', effort: 'high' },
+      // On the HOST harness, which under v4 is what makes it host-deliverable
+      // at all — and `codex` declares a command lane too, so this model has
+      // both to choose from.
+      luna: { provider: 'openai', id: 'gpt-5.6-luna', effort: 'xhigh' },
+      // On a host-only harness that is NOT this session's host: nothing to
+      // deliver it in-session, and no command to spawn — the
+      // restart_required case. (v3 expressed this per route; v4 expresses it
+      // per harness, which is the honest unit: a lane belongs to the CLI.)
+      terra: { provider: 'ompprov', id: 'gpt-5.6-terra', effort: 'high' },
       // Command-only.
-      opus: { provider: 'opusp', id: 'opus', effort: 'high' },
+      opus: { provider: 'anthropic', id: 'opus', effort: 'high' },
     },
-    routes: {
-      codex: {
-        // The reference-frame-neutral sentinel, in its shipped shape: host
-        // delivery and no fallback at all.
-        'current-host': { host: true },
-        lunap: { host: true, command: RELAY },
-        terrap: { host: true },
-        opusp: { command: ['claude', '-p', '--model', '{model}'] },
-      },
+    harnesses: {
+      codex: { provider: 'openai', host: { effort_channel: 'agent-file' }, command: RELAY },
+      omp: { provider: 'ompprov', host: { effort_channel: 'none' } },
+      claude: { provider: 'anthropic', command: ['claude', '-p', '--model', '{model}'] },
     },
     archetypes: { worker: {}, reviewer: {}, judge: {} },
     dials,
@@ -145,7 +145,28 @@ test('CONTRACT: a pinned mismatch with no command fallback is restart_required a
     assert.equal(result.mode, 'restart_required', where);
     assert.equal(result.lane_reason, 'no command fallback', where);
   }
-  assert.match(resolve(root, user, 'terra@xhigh', 'medium').detail, /pins effort xhigh but this session runs at medium/);
+  // The MODEL half decides first and says so: under v4 `terra` lives on a
+  // harness this session is not inside, which is the coarser reason and the
+  // one the user must fix first. (v3 could call terra host-deliverable from a
+  // codex session because each host table declared its own `host: true`
+  // routes; there is one host now.)
+  // The restart branch names the model half first: `terra` lives on a harness
+  // this session is not inside, so "apply the dial and start a fresh session"
+  // is the remedy, not "start a session at xhigh". (v3 could call terra
+  // host-deliverable from a codex session because each host table declared its
+  // own `host: true` routes; there is one host now.)
+  assert.match(
+    resolve(root, user, 'terra@xhigh', 'medium').detail,
+    /apply the dial and start a fresh session/,
+  );
+
+  // The EFFORT half of the same contract, on the one shape that is a genuine
+  // host candidate with nothing to fall back to: the base dial.
+  const { root: base, user: baseUser } = seed(t, { worker: 'current-host@xhigh' });
+  const pinned = resolve(base, baseUser, 'current-host@xhigh', 'medium');
+  assert.equal(pinned.lane, 'restart_required');
+  assert.equal(pinned.lane_reason, 'no command fallback');
+  assert.match(pinned.detail, /pins effort xhigh but this session runs at medium/);
 });
 
 test('an unobserved session effort takes the command lane: a pin the host cannot PROVE is not honored optimistically', (t) => {

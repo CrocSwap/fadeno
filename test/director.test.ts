@@ -3,10 +3,10 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
-import { DialError, runDialSet } from '../src/commands/dial.ts';
+import { runDialResolve, runDialSet } from '../src/commands/dial.ts';
 import { DispatchCommandError, runDispatch } from '../src/commands/dispatch.ts';
 import {
-  compileDialRef,
+  resolveDelivery,
   eligibilityFor,
   ExecutorProfileError,
   parseExecutorProfile,
@@ -25,49 +25,45 @@ const STARTER = readFileSync(join(import.meta.dirname, '..', 'templates', 'commo
 
 // --- route-level eligibility ---
 
-test('route eligibility: parses, merges strictest-wins with model eligibility, binds unregistered models', () => {
+test('lane eligibility: parses, merges strictest-wins with model eligibility, binds unregistered models', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       sol: { provider: 'openai', eligibility: { judge: 'shadow_only' } },
     },
-    routes: {
-      standalone: {
-        openai: { command: ['codex'], eligibility: { director: 'forbidden', judge: 'eligible' } },
-      },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['codex'], eligibility: { director: 'forbidden', judge: 'eligible' } } },
     archetypes: { director: {} },
-    unregistered_model_driver: 'openai',
+    unregistered_model_harness: 'codex',
   });
-  const spec = compileDialRef({ model: 'sol' }, profile).spec;
-  // Route forbids director; the model's stricter judge state survives the merge.
+  const spec = resolveDelivery({ model: 'sol' }, profile).spec;
+  // The lane forbids director; the model's stricter judge state survives the merge.
   assert.equal(eligibilityFor(spec, 'director'), 'forbidden');
   assert.equal(eligibilityFor(spec, 'judge'), 'shadow_only');
-  // Unregistered models fall through the same route and inherit its constraint.
-  const unregistered = compileDialRef({ model: 'mystery-model' }, profile).spec;
+  // Unregistered models fall through to the same harness and inherit its constraint.
+  const unregistered = resolveDelivery({ model: 'mystery-model' }, profile).spec;
   assert.equal(eligibilityFor(unregistered, 'director'), 'forbidden');
 });
 
-test('route eligibility: bad states and non-identifier keys refuse with the route label', () => {
-  const route = (eligibility: unknown) => ({
-    schema_version: 3,
+test('lane eligibility: bad states and non-identifier keys refuse with the lane label', () => {
+  const lane = (eligibility: unknown) => ({
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'], eligibility } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'], eligibility: eligibility } },
   });
   assert.throws(
-    () => parseDoc(route({ director: 'never' })),
+    () => parseDoc(lane({ director: 'never' })),
     (err: unknown) =>
       err instanceof ExecutorProfileError &&
-      /route `routes\.standalone\.openai` `eligibility\.director` must be "eligible", "shadow_only", or "forbidden"/.test(err.message),
+      /`harnesses\.codex` `eligibility\.director` must be "eligible", "shadow_only", or "forbidden"/.test(err.message),
   );
-  assert.throws(() => parseDoc(route({ Director: 'forbidden' })), /eligibility key "Director" is not a bare lowercase identifier/);
+  assert.throws(() => parseDoc(lane({ Director: 'forbidden' })), /eligibility key "Director" is not a bare lowercase identifier/);
 });
 
-test('route eligibility: survives the snapshot as the merged per-spec map', () => {
+test('lane eligibility: survives the snapshot as the merged per-spec map', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'], eligibility: { director: 'forbidden' } } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'], eligibility: { director: 'forbidden' } } },
     archetypes: { director: {} },
   });
   const snapshot = parseSnapshotDocument(serializeSnapshot(profile), 'round-trip');
@@ -78,9 +74,9 @@ test('route eligibility: survives the snapshot as the merged per-spec map', () =
 
 test('archetype brief: parses as a bare identifier, refuses anything else, round-trips the snapshot', () => {
   const profile = parseDoc({
-    schema_version: 3,
+    schema_version: 4,
     models: { sol: { provider: 'openai' } },
-    routes: { standalone: { openai: { command: ['codex'] } } },
+    harnesses: { codex: { provider: 'openai', command: ['codex'] } },
     archetypes: { director: { brief: 'director' } },
   });
   assert.equal(profile.archetypes.director!.brief, 'director');
@@ -88,9 +84,9 @@ test('archetype brief: parses as a bare identifier, refuses anything else, round
   assert.equal(snapshot.archetypes.director!.brief, 'director');
   assert.throws(
     () => parseDoc({
-      schema_version: 3,
+      schema_version: 4,
       models: { sol: { provider: 'openai' } },
-      routes: { standalone: { openai: { command: ['codex'] } } },
+      harnesses: { codex: { provider: 'openai', command: ['codex'] } },
       archetypes: { director: { brief: '../escape' } },
     }),
     /`archetypes\.director\.brief` must be a bare lowercase identifier/,
@@ -106,16 +102,9 @@ function seedDirectorRepo(t: TestContext, opts: { brief?: boolean } = {}): { roo
     writeFileSync(join(root, '.fadeno', 'briefs', 'director.md'), 'BRIEF-HEADER: coordinate through fadeno.\n');
   }
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { boss: { provider: 'openai', id: 'boss-1', effort: 'high' } },
-    routes: {
-      standalone: {
-        openai: {
-          command: ['node', '-e', "let d='';process.stdin.on('data',(c)=>{d+=c});process.stdin.on('end',()=>{process.stdout.write(d)})"],
-          },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'let d=\'\';process.stdin.on(\'data\',(c)=>{d+=c});process.stdin.on(\'end\',()=>{process.stdout.write(d)})'] } },
     archetypes: { director: { brief: 'director' } },
     dials: { director: 'boss' },
   }));
@@ -160,14 +149,9 @@ test('dispatch: --no-brief sends the bare task; a declared-but-missing brief ref
   // A brief name with no template anywhere refuses loudly.
   const { root: root3, user: user3 } = seedDirectorRepo(t, { brief: false });
   writeFileSync(join(root3, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { boss: { provider: 'openai', id: 'boss-1', effort: 'high' } },
-    routes: {
-      standalone: {
-        openai: { command: ['node', '-e', '0'], },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', '0'] } },
     archetypes: { director: { brief: 'sidequest' } },
     dials: { director: 'boss' },
   }));
@@ -183,25 +167,27 @@ test('starter catalog: director brief declared; non-fadeno lanes forbid director
   for (const harness of ['claude', 'codex', 'grok', 'standalone'] as const) {
     const profile = parseExecutorProfile(STARTER, 'starter.yaml', harness);
     assert.equal(profile.archetypes.director!.brief, 'director', harness);
-    // The grok/agy/opencode lanes have no fadeno capability — structurally blocked.
+    // The grok/agy/opencode lanes have no fadeno capability — structurally
+    // blocked, on every lane they declare, so policy has nowhere to fall
+    // through to and the refusal survives to the kernel.
     for (const model of ['grok', 'gemini'] as const) {
-      try {
-        const spec = compileDialRef({ model }, profile).spec;
-        assert.equal(eligibilityFor(spec, 'director'), 'forbidden', `${harness}/${model}`);
-      } catch {
-        // provider absent in this family — equally undialable
-      }
+      const spec = resolveDelivery({ model }, profile, harness, { archetype: 'director' }).spec;
+      assert.equal(eligibilityFor(spec, 'director'), 'forbidden', `${harness}/${model}`);
     }
     // Unregistered fall-through (opencode) is blocked too.
-    const unregistered = compileDialRef({ model: 'mystery' }, profile).spec;
+    const unregistered = resolveDelivery({ model: 'mystery' }, profile, harness, { archetype: 'director' }).spec;
     assert.equal(eligibilityFor(unregistered, 'director'), 'forbidden', harness);
-    // Plain claude lane blocked (its variant has no fadeno grant); exec lane open.
-    const plain = compileDialRef({ model: 'opus' }, profile).spec;
-    assert.equal(eligibilityFor(plain, 'director'), 'forbidden', harness);
-    const exec = compileDialRef({ model: 'opus', via: 'claude-exec' }, profile).spec;
-    assert.equal(eligibilityFor(exec, 'director'), 'eligible', harness);
+    // Plain claude lane blocked (no fadeno grant in its argv). Under v4 the
+    // director does not NAME the exec lane — policy reaches it, because the
+    // base lane forbids the archetype and the variant does not.
+    const asWorker = resolveDelivery({ model: 'opus' }, profile, harness, { archetype: 'worker' });
+    assert.equal(asWorker.variant, null, harness);
+    assert.equal(eligibilityFor(asWorker.spec, 'director'), 'forbidden', harness);
+    const asDirector = resolveDelivery({ model: 'opus' }, profile, harness, { archetype: 'director' });
+    assert.equal(asDirector.variant, 'exec', harness);
+    assert.equal(eligibilityFor(asDirector.spec, 'director'), 'eligible', harness);
     // Codex lane open (workspace-write sandbox runs fadeno).
-    const codexLane = compileDialRef({ model: 'sol' }, profile).spec;
+    const codexLane = resolveDelivery({ model: 'sol' }, profile, harness, { archetype: 'director' }).spec;
     assert.equal(eligibilityFor(codexLane, 'director'), 'eligible', harness);
   }
   // The builtin brief template ships.
@@ -209,26 +195,28 @@ test('starter catalog: director brief declared; non-fadeno lanes forbid director
   assert.match(readFileSync(briefPath, 'utf8'), /fadeno dispatch --archetype worker/);
 });
 
-test('dial: setting director onto a forbidden lane refuses at set time', (t) => {
+test('dial: setting director onto a forbidden lane is RECORDED, and refused at resolve', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { grok: { provider: 'xai', id: 'grok-4.6', effort: 'high' } },
-    routes: {
-      standalone: {
-        xai: { command: ['node', '-e', '0'], eligibility: { director: 'forbidden' } },
-        'current-host': { host: true },
-      },
-    },
+    harnesses: { grok: { provider: 'xai', command: ['node', '-e', '0'], eligibility: { director: 'forbidden' } } },
     archetypes: { director: { } },
   }));
   const user: UserPathOptions = {
     home: join(root, 'home'),
     env: { FADENO_CONFIG_HOME: join(root, 'user-config'), FADENO_STATE_HOME: join(root, 'user-state'), FADENO_HARNESS: 'standalone' },
   };
-  assert.throws(
-    () => runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'director', model: 'grok' }),
-    (err: unknown) => err instanceof DialError && /forbidden/.test((err as Error).message),
-  );
+  // Catalog v4 moved eligibility out of set time: it is a property of the
+  // (lane, archetype) pair, which depends on the CALL, and refusing here
+  // refused dials that resolve fine on another lane or another host. The
+  // refusal is still real — it is the kernel's, and `dial resolve` reports it
+  // with the remedy rather than letting the user find out at dispatch.
+  assert.doesNotThrow(() => runDialSet({ repoRoot: root, userPathOptions: user, archetype: 'director', model: 'grok' }));
+  const resolved = runDialResolve({ repoRoot: root, userPathOptions: user, archetype: 'director' });
+  assert.equal(resolved.eligibility, 'forbidden');
+  assert.equal(resolved.delivery.dispatchable, false);
+  assert.match(resolved.delivery.action, /Do NOT dispatch — it would be refused\./);
+  assert.match(resolved.delivery.action, /eligibility: forbidden/);
 });

@@ -40,26 +40,22 @@ const WRITE_SHADOW = [
   'node', '-e', "require('fs').writeFileSync('shadowed.txt','from-shadow');process.stdout.write('SHADOW_OUT');",
 ];
 
-function seedV3(t: import('node:test').TestContext, extra: Record<string, unknown> = {}): string {
+function seedCatalog(t: import('node:test').TestContext, extra: Record<string, unknown> = {}): string {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   const base: Record<string, unknown> = {
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'echo-worker': { provider: 'openai', id: 'echo-worker' },
       'luna-worker': { provider: 'openai', id: 'luna-worker' },
       'write-worker': { provider: 'openai', id: 'write-worker' },
     },
-    routes: {
-      standalone: { openai: { command: ECHO('REPORT:'), } },
-      codex: { openai: { command: ECHO('REPORT:'), } },
-    },
+    harnesses: { codex: { provider: 'openai', command: ECHO('REPORT:') } },
     archetypes: { worker: {} },
     dials: { worker: 'echo-worker' },
     ...extra,
   };
   if ((extra as any).models) (base as any).models = { ...(base as any).models, ...(extra as any).models };
-  if ((extra as any).routes) (base as any).routes = { ...(base as any).routes, ...(extra as any).routes };
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml(base));
   return root;
 }
@@ -113,7 +109,7 @@ test('shadow pin: round-trip with dial shadows', (t) => {
 });
 
 test('shadow attachment fires and writes paired rows with identical prompt_sha256', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   initGit(root);
   writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'luna-worker' } }, legacyNote: null });
   const echoes: string[] = [];
@@ -162,7 +158,7 @@ test('shadow attachment fires and writes paired rows with identical prompt_sha25
 });
 
 test('--shadow flag fires without attachment', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   initGit(root);
   const result = runDispatch({ archetype: 'worker', prompt: 'flag test', repoRoot: root, shadow: 'luna-worker', userPathOptions: onHarness('standalone') });
   const rows = evidenceRows(root);
@@ -174,7 +170,7 @@ test('--shadow flag fires without attachment', (t) => {
 });
 
 test('shadow rate: not fired leaves no trace, fired when sampler passes, flag ignores rate', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   initGit(root);
   writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'luna-worker', rate: 0.5 } }, legacyNote: null });
   // sampler returns 0.9 > 0.5 => no shadow
@@ -191,7 +187,7 @@ test('shadow rate: not fired leaves no trace, fired when sampler passes, flag ig
   assert.equal(shadowRows.length, 2);
   assert.equal(shadowRows[0]!.shadow_source, 'attachment');
   // flag ignores rate
-  const root2 = seedV3(t);
+  const root2 = seedCatalog(t);
   initGit(root2);
   writeLocalDialState(root2, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'luna-worker', rate: 0.01 } }, legacyNote: null });
   runDispatch({ archetype: 'worker', prompt: 'flag ignores rate', repoRoot: root2, shadow: 'luna-worker', shadowSampler: () => 0.99, userPathOptions: onHarness('standalone') });
@@ -200,7 +196,7 @@ test('shadow rate: not fired leaves no trace, fired when sampler passes, flag ig
 });
 
 test('finite attachment budget counts admitted pairs, composes with rate, and never limits --shadow', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   initGit(root);
   writeLocalDialState(root, {
     dials: { worker: { model: 'echo-worker' } },
@@ -235,7 +231,7 @@ test('finite attachment budget counts admitted pairs, composes with rate, and ne
 });
 
 test('shadow refusals do not consume a finite attachment budget', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   initGit(root);
   writeLocalDialState(root, {
     dials: { worker: { model: 'echo-worker' } },
@@ -252,7 +248,7 @@ test('shadow refusals do not consume a finite attachment budget', (t) => {
 });
 
 test('atomic trigger reservation admits at most N concurrent contenders', async (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   writeLocalDialState(root, {
     dials: {},
     shadows: { worker: { model: 'luna-worker', n: 1, remaining: 1 } },
@@ -284,10 +280,10 @@ test('atomic trigger reservation admits at most N concurrent contenders', async 
 
 test('shadow rate sampling fired-half and flag ignores rate (explicit)', (t) => {
   // Additional hardening: fired-half case already above, but assert shadow_source attachment and rows.length ===6
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   initGit(root);
   writeLocalDialState(root, { dials: {}, shadows: { worker: { model: 'luna-worker', rate: 0.5 } }, legacyNote: null });
-  // need dial for primary? Use default dial from seedV3 (echo-worker)
+  // need dial for primary? Use default dial from seedCatalog (echo-worker)
   runDispatch({ archetype: 'worker', prompt: 'half', repoRoot: root, shadowSampler: () => 0.4, userPathOptions: onHarness('standalone') });
   const rows = evidenceRows(root);
   // sampler 0.4 <0.5 => should fire
@@ -296,7 +292,7 @@ test('shadow rate sampling fired-half and flag ignores rate (explicit)', (t) => 
 });
 
 test('shadow refusal: forbidden eligibility writes dispatch_refused with shadow true', (t) => {
-  const root = seedV3(t, {
+  const root = seedCatalog(t, {
     models: {
       'echo-worker': { provider: 'openai', id: 'echo-worker' },
       'forbidden-worker': { provider: 'openai', id: 'forbidden', eligibility: { worker: 'forbidden' } },
@@ -316,7 +312,7 @@ test('shadow refusal: forbidden eligibility writes dispatch_refused with shadow 
   assert.equal(typeof refusal.primary_dispatch_id, 'string');
   assert.equal((refusal.refusal as Record<string, unknown>).predicate, 'eligibility');
   // shadow_only allowed
-  const root2 = seedV3(t, {
+  const root2 = seedCatalog(t, {
     models: {
       'echo-worker': { provider: 'openai', id: 'echo-worker' },
       'shadow-only-worker': { provider: 'openai', id: 'so', eligibility: { worker: 'shadow_only' } },
@@ -332,7 +328,7 @@ test('shadow refusal: forbidden eligibility writes dispatch_refused with shadow 
 });
 
 test('shadow refusal: shadow_isolation in non-git dir', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   // do NOT init git
   writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'luna-worker' } }, legacyNote: null });
   const echoes: string[] = [];
@@ -348,38 +344,26 @@ test('shadow refusal: shadow_isolation in non-git dir', (t) => {
 });
 
 test('shadow diff artifact contains change a writing fake executor made in worktree', (t) => {
-  const root = seedV3(t, {
+  const root = seedCatalog(t, {
     models: { 'write-worker': { provider: 'openai', id: 'write-worker' } },
-    routes: {
-      standalone: { openai: { command: WRITE_SHADOW, } },
-      codex: { openai: { command: WRITE_SHADOW, } },
-    },
+    harnesses: { codex: { provider: 'openai', command: WRITE_SHADOW } },
   } as any);
   // Need to ensure write-worker route has WRITE_SHADOW - we set routes per provider so all models share it, but we want echo for primary and write for shadow.
   // Workaround: seed with echo for primary, then manually override route for shadow execution? Instead create profile where standalone route is WRITE_SHADOW and primary still uses echo via model-specific command? For v3 route is per provider, so can't differentiate. We'll just test that diff contains shadowed.txt using write-worker as shadow target while primary is also write-worker? The primary will also write but diff is about shadow worktree.
   // Simpler: make primary echo-worker but route still WRITE_SHADOW - then primary also would write shadowed.txt in primary workspace which we don't want. Alternative: we can test isolation differently: use write-worker as shadow and assert diff contains file while primary workspace does not.
-  // Since route is shared, primary will also execute WRITE_SHADOW if we set route to WRITE_SHADOW. So we need to re-seed with echo then after primary, switch route? Instead just use the earlier seedV3 with write-worker model but route still WRITE_SHADOW for both, then assert primary workspace does NOT contain shadowed.txt because shadow runs in worktree.
+  // Since route is shared, primary will also execute WRITE_SHADOW if we set route to WRITE_SHADOW. So we need to re-seed with echo then after primary, switch route? Instead just use the earlier seedCatalog with write-worker model but route still WRITE_SHADOW for both, then assert primary workspace does NOT contain shadowed.txt because shadow runs in worktree.
   // Primary execution will also create shadowed.txt in its worktree? No primary runs in repoRoot, so it would create shadowed.txt in primary workspace. That's not desired for test.
   // To avoid, we use a route that writes to a file only when model is write-worker? Not possible.
-  // So we reconfigure: use seedV3 with echo for primary, but shadow flag will use write-worker via same route (WRITE_SHADOW) - then primary echo won't write file, shadow will write in its worktree. So we need route to be echo for primary but shadow to be write. Since route is per provider, we can't. Instead we make two providers: echo-worker uses provider openai with echo, write-worker uses provider openai2 with WRITE_SHADOW.
+  // So we reconfigure: use seedCatalog with echo for primary, but shadow flag will use write-worker via same route (WRITE_SHADOW) - then primary echo won't write file, shadow will write in its worktree. So we need route to be echo for primary but shadow to be write. Since route is per provider, we can't. Instead we make two providers: echo-worker uses provider openai with echo, write-worker uses provider openai2 with WRITE_SHADOW.
   const root2 = tempRepo(t);
   mkdirSync(join(root2, '.fadeno'), { recursive: true });
   writeFileSync(join(root2, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'echo-worker': { provider: 'openai', id: 'echo-worker' },
       'write-worker': { provider: 'openai2', id: 'write-worker' },
     },
-    routes: {
-      standalone: {
-        openai: { command: ECHO('REPORT:'), },
-        openai2: { command: WRITE_SHADOW, },
-      },
-      codex: {
-        openai: { command: ECHO('REPORT:'), },
-        openai2: { command: WRITE_SHADOW, },
-      },
-    },
+    harnesses: { codex: { provider: 'openai', command: ECHO('REPORT:') }, openai2: { provider: 'openai2', command: WRITE_SHADOW } },
     archetypes: { worker: {} },
     dials: { worker: 'echo-worker' },
   }));
@@ -401,12 +385,12 @@ test('shadow diff artifact contains change a writing fake executor made in workt
 });
 
 test('primary rows byte-stable when a shadow fires', (t) => {
-  const rootShadow = seedV3(t);
+  const rootShadow = seedCatalog(t);
   initGit(rootShadow);
   writeLocalDialState(rootShadow, { dials: {}, shadows: { worker: { model: 'luna-worker' } }, legacyNote: null });
   runDispatch({ archetype: 'worker', prompt: 'stable', repoRoot: rootShadow, userPathOptions: onHarness('standalone') });
 
-  const rootNoShadow = seedV3(t);
+  const rootNoShadow = seedCatalog(t);
   initGit(rootNoShadow);
   runDispatch({ archetype: 'worker', prompt: 'stable', repoRoot: rootNoShadow, userPathOptions: onHarness('standalone') });
 
@@ -477,14 +461,14 @@ test('primary rows byte-stable when a shadow fires', (t) => {
   }
 });
 
-test('shadow identity re-spell: dial/model/model_id/driver/reasoning_effort', (t) => {
-  const root = seedV3(t);
+test('shadow identity re-spell: dial/model/model_id/harness/reasoning_effort', (t) => {
+  const root = seedCatalog(t);
   initGit(root);
   writeLocalDialState(root, { dials: {}, shadows: {}, legacyNote: null });
-  runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, shadow: 'luna-worker@high via openai', userPathOptions: onHarness('standalone') } as any);
+  runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, shadow: 'luna-worker@high on codex', userPathOptions: onHarness('standalone') } as any);
   const rows = evidenceRows(root);
   const sReq = rows.find((r) => r.shadow === true && r.event === 'dispatch_requested')!;
-  assert.deepEqual(sReq.dial, { model: 'luna-worker', effort: 'high', via: 'openai' });
+  assert.deepEqual(sReq.dial, { model: 'luna-worker', effort: 'high', harness: 'codex' });
   assert.equal(sReq.reasoning_effort, 'high');
   assert.ok(!('loadout' in sReq));
   assert.ok(!('target' in sReq));
@@ -494,21 +478,12 @@ function seedTwoProviders(t: import('node:test').TestContext, primaryCmd: string
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'primary-worker': { provider: 'openai', id: 'primary-worker' },
       'shadow-worker': { provider: 'openai2', id: 'shadow-worker' },
     },
-    routes: {
-      standalone: {
-        openai: { command: primaryCmd, },
-        openai2: { command: shadowCmd, },
-      },
-      codex: {
-        openai: { command: primaryCmd, },
-        openai2: { command: shadowCmd, },
-      },
-    },
+    harnesses: { codex: { provider: 'openai', command: primaryCmd }, openai2: { provider: 'openai2', command: shadowCmd } },
     archetypes: { worker: {} },
     dials: { worker: 'primary-worker' },
     // `extra` lets a fixture add top-level keys, most commonly
@@ -531,21 +506,12 @@ test('shadow runs concurrently with the primary, not after it', (t) => {
   const shadow = ['node', '-e', `require('fs').writeFileSync(${JSON.stringify(flag)},'x');process.stdout.write('FLAGGED');`];
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'primary-worker': { provider: 'openai', id: 'primary-worker' },
       'shadow-worker': { provider: 'openai2', id: 'shadow-worker' },
     },
-    routes: {
-      standalone: {
-        openai: { command: primary, },
-        openai2: { command: shadow, },
-      },
-      codex: {
-        openai: { command: primary, },
-        openai2: { command: shadow, },
-      },
-    },
+    harnesses: { codex: { provider: 'openai', command: primary }, openai2: { provider: 'openai2', command: shadow } },
     archetypes: { worker: {} },
     dials: { worker: 'primary-worker' },
   }));
@@ -655,7 +621,7 @@ test('dispatches --output last never resolves to a shadow', (t) => {
   // and its lifetime overlaps the primary's by construction. Neither fact may
   // hand `last` the challenger's report or refuse it as "concurrent" — the
   // caller launched the primary; the kernel launched the shadow.
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   initGit(root);
   writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'luna-worker' } }, legacyNote: null });
   const result = runDispatch({ archetype: 'worker', prompt: 'mine', repoRoot: root, userPathOptions: onHarness('standalone') });
@@ -670,7 +636,7 @@ test('dispatches --output last never resolves to a shadow', (t) => {
 
 test('constraint-boundary shadow_only: assert rows.length ===2 + event names', (t) => {
   // minor hardening: ensure shadow_only produces 2 rows with correct events before loop
-  const root = seedV3(t, {
+  const root = seedCatalog(t, {
     models: {
       'echo-worker': { provider: 'openai', id: 'echo-worker' },
       'shadow-only-worker': { provider: 'openai', id: 'so', eligibility: { worker: 'shadow_only' } },
@@ -681,7 +647,7 @@ test('constraint-boundary shadow_only: assert rows.length ===2 + event names', (
   runDispatch({ archetype: 'worker', prompt: 'shadow only allowed', repoRoot: root, userPathOptions: onHarness('standalone') });
   const rows = evidenceRows(root);
   // primary 2 + shadow 2 =4, but this test is about shadow_only as primary? Actually eligibility shadow_only as primary is not shadow. We'll test shadow_only model as primary directly:
-  const root2 = seedV3(t, {
+  const root2 = seedCatalog(t, {
     models: { 'shadow-only-worker': { provider: 'openai', id: 'so', eligibility: { reviewer: 'shadow_only' } } },
     dials: { reviewer: 'shadow-only-worker' },
   } as any);
@@ -697,7 +663,7 @@ test('constraint-boundary shadow_only: assert rows.length ===2 + event names', (
 });
 
 test('shadow sampling is a function of the prompt, so a retry cannot re-roll it', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   initGit(root);
   writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'luna-worker', rate: 0.5 } }, legacyNote: null });
   // Three dispatches of the SAME prompt at a coin-flip rate. Under Math.random
@@ -725,7 +691,7 @@ test('shadow sampling is a function of the prompt, so a retry cannot re-roll it'
 });
 
 test('a paired dispatch carries one pair_id on both arms and records the challenger workspace', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   initGit(root);
   writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'luna-worker' } }, legacyNote: null });
   runDispatch({ archetype: 'worker', prompt: 'pair me', repoRoot: root, userPathOptions: onHarness('standalone') });
@@ -752,7 +718,7 @@ test('a paired dispatch carries one pair_id on both arms and records the challen
 });
 
 test('a dispatch with no shadow carries no pair_id', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   initGit(root);
   writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: {}, legacyNote: null });
   runDispatch({ archetype: 'worker', prompt: 'solo', repoRoot: root, userPathOptions: onHarness('standalone') });
@@ -760,7 +726,7 @@ test('a dispatch with no shadow carries no pair_id', (t) => {
 });
 
 test('nothing inside a shadow fires a shadow of its own', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   initGit(root);
   writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'luna-worker' } }, legacyNote: null });
   const previous = process.env.FADENO_IN_SHADOW;
@@ -777,7 +743,7 @@ test('nothing inside a shadow fires a shadow of its own', (t) => {
 });
 
 test('the live-shadow cap refuses with a row rather than silently skipping', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   initGit(root);
   writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'luna-worker' } }, legacyNote: null });
   const previous = process.env.FADENO_SHADOW_MAX_LIVE;
@@ -798,7 +764,7 @@ test('the live-shadow cap refuses with a row rather than silently skipping', (t)
 });
 
 test('--isolate and --shadow now coexist: two worktrees, two diffs', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   initGit(root);
   // The guard that refused this assumed only one arm could want a worktree.
   // Symmetric pairs need both, and the paths never collided in the first place.
@@ -886,15 +852,9 @@ test('a host-dialed primary rides its own command lane — alone, and as half of
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { opus: { provider: 'anthropic', id: 'opus' }, grok: { provider: 'xai', id: 'grok' } },
-    routes: {
-      claude: {
-        'current-host': { host: true },
-        anthropic: { driver: 'claude', host: true, command: ECHO('HOST-FALLBACK:'), },
-        xai: { driver: 'grok', command: ECHO('CHALLENGER:'), },
-      },
-    },
+    harnesses: { claude: { provider: 'anthropic', host: { effort_channel: 'none' }, command: ECHO('HOST-FALLBACK:') }, grok: { provider: 'xai', command: ECHO('CHALLENGER:') } },
     archetypes: { worker: {} },
     dials: { worker: 'opus' },
   }));
@@ -935,18 +895,21 @@ test('an unroutable selected pair leaves the spawn untouched — no pair, never 
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { grok: { provider: 'xai', id: 'grok' } },
-    routes: {
-      claude: {
-        xai: { driver: 'grok', command: ECHO('CHALLENGER:'), },
-      },
+    harnesses: {
+      grok: { provider: 'xai', command: ECHO('CHALLENGER:') },
+      // The HOST this test runs as. Declaring it is what makes `current-host`
+      // a real in-session lane here — under v4 a bare shell has no session to
+      // deliver into, and this test is precisely about the in-session work the
+      // hook must not route away.
+      claude: { host: { effort_channel: 'none' } },
     },
     archetypes: { worker: {} },
   }));
   initGit(root);
   // worker carries no primary dial anywhere, so it resolves to the bare
-  // current-host base — a host executor with no fallback_command at all.
+  // current-host base — a host delivery with no fallback_command at all.
   writeLocalDialState(root, { dials: {}, shadows: { worker: { model: 'grok', rate: 1 } }, legacyNote: null });
 
   // The kernel's own view (`fadeno dial resolve`), independent of the hook:
@@ -1011,7 +974,7 @@ test('an unroutable selected pair leaves the spawn untouched — no pair, never 
   );
   assert.throws(
     () => runDispatch({ archetype: 'worker', prompt: 'do the thing', repoRoot: root, userPathOptions: isolated }),
-    /fadeno dial worker <model> --via <driver>/,
+    /fadeno dial worker <model> --harness <id>/,
   );
 });
 
@@ -1240,7 +1203,7 @@ test('a badly-shaped worktree_carry fails the dispatch loudly at load time, not 
   // list brackets got no carry and no error. It is now a validated catalog
   // field, so a bad declaration refuses the WHOLE dispatch (there need be no
   // shadow attached at all) before anything spawns.
-  const wrongType = seedV3(t, { worktree_carry: 'built' });
+  const wrongType = seedCatalog(t, { worktree_carry: 'built' });
   initGit(wrongType);
   assert.throws(
     () => runDispatch({ archetype: 'worker', prompt: 'bad carry type', repoRoot: wrongType, userPathOptions: onHarness('standalone') }),
@@ -1249,14 +1212,14 @@ test('a badly-shaped worktree_carry fails the dispatch loudly at load time, not 
 });
 
 test('a worktree_carry entry escaping the repo (absolute, or a ".." segment) fails the dispatch loudly at load time', (t) => {
-  const absolute = seedV3(t, { worktree_carry: ['/etc/passwd'] });
+  const absolute = seedCatalog(t, { worktree_carry: ['/etc/passwd'] });
   initGit(absolute);
   assert.throws(
     () => runDispatch({ archetype: 'worker', prompt: 'absolute carry path', repoRoot: absolute, userPathOptions: onHarness('standalone') }),
     /repo-relative, not absolute/,
   );
 
-  const escaping = seedV3(t, { worktree_carry: ['../outside'] });
+  const escaping = seedCatalog(t, { worktree_carry: ['../outside'] });
   initGit(escaping);
   assert.throws(
     () => runDispatch({ archetype: 'worker', prompt: 'escaping carry path', repoRoot: escaping, userPathOptions: onHarness('standalone') }),
@@ -1273,9 +1236,9 @@ test('worktree_carry declared in the user or builtin layer is refused — it is 
   const userConfigDir = join(root, 'user-config', 'fadeno');
   mkdirSync(userConfigDir, { recursive: true });
   writeFileSync(join(userConfigDir, 'executors.yaml'), stringifyYaml({
-    schema_version: 3,
+    schema_version: 4,
     models: { 'echo-worker': { provider: 'openai', id: 'echo-worker' } },
-    routes: { standalone: { openai: { command: ECHO('REPORT:'), } } },
+    harnesses: { codex: { provider: 'openai', command: ECHO('REPORT:') } },
     worktree_carry: ['built'],
   }));
   initGit(root);
@@ -1409,7 +1372,7 @@ test('a declared-but-uncarriable path refuses the pair loudly, spawns no shadow,
 // the primary's tree. cwd isolation alone is advisory against that.
 
 test('a prompt naming the repo root as an absolute path refuses the pair with shadow_containment; the same prompt written repo-relative fires it', (t) => {
-  const root = seedV3(t);
+  const root = seedCatalog(t);
   initGit(root);
   writeLocalDialState(root, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'luna-worker' } }, legacyNote: null });
 
@@ -1443,7 +1406,7 @@ test('a prompt naming the repo root as an absolute path refuses the pair with sh
 
   // The identical task, phrased repo-relative instead, is isolable — the
   // pair fires normally.
-  const root2 = seedV3(t);
+  const root2 = seedCatalog(t);
   initGit(root2);
   writeLocalDialState(root2, { dials: { worker: { model: 'echo-worker' } }, shadows: { worker: { model: 'luna-worker' } }, legacyNote: null });
   const relativeResult = runDispatch({

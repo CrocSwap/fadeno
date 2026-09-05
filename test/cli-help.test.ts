@@ -71,7 +71,7 @@ test('focused help uses semantic options and preserves safety-critical modes', (
   assert.match(renderFocusedHelp('bakeoff'), /--record --comparison <file> --adversarial <file>/);
   assert.match(renderFocusedHelp('bakeoff'), /`--measure-only`.*`--prepare`.*`--record`/s);
   assert.match(renderFocusedHelp('models add'), /direct OpenCode.*OpenCode\/OpenRouter/s);
-  assert.match(renderFocusedHelp('model'), /--driver <alias>/);
+  assert.match(renderFocusedHelp('model'), /--harness <id>/);
   for (const path of ['models add', 'model add', 'dial clear-shadow']) {
     assert.match(renderFocusedHelp(path), /--json\s+Emit structured JSON output/);
   }

@@ -195,11 +195,12 @@ function recordHostRefusal(predicate, reason) {
     // Same duplicated literal, and the same reason, as recordHostDelivery
     // below: this script has no import path back into the CLI, so both
     // writers stamp DISPATCHES_FORMAT by hand. Bump them together.
-    format: '1.0',
+    format: '1.1',
     timestamp: new Date().toISOString(),
     event: 'host_refused',
     fadeno_version: HOOK_VERSION,
     hook_version: HOOK_VERSION,
+    host: 'claude',
     archetype, // null on a generic spawn: it named no archetype to refuse for
     agent_type: requested, // exactly what the director asked for
     // The kernel's refusal shape, key for key. A closed vocabulary, not
@@ -325,12 +326,12 @@ if (archetype == null) {
     // spawned anything" and "somebody spawned something Fadeno never steered"
     // must not read identically in the log.
     appendRow({
-      format: '1.0',
+      format: '1.1',
       timestamp: new Date().toISOString(),
       event: 'native_spawn',
       fadeno_version: HOOK_VERSION,
       hook_version: HOOK_VERSION,
-      harness: 'claude',
+      host: 'claude',
       agent_type: requested, // null when the caller named none at all
       model_requested: event.tool_input.model ?? null,
       // Never observable here: a Claude PreToolUse event carries no session
@@ -626,7 +627,7 @@ function recordHostDelivery() {
         // DISPATCHES_FORMAT in src/commands/dispatch.ts: this hook is a
         // standalone script with no import path back into the CLI, and both
         // writers must stamp the same version. Bump them together.
-        format: '1.0',
+        format: '1.1',
         timestamp: new Date().toISOString(),
         event: 'host_delivery',
         // Same key the kernel stamps on every row it writes, so one field
@@ -706,8 +707,15 @@ function recordHostDelivery() {
         // against, and the field would only ever have repeated `archetype`.
         // Nothing read it: `src/commands/dispatches.ts` never did.)
         transport: 'host',
+        // The harness this call ran INSIDE. Under format 1.0 this key was
+        // spelled `harness`, which is now the EXECUTOR's name.
+        host: 'claude',
         dial_source: typeof slot?.source === 'string' ? slot.source : slot?.dial_source ?? null,
-        driver: typeof slot?.driver === 'string' ? slot.driver : null,
+        // The EXECUTOR harness and the lane variant the resolver chose.
+        // Under format 1.0 this pair was one field named `driver`, while
+        // `harness` meant the host; 1.1 gives each its own name.
+        harness: typeof slot?.harness === 'string' ? slot.harness : null,
+        variant: typeof slot?.variant === 'string' ? slot.variant : null,
         effort: typeof slot?.effort === 'string' ? slot.effort : null,
         prompt_sha256: promptSha256,
         prompt_snapshot: snapshotRel,

@@ -42,26 +42,20 @@ function deadProbe(): void {
   throw err;
 }
 
-function seedV3(root: string, extra: Record<string, unknown> = {}): void {
+function seedCatalog(root: string, extra: Record<string, unknown> = {}): void {
   mkdirSync(join(root, '.fadeno'), { recursive: true });
   const base: Record<string, unknown> = {
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'echo-worker': { provider: 'openai', id: 'echo-worker', effort: 'default' },
       'big-worker': { provider: 'openai', id: 'big-worker', effort: 'default' },
     },
-    routes: {
-      standalone: {
-        openai: { command: ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(d))"], },
-      },
-      codex: { openai: { command: ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(d))"], } },
-    },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'let d=\'\';process.stdin.on(\'data\',c=>d+=c);process.stdin.on(\'end\',()=>process.stdout.write(d))'] } },
     archetypes: { worker: {} },
     dials: { worker: 'echo-worker' },
     ...extra,
   };
   if (extra.models) (base as any).models = { ...(base as any).models, ...(extra.models as any) };
-  if (extra.routes) (base as any).routes = { ...(base as any).routes, ...(extra.routes as any) };
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml(base));
 }
 
@@ -89,7 +83,7 @@ function evidenceRows(root: string): Record<string, unknown>[] {
 
 test('diagnostics: not persisted by default, only byte counters remain', (t) => {
   const root = tempRepo(t);
-  seedV3(root);
+  seedCatalog(root);
   const result = runDispatch({ archetype: 'worker', prompt: 'hello', repoRoot: root, userPathOptions: { env: { FADENO_HARNESS: 'standalone' } } });
   const rows = evidenceRows(root);
   const completed = rows.find((r) => r.event === 'dispatch_completed')!;
@@ -102,12 +96,12 @@ test('diagnostics: not persisted by default, only byte counters remain', (t) => 
 
 test('diagnostics: opt-in via --diagnostics writes bounded snapshot with head+tail', (t) => {
   const root = tempRepo(t);
-  seedV3(root);
+  seedCatalog(root);
   // produce output larger than 32 KiB and 500 lines
   const big = Array.from({ length: 600 }, (_, i) => `line-${String(i).padStart(4, '0')}-${'x'.repeat(80)}`).join('\n');
-  seedV3(root, {
+  seedCatalog(root, {
     models: { 'echo-worker': { provider: 'openai', id: 'echo-worker' } },
-    routes: { standalone: { openai: { command: ['node', '-e', "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(d))"], } } },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'let d=\'\';process.stdin.on(\'data\',c=>d+=c);process.stdin.on(\'end\',()=>process.stdout.write(d))'] } },
   });
   const result = runDispatch({
     archetype: 'worker',
@@ -141,7 +135,7 @@ test('diagnostics: opt-in via --diagnostics writes bounded snapshot with head+ta
 
 test('diagnostics: FADENO_DIAGNOSTICS=1 env enables diagnostics for tests', (t) => {
   const root = tempRepo(t);
-  seedV3(root);
+  seedCatalog(root);
   const prev = process.env.FADENO_DIAGNOSTICS;
   process.env.FADENO_DIAGNOSTICS = '1';
   t.after(() => {
@@ -191,9 +185,9 @@ test('diagnostics: non-ASCII and line-heavy output obey both hard bounds', () =>
 
 test('diagnostics: never gates control flow, bounded buffers', (t) => {
   const root = tempRepo(t);
-  seedV3(root, {
+  seedCatalog(root, {
     models: { 'echo-worker': { provider: 'openai', id: 'echo-worker' } },
-    routes: { standalone: { openai: { command: ['node', '-e', 'process.exit(0)'], } } },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'process.exit(0)'] } },
   });
   const result = runDispatch({ archetype: 'worker', prompt: 'ok', diagnostics: true, repoRoot: root, userPathOptions: { env: { FADENO_HARNESS: 'standalone' } } });
   assert.equal(result.exitCode, 0);
@@ -209,9 +203,9 @@ test('diagnostics: never gates control flow, bounded buffers', (t) => {
 test('isolated dispatch: creates diff, omits workspace_changed, bypasses lease', (t) => {
   const root = tempRepo(t);
   initGit(root);
-  seedV3(root, {
+  seedCatalog(root, {
     models: { 'echo-worker': { provider: 'openai', id: 'echo-worker' } },
-    routes: { standalone: { openai: { command: ['node', '-e', "require('node:fs').writeFileSync('isolated.txt','hello');"], } } },
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'require(\'node:fs\').writeFileSync(\'isolated.txt\',\'hello\');'] } },
   });
   // hold shared lease to prove bypass
   // A LIVE holder: pid 99999 was dead by the kernel's own probe, and a dead
@@ -244,7 +238,7 @@ test('an isolated dispatch and its shadow keep separate worktrees with separate 
   // the challenger's is retained for a judgment that has not happened yet.
   const root = tempRepo(t);
   initGit(root);
-  seedV3(root);
+  seedCatalog(root);
   const result = runDispatch({ archetype: 'worker', prompt: 'x', isolate: true, shadow: 'echo-worker', repoRoot: root, userPathOptions: { env: { FADENO_HARNESS: 'standalone' } } });
   assert.equal(result.exitCode, 0);
 
@@ -265,8 +259,8 @@ test('an isolated dispatch and its shadow keep separate worktrees with separate 
 test('isolated dispatch: empty diff is 0 bytes and preserved', (t) => {
   const root = tempRepo(t);
   initGit(root);
-  seedV3(root, {
-    routes: { standalone: { openai: { command: ['node', '-e', 'process.exit(0)'], } } },
+  seedCatalog(root, {
+    harnesses: { codex: { provider: 'openai', command: ['node', '-e', 'process.exit(0)'] } },
   });
   const result = runDispatch({ archetype: 'worker', prompt: 'no-change', isolate: true, repoRoot: root, userPathOptions: { env: { FADENO_HARNESS: 'standalone' } } });
   const completed = evidenceRows(root).find((r) => r.event === 'dispatch_completed')!;

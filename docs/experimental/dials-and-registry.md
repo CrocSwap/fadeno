@@ -1,5 +1,15 @@
 # Model dials and the registry
 
+> **Superseded in part by catalog v4.** The `routes:` table, the `driver:` /
+> `--via` vocabulary, `host: true`, top-level `relay:`,
+> `unregistered_model_driver:` and `models.<m>.delivery:` described below were
+> all removed on 2026-09-04. One `harnesses:` table replaced the six
+> `routes.<host>` tables, a dial names `model[@effort][ on <harness>]`, and the
+> host is discovered at dispatch time rather than selecting a route family.
+> Read [`harness-neutral-dials.md`](harness-neutral-dials.md) for what is true
+> now; everything else here — the dial cascade, session/repo/user layering,
+> eligibility, shadow attachments, the evidence ledger — still stands.
+
 **Status:** implemented — **Shipped (0.6.0-rc.27) and hardened post-0.6.** No backwards compatibility: pre-dials catalogs and snapshots are refused loudly — catalogs require `schema_version: 3` with message `schema_version 3 required — pre-dials catalogs are not supported; migrate: targets:→models:, loadouts:→dials:, default_loadout: delete; see docs/experimental/dials-and-registry.md` and snapshots require `snapshot_version: 3` with message `pre-dials run snapshot — this fadeno verifies snapshot_version 3 ledgers only; verify with fadeno <= 0.6.0-rc.27`. The command is `fadeno dial` with verb-first grammar (open question 1 decided: `fadeno dial` replaces `fadeno loadout`; see Open questions below), `--executor` is removed (`--model` is the one spelling), pin moved to `.fadeno/local/dials` (snapshot_version 3 replaces the v1-shaped emission), and `ConstraintContext.transport` is now `host` (was `native`). The dispatches reader still renders 0.x/legacy ledger rows as `[legacy]` — evidence history is not a compat surface.
 
 Deviations from the sketch below, all deliberate: the catalog bumped to `schema_version: 3` — v2

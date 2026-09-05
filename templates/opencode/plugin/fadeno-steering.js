@@ -26,7 +26,7 @@ import { join } from 'node:path';
 // Same duplicated literal, and the same reason, as every evidence writer in
 // src/: standalone scripts have no import path back into the CLI. Bump
 // DISPATCHES_FORMAT and every copy together.
-const EVIDENCE_FORMAT = '1.0';
+const EVIDENCE_FORMAT = '1.1';
 
 // Which generation of this plugin wrote a given evidence row. Plugins load
 // once at process start, so a live session keeps running the previous build
@@ -207,7 +207,9 @@ function hostDeliveryRow(fields) {
     lane: str(fields.lane),
     lane_reason: str(slot.lane_reason),
     transport: 'host',
-    driver: str(slot.driver),
+    host: 'opencode',
+    harness: str(slot.harness),
+    variant: str(slot.variant),
     background: fields.background === true,
     task_id: str(fields.taskId ?? fields.task_id),
     session_id: str(fields.sessionId ?? fields.session_id),

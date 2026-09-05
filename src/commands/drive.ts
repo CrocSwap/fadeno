@@ -29,6 +29,7 @@ import {
   serializeDialRef,
   roleResolutionEchoLabel,
   serializeSnapshot,
+  snapshotExecutor,
   PROMPT_FILE_PLACEHOLDER,
   SESSION_ID_PLACEHOLDER,
   substitutePromptFile,
@@ -55,7 +56,7 @@ import {
   parseNodeInstanceId,
   stepExecutionIdFor,
 } from '../lib/node-instance.ts';
-import { roleArchetype, SchemaSet, schemaErrorMessages, validateFile, type SchemaKind } from '../lib/playbook-validate.ts';
+import { playbookRoleArchetypes, roleArchetype, SchemaSet, schemaErrorMessages, validateFile, type SchemaKind } from '../lib/playbook-validate.ts';
 import { extractSchemaEnvelope, type EnvelopeExtraction } from '../lib/schema-envelope.ts';
 import { baseArtifactName, parseGeneration, schemaKindFor, type Playbook, type PlaybookStep } from '../lib/prompt-resolve.ts';
 import {
@@ -523,7 +524,10 @@ function ensureProfileSnapshot(
   // Collect extra refs: every ref in live layers + bindings + --bind refs
   const liveLayers = readLiveDialLayers(ctx.repoRoot, ctx.userPathOptions, liveProfile);
   const extraRefs: DialRef[] = [...Object.values(liveLayers.session), ...Object.values(liveLayers.repo), ...Object.values(liveLayers.user), ...Object.values(liveProfile.bindings), ...bindRefs];
-  const text = serializeSnapshot(liveProfile, extraRefs);
+  // The archetypes THIS PLAYBOOK will actually dispatch, which is the only
+  // place a custom role archetype is written down. The catalog need not
+  // enumerate it for its lanes to carry `eligibility:` keyed by it.
+  const text = serializeSnapshot(liveProfile, extraRefs, playbookRoleArchetypes(ctx.playbook));
   writeFileSync(snapshotPath, text, 'utf8');
   appendEvent(
     ctx.runDir,
@@ -552,7 +556,12 @@ function resolveChain(
   const archetype = role == null ? null : roleArchetype(ctx.playbook, role);
   const cascade = resolveDialCascade(role ?? '*', archetype, { bindings: ctx.profile.bindings, archetypes: ctx.profile.archetypes }, ctx.dialLayers);
   const refString = formatDialRef(cascade.ref);
-  const specRaw = ctx.profile.executors[refString];
+  // Archetype-specific first, plain ref second. Under v4 a variant is chosen
+  // by POLICY from the archetype, so the ref alone no longer identifies the
+  // argv — `opus` is the base claude lane for a worker and the `exec` variant
+  // for a director. A snapshot cut before this change has no `#` keys and
+  // lands on exactly the entry it always did.
+  const specRaw = snapshotExecutor(ctx.profile, refString, archetype);
   if (specRaw == null) {
     throw new ExecutorProfileError(`resolved dial "${refString}" has no executor in snapshot`);
   }
@@ -669,9 +678,14 @@ function effectiveBinding(ctx: EngineCtx, role: string | null): { executor: stri
   const key = role ?? '*';
   const overridden = ctx.overrides.get(key);
   if (overridden != null) {
-    const spec0 = ctx.profile.executors[overridden];
-    if (spec0 == null) throw new DriveError(`--bind ${key}=${overridden}: not in snapshot`);
     const archetype = key !== '*' ? roleArchetype(ctx.playbook, key) : null;
+    // Through `snapshotExecutor`, like every other snapshot read: a `--bind`
+    // names a DIAL REF, and the run may have frozen an archetype-specific
+    // answer for it (the policy variant a director gets). Reading the plain
+    // ref here handed the bound role the base lane instead — the one the
+    // unbound path had already rejected.
+    const spec0 = snapshotExecutor(ctx.profile, overridden, archetype);
+    if (spec0 == null) throw new DriveError(`--bind ${key}=${overridden}: not in snapshot`);
     let spec: ExecutorSpec = spec0;
     if (spec.adapter === 'host' && (spec as any).agentType === '*' && archetype != null) spec = { ...spec, agentType: archetype } as ExecutorSpec;
     return { executor: overridden, spec };
@@ -717,23 +731,22 @@ function recordResolutionSnapshot(ctx: EngineCtx): void {
     const archetype = roleArchetype(ctx.playbook, role);
     const overridden = ctx.overrides.get(role);
     if (overridden != null) {
-      const specRaw = ctx.profile.executors[overridden];
-      const spec = specRaw as ExecutorSpec;
-      const model = (spec as any).model ?? (spec.adapter === 'host' ? (spec as any).model : null);
+      const spec = snapshotExecutor(ctx.profile, overridden, archetype) as ExecutorSpec;
+      const model = (spec as { model?: string | null }).model ?? null;
       const effort = (spec as any).reasoningEffort ?? 'default';
-      const driver = (spec as any).driver ?? null;
+      const harness = (spec as { harness?: string }).harness ?? null;
       const provider = (spec as any).provider ?? null;
       const delivery = spec.adapter;
-      entries.push({ role, archetype, executor: overridden, model, effort, driver, provider, delivery, source: 'binding', resolved_via: null });
+      entries.push({ role, archetype, executor: overridden, model, effort, harness, provider, delivery, source: 'binding', resolved_via: null });
       ctx.act(`${role} → ${overridden}${model != null ? ` (${model})` : ''} [binding]`);
       continue;
     }
     try {
       const { executor, spec, source, resolvedVia } = resolveChain(ctx, role);
       const label = roleResolutionEchoLabel(source);
-      const model = (spec as any).model ?? (spec.adapter === 'host' ? (spec as any).model : null);
+      const model = (spec as { model?: string | null }).model ?? null;
       const effort = (spec as any).reasoningEffort ?? 'default';
-      const driver = (spec as any).driver ?? null;
+      const harness = (spec as { harness?: string }).harness ?? null;
       const provider = (spec as any).provider ?? null;
       const delivery = spec.adapter;
       entries.push({
@@ -742,7 +755,7 @@ function recordResolutionSnapshot(ctx: EngineCtx): void {
         executor,
         model,
         effort,
-        driver,
+        harness,
         provider: provider ?? null,
         delivery,
         source,
@@ -989,6 +1002,10 @@ function inputProducersFromRun(
       producers.push({
         dispatchId: null,
         executor,
+        // Provider is a property of the MODEL, identical across a ref's
+        // archetype-specific snapshot entries, so the plain ref is the right
+        // read here — and it is the only key a producer's recorded executor
+        // string is guaranteed to be.
         provider: profile.executors[executor]!.provider ?? null,
       });
     }
@@ -2180,7 +2197,7 @@ function evaluateMemberPreflight(
   const toRefStr = (m: Record<string, import('../lib/executors.ts').DialRef>) => { const o: Record<string, string> = {}; for (const [k, v] of Object.entries(m)) o[k] = formatDialRef(v); return o; };
   const modelId = (binding.spec as any).model ?? null;
   const constraintContext: ConstraintContext = {
-    archetype, role, executor: binding.executor, driver: (binding.spec as any).driver ?? null, provider: (binding.spec as any).provider ?? null, model: (binding.spec as any).model ?? null, model_id: modelId, transport: 'command', command: binding.spec.adapter === 'command' ? binding.spec.command : null, dial: dialRef, dial_source: dialSource, dials: { session: toRefStr(ctx.dialLayers.session), repo: toRefStr(ctx.dialLayers.repo), user: toRefStr(ctx.dialLayers.user) }, resolved_via: chainInfo?.resolvedVia ?? null, input_provenance: producers.map((producer) => ({ dispatch_id: producer.dispatchId, executor: producer.executor, provider: producer.provider })), harness: ctx.harness,
+    archetype, role, executor: binding.executor, harness: (binding.spec as { harness?: string }).harness ?? null, variant: (binding.spec as { variant?: string }).variant ?? null, provider: (binding.spec as any).provider ?? null, model: (binding.spec as any).model ?? null, model_id: modelId, transport: 'command', command: binding.spec.adapter === 'command' ? binding.spec.command : null, dial: dialRef, dial_source: dialSource, dials: { session: toRefStr(ctx.dialLayers.session), repo: toRefStr(ctx.dialLayers.repo), user: toRefStr(ctx.dialLayers.user) }, resolved_via: chainInfo?.resolvedVia ?? null, input_provenance: producers.map((producer) => ({ dispatch_id: producer.dispatchId, executor: producer.executor, provider: producer.provider })), host: ctx.harness,
   };
   let constraintVerdict;
   try { constraintVerdict = evaluateConstraint(ctx.profile, constraintContext, { cwd: ctx.repoRoot }); } catch (err) { if (err instanceof ConstraintError) throw new DriveError(`constraint system error: ${(err as Error).message}`); throw err; }

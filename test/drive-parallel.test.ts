@@ -75,7 +75,7 @@ function seedMap(t: TestContext, executors: Record<string, any>, playbook: strin
   runInit({ target: 'codex', repoRoot: root });
   writeFileSync(join(root, '.fadeno', 'playbooks', 'parallel-smoke.yaml'), playbook);
   const models: Record<string, unknown> = {};
-  const routes: Record<string, unknown> = {};
+  const harnesses: Record<string, unknown> = {};
   for (const [name, spec] of Object.entries(executors)) {
     const provider = name.replace(/-/g, '_') + '_p';
     models[name] = { provider, id: name, effort: 'high' };
@@ -84,9 +84,9 @@ function seedMap(t: TestContext, executors: Record<string, any>, playbook: strin
     if ((spec as any).timeoutMs) route.timeout_ms = (spec as any).timeoutMs;
     if ((spec as any).session_id_pattern) route.session_id_pattern = (spec as any).session_id_pattern;
     if ((spec as any).resume) route.resume = (spec as any).resume;
-    routes[provider] = route;
+    harnesses[provider] = { provider, ...route };
   }
-  routes['current-host'] = { host: true };
+
   // Ensure the done step (worker) can complete without blocking terminal: if the
   // playbook uses worker but no writer executor was supplied, synthesize a fast
   // writer so the run can reach terminal. This keeps the wall-clock focus on
@@ -97,13 +97,13 @@ function seedMap(t: TestContext, executors: Record<string, any>, playbook: strin
     const provider = 'rw_worker_p';
     if (models['rw-worker'] == null) {
       models['rw-worker'] = { provider, id: 'rw-worker', effort: 'high' };
-      routes[provider] = { command: ['node', '-e', `process.stdout.write(JSON.stringify(${VALID_REVIEW}))`] };
+      harnesses[provider] = { provider, command: ['node', '-e', `process.stdout.write(JSON.stringify(${VALID_REVIEW}))`] };
     }
   }
   const v3 = {
-    schema_version: 3,
+    schema_version: 4,
     models,
-    routes: { standalone: routes, codex: routes, claude: routes, grok: routes },
+    harnesses,
     archetypes: { worker: {}, reviewer: {} },
     dials: {},
     bindings: { reviewer_a: 'ro-a', reviewer_b: 'ro-b', worker: 'rw-worker', '*': 'ro-a' },
@@ -121,7 +121,7 @@ function seedMap(t: TestContext, executors: Record<string, any>, playbook: strin
     if (models[exec as string] == null) {
       const p = (exec as string).replace(/-/g, '_') + '_p';
       models[exec as string] = { provider: p, id: exec, effort: 'high' };
-      if (routes[p] == null) routes[p] = { command: ['node', '-e', `process.stdout.write(JSON.stringify(${VALID_REVIEW}))`] };
+      if (harnesses[p] == null) harnesses[p] = { provider: p, command: ['node', '-e', `process.stdout.write(JSON.stringify(${VALID_REVIEW}))`] };
     }
   }
   writeFileSync(join(root, '.fadeno', 'executors.yaml'), stringifyYaml(v3));
@@ -393,9 +393,9 @@ flow:
   const models: Record<string, unknown> = { 'rw-writer': { provider: 'rw_writer_p', id: 'rw-writer', effort: 'high' } };
   const route = { command: sleepCmd(800), };
   const v3two = {
-    schema_version: 3,
+    schema_version: 4,
     models,
-    routes: { standalone: { rw_writer_p: route, 'current-host': { host: true } }, codex: { rw_writer_p: route, 'current-host': { host: true } }, claude: { rw_writer_p: route, 'current-host': { host: true } }, grok: { rw_writer_p: route, 'current-host': { host: true } } },
+    harnesses: { rw_writer_p: { provider: 'rw_writer_p', ...route } },
     archetypes: { worker: {}, reviewer: {} },
     dials: {},
     bindings: { worker_a: 'rw-writer', worker_b: 'rw-writer', '*': 'rw-writer' },
@@ -697,32 +697,17 @@ flow:
   writeFileSync(join(root, '.fadeno', 'playbooks', 'parallel-smoke.yaml'), playbookMixed);
   // Need executors: ro-a for reviewer_a (command, read-only), host for worker
   const v3 = {
-    schema_version: 3,
+    schema_version: 4,
     models: {
       'ro-a': { provider: 'ro_p', id: 'ro-a', effort: 'high' },
       host: { provider: 'hostp', id: 'host', effort: 'high' },
     },
-    routes: {
-      standalone: {
-        ro_p: { command: ['node', '-e', `process.stdout.write(JSON.stringify(${VALID_REVIEW}))`], },
-        hostp: { host: true },
-        'current-host': { host: true },
-      },
-      codex: {
-        ro_p: { command: ['node', '-e', `process.stdout.write(JSON.stringify(${VALID_REVIEW}))`], },
-        hostp: { host: true },
-        'current-host': { host: true },
-      },
-      claude: {
-        ro_p: { command: ['node', '-e', `process.stdout.write(JSON.stringify(${VALID_REVIEW}))`], },
-        hostp: { host: true },
-        'current-host': { host: true },
-      },
-      grok: {
-        ro_p: { command: ['node', '-e', `process.stdout.write(JSON.stringify(${VALID_REVIEW}))`], },
-        hostp: { host: true },
-        'current-host': { host: true },
-      },
+    // One table under v4. `hostp` declares `host:` and no `command:` — a
+    // host-only harness, which is what makes `worker` an awaiting-host
+    // dispatch instead of a spawn.
+    harnesses: {
+      ro_p: { provider: 'ro_p', command: ['node', '-e', `process.stdout.write(JSON.stringify(${VALID_REVIEW}))`] },
+      hostp: { provider: 'hostp', host: { effort_channel: 'none' } },
     },
     archetypes: { worker: {}, reviewer: {} },
     dials: {},

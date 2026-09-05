@@ -148,7 +148,7 @@ test('a resolver-error denial writes a host_refused row naming the predicate', (
   assert.equal(written.length, 1);
   const row = written[0]!;
   assert.equal(row.event, 'host_refused');
-  assert.equal(row.format, '1.0');
+  assert.equal(row.format, '1.1');
   assert.equal(row.archetype, 'worker');
   assert.equal(row.agent_type, 'worker');
   assert.deepEqual(row.refusal, {
@@ -330,7 +330,7 @@ test('outside host mode an unsteered spawn is allowed, unrewritten, and recorded
   // something Fadeno never steered" must not read identically in the log.
   assert.equal(rows(root).length, 1);
   assert.equal(row.event, 'native_spawn');
-  assert.equal(row.harness, 'claude');
+  assert.equal(row.host, 'claude');
   assert.equal(row.agent_type, 'general-purpose');
   assert.equal(row.model_requested, 'opus');
   // A Claude PreToolUse event carries no session model, so unlike the Codex
