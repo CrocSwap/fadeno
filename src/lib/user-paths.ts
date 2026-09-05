@@ -226,6 +226,31 @@ export function recordVerifiedModel(options: UserPathOptions, entry: ModelVerifi
 }
 
 /**
+ * Drop every cached row the predicate selects, returning how many went.
+ *
+ * The cache only ever grew: `recordVerifiedModel` adds and `probeModel` reads,
+ * so a row that stopped being true stayed on disk vouching for a model the
+ * backend no longer lists. Removal is the other half — `models verify` deletes
+ * a pair's rows when the listing definitively does not name it, and `model
+ * remove` deletes them for an alias that is going away.
+ *
+ * Same shape the writer above emits: a sorted flat array, one JSON line.
+ */
+export function removeVerifiedModels(
+  options: UserPathOptions,
+  predicate: (entry: ModelVerification) => boolean,
+): number {
+  const path = userPaths(options).modelVerificationsFile;
+  const existing = readVerifiedModels(options);
+  const kept = existing.filter((entry) => !predicate(entry));
+  const removed = existing.length - kept.length;
+  if (removed === 0) return 0;
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(kept)}\n`, 'utf8');
+  return removed;
+}
+
+/**
  * `$CODEX_HOME/agents`, else `<home>/.codex/agents` — where Codex looks for
  * user-scope role agents, and so where `steering apply --codex` writes them,
  * `status` and `doctor` look for them, and `uninstall` removes them.

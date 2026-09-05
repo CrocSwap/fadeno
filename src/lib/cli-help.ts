@@ -27,6 +27,8 @@ const MODELS_PAGE = page('Inspect the model registry and backend listings.', [
   'fadeno models [<name>]',
   'fadeno models --harness <id>',
   'fadeno models add <alias> <provider/id>',
+  'fadeno models remove <alias> [--force]',
+  'fadeno models verify [<ref>...] [--harness <id>] [--strict]',
 ]);
 const SHADOW_PAGE = page('Attach or show a sampled shadow challenger.', [
   'fadeno dial shadow',
@@ -35,6 +37,20 @@ const SHADOW_PAGE = page('Attach or show a sampled shadow challenger.', [
 const MODEL_ADD_PAGE = page('Discover and persist a canonical user model alias.', 'fadeno models add <alias> <provider/id>', [
   'Discovery checks direct OpenCode first, then the OpenCode/OpenRouter discovery path.',
 ]);
+const MODEL_REMOVE_PAGE = page('Remove a user-catalog model alias.', 'fadeno models remove <alias> [--force] [--json]', [
+  'Edits the user catalog only; a builtin or project entry names the file to edit instead.',
+  'Refuses while a dial or shadow attachment names the alias; --force removes it and reports each stranded reference.',
+  'Cached verification rows for the alias are dropped with it.',
+]);
+const MODEL_VERIFY_PAGE = page(
+  'Re-probe dialed models against their harness listings.',
+  'fadeno models verify [<ref>...] [--harness <id>] [--strict] [--json]',
+  [
+    'Ignores the verification cache and always re-probes; refreshes a row that still lists, deletes one that does not.',
+    'Exits non-zero when a listing definitively omits a dialed model; --strict also fails on an unreachable listing.',
+    'A `<ref>` narrows by alias, delivered id, or provider/id; an unmatched ref is an error, never an empty pass.',
+  ],
+);
 
 const TOP_LEVEL: Record<string, PageSeed> = {
   setup: page('Install safe user-scoped integration.', 'fadeno setup [--codex|--claude] [options]'),
@@ -54,7 +70,13 @@ const TOP_LEVEL: Record<string, PageSeed> = {
   diagram: page('Render a playbook workflow as ASCII or Mermaid.', 'fadeno diagram <playbook> [--format ascii|mermaid]'),
   'new-run': page('Create a run ledger from a playbook.', 'fadeno new-run <playbook> <task> [--input Name=path]...'),
   models: MODELS_PAGE,
-  model: aliasPage(MODELS_PAGE, ['fadeno model [<name>]', 'fadeno model --harness <id>', 'fadeno model add <alias> <provider/id>'], '`fadeno model` is an alias for `fadeno models`.'),
+  model: aliasPage(MODELS_PAGE, [
+    'fadeno model [<name>]',
+    'fadeno model --harness <id>',
+    'fadeno model add <alias> <provider/id>',
+    'fadeno model remove <alias> [--force]',
+    'fadeno model verify [<ref>...] [--harness <id>] [--strict]',
+  ], '`fadeno model` is an alias for `fadeno models`.'),
   dial: page('Show or set per-archetype model selection.', [
     'fadeno dial',
     'fadeno dial <archetype> [<model>[@effort]]',
@@ -101,6 +123,14 @@ const NESTED: Record<string, PageSeed> = {
   'evidence promote': page('Promote a verified run receipt.', 'fadeno evidence promote <run>'),
   'models add': MODEL_ADD_PAGE,
   'model add': aliasPage(MODEL_ADD_PAGE, 'fadeno model add <alias> <provider/id>', '`fadeno model add` is an alias for `fadeno models add`.'),
+  'models remove': MODEL_REMOVE_PAGE,
+  'model remove': aliasPage(MODEL_REMOVE_PAGE, 'fadeno model remove <alias> [--force] [--json]', '`fadeno model remove` is an alias for `fadeno models remove`.'),
+  'models verify': MODEL_VERIFY_PAGE,
+  'model verify': aliasPage(
+    MODEL_VERIFY_PAGE,
+    'fadeno model verify [<ref>...] [--harness <id>] [--strict] [--json]',
+    '`fadeno model verify` is an alias for `fadeno models verify`.',
+  ),
   'dial clear': page('Clear one or more dial layers.', 'fadeno dial clear [<archetype>] [--session|--user|--repo]'),
   'dial shadow': aliasPage(SHADOW_PAGE, SHADOW_PAGE.usage, '`fadeno shadow` is the top-level alias.'),
   'dial clear-shadow': page('Remove shadow attachments.', 'fadeno dial clear-shadow [<archetype>]'),
@@ -136,7 +166,8 @@ const OPTION_HINTS: Record<string, string> = {
   '--reset-runtime': 'Allow runtime downgrade', '--role': 'Role name', '--run': 'Immutable engine run id',
   '--schema': 'Document schema kind', '--scope': 'Steering installation scope', '--session': 'Local session scope',
   '--shadow': 'One-shot challenger reference', '--shared': 'Run in the current worktree', '--source': 'Progress observation source',
-  '--status': 'Run status', '--step': 'Run step id', '--tag': 'Dispatch recovery label', '--tail': 'Number of recent entries',
+  '--status': 'Run status', '--step': 'Run step id', '--strict': 'Fail on an unreachable listing too',
+  '--tag': 'Dispatch recovery label', '--tail': 'Number of recent entries',
   '--timeout': 'Deadline in seconds (0 disables)', '--tool': 'Registered tool name', '--user': 'User-default scope',
   '--verbose': 'Include diagnostic detail', '--version': 'Show Fadeno version',
   '--wait': 'Wait before recovering output', '--with-hooks': 'Scaffold enforcement hooks', '--with-steering': 'Deprecated compatibility alias; steering is already default',
@@ -220,6 +251,10 @@ const PAGE_OPTIONS: Record<string, readonly string[]> = {
   'evidence promote': withGlobals(),
   'models add': withGlobals('--json'),
   'model add': withGlobals('--json'),
+  'models remove': withGlobals('--force', '--json'),
+  'model remove': withGlobals('--force', '--json'),
+  'models verify': withGlobals('--harness', '--strict', '--json'),
+  'model verify': withGlobals('--harness', '--strict', '--json'),
   'dial clear': withGlobals('--session', '--user', '--repo', '--json'),
   'dial shadow': withGlobals('--harness', '--rate', '--n', '--json'),
   'dial clear-shadow': withGlobals('--json'),
@@ -237,6 +272,8 @@ const PATH_OPTION_HINTS: Record<string, Record<string, string>> = {
   init: { '--force': 'Overwrite managed scaffold files' },
   plugin: { '--force': 'Overwrite generated plugin files' },
   'steering apply': { '--force': 'Overwrite managed steering files' },
+  'models remove': { '--force': 'Remove despite live dials, naming each stranded' },
+  'model remove': { '--force': 'Remove despite live dials, naming each stranded' },
   dispatches: { '--output': 'Print saved snapshot bytes for an id, last dispatch, or tag' },
   dispatch: {
     '--isolate': 'Withhold the primary diff from merge-back',

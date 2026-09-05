@@ -96,6 +96,40 @@ All notable changes to Fadeno are documented here. The format follows
 
 ### Added
 
+- **`fadeno model remove <alias>`** (also `fadeno models remove`) — the other
+  half of `model add`. Removes the alias from the USER catalog only, editing
+  through the YAML document so comments and sibling keys survive; a builtin or
+  project entry is refused by naming the file to edit, because that layer is
+  committed policy rather than personal state. It refuses while any dial or
+  shadow attachment still names the alias — the failure it prevents is the
+  quiet one, where the dial outlives the model and the archetype falls through
+  to something else without saying so — and `--force` removes anyway and
+  reports every reference it stranded. The alias's rows leave the verification
+  cache with it — including, on a harness that encodes effort into the model id
+  (`effort_encoding: model-suffix`), rows cached under an effort nothing still
+  references, such as a `personal@high` dial that has since been cleared or
+  re-pointed. A row records neither the alias nor the effort and efforts are
+  free-form strings, so there is no effort universe to resolve; those rows are
+  matched by shape (`<base>` or `<base>-…` on that harness) and kept only when a
+  surviving entry still delivers exactly that id at its default effort. The
+  trade is deliberate: a surviving model shaped like `<base>-<something>` that no
+  registered entry delivers may lose its row, and the next `fadeno dial` or
+  `fadeno models verify` re-probes and rewrites it — over-invalidating a cache is
+  the safe direction; a row outliving the alias it vouched for is not.
+- **`fadeno models verify [<ref>...]`** (also `fadeno model verify`) —
+  re-probes the models the dials actually point at against each harness's
+  `models_command`, **ignoring the cache**. Dial-time verification is
+  existence-only (`isModelVerified`), so a row written once vouches forever and
+  a model the backend has since retired is discovered by a failed dispatch. A
+  model still listed gets a fresh `verified_at`; one the listing definitively
+  omits has its rows **deleted** and exits the command non-zero. A listing that
+  cannot be read is `unavailable` — it says nothing about the model, so its
+  rows are untouched and the exit stays 0 unless `--strict`. `--harness <id>`
+  and `<ref>` (alias, delivered id, or `provider/id`) narrow the set; an
+  unmatched ref is an error rather than an empty pass. User-invoked only: it
+  spawns one listing per pair and must never run on a hook path.
+- `removeVerifiedModels(options, predicate)` in `src/lib/user-paths.ts` — the
+  verification cache could only ever grow before this.
 - `docs/experimental/harness-neutral-dials.md` — the catalog v4 design record:
   the principle, the schema, the resolution algorithm, the shadow-pair
   consequence, the rename table, and the one known gap.

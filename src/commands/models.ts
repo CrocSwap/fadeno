@@ -2,22 +2,28 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { parseDocument } from 'yaml';
-import { loadGlobalProfile, loadLayeredProfile, type LayeredProfile } from '../lib/config-layers.ts';
+import { loadGlobalProfile, loadLayeredProfile, type ConfigLayer, type LayeredProfile } from '../lib/config-layers.ts';
+import { DialError, runDialShow } from './dial.ts';
 import {
   activeHarness,
   argvGrantsFadenoShell,
   BARE_IDENTIFIER_RE,
+  formatDialRef,
   resolveDelivery,
   detectAmbientHarness,
   ExecutorProfileError,
   qualifyListedModelId,
+  shadowAttachmentRef,
   type CommandExecutorSpec,
+  type DialRef,
   type EligibilityState,
   type ExecutorProfile,
   type HarnessRaw,
+  type ModelEntry,
+  type RoleResolutionSource,
 } from '../lib/executors.ts';
-import { findRepoRoot } from '../lib/paths.ts';
-import { readVerifiedModels, userPaths, type UserPathOptions } from '../lib/user-paths.ts';
+import { findRepoRoot, templatesDir } from '../lib/paths.ts';
+import { readVerifiedModels, removeVerifiedModels, userPaths, type UserPathOptions } from '../lib/user-paths.ts';
 
 export class ModelsError extends Error {}
 
@@ -555,5 +561,319 @@ export function runModelsAdd(opts: ModelAddOptions): ModelAddResult {
     matched_identity: matched.listedId,
     delivery: { harness: matched.step.harness, id: matched.spelling, listed_id: matched.listedId },
     suppressed_by_project: layered.selfContained,
+  };
+}
+
+export interface ModelRemoveOptions extends ModelsCommonOptions {
+  alias: string;
+  /** Remove despite live dials, reporting each one it strands. */
+  force?: boolean;
+  /** Passed through to the dial cascade read; see `DialCommonOptions.env`. */
+  env?: NodeJS.ProcessEnv;
+}
+
+/** One dial (or shadow attachment) that names the alias being removed. */
+export interface DanglingDial {
+  archetype: string;
+  /** Where the reference lives: a stored layer, or how the cascade reached it. */
+  layer: RoleResolutionSource | 'session' | 'repo' | 'user';
+  ref: string;
+}
+
+export interface ModelRemoveResult {
+  alias: string;
+  /** The user catalog the entry was removed from. */
+  path: string;
+  removed: true;
+  /** Non-empty only under `--force`: the dials now naming a model that is gone. */
+  dangling_dials: DanglingDial[];
+  /** Same, for shadow attachments — a stranded challenger fails the same way. */
+  dangling_shadows: Array<{ archetype: string; ref: string }>;
+  verifications_removed: number;
+}
+
+/**
+ * The user catalog's own entry for an alias, read straight from the mapping
+ * this command is about to edit rather than from the merged profile.
+ *
+ * The merged profile answers with whichever layer wins, which for a shadowed
+ * alias is a DIFFERENT model that happens to share the name. Removal has to
+ * reason about the bytes it is deleting, so this parses them directly and
+ * tolerates a hand-written file: anything missing falls back the way
+ * `parseExecutorProfile` would.
+ */
+function userModelEntry(raw: unknown): ModelEntry | null {
+  if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const id = typeof record.id === 'string' ? record.id : null;
+  if (id == null || id.length === 0) return null;
+  const spellings: Record<string, string> = {};
+  if (record.spellings != null && typeof record.spellings === 'object' && !Array.isArray(record.spellings)) {
+    for (const [harness, value] of Object.entries(record.spellings as Record<string, unknown>)) {
+      if (typeof value === 'string' && value.length > 0) spellings[harness] = value;
+    }
+  }
+  return {
+    provider: typeof record.provider === 'string' ? record.provider : '',
+    id,
+    effort: typeof record.effort === 'string' ? record.effort : 'default',
+    spellings,
+    eligibility: {},
+    ...(typeof record.harness === 'string' ? { harness: record.harness } : {}),
+  };
+}
+
+/** Where a layer someone must hand-edit actually lives, for the refusal text. */
+function catalogLayerPath(layer: ConfigLayer, repoRoot: string, paths: { executorsFile: string }): string {
+  if (layer === 'user') return paths.executorsFile;
+  if (layer === 'project') return join(repoRoot, '.fadeno', 'executors.yaml');
+  return join(templatesDir(), 'common', 'fadeno', 'executors.yaml');
+}
+
+/**
+ * The other half of `runModelsAdd`: take a personal alias back out.
+ *
+ * User scope only, for the same reason `add` writes only there — a project
+ * catalog is source-controlled policy, and the bundled one ships with the
+ * release. Editing through `parseDocument` keeps the comments and sibling keys
+ * of a file a human maintains.
+ *
+ * It refuses while any dial still names the alias, because the failure it
+ * prevents is the quiet one: the dial survives the removal, resolves to
+ * nothing, and the archetype falls through to some other model without saying
+ * so. `--force` removes anyway and REPORTS every reference it stranded — the
+ * point is that the answer is never silent, not that the user is never allowed
+ * to proceed.
+ */
+export function runModelsRemove(opts: ModelRemoveOptions): ModelRemoveResult {
+  const alias = opts.alias.trim();
+  if (alias.length === 0 || alias === 'current-host') {
+    throw new ModelsError(`"${opts.alias}" is not a removable model alias; current-host is the host itself, not a registry entry.`);
+  }
+  const repoRoot = repoRootOf(opts);
+  const userPathOptions = opts.userPathOptions ?? {};
+  const userCatalogPath = userPaths(userPathOptions).executorsFile;
+  const { doc, value: userCatalog } = readUserCatalog(userCatalogPath);
+  const userModels = userCatalog.models != null && typeof userCatalog.models === 'object' && !Array.isArray(userCatalog.models)
+    ? (userCatalog.models as Record<string, unknown>)
+    : {};
+
+  const layered = loadLayered(repoRoot, userPathOptions);
+  if (!Object.hasOwn(userModels, alias)) {
+    // Say which file to edit instead of which command to rerun: neither the
+    // bundled catalog nor a project's is this command's to write.
+    const owner = layered.provenance.models?.[alias]
+      ?? (Object.hasOwn(layered.profile.models, alias) ? 'project' : null);
+    if (owner == null) {
+      throw new ModelsError(`no model named "${alias}" — \`fadeno models\` lists the registry.`);
+    }
+    throw new ModelsError(
+      `model "${alias}" is not in your user catalog (${userCatalogPath}); it is declared by the ${owner} catalog at ` +
+        `${catalogLayerPath(owner, repoRoot, layered.paths)}. \`fadeno model remove\` edits the user catalog only — ` +
+        'remove it from that file directly.',
+    );
+  }
+
+  // Read the cascade BEFORE the write: afterwards the alias is gone and every
+  // reference to it has already become unresolvable.
+  const show = (() => {
+    try {
+      return runDialShow({ repoRoot, userPathOptions, ...(opts.cwd != null ? { cwd: opts.cwd } : {}), ...(opts.env != null ? { env: opts.env } : {}) });
+    } catch (err) {
+      if (err instanceof DialError) throw new ModelsError(err.message);
+      throw err;
+    }
+  })();
+
+  const dangling_dials: DanglingDial[] = [];
+  const seen = new Set<string>();
+  // The refs themselves, not their printed form: each one is an ACTIVE
+  // delivery whose id may differ from the entry's default (a pinned effort is
+  // encoded into the delivered id on a `model-suffix` harness), so the cache
+  // keys below have to resolve them rather than the entry alone.
+  const strandedRefs: DialRef[] = [];
+  const seenRefs = new Set<string>();
+  const noteRef = (ref: DialRef): void => {
+    const key = formatDialRef(ref);
+    if (seenRefs.has(key)) return;
+    seenRefs.add(key);
+    strandedRefs.push(ref);
+  };
+  const noteDial = (archetype: string, layer: DanglingDial['layer'], ref: DialRef): void => {
+    // A row can reach the alias through a BINDING, whose ref names the binding
+    // and not the model; only a ref that literally names the alias describes a
+    // delivery of the entry being removed.
+    if (ref.model === alias) noteRef(ref);
+    const key = `${layer} ${archetype}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    dangling_dials.push({ archetype, layer, ref: formatDialRef(ref) });
+  };
+  for (const layer of ['session', 'repo', 'user'] as const) {
+    for (const [archetype, ref] of Object.entries(show.dials[layer])) {
+      if (ref.model === alias) noteDial(archetype, layer, ref);
+    }
+  }
+  // Rows cover what the stored layers cannot: a binding, and the archetype an
+  // inherited dial lands on.
+  for (const row of show.rows) {
+    if (row.dial.model === alias || row.model === alias) noteDial(row.archetype, row.source, row.dial);
+  }
+  const dangling_shadows = Object.entries(show.shadows)
+    .filter(([, att]) => att.model === alias)
+    .map(([archetype, att]) => {
+      const ref = shadowAttachmentRef(att);
+      noteRef(ref);
+      return { archetype, ref: formatDialRef(ref) };
+    });
+
+  if (!opts.force && (dangling_dials.length > 0 || dangling_shadows.length > 0)) {
+    const dialed = [...new Set(dangling_dials.map((d) => d.archetype))].sort();
+    const shadowed = [...new Set(dangling_shadows.map((s) => s.archetype))].sort();
+    const parts: string[] = [];
+    if (dialed.length > 0) parts.push(`dialed by ${dialed.join(', ')}`);
+    if (shadowed.length > 0) parts.push(`shadowed on ${shadowed.join(', ')}`);
+    throw new ModelsError(
+      `model "${alias}" is still ${parts.join(' and ')} — re-dial first (\`fadeno dial <archetype> <other>\`), ` +
+        'or pass --force to remove it anyway and leave those references dangling.',
+    );
+  }
+
+  // Every (harness, id) the REMOVED ENTRY could have been cached under.
+  //
+  // Derived from the user entry itself, never from the effective registry row:
+  // a project catalog may declare the same alias with a different id, and
+  // `runModels` answers with whichever entry wins the cascade. Cleaning that
+  // one strands the user entry's own row *and* deletes an unrelated row that
+  // still vouches for a live project model — wrong in both directions at once.
+  const pairs = new Set<string>();
+  const addPair = (harness: string | null | undefined, id: string | null | undefined): void => {
+    if (harness == null || id == null || harness.length === 0 || id.length === 0) return;
+    pairs.add(`${harness} ${id}`);
+  };
+  const removedEntry = userModelEntry(userModels[alias]);
+  if (removedEntry != null) {
+    // The layered harness table (a project may declare harnesses the user
+    // catalog has never seen) with the USER's model entry standing in for the
+    // alias, so `resolveDelivery` computes exactly the ids this entry would
+    // have been asked for — effort suffixes and per-harness spellings included.
+    const removalProfile: ExecutorProfile = {
+      ...layered.profile,
+      models: { ...layered.profile.models, [alias]: removedEntry },
+    };
+    const addResolved = (ref: DialRef): void => {
+      try {
+        const compiled = resolveDelivery(ref, removalProfile);
+        addPair(compiled.harness, compiled.modelId);
+      } catch {
+        // That harness cannot deliver this entry, so nothing was ever cached.
+      }
+    };
+    // Every effort anything actually asked for. A `model-suffix` harness
+    // encodes the effort into the delivered id, so a forced `personal@xhigh`
+    // dial cached `gemini-xhigh` — a set built from the default delivery alone
+    // leaves that row behind.
+    const efforts = new Set<string>(['default', removedEntry.effort]);
+    for (const ref of strandedRefs) if (ref.effort != null) efforts.add(ref.effort);
+    const harnessIds = Object.keys(removalProfile.harnesses ?? {});
+    for (const effort of efforts) {
+      addResolved({ model: alias, effort });
+      for (const harness of harnessIds) addResolved({ model: alias, effort, harness });
+    }
+    // The stranded references verbatim: a ref carries its own harness pin.
+    for (const ref of strandedRefs) addResolved(ref);
+    // A spelling for a harness the table no longer declares still named a row.
+    for (const [harness, id] of Object.entries(removedEntry.spellings)) addPair(harness, id);
+  }
+
+  // The rows the exact set above cannot reach: a `model-suffix` harness under
+  // an effort NOTHING still references.
+  //
+  // A verification row is `{ harness, model, verified_at }` — it records
+  // neither the alias that produced it nor the effort. On a `model-suffix`
+  // harness the effort is encoded into the delivered id (`gemini` dialed
+  // `@high` is asked for as `gemini-high`), and efforts are free-form strings
+  // rather than an enum, so there is no finite "effort universe" to resolve the
+  // removed entry at. Resolving it at the default effort plus the efforts on
+  // CURRENTLY stranded refs — which is all the set above can see — leaves
+  // behind every row written by a dial that has since been cleared or
+  // re-pointed: dial `personal@high` once, re-dial that archetype elsewhere,
+  // remove `personal`, and `agy gemini-high` outlives the alias it vouched for.
+  //
+  // The row's SHAPE is the only handle left. On such a harness, also drop a row
+  // whose id is the removed entry's base id there, or that base followed by a
+  // `-` suffix.
+  //
+  // The bound, stated honestly: a SURVIVING model whose id is literally
+  // `<base>-<something>` and that no registered entry delivers at its default
+  // effort loses its row too. Verification rows are a cache keyed on the
+  // delivered id, so the next `fadeno dial` or `fadeno models verify` re-probes
+  // and rewrites it. The harmful direction — a row outliving its alias — is the
+  // one this closes; over-invalidation is the safe one.
+  const suffixBases = new Map<string, Set<string>>();
+  const survivorPairs = new Set<string>();
+  if (removedEntry != null) {
+    const noteBase = (harness: string, base: string): void => {
+      if (harness.length === 0 || base.length === 0) return;
+      let bases = suffixBases.get(harness);
+      if (bases == null) {
+        bases = new Set<string>();
+        suffixBases.set(harness, bases);
+      }
+      bases.add(base);
+    };
+    const table = harnessTable(layered.profile);
+    for (const [harness, entry] of Object.entries(table)) {
+      if (entry.effort_encoding !== 'model-suffix') continue;
+      noteBase(harness, removedEntry.spellings[harness] ?? removedEntry.id);
+    }
+    // A spelling for a harness the table no longer declares: its encoding is
+    // unknowable now, and a suffixed row under it can only have come from here.
+    for (const [harness, id] of Object.entries(removedEntry.spellings)) {
+      if (!Object.hasOwn(table, harness)) noteBase(harness, id);
+    }
+    // The survivor guard. Every id another registered entry — any layer, any
+    // harness — still delivers at its DEFAULT effort, plus its spellings
+    // verbatim. Deliberately not every surviving dial's pinned effort: that is
+    // the same unbounded re-resolution this prefix rule exists to avoid.
+    const aliasStillDeclared = (layered.provenance.models?.[alias] ?? 'user') !== 'user';
+    for (const [name, entry] of Object.entries(layered.profile.models)) {
+      if (name === alias && !aliasStillDeclared) continue;
+      for (const harness of suffixBases.keys()) {
+        const base = entry.spellings[harness] ?? entry.id;
+        survivorPairs.add(`${harness} ${base}`);
+        // Same rule `resolveDelivery` applies: a declared non-default effort is
+        // part of what this entry is asked for on a `model-suffix` harness.
+        if (entry.effort.length > 0 && entry.effort !== 'default') survivorPairs.add(`${harness} ${base}-${entry.effort}`);
+      }
+      for (const [harness, id] of Object.entries(entry.spellings)) survivorPairs.add(`${harness} ${id}`);
+    }
+  }
+  const matchesRemovedPrefix = (harness: string, model: string): boolean => {
+    const bases = suffixBases.get(harness);
+    if (bases == null) return false;
+    if (survivorPairs.has(`${harness} ${model}`)) return false;
+    for (const base of bases) {
+      if (model === base || model.startsWith(`${base}-`)) return true;
+    }
+    return false;
+  };
+
+  doc.deleteIn(['models', alias]);
+  atomicWrite(userCatalogPath, doc.toString());
+  const verifications_removed = pairs.size === 0 && suffixBases.size === 0
+    ? 0
+    : removeVerifiedModels(
+      userPathOptions,
+      (entry) => pairs.has(`${entry.harness} ${entry.model}`) || matchesRemovedPrefix(entry.harness, entry.model),
+    );
+
+  return {
+    alias,
+    path: userCatalogPath,
+    removed: true,
+    dangling_dials,
+    dangling_shadows,
+    verifications_removed,
   };
 }

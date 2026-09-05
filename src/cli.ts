@@ -37,7 +37,8 @@ import {
   sessionEffort,
   type DialShowResult,
 } from './commands/dial.ts';
-import { runModels, runModelsAdd, runModelsHarness, type HarnessListingResult, type ModelAddResult, type ModelsResult } from './commands/models.ts';
+import { runModels, runModelsAdd, runModelsHarness, runModelsRemove, type HarnessListingResult, type ModelAddResult, type ModelRemoveResult, type ModelsResult } from './commands/models.ts';
+import { runModelsVerify, type ModelsVerifyResult } from './commands/models-verify.ts';
 import { runNewRun } from './commands/new-run.ts';
 import { runPlaybooks, type PlaybooksDetailResult, type PlaybooksListResult } from './commands/playbooks.ts';
 import { runCodexPlugin, runOmpPlugin, runPlugin } from './commands/plugin.ts';
@@ -739,6 +740,51 @@ function printModelAdd(result: ModelAddResult): void {
   }
 }
 
+function printModelRemove(result: ModelRemoveResult): void {
+  console.log(`removed ${result.alias} from ${result.path}`);
+  if (result.verifications_removed > 0) {
+    console.log(`  verification rows dropped: ${result.verifications_removed}`);
+  }
+  // Stranded references go to stderr: the removal succeeded, and what is left
+  // is the thing the next dispatch would otherwise discover for you.
+  for (const dial of result.dangling_dials) {
+    console.error(
+      `warning: dial ${dial.archetype}→${dial.ref} (${dial.layer}) now names a model that is gone — re-dial with \`fadeno dial ${dial.archetype} <other>\``,
+    );
+  }
+  for (const shadow of result.dangling_shadows) {
+    console.error(
+      `warning: shadow attachment ${shadow.archetype}~${shadow.ref} now names a model that is gone — \`fadeno dial clear-shadow ${shadow.archetype}\``,
+    );
+  }
+}
+
+function printModelsVerify(result: ModelsVerifyResult): void {
+  if (result.rows.length === 0) {
+    console.log('no dialed models to verify — `fadeno dial` shows the effective table.');
+    return;
+  }
+  console.log(`${'model'.padEnd(12)}  ${'id'.padEnd(26)}  ${'harness'.padEnd(10)}  ${'outcome'.padEnd(12)}  archetypes`);
+  for (const row of result.rows) {
+    console.log(
+      `${row.model.padEnd(12)}  ${row.model_id.padEnd(26)}  ${row.harness.padEnd(10)}  ${row.outcome.padEnd(12)}  ${row.archetypes.join(', ')}`,
+    );
+  }
+  for (const row of result.rows) {
+    if (row.detail == null) continue;
+    const line = `  ${row.model} on ${row.harness} — ${row.detail}`;
+    if (row.outcome === 'not_listed') console.error(`error:${line}`);
+    else console.log(`note:${line}`);
+  }
+  console.log(
+    `\n${result.counts.verified} verified, ${result.counts.not_listed} not listed, ` +
+      `${result.counts.unavailable} unavailable, ${result.counts.skipped} skipped`,
+  );
+  if (result.counts.not_listed > 0) {
+    console.log('cached verification rows for the not-listed models were deleted.');
+  }
+}
+
 function printPlaybookSummary(summary: PlaybooksListResult['playbooks'][number]): void {
   console.log(`${summary.name}  [${summary.source}]`);
   console.log(`  ${summary.description}`);
@@ -1030,6 +1076,7 @@ function main(argv: string[]): number {
         opencode: { type: 'boolean' },
         omp: { type: 'boolean' },
         force: { type: 'boolean' },
+        strict: { type: 'boolean' },
         'with-hooks': { type: 'boolean' },
         'with-steering': { type: 'boolean' },
         'no-steering': { type: 'boolean' },
@@ -1799,6 +1846,25 @@ function main(argv: string[]): number {
         if (values.json) console.log(JSON.stringify(result, null, 2));
         else printModelAdd(result);
         return 0;
+      }
+      if (positionals[1] === 'remove') {
+        if (positionals.length !== 3 || values.harness != null) {
+          throw new Error('Usage: fadeno model remove <alias> [--force] [--json]');
+        }
+        const result = runModelsRemove({ alias: positionals[2]!, force: Boolean(values.force) });
+        if (values.json) console.log(JSON.stringify(result, null, 2));
+        else printModelRemove(result);
+        return 0;
+      }
+      if (positionals[1] === 'verify') {
+        const result = runModelsVerify({
+          refs: positionals.slice(2),
+          harness: values.harness ?? null,
+          strict: Boolean(values.strict),
+        });
+        if (values.json) console.log(JSON.stringify(result, null, 2));
+        else printModelsVerify(result);
+        return result.ok ? 0 : 1;
       }
       if (values.harness != null) {
         if (positionals.length > 1) throw new Error('Usage: fadeno models --harness <id>  (no positional with --harness)');

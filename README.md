@@ -444,6 +444,30 @@ fadeno setup --codex                        # one-time user-scoped host integrat
 # or: npx fadeno init --claude --no-steering
 ```
 
+The registry itself is editable from the CLI, user scope only — a project or
+bundled catalog is policy someone commits, not personal state:
+
+```bash
+fadeno model add moonshot stealth/ox-alpha  # promote a listed upstream model to an alias
+fadeno model remove moonshot                # take it back out; refuses while a dial names it
+fadeno models verify                        # re-probe every dialed model against its harness
+fadeno models verify opus --harness opencode --strict
+```
+
+`fadeno model remove` edits `~/.config/fadeno/executors.yaml` in place, keeping
+its comments, and drops the alias's rows from the verification cache. It
+refuses while any dial or shadow attachment still names the alias; `--force`
+removes anyway and prints every reference it stranded.
+
+`fadeno models verify` re-probes the models your dials actually point at
+against each harness's `models_command`, **ignoring the cache** — dial-time
+verification is existence-only, so a model a backend has since retired would
+otherwise stay "verified" until a dispatch failed. A listing that still names
+the model refreshes its row; a listing that definitively omits it **deletes**
+the row and exits non-zero. A listing that cannot be reached says nothing about
+the model, so its rows are left alone and the command still exits 0 unless you
+pass `--strict`.
+
 Roles resolve at dispatch time through the dial cascade — explicit binding pin, else session dial, else repo pin, else user dial, else host-native base (`current-host`) —
 and every run start and dispatch echoes where each role landed
 (`implementer → sol @ high via codex (command) [user dial]`). Runs

@@ -283,6 +283,8 @@ export type VerificationStatus = 'verified' | 'cached' | 'unverified' | null;
 export interface ProbeOptions {
   spawn?: (command: string[], opts: { timeout: number }) => { status: number | null; stdout: string | Buffer; stderr: string | Buffer; error?: Error };
   userPathOptions?: UserPathOptions;
+  /** Re-probe even when a row is cached — `fadeno models verify` only. */
+  force?: boolean;
 }
 
 export function probeModel(
@@ -308,7 +310,7 @@ export function probeModel(
   }
   // Check cache
   const userOpts = opts.userPathOptions ?? {};
-  if (isModelVerified(userOpts, harness, modelId)) {
+  if (!opts.force && isModelVerified(userOpts, harness, modelId)) {
     return { status: 'cached', note: null };
   }
   const spawnFn =

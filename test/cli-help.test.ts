@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
-import { PUBLIC_COMMAND_PATHS, TOP_LEVEL_COMMANDS } from '../src/commands/completion.ts';
+import { PUBLIC_COMMAND_PATHS, runCompletionCandidates, TOP_LEVEL_COMMANDS } from '../src/commands/completion.ts';
 import { HELP_PATHS, missingHelpPaths, renderFocusedHelp, renderGlobalHelp, resolveHelpPath } from '../src/lib/cli-help.ts';
 import { packageVersion } from '../src/lib/paths.ts';
 import { tempRepo } from './helpers.ts';
@@ -21,7 +21,7 @@ function run(bin: string, args: string[], cwd = process.cwd()): string {
 
 test('help coverage is derived exactly from completion public paths', () => {
   assert.equal(TOP_LEVEL_COMMANDS.length, 45);
-  assert.equal(PUBLIC_COMMAND_PATHS.length, 55);
+  assert.equal(PUBLIC_COMMAND_PATHS.length, 59);
   assert.deepEqual([...HELP_PATHS].sort(), [...PUBLIC_COMMAND_PATHS].sort());
   assert.deepEqual(missingHelpPaths(), []);
   for (const path of PUBLIC_COMMAND_PATHS) {
@@ -131,6 +131,46 @@ test('source and every bundled CLI render representative focused and global help
     assert.match(nested, /fadeno dial shadow/);
     const alias = run(bin, [...prefix, 'model', 'add', '--help'], root);
     assert.match(alias, /alias for `fadeno models add`/i);
+  }
+});
+
+/**
+ * The bundled binaries carry the whole CLI, and `build:bin` is the only thing
+ * that refreshes them — a source-only change ships plugin users a binary that
+ * does not have the command at all. `models remove` and `models verify` went
+ * out exactly that way: `plugin/bin/fadeno models verify --help` still printed
+ * the old generic models page while the suite was green, because the only
+ * check on the bundle compared its VERSION, which a feature commit never
+ * changes.
+ *
+ * Derived from the source's own registry rather than a literal list, so the
+ * next command added is covered without anyone remembering to add it here.
+ */
+test('every bundled CLI knows the same commands and subcommands as the source', (t) => {
+  const root = tempRepo(t);
+  const parents = [...new Set(PUBLIC_COMMAND_PATHS.filter((path) => path.includes(' ')).map((path) => path.split(' ')[0]!))];
+  const queries: string[][] = [['fadeno', ''], ...parents.map((parent) => ['fadeno', parent, ''])];
+  for (const words of queries) {
+    const cword = words.length - 1;
+    const expected = runCompletionCandidates({ cwd: root, repoRoot: root, cword, words });
+    assert.ok(expected.length > 0, `no source candidates for ${words.join(' ')}`);
+    for (const bin of BUNDLES) {
+      const printed = run(bin, ['completion', 'candidates', String(cword), '--', ...words], root)
+        .split('\n')
+        .filter((line) => line.length > 0);
+      assert.deepEqual(printed, expected, `${bin} is stale for \`${words.join(' ')}\` — run the three plugin builds`);
+    }
+  }
+});
+
+test('every bundled CLI dispatches the model-registry upkeep commands', (t) => {
+  const root = tempRepo(t);
+  for (const bin of [process.execPath, ...BUNDLES]) {
+    const prefix = bin === process.execPath ? [SOURCE] : [];
+    assert.match(run(bin, [...prefix, 'models', 'verify', '--help'], root), /^fadeno models verify — /);
+    assert.match(run(bin, [...prefix, 'models', 'remove', '--help'], root), /^fadeno models remove — /);
+    assert.match(run(bin, [...prefix, 'model', 'verify', '--help'], root), /alias for `fadeno models verify`/i);
+    assert.match(run(bin, [...prefix, 'model', 'remove', '--help'], root), /alias for `fadeno models remove`/i);
   }
 });
 

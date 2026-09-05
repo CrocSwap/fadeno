@@ -14114,6 +14114,17 @@ function recordVerifiedModel(options, entry) {
   (0, import_node_fs2.writeFileSync)(path, `${JSON.stringify(next)}
 `, "utf8");
 }
+function removeVerifiedModels(options, predicate) {
+  const path = userPaths(options).modelVerificationsFile;
+  const existing = readVerifiedModels(options);
+  const kept = existing.filter((entry) => !predicate(entry));
+  const removed = existing.length - kept.length;
+  if (removed === 0) return 0;
+  (0, import_node_fs2.mkdirSync)((0, import_node_path2.join)(path, ".."), { recursive: true });
+  (0, import_node_fs2.writeFileSync)(path, `${JSON.stringify(kept)}
+`, "utf8");
+  return removed;
+}
 function codexUserAgentDir(options = {}) {
   const env = options.env ?? process.env;
   const home = options.home ?? (0, import_node_os.homedir)();
@@ -33610,7 +33621,7 @@ function probeModel(profile, harness, modelId, opts = {}) {
     return { status: "unverified", note: `note: cannot verify ${modelId} on ${harness} (no models_command declared) \u2014 dialing unverified` };
   }
   const userOpts = opts.userPathOptions ?? {};
-  if (isModelVerified(userOpts, harness, modelId)) {
+  if (!opts.force && isModelVerified(userOpts, harness, modelId)) {
     return { status: "cached", note: null };
   }
   const spawnFn = opts.spawn ?? ((command2, spawnOpts) => {
@@ -34820,6 +34831,313 @@ function runModelsAdd(opts) {
     matched_identity: matched.listedId,
     delivery: { harness: matched.step.harness, id: matched.spelling, listed_id: matched.listedId },
     suppressed_by_project: layered.selfContained
+  };
+}
+function userModelEntry(raw) {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const record2 = raw;
+  const id = typeof record2.id === "string" ? record2.id : null;
+  if (id == null || id.length === 0) return null;
+  const spellings = {};
+  if (record2.spellings != null && typeof record2.spellings === "object" && !Array.isArray(record2.spellings)) {
+    for (const [harness, value] of Object.entries(record2.spellings)) {
+      if (typeof value === "string" && value.length > 0) spellings[harness] = value;
+    }
+  }
+  return {
+    provider: typeof record2.provider === "string" ? record2.provider : "",
+    id,
+    effort: typeof record2.effort === "string" ? record2.effort : "default",
+    spellings,
+    eligibility: {},
+    ...typeof record2.harness === "string" ? { harness: record2.harness } : {}
+  };
+}
+function catalogLayerPath(layer, repoRoot, paths) {
+  if (layer === "user") return paths.executorsFile;
+  if (layer === "project") return (0, import_node_path31.join)(repoRoot, ".fadeno", "executors.yaml");
+  return (0, import_node_path31.join)(templatesDir(), "common", "fadeno", "executors.yaml");
+}
+function runModelsRemove(opts) {
+  const alias = opts.alias.trim();
+  if (alias.length === 0 || alias === "current-host") {
+    throw new ModelsError(`"${opts.alias}" is not a removable model alias; current-host is the host itself, not a registry entry.`);
+  }
+  const repoRoot = repoRootOf2(opts);
+  const userPathOptions = opts.userPathOptions ?? {};
+  const userCatalogPath = userPaths(userPathOptions).executorsFile;
+  const { doc, value: userCatalog } = readUserCatalog(userCatalogPath);
+  const userModels = userCatalog.models != null && typeof userCatalog.models === "object" && !Array.isArray(userCatalog.models) ? userCatalog.models : {};
+  const layered = loadLayered2(repoRoot, userPathOptions);
+  if (!Object.hasOwn(userModels, alias)) {
+    const owner = layered.provenance.models?.[alias] ?? (Object.hasOwn(layered.profile.models, alias) ? "project" : null);
+    if (owner == null) {
+      throw new ModelsError(`no model named "${alias}" \u2014 \`fadeno models\` lists the registry.`);
+    }
+    throw new ModelsError(
+      `model "${alias}" is not in your user catalog (${userCatalogPath}); it is declared by the ${owner} catalog at ${catalogLayerPath(owner, repoRoot, layered.paths)}. \`fadeno model remove\` edits the user catalog only \u2014 remove it from that file directly.`
+    );
+  }
+  const show = (() => {
+    try {
+      return runDialShow({ repoRoot, userPathOptions, ...opts.cwd != null ? { cwd: opts.cwd } : {}, ...opts.env != null ? { env: opts.env } : {} });
+    } catch (err) {
+      if (err instanceof DialError) throw new ModelsError(err.message);
+      throw err;
+    }
+  })();
+  const dangling_dials = [];
+  const seen = /* @__PURE__ */ new Set();
+  const strandedRefs = [];
+  const seenRefs = /* @__PURE__ */ new Set();
+  const noteRef = (ref) => {
+    const key = formatDialRef(ref);
+    if (seenRefs.has(key)) return;
+    seenRefs.add(key);
+    strandedRefs.push(ref);
+  };
+  const noteDial = (archetype, layer, ref) => {
+    if (ref.model === alias) noteRef(ref);
+    const key = `${layer} ${archetype}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    dangling_dials.push({ archetype, layer, ref: formatDialRef(ref) });
+  };
+  for (const layer of ["session", "repo", "user"]) {
+    for (const [archetype, ref] of Object.entries(show.dials[layer])) {
+      if (ref.model === alias) noteDial(archetype, layer, ref);
+    }
+  }
+  for (const row of show.rows) {
+    if (row.dial.model === alias || row.model === alias) noteDial(row.archetype, row.source, row.dial);
+  }
+  const dangling_shadows = Object.entries(show.shadows).filter(([, att]) => att.model === alias).map(([archetype, att]) => {
+    const ref = shadowAttachmentRef(att);
+    noteRef(ref);
+    return { archetype, ref: formatDialRef(ref) };
+  });
+  if (!opts.force && (dangling_dials.length > 0 || dangling_shadows.length > 0)) {
+    const dialed = [...new Set(dangling_dials.map((d) => d.archetype))].sort();
+    const shadowed = [...new Set(dangling_shadows.map((s) => s.archetype))].sort();
+    const parts = [];
+    if (dialed.length > 0) parts.push(`dialed by ${dialed.join(", ")}`);
+    if (shadowed.length > 0) parts.push(`shadowed on ${shadowed.join(", ")}`);
+    throw new ModelsError(
+      `model "${alias}" is still ${parts.join(" and ")} \u2014 re-dial first (\`fadeno dial <archetype> <other>\`), or pass --force to remove it anyway and leave those references dangling.`
+    );
+  }
+  const pairs = /* @__PURE__ */ new Set();
+  const addPair = (harness, id) => {
+    if (harness == null || id == null || harness.length === 0 || id.length === 0) return;
+    pairs.add(`${harness} ${id}`);
+  };
+  const removedEntry = userModelEntry(userModels[alias]);
+  if (removedEntry != null) {
+    const removalProfile = {
+      ...layered.profile,
+      models: { ...layered.profile.models, [alias]: removedEntry }
+    };
+    const addResolved = (ref) => {
+      try {
+        const compiled = resolveDelivery(ref, removalProfile);
+        addPair(compiled.harness, compiled.modelId);
+      } catch {
+      }
+    };
+    const efforts = /* @__PURE__ */ new Set(["default", removedEntry.effort]);
+    for (const ref of strandedRefs) if (ref.effort != null) efforts.add(ref.effort);
+    const harnessIds = Object.keys(removalProfile.harnesses ?? {});
+    for (const effort of efforts) {
+      addResolved({ model: alias, effort });
+      for (const harness of harnessIds) addResolved({ model: alias, effort, harness });
+    }
+    for (const ref of strandedRefs) addResolved(ref);
+    for (const [harness, id] of Object.entries(removedEntry.spellings)) addPair(harness, id);
+  }
+  const suffixBases = /* @__PURE__ */ new Map();
+  const survivorPairs = /* @__PURE__ */ new Set();
+  if (removedEntry != null) {
+    const noteBase = (harness, base) => {
+      if (harness.length === 0 || base.length === 0) return;
+      let bases = suffixBases.get(harness);
+      if (bases == null) {
+        bases = /* @__PURE__ */ new Set();
+        suffixBases.set(harness, bases);
+      }
+      bases.add(base);
+    };
+    const table = harnessTable(layered.profile);
+    for (const [harness, entry] of Object.entries(table)) {
+      if (entry.effort_encoding !== "model-suffix") continue;
+      noteBase(harness, removedEntry.spellings[harness] ?? removedEntry.id);
+    }
+    for (const [harness, id] of Object.entries(removedEntry.spellings)) {
+      if (!Object.hasOwn(table, harness)) noteBase(harness, id);
+    }
+    const aliasStillDeclared = (layered.provenance.models?.[alias] ?? "user") !== "user";
+    for (const [name, entry] of Object.entries(layered.profile.models)) {
+      if (name === alias && !aliasStillDeclared) continue;
+      for (const harness of suffixBases.keys()) {
+        const base = entry.spellings[harness] ?? entry.id;
+        survivorPairs.add(`${harness} ${base}`);
+        if (entry.effort.length > 0 && entry.effort !== "default") survivorPairs.add(`${harness} ${base}-${entry.effort}`);
+      }
+      for (const [harness, id] of Object.entries(entry.spellings)) survivorPairs.add(`${harness} ${id}`);
+    }
+  }
+  const matchesRemovedPrefix = (harness, model) => {
+    const bases = suffixBases.get(harness);
+    if (bases == null) return false;
+    if (survivorPairs.has(`${harness} ${model}`)) return false;
+    for (const base of bases) {
+      if (model === base || model.startsWith(`${base}-`)) return true;
+    }
+    return false;
+  };
+  doc.deleteIn(["models", alias]);
+  atomicWrite(userCatalogPath, doc.toString());
+  const verifications_removed = pairs.size === 0 && suffixBases.size === 0 ? 0 : removeVerifiedModels(
+    userPathOptions,
+    (entry) => pairs.has(`${entry.harness} ${entry.model}`) || matchesRemovedPrefix(entry.harness, entry.model)
+  );
+  return {
+    alias,
+    path: userCatalogPath,
+    removed: true,
+    dangling_dials,
+    dangling_shadows,
+    verifications_removed
+  };
+}
+
+// src/commands/models-verify.ts
+var ModelsVerifyError = class extends Error {
+};
+function loadLayered3(repoRoot, userPathOptions) {
+  try {
+    return loadLayeredProfile(repoRoot, userPathOptions, activeHarness(void 0, userPathOptions));
+  } catch (err) {
+    if (err instanceof ExecutorProfileError) throw new ModelsVerifyError(err.message);
+    throw err;
+  }
+}
+function runModelsVerify(opts = {}) {
+  const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
+  const userPathOptions = opts.userPathOptions ?? {};
+  const layered = loadLayered3(repoRoot, userPathOptions);
+  const profile = layered.profile;
+  const host = profile.host ?? "standalone";
+  const harnessFilter = opts.harness?.trim() ?? null;
+  if (harnessFilter != null) {
+    if (!Object.hasOwn(profile.harnesses ?? {}, harnessFilter)) {
+      const declared = Object.keys(profile.harnesses ?? {}).sort();
+      throw new ModelsVerifyError(`unknown harness "${harnessFilter}" \u2014 declared harnesses: ${declared.join(", ") || "(none)"}`);
+    }
+  }
+  const show = (() => {
+    try {
+      return runDialShow({
+        repoRoot,
+        userPathOptions,
+        ...opts.cwd != null ? { cwd: opts.cwd } : {},
+        ...opts.env != null ? { env: opts.env } : {}
+      });
+    } catch (err) {
+      if (err instanceof DialError) throw new ModelsVerifyError(err.message);
+      throw err;
+    }
+  })();
+  const targets = /* @__PURE__ */ new Map();
+  for (const row of show.rows) {
+    if (row.harness == null || row.model_id === "current-host") continue;
+    const key = `${row.harness} ${row.model_id}`;
+    let target = targets.get(key);
+    if (target == null) {
+      target = { model: row.model, model_id: row.model_id, harness: row.harness, archetypes: [], aliases: /* @__PURE__ */ new Set(), models: /* @__PURE__ */ new Set() };
+      targets.set(key, target);
+    }
+    target.models.add(row.model);
+    target.aliases.add(row.model);
+    target.aliases.add(row.model_id);
+    const entry = profile.models[row.model];
+    if (entry != null) {
+      target.aliases.add(`${entry.provider}/${entry.id}`);
+      target.aliases.add(entry.id);
+    }
+    target.model = [...target.models].sort()[0];
+    if (!target.archetypes.includes(row.archetype)) target.archetypes.push(row.archetype);
+  }
+  let selected = [...targets.values()];
+  if (harnessFilter != null) selected = selected.filter((target) => target.harness === harnessFilter);
+  const refs = (opts.refs ?? []).map((ref) => ref.trim()).filter((ref) => ref.length > 0);
+  if (refs.length > 0) {
+    const unmatched = refs.filter((ref) => !selected.some((target) => target.aliases.has(ref)));
+    if (unmatched.length > 0) {
+      const known = [...new Set(selected.flatMap((target) => [...target.models]))].sort();
+      throw new ModelsVerifyError(
+        `no dialed model matches ${unmatched.map((ref) => `"${ref}"`).join(", ")}` + (harnessFilter != null ? ` on harness ${harnessFilter}` : "") + ` \u2014 dialed models: ${known.join(", ") || "(none)"}. \`fadeno dial\` shows the effective table.`
+      );
+    }
+    selected = selected.filter((target) => refs.some((ref) => target.aliases.has(ref)));
+  }
+  selected.sort((a, b) => a.harness !== b.harness ? a.harness.localeCompare(b.harness) : a.model_id.localeCompare(b.model_id));
+  const rows = [];
+  for (const target of selected) {
+    const entry = profile.harnesses?.[target.harness] ?? null;
+    const archetypes = [...target.archetypes].sort();
+    const base = {
+      model: target.model,
+      model_id: target.model_id,
+      harness: target.harness,
+      listed_id: entry != null ? qualifyListedModelId(entry, target.model_id) : null,
+      archetypes
+    };
+    const listing = entry?.models_command ?? null;
+    if (listing == null || listing.length === 0) {
+      rows.push({
+        ...base,
+        outcome: "skipped",
+        detail: `harness ${target.harness} declares no models_command \u2014 its backend cannot be listed.`,
+        verified_at: null,
+        verifications_removed: 0
+      });
+      continue;
+    }
+    try {
+      const probe2 = probeModel(profile, target.harness, target.model_id, {
+        userPathOptions,
+        force: true,
+        ...opts.spawn != null ? { spawn: opts.spawn } : {}
+      });
+      if (probe2.status === "verified") {
+        removeVerifiedModels(userPathOptions, (row) => row.harness === target.harness && row.model === target.model_id);
+        const verified_at = (/* @__PURE__ */ new Date()).toISOString();
+        recordVerifiedModel(userPathOptions, { harness: target.harness, model: target.model_id, verified_at });
+        rows.push({ ...base, outcome: "verified", detail: null, verified_at, verifications_removed: 0 });
+      } else if (probe2.status === null) {
+        rows.push({ ...base, outcome: "skipped", detail: "host-native dial names no external model.", verified_at: null, verifications_removed: 0 });
+      } else {
+        rows.push({ ...base, outcome: "unavailable", detail: probe2.note ?? "the listing could not be read; cached rows left as they were.", verified_at: null, verifications_removed: 0 });
+      }
+    } catch (err) {
+      if (!(err instanceof DialError)) throw err;
+      const removed = removeVerifiedModels(userPathOptions, (row) => row.harness === target.harness && row.model === target.model_id);
+      rows.push({
+        ...base,
+        outcome: "not_listed",
+        detail: `${err.message} \u2014 re-dial with \`fadeno dial <archetype> <other>\`, or see \`fadeno models --harness ${target.harness}\`.`,
+        verified_at: null,
+        verifications_removed: removed
+      });
+    }
+  }
+  const counts = { verified: 0, not_listed: 0, unavailable: 0, skipped: 0 };
+  for (const row of rows) counts[row.outcome] += 1;
+  return {
+    host,
+    rows,
+    counts,
+    ok: counts.not_listed === 0 && (!opts.strict || counts.unavailable === 0)
   };
 }
 
@@ -37925,7 +38243,7 @@ var GLOBAL_OPTIONS = {
   "--version": { kind: "none" }
 };
 var globalOptions = () => ({ ...GLOBAL_OPTIONS });
-var command = (options, positionals = [], subcommands) => ({ options: { ...globalOptions(), ...options }, positionals, subcommands });
+var command = (options, positionals = [], subcommands, repeatLast = false) => ({ options: { ...globalOptions(), ...options }, positionals, subcommands, repeatLast });
 var NONE = { kind: "none" };
 var PATH = { kind: "path" };
 var SHADOW_SPEC = command(
@@ -37935,7 +38253,14 @@ var SHADOW_SPEC = command(
 var MODELS_SPEC = command(
   { "--harness": { kind: "free" }, "--json": NONE },
   ["executor"],
-  { add: command({ "--json": NONE }, ["free", "free"]) }
+  {
+    add: command({ "--json": NONE }, ["free", "free"]),
+    // `remove` edits the user catalog only, and `verify` re-probes what the
+    // dials point at — neither takes the merged registry the `executor` kind
+    // answers with, so neither may propose from it.
+    remove: command({ "--force": NONE, "--json": NONE }, ["user-model"]),
+    verify: command({ "--harness": { kind: "free" }, "--strict": NONE, "--json": NONE }, ["dialed-model"], void 0, true)
+  }
 );
 var COMMANDS = {
   setup: command({ "--codex": NONE, "--claude": NONE, "--non-interactive": NONE, "--from": PATH, "--reset-runtime": NONE }),
@@ -38215,6 +38540,37 @@ function readProfile(repoRoot) {
     return null;
   }
 }
+function userCatalogModels() {
+  try {
+    const parsed = (0, import_yaml19.parse)((0, import_node_fs38.readFileSync)(userPaths().executorsFile, "utf8"));
+    const models = parsed?.models;
+    if (models == null || typeof models !== "object" || Array.isArray(models)) return [];
+    return uniqueSorted(Object.keys(models).filter((name) => name !== "current-host"));
+  } catch {
+    return [];
+  }
+}
+function dialedModelRefs(repoRoot, cwd) {
+  let rows;
+  try {
+    rows = runDialShow({ repoRoot, cwd }).rows;
+  } catch {
+    return [];
+  }
+  const profile = readProfile(repoRoot);
+  const values = /* @__PURE__ */ new Set();
+  for (const row of rows) {
+    if (row.harness == null || row.model_id === "current-host") continue;
+    values.add(row.model);
+    values.add(row.model_id);
+    const entry = profile?.models[row.model];
+    if (entry != null) {
+      values.add(`${entry.provider}/${entry.id}`);
+      values.add(entry.id);
+    }
+  }
+  return uniqueSorted([...values]);
+}
 function profileValues(repoRoot, kind) {
   const profile = readProfile(repoRoot);
   if (profile == null) return [];
@@ -38328,6 +38684,10 @@ function dynamicValues(kind, prefix, repoRoot, cwd, runRef, optionToken) {
     case "executor":
     case "archetype":
       return startsWith(profileValues(repoRoot, kind), prefix);
+    case "user-model":
+      return startsWith(userCatalogModels(), prefix);
+    case "dialed-model":
+      return startsWith(dialedModelRefs(repoRoot, cwd), prefix);
     case "bind": {
       const equals = prefix.indexOf("=");
       const rolePrefix = equals < 0 ? "" : prefix.slice(0, equals + 1);
@@ -38407,7 +38767,8 @@ function runCompletionCandidates(opts) {
     return startsWith(commandOptions(context.spec), current);
   }
   const positionalIndex = context.positionals.length;
-  const kind = context.spec.positionals[positionalIndex];
+  const declared = context.spec.positionals;
+  const kind = declared[positionalIndex] ?? (context.spec.repeatLast === true ? declared[declared.length - 1] : void 0);
   if (kind != null) return dynamicValues(kind, current, repoRoot, cwd, runRef);
   if (current === "") return commandOptions(context.spec);
   return [];
@@ -42029,7 +42390,9 @@ var aliasPage = (canonical2, usage, note) => ({
 var MODELS_PAGE = page("Inspect the model registry and backend listings.", [
   "fadeno models [<name>]",
   "fadeno models --harness <id>",
-  "fadeno models add <alias> <provider/id>"
+  "fadeno models add <alias> <provider/id>",
+  "fadeno models remove <alias> [--force]",
+  "fadeno models verify [<ref>...] [--harness <id>] [--strict]"
 ]);
 var SHADOW_PAGE = page("Attach or show a sampled shadow challenger.", [
   "fadeno dial shadow",
@@ -42038,6 +42401,20 @@ var SHADOW_PAGE = page("Attach or show a sampled shadow challenger.", [
 var MODEL_ADD_PAGE = page("Discover and persist a canonical user model alias.", "fadeno models add <alias> <provider/id>", [
   "Discovery checks direct OpenCode first, then the OpenCode/OpenRouter discovery path."
 ]);
+var MODEL_REMOVE_PAGE = page("Remove a user-catalog model alias.", "fadeno models remove <alias> [--force] [--json]", [
+  "Edits the user catalog only; a builtin or project entry names the file to edit instead.",
+  "Refuses while a dial or shadow attachment names the alias; --force removes it and reports each stranded reference.",
+  "Cached verification rows for the alias are dropped with it."
+]);
+var MODEL_VERIFY_PAGE = page(
+  "Re-probe dialed models against their harness listings.",
+  "fadeno models verify [<ref>...] [--harness <id>] [--strict] [--json]",
+  [
+    "Ignores the verification cache and always re-probes; refreshes a row that still lists, deletes one that does not.",
+    "Exits non-zero when a listing definitively omits a dialed model; --strict also fails on an unreachable listing.",
+    "A `<ref>` narrows by alias, delivered id, or provider/id; an unmatched ref is an error, never an empty pass."
+  ]
+);
 var TOP_LEVEL = {
   setup: page("Install safe user-scoped integration.", "fadeno setup [--codex|--claude] [options]"),
   status: page("Show effective definitions, routing, and runtime state.", "fadeno status [options]"),
@@ -42056,7 +42433,13 @@ var TOP_LEVEL = {
   diagram: page("Render a playbook workflow as ASCII or Mermaid.", "fadeno diagram <playbook> [--format ascii|mermaid]"),
   "new-run": page("Create a run ledger from a playbook.", "fadeno new-run <playbook> <task> [--input Name=path]..."),
   models: MODELS_PAGE,
-  model: aliasPage(MODELS_PAGE, ["fadeno model [<name>]", "fadeno model --harness <id>", "fadeno model add <alias> <provider/id>"], "`fadeno model` is an alias for `fadeno models`."),
+  model: aliasPage(MODELS_PAGE, [
+    "fadeno model [<name>]",
+    "fadeno model --harness <id>",
+    "fadeno model add <alias> <provider/id>",
+    "fadeno model remove <alias> [--force]",
+    "fadeno model verify [<ref>...] [--harness <id>] [--strict]"
+  ], "`fadeno model` is an alias for `fadeno models`."),
   dial: page("Show or set per-archetype model selection.", [
     "fadeno dial",
     "fadeno dial <archetype> [<model>[@effort]]",
@@ -42102,6 +42485,14 @@ var NESTED = {
   "evidence promote": page("Promote a verified run receipt.", "fadeno evidence promote <run>"),
   "models add": MODEL_ADD_PAGE,
   "model add": aliasPage(MODEL_ADD_PAGE, "fadeno model add <alias> <provider/id>", "`fadeno model add` is an alias for `fadeno models add`."),
+  "models remove": MODEL_REMOVE_PAGE,
+  "model remove": aliasPage(MODEL_REMOVE_PAGE, "fadeno model remove <alias> [--force] [--json]", "`fadeno model remove` is an alias for `fadeno models remove`."),
+  "models verify": MODEL_VERIFY_PAGE,
+  "model verify": aliasPage(
+    MODEL_VERIFY_PAGE,
+    "fadeno model verify [<ref>...] [--harness <id>] [--strict] [--json]",
+    "`fadeno model verify` is an alias for `fadeno models verify`."
+  ),
   "dial clear": page("Clear one or more dial layers.", "fadeno dial clear [<archetype>] [--session|--user|--repo]"),
   "dial shadow": aliasPage(SHADOW_PAGE, SHADOW_PAGE.usage, "`fadeno shadow` is the top-level alias."),
   "dial clear-shadow": page("Remove shadow attachments.", "fadeno dial clear-shadow [<archetype>]"),
@@ -42190,6 +42581,7 @@ var OPTION_HINTS = {
   "--source": "Progress observation source",
   "--status": "Run status",
   "--step": "Run step id",
+  "--strict": "Fail on an unreachable listing too",
   "--tag": "Dispatch recovery label",
   "--tail": "Number of recent entries",
   "--timeout": "Deadline in seconds (0 disables)",
@@ -42307,6 +42699,10 @@ var PAGE_OPTIONS = {
   "evidence promote": withGlobals(),
   "models add": withGlobals("--json"),
   "model add": withGlobals("--json"),
+  "models remove": withGlobals("--force", "--json"),
+  "model remove": withGlobals("--force", "--json"),
+  "models verify": withGlobals("--harness", "--strict", "--json"),
+  "model verify": withGlobals("--harness", "--strict", "--json"),
   "dial clear": withGlobals("--session", "--user", "--repo", "--json"),
   "dial shadow": withGlobals("--harness", "--rate", "--n", "--json"),
   "dial clear-shadow": withGlobals("--json"),
@@ -42323,6 +42719,8 @@ var PATH_OPTION_HINTS = {
   init: { "--force": "Overwrite managed scaffold files" },
   plugin: { "--force": "Overwrite generated plugin files" },
   "steering apply": { "--force": "Overwrite managed steering files" },
+  "models remove": { "--force": "Remove despite live dials, naming each stranded" },
+  "model remove": { "--force": "Remove despite live dials, naming each stranded" },
   dispatches: { "--output": "Print saved snapshot bytes for an id, last dispatch, or tag" },
   dispatch: {
     "--isolate": "Withhold the primary diff from merge-back",
@@ -43000,6 +43398,47 @@ function printModelAdd(result) {
     console.log("  note: this checkout has a self-contained project catalog; the alias will fall back into it per-key when its harness is declared there (dial show names any that drop).");
   }
 }
+function printModelRemove(result) {
+  console.log(`removed ${result.alias} from ${result.path}`);
+  if (result.verifications_removed > 0) {
+    console.log(`  verification rows dropped: ${result.verifications_removed}`);
+  }
+  for (const dial of result.dangling_dials) {
+    console.error(
+      `warning: dial ${dial.archetype}\u2192${dial.ref} (${dial.layer}) now names a model that is gone \u2014 re-dial with \`fadeno dial ${dial.archetype} <other>\``
+    );
+  }
+  for (const shadow of result.dangling_shadows) {
+    console.error(
+      `warning: shadow attachment ${shadow.archetype}~${shadow.ref} now names a model that is gone \u2014 \`fadeno dial clear-shadow ${shadow.archetype}\``
+    );
+  }
+}
+function printModelsVerify(result) {
+  if (result.rows.length === 0) {
+    console.log("no dialed models to verify \u2014 `fadeno dial` shows the effective table.");
+    return;
+  }
+  console.log(`${"model".padEnd(12)}  ${"id".padEnd(26)}  ${"harness".padEnd(10)}  ${"outcome".padEnd(12)}  archetypes`);
+  for (const row of result.rows) {
+    console.log(
+      `${row.model.padEnd(12)}  ${row.model_id.padEnd(26)}  ${row.harness.padEnd(10)}  ${row.outcome.padEnd(12)}  ${row.archetypes.join(", ")}`
+    );
+  }
+  for (const row of result.rows) {
+    if (row.detail == null) continue;
+    const line = `  ${row.model} on ${row.harness} \u2014 ${row.detail}`;
+    if (row.outcome === "not_listed") console.error(`error:${line}`);
+    else console.log(`note:${line}`);
+  }
+  console.log(
+    `
+${result.counts.verified} verified, ${result.counts.not_listed} not listed, ${result.counts.unavailable} unavailable, ${result.counts.skipped} skipped`
+  );
+  if (result.counts.not_listed > 0) {
+    console.log("cached verification rows for the not-listed models were deleted.");
+  }
+}
 function printPlaybookSummary(summary) {
   console.log(`${summary.name}  [${summary.source}]`);
   console.log(`  ${summary.description}`);
@@ -43185,6 +43624,7 @@ function main(argv) {
         opencode: { type: "boolean" },
         omp: { type: "boolean" },
         force: { type: "boolean" },
+        strict: { type: "boolean" },
         "with-hooks": { type: "boolean" },
         "with-steering": { type: "boolean" },
         "no-steering": { type: "boolean" },
@@ -43898,6 +44338,25 @@ Or advance manually with the playbook cursor:`);
         if (values.json) console.log(JSON.stringify(result2, null, 2));
         else printModelAdd(result2);
         return 0;
+      }
+      if (positionals[1] === "remove") {
+        if (positionals.length !== 3 || values.harness != null) {
+          throw new Error("Usage: fadeno model remove <alias> [--force] [--json]");
+        }
+        const result2 = runModelsRemove({ alias: positionals[2], force: Boolean(values.force) });
+        if (values.json) console.log(JSON.stringify(result2, null, 2));
+        else printModelRemove(result2);
+        return 0;
+      }
+      if (positionals[1] === "verify") {
+        const result2 = runModelsVerify({
+          refs: positionals.slice(2),
+          harness: values.harness ?? null,
+          strict: Boolean(values.strict)
+        });
+        if (values.json) console.log(JSON.stringify(result2, null, 2));
+        else printModelsVerify(result2);
+        return result2.ok ? 0 : 1;
       }
       if (values.harness != null) {
         if (positionals.length > 1) throw new Error("Usage: fadeno models --harness <id>  (no positional with --harness)");

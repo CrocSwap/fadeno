@@ -450,6 +450,18 @@ const CLAIMS: Claim[] = [
     src: { files: ['src/lib/user-paths.ts'], patterns: [/modelVerificationsFile/, /model-verifications/] },
   },
   {
+    // The two halves of registry upkeep. `--strict` is on the list because it
+    // is the whole difference between "the backend is down" and "the model is
+    // gone", and a README that keeps promising the distinction after the flag
+    // is dropped is worse than one that never mentioned it.
+    id: 'model-remove-verify-commands',
+    doc: { files: ['README.md'], patterns: [/fadeno model remove/, /fadeno models verify/, /--strict/] },
+    src: {
+      files: ['src/cli.ts', 'src/commands/models-verify.ts'],
+      patterns: [/fadeno model remove <alias>/, /runModelsVerify/, /strict/],
+    },
+  },
+  {
     id: 'engine-cancel-command',
     doc: { files: [EXTENDING, 'README.md'], patterns: [/fadeno cancel/] },
     src: { files: ['src/commands/cancel.ts', 'src/cli.ts'], patterns: [/runCancel/] },

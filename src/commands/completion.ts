@@ -5,7 +5,9 @@ import { parse as parseYaml } from 'yaml';
 import { editDistance, loadExecutorProfile, type ExecutorProfile } from '../lib/executors.ts';
 import { listRuns, readEvents, type RunSummary } from '../lib/run-ledger.ts';
 import { findRepoRoot } from '../lib/paths.ts';
+import { userPaths } from '../lib/user-paths.ts';
 import { listDefinitionNames, resolvePlaybookFile } from '../lib/definitions.ts';
+import { runDialShow } from './dial.ts';
 
 /** Arguments supplied by the generated Bash completion function. */
 export interface CompletionCandidatesOptions {
@@ -30,6 +32,10 @@ type ValueKind =
   | 'step'
   | 'dial'
   | 'executor'
+  /** User-catalog aliases only — the ones `model remove` can actually take. */
+  | 'user-model'
+  /** Refs `models verify` accepts: the spellings of a dialed delivery. */
+  | 'dialed-model'
   | 'archetype'
   | 'bind'
   | 'input'
@@ -44,6 +50,14 @@ interface CommandSpec {
   options: Record<string, OptionSpec>;
   positionals: ValueKind[];
   subcommands?: Record<string, CommandSpec>;
+  /**
+   * The last positional is variadic (`[<ref>...]`), so every slot past the
+   * declared ones completes as that kind. Without it a `[<ref>...]` command
+   * silently stops proposing refs after however many slots someone happened
+   * to list, and offers flags instead — the completion says the command is
+   * done taking arguments when it is not.
+   */
+  repeatLast?: boolean;
 }
 
 const GLOBAL_OPTIONS: Record<string, OptionSpec> = {
@@ -57,7 +71,8 @@ const command = (
   options: Record<string, OptionSpec>,
   positionals: ValueKind[] = [],
   subcommands?: Record<string, CommandSpec>,
-): CommandSpec => ({ options: { ...globalOptions(), ...options }, positionals, subcommands });
+  repeatLast = false,
+): CommandSpec => ({ options: { ...globalOptions(), ...options }, positionals, subcommands, repeatLast });
 
 const NONE: OptionSpec = { kind: 'none' };
 const PATH: OptionSpec = { kind: 'path' };
@@ -74,7 +89,14 @@ const SHADOW_SPEC = command(
 const MODELS_SPEC = command(
   { '--harness': { kind: 'free' }, '--json': NONE },
   ['executor'],
-  { add: command({ '--json': NONE }, ['free', 'free']) },
+  {
+    add: command({ '--json': NONE }, ['free', 'free']),
+    // `remove` edits the user catalog only, and `verify` re-probes what the
+    // dials point at — neither takes the merged registry the `executor` kind
+    // answers with, so neither may propose from it.
+    remove: command({ '--force': NONE, '--json': NONE }, ['user-model']),
+    verify: command({ '--harness': { kind: 'free' }, '--strict': NONE, '--json': NONE }, ['dialed-model'], undefined, true),
+  },
 );
 
 const COMMANDS: Record<string, CommandSpec> = {
@@ -391,6 +413,54 @@ function readProfile(repoRoot: string): ExecutorProfile | null {
   }
 }
 
+/**
+ * The aliases `model remove` can actually take: the USER catalog's own keys.
+ *
+ * The general `executor` kind answers with the MERGED registry, so it proposed
+ * `current-host` plus every project and builtin alias — every one of which the
+ * command refuses by construction, naming a file to hand-edit instead. A
+ * completion that offers values the command rejects is worse than no
+ * completion: it teaches a surface that does not exist.
+ */
+function userCatalogModels(): string[] {
+  try {
+    const parsed = parseYaml(readFileSync(userPaths().executorsFile, 'utf8')) as { models?: unknown };
+    const models = parsed?.models;
+    if (models == null || typeof models !== 'object' || Array.isArray(models)) return [];
+    return uniqueSorted(Object.keys(models as Record<string, unknown>).filter((name) => name !== 'current-host'));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Every spelling `models verify` accepts for a dialed delivery — the alias,
+ * the delivered id, the canonical `id`, and `provider/id` — read from the same
+ * effective table the command itself narrows against, so the two cannot drift
+ * into proposing a ref that then fails to match.
+ */
+function dialedModelRefs(repoRoot: string, cwd: string): string[] {
+  let rows: ReadonlyArray<{ model: string; model_id: string; harness: string | null }>;
+  try {
+    rows = runDialShow({ repoRoot, cwd }).rows;
+  } catch {
+    return [];
+  }
+  const profile = readProfile(repoRoot);
+  const values = new Set<string>();
+  for (const row of rows) {
+    if (row.harness == null || row.model_id === 'current-host') continue;
+    values.add(row.model);
+    values.add(row.model_id);
+    const entry = profile?.models[row.model];
+    if (entry != null) {
+      values.add(`${entry.provider}/${entry.id}`);
+      values.add(entry.id);
+    }
+  }
+  return uniqueSorted([...values]);
+}
+
 function profileValues(repoRoot: string, kind: 'dial' | 'executor' | 'archetype'): string[] {
   const profile = readProfile(repoRoot);
   if (profile == null) return [];
@@ -532,6 +602,10 @@ function dynamicValues(
     case 'executor':
     case 'archetype':
       return startsWith(profileValues(repoRoot, kind), prefix);
+    case 'user-model':
+      return startsWith(userCatalogModels(), prefix);
+    case 'dialed-model':
+      return startsWith(dialedModelRefs(repoRoot, cwd), prefix);
     case 'bind': {
       const equals = prefix.indexOf('=');
       const rolePrefix = equals < 0 ? '' : prefix.slice(0, equals + 1);
@@ -624,7 +698,9 @@ export function runCompletionCandidates(opts: CompletionCandidatesOptions): stri
   }
 
   const positionalIndex = context.positionals.length;
-  const kind = context.spec.positionals[positionalIndex];
+  const declared = context.spec.positionals;
+  const kind = declared[positionalIndex]
+    ?? (context.spec.repeatLast === true ? declared[declared.length - 1] : undefined);
   if (kind != null) return dynamicValues(kind, current, repoRoot, cwd, runRef);
 
   // A free-form positional (task, feedback, reason, and so on) has no useful
