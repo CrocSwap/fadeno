@@ -116,9 +116,10 @@ loadout slots and `bindings` reference, so under v2 "target name" and
 
 **Routes.** `routes:` is keyed by harness id — `codex`, `claude`, `grok`,
 `standalone` — and **only the active harness's sub-table is compiled**
-(`FADENO_HARNESS`, else the harness recorded by `fadeno setup`, else
-`standalone`). A v2 catalog with no `routes.<active-harness>` mapping is a hard
-error rather than a silent no-op. Inside that sub-table each entry is keyed by
+(`FADENO_HARNESS`, else the ambient markers a host stamps on its own sessions,
+else `standalone` — nothing on disk records a default harness). A v2 catalog
+with no `routes.<active-harness>` mapping is a hard error rather than a silent
+no-op. Inside that sub-table each entry is keyed by
 **provider**, with one refinement: an entry keyed by an exact *target* name
 wins over its provider entry — that is how one target gets a stricter sandbox
 or a read-only policy without pushing harness specifics up into the loadout.
@@ -833,7 +834,7 @@ delivery has no such gap: the route's argv carries the effort flag itself.
 
 Codex does not expose the same spawn-rewrite hook. Project `init` installs
 safe host broker agents by default; `--no-steering` selects the static legacy
-agents instead. `fadeno setup --codex` records the harness and materializes
+agents instead. `fadeno setup --codex` records the Codex installation and materializes
 user-scoped managed agents; later `fadeno use <loadout>` refreshes them
 automatically and requires a fresh session only when they changed. Explicit
 project overrides remain available with `fadeno steering apply

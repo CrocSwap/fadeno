@@ -1,9 +1,9 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileDigest, readInstallationManifest, writeInstallationManifest } from '../lib/installations.ts';
 import { isRetiredClaudeGridCell, listRetiredClaudeGridCells } from './steering.ts';
-import { codexUserAgentDir, readUserHarness, userPaths, type FadenoHarness, type UserPathOptions } from '../lib/user-paths.ts';
+import { codexUserAgentDir, retiredStateFiles, userPaths, type FadenoHarness, type UserPathOptions } from '../lib/user-paths.ts';
 
 export class UninstallError extends Error {}
 
@@ -87,6 +87,15 @@ function removePermissionRule(
   removed.push(`${permission.path} permission ${permission.rule}`);
 }
 
+/** Only a plain file is swept: a directory at a retired path is not Fadeno's and is left alone. */
+function isRegularFile(path: string): boolean {
+  try {
+    return lstatSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 export function runUninstall(opts: UninstallOptions): UninstallResult {
   if (opts.purgeUserData && !opts.force) {
     throw new UninstallError('`--purge-user-data` is destructive; repeat with --force after reviewing the user paths.');
@@ -126,11 +135,15 @@ export function runUninstall(opts: UninstallOptions): UninstallResult {
     delete manifest.harnesses[harness];
   }
 
-  const currentHarness = readUserHarness(opts.userPathOptions);
-  if (currentHarness != null && selected.includes(currentHarness)) {
-    const remaining = (['codex', 'claude'] as const).find((name) => manifest.harnesses[name] != null);
-    if (remaining == null) rmSync(paths.harnessFile, { force: true });
-    else writeFileSync(paths.harnessFile, `${remaining}\n`, 'utf8');
+  // No harness memo to repoint: nothing records "your harness" any more, and
+  // nothing reads one. Sweep a leftover from an older install unconditionally
+  // — uninstall is exactly when Fadeno-owned state should stop existing, and
+  // rewriting the file to some other still-installed harness (what this used
+  // to do) only kept the wrong idea alive.
+  for (const path of retiredStateFiles(paths)) {
+    if (!isRegularFile(path)) continue;
+    rmSync(path, { force: true });
+    removed.push(path);
   }
   if (Object.keys(manifest.harnesses).length === 0) {
     rmSync(paths.managedRuntimeDir, { recursive: true, force: true });

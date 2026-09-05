@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, lstatSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { packageVersion } from './paths.ts';
-import { readUserHarness, userPaths, type FadenoHarness, type FadenoUserPaths, type UserPathOptions } from './user-paths.ts';
+import { userPaths, type FadenoHarness, type FadenoUserPaths, type UserPathOptions } from './user-paths.ts';
 
 export interface ManagedFile {
   path: string;
@@ -48,13 +48,16 @@ export function readInstallationManifest(options: UserPathOptions = {}): Install
 
 /**
  * Every harness this machine keeps state for — not the one it is running in.
+ *
+ * The manifest is the whole answer: it is the record of what `setup` actually
+ * installed, and `uninstall` removes a key from it. This used to union in the
+ * retired "last harness set up" memo, which could only ever add a name the
+ * manifest already had — or, after an uninstall, a name with nothing left on
+ * disk to maintain.
  */
 export function maintainedHarnesses(options: UserPathOptions = {}): FadenoHarness[] {
   const manifest = readInstallationManifest(options);
-  const names = new Set<FadenoHarness>(Object.keys(manifest.harnesses) as FadenoHarness[]);
-  const memo = readUserHarness(options);
-  if (memo != null) names.add(memo);
-  return [...names].sort();
+  return (Object.keys(manifest.harnesses) as FadenoHarness[]).sort();
 }
 
 export function writeInstallationManifest(paths: FadenoUserPaths, manifest: InstallationManifest): void {

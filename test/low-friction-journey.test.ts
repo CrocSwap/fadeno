@@ -10,7 +10,7 @@ import { runNext } from '../src/commands/next.ts';
 import { runRun } from '../src/commands/run.ts';
 import { runVendor } from '../src/commands/vendor.ts';
 import { runVerify } from '../src/commands/verify.ts';
-import { userPaths, type UserPathOptions } from '../src/lib/user-paths.ts';
+import { retiredStateFiles, userPaths, type UserPathOptions } from '../src/lib/user-paths.ts';
 import { activeHarness, detectAmbientHarness, withoutHarnessIdentity } from '../src/lib/executors.ts';
 import { runSetup, type CommandProbe } from '../src/commands/setup.ts';
 import { runDoctor } from '../src/commands/doctor.ts';
@@ -21,6 +21,7 @@ import { LedgerWriter } from '../src/lib/run-ledger-write.ts';
 import { readEvents } from '../src/lib/run-ledger.ts';
 import { runDrive } from '../src/commands/drive.ts';
 import { runUninstall, UninstallError } from '../src/commands/uninstall.ts';
+import { maintainedHarnesses } from '../src/lib/installations.ts';
 import { runClean } from '../src/commands/clean.ts';
 import { runUnvendor } from '../src/commands/unvendor.ts';
 import { acquireWorkspaceLease } from '../src/lib/workspace-lease.ts';
@@ -86,27 +87,33 @@ test('setup is idempotent and writes no dial/pin state', (t) => {
     '',
   ].join('\n'));
 
+  // `userPaths` has no `loadoutFile` key, so the original spelling of these
+  // asserted `existsSync(undefined)` — vacuously false, and never a check.
+  const userLoadout = join(userPaths(paths).stateDir, 'loadout');
   const first = runSetup({ repoRoot: root, userPathOptions: paths, probeCommand: unavailable });
   assert.equal(first.activeLoadout, 'host-native base');
   assert.equal(existsSync(userPaths(paths).dialsFile), false);
-  assert.equal(existsSync(userPaths(paths).loadoutFile), false);
+  assert.equal(existsSync(userLoadout), false);
   assert.equal(existsSync(join(root, '.fadeno', 'local', 'loadout')), false);
 
   const second = runSetup({ repoRoot: root, userPathOptions: paths, probeCommand: unavailable });
   assert.equal(second.activeLoadout, 'host-native base');
   assert.equal(existsSync(userPaths(paths).dialsFile), false);
-  assert.equal(existsSync(userPaths(paths).loadoutFile), false);
+  assert.equal(existsSync(userLoadout), false);
   assert.equal(existsSync(join(root, '.fadeno', 'local', 'loadout')), false);
   assert.equal(second.created.includes(userPaths(paths).dialsFile), false);
-  assert.equal(second.created.includes(userPaths(paths).loadoutFile), false);
+  assert.equal(second.created.includes(userLoadout), false);
 });
 
-test('setup remembers Codex so later dial switches materialize native agents automatically', (t) => {
+test('setup --codex materializes native agents and records no harness anywhere', (t) => {
   const root = tempRepo(t);
   const paths = pinnedUser(root, 'standalone');
   const setup = runSetup({ repoRoot: root, userPathOptions: paths, target: 'codex', probeCommand: unavailable });
   assert.equal(setup.target, 'codex');
-  assert.equal(readFileSync(userPaths(paths).harnessFile, 'utf8'), 'codex\n');
+  for (const path of retiredStateFiles(userPaths(paths))) {
+    assert.equal(existsSync(path), false, `setup must not write ${path}`);
+    assert.equal(setup.created.includes(path), false);
+  }
   const workerPath = join(paths.home!, '.codex', 'agents', 'fadeno-worker.toml');
   assert.ok(existsSync(workerPath), 'codex setup should materialize host agents');
   const initial = readFileSync(workerPath, 'utf8');
@@ -362,10 +369,12 @@ test('doctor checks a repo-selected executable without executing it', (t) => {
 test('a dial switched from a Claude session still refreshes the Codex agents', (t) => {
   const root = tempRepo(t);
   const base = pinnedUser(root, 'standalone');
-  // Set up both harnesses; last setup writes memo but maintained set is the union
+  // Set up both harnesses; the maintained set is the union, and neither setup
+  // leaves a note behind about which one came last.
   runSetup({ repoRoot: root, userPathOptions: base, target: 'codex', probeCommand: unavailable });
   runSetup({ repoRoot: root, userPathOptions: base, target: 'claude', probeCommand: unavailable });
-  assert.equal(readFileSync(userPaths(base).harnessFile, 'utf8'), 'claude\n');
+  for (const path of retiredStateFiles(userPaths(base))) assert.equal(existsSync(path), false);
+  assert.deepEqual(maintainedHarnesses(base), ['claude', 'codex']);
 
   const worker = join(base.home!, '.codex', 'agents', 'fadeno-worker.toml');
   // initial host baseline contains no unapproved command fallback artifact; at least it is host
@@ -413,17 +422,61 @@ test('an uninstalled Codex is not materialized for, and an explicit target still
   assert.match(harnessFinding.detail, /codex|no host claims/);
 });
 
-test('one memo cannot serve two harnesses, so the host in evidence wins', (t) => {
+test('setting up two harnesses leaves neither as a default; the host in evidence decides', (t) => {
   const root = tempRepo(t);
   const base = isolatedUser(root);
   runSetup({ repoRoot: root, userPathOptions: base, target: 'claude', probeCommand: unavailable });
   runSetup({ repoRoot: root, userPathOptions: base, target: 'codex', probeCommand: unavailable });
-  assert.equal(readFileSync(userPaths(base).harnessFile, 'utf8'), 'codex\n');
   const inClaude: UserPathOptions = { ...base, env: { ...base.env, CLAUDECODE: '1' } };
   assert.equal(activeHarness(undefined, inClaude), 'claude');
   const inCodex: UserPathOptions = { ...base, env: { ...base.env, CODEX_THREAD_ID: 'thread-1' } };
   assert.equal(activeHarness(undefined, inCodex), 'codex');
-  assert.equal(activeHarness(undefined, base), 'codex');
+  // Two harnesses installed, neither of them in front of you: standalone. The
+  // last `setup --codex` is not evidence about the shell you are typing in.
+  assert.equal(activeHarness(undefined, base), 'standalone');
+});
+
+test('a stale harness memo on disk is ignored, and the next setup deletes it', (t) => {
+  const root = tempRepo(t);
+  const base = isolatedUser(root);
+  runSetup({ repoRoot: root, userPathOptions: base, target: 'codex', probeCommand: unavailable });
+  // Exactly what an older install left behind.
+  const memo = join(userPaths(base).stateDir, 'harness');
+  mkdirSync(userPaths(base).stateDir, { recursive: true });
+  writeFileSync(memo, 'codex\n', 'utf8');
+  writeFileSync(join(userPaths(base).stateDir, 'loadout'), 'host-native base\n', 'utf8');
+  assert.equal(activeHarness(undefined, base), 'standalone', 'a file must not make a bare shell a host');
+
+  const setup = runSetup({ repoRoot: root, userPathOptions: base, target: 'codex', probeCommand: unavailable });
+  for (const path of retiredStateFiles(userPaths(base))) assert.equal(existsSync(path), false);
+  assert.ok(setup.notices.some((line) => line.includes(memo) && /retired/i.test(line)));
+});
+
+test('maintainedHarnesses is exactly the installation manifest keys', (t) => {
+  const root = tempRepo(t);
+  const base = isolatedUser(root);
+  assert.deepEqual(maintainedHarnesses(base), []);
+  runSetup({ repoRoot: root, userPathOptions: base, target: 'claude', probeCommand: unavailable });
+  assert.deepEqual(maintainedHarnesses(base), ['claude']);
+  // A leftover memo naming a harness that was never installed adds nothing.
+  mkdirSync(userPaths(base).stateDir, { recursive: true });
+  writeFileSync(join(userPaths(base).stateDir, 'harness'), 'codex\n', 'utf8');
+  assert.deepEqual(maintainedHarnesses(base), ['claude']);
+});
+
+test('uninstall removes a leftover harness memo instead of repointing it', (t) => {
+  const root = tempRepo(t);
+  const base = isolatedUser(root);
+  runSetup({ repoRoot: root, userPathOptions: base, target: 'claude', probeCommand: unavailable });
+  runSetup({ repoRoot: root, userPathOptions: base, target: 'codex', probeCommand: unavailable });
+  const memo = join(userPaths(base).stateDir, 'harness');
+  writeFileSync(memo, 'codex\n', 'utf8');
+
+  // Codex goes; claude stays. The old code rewrote the memo to `claude` here.
+  const result = runUninstall({ target: 'codex', userPathOptions: base });
+  assert.equal(existsSync(memo), false);
+  assert.ok(result.removed.includes(memo));
+  assert.deepEqual(maintainedHarnesses(base), ['claude']);
 });
 
 test('nested hosts abstain rather than guess, and an executor child sheds our identity', (t) => {
@@ -437,7 +490,9 @@ test('nested hosts abstain rather than guess, and an executor child sheds our id
   const detection = detectAmbientHarness(nested);
   assert.equal(detection.harness, null);
   assert.deepEqual(detection.evidence.map((item) => item.harness), ['claude', 'codex']);
-  assert.equal(activeHarness(undefined, nested), 'claude', 'falls back to the recorded memo');
+  // Abstaining means standalone. A coin-flip between two real hosts is no
+  // better than a remembered one, and there is no memo left to consult.
+  assert.equal(activeHarness(undefined, nested), 'standalone');
 
   // The real fix is at the spawn point: a child inherits no harness identity,
   // so whatever it launches asserts its own instead of ours.
@@ -472,7 +527,7 @@ test('doctor stays quiet about the harness when no host evidence is present', (t
   const result = runDoctor({ repoRoot: root, userPathOptions: paths });
   const harness = result.findings.find((item) => item.check === 'harness');
   assert.equal(harness?.severity, 'ok');
-  assert.match(harness?.detail ?? '', /no host claims this session/);
+  assert.match(harness?.detail ?? '', /standalone; not inside a harness, so no host lane is compiled here/);
   assert.equal(harness?.remediation, undefined);
   // dials finding is quiet ok as well
   const dials = result.findings.find((item) => item.check === 'dials');

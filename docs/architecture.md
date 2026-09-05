@@ -63,7 +63,9 @@ same harness can take both.
 **Host** — the harness Fadeno is *running inside*. This is a typed axis:
 `HarnessId = 'codex' | 'claude' | 'grok' | 'opencode' | 'omp' | 'standalone'`
 (`src/lib/executors.ts`), resolved by `activeHarness()` as `FADENO_HARNESS` →
-the harness recorded by `fadeno setup` → `standalone`. A host needs an
+ambient markers → `standalone`. **There is no stored default harness**: both
+inputs are set by a host at call time, so host-specific compilation happens
+only *inside* a harness and nothing on disk remembers one. A host needs an
 **adapter** — a `templates/<host>/` tree emitted by `fadeno init --<host>` —
 because Fadeno has to install skills, subagents, bootstrap files, and hooks
 into it. The active host also selects which `routes:` sub-table compiles; a v2
@@ -477,7 +479,7 @@ Steering is enabled by default for Codex and Claude; `--no-steering` is the
 explicit opt-out and `--with-steering` remains a compatibility alias. On Codex,
 `runInit` renders honest unmaterialized brokers through the same template
 `steering apply` uses, resolving the relay identity from the catalog it just wrote.
-`fadeno setup --codex` records the harness and materializes managed agents in
+`fadeno setup --codex` records the Codex installation and materializes managed agents in
 the user Codex home. When setup is invoked from a plugin, it first copies the
 bundled CLI to the stable user data directory and records runtime and harness
 ownership in the user state directory. Managed agents point at that stable

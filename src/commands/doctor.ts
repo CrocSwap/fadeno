@@ -314,11 +314,20 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
     findings.push(finding(
       'harness',
       'warning',
-      `nested hosts both claim this session — ${names} — so detection abstained and ${status.harness ?? 'standalone'} came from the recorded memo`,
+      `nested hosts both claim this session — ${names} — so detection abstained and this call compiled as ${status.harness ?? 'standalone'}`,
       'Set FADENO_HARNESS explicitly for this session; a spawned executor gets its own identity automatically.',
     ));
   } else if (ambient.harness == null) {
-    findings.push(finding('harness', 'ok', `${status.harness ?? 'standalone'}; no host claims this session, so the recorded memo decides`));
+    // With no marker, the only way to be anything but standalone is an
+    // explicit FADENO_HARNESS — there is no stored default to fall back on.
+    const resolved = status.harness ?? 'standalone';
+    findings.push(finding(
+      'harness',
+      'ok',
+      resolved === 'standalone'
+        ? 'standalone; not inside a harness, so no host lane is compiled here'
+        : `${resolved}; no host claims this session, so an explicit setting selected it`,
+    ));
   } else if (status.harness === ambient.harness) {
     findings.push(finding('harness', 'ok', `${ambient.harness}, detected from the host this session is running inside`));
   } else {

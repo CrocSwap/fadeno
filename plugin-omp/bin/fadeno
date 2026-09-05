@@ -14000,7 +14000,6 @@ function userPaths(options = {}) {
     dataDir,
     executorsFile: (0, import_node_path2.join)(configDir, "executors.yaml"),
     configFile: (0, import_node_path2.join)(configDir, "config.yaml"),
-    harnessFile: (0, import_node_path2.join)(stateDir, "harness"),
     installationsFile: (0, import_node_path2.join)(stateDir, "installations.json"),
     managedRuntimeDir,
     managedCli: (0, import_node_path2.join)(managedRuntimeDir, windows ? "fadeno.cmd" : "fadeno"),
@@ -14008,14 +14007,8 @@ function userPaths(options = {}) {
     modelVerificationsFile: (0, import_node_path2.join)(stateDir, "model-verifications.json")
   };
 }
-function readUserHarness(options = {}) {
-  const path = userPaths(options).harnessFile;
-  try {
-    const value = (0, import_node_fs2.readFileSync)(path, "utf8").trim();
-    return value === "codex" || value === "claude" ? value : null;
-  } catch {
-    return null;
-  }
+function retiredStateFiles(paths) {
+  return [(0, import_node_path2.join)(paths.stateDir, "harness"), (0, import_node_path2.join)(paths.stateDir, "loadout")];
 }
 var UserDialsError = class extends Error {
 };
@@ -14498,7 +14491,7 @@ function activeHarness(explicit, options = {}) {
   if (explicit != null) return explicit;
   const raw = (options.env ?? process.env).FADENO_HARNESS?.trim();
   if (raw === "codex" || raw === "claude" || raw === "grok" || raw === "opencode" || raw === "omp" || raw === "standalone") return raw;
-  return detectAmbientHarness(options).harness ?? readUserHarness(options) ?? "standalone";
+  return detectAmbientHarness(options).harness ?? "standalone";
 }
 var AMBIENT_HARNESS_MARKERS = [
   { harness: "claude", variables: ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"] },
@@ -33889,7 +33882,6 @@ function harnessSource(userPathOptions = {}) {
   const explicit = env.FADENO_HARNESS?.trim();
   if (explicit === "codex" || explicit === "claude" || explicit === "grok" || explicit === "opencode" || explicit === "omp" || explicit === "standalone") return "FADENO_HARNESS";
   if (detectAmbientHarness(userPathOptions).harness != null) return "ambient";
-  if (readUserHarness(userPathOptions) != null) return "user default";
   return "fallback";
 }
 function repoRootOf2(opts) {
@@ -39464,10 +39456,7 @@ function readInstallationManifest(options = {}) {
 }
 function maintainedHarnesses(options = {}) {
   const manifest = readInstallationManifest(options);
-  const names = new Set(Object.keys(manifest.harnesses));
-  const memo = readUserHarness(options);
-  if (memo != null) names.add(memo);
-  return [...names].sort();
+  return Object.keys(manifest.harnesses).sort();
 }
 function writeInstallationManifest(paths, manifest) {
   (0, import_node_fs44.mkdirSync)((0, import_node_path44.dirname)(paths.installationsFile), { recursive: true });
@@ -39886,13 +39875,19 @@ function probe(command2) {
     version: output.length > 0 ? output.split(/\r?\n/, 1)[0] ?? null : null
   };
 }
-function rememberHarness(paths, target, created) {
-  const body = `${target}
-`;
-  if ((0, import_node_fs45.existsSync)(paths.harnessFile) && (0, import_node_fs45.readFileSync)(paths.harnessFile, "utf8") === body) return;
-  (0, import_node_fs45.mkdirSync)(paths.stateDir, { recursive: true });
-  (0, import_node_fs45.writeFileSync)(paths.harnessFile, body, "utf8");
-  created.push(paths.harnessFile);
+function isRegularFile(path) {
+  try {
+    return (0, import_node_fs45.lstatSync)(path).isFile();
+  } catch {
+    return false;
+  }
+}
+function removeRetiredState(paths, notices) {
+  for (const path of retiredStateFiles(paths)) {
+    if (!isRegularFile(path)) continue;
+    (0, import_node_fs45.rmSync)(path, { force: true });
+    notices.push(`Removed retired state ${path} (nothing reads it; there is no stored default harness).`);
+  }
 }
 function ensureClaudePermission(paths, options, notices) {
   if (!(0, import_node_fs45.existsSync)(paths.managedCli)) return null;
@@ -39985,7 +39980,7 @@ function runSetup(opts = {}) {
   } catch (err) {
     throw err;
   }
-  if (opts.target != null) rememberHarness(paths, opts.target, created);
+  removeRetiredState(paths, setupNotices);
   try {
     loadExecutorProfile(repoRoot, opts.userPathOptions).profile;
   } catch (err) {
@@ -40568,11 +40563,16 @@ function runDoctor(opts = {}) {
     findings.push(finding(
       "harness",
       "warning",
-      `nested hosts both claim this session \u2014 ${names} \u2014 so detection abstained and ${status.harness ?? "standalone"} came from the recorded memo`,
+      `nested hosts both claim this session \u2014 ${names} \u2014 so detection abstained and this call compiled as ${status.harness ?? "standalone"}`,
       "Set FADENO_HARNESS explicitly for this session; a spawned executor gets its own identity automatically."
     ));
   } else if (ambient.harness == null) {
-    findings.push(finding("harness", "ok", `${status.harness ?? "standalone"}; no host claims this session, so the recorded memo decides`));
+    const resolved = status.harness ?? "standalone";
+    findings.push(finding(
+      "harness",
+      "ok",
+      resolved === "standalone" ? "standalone; not inside a harness, so no host lane is compiled here" : `${resolved}; no host claims this session, so an explicit setting selected it`
+    ));
   } else if (status.harness === ambient.harness) {
     findings.push(finding("harness", "ok", `${ambient.harness}, detected from the host this session is running inside`));
   } else {
@@ -41084,6 +41084,13 @@ function removePermissionRule(permission, removed, preserved) {
 `, "utf8");
   removed.push(`${permission.path} permission ${permission.rule}`);
 }
+function isRegularFile2(path) {
+  try {
+    return (0, import_node_fs51.lstatSync)(path).isFile();
+  } catch {
+    return false;
+  }
+}
 function runUninstall(opts) {
   if (opts.purgeUserData && !opts.force) {
     throw new UninstallError("`--purge-user-data` is destructive; repeat with --force after reviewing the user paths.");
@@ -41118,12 +41125,10 @@ function runUninstall(opts) {
     }
     delete manifest.harnesses[harness];
   }
-  const currentHarness = readUserHarness(opts.userPathOptions);
-  if (currentHarness != null && selected.includes(currentHarness)) {
-    const remaining = ["codex", "claude"].find((name) => manifest.harnesses[name] != null);
-    if (remaining == null) (0, import_node_fs51.rmSync)(paths.harnessFile, { force: true });
-    else (0, import_node_fs51.writeFileSync)(paths.harnessFile, `${remaining}
-`, "utf8");
+  for (const path of retiredStateFiles(paths)) {
+    if (!isRegularFile2(path)) continue;
+    (0, import_node_fs51.rmSync)(path, { force: true });
+    removed.push(path);
   }
   if (Object.keys(manifest.harnesses).length === 0) {
     (0, import_node_fs51.rmSync)(paths.managedRuntimeDir, { recursive: true, force: true });

@@ -18,7 +18,6 @@ export interface FadenoUserPaths {
   dataDir: string;
   executorsFile: string;
   configFile: string;
-  harnessFile: string;
   installationsFile: string;
   managedRuntimeDir: string;
   managedCli: string;
@@ -57,7 +56,6 @@ export function userPaths(options: UserPathOptions = {}): FadenoUserPaths {
     dataDir,
     executorsFile: join(configDir, 'executors.yaml'),
     configFile: join(configDir, 'config.yaml'),
-    harnessFile: join(stateDir, 'harness'),
     installationsFile: join(stateDir, 'installations.json'),
     managedRuntimeDir,
     managedCli: join(managedRuntimeDir, windows ? 'fadeno.cmd' : 'fadeno'),
@@ -66,17 +64,25 @@ export function userPaths(options: UserPathOptions = {}): FadenoUserPaths {
   };
 }
 
+/** The harnesses Fadeno *installs into* — the ones `setup`/`uninstall` manage. */
 export type FadenoHarness = 'codex' | 'claude';
 
-/** Read the harness selected by the last targeted setup, if any. */
-export function readUserHarness(options: UserPathOptions = {}): FadenoHarness | null {
-  const path = userPaths(options).harnessFile;
-  try {
-    const value = readFileSync(path, 'utf8').trim();
-    return value === 'codex' || value === 'claude' ? value : null;
-  } catch {
-    return null;
-  }
+/**
+ * State files Fadeno used to write and no longer reads, listed here only so
+ * `setup` and `uninstall` can delete a leftover.
+ *
+ * `harness` recorded "the harness you last set up" and `activeHarness` used to
+ * consult it. It is gone on purpose: people swap harnesses constantly, so a
+ * remembered one is a guess dressed as a fact — a bare shell is `standalone`,
+ * and a host is only a host when the session is actually inside it (see
+ * `activeHarness` in `src/lib/executors.ts`). `loadout` is older still: named
+ * loadouts retired in 0.6 and nothing has read it since.
+ *
+ * A file nothing consults is a lie on disk waiting to be believed, so removing
+ * the readers is only half the change — the bytes have to go too.
+ */
+export function retiredStateFiles(paths: FadenoUserPaths): string[] {
+  return [join(paths.stateDir, 'harness'), join(paths.stateDir, 'loadout')];
 }
 
 // --- dials file ---

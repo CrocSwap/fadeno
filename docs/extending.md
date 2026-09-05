@@ -691,7 +691,7 @@ evidence row `relay_attested` (true / false / absent), turning the proxy's
 Codex has no equivalent spawn-rewrite hook, and project custom-agent model
 configuration is session-static. `fadeno init --codex` installs honest broker
 definitions named `worker`, `reviewer`, and `judge`; `fadeno setup --codex`
-records the harness, and later `fadeno dial` switches automatically refresh
+records the Codex installation, and later `fadeno dial` switches automatically refresh
 the user-scoped agents when needed.
 Use `fadeno steering apply --codex --scope project` for a project
 override. Each host-routed slot becomes a host agent with that slot's

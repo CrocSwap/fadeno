@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, unli
 import { dirname, isAbsolute, join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { loadLayeredProfile, type ModelFallbackOutcome, type ProfileProvenance } from './config-layers.ts';
-import { readUserHarness, type FadenoHarness, type UserPathOptions } from './user-paths.ts';
+import { type FadenoHarness, type UserPathOptions } from './user-paths.ts';
 
 export class ExecutorProfileError extends Error {}
 
@@ -505,11 +505,30 @@ export function hostEffortIsMaterializable(harness: HarnessId): boolean {
   return harness === 'codex';
 }
 
+/**
+ * The host this call is running inside: `FADENO_HARNESS` → ambient markers →
+ * `standalone`. Nothing on disk participates.
+ *
+ * There is no default harness and no stored one. Both surviving inputs are set
+ * by a host at call time — `FADENO_HARNESS` by an in-harness adapter (the
+ * Claude PreToolUse hook, the OpenCode plugin, the omp extension, the bundled
+ * plugin launcher), the markers in `AMBIENT_HARNESS_MARKERS` by the harness
+ * process itself — so a bare shell answers `standalone`, which is the honest
+ * answer rather than a fallback.
+ *
+ * This used to end at a memo written by `fadeno setup --codex/--claude`, and
+ * that was wrong in the way that is hard to see: people swap harnesses
+ * constantly, so the memo made every bare-shell call compile some *other*
+ * session's host lane — inventing a host where the run had none. Ambient
+ * detection abstains when two hosts both claim the session (nested), and
+ * abstaining now means `standalone` too: a coin-flip between two real hosts is
+ * no better than a remembered one. Set `FADENO_HARNESS` to say which.
+ */
 export function activeHarness(explicit?: HarnessId, options: UserPathOptions = {}): HarnessId {
   if (explicit != null) return explicit;
   const raw = (options.env ?? process.env).FADENO_HARNESS?.trim();
   if (raw === 'codex' || raw === 'claude' || raw === 'grok' || raw === 'opencode' || raw === 'omp' || raw === 'standalone') return raw;
-  return detectAmbientHarness(options).harness ?? readUserHarness(options) ?? 'standalone';
+  return detectAmbientHarness(options).harness ?? 'standalone';
 }
 
 const AMBIENT_HARNESS_MARKERS: ReadonlyArray<{ harness: FadenoHarness; variables: readonly string[] }> = [

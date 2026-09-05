@@ -352,6 +352,21 @@ const CLAIMS: Claim[] = [
     src: { files: ['src/commands/show.ts', 'src/cli.ts'], patterns: [/OUTPUT_IDLE_WARNING_MS/] },
   },
   {
+    // The host axis has exactly two inputs, both stamped by a harness at call
+    // time. A third one — a file remembering "your harness" — is what this
+    // pins out: if the resolution expression grows a disk read again, or a doc
+    // starts promising a stored default, one side of this fails by name.
+    id: 'no-stored-default-harness',
+    doc: {
+      files: ['docs/architecture.md', LOADOUTS],
+      patterns: [/activeHarness\(\)/, /FADENO_HARNESS/],
+    },
+    src: {
+      files: ['src/lib/executors.ts'],
+      patterns: [/export function activeHarness/, /detectAmbientHarness\(options\)\.harness \?\? 'standalone'/],
+    },
+  },
+  {
     id: 'neutral-current-host',
     doc: { files: ['README.md', 'docs/architecture.md'], patterns: [/current-host/] },
     src: { files: ['src/commands/steering.ts'], patterns: [/current-host/, /requested_only/] },

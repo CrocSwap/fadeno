@@ -16,7 +16,7 @@ import {
   type RouteRaw,
 } from '../lib/executors.ts';
 import { findRepoRoot } from '../lib/paths.ts';
-import { readUserHarness, readVerifiedModels, userPaths, type UserPathOptions } from '../lib/user-paths.ts';
+import { readVerifiedModels, userPaths, type UserPathOptions } from '../lib/user-paths.ts';
 
 export class ModelsError extends Error {}
 
@@ -78,8 +78,11 @@ export interface ModelRow {
 
 export interface ModelsResult {
   harness: string;
-  /** How the harness was chosen — the table is harness-relative, so say so. */
-  harness_source: 'FADENO_HARNESS' | 'ambient' | 'user default' | 'fallback';
+  /**
+   * How the harness was chosen — the table is harness-relative, so say so.
+   * `fallback` means no host claimed this call, so it compiled as standalone.
+   */
+  harness_source: 'FADENO_HARNESS' | 'ambient' | 'fallback';
   models: ModelRow[];
   unregistered_model_driver: string;
   /** Driver aliases under this harness that declare a models_command. */
@@ -91,7 +94,6 @@ function harnessSource(userPathOptions: UserPathOptions = {}): ModelsResult['har
   const explicit = env.FADENO_HARNESS?.trim();
   if (explicit === 'codex' || explicit === 'claude' || explicit === 'grok' || explicit === 'opencode' || explicit === 'omp' || explicit === 'standalone') return 'FADENO_HARNESS';
   if (detectAmbientHarness(userPathOptions).harness != null) return 'ambient';
-  if (readUserHarness(userPathOptions) != null) return 'user default';
   return 'fallback';
 }
 

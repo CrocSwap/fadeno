@@ -1,11 +1,11 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { runSteeringApply, type SteeringApplyResult } from './steering.ts';
 import { loadExecutorProfile } from '../lib/executors.ts';
 import { findRepoRoot, packageVersion } from '../lib/paths.ts';
-import { userPaths, type FadenoUserPaths, type UserPathOptions } from '../lib/user-paths.ts';
+import { retiredStateFiles, userPaths, type FadenoUserPaths, type UserPathOptions } from '../lib/user-paths.ts';
 import {
   syncManagedRuntime,
   readInstallationManifest,
@@ -74,12 +74,27 @@ function probe(command: string): CommandProbe {
   };
 }
 
-function rememberHarness(paths: FadenoUserPaths, target: Exclude<SetupTarget, null>, created: string[]): void {
-  const body = `${target}\n`;
-  if (existsSync(paths.harnessFile) && readFileSync(paths.harnessFile, 'utf8') === body) return;
-  mkdirSync(paths.stateDir, { recursive: true });
-  writeFileSync(paths.harnessFile, body, 'utf8');
-  created.push(paths.harnessFile);
+/**
+ * Setup used to record its `--codex`/`--claude` target as "your harness", and
+ * `activeHarness` used to read it back. Both are gone: a harness is only the
+ * one you are inside right now. Sweep the leftovers so an upgraded install
+ * carries no state nothing consults.
+ */
+/** Only a plain file is swept: a directory at a retired path is not Fadeno's and is left alone. */
+function isRegularFile(path: string): boolean {
+  try {
+    return lstatSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function removeRetiredState(paths: FadenoUserPaths, notices: string[]): void {
+  for (const path of retiredStateFiles(paths)) {
+    if (!isRegularFile(path)) continue;
+    rmSync(path, { force: true });
+    notices.push(`Removed retired state ${path} (nothing reads it; there is no stored default harness).`);
+  }
 }
 
 function ensureClaudePermission(
@@ -185,7 +200,7 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
   } catch (err) {
     throw err;
   }
-  if (opts.target != null) rememberHarness(paths, opts.target, created);
+  removeRetiredState(paths, setupNotices);
 
   try {
     loadExecutorProfile(repoRoot, opts.userPathOptions).profile;

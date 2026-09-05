@@ -6,6 +6,16 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
+### Removed
+
+- The stored default harness. `fadeno setup --codex|--claude` no longer
+  records "the harness" in user state, and nothing reads such a memo:
+  `activeHarness()` resolves `FADENO_HARNESS`, then a single ambient host
+  marker, then `standalone`. A bare shell is standalone, always; host-specific
+  compilation happens only inside a harness. `setup` and `uninstall` remove a
+  leftover memo (and the dead `loadout` file) and say so. `fadeno models
+  --json` no longer reports `harness_source: "user default"`.
+
 ### Fixed
 
 - Isolated host workspaces now replay the caller's tracked and
