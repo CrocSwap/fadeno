@@ -23608,6 +23608,18 @@ function hostRefusedEntry(row) {
   entry.refusal = refusalOf(row.refusal) ?? { predicate: "unknown", message: "" };
   return entry;
 }
+function nativeSpawnEntry(row) {
+  const entry = hostEntry(row);
+  const requested = str(row.model_requested);
+  const inherited = str(row.model_inherited);
+  entry.kind = "native";
+  entry.archetype = null;
+  entry.agentType = str(row.agent_type);
+  entry.model = inherited ?? requested;
+  entry.modelOverride = requested != null && requested !== inherited ? requested : null;
+  entry.reasoningEffort = str(row.reasoning_effort);
+  return entry;
+}
 function correlateAttestation(entries, row) {
   const archetype = str(row.archetype);
   if (archetype == null) return;
@@ -23688,6 +23700,14 @@ function refusalMarker(predicate) {
 }
 function renderDispatchLine(entry) {
   const parts = [entry.timestamp ?? "?", `[${entry.kind}]`];
+  if (entry.kind === "native") {
+    const model2 = entry.modelOverride != null ? `${entry.model ?? "?"} \u2192 ${entry.modelOverride}` : entry.model;
+    parts.push(`${entry.agentType ?? "(unnamed)"}${model2 != null ? ` (${model2})` : ""}`);
+    if (entry.reasoningEffort != null) parts.push(`effort ${entry.reasoningEffort}`);
+    parts.push("[unsteered spawn]");
+    if (entry.promptSha256 != null) parts.push(`sha256:${entry.promptSha256.slice(0, 8)}`);
+    return parts.join("  ");
+  }
   const roleSlot = entry.role ?? (entry.agentType !== entry.archetype ? entry.agentType : null);
   const who = `${entry.archetype ?? "(none)"}${roleSlot != null ? `/${roleSlot}` : ""}`;
   const model = entry.modelOverride != null ? `${entry.model ?? "?"} \u2192 ${entry.modelOverride}` : entry.model;
@@ -23847,6 +23867,10 @@ function runDispatches(opts = {}) {
     }
     if (event === "host_refused") {
       entries.push(hostRefusedEntry(row));
+      continue;
+    }
+    if (event === "native_spawn") {
+      entries.push(nativeSpawnEntry(row));
       continue;
     }
     if (event === "host_attestation") {
@@ -24224,6 +24248,10 @@ function loadAllEntries(absolute) {
     }
     if (event === "host_refused") {
       entries.push(hostRefusedEntry(row));
+      continue;
+    }
+    if (event === "native_spawn") {
+      entries.push(nativeSpawnEntry(row));
       continue;
     }
     if (event === "host_attestation") {
@@ -30950,6 +30978,15 @@ function runCodexPlugin(opts = {}) {
     status: emitFile(
       hostModePath,
       (0, import_node_fs25.readFileSync)((0, import_node_path25.join)(tpl, "common", "plugin", "host-mode-hook.mjs"), "utf8"),
+      force
+    )
+  });
+  const spawnGuardPath = (0, import_node_path25.join)(outDir, "hooks", "spawn-guard.mjs");
+  results.push({
+    path: spawnGuardPath,
+    status: emitFile(
+      spawnGuardPath,
+      stampHookVersion((0, import_node_fs25.readFileSync)((0, import_node_path25.join)(tpl, "codex", "hooks", "spawn-guard.mjs"), "utf8")),
       force
     )
   });
@@ -40058,7 +40095,7 @@ function runSetup(opts = {}) {
   if (opts.target === "claude") {
     notices.push("Claude steering is installed by the plugin and remains inert while the host-native base is active.");
   }
-  if (opts.target === "codex") notices.push("Codex managed agents are user-scoped; start a fresh Codex session to load them.");
+  if (opts.target === "codex") notices.push("Codex managed agents are user-scoped; start a fresh Codex session to load them, and trust the plugin's spawn-guard hook when that session asks to review it.");
   if (!opts.nonInteractive) notices.push("External command dials remain opt-in; setup selected safe host-native base.");
   notices.push("Skills and subagents are loaded at host session start; a fresh session is required to refresh them \u2014 no setup or refresh will update the current session.");
   return {

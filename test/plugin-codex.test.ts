@@ -91,9 +91,30 @@ test('codex plugin: carries setup, host-mode hooks, bundled CLI, and built-in de
   assert.ok(exists(outDir, 'skills/fadeno-setup/SKILL.md'));
   assert.ok(exists(outDir, 'skills/fadeno-host/SKILL.md'));
   assert.ok(exists(outDir, 'hooks/host-mode.mjs'));
+  assert.ok(exists(outDir, 'hooks/spawn-guard.mjs'));
   const hooks = JSON.parse(read(outDir, 'hooks/hooks.json'));
   assert.ok(Array.isArray(hooks.hooks.UserPromptSubmit));
   assert.match(hooks.hooks.UserPromptSubmit[0].hooks[0].command, /\$\{PLUGIN_ROOT\}\/hooks\/host-mode\.mjs/);
+  // The spawn guard is registered on `PreToolUse`/`Agent` — without the
+  // manifest entry the script is inert cargo, which is exactly the state the
+  // Codex plugin was in when a host session spawned three unsteered subagents.
+  assert.ok(Array.isArray(hooks.hooks.PreToolUse));
+  assert.equal(hooks.hooks.PreToolUse[0].matcher, 'Agent');
+  assert.match(hooks.hooks.PreToolUse[0].hooks[0].command, /\$\{PLUGIN_ROOT\}\/hooks\/spawn-guard\.mjs/);
+  // Stamped like the Claude steering hook: every evidence row it writes names
+  // the generation that wrote it, which a session-start hook cache hides.
+  const guard = read(outDir, 'hooks/spawn-guard.mjs');
+  const guardTemplate = readFileSync(
+    join(REPO, 'templates', 'codex', 'hooks', 'spawn-guard.mjs'),
+    'utf8',
+  );
+  assert.ok(
+    guardTemplate.includes("const HOOK_VERSION = 'dev';"),
+    "the spawn-guard template must keep the literal 'dev' placeholder",
+  );
+  const guardVersion = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).version;
+  assert.ok(guard.includes(`const HOOK_VERSION = '${guardVersion}';`));
+  assert.ok(!guard.includes("HOOK_VERSION = 'dev'"));
   assert.ok(exists(outDir, 'bin/fadeno'), 'codex plugin must bundle a binary');
   assert.ok(exists(outDir, 'bin/templates/common/fadeno/playbooks/code-change-review.yaml'));
   const binary = join(outDir, 'bin', 'fadeno');

@@ -183,6 +183,41 @@ test('dispatches: a pre-0.6 native_delivery row still renders as a host entry', 
   assert.equal(result.skipped, 0);
 });
 
+test('dispatches: a native_spawn row renders as an unsteered spawn on its inherited model', (t) => {
+  const root = seedLog(t, [
+    {
+      format: '1.0',
+      timestamp: '2026-09-04T22:26:00.000Z',
+      event: 'native_spawn',
+      hook_version: '0.6.2',
+      harness: 'codex',
+      agent_type: 'default',
+      model_requested: null,
+      model_inherited: 'gpt-6-astra',
+      reasoning_effort: null,
+      fork_turns: 'none',
+      transport: 'host',
+      prompt_sha256: 'a'.repeat(64),
+    },
+  ]);
+  const result = runDispatches({ repoRoot: root });
+  assert.equal(result.total, 1);
+  assert.equal(result.skipped, 0);
+  const entry = result.entries[0]!;
+  assert.equal(entry.kind, 'native');
+  assert.equal(entry.archetype, null);
+  assert.equal(entry.agentType, 'default');
+  // The whole point: the model a spawn naming none of its own actually burns.
+  assert.equal(entry.model, 'gpt-6-astra');
+  const line = result.lines[0]!;
+  assert.ok(line.includes('[native]'));
+  assert.ok(line.includes('default (gpt-6-astra)'));
+  assert.ok(line.includes('[unsteered spawn]'));
+  // Never the host vocabulary: a generic subagent is under no attestation
+  // contract, so `[never attested]` would be an accusation about nothing.
+  assert.ok(!line.includes('[never attested]'));
+});
+
 test('dispatches: host_delivery rows render one entry each, with model_override', (t) => {
   const root = seedLog(t, [
     hostRow({ model_override: 'sonnet' }),

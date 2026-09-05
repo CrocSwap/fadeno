@@ -113,6 +113,22 @@ const CLAIMS: Claim[] = [
     src: { files: ['templates/claude/hooks/dispatch-steering.mjs'], patterns: [/host_delivery/] },
   },
   {
+    // The Codex steering ladder's only rung. Both halves have failed silently
+    // before: a manifest that never registered the script makes the guard
+    // inert cargo, and a guard that stops writing its row makes an unsteered
+    // spawn indistinguishable from no spawn at all — which is precisely the
+    // state the 2026-09-04 receipt was recorded in.
+    id: 'codex-spawn-guard',
+    doc: {
+      files: ['docs/architecture.md'],
+      patterns: [/spawn-guard\.mjs/, /native_spawn/, /generic_spawn_in_host_mode/],
+    },
+    src: {
+      files: ['templates/codex/hooks/spawn-guard.mjs', 'templates/codex/hooks/hooks.json'],
+      patterns: [/spawn-guard\.mjs/, /native_spawn/, /generic_spawn_in_host_mode/],
+    },
+  },
+  {
     id: 'write-access-field',
     doc: { files: [DIALS, EXTENDING], patterns: [/write_access/] },
     src: { files: ['src/lib/executors.ts'], patterns: [/write_access/] },

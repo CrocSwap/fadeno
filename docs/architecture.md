@@ -514,6 +514,28 @@ reasoning effort (the Agent tool schema has no effort parameter), so the row
 records `reasoning_effort: "inherited"` rather than the target's declared
 effort. Grok currently rejects the flag.
 
+The Codex side has one rung of that ladder, and it is a **guard rather than a
+rewrite**: `templates/codex/hooks/spawn-guard.mjs`, registered by the Codex
+plugin on `PreToolUse`/`Agent`. It classifies each `spawn_agent` by whether
+`agent_type` resolves to a managed role agent (`# fadeno:managed`, project
+`.codex/agents/<a>.toml` shadowing user `fadeno-<a>.toml`). While session-scoped
+host mode is on, a **generic** spawn — `default`, `explorer`, any unmarked
+custom agent — is denied with predicate `generic_spawn_in_host_mode`, naming the
+model it would have inherited from the parent session; `$fadeno-host off` lifts
+the refusal. A **managed** spawn is resolved through `fadeno dial resolve` and
+drift-checked: if the agent file's `model`, `model_reasoning_effort`, or baked
+`--host-executor` disagrees with the dial, host mode denies with
+`agent_file_drift` and the fix is `fadeno steering apply --codex` plus a fresh
+session. The guard never rewrites a spawn, because on Codex **a custom agent
+file's `model`/`model_reasoning_effort` win over explicit spawn values** — a
+stamped model would change what the evidence claims, not what runs. Every spawn
+is recorded in either mode: `host_delivery` (with `agent_file` and `drift`) for
+managed ones, and a `native_spawn` row carrying `model_inherited` for generic
+ones that host mode allowed, so an unsteered subagent never again reads as no
+subagent at all. Adding this hook changes `hooks/hooks.json`, so an upgraded
+plugin only starts guarding once Codex's review-and-trust flow accepts it at the
+next session start.
+
 The Claude `claude-agents/` dir carries two kinds of subagents: the host role
 subagents (`worker`/`reviewer`/`judge`) and the **dispatch proxy agents**
 (`dispatch-worker`/`dispatch-reviewer`/`dispatch-judge`). Claude Code can't run

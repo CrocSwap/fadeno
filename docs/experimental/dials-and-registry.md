@@ -419,7 +419,12 @@ surfaces at dial time too.
   `target` / `loadout`. A `host_delivery` row and its `hook_version` stamp
   remain the steering hook's evidence for in-session delivery; the
   stdin-heredoc `FADENO_PROMPT` relay contract and the `relay_attested` mark
-  on paired dispatches are unchanged.
+  on paired dispatches are unchanged. A `native_spawn` row is the one entry
+  that records a spawn Fadeno did *not* steer — the Codex spawn guard writes
+  it for a generic subagent that host mode allowed, carrying
+  `model_inherited` (what the spawn runs on when it names no model of its
+  own) rather than any resolved identity, so an unsteered subagent never
+  reads as no subagent at all.
 - **`resolution_snapshot`** records the full effective table *including
   per-archetype source layers* — which closes the standing deferral that
   drive's engine-side resolution could not honor pin scoping because the

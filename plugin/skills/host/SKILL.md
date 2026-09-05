@@ -22,8 +22,10 @@ monitor, and integrate work through Fadeno.
   archetypes. Parallelize independent work when the expected latency or quality
   benefit outweighs dispatch overhead and merge-conflict risk.
 - Prefer Fadeno's skills, engine, and routed archetypes over unmanaged use of
-  generic harness subagents. Native host subagents remain appropriate when
-  Fadeno selects a host lane or no suitable Fadeno path exists.
+  generic harness subagents. While host mode is on, do not spawn generic (non-archetype)
+  subagents: the managed role agents (`worker`, `reviewer`, `judge`) are the
+  host lane, and on Codex the plugin hook refuses generic spawns outright.
+  Turning host mode `off` lifts the rule for the session.
 - Perform small, local, low-risk changes directly when delegation would cost
   more than the work itself.
 - Retain host responsibility for decomposition, user decisions, integration,

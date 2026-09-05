@@ -348,6 +348,20 @@ export function runCodexPlugin(opts: PluginOptions = {}): PluginResult {
       force,
     ),
   });
+  // The `PreToolUse` spawn guard, stamped like the Claude steering hook so the
+  // evidence rows it writes name the generation that wrote them. A NEW hook
+  // entry in hooks.json goes through Codex's review-and-trust flow on the next
+  // session start, so an upgraded plugin only starts guarding after the user
+  // accepts it.
+  const spawnGuardPath = join(outDir, 'hooks', 'spawn-guard.mjs');
+  results.push({
+    path: spawnGuardPath,
+    status: emitFile(
+      spawnGuardPath,
+      stampHookVersion(readFileSync(join(tpl, 'codex', 'hooks', 'spawn-guard.mjs'), 'utf8')),
+      force,
+    ),
+  });
   const hookManifestPath = join(outDir, 'hooks', 'hooks.json');
   results.push({
     path: hookManifestPath,

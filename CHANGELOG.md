@@ -6,6 +6,26 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A Codex `PreToolUse` spawn guard (`hooks/spawn-guard.mjs`, matcher `Agent`).
+  While session-scoped host mode is on it **denies** any subagent spawn whose
+  `agent_type` is not a managed Fadeno role agent (`generic_spawn_in_host_mode`),
+  naming the model the spawn would have inherited from the parent session and
+  the `$fadeno-host off` escape; it also denies a managed role agent whose file
+  has drifted from its dial (`agent_file_drift`), since on Codex an agent
+  file's `model`/`model_reasoning_effort` win over explicit spawn values and a
+  hook can therefore only refuse, never correct. In **either** mode every spawn
+  is recorded in `.fadeno/dispatches.jsonl`: `host_delivery` (now carrying
+  `agent_file` and `drift`) for managed spawns, and a new `native_spawn` row
+  carrying `model_inherited` for generic ones — `fadeno dispatches` renders
+  those as `[native] … [unsteered spawn]`. Before this, the Codex plugin
+  registered no `PreToolUse` hook at all: a host session could spawn generic
+  subagents on the parent's frontier model with no rewrite, no refusal, and no
+  evidence row anywhere. **This adds a new entry to the plugin's
+  `hooks/hooks.json`, so Codex re-runs its review-and-trust flow on the next
+  session start; the guard is inert until you accept it.**
+
 ### Removed
 
 - The stored default harness. `fadeno setup --codex|--claude` no longer

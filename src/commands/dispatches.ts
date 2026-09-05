@@ -190,9 +190,18 @@ export interface DispatchIgnoredOutputDiscarded {
  * by `fadeno attest` running INSIDE the subagent itself, folded onto the
  * `attestedAt`/`attestedEffort`/`attestedEffortEvidence` fields rather than
  * becoming an entry of its own (see `correlateAttestation`).
+ *
+ * `kind: "native"` is the odd one out: a `native_spawn` row from the Codex
+ * spawn guard, recording a GENERIC harness subagent — no archetype, no dial,
+ * no Fadeno identity of any kind. It is here because the alternative is worse.
+ * The 2026-09-04 basanos receipt is a Codex host session that quietly spawned
+ * three `agent_type: default` subagents on the parent's frontier model and
+ * burned 57.5M input tokens before a human noticed, and the log said nothing
+ * at all — so "nobody spawned anything" and "somebody spawned something
+ * Fadeno never steered" must not render identically.
  */
 export interface DispatchEntry {
-  kind: 'command' | 'host';
+  kind: 'command' | 'host' | 'native';
   format: string | null;
   legacy: boolean;
   timestamp: string | null;
@@ -851,6 +860,38 @@ function hostRefusedEntry(row: Record<string, unknown>): DispatchEntry {
 }
 
 /**
+ * A `native_spawn` row: the Codex spawn guard saw a GENERIC subagent launch
+ * (host mode off, so it was allowed) and recorded it. Built on `hostEntry`
+ * because the row is a host-side spawn like any other, then corrected on the
+ * two fields where a generic spawn differs from a steered one.
+ *
+ * `model` leads with the INHERITED model — the parent session's active model,
+ * which is what a spawn naming none of its own actually runs on, and the fact
+ * the basanos receipt turned on. A spawn that named its own model keeps that
+ * visible as `modelOverride`, so the line reads `inherited → requested`; a
+ * spawn that named the same model the session was already on renders once
+ * rather than twice.
+ *
+ * NOT correlated with attestations, and it must not be: `correlateAttestation`
+ * only walks `kind: 'host'` entries with a matching archetype, and a native
+ * spawn has no archetype to match. A generic subagent never runs `fadeno
+ * attest`, so `[never attested]` would be an accusation about a contract this
+ * spawn was never under.
+ */
+function nativeSpawnEntry(row: Record<string, unknown>): DispatchEntry {
+  const entry = hostEntry(row);
+  const requested = str(row.model_requested);
+  const inherited = str(row.model_inherited);
+  entry.kind = 'native';
+  entry.archetype = null; // by construction: this spawn named no Fadeno role
+  entry.agentType = str(row.agent_type);
+  entry.model = inherited ?? requested;
+  entry.modelOverride = requested != null && requested !== inherited ? requested : null;
+  entry.reasoningEffort = str(row.reasoning_effort);
+  return entry;
+}
+
+/**
  * Correlate a `host_attestation` row (written by `fadeno attest`, running
  * INSIDE the subagent) onto the `host_delivery` entry it measures.
  *
@@ -1013,6 +1054,8 @@ function refusalMarker(predicate: string): string {
  *
  * ```
  * <ts>  [command]  worker/reviewer → executor (model)  via command  exit 0 in 12ms  [markers]  <prompt snapshot>
+ * <ts>  [native]  <agent_type> (<inherited model>)  [unsteered spawn]  sha256:<8>
+ *   — a native spawn writes no snapshot, so its line ends in the prompt digest rather than a path.
  * ```
  *
  * Host deliveries render `[host]`, fold any `model_override` into the
@@ -1020,6 +1063,21 @@ function refusalMarker(predicate: string): string {
  */
 export function renderDispatchLine(entry: DispatchEntry): string {
   const parts: string[] = [entry.timestamp ?? '?', `[${entry.kind}]`];
+  if (entry.kind === 'native') {
+    // A generic subagent: no archetype, no dial, no executor. Every field the
+    // shared renderer below would reach for is null by construction, and
+    // printing `(none) → (unresolved)` would read as a Fadeno dispatch that
+    // failed to resolve rather than as a spawn Fadeno never steered. Say what
+    // was asked for and what it runs on, and mark it unsteered.
+    const model = entry.modelOverride != null
+      ? `${entry.model ?? '?'} → ${entry.modelOverride}`
+      : entry.model;
+    parts.push(`${entry.agentType ?? '(unnamed)'}${model != null ? ` (${model})` : ''}`);
+    if (entry.reasoningEffort != null) parts.push(`effort ${entry.reasoningEffort}`);
+    parts.push('[unsteered spawn]');
+    if (entry.promptSha256 != null) parts.push(`sha256:${entry.promptSha256.slice(0, 8)}`);
+    return parts.join('  ');
+  }
   const roleSlot = entry.role ?? (entry.agentType !== entry.archetype ? entry.agentType : null);
   const who = `${entry.archetype ?? '(none)'}${roleSlot != null ? `/${roleSlot}` : ''}`;
   const model =
@@ -1333,6 +1391,14 @@ export function runDispatches(opts: DispatchesOptions = {}): DispatchesResult {
     // repo where nobody spawned anything.
     if (event === 'host_refused') {
       entries.push(hostRefusedEntry(row));
+      continue;
+    }
+    // A GENERIC subagent the Codex spawn guard let through (host mode off).
+    // Not a Fadeno dispatch, and rendered as its own kind so it never reads
+    // like one — but recorded, because an unsteered spawn that leaves no trace
+    // is the failure this row exists to end.
+    if (event === 'native_spawn') {
+      entries.push(nativeSpawnEntry(row));
       continue;
     }
     if (event === 'host_attestation') {
@@ -2041,6 +2107,10 @@ function loadAllEntries(absolute: string): {
     }
     if (event === 'host_refused') {
       entries.push(hostRefusedEntry(row));
+      continue;
+    }
+    if (event === 'native_spawn') {
+      entries.push(nativeSpawnEntry(row));
       continue;
     }
     if (event === 'host_attestation') {
