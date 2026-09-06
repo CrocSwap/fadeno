@@ -257,12 +257,27 @@ export interface CodexDialIdentity {
   lane: 'host' | 'command';
 }
 
-/** One archetype's row: what its file says, what its dial says, and the verdict. */
+/**
+ * One archetype's row: WHICH file Codex would load, what that file says, what
+ * its dial says, and the verdict.
+ *
+ * `scope`/`path` are not decoration. Until 2026-09-06 both identity surfaces
+ * read `$CODEX_HOME/agents/fadeno-<archetype>.toml` and nothing else, so a
+ * project-scope `.codex/agents/<archetype>.toml` — which Codex resolves FIRST,
+ * making the user file invisible — was judged by neither. A row that names its
+ * file is also the only way a reader can pick the right fix: `--scope user`
+ * rewrites a file that is being shadowed and changes nothing on disk that
+ * Codex will read (see `codexIdentityRemediation`).
+ */
 export interface CodexAgentIdentityRow {
   archetype: string;
+  /** Where the judged file lives, or null when no file exists at either scope. */
+  scope: 'project' | 'user' | null;
+  /** The judged file's absolute path, or null when there is none. */
+  path: string | null;
   file: { model: string | null; effort: string | null } | null;
   dial: CodexDialIdentity | null;
-  status: 'current' | 'stale' | 'missing' | 'not_applicable';
+  status: 'current' | 'stale' | 'missing' | 'not_applicable' | 'unmanaged' | 'shadowed';
 }
 
 /**
@@ -293,6 +308,76 @@ export const CODEX_IDENTITY_REMEDIATION =
   'run `fadeno steering apply --codex --scope user`, then start a fresh Codex session';
 
 /**
+ * The fix when the file Codex actually loads is a PROJECT-scope one.
+ *
+ * `CODEX_IDENTITY_REMEDIATION` is not merely unhelpful here, it is wrong: a
+ * user-scope apply rewrites `$CODEX_HOME/agents/fadeno-<archetype>.toml`,
+ * which the project file makes invisible, so the drift survives the fix and
+ * the next session loads the same wrong identity. Worse, `--scope user`
+ * deliberately resolves the USER dial layer only (`dialLayersForApply`), so it
+ * cannot even bake a session or repo dial that this row is being judged
+ * against.
+ *
+ * `--scope project` reads the full cascade — the same layers `steering
+ * resolve` answers `status` with — so it writes the file this row compared,
+ * and a managed project file is refreshed in place. Deleting is offered as the
+ * equal alternative because it is the right answer when the project copy was
+ * never wanted: it hands the slot back to the managed user-scope set.
+ */
+export const CODEX_PROJECT_IDENTITY_REMEDIATION =
+  'run `fadeno steering apply --codex --scope project` to re-cut the project-scope file(s) Codex ' +
+  'loads instead, or delete them so the managed user-scope agents load again, then start a fresh ' +
+  'Codex session';
+
+/**
+ * The fix for a file Fadeno did not write and will never overwrite.
+ *
+ * Neither apply spelling touches it on its own: `managedAgentEmit` refuses any
+ * file whose first line is not `CODEX_MANAGED_MARK`, and at USER scope that
+ * refusal is absolute — `--force` is scope-dependent and does not apply there,
+ * because `fadeno-<archetype>.toml` is a name Fadeno owns by convention and a
+ * foreign file at it is a deliberate takeover. So the only remediation that
+ * always works is to move the file out of the way; the `--force` takeover is
+ * named as the project-scope-only option it is.
+ */
+export const CODEX_UNMANAGED_IDENTITY_REMEDIATION =
+  'move or delete the unmanaged file(s) so Fadeno\'s managed agent loads again — `fadeno steering ' +
+  'apply` never overwrites a file it did not write, and only at project scope does `--force` take ' +
+  'one over deliberately — then start a fresh Codex session';
+
+/**
+ * The one fix line for a set of rows, chosen per row and de-duplicated.
+ *
+ * `status`, `dial` and `doctor` all print this rather than picking a constant
+ * themselves: the whole reason the remediation was frozen into a constant in
+ * run 2002 was that three surfaces re-spelling it is how they drift, and
+ * "which constant applies" is the same question wearing a hat.
+ *
+ * Order is row order, so the sentence is stable for a given report.
+ */
+export function codexIdentityRemediation(rows: CodexAgentIdentityRow[]): string | null {
+  const needed: string[] = [];
+  const add = (text: string): void => {
+    if (!needed.includes(text)) needed.push(text);
+  };
+  for (const row of rows) {
+    switch (row.status) {
+      case 'current':
+      case 'not_applicable':
+        continue;
+      case 'unmanaged':
+        add(CODEX_UNMANAGED_IDENTITY_REMEDIATION);
+        continue;
+      default:
+        // `missing` has no file at either scope, so the managed set is what is
+        // wanted and user scope is where it lives.
+        add(row.scope === 'project' ? CODEX_PROJECT_IDENTITY_REMEDIATION : CODEX_IDENTITY_REMEDIATION);
+    }
+  }
+  return needed.length === 0 ? null : needed.join('; and ');
+}
+
+/**
  * The verdict for one archetype, from the file's identity and the dial's.
  *
  * A missing file outranks everything: whatever lane the dial lands on, Codex
@@ -311,6 +396,64 @@ export function codexAgentIdentityStatus(
   return file.model === dial.model && file.effort === dial.effort ? 'current' : 'stale';
 }
 
+/**
+ * One archetype's row, built from the file Codex would ACTUALLY load.
+ *
+ * The single builder `status` and `dial` both go through. They used to reach
+ * for `join(codexUserAgentDir(...), \`fadeno-${archetype}.toml\`)` each, which
+ * is the same one-fact-two-readers shape this codebase keeps paying for — and
+ * both readers had the same fact wrong, because Codex resolves a project-scope
+ * `.codex/agents/<archetype>.toml` first and never looks at the user file
+ * underneath it (`effectiveCodexAgentCandidates`). `doctor` has applied that
+ * precedence since it grew shadow-drift findings; the identity surfaces did
+ * not, so both could print `current` for a file no session would ever load.
+ *
+ * `codexAgentIdentityStatus` is left exactly as run 2002 factored it — this
+ * decides WHICH file is fed to it, plus the two verdicts that are about the
+ * file's standing rather than its identity:
+ *
+ *  - `unmanaged`: Codex will load it, Fadeno did not write it, and Fadeno
+ *    cannot vouch for it. Deliberately NOT judged on model/effort, because a
+ *    hand-authored file that happens to name the dialed model would then be
+ *    called `current` — a claim about the two TOML keys being read as a claim
+ *    about the whole file. It is not: the instructions that make an agent
+ *    resolve an envelope at all (`CODEX_RESOLVE_FLAGS`) are unverified here,
+ *    and `steering apply` will never refresh it. `missing` outranks it only
+ *    because there is nothing to load at all in that case.
+ *  - `shadowed`: a PROJECT-scope command broker is what loads while the dial
+ *    resolves to the host lane. Judging its identity would be a lie in the
+ *    other direction — a broker carries the relay's model and effort by
+ *    construction, so `stale` would accuse the file of an identity no apply
+ *    would ever write there. What is actually wrong is structural: the host
+ *    lane this dial asks for cannot be delivered in this repo at all, because
+ *    the managed host agent underneath (if any) is invisible. Scoped to
+ *    project scope on purpose — at USER scope a broker under a host dial IS
+ *    ordinary drift that `--scope user` re-cuts, which is the `stale` verdict
+ *    this surface has always given it.
+ *
+ * A host agent is told from a broker by its baked `--host-executor`, the same
+ * discriminator `findSpawnableCodexAgent` uses: only `renderCodexHostAgent`
+ * writes the flag into its own instructions, and it writes it for the neutral
+ * `current-host` slot too (where both identity lines are omitted), so this
+ * does not mistake the untouched default for a broker.
+ */
+export function codexAgentIdentityRow(
+  archetype: string,
+  candidate: CodexAgentCandidate | null,
+  dial: CodexDialIdentity | null,
+): CodexAgentIdentityRow {
+  if (candidate == null) {
+    return { archetype, scope: null, path: null, file: null, dial, status: 'missing' };
+  }
+  const file = { model: candidate.state.model, effort: candidate.state.reasoningEffort };
+  const base = { archetype, scope: candidate.scope, path: candidate.path, file, dial };
+  if (!candidate.state.managed) return { ...base, status: 'unmanaged' };
+  if (candidate.scope === 'project' && candidate.state.hostExecutor == null && dial?.lane === 'host') {
+    return { ...base, status: 'shadowed' };
+  }
+  return { ...base, status: codexAgentIdentityStatus(file, dial) };
+}
+
 function identityText(identity: { model: string | null; effort: string | null } | null): string {
   if (identity == null) return 'missing';
   if (identity.model == null) return 'the session baseline';
@@ -321,12 +464,32 @@ function identityText(identity: { model: string | null; effort: string | null } 
  * One drifted row as a person reads it: `reviewer file gpt-5.6-luna/high vs
  * dial gpt-5.6-terra/xhigh`.
  *
- * The single formatter `status` and `dial` both print through — the two
- * surfaces state the same fact, and a second spelling of it is exactly the
- * one-fact-two-readers drift this codebase keeps paying for.
+ * The single formatter `status`, `dial` and `doctor` all print through — the
+ * three surfaces state the same fact, and a second spelling of it is exactly
+ * the one-fact-two-readers drift this codebase keeps paying for. `missing` is
+ * rendered here rather than by a ternary at each call site for that same
+ * reason; two of the three had already grown a copy of it.
+ *
+ * A user-scope row keeps its exact 2026-09-05 spelling, so the one sentence a
+ * test froze is unchanged. Every other row NAMES ITS FILE, because that is the
+ * fact a reader needs and cannot otherwise get: the report's header names the
+ * user agent directory, and a row about `.codex/agents/reviewer.toml` read as
+ * a row about `$CODEX_HOME/agents/fadeno-reviewer.toml` sends its reader to
+ * re-cut a file that is not the one loading.
  */
 export function describeCodexAgentIdentityRow(row: CodexAgentIdentityRow): string {
-  return `${row.archetype} file ${identityText(row.file)} vs dial ${identityText(row.dial)}`;
+  if (row.status === 'missing') return `${row.archetype} file missing`;
+  if (row.status === 'unmanaged') {
+    return `${row.archetype} loads ${row.path}, which carries no managed header — Fadeno did not ` +
+      'write it and cannot vouch for what it does';
+  }
+  if (row.status === 'shadowed') {
+    return `${row.archetype} loads the project-scope command broker ${row.path}, which shadows the ` +
+      `managed user-scope agent — dial ${identityText(row.dial)} resolves to the host lane, which ` +
+      'a broker can never deliver';
+  }
+  const where = row.scope === 'project' ? `project file ${row.path} ` : 'file ';
+  return `${row.archetype} ${where}${identityText(row.file)} vs dial ${identityText(row.dial)}`;
 }
 
 /**

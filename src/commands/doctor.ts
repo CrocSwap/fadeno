@@ -538,16 +538,20 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorResult {
     ));
   }
   if (status.codexMaterialization?.restartRequired) {
+    // Same filter as `status`'s own `fresh`: anything that is not `current` or
+    // `not_applicable` needs saying, including the two verdicts about the
+    // file's standing rather than its identity (`unmanaged`, `shadowed`).
     const drifted = status.codexMaterialization.agents.filter(
-      (agent) => agent.status === 'stale' || agent.status === 'missing',
+      (agent) => agent.status !== 'current' && agent.status !== 'not_applicable',
     );
-    const detail = drifted
-      .map((agent) => (agent.status === 'missing' ? `${agent.archetype} file missing` : describeCodexAgentIdentityRow(agent)))
-      .join('; ');
+    const detail = drifted.map(describeCodexAgentIdentityRow).join('; ');
     findings.push(finding(
       'codex-agents',
       'warning',
-      `managed host agents are missing or stale in ${status.codexMaterialization.path}${detail === '' ? '' : ` — ${detail}`}`,
+      // The header names the managed user-scope directory; a row that was
+      // judged elsewhere names its own file, which is why the describer prints
+      // the path for every scope but that one.
+      `the agents Codex would load for the role slots are missing or stale (managed set in ${status.codexMaterialization.path})${detail === '' ? '' : ` — ${detail}`}`,
       // One remediation, printed from where it is defined: `status`, `dial` and
       // `doctor` re-spelling it separately is how the three drift apart.
       `${status.codexMaterialization.remediation ?? CODEX_IDENTITY_REMEDIATION}.`,

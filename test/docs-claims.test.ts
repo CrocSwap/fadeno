@@ -813,15 +813,35 @@ const CLAIMS: Claim[] = [
   },
   {
     // One spelling of the fix, in one place: `status` and `dial` both print
-    // this constant rather than either re-spelling it.
+    // what `codexIdentityRemediation` picks rather than either re-spelling it
+    // — and both judge the file `effectiveCodexAgentCandidates` says Codex
+    // would load, which is the same rule `doctor` reads. Reading a DIFFERENT
+    // file was the 2026-09-06 finding, so the effective-file resolver is named
+    // on both sides and not just the constants it selects between.
     id: 'codex-identity-remediation',
     doc: {
       files: ['docs/architecture.md'],
-      patterns: [/CODEX_IDENTITY_REMEDIATION/, /codexAgentIdentityStatus/, /not_applicable/],
+      patterns: [
+        /CODEX_IDENTITY_REMEDIATION/,
+        /CODEX_PROJECT_IDENTITY_REMEDIATION/,
+        /CODEX_UNMANAGED_IDENTITY_REMEDIATION/,
+        /codexIdentityRemediation/,
+        /codexAgentIdentityStatus/,
+        /effectiveCodexAgentCandidates/,
+        /not_applicable/,
+      ],
     },
     src: {
       files: ['src/lib/codex-agent-file.ts', 'src/commands/status.ts', 'src/commands/dial.ts'],
-      patterns: [/CODEX_IDENTITY_REMEDIATION/, /codexAgentIdentityStatus/, /not_applicable/],
+      patterns: [
+        /CODEX_IDENTITY_REMEDIATION/,
+        /CODEX_PROJECT_IDENTITY_REMEDIATION/,
+        /CODEX_UNMANAGED_IDENTITY_REMEDIATION/,
+        /codexIdentityRemediation/,
+        /codexAgentIdentityStatus/,
+        /effectiveCodexAgentCandidates/,
+        /not_applicable/,
+      ],
     },
   },
   {

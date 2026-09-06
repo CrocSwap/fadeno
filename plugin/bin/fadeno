@@ -24905,6 +24905,14 @@ function summarize(shown, total, skipped, newerFormat, exists, path) {
   }
   return `${shown} of ${total} dispatch${total === 1 ? "" : "es"} shown${notes}`;
 }
+var KNOWN_NON_ENTRY_EVENTS = /* @__PURE__ */ new Set([
+  "dispatch_cancelled",
+  "dispatch_merged",
+  "artifact_created",
+  "shadow_apply",
+  "workspace_lease_recovered",
+  "workspace_lease_reclaim_denied"
+]);
 function foldEvidenceRow(row, entries, byDispatchId) {
   const tier = formatTier(row.format);
   if (tier === "newer") {
@@ -24963,6 +24971,7 @@ function foldEvidenceRow(row, entries, byDispatchId) {
     }
     return "read";
   }
+  if (KNOWN_NON_ENTRY_EVENTS.has(event ?? "")) return "no-entry";
   return "skipped";
 }
 function runDispatches(opts = {}) {
@@ -32655,10 +32664,43 @@ function findSpawnableCodexAgent(candidates, archetype, hostExecutor, identity) 
   ) ?? null;
 }
 var CODEX_IDENTITY_REMEDIATION = "run `fadeno steering apply --codex --scope user`, then start a fresh Codex session";
+var CODEX_PROJECT_IDENTITY_REMEDIATION = "run `fadeno steering apply --codex --scope project` to re-cut the project-scope file(s) Codex loads instead, or delete them so the managed user-scope agents load again, then start a fresh Codex session";
+var CODEX_UNMANAGED_IDENTITY_REMEDIATION = "move or delete the unmanaged file(s) so Fadeno's managed agent loads again \u2014 `fadeno steering apply` never overwrites a file it did not write, and only at project scope does `--force` take one over deliberately \u2014 then start a fresh Codex session";
+function codexIdentityRemediation(rows) {
+  const needed = [];
+  const add = (text) => {
+    if (!needed.includes(text)) needed.push(text);
+  };
+  for (const row of rows) {
+    switch (row.status) {
+      case "current":
+      case "not_applicable":
+        continue;
+      case "unmanaged":
+        add(CODEX_UNMANAGED_IDENTITY_REMEDIATION);
+        continue;
+      default:
+        add(row.scope === "project" ? CODEX_PROJECT_IDENTITY_REMEDIATION : CODEX_IDENTITY_REMEDIATION);
+    }
+  }
+  return needed.length === 0 ? null : needed.join("; and ");
+}
 function codexAgentIdentityStatus(file, dial) {
   if (file == null) return "missing";
   if (dial == null || dial.lane === "command") return "not_applicable";
   return file.model === dial.model && file.effort === dial.effort ? "current" : "stale";
+}
+function codexAgentIdentityRow(archetype, candidate, dial) {
+  if (candidate == null) {
+    return { archetype, scope: null, path: null, file: null, dial, status: "missing" };
+  }
+  const file = { model: candidate.state.model, effort: candidate.state.reasoningEffort };
+  const base = { archetype, scope: candidate.scope, path: candidate.path, file, dial };
+  if (!candidate.state.managed) return { ...base, status: "unmanaged" };
+  if (candidate.scope === "project" && candidate.state.hostExecutor == null && dial?.lane === "host") {
+    return { ...base, status: "shadowed" };
+  }
+  return { ...base, status: codexAgentIdentityStatus(file, dial) };
 }
 function identityText(identity) {
   if (identity == null) return "missing";
@@ -32666,7 +32708,15 @@ function identityText(identity) {
   return identity.effort == null ? identity.model : `${identity.model}/${identity.effort}`;
 }
 function describeCodexAgentIdentityRow(row) {
-  return `${row.archetype} file ${identityText(row.file)} vs dial ${identityText(row.dial)}`;
+  if (row.status === "missing") return `${row.archetype} file missing`;
+  if (row.status === "unmanaged") {
+    return `${row.archetype} loads ${row.path}, which carries no managed header \u2014 Fadeno did not write it and cannot vouch for what it does`;
+  }
+  if (row.status === "shadowed") {
+    return `${row.archetype} loads the project-scope command broker ${row.path}, which shadows the managed user-scope agent \u2014 dial ${identityText(row.dial)} resolves to the host lane, which a broker can never deliver`;
+  }
+  const where = row.scope === "project" ? `project file ${row.path} ` : "file ";
+  return `${row.archetype} ${where}${identityText(row.file)} vs dial ${identityText(row.dial)}`;
 }
 function describeCodexAgentFileIdentity(state) {
   return `${state.model ?? "the session model"}${state.reasoningEffort != null ? ` at effort ${state.reasoningEffort}` : ""}`;
@@ -34955,28 +35005,26 @@ function unroutablePrimaryNote(params) {
   return `WARNING: NO PAIR POSSIBLE \u2014 ${archetype}'s primary (${resolved.delivery.refString}) cannot carry a pair, so this shadow attachment can never be sampled and every dispatch will silently run unpaired.
 ${routability.reason}`;
 }
-function codexIdentityNotice(archetype, compiled, userPathOptions) {
+function codexIdentityNotice(archetype, compiled, repoRoot, userPathOptions) {
   if (!maintainedHarnesses(userPathOptions).includes("codex")) return null;
-  const state = readCodexAgentFile((0, import_node_path33.join)(codexUserAgentDir(userPathOptions), `fadeno-${archetype}.toml`));
-  if (state == null) return null;
-  const file = { model: state.model, effort: state.reasoningEffort };
+  const candidate = effectiveCodexAgentCandidates(repoRoot, userPathOptions).find((item) => item.archetype === archetype) ?? null;
+  if (candidate == null) return null;
   const neutral = compiled.modelId === "current-host";
   const dial = {
     model: neutral ? null : compiled.modelId,
     effort: neutral ? null : compiled.effectiveEffort,
     lane: compiled.harness === "codex" ? "host" : "command"
   };
-  const row = {
-    archetype,
-    file,
-    dial,
-    status: codexAgentIdentityStatus(file, dial)
-  };
-  if (row.status !== "stale") return null;
+  const row = codexAgentIdentityRow(archetype, candidate, dial);
+  if (row.status !== "stale" && row.status !== "unmanaged" && row.status !== "shadowed") return null;
   return {
     stale: true,
+    status: row.status,
     detail: describeCodexAgentIdentityRow(row),
-    remediation: CODEX_IDENTITY_REMEDIATION
+    // The fix depends on which file loads; `codexIdentityRemediation` is the
+    // one place that mapping lives. Non-null by the guard above: every status
+    // that reaches here is one it has an answer for.
+    remediation: codexIdentityRemediation([row])
   };
 }
 function runDialSet(opts) {
@@ -35148,7 +35196,7 @@ function runDialSet(opts) {
     verification,
     narrative,
     notes: [...notes, ...probeNote != null ? [probeNote] : []],
-    codex_materialization: codexIdentityNotice(archetype, compiled, opts.userPathOptions)
+    codex_materialization: codexIdentityNotice(archetype, compiled, repoRoot, opts.userPathOptions)
   };
 }
 function runDialClear(opts = {}) {
@@ -43070,9 +43118,9 @@ function materialization(codexMaintained, repoRoot, userPathOptions) {
     ...userPathOptions,
     env: { ...userPathOptions?.env ?? process.env, FADENO_HARNESS: "codex" }
   };
+  const candidates = effectiveCodexAgentCandidates(repoRoot, userPathOptions);
   const agents = CODEX_STEERING_ARCHETYPES.map((archetype) => {
-    const state = readCodexAgentFile((0, import_node_path50.join)(path, `fadeno-${archetype}.toml`));
-    const file = state == null ? null : { model: state.model, effort: state.reasoningEffort };
+    const candidate = candidates.find((item) => item.archetype === archetype) ?? null;
     let dial = null;
     try {
       const resolved = runSteeringResolve({
@@ -43090,7 +43138,7 @@ function materialization(codexMaintained, repoRoot, userPathOptions) {
     } catch {
       dial = null;
     }
-    return { archetype, file, dial, status: codexAgentIdentityStatus(file, dial) };
+    return codexAgentIdentityRow(archetype, candidate, dial);
   });
   const fresh = agents.every((agent) => agent.status === "current" || agent.status === "not_applicable");
   return {
@@ -43098,7 +43146,10 @@ function materialization(codexMaintained, repoRoot, userPathOptions) {
     fresh,
     restartRequired: !fresh,
     agents,
-    remediation: fresh ? null : CODEX_IDENTITY_REMEDIATION
+    // Per row, because the fix depends on WHICH file loads: a user-scope apply
+    // cannot reach a project-scope shadow, and neither apply overwrites a file
+    // Fadeno did not write.
+    remediation: codexIdentityRemediation(agents)
   };
 }
 function runStatus(opts = {}) {
@@ -43643,13 +43694,16 @@ function runDoctor(opts = {}) {
   }
   if (status.codexMaterialization?.restartRequired) {
     const drifted = status.codexMaterialization.agents.filter(
-      (agent) => agent.status === "stale" || agent.status === "missing"
+      (agent) => agent.status !== "current" && agent.status !== "not_applicable"
     );
-    const detail2 = drifted.map((agent) => agent.status === "missing" ? `${agent.archetype} file missing` : describeCodexAgentIdentityRow(agent)).join("; ");
+    const detail2 = drifted.map(describeCodexAgentIdentityRow).join("; ");
     findings.push(finding2(
       "codex-agents",
       "warning",
-      `managed host agents are missing or stale in ${status.codexMaterialization.path}${detail2 === "" ? "" : ` \u2014 ${detail2}`}`,
+      // The header names the managed user-scope directory; a row that was
+      // judged elsewhere names its own file, which is why the describer prints
+      // the path for every scope but that one.
+      `the agents Codex would load for the role slots are missing or stale (managed set in ${status.codexMaterialization.path})${detail2 === "" ? "" : ` \u2014 ${detail2}`}`,
       // One remediation, printed from where it is defined: `status`, `dial` and
       // `doctor` re-spelling it separately is how the three drift apart.
       `${status.codexMaterialization.remediation ?? CODEX_IDENTITY_REMEDIATION}.`
@@ -45913,8 +45967,8 @@ function main(argv) {
       if (result.staleUserPin) console.log(`stale user pin: ${result.staleUserPin}`);
       if (result.codexMaterialization) {
         const m = result.codexMaterialization;
-        const drifted = m.agents.filter((agent) => agent.status === "stale" || agent.status === "missing");
-        const detail2 = drifted.map((agent) => agent.status === "missing" ? `${agent.archetype} file missing` : describeCodexAgentIdentityRow(agent)).join("; ");
+        const drifted = m.agents.filter((agent) => agent.status !== "current" && agent.status !== "not_applicable");
+        const detail2 = drifted.map(describeCodexAgentIdentityRow).join("; ");
         console.log(
           m.fresh ? "Codex managed agents: current" : `Codex managed agents: stale \u2014 ${detail2}; ${m.remediation}`
         );

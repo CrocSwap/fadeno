@@ -1338,10 +1338,11 @@ function main(argv: string[]): number {
       if ((result as any).staleUserPin) console.log(`stale user pin: ${(result as any).staleUserPin}`);
       if ((result as any).codexMaterialization) {
         const m = (result as any).codexMaterialization as CodexMaterialization;
-        const drifted = m.agents.filter((agent) => agent.status === 'stale' || agent.status === 'missing');
-        const detail = drifted
-          .map((agent) => (agent.status === 'missing' ? `${agent.archetype} file missing` : describeCodexAgentIdentityRow(agent)))
-          .join('; ');
+        // Every verdict that is not "fine": `unmanaged` and `shadowed` are as
+        // actionable as `stale`, and dropping them here would print
+        // `Codex managed agents: stale — ; <fix>` with an empty detail.
+        const drifted = m.agents.filter((agent) => agent.status !== 'current' && agent.status !== 'not_applicable');
+        const detail = drifted.map(describeCodexAgentIdentityRow).join('; ');
         console.log(
           m.fresh
             ? 'Codex managed agents: current'

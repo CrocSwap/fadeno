@@ -47,7 +47,6 @@ import {
 } from '../lib/lane.ts';
 import { findRepoRoot } from '../lib/paths.ts';
 import {
-  codexUserAgentDir,
   isModelVerified,
   readUserDials,
   recordVerifiedModel,
@@ -56,10 +55,10 @@ import {
 } from '../lib/user-paths.ts';
 import { maintainedHarnesses } from '../lib/installations.ts';
 import {
-  CODEX_IDENTITY_REMEDIATION,
-  codexAgentIdentityStatus,
+  codexAgentIdentityRow,
+  codexIdentityRemediation,
   describeCodexAgentIdentityRow,
-  readCodexAgentFile,
+  effectiveCodexAgentCandidates,
   type CodexAgentIdentityRow,
   type CodexDialIdentity,
 } from '../lib/codex-agent-file.ts';
@@ -413,11 +412,23 @@ export interface DialSetResult {
    * put this here was a director dialing a role and then spawning the old
    * model for the rest of the session.
    *
-   * Non-null only when Codex is maintained and the file's identity differs, so
-   * `stale` is true whenever the field is present; read the field rather than
-   * the null-ness, which is what a later "current" notice would change.
+   * Non-null only when Codex is maintained and the file Codex would actually
+   * LOAD will not deliver this dial, so `stale` is true whenever the field is
+   * present; read the field rather than the null-ness, which is what a later
+   * "current" notice would change.
+   *
+   * `status` says which of the three ways it will not deliver it — the file's
+   * identity has drifted (`stale`), Fadeno did not write the file at all
+   * (`unmanaged`), or a project-scope broker shadows the host agent this dial
+   * needs (`shadowed`) — because they take three different fixes and `stale:
+   * true` alone cannot carry that.
    */
-  codex_materialization: { stale: boolean; detail: string; remediation: string } | null;
+  codex_materialization: {
+    stale: boolean;
+    status: CodexAgentIdentityRow['status'];
+    detail: string;
+    remediation: string;
+  } | null;
 }
 
 export interface DialSetManyOptions extends DialCommonOptions {
@@ -612,33 +623,51 @@ function unroutablePrimaryNote(params: {
  * whether the file is cut for it at all: a dial on any other harness
  * materializes as a command broker whose identity is the relay's, which the
  * shared `codexAgentIdentityStatus` then declines to judge.
+ *
+ * The file judged is the one Codex would actually LOAD, through the same
+ * `effectiveCodexAgentCandidates` `status` and `doctor` read. Reading the
+ * user-scope path directly was wrong twice over here, and the second way was
+ * the silent one: `if (state == null) return null` meant that when a project
+ * file shadowed an ABSENT user file — the ordinary state of a repo scaffolded
+ * by `fadeno init` on a machine where `fadeno setup --codex` never ran — the
+ * dial printed nothing at all, having decided there was no managed agent to
+ * disagree with while a project file sat there ready to spawn.
+ *
+ * `missing` (no file at either scope) still says nothing, and deliberately:
+ * this notice exists to catch a dial the LOADED file will not honour, and a
+ * repo with no agent files at all is `status`/`doctor`'s report to make, not a
+ * consequence of the dial just typed.
  */
 function codexIdentityNotice(
   archetype: string,
   compiled: CompiledDelivery,
+  repoRoot: string,
   userPathOptions: UserPathOptions | undefined,
 ): DialSetResult['codex_materialization'] {
   if (!maintainedHarnesses(userPathOptions).includes('codex')) return null;
-  const state = readCodexAgentFile(join(codexUserAgentDir(userPathOptions), `fadeno-${archetype}.toml`));
-  if (state == null) return null;
-  const file = { model: state.model, effort: state.reasoningEffort };
+  const candidate = effectiveCodexAgentCandidates(repoRoot, userPathOptions)
+    .find((item) => item.archetype === archetype) ?? null;
+  if (candidate == null) return null;
   const neutral = compiled.modelId === 'current-host';
   const dial: CodexDialIdentity = {
     model: neutral ? null : compiled.modelId,
     effort: neutral ? null : compiled.effectiveEffort,
     lane: compiled.harness === 'codex' ? 'host' : 'command',
   };
-  const row: CodexAgentIdentityRow = {
-    archetype,
-    file,
-    dial,
-    status: codexAgentIdentityStatus(file, dial),
-  };
-  if (row.status !== 'stale') return null;
+  const row: CodexAgentIdentityRow = codexAgentIdentityRow(archetype, candidate, dial);
+  // Every verdict that means "the file that loads will not deliver this dial".
+  // `unmanaged` and `shadowed` are as much the dial's business as `stale` is:
+  // in all three the user has just moved an identity that the next spawn will
+  // not carry, which is the exact silence this notice was added to break.
+  if (row.status !== 'stale' && row.status !== 'unmanaged' && row.status !== 'shadowed') return null;
   return {
     stale: true,
+    status: row.status,
     detail: describeCodexAgentIdentityRow(row),
-    remediation: CODEX_IDENTITY_REMEDIATION,
+    // The fix depends on which file loads; `codexIdentityRemediation` is the
+    // one place that mapping lives. Non-null by the guard above: every status
+    // that reaches here is one it has an answer for.
+    remediation: codexIdentityRemediation([row])!,
   };
 }
 
@@ -853,7 +882,7 @@ export function runDialSet(opts: DialSetOptions): DialSetResult {
     verification,
     narrative,
     notes: [...notes, ...(probeNote != null ? [probeNote] : [])],
-    codex_materialization: codexIdentityNotice(archetype, compiled, opts.userPathOptions),
+    codex_materialization: codexIdentityNotice(archetype, compiled, repoRoot, opts.userPathOptions),
   };
 }
 

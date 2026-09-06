@@ -760,11 +760,31 @@ managed file's `model`/`model_reasoning_effort` against what
 `steering resolve` reports for that archetype (`codexAgentIdentityStatus` →
 `current` | `stale` | `missing` | `not_applicable`, the last for a slot the
 dial resolves onto another provider's command lane, whose file identity is
-reported but not judged), and prints the drift with the one frozen fix,
-`CODEX_IDENTITY_REMEDIATION`. `fadeno dial` returns the same fact as
+reported but not judged), and prints the drift with the fix for the file it
+actually judged. `fadeno dial` returns the same fact as
 `codex_materialization` when the archetype it just set has drifted. File
 EXISTENCE was the whole test until 2026-09-05, which reported `current` at the
-exact moment it mattered least. `fadeno steering apply --codex --scope project` remains the explicit project override and
+exact moment it mattered least.
+
+The file both surfaces judge is the file Codex would actually LOAD, resolved
+through `effectiveCodexAgentCandidates` — project-over-user, where a
+`<repo>/.codex/agents/<archetype>.toml` makes the managed user-scope file
+invisible rather than merely lower priority. `doctor` had applied that
+precedence since it grew shadow-drift findings; `status` and `dial` read the
+user path alone until 2026-09-06 and so could vouch for a file no session
+loads, which is the ordinary state of any repo `fadeno init` has scaffolded.
+`codexAgentIdentityRow` is the one builder both go through, and it adds the two
+verdicts that are about the file's standing rather than its identity:
+`unmanaged` (Codex will load it, Fadeno did not write it, and matching
+model/effort keys do not license vouching for the rest of it) and `shadowed` (a
+project-scope command broker shadows the host agent a host-lane dial needs, so
+the dialed identity can never spawn there — and a broker's relay identity is
+not drift). Each row carries the `scope` and `path` it judged, because the fix
+depends on them: `CODEX_IDENTITY_REMEDIATION` (`--scope user`) rewrites a file
+a project copy is shadowing, `CODEX_PROJECT_IDENTITY_REMEDIATION` re-cuts or
+deletes the project copy, and `CODEX_UNMANAGED_IDENTITY_REMEDIATION` says to
+move the file, because no apply overwrites one Fadeno did not write.
+`codexIdentityRemediation` is the single place that mapping lives. `fadeno steering apply --codex --scope project` remains the explicit project override and
 then materializes every required slot into session-static role TOML: host slots
 become host agents using their configured model/effort, while command slots
 become cheap brokers that delegate through `fadeno dispatch`. Before each task,

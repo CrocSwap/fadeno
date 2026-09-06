@@ -560,6 +560,58 @@ All notable changes to Fadeno are documented here. The format follows
 
 ### Fixed
 
+- **`fadeno status` and `fadeno dial` judged a Codex agent file that no session
+  loads.** Both read `$CODEX_HOME/agents/fadeno-<archetype>.toml` and nothing
+  else, while Codex resolves `<repo>/.codex/agents/<archetype>.toml` FIRST and
+  never looks underneath it. So the identity comparison added on 2026-09-05 —
+  the one that exists because an agent file is a frozen identity no spawn value
+  can correct — was run against the wrong bytes: `status` printed `current`,
+  `doctor` said "managed host-agent state is current", and the file that would
+  actually spawn was a different one, possibly carrying a different model and
+  effort, possibly not written by Fadeno at all. This is not an exotic state.
+  `fadeno init` writes exactly those three project paths, so every scaffolded
+  repo on a machine that has also run `fadeno setup --codex` was in it, and
+  `doctor` — which has read the effective set through
+  `effectiveCodexAgentCandidates` since it grew shadow-drift findings — was
+  reporting one rule while the two identity surfaces applied another. One list,
+  two consumers, disagreeing: the same shape as the digest skew above.
+
+  `dial` failed the same way twice, and the second way was silent: its
+  `if (state == null) return null` meant that when a project file shadowed an
+  ABSENT user file, it concluded there was no managed agent to disagree with
+  and printed nothing at all.
+
+  Both now go through `codexAgentIdentityRow`, which feeds
+  `codexAgentIdentityStatus` — unchanged, and still declining to judge a
+  command broker — the file Codex would actually load. Each row carries the
+  `scope` and `path` it judged, because a verdict you cannot attribute to a
+  file cannot be acted on, and two new verdicts name what the identity
+  comparison alone would have got wrong:
+
+  - `unmanaged` — Codex will load it, Fadeno did not write it. Deliberately not
+    judged on model/effort: a hand-authored file whose two identity keys happen
+    to match the dial would otherwise be called `current`, which reads as a
+    claim about the whole file. It is not one — nothing here verifies the
+    instructions that make an agent resolve an envelope at all, and
+    `steering apply` will never refresh it.
+  - `shadowed` — a project-scope command broker shadows the host agent a
+    host-lane dial needs. `stale` would have been a lie in the other direction:
+    a broker carries the relay's model and effort by construction, so the
+    accusation would be about an identity no apply would ever write there. What
+    is actually wrong is structural — the host lane cannot be delivered in that
+    repo at all.
+
+  The remediation had to split with it. `CODEX_IDENTITY_REMEDIATION`
+  (`--scope user`) is not merely unhelpful for a project-scope shadow, it is
+  wrong: it rewrites the invisible file, the drift survives, and the next
+  session loads the same identity — and `--scope user` resolves the user dial
+  layer only, so it cannot bake the session or repo dial the row was judged
+  against. `CODEX_PROJECT_IDENTITY_REMEDIATION` re-cuts or deletes the project
+  copy; `CODEX_UNMANAGED_IDENTITY_REMEDIATION` says move the file, because no
+  apply overwrites one Fadeno did not write and `--force` is a project-scope
+  override only. `codexIdentityRemediation` is the single place that mapping
+  lives, so the three surfaces still cannot drift apart on it.
+
 - **One prompt digest for the shadow-pair roll — the hook and the kernel now
   agree.** The steering hook rolled a spawn's shadow attachment on the caller's
   prompt bytes; the kernel re-rolled the same attachment on the bytes it had

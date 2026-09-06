@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { runDialSet } from '../src/commands/dial.ts';
 import { runSteeringApply } from '../src/commands/steering.ts';
-import { CODEX_IDENTITY_REMEDIATION } from '../src/lib/codex-agent-file.ts';
+import {
+  CODEX_IDENTITY_REMEDIATION,
+  CODEX_PROJECT_IDENTITY_REMEDIATION,
+  CODEX_UNMANAGED_IDENTITY_REMEDIATION,
+} from '../src/lib/codex-agent-file.ts';
 import { userPaths, writeUserDials, type UserPathOptions } from '../src/lib/user-paths.ts';
 import { tempRepo } from './helpers.ts';
 
@@ -146,4 +150,98 @@ test('no notice when the archetype has no managed file at all', (t) => {
     user: true,
   });
   assert.equal(result.codex_materialization, null, 'a file that does not exist has no identity to disagree');
+});
+
+/**
+ * Codex loads `<repo>/.codex/agents/<archetype>.toml` before it ever looks at
+ * `$CODEX_HOME/agents/fadeno-<archetype>.toml`, and this notice read only the
+ * second one until 2026-09-06.
+ *
+ * The user-scope-only read failed in two directions, and this is the SILENT
+ * one: with no user-scope file the old code hit `if (state == null) return
+ * null` and printed nothing at all — having concluded there was no managed
+ * agent to disagree with, while a project file sat in the repo ready to spawn
+ * the identity the user had just dialed away from. That is the ordinary state
+ * of any repo scaffolded by `fadeno init` on a machine where `fadeno setup
+ * --codex` has not run.
+ */
+test('a project file shadowing an ABSENT user file still gets a notice', (t) => {
+  const fx = fixture(t);
+  writeUserDials(fx.user, { reviewer: { model: 'luna' } });
+  runSteeringApply({ repoRoot: fx.root, target: 'codex', scope: 'project', userPathOptions: fx.user });
+  assert.ok(!existsSync(join(fx.agentDir, 'fadeno-reviewer.toml')), 'nothing at user scope to read');
+
+  const result = runDialSet({
+    repoRoot: fx.root,
+    userPathOptions: fx.user,
+    archetype: 'reviewer',
+    model: 'terra',
+    user: true,
+  });
+
+  assert.ok(result.codex_materialization != null, 'the project file still carries the old identity');
+  assert.equal(result.codex_materialization.status, 'stale');
+  assert.match(result.codex_materialization.detail, /project file .*reviewer\.toml gpt-5\.6-luna\/xhigh vs dial gpt-5\.6-terra\/xhigh/);
+  // A user-scope apply would write a file this project copy shadows.
+  assert.equal(result.codex_materialization.remediation, CODEX_PROJECT_IDENTITY_REMEDIATION);
+  assert.notEqual(result.codex_materialization.remediation, CODEX_IDENTITY_REMEDIATION);
+});
+
+/**
+ * The loud direction of the same bug: a correct user-scope file underneath a
+ * drifted project one. The old reader found the user file, judged it current,
+ * and said nothing.
+ */
+test('a stale project file shadowing a CORRECT user file gets a notice', (t) => {
+  const fx = fixture(t);
+  seed(fx, { reviewer: { model: 'terra' } });
+  runSteeringApply({ repoRoot: fx.root, target: 'codex', scope: 'project', userPathOptions: fx.user });
+  const projectFile = join(fx.root, '.codex', 'agents', 'reviewer.toml');
+  writeFileSync(
+    projectFile,
+    readFileSync(projectFile, 'utf8')
+      .replace(/^model = ".*"$/m, 'model = "gpt-5.6-luna"')
+      .replace(/^model_reasoning_effort = ".*"$/m, 'model_reasoning_effort = "high"'),
+    'utf8',
+  );
+
+  const result = runDialSet({
+    repoRoot: fx.root,
+    userPathOptions: fx.user,
+    archetype: 'reviewer',
+    model: 'terra',
+    user: true,
+  });
+
+  assert.ok(result.codex_materialization != null, 'the user file agrees, but it is not the file that loads');
+  assert.equal(result.codex_materialization.status, 'stale');
+  assert.equal(agentFile(fx, 'reviewer').includes('gpt-5.6-terra'), true, 'the user-scope file is the correct one');
+});
+
+/**
+ * A file Fadeno never wrote is what Codex will load. Whatever this dial says,
+ * that file's instructions are unverified and no apply will refresh them, so
+ * the notice fires rather than pretending the dial took.
+ */
+test('an unmanaged project file gets its own notice and its own fix', (t) => {
+  const fx = fixture(t);
+  seed(fx, { reviewer: { model: 'terra' } });
+  mkdirSync(join(fx.root, '.codex', 'agents'), { recursive: true });
+  writeFileSync(
+    join(fx.root, '.codex', 'agents', 'reviewer.toml'),
+    'name = "reviewer"\nmodel = "gpt-5.6-terra"\nmodel_reasoning_effort = "xhigh"\n',
+    'utf8',
+  );
+
+  const result = runDialSet({
+    repoRoot: fx.root,
+    userPathOptions: fx.user,
+    archetype: 'reviewer',
+    model: 'terra',
+    user: true,
+  });
+
+  assert.ok(result.codex_materialization != null);
+  assert.equal(result.codex_materialization.status, 'unmanaged');
+  assert.equal(result.codex_materialization.remediation, CODEX_UNMANAGED_IDENTITY_REMEDIATION);
 });

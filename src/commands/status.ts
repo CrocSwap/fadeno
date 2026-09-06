@@ -16,10 +16,10 @@ import type { DialRef } from '../lib/executors.ts';
 import { inspectOpenCodeMaterialization, type OpenCodeMaterialization } from '../lib/opencode-steering.ts';
 import { inspectOmpMaterialization, type OmpMaterialization } from '../lib/omp-steering.ts';
 import {
-  CODEX_IDENTITY_REMEDIATION,
   CODEX_STEERING_ARCHETYPES,
-  codexAgentIdentityStatus,
-  readCodexAgentFile,
+  codexAgentIdentityRow,
+  codexIdentityRemediation,
+  effectiveCodexAgentCandidates,
   type CodexAgentIdentityRow,
   type CodexDialIdentity,
 } from '../lib/codex-agent-file.ts';
@@ -88,6 +88,12 @@ function harnessOf(target: StatusOptions['target'], userPathOptions?: UserPathOp
 }
 
 export interface CodexMaterialization {
+  /**
+   * The managed user-scope agent directory. Kept as the report's header even
+   * though a row may name a project-scope file instead: this is where the set
+   * Fadeno maintains lives, and each row now carries its own `path` for the
+   * file that was actually judged.
+   */
   path: string;
   /** No file missing and no host slot's identity drifted. */
   fresh: boolean;
@@ -106,6 +112,15 @@ export interface CodexMaterialization {
  * `reviewer` dial had moved to another model kept spawning the old identity,
  * because the agent file is a frozen identity that no spawn value can correct
  * (`findSpawnableCodexAgent`), and `status` said the managed agents were fine.
+ *
+ * The identity comparison that replaced it still read the WRONG FILE until
+ * 2026-09-06: `$CODEX_HOME/agents/fadeno-<archetype>.toml` and nothing else,
+ * while Codex resolves `<repoRoot>/.codex/agents/<archetype>.toml` first and
+ * never looks underneath it. So a repo scaffolded by `fadeno init` — which
+ * writes exactly those three project files — had every managed user-scope
+ * agent shadowed, and `status` judged and vouched for three files no session
+ * would load. `effectiveCodexAgentCandidates` is the one place that precedence
+ * is encoded, and `doctor` was already the only consumer applying it.
  *
  * The dial side comes from `runSteeringResolve`, so this asks the same
  * resolver `steering apply` and the spawn guard ask rather than re-deriving a
@@ -143,9 +158,14 @@ function materialization(
     ...userPathOptions,
     env: { ...(userPathOptions?.env ?? process.env), FADENO_HARNESS: 'codex' },
   };
+  // The file Codex would ACTUALLY resolve per archetype, project-over-user —
+  // not the managed user-scope file, which a project file makes invisible.
+  // `doctor` has read the effective set since it grew shadow-drift findings;
+  // reading a different one here is how `status` came to print `current` for a
+  // file no session loads.
+  const candidates = effectiveCodexAgentCandidates(repoRoot, userPathOptions);
   const agents = CODEX_STEERING_ARCHETYPES.map((archetype): CodexAgentIdentityRow => {
-    const state = readCodexAgentFile(join(path, `fadeno-${archetype}.toml`));
-    const file = state == null ? null : { model: state.model, effort: state.reasoningEffort };
+    const candidate = candidates.find((item) => item.archetype === archetype) ?? null;
     let dial: CodexDialIdentity | null = null;
     try {
       const resolved = runSteeringResolve({
@@ -168,7 +188,7 @@ function materialization(
       // `status` must not turn a catalog problem into an identity accusation.
       dial = null;
     }
-    return { archetype, file, dial, status: codexAgentIdentityStatus(file, dial) };
+    return codexAgentIdentityRow(archetype, candidate, dial);
   });
   const fresh = agents.every((agent) => agent.status === 'current' || agent.status === 'not_applicable');
   return {
@@ -176,7 +196,10 @@ function materialization(
     fresh,
     restartRequired: !fresh,
     agents,
-    remediation: fresh ? null : CODEX_IDENTITY_REMEDIATION,
+    // Per row, because the fix depends on WHICH file loads: a user-scope apply
+    // cannot reach a project-scope shadow, and neither apply overwrites a file
+    // Fadeno did not write.
+    remediation: codexIdentityRemediation(agents),
   };
 }
 
