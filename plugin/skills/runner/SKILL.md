@@ -64,11 +64,20 @@ bodies at canonical run paths; workers never invoke Fadeno ledger commands.
    <dispatch> --file <workspace>/<sidecar> --source agent`.
 9. If host subagents are available, delegate role-specific work to them — but
    **one level only**; do not assume a subagent can spawn its own subagents.
-10. If host subagents are unavailable, degrade loudly: use a declared command
-   executor or stop with the unavailable model/facility named. Never silently
-   substitute a requested host model.
-11. If host subagents are unavailable, simulate role separation with separate
-   passes and save each pass as a distinct artifact.
+10. If host subagents are UNAVAILABLE, walk this ladder in order and stop at
+   the first rung that works: (a) a declared command executor; (b) separate
+   role-passes in this session, under the honesty rule in 11; (c) stop, naming
+   the unavailable model or facility. Never silently substitute a requested
+   host model. "Unavailable" means the facility does not exist here. A dispatch
+   that EXISTS and FAILS — refused, errored, or returning nothing — is not this
+   rule: under host mode that is a user-facing event that stops the work, and
+   walking this ladder to route around it is the thing host mode forbids.
+11. Same-session role-passes are a degradation, and the artifacts must say so.
+   Save each pass as a distinct artifact AND record that one model played every
+   role — `agent: director`, never the archetype's dialed model. A run whose
+   reviewer was the author, recorded as though a second model reviewed, is a
+   fabricated comparison: the exact failure the role separation exists to
+   prevent. If you cannot record it honestly, take rung (c) and stop.
 12. Save every major output under `artifacts/`.
 13. Apply gates using the **structured judgment artifact**, not vague prose: an
     evaluator writes a schema-valid report or test result, then run

@@ -1446,21 +1446,30 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
    * It used to advertise `--timeout`, which no longer exists, and it used to
    * sell the command lane on three things the host lane supposedly could not
    * do — an isolated worktree, a dispatch id, a terminal receipt. All three
-   * are available on the host lane inside an engine run: `fadeno
-   * dispatch-prepare --isolate` cuts the worktree, the request carries the
-   * dispatch id, and `dispatch-complete` / `dispatch-fail` write the terminal
-   * receipt. Selling a lane on capabilities the other lane also has is how a
-   * caller ends up choosing the command lane for a reason that was never
-   * true. What is genuinely command-lane-only is named instead.
+   * are available on the host lane: inside an engine run through `fadeno
+   * dispatch-prepare --isolate` → `dispatch-complete`/`dispatch-fail`, and
+   * WITHOUT one through `fadeno dispatch-open` → `dispatch-close`. Selling a
+   * lane on capabilities the other lane also has is how a caller ends up
+   * choosing the command lane for a reason that was never true.
+   *
+   * The runless pair matters more than the run-scoped one here, because the
+   * caller reading this note is doing ad-hoc work: until `dispatch-open`
+   * existed, "the host lane gives all three inside an engine run" was an
+   * answer that required a playbook the caller did not have, and the honest
+   * reading of it was "so use the command lane". What is genuinely
+   * command-lane-only is named instead.
    */
   const hostLaneNote = hostLanePreferred
     ? `NOTE: ${shape} resolves to the HOST lane here (${laneDecision.lane_reason}), so the resolver's own ` +
       `choice for this task is the in-session ${shape} agent — spawn it and you are done; it is not a ` +
       'downgrade, it is the delivery every other caller gets. If you need a dispatch id, an isolated ' +
-      'worktree and a terminal receipt, the host lane gives all three inside an engine run: `fadeno ' +
-      'dispatch-prepare --isolate`, then `dispatch-complete`/`dispatch-fail`. Dispatch down the command ' +
-      'lane only for what neither of those can give: `--diagnostics`, or a shadow pair (both arms are ' +
-      'forced onto the command lane so they are comparable, so a pair is command-lane by construction). ' +
+      'worktree and a terminal receipt, the host lane gives all three with no playbook run: `fadeno ' +
+      'dispatch-open` cuts the worktree and mints the id, you spawn the in-session agent against it, and ' +
+      '`fadeno dispatch-close` merges the diff back and writes the receipt (inside an engine run the same ' +
+      'three come from `fadeno dispatch-prepare --isolate`, then `dispatch-complete`/`dispatch-fail`). ' +
+      'Dispatch down the command lane only for what neither of those can give: `--diagnostics`, or a ' +
+      'shadow pair (both arms are forced onto the command lane so they are comparable, so a pair is ' +
+      'command-lane by construction). ' +
       `This call already delivers out of process down the harness's own command lane; to send it to a ` +
       'DIFFERENT harness for this call only, without moving the dial, add `--harness <id>` (`fadeno ' +
       'models` lists them).'
@@ -1495,10 +1504,11 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     //
     // The same version also claimed the host lane gives no isolated worktree,
     // no dispatch id and no terminal receipt at all. That is only true of the
-    // bare spawn: a host delivery INSIDE AN ENGINE RUN gets all three from the
-    // host dispatch protocol. So the remedy named here is that run, not a
-    // re-dial, and `--timeout` — which no longer exists — is gone from the
-    // list of things the command lane uniquely offers.
+    // bare spawn: a host delivery gets all three from the host dispatch
+    // protocol — inside an engine run, and since `dispatch-open` also without
+    // one. So the remedy named here is that protocol, not a re-dial, and
+    // `--timeout` — which no longer exists — is gone from the list of things
+    // the command lane uniquely offers.
     throw new DispatchCommandError(
       (hostLaneNote != null ? `${hostLaneNote}\n\n` : '') +
         `resolved to host executor "${executorName}", which declares no fallback_command, so ad-hoc ` +
@@ -1511,9 +1521,11 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
         'code, no duration, no captured output, and nothing to read back with `fadeno dispatches --output ' +
         'tag:<tag>`. It also runs in this workspace with no isolated worktree, honours no --diagnostics, ' +
         'and forms no shadow pair. ' +
-        'The host lane INSIDE AN ENGINE RUN is a different matter and is the better remedy here: it gives ' +
-        'a dispatch id, an isolated worktree (`fadeno dispatch-prepare --isolate`) and a terminal receipt ' +
-        '(`fadeno dispatch-complete` / `dispatch-fail`) without needing a command lane at all.',
+        'The host DISPATCH PROTOCOL is a different matter and is the better remedy here: it gives a ' +
+        'dispatch id, an isolated worktree and a terminal receipt without needing a command lane at all. ' +
+        'With no playbook run: `fadeno dispatch-open`, spawn the in-session agent against the workspace it ' +
+        'prints, then `fadeno dispatch-close`. Inside an engine run: `fadeno dispatch-prepare --isolate`, ' +
+        'then `fadeno dispatch-complete` / `dispatch-fail`.',
     );
   }
   let command = spec.adapter === 'command' ? spec.command : spec.fallbackCommand!;

@@ -324,6 +324,13 @@ fadeno dispatch-complete <run-id> <dispatch-id> --output - < result.json
 fadeno dispatch-fail <run-id> <dispatch-id> --reason "blocked"
 fadeno dispatch-fallback <run-id> <dispatch-id> # exact snapshotted command fallback
 
+# The same three things — worktree, dispatch id, terminal receipt — with NO run:
+fadeno dispatch-open --archetype worker --tag lane-a   # cuts the worktree, mints the id, prints both
+#   ... spawn your in-session agent against the printed workspace ...
+fadeno dispatch-close tag:lane-a                       # collect the diff, merge it back, write the receipt
+fadeno dispatch-close tag:lane-a --reason "it 429'd"   # terminal FAILED receipt; nothing merges, the tree is kept
+
+
 # Engine-delivered Codex steering resolves the immutable request envelope:
 fadeno steering resolve --archetype worker --host-executor luna \
   --run <run-id> --dispatch-id <dispatch-id>

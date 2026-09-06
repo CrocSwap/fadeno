@@ -63,6 +63,133 @@ All notable changes to Fadeno are documented here. The format follows
   side carries the concrete intersection, so each of the pair names the other.
   Conflicts route to an integrator through the existing merge-back rebase.
 
+- **`fadeno dispatch-open` / `fadeno dispatch-close` — the host dispatch
+  protocol without a playbook run.** Fadeno is supposed to PREFER the host lane,
+  and the preference was advisory while the capability was one-sided. `fadeno
+  dispatch` isolates by default and merges the primary diff back, and it needs
+  no run: a worktree, a dispatch id and a terminal receipt from one invocation.
+  The host lane's equivalent was run-scoped all the way down —
+  `hostWorktreePath(runId, dispatchId)` takes a run id, `dispatch-prepare`
+  requires one, and `requestHostDispatch` is only ever called by the engine — so
+  a director doing ad-hoc parallel work had exactly ONE way to get isolation
+  plus receipts, and it was the lossy lane. That is not a wording problem, and
+  it is what a real Codex-director session did on 2026-09-05: a five-lane
+  campaign onto the command lane, five reports lost.
+
+  `dispatch-open` cuts the worktree, mints the id, opens the overlap window and
+  records the request; the host spawns its in-session agent against the printed
+  workspace (Fadeno cannot spawn into its own parent session, and does not
+  pretend to); `dispatch-close` collects the diff, merges it back, stamps
+  `concurrent_write`, closes the window and writes the terminal receipt.
+  `--reason <text>` records a FAILED outcome and merges nothing; `--no-merge`
+  records success and keeps the diff. The worktree is torn down on exactly one
+  condition — the work landed in the caller's tree — so no ending can destroy
+  work that has nowhere else to be.
+
+  The worktree comes from the SAME `prepareHostWorkspace` the engine's host lane
+  uses, with `adhoc` filling the run path segment: that argument is validated as
+  a path segment, not resolved as a run, and no `YYYY-MM-DD-HHMM-slug` run id
+  can collide with it. There is no `dispatch-start` on this lane, because the
+  host spawns out of band and Fadeno never sees the process — so there is ONE
+  terminal receipt rather than a `complete`/`fail` pair, and its `outcome` is
+  STATED by the host, never derived from an exit code that does not exist.
+
+  **Where the record lives.** `.fadeno/dispatches.jsonl`, beside the command
+  lane, not a synthesized ledger under `.fadeno/runs/adhoc-*`. A run-shaped
+  record would have made every existing verb work unchanged, and it loses on the
+  reader count: that log has one entry reader (`foldEvidenceRow`), where
+  `.fadeno/runs/` has `listRuns`, `resolveRun`, `verify`, `show`, `runs`,
+  `status`, `clean`, `doctor` and the persisted-state audit — and a
+  `run.schema.json` that REQUIRES a `playbook`, so a runless run is either a
+  schema violation or a fiction with a made-up playbook name in it. Teaching all
+  of those that some runs are not runs is the one-list-many-consumers failure
+  this repo keeps re-committing. The two new event names ship with their
+  `foldEvidenceRow` cases in the same change, because a row kind that reader
+  does not handle is counted as unreadable DAMAGE — the exact regression a838a0a
+  fixed for the rows that already existed.
+
+  **`fadeno verify` is not this lane's auditor, and now says so.** It audits run
+  ledgers: attempt contiguity, the playbook snapshot's digest, gate coherence,
+  the host-dispatch lifecycle. An ad-hoc host dispatch has none of those by
+  construction, so `verify` never sees one and can never falsely fail it — but
+  handed an ad-hoc dispatch id it used to answer "No run matching `<id>`", which
+  reads as *your evidence is gone* rather than *you are asking the wrong
+  command*. It now names what the id is, whether it is open or closed, why there
+  is nothing here to verify, and where the receipt actually is.
+
+  **`dispatch-prepare --isolate` stays required.** Confirmed, not assumed:
+  `HostWorkspaceState.workspace_mode` is the literal `'isolated'` and
+  `readHostWorkspaceState` refuses a state file that says anything else, so a
+  `--shared` prepare could not record what it had done; and a shared host
+  delivery needs no preparation at all, because `startHostDispatch` derives
+  `isIsolated` purely from whether that state file exists. The flag is not a
+  mode selector with one value filled in — there is no second mode.
+- **Readers for `concurrent_write` and `ignored_output_discarded`, because
+  neither had one.** Both fields are written by the kernel at a terminal
+  receipt and, until now, `grep -c` across `verify.ts` and `show.ts` returned
+  `0` for each. That makes the detection above worth what the relay-fidelity
+  warning was worth before `7c7a0f6`: `concurrent_write` reached one echo on
+  `fadeno dispatch`'s stdout, which is exactly what the recover-by-tag path
+  discards, and `ignored_output_discarded` reached only the `fadeno dispatches`
+  listing — which is not where anyone noticed a `data/research/` directory
+  disappear, twice, from a repo whose `.gitignore` carried a broad `data`
+  wildcard. The safety story of deleting the writer lock was "detect and
+  report"; nothing reported.
+
+  `fadeno verify` grows two findings, `concurrent-writes` and
+  `discarded-output`, and a fourth `FindingStatus`: **`warn`**. The existing
+  three share one axis — recomputed and holds, recomputed and does not, could
+  not recompute — and on that axis both attestations are `skip`, which is how
+  they stayed invisible: a skip reads as "nothing here". `warn` says the
+  opposite, and never fails the run. That restraint is the point rather than
+  timidity: a failing `verify` exits non-zero and makes `fadeno evidence`
+  refuse to promote the run, with `--allow-failed` ("accept an honest failed
+  terminal") as the only escape. An overlap is not proof of damage — path
+  granularity means two agents editing different functions in one file land
+  here — and discarding gitignored output is the DECLARED behaviour of the
+  `ignored_output: discardable` default, which `verify` cannot tell apart from
+  a lost deliverable. Gating on either would make ordinary runs unpromotable
+  and teach readers to reach for `--allow-failed`, which is the same outcome as
+  rendering nothing. `doctor` draws this line already with `ok | warning |
+  error`.
+
+  `fadeno show` renders a `DISCARDED OUTPUT` section and a `concurrent writes`
+  section directly under the workflow — **above** `active artifacts`, not down
+  with `failures`, because a reader who meets the artifact list first concludes
+  it is the whole product, which is precisely how the loss went unnoticed.
+  `fadeno dispatches` renders overlaps inline; that log is the only home of an
+  ad-hoc dispatch's stamp, so without it half the detection had no reader
+  anywhere.
+
+  On `fadeno dispatches --output` the two findings deliberately travel on
+  different channels. A discard is prefixed onto the returned **bytes**, beside
+  the relay banner, because it changes what the report means: a report that
+  says "wrote the analysis to `data/research/`" is describing files that are
+  not in your tree. An overlap is stated on stderr only — it does not make the
+  report false, and an in-band banner readers learn to scroll past protects
+  nothing. The banner is not hashed into `attested`: the digest on the
+  completion row is the executor's output.
+
+  One parser (`src/lib/receipt-attestations.ts`) backs all four surfaces.
+  Rendering stays local — a bracketed fragment on a one-line listing is not a
+  section heading in a run projection — but *whether there is a finding* is
+  decided once. Two readers wording a discard differently costs a re-read; two
+  readers disagreeing about whether there was one costs the output.
+
+### Fixed
+
+- **The engine recorded "I could not tell what was destroyed" as `[]`.**
+  `drive.ts` wrote `ignored_output_discarded` as a bare `string[]` while
+  `dispatch.ts` wrote the object with `truncated` and `note`. The scan is
+  capped (`IGNORED_OUTPUT_MAX_ENTRIES`) and a git failure returns a partial
+  listing, so on the engine path a floor was indistinguishable from a complete
+  set — and the worst case, a truncated scan that enumerated nothing, was
+  written as an empty array, byte-identical on the wire to a listing that found
+  nothing. It now writes the same object the ad-hoc path does. Rows already on
+  disk still read: an array is parsed as `truncated`, with a note saying it
+  carried no completeness flag, because a row that cannot state its own
+  completeness does not get assumed complete.
+
 ### Changed
 
 - **`src/lib/workspace-lease.ts` split.** Its own header always said it was two
@@ -78,9 +205,13 @@ All notable changes to Fadeno are documented here. The format follows
   no longer exists, and sold the command lane on an isolated worktree, a
   dispatch id and a terminal receipt — all three of which the host lane gives
   inside an engine run (`dispatch-prepare --isolate`, the request's dispatch id,
-  `dispatch-complete`/`dispatch-fail`). It now names the engine run as the third
-  option and keeps only what is genuinely command-lane-only: `--diagnostics`,
-  and a shadow pair, which forces both arms onto the command lane by design.
+  `dispatch-complete`/`dispatch-fail`). It now names the host dispatch protocol
+  as the third option and keeps only what is genuinely command-lane-only:
+  `--diagnostics`, and a shadow pair, which forces both arms onto the command
+  lane by design. With `dispatch-open` it names the RUNLESS pair first: the
+  caller reading that note is doing ad-hoc work, and "the host lane gives all
+  three inside an engine run" was an answer that required a playbook they did
+  not have — whose honest reading was *so use the command lane*.
 
 ### Changed — BREAKING
 
@@ -689,6 +820,47 @@ All notable changes to Fadeno are documented here. The format follows
   --json` no longer reports `harness_source: "user default"`.
 
 ### Fixed
+
+- **`doctor` called a Codex agent file `ok` two lines under its own
+  `unmanaged` warning about that same file.** The fix below added `unmanaged` —
+  Codex will load this file, Fadeno did not write it — to the identity row that
+  `status`, `dial` and `doctor`'s `codex-agents` check all print. `doctor`'s
+  own `codex-agents-project` finding never learned it: an unmanaged
+  project-scope file with no user-scope counterpart was reported as a
+  "project-scope Codex broker … so nothing is being shadowed", severity `ok`,
+  in the same report that had just refused to vouch for it. One file, two
+  verdicts, in two commands a user runs side by side — and this instance was
+  created by the fix for the previous instance of the same bug class.
+
+  Both surfaces are kept, because they are asking different questions and both
+  answers are true. `codex-agents-project` is RELATIONAL: does this project
+  file override the managed user-scope set? With no user file underneath it,
+  nothing is being overridden, and that is genuinely `ok` — a second warning
+  about the same path would read as a second problem. `codex-agents` is about
+  the file Codex would actually load: can Fadeno vouch for it, and does its
+  identity match the dial? What was false was neither verdict but the finding's
+  SCOPE CLAIM. It called every project file a "broker" — a Fadeno artifact
+  noun, asserting a provenance the check never checked — and its unqualified
+  `ok` read as a clean bill of health. It now says what it read and what it did
+  not: the unmanaged file is named as carrying no managed header, the `ok` is
+  stated as covering the shadowing relation only, and the file itself is handed
+  to the `codex-agents` row. Its remediation stops promising that such a file
+  "would win over" the managed set once `fadeno setup --codex` runs, without
+  adding that it would then never be refreshable;
+  `CODEX_UNMANAGED_IDENTITY_REMEDIATION` is interpolated rather than re-spelled.
+
+  The point is not the wording, it is that the two surfaces can no longer drift.
+  The shadow findings now take their file set from
+  `effectiveCodexAgentCandidates` — the one encoding of Codex's
+  project-over-user precedence — instead of re-sweeping `.codex/agents/`
+  themselves, and their standing verdict from `codexAgentFileVouched`, which is
+  `codexAgentIdentityRow` asked with a null dial. A null dial is the builder's
+  own "unresolvable" input, under which no identity comparison happens and only
+  the standing verdicts are reachable, and the helper asks for
+  `not_applicable` rather than for NOT-`unmanaged` so that a standing verdict
+  added later stops `doctor` vouching automatically instead of slipping past a
+  predicate that knew one name. A second hand-rolled `!managed` test is exactly
+  how these two came apart.
 
 - **`fadeno status` and `fadeno dial` judged a Codex agent file that no session
   loads.** Both read `$CODEX_HOME/agents/fadeno-<archetype>.toml` and nothing

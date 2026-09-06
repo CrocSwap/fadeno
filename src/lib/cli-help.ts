@@ -99,6 +99,24 @@ const TOP_LEVEL: Record<string, PageSeed> = {
   steering: page('Resolve dials or materialize harness steering.', ['fadeno steering resolve --archetype <name> [options]', 'fadeno steering apply --codex|--claude|--opencode|--omp [options]']),
   dispatch: page('Resolve an archetype and invoke it once.', ['fadeno dispatch --archetype <name> [options]', 'fadeno dispatch --model <ref> [options]'], ['Read prompt text from stdin or `--prompt-file`. `--archetype` is required unless `--model` is supplied; both are accepted.', 'Dispatches isolate by default and merge a successful primary diff back. `--isolate` withholds merge-back; `--shadow <ref>` adds a one-shot challenger.', 'A failed relay-fidelity check refuses the dispatch before the executor spawns; `--allow-relay-mismatch` proceeds and records `relay_mismatch_allowed: true`.', 'Recover output with `fadeno dispatches --output tag:<tag> --wait 120`.']),
   'dispatch-prepare': page('Prepare an isolated workspace for a pending host dispatch.', 'fadeno dispatch-prepare <run> <dispatch-id> --isolate'),
+  'dispatch-open': page(
+    'Open a runless host dispatch: an isolated worktree, an id, and a receipt to come.',
+    'fadeno dispatch-open [--archetype <name>] [--tag <handle>] [--note <text>]',
+    [
+      'The host-lane twin of `fadeno dispatch --isolate`, with no playbook run behind it: it cuts a worktree from HEAD with your uncommitted state replayed into it, mints a dispatch id, and records the request in `.fadeno/dispatches.jsonl`.',
+      'Spawn your in-session agent against the printed workspace, then close it with `fadeno dispatch-close`. Nothing is merged and no receipt exists until you do.',
+      'There is no run ledger, so `fadeno verify` has nothing to audit here; `fadeno dispatches` is where the dispatch and its receipt appear.',
+    ],
+  ),
+  'dispatch-close': page(
+    'Record the terminal receipt for a runless host dispatch.',
+    'fadeno dispatch-close <id|tag:<handle>|last> [--reason <text>] [--no-merge] [--agent-id <id>]',
+    [
+      'Collects the worktree\'s diff, merges it back into this workspace, and removes the worktree — the same ending `fadeno dispatch` gives a command-lane primary.',
+      '`--reason <text>` records a FAILED outcome and merges nothing. `--no-merge` records success but leaves the diff for you to apply.',
+      'The worktree is removed on exactly one condition: the work landed in this tree. Every other ending retains it and the command says where it is.',
+    ],
+  ),
   'dispatch-prompt': page('Emit the canonical host-dispatch envelope.', 'fadeno dispatch-prompt <run> <dispatch-id>'),
   'dispatch-fallback': page('Deliver a locked host request through its declared fallback.', 'fadeno dispatch-fallback <run> <dispatch-id>'),
   'dispatch-start': page('Record a host dispatch start.', 'fadeno dispatch-start <run> <dispatch-id> --agent-id <host-agent-id> [options]'),
@@ -175,7 +193,9 @@ const OPTION_HINTS: Record<string, string> = {
   '--max-transitions': 'Engine transition limit', '--measure-only': 'Measure without adjudicating', '--member': 'Map member attribution',
   '--merge': 'Dispatch id or tag to merge', '--model': 'Direct model reference', '--n': 'Maximum shadow pairings',
   '--allow-relay-mismatch': 'Proceed despite a failed relay-fidelity check',
-  '--native-executor': 'Legacy host-executor spelling', '--no-brief': 'Skip archetype brief preamble', '--no-record': 'Preview without recording',
+  '--native-executor': 'Legacy host-executor spelling', '--no-brief': 'Skip archetype brief preamble',
+  '--no-merge': 'Keep the diff instead of merging it back', '--note': 'Free text recorded on the request',
+  '--no-record': 'Preview without recording',
   '--no-steering': 'Do not scaffold steering', '--non-interactive': 'Never prompt during setup', '--omp': 'Target omp',
   '--opencode': 'Target OpenCode', '--output': 'Output artifact path or selector', '--parallel': 'Concurrent deliveries in isolated worktrees',
   '--prepare': 'Write blinded judge prompts', '--prompt-file': 'Read prompt from file', '--prompt-sha256': 'Prompt content SHA-256',
@@ -212,7 +232,7 @@ const OPTION_FORMS: Record<string, string> = {
   '--tail': '--tail <count>', '--wait': '--wait <seconds>', '--cancel': '--cancel <id|tag>', '--merge': '--merge <id|tag>',
   '--arm': '--arm <arm>', '--shadow': '--shadow <ref>', '--evidence': '--evidence <mode>', '--comparison': '--comparison <path>',
   '--adversarial': '--adversarial <path>', '--judge': '--judge <ref>', '--scope': '--scope <project|user>',
-  '--from': '--from <bin-dir>', '--unbind': '--unbind <role>',
+  '--from': '--from <bin-dir>', '--unbind': '--unbind <role>', '--note': '--note <text>',
 };
 
 const withGlobals = (...flags: string[]): readonly string[] => ['--help', '--version', ...flags];
@@ -243,6 +263,8 @@ const PAGE_OPTIONS: Record<string, readonly string[]> = {
   steering: withGlobals(),
   dispatch: withGlobals('--archetype', '--model', '--role', '--harness', '--prompt-file', '--tag', '--shadow', '--isolate', '--shared', '--ignored-output', '--diagnostics', '--no-brief', '--allow-relay-mismatch'),
   'dispatch-prepare': withGlobals('--isolate'),
+  'dispatch-open': withGlobals('--archetype', '--tag', '--note'),
+  'dispatch-close': withGlobals('--reason', '--no-merge', '--tag', '--agent-id'),
   'dispatch-prompt': withGlobals(),
   'dispatch-fallback': withGlobals(),
   'dispatch-start': withGlobals('--agent-id', '--workspace', '--branch'),
@@ -391,6 +413,7 @@ Models and delivery
 Host dispatch protocol
   dispatch-prepare, dispatch-prompt, dispatch-start, dispatch-progress,
   dispatch-complete, dispatch-fail, dispatch-withdraw, dispatch-fallback
+  dispatch-open, dispatch-close  (runless: no playbook run required)
 
 Setup and maintenance
   setup, status, doctor, vendor, unvendor, clean, uninstall, plugin, completion

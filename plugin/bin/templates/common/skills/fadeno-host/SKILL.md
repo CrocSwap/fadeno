@@ -78,10 +78,21 @@ Fadeno.
   `--work-left <path>` when the tree still holds the dispatch's edits. Until
   that receipt exists the dispatch reads as potentially live to you and to
   everyone after you.
+- Ad-hoc parallel work does not need a playbook run to get isolation and
+  receipts on the host lane. `fadeno dispatch-open [--archetype <a>] [--tag
+  <handle>]` cuts a worktree from HEAD with your uncommitted state replayed
+  into it, mints a dispatch id, and prints the workspace path; spawn your
+  in-session agent with that directory as its working tree, then
+  `fadeno dispatch-close <id|tag:<handle>>` collects the agent's diff, merges
+  it back, and writes the terminal receipt (`--reason <text>` records a FAILED
+  receipt and merges nothing; `--no-merge` keeps the diff for you to apply).
+  Reach for the command lane only for what it alone gives — `--diagnostics`, or
+  a shadow pair. An ad-hoc host dispatch has no run ledger, so `fadeno verify`
+  is not its auditor: `fadeno dispatches` is where it and its receipt appear.
 - Two implementers must not share one tree. When a second implementation
   dispatch would overlap a live one, isolate it (`fadeno dispatch --isolate`,
-  or `fadeno dispatch-prepare --isolate` on the host lane) rather than letting
-  both write the same working copy. A Bash `PreToolUse` hook refuses the
+  or `fadeno dispatch-open` / `fadeno dispatch-prepare --isolate` on the host
+  lane) rather than letting both write the same working copy. A Bash `PreToolUse` hook refuses the
   destructive git subcommands (`checkout`, `switch`, `restore`, `reset`,
   `stash`, `clean`) inside the managed `worker`, `reviewer` and `judge` agents,
   but that guard is **partial and must not be relied on**: it identifies role

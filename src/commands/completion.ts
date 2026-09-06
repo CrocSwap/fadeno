@@ -179,6 +179,11 @@ const COMMANDS: Record<string, CommandSpec> = {
     },
   ),
   'dispatch-prepare': command({ '--isolate': NONE }, ['run', 'dispatch-id']),
+  'dispatch-open': command({ '--archetype': { kind: 'archetype' }, '--tag': { kind: 'free' }, '--note': { kind: 'free' } }),
+  'dispatch-close': command(
+    { '--reason': { kind: 'free' }, '--no-merge': NONE, '--tag': { kind: 'free' }, '--agent-id': { kind: 'free' } },
+    ['free'],
+  ),
   'dispatch-prompt': command({}, ['run', 'dispatch-id']),
   'dispatch-fallback': command({}, ['run', 'dispatch-id']),
   'dispatch-start': command({ '--agent-id': { kind: 'free' }, '--workspace': PATH, '--branch': { kind: 'free' } }, ['run', 'dispatch-id']),

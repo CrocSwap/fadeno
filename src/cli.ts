@@ -65,6 +65,8 @@ import { EVIDENCE_MODES, isEvidenceMode, type EvidenceMode } from './lib/bakeoff
 import { runSteeringApply, runSteeringApplyClaude, runSteeringApplyOpenCode, runSteeringApplyOmp, runSteeringResolve } from './commands/steering.ts';
 import { runDispatchPrompt } from './commands/dispatch-prompt.ts';
 import { runDispatchPrepare } from './commands/dispatch-prepare.ts';
+import { runDispatchClose, runDispatchOpen } from './commands/dispatch-adhoc.ts';
+import { mergeBackReapplyCommand } from './lib/workspace-baseline.ts';
 import { runDispatchWithdraw } from './commands/dispatch-withdraw.ts';
 import { runToolComplete } from './commands/tool-complete.ts';
 import { runToolRun } from './commands/tool-run.ts';
@@ -462,6 +464,34 @@ function printProjection(projection: ShowProjection): void {
       if (runtime != null) details.push(runtime);
       if (instance.generation != null) details.push(`generation ${instance.generation}`);
       console.log(`${indent}    ${STEP_GLYPHS[instance.state]} ${instance.member ?? instance.id}  ${details.join(' · ')}`);
+    }
+  }
+
+  // Both sections sit HERE — directly under the workflow, above the process
+  // facts and well above `active artifacts` — because they qualify the thing
+  // the reader is about to be shown. A reader who meets the artifact list
+  // first concludes it is the whole product, which is exactly how a
+  // `data/research/` deliverable was lost twice without anyone noticing;
+  // `failures` at the bottom of this projection is the other end of the page.
+  if (projection.discardedOutput.length > 0) {
+    const truncated = projection.discardedOutput.some((item) => item.truncated);
+    console.log(
+      `\nDISCARDED OUTPUT — gitignored content no diff carried out of its worktree${truncated ? ' (at least: a listing was a FLOOR, not the set)' : ''}`,
+    );
+    for (const item of projection.discardedOutput) {
+      const where = `${item.step ?? '(run)'}${item.actor != null ? `/${item.actor}` : ''}`;
+      console.log(`  ${where}: ${item.detail}`);
+    }
+  }
+
+  if (projection.workspaceOverlaps.length > 0) {
+    // The header states the register before the rows do. Nothing prevents a
+    // concurrent writer any more, so this is a record that one happened —
+    // not a finding that either side lost work.
+    console.log('\nconcurrent writes (attestation, non-gating — an overlap is not proof of damage)');
+    for (const item of projection.workspaceOverlaps) {
+      const where = `${item.step ?? '(run)'}${item.actor != null ? `/${item.actor}` : ''}`;
+      console.log(`  ${where}: ${item.detail}`);
     }
   }
 
@@ -1041,17 +1071,30 @@ function printVerify(result: VerifyResult): void {
   console.log(`run ${run.runId}  [${run.status ?? '?'}]`);
   console.log('');
   for (const f of findings) {
-    const token = f.status === 'fail' ? 'FAIL' : f.status;
+    // WARN is uppercased alongside FAIL because it is a finding, not a state
+    // of the checker: a lower-case token next to `ok` and `skip` is how an
+    // attestation reads as bookkeeping. It stays on stdout — a warning is
+    // part of the report, and stderr is the channel a recover-by-tag drops.
+    const token = f.status === 'fail' ? 'FAIL' : f.status === 'warn' ? 'WARN' : f.status;
     const line = `  ${token.padEnd(4)}  ${f.check.padEnd(22)}  ${f.detail}`;
     if (f.status === 'fail') console.error(line);
     else console.log(line);
   }
 
-  const counts = { ok: 0, skip: 0, fail: 0 };
+  const counts = { ok: 0, skip: 0, fail: 0, warn: 0 };
   for (const f of findings) counts[f.status] += 1;
-  const summary = `\nverify: ${counts.ok} ok, ${counts.skip} skipped, ${counts.fail} failed`;
+  const summary = `\nverify: ${counts.ok} ok, ${counts.skip} skipped, ${counts.warn} warned, ${counts.fail} failed`;
   if (ok) console.log(summary);
   else console.error(summary);
+  // A zero exit with warnings is the exact shape that let `concurrent_write`
+  // and `ignored_output_discarded` go unread, so the summary names them
+  // rather than leaving a reader to notice a count changed.
+  const warned = findings.filter((f) => f.status === 'warn');
+  if (warned.length > 0) {
+    console.log(
+      `  warnings (not failures — verify cannot adjudicate these): ${warned.map((f) => f.check).join(', ')}`,
+    );
+  }
 }
 
 type TargetFlags = { codex?: boolean; claude?: boolean; grok?: boolean; opencode?: boolean; omp?: boolean };
@@ -1241,6 +1284,8 @@ function main(argv: string[]): number {
         withdraw: { type: 'string' },
         'work-left': { type: 'string' },
         merge: { type: 'string' },
+        'no-merge': { type: 'boolean' },
+        note: { type: 'string' },
         commit: { type: 'string' },
         reason: { type: 'string' },
         decision: { type: 'string' },
@@ -2273,6 +2318,71 @@ function main(argv: string[]): number {
       console.log(`${result.dispatchId} prepared isolated at ${result.workspace} (base ${result.baseCommit.slice(0, 8)})${result.idempotent ? ' (idempotent)' : ''}`);
       return 0;
     }
+    case 'dispatch-open': {
+      const result = runDispatchOpen({
+        archetype: values.archetype,
+        tag: values.tag,
+        note: values.note,
+      });
+      console.log(`${result.dispatchId} opened (host lane, isolated)`);
+      console.log(`  workspace: ${result.workspaceAbs}`);
+      console.log(`  base:      ${result.baseCommit.slice(0, 12)}`);
+      // The one thing the host must actually do next, spelled out: spawn into
+      // that directory, then close. A director that reads only this block has
+      // everything the command lane's single invocation would have done for it.
+      console.log(
+        '  Spawn your in-session agent with that directory as its working tree, then record the receipt:',
+      );
+      console.log(
+        `    fadeno dispatch-close ${result.tag != null ? `tag:${result.tag}` : result.dispatchId.slice(0, 8)}` +
+          '            # merges the agent\'s diff back',
+      );
+      console.log(
+        `    fadeno dispatch-close ${result.tag != null ? `tag:${result.tag}` : result.dispatchId.slice(0, 8)} --reason <text>  # it failed; nothing is merged`,
+      );
+      return 0;
+    }
+    case 'dispatch-close': {
+      const [, target] = positionals;
+      if (!target) {
+        throw new Error('Usage: fadeno dispatch-close <id|tag:<handle>|last> [--reason <text>] [--no-merge] [--agent-id <id>]');
+      }
+      const inlineTag = target.startsWith('tag:') ? target.slice(4) : null;
+      const result = runDispatchClose({
+        dispatchId: inlineTag != null ? '' : target,
+        tag: inlineTag ?? values.tag,
+        reason: values.reason,
+        noMerge: values['no-merge'] === true,
+        agentId: values['agent-id'],
+        onEcho: (line) => console.error(line),
+      });
+      const how = result.resolvedBy === 'tag' ? ` (tag: ${result.tag})` : '';
+      console.log(
+        `${result.dispatchId.slice(0, 8)}${how} closed: ${result.outcome}` +
+          `${result.idempotent ? ' (idempotent)' : ''}`,
+      );
+      if (result.diffSnapshot != null) {
+        console.log(`  diff: ${result.diffBytes ?? 0} bytes at ${result.diffSnapshot}`);
+      }
+      if (result.merge != null) {
+        console.log(
+          `  merge-back: ${result.merge.status}${result.merge.detail != null ? ` — ${result.merge.detail}` : ''}`,
+        );
+      }
+      if (result.workspaceRetained != null) {
+        // Never silent about a tree that still holds work: this is the one
+        // fact a host cannot recover from anywhere else.
+        console.log(
+          `  worktree RETAINED at ${result.workspaceRetained}` +
+            (result.diffSnapshot != null
+              ? ` — apply it with \`${mergeBackReapplyCommand(result.diffSnapshot)}\``
+              : ''),
+        );
+      } else if (result.workspaceRemoved) {
+        console.log('  worktree removed; the work is in this workspace.');
+      }
+      return 0;
+    }
     case 'dispatch-fail': {
       const [, run, dispatchId] = positionals;
       if (!run || !dispatchId || !values.reason) {
@@ -2517,7 +2627,25 @@ function main(argv: string[]): number {
           ? `RELAY FIDELITY FAILED (relay_attested: false${result.relayMismatchAllowed ? ', dispatched under --allow-relay-mismatch' : ''}) — ` +
             'the report above answers a prompt the caller never wrote; do not relay it as an answer'
           : null;
-        const note = [relay, verdict, merge, attestation].filter((part) => part != null).join('; ');
+        // Repeated here for the human at the terminal; the banner in the bytes
+        // is what survives a relay. Neither is a substitute for the other.
+        const discarded = result.ignoredOutputDiscarded == null
+          ? null
+          : `GITIGNORED OUTPUT DISCARDED${result.ignoredOutputDiscarded.truncated ? ' (the listing is a FLOOR, not the set)' : ''} — ` +
+            `${result.ignoredOutputDiscarded.paths.slice(0, 5).join(', ') || '(paths unrecorded)'}: no diff carried ` +
+            'this out of the worktree, so it is not in your tree';
+        // Not prefixed onto the bytes: an overlap does not make the report
+        // false. It is still stated, because nothing prevents a concurrent
+        // writer any more and this is one of the two places it can be read.
+        const overlap = result.concurrentWrite == null || result.concurrentWrite.length === 0
+          ? null
+          : `concurrent_write: ${result.concurrentWrite.length} other ` +
+            `${result.concurrentWrite.length === 1 ? 'delivery' : 'deliveries'} wrote while this ran ` +
+            `(${result.concurrentWrite.map((stamp) => stamp.dispatchId.slice(0, 8)).join(', ')}) — an ` +
+            'attestation, not proof of damage; `fadeno dispatches` names the intersecting paths';
+        const note = [relay, discarded, verdict, merge, attestation, overlap]
+          .filter((part) => part != null)
+          .join('; ');
         // Say how `last` landed. Recency now only survives when nothing
         // overlapped this dispatch — concurrent-and-finished refuses outright —
         // so the note reports that narrowed claim rather than a bare warning.

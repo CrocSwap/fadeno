@@ -213,9 +213,20 @@ export const PERSISTED_SURFACES: readonly PersistedSurface[] = [
     format: 'jsonl',
     versionField: 'format',
     currentVersion: '1.1',
-    reader: 'lookupInputProducers / findTagOccupant (src/commands/dispatch.ts), src/commands/dispatches.ts',
-    writer: 'appendEvidenceRow (src/commands/dispatch.ts) + the Claude steering hook, which writes the stamp as a literal',
-    notes: 'Per-ROW stamp, not per-file: the log is append-only, so rows outlive the shape they were written in.',
+    reader:
+      'lookupInputProducers / findTagOccupant (src/commands/dispatch.ts), src/commands/dispatches.ts, ' +
+      'readAdhocHostRecords (src/commands/dispatch-adhoc.ts)',
+    writer:
+      'appendEvidenceRow (src/commands/dispatch.ts), called by the command lane, by the runless host lane ' +
+      '(src/commands/dispatch-adhoc.ts), and by the Claude steering hook, which writes the stamp as a literal',
+    notes:
+      'Per-ROW stamp, not per-file: the log is append-only, so rows outlive the shape they were written in. '
+      + 'THREE lanes write here — command (`dispatch_requested`/`dispatch_completed`/`dispatch_withdrawn`), '
+      + 'runless host (`adhoc_host_dispatch_requested`/`adhoc_host_dispatch_closed`), and the steering hook '
+      + '(`host_delivery`/`host_refused`/`host_rewritten`/`native_spawn`/`host_attestation`) — and every one of '
+      + 'their event names is additive under format 1.x, because readers tier on the MAJOR. A row kind the '
+      + 'entry reader does not handle is counted as unreadable DAMAGE, so a new event name always ships with '
+      + 'its `foldEvidenceRow` case.',
   },
   {
     id: 'run-ledger',
