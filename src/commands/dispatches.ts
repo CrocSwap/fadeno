@@ -686,6 +686,18 @@ export interface DispatchesOutputResult {
   exitCode: number | null;
   signal: string | null;
   outputBytes: number | null;
+  /**
+   * Where the executor's stderr was retained, from the completion row.
+   *
+   * `dispatch` no longer relays that transcript to the terminal — it is
+   * retained and its path echoed — and the echo goes on stderr, which is
+   * exactly what a killed Bash call discards. This is how the caller who
+   * recovers by tag learns where it went. `stderrTruncated` is carried
+   * alongside because a path is a claim about what is IN the file.
+   */
+  stderrSnapshot: string | null;
+  stderrBytes: number | null;
+  stderrTruncated: boolean;
   /** The deadline that killed it, when `outcome` is `timeout`. */
   timeoutMs: number | null;
   /** The merge-back stamp, when the dispatch ran isolated and one was attempted. */
@@ -2130,6 +2142,20 @@ interface OutputRecord {
   exitCode: number | null;
   signal: string | null;
   outputBytes: number | null;
+  /**
+   * The retained executor stderr transcript, from the completion row.
+   *
+   * Read here for the reason this command exists: `dispatch` echoes the path
+   * on stderr, and stderr is what a killed Bash call takes with it. Without
+   * this, the one caller who most needs the transcript — the one recovering
+   * by tag after losing every byte the dispatch printed — could not be told
+   * where it is.
+   */
+  stderrSnapshot: string | null;
+  /** Bytes the executor wrote, which is not what the snapshot holds when truncated. */
+  stderrBytes: number | null;
+  /** The snapshot is a head+tail sample of `stderrBytes`, not the whole stream. */
+  stderrTruncated: boolean;
   /** The deadline that killed it, when `outcome` is `timeout`. */
   timeoutMs: number | null;
   /** The merge-back stamp, when the dispatch ran isolated and one was attempted. */
@@ -2292,6 +2318,9 @@ function loadOutputRecords(absolute: string): {
         exitCode: null,
         signal: null,
         outputBytes: null,
+        stderrSnapshot: null,
+        stderrBytes: null,
+        stderrTruncated: false,
         timeoutMs: null,
         primaryMerge: null,
         workspace: null,
@@ -2346,6 +2375,12 @@ function loadOutputRecords(absolute: string): {
       rec.exitCode = typeof row.exit_code === 'number' ? row.exit_code : null;
       rec.signal = str(row.signal);
       rec.outputBytes = typeof row.output_bytes === 'number' ? row.output_bytes : null;
+      rec.stderrSnapshot = str(row.stderr_snapshot);
+      rec.stderrBytes = typeof row.stderr_bytes === 'number' ? row.stderr_bytes : null;
+      // Absent means "the whole stream is in that file". A row written before
+      // this field existed carries no transcript path either, so there is no
+      // legacy row for which the default could claim completeness it lacks.
+      rec.stderrTruncated = row.stderr_truncated === true;
       rec.timeoutMs = typeof row.timeout_ms === 'number' ? row.timeout_ms : null;
       // Stated outcome first, derived from the row's facts for rows written
       // before the field — the same rule the listing applies.
@@ -2701,6 +2736,9 @@ export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOu
     exitCode: rec.completed ? rec.exitCode : null,
     signal: rec.completed ? rec.signal : null,
     outputBytes: rec.completed ? rec.outputBytes : null,
+    stderrSnapshot: rec.completed ? rec.stderrSnapshot : null,
+    stderrBytes: rec.completed ? rec.stderrBytes : null,
+    stderrTruncated: rec.completed ? rec.stderrTruncated : false,
     timeoutMs: rec.completed ? rec.timeoutMs : null,
     primaryMerge: rec.completed ? rec.primaryMerge : null,
     workspace: rec.completed ? rec.workspace : null,

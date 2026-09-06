@@ -197,7 +197,7 @@ assert on return values and filesystem effects instead of scraping stdout.
 | `runPrompt` | prompt text + sha + record status + plan | Deterministic step-prompt assembler; records a snapshot + `prompt_assembled` by default. Pure resolution/rendering live in `lib/prompt-resolve.ts` + `lib/prompt.ts`. |
 | `runNext` | next-step JSON (`status`, `step`, `gate`, …) | Pure flow cursor over playbook + events; read-only. Logic in `lib/flow-cursor.ts`. |
 | `runDialShow` / `…Set` / `…Clear` / `…Shadow` | effective dial table + layered dial state | `set`/`clear` pin `.fadeno/local/dials` (session) or `$FADENO_STATE_HOME/dials.json` (user) or `dials:` (repo); shadows are session-pinned. Resolution via `resolveDialCascade` + `resolveDelivery` in `lib/executors.ts`. |
-| `runDispatch` | executor report + evidence row | Ad-hoc archetype→executor dispatch; appends a correlated `dispatch_requested`/`dispatch_completed` row pair to `.fadeno/dispatches.jsonl`. Refuses before spawning on eligibility, a `constraints.command` refusal, or a delivery with no argv to invoke. Echo goes to stderr so stdout stays the executor's pure report. |
+| `runDispatch` | executor report + evidence row | Ad-hoc archetype→executor dispatch; appends a correlated `dispatch_requested`/`dispatch_completed` row pair to `.fadeno/dispatches.jsonl`. Refuses before spawning on eligibility, a `constraints.command` refusal, or a delivery with no argv to invoke. Echo goes to stderr so stdout stays the executor's pure report; the executor's own stderr is retained to `stderr_snapshot` and only excerpted onto the terminal (see the transcript entry below). |
 | `runDispatches` | correlated dispatch rows | Read-only projection of `.fadeno/dispatches.jsonl`: pairs `dispatch_requested`/`dispatch_completed` by `dispatch_id`, keeps `host_delivery` rows inline, and marks a request with no completion as killed-or-in-flight rather than dropping it. Pre-format legacy rows render as `[legacy]`; newer-format rows get a separate count. `--tail <N>` (default 10) / `--json`. |
 | `runSteeringResolve` / `runSteeringApply` | hybrid mode / emitted Codex agents | Resolves host vs command vs restart-required vs write-conflict per invocation; materializes per-slot host agents or cheap command brokers, declining brokers for write-conflicted slots. |
 | `runToolRun` | `ToolRunResult` + `artifact` | Executes a registered `tool_call` (`test-result` only) deterministically: strict registry, supervisor/process-group, overlap window, bounded TestResult synthesis, exclusive placement, and `tool_dispatched`/`tool_completed`/`tool_failed` lifecycle. Thin adapter over `lib/tool-exec.ts`. |
@@ -314,6 +314,27 @@ back to ordinary file completion when no specialized candidates apply.
   `workspace-lease.json` remains, so `doctor` can report one and say it is safe
   to delete (unconditionally: nothing consults it, so there is no writer to
   verify first). `--diagnostics` (or `FADENO_DIAGNOSTICS=1`) is opt-in only, bounded to 32 KiB / 500 lines per stream with head+tail sampling and a single truncation marker `…[fadeno diagnostics truncated: <stdout|stderr> exceeded 32 KiB / 500 lines]…`, stored machine-local under `.fadeno/local/outputs/diagnostics/` as `dispatch-<id>.log` (ad-hoc) or `<run>-<actorCallId>-a<attempt>.log` (engine), never ledger-committed, never gating.
+- **The executor's stderr transcript is retained, not relayed.** Every ad-hoc
+  dispatch and command fallback writes the executor's stderr to the `.err`
+  sibling of its stdout snapshot (`.fadeno/local/outputs/<archetype>-<id8>.err`,
+  `fallback-<id8>.err`), stamps `stderr_snapshot` / `stderr_bytes` (and
+  `stderr_truncated`, `stderr_retention_failed`) on the completion row, and
+  echoes one line naming the path. `cli.ts` prints the BYTES only when the
+  caller has nothing else to act on — a non-zero exit, a signal, a spawn
+  failure, exit 0 with no report, or a retention that failed — and then only a
+  bounded head+tail excerpt (`INLINE_STDERR_MAX_BYTES` 4 KiB /
+  `INLINE_STDERR_MAX_LINES` 40) whose marker names itself a sample and names
+  where the rest is. This is deliberately NOT the diagnostics ceiling: a
+  `--diagnostics` snapshot samples streams that also reached the terminal,
+  while the transcript is the only copy of bytes that no longer do, so it
+  carries its own `TRANSCRIPT_MAX_BYTES` 4 MiB / `TRANSCRIPT_MAX_LINES` 100,000
+  ceiling and marks itself *a floor, not the set* when that bites. Fadeno's own
+  decision-changing notices never travel through that buffer — the relay
+  quarantine banner and the discarded-output banner ride in-band on stdout, and
+  resolution/isolation/retention notices are discrete `onEcho` lines — so the
+  bound cannot reach them. The path is on the ledger row and in the `fadeno
+  dispatches --output` note because the echo naming it goes to stderr, which is
+  what a killed Bash call discards.
 - **Command dispatch supervision and recovery** — both ad-hoc dispatches and
   engine command attempts run below a supervisor that owns the executor's
   process group. The supervisor forwards exact output bytes while publishing

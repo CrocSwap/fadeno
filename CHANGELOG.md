@@ -116,6 +116,110 @@ All notable changes to Fadeno are documented here. The format follows
   was the only way to be one. Said of an outdated file that is false, and so was
   the remediation it attached — Fadeno wrote the file and will happily re-cut
   it. Both now come from the row's own verdict.
+- **Fadeno gave a director two different answers about which lane a dispatch
+  takes.** One question — "is this host-lane work?" — had two consumers reading
+  two different computations, and both were confident.
+  A `fadeno steering resolve` run from a shell reported the command lane *as a
+  property of the model*: `lane_reason: model not deliverable in-host`, for
+  models the session hosts perfectly well. The cause was one `&&`. Only
+  `steering resolve` folded "and the caller is the agent cut for this dial"
+  into `hostModel`, and a shell names no `--host-executor`, so the clause was
+  false and the *model* took the blame. A director read that preflight,
+  concluded no native delegate existed, and routed a five-lane campaign onto
+  the command lane, where every report was lost. The note it wrote was honest;
+  the preflight is what rigged the choice. Measured, same dial, same session:
+  `steering resolve --archetype worker` said `command`, and the same call with
+  `--host-executor luna` said `host`.
+  Meanwhile `fadeno dispatch` computed only the *other* half and printed a NOTE
+  asserting the archetype resolved to HOST and recommending a native spawn — in
+  the same minute the resolver answered `delegate_to: null` and host baseline
+  `(none)`. Dispatch `782b7751` is the receipt.
+  The two halves now travel separately. `hostModel` is the catalog fact alone
+  (`hostCandidateOf`: does a host lane exist for this dial at all?), and who is
+  asking is `frame: HostFrame` — `held` / `mismatched` / `unstated` — derived in
+  one place by `hostFrameOf`. `frame` is **required** on `LaneInput`, which is
+  the mechanical half of the fix: the compiler now refuses a call site that
+  omits it, and omitting it is exactly how three of the four surfaces got the
+  optimistic answer for free.
+  A surface that has to *explain* a route rather than just take one calls
+  `explainLane`, which returns `decision` (this caller) and `inAgent` (a caller
+  that holds the identity) from one evaluation — the same object when the frame
+  is already held, so no wording or future edit can make them disagree.
+  `steering resolve` publishes the pair as **`host_frame`** (`identity`,
+  `in_agent_lane`, `in_agent_lane_reason`), present on every resolution; the
+  host-lane note reads `inAgent` off the same shape and now names the field, so
+  the two answers reconcile on sight instead of reading as a contradiction.
+  Two new closed-vocabulary `lane_reason` members say what actually decided —
+  `the caller named no host executor` and `the caller holds another host
+  executor` — and `model not deliverable in-host` is once again reserved for the
+  case it describes. An archetype that is *genuinely* command-lane (its dial
+  names a harness this session is not inside) answers exactly what it always
+  did, and its counterfactual agrees: reporting "host available" there would
+  have been a new wrong answer in place of the old one.
+  **`delegate_to` now fires on the ambient resolve, not only on a locked engine
+  request.** The surface a coordinator actually preflights answered `command` +
+  `delegate_to: null` to every question — a pair whose honest reading is "there
+  is no native option" — with the managed agent sitting on disk. Same search,
+  same identity clause, same reason: on Codex the agent file's model wins over
+  any spawn value, so only a file already carrying this dial's identity is
+  offered, and a command broker (which bakes no `--host-executor` at all) is
+  never offered.
+  **`fadeno dial` grew a `lane` column.** The table printed model, effort and
+  harness and left the lane to be inferred from columns that do not determine
+  it — effort moves a delivery only when *pinned*, the harness only against the
+  ambient host — and a preflight is where that inference gets acted on. It is
+  derived from the same `decideLane` as `dial resolve` and the resolution
+  echo's `[command lane: …]` label, never re-decided, so the column cannot
+  become a fourth opinion.
+- **A dispatch relayed the executor's entire stderr into the caller's context.**
+  `cli.ts` wrote `result.stderr` unbounded on both the `dispatch` and
+  `dispatch-fallback` lanes. On `782b7751` a Codex director got a 7 KB report
+  beside roughly 127,000 output tokens of executor transcript; for a host agent
+  that lands in a context window and evicts the thing it asked for. The
+  transcript is now **retained, not relayed**: it is written to the `.err`
+  sibling of the stdout snapshot (`.fadeno/local/outputs/<archetype>-<id8>.err`,
+  the naming the engine already uses for a command attempt), the completion row
+  carries `stderr_snapshot` / `stderr_bytes`, and the terminal gets one line
+  saying how many bytes went where.
+
+  Printing less is the mistake this line has already paid for twice, so the
+  bound is drawn by asking **whose bytes they are**. Fadeno's own
+  decision-changing notices do not pass through that buffer at all — the relay
+  quarantine banner rides in-band on stdout (7c7a0f6), discarded output the
+  same (828dbcf), and resolution, isolation, ignored-output and the new
+  retention line come out as discrete `onEcho` lines — so bounding the
+  executor's transcript cannot reach any of them, and a test now pins that a
+  `relay_attested: false` dispatch still banners on stdout while its 420 KB of
+  chatter stays under 2 KB.
+
+  What a caller cannot act on without still reaches it. A non-zero exit, a
+  signal, a spawn failure, exit 0 with no report, or a retention that failed
+  prints a **bounded head+tail excerpt** (4 KiB / 40 lines) — head *and* tail,
+  because a config refusal lands at the top and the supervisor's spawn marker
+  at the bottom. Every excerpt names itself a sample and names the file holding
+  the rest, in the project's vocabulary: `all N bytes are at <path>`, or *"the
+  transcript … is itself a floor, not the set"* when the retained file is
+  sampled too, or *"retention FAILED (…), so the rest of it is gone"* when
+  there is no file to point at. An executor that wrote nothing now says
+  `executor stderr: none` out loud, so the empty-output diagnosis no longer
+  points a reader at a stream that was never there.
+
+  **The retained transcript is not bounded at the diagnostics ceiling, and the
+  difference is a claim about copies.** A `--diagnostics` snapshot samples
+  streams that also reached the terminal, so 32 KiB costs nothing; the
+  transcript exists *because* those bytes no longer reach it, which makes it
+  the only copy — sampling it at 32 KiB would destroy evidence a caller had
+  before this change and call that a fix. It gets its own 4 MiB / 100,000-line
+  ceiling, about eight times the largest transcript this line has produced, and
+  stamps `stderr_truncated` on the row when the ceiling bites. `--diagnostics`
+  itself is untouched: still opt-in, still 32 KiB / 500 lines, still absent by
+  default.
+
+  The path is on the ledger row and in the `fadeno dispatches --output` note
+  for the same reason the finding above it moved in-band: the line naming it is
+  echoed on **stderr**, which is exactly what a killed Bash call discards — the
+  caller who then recovers by tag. A pointer that only appears on the channel
+  it compensates for is no pointer at all.
 
 - **`fadeno models --json` answered `fadeno_capable: false` for every codex
   delivery.** `argvGrantsFadenoShell` — the one predicate that reads a lane's

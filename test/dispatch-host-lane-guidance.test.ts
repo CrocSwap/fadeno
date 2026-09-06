@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stringify as stringifyYaml } from 'yaml';
 import { runDispatch } from '../src/commands/dispatch.ts';
+import { runSteeringResolve } from '../src/commands/steering.ts';
 import { tempRepo } from './helpers.ts';
 import type { UserPathOptions } from '../src/lib/user-paths.ts';
 
@@ -138,4 +139,49 @@ test('the escalation does not move the dial', (t) => {
     requested[0]!.executor,
     'the second dispatch must resolve through the dial, not through the first call\'s --harness',
   );
+});
+
+// --- One authoritative route explanation ---
+//
+// Symptom 2 of the director's report, made executable. Dispatch `782b7751`
+// launched via `host-command-fallback` and printed a NOTE asserting that
+// reviewer resolves to HOST and recommending a native spawn, in the same
+// minute the resolver answered `delegate_to: null` and host baseline `(none)`.
+// Neither surface was lying about the question it asked; each was answering a
+// different question and presenting it as the other.
+
+test('the host-lane note and `steering resolve` make ONE claim about the lane', (t) => {
+  const { root, user } = seed(t);
+  const echoes: string[] = [];
+  runDispatch({
+    archetype: 'reviewer', prompt: 'review it', repoRoot: root,
+    userPathOptions: user, onEcho: (l) => echoes.push(l),
+  });
+  const note = echoes.find((l) => /resolves to the HOST lane/.test(l));
+  assert.ok(note != null, echoes.join('\n'));
+
+  // The resolver, asked the way a coordinator asks it: from a shell, with no
+  // `--host-executor` to offer.
+  const resolved = runSteeringResolve({
+    archetype: 'reviewer', repoRoot: root, userPathOptions: user, env: user.env as NodeJS.ProcessEnv,
+  });
+
+  // The resolver still answers `command` FOR ITS OWN CALLER — that has not
+  // changed and must not: a shell is not a host agent and cannot deliver
+  // in-session. What changed is that it no longer says so about the model.
+  assert.equal(resolved.lane, 'command');
+  assert.notEqual(resolved.lane_reason, 'model not deliverable in-host');
+  assert.equal(resolved.host_frame.identity, 'unstated');
+
+  // And THIS is the shared claim: the lane the note asserts is the same field,
+  // with the same reason, that the resolver publishes for a caller that can
+  // take it. One `explainLane` shape, two consumers.
+  assert.equal(resolved.host_frame.in_agent_lane, 'host');
+  assert.ok(
+    note.includes(`(${resolved.host_frame.in_agent_lane_reason})`),
+    `the note must quote the resolver's own reason, not a second wording:\n${note}`,
+  );
+  // The note also tells the reader which field to read, so the two answers are
+  // reconcilable on sight rather than looking like a contradiction.
+  assert.match(note, /host_frame\.in_agent_lane/);
 });

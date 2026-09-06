@@ -367,3 +367,94 @@ test('new-run echo: an out-of-session pin names the lane and why', (t) => {
   const bareOut = execFileSync(process.execPath, [cli, 'new-run', 'code-change-review', 'lane echo'], { cwd: root, env: bareEnv, encoding: 'utf8', stdio: 'pipe' });
   assert.match(bareOut, /implementer → current-host@xhigh \(current-host\) \[restart required: no command fallback\]/);
 });
+
+// --- The lane column ---
+//
+// `fadeno dial` printed model, effort, harness and source, and left the LANE
+// to be inferred from columns that do not determine it. A director's preflight
+// is where that inference gets acted on, and one wrong inference put a
+// five-lane campaign on the command lane. Shown, and derived from the same
+// `decideLane` every other surface answers with — not a fourth opinion.
+
+test('dial show: every row carries the lane it would take, from the shared predicate', (t) => {
+  const root = seedCatalog(t, {
+    harnesses: {
+      // The host: `sol` is deliverable in-session here, and has a command lane.
+      codex: { provider: 'openai', host: { effort_channel: 'agent-file' }, command: ['node', '-e', '0'] },
+      // Not the host, so `grok` can only be spawned.
+      grok: { provider: 'xai', command: ['node', '-e', '0'] },
+    },
+    dials: { worker: 'sol', reviewer: 'grok', judge: 'sol@low' },
+  });
+  const paths: UserPathOptions = {
+    home: join(root, 'home-codex'),
+    env: {
+      FADENO_CONFIG_HOME: join(root, 'cfg-codex'),
+      FADENO_STATE_HOME: join(root, 'state-codex'),
+      FADENO_HARNESS: 'codex',
+      CLAUDE_EFFORT: 'high',
+    },
+  };
+  const result = runDialShow({ repoRoot: root, userPathOptions: paths, env: paths.env });
+  const row = (archetype: string) => result.rows.find((r) => r.archetype === archetype)!;
+
+  // Unpinned on the host harness: in-session, the common path.
+  assert.equal(row('worker').lane, 'host');
+  assert.equal(row('worker').lane_reason, 'effort unpinned');
+  // A harness this session is not inside: the catalog decides, and says so.
+  assert.equal(row('reviewer').lane, 'command');
+  assert.equal(row('reviewer').lane_reason, 'model not deliverable in-host');
+  // Host harness, but a pin the session contradicts — the case the effort and
+  // harness columns cannot show together, which is the whole reason for this
+  // column.
+  assert.equal(row('judge').lane, 'command');
+  assert.equal(row('judge').lane_reason, 'session effort is high, dial pins low');
+
+  // The same answer `offHostLanes` gives for the same refs in the same
+  // session, because it is the same call — the table and the resolution echo
+  // cannot name different lanes for one dial.
+  //
+  // `worker` and `reviewer` come back null there, and that is the echo's
+  // RENDERING filter, not a second predicate: a host-lane row needs no label,
+  // and a row that was never a host candidate leaves the session because of a
+  // model the reader can already see. The column has no such filter — a table
+  // cell has to print something — which is exactly why it must be derived and
+  // not re-decided.
+  const [worker, reviewer, judge] = offHostLanes(
+    [row('worker').refString, row('reviewer').refString, row('judge').refString],
+    'high',
+    { repoRoot: root, userPathOptions: paths },
+  );
+  assert.equal(worker, null);
+  assert.equal(reviewer, null);
+  assert.equal(judge!.lane, row('judge').lane);
+  assert.equal(judge!.lane_reason, row('judge').lane_reason);
+});
+
+test('dial CLI: the table prints the lane between harness and source', (t) => {
+  const root = seedCatalog(t, {
+    harnesses: {
+      codex: { provider: 'openai', host: { effort_channel: 'agent-file' }, command: ['node', '-e', '0'] },
+      grok: { provider: 'xai', command: ['node', '-e', '0'] },
+    },
+    dials: { worker: 'sol', reviewer: 'grok' },
+  });
+  const cli = join(import.meta.dirname, '..', 'src', 'cli.ts');
+  const table = execFileSync(process.execPath, [cli, 'dial'], {
+    cwd: root,
+    env: {
+      ...process.env,
+      FADENO_CONFIG_HOME: join(root, 'cfg-codex'),
+      FADENO_STATE_HOME: join(root, 'state-codex'),
+      FADENO_HARNESS: 'codex',
+      HOME: join(root, 'home-codex'),
+      CLAUDE_EFFORT: 'high',
+    },
+    encoding: 'utf8',
+    stdio: 'pipe',
+  });
+  const rowFor = (archetype: string) => table.split('\n').find((line) => line.startsWith(archetype))!;
+  assert.match(table.split('\n')[0]!, /harness\s+lane\s+source/);
+  assert.match(rowFor('worker'), /codex \(home\)\s+host\s+repo pin/);
+  assert.match(rowFor('reviewer'), /grok \(home\)\s+command\s+repo pin/);
+});
