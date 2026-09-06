@@ -17,6 +17,7 @@ import {
   runDispatchesCancel,
   runDispatchesBakeoffs,
   runDispatchesOutput,
+  relayQuarantineNotice,
   type DispatchesResult,
   runDispatchesMerge,
 } from './commands/dispatches.ts';
@@ -1187,6 +1188,7 @@ function main(argv: string[]): number {
         'no-brief': { type: 'boolean' },
         isolate: { type: 'boolean' },
         shared: { type: 'boolean' },
+        'allow-relay-mismatch': { type: 'boolean' },
         'ignored-output': { type: 'string' },
         diagnostics: { type: 'boolean' },
         tail: { type: 'string' },
@@ -2142,6 +2144,7 @@ function main(argv: string[]): number {
         timeoutMs: dispatchTimeoutMs,
         isolate: Boolean(values.isolate),
         shared: Boolean(values.shared),
+        allowRelayMismatch: Boolean(values['allow-relay-mismatch']),
         ignoredOutput: ((): 'kept' | 'discardable' | null => {
           const raw = values['ignored-output'];
           if (typeof raw !== 'string') return null;
@@ -2155,6 +2158,20 @@ function main(argv: string[]): number {
         prompt: promptFile == null ? readFileSync(0, 'utf8') : undefined,
         onEcho: (line: string) => console.error(line),
       });
+      // The quarantine banner goes to STDOUT, ahead of the report, and only
+      // when a person used --allow-relay-mismatch to get here (without it the
+      // dispatch was refused and never reached this line).
+      //
+      // stdout is normally the executor's pure report, and breaking that is
+      // the deliberate cost. A proxy relays stdout and discards stderr, so a
+      // warning on stderr about bytes on stdout is a warning that does not
+      // reach the one reader who must not act on them. Better a report with a
+      // banner on it than a tainted report that looks clean.
+      if (result.relayAttested === false) {
+        process.stdout.write(
+          `${relayQuarantineNotice(result.dispatchId, result.relayAttested, result.relayMismatchAllowed)}\n\n`,
+        );
+      }
       if (result.stdout.length > 0) process.stdout.write(result.stdout);
       if (result.stderr.length > 0) process.stderr.write(result.stderr);
       if (result.outcome === 'timeout') {
@@ -2367,6 +2384,7 @@ function main(argv: string[]): number {
         const result = runDispatchesMerge({
           dispatchId: inline != null ? '' : values.merge,
           tag: inline ?? values.tag,
+          allowRelayMismatch: Boolean(values['allow-relay-mismatch']),
         });
         const how = result.resolvedBy === 'tag' ? ` (tag: ${result.tag})` : '';
         console.log(
@@ -2402,8 +2420,15 @@ function main(argv: string[]): number {
           // blocked on this call sees life instead of a hang.
           onHeartbeat: (line) => console.error(line),
         });
-        // stdout carries the snapshot bytes verbatim (relay-safe); the
-        // attestation verdict goes to stderr so piping stays clean.
+        // stdout carries the snapshot bytes (relay-safe); the attestation
+        // verdict goes to stderr so piping stays clean.
+        //
+        // One exception, and it is the reason this fix exists: when the relay
+        // attestation failed, `result.bytes` already carries the quarantine
+        // banner ahead of the report. Everything else here is a caveat ABOUT
+        // the bytes and can live on stderr; that one says the bytes answer a
+        // different question, and stderr is discarded on exactly the
+        // recover-by-tag path this command serves.
         process.stdout.write(result.bytes);
         // The verdict leads. "attested" only says these are the bytes the
         // completion row hashed — a dispatch the kernel killed at its
@@ -2464,7 +2489,14 @@ function main(argv: string[]): number {
                 : 'no completion row recorded YET: the executor may still be running, and the ' +
                   'kernel writes that row only when it exits. This is its output so far, not a ' +
                   'failure. Re-run with --wait <seconds> to wait for the real answer.';
-        const note = [verdict, merge, attestation].filter((part) => part != null).join('; ');
+        // Repeated on stderr as well as in the bytes. The banner is what
+        // survives a relay; this is what a human watching the terminal sees
+        // first, and neither is a substitute for the other.
+        const relay = result.relayAttested === false
+          ? `RELAY FIDELITY FAILED (relay_attested: false${result.relayMismatchAllowed ? ', dispatched under --allow-relay-mismatch' : ''}) — ` +
+            'the report above answers a prompt the caller never wrote; do not relay it as an answer'
+          : null;
+        const note = [relay, verdict, merge, attestation].filter((part) => part != null).join('; ');
         // Say how `last` landed. Recency now only survives when nothing
         // overlapped this dispatch — concurrent-and-finished refuses outright —
         // so the note reports that narrowed claim rather than a bare warning.

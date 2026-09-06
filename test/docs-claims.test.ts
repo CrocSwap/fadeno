@@ -260,6 +260,23 @@ const CLAIMS: Claim[] = [
     src: { files: ['src/commands/dispatch.ts'], patterns: [/relay_attested/] },
   },
   {
+    // The refusal, not just the mark. A doc that still says the attestation is
+    // "evidence-only" while the kernel refuses on it describes a Fadeno that
+    // ships a success verdict over an altered prompt — which is the exact
+    // failure this predicate was added to stop (E25, 2026-09-06). All three
+    // tokens travel together: the predicate names the refusal, the flag is the
+    // only way past it, and the field is what proves a person used the flag.
+    id: 'relay-fidelity-refusal',
+    doc: {
+      files: [LOADOUTS, 'docs/architecture.md'],
+      patterns: [/relay_fidelity/, /--allow-relay-mismatch/, /relay_mismatch_allowed/, /refus/],
+    },
+    src: {
+      files: ['src/commands/dispatch.ts', 'src/commands/dispatches.ts', 'src/cli.ts'],
+      patterns: [/'relay_fidelity'/, /--allow-relay-mismatch/, /relay_mismatch_allowed/, /allowRelayMismatch/],
+    },
+  },
+  {
     id: 'stdin-relay-contract',
     doc: { files: [DIALS], patterns: [/FADENO_PROMPT/] },
     src: { files: ['templates/claude/claude-agents/dispatch-worker.md'], patterns: [/FADENO_PROMPT/] },

@@ -774,7 +774,11 @@ prompt_sha256}` of the Agent call's prompt, appended to
 `.fadeno/local/pending-relays.jsonl` — whenever a subtask heads to a dispatch
 proxy. The kernel consumes a matching stash at dispatch time and marks the
 evidence row `relay_attested` (true / false / absent), turning the proxy's
-"verbatim" from an instruction into a checked claim.
+"verbatim" from an instruction into a checked claim. `false` is enforced, not
+just recorded: the dispatch is refused before the executor spawns (predicate
+`relay_fidelity`), and `--allow-relay-mismatch` is the deliberate override that
+stamps `relay_mismatch_allowed: true` on the row. *Absent* never refuses — it
+is the absence of a claim, not a finding.
 
 > **Hook generations are ambiguous from the inside.** A harness binds hook
 > *registrations* (like the agent and skill surface) at session start, but the

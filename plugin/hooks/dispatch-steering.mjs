@@ -93,8 +93,10 @@ function callerPromptDigest(text) {
 // Relay-fidelity attestation: whenever a subtask heads to a dispatch proxy,
 // stash the spawn-side prompt digest. The kernel consumes a matching entry at
 // dispatch time and marks the evidence row `relay_attested` — turning the
-// proxy's "verbatim" from an instruction into a checked claim. Content-keyed
-// (sha256), so concurrent dispatches match without ordering.
+// proxy's "verbatim" from an instruction into a checked claim, and now an
+// enforced one: a mismatch is refused before the executor spawns (predicate
+// `relay_fidelity`; `--allow-relay-mismatch` is the deliberate override).
+// Content-keyed (sha256), so concurrent dispatches match without ordering.
 function stashRelay() {
   const prompt = event.tool_input.prompt;
   if (typeof prompt !== 'string' || prompt.length === 0) return;

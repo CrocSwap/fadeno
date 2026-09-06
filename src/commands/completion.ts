@@ -175,6 +175,7 @@ const COMMANDS: Record<string, CommandSpec> = {
       '--isolate': NONE, '--shared': NONE,
       '--ignored-output': { kind: 'enum', values: ['kept', 'discardable'] },
       '--no-brief': NONE,
+      '--allow-relay-mismatch': NONE,
       '--diagnostics': NONE,
     },
   ),
@@ -229,6 +230,7 @@ const COMMANDS: Record<string, CommandSpec> = {
     '--tag': { kind: 'free' },
     '--cancel': { kind: 'free' },
     '--merge': { kind: 'free' },
+    '--allow-relay-mismatch': NONE,
   }),
   'shadow-apply': command({ '--arm': { kind: 'enum', values: ['challenger', 'primary'] }, '--check': NONE }, ['free']),
   bakeoff: command(

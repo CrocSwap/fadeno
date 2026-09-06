@@ -8,6 +8,33 @@ All notable changes to Fadeno are documented here. The format follows
 
 ### Changed — BREAKING
 
+- **A failed relay-fidelity check now REFUSES the dispatch.** `relay_attested:
+  false` — a dispatch proxy marked itself for these exact bytes and the
+  spawn-side record disagrees — is a boundary refusal with predicate
+  `relay_fidelity`: a `dispatch_refused` row, a non-zero exit, and no executor
+  spawned. It was warn-only, on stderr, and the E25 dispatch of 2026-09-06
+  showed what that is worth: Fadeno detected that the bytes reaching the
+  executor were not the bytes the caller wrote, said so on a stream the relay
+  contract discards, and returned a **success verdict** for work on the wrong
+  prompt — correct only because the director happened to read the whole diff by
+  hand.
+
+  `--allow-relay-mismatch` (on `fadeno dispatch`) proceeds anyway and records
+  `relay_mismatch_allowed: true` beside `relay_attested: false`, so the ledger
+  shows a person chose it rather than the kernel forgiving it. The Claude proxy
+  guard's relay grammar does not admit the flag: the party whose fidelity is in
+  question cannot wave away its own finding. A dispatch that proceeds is
+  quarantined, not forgiven — `fadeno dispatches --output` prefixes the returned
+  **bytes** with the failure (stderr does not survive the recover-by-tag path,
+  which is precisely where the warning was lost), the listing renders it as
+  `[RELAY FIDELITY FAILED — relay_attested: false]`, and `fadeno dispatches
+  --merge` refuses without its own `--allow-relay-mismatch`.
+
+  An **absent** `relay_attested` is unchanged and must stay so: it is the
+  absence of a claim, not a finding. Failing closed is licensed only because
+  `false` requires a proxy marker to match first, which makes it positive
+  evidence of defection.
+
 - **Catalog v4: harness-neutral dials and one `harnesses:` table.** A dial names
   WHO runs an archetype and, optionally, WHICH HARNESS runs it — never a lane, a
   driver, or an argv. The HOST harness is discovered at dispatch time from

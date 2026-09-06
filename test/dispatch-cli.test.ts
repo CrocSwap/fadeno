@@ -136,7 +136,13 @@ test('dispatch: relay attestation consumes a matching spawn-side stash', (t) => 
     .map((line) => JSON.parse(line) as { prompt_sha256: string });
   assert.deepEqual(remaining.map((row) => row.prompt_sha256), [sha256Hex('other')]);
 
-  const mangled = runDispatch({ archetype: 'worker', prompt: 'ello\n', repoRoot: root, now, userPathOptions: onHarness('standalone') });
+  // `--allow-relay-mismatch` so this stays a test of CONSUMPTION: without it
+  // the mangled dispatch is refused (see the refusal tests below) and the
+  // stash bookkeeping would never be reached.
+  const mangled = runDispatch({
+    archetype: 'worker', prompt: 'ello\n', repoRoot: root, now,
+    userPathOptions: onHarness('standalone'), allowRelayMismatch: true,
+  });
   assert.equal(mangled.relayAttested, false);
   assert.equal(evidenceRows(root).at(-1)!.relay_attested, false);
 });
@@ -203,28 +209,198 @@ test('dispatch: an un-relayed dispatch colliding with a fresh stash attests null
   assert.deepEqual(stash.map((row) => row.prompt_sha256), [sha256Hex('someone-elses-prompt')]);
 });
 
-test('dispatch: a proxy that altered the prompt attests false', (t) => {
-  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
-  const now = new Date('2026-08-12T12:00:00Z');
+/**
+ * Stage a defecting relay: the parent handed the proxy one set of bytes, and
+ * the proxy is dispatching different ones. It still marks itself, which is
+ * precisely what makes the alteration visible.
+ */
+function stageDefectingRelay(root: string): void {
   mkdirSync(join(root, '.fadeno', 'local'), { recursive: true });
-  // The parent handed the proxy these bytes...
   writeFileSync(
     join(root, PENDING_RELAYS_FILE),
     `${JSON.stringify({ timestamp: '2026-08-12T11:59:00Z', prompt_sha256: sha256Hex('the original task text\n') })}\n`,
   );
-  // ...and the proxy is dispatching DIFFERENT bytes. It still marks itself,
-  // which is precisely what makes the alteration visible.
   markProxyDispatch(root, ['a summary of the task\n']);
+}
+
+/**
+ * The E25 regression, and why this predicate exists.
+ *
+ * Fadeno detected that the bytes reaching the executor were not the bytes the
+ * caller wrote, said so on stderr, ran the executor anyway, and returned a
+ * success verdict. The director who caught it read the whole diff by hand and
+ * the work happened to be right: being right was luck, not process.
+ *
+ * `false` is a positive finding of defection, not an absence of evidence, so
+ * the honest answer is to refuse — and to refuse HERE, before the spawn, where
+ * it costs nothing.
+ */
+test('dispatch: a proxy that altered the prompt is REFUSED before the executor spawns', (t) => {
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
+  const now = new Date('2026-08-12T12:00:00Z');
+  stageDefectingRelay(root);
+  const echoed: string[] = [];
+  assert.throws(
+    () => runDispatch({
+      archetype: 'worker', prompt: 'a summary of the task\n', repoRoot: root, now,
+      userPathOptions: onHarness('standalone'), onEcho: (line: string) => echoed.push(line),
+    }),
+    (err: unknown) => err instanceof DispatchCommandError && /RELAY FIDELITY FAILED/.test((err as Error).message),
+  );
+
+  const rows = evidenceRows(root);
+  // A boundary refusal, in the shape every other one uses — with the finding
+  // and the remedy on the row, so the defection stays investigable.
+  const refused = rows.at(-1)!;
+  assert.equal(refused.event, 'dispatch_refused');
+  assert.equal((refused.refusal as Record<string, unknown>).predicate, 'relay_fidelity');
+  assert.match(String((refused.refusal as Record<string, unknown>).message), /--allow-relay-mismatch/);
+  assert.equal(refused.relay_attested, false);
+  assert.ok(!('relay_mismatch_allowed' in refused));
+
+  // The point of refusing at the boundary: NOTHING ran. No request row, no
+  // completion row, no output snapshot — so no tokens were spent and there is
+  // no report for anyone to mistake for an answer.
+  assert.deepEqual(rows.filter((r) => r.event === 'dispatch_requested'), []);
+  assert.deepEqual(rows.filter((r) => r.event === 'dispatch_completed'), []);
+  assert.ok(!('output_snapshot' in refused));
+
+  // The stderr echo is kept — it is what a human watching the terminal sees
+  // first — but it is no longer the mechanism, because stderr is discarded on
+  // the recover-by-tag path.
+  assert.ok(echoed.some((line) => line.startsWith('RELAY FIDELITY FAILED:')), echoed.join(' | '));
+});
+
+/**
+ * The refusal has to survive being re-run, or it is not a refusal.
+ *
+ * Reading the attestation used to CONSUME it, so the dispatch that had just
+ * been refused destroyed the evidence it was refused on: an identical re-run
+ * found no proxy marker, read `null` ("no proxy sent this"), and proceeded —
+ * with no override flag and no `relay_mismatch_allowed` on the row. That is
+ * strictly worse than the warn-only behaviour it replaced, because the
+ * operator now believes a gate exists. A refusal must not destroy the evidence
+ * it refused on.
+ */
+test('dispatch: an identical re-run after a relay refusal refuses AGAIN, not silently', (t) => {
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
+  const now = new Date('2026-08-12T12:00:00Z');
+  stageDefectingRelay(root);
+  const run = () => runDispatch({
+    archetype: 'worker', prompt: 'a summary of the task\n', repoRoot: root, now,
+    userPathOptions: onHarness('standalone'),
+  });
+  const refusedTwice = /RELAY FIDELITY FAILED/;
+  assert.throws(run, (err: unknown) => err instanceof DispatchCommandError && refusedTwice.test((err as Error).message));
+  // Up-arrow, enter. Same bytes, same repo, no flag.
+  assert.throws(run, (err: unknown) => err instanceof DispatchCommandError && refusedTwice.test((err as Error).message));
+  assert.throws(run, (err: unknown) => err instanceof DispatchCommandError && refusedTwice.test((err as Error).message));
+
+  // Three refusal rows and nothing else: no dispatch ever proceeded.
+  const rows = evidenceRows(root);
+  assert.equal(rows.length, 3);
+  assert.deepEqual(new Set(rows.map((r) => r.event)), new Set(['dispatch_refused']));
+  assert.deepEqual(rows.map((r) => (r.refusal as Record<string, unknown>).predicate), ['relay_fidelity', 'relay_fidelity', 'relay_fidelity']);
+
+  // A refusal writes nothing to the attestation state — that is what makes the
+  // re-read reach the same finding.
+  assert.ok(existsSync(join(root, PROXY_DISPATCHES_FILE)));
+  assert.ok(existsSync(join(root, PENDING_RELAYS_FILE)));
+});
+
+/**
+ * Aging is the one way a left-in-place marker goes away on its own, and the
+ * direction it falls in is what makes leaving it safe. An hour later the proxy
+ * marker is outside the freshness window, so nothing fresh names these bytes
+ * and the verdict is `null` — "cannot say", the field omitted from the row.
+ * It can never become `true`: that needs a MATCHING spawn-side row, which a
+ * defecting relay by construction does not have.
+ */
+test('dispatch: a refused attestation that ages out degrades to cannot-say, never to a silent attested', (t) => {
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
+  stageDefectingRelay(root);
+  assert.throws(
+    () => runDispatch({
+      archetype: 'worker', prompt: 'a summary of the task\n', repoRoot: root,
+      now: new Date('2026-08-12T12:00:00Z'), userPathOptions: onHarness('standalone'),
+    }),
+    (err: unknown) => err instanceof DispatchCommandError,
+  );
+
+  // Two hours later: the markers are stale, not matched.
+  const result = runDispatch({
+    archetype: 'worker', prompt: 'a summary of the task\n', repoRoot: root,
+    now: new Date('2026-08-12T14:00:00Z'), userPathOptions: onHarness('standalone'),
+  });
+  assert.equal(result.relayAttested, null);
+  const completion = evidenceRows(root).at(-1)!;
+  assert.equal(completion.event, 'dispatch_completed');
+  // Not `true`, and not present at all — nothing claims this was attested.
+  assert.ok(!('relay_attested' in completion));
+  assert.ok(!('relay_mismatch_allowed' in completion));
+  // The finding itself did not expire: the refusal row is still the record.
+  assert.equal(evidenceRows(root)[0]!.event, 'dispatch_refused');
+});
+
+test('dispatch: --allow-relay-mismatch proceeds, and records that a human chose it', (t) => {
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
+  const now = new Date('2026-08-12T12:00:00Z');
+  stageDefectingRelay(root);
   const echoed: string[] = [];
   const result = runDispatch({
     archetype: 'worker', prompt: 'a summary of the task\n', repoRoot: root, now,
-    userPathOptions: onHarness('standalone'), onEcho: (line: string) => echoed.push(line),
+    userPathOptions: onHarness('standalone'), allowRelayMismatch: true,
+    onEcho: (line: string) => echoed.push(line),
   });
   assert.equal(result.relayAttested, false);
-  assert.equal(evidenceRows(root).at(-1)!.relay_attested, false);
-  // The row alone is not the deliverable: a defection has to reach the person
-  // running the command, while the output it taints is still in front of them.
-  assert.ok(echoed.some((line) => line.startsWith('RELAY FIDELITY FAILED:')), echoed.join(' | '));
+  assert.equal(result.relayMismatchAllowed, true);
+
+  // Both fields, on both rows. The finding is not erased by the override —
+  // the ledger has to show a defection AND a person who waved it through.
+  const rows = evidenceRows(root);
+  assert.deepEqual(rows.filter((r) => r.event === 'dispatch_refused'), []);
+  for (const event of ['dispatch_requested', 'dispatch_completed']) {
+    const row = rows.find((r) => r.event === event)!;
+    assert.equal(row.relay_attested, false, event);
+    assert.equal(row.relay_mismatch_allowed, true, event);
+  }
+  assert.ok(echoed.some((line) => line.includes('Proceeding under --allow-relay-mismatch')), echoed.join(' | '));
+
+  // Consumed exactly once. The PROXY marker — the row that hit, and the row
+  // that makes a `false` verdict reachable at all — is spent, so this
+  // dispatch's finding cannot re-fire on the next one.
+  assert.ok(!existsSync(join(root, PROXY_DISPATCHES_FILE)));
+  // The spawn-side entry legitimately survives: it never matched (that is WHY
+  // the verdict was false), so it is still an un-consumed attestation waiting
+  // for the dispatch it actually belongs to. Deleting it would forge a
+  // consumption that never happened.
+  assert.ok(existsSync(join(root, PENDING_RELAYS_FILE)));
+
+  // And it is inert on its own. A later dispatch of the same bytes reads
+  // `null`, not the previous run's `false`: a defection verdict needs a proxy
+  // marker to hit FIRST, and that one is spent.
+  const after = runDispatch({
+    archetype: 'worker', prompt: 'a summary of the task\n', repoRoot: root, now,
+    userPathOptions: onHarness('standalone'),
+  });
+  assert.equal(after.relayAttested, null);
+  assert.equal(after.relayMismatchAllowed, false);
+  assert.ok(!('relay_attested' in evidenceRows(root).at(-1)!));
+});
+
+/**
+ * The override is scoped to the finding, not a mode. A dispatch with nothing
+ * to allow must not claim on its ledger row that something was allowed.
+ */
+test('dispatch: --allow-relay-mismatch records nothing when there was no mismatch', (t) => {
+  const root = seedCatalog(t, { dials: { worker: 'echo-worker' } });
+  const result = runDispatch({
+    archetype: 'worker', prompt: 'plain\n', repoRoot: root,
+    userPathOptions: onHarness('standalone'), allowRelayMismatch: true,
+  });
+  assert.equal(result.relayAttested, null);
+  assert.equal(result.relayMismatchAllowed, false);
+  assert.ok(!('relay_mismatch_allowed' in evidenceRows(root).at(-1)!));
 });
 
 test('dispatch: a proxy dispatch with no spawn-side stash attests null, never false', (t) => {

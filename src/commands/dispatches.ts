@@ -300,6 +300,13 @@ export interface DispatchEntry {
    */
   callerPromptSha256: string | null;
   relayAttested: boolean | null;
+  /**
+   * `--allow-relay-mismatch` carried a `relay_attested: false` dispatch past
+   * the `relay_fidelity` refusal. False on every row that never had the
+   * field, which reads correctly for both cases that produce one: a dispatch
+   * nobody waved through, and a pre-refusal row from before the flag existed.
+   */
+  relayMismatchAllowed: boolean;
   writeVariant: boolean | null;
   /**
    * Present only on a `host_rewritten` row (`kind: "rewritten"`): the Claude
@@ -546,8 +553,35 @@ export interface DispatchesOutputResult {
   dispatchId: string;
   /** Repo-relative `output_snapshot` path recorded on the request row. */
   path: string;
-  /** Current snapshot file content. */
+  /**
+   * What a caller relays: the snapshot file content, preceded by
+   * `relayNotice` when there is one.
+   *
+   * The prefix is the whole point rather than a convenience. Every other
+   * caveat this command can raise — the verdict, the merge stamp, the
+   * attestation — travels on stderr, and the dispatch-proxy contract states
+   * that stderr "is discarded along with a timed-out call". So on the exact
+   * path where a dispatch is recovered by tag after a timeout, a stderr-only
+   * warning does not exist. A relay-fidelity failure is the one finding that
+   * invalidates the bytes themselves, so it rides WITH them.
+   */
   bytes: string;
+  /**
+   * The in-band quarantine banner prefixed onto `bytes`, or null when the
+   * relay attestation raised nothing. Exposed separately so a caller can tell
+   * report from banner without re-deriving the boundary.
+   */
+  relayNotice: string | null;
+  /** The dispatch's `relay_attested` verdict; see `runDispatch`. */
+  relayAttested: boolean | null;
+  /** Whether `--allow-relay-mismatch` is why a `false` dispatch ran at all. */
+  relayMismatchAllowed: boolean;
+  /**
+   * The snapshot bytes alone, with no banner. `attested` is computed against
+   * THIS, never `bytes`: the digest on the completion row is the executor's
+   * output, and a banner Fadeno prepended afterwards is not part of it.
+   */
+  snapshotBytes: string;
   /**
    * `match` / `mismatch` compare sha256(bytes) to the completion row's
    * `output_sha256`. `incomplete` when no completion row exists — the
@@ -830,6 +864,7 @@ function requestedEntry(row: Record<string, unknown>): DispatchEntry {
     promptSha256: str(row.prompt_sha256),
     callerPromptSha256: str(row.caller_prompt_sha256),
     relayAttested: bool(row.relay_attested),
+    relayMismatchAllowed: row.relay_mismatch_allowed === true,
     writeVariant: bool(row.write_variant),
     rewrite: null, // a kernel row is the delivery, never the decision to reroute one
     refusal: refusalOf(row.refusal),
@@ -919,6 +954,7 @@ function hostEntry(row: Record<string, unknown>): DispatchEntry {
     // below.
     callerPromptSha256: null,
     relayAttested: null,
+    relayMismatchAllowed: false,
     writeVariant: null,
     rewrite: null, // set by `hostRewrittenEntry`, which builds on this
     refusal: null,
@@ -1111,6 +1147,9 @@ function applyCompletion(entry: DispatchEntry, row: Record<string, unknown>): vo
     entry.workspaceChanged = row.workspace_changed;
   }
   entry.relayAttested = entry.relayAttested ?? bool(row.relay_attested);
+  // `||=`, not `??=`: the field is a boolean, and the completion row is the
+  // one that carries it once the request row already said false.
+  entry.relayMismatchAllowed = entry.relayMismatchAllowed || row.relay_mismatch_allowed === true;
   entry.writeVariant = entry.writeVariant ?? bool(row.write_variant);
   entry.model = entry.model ?? str(row.model);
   entry.modelId = entry.modelId ?? str(row.model_id);
@@ -1475,7 +1514,17 @@ export function renderDispatchLine(entry: DispatchEntry): string {
     }
   }
 
-  if (entry.relayAttested != null) parts.push(`[relay_attested: ${entry.relayAttested}]`);
+  // `true` stays a quiet mark; `false` does not. A row that says a relay
+  // altered the prompt is the loudest fact on the line, and rendering it in
+  // the same register as "attested" is how it read as a footnote next to a
+  // success. The machine token is kept inside the louder phrasing so anything
+  // grepping for `relay_attested: false` still finds it.
+  if (entry.relayAttested === false) {
+    parts.push('[RELAY FIDELITY FAILED — relay_attested: false]');
+    if (entry.relayMismatchAllowed) parts.push('[relay_mismatch_allowed: true — dispatched anyway]');
+  } else if (entry.relayAttested != null) {
+    parts.push(`[relay_attested: ${entry.relayAttested}]`);
+  }
   if (entry.writeVariant === true) parts.push('[write variant]');
   if (entry.gateEligible === false) parts.push('[shadow-only]');
   if (entry.error != null) parts.push(`[error: ${excerpt(entry.error, ERROR_EXCERPT)}]`);
@@ -1696,6 +1745,14 @@ interface OutputRecord {
   /** A `dispatch_merged` row landed: the retained worktree was merged by hand. */
   merged: boolean;
   /**
+   * The `relay_attested` verdict from this dispatch's own rows. `false` means
+   * a dispatch proxy sent bytes that did not match what it was handed — the
+   * report in the snapshot answers a prompt the caller never wrote.
+   */
+  relayAttested: boolean | null;
+  /** `--allow-relay-mismatch` is why a `relay_attested: false` dispatch ran. */
+  relayMismatchAllowed: boolean;
+  /**
    * Whether this is a shadow duplication. Shadows stay recoverable and
    * cancellable by explicit id, but are never candidates for `last`: the
    * caller asking "which dispatch was mine?" launched the primary — the
@@ -1795,6 +1852,8 @@ function loadOutputRecords(absolute: string): {
         primaryMerge: null,
         workspace: null,
         merged: false,
+        relayAttested: null,
+        relayMismatchAllowed: false,
         shadow: false,
         tag: null,
         requestedAt: null,
@@ -1803,6 +1862,13 @@ function loadOutputRecords(absolute: string): {
       byId.set(dispatchId, rec);
     }
     if (row.shadow === true) rec.shadow = true;
+    // Read off BOTH rows: the request row carries the verdict (it is decided
+    // before the spawn), and the completion row repeats it. Taking the first
+    // non-null means a recovery that runs while the dispatch is still open —
+    // the case this reader exists for — is warned just as loudly as one that
+    // reads a finished dispatch.
+    if (typeof row.relay_attested === 'boolean') rec.relayAttested = rec.relayAttested ?? row.relay_attested;
+    if (row.relay_mismatch_allowed === true) rec.relayMismatchAllowed = true;
     const snapshot = str(row.output_snapshot);
     if (snapshot != null) rec.snapshot = snapshot;
     const tag = str(row.tag);
@@ -1967,6 +2033,43 @@ function resolveOutputRecord(
 }
 
 /**
+ * The in-band quarantine banner for a dispatch whose relay defected, or null
+ * when there is nothing to say.
+ *
+ * One function, used by `--output` (which prefixes it onto the bytes) and by
+ * `--merge` (which refuses with it), so the two cannot describe the same
+ * finding differently. It is deliberately shaped as a banner rather than a
+ * log line: it is read by whoever is about to act on the report, and the
+ * action it is trying to stop is "relay this as the answer".
+ *
+ * Two shapes, because the two rows mean different things. A row with
+ * `relay_mismatch_allowed` is a dispatch a person waved through with
+ * `--allow-relay-mismatch`. A row without it, under the current build, cannot
+ * exist — the `relay_fidelity` predicate refuses before the spawn — so it is
+ * an OLD row, written while the failure was warn-only. Both are quarantined;
+ * only the second needs to say where it came from.
+ */
+export function relayQuarantineNotice(
+  dispatchId: string,
+  relayAttested: boolean | null,
+  relayMismatchAllowed: boolean,
+): string | null {
+  if (relayAttested !== false) return null;
+  const id8 = dispatchId.slice(0, 8);
+  const provenance = relayMismatchAllowed
+    ? 'It was dispatched anyway under --allow-relay-mismatch'
+    : 'It predates the `relay_fidelity` refusal, which now stops this before the executor spawns';
+  return (
+    `!! RELAY FIDELITY FAILED for dispatch ${id8} (relay_attested: false). ` +
+    'A dispatch proxy sent the executor bytes that did not match what it was handed, so the report ' +
+    `below answers a prompt the caller never wrote. ${provenance}. ` +
+    'QUARANTINE IT: do not relay this as an answer and do not act on it unread — re-dispatch without ' +
+    'the defecting relay, or verify every claim in it by hand first. ' +
+    '---- report follows ----'
+  );
+}
+
+/**
  * Recover the streamed output snapshot for one command dispatch. `dispatchId`
  * is a full `dispatch_id`, a unique prefix of at least 8 characters, or the
  * keyword `last` (most recent `dispatch_requested` row that carries
@@ -2036,16 +2139,21 @@ export function runDispatchesOutput(opts: DispatchesOutputOptions): DispatchesOu
     throw new DispatchesCommandError(`output snapshot missing: ${snapshotRel}.`);
   }
 
-  const bytes = readFileSync(snapshotAbs, 'utf8');
+  const snapshotBytes = readFileSync(snapshotAbs, 'utf8');
   const attested: DispatchOutputAttestation = !rec.completed
     ? 'incomplete'
-    : sha256Hex(bytes) === rec.outputSha256
+    : sha256Hex(snapshotBytes) === rec.outputSha256
       ? 'match'
       : 'mismatch';
+  const relayNotice = relayQuarantineNotice(rec.dispatchId, rec.relayAttested, rec.relayMismatchAllowed);
   return {
     dispatchId: rec.dispatchId,
     path: snapshotRel,
-    bytes,
+    bytes: relayNotice == null ? snapshotBytes : `${relayNotice}\n\n${snapshotBytes}`,
+    relayNotice,
+    relayAttested: rec.relayAttested,
+    relayMismatchAllowed: rec.relayMismatchAllowed,
+    snapshotBytes,
     attested,
     outcome: rec.completed ? rec.outcome : null,
     exitCode: rec.completed ? rec.exitCode : null,
@@ -2069,6 +2177,16 @@ export interface DispatchesMergeOptions {
   repoRoot?: string;
   cwd?: string;
   now?: Date;
+  /**
+   * `--allow-relay-mismatch`: merge a `relay_attested: false` dispatch's
+   * worktree anyway.
+   *
+   * A SECOND override, not the one that ran the dispatch. Choosing to spend
+   * tokens on a tainted prompt and choosing to put its diff in your working
+   * tree are different decisions, made at different times by possibly
+   * different people, and the second is the one that is hard to undo.
+   */
+  allowRelayMismatch?: boolean;
 }
 
 export interface DispatchesMergeResult {
@@ -2109,6 +2227,18 @@ export function runDispatchesMerge(opts: DispatchesMergeOptions = {}): Dispatche
   const id8 = record.dispatchId.slice(0, 8);
   if (!record.completed) throw new DispatchesCommandError(`dispatch ${id8} has not completed; there is nothing to merge yet.`);
   if (record.merged) throw new DispatchesCommandError(`dispatch ${id8} was already merged.`);
+  // Before anything is read from the worktree, let alone applied. Merging is
+  // the point of no return for a tainted dispatch: the diff stops being
+  // something the ledger describes and becomes something the working tree
+  // contains.
+  if (record.relayAttested === false && opts.allowRelayMismatch !== true) {
+    throw new DispatchesCommandError(
+      `${relayQuarantineNotice(record.dispatchId, record.relayAttested, record.relayMismatchAllowed)}\n` +
+        `Refusing to merge ${id8} into your workspace. Nothing was applied and ` +
+        `${record.workspace != null ? `the worktree ${record.workspace}` : 'its worktree'} is untouched — ` +
+        'read the diff there first. Pass --allow-relay-mismatch to merge it anyway.',
+    );
+  }
   if (record.primaryMerge?.status !== 'unresolved' || record.workspace == null) {
     throw new DispatchesCommandError(
       `dispatch ${id8} has no unresolved merge-back to finish (merge-back: ${record.primaryMerge?.status ?? 'none recorded'}).`,

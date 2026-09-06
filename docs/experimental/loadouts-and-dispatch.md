@@ -806,8 +806,30 @@ received prompt against fresh stashes (content-keyed, so concurrency is safe;
 tolerant of the single trailing newline a heredoc appends; entries expire
 after an hour) and marks the evidence row `relay_attested: true` (consumed
 match), `false` (fresh stashes pending but none matched — the relay altered
-the prompt), or omits the field (no hook flow in play). Evidence-only: it
-never blocks a dispatch.
+the prompt), or omits the field (no hook flow in play).
+
+**A failed relay-fidelity check refuses the dispatch.** `false` is a boundary
+refusal with predicate `relay_fidelity`: the `dispatch_refused` row carries the
+full identity and the finding, the command exits non-zero, and no executor ever
+spawns — the check sits far above the spawn, so the refusal costs zero executor
+tokens. `--allow-relay-mismatch` proceeds anyway and records
+`relay_mismatch_allowed: true` beside `relay_attested: false`, so the ledger
+shows a person chose it; the Claude proxy guard's relay grammar does not admit
+that flag, which is deliberate — the party whose fidelity is in question must
+not be able to wave away its own finding. A dispatch that proceeds is
+quarantined rather than forgiven: `fadeno dispatches --output` prefixes the
+returned bytes with the failure (stderr is discarded on the recover-by-tag
+path, so the finding has to ride with the output), and `fadeno dispatches
+--merge` refuses without its own `--allow-relay-mismatch`.
+
+`relay_attested` absent — "cannot say" — is untouched by all of this, and must
+stay that way: it is the absence of a claim, not a finding, and refusing on it
+would refuse every un-relayed dispatch. The reason this predicate is allowed to
+fail closed at all is that `false` requires a proxy marker to match first, which
+makes it a positive finding of defection rather than an unexplained
+disagreement. The prompt was warn-only until 2026-09-06, when an E25 dispatch
+returned a success verdict over an altered prompt with the warning on a stream
+nobody read.
 
 **Retyping fidelity.** The generalized rule behind the heredoc contract, the
 kernel-owned snapshot, and the attestation: *text that must arrive verbatim

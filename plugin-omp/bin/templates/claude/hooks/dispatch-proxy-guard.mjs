@@ -161,8 +161,14 @@ for (const statement of statements) {
  * this, so the verdict is `null` (not attested) rather than `false`.
  *
  * Digest only, never content — the prompt is the user's task text and this
- * hook does not read it. Best-effort: attestation is evidence, never a gate,
- * so a write failure must not block a contract-conforming dispatch.
+ * hook does not read it.
+ *
+ * Best-effort, and that stays safe now that the kernel REFUSES on
+ * `relay_attested: false` (predicate `relay_fidelity`): a failure to write
+ * this marker loses the proxy claim, so the kernel reads `null` — "no proxy
+ * sent this" — and a contract-conforming dispatch runs exactly as before. The
+ * gate can only fire on a marker that was written, which is the direction a
+ * best-effort write is allowed to be wrong in.
  *
  * Only the heredoc form is marked. The `--prompt-file` retry spelling carries
  * no bytes here (and its path may be a shell variable), so those dispatches

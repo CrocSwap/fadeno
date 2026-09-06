@@ -774,7 +774,13 @@ across the relay: the proxy hands the prompt over in a quoted heredoc and the
 shell adds a terminator the spawn side never saw, so the two hash the same
 canonical bytes rather than the same literal ones (the proxy guard's
 `proxy-dispatches.jsonl` marker and the hook's `pending-relays.jsonl` stash
-use the same rule, which is what lets `relay_attested` match at all).
+use the same rule, which is what lets `relay_attested` match at all). A
+`relay_attested: false` — a proxy marked itself for these bytes and the
+spawn-side record disagrees — is a boundary refusal with predicate
+`relay_fidelity`, raised before the executor spawns; `--allow-relay-mismatch`
+proceeds and stamps `relay_mismatch_allowed: true` on the row, and the dispatch
+stays quarantined in every reader afterwards. An *absent* `relay_attested`
+never refuses: it says nothing was claimed.
 
 The Codex side has one rung of that ladder, and it is a **guard rather than a
 rewrite**: `templates/codex/hooks/spawn-guard.mjs`, registered by the Codex

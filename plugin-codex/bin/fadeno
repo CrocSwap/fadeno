@@ -22230,8 +22230,8 @@ var PENDING_RELAY_MAX_AGE_MS = 60 * 60 * 1e3;
 function attestationDigests(prompt) {
   return /* @__PURE__ */ new Set([callerPromptDigest(prompt), sha256Hex(prompt)]);
 }
-function consumeSpawnSideRelay(repoRoot, prompt, now) {
-  const path = (0, import_node_path16.join)(repoRoot, PENDING_RELAYS_FILE);
+function matchMarkerFile(repoRoot, file, prompt, now) {
+  const path = (0, import_node_path16.join)(repoRoot, file);
   if (!(0, import_node_fs16.existsSync)(path)) return null;
   let rows;
   try {
@@ -22241,43 +22241,47 @@ function consumeSpawnSideRelay(repoRoot, prompt, now) {
   }
   const fresh = rows.filter((row) => spawnMarkerIsFresh(row, now, PENDING_RELAY_MAX_AGE_MS));
   const digests = attestationDigests(prompt);
-  const hit = fresh.findIndex((row) => digests.has(spawnMarkerRow(row).prompt_sha256));
-  const remaining = hit === -1 ? fresh : fresh.filter((_, index) => index !== hit);
-  try {
-    if (remaining.length === 0) (0, import_node_fs16.rmSync)(path, { force: true });
-    else (0, import_node_fs16.writeFileSync)(path, `${remaining.map((row) => JSON.stringify(row)).join("\n")}
+  const index = fresh.findIndex((row) => digests.has(spawnMarkerRow(row).prompt_sha256));
+  return {
+    hit: index !== -1,
+    fresh: fresh.length,
+    settle: (dropHit) => {
+      const remaining = dropHit && index !== -1 ? fresh.filter((_, i) => i !== index) : fresh;
+      try {
+        if (remaining.length === 0) (0, import_node_fs16.rmSync)(path, { force: true });
+        else (0, import_node_fs16.writeFileSync)(path, `${remaining.map((row) => JSON.stringify(row)).join("\n")}
 `, "utf8");
-  } catch {
-  }
-  if (hit !== -1) return true;
-  return fresh.length > 0 ? false : null;
+      } catch {
+      }
+    }
+  };
 }
-function consumeProxyDispatchMarker(repoRoot, prompt, now) {
-  const path = (0, import_node_path16.join)(repoRoot, PROXY_DISPATCHES_FILE);
-  if (!(0, import_node_fs16.existsSync)(path)) return false;
-  let rows;
-  try {
-    rows = spawnMarkerLines((0, import_node_fs16.readFileSync)(path, "utf8"));
-  } catch {
-    return false;
+function readRelayAttestation(repoRoot, prompt, now) {
+  const proxy = matchMarkerFile(repoRoot, PROXY_DISPATCHES_FILE, prompt, now);
+  if (proxy == null) return { verdict: null, settle: () => {
+  } };
+  if (!proxy.hit) {
+    proxy.settle(false);
+    return { verdict: null, settle: () => {
+    } };
   }
-  const fresh = rows.filter((row) => spawnMarkerIsFresh(row, now, PENDING_RELAY_MAX_AGE_MS));
-  const digests = attestationDigests(prompt);
-  const hit = fresh.findIndex((row) => digests.has(spawnMarkerRow(row).prompt_sha256));
-  const remaining = hit === -1 ? fresh : fresh.filter((_, index) => index !== hit);
-  try {
-    if (remaining.length === 0) (0, import_node_fs16.rmSync)(path, { force: true });
-    else (0, import_node_fs16.writeFileSync)(path, `${remaining.map((row) => JSON.stringify(row)).join("\n")}
-`, "utf8");
-  } catch {
+  const spawnSide = matchMarkerFile(repoRoot, PENDING_RELAYS_FILE, prompt, now);
+  if (spawnSide == null) {
+    return { verdict: null, settle: () => proxy.settle(true) };
   }
-  return hit !== -1;
-}
-function consumeRelayAttestation(repoRoot, prompt, now) {
-  if (!consumeProxyDispatchMarker(repoRoot, prompt, now)) return null;
-  return consumeSpawnSideRelay(repoRoot, prompt, now);
+  const verdict = spawnSide.hit ? true : spawnSide.fresh > 0 ? false : null;
+  return {
+    verdict,
+    settle: () => {
+      proxy.settle(true);
+      spawnSide.settle(true);
+    }
+  };
 }
 var SPAWN_MAX_BUFFER2 = 32 * 1024 * 1024;
+var RELAY_FIDELITY_DIAGNOSIS = "RELAY FIDELITY FAILED: a dispatch proxy sent bytes that do not match what it was handed. An executor run on these bytes is answering a different question than the one that was asked.";
+var RELAY_FIDELITY_REMEDY = "Check the relay identity (`relay.claude` / `relay.codex` in executors.yaml); a model too small for the relay contract summarizes instead of forwarding. To dispatch anyway \u2014 deliberately and on the record \u2014 re-run with --allow-relay-mismatch; the proxy relay contract does not permit that flag, so only a human at the CLI can pass it.";
+var RELAY_FIDELITY_REFUSAL = `${RELAY_FIDELITY_DIAGNOSIS} Refusing before the spawn: no executor ran, nothing was written, and no tokens were spent. ${RELAY_FIDELITY_REMEDY}`;
 function producedByIds(opts) {
   if (opts.producedBy == null) return [];
   return opts.producedBy.map((id) => id.trim()).filter((id) => id.length > 0);
@@ -22679,10 +22683,12 @@ ${prompt}`;
   }
   const dispatchId = (0, import_node_crypto7.randomUUID)();
   const now = opts.now ?? /* @__PURE__ */ new Date();
-  const relayAttested = consumeRelayAttestation(repoRoot, callerPrompt, now);
+  const relay = readRelayAttestation(repoRoot, callerPrompt, now);
+  const relayAttested = relay.verdict;
+  const relayMismatchAllowed = relayAttested === false && opts.allowRelayMismatch === true;
   if (relayAttested === false) {
     opts.onEcho?.(
-      "RELAY FIDELITY FAILED: a dispatch proxy sent bytes that do not match what it was handed. The executor below is working from an altered prompt \u2014 treat its output as answering a different question. Check the relay identity (`relay.claude` / `relay.codex` in executors.yaml); a model too small for the relay contract summarizes instead of forwarding."
+      relayMismatchAllowed ? `${RELAY_FIDELITY_DIAGNOSIS} Proceeding under --allow-relay-mismatch: the ledger records \`relay_mismatch_allowed: true\`, and every reader of this dispatch's output is warned in band. ${RELAY_FIDELITY_REMEDY}` : RELAY_FIDELITY_REFUSAL
     );
   }
   prompt = `${prompt}
@@ -22817,10 +22823,19 @@ ${DISPATCH_RESULT_FOOTER}`;
     // the pair roll and the relay attestation are keyed on.
     caller_prompt_sha256: callerPromptSha256,
     ...relayAttested != null ? { relay_attested: relayAttested } : {},
+    // Omitted unless it happened, for the same reason `relay_attested` is: an
+    // always-present `false` here would be a claim about every dispatch, and
+    // the only dispatches this is a fact about are the ones a person waved
+    // through. On the refusal row it is absent by construction — the refusal
+    // is what happens when nobody waved.
+    ...relayMismatchAllowed ? { relay_mismatch_allowed: true } : {},
     command: command2,
     command_sha256: commandSha256,
     ...producers.length > 0 ? { input_provenance: provenanceFields(producers) } : {}
   };
+  if (relayAttested === false && !relayMismatchAllowed) {
+    refuseDispatch(repoRoot, identity, "relay_fidelity", RELAY_FIDELITY_REFUSAL, now);
+  }
   const deliveryChoice = { executor: executorName, spec };
   const eligibilityConflict = explainEligibilityConflict(deliveryChoice, archetype);
   if (eligibilityConflict != null) {
@@ -22975,6 +22990,7 @@ ${DISPATCH_RESULT_FOOTER}`;
       throw err;
     }
   }
+  relay.settle();
   try {
     appendEvidenceRow(repoRoot, {
       format: DISPATCHES_FORMAT,
@@ -23823,6 +23839,7 @@ ${truncatedStderr}
       promptSource,
       promptSnapshot,
       relayAttested,
+      relayMismatchAllowed,
       archetype,
       role,
       dial,
@@ -24463,6 +24480,7 @@ function requestedEntry(row) {
     promptSha256: str(row.prompt_sha256),
     callerPromptSha256: str(row.caller_prompt_sha256),
     relayAttested: bool(row.relay_attested),
+    relayMismatchAllowed: row.relay_mismatch_allowed === true,
     writeVariant: bool(row.write_variant),
     rewrite: null,
     // a kernel row is the delivery, never the decision to reroute one
@@ -24552,6 +24570,7 @@ function hostEntry(row) {
     // below.
     callerPromptSha256: null,
     relayAttested: null,
+    relayMismatchAllowed: false,
     writeVariant: null,
     rewrite: null,
     // set by `hostRewrittenEntry`, which builds on this
@@ -24652,6 +24671,7 @@ function applyCompletion(entry, row) {
     entry.workspaceChanged = row.workspace_changed;
   }
   entry.relayAttested = entry.relayAttested ?? bool(row.relay_attested);
+  entry.relayMismatchAllowed = entry.relayMismatchAllowed || row.relay_mismatch_allowed === true;
   entry.writeVariant = entry.writeVariant ?? bool(row.write_variant);
   entry.model = entry.model ?? str(row.model);
   entry.modelId = entry.modelId ?? str(row.model_id);
@@ -24825,7 +24845,12 @@ function renderDispatchLine(entry) {
       parts.push(`[still on disk at ${flatPath(ignored.retainedAt)} until \`fadeno clean\`]`);
     }
   }
-  if (entry.relayAttested != null) parts.push(`[relay_attested: ${entry.relayAttested}]`);
+  if (entry.relayAttested === false) {
+    parts.push("[RELAY FIDELITY FAILED \u2014 relay_attested: false]");
+    if (entry.relayMismatchAllowed) parts.push("[relay_mismatch_allowed: true \u2014 dispatched anyway]");
+  } else if (entry.relayAttested != null) {
+    parts.push(`[relay_attested: ${entry.relayAttested}]`);
+  }
   if (entry.writeVariant === true) parts.push("[write variant]");
   if (entry.gateEligible === false) parts.push("[shadow-only]");
   if (entry.error != null) parts.push(`[error: ${excerpt(entry.error, ERROR_EXCERPT)}]`);
@@ -25005,6 +25030,8 @@ function loadOutputRecords(absolute) {
         primaryMerge: null,
         workspace: null,
         merged: false,
+        relayAttested: null,
+        relayMismatchAllowed: false,
         shadow: false,
         tag: null,
         requestedAt: null,
@@ -25013,6 +25040,8 @@ function loadOutputRecords(absolute) {
       byId.set(dispatchId, rec);
     }
     if (row.shadow === true) rec.shadow = true;
+    if (typeof row.relay_attested === "boolean") rec.relayAttested = rec.relayAttested ?? row.relay_attested;
+    if (row.relay_mismatch_allowed === true) rec.relayMismatchAllowed = true;
     const snapshot = str(row.output_snapshot);
     if (snapshot != null) rec.snapshot = snapshot;
     const tag = str(row.tag);
@@ -25114,6 +25143,12 @@ function resolveOutputRecord(query, byId, lastWithSnapshot, requestOrder) {
   }
   return { record: hits[0], resolvedBy: "id" };
 }
+function relayQuarantineNotice(dispatchId, relayAttested, relayMismatchAllowed) {
+  if (relayAttested !== false) return null;
+  const id8 = dispatchId.slice(0, 8);
+  const provenance = relayMismatchAllowed ? "It was dispatched anyway under --allow-relay-mismatch" : "It predates the `relay_fidelity` refusal, which now stops this before the executor spawns";
+  return `!! RELAY FIDELITY FAILED for dispatch ${id8} (relay_attested: false). A dispatch proxy sent the executor bytes that did not match what it was handed, so the report below answers a prompt the caller never wrote. ${provenance}. QUARANTINE IT: do not relay this as an answer and do not act on it unread \u2014 re-dispatch without the defecting relay, or verify every claim in it by hand first. ---- report follows ----`;
+}
 function runDispatchesOutput(opts) {
   const tag = opts.tag?.trim() ? opts.tag.trim() : null;
   const query = opts.dispatchId.trim();
@@ -25161,12 +25196,19 @@ function runDispatchesOutput(opts) {
   if (!(0, import_node_fs18.existsSync)(snapshotAbs)) {
     throw new DispatchesCommandError(`output snapshot missing: ${snapshotRel}.`);
   }
-  const bytes = (0, import_node_fs18.readFileSync)(snapshotAbs, "utf8");
-  const attested = !rec.completed ? "incomplete" : sha256Hex(bytes) === rec.outputSha256 ? "match" : "mismatch";
+  const snapshotBytes = (0, import_node_fs18.readFileSync)(snapshotAbs, "utf8");
+  const attested = !rec.completed ? "incomplete" : sha256Hex(snapshotBytes) === rec.outputSha256 ? "match" : "mismatch";
+  const relayNotice = relayQuarantineNotice(rec.dispatchId, rec.relayAttested, rec.relayMismatchAllowed);
   return {
     dispatchId: rec.dispatchId,
     path: snapshotRel,
-    bytes,
+    bytes: relayNotice == null ? snapshotBytes : `${relayNotice}
+
+${snapshotBytes}`,
+    relayNotice,
+    relayAttested: rec.relayAttested,
+    relayMismatchAllowed: rec.relayMismatchAllowed,
+    snapshotBytes,
     attested,
     outcome: rec.completed ? rec.outcome : null,
     exitCode: rec.completed ? rec.exitCode : null,
@@ -25192,6 +25234,12 @@ function runDispatchesMerge(opts = {}) {
   const id8 = record2.dispatchId.slice(0, 8);
   if (!record2.completed) throw new DispatchesCommandError(`dispatch ${id8} has not completed; there is nothing to merge yet.`);
   if (record2.merged) throw new DispatchesCommandError(`dispatch ${id8} was already merged.`);
+  if (record2.relayAttested === false && opts.allowRelayMismatch !== true) {
+    throw new DispatchesCommandError(
+      `${relayQuarantineNotice(record2.dispatchId, record2.relayAttested, record2.relayMismatchAllowed)}
+Refusing to merge ${id8} into your workspace. Nothing was applied and ${record2.workspace != null ? `the worktree ${record2.workspace}` : "its worktree"} is untouched \u2014 read the diff there first. Pass --allow-relay-mismatch to merge it anyway.`
+    );
+  }
   if (record2.primaryMerge?.status !== "unresolved" || record2.workspace == null) {
     throw new DispatchesCommandError(
       `dispatch ${id8} has no unresolved merge-back to finish (merge-back: ${record2.primaryMerge?.status ?? "none recorded"}).`
@@ -39557,6 +39605,7 @@ var COMMANDS = {
       "--shared": NONE,
       "--ignored-output": { kind: "enum", values: ["kept", "discardable"] },
       "--no-brief": NONE,
+      "--allow-relay-mismatch": NONE,
       "--diagnostics": NONE
     }
   ),
@@ -39610,7 +39659,8 @@ var COMMANDS = {
     "--wait": { kind: "free" },
     "--tag": { kind: "free" },
     "--cancel": { kind: "free" },
-    "--merge": { kind: "free" }
+    "--merge": { kind: "free" },
+    "--allow-relay-mismatch": NONE
   }),
   "shadow-apply": command({ "--arm": { kind: "enum", values: ["challenger", "primary"] }, "--check": NONE }, ["free"]),
   bakeoff: command(
@@ -44339,7 +44389,7 @@ var TOP_LEVEL = {
   ], ["Cascade: binding \u2192 session dial \u2192 repo pin \u2192 user dial \u2192 base."]),
   shadow: aliasPage(SHADOW_PAGE, ["fadeno shadow", "fadeno shadow <archetype> <model>[@effort] [options]"], "`fadeno shadow` is an alias for `fadeno dial shadow`."),
   steering: page("Resolve dials or materialize harness steering.", ["fadeno steering resolve --archetype <name> [options]", "fadeno steering apply --codex|--claude|--opencode|--omp [options]"]),
-  dispatch: page("Resolve an archetype and invoke it once.", ["fadeno dispatch --archetype <name> [options]", "fadeno dispatch --model <ref> [options]"], ["Read prompt text from stdin or `--prompt-file`. `--archetype` is required unless `--model` is supplied; both are accepted.", "Dispatches isolate by default and merge a successful primary diff back. `--isolate` withholds merge-back; `--shadow <ref>` adds a one-shot challenger.", "Recover output with `fadeno dispatches --output tag:<tag> --wait 120`."]),
+  dispatch: page("Resolve an archetype and invoke it once.", ["fadeno dispatch --archetype <name> [options]", "fadeno dispatch --model <ref> [options]"], ["Read prompt text from stdin or `--prompt-file`. `--archetype` is required unless `--model` is supplied; both are accepted.", "Dispatches isolate by default and merge a successful primary diff back. `--isolate` withholds merge-back; `--shadow <ref>` adds a one-shot challenger.", "A failed relay-fidelity check refuses the dispatch before the executor spawns; `--allow-relay-mismatch` proceeds and records `relay_mismatch_allowed: true`.", "Recover output with `fadeno dispatches --output tag:<tag> --wait 120`."]),
   "dispatch-prepare": page("Prepare an isolated workspace for a pending host dispatch.", "fadeno dispatch-prepare <run> <dispatch-id> --isolate"),
   "dispatch-prompt": page("Emit the canonical host-dispatch envelope.", "fadeno dispatch-prompt <run> <dispatch-id>"),
   "dispatch-fallback": page("Deliver a locked host request through its declared fallback.", "fadeno dispatch-fallback <run> <dispatch-id>"),
@@ -44370,7 +44420,7 @@ var TOP_LEVEL = {
   "attempt-accept": page("Accept a hand-resolved isolated attempt.", "fadeno attempt-accept <run> <actor-call>"),
   runs: page("List run ledgers under `.fadeno/runs`.", "fadeno runs"),
   attest: page("Record this subagent delivery as evidence.", "fadeno attest --archetype <name>"),
-  dispatches: page("Inspect or recover command dispatches.", ["fadeno dispatches [--tail <count>] [--json] [--bakeoffs]", "fadeno dispatches --output <id|last|tag:<tag>> [--wait <seconds>]", "fadeno dispatches --cancel <id|tag:<tag>> | --merge <id|tag:<tag>>"], ["`--output` writes the saved snapshot bytes verbatim to stdout; use `--wait` only for a completion row."]),
+  dispatches: page("Inspect or recover command dispatches.", ["fadeno dispatches [--tail <count>] [--json] [--bakeoffs]", "fadeno dispatches --output <id|last|tag:<tag>> [--wait <seconds>]", "fadeno dispatches --cancel <id|tag:<tag>> | --merge <id|tag:<tag>>"], ["`--output` writes the saved snapshot bytes to stdout; use `--wait` only for a completion row.", "A `relay_attested: false` dispatch is quarantined: `--output` prefixes the bytes with the failure, and `--merge` refuses without `--allow-relay-mismatch`."]),
   "shadow-apply": page("Apply a selected shadow arm diff.", "fadeno shadow-apply <pair-id|dispatch-id> [--arm challenger|primary] [--check]"),
   bakeoff: page("Measure or adjudicate a shadow pair.", ["fadeno bakeoff <pair-id|dispatch-id> [--measure-only] [--judge <ref>] [--harness <id>] [--evidence inlined|explored]", "fadeno bakeoff <pair-id|dispatch-id> --prepare [--evidence inlined|explored]", "fadeno bakeoff <pair-id|dispatch-id> --record --comparison <file> --adversarial <file> [--evidence inlined|explored]"], ["`--measure-only` records no adjudication; `--prepare` writes blinded prompts; `--record` requires both host-delivered judgment files."]),
   show: page("Show a run step projection and artifacts.", "fadeno show <run> [--events] [--legacy]"),
@@ -44449,6 +44499,7 @@ var OPTION_HINTS = {
   "--merge": "Dispatch id or tag to merge",
   "--model": "Direct model reference",
   "--n": "Maximum shadow pairings",
+  "--allow-relay-mismatch": "Proceed despite a failed relay-fidelity check",
   "--native-executor": "Legacy host-executor spelling",
   "--no-brief": "Skip archetype brief preamble",
   "--no-record": "Preview without recording",
@@ -44568,7 +44619,7 @@ var PAGE_OPTIONS = {
   dial: withGlobals("--harness", "--session", "--user", "--repo", "--json"),
   shadow: withGlobals("--harness", "--rate", "--n", "--json"),
   steering: withGlobals(),
-  dispatch: withGlobals("--archetype", "--model", "--role", "--harness", "--prompt-file", "--tag", "--shadow", "--timeout", "--isolate", "--shared", "--ignored-output", "--diagnostics", "--no-brief"),
+  dispatch: withGlobals("--archetype", "--model", "--role", "--harness", "--prompt-file", "--tag", "--shadow", "--timeout", "--isolate", "--shared", "--ignored-output", "--diagnostics", "--no-brief", "--allow-relay-mismatch"),
   "dispatch-prepare": withGlobals("--isolate"),
   "dispatch-prompt": withGlobals(),
   "dispatch-fallback": withGlobals(),
@@ -44589,7 +44640,7 @@ var PAGE_OPTIONS = {
   "attempt-accept": withGlobals(),
   runs: withGlobals(),
   attest: withGlobals("--archetype"),
-  dispatches: withGlobals("--tail", "--json", "--bakeoffs", "--output", "--wait", "--tag", "--cancel", "--merge"),
+  dispatches: withGlobals("--tail", "--json", "--bakeoffs", "--output", "--wait", "--tag", "--cancel", "--merge", "--allow-relay-mismatch"),
   "shadow-apply": withGlobals("--arm", "--check"),
   bakeoff: withGlobals("--measure-only", "--evidence", "--prepare", "--record", "--comparison", "--adversarial", "--json", "--judge", "--harness"),
   show: withGlobals("--events", "--legacy"),
@@ -44622,11 +44673,15 @@ var PATH_OPTION_HINTS = {
   "models remove": { "--force": "Remove despite live dials, naming each stranded" },
   "model remove": { "--force": "Remove despite live dials, naming each stranded" },
   doctor: { "--probe-models": "Spawn each dialed harness\u2019s models_command and report a model it no longer lists" },
-  dispatches: { "--output": "Print saved snapshot bytes for an id, last dispatch, or tag" },
+  dispatches: {
+    "--output": "Print saved snapshot bytes for an id, last dispatch, or tag",
+    "--allow-relay-mismatch": "Merge a relay_attested: false dispatch anyway"
+  },
   dispatch: {
     "--isolate": "Withhold the primary diff from merge-back",
     "--shared": "Run directly in the current worktree",
-    "--shadow": "One-shot challenger model reference"
+    "--shadow": "One-shot challenger model reference",
+    "--allow-relay-mismatch": "Dispatch despite relay_attested: false, on the record"
   }
 };
 var PATH_OPTION_FORMS = {
@@ -45617,6 +45672,7 @@ function main(argv) {
         "no-brief": { type: "boolean" },
         isolate: { type: "boolean" },
         shared: { type: "boolean" },
+        "allow-relay-mismatch": { type: "boolean" },
         "ignored-output": { type: "string" },
         diagnostics: { type: "boolean" },
         tail: { type: "string" },
@@ -46490,6 +46546,7 @@ Or advance manually with the playbook cursor:`);
         timeoutMs: dispatchTimeoutMs,
         isolate: Boolean(values.isolate),
         shared: Boolean(values.shared),
+        allowRelayMismatch: Boolean(values["allow-relay-mismatch"]),
         ignoredOutput: (() => {
           const raw = values["ignored-output"];
           if (typeof raw !== "string") return null;
@@ -46503,6 +46560,13 @@ Or advance manually with the playbook cursor:`);
         prompt: promptFile == null ? (0, import_node_fs57.readFileSync)(0, "utf8") : void 0,
         onEcho: (line) => console.error(line)
       });
+      if (result.relayAttested === false) {
+        process.stdout.write(
+          `${relayQuarantineNotice(result.dispatchId, result.relayAttested, result.relayMismatchAllowed)}
+
+`
+        );
+      }
       if (result.stdout.length > 0) process.stdout.write(result.stdout);
       if (result.stderr.length > 0) process.stderr.write(result.stderr);
       if (result.outcome === "timeout") {
@@ -46689,7 +46753,8 @@ Or advance manually with the playbook cursor:`);
         const inline = values.merge.startsWith("tag:") ? values.merge.slice(4) : null;
         const result2 = runDispatchesMerge({
           dispatchId: inline != null ? "" : values.merge,
-          tag: inline ?? values.tag
+          tag: inline ?? values.tag,
+          allowRelayMismatch: Boolean(values["allow-relay-mismatch"])
         });
         const how = result2.resolvedBy === "tag" ? ` (tag: ${result2.tag})` : "";
         console.log(
@@ -46738,7 +46803,8 @@ Or advance manually with the playbook cursor:`);
         })();
         const merge = result2.primaryMerge == null ? null : result2.primaryMerge.status === "unresolved" ? `merge-back UNRESOLVED: the work conflicts with the workspace and did NOT land; the worktree is retained with conflict markers${result2.workspace != null ? ` at ${result2.workspace}` : ""}${result2.primaryMerge.detail != null ? ` (${result2.primaryMerge.detail})` : ""}. Resolve them there, then \`fadeno dispatches --merge ${result2.dispatchId.slice(0, 8)}\`` : result2.primaryMerge.status === "conflicted" ? `merge-back CONFLICTED: the tree MAY be partly applied \u2014 inspect \`git status\`${result2.primaryMerge.detail != null ? ` (${result2.primaryMerge.detail})` : ""}` : result2.primaryMerge.status === "blocked" ? `merge-back BLOCKED: nothing was applied, the workspace is untouched${result2.primaryMerge.detail != null ? ` (${result2.primaryMerge.detail})` : ""}` : result2.primaryMerge.detail != null ? `merge-back clean: ${result2.primaryMerge.detail}` : null;
         const attestation = result2.attested === "match" ? "output attested: sha matches the completion row" : result2.attested === "mismatch" ? "WARNING: snapshot sha does not match the completion row (file changed after the dispatch?)" : waitMs > 0 ? `STILL RUNNING: no completion row after waiting ${Math.round(waitMs / 1e3)}s. The executor has not exited; this is its output so far. Not a failure \u2014 re-run this command to check again.` : "no completion row recorded YET: the executor may still be running, and the kernel writes that row only when it exits. This is its output so far, not a failure. Re-run with --wait <seconds> to wait for the real answer.";
-        const note = [verdict, merge, attestation].filter((part) => part != null).join("; ");
+        const relay = result2.relayAttested === false ? `RELAY FIDELITY FAILED (relay_attested: false${result2.relayMismatchAllowed ? ", dispatched under --allow-relay-mismatch" : ""}) \u2014 the report above answers a prompt the caller never wrote; do not relay it as an answer` : null;
+        const note = [relay, verdict, merge, attestation].filter((part) => part != null).join("; ");
         const how = result2.resolvedBy === "recency" ? " [resolved by recency: nothing was open and nothing overlapped it, so this is the only candidate \u2014 launch with `--tag <handle>` to name it outright]" : result2.resolvedBy === "tag" ? " [resolved by tag]" : "";
         console.error(`[${result2.dispatchId}] ${result2.path} \u2014 ${note}${how}`);
         return 0;

@@ -335,60 +335,84 @@ function attestationDigests(prompt: string): Set<string> {
  * trailing newlines a heredoc appends, which `callerPromptDigest` canonicalizes
  * away on both sides); fresh entries with no hit mean the relay altered the
  * prompt (`false`); no fresh entries — non-hook flows — record nothing
- * (`null`). Evidence-only: never blocks the dispatch.
+ * (`null`).
+ *
+ * Detection only: this function decides nothing about whether the dispatch
+ * runs. `false` is acted on by the `relay_fidelity` boundary predicate below,
+ * and `null` never is.
  */
-function consumeSpawnSideRelay(repoRoot: string, prompt: string, now: Date): boolean | null {
-  const path = join(repoRoot, PENDING_RELAYS_FILE);
+interface MarkerMatch {
+  /** A fresh row carried one of these bytes' digests. */
+  hit: boolean;
+  /** How many rows were still inside the freshness window, the hit included. */
+  fresh: number;
+  /**
+   * Write the file back.
+   *
+   * `dropHit: true` removes the matched row — the row has been spent on a
+   * dispatch that is going ahead. `false` leaves it exactly where it was, so
+   * the next read reaches the same finding.
+   *
+   * Stale rows are dropped either way, and that is safe by construction: a row
+   * outside the freshness window can no longer produce any verdict, so pruning
+   * it destroys no evidence.
+   */
+  settle: (dropHit: boolean) => void;
+}
+
+/**
+ * Read one marker file and match it against these bytes — WITHOUT writing.
+ *
+ * The split between matching and writing is the whole point. Reading used to
+ * consume unconditionally, which meant a dispatch REFUSED for relay fidelity
+ * destroyed the evidence it had just refused on: the next identical run found
+ * no proxy marker, read `null` ("no proxy sent this"), and sailed through. A
+ * gate a person clears by pressing up-arrow is worse than no gate, because now
+ * they believe there is one.
+ */
+function matchMarkerFile(repoRoot: string, file: string, prompt: string, now: Date): MarkerMatch | null {
+  const path = join(repoRoot, file);
   if (!existsSync(path)) return null;
   let rows: unknown[];
   try {
     rows = spawnMarkerLines(readFileSync(path, 'utf8'));
   } catch {
-    return null; // malformed stash — attest nothing rather than guess
+    return null; // malformed marker file — claim nothing rather than guess
   }
   const fresh = rows.filter((row) => spawnMarkerIsFresh(row, now, PENDING_RELAY_MAX_AGE_MS));
   const digests = attestationDigests(prompt);
-  const hit = fresh.findIndex((row) => digests.has(spawnMarkerRow(row)!.prompt_sha256));
-  const remaining = hit === -1 ? fresh : fresh.filter((_, index) => index !== hit);
-  try {
-    if (remaining.length === 0) rmSync(path, { force: true });
-    else writeFileSync(path, `${remaining.map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8');
-  } catch {
-    // best-effort pruning; the verdict stands either way
-  }
-  if (hit !== -1) return true;
-  return fresh.length > 0 ? false : null;
+  const index = fresh.findIndex((row) => digests.has(spawnMarkerRow(row)!.prompt_sha256));
+  return {
+    hit: index !== -1,
+    fresh: fresh.length,
+    settle: (dropHit: boolean) => {
+      const remaining = dropHit && index !== -1 ? fresh.filter((_, i) => i !== index) : fresh;
+      try {
+        if (remaining.length === 0) rmSync(path, { force: true });
+        else writeFileSync(path, `${remaining.map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8');
+      } catch {
+        // best-effort pruning; the verdict stands either way
+      }
+    },
+  };
 }
 
 /**
- * Consume a proxy-dispatch marker matching these prompt bytes. True means a
- * dispatch proxy sent this exact prompt.
+ * A relay verdict that has been READ but not yet spent.
  *
- * Note it matches the bytes the kernel RECEIVED, not the bytes the parent
- * handed the proxy — so a proxy that altered the prompt still marks itself,
- * which is exactly what makes the alteration detectable below rather than
- * indistinguishable from silence.
+ * `settle()` is what consumes the markers, and it is called at exactly one
+ * place: immediately before the `dispatch_requested` row is appended — the row
+ * that means "this dispatch is going ahead". Every boundary refusal throws
+ * above that line, so a refused dispatch mutates no attestation state at all
+ * and an identical re-run reaches the identical finding.
+ *
+ * Not calling `settle()` is therefore safe in the only direction that matters:
+ * it can leave a marker alive too long (a later dispatch of the SAME bytes
+ * re-reads it, which is the point), never spend one that was never used.
  */
-function consumeProxyDispatchMarker(repoRoot: string, prompt: string, now: Date): boolean {
-  const path = join(repoRoot, PROXY_DISPATCHES_FILE);
-  if (!existsSync(path)) return false;
-  let rows: unknown[];
-  try {
-    rows = spawnMarkerLines(readFileSync(path, 'utf8'));
-  } catch {
-    return false; // malformed marker file — claim nothing rather than guess
-  }
-  const fresh = rows.filter((row) => spawnMarkerIsFresh(row, now, PENDING_RELAY_MAX_AGE_MS));
-  const digests = attestationDigests(prompt);
-  const hit = fresh.findIndex((row) => digests.has(spawnMarkerRow(row)!.prompt_sha256));
-  const remaining = hit === -1 ? fresh : fresh.filter((_, index) => index !== hit);
-  try {
-    if (remaining.length === 0) rmSync(path, { force: true });
-    else writeFileSync(path, `${remaining.map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8');
-  } catch {
-    // best-effort pruning; the verdict stands either way
-  }
-  return hit !== -1;
+interface RelayAttestation {
+  verdict: boolean | null;
+  settle: () => void;
 }
 
 /**
@@ -405,13 +429,49 @@ function consumeProxyDispatchMarker(repoRoot: string, prompt: string, now: Date)
  * fired for an un-relayed dispatch that happened to run while someone else's
  * spawn attestation was fresh — so the value could not be acted on, and was
  * recorded anyway.
+ *
+ * That distinction is the whole licence for the `relay_fidelity` refusal:
+ * `false` is a POSITIVE finding of defection, never an absence of evidence, so
+ * failing closed on it is not failing closed on ignorance. `null` — which is
+ * what ignorance looks like — keeps the behaviour it always had.
+ *
+ * AGING. Markers live inside a one-hour freshness window, evaluated per read.
+ * A refusal deliberately leaves them in place, so they can eventually expire
+ * un-consumed — and the direction that expiry falls in is what makes leaving
+ * them safe. Once the proxy marker is stale there is no fresh row naming these
+ * bytes, so the verdict is `null`: "cannot say", the field omitted from the
+ * row entirely. It cannot become `true`, because `true` needs a MATCHING
+ * spawn-side row and a defecting relay by construction has none. So an aged-out
+ * refusal degrades to an un-attested dispatch, never to one that looks
+ * attested — and the `dispatch_refused` row, which does not expire, is still in
+ * the ledger saying what was found.
  */
-function consumeRelayAttestation(repoRoot: string, prompt: string, now: Date): boolean | null {
-  if (!consumeProxyDispatchMarker(repoRoot, prompt, now)) return null;
-  // A proxy sent this. `null` here means no spawn-side attestation exists to
+function readRelayAttestation(repoRoot: string, prompt: string, now: Date): RelayAttestation {
+  const proxy = matchMarkerFile(repoRoot, PROXY_DISPATCHES_FILE, prompt, now);
+  // No marker file, or none of its fresh rows names these bytes: no proxy sent
+  // this. Nothing here is evidence about this dispatch, so the stale-prune runs
+  // straight away — there is nothing to preserve for a re-read.
+  if (proxy == null) return { verdict: null, settle: () => {} };
+  if (!proxy.hit) {
+    proxy.settle(false);
+    return { verdict: null, settle: () => {} };
+  }
+
+  // A proxy sent this. `null` below means no spawn-side attestation exists to
   // check against (the spawn did not route through the steering hook), which
   // is still "cannot say", never "defected".
-  return consumeSpawnSideRelay(repoRoot, prompt, now);
+  const spawnSide = matchMarkerFile(repoRoot, PENDING_RELAYS_FILE, prompt, now);
+  if (spawnSide == null) {
+    return { verdict: null, settle: () => proxy.settle(true) };
+  }
+  const verdict = spawnSide.hit ? true : spawnSide.fresh > 0 ? false : null;
+  return {
+    verdict,
+    settle: () => {
+      proxy.settle(true);
+      spawnSide.settle(true);
+    },
+  };
 }
 
 const SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
@@ -438,7 +498,41 @@ export type DispatchRefusalPredicate =
   | 'shadow_containment'
   | 'shadow_no_command_lane'
   | 'ignored_output_kept'
+  | 'relay_fidelity'
   | 'workspace_lease';
+
+/**
+ * The one wording for a relay-fidelity defection, so the stderr echo, the
+ * refusal message, the `dispatch_refused` row, and the in-band banner
+ * `fadeno dispatches --output` prints cannot drift into three descriptions of
+ * the same finding.
+ *
+ * Split in two because the diagnosis is what every channel repeats and the
+ * remedy is what only a person at a terminal can act on.
+ */
+export const RELAY_FIDELITY_DIAGNOSIS =
+  'RELAY FIDELITY FAILED: a dispatch proxy sent bytes that do not match what it was handed. ' +
+  'An executor run on these bytes is answering a different question than the one that was asked.';
+
+/**
+ * Named here rather than inlined at the two call sites: `--allow-relay-mismatch`
+ * is the only way past the refusal, and a caller who never sees its name has no
+ * way past at all.
+ *
+ * The Claude proxy guard's relay grammar (templates/claude/hooks/dispatch-proxy-guard.mjs)
+ * does not admit this flag, which is deliberate and load-bearing: the party
+ * whose fidelity is in question must not be able to wave away its own finding.
+ */
+export const RELAY_FIDELITY_REMEDY =
+  'Check the relay identity (`relay.claude` / `relay.codex` in executors.yaml); a model too small ' +
+  'for the relay contract summarizes instead of forwarding. To dispatch anyway — deliberately and ' +
+  'on the record — re-run with --allow-relay-mismatch; the proxy relay contract does not permit ' +
+  'that flag, so only a human at the CLI can pass it.';
+
+/** The refusal text, which is also the `dispatch_refused` row's `refusal.message`. */
+export const RELAY_FIDELITY_REFUSAL =
+  `${RELAY_FIDELITY_DIAGNOSIS} Refusing before the spawn: no executor ran, nothing was written, ` +
+  `and no tokens were spent. ${RELAY_FIDELITY_REMEDY}`;
 
 function producedByIds(opts: AdHocDispatchOptions): string[] {
   if (opts.producedBy == null) return [];
@@ -746,6 +840,19 @@ export interface AdHocDispatchOptions {
   timeoutMs?: number | null;
   /** Bounded opt-in process output diagnostics (per-stream 32 KiB / 500 lines). */
   diagnostics?: boolean;
+  /**
+   * `--allow-relay-mismatch`: dispatch anyway when the relay attestation came
+   * back `false`.
+   *
+   * Not a silent bypass, and deliberately not a mode. It records
+   * `relay_mismatch_allowed: true` beside `relay_attested: false` on the row,
+   * so the ledger shows a person chose this rather than the kernel forgiving
+   * it; and the finding still rides out in-band with the output, because the
+   * dispatch remains quarantined — the flag says "run it", never "trust it".
+   *
+   * Meaningless on `null` and `true`: there is nothing to allow.
+   */
+  allowRelayMismatch?: boolean;
   /** Injectable random sampler for shadow rate (test seam). */
   shadowSampler?: () => number;
 }
@@ -765,8 +872,18 @@ export interface AdHocDispatchResult {
    * Spawn-side relay verdict: `true` = the prompt matches a stashed
    * attestation, `false` = attestations were pending but none matched,
    * `null` = no attestation flow in play.
+   *
+   * `false` only ever reaches a result at all when `relayMismatchAllowed` is
+   * true; without the override the dispatch is refused before the spawn and
+   * this function throws instead of returning.
    */
   relayAttested: boolean | null;
+  /**
+   * Whether `--allow-relay-mismatch` carried a `relay_attested: false`
+   * dispatch past the `relay_fidelity` refusal. Always false otherwise —
+   * including when there was nothing to allow.
+   */
+  relayMismatchAllowed: boolean;
   archetype: string | null;
   role: string | null;
   dial: DialRef;
@@ -1398,18 +1515,34 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // line already carried the archetype brief: a `--brief` dispatch could
   // therefore never match its own attestation, and recorded `relay_attested:
   // null` ("no proxy sent this") for a relay that demonstrably had.
-  const relayAttested = consumeRelayAttestation(repoRoot, callerPrompt, now);
+  // Read, not consumed. The markers are spent by `relay.settle()` immediately
+  // before the request row is appended, so every refusal below this line —
+  // relay fidelity, eligibility, distinctness, constraint, workspace lease —
+  // leaves the attestation exactly as it found it.
+  const relay = readRelayAttestation(repoRoot, callerPrompt, now);
+  const relayAttested = relay.verdict;
+  // Only ever true alongside `relayAttested === false`: there is nothing to
+  // allow otherwise, and a row claiming an override that overrode nothing
+  // would read as a defection that never happened.
+  const relayMismatchAllowed = relayAttested === false && opts.allowRelayMismatch === true;
   if (relayAttested === false) {
     // Contemporaneous, because retrospective is the wrong shape for this. A
-    // defecting relay means the executor is about to work from bytes the
-    // caller never wrote, and the person who can tell whether that matters is
-    // watching this command right now. The row is written either way; this is
-    // the part that gets read.
+    // defecting relay means the executor would work from bytes the caller
+    // never wrote, and the person who can tell whether that matters is
+    // watching this command right now.
+    //
+    // The echo is kept, and it is NOT the mechanism. It goes to stderr, which
+    // the relay contract discards along with a timed-out call — which is
+    // exactly how the E25 dispatch shipped a success verdict with this
+    // sentence nowhere a reader could reach it. The refusal below (or, under
+    // the override, the in-band banner on the output) is what carries the
+    // finding; this line is only what makes it immediate.
     opts.onEcho?.(
-      'RELAY FIDELITY FAILED: a dispatch proxy sent bytes that do not match what it was handed. ' +
-      'The executor below is working from an altered prompt — treat its output as answering a ' +
-      'different question. Check the relay identity (`relay.claude` / `relay.codex` in ' +
-      'executors.yaml); a model too small for the relay contract summarizes instead of forwarding.',
+      relayMismatchAllowed
+        ? `${RELAY_FIDELITY_DIAGNOSIS} Proceeding under --allow-relay-mismatch: the ledger records ` +
+          '`relay_mismatch_allowed: true`, and every reader of this dispatch\'s output is warned ' +
+          `in band. ${RELAY_FIDELITY_REMEDY}`
+        : RELAY_FIDELITY_REFUSAL,
     );
   }
 
@@ -1691,6 +1824,12 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // the pair roll and the relay attestation are keyed on.
     caller_prompt_sha256: callerPromptSha256,
     ...(relayAttested != null ? { relay_attested: relayAttested } : {}),
+    // Omitted unless it happened, for the same reason `relay_attested` is: an
+    // always-present `false` here would be a claim about every dispatch, and
+    // the only dispatches this is a fact about are the ones a person waved
+    // through. On the refusal row it is absent by construction — the refusal
+    // is what happens when nobody waved.
+    ...(relayMismatchAllowed ? { relay_mismatch_allowed: true } : {}),
     command,
     command_sha256: commandSha256,
     ...(producers.length > 0 ? { input_provenance: provenanceFields(producers) } : {}),
@@ -1701,6 +1840,25 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
   // advisory provider clash warns and continues. There is no write-posture
   // predicate here any more: a harness lane is an argv, and what it may do is the
   // vendor's business and the worktree's, not a claim for Fadeno to check.
+  //
+  // Relay fidelity comes FIRST among them, because it is the only predicate
+  // about the prompt itself: every other check reasons about a task the
+  // caller wrote, and this one says that assumption is false. Deciding
+  // anything downstream of an altered prompt is deciding about the wrong task.
+  //
+  // Refusing here rather than at the attestation call site (~700 lines up)
+  // buys the full identity — executor, model, dial, both prompt digests — on
+  // the `dispatch_refused` row, which is what makes the defection
+  // investigable afterwards. It costs nothing that matters: the executor
+  // spawns another thousand lines below, so no tokens are spent either way,
+  // and the only artifact left behind is the prompt snapshot every boundary
+  // refusal already leaves.
+  //
+  // `null` is not handled here at all, deliberately. See
+  // `consumeRelayAttestation`: `null` is ignorance, `false` is a finding.
+  if (relayAttested === false && !relayMismatchAllowed) {
+    refuseDispatch(repoRoot, identity, 'relay_fidelity', RELAY_FIDELITY_REFUSAL, now);
+  }
   const deliveryChoice = { executor: executorName, spec };
   const eligibilityConflict = explainEligibilityConflict(deliveryChoice, archetype);
   if (eligibilityConflict != null) {
@@ -1902,6 +2060,16 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
       throw err;
     }
   }
+
+  // Spend the relay markers HERE, on the last line before this dispatch becomes
+  // a fact. Everything that could still refuse has already thrown, so this runs
+  // once per dispatch that actually proceeds — attested, cannot-say, or waved
+  // through with --allow-relay-mismatch — and never for one that was refused.
+  //
+  // Before the append rather than after: the append can throw (a full disk, a
+  // read-only tree), and a dispatch that fails to record itself is one a caller
+  // will re-run. Consuming first would hand that re-run a `null`.
+  relay.settle();
 
   try {
     appendEvidenceRow(repoRoot, {
@@ -3103,6 +3271,7 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     promptSource,
     promptSnapshot,
     relayAttested,
+    relayMismatchAllowed,
     archetype,
     role,
     dial,
