@@ -162,8 +162,9 @@ All notable changes to Fadeno are documented here. The format follows
 
   The coverage is **partial and is documented as partial**: role agents are
   identified by `agent_type`, so a role brief handed to a plain `claude`-type
-  subagent is invisible to it; Codex has no Bash `PreToolUse` hook at all; and
-  the statement splitter reads shell text without being a shell. Isolation
+  subagent is invisible to it; Codex-hosted role agents were not covered (closed
+  separately below — the gap was our wiring, not a Codex limit); and the
+  statement splitter reads shell text without being a shell. Isolation
   (`--isolate`) remains the protection for two concurrent implementers — the
   hook only catches the reflex.
 
@@ -172,6 +173,59 @@ All notable changes to Fadeno are documented here. The format follows
   than re-dispatching (a resumed agent returns to its own transcript; a fresh
   dispatch puts a second implementer on the same tree), and report which files
   are dirty and which agent owns them before doing so.
+- **Relay fidelity now works on a Codex host, and Codex role agents are guarded
+  against destructive git.** Both sides of `relay_attested` were written by
+  Claude-only hooks, so on a Codex host the verdict was permanently *absent* —
+  "cannot say" — and the new `relay_fidelity` refusal could never fire there. A
+  live Codex-director session had no protection at all against the exact
+  substitution class the refusal was built for. That was never a Codex
+  limitation, only the shape of our wiring: Codex fires `PreToolUse` for every
+  tool, and a shell call arrives as `tool_name: "Bash"` with the command bytes
+  in `tool_input.command` (measured against the shipped 0.153.4 binary, not read
+  out of documentation).
+
+  The new `templates/codex/hooks/dispatch-proxy-guard.mjs` writes the
+  dispatch-side marker, and `spawn-guard.mjs` now writes the spawn-side stash.
+  The two ship together on purpose: a proxy marker with no spawn-side stash lets
+  an unrelated session's fresh rows turn an honest dispatch into a
+  `relay_attested: false`, and *manufacturing* that finding is worse than not
+  having it. The kernel needed no changes — it already reads both files without
+  knowing which harness wrote them.
+
+  The Codex relay is not shaped like the Claude one, and the implementation
+  follows that rather than the other way round. Codex has no dispatch-proxy
+  agent type: the managed role agent brokers its own dispatch, writing the
+  prompt it received to a file under `.fadeno/local/prompts/` and running
+  `fadeno dispatch --archetype <role> --prompt-file <path>`. So the bytes are
+  not in the command — the path to them is, and the hook reads that file (only
+  under the prompts dir; anything else is left unattested rather than read, so a
+  guard cannot be turned into a file oracle with a hash for an output). The
+  spawn side stashes **every** delivered managed role spawn, host lane included,
+  because a host-adapter role agent resolves per task and dispatches on
+  `mode=command` — stashing only the command lane would leave those dispatches
+  carrying a marker with no row of their own, which the kernel reads as
+  defection. Refusals stash nothing: nothing was handed over.
+
+  Deliberately absent is the Claude proxy guard's relay grammar, which allows a
+  dispatch proxy exactly one shape of Bash. That contract is safe on Claude
+  because `dispatch-worker` exists only to relay; on Codex the same `worker` is
+  also the host-lane implementer, so an allowlist would refuse it every
+  legitimate command it runs. The **destructive-git** refusal does carry over
+  byte for byte (`checkout`, `switch`, `restore`, `reset`, `stash`, `clean`;
+  `git stash list|show` and `git clean -n` pass), with the same stated limits:
+  identification is by `agent_type`, so a role brief handed to a generic Codex
+  subagent is not covered, and the splitter reads shell text without being a
+  shell. Heredoc bodies are stripped before that scan — they are the user's task
+  prompt, and a prompt that mentions `git checkout` must not read as running
+  one. A refused command writes no marker, because it never ran and therefore
+  sent no bytes.
+
+  The manifest entry is appended **after** the `Agent` group in
+  `hooks/hooks.json`: Codex keys hook trust per matcher group by index, so the
+  spawn guard's existing trusted hash stays valid and only the new group goes
+  through review at the next session start. Until it is trusted, Codex role
+  dispatches stay unattested and role agents stay unguarded — `fadeno setup
+  --codex` now says so.
 
 - **`fadeno dispatch-withdraw <run> <dispatch-id> --reason <text>` — retire a
   host request that was never started.** A minted request had exactly two exits,

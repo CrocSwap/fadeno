@@ -677,11 +677,11 @@ the `DESTRUCTIVE_GIT` subcommands — `checkout`, `switch`, `restore`, `reset`,
 in a shared tree against its own explicit instructions. `git stash list|show`
 and `git clean -n` pass; the main session is never guarded. The coverage is
 **partial and documented as such**: identification is by `agent_type`, so a role
-brief handed to a plain `claude`-type subagent is invisible to it, Codex-hosted
-role agents are not covered because Fadeno wires no Bash guard there yet (a gap
-in our wiring, not a Codex limit — Codex 0.153.4 fires `PreToolUse` for every
-tool and its payload carries `tool_input` and `agent_type`), and the statement
-splitter reads shell text without being a shell. Isolation (`--isolate`) is the protection for two
+brief handed to a plain `claude`-type subagent is invisible to it, and the
+statement splitter reads shell text without being a shell. Codex-hosted role
+agents are covered by their own twin of this hook
+(`templates/codex/hooks/dispatch-proxy-guard.mjs`), which carries the same
+`DESTRUCTIVE_GIT` rule and must be changed with it. Isolation (`--isolate`) is the protection for two
 concurrent implementers; the hook only catches the reflex.
 
 `.fadeno/local/` is per-machine session state (sticky dials at `.fadeno/local/dials`, proxy
@@ -846,9 +846,9 @@ proceeds and stamps `relay_mismatch_allowed: true` on the row, and the dispatch
 stays quarantined in every reader afterwards. An *absent* `relay_attested`
 never refuses: it says nothing was claimed.
 
-The Codex side has one rung of that ladder, and it is a **guard rather than a
-rewrite**: `templates/codex/hooks/spawn-guard.mjs`, registered by the Codex
-plugin on `PreToolUse`/`Agent`. It classifies each `spawn_agent` by whether
+The Codex side has two rungs of that ladder, and both are **guards rather than
+rewrites**. The first is `templates/codex/hooks/spawn-guard.mjs`, registered by
+the Codex plugin on `PreToolUse`/`Agent`. It classifies each `spawn_agent` by whether
 `agent_type` resolves to a managed role agent, and the test is exact: the
 `# fadeno:managed` header, project `.codex/agents/<a>.toml` shadowing user
 `fadeno-<a>.toml`, and the file's own `name` key equal to the spawned type —
@@ -885,6 +885,44 @@ ones that host mode allowed, so an unsteered subagent never again reads as no
 subagent at all. Adding this hook changes `hooks/hooks.json`, so an upgraded
 plugin only starts guarding once Codex's review-and-trust flow accepts it at the
 next session start.
+
+The second rung is `templates/codex/hooks/dispatch-proxy-guard.mjs`, registered
+on `PreToolUse` for the shell tool — Codex fires `PreToolUse` for every tool,
+and a shell call arrives as `tool_name: "Bash"` with the command bytes in
+`tool_input.command` (measured against the shipped binary, 0.153.4). It carries
+the **dispatch-side half of relay attestation** and the role agents'
+**destructive-git refusal**, and its shape follows from how a Codex relay
+differs from a Claude one. Codex has no dispatch-proxy agent type: the managed
+role agent brokers its own dispatch, writing the prompt it received to a file
+under `.fadeno/local/prompts/` and running `fadeno dispatch --archetype <role>
+--prompt-file <path>`. So the bytes are not in the command — the path to them
+is, and the hook reads that file (only under the prompts dir; a path anywhere
+else is left unattested rather than read) and writes the same
+`proxy-dispatches.jsonl` marker the Claude proxy guard writes, under the same
+caller-prompt digest. Its partner is `spawn-guard.mjs`, which now stashes
+`pending-relays.jsonl` for **every managed role spawn it lets through**, host
+lane included: a host-adapter role agent resolves per task and dispatches on
+`mode=command`, and stashing only the command lane would leave those dispatches
+carrying a marker with no spawn-side row of their own — which the kernel reads
+as defection. Refusals stash nothing, because nothing was handed over. The two
+halves ship together on purpose: a proxy marker without a spawn-side stash can
+turn an unrelated session's fresh rows into a `relay_attested: false` for a
+dispatch that never defected.
+
+What this rung deliberately does **not** carry is the Claude proxy guard's
+relay grammar, which allows a dispatch proxy exactly one shape of Bash. That
+contract is safe on Claude because `dispatch-worker` exists only to relay; on
+Codex the same `worker` is also the host-lane implementer, so an allowlist
+would refuse it every legitimate command it runs. The destructive-git list is
+byte-identical to the Claude guard's (`checkout`, `switch`, `restore`, `reset`,
+`stash`, `clean`; `git stash list|show` and `git clean -n` pass), with the same
+stated limits: identification is by `agent_type`, so a role brief handed to a
+generic Codex subagent is not covered, and the statement splitter reads shell
+text without being a shell. Heredoc bodies are stripped before the git scan —
+they are the user's task prompt, and a prompt that mentions `git checkout` must
+not read as running one. This entry is appended after the `Agent` group in
+`hooks/hooks.json` so Codex's per-group trust keys leave the spawn guard's
+existing trusted hash valid and put only the new group through review.
 
 The Claude `claude-agents/` dir carries two kinds of subagents: the host role
 subagents (`worker`/`reviewer`/`judge`) and the **dispatch proxy agents**

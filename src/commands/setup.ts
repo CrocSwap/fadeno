@@ -302,7 +302,7 @@ export function runSetup(opts: SetupOptions = {}): SetupResult {
   if (opts.target === 'claude') {
     notices.push('Claude steering is installed by the plugin and remains inert while the host-native base is active.');
   }
-  if (opts.target === 'codex') notices.push('Codex managed agents are user-scoped; start a fresh Codex session to load them, and trust the plugin\'s spawn-guard hook when that session asks to review it.');
+  if (opts.target === 'codex') notices.push('Codex managed agents are user-scoped; start a fresh Codex session to load them, and trust the plugin\'s spawn-guard and Bash guard hooks when that session asks to review them — an untrusted Bash guard leaves role dispatches unattested (relay_attested stays absent) and role agents unguarded against destructive git.');
   if (!opts.nonInteractive) notices.push('External command dials remain opt-in; setup selected safe host-native base.');
 
   // Add session definitions notice (point 7)

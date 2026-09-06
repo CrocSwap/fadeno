@@ -32362,6 +32362,15 @@ function runCodexPlugin(opts = {}) {
       force
     )
   });
+  const proxyGuardPath = (0, import_node_path27.join)(outDir, "hooks", "dispatch-proxy-guard.mjs");
+  results.push({
+    path: proxyGuardPath,
+    status: emitFile(
+      proxyGuardPath,
+      stampHookVersion((0, import_node_fs26.readFileSync)((0, import_node_path27.join)(tpl, "codex", "hooks", "dispatch-proxy-guard.mjs"), "utf8")),
+      force
+    )
+  });
   const hookManifestPath = (0, import_node_path27.join)(outDir, "hooks", "hooks.json");
   results.push({
     path: hookManifestPath,
@@ -42084,8 +42093,8 @@ var PERSISTED_SURFACES = [
     versionField: null,
     currentVersion: null,
     reader: "consumeSpawnSideRelay (src/commands/dispatch.ts, PENDING_RELAYS_FILE)",
-    writer: "templates/claude/hooks/dispatch-steering.mjs \u2014 a standalone hook that cannot import the constant",
-    notes: "Proof that a relay-bound spawn happened. Consumed and truncated within a session."
+    writer: "templates/claude/hooks/dispatch-steering.mjs and templates/codex/hooks/spawn-guard.mjs \u2014 standalone hooks that cannot import the constant",
+    notes: "Proof that a relay-bound spawn happened. Consumed and truncated within a session. Two writers, one row shape: the Claude hook stashes a spawn bound for a dispatch proxy, the Codex hook stashes every delivered managed role spawn (any of which can dispatch on a per-task `mode=command` resolution)."
   },
   {
     id: "proxy-dispatches",
@@ -42095,8 +42104,8 @@ var PERSISTED_SURFACES = [
     versionField: null,
     currentVersion: null,
     reader: "consumeProxyDispatchMarker (src/commands/dispatch.ts, PROXY_DISPATCHES_FILE)",
-    writer: "templates/claude/hooks/dispatch-proxy-guard.mjs \u2014 a standalone hook that cannot import the constant",
-    notes: "Sibling of pending-relays; machine-local proxy bookkeeping."
+    writer: "templates/claude/hooks/dispatch-proxy-guard.mjs and templates/codex/hooks/dispatch-proxy-guard.mjs \u2014 standalone hooks that cannot import the constant",
+    notes: "Sibling of pending-relays; machine-local proxy bookkeeping. The Codex writer digests the prompt FILE the role agent named, since a Codex relay carries the path rather than the bytes."
   }
 ];
 function surfaceAbsolutePath(surface, opts) {
@@ -42964,7 +42973,7 @@ function runSetup(opts = {}) {
   if (opts.target === "claude") {
     notices.push("Claude steering is installed by the plugin and remains inert while the host-native base is active.");
   }
-  if (opts.target === "codex") notices.push("Codex managed agents are user-scoped; start a fresh Codex session to load them, and trust the plugin's spawn-guard hook when that session asks to review it.");
+  if (opts.target === "codex") notices.push("Codex managed agents are user-scoped; start a fresh Codex session to load them, and trust the plugin's spawn-guard and Bash guard hooks when that session asks to review them \u2014 an untrusted Bash guard leaves role dispatches unattested (relay_attested stays absent) and role agents unguarded against destructive git.");
   if (!opts.nonInteractive) notices.push("External command dials remain opt-in; setup selected safe host-native base.");
   notices.push("Skills and subagents are loaded at host session start; a fresh session is required to refresh them \u2014 no setup or refresh will update the current session.");
   return {

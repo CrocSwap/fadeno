@@ -1456,7 +1456,7 @@ test('the proxy heredoc does not change the prompt identity: hook, proxy guard a
 });
 
 /**
- * One rule, five copies of it.
+ * One rule, six copies of it.
  *
  * `callerPromptDigest` is the definition, but a hook or a bundled plugin has no
  * import path back into the CLI, so each spells the sha256 AND its
@@ -1473,6 +1473,7 @@ test('every hand-spelled caller digest strips trailing newlines the same way', (
     'templates/claude/hooks/dispatch-steering.mjs',
     'templates/claude/hooks/dispatch-proxy-guard.mjs',
     'templates/codex/hooks/spawn-guard.mjs',
+    'templates/codex/hooks/dispatch-proxy-guard.mjs',
     'templates/opencode/plugin/fadeno-steering.js',
     'templates/omp/extensions/fadeno-steering.ts',
   ]) {

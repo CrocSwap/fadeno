@@ -362,6 +362,25 @@ export function runCodexPlugin(opts: PluginOptions = {}): PluginResult {
       force,
     ),
   });
+  // The `PreToolUse` Bash guard: the proxy-side half of relay attestation plus
+  // the role agents' destructive-git refusal. Stamped for the same reason the
+  // spawn guard is — the marker rows it writes name the generation that wrote
+  // them, which a session-start hook cache otherwise hides.
+  //
+  // Its manifest entry sits AFTER the `Agent` group on purpose. Codex keys hook
+  // trust per matcher group by index
+  // (`hooks.state."<plugin>:hooks/hooks.json:pre_tool_use:<group>:<handler>"`),
+  // so a new group at the end leaves the spawn guard's existing trusted hash
+  // valid and puts only the new entry through review on the next session start.
+  const proxyGuardPath = join(outDir, 'hooks', 'dispatch-proxy-guard.mjs');
+  results.push({
+    path: proxyGuardPath,
+    status: emitFile(
+      proxyGuardPath,
+      stampHookVersion(readFileSync(join(tpl, 'codex', 'hooks', 'dispatch-proxy-guard.mjs'), 'utf8')),
+      force,
+    ),
+  });
   const hookManifestPath = join(outDir, 'hooks', 'hooks.json');
   results.push({
     path: hookManifestPath,

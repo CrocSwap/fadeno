@@ -297,8 +297,12 @@ export const PERSISTED_SURFACES: readonly PersistedSurface[] = [
     versionField: null,
     currentVersion: null,
     reader: 'consumeSpawnSideRelay (src/commands/dispatch.ts, PENDING_RELAYS_FILE)',
-    writer: 'templates/claude/hooks/dispatch-steering.mjs — a standalone hook that cannot import the constant',
-    notes: 'Proof that a relay-bound spawn happened. Consumed and truncated within a session.',
+    writer:
+      'templates/claude/hooks/dispatch-steering.mjs and templates/codex/hooks/spawn-guard.mjs — standalone hooks that cannot import the constant',
+    notes:
+      'Proof that a relay-bound spawn happened. Consumed and truncated within a session. Two writers, one row shape: '
+      + 'the Claude hook stashes a spawn bound for a dispatch proxy, the Codex hook stashes every delivered managed role spawn '
+      + '(any of which can dispatch on a per-task `mode=command` resolution).',
   },
   {
     id: 'proxy-dispatches',
@@ -308,8 +312,11 @@ export const PERSISTED_SURFACES: readonly PersistedSurface[] = [
     versionField: null,
     currentVersion: null,
     reader: 'consumeProxyDispatchMarker (src/commands/dispatch.ts, PROXY_DISPATCHES_FILE)',
-    writer: 'templates/claude/hooks/dispatch-proxy-guard.mjs — a standalone hook that cannot import the constant',
-    notes: 'Sibling of pending-relays; machine-local proxy bookkeeping.',
+    writer:
+      'templates/claude/hooks/dispatch-proxy-guard.mjs and templates/codex/hooks/dispatch-proxy-guard.mjs — standalone hooks that cannot import the constant',
+    notes:
+      'Sibling of pending-relays; machine-local proxy bookkeeping. The Codex writer digests the prompt FILE the role agent '
+      + 'named, since a Codex relay carries the path rather than the bytes.',
   },
 ];
 

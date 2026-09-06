@@ -1,5 +1,5 @@
 {
-  "description": "Keep explicitly enabled Fadeno host mode active for one Codex session without repository instructions, and guard subagent spawns while it is on.",
+  "description": "Keep explicitly enabled Fadeno host mode active for one Codex session without repository instructions, guard subagent spawns while it is on, and attest the relay a managed role agent brokers.",
   "hooks": {
     "PreToolUse": [
       {
@@ -8,6 +8,16 @@
           {
             "type": "command",
             "command": "node ${PLUGIN_ROOT}/hooks/spawn-guard.mjs",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|bash|shell|local_shell|exec_command|unified_exec",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/hooks/dispatch-proxy-guard.mjs",
             "timeout": 15
           }
         ]

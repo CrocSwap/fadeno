@@ -313,6 +313,62 @@ function recordHostRefusal(predicate, reason, refusedSlot) {
 }
 
 /**
+ * Relay-fidelity attestation, SPAWN side: stash the caller's prompt digest for
+ * every managed role spawn this guard lets through.
+ *
+ * The Codex twin of the Claude steering hook's `pending-relays.jsonl` write,
+ * and the half that makes `relay_attested` decidable on a Codex host at all.
+ * The dispatch-side half is `dispatch-proxy-guard.mjs`, which marks the bytes a
+ * role agent is about to hand to `fadeno dispatch`; the kernel matches the two
+ * (`readRelayAttestation`, src/commands/dispatch.ts) and refuses a mismatch as
+ * predicate `relay_fidelity`. Content-keyed (sha256), so concurrent spawns
+ * match without ordering.
+ *
+ * DELIVERED spawns only, and ALL of them — not just the command lane. Both
+ * halves of that are load-bearing:
+ *
+ * - A refusal stashes nothing, because nothing was handed over. `recordHostRefusal`
+ *   deliberately does not call this.
+ * - Every managed role agent on Codex can end up dispatching, host-adapter
+ *   spawns included: `renderCodexHostAgent`'s brief resolves per task and runs
+ *   `fadeno dispatch --archetype <role> --prompt-file <path>` on `mode=command`
+ *   (a shadow pair moving both arms to the command lane produces exactly that).
+ *   Stashing only command-adapter spawns would leave those dispatches carrying a
+ *   proxy marker with no spawn-side row of their own — and the kernel reads
+ *   "marker matched, fresh rows exist, none of them mine" as DEFECTION. Over-
+ *   stashing cannot invent that failure: an unused row ages out of the one-hour
+ *   window, and a row that is never matched by a marker is never consulted.
+ *
+ * The digest is `callerDigest` — canonical, trailing terminators stripped —
+ * because the role brief writes the prompt it received to a FILE (which almost
+ * always ends in a newline) while `message` almost never does. Hashing raw bytes
+ * on the two sides would split the digest for the same task and manufacture the
+ * finding this exists to detect.
+ *
+ * Best-effort: attestation is evidence, never a gate on the spawn. A write that
+ * fails costs a `true`, never a false `false` — with no spawn-side file the
+ * kernel reads `null`, "cannot say".
+ */
+function stashRelay() {
+  if (!ledger) return; // not a Fadeno repo: never create the tree from a hook
+  if (callerDigest == null) return; // no prompt bytes, nothing to attest
+  try {
+    const dir = join(cwd, '.fadeno', 'local');
+    mkdirSync(dir, { recursive: true });
+    appendFileSync(
+      join(dir, 'pending-relays.jsonl'),
+      `${JSON.stringify({
+        timestamp: new Date().toISOString(),
+        hook_version: HOOK_VERSION,
+        prompt_sha256: callerDigest,
+      })}\n`,
+    );
+  } catch {
+    // best-effort: attestation is evidence, never a gate on the spawn
+  }
+}
+
+/**
  * Evidence for a managed spawn this guard let through. The Codex twin of the
  * Claude hook's `host_delivery` row, field for field where the two harnesses
  * can observe the same thing, plus the two facts only this side has: the agent
@@ -325,6 +381,7 @@ function recordHostRefusal(predicate, reason, refusedSlot) {
  */
 function recordHostDelivery(extra) {
   if (!ledger) return;
+  stashRelay();
   let snapshotRel = null;
   if (message.length > 0 && promptDigest != null) {
     try {

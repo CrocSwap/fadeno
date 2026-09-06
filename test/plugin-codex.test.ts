@@ -101,6 +101,28 @@ test('codex plugin: carries setup, host-mode hooks, bundled CLI, and built-in de
   assert.ok(Array.isArray(hooks.hooks.PreToolUse));
   assert.equal(hooks.hooks.PreToolUse[0].matcher, 'Agent');
   assert.match(hooks.hooks.PreToolUse[0].hooks[0].command, /\$\{PLUGIN_ROOT\}\/hooks\/spawn-guard\.mjs/);
+  // The Bash guard — relay attestation's dispatch side plus the role agents'
+  // destructive-git refusal — is the second `PreToolUse` group, and its
+  // POSITION is part of the contract: Codex keys hook trust per matcher group
+  // by index, so appending leaves the spawn guard's existing trusted hash
+  // valid and puts only the new group through review.
+  assert.ok(exists(outDir, 'hooks/dispatch-proxy-guard.mjs'));
+  assert.equal(hooks.hooks.PreToolUse.length, 2);
+  assert.match(hooks.hooks.PreToolUse[1].matcher, /(^|\|)Bash(\||$)/);
+  assert.match(
+    hooks.hooks.PreToolUse[1].hooks[0].command,
+    /\$\{PLUGIN_ROOT\}\/hooks\/dispatch-proxy-guard\.mjs/,
+  );
+  const proxyGuardTemplate = readFileSync(
+    join(REPO, 'templates', 'codex', 'hooks', 'dispatch-proxy-guard.mjs'),
+    'utf8',
+  );
+  assert.ok(
+    proxyGuardTemplate.includes("const HOOK_VERSION = 'dev';"),
+    "the codex proxy-guard template must keep the literal 'dev' placeholder",
+  );
+  const emittedProxyGuard = read(outDir, 'hooks/dispatch-proxy-guard.mjs');
+  assert.ok(!emittedProxyGuard.includes("HOOK_VERSION = 'dev'"));
   // Stamped like the Claude steering hook: every evidence row it writes names
   // the generation that wrote it, which a session-start hook cache hides.
   const guard = read(outDir, 'hooks/spawn-guard.mjs');

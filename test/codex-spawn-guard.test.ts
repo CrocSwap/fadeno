@@ -282,6 +282,21 @@ function denial(stdout: string): { permissionDecision: string; permissionDecisio
   return parsed.hookSpecificOutput;
 }
 
+/** The spawn-side relay attestations this guard stashed, or `[]`. */
+function relayStash(root: string): Array<Record<string, unknown>> {
+  if (!exists(root, '.fadeno/local/pending-relays.jsonl')) return [];
+  return read(root, '.fadeno/local/pending-relays.jsonl')
+    .trim()
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+/** The canonical caller digest every writer of these markers must agree on. */
+function callerDigest(text: string): string {
+  return createHash('sha256').update(text.replace(/(?:\r?\n)+$/, '')).digest('hex');
+}
+
 test('codex spawn guard: host mode denies a generic spawn and names the model it would inherit', (t) => {
   const g = guard(t);
   g.hostMode(true);
@@ -758,4 +773,84 @@ test('codex spawn guard: a repo without .fadeno is still guarded but never writt
   // A hook must never be the thing that creates a Fadeno tree in a repo that
   // has none: the decision still stands, the evidence is simply not written.
   assert.equal(exists(g.root, '.fadeno'), false);
+});
+
+// --- Relay attestation, spawn side -------------------------------------------
+
+test('codex spawn guard: every delivered managed spawn stashes the caller prompt digest', (t) => {
+  const g = guard(t);
+  g.hostMode(true);
+  managedWorker(g.codexHome, { model: null, effort: null, hostExecutor: null });
+  g.resolver(
+    JSON.stringify({
+      archetype: 'worker',
+      executor: 'claude-opus@high',
+      model: 'claude-opus',
+      model_id: 'claude-opus',
+      effort: 'high',
+      pinned_effort: 'high',
+      effective_effort: 'high',
+      effort_pinned: true,
+      session_effort: null,
+      lane: 'command',
+      lane_reason: 'session effort unobserved',
+      adapter: 'command',
+      harness: 'claude',
+      variant: null,
+      host: 'codex',
+      source: 'repo',
+    }),
+  );
+  g.run(spawnEvent(g.root, { agent_type: 'worker', message: 'implement it' }));
+  const stash = relayStash(g.root);
+  assert.equal(stash.length, 1);
+  // The CANONICAL digest, because the broker relays through a prompt FILE that
+  // ends in a newline `message` never had. The dispatch-side marker
+  // (`templates/codex/hooks/dispatch-proxy-guard.mjs`) and the kernel's
+  // `callerPromptSha256` reduce the same task to this same value; hashing raw
+  // bytes on either side would manufacture `relay_attested: false`.
+  assert.equal(stash[0]!.prompt_sha256, callerDigest('implement it'));
+  assert.equal(stash[0]!.hook_version, packageVersion());
+  assert.equal(typeof stash[0]!.timestamp, 'string');
+});
+
+test('codex spawn guard: a HOST-lane managed spawn is stashed too', (t) => {
+  const g = guard(t);
+  g.hostMode(true);
+  managedWorker(g.codexHome);
+  g.resolver(PINNED_HOST_SLOT);
+  const result = g.run(spawnEvent(g.root, { agent_type: 'worker', message: 'implement it' }));
+  assert.equal(result.stdout, '');
+  assert.equal(g.rows().at(-1)!.lane, 'host');
+  // A host-adapter role agent resolves per task and dispatches on
+  // `mode=command` (a shadow pair moves both arms to the command lane). Stash
+  // only the command lane and those dispatches carry a proxy marker with no
+  // spawn-side row of their own — which the kernel reads as DEFECTION.
+  assert.equal(relayStash(g.root).length, 1);
+});
+
+test('codex spawn guard: a refused spawn stashes nothing', (t) => {
+  const g = guard(t);
+  g.hostMode(true);
+  // Generic in host mode: denied, so nothing was ever handed over. A stash here
+  // would be a spawn-side record with no spawn behind it.
+  g.run(spawnEvent(g.root, { agent_type: 'default', message: 'do x' }));
+  assert.deepEqual(relayStash(g.root), []);
+
+  // And a managed spawn whose agent file drifted, which is the other refusal.
+  managedWorker(g.codexHome, { model: 'gpt-5.6-sol' });
+  g.resolver(PINNED_HOST_SLOT);
+  g.run(spawnEvent(g.root, { agent_type: 'worker', message: 'implement it' }));
+  assert.equal((g.rows().at(-1)!.refusal as { predicate: string }).predicate, 'agent_file_drift');
+  assert.deepEqual(relayStash(g.root), []);
+});
+
+test('codex spawn guard: a spawn with no message has nothing to attest', (t) => {
+  const g = guard(t);
+  g.hostMode(false);
+  managedWorker(g.codexHome);
+  g.resolver(UNPINNED_HOST_SLOT);
+  g.run(spawnEvent(g.root, { agent_type: 'worker' }));
+  assert.equal(g.rows().at(-1)!.event, 'host_delivery');
+  assert.deepEqual(relayStash(g.root), []);
 });
