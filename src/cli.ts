@@ -51,7 +51,8 @@ import { runRuns } from './commands/runs.ts';
 import { runShow } from './commands/show.ts';
 import { runValidate } from './commands/validate.ts';
 import { runVerify, type VerifyResult } from './commands/verify.ts';
-import { knownFlagsFor, runCompletion, runCompletionCandidates, suggestFlag, TOP_LEVEL_COMMANDS, unknownFlagsFor } from './commands/completion.ts';
+import { IGNORED_DEADLINE_NOTE_TOKEN } from './lib/executors.ts';
+import { knownFlagsFor, retiredFlagFor, runCompletion, runCompletionCandidates, suggestFlag, TOP_LEVEL_COMMANDS, unknownFlagsFor } from './commands/completion.ts';
 import { runShadowApply } from './commands/shadow-apply.ts';
 import {
   runBakeoff,
@@ -1209,6 +1210,7 @@ function main(argv: string[]): number {
         'no-steering': { type: 'boolean' },
         'data-only': { type: 'boolean' },
         'non-interactive': { type: 'boolean' },
+        timeout: { type: 'string' }, // retired: accepted, ignored, warned. See RETIRED_FLAGS.
         from: { type: 'string' },
         'reset-runtime': { type: 'boolean' },
         all: { type: 'boolean' },
@@ -1322,6 +1324,16 @@ function main(argv: string[]): number {
   // unknown command answers `[]` rather than "accepts nothing", because
   // rejecting every flag of a command the registry forgot would be a worse
   // failure than the one being fixed.
+  // A retired flag is accepted and does nothing, but saying nothing would let
+  // a caller believe a deadline is in force. Nothing is armed; nothing will
+  // stop an executor on a clock. Same wording doctor uses for `timeout_ms`.
+  if (command != null && values.timeout != null && retiredFlagFor(command, '--timeout')) {
+    console.error(
+      `warning: \`--timeout\` ${IGNORED_DEADLINE_NOTE_TOKEN}. Nothing will stop this executor on a ` +
+        'clock — a clock cannot tell slow from stuck. Stop work with `fadeno cancel <run>` or ' +
+        '`fadeno dispatches --cancel <id|tag:<tag>>`. Remove the flag; it will go away.',
+    );
+  }
   if (command != null && values.help !== true && values.version !== true) {
     const unknown = unknownFlagsFor(command, positionals[1], Object.keys(values));
     if (unknown.length > 0) {
@@ -1465,17 +1477,30 @@ function main(argv: string[]): number {
       const result = runClean({ force: values.force });
       const paths = result.dryRun ? result.candidates : result.removed;
       for (const path of paths) console.log(`${result.dryRun ? 'would remove' : 'removed'} ${path}`);
-      // Retention is otherwise invisible and unbounded, so a user about to
-      // delete evidence sees what they are about to delete — on the dry run
-      // as a preview, and on a --force run as what was actually deregistered.
+      // What git still has registered under `.fadeno/local` — every kind,
+      // asked of git rather than derived from a list of kinds this file would
+      // then have to keep current. On the dry run it is the preview; on a
+      // --force run it is what was actually deregistered.
+      if (result.registeredWorktrees.length > 0) {
+        const count = result.registeredWorktrees.length;
+        console.log(
+          `${count} registered git worktree${count === 1 ? '' : 's'} under .fadeno/local ` +
+            `${result.dryRun ? 'would be deregistered and removed' : 'deregistered'}:`,
+        );
+        const shown = result.dryRun ? result.registeredWorktrees : result.deregisteredWorktrees;
+        for (const path of shown) console.log(`  ${path}`);
+      }
+      // Shadow retention is otherwise invisible and unbounded, so a user about
+      // to delete pair evidence sees what they are about to delete. Listed on
+      // both runs: on the dry run it is the warning, on a --force run it is
+      // the record of what went.
       if (result.retainedShadowWorktrees.length > 0) {
         const count = result.retainedShadowWorktrees.length;
         console.log(
-          `${count} retained shadow worktree${count === 1 ? '' : 's'} ` +
-            `${result.dryRun ? 'would be deregistered and removed' : 'deregistered'}:`,
+          `${count} retained shadow worktree${count === 1 ? '' : 's'} named by the ledger — ` +
+            `${result.dryRun ? 'this would delete' : 'this deleted'} that pair evidence:`,
         );
-        const shown = result.dryRun ? result.retainedShadowWorktrees : result.deregisteredShadowWorktrees;
-        for (const path of shown) console.log(`  ${path}`);
+        for (const path of result.retainedShadowWorktrees) console.log(`  ${path}`);
       }
       if (result.dryRun && paths.length > 0) console.log('Re-run with --force to remove these ignored runtime files.');
       return 0;

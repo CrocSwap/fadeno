@@ -754,10 +754,36 @@ export function knownFlagsFor(command: string, subcommand?: string): Set<string>
  * one table that already knows which flags belong to which command now
  * answers for both completion and validation.
  */
+/**
+ * Flags a command still ACCEPTS but no longer does anything with, and the
+ * commands that tolerate each.
+ *
+ * Deliberately not in `knownFlagsFor`: that set drives `--help`, tab
+ * completion and the did-you-mean, and a retired flag belongs in none of them
+ * — offering it would be advertising a feature that does not exist.
+ *
+ * They are tolerated rather than rejected for the reason the catalog loader
+ * already tolerates a `timeout_ms` key: agents cache their skills at session
+ * start, so a session opened before deadlines were removed still holds
+ * instructions to pass `--timeout` (a real one said so — `--timeout 0` was
+ * named as operating knowledge in a handoff). Under host mode a Fadeno failure
+ * is a user-facing event that stops the work, so hard-failing on a stale flag
+ * turns an out-of-date skill into a stopped campaign. The caller is told, in
+ * the same words `doctor` uses for the catalog key, that nothing is armed.
+ */
+const RETIRED_FLAGS: Record<string, readonly string[]> = {
+  '--timeout': ['dispatch', 'drive', 'tool-run'],
+};
+
+/** Whether `command` tolerates this retired flag. */
+export function retiredFlagFor(command: string, flag: string): boolean {
+  return RETIRED_FLAGS[flag]?.includes(command) ?? false;
+}
+
 export function unknownFlagsFor(command: string, subcommand: string | undefined, passed: readonly string[]): string[] {
   const known = knownFlagsFor(command, subcommand);
   if (known == null) return [];
-  return passed.map((name) => `--${name}`).filter((flag) => !known.has(flag));
+  return passed.map((name) => `--${name}`).filter((flag) => !known.has(flag) && !retiredFlagFor(command, flag));
 }
 
 /** Nearest accepted flag within a small edit distance, for a did-you-mean. */

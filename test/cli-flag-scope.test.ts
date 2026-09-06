@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { KNOWN_CLI_COMMANDS, renderDoctorFindings } from '../src/cli.ts';
-import { knownFlagsFor, suggestFlag, unknownFlagsFor } from '../src/commands/completion.ts';
+import { knownFlagsFor, retiredFlagFor, suggestFlag, unknownFlagsFor } from '../src/commands/completion.ts';
 
 /**
  * A flag belonging to one command must not be silently accepted by another.
@@ -127,4 +127,29 @@ test('every flag a command reads is a flag the registry accepts', () => {
     for (const flag of read) if (!all.has(flag)) gaps.push(`${command} reads ${flag}`);
   }
   assert.deepEqual(gaps, [], 'completion.ts must accept every flag cli.ts reads, or that flag is now rejected in production');
+});
+
+test('a retired flag is tolerated on the commands that used to take it, and advertised by none', () => {
+  // Agents cache their skills at session start, so a session opened before
+  // deadlines were removed still holds instructions to pass `--timeout` — one
+  // real Codex director named `--timeout 0` as operating knowledge. Under host
+  // mode a Fadeno failure stops the work, so hard-failing on a stale flag
+  // turns an out-of-date skill into a stopped campaign. The catalog loader
+  // already tolerates a stale `timeout_ms` key for exactly this reason.
+  for (const command of ['dispatch', 'drive', 'tool-run']) {
+    assert.deepEqual(unknownFlagsFor(command, undefined, ['timeout']), [], `${command} must tolerate --timeout`);
+    assert.ok(retiredFlagFor(command, '--timeout'), `${command} must name it retired`);
+  }
+
+  // Tolerated is not the same as offered. `knownFlagsFor` drives --help, tab
+  // completion and the did-you-mean; a retired flag in any of them advertises
+  // a feature that does not exist.
+  for (const command of ['dispatch', 'drive', 'tool-run']) {
+    assert.ok(!knownFlagsFor(command, undefined)!.has('--timeout'), `${command} must not advertise --timeout`);
+  }
+
+  // And it is not a free pass for every command: one that never took it still
+  // rejects it, so this cannot become a hole in the scope check.
+  assert.deepEqual(unknownFlagsFor('doctor', undefined, ['timeout']), ['--timeout']);
+  assert.ok(!retiredFlagFor('doctor', '--timeout'));
 });
