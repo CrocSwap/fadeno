@@ -37,7 +37,9 @@ import { legacyDriverHarness } from '../lib/executors.ts';
 import { INFLIGHT_DIR, readInflightClaim } from '../lib/supervisor.ts';
 import { collectIsolatedDiff, removeIsolatedWorktree, WorkspaceIsolationError } from '../lib/workspace-isolation.ts';
 import {
+  concurrentWriteStrength,
   describeConcurrentWrite,
+  UNREADABLE_WINDOW_LOG_ID,
   describeIgnoredOutput,
   parseConcurrentWriteStamps,
   parseIgnoredOutputDiscarded,
@@ -1761,18 +1763,29 @@ export function renderDispatchLine(entry: DispatchEntry): string {
   // rendering it. The machine token stays in the text for grep.
   const overlaps = entry.concurrentWrite;
   if (overlaps != null && overlaps.length > 0) {
-    const settled = overlaps.filter((stamp) => !stamp.pending);
-    const pending = overlaps.length - settled.length;
+    // "N other deliveries wrote while this ran" is a claim, and only the
+    // `intersected` stamps support it. A stamp whose intersection could not be
+    // computed says the opposite — that nobody can say what was written — and
+    // folding it into that count is how an admission becomes an accusation.
+    // The log-unreadable stamp names no delivery, so it is not counted as one
+    // and contributes no id to the list. It still gets its own line below.
+    const named = overlaps.filter((stamp) => stamp.dispatchId !== UNREADABLE_WINDOW_LOG_ID);
+    const settled = named.filter((stamp) => concurrentWriteStrength(stamp) === 'intersected');
+    const pending = named.filter((stamp) => concurrentWriteStrength(stamp) === 'pending').length;
+    const unknown = named.length - settled.length - pending;
     const floor = settled.some((stamp) => stamp.degraded);
     const total = settled.reduce((sum, stamp) => sum + (stamp.pathsIntersecting ?? stamp.paths.length), 0);
-    const who = overlaps.map((stamp) => stamp.dispatchId.slice(0, 8)).join(', ');
-    parts.push(
-      `[concurrent_write: ${overlaps.length} other ${overlaps.length === 1 ? 'delivery' : 'deliveries'} ` +
-        `wrote while this ran (${who})` +
+    const who = named.map((stamp) => stamp.dispatchId.slice(0, 8)).join(', ');
+    if (named.length > 0) parts.push(
+      `[concurrent_write: ${named.length} other ${named.length === 1 ? 'delivery' : 'deliveries'} ` +
+        `overlapped this one (${who})` +
         (settled.length > 0
           ? ` — ${floor ? 'at least ' : ''}${total} intersecting path${total === 1 ? '' : 's'}`
           : '') +
         (pending > 0 ? `${settled.length > 0 ? ',' : ' —'} ${pending} still open at this receipt` : '') +
+        (unknown > 0
+          ? `${settled.length > 0 || pending > 0 ? ',' : ' —'} ${unknown} where the intersection could not be computed`
+          : '') +
         ']',
     );
     // The paths, the attribution and the "could not tell" all live in the

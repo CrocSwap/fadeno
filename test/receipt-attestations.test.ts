@@ -13,6 +13,7 @@ import {
   describeIgnoredOutput,
   parseConcurrentWriteStamps,
   parseIgnoredOutputDiscarded,
+  UNREADABLE_WINDOW_LOG_ID,
 } from '../src/lib/receipt-attestations.ts';
 import { tempRepo } from './helpers.ts';
 
@@ -207,7 +208,12 @@ test('verify reports a shared-tree overlap as an attestation, and a pending one 
   assert.match(overlap.detail, /ATTESTATION ONLY/, 'a shared set includes whoever else touched the tree');
   assert.match(overlap.detail, /not who wrote them/);
   assert.match(overlap.detail, /PENDING/, 'the overlap in time is a fact even with no set to intersect');
-  assert.match(overlap.detail, /still open at this receipt|its own receipt carries the intersection/);
+  // The pending wording must not PROMISE an intersection on the other
+  // receipt: the other side may close unable to enumerate its own changes, in
+  // which case its receipt carries a degraded admission instead. A pointer to
+  // a page that turns out to be empty is worse than saying what will be there.
+  assert.match(overlap.detail, /its receipt is where this pair's intersection is recorded/);
+  assert.doesNotMatch(overlap.detail, /carries the intersection/);
 });
 
 test('verify says "at least" when an overlap listing was incomplete', (t) => {
@@ -360,7 +366,10 @@ test('the dispatches listing names who else wrote while a dispatch ran', (t) => 
   });
   const { entries, lines } = runDispatches({ repoRoot: root });
   assert.equal(entries[0]!.concurrentWrite!.length, 1);
-  assert.match(lines[0]!, /\[concurrent_write: 1 other delivery wrote while this ran \(aaaaaaaa\)/);
+  // "overlapped this one", not "wrote": the same list also carries stamps
+  // whose intersection could not be computed, and folding those into a claim
+  // that someone wrote turns an admission into an accusation.
+  assert.match(lines[0]!, /\[concurrent_write: 1 other delivery overlapped this one \(aaaaaaaa\)/);
   assert.match(lines[0]!, /2 intersecting paths/);
   assert.match(lines[0]!, /src\/a\.ts, src\/b\.ts/);
   assert.match(lines[0]!, /attributable/);
@@ -428,4 +437,51 @@ test('--output says nothing about a receipt that recorded nothing', (t) => {
   assert.equal(result.ignoredOutputDiscarded, null);
   assert.equal(result.concurrentWrite, null);
   assert.equal(result.bytes, result.snapshotBytes);
+});
+
+test('an unreadable window log reaches every reader, and is never counted as a delivery', (t) => {
+  // The blindest case the detector has: the log could not be read, so the set
+  // of neighbours is unknown rather than empty. It has to be visible — and it
+  // must not be tallied beside a real overlap, because "1 other delivery wrote
+  // while this ran" is a claim and this stamp is the refusal to make one.
+  const { root, runId } = seedRun(t, {
+    concurrent_write: [
+      { dispatch_id: UNREADABLE_WINDOW_LOG_ID, paths_intersecting: 0, paths: [], degraded: true, note: 'n' },
+    ],
+  });
+  const overlap = finding(runVerify({ repoRoot: root, run: runId }).findings, 'concurrent-writes');
+  assert.equal(overlap.status, 'warn', 'a blind detector is a warning, not silence');
+  assert.match(overlap.detail, /WINDOW LOG UNREADABLE/);
+  assert.match(overlap.detail, /could not be computed at all/, 'bucketed apart from real intersections');
+  assert.doesNotMatch(overlap.detail, /1 with an intersecting path set(?!.*0 with)/);
+
+  const show = runShow({ repoRoot: root, run: runId });
+  assert.equal(show.projection.workspaceOverlaps.length, 1, 'show never drops it');
+  assert.match(show.projection.workspaceOverlaps[0]!.detail, /WINDOW LOG UNREADABLE/);
+});
+
+test('the listing renders the unreadable-log stamp without claiming a delivery', (t) => {
+  const root = seedDispatchLog(t, {
+    concurrent_write: [
+      { dispatch_id: UNREADABLE_WINDOW_LOG_ID, paths_intersecting: 0, paths: [], degraded: true, note: 'n' },
+    ],
+  });
+  const { lines } = runDispatches({ repoRoot: root });
+  assert.match(lines[0]!, /WINDOW LOG UNREADABLE/, 'the reader that sees ad-hoc stamps still sees this one');
+  assert.doesNotMatch(lines[0]!, /other deliver(y|ies) overlapped/, 'it names no delivery, so it counts as none');
+});
+
+test('a settled overlap with no known intersection reads as COULD NOT TELL, not as nothing', (t) => {
+  // What a shared host delivery's neighbour now sees: the windows met in time
+  // and one side could not enumerate its changes. "at least 0 paths changed in
+  // both windows" would read as a finding of nothing.
+  const { root, runId } = seedRun(t, {
+    concurrent_write: [
+      { dispatch_id: 'ccccccccdddddddd', kind: 'host-dispatch', workspace_mode: 'shared', attribution: 'workspace', paths_intersecting: 0, paths: [], degraded: true, note: 'n' },
+    ],
+  });
+  const overlap = finding(runVerify({ repoRoot: root, run: runId }).findings, 'concurrent-writes');
+  assert.match(overlap.detail, /COULD NOT TELL/);
+  assert.doesNotMatch(overlap.detail, /at least 0 paths/);
+  assert.match(overlap.detail, /could not be computed at all/);
 });

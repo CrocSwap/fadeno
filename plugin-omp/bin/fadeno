@@ -18173,6 +18173,105 @@ function definitionSourceSummary(repoRoot) {
 var import_node_fs8 = require("node:fs");
 var import_node_path8 = require("node:path");
 var import_node_child_process2 = require("node:child_process");
+
+// src/lib/receipt-attestations.ts
+var UNREADABLE_WINDOW_LOG_ID = "(window log unreadable)";
+function text(value) {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+function pathList(value) {
+  return Array.isArray(value) ? value.filter((p) => typeof p === "string" && p !== "") : [];
+}
+function parseIgnoredOutputDiscarded(value) {
+  if (Array.isArray(value)) {
+    return {
+      paths: pathList(value),
+      truncated: true,
+      note: "this row recorded a bare path list with no completeness flag (an engine writer that predates the object shape), so it cannot say whether these were all of it.",
+      retainedAt: null
+    };
+  }
+  if (value == null || typeof value !== "object") return null;
+  const row = value;
+  const rawPaths = Array.isArray(row.paths) ? row.paths : null;
+  const truncated = row.truncated != null && row.truncated !== false;
+  const note = text(row.note);
+  if (rawPaths == null && !truncated && note == null) return null;
+  const out = { paths: pathList(rawPaths), truncated, retainedAt: text(row.retained_at) };
+  if (note != null) out.note = note;
+  return out;
+}
+function parseConcurrentWriteStamps(value) {
+  if (!Array.isArray(value)) return null;
+  const out = [];
+  for (const item of value) {
+    if (item == null || typeof item !== "object" || Array.isArray(item)) continue;
+    const row = item;
+    const dispatchId = text(row.dispatch_id);
+    if (dispatchId == null) continue;
+    const attribution2 = row.attribution === "delivery" || row.attribution === "workspace" ? row.attribution : null;
+    out.push({
+      dispatchId,
+      runId: text(row.run_id),
+      kind: text(row.kind),
+      workspaceMode: text(row.workspace_mode),
+      attribution: attribution2,
+      pathsIntersecting: typeof row.paths_intersecting === "number" ? row.paths_intersecting : null,
+      paths: pathList(row.paths),
+      pending: row.pending === true,
+      // Same asymmetry as `truncated` above, for the same reason.
+      degraded: row.degraded != null && row.degraded !== false,
+      note: text(row.note)
+    });
+  }
+  return out.length > 0 ? out : null;
+}
+var ATTESTATION_PATHS_SHOWN = 8;
+function concurrentWriteStrength(record2) {
+  if (record2.dispatchId === UNREADABLE_WINDOW_LOG_ID) return "unknown";
+  if (record2.pending) return "pending";
+  const count = record2.pathsIntersecting ?? record2.paths.length;
+  return count === 0 && record2.degraded ? "unknown" : "intersected";
+}
+function shortId(id) {
+  return id.length > 8 ? id.slice(0, 8) : id;
+}
+function samplePaths(paths, stated) {
+  if (paths.length === 0) return stated != null && stated > 0 ? "(paths unrecorded)" : "(no paths named)";
+  const shown = paths.slice(0, ATTESTATION_PATHS_SHOWN);
+  const total = stated != null && stated > paths.length ? stated : paths.length;
+  const rest = total - shown.length;
+  return `${shown.join(", ")}${rest > 0 ? ` (+${rest} more)` : ""}`;
+}
+function describeConcurrentWrite(record2) {
+  if (record2.dispatchId === UNREADABLE_WINDOW_LOG_ID) {
+    return "WINDOW LOG UNREADABLE \u2014 the log of who else was writing could not be read whole, so the overlaps named on this receipt are a floor. Any of them still happened; there may be others nothing saw. This is not a report that the tree was clean.";
+  }
+  const where = [record2.kind, record2.workspaceMode, record2.runId != null ? `run ${record2.runId}` : null].filter((part) => part != null).join(" \xB7 ");
+  const head = `${shortId(record2.dispatchId)}${where.length > 0 ? ` [${where}]` : ""}`;
+  if (record2.pending) {
+    return `${head}  PENDING \u2014 the windows overlapped in time, but that delivery had not finished, so no path set existed to intersect. It closes later, and its receipt is where this pair's intersection is recorded \u2014 concretely when it can enumerate its changes, and as a degraded stamp when it cannot.`;
+  }
+  const count = record2.pathsIntersecting ?? record2.paths.length;
+  if (count === 0 && record2.degraded) {
+    return `${head}  COULD NOT TELL \u2014 the windows overlapped in time and at least one side could not enumerate what it changed, so whether their edits met is unknown. This is not a report that they did not meet.`;
+  }
+  const noun = count === 1 ? "path" : "paths";
+  const floor = record2.degraded ? "at least " : "";
+  const strength = record2.attribution === "delivery" ? "attributable \u2014 those paths are that delivery's own work" : record2.attribution === "workspace" ? "ATTESTATION ONLY \u2014 that delivery ran in the shared tree, so its path set is the tree's delta over its window; this says both windows touched these paths, not who wrote them" : "the row did not say how that path set was derived, so it is not attributable";
+  const incomplete = record2.degraded ? " At least one listing was incomplete, so this is a floor, not the set." : "";
+  return `${head}  ${floor}${count} ${noun} changed in both windows \u2014 ${strength}: ${samplePaths(record2.paths, record2.pathsIntersecting)}.${incomplete}`;
+}
+function describeIgnoredOutput(record2) {
+  const listed = samplePaths(record2.paths, null);
+  const fate = record2.retainedAt != null ? `still on disk at ${record2.retainedAt} until \`fadeno clean\` removes it` : "the worktree is gone, so this content is not recoverable from it";
+  const head = record2.paths.length === 0 ? record2.truncated ? "gitignored output was DISCARDED and the listing could not be taken \u2014 what was destroyed is unknown, not nothing" : "gitignored output was DISCARDED; the row names no paths" : `${record2.truncated ? "at least " : ""}${listed} \u2014 gitignored, so \`git add -A\` staged none of it and no diff carried it out of the worktree`;
+  const floor = record2.truncated && record2.paths.length > 0 ? " The listing is a floor, not the set." : "";
+  const why = record2.note != null ? ` (${record2.note})` : "";
+  return `${head}. ${fate}.${floor}${why}`;
+}
+
+// src/lib/workspace-overlap.ts
 var DISPATCH_WINDOWS_FILE = (0, import_node_path8.join)(".fadeno", "local", "dispatch-windows.jsonl");
 var WINDOW_MAX_PATHS = 2e3;
 var OVERLAP_MAX_EXAMPLES = 20;
@@ -18280,9 +18379,10 @@ function readDispatchWindows(repoRoot) {
         degraded = true;
         continue;
       }
+      const parsed = raw.filter((p) => typeof p === "string");
       open.endedAt = endedAt;
-      open.changedPaths = raw.filter((p) => typeof p === "string");
-      open.truncated = row.truncated === true || open.changedPaths.length !== raw.length;
+      open.changedPaths = open.changedPaths == null ? parsed : [.../* @__PURE__ */ new Set([...open.changedPaths, ...parsed])].sort();
+      open.truncated = open.truncated || row.truncated === true || parsed.length !== raw.length;
     } else {
       degraded = true;
     }
@@ -18317,6 +18417,7 @@ function detectConcurrentWrites(self, windows, opts = {}) {
     truncated: Boolean(self.truncated)
   };
   const mine = new Set(self.changedPaths);
+  const selfIncomplete = Boolean(self.truncated);
   const stamps = [];
   for (const other of windows) {
     if (other.dispatchId === self.dispatchId) continue;
@@ -18332,13 +18433,21 @@ function detectConcurrentWrites(self, windows, opts = {}) {
         paths_intersecting: 0,
         paths: [],
         pending: true,
-        note: `windows overlapped in time; "${other.dispatchId}" had not finished, so no path set existed to intersect. It closes later and its own receipt carries the intersection.`
+        // The wording used to promise that the other side's receipt "carries
+        // the intersection". It cannot promise that: the other side may close
+        // unable to enumerate its own changes, in which case its receipt
+        // carries a degraded admission instead. A pointer to a receipt that
+        // turns out to be empty sends a reader somewhere for nothing, which is
+        // worse than saying plainly what will be there.
+        note: `windows overlapped in time; "${other.dispatchId}" had not finished, so no path set existed to intersect. It closes later, and its own receipt is where this pair's intersection is recorded \u2014 as a concrete set when it can enumerate what it changed, and as a degraded stamp when it cannot.`
       });
       continue;
     }
     const hits = other.changedPaths.filter((p) => mine.has(p)).sort();
-    if (hits.length === 0) continue;
-    const degraded = other.truncated || Boolean(self.truncated) || Boolean(opts.logDegraded);
+    const bothWhole = !selfIncomplete && !other.truncated;
+    if (hits.length === 0 && bothWhole) continue;
+    const degraded = !bothWhole || Boolean(opts.logDegraded);
+    const whose = attribution2 === "delivery" ? `Those paths are "${other.dispatchId}"'s own work.` : `"${other.dispatchId}" ran in the shared tree, so its set is the tree's delta over its window \u2014 this is an attestation that both windows touched these paths, not proof of who wrote them.`;
     stamps.push({
       dispatch_id: other.dispatchId,
       ...other.runId != null ? { run_id: other.runId } : {},
@@ -18348,7 +18457,16 @@ function detectConcurrentWrites(self, windows, opts = {}) {
       paths_intersecting: hits.length,
       paths: hits.slice(0, OVERLAP_MAX_EXAMPLES),
       ...degraded ? { degraded: true } : {},
-      note: `${hits.length} ${hits.length === 1 ? "path" : "paths"} changed in both windows, which overlapped in time. ${attribution2 === "delivery" ? `Those paths are "${other.dispatchId}"'s own work.` : `"${other.dispatchId}" ran in the shared tree, so its set is the tree's delta over its window \u2014 this is an attestation that both windows touched these paths, not proof of who wrote them.`}` + (degraded ? " At least one listing was incomplete, so this is a floor, not the set." : "")
+      note: hits.length === 0 ? `windows overlapped in time and ${selfIncomplete && other.truncated ? "neither side could enumerate" : selfIncomplete ? "this delivery could not enumerate" : `"${other.dispatchId}" could not enumerate`} what it changed, so whether their edits met is UNKNOWN. This is not a report that they did not meet.` : `${hits.length} ${hits.length === 1 ? "path" : "paths"} changed in both windows, which overlapped in time. ${whose}` + (degraded ? " At least one listing was incomplete, so this is a floor, not the set." : "")
+    });
+  }
+  if (opts.logDegraded === true) {
+    stamps.push({
+      dispatch_id: UNREADABLE_WINDOW_LOG_ID,
+      paths_intersecting: 0,
+      paths: [],
+      degraded: true,
+      note: "the window log could not be read whole, so the list of deliveries that overlapped this one is a floor. Any overlap named on this receipt still happened; there may be others this detector never saw. Nothing here says the tree was clean."
     });
   }
   return stamps.length > 0 ? stamps : null;
@@ -20198,11 +20316,69 @@ function attemptPath(request) {
 function hostWindowId(runId, dispatchId) {
   return `${runId}:${dispatchId}`;
 }
-function closeHostWindow(repoRoot, runId, dispatchId, changedPaths = []) {
+function closeHostWindow(repoRoot, runId, dispatchId, changedPaths = null) {
   try {
-    closeDispatchWindow(repoRoot, { dispatchId: hostWindowId(runId, dispatchId), changedPaths });
+    closeDispatchWindow(repoRoot, {
+      dispatchId: hostWindowId(runId, dispatchId),
+      changedPaths: changedPaths ?? [],
+      truncated: changedPaths == null
+    });
   } catch {
   }
+}
+function closeHostWindowIfOpen(repoRoot, runId, dispatchId) {
+  try {
+    const windowId = hostWindowId(runId, dispatchId);
+    const existing = readDispatchWindows(repoRoot).windows.find((w) => w.dispatchId === windowId);
+    if (existing == null || existing.endedAt != null) return;
+    closeHostWindow(repoRoot, runId, dispatchId, null);
+  } catch {
+  }
+}
+function settleHostOverlap(opts) {
+  const windowId = hostWindowId(opts.runId, opts.dispatchId);
+  const changed = opts.diffSnapshot != null ? diffChangedPaths(opts.repoRoot, (0, import_node_path14.join)(opts.repoRoot, ...opts.diffSnapshot.split("/"))) : null;
+  const truncated = changed == null;
+  const paths = changed ?? [];
+  let stamps = null;
+  try {
+    const log = readDispatchWindows(opts.repoRoot);
+    const mine = log.windows.find((w) => w.dispatchId === windowId);
+    const startedAt = mine?.startedAt ?? opts.startFallbackIso;
+    if (startedAt != null) {
+      stamps = detectConcurrentWrites(
+        {
+          dispatchId: windowId,
+          startedAt,
+          endedAt: opts.now.toISOString(),
+          workspaceMode: opts.workspaceMode,
+          changedPaths: paths,
+          truncated
+        },
+        log.windows,
+        { logDegraded: log.degraded }
+      );
+    }
+  } catch {
+  }
+  return {
+    stamps,
+    // Closed AFTER the receipt is appended, exactly as before: a window left
+    // open costs a later delivery an unnecessary worktree, where a window
+    // closed before a receipt that then failed to append costs a missed
+    // overlap.
+    close: () => {
+      try {
+        closeDispatchWindow(opts.repoRoot, {
+          dispatchId: windowId,
+          changedPaths: paths,
+          truncated,
+          endedAt: opts.now
+        });
+      } catch {
+      }
+    }
+  };
 }
 function writeArtifactAtomic(path, bytes) {
   const temporary = `${path}.tmp-${process.pid}-${(0, import_node_crypto6.randomUUID)()}`;
@@ -20396,7 +20572,7 @@ function startHostDispatch(opts) {
       opts.now
     );
   } catch (err) {
-    closeHostWindow(repoRoot, runId, opts.dispatchId);
+    closeHostWindow(repoRoot, runId, opts.dispatchId, []);
     throw err;
   }
   return { dispatchId: opts.dispatchId, state: "started", idempotent: false, agentId: opts.agentId };
@@ -20521,13 +20697,14 @@ function completeHostDispatch(opts) {
   if (terminal2.length > 0) {
     if (isIsolated) {
       settleIsolatedTerminalWorkspace({ repoRoot, runId, dispatchId: opts.dispatchId, start: starts[0], terminal: terminal2[0] ?? null });
+      closeHostWindowIfOpen(repoRoot, runId, opts.dispatchId);
       const prior = terminal2[0];
       if (prior.type === "actor_completed" && (prior.extra.output_sha256 === digest4 || prior.extra.raw_output_sha256 === digest4)) {
         return { dispatchId: opts.dispatchId, state: "completed", idempotent: true, outputPath: typeof prior.extra.output === "string" ? prior.extra.output : request.outputPath, outputSha256: digest4 };
       }
       throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already has a different terminal receipt.`);
     } else {
-      closeHostWindow(repoRoot, runId, opts.dispatchId);
+      closeHostWindowIfOpen(repoRoot, runId, opts.dispatchId);
       const prior = terminal2[0];
       if (prior.type === "actor_completed" && (prior.extra.output_sha256 === digest4 || prior.extra.raw_output_sha256 === digest4)) {
         return { dispatchId: opts.dispatchId, state: "completed", idempotent: true, outputPath: typeof prior.extra.output === "string" ? prior.extra.output : request.outputPath, outputSha256: digest4 };
@@ -20574,6 +20751,16 @@ function completeHostDispatch(opts) {
       }
     }
   }
+  const overlap = settleHostOverlap({
+    repoRoot,
+    runId,
+    dispatchId: opts.dispatchId,
+    workspaceMode: isIsolated ? "isolated" : "shared",
+    diffSnapshot: isolatedComplete?.kind === "collected" ? isolatedComplete.collected.diffSnapshot : null,
+    startFallbackIso: starts[0].timestamp,
+    now: opts.now ?? /* @__PURE__ */ new Date()
+  });
+  const overlapFields = () => overlap.stamps != null ? { concurrent_write: overlap.stamps } : {};
   const verdict = validationFor(repoRoot, runDir, request, bytes);
   const agentId = typeof starts[0].extra.agent_id === "string" ? starts[0].extra.agent_id : void 0;
   if (!verdict.ok) {
@@ -20621,7 +20808,8 @@ function completeHostDispatch(opts) {
           parent_instance_id: request.parentInstanceId,
           map_member: request.mapMember,
           generation: request.generation,
-          logical_artifact: request.logicalArtifact
+          logical_artifact: request.logicalArtifact,
+          ...overlapFields()
         },
         opts.now
       );
@@ -20629,6 +20817,7 @@ function completeHostDispatch(opts) {
         removeHostWorkspace({ repoRoot, state: collected.state });
       } catch {
       }
+      overlap.close();
       return { dispatchId: opts.dispatchId, state: "completed", idempotent: false, agentId, outputPath: parked, outputSha256: digest4 };
     } else {
       append(
@@ -20662,11 +20851,12 @@ function completeHostDispatch(opts) {
           parent_instance_id: request.parentInstanceId,
           map_member: request.mapMember,
           generation: request.generation,
-          logical_artifact: request.logicalArtifact
+          logical_artifact: request.logicalArtifact,
+          ...overlapFields()
         },
         opts.now
       );
-      closeHostWindow(repoRoot, runId, opts.dispatchId);
+      overlap.close();
       return { dispatchId: opts.dispatchId, state: "completed", idempotent: false, agentId, outputPath: parked, outputSha256: digest4 };
     }
   }
@@ -20767,7 +20957,8 @@ function completeHostDispatch(opts) {
           parent_instance_id: request.parentInstanceId,
           map_member: request.mapMember,
           generation: request.generation,
-          logical_artifact: request.logicalArtifact
+          logical_artifact: request.logicalArtifact,
+          ...overlapFields()
         },
         opts.now
       );
@@ -20775,6 +20966,7 @@ function completeHostDispatch(opts) {
         removeHostWorkspace({ repoRoot, state: collected.state });
       } catch {
       }
+      overlap.close();
       return { dispatchId: opts.dispatchId, state: "completed", idempotent: false, agentId, outputPath: outputRel2, outputSha256: normalizedDigest };
     } else {
       append(
@@ -20813,11 +21005,12 @@ function completeHostDispatch(opts) {
           parent_instance_id: request.parentInstanceId,
           map_member: request.mapMember,
           generation: request.generation,
-          logical_artifact: request.logicalArtifact
+          logical_artifact: request.logicalArtifact,
+          ...overlapFields()
         },
         opts.now
       );
-      closeHostWindow(repoRoot, runId, opts.dispatchId);
+      overlap.close();
       return { dispatchId: opts.dispatchId, state: "completed", idempotent: false, agentId, outputPath: outputRel2, outputSha256: normalizedDigest };
     }
   }
@@ -20899,7 +21092,8 @@ function completeHostDispatch(opts) {
         parent_instance_id: request.parentInstanceId,
         map_member: request.mapMember,
         generation: request.generation,
-        logical_artifact: request.logicalArtifact
+        logical_artifact: request.logicalArtifact,
+        ...overlapFields()
       },
       opts.now
     );
@@ -20907,6 +21101,7 @@ function completeHostDispatch(opts) {
       removeHostWorkspace({ repoRoot, state: collected.state });
     } catch {
     }
+    overlap.close();
     return { dispatchId: opts.dispatchId, state: "completed", idempotent: false, agentId, outputPath: outputRel, outputSha256: digest4 };
   } else {
     append(
@@ -20940,11 +21135,12 @@ function completeHostDispatch(opts) {
         parent_instance_id: request.parentInstanceId,
         map_member: request.mapMember,
         generation: request.generation,
-        logical_artifact: request.logicalArtifact
+        logical_artifact: request.logicalArtifact,
+        ...overlapFields()
       },
       opts.now
     );
-    closeHostWindow(repoRoot, runId, opts.dispatchId);
+    overlap.close();
     return { dispatchId: opts.dispatchId, state: "completed", idempotent: false, agentId, outputPath: outputRel, outputSha256: digest4 };
   }
 }
@@ -20962,13 +21158,14 @@ function failHostDispatch(opts) {
   if (terminal2.length > 0) {
     if (isIsolated) {
       settleIsolatedTerminalWorkspace({ repoRoot, runId, dispatchId: opts.dispatchId, start: starts[0], terminal: terminal2[0] ?? null });
+      closeHostWindowIfOpen(repoRoot, runId, opts.dispatchId);
       const prior = terminal2[0];
       if (prior.type === "actor_failed" && prior.extra.failure_reason === opts.reason) {
         return { dispatchId: opts.dispatchId, state: "failed", idempotent: true, agentId: typeof starts[0].extra.agent_id === "string" ? starts[0].extra.agent_id : void 0 };
       }
       throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already has a different terminal receipt.`);
     } else {
-      closeHostWindow(repoRoot, runId, opts.dispatchId);
+      closeHostWindowIfOpen(repoRoot, runId, opts.dispatchId);
       const prior = terminal2[0];
       if (prior.type === "actor_failed" && prior.extra.failure_reason === opts.reason) {
         return { dispatchId: opts.dispatchId, state: "failed", idempotent: true, agentId: typeof starts[0].extra.agent_id === "string" ? starts[0].extra.agent_id : void 0 };
@@ -21020,6 +21217,15 @@ function failHostDispatch(opts) {
       }
     }
   }
+  const overlap = settleHostOverlap({
+    repoRoot,
+    runId,
+    dispatchId: opts.dispatchId,
+    workspaceMode: isIsolated ? "isolated" : "shared",
+    diffSnapshot: isolatedFail?.kind === "collected" ? isolatedFail.collected.diffSnapshot : null,
+    startFallbackIso: starts[0].timestamp,
+    now: opts.now ?? /* @__PURE__ */ new Date()
+  });
   const failedBase = {
     type: "actor_failed",
     step: request.step,
@@ -21046,7 +21252,8 @@ function failHostDispatch(opts) {
     parent_instance_id: request.parentInstanceId,
     map_member: request.mapMember,
     generation: request.generation,
-    logical_artifact: request.logicalArtifact
+    logical_artifact: request.logicalArtifact,
+    ...overlap.stamps != null ? { concurrent_write: overlap.stamps } : {}
   };
   if (isIsolated) {
     if (isolatedFail == null) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" isolated evidence was not collected`);
@@ -21058,6 +21265,7 @@ function failHostDispatch(opts) {
         ...outcome.workspace != null ? { workspace: outcome.workspace } : {},
         ...outcome.baseCommit != null ? { base_commit: outcome.baseCommit } : {}
       }, opts.now);
+      overlap.close();
       return { dispatchId: opts.dispatchId, state: "failed", idempotent: false, agentId: typeof starts[0].extra.agent_id === "string" ? starts[0].extra.agent_id : void 0 };
     }
     append(runDir, {
@@ -21072,10 +21280,11 @@ function failHostDispatch(opts) {
       removeHostWorkspace({ repoRoot, state: outcome.collected.state });
     } catch {
     }
+    overlap.close();
     return { dispatchId: opts.dispatchId, state: "failed", idempotent: false, agentId: typeof starts[0].extra.agent_id === "string" ? starts[0].extra.agent_id : void 0 };
   } else {
     append(runDir, { ...failedBase }, opts.now);
-    closeHostWindow(repoRoot, runId, opts.dispatchId);
+    overlap.close();
     return { dispatchId: opts.dispatchId, state: "failed", idempotent: false, agentId: typeof starts[0].extra.agent_id === "string" ? starts[0].extra.agent_id : void 0 };
   }
 }
@@ -23457,8 +23666,9 @@ ${truncatedStderr}
       );
       if (stamps != null) {
         row.concurrent_write = stamps;
-        opts.onEcho?.(
-          `concurrent_write: ${stamps.length} other ${stamps.length === 1 ? "delivery" : "deliveries"} wrote while this one ran (${stamps.map((stamp) => `${stamp.dispatch_id.slice(0, 8)}:${stamp.paths_intersecting}`).join(", ")}). The receipt names the intersecting paths.`
+        const named = stamps.filter((stamp) => stamp.dispatch_id !== UNREADABLE_WINDOW_LOG_ID);
+        if (named.length > 0) opts.onEcho?.(
+          `concurrent_write: ${named.length} other ${named.length === 1 ? "delivery" : "deliveries"} overlapped this one (${named.map((stamp) => `${stamp.dispatch_id.slice(0, 8)}:${stamp.paths_intersecting}`).join(", ")}). The receipt says what each one establishes.`
         );
       }
       closeDispatchWindow(repoRoot, {
@@ -24257,8 +24467,9 @@ function runDispatchClose(opts = {}) {
       { logDegraded: log.degraded }
     );
     if (concurrentWrites != null) {
-      opts.onEcho?.(
-        `concurrent_write: ${concurrentWrites.length} other ${concurrentWrites.length === 1 ? "delivery" : "deliveries"} wrote while this one ran (${concurrentWrites.map((s) => `${s.dispatch_id.slice(0, 8)}:${s.paths_intersecting}`).join(", ")}). The receipt names the intersecting paths.`
+      const named = concurrentWrites.filter((stamp) => stamp.dispatch_id !== UNREADABLE_WINDOW_LOG_ID);
+      if (named.length > 0) opts.onEcho?.(
+        `concurrent_write: ${named.length} other ${named.length === 1 ? "delivery" : "deliveries"} overlapped this one (${named.map((s) => `${s.dispatch_id.slice(0, 8)}:${s.paths_intersecting}`).join(", ")}). The receipt says what each one establishes.`
       );
     }
     closeDispatchWindow(repoRoot, { dispatchId: record2.dispatchId, changedPaths: paths, truncated, endedAt: now });
@@ -24309,90 +24520,6 @@ function readAdhocState(repoRoot, dispatchId) {
     if (err instanceof HostWorkspaceError) return null;
     throw err;
   }
-}
-
-// src/lib/receipt-attestations.ts
-function text(value) {
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-function pathList(value) {
-  return Array.isArray(value) ? value.filter((p) => typeof p === "string" && p !== "") : [];
-}
-function parseIgnoredOutputDiscarded(value) {
-  if (Array.isArray(value)) {
-    return {
-      paths: pathList(value),
-      truncated: true,
-      note: "this row recorded a bare path list with no completeness flag (an engine writer that predates the object shape), so it cannot say whether these were all of it.",
-      retainedAt: null
-    };
-  }
-  if (value == null || typeof value !== "object") return null;
-  const row = value;
-  const rawPaths = Array.isArray(row.paths) ? row.paths : null;
-  const truncated = row.truncated != null && row.truncated !== false;
-  const note = text(row.note);
-  if (rawPaths == null && !truncated && note == null) return null;
-  const out = { paths: pathList(rawPaths), truncated, retainedAt: text(row.retained_at) };
-  if (note != null) out.note = note;
-  return out;
-}
-function parseConcurrentWriteStamps(value) {
-  if (!Array.isArray(value)) return null;
-  const out = [];
-  for (const item of value) {
-    if (item == null || typeof item !== "object" || Array.isArray(item)) continue;
-    const row = item;
-    const dispatchId = text(row.dispatch_id);
-    if (dispatchId == null) continue;
-    const attribution2 = row.attribution === "delivery" || row.attribution === "workspace" ? row.attribution : null;
-    out.push({
-      dispatchId,
-      runId: text(row.run_id),
-      kind: text(row.kind),
-      workspaceMode: text(row.workspace_mode),
-      attribution: attribution2,
-      pathsIntersecting: typeof row.paths_intersecting === "number" ? row.paths_intersecting : null,
-      paths: pathList(row.paths),
-      pending: row.pending === true,
-      // Same asymmetry as `truncated` above, for the same reason.
-      degraded: row.degraded != null && row.degraded !== false,
-      note: text(row.note)
-    });
-  }
-  return out.length > 0 ? out : null;
-}
-var ATTESTATION_PATHS_SHOWN = 8;
-function shortId(id) {
-  return id.length > 8 ? id.slice(0, 8) : id;
-}
-function samplePaths(paths, stated) {
-  if (paths.length === 0) return stated != null && stated > 0 ? "(paths unrecorded)" : "(no paths named)";
-  const shown = paths.slice(0, ATTESTATION_PATHS_SHOWN);
-  const total = stated != null && stated > paths.length ? stated : paths.length;
-  const rest = total - shown.length;
-  return `${shown.join(", ")}${rest > 0 ? ` (+${rest} more)` : ""}`;
-}
-function describeConcurrentWrite(record2) {
-  const where = [record2.kind, record2.workspaceMode, record2.runId != null ? `run ${record2.runId}` : null].filter((part) => part != null).join(" \xB7 ");
-  const head = `${shortId(record2.dispatchId)}${where.length > 0 ? ` [${where}]` : ""}`;
-  if (record2.pending) {
-    return `${head}  PENDING \u2014 the windows overlapped in time, but that delivery had not finished, so no path set existed to intersect. It closes later and its own receipt carries the intersection.`;
-  }
-  const count = record2.pathsIntersecting ?? record2.paths.length;
-  const noun = count === 1 ? "path" : "paths";
-  const floor = record2.degraded ? "at least " : "";
-  const strength = record2.attribution === "delivery" ? "attributable \u2014 those paths are that delivery's own work" : record2.attribution === "workspace" ? "ATTESTATION ONLY \u2014 that delivery ran in the shared tree, so its path set is the tree's delta over its window; this says both windows touched these paths, not who wrote them" : "the row did not say how that path set was derived, so it is not attributable";
-  const incomplete = record2.degraded ? " At least one listing was incomplete, so this is a floor, not the set." : "";
-  return `${head}  ${floor}${count} ${noun} changed in both windows \u2014 ${strength}: ${samplePaths(record2.paths, record2.pathsIntersecting)}.${incomplete}`;
-}
-function describeIgnoredOutput(record2) {
-  const listed = samplePaths(record2.paths, null);
-  const fate = record2.retainedAt != null ? `still on disk at ${record2.retainedAt} until \`fadeno clean\` removes it` : "the worktree is gone, so this content is not recoverable from it";
-  const head = record2.paths.length === 0 ? record2.truncated ? "gitignored output was DISCARDED and the listing could not be taken \u2014 what was destroyed is unknown, not nothing" : "gitignored output was DISCARDED; the row names no paths" : `${record2.truncated ? "at least " : ""}${listed} \u2014 gitignored, so \`git add -A\` staged none of it and no diff carried it out of the worktree`;
-  const floor = record2.truncated && record2.paths.length > 0 ? " The listing is a floor, not the set." : "";
-  const why = record2.note != null ? ` (${record2.note})` : "";
-  return `${head}. ${fate}.${floor}${why}`;
 }
 
 // src/commands/dispatches.ts
@@ -25018,13 +25145,15 @@ function renderDispatchLine(entry) {
   }
   const overlaps2 = entry.concurrentWrite;
   if (overlaps2 != null && overlaps2.length > 0) {
-    const settled = overlaps2.filter((stamp) => !stamp.pending);
-    const pending = overlaps2.length - settled.length;
+    const named = overlaps2.filter((stamp) => stamp.dispatchId !== UNREADABLE_WINDOW_LOG_ID);
+    const settled = named.filter((stamp) => concurrentWriteStrength(stamp) === "intersected");
+    const pending = named.filter((stamp) => concurrentWriteStrength(stamp) === "pending").length;
+    const unknown = named.length - settled.length - pending;
     const floor = settled.some((stamp) => stamp.degraded);
     const total = settled.reduce((sum, stamp) => sum + (stamp.pathsIntersecting ?? stamp.paths.length), 0);
-    const who2 = overlaps2.map((stamp) => stamp.dispatchId.slice(0, 8)).join(", ");
-    parts.push(
-      `[concurrent_write: ${overlaps2.length} other ${overlaps2.length === 1 ? "delivery" : "deliveries"} wrote while this ran (${who2})` + (settled.length > 0 ? ` \u2014 ${floor ? "at least " : ""}${total} intersecting path${total === 1 ? "" : "s"}` : "") + (pending > 0 ? `${settled.length > 0 ? "," : " \u2014"} ${pending} still open at this receipt` : "") + "]"
+    const who2 = named.map((stamp) => stamp.dispatchId.slice(0, 8)).join(", ");
+    if (named.length > 0) parts.push(
+      `[concurrent_write: ${named.length} other ${named.length === 1 ? "delivery" : "deliveries"} overlapped this one (${who2})` + (settled.length > 0 ? ` \u2014 ${floor ? "at least " : ""}${total} intersecting path${total === 1 ? "" : "s"}` : "") + (pending > 0 ? `${settled.length > 0 ? "," : " \u2014"} ${pending} still open at this receipt` : "") + (unknown > 0 ? `${settled.length > 0 || pending > 0 ? "," : " \u2014"} ${unknown} where the intersection could not be computed` : "") + "]"
     );
     for (const stamp of overlaps2) parts.push(`[overlap ${describeConcurrentWrite(stamp)}]`);
   }
@@ -28451,6 +28580,18 @@ function executeToolCore(params) {
     workspaceMode: "shared",
     ...params.now != null ? { startedAt: params.now } : {}
   });
+  const overlapStatusBefore = workspaceStatusMap(params.repoRoot);
+  let windowClosed = false;
+  const closeToolWindow = () => {
+    if (windowClosed) return;
+    windowClosed = true;
+    const changed = changedBetween(overlapStatusBefore, workspaceStatusMap(params.repoRoot));
+    closeDispatchWindow(params.repoRoot, {
+      dispatchId: holder.id,
+      changedPaths: changed ?? [],
+      truncated: changed == null
+    });
+  };
   const commandDigestValue = commandDigest(params.command);
   try {
     withRunLock(params.runDir, () => {
@@ -28489,7 +28630,7 @@ function executeToolCore(params) {
       }, params.now ?? /* @__PURE__ */ new Date());
     });
   } catch (err) {
-    closeDispatchWindow(params.repoRoot, { dispatchId: holder.id, changedPaths: [] });
+    closeToolWindow();
     withdrawClaim();
     if (err instanceof ToolExecError) throw err;
     if (err instanceof LedgerWriteError) throw new ToolExecError(err.message);
@@ -28578,6 +28719,7 @@ function executeToolCore(params) {
       outputSnapshotAbs,
       stderrSnapshotAbs,
       holder,
+      closeWindow: closeToolWindow,
       claimRel
     });
     throw new ToolExecError(`failed to spawn tool "${params.toolName}": ${msg}`);
@@ -28650,6 +28792,7 @@ function executeToolCore(params) {
       outputSnapshotAbs,
       stderrSnapshotAbs,
       holder,
+      closeWindow: closeToolWindow,
       claimRel
     });
     throw new ToolExecError(`tool "${params.toolName}" supervisor lost without report`);
@@ -28715,6 +28858,7 @@ function executeToolCore(params) {
         outputSnapshotAbs,
         stderrSnapshotAbs,
         holder,
+        closeWindow: closeToolWindow,
         claimRel
       });
       throw new ToolExecError(`tool "${params.toolName}" output unreadable: ${err.message}`);
@@ -28782,6 +28926,7 @@ function executeToolCore(params) {
       outputSnapshotAbs,
       stderrSnapshotAbs,
       holder,
+      closeWindow: closeToolWindow,
       claimRel,
       synthesizedResult: result,
       detailsContent
@@ -28814,7 +28959,7 @@ function executeToolCore(params) {
       (0, import_node_fs24.rmSync)(claimAbs, { force: true });
     } catch {
     }
-    closeDispatchWindow(params.repoRoot, { dispatchId: holder.id, changedPaths: [] });
+    closeToolWindow();
   };
   const concurrentLoss = (why) => {
     const parked = { ...result, command: renderArgv(params.command) };
@@ -28945,6 +29090,7 @@ function executeToolCore(params) {
         outputSnapshotAbs,
         stderrSnapshotAbs,
         holder,
+        closeWindow: closeToolWindow,
         claimRel,
         synthesizedResult: result,
         detailsContent
@@ -28977,6 +29123,7 @@ function executeToolCore(params) {
         outputSnapshotAbs,
         stderrSnapshotAbs,
         holder,
+        closeWindow: closeToolWindow,
         claimRel
       });
       throw new ToolExecError(
@@ -29120,7 +29267,7 @@ function handleInfraFailure(opts) {
     (0, import_node_fs24.rmSync)(opts.claimAbs, { force: true });
   } catch {
   }
-  closeDispatchWindow(opts.repoRoot, { dispatchId: opts.holder.id, changedPaths: [] });
+  opts.closeWindow();
 }
 function recoverInterruptedToolDispatchesShared(repoRoot, runDir, runId, now, makeError) {
   let entered = false;
@@ -37918,13 +38065,16 @@ function checkConcurrentWrites(events) {
   let receipts = 0;
   let settled = 0;
   let pendingOnly = 0;
+  let unknown = 0;
   let degraded = 0;
   for (const event of events) {
     const stamps = parseConcurrentWriteStamps(event.extra.concurrent_write);
     if (stamps == null) continue;
     receipts += 1;
     for (const stamp of stamps) {
-      if (stamp.pending) pendingOnly += 1;
+      const strength = concurrentWriteStrength(stamp);
+      if (strength === "pending") pendingOnly += 1;
+      else if (strength === "unknown") unknown += 1;
       else settled += 1;
       if (stamp.degraded) degraded += 1;
       lines.push(`${receiptLabel(event)}: ${describeConcurrentWrite(stamp)}`);
@@ -37940,6 +38090,7 @@ function checkConcurrentWrites(events) {
   const counted = [
     `${settled} with an intersecting path set`,
     pendingOnly > 0 ? `${pendingOnly} recorded while the other window was still open` : null,
+    unknown > 0 ? `${unknown} where the intersection could not be computed at all` : null,
     degraded > 0 ? `${degraded} from an incomplete listing (a floor, not the set)` : null
   ].filter((part) => part != null).join(", ");
   return {
@@ -47118,7 +47269,8 @@ Or advance manually with the playbook cursor:`);
         const attestation = result2.attested === "match" ? "output attested: sha matches the completion row" : result2.attested === "mismatch" ? "WARNING: snapshot sha does not match the completion row (file changed after the dispatch?)" : result2.withdrawn ? `WITHDRAWN: an operator retired this dispatch${result2.withdrawnReason != null ? ` (${result2.withdrawnReason})` : ""}; these are all the bytes it ever produced and no completion row is coming. Do not wait on it.` : waitMs > 0 ? `STILL RUNNING: no completion row after waiting ${Math.round(waitMs / 1e3)}s. The executor has not exited; this is its output so far. Not a failure \u2014 re-run this command to check again.` : "no completion row recorded YET: the executor may still be running, and the kernel writes that row only when it exits. This is its output so far, not a failure. Re-run with --wait <seconds> to wait for the real answer.";
         const relay = result2.relayAttested === false ? `RELAY FIDELITY FAILED (relay_attested: false${result2.relayMismatchAllowed ? ", dispatched under --allow-relay-mismatch" : ""}) \u2014 the report above answers a prompt the caller never wrote; do not relay it as an answer` : null;
         const discarded = result2.ignoredOutputDiscarded == null ? null : `GITIGNORED OUTPUT DISCARDED${result2.ignoredOutputDiscarded.truncated ? " (the listing is a FLOOR, not the set)" : ""} \u2014 ${result2.ignoredOutputDiscarded.paths.slice(0, 5).join(", ") || "(paths unrecorded)"}: no diff carried this out of the worktree, so it is not in your tree`;
-        const overlap = result2.concurrentWrite == null || result2.concurrentWrite.length === 0 ? null : `concurrent_write: ${result2.concurrentWrite.length} other ${result2.concurrentWrite.length === 1 ? "delivery" : "deliveries"} wrote while this ran (${result2.concurrentWrite.map((stamp) => stamp.dispatchId.slice(0, 8)).join(", ")}) \u2014 an attestation, not proof of damage; \`fadeno dispatches\` names the intersecting paths`;
+        const overlapNamed = (result2.concurrentWrite ?? []).filter((stamp) => stamp.dispatchId !== UNREADABLE_WINDOW_LOG_ID);
+        const overlap = overlapNamed.length === 0 ? null : `concurrent_write: ${overlapNamed.length} other ${overlapNamed.length === 1 ? "delivery" : "deliveries"} overlapped this one (${overlapNamed.map((stamp) => stamp.dispatchId.slice(0, 8)).join(", ")}) \u2014 an attestation, not proof of damage; \`fadeno dispatches\` names the intersecting paths`;
         const note = [relay, discarded, verdict, merge, attestation, overlap].filter((part) => part != null).join("; ");
         const how = result2.resolvedBy === "recency" ? " [resolved by recency: nothing was open and nothing overlapped it, so this is the only candidate \u2014 launch with `--tag <handle>` to name it outright]" : result2.resolvedBy === "tag" ? " [resolved by tag]" : "";
         console.error(`[${result2.dispatchId}] ${result2.path} \u2014 ${note}${how}`);

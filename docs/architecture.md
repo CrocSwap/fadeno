@@ -286,10 +286,14 @@ back to ordinary file completion when no specialized candidates apply.
   silent lost writes, so every delivery records a WINDOW (`.fadeno/local/
   dispatch-windows.jsonl`, append-only, machine-local, never ledger) and, at
   its terminal receipt, intersects its changed paths with every window that
-  overlapped it in time. A non-empty intersection lands as `concurrent_write`
-  on the receipt, naming the other dispatch and the paths, with `attribution:
-  delivery` (an isolated arm's own diff) or `workspace` (a shared window's tree
-  delta — an attestation, not blame). Conflicts route to an integrator through
+  overlapped it in time — host deliveries included. An intersection lands as
+  `concurrent_write` on the receipt, naming the other dispatch and the paths,
+  with `attribution: delivery` (an isolated arm's own diff) or `workspace` (a
+  shared window's tree delta — an attestation, not blame). A side that could
+  not enumerate its own changes — a shared host delivery always, since nothing
+  records the tree at its `dispatch-start` — closes its window TRUNCATED, and
+  the stamp says the intersection is unknown rather than empty; an unreadable
+  window log gets a stamp of its own that names no delivery. Conflicts route to an integrator through
   the existing merge-back rebase. The stamp is READ by `verify` (a
   `concurrent-writes` warning — never a failure: an overlap is not proof of
   damage), by `show` (a `concurrent writes` section), and by `dispatches`,

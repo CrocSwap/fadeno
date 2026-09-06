@@ -13,7 +13,7 @@ import { runNewRun } from '../src/commands/new-run.ts';
 import { runDispatchStart, runDispatchComplete, runDispatchFail, runDispatchProgress } from '../src/commands/dispatch.ts';
 import { readEvents } from '../src/lib/run-ledger.ts';
 import { readWorkspaceLease, WORKSPACE_LEASE_FILE } from '../src/lib/workspace-lease.ts';
-import { openDispatchWindow, readDispatchWindows } from '../src/lib/workspace-overlap.ts';
+import { closeDispatchWindow, detectConcurrentWrites, openDispatchWindow, readDispatchWindows } from '../src/lib/workspace-overlap.ts';
 import { hostDeliveryWorkspaceMode } from '../src/lib/host-dispatch.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
 import { runVerify } from '../src/commands/verify.ts';
@@ -1022,4 +1022,126 @@ test('ledger workspace pointing to sibling worktree is ignored and leaves siblin
   rmSync(wtAbs, { recursive: true, force: true });
   rmSync(wtAbs2, { recursive: true, force: true });
   pruneWorktrees(root);
+});
+
+// ---------------------------------------------------------------------------
+// Overlap detection reaches the host lane in BOTH directions.
+//
+// Host deliveries opened and closed windows and never intersected them, so a
+// host receipt could not carry a `concurrent_write` stamp at all — while their
+// closes reported a positive empty path set, so no neighbour could see them
+// either. The pair below is the seam that made that visible in the field: a
+// command delivery correctly stamped PENDING against an open host window, and
+// the stamp told a human the host's own receipt would carry the intersection.
+// It could not. The promise has to resolve.
+// ---------------------------------------------------------------------------
+
+test("a PENDING stamp resolves: the other side's receipt carries the intersection", (t) => {
+  const { root, runId, runDir, request } = seedIsolatedRun(t);
+
+  // A neighbour delivery — the command lane's shape — opens first.
+  openDispatchWindow(root, {
+    dispatchId: 'neighbour-1',
+    kind: 'ad-hoc',
+    workspaceMode: 'shared',
+    startedAt: new Date('2026-09-06T10:00:00Z'),
+  });
+
+  // The host delivery starts while the neighbour is still writing.
+  const prep = runDispatchPrepare({ repoRoot: root, run: runId, dispatchId: request.dispatchId, isolate: true });
+  runDispatchStart({ repoRoot: root, run: runId, dispatchId: request.dispatchId, agentId: 'host-1', now: new Date('2026-09-06T10:01:00Z') });
+  writeFileSync(join(resolve(root, prep.workspace), 'base.txt'), 'host edit\n');
+
+  // The neighbour closes FIRST and sees an open host window: overlap in time,
+  // no set on the other side to intersect. This is the real detector, called
+  // exactly as `dispatch.ts` calls it.
+  const log = readDispatchWindows(root);
+  const neighbourStamps = detectConcurrentWrites(
+    {
+      dispatchId: 'neighbour-1',
+      startedAt: '2026-09-06T10:00:00.000Z',
+      endedAt: '2026-09-06T10:02:00.000Z',
+      workspaceMode: 'shared',
+      changedPaths: ['base.txt'],
+    },
+    log.windows,
+    { logDegraded: log.degraded },
+  );
+  assert.ok(neighbourStamps != null, 'the neighbour sees the host window');
+  const pending = neighbourStamps!.find((stamp) => stamp.dispatch_id === `${runId}:${request.dispatchId}`)!;
+  assert.equal(pending.pending, true, 'the host had not finished, so there was no set to intersect');
+  closeDispatchWindow(root, {
+    dispatchId: 'neighbour-1',
+    changedPaths: ['base.txt'],
+    endedAt: new Date('2026-09-06T10:02:00Z'),
+  });
+
+  // Now the host closes. Its receipt is the page the PENDING stamp points at,
+  // and it must not be empty.
+  const tmp = join(root, 'out.md');
+  writeFileSync(tmp, 'final output');
+  runDispatchComplete({ repoRoot: root, run: runId, dispatchId: request.dispatchId, output: tmp, now: new Date('2026-09-06T10:03:00Z') });
+
+  const termExtra = readTerminalExtra(runDir, request.dispatchId)!;
+  const stamps = termExtra.concurrent_write as Record<string, unknown>[] | undefined;
+  assert.ok(Array.isArray(stamps), 'the host terminal receipt carries the stamp the pending one promised');
+  const back = stamps!.find((stamp) => stamp.dispatch_id === 'neighbour-1')!;
+  assert.ok(back != null, 'and it names the delivery that stamped it');
+  assert.equal(back.paths_intersecting, 1);
+  assert.deepEqual(back.paths, ['base.txt'], "from the host worktree's own diff");
+  assert.equal(back.attribution, 'workspace', 'the NEIGHBOUR ran in the shared tree, so its set is an attestation');
+  assert.equal(back.pending, undefined);
+
+  // The window closes with the delivery's real path set, so anyone who closes
+  // after it intersects against work, not against nothing.
+  const window = readDispatchWindows(root).windows.find((w) => w.dispatchId === `${runId}:${request.dispatchId}`)!;
+  assert.equal(window.endedAt, '2026-09-06T10:03:00.000Z', 'an isolated host window is closed at all — it used to leak open forever');
+  assert.deepEqual(window.changedPaths, ['base.txt']);
+  assert.equal(window.truncated, false);
+});
+
+test('a shared host delivery is TRUNCATED, never a positive empty set', (t) => {
+  // A shared host delivery has no worktree diff, and `changedBetween` is not
+  // available to it: `dispatch-start` and the terminal receipt are separate CLI
+  // invocations, so no before-snapshot of the tree survives between them.
+  // `changedPaths: []` said "this delivery changed nothing", which every
+  // neighbour then intersected against. Truncated says the true thing.
+  const { root, runId, runDir, request } = seedIsolatedRun(t);
+  openDispatchWindow(root, {
+    dispatchId: 'neighbour-2',
+    kind: 'ad-hoc',
+    workspaceMode: 'isolated',
+    startedAt: new Date('2026-09-06T11:00:00Z'),
+  });
+  runDispatchStart({ repoRoot: root, run: runId, dispatchId: request.dispatchId, agentId: 'host-shared', now: new Date('2026-09-06T11:01:00Z') });
+  runDispatchFail({ repoRoot: root, run: runId, dispatchId: request.dispatchId, reason: 'stopped', now: new Date('2026-09-06T11:02:00Z') });
+
+  const window = readDispatchWindows(root).windows.find((w) => w.dispatchId === `${runId}:${request.dispatchId}`)!;
+  assert.equal(window.truncated, true, 'the window admits it could not enumerate its changes');
+  assert.deepEqual(window.changedPaths, []);
+
+  // A neighbour closing afterwards must read that as unknown, not as clean.
+  const log = readDispatchWindows(root);
+  const stamps = detectConcurrentWrites(
+    {
+      dispatchId: 'neighbour-2',
+      startedAt: '2026-09-06T11:00:00.000Z',
+      endedAt: '2026-09-06T11:03:00.000Z',
+      workspaceMode: 'isolated',
+      changedPaths: ['base.txt'],
+    },
+    log.windows,
+    { logDegraded: log.degraded },
+  );
+  const seen = stamps?.find((stamp) => stamp.dispatch_id === `${runId}:${request.dispatchId}`);
+  assert.ok(seen != null, 'a shared host delivery is visible to its neighbours');
+  assert.equal(seen!.degraded, true);
+  assert.match(seen!.note, /could not enumerate/);
+
+  // And a FAILED host delivery stamps its own receipt too — an agent killed
+  // mid-write is the case most likely to have met another writer.
+  const termExtra = readTerminalExtra(runDir, request.dispatchId)!;
+  const own = (termExtra.concurrent_write as Record<string, unknown>[] | undefined)?.find((stamp) => stamp.dispatch_id === 'neighbour-2');
+  assert.ok(own != null, 'the failure receipt carries the overlap');
+  assert.equal(own!.pending, true, 'the neighbour was still open when this one closed');
 });

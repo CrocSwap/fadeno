@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { sha256Hex } from './artifact-manifest.ts';
 import { INFLIGHT_DIR, inflightClaimIsAlive, readInflightClaim, readSupervisorStatus, sleepSync, superviseArgv, supervisedSpawnError, supervisorCanStillReport } from './supervisor.ts';
-import { closeDispatchWindow, openDispatchWindow } from './workspace-overlap.ts';
+import { changedBetween, closeDispatchWindow, openDispatchWindow, workspaceStatusMap } from './workspace-overlap.ts';
 import { atCwd, withDispatchProvenance, withoutHarnessIdentity } from './executors.ts';
 import { readEventsStrict, type RunEvent } from './run-ledger.ts';
 import { parseGeneration } from './prompt-resolve.ts';
@@ -483,6 +483,35 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
     workspaceMode: 'shared',
     ...(params.now != null ? { startedAt: params.now } : {}),
   });
+  /**
+   * What this attempt changed, and who else was writing at the time.
+   *
+   * A tool attempt is a shell command in the caller's tree — a formatter, a
+   * codegen step, a test run that rewrites a snapshot — so "a tool cannot
+   * write" was never true. Every close here used to report `changedPaths: []`
+   * with no truncation flag, which is a POSITIVE claim of an empty set: every
+   * neighbouring delivery intersected against nothing and therefore never saw
+   * a tool attempt, however much it wrote.
+   *
+   * `changedBetween` is available here where it is not for a host delivery,
+   * and for one reason: this kernel spawns the supervisor and polls it in the
+   * SAME process, so both snapshots are taken by one caller around one
+   * interval. Null on either side is `truncated` — "could not tell" — never an
+   * empty set. Memoized behind `windowClosed` because several exits release
+   * this attempt and a second reading would describe a tree that has moved on.
+   */
+  const overlapStatusBefore = workspaceStatusMap(params.repoRoot);
+  let windowClosed = false;
+  const closeToolWindow = (): void => {
+    if (windowClosed) return;
+    windowClosed = true;
+    const changed = changedBetween(overlapStatusBefore, workspaceStatusMap(params.repoRoot));
+    closeDispatchWindow(params.repoRoot, {
+      dispatchId: holder.id,
+      changedPaths: changed ?? [],
+      truncated: changed == null,
+    });
+  };
 
   const commandDigestValue = commandDigest(params.command);
   // Durable admission: check-then-append under the per-run ledger lock so two
@@ -537,7 +566,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
       }, params.now ?? new Date());
     });
   } catch (err) {
-    closeDispatchWindow(params.repoRoot, { dispatchId: holder.id, changedPaths: [] });
+    closeToolWindow();
     withdrawClaim();
     if (err instanceof ToolExecError) throw err;
     if (err instanceof LedgerWriteError) throw new ToolExecError(err.message);
@@ -620,6 +649,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
       outputSnapshotAbs,
       stderrSnapshotAbs,
       holder,
+      closeWindow: closeToolWindow,
       claimRel,
     });
     throw new ToolExecError(`failed to spawn tool "${params.toolName}": ${msg}`);
@@ -701,6 +731,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
       outputSnapshotAbs,
       stderrSnapshotAbs,
       holder,
+      closeWindow: closeToolWindow,
       claimRel,
     });
     throw new ToolExecError(`tool "${params.toolName}" supervisor lost without report`);
@@ -779,6 +810,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
         outputSnapshotAbs,
         stderrSnapshotAbs,
         holder,
+        closeWindow: closeToolWindow,
         claimRel,
       });
       throw new ToolExecError(`tool "${params.toolName}" output unreadable: ${(err as Error).message}`);
@@ -853,6 +885,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
       outputSnapshotAbs,
       stderrSnapshotAbs,
       holder,
+      closeWindow: closeToolWindow,
       claimRel,
       synthesizedResult: result,
       detailsContent,
@@ -878,7 +911,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
     try { rmSync(stderrSnapshotAbs, { force: true }); } catch {}
     try { rmSync(statusAbs, { force: true }); } catch {}
     try { rmSync(claimAbs, { force: true }); } catch {}
-    closeDispatchWindow(params.repoRoot, { dispatchId: holder.id, changedPaths: [] });
+    closeToolWindow();
   };
 
   /**
@@ -1055,6 +1088,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
         outputSnapshotAbs,
         stderrSnapshotAbs,
         holder,
+        closeWindow: closeToolWindow,
         claimRel,
         synthesizedResult: result,
         detailsContent,
@@ -1087,6 +1121,7 @@ export function executeToolCore(params: ToolCoreParams): ToolCoreResult {
         outputSnapshotAbs,
         stderrSnapshotAbs,
         holder,
+        closeWindow: closeToolWindow,
         claimRel,
       });
       throw new ToolExecError(
@@ -1199,6 +1234,14 @@ function handleInfraFailure(opts: {
   stderrSnapshotAbs: string;
   holder: { id: string; kind: 'engine'; runId: string; dispatchId: string };
   claimRel: string;
+  /**
+   * The caller's memoized window close. Passed in rather than re-derived:
+   * this path and `releaseGuards` can both run for one attempt (an infra
+   * failure records its receipt and then throws through the `finally`), and
+   * two independent closes would append two `window_closed` rows for one
+   * window.
+   */
+  closeWindow: () => void;
   synthesizedResult?: SynthesizedTestResult;
   detailsContent?: string | null;
 }): void {
@@ -1277,7 +1320,7 @@ function handleInfraFailure(opts: {
   try { rmSync(opts.stderrSnapshotAbs, { force: true }); } catch {}
   try { rmSync(opts.statusAbs, { force: true }); } catch {}
   try { rmSync(opts.claimAbs, { force: true }); } catch {}
-  closeDispatchWindow(opts.repoRoot, { dispatchId: opts.holder.id, changedPaths: [] });
+  opts.closeWindow();
 }
 
 /**

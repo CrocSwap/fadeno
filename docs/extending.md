@@ -647,17 +647,28 @@ What replaced it:
   and machine-local, never ledger evidence, never gating — the thing it
   observes is concurrent writers, so it must not itself need a lock.
 - **`concurrent_write` receipts.** At the terminal receipt a delivery
-  intersects its own path set with every window that overlapped it in time. A
-  non-empty intersection lands on the receipt as `concurrent_write: [{
-  dispatch_id, kind, workspace_mode, attribution, paths_intersecting, paths,
-  note }]`, naming the other dispatch and the intersecting paths. Absent when
-  nothing overlapped. `attribution: delivery` means the other side's paths came
-  from its own worktree diff and are its work; `attribution: workspace` means
-  they are a shared tree's delta over the interval — an attestation that both
-  windows touched those paths, never proof of who wrote them. An overlapping
-  window that has not closed yet is recorded as `pending`: the later-closing
-  side sees the completed set and carries the concrete intersection, so between
-  the two receipts the pair is fully described and each names the other.
+  intersects its own path set with every window that overlapped it in time —
+  on every lane, host deliveries included (`completeHostDispatch` and
+  `failHostDispatch` compute one stamp before any terminal payload is written,
+  so all of their branches carry the same one). A stamp lands as
+  `concurrent_write: [{ dispatch_id, kind, workspace_mode, attribution,
+  paths_intersecting, paths, note }]`, naming the other dispatch and the
+  intersecting paths. Absent when nothing overlapped. `attribution: delivery`
+  means the other side's paths came from its own worktree diff and are its
+  work; `attribution: workspace` means they are a shared tree's delta over the
+  interval — an attestation that both windows touched those paths, never proof
+  of who wrote them. An overlapping window that has not closed yet is recorded
+  as `pending`: the later-closing side's receipt is where the intersection is
+  recorded — concretely when it can enumerate its changes, and as a `degraded`
+  admission when it cannot. **An empty intersection is only reported as "these
+  two never met" when BOTH listings were whole.** When either side could not
+  enumerate what it changed, the stamp is written with `paths_intersecting: 0`
+  and `degraded` and reads *COULD NOT TELL* — a shared host delivery is always
+  in that state, because nothing records the tree at its `dispatch-start` and
+  the delta cannot be recovered from a separate CLI invocation later. When the
+  window log itself could not be read whole, one stamp carries
+  `UNREADABLE_WINDOW_LOG_ID` and no `kind`/`workspace_mode`/`attribution`: it
+  names no window, and every reader counts it as no delivery.
   Path granularity, not hunk. This is deliberately non-optional: deleting the
   lock without detection would convert a wedged repo into silent lost writes,
   which is worse.

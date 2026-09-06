@@ -16,6 +16,12 @@ import {
   WINDOW_MAX_PATHS,
   workspaceStatusMap,
 } from '../src/lib/workspace-overlap.ts';
+import {
+  concurrentWriteStrength,
+  describeConcurrentWrite,
+  parseConcurrentWriteStamps,
+  UNREADABLE_WINDOW_LOG_ID,
+} from '../src/lib/receipt-attestations.ts';
 import { describeVestigialWorkspaceLease, WORKSPACE_LEASE_FILE, WORKSPACE_LEASE_LOCK } from '../src/lib/workspace-lease.ts';
 import { runDoctor } from '../src/commands/doctor.ts';
 import { tempRepo } from './helpers.ts';
@@ -189,13 +195,131 @@ test('a shared window is an attestation and says so', () => {
   assert.match(stamps![0]!.note, /attestation/, 'a shared set includes whoever else touched the tree, and must not read as blame');
 });
 
-test('an incomplete listing degrades the stamp rather than under-reporting it', () => {
+test("a capped listing degrades the stamp rather than under-reporting it", () => {
+  // The OTHER side hit `WINDOW_MAX_PATHS`: it named paths, and there were
+  // more. Its intersection is a floor. (Self can never be in this state — see
+  // the next test for the shape a real caller actually produces.)
   const stamps = detectConcurrentWrites(
-    { dispatchId: 'mine', startedAt: '2026-09-06T10:05:00Z', endedAt: '2026-09-06T10:15:00Z', workspaceMode: 'shared', changedPaths: ['src/shared.ts'], truncated: true },
-    [{ dispatchId: 'other', runId: null, kind: 'ad-hoc', workspaceMode: 'shared', startedAt: '2026-09-06T10:00:00Z', endedAt: '2026-09-06T10:10:00Z', changedPaths: ['src/shared.ts'], truncated: false }],
+    { dispatchId: 'mine', startedAt: '2026-09-06T10:05:00Z', endedAt: '2026-09-06T10:15:00Z', workspaceMode: 'shared', changedPaths: ['src/shared.ts'] },
+    [{ dispatchId: 'other', runId: null, kind: 'ad-hoc', workspaceMode: 'shared', startedAt: '2026-09-06T10:00:00Z', endedAt: '2026-09-06T10:10:00Z', changedPaths: ['src/shared.ts'], truncated: true }],
   );
   assert.equal(stamps![0]!.degraded, true);
   assert.match(stamps![0]!.note, /floor, not the set/);
+});
+
+test('a delivery that could not list its OWN changes still reports every overlap', () => {
+  // THE SHAPE A REAL CALLER PRODUCES. Every caller writes
+  //   `const truncated = changed == null; const paths = changed ?? [];`
+  // so a self-truncated delivery arrives with an EMPTY set — never with paths.
+  // The old test passed `truncated: true` WITH a path, a combination no caller
+  // can produce, and that is why it went green while the branch it was meant
+  // to protect returned nothing at all: `mine` was empty, every intersection
+  // was empty, and the empty intersection was reported as "no overlap".
+  const neighbour = {
+    dispatchId: 'other',
+    runId: 'r1',
+    kind: 'engine' as const,
+    workspaceMode: 'isolated' as const,
+    startedAt: '2026-09-06T10:00:00Z',
+    endedAt: '2026-09-06T10:10:00Z',
+    changedPaths: ['src/a.ts', 'src/b.ts'],
+    truncated: false,
+  };
+  const stamps = detectConcurrentWrites(
+    {
+      dispatchId: 'mine',
+      startedAt: '2026-09-06T10:05:00Z',
+      endedAt: '2026-09-06T10:15:00Z',
+      workspaceMode: 'shared',
+      changedPaths: [],
+      truncated: true,
+    },
+    [neighbour],
+  );
+  assert.ok(stamps != null, 'a delivery that cannot say what it changed must not report "nothing overlapped"');
+  assert.equal(stamps!.length, 1);
+  assert.equal(stamps![0]!.dispatch_id, 'other');
+  assert.equal(stamps![0]!.degraded, true);
+  assert.equal(stamps![0]!.paths_intersecting, 0, 'zero KNOWN hits');
+  assert.match(stamps![0]!.note, /UNKNOWN/);
+  assert.match(stamps![0]!.note, /not a report that they did not meet/);
+  assert.equal(concurrentWriteStrength(parseConcurrentWriteStamps(stamps)![0]!), 'unknown');
+  assert.match(describeConcurrentWrite(parseConcurrentWriteStamps(stamps)![0]!), /COULD NOT TELL/);
+
+  // And the same delivery with a listing it COULD take, meeting nobody, still
+  // says nothing — the silence has to stay meaningful.
+  assert.equal(
+    detectConcurrentWrites(
+      { dispatchId: 'mine', startedAt: '2026-09-06T10:05:00Z', endedAt: '2026-09-06T10:15:00Z', workspaceMode: 'shared', changedPaths: ['src/z.ts'] },
+      [neighbour],
+    ),
+    null,
+  );
+});
+
+test('a neighbour that could not list ITS changes is not intersected against nothing', () => {
+  // The mirror of the case above, and the one hole 4 creates on purpose: a
+  // shared host delivery closes truncated because no before-snapshot of the
+  // tree survives between `dispatch-start` and its terminal receipt. Its
+  // window carries an empty set, and a neighbour intersecting against it must
+  // read that as "unknown", never as "we did not meet".
+  const stamps = detectConcurrentWrites(
+    { dispatchId: 'mine', startedAt: '2026-09-06T10:05:00Z', endedAt: '2026-09-06T10:15:00Z', workspaceMode: 'isolated', changedPaths: ['src/a.ts'] },
+    [{ dispatchId: 'host', runId: 'r1', kind: 'host-dispatch', workspaceMode: 'shared', startedAt: '2026-09-06T10:00:00Z', endedAt: '2026-09-06T10:10:00Z', changedPaths: [], truncated: true }],
+  );
+  assert.ok(stamps != null, 'an unenumerable neighbour is a blind spot, not a clean bill of health');
+  assert.equal(stamps![0]!.dispatch_id, 'host');
+  assert.equal(stamps![0]!.degraded, true);
+  assert.match(stamps![0]!.note, /"host" could not enumerate/);
+});
+
+test('an unreadable window log is recorded on the receipt, not swallowed', () => {
+  // The log could not be read, so `readDispatchWindows` hands back zero
+  // windows and `degraded: true`. Zero windows produced zero stamps, and a
+  // receipt with no stamp is exactly what a delivery that was genuinely alone
+  // writes — the strongest evidence of a blind spot rendered as the emptiest
+  // possible record.
+  const stamps = detectConcurrentWrites(
+    { dispatchId: 'mine', startedAt: '2026-09-06T10:05:00Z', endedAt: '2026-09-06T10:15:00Z', workspaceMode: 'shared', changedPaths: ['src/a.ts'] },
+    [],
+    { logDegraded: true },
+  );
+  assert.ok(stamps != null, '"I could not tell" must never be spelled like "nothing happened"');
+  assert.equal(stamps!.length, 1);
+  assert.equal(stamps![0]!.dispatch_id, UNREADABLE_WINDOW_LOG_ID);
+  assert.equal(stamps![0]!.degraded, true);
+  assert.equal(stamps![0]!.kind, undefined, 'it names no window, so it claims nothing about one');
+  assert.equal(stamps![0]!.attribution, undefined);
+
+  const record = parseConcurrentWriteStamps(stamps)![0]!;
+  assert.equal(concurrentWriteStrength(record), 'unknown', 'never counted as a delivery that wrote');
+  assert.match(describeConcurrentWrite(record), /WINDOW LOG UNREADABLE/);
+  assert.doesNotMatch(describeConcurrentWrite(record), /\(window l/, 'the sentinel id is never rendered as a short id');
+
+  // A readable log that found nothing still says nothing.
+  assert.equal(
+    detectConcurrentWrites(
+      { dispatchId: 'mine', startedAt: '2026-09-06T10:05:00Z', endedAt: '2026-09-06T10:15:00Z', workspaceMode: 'shared', changedPaths: ['src/a.ts'] },
+      [],
+    ),
+    null,
+  );
+});
+
+test('a duplicate close merges rather than erasing the first listing', (t) => {
+  // An idempotent terminal receipt closes the window a second time, with
+  // nothing to report. Under "last close wins" that second row replaced a
+  // complete, attributable listing with an empty one, and every neighbour
+  // then intersected against nothing.
+  const root = tempRepo(t);
+  openDispatchWindow(root, { dispatchId: 'd1', kind: 'ad-hoc', workspaceMode: 'isolated', startedAt: new Date('2026-09-06T10:00:00Z') });
+  closeDispatchWindow(root, { dispatchId: 'd1', changedPaths: ['src/a.ts'], endedAt: new Date('2026-09-06T10:05:00Z') });
+  closeDispatchWindow(root, { dispatchId: 'd1', changedPaths: [], truncated: true, endedAt: new Date('2026-09-06T10:06:00Z') });
+
+  const window = readDispatchWindows(root).windows[0]!;
+  assert.deepEqual(window.changedPaths, ['src/a.ts'], 'what was known stays known');
+  assert.equal(window.truncated, true, 'and the second close\'s uncertainty is carried, not dropped');
+  assert.equal(window.endedAt, '2026-09-06T10:06:00.000Z', 'the interval still ends at the latest close');
 });
 
 test('a window over the path budget is truncated, never silently trimmed to clean', (t) => {

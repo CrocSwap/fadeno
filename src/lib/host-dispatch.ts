@@ -7,7 +7,14 @@ import { SchemaSet, schemaErrorMessages, type SchemaKind } from './playbook-vali
 import { extractSchemaEnvelope, type EnvelopeExtraction } from './schema-envelope.ts';
 import { runSchemaDirectories } from './definitions.ts';
 import { findRepoRoot } from './paths.ts';
-import { closeDispatchWindow, openDispatchWindow } from './workspace-overlap.ts';
+import {
+  closeDispatchWindow,
+  detectConcurrentWrites,
+  diffChangedPaths,
+  openDispatchWindow,
+  readDispatchWindows,
+  type ConcurrentWriteStamp,
+} from './workspace-overlap.ts';
 import { readEventsStrict, resolveRun, RUN_LEDGER_SCHEMA_VERSION, RunLedgerError, type RunEvent } from './run-ledger.ts';
 import { LedgerWriteError, LedgerWriter } from './run-ledger-write.ts';
 import { parseSnapshotDocument, type SnapshotDocument } from './executors.ts';
@@ -750,12 +757,158 @@ function hostWindowId(runId: string, dispatchId: string): string {
   return `${runId}:${dispatchId}`;
 }
 
-function closeHostWindow(repoRoot: string, runId: string, dispatchId: string, changedPaths: readonly string[] = []): void {
+/**
+ * Close a host window with no claim about what it changed.
+ *
+ * `changedPaths: []` with `truncated: false` is a POSITIVE statement that the
+ * delivery changed nothing, and every neighbour intersects against it — so a
+ * shared host delivery that rewrote half the tree was recorded as having
+ * written nothing at all, and was invisible in both directions. Truncated is
+ * the field for "could not tell", and it is what every host close that has no
+ * diff to read must use.
+ *
+ * Used for the idempotent re-close of an already-terminal delivery and for
+ * shared deliveries, whose honest set is discussed at `settleHostOverlap`.
+ */
+function closeHostWindow(repoRoot: string, runId: string, dispatchId: string, changedPaths: readonly string[] | null = null): void {
   try {
-    closeDispatchWindow(repoRoot, { dispatchId: hostWindowId(runId, dispatchId), changedPaths });
+    closeDispatchWindow(repoRoot, {
+      dispatchId: hostWindowId(runId, dispatchId),
+      changedPaths: changedPaths ?? [],
+      truncated: changedPaths == null,
+    });
   } catch {
     // deliberately swallowed; see above
   }
+}
+
+/**
+ * Close a host window on the idempotent re-terminal path, and only if the
+ * first terminal did not already close it.
+ *
+ * Two failures meet here. A re-close appends a second `window_closed` row, and
+ * the reader merges duplicate closes — so an unconditional truncated re-close
+ * would mark a delivery's complete, attributable listing as incomplete for no
+ * reason. And the ISOLATED terminal branches never closed a window at all, so
+ * an isolated host delivery's window stayed open forever: every later delivery
+ * in that repo saw a writer that had finished hours ago, isolated against it,
+ * and stamped a `pending` overlap naming it. This closes that leak without
+ * downgrading a good record.
+ */
+function closeHostWindowIfOpen(repoRoot: string, runId: string, dispatchId: string): void {
+  try {
+    const windowId = hostWindowId(runId, dispatchId);
+    const existing = readDispatchWindows(repoRoot).windows.find((w) => w.dispatchId === windowId);
+    // Absent means the log never saw the open; a close naming it would be an
+    // orphan the reader drops anyway.
+    if (existing == null || existing.endedAt != null) return;
+    closeHostWindow(repoRoot, runId, dispatchId, null);
+  } catch {
+    // deliberately swallowed; see above
+  }
+}
+
+/**
+ * What a terminal host receipt says about who else was writing.
+ *
+ * ## Why this exists at all
+ *
+ * Host deliveries opened and closed windows and never intersected them. The
+ * consequence was not symmetric under-reporting, it was a one-way mirror: a
+ * command delivery correctly stamped `pending` against an open host window,
+ * and that stamp told the reader the host's own receipt would carry the
+ * intersection — a receipt that could never carry one. The pending case did
+ * not merely under-report; it pointed a human at an empty page.
+ *
+ * ## The honest path set, per lane
+ *
+ * ISOLATED: the collected diff. `diffChangedPaths` parses the patch without
+ * applying it, so it works after the worktree is gone, and its paths are the
+ * delivery's OWN work — `attribution: 'delivery'` for anyone intersecting it.
+ * A degraded terminal (no diff collected) has nothing to read and is
+ * truncated.
+ *
+ * SHARED: truncated, and this is a deliberate admission rather than an
+ * oversight. The shared command lane produces a set with `changedBetween(before,
+ * after)` — two `workspaceStatusMap` snapshots taken inside ONE process, the
+ * first immediately before the executor is spawned. A host delivery has no
+ * such process: `dispatch-start` and `dispatch-complete` are separate CLI
+ * invocations, minutes or hours apart, and the kernel holds nothing in memory
+ * between them. The tree's state at `dispatch-start` is simply not recorded
+ * anywhere, so the delta over the window cannot be computed after the fact.
+ *
+ * The available near-misses are both worse than admitting it. A bare
+ * `workspaceStatusMap` at the terminal describes what is dirty NOW — including
+ * everything that was already dirty before the window opened, and excluding
+ * everything changed and then committed inside it — so publishing it as
+ * `changed_paths` would manufacture intersections that never happened, in a
+ * detector whose usefulness depends on a reader trusting it. And `[]` is the
+ * bug this replaces. Truncated says the true thing: the windows overlapped and
+ * nobody can say where.
+ */
+function settleHostOverlap(opts: {
+  repoRoot: string;
+  runId: string;
+  dispatchId: string;
+  workspaceMode: 'isolated' | 'shared';
+  /** Repo-relative diff for an isolated delivery; null when there is none. */
+  diffSnapshot: string | null;
+  /** The `actor_dispatched` timestamp, used when the window log lost the open. */
+  startFallbackIso: string | null;
+  now: Date;
+}): { stamps: ConcurrentWriteStamp[] | null; close: () => void } {
+  const windowId = hostWindowId(opts.runId, opts.dispatchId);
+  const changed = opts.diffSnapshot != null
+    ? diffChangedPaths(opts.repoRoot, join(opts.repoRoot, ...opts.diffSnapshot.split('/')))
+    : null;
+  const truncated = changed == null;
+  const paths = changed ?? [];
+  let stamps: ConcurrentWriteStamp[] | null = null;
+  try {
+    const log = readDispatchWindows(opts.repoRoot);
+    // The window's own record is the authority on when this delivery started
+    // writing; the start event's timestamp is the fallback for a log that lost
+    // the open row. Neither available means the interval is unknown, and an
+    // unknown interval intersects nothing — so nothing is claimed.
+    const mine = log.windows.find((w) => w.dispatchId === windowId);
+    const startedAt = mine?.startedAt ?? opts.startFallbackIso;
+    if (startedAt != null) {
+      stamps = detectConcurrentWrites(
+        {
+          dispatchId: windowId,
+          startedAt,
+          endedAt: opts.now.toISOString(),
+          workspaceMode: opts.workspaceMode,
+          changedPaths: paths,
+          truncated,
+        },
+        log.windows,
+        { logDegraded: log.degraded },
+      );
+    }
+  } catch {
+    // Machine-local bookkeeping never turns a recorded terminal into a CLI
+    // failure. The receipt is the fact; the stamp is an observation about it.
+  }
+  return {
+    stamps,
+    // Closed AFTER the receipt is appended, exactly as before: a window left
+    // open costs a later delivery an unnecessary worktree, where a window
+    // closed before a receipt that then failed to append costs a missed
+    // overlap.
+    close: () => {
+      try {
+        closeDispatchWindow(opts.repoRoot, {
+          dispatchId: windowId,
+          changedPaths: paths,
+          truncated,
+          endedAt: opts.now,
+        });
+      } catch {
+        // deliberately swallowed; see above
+      }
+    },
+  };
 }
 
 function writeArtifactAtomic(path: string, bytes: Buffer): void {
@@ -996,7 +1149,10 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
       opts.now,
     );
   } catch (err) {
-    closeHostWindow(repoRoot, runId, opts.dispatchId);
+    // The one host close that can honestly claim an empty set: the window was
+    // opened moments ago and the executor was never spawned, so nothing of
+    // this delivery has run.
+    closeHostWindow(repoRoot, runId, opts.dispatchId, []);
     throw err;
   }
   return { dispatchId: opts.dispatchId, state: 'started', idempotent: false, agentId: opts.agentId };
@@ -1135,6 +1291,7 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
   if (terminal.length > 0) {
     if (isIsolated) {
       settleIsolatedTerminalWorkspace({ repoRoot, runId, dispatchId: opts.dispatchId, start: starts[0]!, terminal: terminal[0] ?? null });
+      closeHostWindowIfOpen(repoRoot, runId, opts.dispatchId);
       const prior = terminal[0]!;
       if (
         prior.type === 'actor_completed' &&
@@ -1144,7 +1301,7 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
       }
       throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already has a different terminal receipt.`);
     } else {
-      closeHostWindow(repoRoot, runId, opts.dispatchId);
+      closeHostWindowIfOpen(repoRoot, runId, opts.dispatchId);
       const prior = terminal[0]!;
       if (
         prior.type === 'actor_completed' &&
@@ -1199,6 +1356,24 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
     }
   }
 
+  // Who else was writing while this delivery ran. Computed ONCE, here, after
+  // the isolated diff exists and before any receipt is appended, because every
+  // branch below writes a different terminal payload and they must not
+  // disagree about the overlap — the same reason `drive.ts` funnels this
+  // through one `workspaceFields()`.
+  const overlap = settleHostOverlap({
+    repoRoot,
+    runId,
+    dispatchId: opts.dispatchId,
+    workspaceMode: isIsolated ? 'isolated' : 'shared',
+    diffSnapshot: isolatedComplete?.kind === 'collected' ? isolatedComplete.collected.diffSnapshot : null,
+    startFallbackIso: starts[0]!.timestamp,
+    now: opts.now ?? new Date(),
+  });
+  /** Absent when nothing overlapped — a field on every receipt is one nobody reads. */
+  const overlapFields = (): Record<string, unknown> =>
+    (overlap.stamps != null ? { concurrent_write: overlap.stamps } : {});
+
   const verdict = validationFor(repoRoot, runDir, request, bytes);
   const agentId = typeof starts[0]!.extra.agent_id === 'string' ? starts[0]!.extra.agent_id : undefined;
   if (!verdict.ok) {
@@ -1247,10 +1422,12 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
           map_member: request.mapMember,
           generation: request.generation,
           logical_artifact: request.logicalArtifact,
+          ...overlapFields(),
         },
         opts.now,
       );
       try { removeHostWorkspace({ repoRoot, state: collected.state }); } catch {}
+      overlap.close();
       return { dispatchId: opts.dispatchId, state: 'completed', idempotent: false, agentId, outputPath: parked, outputSha256: digest };
     } else {
       append(
@@ -1285,10 +1462,11 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
           map_member: request.mapMember,
           generation: request.generation,
           logical_artifact: request.logicalArtifact,
+          ...overlapFields(),
         },
         opts.now,
       );
-      closeHostWindow(repoRoot, runId, opts.dispatchId);
+      overlap.close();
       return { dispatchId: opts.dispatchId, state: 'completed', idempotent: false, agentId, outputPath: parked, outputSha256: digest };
     }
   }
@@ -1391,10 +1569,12 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
           map_member: request.mapMember,
           generation: request.generation,
           logical_artifact: request.logicalArtifact,
+          ...overlapFields(),
         },
         opts.now,
       );
       try { removeHostWorkspace({ repoRoot, state: collected.state }); } catch {}
+      overlap.close();
       return { dispatchId: opts.dispatchId, state: 'completed', idempotent: false, agentId, outputPath: outputRel, outputSha256: normalizedDigest };
     } else {
       append(
@@ -1434,10 +1614,11 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
           map_member: request.mapMember,
           generation: request.generation,
           logical_artifact: request.logicalArtifact,
+          ...overlapFields(),
         },
         opts.now,
       );
-      closeHostWindow(repoRoot, runId, opts.dispatchId);
+      overlap.close();
       return { dispatchId: opts.dispatchId, state: 'completed', idempotent: false, agentId, outputPath: outputRel, outputSha256: normalizedDigest };
     }
   }
@@ -1521,10 +1702,12 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
         map_member: request.mapMember,
         generation: request.generation,
         logical_artifact: request.logicalArtifact,
+        ...overlapFields(),
       },
       opts.now,
     );
     try { removeHostWorkspace({ repoRoot, state: collected.state }); } catch {}
+    overlap.close();
     return { dispatchId: opts.dispatchId, state: 'completed', idempotent: false, agentId, outputPath: outputRel, outputSha256: digest };
   } else {
     append(
@@ -1559,10 +1742,11 @@ export function completeHostDispatch(opts: DispatchCompleteOptions): HostDispatc
         map_member: request.mapMember,
         generation: request.generation,
         logical_artifact: request.logicalArtifact,
+        ...overlapFields(),
       },
       opts.now,
     );
-    closeHostWindow(repoRoot, runId, opts.dispatchId);
+    overlap.close();
     return { dispatchId: opts.dispatchId, state: 'completed', idempotent: false, agentId, outputPath: outputRel, outputSha256: digest };
   }
 }
@@ -1581,13 +1765,14 @@ export function failHostDispatch(opts: DispatchFailOptions): HostDispatchReceipt
   if (terminal.length > 0) {
     if (isIsolated) {
       settleIsolatedTerminalWorkspace({ repoRoot, runId, dispatchId: opts.dispatchId, start: starts[0]!, terminal: terminal[0] ?? null });
+      closeHostWindowIfOpen(repoRoot, runId, opts.dispatchId);
       const prior = terminal[0]!;
       if (prior.type === 'actor_failed' && prior.extra.failure_reason === opts.reason) {
         return { dispatchId: opts.dispatchId, state: 'failed', idempotent: true, agentId: typeof starts[0]!.extra.agent_id === 'string' ? starts[0]!.extra.agent_id : undefined };
       }
       throw new HostDispatchError(`host dispatch "${opts.dispatchId}" already has a different terminal receipt.`);
     } else {
-      closeHostWindow(repoRoot, runId, opts.dispatchId);
+      closeHostWindowIfOpen(repoRoot, runId, opts.dispatchId);
       const prior = terminal[0]!;
       if (prior.type === 'actor_failed' && prior.extra.failure_reason === opts.reason) {
         return { dispatchId: opts.dispatchId, state: 'failed', idempotent: true, agentId: typeof starts[0]!.extra.agent_id === 'string' ? starts[0]!.extra.agent_id : undefined };
@@ -1644,6 +1829,20 @@ export function failHostDispatch(opts: DispatchFailOptions): HostDispatchReceipt
       }
     }
   }
+  // Who else was writing while this delivery ran. A FAILED delivery overlaps
+  // exactly as hard as a successful one — an agent that was killed after
+  // writing half its edits is the case most likely to have met another writer
+  // — so this is computed on the failure path too, from whatever evidence the
+  // isolated collect managed to preserve.
+  const overlap = settleHostOverlap({
+    repoRoot,
+    runId,
+    dispatchId: opts.dispatchId,
+    workspaceMode: isIsolated ? 'isolated' : 'shared',
+    diffSnapshot: isolatedFail?.kind === 'collected' ? isolatedFail.collected.diffSnapshot : null,
+    startFallbackIso: starts[0]!.timestamp,
+    now: opts.now ?? new Date(),
+  });
   // Build the shared failed payload once to avoid triplication; isolated
   // branches only add workspace tail. Degraded isolated omits diff keys
   // entirely rather than fabricating zero/sentinel.
@@ -1674,6 +1873,7 @@ export function failHostDispatch(opts: DispatchFailOptions): HostDispatchReceipt
     map_member: request.mapMember,
     generation: request.generation,
     logical_artifact: request.logicalArtifact,
+    ...(overlap.stamps != null ? { concurrent_write: overlap.stamps } : {}),
   };
   if (isIsolated) {
     if (isolatedFail == null) throw new HostDispatchError(`host dispatch "${opts.dispatchId}" isolated evidence was not collected`);
@@ -1687,6 +1887,7 @@ export function failHostDispatch(opts: DispatchFailOptions): HostDispatchReceipt
       }, opts.now);
       // Never delete an unverified worktree; only remove when verified and we have a collected state to reference.
       // Degraded path preserves the worktree for manual recovery.
+      overlap.close();
       return { dispatchId: opts.dispatchId, state: 'failed', idempotent: false, agentId: typeof starts[0]!.extra.agent_id === 'string' ? starts[0]!.extra.agent_id : undefined };
     }
     append(runDir, {
@@ -1700,10 +1901,11 @@ export function failHostDispatch(opts: DispatchFailOptions): HostDispatchReceipt
     try { removeHostWorkspace({ repoRoot, state: outcome.collected.state }); } catch {
       // best-effort
     }
+    overlap.close();
     return { dispatchId: opts.dispatchId, state: 'failed', idempotent: false, agentId: typeof starts[0]!.extra.agent_id === 'string' ? starts[0]!.extra.agent_id : undefined };
   } else {
     append(runDir, { ...failedBase }, opts.now);
-    closeHostWindow(repoRoot, runId, opts.dispatchId);
+    overlap.close();
     return { dispatchId: opts.dispatchId, state: 'failed', idempotent: false, agentId: typeof starts[0]!.extra.agent_id === 'string' ? starts[0]!.extra.agent_id : undefined };
   }
 }

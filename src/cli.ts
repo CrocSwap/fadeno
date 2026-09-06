@@ -95,6 +95,7 @@ import type { ShowProjection, ShowResult, StepView } from './commands/show.ts';
 import { readInstallationManifest, syncManagedRuntime } from './lib/installations.ts';
 import { userPaths } from './lib/user-paths.ts';
 import { renderFocusedHelp, renderGlobalHelp, resolveHelpPath } from './lib/cli-help.ts';
+import { UNREADABLE_WINDOW_LOG_ID } from './lib/receipt-attestations.ts';
 
 export const KNOWN_CLI_COMMANDS = new Set(TOP_LEVEL_COMMANDS);
 
@@ -2662,11 +2663,14 @@ function main(argv: string[]): number {
         // Not prefixed onto the bytes: an overlap does not make the report
         // false. It is still stated, because nothing prevents a concurrent
         // writer any more and this is one of the two places it can be read.
-        const overlap = result.concurrentWrite == null || result.concurrentWrite.length === 0
+        // The log-unreadable stamp names no delivery; counting it as one would
+        // turn "I could not see who else was there" into "someone else was".
+        const overlapNamed = (result.concurrentWrite ?? []).filter((stamp) => stamp.dispatchId !== UNREADABLE_WINDOW_LOG_ID);
+        const overlap = overlapNamed.length === 0
           ? null
-          : `concurrent_write: ${result.concurrentWrite.length} other ` +
-            `${result.concurrentWrite.length === 1 ? 'delivery' : 'deliveries'} wrote while this ran ` +
-            `(${result.concurrentWrite.map((stamp) => stamp.dispatchId.slice(0, 8)).join(', ')}) — an ` +
+          : `concurrent_write: ${overlapNamed.length} other ` +
+            `${overlapNamed.length === 1 ? 'delivery' : 'deliveries'} overlapped this one ` +
+            `(${overlapNamed.map((stamp) => stamp.dispatchId.slice(0, 8)).join(', ')}) — an ` +
             'attestation, not proof of damage; `fadeno dispatches` names the intersecting paths';
         const note = [relay, discarded, verdict, merge, attestation, overlap]
           .filter((part) => part != null)

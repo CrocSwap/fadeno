@@ -64,6 +64,10 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { WorkspaceMode } from './workspace-isolation.ts';
+// One token, spelled once. The writer emits the log-unreadable stamp and four
+// surfaces have to recognise it; a second copy of the string here is the
+// one-list-two-consumers shape that ends in a reader silently saying "clean".
+import { UNREADABLE_WINDOW_LOG_ID } from './receipt-attestations.ts';
 
 /** Repo-relative window log. Machine-local; never committed, never ledger. */
 export const DISPATCH_WINDOWS_FILE = join('.fadeno', 'local', 'dispatch-windows.jsonl');
@@ -116,24 +120,36 @@ export type OverlapAttribution =
 
 /** The row-shaped projection. snake_case: it lands verbatim on a receipt. */
 export interface ConcurrentWriteStamp {
-  /** The other window's dispatch id. */
+  /**
+   * The other window's dispatch id, or `UNREADABLE_WINDOW_LOG_ID` on the one
+   * stamp that names no window at all.
+   */
   dispatch_id: string;
   run_id?: string;
-  kind: WindowKind;
-  workspace_mode: WorkspaceMode;
+  /**
+   * Absent only on the log-unreadable stamp: it describes windows that could
+   * not be read, so nothing about them — kind, mode, attribution — is known.
+   * Absence is this file's only spelling of "not known"; a placeholder value
+   * would be a claim.
+   */
+  kind?: WindowKind;
+  workspace_mode?: WorkspaceMode;
   /** How the OTHER window's path set was derived. */
-  attribution: OverlapAttribution;
+  attribution?: OverlapAttribution;
   /** Exact count of intersecting paths; `paths` is a sample of it. */
   paths_intersecting: number;
   paths: string[];
   /**
    * Absent when the other window had not closed yet, so no set existed to
-   * intersect. The overlap in TIME is still recorded, and the other side —
-   * which closes later and therefore sees this one's completed set — is what
-   * carries the concrete intersection.
+   * intersect. The overlap in TIME is still recorded, and the other side
+   * closes later — its receipt is where any intersection is recorded.
    */
   pending?: true;
-  /** Present when either side's listing was incomplete. */
+  /**
+   * Present when either side's listing was incomplete — including the case
+   * where a side could not enumerate its changes AT ALL, which is a
+   * `paths_intersecting: 0` stamp that means "unknown", not "nothing".
+   */
   degraded?: true;
   note: string;
 }
@@ -278,9 +294,19 @@ export function readDispatchWindows(repoRoot: string): { windows: DispatchWindow
       if (endedAt == null || Number.isNaN(Date.parse(endedAt))) { degraded = true; continue; }
       const raw = Array.isArray(row.changed_paths) ? row.changed_paths : null;
       if (raw == null) { degraded = true; continue; }
+      const parsed = raw.filter((p): p is string => typeof p === 'string');
       open.endedAt = endedAt;
-      open.changedPaths = raw.filter((p): p is string => typeof p === 'string');
-      open.truncated = row.truncated === true || open.changedPaths.length !== raw.length;
+      // A duplicate close MERGES rather than replaces. "Last close wins" was
+      // fine for the interval — the latest moment the delivery could still
+      // have been writing — and destructive for the path set: a terminal
+      // receipt reissued idempotently closes the window a second time with
+      // nothing to report, and that second row overwrote the first one's
+      // complete listing with an empty one. The honest merge of a known set
+      // and an unknown set is the known set, marked truncated.
+      open.changedPaths = open.changedPaths == null
+        ? parsed
+        : [...new Set([...open.changedPaths, ...parsed])].sort();
+      open.truncated = open.truncated || row.truncated === true || parsed.length !== raw.length;
     } else {
       degraded = true;
     }
@@ -369,6 +395,13 @@ export function detectConcurrentWrites(
     truncated: Boolean(self.truncated),
   };
   const mine = new Set(self.changedPaths);
+  // A real caller derives BOTH of these from one value: `truncated = changed
+  // == null; paths = changed ?? []`. So a self-truncated delivery always
+  // arrives here with an EMPTY set, `mine` is empty, every intersection is
+  // empty, and the old `continue` below reported that as "nothing happened".
+  // The one case the kernel most needs to hear about — a delivery that could
+  // not enumerate its own work — was the one case it said nothing about.
+  const selfIncomplete = Boolean(self.truncated);
   const stamps: ConcurrentWriteStamp[] = [];
   for (const other of windows) {
     if (other.dispatchId === self.dispatchId) continue;
@@ -384,15 +417,31 @@ export function detectConcurrentWrites(
         paths_intersecting: 0,
         paths: [],
         pending: true,
+        // The wording used to promise that the other side's receipt "carries
+        // the intersection". It cannot promise that: the other side may close
+        // unable to enumerate its own changes, in which case its receipt
+        // carries a degraded admission instead. A pointer to a receipt that
+        // turns out to be empty sends a reader somewhere for nothing, which is
+        // worse than saying plainly what will be there.
         note:
           `windows overlapped in time; "${other.dispatchId}" had not finished, so no path set existed to ` +
-          'intersect. It closes later and its own receipt carries the intersection.',
+          "intersect. It closes later, and its own receipt is where this pair's intersection is recorded — " +
+          'as a concrete set when it can enumerate what it changed, and as a degraded stamp when it cannot.',
       });
       continue;
     }
     const hits = other.changedPaths.filter((p) => mine.has(p)).sort();
-    if (hits.length === 0) continue;
-    const degraded = other.truncated || Boolean(self.truncated) || Boolean(opts.logDegraded);
+    const bothWhole = !selfIncomplete && !other.truncated;
+    // An empty intersection means "these two never met" ONLY when both
+    // listings were whole. When either side could not enumerate what it
+    // changed, zero hits means "could not tell" — and `continue` spells that
+    // identically to "nothing happened".
+    if (hits.length === 0 && bothWhole) continue;
+    const degraded = !bothWhole || Boolean(opts.logDegraded);
+    const whose = attribution === 'delivery'
+      ? `Those paths are "${other.dispatchId}"'s own work.`
+      : `"${other.dispatchId}" ran in the shared tree, so its set is the tree's delta over its window — ` +
+        'this is an attestation that both windows touched these paths, not proof of who wrote them.';
     stamps.push({
       dispatch_id: other.dispatchId,
       ...(other.runId != null ? { run_id: other.runId } : {}),
@@ -402,13 +451,34 @@ export function detectConcurrentWrites(
       paths_intersecting: hits.length,
       paths: hits.slice(0, OVERLAP_MAX_EXAMPLES),
       ...(degraded ? { degraded: true as const } : {}),
+      note: hits.length === 0
+        ? `windows overlapped in time and ${selfIncomplete && other.truncated
+            ? 'neither side could enumerate'
+            : selfIncomplete
+              ? 'this delivery could not enumerate'
+              : `"${other.dispatchId}" could not enumerate`} what it changed, so whether their edits met is ` +
+          'UNKNOWN. This is not a report that they did not meet.'
+        : `${hits.length} ${hits.length === 1 ? 'path' : 'paths'} changed in both windows, which overlapped in ` +
+          `time. ${whose}` +
+          (degraded ? ' At least one listing was incomplete, so this is a floor, not the set.' : ''),
+    });
+  }
+  // The log itself could not be read whole, so the set of NEIGHBOURS is
+  // unknown — not empty. Decorating the stamps above with `degraded` cannot
+  // say this: it qualifies overlaps that were found, and the thing at stake is
+  // the ones that could not be. With an unreadable log there are no windows at
+  // all, so without this row the strongest evidence of a blind spot produced
+  // the emptiest possible receipt.
+  if (opts.logDegraded === true) {
+    stamps.push({
+      dispatch_id: UNREADABLE_WINDOW_LOG_ID,
+      paths_intersecting: 0,
+      paths: [],
+      degraded: true,
       note:
-        `${hits.length} ${hits.length === 1 ? 'path' : 'paths'} changed in both windows, which overlapped in ` +
-        `time. ${attribution === 'delivery'
-          ? `Those paths are "${other.dispatchId}"'s own work.`
-          : `"${other.dispatchId}" ran in the shared tree, so its set is the tree's delta over its window — ` +
-            'this is an attestation that both windows touched these paths, not proof of who wrote them.'}` +
-        (degraded ? ' At least one listing was incomplete, so this is a floor, not the set.' : ''),
+        'the window log could not be read whole, so the list of deliveries that overlapped this one is a ' +
+        'floor. Any overlap named on this receipt still happened; there may be others this detector never ' +
+        'saw. Nothing here says the tree was clean.',
     });
   }
   return stamps.length > 0 ? stamps : null;

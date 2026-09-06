@@ -41,6 +41,23 @@
 export type OverlapAttribution = 'delivery' | 'workspace';
 
 /**
+ * The `dispatch_id` of the one stamp that names no other window.
+ *
+ * Every other stamp is about a neighbour. This one is about the DETECTOR: the
+ * window log could not be read whole, so the set of neighbours is itself
+ * unknown. Without it, an unreadable log produced zero windows, therefore zero
+ * stamps, therefore a receipt indistinguishable from one written in an empty
+ * repo — "I could not tell" spelled exactly like "nothing happened".
+ *
+ * It lives HERE, with the renderers, rather than with the writer, because the
+ * writer emits it once and four surfaces have to recognise it. Spaces and
+ * parentheses keep it outside every id shape the kernel mints (uuids,
+ * `run:dispatch`, `tool:run:step:gN:aN`), so it can never collide with a real
+ * window.
+ */
+export const UNREADABLE_WINDOW_LOG_ID = '(window log unreadable)';
+
+/**
  * One `concurrent_write` stamp as a reader sees it.
  *
  * Deliberately looser than the writer's `ConcurrentWriteStamp`: every
@@ -188,6 +205,32 @@ export function parseConcurrentWriteStamps(value: unknown): ConcurrentWriteRecor
 /** How many paths one rendered line names before it starts counting. */
 export const ATTESTATION_PATHS_SHOWN = 8;
 
+/** What one stamp actually establishes. */
+export type OverlapStrength =
+  /** Two windows overlapped in time and named at least one path in common. */
+  | 'intersected'
+  /** They overlapped in time; the other side had not closed, so no set existed. */
+  | 'pending'
+  /** They overlapped in time and the intersection could not be computed at all. */
+  | 'unknown';
+
+/**
+ * Grade one stamp, in the ONE place that decides.
+ *
+ * Every surface that counts overlaps needs this, and each one guessing costs
+ * the same defect: a stamp that says "I could not tell" being tallied as a
+ * delivery that wrote. A zero-path settled stamp is only ever written when a
+ * side could not enumerate its changes — the writer omits the stamp when both
+ * listings were whole and did not meet — so zero-and-degraded is `unknown`,
+ * never a finding of nothing.
+ */
+export function concurrentWriteStrength(record: ConcurrentWriteRecord): OverlapStrength {
+  if (record.dispatchId === UNREADABLE_WINDOW_LOG_ID) return 'unknown';
+  if (record.pending) return 'pending';
+  const count = record.pathsIntersecting ?? record.paths.length;
+  return count === 0 && record.degraded ? 'unknown' : 'intersected';
+}
+
 function shortId(id: string): string {
   return id.length > 8 ? id.slice(0, 8) : id;
 }
@@ -216,6 +259,13 @@ function samplePaths(paths: readonly string[], stated: number | null): string {
  * the same outcome as never rendering them.
  */
 export function describeConcurrentWrite(record: ConcurrentWriteRecord): string {
+  if (record.dispatchId === UNREADABLE_WINDOW_LOG_ID) {
+    return (
+      'WINDOW LOG UNREADABLE — the log of who else was writing could not be read whole, so the overlaps ' +
+      'named on this receipt are a floor. Any of them still happened; there may be others nothing saw. ' +
+      'This is not a report that the tree was clean.'
+    );
+  }
   const where = [record.kind, record.workspaceMode, record.runId != null ? `run ${record.runId}` : null]
     .filter((part): part is string => part != null)
     .join(' · ');
@@ -223,10 +273,23 @@ export function describeConcurrentWrite(record: ConcurrentWriteRecord): string {
   if (record.pending) {
     return (
       `${head}  PENDING — the windows overlapped in time, but that delivery had not finished, so no path ` +
-      'set existed to intersect. It closes later and its own receipt carries the intersection.'
+      "set existed to intersect. It closes later, and its receipt is where this pair's intersection is " +
+      'recorded — concretely when it can enumerate its changes, and as a degraded stamp when it cannot.'
     );
   }
   const count = record.pathsIntersecting ?? record.paths.length;
+  // Zero intersecting paths on a settled stamp is only ever written when a
+  // side could not enumerate its changes; the writer drops the stamp entirely
+  // when both listings were whole and did not meet. Rendering it through the
+  // sentence below would produce "at least 0 paths changed in both windows",
+  // which reads as a finding of nothing — the exact collapse this file exists
+  // to prevent.
+  if (count === 0 && record.degraded) {
+    return (
+      `${head}  COULD NOT TELL — the windows overlapped in time and at least one side could not enumerate ` +
+      'what it changed, so whether their edits met is unknown. This is not a report that they did not meet.'
+    );
+  }
   const noun = count === 1 ? 'path' : 'paths';
   const floor = record.degraded ? 'at least ' : '';
   const strength = record.attribution === 'delivery'

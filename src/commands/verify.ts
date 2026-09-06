@@ -16,6 +16,7 @@ import {
 } from '../lib/node-instance.ts';
 import { SchemaSet, schemaErrorMessages, type SchemaKind } from '../lib/playbook-validate.ts';
 import {
+  concurrentWriteStrength,
   describeConcurrentWrite,
   describeIgnoredOutput,
   parseConcurrentWriteStamps,
@@ -475,13 +476,20 @@ function checkConcurrentWrites(events: RunEvent[]): Finding {
   let receipts = 0;
   let settled = 0;
   let pendingOnly = 0;
+  let unknown = 0;
   let degraded = 0;
   for (const event of events) {
     const stamps = parseConcurrentWriteStamps(event.extra.concurrent_write);
     if (stamps == null) continue;
     receipts += 1;
     for (const stamp of stamps) {
-      if (stamp.pending) pendingOnly += 1;
+      // Graded once, in `receipt-attestations`: a stamp that says the
+      // intersection could not be computed must not be tallied beside one that
+      // names paths, or the count reads as evidence of writes that were never
+      // observed.
+      const strength = concurrentWriteStrength(stamp);
+      if (strength === 'pending') pendingOnly += 1;
+      else if (strength === 'unknown') unknown += 1;
       else settled += 1;
       if (stamp.degraded) degraded += 1;
       lines.push(`${receiptLabel(event)}: ${describeConcurrentWrite(stamp)}`);
@@ -497,6 +505,7 @@ function checkConcurrentWrites(events: RunEvent[]): Finding {
   const counted = [
     `${settled} with an intersecting path set`,
     pendingOnly > 0 ? `${pendingOnly} recorded while the other window was still open` : null,
+    unknown > 0 ? `${unknown} where the intersection could not be computed at all` : null,
     degraded > 0 ? `${degraded} from an incomplete listing (a floor, not the set)` : null,
   ].filter((part): part is string => part != null).join(', ');
   return {

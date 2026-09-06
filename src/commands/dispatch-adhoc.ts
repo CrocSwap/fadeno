@@ -63,6 +63,7 @@ import {
 } from '../lib/host-workspace.ts';
 import { settleIsolatedWork, type MergeBackResult } from '../lib/workspace-baseline.ts';
 import { isRegisteredWorktree, type IsolatedDiffResult } from '../lib/workspace-isolation.ts';
+import { UNREADABLE_WINDOW_LOG_ID } from '../lib/receipt-attestations.ts';
 import {
   closeDispatchWindow,
   detectConcurrentWrites,
@@ -636,11 +637,14 @@ export function runDispatchClose(opts: DispatchCloseOptions = {}): DispatchClose
       { logDegraded: log.degraded },
     );
     if (concurrentWrites != null) {
-      opts.onEcho?.(
-        `concurrent_write: ${concurrentWrites.length} other ` +
-          `${concurrentWrites.length === 1 ? 'delivery' : 'deliveries'} wrote while this one ran ` +
-          `(${concurrentWrites.map((s) => `${s.dispatch_id.slice(0, 8)}:${s.paths_intersecting}`).join(', ')}). ` +
-          'The receipt names the intersecting paths.',
+      // The log-unreadable stamp names no delivery, so it is never counted as
+      // one; the receipt still carries it.
+      const named = concurrentWrites.filter((stamp) => stamp.dispatch_id !== UNREADABLE_WINDOW_LOG_ID);
+      if (named.length > 0) opts.onEcho?.(
+        `concurrent_write: ${named.length} other ` +
+          `${named.length === 1 ? 'delivery' : 'deliveries'} overlapped this one ` +
+          `(${named.map((s) => `${s.dispatch_id.slice(0, 8)}:${s.paths_intersecting}`).join(', ')}). ` +
+          'The receipt says what each one establishes.',
       );
     }
     closeDispatchWindow(repoRoot, { dispatchId: record.dispatchId, changedPaths: paths, truncated, endedAt: now });

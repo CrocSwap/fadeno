@@ -224,6 +224,95 @@ All notable changes to Fadeno are documented here. The format follows
   `references/runtime.md` described the `tools:` registry as "static argv +
   optional timeout"; `timeout` / `timeout_ms` is parsed, validated so a typo
   stays an error, and never armed. It now says so.
+- **Overlap detection could not see a host delivery, in either direction.**
+  Four producer holes, all in the mechanism the lock removal rests on. Together
+  they meant a host delivery could neither report an overlap nor be reported in
+  one, while the surfaces above it kept saying "no overlap" — the same defect
+  the removal was supposed to close, moved one layer down.
+
+  1. **A delivery that could not list its OWN changes reported nothing.** Every
+     caller derives its two arguments from one value — `truncated = changed ==
+     null; paths = changed ?? []` — so a self-truncated delivery reached
+     `detectConcurrentWrites` with an EMPTY set. `mine` was empty, every
+     intersection was empty, and the empty intersection hit `continue`. The one
+     case that most needs saying, a delivery that cannot account for its own
+     work, was the one case that said nothing. An empty intersection is now
+     "these two never met" only when BOTH listings were whole; when either side
+     could not enumerate, the stamp is written with `paths_intersecting: 0` and
+     `degraded`, and reads *COULD NOT TELL*, never *nothing*. The test that was
+     supposed to protect this passed `truncated: true` alongside a non-empty
+     path list — a combination no caller can produce — so it went green over a
+     branch that returned nothing; it is replaced by the shape a real caller
+     makes.
+
+  2. **An unreadable window log was recorded nowhere at all.** `logDegraded`
+     only decorated stamps that already existed, and an unreadable log yields
+     zero windows, therefore zero stamps, therefore a receipt byte-identical to
+     one written by a delivery that was genuinely alone — the strongest
+     evidence of a blind spot rendered as the emptiest possible record. It now
+     emits one stamp whose `dispatch_id` is `UNREADABLE_WINDOW_LOG_ID`: it
+     names no window, so it carries no `kind`, `workspace_mode` or
+     `attribution` (absence is this file's only spelling of "not known"), and
+     every reader renders it as *WINDOW LOG UNREADABLE* and counts it as no
+     delivery at all.
+
+  3. **Host deliveries never intersected their windows.** `host-dispatch.ts`
+     opened and closed windows and never called `detectConcurrentWrites`, so no
+     host receipt could carry a stamp. The cost was not symmetric
+     under-reporting; it was a promise nobody could keep. A command delivery
+     correctly stamped `pending` against an open host window, and the wording
+     told the reader that the host's own receipt would carry the intersection —
+     a receipt that could never carry one, so the pending case did not merely
+     under-report, it pointed a human at an empty page. Both `dispatch-complete`
+     and `dispatch-fail` now compute the stamp once, before any terminal
+     payload is written, and every branch — isolated, shared, invalid-output,
+     envelope-extracted, plain, and both failure shapes — carries the same one,
+     the way `drive.ts` funnels its own through `workspaceFields()`. The
+     `pending` wording stopped promising a concrete set and now says where the
+     intersection will be recorded and that it may be a degraded admission,
+     because a pointer to a page that turns out to be empty is worse than
+     saying plainly what will be there. Isolated host terminals also never
+     closed their window at all: it stayed open forever, so every later
+     delivery in that repo isolated against a writer that had finished hours
+     ago and stamped a `pending` overlap naming it.
+
+  4. **Host and tool windows closed with a POSITIVE empty set.**
+     `changedPaths: []` with no truncation flag is a claim that the delivery
+     changed nothing, and every neighbour intersected against it — so a shared
+     host delivery that rewrote half the tree was invisible to its neighbours
+     too. What each lane can honestly report differs, and the difference is now
+     recorded rather than flattened. An ISOLATED host delivery reports its
+     collected diff (`diffChangedPaths` parses the patch without applying it,
+     so it works after the worktree is gone) and those paths are attributable
+     to it. A TOOL attempt reports `changedBetween` over two
+     `workspaceStatusMap` snapshots — available there, and only there, because
+     that kernel spawns the supervisor and polls it in ONE process, so both
+     snapshots are taken by one caller around one interval; a tool call is a
+     shell command in the caller's tree, and "a tool cannot write" was never
+     true. A SHARED host delivery reports TRUNCATED, deliberately: its
+     `dispatch-start` and its terminal receipt are separate CLI invocations
+     minutes or hours apart, nothing records the tree's state at the start, and
+     the delta over the window cannot be recovered afterwards. Both available
+     near-misses are worse than admitting it — a bare status listing at the
+     terminal describes what is dirty NOW, including what was already dirty
+     before the window opened and excluding what was changed and then
+     committed, so publishing it would manufacture intersections that never
+     happened in a detector whose whole value is being trusted; and `[]` is the
+     bug being fixed. The one host close that still claims an empty set is the
+     `dispatch-start` rollback, where the executor was never spawned.
+
+  Two consequences of the above are worth naming. Duplicate closes now MERGE
+  instead of the last one winning: an idempotent terminal receipt closes a
+  window a second time with nothing to report, and that row used to overwrite a
+  complete, attributable listing with an empty one — the honest merge of a
+  known set and an unknown one is the known set, marked truncated. And a
+  truncated neighbour now produces a stamp on receipts that would previously
+  have carried none, so shared host deliveries will make more noise until they
+  can enumerate their changes; that noise is the true statement, and the
+  readers grade it apart from a real intersection (`concurrentWriteStrength`,
+  one place, four surfaces) so an admission is never tallied as an accusation.
+  `fadeno dispatches` and the kernel echoes say "overlapped this one" rather
+  than "wrote while this ran" for the same reason.
 
 - **The engine recorded "I could not tell what was destroyed" as `[]`.**
   `drive.ts` wrote `ignored_output_discarded` as a bare `string[]` while

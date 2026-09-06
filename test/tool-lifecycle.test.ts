@@ -12,6 +12,7 @@ import { readEventsStrict } from '../src/lib/run-ledger.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
 import { LedgerWriter } from '../src/lib/run-ledger-write.ts';
 import { openDispatchWindow, readDispatchWindows } from '../src/lib/workspace-overlap.ts';
+import { execFileSync } from 'node:child_process';
 
 /** Is this run's tool window still open? Replaces `readEffectiveLease(root)
  * === null`: nothing is reserved any more, but a terminal receipt still owes
@@ -473,4 +474,50 @@ test('a run whose snapshot predates the tool binding names the snapshot and the 
     () => runToolRun({ repoRoot: setup.root, run: setup.runId }),
     (err) => /absent from this run's immutable snapshot/.test((err as Error).message) && /tool-complete/.test((err as Error).message),
   );
+});
+
+test('a tool window records what the tool WROTE, not a positive empty set', (t) => {
+  // A tool call is a shell command in the caller's shared tree — a formatter, a
+  // codegen step, a test run that rewrites a snapshot. Every close reported
+  // `changedPaths: []` with no truncation flag, which is a positive claim that
+  // the attempt changed nothing, so every neighbouring delivery intersected
+  // against an empty set and no tool attempt was ever visible in an overlap.
+  //
+  // `changedBetween` IS available here, unlike on the host lane: this kernel
+  // spawns the supervisor and polls it in one process, so both snapshots are
+  // taken by one caller around one interval.
+  const setup = seedToolRepo(t, {
+    test_runner: { command: ['node', '-e', "require('fs').writeFileSync('tool-wrote.txt','x')"] },
+  });
+  const git = (...args: string[]): void => {
+    execFileSync('git', ['-C', setup.root, ...args], {
+      stdio: 'pipe',
+      env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
+    });
+  };
+  git('init', '-q');
+  git('config', 'user.email', 't@example.com');
+  git('config', 'user.name', 'T');
+
+  const result = runToolRun({ repoRoot: setup.root, run: setup.runId });
+  assert.equal(result.status, 'passed');
+  assert.equal(toolWindowOpen(setup.root, setup.runId), false, 'the terminal receipt still owes a closed window');
+
+  const window = readDispatchWindows(setup.root).windows.find((w) => w.dispatchId.startsWith(`tool:${setup.runId}:`))!;
+  assert.ok(window.changedPaths!.includes('tool-wrote.txt'), 'the file the tool created is in the window');
+  assert.equal(window.truncated, false, 'the listing was taken, so it is not a floor');
+  assert.ok(
+    !window.changedPaths!.some((p) => p.startsWith('.fadeno/runs/') || p.startsWith('.fadeno/local/')),
+    "the kernel's own ledger writes are gitignored and stay out of the delta",
+  );
+});
+
+test('a tool window in a tree git cannot read is TRUNCATED, never empty', (t) => {
+  // No git, no snapshot, no delta. The old close called that "changed
+  // nothing"; the honest answer is that nobody can say.
+  const setup = seedToolRepo(t, { test_runner: { command: exitsWith(0) } });
+  runToolRun({ repoRoot: setup.root, run: setup.runId });
+  const window = readDispatchWindows(setup.root).windows.find((w) => w.dispatchId.startsWith(`tool:${setup.runId}:`))!;
+  assert.equal(window.truncated, true, '"I could not tell" is not "nothing happened"');
+  assert.deepEqual(window.changedPaths, []);
 });

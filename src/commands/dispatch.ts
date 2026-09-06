@@ -75,6 +75,7 @@ import {
   type WorkspaceMode,
   type WorktreeCarryMechanism,
 } from '../lib/workspace-isolation.ts';
+import { UNREADABLE_WINDOW_LOG_ID } from '../lib/receipt-attestations.ts';
 import {
   changedBetween,
   closeDispatchWindow,
@@ -3283,10 +3284,13 @@ export function runDispatch(opts: AdHocDispatchOptions): AdHocDispatchResult {
     // `worktree_carry` follow: a field on every receipt is a field nobody reads.
     if (stamps != null) {
       row.concurrent_write = stamps;
-      opts.onEcho?.(
-        `concurrent_write: ${stamps.length} other ${stamps.length === 1 ? 'delivery' : 'deliveries'} ` +
-          `wrote while this one ran (${stamps.map((stamp) => `${stamp.dispatch_id.slice(0, 8)}:${stamp.paths_intersecting}`).join(', ')}). ` +
-          'The receipt names the intersecting paths.',
+      // The log-unreadable stamp names no delivery, so it is never counted as
+      // one; the receipt still carries it.
+      const named = stamps.filter((stamp) => stamp.dispatch_id !== UNREADABLE_WINDOW_LOG_ID);
+      if (named.length > 0) opts.onEcho?.(
+        `concurrent_write: ${named.length} other ${named.length === 1 ? 'delivery' : 'deliveries'} ` +
+          `overlapped this one (${named.map((stamp) => `${stamp.dispatch_id.slice(0, 8)}:${stamp.paths_intersecting}`).join(', ')}). ` +
+          'The receipt says what each one establishes.',
       );
     }
     closeDispatchWindow(repoRoot, {
