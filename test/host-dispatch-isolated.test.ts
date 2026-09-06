@@ -13,7 +13,7 @@ import { runNewRun } from '../src/commands/new-run.ts';
 import { runDispatchStart, runDispatchComplete, runDispatchFail, runDispatchProgress } from '../src/commands/dispatch.ts';
 import { readEvents } from '../src/lib/run-ledger.ts';
 import { readWorkspaceLease, WORKSPACE_LEASE_FILE } from '../src/lib/workspace-lease.ts';
-import { closeDispatchWindow, detectConcurrentWrites, openDispatchWindow, readDispatchWindows } from '../src/lib/workspace-overlap.ts';
+import { closeDispatchWindow, detectConcurrentWrites, openDispatchWindow, overlapSnapshotPath, readDispatchWindows } from '../src/lib/workspace-overlap.ts';
 import { hostDeliveryWorkspaceMode } from '../src/lib/host-dispatch.ts';
 import { sha256Hex } from '../src/lib/artifact-manifest.ts';
 import { runVerify } from '../src/commands/verify.ts';
@@ -1100,12 +1100,14 @@ test("a PENDING stamp resolves: the other side's receipt carries the intersectio
   assert.equal(window.truncated, false);
 });
 
-test('a shared host delivery is TRUNCATED, never a positive empty set', (t) => {
-  // A shared host delivery has no worktree diff, and `changedBetween` is not
-  // available to it: `dispatch-start` and the terminal receipt are separate CLI
-  // invocations, so no before-snapshot of the tree survives between them.
-  // `changedPaths: []` said "this delivery changed nothing", which every
-  // neighbour then intersected against. Truncated says the true thing.
+test('a shared host delivery that cannot enumerate is TRUNCATED, never a positive empty set', (t) => {
+  // A shared host delivery gets its path set from `changedBetween` over two
+  // `workspaceStatusMap` readings, the first PERSISTED at `dispatch-start`
+  // because this lane has no single process to hold it in memory (that half is
+  // `test/host-overlap-snapshot.test.ts`). This test is the other half: when
+  // the baseline is not there, the answer is TRUNCATED, on the same terms as
+  // before it existed. `changedPaths: []` said "this delivery changed
+  // nothing", which every neighbour then intersected against.
   const { root, runId, runDir, request } = seedIsolatedRun(t);
   openDispatchWindow(root, {
     dispatchId: 'neighbour-2',
@@ -1114,6 +1116,7 @@ test('a shared host delivery is TRUNCATED, never a positive empty set', (t) => {
     startedAt: new Date('2026-09-06T11:00:00Z'),
   });
   runDispatchStart({ repoRoot: root, run: runId, dispatchId: request.dispatchId, agentId: 'host-shared', now: new Date('2026-09-06T11:01:00Z') });
+  rmSync(join(root, overlapSnapshotPath(`${runId}:${request.dispatchId}`)), { force: true });
   runDispatchFail({ repoRoot: root, run: runId, dispatchId: request.dispatchId, reason: 'stopped', now: new Date('2026-09-06T11:02:00Z') });
 
   const window = readDispatchWindows(root).windows.find((w) => w.dispatchId === `${runId}:${request.dispatchId}`)!;

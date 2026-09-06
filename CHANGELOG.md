@@ -91,6 +91,42 @@ All notable changes to Fadeno are documented here. The format follows
   is machine-local and never gating, and doctor's error tier is for state that
   stops Fadeno working.
 
+- **A shared host delivery reported TRUNCATED instead of a path set, and that
+  was the last producer hole in overlap detection.** `settleHostOverlap` had
+  one source of paths — an isolated delivery's own diff — so a SHARED host
+  delivery closed its window `truncated: true` with an empty set: "the windows
+  overlapped and nobody can say where." Honest, and permanent for a whole lane,
+  and it degraded every neighbouring receipt that intersected against it. The
+  stated reason was that `changedBetween(before, after)` — which the command
+  and tool lanes use — needs two `workspaceStatusMap` readings around one
+  interval, and `fadeno dispatch-start` and `fadeno dispatch-complete` are
+  separate CLI invocations minutes apart with nothing held in memory between
+  them. That was true of the implementation, not of the problem: the "before"
+  reading was simply never written down. It is now, at
+  `.fadeno/local/overlap-snapshots/<window>-<digest>.json`, and the terminal
+  reads it back. Shared host receipts now carry real intersecting paths, and
+  the neighbours that used to intersect against an admission of ignorance
+  intersect against work.
+  Only for `workspace_mode: shared` — an isolated delivery's worktree diff is a
+  strictly better answer (`attribution: delivery`) and spending a snapshot on
+  it would buy a worse one. The FIRST capture wins, because `dispatch-start` is
+  idempotent and re-reading the tree on a replay would move the baseline past
+  work the agent had already done and erase it from the delta. It is removed at
+  every terminal — complete, fail, withdraw, and the idempotent re-terminal,
+  which sweeps it without recomputing anything, since that path exists because
+  a re-terminal used to overwrite a good record. A leftover is inert: nothing
+  reads a closed window's baseline. `fadeno doctor` reports them
+  (`overlap-snapshots`, an `ok` finding when there are none and when the ones
+  present belong to deliveries still in flight) and `fadeno clean` counts them
+  as `.fadeno/local` goes.
+  What did NOT change is what `truncated` was protecting. A missing,
+  unreadable, over-budget, wrong-version or foreign baseline — and a `git
+  status` that will not answer at either end — all produce `null` from
+  `changedBetween`, which is `truncated`, never `[]`: the empty set is a
+  positive claim that a delivery changed nothing, and it is the bug this whole
+  area exists to avoid. Nor does a better attestation become attribution: a
+  shared tree's delta over an interval is still this delivery *or anyone else*
+  in the same minutes, and it is still stamped `attribution: workspace`.
 - **A Codex agent file could be stale in a way nothing could detect, so the
   permissions change above was inert for every existing install while every
   surface said it was fine.** The commit that shipped it filed this and did not

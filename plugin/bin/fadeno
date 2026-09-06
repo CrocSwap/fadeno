@@ -18809,6 +18809,122 @@ function diffChangedPaths(repoRoot, diffAbs) {
   }
   return [...paths].sort();
 }
+var OVERLAP_SNAPSHOTS_DIR = (0, import_node_path8.join)(".fadeno", "local", "overlap-snapshots");
+var OVERLAP_SNAPSHOT_SCHEMA_VERSION = 1;
+var OVERLAP_SNAPSHOT_MAX_ENTRIES = 2e4;
+function overlapSnapshotPath(windowId) {
+  const digest4 = (0, import_node_crypto3.createHash)("sha256").update(windowId, "utf8").digest("hex").slice(0, 12);
+  const readable = windowId.replace(/[^A-Za-z0-9_.-]+/g, "_").replace(/^[.-]+/, "").slice(0, 80);
+  return (0, import_node_path8.join)(OVERLAP_SNAPSHOTS_DIR, `${readable === "" ? "window" : readable}-${digest4}.json`);
+}
+function captureOverlapSnapshot(repoRoot, windowId, opts = {}) {
+  try {
+    const abs = (0, import_node_path8.join)(repoRoot, overlapSnapshotPath(windowId));
+    if ((0, import_node_fs8.existsSync)(abs)) return "kept-existing";
+    const status = opts.status !== void 0 ? opts.status : workspaceStatusMap(repoRoot);
+    const complete = status != null && status.size <= OVERLAP_SNAPSHOT_MAX_ENTRIES;
+    const doc = {
+      schema_version: OVERLAP_SNAPSHOT_SCHEMA_VERSION,
+      dispatch_id: windowId,
+      captured_at: (opts.capturedAt ?? /* @__PURE__ */ new Date()).toISOString(),
+      complete,
+      // A document is written even when the reading failed, so the terminal
+      // can tell "nobody captured" from "the capture could not read the tree".
+      // Both read back as null; only the second leaves a record of trying.
+      ...complete ? { status: Object.fromEntries(status) } : {}
+    };
+    (0, import_node_fs8.mkdirSync)((0, import_node_path8.dirname)(abs), { recursive: true });
+    (0, import_node_fs8.writeFileSync)(abs, `${JSON.stringify(doc)}
+`, { encoding: "utf8", flag: "wx" });
+    return complete ? "captured" : "degraded";
+  } catch (err) {
+    if (err.code === "EEXIST") return "kept-existing";
+    return "degraded";
+  }
+}
+function readOverlapSnapshot(repoRoot, windowId) {
+  try {
+    const abs = (0, import_node_path8.join)(repoRoot, overlapSnapshotPath(windowId));
+    if (!(0, import_node_fs8.existsSync)(abs)) return null;
+    const parsed = JSON.parse((0, import_node_fs8.readFileSync)(abs, "utf8"));
+    if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const doc = parsed;
+    if (doc.schema_version !== OVERLAP_SNAPSHOT_SCHEMA_VERSION) return null;
+    if (doc.dispatch_id !== windowId) return null;
+    if (doc.complete !== true) return null;
+    const status = doc.status;
+    if (status == null || typeof status !== "object" || Array.isArray(status)) return null;
+    const map = /* @__PURE__ */ new Map();
+    for (const [path, code] of Object.entries(status)) {
+      if (typeof code !== "string") return null;
+      map.set(path, code);
+    }
+    return map;
+  } catch {
+    return null;
+  }
+}
+function discardOverlapSnapshot(repoRoot, windowId) {
+  try {
+    (0, import_node_fs8.rmSync)((0, import_node_path8.join)(repoRoot, overlapSnapshotPath(windowId)), { force: true });
+  } catch {
+  }
+}
+function listOverlapSnapshots(repoRoot) {
+  try {
+    return (0, import_node_fs8.readdirSync)((0, import_node_path8.join)(repoRoot, OVERLAP_SNAPSHOTS_DIR)).filter((name) => name.endsWith(".json")).sort().map((name) => (0, import_node_path8.join)(OVERLAP_SNAPSHOTS_DIR, name));
+  } catch {
+    return [];
+  }
+}
+function overlapSnapshotFindings(repoRoot) {
+  let files;
+  try {
+    files = listOverlapSnapshots(repoRoot);
+  } catch {
+    return [];
+  }
+  if (files.length === 0) {
+    return [{
+      check: "overlap-snapshots",
+      severity: "ok",
+      detail: "no leftover pre-delivery workspace snapshots"
+    }];
+  }
+  const log = readDispatchWindows(repoRoot);
+  const claimed = new Map(log.windows.map((w) => [overlapSnapshotPath(w.dispatchId), w]));
+  const orphaned = [];
+  const unknown = [];
+  let inFlight = 0;
+  for (const file of files) {
+    const window = claimed.get(file);
+    if (window != null && window.endedAt == null) {
+      inFlight += 1;
+      continue;
+    }
+    if (window != null) {
+      orphaned.push(`${window.dispatchId} (${file})`);
+      continue;
+    }
+    if (log.degraded) unknown.push(file);
+    else orphaned.push(file);
+  }
+  const stale = orphaned.length + unknown.length;
+  if (stale === 0) {
+    return [{
+      check: "overlap-snapshots",
+      severity: "ok",
+      detail: `${inFlight} pre-delivery workspace snapshot${inFlight === 1 ? "" : "s"} under ${OVERLAP_SNAPSHOTS_DIR}, all for deliveries whose overlap window is still open`
+    }];
+  }
+  const named = [...orphaned, ...unknown].slice(0, 5).join(", ");
+  return [{
+    check: "overlap-snapshots",
+    severity: "warning",
+    detail: `${stale} leftover pre-delivery workspace snapshot${stale === 1 ? "" : "s"} under ${OVERLAP_SNAPSHOTS_DIR}${inFlight > 0 ? ` (a further ${inFlight} belong to deliveries still in flight)` : ""}: ${named}${stale > 5 ? ", \u2026" : ""}. ` + (unknown.length > 0 ? `${unknown.length} of them are claimed by no window this reader could match, and the window log could not be read whole \u2014 so those are possibly-live rather than proven stale. ` : "") + "Each one is a baseline that outlived the window it was taken for \u2014 a shared host delivery killed before its terminal receipt, or a terminal whose cleanup did not take. The files themselves do nothing: nothing reads a closed window's baseline, so no overlap was mis-reported either way.",
+    remediation: `Harmless to leave and harmless to delete: remove ${OVERLAP_SNAPSHOTS_DIR} (or run \`fadeno clean --force\`, which sweeps all of \`.fadeno/local\`). A growing pile means shared host deliveries are dying before \`dispatch-complete\`/\`dispatch-fail\`; \`fadeno dispatches\` names which.`
+  }];
+}
 
 // src/lib/run-ledger.ts
 var import_node_fs9 = require("node:fs");
@@ -20655,6 +20771,7 @@ function closeHostWindow(repoRoot, runId, dispatchId, changedPaths = null) {
 function closeHostWindowIfOpen(repoRoot, runId, dispatchId) {
   try {
     const windowId = hostWindowId(runId, dispatchId);
+    discardOverlapSnapshot(repoRoot, windowId);
     const existing = readDispatchWindows(repoRoot).windows.find((w) => w.dispatchId === windowId);
     if (existing == null || existing.endedAt != null) return;
     closeHostWindow(repoRoot, runId, dispatchId, null);
@@ -20663,7 +20780,20 @@ function closeHostWindowIfOpen(repoRoot, runId, dispatchId) {
 }
 function settleHostOverlap(opts) {
   const windowId = hostWindowId(opts.runId, opts.dispatchId);
-  const changed = opts.diffSnapshot != null ? diffChangedPaths(opts.repoRoot, (0, import_node_path14.join)(opts.repoRoot, ...opts.diffSnapshot.split("/"))) : null;
+  const changed = (() => {
+    try {
+      if (opts.diffSnapshot != null) {
+        return diffChangedPaths(opts.repoRoot, (0, import_node_path14.join)(opts.repoRoot, ...opts.diffSnapshot.split("/")));
+      }
+      if (opts.workspaceMode !== "shared") return null;
+      return changedBetween(
+        readOverlapSnapshot(opts.repoRoot, windowId),
+        workspaceStatusMap(opts.repoRoot)
+      );
+    } catch {
+      return null;
+    }
+  })();
   const truncated = changed == null;
   const paths = changed ?? [];
   let stamps = null;
@@ -20703,6 +20833,7 @@ function settleHostOverlap(opts) {
         });
       } catch {
       }
+      discardOverlapSnapshot(opts.repoRoot, windowId);
     }
   };
 }
@@ -20812,6 +20943,11 @@ function startHostDispatch(opts) {
     }
   }
   const openHostWindow = () => {
+    if (!isIsolated) {
+      captureOverlapSnapshot(repoRoot, hostWindowId(runId, opts.dispatchId), {
+        capturedAt: opts.now ?? /* @__PURE__ */ new Date()
+      });
+    }
     try {
       openDispatchWindow(repoRoot, {
         dispatchId: hostWindowId(runId, opts.dispatchId),
@@ -20899,6 +21035,7 @@ function startHostDispatch(opts) {
     );
   } catch (err) {
     closeHostWindow(repoRoot, runId, opts.dispatchId, []);
+    discardOverlapSnapshot(repoRoot, hostWindowId(runId, opts.dispatchId));
     throw err;
   }
   return { dispatchId: opts.dispatchId, state: "started", idempotent: false, agentId: opts.agentId };
@@ -21645,6 +21782,7 @@ function withdrawHostDispatch(opts) {
       `host dispatch "${opts.dispatchId}" already has an ${finals[0].type} receipt; it cannot be withdrawn.`
     );
   }
+  discardOverlapSnapshot(repoRoot, hostWindowId(runId, opts.dispatchId));
   const priorWithdrawals = withdrawalsFor(events, opts.dispatchId);
   if (priorWithdrawals.length > 0) {
     const prior = priorWithdrawals[0];
@@ -44967,6 +45105,7 @@ function runDoctor(opts = {}) {
     }
   }
   findings.push(...dispatchWindowLogFindings(repoRoot));
+  findings.push(...overlapSnapshotFindings(repoRoot));
   return { repoRoot, findings, ok: findings.every((item) => item.severity !== "error") };
 }
 
@@ -45234,6 +45373,7 @@ function runClean(opts = {}) {
     (w) => (0, import_node_path57.join)(repoRoot, w.workspace)
   );
   const registeredWorktrees = listRegisteredWorktreesUnder(repoRoot, LOCAL_DIR);
+  const overlapSnapshots = listOverlapSnapshots(repoRoot);
   const removed = [];
   const deregisteredWorktrees = [];
   if (opts.force) {
@@ -45263,7 +45403,8 @@ function runClean(opts = {}) {
     dryRun: !opts.force,
     retainedShadowWorktrees,
     registeredWorktrees,
-    deregisteredWorktrees
+    deregisteredWorktrees,
+    overlapSnapshots
   };
 }
 
@@ -47081,6 +47222,12 @@ function main(argv) {
           `${count} retained shadow worktree${count === 1 ? "" : "s"} named by the ledger \u2014 ${result.dryRun ? "this would delete" : "this deleted"} that pair evidence:`
         );
         for (const path of result.retainedShadowWorktrees) console.log(`  ${path}`);
+      }
+      if (result.overlapSnapshots.length > 0) {
+        const count = result.overlapSnapshots.length;
+        console.log(
+          `${count} pre-delivery workspace snapshot${count === 1 ? "" : "s"} under .fadeno/local ${result.dryRun ? "would go" : "went"} with it (overlap detection's baselines; one per shared host delivery that never reached a terminal receipt).`
+        );
       }
       if (result.dryRun && paths.length > 0) console.log("Re-run with --force to remove these ignored runtime files.");
       return 0;

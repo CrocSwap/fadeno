@@ -76,6 +76,7 @@ import {
   existsSync,
   linkSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -83,7 +84,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import type { WorkspaceMode } from './workspace-isolation.ts';
 // One token, spelled once. The writer emits the log-unreadable stamp and four
@@ -1165,4 +1166,308 @@ export function diffChangedPaths(repoRoot: string, diffAbs: string): string[] | 
     if (path.length > 0) paths.add(path);
   }
   return [...paths].sort();
+}
+
+// ---------------------------------------------------------------------------
+// Persisted pre-delivery snapshots — `changedBetween` for a two-process lane
+// ---------------------------------------------------------------------------
+//
+// `changedBetween` needs a BEFORE and an AFTER reading of the same tree. The
+// tool kernel has both for free: it spawns and polls in one process, so both
+// snapshots are taken by one caller around one interval. A host delivery has
+// neither for free — `fadeno dispatch-start` and `fadeno dispatch-complete`
+// are separate CLI invocations, often minutes or hours apart, and nothing
+// survives in memory between them. That is the ENTIRE reason a shared host
+// delivery closed its window `truncated`: not that the delta was
+// unknowable, but that the "before" reading was never written down.
+//
+// So it is written down. `dispatch-start` persists the tree's status map for
+// a SHARED delivery, and the terminal reads it back and diffs against a fresh
+// one. An isolated delivery gets nothing here on purpose: its worktree diff is
+// a strictly better answer (`attribution: 'delivery'`), and spending a
+// snapshot on it would buy a worse one.
+//
+// Three properties this file will not trade away:
+//
+//   1. **A missing, unreadable, incomplete or unparsable snapshot is `null`.**
+//      `changedBetween` turns that into a `null` changed set, and every caller
+//      already spells a null set `truncated`. It must NEVER degrade to an
+//      empty array, which is the positive claim "this delivery changed
+//      nothing" that the whole overlap machinery exists to avoid making
+//      falsely.
+//   2. **The FIRST capture wins.** `dispatch-start` is idempotent and can be
+//      replayed against a delivery already in flight; re-capturing there would
+//      move the baseline forward and silently erase everything the agent had
+//      already written. The write is `wx`, matching `readDispatchWindows`'s
+//      "a duplicate open keeps the first".
+//   3. **It is an ATTESTATION, not attribution.** What comes back is the
+//      shared tree's delta over the window — this delivery's work, the human's
+//      edits in the same minutes, and any unwindowed script's. It is recorded
+//      as `attribution: 'workspace'` for exactly that reason, and a better
+//      attestation is all this buys: it does not make a shared delta
+//      attributable to anyone.
+
+/**
+ * Repo-relative directory of persisted pre-delivery status snapshots.
+ *
+ * Beside the window log it serves, under `.fadeno/local/` with the rest of the
+ * machine-local state: never committed, never ledger, and swept whole by
+ * `fadeno clean --force`. A leaked snapshot is inert — nothing reads one whose
+ * window has closed — and `fadeno doctor` reports a pile of them.
+ */
+export const OVERLAP_SNAPSHOTS_DIR = join('.fadeno', 'local', 'overlap-snapshots');
+
+/** Bumped when the document shape changes; an unrecognised version reads null. */
+export const OVERLAP_SNAPSHOT_SCHEMA_VERSION = 1;
+
+/**
+ * How many status entries one snapshot records before it stops claiming to be
+ * a snapshot at all.
+ *
+ * A capped snapshot is WORSE than no snapshot: diffed against a complete
+ * "after" reading, every entry the cap dropped looks like a path that changed,
+ * and the detector's whole value is a reader trusting that a named path really
+ * did move. So the over-budget document records that it is incomplete and
+ * carries no entries, and reading it yields `null` — "could not tell".
+ *
+ * Sized far above any working tree an agent runs against (a dirty repo is tens
+ * to hundreds of entries; this is twenty thousand) and far below a file large
+ * enough to matter on disk.
+ */
+export const OVERLAP_SNAPSHOT_MAX_ENTRIES = 20_000;
+
+/** What one persisted snapshot holds. snake_case: it is a JSON document. */
+interface OverlapSnapshotDocument {
+  schema_version: number;
+  /** The window id this baseline belongs to, verbatim. */
+  dispatch_id: string;
+  captured_at: string;
+  /**
+   * False when the tree held more than `OVERLAP_SNAPSHOT_MAX_ENTRIES` dirty
+   * paths, in which case `status` is absent. A reader must treat this exactly
+   * as a missing snapshot: unknown, never clean.
+   */
+  complete: boolean;
+  /** `path -> porcelain status code`, absent when `complete` is false. */
+  status?: Record<string, string>;
+}
+
+/**
+ * Where one window's snapshot lives, repo-relative.
+ *
+ * A readable prefix for a human reading `ls`, plus a digest of the FULL window
+ * id so two ids that sanitize alike cannot share a file. A collision here
+ * would hand one delivery another's baseline and produce a confidently wrong
+ * path set, which is the one outcome this module never permits.
+ */
+export function overlapSnapshotPath(windowId: string): string {
+  const digest = createHash('sha256').update(windowId, 'utf8').digest('hex').slice(0, 12);
+  const readable = windowId
+    .replace(/[^A-Za-z0-9_.-]+/g, '_')
+    .replace(/^[.-]+/, '')
+    .slice(0, 80);
+  return join(OVERLAP_SNAPSHOTS_DIR, `${readable === '' ? 'window' : readable}-${digest}.json`);
+}
+
+/**
+ * Record the tree as it stands before a shared delivery starts writing.
+ *
+ * Returns what happened, for a caller that wants to say so; nothing here ever
+ * throws. A snapshot that cannot be written costs a `truncated` window — the
+ * behaviour before this existed — and must never cost the dispatch.
+ *
+ * An existing snapshot is KEPT (`wx`): see property 2 above.
+ */
+export function captureOverlapSnapshot(
+  repoRoot: string,
+  windowId: string,
+  opts: { capturedAt?: Date; status?: Map<string, string> | null } = {},
+): 'captured' | 'kept-existing' | 'degraded' {
+  try {
+    const abs = join(repoRoot, overlapSnapshotPath(windowId));
+    if (existsSync(abs)) return 'kept-existing';
+    const status = opts.status !== undefined ? opts.status : workspaceStatusMap(repoRoot);
+    const complete = status != null && status.size <= OVERLAP_SNAPSHOT_MAX_ENTRIES;
+    const doc: OverlapSnapshotDocument = {
+      schema_version: OVERLAP_SNAPSHOT_SCHEMA_VERSION,
+      dispatch_id: windowId,
+      captured_at: (opts.capturedAt ?? new Date()).toISOString(),
+      complete,
+      // A document is written even when the reading failed, so the terminal
+      // can tell "nobody captured" from "the capture could not read the tree".
+      // Both read back as null; only the second leaves a record of trying.
+      ...(complete ? { status: Object.fromEntries(status!) } : {}),
+    };
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, `${JSON.stringify(doc)}\n`, { encoding: 'utf8', flag: 'wx' });
+    return complete ? 'captured' : 'degraded';
+  } catch (err) {
+    // A racing `dispatch-start` won the create: its snapshot is the earlier
+    // observation and the one to keep.
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return 'kept-existing';
+    return 'degraded';
+  }
+}
+
+/**
+ * Read a persisted baseline back, or null when there is not one this reader
+ * can use.
+ *
+ * Null covers every failure without distinguishing them, because every one of
+ * them means the same thing downstream: the delta cannot be computed, so the
+ * window closes `truncated`. Absent, unreadable, unparsable, wrong schema
+ * version, incomplete, wrong window, or holding a non-string entry — all null.
+ */
+export function readOverlapSnapshot(repoRoot: string, windowId: string): Map<string, string> | null {
+  try {
+    const abs = join(repoRoot, overlapSnapshotPath(windowId));
+    if (!existsSync(abs)) return null;
+    const parsed = JSON.parse(readFileSync(abs, 'utf8')) as unknown;
+    if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const doc = parsed as Record<string, unknown>;
+    if (doc.schema_version !== OVERLAP_SNAPSHOT_SCHEMA_VERSION) return null;
+    // The digest in the filename makes this near-impossible; checked anyway,
+    // because "near-impossible" is how a baseline from another delivery would
+    // have to arrive, and that is the one error with no visible symptom.
+    if (doc.dispatch_id !== windowId) return null;
+    if (doc.complete !== true) return null;
+    const status = doc.status;
+    if (status == null || typeof status !== 'object' || Array.isArray(status)) return null;
+    const map = new Map<string, string>();
+    for (const [path, code] of Object.entries(status as Record<string, unknown>)) {
+      if (typeof code !== 'string') return null;
+      map.set(path, code);
+    }
+    return map;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remove a delivery's baseline. Idempotent, and never throws.
+ *
+ * Called at every terminal — success, failure, withdrawal, and the idempotent
+ * re-terminal — because the baseline describes a window that is over. A leak
+ * is harmless (nothing reads a closed window's snapshot) and `doctor` counts
+ * them, so this is bookkeeping, never a gate.
+ */
+export function discardOverlapSnapshot(repoRoot: string, windowId: string): void {
+  try {
+    rmSync(join(repoRoot, overlapSnapshotPath(windowId)), { force: true });
+  } catch {
+    // deliberately swallowed: machine-local bookkeeping never turns a
+    // recorded terminal receipt into a failure.
+  }
+}
+
+/**
+ * Every persisted snapshot on disk, as repo-relative paths.
+ *
+ * A DIRECTORY LISTING and nothing more: no file is opened, so a snapshot that
+ * cannot be parsed is counted exactly like one that can. Which window a file
+ * belongs to is recoverable from its NAME — `overlapSnapshotPath` is a pure
+ * function of the window id — so reading a document to learn what its filename
+ * already says would buy nothing and cost a megabyte-scale read per leftover,
+ * in two commands (`doctor`, `clean`) that run on every repo.
+ */
+export function listOverlapSnapshots(repoRoot: string): string[] {
+  try {
+    return readdirSync(join(repoRoot, OVERLAP_SNAPSHOTS_DIR))
+      .filter((name) => name.endsWith('.json'))
+      .sort()
+      .map((name) => join(OVERLAP_SNAPSHOTS_DIR, name));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Structurally identical to `DoctorFinding` in `src/commands/doctor.ts`, and
+ * declared here for the same reason `catalog-rot.ts` and `workspace-lease.ts`
+ * declare their own: `src/lib/` must not depend on `src/commands/`.
+ */
+export interface OverlapSnapshotFinding {
+  check: string;
+  severity: 'ok' | 'warning' | 'error';
+  detail: string;
+  remediation?: string;
+}
+
+/**
+ * What `doctor` says about leftover pre-delivery snapshots.
+ *
+ * A snapshot whose window is still OPEN is a delivery in flight and is not a
+ * leftover — which is why this reads the window log rather than counting
+ * files. The distinction matters in both directions: reporting an in-flight
+ * baseline as garbage invites a user to delete the thing a running delivery is
+ * about to read, and not reporting a closed one hides the only visible trace
+ * of a dispatch that died before its terminal.
+ *
+ * Matching is by FILENAME — `overlapSnapshotPath` maps a window id to its file
+ * — so no snapshot is opened here, and a corrupt one is classified exactly
+ * like an intact one. A classifier that had to parse a document would report
+ * "unknown" about the very files most likely to be leftovers.
+ *
+ * When the log could not be read whole, a snapshot no window claims is
+ * reported as UNKNOWN rather than orphaned. The log is the evidence for the
+ * claim; a degraded log cannot support it.
+ */
+export function overlapSnapshotFindings(repoRoot: string): OverlapSnapshotFinding[] {
+  let files: string[];
+  try {
+    files = listOverlapSnapshots(repoRoot);
+  } catch {
+    return [];
+  }
+  if (files.length === 0) {
+    return [{
+      check: 'overlap-snapshots',
+      severity: 'ok',
+      detail: 'no leftover pre-delivery workspace snapshots',
+    }];
+  }
+  const log = readDispatchWindows(repoRoot);
+  const claimed = new Map(log.windows.map((w) => [overlapSnapshotPath(w.dispatchId), w]));
+  const orphaned: string[] = [];
+  const unknown: string[] = [];
+  let inFlight = 0;
+  for (const file of files) {
+    const window = claimed.get(file);
+    if (window != null && window.endedAt == null) { inFlight += 1; continue; }
+    if (window != null) { orphaned.push(`${window.dispatchId} (${file})`); continue; }
+    // No window claims it: orphaned if the log is trustworthy, unknown if not.
+    if (log.degraded) unknown.push(file);
+    else orphaned.push(file);
+  }
+  const stale = orphaned.length + unknown.length;
+  if (stale === 0) {
+    return [{
+      check: 'overlap-snapshots',
+      severity: 'ok',
+      detail:
+        `${inFlight} pre-delivery workspace snapshot${inFlight === 1 ? '' : 's'} under ` +
+        `${OVERLAP_SNAPSHOTS_DIR}, all for deliveries whose overlap window is still open`,
+    }];
+  }
+  const named = [...orphaned, ...unknown].slice(0, 5).join(', ');
+  return [{
+    check: 'overlap-snapshots',
+    severity: 'warning',
+    detail:
+      `${stale} leftover pre-delivery workspace snapshot${stale === 1 ? '' : 's'} under ` +
+      `${OVERLAP_SNAPSHOTS_DIR}${inFlight > 0 ? ` (a further ${inFlight} belong to deliveries still in flight)` : ''}` +
+      `: ${named}${stale > 5 ? ', …' : ''}. ` +
+      (unknown.length > 0
+        ? `${unknown.length} of them are claimed by no window this reader could match, and the window log could ` +
+          'not be read whole — so those are possibly-live rather than proven stale. '
+        : '') +
+      'Each one is a baseline that outlived the window it was taken for — a shared host delivery killed before ' +
+      'its terminal receipt, or a terminal whose cleanup did not take. The files themselves do nothing: nothing ' +
+      "reads a closed window's baseline, so no overlap was mis-reported either way.",
+    remediation:
+      `Harmless to leave and harmless to delete: remove ${OVERLAP_SNAPSHOTS_DIR} (or run \`fadeno clean --force\`, ` +
+      'which sweeps all of `.fadeno/local`). A growing pile means shared host deliveries are dying before ' +
+      '`dispatch-complete`/`dispatch-fail`; `fadeno dispatches` names which.',
+  }];
 }

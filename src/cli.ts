@@ -1542,6 +1542,17 @@ function main(argv: string[]): number {
         );
         for (const path of result.retainedShadowWorktrees) console.log(`  ${path}`);
       }
+      // Counted, not listed: one line is the signal (shared host deliveries
+      // dying before their terminal receipt), where a hundred paths would be
+      // noise. `fadeno doctor` names them.
+      if (result.overlapSnapshots.length > 0) {
+        const count = result.overlapSnapshots.length;
+        console.log(
+          `${count} pre-delivery workspace snapshot${count === 1 ? '' : 's'} under .fadeno/local ` +
+            `${result.dryRun ? 'would go' : 'went'} with it (overlap detection's baselines; ` +
+            'one per shared host delivery that never reached a terminal receipt).',
+        );
+      }
       if (result.dryRun && paths.length > 0) console.log('Re-run with --force to remove these ignored runtime files.');
       return 0;
     }

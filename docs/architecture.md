@@ -289,11 +289,20 @@ back to ordinary file completion when no specialized candidates apply.
   overlapped it in time — host deliveries included. An intersection lands as
   `concurrent_write` on the receipt, naming the other dispatch and the paths,
   with `attribution: delivery` (an isolated arm's own diff) or `workspace` (a
-  shared window's tree delta — an attestation, not blame). A side that could
-  not enumerate its own changes — a shared host delivery always, since nothing
-  records the tree at its `dispatch-start` — closes its window TRUNCATED, and
-  the stamp says the intersection is unknown rather than empty; an unreadable
-  window log gets a stamp of its own that names no delivery. Conflicts route to an integrator through
+  shared window's tree delta — an attestation, not blame). A shared delivery's
+  delta comes from `changedBetween` over two `workspaceStatusMap` readings; the
+  command and tool lanes take both inside one process, and a shared HOST
+  delivery — whose `dispatch-start` and terminal receipt are separate CLI
+  invocations minutes apart — persists the first at
+  `.fadeno/local/overlap-snapshots/` and reads it back at the terminal (first
+  capture wins, removed at every terminal including the idempotent re-terminal,
+  a leftover is inert and counted by `doctor` as `overlap-snapshots`). A side
+  that could not enumerate its own changes — an isolated terminal with no
+  collected diff, or a shared one whose baseline is missing, unreadable, over
+  budget, or whose `git status` will not answer — closes its window TRUNCATED,
+  and the stamp says the intersection is unknown rather than empty; an
+  unreadable window log gets a stamp of its own that names no delivery.
+  Conflicts route to an integrator through
   the existing merge-back rebase. The stamp is READ by `verify` (a
   `concurrent-writes` warning — never a failure: an overlap is not proof of
   damage), by `show` (a `concurrent writes` section), and by `dispatches`,

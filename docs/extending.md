@@ -658,6 +658,21 @@ What replaced it:
   at its terminal receipt, with the repo-relative paths it changed. Append-only
   and machine-local, never ledger evidence, never gating — the thing it
   observes is concurrent writers, so it must not itself need a lock.
+- **Where a shared delivery's path set comes from.** `changedBetween(before,
+  after)` over two `workspaceStatusMap` readings of the caller's tree. The
+  command and tool lanes take both inside one process. A shared HOST delivery
+  cannot — `fadeno dispatch-start` and `fadeno dispatch-complete` are separate
+  CLI invocations — so `dispatch-start` PERSISTS the "before" reading at
+  `.fadeno/local/overlap-snapshots/<window>-<digest>.json` and the terminal
+  reads it back. The first capture wins (a replayed `dispatch-start` must not
+  move the baseline past work already done), it is removed at every terminal —
+  complete, fail, withdraw, and the idempotent re-terminal — and a leftover is
+  inert: nothing reads a closed window's baseline. `fadeno doctor` counts them
+  (`overlap-snapshots`) and `fadeno clean` sweeps them with `.fadeno/local`.
+  Missing, unreadable, over-budget, or a `git status` that will not answer all
+  produce `null`, which is `truncated`, never `[]`. An ISOLATED delivery uses
+  its own worktree diff instead and takes no snapshot: that set is
+  `attribution: delivery`, which is strictly better than a shared delta.
 - **Compaction.** Append-only is not unbounded. A terminal compacts the log
   once it passes 256 KiB, and `fadeno clean --windows` does it on demand:
   unusable rows are dropped (a torn append otherwise makes every later receipt
@@ -686,9 +701,7 @@ What replaced it:
   admission when it cannot. **An empty intersection is only reported as "these
   two never met" when BOTH listings were whole.** When either side could not
   enumerate what it changed, the stamp is written with `paths_intersecting: 0`
-  and `degraded` and reads *COULD NOT TELL* — a shared host delivery is always
-  in that state, because nothing records the tree at its `dispatch-start` and
-  the delta cannot be recovered from a separate CLI invocation later. When the
+  and `degraded` and reads *COULD NOT TELL*. When the
   window log itself could not be read whole, one stamp carries
   `UNREADABLE_WINDOW_LOG_ID` and no `kind`/`workspace_mode`/`attribution`: it
   names no window, and every reader counts it as no delivery.

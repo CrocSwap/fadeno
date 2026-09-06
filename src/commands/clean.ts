@@ -3,7 +3,7 @@ import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { findRepoRoot } from '../lib/paths.ts';
 import { listRegisteredWorktreesUnder } from '../lib/workspace-isolation.ts';
-import { compactDispatchWindows, type WindowLogCompaction } from '../lib/workspace-overlap.ts';
+import { compactDispatchWindows, listOverlapSnapshots, type WindowLogCompaction } from '../lib/workspace-overlap.ts';
 import { listRetainedShadowWorktrees } from './dispatches.ts';
 
 /**
@@ -67,6 +67,18 @@ export interface CleanResult {
    * a dry run.
    */
   deregisteredWorktrees: string[];
+  /**
+   * Repo-relative pre-delivery workspace snapshots under `.fadeno/local`
+   * (`workspace-overlap.ts`), counted rather than listed one by one.
+   *
+   * They need no special handling — plain files, nothing registered with git,
+   * swept with the directory that holds them. They are counted because a pile
+   * of them is the only visible trace that shared host deliveries have been
+   * dying before their terminal receipt, and `fadeno clean` is where a user
+   * with a leftover-looking repo actually looks. `fadeno doctor` says the same
+   * thing in more detail. Populated on a dry run too.
+   */
+  overlapSnapshots: string[];
 }
 
 /**
@@ -92,6 +104,13 @@ export interface CleanResult {
  * worktree that is already gone — removed by hand, or by an older `fadeno
  * clean` — is tolerated, not an error: this command's job is cleanup, not
  * asserting the registry is current.
+ *
+ * Plain machine-local files under `.fadeno/local` need none of that and are
+ * simply deleted with it. One kind is COUNTED on the way past — the
+ * pre-delivery workspace snapshots overlap detection persists between a shared
+ * `dispatch-start` and its terminal receipt — because a pile of them means
+ * shared host deliveries are dying before their terminal, and this command is
+ * where someone with a leftover-looking `.fadeno/local` looks first.
  */
 export function runClean(opts: CleanOptions = {}): CleanResult {
   const repoRoot = opts.repoRoot ?? findRepoRoot(opts.cwd ?? process.cwd());
@@ -109,6 +128,9 @@ export function runClean(opts: CleanOptions = {}): CleanResult {
     join(repoRoot, w.workspace),
   );
   const registeredWorktrees = listRegisteredWorktreesUnder(repoRoot, LOCAL_DIR);
+  // Read before deletion for the same reason the shadow list is: they live
+  // inside a candidate.
+  const overlapSnapshots = listOverlapSnapshots(repoRoot);
 
   const removed: string[] = [];
   const deregisteredWorktrees: string[] = [];
@@ -142,5 +164,6 @@ export function runClean(opts: CleanOptions = {}): CleanResult {
     retainedShadowWorktrees,
     registeredWorktrees,
     deregisteredWorktrees,
+    overlapSnapshots,
   };
 }

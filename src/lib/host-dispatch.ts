@@ -8,11 +8,16 @@ import { extractSchemaEnvelope, type EnvelopeExtraction } from './schema-envelop
 import { runSchemaDirectories } from './definitions.ts';
 import { findRepoRoot } from './paths.ts';
 import {
+  captureOverlapSnapshot,
+  changedBetween,
   closeDispatchWindow,
   detectConcurrentWrites,
   diffChangedPaths,
+  discardOverlapSnapshot,
   openDispatchWindow,
   readDispatchWindows,
+  readOverlapSnapshot,
+  workspaceStatusMap,
   type ConcurrentWriteStamp,
 } from './workspace-overlap.ts';
 import { readEventsStrict, resolveRun, RUN_LEDGER_SCHEMA_VERSION, RunLedgerError, type RunEvent } from './run-ledger.ts';
@@ -833,6 +838,14 @@ function closeHostWindow(repoRoot: string, runId: string, dispatchId: string, ch
 function closeHostWindowIfOpen(repoRoot: string, runId: string, dispatchId: string): void {
   try {
     const windowId = hostWindowId(runId, dispatchId);
+    // The baseline goes UNCONDITIONALLY, before the window question is even
+    // asked: this is a re-terminal, so the delivery is over on every branch
+    // below, and a baseline that outlives its delivery is exactly the leftover
+    // `doctor` counts. Deliberately NOT used to recompute a set here — the
+    // first terminal already settled this window, and the whole reason this
+    // function checks `endedAt` is that a re-terminal used to overwrite a good
+    // record with a worse one.
+    discardOverlapSnapshot(repoRoot, windowId);
     const existing = readDispatchWindows(repoRoot).windows.find((w) => w.dispatchId === windowId);
     // Absent means the log never saw the open; a close naming it would be an
     // orphan the reader drops anyway.
@@ -863,23 +876,31 @@ function closeHostWindowIfOpen(repoRoot: string, runId: string, dispatchId: stri
  * A degraded terminal (no diff collected) has nothing to read and is
  * truncated.
  *
- * SHARED: truncated, and this is a deliberate admission rather than an
- * oversight. The shared command lane produces a set with `changedBetween(before,
- * after)` — two `workspaceStatusMap` snapshots taken inside ONE process, the
- * first immediately before the executor is spawned. A host delivery has no
- * such process: `dispatch-start` and `dispatch-complete` are separate CLI
- * invocations, minutes or hours apart, and the kernel holds nothing in memory
- * between them. The tree's state at `dispatch-start` is simply not recorded
- * anywhere, so the delta over the window cannot be computed after the fact.
+ * SHARED: the tree's delta over the window, from `changedBetween(before,
+ * after)` — the same two `workspaceStatusMap` readings the shared command lane
+ * uses, with the "before" one PERSISTED at `dispatch-start` (see
+ * `captureOverlapSnapshot`) because this lane has no single process to hold it
+ * in memory. `dispatch-start` and `dispatch-complete` are separate CLI
+ * invocations, minutes or hours apart; what was missing was never the delta,
+ * it was a written-down reading of the tree at the moment the window opened.
  *
- * The available near-misses are both worse than admitting it. A bare
- * `workspaceStatusMap` at the terminal describes what is dirty NOW — including
- * everything that was already dirty before the window opened, and excluding
- * everything changed and then committed inside it — so publishing it as
- * `changed_paths` would manufacture intersections that never happened, in a
- * detector whose usefulness depends on a reader trusting it. And `[]` is the
- * bug this replaces. Truncated says the true thing: the windows overlapped and
- * nobody can say where.
+ * This lane was `truncated` unconditionally until that reading existed, and
+ * the reasons it was are the reasons it is still `truncated` whenever the
+ * reading is not there. A bare `workspaceStatusMap` at the terminal describes
+ * what is dirty NOW, including everything already dirty before the window
+ * opened, so it would manufacture intersections that never happened; `[]` is
+ * the positive empty claim this whole area exists to avoid. So a missing,
+ * unreadable, incomplete or unparsable baseline — and a `git` that will not
+ * answer at either end — all arrive here as a `null` from `changedBetween` and
+ * all close the window `truncated`. Only two real readings of one tree ever
+ * produce a set.
+ *
+ * That set is an ATTESTATION and nothing more. It is the shared tree's delta
+ * over the interval: this delivery's work, the human's edits in the same
+ * minutes, and whatever an unwindowed script did. `attribution: 'workspace'`
+ * says exactly that on every stamp derived from it, and a better attestation
+ * is all this buys — a shared delta does not become attributable to anyone by
+ * being recorded more precisely.
  */
 function settleHostOverlap(opts: {
   repoRoot: string;
@@ -893,9 +914,30 @@ function settleHostOverlap(opts: {
   now: Date;
 }): { stamps: ConcurrentWriteStamp[] | null; close: () => void } {
   const windowId = hostWindowId(opts.runId, opts.dispatchId);
-  const changed = opts.diffSnapshot != null
-    ? diffChangedPaths(opts.repoRoot, join(opts.repoRoot, ...opts.diffSnapshot.split('/')))
-    : null;
+  const changed = ((): string[] | null => {
+    try {
+      if (opts.diffSnapshot != null) {
+        return diffChangedPaths(opts.repoRoot, join(opts.repoRoot, ...opts.diffSnapshot.split('/')));
+      }
+      // Only `shared`. An isolated delivery with no collected diff is a
+      // degraded terminal: the tree it wrote was its worktree, not this one,
+      // so this tree's delta says nothing about it and reading it would be a
+      // claim about the wrong directory.
+      if (opts.workspaceMode !== 'shared') return null;
+      // `changedBetween` returns null when EITHER reading is missing, which is
+      // every way this can fail: no baseline was captured, the file is
+      // unreadable or over budget, or git will not answer now. Null is
+      // `truncated` below. It must never become `[]`.
+      return changedBetween(
+        readOverlapSnapshot(opts.repoRoot, windowId),
+        workspaceStatusMap(opts.repoRoot),
+      );
+    } catch {
+      // Same rule one level up: bookkeeping never fails a terminal, and an
+      // exception is one more spelling of "could not tell".
+      return null;
+    }
+  })();
   const truncated = changed == null;
   const paths = changed ?? [];
   let stamps: ConcurrentWriteStamp[] | null = null;
@@ -942,6 +984,13 @@ function settleHostOverlap(opts: {
       } catch {
         // deliberately swallowed; see above
       }
+      // The baseline described an interval that has just ended, so it goes
+      // with the window it belonged to — on the success path and the failure
+      // path alike, since `close` is the one call every terminal branch makes.
+      // Its own removal swallows: a leaked baseline is inert and counted by
+      // `doctor`, where a throw here would fail a dispatch whose receipt is
+      // already durable.
+      discardOverlapSnapshot(opts.repoRoot, windowId);
     },
   };
 }
@@ -1084,7 +1133,8 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
     }
   }
   /**
-   * Open this delivery's overlap window.
+   * Open this delivery's overlap window, and — for a SHARED delivery — write
+   * down the tree it is about to write into.
    *
    * Where the lease acquire used to be, and it cannot fail the dispatch. The
    * acquire could, and did: a shared host delivery that found a live lease was
@@ -1092,8 +1142,27 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
    * a state nothing could leave. Opening a window is a record, so the only
    * question left is what a second writer should DO — and the answer is that
    * it gets its own tree, not that it waits for one it cannot outlive.
+   *
+   * The baseline is captured BEFORE the window row so it can only ever be at
+   * or before the interval it describes: a baseline read a moment early
+   * over-reports the delta by whatever landed in between, and a baseline read
+   * a moment late MISSES work inside the window. In a detector that must never
+   * say "clean" when it does not know, those two errors are not symmetric.
+   *
+   * Only `shared`, and only once. An isolated delivery has its own worktree
+   * diff, which is a strictly better answer (`attribution: 'delivery'`), so
+   * spending a snapshot on it would buy a worse one. And `captureOverlapSnapshot`
+   * keeps an existing file rather than replacing it, which is what makes this
+   * safe on the idempotent re-`dispatch-start` below: re-reading the tree there
+   * would move the baseline past everything the agent had already written and
+   * quietly erase it from the delta.
    */
   const openHostWindow = (): void => {
+    if (!isIsolated) {
+      captureOverlapSnapshot(repoRoot, hostWindowId(runId, opts.dispatchId), {
+        capturedAt: opts.now ?? new Date(),
+      });
+    }
     try {
       openDispatchWindow(repoRoot, {
         dispatchId: hostWindowId(runId, opts.dispatchId),
@@ -1186,8 +1255,12 @@ export function startHostDispatch(opts: DispatchStartOptions): HostDispatchRecei
   } catch (err) {
     // The one host close that can honestly claim an empty set: the window was
     // opened moments ago and the executor was never spawned, so nothing of
-    // this delivery has run.
+    // this delivery has run. The baseline goes with it — there is no delivery
+    // left for it to be the baseline of, and leaving it would make a LATER
+    // start of the same dispatch inherit a stale reading (the keep-existing
+    // rule that protects a live delivery works against a dead one).
     closeHostWindow(repoRoot, runId, opts.dispatchId, []);
+    discardOverlapSnapshot(repoRoot, hostWindowId(runId, opts.dispatchId));
     throw err;
   }
   return { dispatchId: opts.dispatchId, state: 'started', idempotent: false, agentId: opts.agentId };
@@ -1992,6 +2065,15 @@ export function withdrawHostDispatch(opts: DispatchWithdrawOptions): HostDispatc
       `host dispatch "${opts.dispatchId}" already has an ${finals[0]!.type} receipt; it cannot be withdrawn.`,
     );
   }
+  // A withdraw is terminal, so any overlap baseline for this dispatch is over
+  // too — on this call and on every repeat of it. There is normally none: a
+  // withdraw requires that `dispatch-start` never landed, and the baseline is
+  // written there. The exception is the one path that writes a baseline and
+  // then fails to append `actor_dispatched`, which leaves a started-looking
+  // baseline behind a request that never started — exactly the request a
+  // withdraw exists to retire. Placed above the idempotent replay so a repeat
+  // sweeps what the first call could not.
+  discardOverlapSnapshot(repoRoot, hostWindowId(runId, opts.dispatchId));
   const priorWithdrawals = withdrawalsFor(events, opts.dispatchId);
   if (priorWithdrawals.length > 0) {
     const prior = priorWithdrawals[0]!;

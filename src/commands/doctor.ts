@@ -10,7 +10,7 @@ import { loadLayeredProfile } from '../lib/config-layers.ts';
 import { findRepoRoot, templatesDir } from '../lib/paths.ts';
 import { isFadenoPathIgnored } from '../lib/source-control.ts';
 import { describeVestigialWorkspaceLease } from '../lib/workspace-lease.ts';
-import { dispatchWindowLogFindings } from '../lib/workspace-overlap.ts';
+import { dispatchWindowLogFindings, overlapSnapshotFindings } from '../lib/workspace-overlap.ts';
 import { catalogLayerVersions, explainSuppressedBuiltin } from '../lib/config-layers.ts';
 import { compareFadenoVersions, readInstallationManifest } from '../lib/installations.ts';
 import { codexUserAgentDir, readVerifiedModels, userPaths } from '../lib/user-paths.ts';
@@ -966,5 +966,11 @@ function missingBundledTemplates(pluginRoot: string): string[] {
   // there was no surface that said the file existed, let alone that it was
   // broken.
   findings.push(...dispatchWindowLogFindings(repoRoot));
+  // Leftover overlap baselines: the machine-local snapshots a shared host
+  // `dispatch-start` writes so its terminal can compute a real changed set.
+  // The logic lives with the state it describes (`workspace-overlap.ts`),
+  // beside `describeVestigialWorkspaceLease` in spirit — one push, no reasoning
+  // here about what counts as stale.
+  findings.push(...overlapSnapshotFindings(repoRoot));
   return { repoRoot, findings, ok: findings.every((item) => item.severity !== 'error') };
 }
