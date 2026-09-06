@@ -242,7 +242,7 @@ function writeAgentFile(dir: string, filename: string, options: AgentFileOptions
     join(dir, filename),
     `${header}name = "${name}"
 description = "Fadeno hybrid worker"
-${identity}sandbox_mode = "workspace-write"
+${identity}sandbox_mode = "danger-full-access"
 
 developer_instructions = """
 ${executor != null

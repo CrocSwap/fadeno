@@ -13,10 +13,11 @@ import { argvGrantsFadenoShell } from '../src/lib/executors.ts';
  * exactly the shape this project keeps finding. Every spelling that grants is
  * read here, in one place, and every one is pinned.
  *
- * The negatives matter as much: the predicate reads only `--allowedTools`
- * VALUES (plus the two blanket flags), so a restricted variant that DENIES Bash
- * must not read as capable, and a stray "Bash" inside some other flag's value
- * must not either.
+ * The negatives matter as much: the predicate reads only the VALUES of the
+ * flags that select permission (`--allowedTools`, `--sandbox`) plus the blanket
+ * flags, so a restricted variant that DENIES Bash — or that picks
+ * `--sandbox read-only` — must not read as capable, and a stray "Bash" or
+ * "danger-full-access" inside some other flag's value must not either.
  */
 test('argvGrantsFadenoShell: every documented way an argv grants the shell', () => {
   // The shipped lanes. `--allowedTools` takes a comma- or space-separated list
@@ -50,13 +51,39 @@ test('argvGrantsFadenoShell: every documented way an argv grants the shell', () 
     true,
     'variadic values',
   );
-  // Two flags that open the shell without naming a tool at all.
+  // Three flags that open the shell without naming a tool at all — the first is
+  // what the shipped claude lanes carry as of 2026-09-06.
   assert.equal(argvGrantsFadenoShell(['claude', '-p', '--dangerously-skip-permissions']), true);
   assert.equal(argvGrantsFadenoShell(['claude', '-p', '--permission-mode', 'bypassPermissions']), true);
   assert.equal(argvGrantsFadenoShell(['claude', '-p', '--permission-mode=bypassPermissions']), true);
+
+  // The codex vocabulary. `--dangerously-bypass-approvals-and-sandbox` is what
+  // the shipped codex lane carries as of 2026-09-06; the sandbox modes are the
+  // spellings a user or project catalog may still pin, including the
+  // `workspace-write` every install had before that date.
+  assert.equal(
+    argvGrantsFadenoShell([
+      'codex', 'exec', '--model', 'gpt-5.6-sol', '--dangerously-bypass-approvals-and-sandbox', '-',
+    ]),
+    true,
+    'the shipped codex lane',
+  );
+  assert.equal(argvGrantsFadenoShell(['codex', 'exec', '--sandbox', 'danger-full-access', '-']), true);
+  assert.equal(argvGrantsFadenoShell(['codex', 'exec', '--sandbox=danger-full-access', '-']), true, '`=` form');
+  assert.equal(argvGrantsFadenoShell(['codex', 'exec', '-s', 'danger-full-access', '-']), true, 'short flag');
+  // The pre-2026-09-06 lane. `workspace-write` runs shell commands and writes
+  // inside the workspace, which is all `fadeno` needs, so an install still on
+  // the old catalog must not be reported as incapable. Widened deliberately —
+  // see the predicate's doc comment for why the narrow answer was wrong.
+  assert.equal(
+    argvGrantsFadenoShell(['codex', 'exec', '--sandbox', 'workspace-write', '-']),
+    true,
+    'the codex lane every install carried before the posture change',
+  );
+  assert.equal(argvGrantsFadenoShell(['codex', 'exec', '-s', 'workspace-write', '-']), true, 'short flag');
 });
 
-test('argvGrantsFadenoShell: reads `--allowedTools` values and nothing else', () => {
+test('argvGrantsFadenoShell: reads the permission flags\' values and nothing else', () => {
   assert.equal(
     argvGrantsFadenoShell(['claude', '-p', '--permission-mode', 'acceptEdits']),
     false,
@@ -88,11 +115,37 @@ test('argvGrantsFadenoShell: reads `--allowedTools` values and nothing else', ()
   assert.equal(argvGrantsFadenoShell(['claude', '--allowedTools', 'Edit,Read']), false);
   assert.equal(argvGrantsFadenoShell(['claude', '--allowedTools']), false, 'the flag with no value');
   assert.equal(argvGrantsFadenoShell([]), false);
-  // Pre-existing narrowness, pinned so widening it is a deliberate act: this
-  // predicate is Claude-shaped and says nothing about codex's OS sandbox.
+
+  // The codex half has to draw the same line the claude half does: a mode that
+  // genuinely restricts must not read as capable, or the widening above would
+  // have turned the predicate into "is this argv codex-shaped".
   assert.equal(
-    argvGrantsFadenoShell(['codex', 'exec', '--sandbox', 'workspace-write', '-']),
+    argvGrantsFadenoShell(['codex', 'exec', '--sandbox', 'read-only', '-']),
     false,
-    'not a claim about codex — see the doc comment',
+    'read-only cannot write the ledger, so it cannot run fadeno',
+  );
+  assert.equal(argvGrantsFadenoShell(['codex', 'exec', '-s', 'read-only', '-']), false, 'short flag');
+  assert.equal(argvGrantsFadenoShell(['codex', 'exec', '--sandbox=read-only', '-']), false, '`=` form');
+  assert.equal(
+    argvGrantsFadenoShell(['codex', 'exec', '--model', 'gpt-5.6-sol', '-']),
+    false,
+    'no sandbox flag at all — `codex exec` defaults to read-only',
+  );
+  // Flag-awareness, the codex mirror of the `--append-system-prompt` case: the
+  // mode counts only as the value of the flag that SELECTS it.
+  assert.equal(
+    argvGrantsFadenoShell(['codex', 'exec', '-c', 'sandbox_permissions=["danger-full-access"]', '-']),
+    false,
+    'a config override is not the sandbox flag',
+  );
+  assert.equal(
+    argvGrantsFadenoShell(['codex', 'exec', '--sandbox', 'read-only', '--model', 'workspace-write', '-']),
+    false,
+    'the mode token in another flag\'s value is not a grant',
+  );
+  assert.equal(
+    argvGrantsFadenoShell(['codex', 'exec', '--sandbox', '--model', 'danger-full-access', '-']),
+    false,
+    '`--sandbox` is not variadic; it does not reach past the next flag',
   );
 });

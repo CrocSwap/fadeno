@@ -186,7 +186,9 @@ test('starter catalog: director brief declared; non-fadeno lanes forbid director
     const asDirector = resolveDelivery({ model: 'opus' }, profile, harness, { archetype: 'director' });
     assert.equal(asDirector.variant, 'exec', harness);
     assert.equal(eligibilityFor(asDirector.spec, 'director'), 'eligible', harness);
-    // Codex lane open (workspace-write sandbox runs fadeno).
+    // Codex lane open (`--dangerously-bypass-approvals-and-sandbox` runs
+    // fadeno; so did the `--sandbox workspace-write` it replaced on
+    // 2026-09-06).
     const codexLane = resolveDelivery({ model: 'sol' }, profile, harness, { archetype: 'director' }).spec;
     assert.equal(eligibilityFor(codexLane, 'director'), 'eligible', harness);
   }

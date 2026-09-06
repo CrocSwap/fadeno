@@ -75,17 +75,17 @@ harnesses:
       effort_channel: none               # no effort channel → a pin ejects to the command lane
       relay: sonnet                      # was relay.claude
       eligibility: { director: forbidden }
-    command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, Bash ]
+    command: [ claude, -p, --model, "{model}", --dangerously-skip-permissions ]
     eligibility: { director: forbidden } # the BASE command lane's own constraint
     variants:
       exec:                              # was the anthropic-exec route / `--via claude-exec`
-        command: [ claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, Bash ]
+        command: [ claude, -p, --model, "{model}", --dangerously-skip-permissions ]
   codex:
     provider: openai
     host:
       effort_channel: agent-file         # the agent TOML carries model_reasoning_effort
       relay: luna@high                   # was relay.codex
-    command: [ codex, exec, --model, "{model}", --sandbox, workspace-write, -c, 'model_reasoning_effort="{reasoning_effort}"', "-" ]
+    command: [ codex, exec, --model, "{model}", --dangerously-bypass-approvals-and-sandbox, -c, 'model_reasoning_effort="{reasoning_effort}"', "-" ]
   agy:                                   # executor only: no host: block
     provider: google
     command: [ agy, --model, "{model}", --new-project, --dangerously-skip-permissions, --output-format, text ]
@@ -289,20 +289,24 @@ represented.
   grammars so an agent file written by an older fadeno still identifies itself.
 - **Claude**: the proxies' relay model comes from
   `harnesses.claude.host.relay`; the hook reads `harness`/`lane`. The base
-  `harnesses.claude.command` carries `--allowedTools Bash` beside
-  `--permission-mode acceptEdits` — the same headless trust codex, grok, agy,
-  opencode and muse already carry on their own command lanes. Without it,
-  `acceptEdits` auto-approves edits while other shell commands still need an
-  `--allowedTools` entry, and an unresolved permission request is denied by a
-  headless `-p` run — so a non-director anthropic dial ejected to the command
-  lane could edit and then not run the tests, git, or `fadeno attest`.
-  A **bare** tool name is the documented match-all rule (the permissions
-  reference's "Match all uses of a tool" table: `Bash` — "Matches all Bash
-  commands"); a scoped rule names a command (`Bash(ls *)`). The same page
-  documents `Bash(*)` as equivalent to the bare form, and the bare form is the
-  one the permission table and the headless docs lead with, so that is what the
-  catalog writes. This is a permission grant, not a sandbox: containment
-  is the isolated worktree, which contains file writes and nothing else.
+  `harnesses.claude.command` carries `--dangerously-skip-permissions` — the
+  same headless trust codex, grok, agy, opencode and muse carry on their own
+  command lanes. It replaced `--permission-mode acceptEdits --allowedTools
+  Bash` on 2026-09-06, and the reason is the general one below: that pair
+  auto-approved edits and Bash and nothing else, so any tool outside it was a
+  denial rather than a pending request, mid-assignment.
+- **Every command lane, one rule.** Each lane carries its vendor's
+  headless-approval flag and none carries a restricting one. An unresolved
+  permission request is *denied* by a headless run — nobody is there to answer
+  it — so a partial grant buys no safety and costs whole assignments. Codex was
+  the last lane where that was not true: `--sandbox workspace-write` denied a
+  worker's SSH to a remote host twice with `Operation not permitted` while the
+  host's own SSH succeeded through escalation, and the assignment could not run
+  at all. It now carries `--dangerously-bypass-approvals-and-sandbox`.
+  These are permission grants, not sandboxes: containment is the isolated
+  worktree, which contains file writes and nothing else. A project that wants a
+  tighter posture declares its own named variant with its own restricting
+  flags — see `permissions-and-isolation.md`.
 
   The `exec` variant keeps the identical argv and remains only the `director`
   **eligibility carrier**. It grants no capability the base lane lacks; the base

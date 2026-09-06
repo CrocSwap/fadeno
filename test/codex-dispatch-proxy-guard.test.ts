@@ -341,7 +341,7 @@ test('codex hooks: spawn stash + dispatch marker attest a relay through the kern
   // bakes no `--host-executor` because the dial's identity travels in the argv.
   writeFileSync(
     join(codexHome, 'agents', 'fadeno-worker.toml'),
-    '# fadeno:managed version=0.6.1 digest=deadbeef\nname = "worker"\ndescription = "Fadeno command broker worker"\nsandbox_mode = "workspace-write"\n\ndeveloper_instructions = """\nRun `fadeno steering resolve --archetype worker --prompt-file <path>`\n"""\n',
+    '# fadeno:managed version=0.6.1 digest=deadbeef\nname = "worker"\ndescription = "Fadeno command broker worker"\nsandbox_mode = "danger-full-access"\n\ndeveloper_instructions = """\nRun `fadeno steering resolve --archetype worker --prompt-file <path>`\n"""\n',
     'utf8',
   );
   const resolution = JSON.stringify({

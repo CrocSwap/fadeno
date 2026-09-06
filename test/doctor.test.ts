@@ -222,7 +222,7 @@ function brokerBody(archetype: string, resolveFlags: string): string {
     `description = "Fadeno command broker ${archetype}."`,
     'model = "gpt-5.6-luna"',
     'model_reasoning_effort = "low"',
-    'sandbox_mode = "workspace-write"',
+    'sandbox_mode = "danger-full-access"',
     '',
     'developer_instructions = """',
     `Run \`fadeno steering resolve --archetype ${archetype}${resolveFlags}\`.`,

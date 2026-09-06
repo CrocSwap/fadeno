@@ -17,7 +17,9 @@ nothing checked.
 The new model states that plainly instead of dressing it up:
 
 - Routes are argvs. Permissive by default. A restriction is a *different route*
-  with a different name, visible by reading its command.
+  with a different name, visible by reading its command. (As of 2026-09-06
+  "permissive by default" is finally true of every shipped lane — see
+  [2026-09-06](#2026-09-06-the-last-restricting-flag-leaves-the-shipped-catalog).)
 - The dial is the only decision. What you dial is what runs.
 - Isolation is the real boundary, and it is the default wherever git allows it.
 - The ledger records what ran, not what was claimed.
@@ -135,6 +137,64 @@ The argv and its sha256 are already recorded. The claim fields
 For anyone who wants enforcement at the Fadeno layer, a constraint policy is
 it — and it becomes more useful for being the only one. It sees the argv, so it
 can gate on what will actually run rather than on a label.
+
+## 2026-09-06: the last restricting flag leaves the shipped catalog
+
+*A later development, recorded here rather than folded into the sections above:
+the argvs quoted in "Routes are argvs" are the ones the catalog carried when
+this document was written, in the `routes:` grammar catalog v4 has since
+replaced. They are left as written. What changed is which flags sit in them.*
+
+Every command lane in `templates/common/fadeno/executors.yaml` now carries its
+vendor's **headless-approval** flag, and no lane carries a restricting one:
+
+| Lane | Was | Is |
+|---|---|---|
+| `codex` | `--sandbox workspace-write` | `--dangerously-bypass-approvals-and-sandbox` |
+| `claude` (base and `exec`) | `--permission-mode acceptEdits --allowedTools Bash` | `--dangerously-skip-permissions` |
+| `grok`, `agy`, `opencode`, `muse` | already headless-approval | unchanged |
+
+Three things are worth recording about it.
+
+**It makes this document's central claim *more* true, not less.** Fadeno still
+does not enforce permissions; it selects an argv and records what ran. What
+went away is the last place where the argv Fadeno selected was *stricter than
+the host that spawned it* — a restriction that read as safety and behaved as
+breakage.
+
+**The failure it fixes is the same shape as the four above: unknown collapsing
+into something else.** A headless run has nobody to answer an approval request,
+so an unresolved request is **denied**, not left pending. A partial grant is
+therefore not a reduced-blast-radius setting; it is a silent mid-assignment
+denial of everything outside the grant. The receipt: a Tokyo benchmark worker
+needed SSH to a remote machine and got `Operation not permitted` — twice —
+while the host's own SSH succeeded through escalation. The assignment could not
+run at all. Codex's `--approve-for-me` is the same trap more politely spelled:
+routing an approval request somewhere, in a run where nothing can answer it,
+resolves to a denial with extra steps.
+
+**The old note "side effects outside the worktree are uncontained" was true of
+five lanes and false of one.** Codex alone carried a real kernel sandbox, so
+the document's own containment story did not describe the lane people actually
+hit. Now it describes all of them: the isolated worktree contains **file
+writes** and nothing else — network, package registries, and any credential in
+the environment are reachable from every lane.
+
+The escape hatch is unchanged, and is the same one section 1 argues for: a
+project that wants a tighter posture declares its **own named variant** with
+its own restricting flags (`--sandbox read-only`, `--disallowedTools`,
+`--disable-shell`) and lets policy or an explicit `--harness` reach it. A
+restriction spelled out in an argv is one a reader can see.
+
+One consumer had to move with the argv. `argvGrantsFadenoShell`
+(`src/lib/executors.ts`) reads a lane's argv to answer whether it can run the
+`fadeno` command family, and it knew only Claude's vocabulary — so it had been
+answering `fadeno_capable: false` for every codex delivery while this catalog's
+own director note said codex could run fadeno. That is the one-list-two-consumers
+shape, and the flag swap was the occasion to close it: the predicate now reads
+codex's `--dangerously-bypass-approvals-and-sandbox` and the `--sandbox` modes
+that can run a shell (`workspace-write`, `danger-full-access`), and still
+refuses `read-only`.
 
 ## Replacing posture with measurement
 

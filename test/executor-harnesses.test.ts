@@ -3,7 +3,13 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { parse as parseYaml } from 'yaml';
-import { resolveDelivery, parseDialRef, parseExecutorProfile, type HarnessId } from '../src/lib/executors.ts';
+import {
+  argvGrantsFadenoShell,
+  resolveDelivery,
+  parseDialRef,
+  parseExecutorProfile,
+  type HarnessId,
+} from '../src/lib/executors.ts';
 import './helpers.ts';
 
 /**
@@ -146,9 +152,15 @@ test('the claude harness can escalate its own models — the asymmetry that moti
   // gone, the command lane simply carries the permissive flags directly.
   const claude = catalogFor('standalone').harnesses.claude!;
   assert.ok(claude.command, 'the host-capable claude harness keeps a command lane');
+  // The property is "this lane is permissive on its own", not any one flag: it
+  // was `--permission-mode acceptEdits` until 2026-09-06 and is
+  // `--dangerously-skip-permissions` after — strictly wider, since the blanket
+  // flag admits the shell as well as edits. Pinned through the predicate that
+  // reads this argv for real, so the assertion cannot drift from the lane again
+  // the way a literal token did.
   assert.ok(
-    claude.command!.command.includes('acceptEdits'),
-    'the claude command lane must be able to write without a variant to escalate through',
+    argvGrantsFadenoShell(claude.command!.command),
+    'the claude command lane must be permissive without a variant to escalate through',
   );
 });
 
@@ -168,8 +180,11 @@ test('a director reaches the exec variant by POLICY, never by naming a lane on t
   assert.equal(director.variant, 'exec');
   assert.equal(director.hostCandidate, false, 'an in-session agent cannot spawn subagents, so it cannot coordinate');
   assert.ok(
-    (director.spec as { fallbackCommand?: string[] | null }).fallbackCommand?.includes('Bash')
-      ?? (director.spec as { command?: string[] }).command?.includes('Bash'),
+    argvGrantsFadenoShell(
+      (director.spec as { fallbackCommand?: string[] | null }).fallbackCommand
+        ?? (director.spec as { command?: string[] }).command
+        ?? [],
+    ),
     'the exec variant is a lane that can actually run fadeno',
   );
 });

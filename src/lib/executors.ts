@@ -214,11 +214,15 @@ export function substitutePromptFile(argv: string[], promptPath: string): string
 }
 
 /**
- * Does this argv carry a Claude Code permission grant that admits the `fadeno`
- * command family? Read off the argv that will actually run — the grant is IN
- * the command, never in metadata beside it.
+ * Does this argv carry a permission grant that admits the `fadeno` command
+ * family? Read off the argv that will actually run — the grant is IN the
+ * command, never in metadata beside it.
  *
- * It reads exactly two things, and nothing else in the argv:
+ * Two vendor vocabularies, because two vendors ship a lane a director can be
+ * delivered to. Each is read FLAG-AWARE: only the values of the flags named
+ * below, never a token that merely appears somewhere in the argv.
+ *
+ * Claude Code (and Antigravity, which borrows the blanket flag):
  *
  *  1. The VALUES of `--allowedTools` / `--allowed-tools`, in both the
  *     separate-token and the `=` form. The flag is variadic, so its values run
@@ -226,13 +230,36 @@ export function substitutePromptFile(argv: string[], promptPath: string): string
  *     space-separated list of permission rules, which is what makes
  *     `--allowedTools "Edit Bash"` read the same as `--allowedTools Bash`. A
  *     rule grants when it is exactly `Bash` or exactly `Bash(*)` — the vendor
- *     documents those as the same match-all rule, and the shipped lanes write
- *     the bare form — or when it starts with `Bash(fadeno`, the scoped grant
- *     the lanes carried before the base lane opened its shell and which a user
- *     catalog may still pin. `Bash(git *)` grants nothing here.
+ *     documents those as the same match-all rule — or when it starts with
+ *     `Bash(fadeno`, the scoped grant the lanes carried before 2026-09-06 and
+ *     which a user catalog may still pin. `Bash(git *)` grants nothing here.
  *  2. `--dangerously-skip-permissions`, and `--permission-mode
  *     bypassPermissions` in either spelling — which open the shell without
- *     naming a tool at all.
+ *     naming a tool at all. The shipped claude lanes carry the first of these.
+ *
+ * Codex, added 2026-09-06 with the all-permissive posture:
+ *
+ *  3. `--dangerously-bypass-approvals-and-sandbox` — codex's analogue of
+ *     `--dangerously-skip-permissions`, and what the shipped codex lane now
+ *     carries.
+ *  4. The VALUE of `--sandbox` / `-s`, in both the separate-token and the `=`
+ *     form. `codex exec --help` (0.153.4) documents exactly three modes:
+ *     `read-only`, `workspace-write`, `danger-full-access`. The latter two run
+ *     model-generated shell commands and can write inside the workspace, which
+ *     is the whole of what `fadeno` needs — its ledger and state live under
+ *     `.fadeno/` and it makes no network call. `read-only` cannot, and neither
+ *     can an argv naming no sandbox at all, since `codex exec` defaults to
+ *     read-only.
+ *
+ * Reading codex at all is a DELIBERATE widening of a narrowness this comment
+ * used to merely record, not a side effect of the flag swap. Before it the
+ * predicate was Claude-shaped and answered `fadeno_capable: false` for every
+ * codex delivery — while the catalog's own director note said codex "already
+ * could" run fadeno and `director.test.ts` called the codex lane open. The
+ * argv and the predicate reading it disagreed: the one-list-two-consumers
+ * shape this project keeps paying for. Widening covers BOTH the new flag and
+ * the `--sandbox workspace-write` a user or project catalog may still pin, so
+ * an install that has not re-cut its own catalog still reads true.
  *
  * It deliberately reads no other flag's values. `--disallowedTools Bash` is the
  * natural shape of the restricted claude variant this catalog invites projects
@@ -240,23 +267,30 @@ export function substitutePromptFile(argv: string[], promptPath: string): string
  * flag it belonged to reported that argv as CAPABLE — as it did
  * `--append-system-prompt 'Prefer Bash, not Python'`. Position-blindness was
  * survivable while the only token was the implausible `Bash(fadeno:`; a bare
- * `Bash` collides freely, so the walk below is the flag-aware replacement.
- *
- * Claude-shaped by construction: it does NOT report codex's `--sandbox
- * workspace-write` as capable, which is a pre-existing narrowness of the
- * `fadeno models --json` `fadeno_capable` column, not something this predicate
- * introduced. Widen it here, in one place, if that is ever wanted.
+ * `Bash` collides freely, so the walk below is the flag-aware replacement —
+ * and the same rule is why a sandbox MODE only counts as the value of the flag
+ * that selects it, never inside `-c 'sandbox_permissions=…'` or prose.
  */
 export function argvGrantsFadenoShell(argv: readonly string[]): boolean {
   const grants = (rule: string): boolean =>
     rule === 'Bash' || rule === 'Bash(*)' || rule.startsWith('Bash(fadeno');
+  // The two codex sandbox modes that can run a shell command and write inside
+  // the workspace. `read-only` is the third, and it is excluded.
+  const shellSandbox = (mode: string): boolean =>
+    mode === 'workspace-write' || mode === 'danger-full-access';
   for (let i = 0; i < argv.length; i += 1) {
     const part = argv[i] ?? '';
     if (part === '--dangerously-skip-permissions') return true;
+    if (part === '--dangerously-bypass-approvals-and-sandbox') return true;
     if (part === '--permission-mode=bypassPermissions') return true;
     if (part === '--permission-mode' && argv[i + 1] === 'bypassPermissions') return true;
     const eq = part.indexOf('=');
     const flag = eq === -1 ? part : part.slice(0, eq);
+    if (flag === '--sandbox' || flag === '-s') {
+      // Not variadic: `--sandbox` takes exactly one mode, so read exactly one.
+      if (shellSandbox(eq === -1 ? argv[i + 1] ?? '' : part.slice(eq + 1))) return true;
+      continue;
+    }
     if (flag !== '--allowedTools' && flag !== '--allowed-tools') continue;
     const values = eq === -1 ? [] : [part.slice(eq + 1)];
     for (let j = i + 1; j < argv.length && !(argv[j] ?? '').startsWith('--'); j += 1) {

@@ -69,6 +69,18 @@ client of it; ad-hoc subagent dispatch is the second.
 portable — "my worker is Luna" is a true statement in every harness, while the
 argv that delivers Luna is not.
 
+> **Historical grammar** (applies to every catalog sketch in this document).
+> The `routes:` table, `write_access` and
+> `requires_write` are **removed** — catalog v4 replaced
+> the six `routes.<host>` tables with one `harnesses:` table
+> ([`harness-neutral-dials.md`](harness-neutral-dials.md)), and the write
+> posture was cut outright
+> ([`permissions-and-isolation.md`](permissions-and-isolation.md)). The argvs
+> quoted here are likewise the ones of the day; every shipped lane has carried
+> its vendor's headless-approval flag, and no restricting flag, since
+> 2026-09-06. The kernel and evidence semantics this document designs are
+> unchanged.
+
 ```yaml
 schema_version: 2
 
@@ -886,11 +898,16 @@ arbitrage win is expensive worker turns. Unsteered is about the *rewrite*: a
 generic spawn is refused while session-scoped host mode is on, and recorded as
 a `native_spawn` row when it is off.
 
-**Permission boundary (must stay loud):** an external worker invoked with its
-own sandbox flags (e.g. `codex exec -s workspace-write`) runs *outside* the
+**Permission boundary (must stay loud):** an external worker runs *outside* the
 host harness's permission fences. Enabling dispatch proxies is an explicit
 user opt-in with this stated plainly; the dispatch evidence row is the
-compensating audit trail.
+compensating audit trail. Louder still since 2026-09-06: it runs outside a
+sandbox of its own too. Every shipped command lane now carries its vendor's
+headless-approval flag and none carries a restricting one (`codex exec
+--dangerously-bypass-approvals-and-sandbox`, `claude -p
+--dangerously-skip-permissions`), so the isolated worktree is the only
+containment, and it contains file writes and nothing else. See
+[`permissions-and-isolation.md`](permissions-and-isolation.md).
 
 ## Parallel dispatch fan-out
 

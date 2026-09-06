@@ -89,7 +89,7 @@ harnesses:
   claude:                                    # …and a harness that is both
     provider: anthropic
     host: { effort_channel: none }
-    command: [claude, -p, --model, "{model}", --permission-mode, acceptEdits, --allowedTools, Bash]
+    command: [claude, -p, --model, "{model}", --dangerously-skip-permissions]
 ```
 
 A Claude Code session can drive `grok` with no Grok plugin anywhere, and the
@@ -988,9 +988,12 @@ the host boundary by default with `init --claude`; `--no-steering` opts out.
 Resolution stays in
 the CLI. The
 permission boundary stays loud: the external executor a proxy dispatches runs
-*outside* the harness's permission fences, under its own sandbox flags — a
-deliberate user choice made by binding that executor via a dial, with the
-dispatch evidence row as the audit trail.
+*outside* the harness's permission fences, and since 2026-09-06 under no
+sandbox of its own either — every command lane carries its vendor's
+headless-approval flag and no restricting one. A deliberate user choice made by
+binding that executor via a dial, with the dispatch evidence row as the audit
+trail and the isolated worktree as the only containment, over file writes
+alone.
 
 Two non-obvious template rules:
 

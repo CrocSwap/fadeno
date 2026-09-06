@@ -920,7 +920,8 @@ function renderCodexHostAgent(
       : `model = ${tomlString(spec.model)}\nmodel_reasoning_effort = ${tomlString(spec.reasoningEffort)}\n`;
   return `name = ${tomlString(archetype)}
 description = ${tomlString(`Fadeno hybrid ${archetype}: host-delivered on the session baseline, command-dispatched when the active loadout switches providers.`)}
-${identity}sandbox_mode = "workspace-write"
+${identity}sandbox_mode = "danger-full-access"
+approval_policy = "never"
 
 developer_instructions = """
 You are Fadeno's hybrid ${archetype}. Do not spawn subagents.
@@ -1015,7 +1016,8 @@ function renderCodexCommandBroker(
 description = ${tomlString(`Fadeno command broker ${archetype}: delegates command slots through the active loadout and stops when a host slot needs host materialization.`)}
 model = ${tomlString(relay?.modelId ?? BUILTIN_CODEX_RELAY_MODEL)}
 model_reasoning_effort = ${tomlString(relay?.effort ?? BUILTIN_CODEX_RELAY_EFFORT)}
-sandbox_mode = "workspace-write"
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
 
 developer_instructions = """
 You are Fadeno's command-broker ${archetype}. Do not spawn subagents.

@@ -286,8 +286,8 @@ Harnesses shipped in the starter catalog:
 
 | Harness | Home provider | Host? | Command lane | Effort dial |
 |---|---|---|---|---|
-| `codex` | `openai` | yes (`agent-file`) | `codex exec --sandbox workspace-write` | `-c model_reasoning_effort=` |
-| `claude` | `anthropic` | yes (`none`) | `claude -p --permission-mode acceptEdits --allowedTools Bash` (+ `exec` variant, same argv) | — |
+| `codex` | `openai` | yes (`agent-file`) | `codex exec --dangerously-bypass-approvals-and-sandbox` | `-c model_reasoning_effort=` |
+| `claude` | `anthropic` | yes (`none`) | `claude -p --dangerously-skip-permissions` (+ `exec` variant, same argv) | — |
 | `grok` | `xai` | yes (`none`) | `grok --always-approve` | `--reasoning-effort` |
 | `agy` | `google` | no | `agy --new-project --dangerously-skip-permissions` | in the model id |
 | `opencode` | — | session-identity only | `opencode run -m openrouter/…` (+ `direct` variant) | `--variant` |
@@ -316,18 +316,30 @@ reading docs:
   no provider as home and its base lane prefixes the credential holder:
   `-m openrouter/{model}`. Its CLI has no argv-only sandbox; `init` emits
   `.opencode/agents/fadeno-readonly.md`.
-- **`--permission-mode acceptEdits` alone does not open Claude's shell.** It
-  auto-approves file edits while other shell commands still need an
-  `--allowedTools` entry, and an unresolved permission request is denied by a
-  headless `-p` run — so a `claude` command lane without `--allowedTools Bash`
-  could edit and then not run the tests, git, or `fadeno attest`. A **bare**
-  tool name is the documented match-all rule ("Match all uses of a tool":
-  `Bash` — "Matches all Bash commands"); a scoped rule names a command
-  (`Bash(ls *)`). `Bash(*)` is documented as equivalent to the bare form; the
-  bare form is the one the permission table and the headless docs lead with, so
-  it is what the catalog writes. This is a permission grant, not a sandbox —
-  containment is the isolated worktree, which contains file writes and nothing
-  else; a project wanting less declares its own restricted variant.
+- **Every command lane carries its vendor's headless-approval flag, and none
+  carries a restricting one** (`--dangerously-skip-permissions` for `claude`
+  and `agy`, `--dangerously-bypass-approvals-and-sandbox` for `codex`,
+  `--always-approve` for `grok`, `--auto` for `opencode`, the
+  `--trust-workspace --disable-approval --user-input-auto-resolve` trio for
+  `muse`). The rule behind that is mechanical, not a taste call: an unresolved
+  permission request is **denied** by a headless run rather than left pending,
+  because nobody is there to answer it. So a *partial* grant is not a safety
+  margin, it is a silent mid-assignment denial. The two the shipped catalog
+  used to carry both proved it — `--permission-mode acceptEdits --allowedTools
+  Bash` auto-approved edits and Bash and nothing else, and `codex --sandbox
+  workspace-write` returned `Operation not permitted` twice for a worker that
+  needed SSH while the host's own SSH succeeded through escalation, so that
+  assignment could not run at all. Codex's `--approve-for-me` is the same trap
+  in a friendlier spelling: routing an approval request somewhere in a headless
+  `codex exec` still resolves to a denial.
+- **These are permission grants, not sandboxes.** No lane carries an OS
+  sandbox; containment is the isolated worktree, which contains **file writes
+  and nothing else** — a spawned executor can still reach the network, a
+  package registry, and any credential in the environment. A project that wants
+  a tighter posture declares its **own named variant** with its own restricting
+  flags (a `sandboxed` variant with `--sandbox read-only`, a claude variant with
+  `--disallowedTools`), and lets policy or an explicit `--harness` reach it. A
+  restriction spelled out in an argv is one a reader can see.
 - **The `claude` `exec` variant is the same argv as the base lane** and exists
   only to carry `director` eligibility: the base lane declares
   `eligibility: { director: forbidden }` so policy falls through and the
@@ -953,9 +965,11 @@ session-scoped host mode is on, and record a `native_spawn` row for the ones
 they allow when it is off.
 
 > **Permission boundary:** the external executor a proxy dispatches runs
-> *outside* the host harness's permission fences, under its own sandbox flags
-> (e.g. `codex exec -s workspace-write`). Binding that executor via a dial is the explicit opt-in; the `.fadeno/dispatches.jsonl` evidence row
-> is the compensating audit trail.
+> *outside* the host harness's permission fences, and as of 2026-09-06 under no
+> sandbox of its own either (`codex exec
+> --dangerously-bypass-approvals-and-sandbox`). Binding that executor via a dial is the explicit opt-in; the `.fadeno/dispatches.jsonl` evidence row
+> is the compensating audit trail — and the isolated worktree is the only
+> containment, over file writes alone.
 
 ---
 

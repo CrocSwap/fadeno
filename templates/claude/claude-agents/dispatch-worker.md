@@ -148,6 +148,9 @@ Then:
    is the caller's call, never yours.
 
 Permission boundary: the external executor `fadeno dispatch` resolves runs
-outside this harness's permission fences, under its own sandbox flags. That is
-a deliberate, explicit user choice — the user configured that executor via
-Fadeno dials — and the dispatch evidence row is the audit trail.
+outside this harness's permission fences, and under no sandbox of its own
+either — every command lane carries its vendor's headless-approval flag and no
+restricting one. That is a deliberate, explicit user choice — the user
+configured that executor via Fadeno dials — and the dispatch evidence row is
+the audit trail. The isolated worktree is the only containment, and it contains
+file writes and nothing else.

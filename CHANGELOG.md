@@ -6,6 +6,67 @@ All notable changes to Fadeno are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- **Every command lane is maximally permissioned.** `harnesses.codex.command`
+  trades `--sandbox workspace-write` for
+  `--dangerously-bypass-approvals-and-sandbox`; both claude lanes trade
+  `--permission-mode acceptEdits --allowedTools Bash` for
+  `--dangerously-skip-permissions`. This changes what a spawned executor is
+  permitted to do on every dispatch, which is why it is breaking: a lane that
+  could previously only write inside the workspace can now do anything the
+  invoking user can. Grok, agy, opencode and muse already carried their
+  vendor's headless-approval flag and are unchanged.
+  It is the same lesson as the deadline and the lease, one axis over —
+  **Fadeno cannot enforce what it cannot answer for.** A headless run has
+  nobody to answer an approval request, so an unresolved request is *denied*,
+  not left pending; a partial grant is therefore not a reduced blast radius,
+  it is a silent mid-assignment denial of everything the grant omits, and the
+  agent surfaces it as having stopped rather than as a permission error. The
+  receipt: a Tokyo benchmark worker needed SSH to a remote machine and got
+  `Operation not permitted` — twice — while the host's own SSH succeeded
+  through escalation, so the assignment could not run at all. Codex's
+  `--approve-for-me` is the same trap more politely spelled. Every user of this
+  project drives their own host in yolo mode, and a command lane stricter than
+  the host that spawned it buys nothing.
+  The catalog's containment claim is now true of every lane rather than five of
+  six: **no lane carries an OS sandbox**, the isolated worktree is the only
+  containment, and it contains file writes and nothing else — network, package
+  registries and any credential in the environment are reachable from every
+  lane. The escape hatch is unchanged and is the one this catalog has always
+  argued for: a project wanting a tighter posture declares its **own named
+  variant** with its own restricting flags (`--sandbox read-only`,
+  `--disallowedTools`, `--disable-shell`) and lets policy or an explicit
+  `--harness` reach it. A restriction spelled out in an argv is one a reader
+  can see.
+  `fadeno steering apply --codex` also re-cuts the Codex agent files with
+  `sandbox_mode = "danger-full-access"` and `approval_policy = "never"` (both
+  keys and the value verified against codex 0.153.4's own vocabulary), so the
+  role agents Codex loads in-session match the lane that spawns them.
+  Design record: `docs/experimental/permissions-and-isolation.md`, which gains
+  the change as a dated development rather than a rewrite — the posture makes
+  its central claim ("Fadeno does not enforce permissions; it selects an argv
+  and records what ran") *more* true, not less.
+
+### Fixed
+
+- **`fadeno models --json` answered `fadeno_capable: false` for every codex
+  delivery.** `argvGrantsFadenoShell` — the one predicate that reads a lane's
+  argv to decide whether it can run the `fadeno` command family — knew only
+  Claude's vocabulary, so it had been wrong about codex since the column
+  existed, while the catalog's own director note said codex "already could" run
+  fadeno and `director.test.ts` called the codex lane open. One list, two
+  consumers, disagreeing in silence. It now reads codex's
+  `--dangerously-bypass-approvals-and-sandbox` and the `--sandbox` / `-s` modes
+  that can run a shell (`workspace-write`, `danger-full-access`), in both the
+  separate-token and `=` forms, and still refuses `read-only` and an argv that
+  names no sandbox at all — `codex exec` defaults to read-only. Reading the
+  retired `workspace-write` as capable is deliberate: an install whose user or
+  project catalog still pins it is not less capable for not having upgraded.
+  The widening is flag-aware like the claude half, so `-c
+  'sandbox_permissions=…'` and a mode named as some other flag's value grant
+  nothing.
+
 ### Removed — BREAKING
 
 - **Executor deadlines, entirely.** `--timeout` is deleted from `fadeno

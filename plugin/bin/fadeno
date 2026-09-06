@@ -14720,13 +14720,19 @@ function substitutePromptFile(argv, promptPath) {
 }
 function argvGrantsFadenoShell(argv) {
   const grants = (rule) => rule === "Bash" || rule === "Bash(*)" || rule.startsWith("Bash(fadeno");
+  const shellSandbox = (mode) => mode === "workspace-write" || mode === "danger-full-access";
   for (let i = 0; i < argv.length; i += 1) {
     const part = argv[i] ?? "";
     if (part === "--dangerously-skip-permissions") return true;
+    if (part === "--dangerously-bypass-approvals-and-sandbox") return true;
     if (part === "--permission-mode=bypassPermissions") return true;
     if (part === "--permission-mode" && argv[i + 1] === "bypassPermissions") return true;
     const eq = part.indexOf("=");
     const flag = eq === -1 ? part : part.slice(0, eq);
+    if (flag === "--sandbox" || flag === "-s") {
+      if (shellSandbox(eq === -1 ? argv[i + 1] ?? "" : part.slice(eq + 1))) return true;
+      continue;
+    }
     if (flag !== "--allowedTools" && flag !== "--allowed-tools") continue;
     const values = eq === -1 ? [] : [part.slice(eq + 1)];
     for (let j = i + 1; j < argv.length && !(argv[j] ?? "").startsWith("--"); j += 1) {
@@ -33329,7 +33335,8 @@ model_reasoning_effort = ${tomlString(spec.reasoningEffort)}
 `;
   return `name = ${tomlString(archetype)}
 description = ${tomlString(`Fadeno hybrid ${archetype}: host-delivered on the session baseline, command-dispatched when the active loadout switches providers.`)}
-${identity}sandbox_mode = "workspace-write"
+${identity}sandbox_mode = "danger-full-access"
+approval_policy = "never"
 
 developer_instructions = """
 You are Fadeno's hybrid ${archetype}. Do not spawn subagents.
@@ -33387,7 +33394,8 @@ function renderCodexCommandBroker(archetype, cliPath, relay) {
 description = ${tomlString(`Fadeno command broker ${archetype}: delegates command slots through the active loadout and stops when a host slot needs host materialization.`)}
 model = ${tomlString(relay?.modelId ?? BUILTIN_CODEX_RELAY_MODEL)}
 model_reasoning_effort = ${tomlString(relay?.effort ?? BUILTIN_CODEX_RELAY_EFFORT)}
-sandbox_mode = "workspace-write"
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
 
 developer_instructions = """
 You are Fadeno's command-broker ${archetype}. Do not spawn subagents.

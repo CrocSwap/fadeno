@@ -479,6 +479,16 @@ eligibility via `constraints:` — all re-spelled onto the `model`/`driver`
 row fields but semantically identical, including the `shadow_only` →
 `gate_eligible: false` stamp.
 
+> **Write posture was cut entirely.** `write_access`, `write_variant`,
+> `requires_write` and `force_write_posture` are **removed** and now error at
+> load — the paragraph below is the record of a mechanism that produced four
+> silent-wrong-answer defects, not a description of anything that ships.
+> Every command lane simply carries its vendor's permissive argv; as of
+> 2026-09-06 that means a headless-approval flag on every lane and a
+> restricting flag on none, so the `--permission-mode acceptEdits` escalation
+> target named below is not a spelling the catalog uses any more either. See
+> [`permissions-and-isolation.md`](permissions-and-isolation.md).
+
 **Write variants** (decided 2026-08-16, completing the who/how split): a
 route declared `write_access: false` may declare a `write_variant:` — an
 alternative argv that CAN write (e.g. headless claude with `--permission-mode

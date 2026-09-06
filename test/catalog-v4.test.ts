@@ -13,6 +13,7 @@ import { runToolRun } from '../src/commands/tool-run.ts';
 import { runVerify } from '../src/commands/verify.ts';
 import { loadGlobalProfile, loadLayeredProfile } from '../src/lib/config-layers.ts';
 import {
+  argvGrantsFadenoShell,
   eligibilityFor,
   ExecutorProfileError,
   formatDialRef,
@@ -101,14 +102,21 @@ test('v4: policy chooses the variant; a dial never names one', () => {
   const argv = director.spec.adapter === 'command'
     ? director.spec.command
     : (director.spec as { fallbackCommand: string[] | null }).fallbackCommand ?? [];
-  assert.ok(argv.includes('Bash'), 'the exec variant can run fadeno');
+  // Asked of the predicate that actually reads this argv, not of a token that
+  // happens to be in it: a director lane has to be able to run `fadeno`, and
+  // `argvGrantsFadenoShell` is the one place that question is answered. Pinning
+  // a literal here is what made this assertion a second, drifting copy of the
+  // rule when the lane traded `--allowedTools Bash` for
+  // `--dangerously-skip-permissions`.
+  assert.ok(argvGrantsFadenoShell(argv), 'the exec variant can run fadeno');
   // And the ref the user typed is unchanged: the variant is not on the dial.
   assert.equal(formatDialRef(director.ref), 'opus');
 });
 
 test('the claude exec variant lifts `director` on an argv identical to the base lane', () => {
-  // Since the base lane opened its shell (`--allowedTools Bash`), the variant
-  // grants nothing extra. It is the ELIGIBILITY carrier: the base lane forbids
+  // Since the base lane opened its shell (`--dangerously-skip-permissions`),
+  // the variant grants nothing extra. It is the ELIGIBILITY carrier: the base
+  // lane forbids
   // `director`, policy falls through, and the delivery gets the name `exec` in
   // the ledger row and run snapshot — the only thing that tells a director
   // dispatch apart from a worker dispatch that ran the identical command. If
@@ -135,19 +143,77 @@ test('the claude exec variant lifts `director` on an argv identical to the base 
 });
 
 test('the claude command lane carries the headless-approval flag every other vendor has', () => {
-  // `--permission-mode acceptEdits` auto-approves EDITS only; without a Bash
-  // grant, an unresolved permission request is denied by a headless `-p` run,
-  // so a claude could edit and then not run the tests, git, or `fadeno attest`.
-  // A BARE `Bash` is the documented match-all rule ("Match all uses of a
-  // tool"); `Bash(*)` is documented as equivalent, and the bare form is the one
-  // the permission table and the headless docs lead with, so THAT is the token
-  // this pins. If the catalog ever moves to the equivalent spelling, this
-  // assertion is the one to update — deliberately, not by accident.
+  // The claim this pins is the one the catalog's own comment makes: EVERY lane
+  // carries its vendor's headless-approval flag, because an unresolved
+  // permission request is DENIED by a headless run rather than left pending, so
+  // anything short of blanket approval is a silent mid-assignment denial.
+  //
+  // Until 2026-09-06 this lane's flag was the pair `--permission-mode
+  // acceptEdits --allowedTools Bash`, and this test pinned both tokens. That
+  // pair auto-approved edits plus Bash and NOTHING else — the same partial
+  // grant that cost the codex sandbox two Tokyo runs. The posture is now
+  // blanket, so the assertion moves to the blanket flag AND adds the negative
+  // the old spelling could not express: the restricting pair must not creep
+  // back, because a lane that narrows while the docs still promise vendor-equal
+  // headless trust is exactly the divergence `docs-claims` exists to catch.
   const claude = starter('claude').harnesses.claude!.command!.command;
-  const flag = claude.indexOf('--allowedTools');
-  assert.notEqual(flag, -1, 'the base claude lane grants shell');
-  assert.equal(claude[flag + 1], 'Bash', 'the match-all rule, not a scoped Bash(<command>)');
-  assert.ok(claude.includes('acceptEdits'), 'beside acceptEdits, not instead of it');
+  assert.ok(
+    claude.includes('--dangerously-skip-permissions'),
+    'the base claude lane carries Claude Code\'s headless-approval flag',
+  );
+  assert.ok(
+    !claude.includes('--permission-mode') && !claude.includes('--allowedTools'),
+    'and no partial grant beside it — a scoped rule is a denial waiting to happen',
+  );
+  // Read through the predicate too, so the argv and its only reader cannot
+  // disagree about this lane.
+  assert.ok(argvGrantsFadenoShell(claude), 'and it reads as fadeno-capable');
+});
+
+test('every shipped command lane carries a headless-approval flag and no restricting one', () => {
+  // The posture note at the bottom of the catalog states this as a property of
+  // the whole table, not of one lane, so assert it as one. Before 2026-09-06 it
+  // was false of exactly one lane — codex, with `--sandbox workspace-write` —
+  // and that is the lane whose restriction people actually hit.
+  //
+  // Each vendor spells the flag differently, so the table below is the list;
+  // a NEW harness with a command lane must be added here deliberately, which is
+  // the point. The restricting spellings are listed separately because catching
+  // a re-narrowing is the half a positive-only assertion misses.
+  const approvals: Record<string, string[]> = {
+    claude: ['--dangerously-skip-permissions'],
+    codex: ['--dangerously-bypass-approvals-and-sandbox'],
+    grok: ['--always-approve'],
+    agy: ['--dangerously-skip-permissions'],
+    opencode: ['--auto'],
+    muse: ['--trust-workspace', '--disable-approval', '--user-input-auto-resolve'],
+  };
+  const restricting = ['--permission-mode', '--allowedTools', '--disallowedTools', '--disable-shell'];
+  const profile = starter('claude');
+  for (const [harness, entry] of Object.entries(profile.harnesses)) {
+    const lanes: Array<[string, string[]]> = [];
+    if (entry.command) lanes.push([harness, entry.command.command]);
+    for (const [name, variant] of Object.entries(entry.variants ?? {})) {
+      if (variant.command) lanes.push([`${harness}/${name}`, variant.command]);
+    }
+    if (lanes.length === 0) continue;
+    const expected = approvals[harness];
+    assert.ok(expected, `${harness} ships a command lane but names no headless-approval flag here`);
+    for (const [label, argv] of lanes) {
+      for (const flag of expected!) {
+        assert.ok(argv.includes(flag), `${label} lost its headless-approval flag ${flag}`);
+      }
+      for (const flag of restricting) {
+        assert.ok(!argv.includes(flag), `${label} narrowed back with ${flag}`);
+      }
+      // `--sandbox read-only` is the other way to narrow; the permissive modes
+      // are fine, which is why this reads the VALUE and not the flag.
+      const sandbox = argv.indexOf('--sandbox');
+      if (sandbox !== -1) {
+        assert.notEqual(argv[sandbox + 1], 'read-only', `${label} narrowed back with a read-only sandbox`);
+      }
+    }
+  }
 });
 
 // 4. Legacy read.
@@ -547,7 +613,9 @@ test('a run snapshot carries the archetype-specific lane, so drive and dispatch 
   const argv = director.adapter === 'command'
     ? director.command
     : (director as { fallbackCommand: string[] | null }).fallbackCommand ?? [];
-  assert.ok(argv.includes('Bash'));
+  // Through the predicate, not a token: the snapshot has to carry a lane that
+  // can really run `fadeno`, and which token proves that changed on 2026-09-06.
+  assert.ok(argvGrantsFadenoShell(argv));
   // Additive: a lookup with no archetype, or for an archetype policy does not
   // move, lands on the plain ref — which is what an older snapshot has.
   assert.equal(snapshotExecutor(snapshot, 'opus', null), base);

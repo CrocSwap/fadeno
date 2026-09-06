@@ -120,12 +120,38 @@ const CLAIMS: Claim[] = [
     // remedy the catalog never carried. If the catalog's argv ever narrows back
     // to a scoped rule (or drops the flag) while the docs keep saying the lane
     // carries the same headless trust as every other vendor, that is the same
-    // divergence again — so pin the flag AND the mode it sits beside.
+    // divergence again — so pin the flag.
+    //
+    // Re-pointed 2026-09-06: the pinned tokens were `--allowedTools Bash` and
+    // `acceptEdits`, the partial grant this lane carried until the posture went
+    // blanket. Pinning the blanket flag is the same tripwire on the current
+    // fact; pinning the retired pair would have made the test assert a lane
+    // nobody ships.
     id: 'claude-command-shell-grant',
-    doc: { files: [HARNESSES, EXTENDING], patterns: [/--allowedTools Bash/, /acceptEdits/] },
+    doc: {
+      files: [HARNESSES, EXTENDING],
+      patterns: [/--dangerously-skip-permissions/],
+    },
     src: {
       files: ['templates/common/fadeno/executors.yaml'],
-      patterns: [/--allowedTools, Bash/, /--permission-mode, acceptEdits/],
+      patterns: [/--dangerously-skip-permissions/],
+    },
+  },
+  {
+    // The codex lane's half of the same posture, added 2026-09-06 with it. This
+    // is the lane whose restriction people actually hit — `--sandbox
+    // workspace-write` denied a worker's SSH twice while the host's own SSH
+    // succeeded — so it gets its own tripwire rather than riding on the claude
+    // one: a silent revert here would put the denial back with the docs still
+    // promising every lane carries a headless-approval flag.
+    id: 'codex-command-headless-approval',
+    doc: {
+      files: [HARNESSES, EXTENDING],
+      patterns: [/--dangerously-bypass-approvals-and-sandbox/],
+    },
+    src: {
+      files: ['templates/common/fadeno/executors.yaml'],
+      patterns: [/--dangerously-bypass-approvals-and-sandbox/],
     },
   },
   {

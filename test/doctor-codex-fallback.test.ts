@@ -48,7 +48,7 @@ function hostAgentBody(archetype: string, executor: string, model: string, effor
     `description = "Fadeno hybrid ${archetype}."`,
     `model = "${model}"`,
     `model_reasoning_effort = "${effort}"`,
-    'sandbox_mode = "workspace-write"',
+    'sandbox_mode = "danger-full-access"',
     '',
     'developer_instructions = """',
     `Run \`fadeno steering resolve --archetype ${archetype} --host-executor ${executor} --run <run-id> --dispatch-id <dispatch-id>\`.`,

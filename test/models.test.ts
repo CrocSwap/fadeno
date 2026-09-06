@@ -148,6 +148,29 @@ test('models: the SHIPPED catalog reports an anthropic command delivery as faden
   );
 });
 
+test('models: the SHIPPED catalog reports an openai command delivery as fadeno_capable', (t) => {
+  // The codex half of the same one-list-two-consumers path, and until
+  // 2026-09-06 it was WRONG: the catalog's director note said codex "already
+  // could" run fadeno and `director.test.ts` called the codex lane open, while
+  // this column answered `false` for every codex delivery because the
+  // predicate only knew Claude's vocabulary. Widening it is the fix; this is
+  // the end-to-end pin that the two now agree.
+  const root = tempRepo(t);
+  const user: UserPathOptions = {
+    home: join(root, 'home'),
+    env: {
+      FADENO_CONFIG_HOME: join(root, 'user-config'),
+      FADENO_STATE_HOME: join(root, 'user-state'),
+      // A NON-Codex host, so the openai dial ejects to the codex command lane.
+      FADENO_HARNESS: 'claude',
+    },
+  };
+  const sol = runModels({ repoRoot: root, userPathOptions: user }).models.find((r) => r.name === 'sol')!;
+  assert.equal(sol.home_harness, 'codex');
+  assert.equal(sol.adapter, 'command', 'ejected to the command lane under a claude host');
+  assert.equal(sol.fadeno_capable, true, 'the shipped codex command lane can run fadeno');
+});
+
 test('models: a model whose provider no harness claims as home is a LOAD error, not a stale row', (t) => {
   const root = tempRepo(t);
   mkdirSync(join(root, '.fadeno'), { recursive: true });
